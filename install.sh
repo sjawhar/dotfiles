@@ -9,6 +9,13 @@ if ! grep ".dotfiles" "${HOME}/.bashrc"; then
     echo '[ ! -f "${HOME}/.dotfiles/.bashrc" ] || . "${HOME}/.dotfiles/.bashrc"' >> "${HOME}/.bashrc"
 fi
 
+if ! grep ".dotfiles" "${HOME}/.gitconfig"; then
+    cat <<EOF >> "${HOME}/.gitconfig"
+[include]
+    path = ${HOME}/.dotfiles/.gitconfig
+EOF
+fi
+
 mkdir -p "${DOTFILES_BIN_DIR}"
 mkdir -p "${DOTFILES_COMPLETIONS_DIR}"
 
