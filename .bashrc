@@ -1,9 +1,12 @@
-PS1="${PS1/'\[\033[00m\]\$'/'\[\033[36m\]`__git_ps1`\[\033[00m\]\n\$'}"
+export PATH="${HOME}/.dotfiles/bin:$PATH"
 
-export PATH="${HOME}/.jj/bin:$PATH"
-
-if [ -d ~/.dotfiles/completions.d ]; then
-    for completion in ~/.dotfiles/completions.d/*.bash; do
+if [ -d "${HOME}/.dotfiles/completions.d" ]; then
+    while IFS= read -r completion; do
         . "$completion"
-    done
+    done < <(find "${HOME}/.dotfiles/completions.d" -type f -name "*.bash")
+fi
+
+export STARSHIP_CONFIG="${HOME}/.dotfiles/starship.toml"
+if command -v starship &> /dev/null; then
+    eval "$(starship init bash)"
 fi
