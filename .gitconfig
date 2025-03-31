@@ -1,0 +1,11 @@
+[pull]
+        rebase = true
+[alias]
+    fc = ! "git fetch --prune --tags --prune-tags"
+    gone = ! "git fc && git branch --format '%(refname:short) %(upstream:track)' | awk '$2 == \"[gone]\" {print $1}' | xargs -r git branch -D"
+[fetch]
+        prune = true
+[init]
+        defaultBranch = main
+[push]
+        autoSetupRemote = true
