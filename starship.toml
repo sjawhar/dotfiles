@@ -1,8 +1,7 @@
-# custom module for jj status
 [custom.jj]
 ignore_timeout = true
 description = "The current jj status"
-detect_folders = [".jj"]
+when = "jj root --ignore-working-copy > /dev/null 2>&1"
 symbol = "🥋 "
 command = '''
 jj log --revisions @ --no-graph --ignore-working-copy --color always --limit 1 --template '
@@ -28,7 +27,6 @@ jj log --revisions @ --no-graph --ignore-working-copy --color always --limit 1 -
 '
 '''
 
-# optionally disable git modules
 [git_state]
 disabled = true
 
@@ -41,8 +39,20 @@ disabled = true
 [git_branch]
 disabled = true
 
+[git_status]
+disabled = true
+
 # re-enable git_branch as long as we're not in a jj repo
 [custom.git_branch]
 when = true
-command = "jj root >/dev/null 2>&1 || starship module git_branch"
+command = "jj root --ignore-working-copy >/dev/null 2>&1 || starship module git_branch"
 description = "Only show git_branch if we're not in a jj repo"
+
+[python]
+disabled = true
+
+[nodejs]
+disabled = true
+
+[package]
+disabled = true
