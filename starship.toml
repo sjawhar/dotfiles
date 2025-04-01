@@ -1,3 +1,14 @@
+format = '''$username@$hostname$terraform$aws$custom$python
+$directory$character'''
+
+[hostname]
+ssh_only = false
+format = '[$ssh_symbol$hostname]($style) '
+
+[username]
+show_always = true
+format = '[$user]($style)'
+
 [custom.jj]
 ignore_timeout = true
 description = "The current jj status"
@@ -27,21 +38,6 @@ jj log --revisions @ --no-graph --ignore-working-copy --color always --limit 1 -
 '
 '''
 
-[git_state]
-disabled = true
-
-[git_commit]
-disabled = true
-
-[git_metrics]
-disabled = true
-
-[git_branch]
-disabled = true
-
-[git_status]
-disabled = true
-
 # re-enable git_branch as long as we're not in a jj repo
 [custom.git_branch]
 when = true
@@ -49,10 +45,10 @@ command = "jj root --ignore-working-copy >/dev/null 2>&1 || starship module git_
 description = "Only show git_branch if we're not in a jj repo"
 
 [python]
-disabled = true
+format = '[(\($virtualenv\) )]($style)'
 
-[nodejs]
-disabled = true
+[aws]
+format = '[$symbol($profile )(\[$duration\] )]($style)'
 
-[package]
-disabled = true
+[terraform]
+format = '[$symbol$workspace]($style) '
