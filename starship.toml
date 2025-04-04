@@ -12,7 +12,7 @@ format = '[$user]($style)'
 [custom.jj]
 ignore_timeout = true
 description = "The current jj status"
-when = "jj root --ignore-working-copy > /dev/null 2>&1"
+when = "jj show --ignore-working-copy --template '' > /dev/null 2>&1"
 symbol = "🥋 "
 command = '''
 jj log --revisions @ --no-graph --ignore-working-copy --color always --limit 1 --template '
@@ -41,7 +41,7 @@ jj log --revisions @ --no-graph --ignore-working-copy --color always --limit 1 -
 # re-enable git_branch as long as we're not in a jj repo
 [custom.git_branch]
 when = true
-command = "jj root --ignore-working-copy >/dev/null 2>&1 || starship module git_branch"
+command = "jj show --ignore-working-copy --template '' >/dev/null 2>&1 || starship module git_branch"
 description = "Only show git_branch if we're not in a jj repo"
 
 [python]
