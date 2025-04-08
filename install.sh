@@ -6,6 +6,8 @@ DOTFILES_BIN_DIR="${DOTFILES_DIR}/bin"
 DOTFILES_COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"
 
 if ! grep ".dotfiles" "${HOME}/.bashrc"; then
+    echo "Adding .dotfiles to .bashrc"
+    echo "" >> "${HOME}/.bashrc"
     echo '[ ! -f "${HOME}/.dotfiles/.bashrc" ] || . "${HOME}/.dotfiles/.bashrc"' >> "${HOME}/.bashrc"
 fi
 
@@ -37,3 +39,6 @@ if ! command -v starship &> /dev/null; then
 fi
 
 . "${HOME}/.bashrc"
+
+cd "${DOTFILES_DIR}"
+jj git init --colocate
