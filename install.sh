@@ -38,6 +38,13 @@ if ! command -v starship &> /dev/null; then
         --yes
 fi
 
+YQ_VERSION=4.45.1
+if ! command -v yq &> /dev/null; then
+    [ $(uname -m) == "aarch64" ] && ARCH="arm64" || ARCH="amd64"
+    curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${ARCH}" -O "${DOTFILES_BIN_DIR}/yq"
+    chmod +x "${DOTFILES_BIN_DIR}/yq"
+fi
+
 . "${HOME}/.bashrc"
 
 cd "${DOTFILES_DIR}"
