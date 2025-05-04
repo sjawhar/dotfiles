@@ -10,3 +10,5 @@ export STARSHIP_CONFIG="${HOME}/.dotfiles/starship.toml"
 if command -v starship &> /dev/null; then
     eval "$(starship init bash)"
 fi
+
+export JJ_CONFIG="${HOME}/.config/jj/config.toml:${HOME}/.dotfiles/.jjconfig.toml"
