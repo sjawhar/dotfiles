@@ -55,9 +55,9 @@ if ! command -v yq &> /dev/null; then
     chmod +x "${DOTFILES_BIN_DIR}/yq"
 fi
 
-. "${HOME}/.bashrc"
+source "${HOME}/.bashrc"
 
 cd "${DOTFILES_DIR}"
-if ! jj st &> /dev/null; then
-    jj git init --colocate
+if ! ${DOTFILES_BIN_DIR}/jj st &> /dev/null; then
+    ${DOTFILES_BIN_DIR}/jj git init --colocate
 fi
