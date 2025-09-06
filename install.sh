@@ -21,7 +21,7 @@ fi
 mkdir -p "${DOTFILES_BIN_DIR}"
 mkdir -p "${DOTFILES_COMPLETIONS_DIR}"
 
-JJ_VERSION=0.28.2
+JJ_VERSION=0.33.0
 install_jj() {
     curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-$(uname -m)-unknown-linux-musl.tar.gz" \
         | tar -xz -C "${DOTFILES_BIN_DIR}"
