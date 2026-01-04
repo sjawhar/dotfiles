@@ -1,5 +1,8 @@
 export PATH="${HOME}/.dotfiles/bin:$PATH"
 
+export NPM_CONFIG_PREFIX="${HOME}/.npm-global"
+export PATH="${NPM_CONFIG_PREFIX}/bin:$PATH"
+
 if [ -d "${HOME}/.dotfiles/completions.d" ]; then
     while IFS= read -r completion; do
         . "$completion"
