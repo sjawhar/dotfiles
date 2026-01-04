@@ -11,6 +11,8 @@ if ! grep ".dotfiles" "${HOME}/.bashrc"; then
     echo '[ ! -f "${HOME}/.dotfiles/.bashrc" ] || . "${HOME}/.dotfiles/.bashrc"' >> "${HOME}/.bashrc"
 fi
 
+source "${HOME}/.dotfiles/.bashrc"
+
 if ! grep ".dotfiles" "${HOME}/.gitconfig"; then
     cat <<EOF >> "${HOME}/.gitconfig"
 [include]
@@ -55,7 +57,22 @@ if ! command -v yq &> /dev/null; then
     chmod +x "${DOTFILES_BIN_DIR}/yq"
 fi
 
-source "${HOME}/.bashrc"
+NODE_VERSION=22.16.0
+if ! command -v node &> /dev/null; then
+    [ $(uname -m) == "aarch64" ] && ARCH="arm64" || ARCH="x64"
+    mkdir -p "${DOTFILES_DIR}/.node"
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" \
+        | tar -xJ -C "${DOTFILES_DIR}/.node" --strip-components=1
+
+    while read -r file; do
+        ln -s "$file" "${DOTFILES_BIN_DIR}/$(basename "$file")"
+    done < <(find "${DOTFILES_DIR}/.node/bin" -executable -print)
+fi
+
+mkdir -p "${NPM_CONFIG_PREFIX}"
+if ! command -v claude &> /dev/null; then
+    npm install -g @anthropic-ai/claude-code
+fi
 
 cd "${DOTFILES_DIR}"
 if ! ${DOTFILES_BIN_DIR}/jj st &> /dev/null; then
