@@ -15,3 +15,5 @@ if command -v starship &> /dev/null; then
 fi
 
 export JJ_CONFIG="${HOME}/.config/jj/config.toml:${HOME}/.dotfiles/.jjconfig.toml"
+
+export CLAUDE_CONFIG_DIR="${HOME}/.dotfiles/.claude"
