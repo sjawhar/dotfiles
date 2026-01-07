@@ -1,3 +1,7 @@
+# Shared jj config (checked into dotfiles)
+# User-specific settings (name, email) go in ~/.config/jj/config.toml
+# which is environment-specific and NOT checked in.
+
 [revset-aliases]
 'closest_bookmark(to)' = 'heads(::to & bookmarks())'
 
