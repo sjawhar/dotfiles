@@ -1,0 +1,13 @@
+{
+  "name": "sjawhar",
+  "owner": {
+    "name": "sjawhar"
+  },
+  "plugins": [
+    {
+      "name": "code-review-jj",
+      "description": "Code review for Jujutsu workflows",
+      "source": "./code-review-jj"
+    }
+  ]
+}

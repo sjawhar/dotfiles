@@ -1,0 +1,8 @@
+{
+  "name": "code-review-jj",
+  "description": "Automated code review for pull requests with jj workspace support",
+  "author": {
+    "name": "pivot",
+    "email": ""
+  }
+}
