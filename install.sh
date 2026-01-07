@@ -23,7 +23,7 @@ fi
 mkdir -p "${DOTFILES_BIN_DIR}"
 mkdir -p "${DOTFILES_COMPLETIONS_DIR}"
 
-JJ_VERSION=0.33.0
+JJ_VERSION=0.37.0
 install_jj() {
     curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-$(uname -m)-unknown-linux-musl.tar.gz" \
         | tar -xz -C "${DOTFILES_BIN_DIR}"
@@ -39,6 +39,23 @@ else
         echo "Upgrading jj from v$CURRENT_JJ_VERSION to v$JJ_VERSION"
         install_jj
     fi
+fi
+
+# Set up environment-specific jj user config (not in dotfiles)
+JJ_USER_CONFIG="${HOME}/.config/jj/config.toml"
+mkdir -p "$(dirname "${JJ_USER_CONFIG}")"
+if [ ! -f "${JJ_USER_CONFIG}" ]; then
+    echo "Setting up jj user config..."
+    read -p "Enter your name for jj commits: " JJ_USER_NAME
+    read -p "Enter your email for jj commits: " JJ_USER_EMAIL
+    cat > "${JJ_USER_CONFIG}" <<EOF
+# Environment-specific jj config (NOT checked into dotfiles)
+
+[user]
+name = "${JJ_USER_NAME}"
+email = "${JJ_USER_EMAIL}"
+EOF
+    echo "Created ${JJ_USER_CONFIG}"
 fi
 
 STARSHIP_VERSION=1.22.1

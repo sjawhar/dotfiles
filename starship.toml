@@ -12,36 +12,41 @@ format = '[$user]($style)'
 [custom.jj]
 ignore_timeout = true
 description = "The current jj status"
-when = "jj show --ignore-working-copy --template '' > /dev/null 2>&1"
+when = "jj root --ignore-working-copy >/dev/null 2>&1"
 symbol = "🥋 "
 command = '''
-jj log --revisions @ --no-graph --color always --limit 1 --template '
-  separate(" ",
+jj log --ignore-working-copy --revisions @ --no-graph --color always --limit 1 --template '
+  concat(
     change_id.shortest(4),
-    bookmarks,
-    "|",
-    concat(
-      if(conflict, "💥"),
-      if(divergent, "🚧"),
-      if(hidden, "👻"),
-      if(immutable, "🔒"),
-    ),
-    raw_escape_sequence("\x1b[1;32m") ++ if(empty, "(empty)"),
-    raw_escape_sequence("\x1b[1;32m") ++ if(description.first_line().len() == 0,
-      "(no description set)",
-      if(description.first_line().substr(0, 29) == description.first_line(),
-        description.first_line(),
-        description.first_line().substr(0, 29) ++ "…",
+    if(bookmarks, " " ++ bookmarks),
+    surround(" | ", "",
+      concat(
+        if(conflict, "💥"),
+        if(divergent, "🚧"),
+        if(hidden, "👻"),
+        if(immutable, "🔒"),
       )
-    ) ++ raw_escape_sequence("\x1b[0m"),
+    ),
+    " ",
+    raw_escape_sequence("\x1b[1;32m"),
+    if(empty, "(empty) "),
+    if(description.first_line(),
+      truncate_end(30, description.first_line(), "…"),
+      "(no description set)"
+    ),
+    raw_escape_sequence("\x1b[0m"),
   )
 '
 '''
 
-# re-enable git_branch as long as we're not in a jj repo
+# Show git_branch only in git repos that are NOT jj repos.
+# Why the subprocess hack? Starship's built-in git_branch module doesn't support
+# detect_folders to exclude .jj directories (see https://github.com/starship/starship/issues/6957).
+# Until that's fixed, we use this workaround: check if we're in a jj repo first,
+# and only call `starship module git_branch` if we're not.
 [custom.git_branch]
 when = true
-command = "jj show --ignore-working-copy --template '' >/dev/null 2>&1 || starship module git_branch"
+command = "jj root --ignore-working-copy >/dev/null 2>&1 || starship module git_branch"
 description = "Only show git_branch if we're not in a jj repo"
 
 [python]
