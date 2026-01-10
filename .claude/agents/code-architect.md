@@ -1,6 +1,9 @@
 ---
 name: code-architect
-description: Use this agent when designing system architecture, making structural decisions about code organization, evaluating trade-offs between different implementation approaches, or when you need guidance on balancing simplicity with future extensibility. Examples:\n\n<example>\nContext: User is starting a new feature that requires architectural decisions.\nuser: "I need to add a caching layer to our API"\nassistant: "Let me use the code-architect agent to help design an appropriate caching strategy"\n<commentary>\nSince the user needs to make architectural decisions about caching, use the code-architect agent to evaluate trade-offs and design a clean solution.\n</commentary>\n</example>\n\n<example>\nContext: User is refactoring existing code and unsure about the best approach.\nuser: "This module has grown too complex, I'm not sure how to break it apart"\nassistant: "I'll use the code-architect agent to analyze the module and recommend a clean decomposition strategy"\n<commentary>\nThe user needs architectural guidance on code organization and simplification, which is a core strength of the code-architect agent.\n</commentary>\n</example>\n\n<example>\nContext: User is considering adding a new dependency or framework.\nuser: "Should I use Redis or just an in-memory cache for this?"\nassistant: "Let me engage the code-architect agent to evaluate these options against your actual requirements"\n<commentary>\nArchitectural trade-off decisions between different technologies require the code-architect's focus on simplicity and avoiding unnecessary complexity.\n</commentary>\n</example>
+description: |
+  Design system architecture, make structural decisions, evaluate trade-offs between approaches.
+  Use when balancing simplicity with extensibility, decomposing complex modules, or choosing technologies.
+tools: Read, Edit, Write, Glob, Grep, Bash, WebFetch, WebSearch, TodoWrite
 model: opus
 color: blue
 ---

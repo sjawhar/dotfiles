@@ -46,13 +46,12 @@ JJ_USER_CONFIG="${HOME}/.config/jj/config.toml"
 mkdir -p "$(dirname "${JJ_USER_CONFIG}")"
 if [ ! -f "${JJ_USER_CONFIG}" ]; then
     echo "Setting up jj user config..."
-    read -p "Enter your name for jj commits: " JJ_USER_NAME
     read -p "Enter your email for jj commits: " JJ_USER_EMAIL
     cat > "${JJ_USER_CONFIG}" <<EOF
 # Environment-specific jj config (NOT checked into dotfiles)
 
 [user]
-name = "${JJ_USER_NAME}"
+name = "Sami Jawhar"
 email = "${JJ_USER_EMAIL}"
 EOF
     echo "Created ${JJ_USER_CONFIG}"
