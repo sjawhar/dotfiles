@@ -1,6 +1,6 @@
 ## Dotfiles Repo
 
-This is a personal dotfiles repo. Push directly to main—no PRs needed.
+The `~/.dotfiles` repo is a personal dotfiles repo. Push directly to main—no PRs needed.
 
 ## Version Control (jj)
 
