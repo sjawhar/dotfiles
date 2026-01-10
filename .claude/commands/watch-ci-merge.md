@@ -28,8 +28,16 @@ Steps:
    - Merge with: `gh pr merge --squash --delete-branch`
    - Report success
 
-5. **Handle edge cases:**
-   - If PR has merge conflicts, report and ask for guidance
+5. **Handle main branch changes:**
+   - Other PRs may merge while you're waiting, causing main to change
+   - Run `jj git fetch` periodically to stay current
+   - If your branch needs rebasing onto main:
+     - Rebase with `jj rebase -d main`
+     - Resolve any merge conflicts
+     - Push with `jj git push`
+     - Return to step 2
+
+6. **Handle other edge cases:**
    - If a check keeps failing after 3 attempts, stop and ask for help
    - If PR requires reviews, report the review status
 

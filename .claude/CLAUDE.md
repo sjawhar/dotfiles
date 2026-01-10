@@ -1,3 +1,7 @@
+## Dotfiles Repo
+
+This is a personal dotfiles repo. Push directly to main—no PRs needed.
+
 ## Version Control (jj)
 
 This user uses [jj (Jujutsu)](https://github.com/martinvonz/jj) with a squash workflow:
