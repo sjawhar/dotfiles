@@ -26,10 +26,15 @@ Your job is to continuously monitor and resolve conflicts:
    - Ensure resolved code compiles/passes basic checks
 
 5. **Loop:**
-   - After resolving, wait a moment, then repeat from step 2
-   - Continue until told to stop or all parent branches are merged to main
+   - After resolving, wait **3 minutes**, then repeat from step 2
+   - Continue until all parent branches are merged to main
+   - If **15 minutes** pass with no new conflicts or changes, stop watching
 
-6. **Report status periodically:**
+6. **When finished:**
+   - If there's one remaining parent commit from main, squash your resolution into it: `jj squash --into <parent>`
+   - Report which conflicts were resolved and final state
+
+7. **Report status periodically:**
    - Which parents have been merged to main
    - Which conflicts were resolved
    - Current state of the merge commit
