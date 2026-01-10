@@ -1,7 +1,9 @@
 ---
 name: bug-finder
-description: Use this agent when you need to find subtle bugs, edge cases, and potential failure modes in recently written code. This agent excels at adversarial thinking and identifying issues that typical testing might miss. It should be invoked after implementing a feature or function to stress-test the logic before considering it complete.\n\nExamples:\n\n<example>\nContext: User just implemented a function to parse user input.\nuser: "Write a function that extracts email addresses from a string"\nassistant: "Here is the email extraction function:"\n<function implementation>\nassistant: "Now let me use the bug-finder agent to find potential bugs and edge cases in this parsing logic"\n<Task tool invocation with bug-finder>\n</example>\n\n<example>\nContext: User completed a data processing pipeline.\nuser: "I've finished the CSV import feature"\nassistant: "I'll use the bug-finder agent to identify subtle bugs and adversarial inputs that could break the import"\n<Task tool invocation with bug-finder>\n</example>\n\n<example>\nContext: User asks for a review of error handling.\nuser: "Can you check if there are any edge cases I missed in the authentication flow?"\nassistant: "I'll launch the bug-finder agent to thoroughly analyze the authentication flow for subtle bugs and adversarial scenarios"\n<Task tool invocation with bug-finder>\n</example>
-tools: Glob, Grep, Read, WebFetch, TodoWrite, WebSearch, Bash
+description: |
+  Find subtle bugs, edge cases, and potential failure modes in recently written code.
+  Use after implementing a feature to stress-test the logic. Excels at adversarial thinking.
+tools: Read, Edit, Write, Glob, Grep, Bash, WebFetch, WebSearch, TodoWrite
 model: opus
 color: red
 ---

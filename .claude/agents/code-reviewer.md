@@ -1,6 +1,9 @@
 ---
 name: code-reviewer
-description: Use this agent when you need to review code changes against GitHub issue requirements and verify implementation correctness. This agent should be invoked:\n\n- After completing a logical chunk of work (e.g., implementing a feature, fixing a bug, refactoring a module)\n- Before pushing changes or creating a pull request\n- When explicitly asked to review code\n- When the user mentions reviewing, checking, or validating their implementation\n\nExamples:\n\n<example>\nContext: User has just implemented a new caching mechanism for stage fingerprints.\n\nuser: "I've implemented the fingerprint caching system. Can you check if it looks good?"\n\nassistant: "I'll use the code-reviewer agent to thoroughly review your fingerprint caching implementation against the requirements."\n\n<uses Agent tool to launch code-reviewer>\n</example>\n\n<example>\nContext: User has finished fixing a bug related to multiprocessing queue handling.\n\nuser: "Just fixed the queue.Empty exception handling issue from #234"\n\nassistant: "Let me review your fix against issue #234 to ensure it properly addresses the queue handling problem."\n\n<uses Agent tool to launch code-reviewer>\n</example>\n\n<example>\nContext: User has completed a refactoring of the dependency graph construction.\n\nuser: "Refactored the graph builder - made it way cleaner"\n\nassistant: "I'll review the refactored graph builder to verify it maintains correctness while improving code quality."\n\n<uses Agent tool to launch code-reviewer>\n</example>
+description: |
+  Review code changes against requirements and verify implementation correctness.
+  Use after completing features, before pushing, or when asked to review/validate code.
+tools: Read, Edit, Write, Glob, Grep, Bash, WebFetch, WebSearch, TodoWrite
 model: opus
 color: green
 ---
