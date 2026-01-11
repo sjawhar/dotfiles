@@ -2,7 +2,7 @@
         rebase = true
 [alias]
     fc = ! "git fetch --prune --tags --prune-tags"
-    gone = ! "git fc && git branch --format '%(refname:short) %(upstream:track)' | awk '$2 == \"[gone]\" {print $1}' | xargs -r git branch -D"
+    gone = ! "git fc && git branch --format '%(refname:short) %(upstream:track)' | awk '$2 == \"[gone]\" {print $1}' | xargs git branch -D 2>/dev/null || true"
 [fetch]
         prune = true
 [init]
