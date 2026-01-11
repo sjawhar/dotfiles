@@ -7,12 +7,13 @@
     "defaultMode": "plan"
   },
   "model": "opus",
-  "enabledPlugins": {
-    "code-review-jj@sjawhar": true,
-    "ralph-loop@claude-plugins-official": true
-  },
   "statusLine": {
     "type": "command",
     "command": "/home/pivot/.dotfiles/.claude/status-line.sh"
+  },
+  "enabledPlugins": {
+    "code-review-jj@sjawhar": true,
+    "ralph-loop@claude-plugins-official": true,
+    "rust-analyzer-lsp@claude-plugins-official": true
   }
 }
