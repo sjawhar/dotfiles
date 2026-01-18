@@ -4,10 +4,6 @@
     "defaultMode": "plan"
   },
   "model": "opus",
-  "statusLine": {
-    "type": "command",
-    "command": "/home/pivot/.dotfiles/.claude/status-line.sh"
-  },
   "enabledPlugins": {
     "code-review-jj@sjawhar": true,
     "ralph-loop@claude-plugins-official": true,

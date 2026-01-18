@@ -1,96 +1,95 @@
 #!/bin/bash
-set -eufx -o pipefail
+set -eu
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOTFILES_BIN_DIR="${DOTFILES_DIR}/bin"
-DOTFILES_COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"
 
-if ! grep ".dotfiles" "${HOME}/.bashrc"; then
-    echo "Adding .dotfiles to .bashrc"
-    echo "" >> "${HOME}/.bashrc"
-    echo '[ ! -f "${HOME}/.dotfiles/.bashrc" ] || . "${HOME}/.dotfiles/.bashrc"' >> "${HOME}/.bashrc"
+echo "=== Dotfiles Install ==="
+
+# Shell config
+if [ -f ~/.bashrc ]; then
+    echo "" >> ~/.bashrc
+    echo '[ ! -f "${HOME}/.dotfiles/.bashrc" ] || . "${HOME}/.dotfiles/.bashrc"' >> ~/.bashrc
+fi
+. "${DOTFILES_DIR}/.bashrc"
+
+# ------------------------------------------------------------------------------
+# Mise (tool version manager)
+# ------------------------------------------------------------------------------
+
+if ! command -v mise &>/dev/null
+then
+    echo "Installing mise..."
+    curl -fsSL https://mise.run | MISE_INSTALL_PATH="${DOTFILES_DIR}/bin/mise" sh
+    eval "$(mise activate "$DOTFILES_SHELL")"
 fi
 
-source "${HOME}/.dotfiles/.bashrc"
+mkdir -p ~/.config/mise
+ln -sf "${DOTFILES_DIR}/mise.toml" ~/.config/mise/config.toml
+echo "Installing tools via mise..."
+mise trust 2>/dev/null || true
+for i in {1..3}
+do
+    mise install && break || echo "Some tools failed to install (may be rate-limited). Run 'mise install' later."
+    sleep 1
+done
 
-if ! grep ".dotfiles" "${HOME}/.gitconfig"; then
-    cat <<EOF >> "${HOME}/.gitconfig"
-[include]
-    path = ${HOME}/.dotfiles/.gitconfig
+# ------------------------------------------------------------------------------
+# Symlinks
+# ------------------------------------------------------------------------------
+
+echo "Creating symlinks..."
+mkdir -p ~/.config/nvim
+ln -sf "${DOTFILES_DIR}/.gitconfig" ~/.gitconfig
+ln -sf "${DOTFILES_DIR}/.tmux.conf" ~/.tmux.conf
+ln -sf "${DOTFILES_DIR}/nvim/init.lua" ~/.config/nvim/init.lua
+
+# ------------------------------------------------------------------------------
+# jj (version control system)
+# ------------------------------------------------------------------------------
+
+if [ ! -f ~/.config/jj/config.toml ]; then
+    if [ -t 0 ]; then
+        read -rp "Email for jj/git commits: " USER_EMAIL
+        cat > ~/.config/jj/config.toml <<EOF
+[user]
+name = "Sami Jawhar"
+email = "${USER_EMAIL}"
 EOF
-fi
-
-mkdir -p "${DOTFILES_BIN_DIR}"
-mkdir -p "${DOTFILES_COMPLETIONS_DIR}"
-
-JJ_VERSION=0.37.0
-install_jj() {
-    curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-$(uname -m)-unknown-linux-musl.tar.gz" \
-        | tar -xz -C "${DOTFILES_BIN_DIR}"
-    chmod +x "${DOTFILES_BIN_DIR}/jj"
-    "${DOTFILES_BIN_DIR}/jj" util completion bash > "${DOTFILES_COMPLETIONS_DIR}/jj.bash"
-}
-
-if ! command -v jj &> /dev/null; then
-    install_jj
-else
-    CURRENT_JJ_VERSION=$(jj --version | awk '{print $2}' | awk -F '-' '{print $1}')
-    if [ "$CURRENT_JJ_VERSION" != "$JJ_VERSION" ]; then
-        echo "Upgrading jj from v$CURRENT_JJ_VERSION to v$JJ_VERSION"
-        install_jj
+    else
+        echo "Skipping jj config (non-interactive). Create ~/.config/jj/config.toml manually."
     fi
 fi
 
-# Set up environment-specific jj user config (not in dotfiles)
-JJ_USER_CONFIG="${HOME}/.config/jj/config.toml"
-mkdir -p "$(dirname "${JJ_USER_CONFIG}")"
-if [ ! -f "${JJ_USER_CONFIG}" ]; then
-    echo "Setting up jj user config..."
-    read -p "Enter your email for jj commits: " JJ_USER_EMAIL
-    cat > "${JJ_USER_CONFIG}" <<EOF
-# Environment-specific jj config (NOT checked into dotfiles)
+# ------------------------------------------------------------------------------
+# TPM (Tmux Plugin Manager)
+# ------------------------------------------------------------------------------
 
-[user]
-name = "Sami Jawhar"
-email = "${JJ_USER_EMAIL}"
-EOF
-    echo "Created ${JJ_USER_CONFIG}"
+if command -v tmux &>/dev/null; then
+    TPM_DIR="${HOME}/.tmux/plugins/tpm"
+    if [ ! -d "${TPM_DIR}/.git" ]; then
+        echo "Installing TPM..."
+        rm -rf "$TPM_DIR"
+        git clone --depth 1 https://github.com/tmux-plugins/tpm "$TPM_DIR"
+    fi
 fi
 
-STARSHIP_VERSION=1.22.1
-if ! command -v starship &> /dev/null; then
-    curl -sS https://starship.rs/install.sh \
-        | sh -s -- \
-        --bin-dir "${DOTFILES_BIN_DIR}" \
-        --version "v${STARSHIP_VERSION}" \
-        --yes
-fi
+# ------------------------------------------------------------------------------
+# Claude Code
+# ------------------------------------------------------------------------------
 
-YQ_VERSION=4.45.1
-if ! command -v yq &> /dev/null; then
-    [ $(uname -m) == "aarch64" ] && ARCH="arm64" || ARCH="amd64"
-    curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${ARCH}" -o "${DOTFILES_BIN_DIR}/yq"
-    chmod +x "${DOTFILES_BIN_DIR}/yq"
-fi
-
-NODE_VERSION=22.16.0
-if ! command -v node &> /dev/null; then
-    [ $(uname -m) == "aarch64" ] && ARCH="arm64" || ARCH="x64"
-    mkdir -p "${DOTFILES_DIR}/.node"
-    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" \
-        | tar -xJ -C "${DOTFILES_DIR}/.node" --strip-components=1
-
-    while read -r file; do
-        ln -s "$file" "${DOTFILES_BIN_DIR}/$(basename "$file")"
-    done < <(find "${DOTFILES_DIR}/.node/bin" -executable -print)
-fi
-
-mkdir -p "${NPM_CONFIG_PREFIX}"
-if ! command -v claude &> /dev/null; then
+mkdir -p "$NPM_CONFIG_PREFIX"
+if ! command -v claude &>/dev/null; then
+    echo "Installing Claude Code..."
     npm install -g @anthropic-ai/claude-code
 fi
 
-cd "${DOTFILES_DIR}"
-if ! ${DOTFILES_BIN_DIR}/jj st &> /dev/null; then
-    ${DOTFILES_BIN_DIR}/jj git init --colocate
-fi
+# ------------------------------------------------------------------------------
+# Completions
+# ------------------------------------------------------------------------------
+
+COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"
+mkdir -p "$COMPLETIONS_DIR"
+jj util completion bash > "${COMPLETIONS_DIR}/jj.bash" 2>/dev/null || true
+jj util completion zsh > "${COMPLETIONS_DIR}/jj.zsh" 2>/dev/null || true
+
+echo "=== Done! Restart your shell or run: source ~/.bashrc ==="
