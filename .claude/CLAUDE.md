@@ -1,3 +1,7 @@
+## Dotfiles Repo
+
+The `~/.dotfiles` repo is a personal dotfiles repo. Push directly to main—no PRs needed.
+
 ## Version Control (jj)
 
 This user uses [jj (Jujutsu)](https://github.com/martinvonz/jj) with a squash workflow:
@@ -30,6 +34,21 @@ In non-default workspaces:
 - Always use `jj` commands, never `git`
 - If the workspace is stale, run `jj workspace update-stale`
 - If your commit was split, use `jj squash` to recombine
+
+### Parallel Workspaces
+
+Multiple jj workspaces may be active simultaneously (potentially with other Claude sessions).
+
+- **Main branch moves frequently** — rebase often with `jj git fetch && jj rebase -d main`
+- **Expect merge conflicts** — resolve without losing others' work
+- **Verify your workspace** — confirm you're operating on the right directory before making changes
+
+### Merge Conflict Resolution
+
+When resolving conflicts after rebase:
+1. **Check divergent commits first** — run `jj log` to see what diverged
+2. **Never lose functionality** — review what changed in the commits being merged
+3. **Don't delete local changes** without explicit permission
 
 ### Bookmarks and Remote Branches
 

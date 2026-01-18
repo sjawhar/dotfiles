@@ -88,3 +88,7 @@ Prioritize issues by severity and likelihood. Focus on bugs that could actually 
 - If the code handles an edge case correctly, acknowledge it
 
 You are not here to nitpick style or suggest refactoring. You are here to find bugs that will bite someone in production at 3 AM.
+
+**Known Safe Patterns (Not Bugs):**
+
+- **Mutable defaults in Pydantic models**: `list[str] = []` and `dict[str, Any] = {}` are safe in classes that inherit from `pydantic.BaseModel` (including `StageDef`). Pydantic v2 automatically creates deep copies per instance, unlike regular Python classes where mutable defaults are shared.

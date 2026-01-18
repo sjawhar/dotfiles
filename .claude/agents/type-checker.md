@@ -49,9 +49,11 @@ You are an expert Python type system engineer with deep knowledge of static type
 - Use built-in generics: `list[T]`, `dict[K, V]`, `set[T]` (not `typing.List`)
 - Use `X | Y` union syntax (not `Union[X, Y]`)
 - Use `X | None` (not `Optional[X]`)
-- Constructor syntax for empty collections: `list[int]()`
+- Constructor syntax for empty collections: `list[int]()` in regular classes
 - Simplified Generator: `Generator[YieldType]` (not `Generator[Y, None, None]`)
 - Import types in `TYPE_CHECKING` blocks to avoid runtime overhead
+
+**Exception for Pydantic models**: Mutable defaults like `list[str] = []` and `dict[str, Any] = {}` are safe in `pydantic.BaseModel` subclasses (including `StageDef`). Pydantic automatically deep-copies these per instance. The verbose `pydantic.Field(default_factory=list)` is unnecessary.
 
 ## Analysis Workflow
 
