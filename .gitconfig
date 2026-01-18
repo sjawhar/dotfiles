@@ -2,10 +2,16 @@
         rebase = true
 [alias]
     fc = ! "git fetch --prune --tags --prune-tags"
-    gone = ! "git fc && git branch --format '%(refname:short) %(upstream:track)' | awk '$2 == \"[gone]\" {print $1}' | xargs -r git branch -D"
+    gone = ! "git fc && git branch --format '%(refname:short) %(upstream:track)' | awk '$2 == \"[gone]\" {print $1}' | xargs git branch -D 2>/dev/null || true"
 [fetch]
         prune = true
 [init]
         defaultBranch = main
 [push]
         autoSetupRemote = true
+[credential "https://github.com"]
+	helper = 
+	helper = !/home/sami/.local/share/mise/installs/gh/2.85.0/gh_2.85.0_linux_amd64/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/home/sami/.local/share/mise/installs/gh/2.85.0/gh_2.85.0_linux_amd64/bin/gh auth git-credential
