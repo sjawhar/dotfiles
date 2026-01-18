@@ -1,0 +1,14 @@
+# Exclude build artifacts and local state
+.git
+.jj
+.node
+*.log
+bin/
+completions.d/
+
+.claude/*
+!.claude/settings.json
+!.claude/CLAUDE.md
+!.claude/agents/
+!.claude/commands/
+!.claude/mcp.json
