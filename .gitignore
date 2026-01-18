@@ -8,3 +8,4 @@ completions.d/
 !.claude/CLAUDE.md
 !.claude/agents/
 !.claude/commands/
+!.claude/mcp.json
