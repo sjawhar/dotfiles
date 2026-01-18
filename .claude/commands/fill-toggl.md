@@ -10,6 +10,7 @@ Auto-fill missing Toggl time entries from desktop activity, Claude Code sessions
 4. Classify gaps using session content → patterns → desktop hints
 5. Present plan and get user approval
 6. Create approved entries
+7. Verify and iterate until all completion criteria pass
 
 **Key principle**: Claude session content is the primary source of truth for what was worked on; desktop activity only provides timing hints.
 
@@ -141,17 +142,32 @@ For each gap, determine what to fill it with:
 - But don't over-categorize based on app names alone
 - "Chrome" doesn't mean "browsing" - could be documentation, PRs, etc.
 
+**Activity type separation:**
+- Strategic/planning work (OKRs, roadmaps) → separate entries, often "Management" project
+- Development work → project-specific entries
+- Code review → separate entries with "Code Review" tag, even if time-adjacent to development
+- PR-related window titles need explicit verification against Claude sessions to distinguish review from development
+
+**Interpreting desktop activity:**
+- Don't accept large time blocks from app names alone (e.g., "Shopping" app doesn't mean 63 minutes of shopping)
+- Cross-check significant desktop activity against Claude sessions
+- "Chrome" could be docs, PRs, research - not just "browsing"
+- "Terminal" could be anything - verify with session content
+- Brief scattered activity shouldn't become a consolidated block unless Claude session confirms
+
 ### Phase 5: User Confirmation
 
 **⏸️ STOP AND WAIT FOR USER INPUT**
 
 9. **Present the gaps** in a table:
 
-| Time | Duration | Description | Project | Source |
-|------|----------|-------------|---------|--------|
-| 09:15-10:30 | 1h 15m | Code review for auth PR | vivaria | Claude session |
-| 14:00-14:45 | 45m | Similar to "standup prep" | meetings | Pattern match |
-| 16:30-17:15 | 45m | Development work | (unknown) | Desktop activity |
+| Time | Duration | Description | Project | Tags | Source |
+|------|----------|-------------|---------|------|--------|
+| 09:15-10:30 | 1h 15m | Code review for auth PR | vivaria | Code Review | Claude session |
+| 14:00-14:45 | 45m | Similar to "standup prep" | meetings | Meeting | Pattern match |
+| 16:30-17:15 | 45m | Development work | (unknown) | — | Desktop activity |
+
+**⚠️ Warning**: If any proposed entry is missing a project or tags, highlight it and ask the user to provide values before proceeding.
 
 10. **Ask**: "What do you think?"
 
@@ -171,16 +187,56 @@ Wait for user feedback. They may:
 
 11. **Create entries** using `toggl_create_time_entry` for each approved gap
 
-12. **Handle overlaps silently**:
-    - If a proposed entry overlaps an existing one, trim the proposed entry's boundaries to avoid overlap
-    - If the overlap is in the middle, split into two entries (before and after)
-    - If trimming/splitting results in a segment shorter than 10 minutes, drop that segment
+12. **Check for overlaps**:
+    - Before creating, check if proposed entry overlaps an existing one
+    - If overlap found, **report to user** with details:
+      - Proposed: 09:00-10:30 "Development work"
+      - Existing: 09:45-10:15 "Standup"
+      - Overlap: 30 minutes
+    - Propose resolution (trim proposed entry to avoid overlap)
+    - Create only after user confirms
     - Never modify existing entries—only adjust proposed ones
 
 13. **Report results**:
     - Number of entries created
     - Total time filled
     - Any entries that couldn't be created (and why)
+
+## Completion Criteria
+
+The skill is **not done** until ALL of the following are verified:
+
+1. **No uncovered activity**: Every period of desktop activity or Claude session has a corresponding Toggl entry
+2. **No incomplete entries**: Every Toggl entry has a description, project, AND at least one tag
+3. **No overlapping entries**: No two Toggl entries overlap in time
+4. **Session alignment**: All entries make sense according to active Claude Code sessions at the time
+
+Run verification after entry creation and iterate until all criteria pass.
+
+### Phase 7: Verification & Iteration
+
+**Repeat until all completion criteria pass:**
+
+14. **Gap check**: Fetch fresh Toggl entries and desktop activity. Identify any remaining gaps where activity occurred but no entry exists.
+
+15. **Quality check**: For each Toggl entry in the date range, verify:
+    - Has non-empty description
+    - Has project assigned
+    - Has at least one tag
+
+    Report any entries missing these and propose fixes.
+
+16. **Overlap check**: Scan all entries for time overlaps. Report any overlapping pairs with details.
+
+17. **Session alignment check**: Cross-reference entries against Claude sessions to verify descriptions make sense. Flag mismatches (e.g., entry says "development" but session shows code review).
+
+18. **Present findings** to user. If issues found:
+    - Propose new entries for gaps
+    - Propose updates for incomplete entries
+    - Propose fixes for overlaps (trim/split)
+    - Ask for approval before making changes
+
+19. **Create/update entries** as approved and return to step 14.
 
 ## Local Toggl Database Details
 
