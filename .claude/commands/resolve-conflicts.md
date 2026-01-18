@@ -4,18 +4,39 @@ description: "Resolve merge conflicts after rebase and update PR"
 
 There are merge conflicts on the current branch after rebasing onto main. Resolve them and update the PR.
 
-Steps:
-1. Run `jj git fetch` to ensure you have the latest remote state
-2. Run `jj status` to see the current state and identify conflicted files
-3. Run `jj log -r @` to understand the current commit and its relationship to main
-4. For each conflicted file:
-   - Read the file to see the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
-   - Understand both sides of the conflict
-   - Resolve by keeping the correct changes (usually combining our changes with upstream updates)
-   - Ensure the resolved code is syntactically correct and logically sound
-5. After resolving all conflicts, run `jj status` to confirm no conflicts remain
-6. Run the project's quality checks (type checking, linting, tests) to verify the resolution
-7. If checks pass, push with `jj git push`
-8. The PR will auto-update; report the result
+**1. Ensure latest state:**
+```bash
+jj git fetch
+jj status
+```
+
+**2. Understand the situation:**
+- Run `jj log -r @` to see the current commit and its relationship to main
+- Identify conflicted files (marked with "Conflict" in status)
+
+**3. For each conflicted file:**
+- Read the file to see conflict markers (jj uses `<<<<<<<` with sections for each side)
+- Understand what each side changed and why
+- Resolution strategy:
+  - **Different parts of file:** keep both changes
+  - **Overlapping changes:** combine logically, preserving intent of both
+  - **True conflict (mutually exclusive):** prefer our changes unless upstream clearly fixes a bug
+- Ensure resolved code is syntactically correct and logically sound
+
+**4. Verify resolution:**
+- Run `jj status` to confirm no conflicts remain
+- Run the project's quality checks (type checking, linting, tests)
+
+**5. Handle check failures:**
+- If failure is related to conflict resolution, fix and re-verify
+- If failure is unrelated to conflicts, report it as a separate issue
+
+**6. Push and report:**
+- Check if a PR exists: `jj bookmark list` and `gh pr view 2>/dev/null`
+- Push with `jj git push`
+- If PR exists, note that it will auto-update
+- Report the resolution result
+
+**Done when:** All conflicts resolved, checks pass, and changes are pushed.
 
 If conflicts are complex or ambiguous, explain both sides and ask for guidance before resolving.

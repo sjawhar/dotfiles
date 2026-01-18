@@ -115,6 +115,9 @@ This project follows strict standards documented in CLAUDE.md. Pay special atten
 
 ## Critical Guidelines
 
+- **Flag test removal loudly**: Any deleted test file, function, or class is a BLOCKING issue—require justification
+- **Flag test logic inversion**: Assertions flipped to make failing tests pass (`==` → `!=`, `assertTrue` → `assertFalse`, expected values changed to match buggy output) are BLOCKING—this masks bugs
+
 - **Be thorough, not perfunctory**: Your job is to find issues, not give approval
 - **Be specific**: "This could cause bugs" is useless. "This assumes non-empty list but doesn't validate—will raise IndexError" is actionable
 - **Explain your reasoning**: Help the author learn, don't just dictate changes

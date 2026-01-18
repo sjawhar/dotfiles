@@ -7,9 +7,9 @@ You are managing an octopus merge commit. Your commit merges multiple parent com
 Your job is to continuously monitor and resolve conflicts:
 
 1. **Initial state check:**
+   - Run `jj log -r 'parents(@)'` to identify the merge parents (note their change IDs)
    - Run `jj log -r 'ancestors(@, 2)'` to see your commit and its immediate parents
    - Run `jj status` to check for current conflicts
-   - Note which parents you're merging
 
 2. **Watch for workspace staleness:**
    - Run `jj workspace update-stale` to sync with any rebased commits
@@ -22,11 +22,13 @@ Your job is to continuously monitor and resolve conflicts:
 
 4. **Resolve any conflicts:**
    - For each conflicted file, read and resolve the conflict markers
-   - The "ours" side is your merge; "theirs" is from the rebased parent
+   - In octopus merges, there may be **more than two sides** — read carefully
+   - Combine changes from all sides, preserving functionality from each
    - Ensure resolved code compiles/passes basic checks
 
 5. **Loop:**
    - After resolving, wait **3 minutes**, then repeat from step 2
+   - Check if all parents are now on main: `jj log -r 'parents(@) & ::main'`
    - Continue until all parent branches are merged to main
    - If **15 minutes** pass with no new conflicts or changes, stop watching
 
