@@ -86,7 +86,7 @@ RUN curl -fsSL "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION
 RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz" \
     | tar -xz -C /usr/local/bin --strip-components=1 linux-${TARGETARCH}/helm
 
-COPY --from=aws-cli /usr/local/aws-cli /usr/local/aws-cli
+COPY --from=aws-cli /usr/local/aws-cli/v2/current /usr/local
 COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 
