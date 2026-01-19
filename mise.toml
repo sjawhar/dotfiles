@@ -16,3 +16,6 @@ ripgrep = "15.1.0"  # Fast grep that respects .gitignore
 starship = "1.24.2" # Shell prompt
 yq = "4.50.1"       # YAML processor
 zoxide = "0.9.8"    # Smart directory jumping (z command)
+
+# Cloud
+awscli = "2.33.2"   # AWS command-line interface
