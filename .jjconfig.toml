@@ -1,9 +1,13 @@
-# Shared jj config (checked into dotfiles)
+# Shared jj config (symlinked to ~/.jjconfig.toml)
 # User-specific settings (name, email) go in ~/.config/jj/config.toml
-# which is environment-specific and NOT checked in.
+# which has higher priority and overrides settings here.
 
 [revset-aliases]
 'closest_bookmark(to)' = 'heads(::to & bookmarks())'
 
 [aliases]
 tug = ["bookmark", "move", "--from", "closest_bookmark(@)", "--to", "@"]
+
+[ui]
+editor = "nvim"
+

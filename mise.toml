@@ -1,5 +1,5 @@
 # Global mise tool configuration
-# Symlinked to ~/.mise.toml
+# Symlinked to ~/.config/mise/config.toml
 # All versions pinned for reproducibility
 
 [tools]

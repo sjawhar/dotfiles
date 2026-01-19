@@ -16,6 +16,9 @@ fi
 # Mise (tool version manager)
 # ------------------------------------------------------------------------------
 
+mkdir -p ~/.config/mise
+ln -sf "${DOTFILES_DIR}/mise.toml" ~/.config/mise/config.toml
+
 if ! command -v mise &>/dev/null
 then
     echo "Installing mise..."
@@ -23,8 +26,6 @@ then
     eval "$(mise activate "$DOTFILES_SHELL")"
 fi
 
-mkdir -p ~/.config/mise
-ln -sf "${DOTFILES_DIR}/mise.toml" ~/.config/mise/config.toml
 echo "Installing tools via mise..."
 mise trust 2>/dev/null || true
 for i in {1..3}
@@ -47,6 +48,11 @@ ln -sf "${DOTFILES_DIR}/nvim/init.lua" ~/.config/nvim/init.lua
 # jj (version control system)
 # ------------------------------------------------------------------------------
 
+# Shared config (aliases, editor, etc.) - lower priority
+ln -sf "${DOTFILES_DIR}/.jjconfig.toml" ~/.jjconfig.toml
+
+# Machine-specific config (user.name, user.email) - higher priority, overrides shared
+mkdir -p ~/.config/jj
 if [ ! -f ~/.config/jj/config.toml ]; then
     if [ -t 0 ]; then
         read -rp "Email for jj/git commits: " USER_EMAIL
