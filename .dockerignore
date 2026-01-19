@@ -10,9 +10,10 @@
 !.gitconfig
 !.jjconfig.toml
 !.tmux.conf
-!aerospace.toml
 !mise.toml
 !nvim/init.lua
+!starship.toml
+!scripts/
 
 !.claude/agents/
 !.claude/CLAUDE.md

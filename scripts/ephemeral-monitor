@@ -1,0 +1,58 @@
+#!/bin/bash
+# Ephemeral storage monitor for Kubernetes pods
+# Writes status file only when usage exceeds threshold
+
+PIDFILE="/tmp/ephemeral-monitor.pid"
+STATUS_FILE="/tmp/ephemeral-storage-status"
+
+# Single-instance via flock (atomic, handles PID recycling)
+exec 200>"$PIDFILE"
+flock -n 200 || exit 0
+echo "$$" >&200
+
+# Cleanup on exit
+cleanup() {
+  rm -f "$PIDFILE" "$STATUS_FILE" "${STATUS_FILE}.tmp"
+  exit 0
+}
+trap cleanup SIGTERM SIGINT EXIT
+
+LIMIT_KB=${EPHEMERAL_LIMIT_KB:-157286400}  # 150GB in KB
+WARN_PERCENT=${EPHEMERAL_WARN_PERCENT:-75}
+INTERVAL=${EPHEMERAL_CHECK_INTERVAL:-300}  # 5 minutes
+
+# Validate numeric inputs
+for var in LIMIT_KB WARN_PERCENT INTERVAL; do
+  if ! [[ "${!var}" =~ ^[0-9]+$ ]]; then
+    echo "ephemeral-monitor: $var must be numeric, got '${!var}'" >&2
+    exit 1
+  fi
+done
+
+# Enforce sane bounds
+[ "$LIMIT_KB" -lt 1 ] && LIMIT_KB=157286400
+[ "$WARN_PERCENT" -gt 100 ] && WARN_PERCENT=100
+[ "$WARN_PERCENT" -lt 1 ] && WARN_PERCENT=1
+[ "$INTERVAL" -lt 10 ] && INTERVAL=10
+
+# Pre-calculate constants (avoids overflow: divide first)
+threshold_kb=$((LIMIT_KB / 100 * WARN_PERCENT))
+
+while true; do
+  used_kb=$(timeout 60 du -sx / 2>/dev/null | cut -f1)
+
+  # Validate du output is numeric
+  if ! [[ "$used_kb" =~ ^[0-9]+$ ]]; then
+    sleep "$INTERVAL"
+    continue
+  fi
+
+  if [ "$used_kb" -gt "$threshold_kb" ]; then
+    percent=$((used_kb * 100 / LIMIT_KB))
+    # Atomic write: temp file then rename
+    echo "${percent}%" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+  else
+    rm -f "$STATUS_FILE"
+  fi
+  sleep "$INTERVAL"
+done

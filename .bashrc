@@ -1,6 +1,5 @@
 # Dotfiles shell configuration
 DOTFILES_DIR="${DOTFILES_DIR:-${HOME}/.dotfiles}"
-export PATH="${DOTFILES_DIR}/bin:$PATH"
 
 # ==============================================================================
 # Shell detection (must be first - other sections depend on this)
@@ -14,12 +13,17 @@ else
 fi
 
 # ==============================================================================
-# Mise (tool version manager)
+# Mise (tool version manager) - data stored in ~/.mise
 # ==============================================================================
 
-if command -v mise &>/dev/null
+export MISE_DATA_DIR="${HOME}/.mise"
+
+if [ -x "${DOTFILES_DIR}/bin/mise" ]
 then
-    eval "$(mise activate "$DOTFILES_SHELL")"
+    eval "$("${DOTFILES_DIR}/bin/mise" activate --shims "$DOTFILES_SHELL")"
+elif command -v mise &>/dev/null
+then
+    eval "$(mise activate --shims "$DOTFILES_SHELL")"
 fi
 
 # ==============================================================================
@@ -112,7 +116,7 @@ alias cc-continue='claude --dangerously-skip-permissions --continue'
 alias tm='tmux attach -t main || tmux new -s main'
 
 # Proxy toggle (for Tailscale userspace networking)
-alias proxy-on='. ${DOTFILES_DIR}/devpod/proxy.sh'
+alias proxy-on='. "${DOTFILES_DIR}/devpod/proxy.sh"'
 alias proxy-off='unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy && echo "Proxy disabled"'
 
 # ==============================================================================
@@ -121,3 +125,28 @@ alias proxy-off='unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY a
 
 # Rust/Cargo
 [ ! -f "${HOME}/.cargo/env" ] || . "${HOME}/.cargo/env"
+
+# ==============================================================================
+# Kubernetes pod monitoring
+# ==============================================================================
+
+# Start ephemeral storage monitor (for k8s pods)
+# Script handles single-instance via PID file
+if [ -d /var/run/secrets/kubernetes.io/serviceaccount ]; then
+  if [ -n "${DOTFILES_DIR:-}" ] && [ -x "${DOTFILES_DIR}/scripts/ephemeral-monitor" ]; then
+    nohup "${DOTFILES_DIR}/scripts/ephemeral-monitor" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+  fi
+fi
+
+# ==============================================================================
+# Dotfiles bin (must be last to take precedence)
+# ==============================================================================
+
+_path=""
+IFS=':' read -ra _parts <<< "$PATH"
+for _p in "${_parts[@]}"; do
+    [[ "$_p" != "${DOTFILES_DIR}/bin" ]] && _path="${_path:+$_path:}$_p"
+done
+export PATH="${DOTFILES_DIR}/bin:$_path"
+unset _path _parts _p
