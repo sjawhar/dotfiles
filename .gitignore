@@ -1,11 +1,18 @@
+__pycache__
+*.pyc
+.venv/
+uv.lock
+
 bin/
 completions.d/
 .node/
 
 # Claude Code - ignore all machine-specific state, whitelist config
 .claude/*
-!.claude/settings.json
 !.claude/CLAUDE.md
 !.claude/agents/
 !.claude/commands/
 !.claude/mcp.json
+!.claude/project-instructions/
+!.claude/settings.json
+

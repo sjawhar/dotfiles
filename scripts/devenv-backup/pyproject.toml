@@ -1,0 +1,27 @@
+[project]
+name = "devenv-backup"
+version = "0.0.0"
+description = "DevEnv Capture/Restore System"
+requires-python = ">=3.11"
+# Runtime deps are in the inline script metadata, not here
+
+[project.optional-dependencies]
+dev = [
+    "basedpyright>=1.0",
+    "types-aioboto3[s3]",
+    # Runtime deps needed for type checking
+    "aioboto3",
+    "aiofiles",
+    "pydantic>=2.0",
+    "tenacity",
+]
+
+[tool.basedpyright]
+pythonVersion = "3.11"
+typeCheckingMode = "recommended"
+reportAny = false  # Too noisy with argparse
+reportUnusedCallResult = false
+reportExplicitAny = false
+reportUnknownVariableType = false  # Complex nested dicts
+reportUnknownMemberType = false  # Complex nested dicts
+reportUnknownArgumentType = false  # Complex nested dicts

@@ -89,6 +89,11 @@ if ! command -v claude &>/dev/null; then
     npm install -g @anthropic-ai/claude-code
 fi
 
+# Symlink basedpyright as pyright for Claude Code LSP compatibility
+if command -v basedpyright-langserver &>/dev/null; then
+    ln -sf "$(which basedpyright-langserver)" "${DOTFILES_DIR}/bin/pyright-langserver"
+fi
+
 # ------------------------------------------------------------------------------
 # Completions
 # ------------------------------------------------------------------------------

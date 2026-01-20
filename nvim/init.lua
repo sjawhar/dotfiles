@@ -270,7 +270,7 @@ require("lazy").setup({
 -- Native LSP (Neovim 0.11+)
 if vim.fn.has("nvim-0.11") == 1 then
   vim.lsp.config.pyright = {
-    cmd = { "pyright-langserver", "--stdio" },
+    cmd = { "basedpyright-langserver", "--stdio" },
     filetypes = { "python" },
     root_markers = { "pyproject.toml", "setup.py", "requirements.txt", ".git" },
     settings = {
