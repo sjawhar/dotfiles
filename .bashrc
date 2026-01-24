@@ -140,13 +140,15 @@ if [ -d /var/run/secrets/kubernetes.io/serviceaccount ]; then
 fi
 
 # ==============================================================================
-# Dotfiles bin (must be last to take precedence)
+# Dotfiles paths (must be last to take precedence)
+# shims/ contains wrapper scripts that intercept commands (e.g., pyright -> basedpyright)
+# bin/ contains binaries and symlinks
 # ==============================================================================
 
 _path=""
 IFS=':' read -ra _parts <<< "$PATH"
 for _p in "${_parts[@]}"; do
-    [[ "$_p" != "${DOTFILES_DIR}/bin" ]] && _path="${_path:+$_path:}$_p"
+    [[ "$_p" != "${DOTFILES_DIR}/bin" && "$_p" != "${DOTFILES_DIR}/shims" ]] && _path="${_path:+$_path:}$_p"
 done
-export PATH="${DOTFILES_DIR}/bin:$_path"
+export PATH="${DOTFILES_DIR}/shims:${DOTFILES_DIR}/bin:$_path"
 unset _path _parts _p
