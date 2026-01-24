@@ -124,7 +124,6 @@ RUN groupadd -g ${GROUP_ID} ${APP_USER} \
  && useradd -m -u ${USER_ID} -g ${APP_USER} -s /bin/bash ${APP_USER} \
  && mkdir -p \
     /home/${APP_USER}/.cache/mise \
-    /home/${APP_USER}/.npm \
     /home/${APP_USER}/.tmux/plugins \
  && chown -R ${APP_USER}:${APP_USER} /home/${APP_USER}
 
@@ -136,7 +135,6 @@ COPY --chown=${APP_USER}:${APP_USER} . .dotfiles
 ENV PATH="/home/${APP_USER}/.local/bin:${PATH}"
 
 RUN --mount=type=cache,target=/home/${APP_USER}/.cache/mise,uid=${USER_ID},gid=${GROUP_ID} \
-    --mount=type=cache,target=/home/${APP_USER}/.npm,uid=${USER_ID},gid=${GROUP_ID} \
     ./.dotfiles/install.sh
 
 RUN nvim --headless "+Lazy! sync" +qa 2>/dev/null || true
