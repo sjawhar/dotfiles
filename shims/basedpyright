@@ -1,0 +1,7 @@
+#!/bin/bash
+# Wrapper: use venv basedpyright if available, else fall back to mise
+if [[ -x .venv/bin/basedpyright ]]; then
+    exec .venv/bin/basedpyright "$@"
+else
+    exec mise exec basedpyright -- basedpyright "$@"
+fi

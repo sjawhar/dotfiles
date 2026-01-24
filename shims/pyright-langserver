@@ -1,0 +1,8 @@
+#!/bin/bash
+# Alias for basedpyright-langserver (Claude Code LSP compatibility)
+# Use venv if available, else fall back to mise
+if [[ -x .venv/bin/basedpyright-langserver ]]; then
+    exec .venv/bin/basedpyright-langserver "$@"
+else
+    exec mise exec basedpyright -- basedpyright-langserver "$@"
+fi
