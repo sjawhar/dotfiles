@@ -22,3 +22,8 @@
 !.claude/mcp.json
 !.claude/settings.json
 !code-review-jj/
+
+# Re-exclude build artifacts from un-ignored directories
+**/.venv/
+**/.mypy_cache/
+**/__pycache__/

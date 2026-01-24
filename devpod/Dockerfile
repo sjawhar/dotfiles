@@ -1,40 +1,58 @@
-ARG AWS_CLI_VERSION=2.32.34
 ARG BUILDX_VERSION=0.30.1-desktop.2
 ARG DOCKER_VERSION=29.1.5
 ARG HELM_VERSION=4.0.5
-ARG JJ_VERSION=0.37.0
 ARG K9S_VERSION=0.50.18
 ARG KUBECTL_VERSION=1.34.3
 ARG NEOVIM_VERSION=0.11.5
-ARG NODE_VERSION=22.21.1
 ARG PYTHON_VERSION=3.13.11
 ARG UV_VERSION=0.9.26
 
-FROM amazon/aws-cli:${AWS_CLI_VERSION} AS aws-cli
+# Source images for binary copies
 FROM docker:${DOCKER_VERSION}-cli AS docker
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
-FROM node:${NODE_VERSION}-trixie AS node
 FROM rancher/kubectl:v${KUBECTL_VERSION} AS kubectl
 
-# Download stage - fetch all binaries in parallel
-FROM debian:trixie-slim AS downloads
+# ------------------------------------------------------------------------------
+# Base layer - shared packages and user setup
+# ------------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION}-trixie AS base
+ARG DEVPOD_USER=sami
+ARG DEVPOD_UID=1000
+ARG DEVPOD_GID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+ENV SHELL=/bin/bash
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        locales \
+ && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
+ && locale-gen
+
+RUN groupadd -g ${DEVPOD_GID} ${DEVPOD_USER} \
+ && useradd -m -u ${DEVPOD_UID} -g ${DEVPOD_USER} -s /bin/bash ${DEVPOD_USER}
+
+# ------------------------------------------------------------------------------
+# Builder: Download binaries not managed by mise
+# ------------------------------------------------------------------------------
+FROM base AS builder-downloads
 ARG TARGETARCH
 ARG BUILDX_VERSION
 ARG HELM_VERSION
-ARG JJ_VERSION
 ARG K9S_VERSION
 ARG NEOVIM_VERSION
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
-
 RUN NVIM_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x86_64") \
+ && mkdir -p /build/nvim \
  && curl -fsSL "https://github.com/neovim/neovim/releases/download/v${NEOVIM_VERSION}/nvim-linux-${NVIM_ARCH}.tar.gz" \
-    | tar -xz -C /opt --strip-components=1
-
-RUN JJ_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") \
- && curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-${JJ_ARCH}-unknown-linux-musl.tar.gz" \
-    | tar -xz -C /usr/local/bin
+    | tar -xz -C /build/nvim --strip-components=1
 
 RUN curl -fsSL "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_${TARGETARCH}.tar.gz" \
     | tar -xz -C /usr/local/bin k9s
@@ -47,28 +65,39 @@ RUN mkdir -p /usr/local/libexec/docker/cli-plugins \
         -o /usr/local/libexec/docker/cli-plugins/docker-buildx \
  && chmod +x /usr/local/libexec/docker/cli-plugins/docker-buildx
 
-FROM python:${PYTHON_VERSION}-trixie AS base
+# ------------------------------------------------------------------------------
+# Builder: Install tools via mise
+# ------------------------------------------------------------------------------
+FROM base AS builder-mise
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV LANG=en_US.UTF-8
-ENV LC_ALL=en_US.UTF-8
-ENV SHELL=/bin/bash
+RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
 
+USER ${DEVPOD_USER}
+WORKDIR /home/${DEVPOD_USER}
+ENV MISE_DATA_DIR=/home/${DEVPOD_USER}/.mise
+
+COPY --chown=${DEVPOD_USER}:${DEVPOD_USER} mise.toml .config/mise/config.toml
+RUN --mount=type=cache,target=/home/${DEVPOD_USER}/.cache/mise,uid=${DEVPOD_UID},gid=${DEVPOD_GID} \
+    mise trust \
+  && mise install
+
+# ------------------------------------------------------------------------------
+# Final image
+# ------------------------------------------------------------------------------
+FROM base
+
+# Additional packages for final image
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
         bash-completion \
-        build-essential \
-        ca-certificates \
-        curl \
         dnsutils \
         fd-find \
-        git \
         gnupg \
-        iputils-ping \
         groff \
+        iputils-ping \
         less \
-        locales \
+        man-db \
         mosh \
         netcat-openbsd \
         openssh-server \
@@ -76,73 +105,55 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         tmux \
         unzip \
         xz-utils \
- && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
- && locale-gen \
- && echo 'LANG=en_US.UTF-8\nLC_ALL=en_US.UTF-8' > /etc/default/locale \
  && ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
+# Tailscale
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
  && curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends tailscale \
- && mkdir -p /var/lib/tailscale
+ && mkdir -p /var/lib/tailscale /var/run/tailscale
 
-COPY --link --from=downloads /opt/ /usr/local/
-
+# SSH server
 RUN mkdir -p /var/run/sshd \
  && ssh-keygen -A \
  && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
  && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
 
-COPY --link --from=kubectl /bin/kubectl /usr/local/bin/kubectl
-COPY --link --from=downloads /usr/local/bin/jj /usr/local/bin/jj
-COPY --link --from=downloads /usr/local/bin/k9s /usr/local/bin/k9s
-COPY --link --from=downloads /usr/local/bin/helm /usr/local/bin/helm
-COPY --link --from=aws-cli /usr/local/aws-cli/v2/current /usr/local
+# Copy binaries from builders and source images
+COPY --link --from=builder-downloads /build/nvim/ /usr/local/
+COPY --link --from=builder-downloads /usr/local/bin/helm /usr/local/bin/helm
+COPY --link --from=builder-downloads /usr/local/bin/k9s /usr/local/bin/k9s
+COPY --link --from=builder-downloads /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
+COPY --link --from=builder-mise /usr/local/bin/mise /usr/local/bin/mise
+COPY --link --from=builder-mise --chown=${DEVPOD_UID}:${DEVPOD_GID} /home/${DEVPOD_USER}/.mise /home/${DEVPOD_USER}/.mise
 COPY --link --from=docker /usr/local/bin/docker /usr/local/bin/docker
 COPY --link --from=docker /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
-COPY --link --from=downloads /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
+COPY --link --from=kubectl /bin/kubectl /usr/local/bin/kubectl
 COPY --link --from=uv /uv /uvx /usr/local/bin/
-COPY --link --from=node /usr/local/bin /usr/local/bin
-COPY --link --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 
+USER ${DEVPOD_USER}
+WORKDIR /home/${DEVPOD_USER}
+ENV MISE_DATA_DIR=/home/${DEVPOD_USER}/.mise
+ENV PATH="/home/${DEVPOD_USER}/.local/bin:${PATH}"
+
+COPY --chown=${DEVPOD_USER}:${DEVPOD_USER} . .dotfiles
+
+RUN ./.dotfiles/install.sh --skip-mise
+
+# Final setup
+USER root
 RUN mkdir -p /etc/bash_completion.d \
- && kubectl completion bash > /etc/bash_completion.d/kubectl \
+ && docker completion bash > /etc/bash_completion.d/docker \
  && helm completion bash > /etc/bash_completion.d/helm \
  && k9s completion bash > /etc/bash_completion.d/k9s \
- && docker completion bash > /etc/bash_completion.d/docker \
- && uv generate-shell-completion bash > /etc/bash_completion.d/uv \
- && jj util completion bash > /etc/bash_completion.d/jj \
- && echo 'complete -C /usr/local/bin/aws_completer aws' > /etc/bash_completion.d/aws
+ && kubectl completion bash > /etc/bash_completion.d/kubectl \
+ && uv generate-shell-completion bash > /etc/bash_completion.d/uv
 
-ARG APP_USER=sami
-ARG USER_ID=1000
-ARG GROUP_ID=1000
-RUN groupadd -g ${GROUP_ID} ${APP_USER} \
- && useradd -m -u ${USER_ID} -g ${APP_USER} -s /bin/bash ${APP_USER} \
- && mkdir -p \
-    /home/${APP_USER}/.cache/mise \
-    /home/${APP_USER}/.tmux/plugins \
- && chown -R ${APP_USER}:${APP_USER} /home/${APP_USER}
+RUN mkdir -p /devpod \
+ && ln -sf "/home/${DEVPOD_USER}/.dotfiles/devpod/entrypoint.sh" /devpod/startup.sh
 
-USER ${APP_USER}
-WORKDIR /home/${APP_USER}
-RUN git clone https://github.com/tmux-plugins/tpm .tmux/plugins/tpm
-
-COPY --chown=${APP_USER}:${APP_USER} . .dotfiles
-ENV PATH="/home/${APP_USER}/.local/bin:${PATH}"
-
-RUN --mount=type=cache,target=/home/${APP_USER}/.cache/mise,uid=${USER_ID},gid=${GROUP_ID} \
-    ./.dotfiles/install.sh
-
-RUN nvim --headless "+Lazy! sync" +qa 2>/dev/null || true
-
-USER root
-RUN mkdir -p /var/run/tailscale \
- && mkdir -p /devpod \
- && ln -sf "/home/${APP_USER}/.dotfiles/devpod/entrypoint.sh" /devpod/startup.sh
- 
 EXPOSE 22
 CMD ["/devpod/startup.sh"]
