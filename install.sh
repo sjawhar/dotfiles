@@ -2,6 +2,13 @@
 set -eu
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKIP_MISE=false
+
+for arg in "$@"; do
+    case $arg in
+        --skip-mise) SKIP_MISE=true ;;
+    esac
+done
 
 echo "=== Dotfiles Install ==="
 
@@ -18,6 +25,7 @@ fi
 
 mkdir -p ~/.config/mise
 ln -sf "${DOTFILES_DIR}/mise.toml" ~/.config/mise/config.toml
+mise trust ~/.config/mise/config.toml || echo "MISE INSTALL FAILED"
 
 if ! command -v mise &>/dev/null
 then
@@ -26,13 +34,16 @@ then
     eval "$(mise activate "$DOTFILES_SHELL")"
 fi
 
-echo "Installing tools via mise..."
-mise trust 2>/dev/null || true
-for i in {1..3}
-do
-    mise install && break || echo "Some tools failed to install (may be rate-limited). Run 'mise install' later."
-    sleep 1
-done
+if [ "$SKIP_MISE" = true ]; then
+    echo "Skipping mise install (--skip-mise)"
+else
+    echo "Installing tools via mise..."
+    mise trust || echo "MISE TRUST FAILED"
+    for i in {1..3}; do
+        mise install && break || echo "Some tools failed to install (may be rate-limited). Run 'mise install' later."
+        sleep 1
+    done
+fi
 
 # ------------------------------------------------------------------------------
 # Symlinks
@@ -43,6 +54,12 @@ mkdir -p ~/.config/nvim
 ln -sf "${DOTFILES_DIR}/.gitconfig" ~/.gitconfig
 ln -sf "${DOTFILES_DIR}/.tmux.conf" ~/.tmux.conf
 ln -sf "${DOTFILES_DIR}/nvim/init.lua" ~/.config/nvim/init.lua
+
+# Install nvim plugins
+if command -v nvim &>/dev/null; then
+    echo "Installing nvim plugins..."
+    nvim --headless "+Lazy! sync" +qa || echo "NVIM PLUGIN INSTALL FAILED"
+fi
 
 # ------------------------------------------------------------------------------
 # jj (version control system)
@@ -74,6 +91,7 @@ if command -v tmux &>/dev/null; then
     TPM_DIR="${HOME}/.tmux/plugins/tpm"
     if [ ! -d "${TPM_DIR}/.git" ]; then
         echo "Installing TPM..."
+        mkdir -p "${HOME}/.tmux/plugins"
         rm -rf "$TPM_DIR"
         git clone --depth 1 https://github.com/tmux-plugins/tpm "$TPM_DIR"
     fi
@@ -92,9 +110,12 @@ fi
 # Completions
 # ------------------------------------------------------------------------------
 
+echo "Generating completions..."
 COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"
 mkdir -p "$COMPLETIONS_DIR"
-jj util completion bash > "${COMPLETIONS_DIR}/jj.bash" 2>/dev/null || true
-jj util completion zsh > "${COMPLETIONS_DIR}/jj.zsh" 2>/dev/null || true
+
+# Mise-managed tools (skip if not available)
+jj util completion bash > "${COMPLETIONS_DIR}/jj.bash" || true
+gh completion -s bash > "${COMPLETIONS_DIR}/gh.bash" || true
 
 echo "=== Done! Restart your shell or run: source ~/.bashrc ==="
