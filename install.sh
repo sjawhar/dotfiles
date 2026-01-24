@@ -83,15 +83,9 @@ fi
 # Claude Code
 # ------------------------------------------------------------------------------
 
-mkdir -p "$NPM_CONFIG_PREFIX"
 if ! command -v claude &>/dev/null; then
     echo "Installing Claude Code..."
-    npm install -g @anthropic-ai/claude-code
-fi
-
-# Symlink basedpyright as pyright for Claude Code LSP compatibility
-if command -v basedpyright-langserver &>/dev/null; then
-    ln -sf "$(which basedpyright-langserver)" "${DOTFILES_DIR}/bin/pyright-langserver"
+    curl -fsSL https://claude.ai/install.sh | bash
 fi
 
 # ------------------------------------------------------------------------------
