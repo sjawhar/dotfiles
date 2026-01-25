@@ -135,7 +135,7 @@ fi
 
 alias cc='claude'
 alias ccd='claude --dangerously-skip-permissions'
-alias cc-continue='claude --dangerously-skip-permissions --continue'
+alias ccc='claude --dangerously-skip-permissions --continue'
 
 # ==============================================================================
 # AWS profile management
