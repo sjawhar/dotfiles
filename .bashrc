@@ -82,6 +82,35 @@ export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 
 # ==============================================================================
+# jj (Jujutsu) workspace utilities
+# ==============================================================================
+
+# Refresh all jj workspaces in current project
+# Finds workspaces by locating directories whose .jj/repo points to the main repo
+jj-refresh-workspaces() {
+    local main_repo
+    main_repo="$(jj workspace root 2>/dev/null)/.jj/repo" || return 1
+
+    # Find directories with .jj/repo pointing to our main repo
+    find ~ -maxdepth 3 -name ".jj" -type d 2>/dev/null | while read -r jj_dir; do
+        local repo_file="$jj_dir/repo"
+        [ -f "$repo_file" ] || continue
+        local target
+        target="$(cat "$repo_file" 2>/dev/null)"
+        [ "$target" = "$main_repo" ] && echo "${jj_dir%/.jj}"
+    done | sort -u | while read -r ws_path; do
+        [ -z "$ws_path" ] && continue
+        echo "Refreshing workspace $ws_path..."
+        (cd "$ws_path" && jj workspace update-stale &>/dev/null; jj st &>/dev/null)
+    done
+
+    # Also update the main workspace itself
+    local main_path="${main_repo%/.jj/repo}"
+    echo "Refreshing workspace $main_path..."
+    (cd "$main_path" && jj workspace update-stale &>/dev/null; jj st &>/dev/null)
+}
+
+# ==============================================================================
 # Modern CLI aliases
 # ==============================================================================
 
