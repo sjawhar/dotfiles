@@ -138,6 +138,67 @@ alias cc-start='claude --dangerously-skip-permissions'
 alias cc-continue='claude --dangerously-skip-permissions --continue'
 
 # ==============================================================================
+# AWS profile management
+# ==============================================================================
+
+# AWS profile switcher with tab completion
+aprof() {
+    if [ -z "$1" ]; then
+        echo "Current: ${AWS_PROFILE:-<not set>}"
+        echo "Available profiles:"
+        grep '^\[profile ' ~/.aws/config 2>/dev/null | sed 's/\[profile \(.*\)\]/  \1/'
+        return
+    fi
+    export AWS_PROFILE="$1"
+    echo "AWS_PROFILE=$AWS_PROFILE"
+}
+
+# Tab completion for aprof (bash and zsh)
+if [ -n "${ZSH_VERSION:-}" ]; then
+    _aprof_complete() {
+        local profiles
+        profiles=($(grep '^\[profile ' ~/.aws/config 2>/dev/null | sed 's/\[profile \(.*\)\]/\1/'))
+        _describe 'AWS profile' profiles
+    }
+    compdef _aprof_complete aprof
+else
+    _aprof_complete() {
+        local profiles
+        profiles=$(grep '^\[profile ' ~/.aws/config 2>/dev/null | sed 's/\[profile \(.*\)\]/\1/')
+        COMPREPLY=($(compgen -W "$profiles" -- "${COMP_WORDS[COMP_CWORD]}"))
+    }
+    complete -F _aprof_complete aprof
+fi
+
+# AWS SSO login
+alias alog='aws sso login --use-device-code'
+
+# ==============================================================================
+# Environment file loading
+# ==============================================================================
+
+# Load .env file (defaults to .env in current directory)
+loadenv() {
+    local envfile="${1:-.env}"
+    if [ -f "$envfile" ]; then
+        set -a
+        source "$envfile"
+        set +a
+        echo "Loaded $envfile"
+    else
+        echo "File not found: $envfile" >&2
+        return 1
+    fi
+}
+
+# ==============================================================================
+# Python development (UV-based)
+# ==============================================================================
+
+alias ulint='uv run ruff format && uv run ruff check --fix'
+alias ucheck='uv run ruff format && uv run ruff check --fix && uv run basedpyright'
+
+# ==============================================================================
 # Tmux session management (Harper Reed workflow)
 # ==============================================================================
 
