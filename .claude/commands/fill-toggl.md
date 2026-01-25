@@ -5,14 +5,15 @@ Auto-fill missing Toggl time entries from desktop activity, Claude Code sessions
 ## Quick Reference
 
 1. Collect data (existing entries, desktop activity, Claude sessions)
-2. Analyze sessions via subagents
-3. Detect time gaps
-4. Classify gaps using session content → patterns → desktop hints
-5. Present plan and get user approval
-6. Create approved entries
-7. Verify and iterate until all completion criteria pass
+2. **Clean up multi-tag entries** (every entry must have exactly one tag)
+3. Analyze sessions via subagents
+4. Detect time gaps (desktop activity required, not just Claude sessions)
+5. Classify gaps using session content → patterns → desktop hints
+6. Present plan and get user approval
+7. Create approved entries
+8. Verify and iterate until all completion criteria pass
 
-**Key principle**: Claude session content is the primary source of truth for what was worked on; desktop activity only provides timing hints.
+**Key principle**: Claude session content is the primary source of truth for what was worked on; desktop activity provides both timing AND validation that you were actively working (not just background processes).
 
 ## Arguments
 
@@ -24,6 +25,18 @@ Auto-fill missing Toggl time entries from desktop activity, Claude Code sessions
 **Optional flags** (named parameters only):
 - `--sessions <path>`: Path to directory containing Claude Code session JSONL files
 - `--toggl-db <path>`: Path to local Toggl SQLite database
+
+**Default data locations** (used if flags not provided):
+- Toggl DB: `/data/toggl/production/DatabaseModel.sqlite`
+- Claude sessions: `/data/claude/*/` (searches all home directories)
+
+These paths are checked automatically. If not found, the command will ask.
+
+**Timezone handling:**
+- Dates are interpreted in the user's local timezone (inferred from system)
+- To specify explicitly: `2026-01-18T00:00 America/Los_Angeles`
+- All displayed times use local timezone
+- When comparing with UTC data from APIs, convert appropriately
 
 Examples:
 - `/fill-toggl today`
@@ -44,13 +57,36 @@ If a bare path is provided without a flag, ask the user to clarify whether it's 
 
 4. **Get desktop activity** from Toggl:
    - If user provided a Toggl DB path, use it directly
-   - Otherwise, ask the user where to find it (or if they want to skip local DB)
+   - Otherwise, check default path `/data/toggl/production/DatabaseModel.sqlite`
+   - If not found, ask the user where to find it (or if they want to skip local DB)
    - If local DB not available, use `toggl_get_timeline` API (note: rate limited to 30 req/hr)
    - If neither available, proceed with Claude sessions only
 
-5. **Collect Claude Code sessions** if path provided:
-   - Look for `.jsonl` files in the provided path
-   - Each file is a session transcript
+5. **Collect Claude Code sessions**:
+   - If `--sessions` provided: use that path
+   - Otherwise, scan `/data/claude/*/` for all home directories
+   - For EACH home directory found:
+     - Look in `.claude/projects/*/` for session `.jsonl` files
+     - Include sessions that overlap with the target date range
+   - Report: "Found X sessions across Y projects in Z home directories"
+
+### Phase 1.5: Multi-Tag Entry Cleanup
+
+**Rule**: Every time entry MUST have exactly ONE tag. This applies to ALL entries in the date range, not just newly created ones.
+
+Scan ALL existing entries in the date range for tag violations:
+
+1. **Find multi-tag entries**: Query entries where tag count > 1
+2. **For each multi-tag entry**:
+   - Present to user: "Entry X has tags [A, B, C]. How should we split?"
+   - Cross-reference with Claude sessions for that time to propose intelligent splits
+   - Propose splitting by activity type OR by equal duration as fallback
+   - Get user approval
+   - Delete original entry and create separate single-tag entries
+
+3. **Find zero-tag entries**: Also flag entries with NO tags for user to assign one
+
+Complete this cleanup before proceeding to gap detection.
 
 ### Phase 2: Session Analysis
 
@@ -111,7 +147,8 @@ Run subagents in parallel for efficiency. Collect their outputs.
 7. **Find gaps** using this logic:
    - A gap is any time period where:
      a) No existing Toggl entry covers it, AND
-     b) Either desktop activity (non-idle) exists, OR a Claude session was active
+     b) Desktop activity (non-idle) exists
+   - **IMPORTANT**: Claude session activity WITHOUT corresponding desktop activity should NOT create entries. Claude sessions alone indicate passive/background work that shouldn't be billed.
    - Merge adjacent activity into continuous gaps (don't report many tiny gaps)
    - Idle periods > 10 minutes within activity should split into separate gaps
 
@@ -154,6 +191,13 @@ For each gap, determine what to fill it with:
 - "Chrome" could be docs, PRs, research - not just "browsing"
 - "Terminal" could be anything - verify with session content
 - Brief scattered activity shouldn't become a consolidated block unless Claude session confirms
+
+**Mandatory entry splitting:**
+- Never create entries > 2 hours without explicit user approval
+- ALWAYS split when work crosses different projects
+- ALWAYS split when work crosses different tags
+- Prefer multiple smaller entries over large mixed-work blocks
+- When Claude session shows project/context switch mid-block, create separate entries
 
 ### Phase 5: User Confirmation
 
@@ -204,14 +248,21 @@ Wait for user feedback. They may:
 
 ## Completion Criteria
 
-The skill is **not done** until ALL of the following are verified:
+**You are NOT DONE until ALL of the following are verified:**
 
-1. **No uncovered activity**: Every period of desktop activity or Claude session has a corresponding Toggl entry
-2. **No incomplete entries**: Every Toggl entry has a description, project, AND at least one tag
-3. **No overlapping entries**: No two Toggl entries overlap in time
-4. **Session alignment**: All entries make sense according to active Claude Code sessions at the time
+1. **Desktop activity coverage**: Every period with desktop activity (non-idle) has a time entry
+2. **No session-only entries**: No entries exist for periods with Claude activity but no desktop activity (session-only = passive work)
+3. **Single-tag rule**: EVERY entry in the date range has exactly ONE tag (not zero, not multiple). This includes pre-existing entries.
+4. **Complete metadata**: Every entry has description, project, AND exactly one tag
+5. **No overlaps**: No two entries overlap in time
+6. **Granularity**: No entry exceeds 2 hours without explicit user approval
+7. **Session alignment**: Entry descriptions accurately reflect Claude session content for that period
 
-Run verification after entry creation and iterate until all criteria pass.
+**Verification loop**:
+- After each batch of changes, re-fetch ALL data and re-check ALL criteria
+- If any criterion fails, fix it and loop again
+- Continue until a full pass with ZERO issues
+- Do NOT ask user "are we done?" - verify programmatically
 
 ### Phase 7: Verification & Iteration
 
@@ -222,7 +273,7 @@ Run verification after entry creation and iterate until all criteria pass.
 15. **Quality check**: For each Toggl entry in the date range, verify:
     - Has non-empty description
     - Has project assigned
-    - Has at least one tag
+    - Has exactly one tag (not zero, not multiple)
 
     Report any entries missing these and propose fixes.
 
@@ -230,13 +281,16 @@ Run verification after entry creation and iterate until all criteria pass.
 
 17. **Session alignment check**: Cross-reference entries against Claude sessions to verify descriptions make sense. Flag mismatches (e.g., entry says "development" but session shows code review).
 
-18. **Present findings** to user. If issues found:
+18. **Granularity check**: Flag any entries exceeding 2 hours for user review.
+
+19. **Present findings** to user. If issues found:
     - Propose new entries for gaps
     - Propose updates for incomplete entries
     - Propose fixes for overlaps (trim/split)
+    - Propose splits for oversized entries
     - Ask for approval before making changes
 
-19. **Create/update entries** as approved and return to step 14.
+20. **Create/update entries** as approved and return to step 14.
 
 ## Local Toggl Database Details
 
