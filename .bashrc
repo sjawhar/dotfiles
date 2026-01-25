@@ -134,7 +134,7 @@ fi
 # ==============================================================================
 
 alias cc='claude'
-alias cc-start='claude --dangerously-skip-permissions'
+alias ccd='claude --dangerously-skip-permissions'
 alias cc-continue='claude --dangerously-skip-permissions --continue'
 
 # ==============================================================================
