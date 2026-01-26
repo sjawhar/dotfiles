@@ -2,6 +2,31 @@
 
 The `~/.dotfiles` repo is a personal dotfiles repo. Push directly to main—no PRs needed.
 
+## Working Style
+
+### Planning
+
+When creating plans:
+- **Prepare for feedback** — treat plans as drafts to iterate on, not final deliverables
+- **Front-load uncertainty** — call out areas where you're unsure or see multiple approaches
+- **Show your reasoning** — explain why you chose an approach so the user can evaluate trade-offs
+- **Don't declare plans "complete"** — say "ready for review" and expect revisions
+
+### Code Patterns
+
+Before implementing new functionality, search the codebase for similar patterns. Follow existing conventions by default.
+
+If you see a cleaner alternative:
+- Note it explicitly: "The existing pattern does X, but Y might be cleaner because..."
+- **Don't deviate from existing patterns without explicit approval**
+- Consistency with existing code takes priority unless the user agrees to change it
+
+### Scope Awareness
+
+- Implement exactly what's requested — don't add unrequested features
+- If uncertain whether something is in scope, ask rather than assume it is
+- When the user says something is "not in scope" or "not in the plan," respect that boundary
+
 ## Version Control (jj)
 
 This user uses [jj (Jujutsu)](https://github.com/martinvonz/jj) with a squash workflow:
