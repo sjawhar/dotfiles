@@ -12,6 +12,7 @@ completions.d/
 !.claude/CLAUDE.md
 !.claude/agents/
 !.claude/commands/
+!.claude/skills/
 !.claude/mcp.json
 !.claude/project-instructions/
 !.claude/settings.json
