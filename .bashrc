@@ -86,28 +86,26 @@ export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 # ==============================================================================
 
 # Refresh all jj workspaces in current project
-# Finds workspaces by locating directories whose .jj/repo points to the main repo
+# Uses jj's workspace list and path lookup (requires workspaces to have recorded paths)
 jj-refresh-workspaces() {
-    local main_repo
-    main_repo="$(jj workspace root 2>/dev/null)/.jj/repo" || return 1
+    local root_path ws path
 
-    # Find directories with .jj/repo pointing to our main repo
-    find ~ -maxdepth 3 -name ".jj" -type d 2>/dev/null | while read -r jj_dir; do
-        local repo_file="$jj_dir/repo"
-        [ -f "$repo_file" ] || continue
-        local target
-        target="$(cat "$repo_file" 2>/dev/null)"
-        [ "$target" = "$main_repo" ] && echo "${jj_dir%/.jj}"
-    done | sort -u | while read -r ws_path; do
-        [ -z "$ws_path" ] && continue
-        echo "Refreshing workspace $ws_path..."
-        (cd "$ws_path" && jj workspace update-stale &>/dev/null; jj st &>/dev/null)
+    # 1. Get root workspace path
+    root_path=$(jj workspace root 2>/dev/null) || return 1
+    [ -f "$root_path/.jj/repo" ] && root_path="$(cat "$root_path/.jj/repo")" && root_path="${root_path%/.jj/repo}"
+
+    # 2. Refresh root workspace
+    echo "Refreshing workspace $root_path..."
+    jj -R "$root_path" workspace update-stale &>/dev/null
+    jj -R "$root_path" st &>/dev/null
+
+    # 3. Refresh all other workspaces
+    for ws in $(jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null); do
+        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || continue
+        echo "Refreshing workspace $path..."
+        jj -R "$path" workspace update-stale &>/dev/null
+        jj -R "$path" st &>/dev/null
     done
-
-    # Also update the main workspace itself
-    local main_path="${main_repo%/.jj/repo}"
-    echo "Refreshing workspace $main_path..."
-    (cd "$main_path" && jj workspace update-stale &>/dev/null; jj st &>/dev/null)
 }
 
 # ==============================================================================
