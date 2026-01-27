@@ -190,6 +190,23 @@ loadenv() {
 }
 
 # ==============================================================================
+# File concatenation utility
+# ==============================================================================
+
+# Concatenate files with path headers and separators
+# Usage: codecat [files/globs...] > output.txt
+codecat() {
+    local first=1
+    for file in "$@"; do
+        [ -f "$file" ] || continue
+        [ "$first" -eq 1 ] || echo "---"
+        first=0
+        echo "# $file"
+        cat "$file"
+    done
+}
+
+# ==============================================================================
 # Python development (UV-based)
 # ==============================================================================
 
