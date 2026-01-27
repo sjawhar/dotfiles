@@ -9,6 +9,10 @@ format = '[$ssh_symbol$hostname]($style) '
 show_always = true
 format = '[$user]($style)'
 
+[directory]
+truncation_length = 2
+truncate_to_repo = false
+
 [custom.jj]
 ignore_timeout = true
 description = "The current jj status"
