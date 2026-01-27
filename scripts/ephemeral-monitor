@@ -4,6 +4,7 @@
 
 PIDFILE="/tmp/ephemeral-monitor.pid"
 STATUS_FILE="/tmp/ephemeral-storage-status"
+LOGFILE="/tmp/ephemeral-monitor.log"
 
 # Single-instance via flock (atomic, handles PID recycling)
 exec 200>"$PIDFILE"
@@ -12,14 +13,36 @@ echo "$$" >&200
 
 # Cleanup on exit
 cleanup() {
-  rm -f "$PIDFILE" "$STATUS_FILE" "${STATUS_FILE}.tmp"
+  rm -f "$STATUS_FILE" "${STATUS_FILE}.tmp"
+  # Don't delete PIDFILE - let the lock release naturally
   exit 0
 }
 trap cleanup SIGTERM SIGINT EXIT
 
+# Logging helper (rotates to keep last ~100 lines)
+log() {
+  local msg="$(date '+%Y-%m-%d %H:%M:%S') $1"
+  echo "$msg" >> "$LOGFILE"
+  # Rotate if over 100 lines
+  if [ "$(wc -l < "$LOGFILE" 2>/dev/null)" -gt 100 ]; then
+    tail -n 100 "$LOGFILE" > "${LOGFILE}.tmp" && mv "${LOGFILE}.tmp" "$LOGFILE"
+  fi
+}
+
+# Unit conversion helpers
+kb_to_gb() { echo $(($1 / 1024 / 1024)); }
+usage_percent() { echo $(($1 * 100 / LIMIT_KB)); }
+
+# Log state transition (WARN or CLEAR)
+log_transition() {
+  local level=$1 new_state=$2 cmp=$3
+  log "[$level] usage=$(kb_to_gb "$used_kb")GB ($(usage_percent "$used_kb")%) $cmp threshold"
+  was_warning=$new_state
+}
+
 LIMIT_KB=${EPHEMERAL_LIMIT_KB:-157286400}  # 150GB in KB
 WARN_PERCENT=${EPHEMERAL_WARN_PERCENT:-75}
-INTERVAL=${EPHEMERAL_CHECK_INTERVAL:-300}  # 5 minutes
+INTERVAL=${EPHEMERAL_CHECK_INTERVAL:-30}   # 30 seconds
 
 # Validate numeric inputs
 for var in LIMIT_KB WARN_PERCENT INTERVAL; do
@@ -38,6 +61,11 @@ done
 # Pre-calculate constants (avoids overflow: divide first)
 threshold_kb=$((LIMIT_KB / 100 * WARN_PERCENT))
 
+log "[START] limit=$(kb_to_gb "$LIMIT_KB")GB threshold=${WARN_PERCENT}% ($(kb_to_gb "$threshold_kb")GB)"
+
+# Track warning state for logging transitions
+was_warning=false
+
 while true; do
   used_kb=$(timeout 60 du -sx / 2>/dev/null | cut -f1)
 
@@ -48,10 +76,11 @@ while true; do
   fi
 
   if [ "$used_kb" -gt "$threshold_kb" ]; then
-    percent=$((used_kb * 100 / LIMIT_KB))
+    [ "$was_warning" = false ] && log_transition "WARN" true ">"
     # Atomic write: temp file then rename
-    echo "${percent}%" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    echo "$(usage_percent "$used_kb")%" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
   else
+    [ "$was_warning" = true ] && log_transition "CLEAR" false "<"
     rm -f "$STATUS_FILE"
   fi
   sleep "$INTERVAL"
