@@ -3,11 +3,12 @@
   "permissions": {
     "defaultMode": "plan"
   },
+  "model": "opus",
   "enabledPlugins": {
     "code-review-jj@sjawhar": true,
     "ralph-loop@claude-plugins-official": true,
     "rust-analyzer-lsp@claude-plugins-official": true,
-    "pyright-lsp@claude-plugins-official": true
-  },
-  "model": "opus"
+    "pyright-lsp@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true
+  }
 }
