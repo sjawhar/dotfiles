@@ -102,6 +102,7 @@ jj-refresh-workspaces() {
     # 3. Refresh all other workspaces
     for ws in $(jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null); do
         path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || continue
+        [ "$path" = "$root_path" ] && continue
         echo "Refreshing workspace $path..."
         jj -R "$path" workspace update-stale &>/dev/null
         jj -R "$path" st &>/dev/null
