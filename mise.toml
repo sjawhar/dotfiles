@@ -3,17 +3,19 @@
 # All versions pinned for reproducibility
 
 [tools]
+"cargo:https://github.com/jj-vcs/jj" = { version = "branch:workspace-forget-cleanup", crate = "jj-cli", bin = "jj" }
+"github:anomalyco/opencode" = "v1.1.39"  # Terminal AI coding assistant
+"npm:@openai/codex" = "0.92.0"  # OpenAI coding agent CLI
 bat = "0.26.1"      # Cat with syntax highlighting
 eza = "0.23.4"      # Modern ls with colors and git status
 fd = "10.3.0"       # Fast, user-friendly find alternative
 fzf = "0.67.0"      # Fuzzy finder (Ctrl+R for history, Alt+C for directories)
 gh = "2.85.0"       # GitHub CLI
-rust = "1.92.0"  # Required to build jj from source
-"cargo:https://github.com/jj-vcs/jj" = { version = "branch:workspace-forget-cleanup", crate = "jj-cli", bin = "jj" }
 jq = "1.8.1"        # JSON processor
 node = "22.22.0"    # Node.js runtime
 opentofu = "1.11.3" # Terraform alternative
 ripgrep = "15.1.0"  # Fast grep that respects .gitignore
+rust = "1.92.0"  # Required to build jj from source
 starship = "1.24.2" # Shell prompt
 yq = "4.50.1"       # YAML processor
 zoxide = "0.9.8"    # Smart directory jumping (z command)
