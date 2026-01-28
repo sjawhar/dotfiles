@@ -1,0 +1,845 @@
+#!/usr/bin/env python3
+"""
+Analyze Claude Code transcripts to calculate agent independent work time and user response time.
+
+Usage: claude-transcript-times <input_dir> <output_dir>
+"""
+
+import argparse
+import csv
+import json
+import os
+import sys
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal, TypedDict
+
+# Type definitions
+Role = Literal["user", "assistant"]
+AssistantLabel = Literal["question", "tool_use", "thinking", "text"]
+
+
+class SessionInfo(TypedDict):
+    main: Path | None
+    subagents: list[Path]
+    project: str
+
+
+class StatisticsResult(TypedDict):
+    mean: float | None
+    median: float | None
+    p90: float | None
+    max: float | None
+    count: int
+
+
+class LabelStats(TypedDict):
+    count: int
+    mean_user_response: float | None
+
+
+class TurnDurationComparison(TypedDict, total=False):
+    mean_difference: float
+    correlation: float | None
+    sample_size: int
+
+
+class Summary(TypedDict):
+    generated_at: str
+    total_sessions: int
+    total_turns: int
+    session_continuations_excluded: int
+    turn_duration_computed: StatisticsResult
+    user_response_time: StatisticsResult
+    turn_duration_comparison: TurnDurationComparison
+    by_final_label: dict[str, LabelStats]
+
+
+@dataclass
+class TimestampedMessage:
+    """A message with its timestamp and metadata."""
+    timestamp: datetime
+    role: Role  # "user", "assistant", or for internal tracking: "progress"
+    is_real_user: bool  # True if this is a real user message (not tool result)
+    is_tool_result: bool  # True if this is a tool_result message
+    content: dict[str, Any]
+    session_id: str
+    is_subagent: bool
+
+
+@dataclass
+class Turn:
+    """A complete turn from user message to assistant response."""
+    session_id: str
+    project: str
+    user_timestamp: datetime
+    last_assistant_timestamp: datetime | None
+    turn_duration_computed: float | None
+    tool_wait_time_seconds: float | None  # Time user spent on tool confirmations (>30s gaps)
+    final_assistant_label: AssistantLabel | None
+    user_response_time_seconds: float | None
+    turn_duration_reported: float | None
+    has_subagents: bool
+    is_session_continuation: bool  # True if turn started with session continuation message
+    user_message_preview: str
+
+
+def parse_timestamp(ts: str) -> datetime:
+    """Parse ISO timestamp string to datetime. Always returns UTC-aware datetime."""
+    # Handle various formats - normalize to +00:00
+    ts = ts.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(ts)
+        # Ensure timezone-aware (convert naive to UTC)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        # Try parsing without timezone, then make UTC-aware
+        if "+" in ts:
+            ts = ts.split("+")[0]
+        dt = datetime.fromisoformat(ts)
+        return dt.replace(tzinfo=timezone.utc)
+
+
+def _get_message_content(msg: dict[str, Any]) -> Any:
+    """Safely extract content from a message, handling non-dict message fields."""
+    message = msg.get("message")
+    if isinstance(message, dict):
+        return message.get("content")
+    return None
+
+
+def _contains_bash_input(content: Any) -> bool:
+    """Check if content contains <bash-input> tag."""
+    if isinstance(content, str):
+        return "<bash-input>" in content
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, str) and "<bash-input>" in item:
+                return True
+            if isinstance(item, dict) and "<bash-input>" in item.get("text", ""):
+                return True
+    return False
+
+
+def is_real_user_message(msg: dict[str, Any]) -> bool:
+    """
+    Determine if a message is a real user message.
+
+    Real user messages have:
+    - type == "user"
+    - isMeta != true
+    - Content is string (not array with tool_result)
+    - OR content contains <bash-input> (counts as real user input)
+    """
+    if msg.get("type") != "user":
+        return False
+
+    if msg.get("isMeta", False):
+        return False
+
+    content = _get_message_content(msg)
+
+    # String content is real user input
+    if isinstance(content, str):
+        return True
+
+    # Check for bash-input in content list
+    if isinstance(content, list):
+        has_tool_result = False
+        has_bash_input = False
+
+        for block in content:
+            if isinstance(block, str):
+                if "<bash-input>" in block:
+                    has_bash_input = True
+            elif isinstance(block, dict):
+                if block.get("type") == "tool_result":
+                    has_tool_result = True
+                    # Check if this tool_result contains bash-input
+                    if _contains_bash_input(block.get("content", "")):
+                        has_bash_input = True
+
+        # If there's bash-input anywhere, it's a real user message
+        if has_bash_input:
+            return True
+        # If there are tool_results but no bash-input, it's not real user input
+        if has_tool_result:
+            return False
+        # No tool_results and no bash-input - could be other content types
+        return False
+
+    return False
+
+
+def is_session_continuation_message(msg: dict[str, Any]) -> bool:
+    """Check if a message is a session continuation (resumed from previous context)."""
+    content = _get_message_content(msg)
+    if isinstance(content, str):
+        return "This session is being continued from a previous" in content
+    return False
+
+
+def is_tool_result_message(msg: dict[str, Any]) -> bool:
+    """Check if a user message contains tool_result content."""
+    if msg.get("type") != "user":
+        return False
+    content = _get_message_content(msg)
+    if isinstance(content, list):
+        return any(
+            isinstance(block, dict) and block.get("type") == "tool_result"
+            for block in content
+        )
+    return False
+
+
+# Threshold for considering a gap as "user waiting" rather than normal processing
+TOOL_WAIT_THRESHOLD_SECONDS = 30
+
+# Minimum progress messages per minute to consider a gap as "active work"
+MIN_PROGRESS_RATE_PER_MINUTE = 1
+
+
+def has_activity_during_gap(
+    messages: list[dict[str, Any]],
+    start_ts: datetime,
+    end_ts: datetime,
+) -> bool:
+    """
+    Check if there was active work during a gap (progress messages).
+
+    If there are progress messages during the gap, Claude was working
+    (e.g., sub-agent running, long command executing). If the gap is
+    silent, the user was likely AFK.
+    """
+    gap_seconds = (end_ts - start_ts).total_seconds()
+    if gap_seconds <= 0:
+        return False
+
+    progress_count = 0
+    for msg in messages:
+        if msg.get("type") != "progress":
+            continue
+        ts_str = msg.get("timestamp")
+        if not ts_str:
+            continue
+        try:
+            ts = parse_timestamp(ts_str)
+            if start_ts < ts < end_ts:
+                progress_count += 1
+        except (ValueError, TypeError):
+            continue
+
+    # Check if progress rate indicates active work
+    gap_minutes = gap_seconds / 60
+    progress_rate = progress_count / gap_minutes if gap_minutes > 0 else 0
+
+    return progress_rate >= MIN_PROGRESS_RATE_PER_MINUTE
+
+
+def get_message_preview(msg: dict[str, Any], max_len: int = 50) -> str:
+    """Extract a preview of the message content."""
+    content = _get_message_content(msg)
+
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        texts = [
+            block if isinstance(block, str) else block.get("text", "")
+            for block in content
+            if isinstance(block, str) or (isinstance(block, dict) and block.get("type") == "text")
+        ]
+        text = " ".join(texts)
+    else:
+        text = str(content)
+
+    # Clean up whitespace and truncate
+    text = " ".join(text.split())
+    if len(text) > max_len:
+        text = text[:max_len] + "..."
+    return text
+
+
+def label_assistant_message(msg: dict[str, Any]) -> AssistantLabel:
+    """
+    Label the type of assistant message.
+
+    Returns one of: question, tool_use, thinking, text
+    """
+    content = _get_message_content(msg)
+
+    if content is None:
+        content = []
+    elif not isinstance(content, list):
+        content = [{"type": "text", "text": str(content)}]
+
+    # Check if it uses AskUserQuestion tool
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            if block.get("name") == "AskUserQuestion":
+                return "question"
+
+    # Filter to dict blocks only
+    dict_blocks = [b for b in content if isinstance(b, dict)]
+    if not dict_blocks:
+        return "text"
+
+    last_block = dict_blocks[-1]
+    block_type = last_block.get("type", "")
+
+    if block_type == "tool_use":
+        return "tool_use"
+
+    if block_type == "thinking":
+        # Check if ALL dict blocks are thinking
+        if all(b.get("type") == "thinking" for b in dict_blocks):
+            return "thinking"
+
+    if block_type == "text":
+        text = last_block.get("text", "")
+        if text.strip().endswith("?"):
+            return "question"
+
+    return "text"
+
+
+@dataclass
+class TurnDurationRecord:
+    """A turn_duration system message."""
+    timestamp: datetime
+    duration_seconds: float
+
+
+def extract_turn_durations(messages: list[dict[str, Any]]) -> list[TurnDurationRecord]:
+    """
+    Extract all turn_duration system messages from a transcript.
+
+    These messages have type="system", subtype="turn_duration", and durationMs field.
+    They appear at the END of a turn, after all assistant messages.
+    """
+    records: list[TurnDurationRecord] = []
+    for msg in messages:
+        if msg.get("type") == "system" and msg.get("subtype") == "turn_duration":
+            ts_str = msg.get("timestamp")
+            duration_ms = msg.get("durationMs")
+            if ts_str and duration_ms is not None:
+                try:
+                    ts = parse_timestamp(ts_str)
+                    duration_sec = float(duration_ms) / 1000.0
+                    records.append(TurnDurationRecord(timestamp=ts, duration_seconds=duration_sec))
+                except (ValueError, TypeError):
+                    continue
+    return records
+
+
+def find_turn_duration_for_turn(
+    turn_durations: list[TurnDurationRecord],
+    last_assistant_ts: datetime | None,
+    next_user_ts: datetime | None,
+) -> float | None:
+    """
+    Find the turn_duration record that falls between last_assistant_ts and next_user_ts.
+
+    The turn_duration message appears after the turn ends (after last assistant message)
+    but before the next user message.
+    """
+    if not last_assistant_ts:
+        return None
+
+    for record in turn_durations:
+        # turn_duration should be after the last assistant message
+        if record.timestamp < last_assistant_ts:
+            continue
+        # And before the next user message (if there is one)
+        if next_user_ts and record.timestamp > next_user_ts:
+            continue
+        return record.duration_seconds
+
+    return None
+
+
+def parse_jsonl_file(filepath: Path) -> list[dict[str, Any]]:
+    """Parse a JSONL file and return list of message dicts."""
+    messages: list[dict[str, Any]] = []
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+    except OSError as e:
+        print(f"Warning: Could not read {filepath}: {e}", file=sys.stderr)
+    return messages
+
+
+def _get_session_start_timestamp(session_info: SessionInfo) -> datetime | None:
+    """Get the first timestamp from the main session file."""
+    if not session_info["main"]:
+        return None
+
+    try:
+        with open(session_info["main"], "r", encoding="utf-8") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                    ts_str = msg.get("timestamp")
+                    if ts_str:
+                        return parse_timestamp(ts_str)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except OSError:
+        pass
+    return None
+
+
+def find_transcript_files(input_dir: Path) -> dict[str, SessionInfo]:
+    """
+    Find all transcript files and organize by session.
+
+    Returns: {session_id: {"main": Path, "subagents": [Path, ...], "project": str}}
+    """
+    sessions: dict[str, SessionInfo] = {}
+
+    for jsonl_file in input_dir.rglob("*.jsonl"):
+        parts = jsonl_file.relative_to(input_dir).parts
+
+        # Check if this is a subagent file
+        if "subagents" in parts and jsonl_file.name.startswith("agent-"):
+            # Find the session ID (parent of subagents dir)
+            subagent_idx = parts.index("subagents")
+            if subagent_idx > 0:
+                session_id = parts[subagent_idx - 1]
+                project = "/".join(parts[:subagent_idx - 1]) if subagent_idx > 1 else "unknown"
+                sessions.setdefault(session_id, {"main": None, "subagents": [], "project": project})
+                sessions[session_id]["subagents"].append(jsonl_file)
+        else:
+            # Main session file - UUID.jsonl
+            session_id = jsonl_file.stem
+            project = "/".join(parts[:-1]) if len(parts) > 1 else "unknown"
+            sessions.setdefault(session_id, {"main": None, "subagents": [], "project": project})
+            sessions[session_id]["main"] = jsonl_file
+
+    return sessions
+
+
+def _extract_timestamped_messages(
+    messages: list[dict[str, Any]],
+    session_id: str,
+    is_subagent: bool,
+) -> list[TimestampedMessage]:
+    """Extract timestamped messages from a list of message dicts."""
+    result: list[TimestampedMessage] = []
+    for msg in messages:
+        ts_str = msg.get("timestamp")
+        if not ts_str:
+            continue
+
+        try:
+            ts = parse_timestamp(ts_str)
+        except (ValueError, TypeError):
+            continue
+
+        msg_type = msg.get("type")
+        if msg_type == "user":
+            result.append(TimestampedMessage(
+                timestamp=ts,
+                role="user",
+                is_real_user=not is_subagent and is_real_user_message(msg),
+                is_tool_result=is_tool_result_message(msg),
+                content=msg,
+                session_id=session_id,
+                is_subagent=is_subagent,
+            ))
+        elif msg_type == "assistant":
+            result.append(TimestampedMessage(
+                timestamp=ts,
+                role="assistant",
+                is_real_user=False,
+                is_tool_result=False,
+                content=msg,
+                session_id=session_id,
+                is_subagent=is_subagent
+            ))
+    return result
+
+
+def process_session(session_id: str, session_info: SessionInfo) -> list[Turn]:
+    """Process a single session and extract turns."""
+    turns: list[Turn] = []
+
+    # Parse main session
+    main_messages: list[dict[str, Any]] = []
+    if session_info["main"]:
+        main_messages = parse_jsonl_file(session_info["main"])
+
+    has_subagents = bool(session_info["subagents"])
+
+    # Extract turn_duration records from main session (they appear at end of turns)
+    turn_durations = extract_turn_durations(main_messages)
+
+    # Extract timestamped messages from main session
+    timestamped = _extract_timestamped_messages(main_messages, session_id, is_subagent=False)
+
+    # Add subagent timestamps for merged timeline
+    for subagent_file in session_info["subagents"]:
+        subagent_messages = parse_jsonl_file(subagent_file)
+        timestamped.extend(_extract_timestamped_messages(subagent_messages, session_id, is_subagent=True))
+
+    # Sort by timestamp
+    timestamped.sort(key=lambda m: m.timestamp)
+
+    # Find real user messages and calculate times
+    real_user_indices = [i for i, m in enumerate(timestamped) if m.is_real_user]
+
+    for turn_idx, user_idx in enumerate(real_user_indices):
+        user_msg = timestamped[user_idx]
+
+        # Check if this is a session continuation
+        is_continuation = is_session_continuation_message(user_msg.content)
+
+        # Find last assistant message before next real user message
+        if turn_idx + 1 < len(real_user_indices):
+            next_user_idx = real_user_indices[turn_idx + 1]
+            next_user_msg = timestamped[next_user_idx]
+        else:
+            next_user_idx = len(timestamped)
+            next_user_msg = None
+
+        # Find last assistant message in this range and calculate tool wait gaps
+        last_assistant: TimestampedMessage | None = None
+        tool_wait_time: float = 0.0
+        prev_assistant_ts: datetime | None = None
+
+        for i in range(user_idx + 1, next_user_idx):
+            msg = timestamped[i]
+            if msg.role == "assistant" and not msg.is_subagent:
+                last_assistant = msg
+                prev_assistant_ts = msg.timestamp
+            elif msg.is_tool_result and prev_assistant_ts:
+                # Check for gap between assistant and tool_result
+                gap = (msg.timestamp - prev_assistant_ts).total_seconds()
+                if gap > TOOL_WAIT_THRESHOLD_SECONDS:
+                    # Only count as user wait if there's no activity during the gap
+                    if not has_activity_during_gap(main_messages, prev_assistant_ts, msg.timestamp):
+                        tool_wait_time += gap
+
+        # Calculate raw turn duration
+        raw_turn_duration: float | None = None
+        if last_assistant:
+            delta = (last_assistant.timestamp - user_msg.timestamp).total_seconds()
+            raw_turn_duration = delta if delta >= 0 else None
+
+        # Subtract tool wait time to get computed turn duration
+        computed_duration: float | None = None
+        if raw_turn_duration is not None:
+            computed_duration = max(0, raw_turn_duration - tool_wait_time)
+
+        # Calculate user response time (clamp negative values to None)
+        user_response_time: float | None = None
+        if next_user_msg and last_assistant:
+            delta = (next_user_msg.timestamp - last_assistant.timestamp).total_seconds()
+            user_response_time = delta if delta >= 0 else None
+
+        # Label the assistant message
+        final_label: AssistantLabel | None = None
+        if last_assistant:
+            final_label = label_assistant_message(last_assistant.content)
+
+        # Find turn_duration that falls between last_assistant and next_user
+        turn_duration = find_turn_duration_for_turn(
+            turn_durations,
+            last_assistant.timestamp if last_assistant else None,
+            next_user_msg.timestamp if next_user_msg else None,
+        )
+
+        turn = Turn(
+            session_id=session_id,
+            project=session_info["project"],
+            user_timestamp=user_msg.timestamp,
+            last_assistant_timestamp=last_assistant.timestamp if last_assistant else None,
+            turn_duration_computed=computed_duration,
+            tool_wait_time_seconds=tool_wait_time if tool_wait_time > 0 else None,
+            final_assistant_label=final_label,
+            user_response_time_seconds=user_response_time,
+            turn_duration_reported=turn_duration,
+            has_subagents=has_subagents,
+            is_session_continuation=is_continuation,
+            user_message_preview=get_message_preview(user_msg.content)
+        )
+        turns.append(turn)
+
+    return turns
+
+
+def calculate_statistics(values: list[float]) -> StatisticsResult:
+    """Calculate basic statistics for a list of values."""
+    if not values:
+        return {"mean": None, "median": None, "p90": None, "max": None, "count": 0}
+
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+
+    mean = sum(sorted_vals) / n
+    median = sorted_vals[n // 2] if n % 2 == 1 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    p90_idx = int(n * 0.9)
+    p90 = sorted_vals[min(p90_idx, n - 1)]
+    max_val = sorted_vals[-1]
+
+    return {
+        "mean": round(mean, 1),
+        "median": round(median, 1),
+        "p90": round(p90, 1),
+        "max": round(max_val, 1),
+        "count": n
+    }
+
+
+def calculate_correlation(x: list[float], y: list[float]) -> float | None:
+    """Calculate Pearson correlation coefficient."""
+    if len(x) != len(y) or len(x) < 2:
+        return None
+
+    n = len(x)
+    mean_x = sum(x) / n
+    mean_y = sum(y) / n
+
+    numerator = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+    denom_x = sum((xi - mean_x) ** 2 for xi in x) ** 0.5
+    denom_y = sum((yi - mean_y) ** 2 for yi in y) ** 0.5
+
+    # Use epsilon to avoid division by near-zero
+    if denom_x < 1e-10 or denom_y < 1e-10:
+        return None
+
+    return round(numerator / (denom_x * denom_y), 2)
+
+
+def generate_summary(turns: list[Turn], total_sessions: int) -> Summary:
+    """Generate aggregate summary statistics."""
+    # Exclude session continuations from main stats (they span multiple sessions)
+    normal_turns = [t for t in turns if not t.is_session_continuation]
+    continuation_count = len(turns) - len(normal_turns)
+
+    turn_durations_computed = [t.turn_duration_computed for t in normal_turns if t.turn_duration_computed is not None]
+    user_response_times = [t.user_response_time_seconds for t in normal_turns if t.user_response_time_seconds is not None]
+
+    # Compare with turn_duration where available (exclude continuations and large discrepancies)
+    # Large discrepancies happen when user sends multiple messages mid-turn - different semantics
+    comparison_pairs = [
+        (t.turn_duration_computed, t.turn_duration_reported)
+        for t in normal_turns
+        if t.turn_duration_computed is not None and t.turn_duration_reported is not None
+        and abs(t.turn_duration_computed - t.turn_duration_reported) < 60  # Exclude outliers
+    ]
+
+    turn_duration_comparison: TurnDurationComparison = {}
+    if comparison_pairs:
+        diffs = [abs(a - b) for a, b in comparison_pairs]
+        turn_duration_comparison["mean_difference"] = round(sum(diffs) / len(diffs), 1)
+        turn_duration_comparison["correlation"] = calculate_correlation(
+            [p[0] for p in comparison_pairs],
+            [p[1] for p in comparison_pairs]
+        )
+        turn_duration_comparison["sample_size"] = len(comparison_pairs)
+
+    # By final label (exclude continuations)
+    by_label: dict[str, list[float]] = defaultdict(list)
+    for t in normal_turns:
+        if t.final_assistant_label and t.user_response_time_seconds is not None:
+            by_label[t.final_assistant_label].append(t.user_response_time_seconds)
+
+    by_final_label: dict[str, LabelStats] = {}
+    for label, times in by_label.items():
+        by_final_label[label] = {
+            "count": len(times),
+            "mean_user_response": round(sum(times) / len(times), 1) if times else None
+        }
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "total_sessions": total_sessions,
+        "total_turns": len(turns),
+        "session_continuations_excluded": continuation_count,
+        "turn_duration_computed": calculate_statistics(turn_durations_computed),
+        "user_response_time": calculate_statistics(user_response_times),
+        "turn_duration_comparison": turn_duration_comparison,
+        "by_final_label": by_final_label
+    }
+
+
+def _format_timestamp(dt: datetime | None) -> str:
+    """Format datetime as ISO string with Z suffix for UTC."""
+    if dt is None:
+        return ""
+    # Convert to UTC and format without +00:00
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def write_csv(turns: list[Turn], output_path: Path) -> None:
+    """Write turns to CSV file."""
+    fieldnames = [
+        "session_id", "project", "user_timestamp", "last_assistant_timestamp",
+        "turn_duration_computed", "tool_wait_time_seconds", "final_assistant_label",
+        "user_response_time_seconds", "turn_duration_reported",
+        "has_subagents", "is_session_continuation", "user_message_preview"
+    ]
+
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for turn in turns:
+            writer.writerow({
+                "session_id": turn.session_id,
+                "project": turn.project,
+                "user_timestamp": _format_timestamp(turn.user_timestamp),
+                "last_assistant_timestamp": _format_timestamp(turn.last_assistant_timestamp),
+                "turn_duration_computed": turn.turn_duration_computed,
+                "tool_wait_time_seconds": turn.tool_wait_time_seconds,
+                "final_assistant_label": turn.final_assistant_label or "",
+                "user_response_time_seconds": turn.user_response_time_seconds,
+                "turn_duration_reported": turn.turn_duration_reported,
+                "has_subagents": turn.has_subagents,
+                "is_session_continuation": turn.is_session_continuation,
+                "user_message_preview": turn.user_message_preview
+            })
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Analyze Claude Code transcripts to calculate agent and user response times."
+    )
+    parser.add_argument("input_dir", type=Path, help="Directory containing transcript JSONL files (recursive search)")
+    parser.add_argument("output_dir", type=Path, help="Directory to write CSV and JSON output files")
+    parser.add_argument("--since", type=str, help="Only process sessions started after this date (YYYY-MM-DD or ISO timestamp)")
+
+    args = parser.parse_args()
+
+    # Parse --since filter if provided
+    since_dt: datetime | None = None
+    if args.since:
+        try:
+            since_dt = parse_timestamp(args.since)
+        except ValueError:
+            # Try date-only format
+            try:
+                since_dt = datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                print(f"Error: Invalid --since format: {args.since}. Use YYYY-MM-DD or ISO timestamp.", file=sys.stderr)
+                sys.exit(1)
+
+    if not args.input_dir.exists():
+        print(f"Error: Input directory does not exist: {args.input_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find all transcript files
+    print(f"Scanning {args.input_dir} for transcript files...")
+    sessions = find_transcript_files(args.input_dir)
+
+    # Filter by --since if provided
+    if since_dt:
+        original_count = len(sessions)
+        sessions = {
+            sid: sinfo for sid, sinfo in sessions.items()
+            if (ts := _get_session_start_timestamp(sinfo)) and ts >= since_dt
+        }
+        print(f"Filtered to {len(sessions)}/{original_count} sessions started after {args.since}")
+
+    if not sessions:
+        print("Warning: No transcript files found in input directory", file=sys.stderr)
+        # Write empty outputs and exit
+        write_csv([], args.output_dir / "turn_times.csv")
+        summary = generate_summary([], 0)
+        with open(args.output_dir / "turn_times_summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        print("Wrote empty output files")
+        return
+
+    print(f"Found {len(sessions)} sessions")
+
+    # Process sessions in parallel
+    max_workers = min(os.cpu_count() or 4, len(sessions), 32)
+    all_turns: list[Turn] = []
+
+    print(f"Processing with {max_workers} workers...")
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(process_session, sid, sinfo): sid
+            for sid, sinfo in sessions.items()
+        }
+
+        completed = 0
+        for future in as_completed(futures):
+            session_id = futures[future]
+            try:
+                turns = future.result()
+                all_turns.extend(turns)
+            except Exception as e:
+                print(f"\nError processing {session_id}: {e}", file=sys.stderr)
+
+            completed += 1
+            print(f"\rProcessed {completed}/{len(sessions)} sessions", end="", flush=True)
+
+        print()
+
+    print(f"Processed {len(all_turns)} turns")
+
+    # Sort turns by timestamp
+    all_turns.sort(key=lambda t: t.user_timestamp)
+
+    # Write CSV
+    csv_path = args.output_dir / "turn_times.csv"
+    write_csv(all_turns, csv_path)
+    print(f"Wrote CSV: {csv_path}")
+
+    # Generate and write summary
+    summary = generate_summary(all_turns, len(sessions))
+    json_path = args.output_dir / "turn_times_summary.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Wrote JSON: {json_path}")
+
+    # Print summary to stdout
+    print("\n=== Summary ===")
+    print(f"Total sessions: {summary['total_sessions']}")
+    print(f"Total turns: {summary['total_turns']}")
+
+    tdc = summary['turn_duration_computed']
+    print(f"\nTurn Duration Computed (seconds):")
+    print(f"  Mean: {tdc['mean']}, Median: {tdc['median']}, P90: {tdc['p90']}, Max: {tdc['max']}")
+
+    urt = summary['user_response_time']
+    print(f"\nUser Response Time (seconds):")
+    print(f"  Mean: {urt['mean']}, Median: {urt['median']}, P90: {urt['p90']}")
+
+    if summary['turn_duration_comparison']:
+        tdc = summary['turn_duration_comparison']
+        print(f"\nTurn Duration Comparison (n={tdc.get('sample_size', 0)}):")
+        print(f"  Mean difference: {tdc.get('mean_difference')}s, Correlation: {tdc.get('correlation')}")
+
+    if summary['by_final_label']:
+        print(f"\nBy Final Assistant Label:")
+        for label, stats in sorted(summary['by_final_label'].items()):
+            print(f"  {label}: count={stats['count']}, mean_user_response={stats['mean_user_response']}s")
+
+
+if __name__ == "__main__":
+    main()
