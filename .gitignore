@@ -6,6 +6,7 @@ uv.lock
 bin/
 completions.d/
 .node/
+.claudeforge/
 
 # Claude Code - ignore all machine-specific state, whitelist config
 .claude/*
