@@ -1,0 +1,26 @@
+#!/bin/bash
+# Install/update ClaudeForge components to dotfiles .claude directory
+set -eu
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+CLAUDE_DIR="${DOTFILES_DIR}/.claude"
+REPO_DIR="${DOTFILES_DIR}/.claudeforge"
+REPO_URL="https://github.com/alirezarezvani/ClaudeForge.git"
+
+if [ -d "$REPO_DIR" ]; then
+    echo "Updating ClaudeForge..."
+    git -C "$REPO_DIR" pull --ff-only
+else
+    echo "Cloning ClaudeForge..."
+    git clone --depth 1 "$REPO_URL" "$REPO_DIR"
+fi
+
+# Ensure target directories exist
+mkdir -p "$CLAUDE_DIR"/{skills,commands,agents}
+
+# Install components
+cp -r "$REPO_DIR/skill" "$CLAUDE_DIR/skills/claudeforge-skill"
+cp "$REPO_DIR/command/enhance-claude-md.md" "$CLAUDE_DIR/commands/enhance-claude-md.md"
+cp "$REPO_DIR/agent/claude-md-guardian.md" "$CLAUDE_DIR/agents/"
+
+echo "ClaudeForge installed to $CLAUDE_DIR"
