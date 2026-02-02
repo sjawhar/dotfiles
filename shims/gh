@@ -1,0 +1,218 @@
+#!/bin/bash
+# gh wrapper for jj (Jujutsu) compatibility
+#
+# Problem: gh CLI uses `git symbolic-ref HEAD` to detect current branch.
+# jj operates in detached HEAD mode, so this detection fails.
+#
+# Solution: For pr subcommands that need branch context, inject the
+# jj bookmark pointing at the current change (@).
+#
+# Commands handled:
+#   gh pr create           -> adds --head <bookmark>
+#   gh pr view             -> adds <bookmark> positional arg
+#   gh pr checks           -> adds <bookmark> positional arg
+#   gh pr diff             -> adds <bookmark> positional arg
+#   gh pr merge            -> adds <bookmark> positional arg
+#   gh pr checkout         -> adds <bookmark> positional arg
+#   gh pr edit             -> adds <bookmark> positional arg
+#   gh pr comment          -> adds <bookmark> positional arg
+#   gh pr ready            -> adds <bookmark> positional arg
+#   gh pr review           -> adds <bookmark> positional arg
+#   gh pr update-branch    -> adds <bookmark> positional arg
+#
+# Commands NOT handled (require explicit target, no default):
+#   gh pr close, lock, unlock, reopen, revert
+#
+# Commands that don't need branch context:
+#   gh pr list, gh pr status, all non-pr commands
+
+set -euo pipefail
+
+# Find the real gh binary (skip this specific shim directory)
+real_gh() {
+    local IFS=':'
+    local dotfiles_shims="${DOTFILES_DIR:-$HOME/.dotfiles}/shims"
+    for dir in $PATH; do
+        [[ "$dir" == "$dotfiles_shims" ]] && continue
+        [[ -x "$dir/gh" ]] && { echo "$dir/gh"; return; }
+    done
+    echo "gh"  # fallback
+}
+
+GH="$(real_gh)"
+
+# Check if we're in a jj repo
+in_jj_repo() {
+    jj root &>/dev/null
+}
+
+# Get first bookmark at current change (@ revision)
+get_current_bookmark() {
+    local bookmarks
+    bookmarks=$(jj log -r @ --no-graph -T 'self.bookmarks()' 2>/dev/null) || return 1
+    # bookmarks are space-separated; return first one (empty if none)
+    local first="${bookmarks%% *}"
+    # Validate bookmark name: must be non-empty and contain only safe chars
+    # Valid bookmark names: alphanumeric, dash, underscore, dot, slash
+    if [[ -n "$first" && "$first" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+        echo "$first"
+    else
+        return 1
+    fi
+}
+
+# Error and exit when no bookmark found
+die_no_bookmark() {
+    echo "Error: No jj bookmark at current change (@)" >&2
+    echo "" >&2
+    echo "Create one with:" >&2
+    echo "  jj bookmark create <name>" >&2
+    echo "" >&2
+    echo "Or push and create in one step:" >&2
+    echo "  jj git push --named=<name>=@" >&2
+    exit 1
+}
+
+# Parse arguments to find pr subcommand
+# Sets: PR_SUBCOMMAND, PR_SUBCOMMAND_INDEX
+parse_pr_subcommand() {
+    PR_SUBCOMMAND=""
+    PR_SUBCOMMAND_INDEX=-1
+
+    local found_pr=false
+    local i=0
+    for arg in "$@"; do
+        if [[ "$found_pr" == true ]]; then
+            # Skip flags between "pr" and subcommand
+            if [[ "$arg" == -* ]]; then
+                ((i++)) || true
+                continue
+            fi
+            PR_SUBCOMMAND="$arg"
+            PR_SUBCOMMAND_INDEX=$i
+            return 0
+        fi
+        [[ "$arg" == "pr" ]] && found_pr=true
+        ((i++)) || true
+    done
+    return 1
+}
+
+# Check if --head flag is present
+has_head_flag() {
+    for arg in "$@"; do
+        case "$arg" in
+            --head|--head=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Check if positional target is provided after subcommand
+# A target is the first non-flag argument after the subcommand
+has_positional_target() {
+    local subcommand="$1"
+    shift
+
+    local found_subcommand=false
+    local prev_was_flag_with_value=false
+
+    for arg in "$@"; do
+        # Skip flag values (e.g., --repo value)
+        if [[ "$prev_was_flag_with_value" == true ]]; then
+            prev_was_flag_with_value=false
+            continue
+        fi
+
+        if [[ "$found_subcommand" == true ]]; then
+            # Check if this is a flag
+            if [[ "$arg" == -* ]]; then
+                # Handle --flag=value syntax (no separate value arg)
+                [[ "$arg" == *=* ]] && continue
+
+                # Flags that take a separate value argument
+                case "$arg" in
+                    -R|--repo|-q|--jq|-t|--template|--json|\
+                    -b|--body|-F|--body-file|--branch|\
+                    -c|--comment|-r|--reason|--color|-i|--interval|\
+                    --subject|--match-head-commit|--author-email|-A|\
+                    -l|--label|-m|--milestone|-p|--project|\
+                    --reviewer|--assignee|-T|--title|--recover)
+                        prev_was_flag_with_value=true
+                        ;;
+                esac
+                continue
+            fi
+            # Found a non-flag argument = positional target
+            return 0
+        fi
+
+        [[ "$arg" == "$subcommand" ]] && found_subcommand=true
+    done
+
+    return 1
+}
+
+# Build new argument array with bookmark inserted after subcommand
+# Uses a nameref to avoid subshell issues with arrays
+build_args_with_bookmark() {
+    local -n result_array=$1
+    local subcommand="$2"
+    local bookmark="$3"
+    shift 3
+
+    local inserted=false
+
+    for arg in "$@"; do
+        result_array+=("$arg")
+        if [[ "$inserted" == false && "$arg" == "$subcommand" ]]; then
+            result_array+=("$bookmark")
+            inserted=true
+        fi
+    done
+}
+
+# Main logic
+main() {
+    # Pass through if not in jj repo
+    if ! in_jj_repo; then
+        exec "$GH" "$@"
+    fi
+
+    # Pass through if not a pr command
+    if ! parse_pr_subcommand "$@"; then
+        exec "$GH" "$@"
+    fi
+
+    case "$PR_SUBCOMMAND" in
+        # Command using --head flag
+        create)
+            if has_head_flag "$@"; then
+                exec "$GH" "$@"
+            fi
+            bookmark=$(get_current_bookmark) || die_no_bookmark
+            exec "$GH" "$@" --head "$bookmark"
+            ;;
+
+        # Commands with optional positional target (default to current branch)
+        view|checks|diff|merge|checkout|edit|comment|ready|review|update-branch)
+            if has_positional_target "$PR_SUBCOMMAND" "$@"; then
+                exec "$GH" "$@"
+            fi
+            bookmark=$(get_current_bookmark) || die_no_bookmark
+            # Build new args array with bookmark inserted after subcommand
+            new_args=()
+            build_args_with_bookmark new_args "$PR_SUBCOMMAND" "$bookmark" "$@"
+            exec "$GH" "${new_args[@]}"
+            ;;
+
+        # Commands that require explicit target (no injection needed)
+        # close, lock, unlock, reopen, revert
+        # Also: list, status (don't take branch target)
+        *)
+            exec "$GH" "$@"
+            ;;
+    esac
+}
+
+main "$@"

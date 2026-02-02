@@ -158,10 +158,12 @@ Track the user's observations as they narrate. **Do not show background agent re
 **Maintain a comment tracker** with this structure:
 ```
 Comments:
-1. [file:line_range] [SEVERITY] - comment text
-2. [file:line_range] [SEVERITY] - comment text
+1. [file:line] [SEVERITY] - comment text
+2. [file:start_line-end_line] [SEVERITY] - comment text (for multi-line)
 ...
 ```
+
+**Line numbers must be actual file line numbers** (from the new version of the file for additions, old version for deletions). These will be used directly in the GitHub API call.
 
 ### Identifying File/Line Locations
 
@@ -403,15 +405,39 @@ COMMIT_SHA=$(gh pr view <pr> --json headRefOid -q '.headRefOid')
 REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
 ```
 
-Post review with inline comments:
+**Post review with inline comments using `-f` flags with array notation:**
+
 ```bash
 gh api repos/$REPO/pulls/<number>/reviews \
   --method POST \
-  -f body="[top-level summary]" \
+  -f body="## 🎯 Review Summary..." \
   -f event="COMMENT" \
   -f commit_id="$COMMIT_SHA" \
-  --input comments.json  # Array of {path, line, body}
+  -f 'comments[0][path]=src/example.py' \
+  -f 'comments[0][line]=42' \
+  -f 'comments[0][body]=💡 **Suggestion**
+
+Consider extracting this...' \
+  -f 'comments[1][path]=src/other.py' \
+  -f 'comments[1][line]=89' \
+  -f 'comments[1][body]=🔍 **Question**
+
+Why is this done this way?'
 ```
+
+**Comment fields (for each `comments[N]`):**
+- `path` (required): File path relative to repo root
+- `line` (required): Line number in the file (the new version for additions)
+- `body` (required): Comment text (markdown supported)
+
+**That's it.** Just `path`, `line`, and `body`. No `side`, no `position`, no `start_line`.
+
+**Common errors:**
+- `"line" is not a permitted key` → You're using the wrong endpoint. Use `/pulls/{number}/reviews`, NOT `/pulls/{number}/comments`
+- `HTTP 422` → Check array notation syntax: `comments[0][path]`, `comments[0][line]`, `comments[0][body]`
+- Comments not appearing → Verify `path` matches exact file path from PR diff, and `line` exists in the new version of the file
+
+**🛑 DO NOT silently fall back to a plain PR comment.** If the API call fails, debug the JSON payload and fix it. The whole point is to post *inline* comments on specific lines. A single PR comment with all feedback lumped together defeats the purpose.
 
 **3. Confirm success:**
 - Show link to the posted review
