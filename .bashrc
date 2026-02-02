@@ -68,13 +68,14 @@ export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 
 # Claude Code
 export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
+export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
 # ==============================================================================
 # INTERACTIVE GUARD
 # Everything below this point only runs for interactive shells
 # ==============================================================================
 
-[[ $- == *i* ]] || return
+[[ $- == *i* ]] || return 0
 
 # ==============================================================================
 # INTERACTIVE-ONLY SECTION
