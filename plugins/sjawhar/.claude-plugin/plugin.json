@@ -1,0 +1,9 @@
+{
+  "name": "sjawhar",
+  "description": "Personal development workflow tools: code review agents, jj/git workflows, CI automation, and productivity skills",
+  "version": "1.0.0",
+  "author": {
+    "name": "Sami"
+  },
+  "keywords": ["workflow", "code-review", "jj", "git", "ci", "productivity"]
+}

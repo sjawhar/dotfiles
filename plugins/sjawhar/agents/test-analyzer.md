@@ -4,7 +4,7 @@ description: |
   Review test coverage quality and completeness for recent changes.
   Use after creating or updating code to ensure tests adequately cover new functionality and edge cases.
 tools: Read, Glob, Grep, Bash, TodoWrite
-model: sonnet
+model: opus
 color: cyan
 ---
 

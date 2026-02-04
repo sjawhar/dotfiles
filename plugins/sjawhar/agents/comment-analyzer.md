@@ -4,7 +4,7 @@ description: |
   Analyze code comments for accuracy, completeness, and long-term maintainability.
   Use after generating documentation, before finalizing changes with comment modifications, or when reviewing existing comments for technical debt.
 tools: Read, Glob, Grep, Bash, TodoWrite
-model: sonnet
+model: opus
 color: green
 ---
 

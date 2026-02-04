@@ -1,0 +1,16 @@
+{
+  "name": "sjawhar",
+  "owner": {
+    "name": "Sami"
+  },
+  "metadata": {
+    "description": "Personal Claude Code plugins and workflow tools"
+  },
+  "plugins": [
+    {
+      "name": "sjawhar",
+      "source": "./plugins/sjawhar",
+      "description": "Personal development workflow tools: code review agents, jj/git workflows, CI automation, and productivity skills"
+    }
+  ]
+}
