@@ -1,0 +1,36 @@
+#!/bin/sh
+# Combined resource warnings for starship prompt.
+# Prints warnings on a single line, or nothing if all clear.
+
+warnings=""
+
+# --- Ephemeral storage (K8s) ---
+if [ -f /tmp/ephemeral-storage-status ]; then
+  warnings="disk: $(cat /tmp/ephemeral-storage-status)"
+fi
+
+# --- Memory usage ---
+mem=""
+mem_script="$HOME/.dotfiles/scripts/mem-usage"
+if [ -x "$mem_script" ]; then
+  mem_output=$("$mem_script")
+  if [ -n "$mem_output" ]; then
+    mem_pct=${mem_output%% *}
+    mem_used=${mem_output#* }
+    if [ "$mem_used" != "$mem_output" ]; then
+      mem="mem: ${mem_pct} (${mem_used})"
+    else
+      mem="mem: ${mem_output}"
+    fi
+  fi
+fi
+
+if [ -n "$mem" ]; then
+  if [ -n "$warnings" ]; then
+    warnings="$warnings  $mem"
+  else
+    warnings="$mem"
+  fi
+fi
+
+[ -n "$warnings" ] && echo "$warnings"

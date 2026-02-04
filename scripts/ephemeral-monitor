@@ -78,7 +78,7 @@ while true; do
   if [ "$used_kb" -gt "$threshold_kb" ]; then
     [ "$was_warning" = false ] && log_transition "WARN" true ">"
     # Atomic write: temp file then rename
-    echo "$(usage_percent "$used_kb")%" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    echo "$(usage_percent "$used_kb")% ($(kb_to_gb "$used_kb")/$(kb_to_gb "$LIMIT_KB")G)" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
   else
     [ "$was_warning" = true ] && log_transition "CLEAR" false "<"
     rm -f "$STATUS_FILE"

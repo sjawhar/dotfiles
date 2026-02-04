@@ -1,4 +1,4 @@
-format = '''$username@$hostname$terraform$aws$custom$python${custom.ephemeral_warn}
+format = '''${custom.resource_warn}$username@$hostname$terraform$aws$custom$python
 $directory$character'''
 
 [hostname]
@@ -62,9 +62,9 @@ format = '[$symbol($profile )(\[$duration\] )]($style)'
 [terraform]
 format = '[$symbol$workspace]($style) '
 
-[custom.ephemeral_warn]
-when = "[ -f /tmp/ephemeral-storage-status ]"
-command = "cat /tmp/ephemeral-storage-status"
-format = "[disk: $output]($style) "
+[custom.resource_warn]
+when = true
+command = "~/.dotfiles/scripts/resource-warnings"
+format = "[$output]($style)\n"
 style = "bold red"
-description = "Warn when pod ephemeral storage exceeds 75%"
+description = "Warn when memory or ephemeral storage usage is high"
