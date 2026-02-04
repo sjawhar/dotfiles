@@ -50,6 +50,9 @@ else
     done
 fi
 
+# Activate mise so tools (node, npm, jj, gh, etc.) are on PATH for the rest of the script
+eval "$(mise activate bash)"
+
 # ------------------------------------------------------------------------------
 # Symlinks
 # ------------------------------------------------------------------------------
