@@ -4,7 +4,6 @@
 
 [tools]
 "cargo:https://github.com/jj-vcs/jj" = { version = "branch:workspace-forget-cleanup", crate = "jj-cli", bin = "jj" }
-"github:anomalyco/opencode" = "v1.1.39"  # Terminal AI coding assistant
 "npm:@openai/codex" = "0.92.0"  # OpenAI coding agent CLI
 bat = "0.26.1"      # Cat with syntax highlighting
 eza = "0.23.4"      # Modern ls with colors and git status

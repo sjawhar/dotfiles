@@ -3,16 +3,19 @@
   "permissions": {
     "defaultMode": "plan"
   },
-  "model": "opus",
+  "model": "opus[1m]",
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/hooks/statusline.sh"
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
   "enabledPlugins": {
     "ralph-loop@claude-plugins-official": true,
     "rust-analyzer-lsp@claude-plugins-official": true,
     "pyright-lsp@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
     "compound-engineering@every-marketplace": true
-  },
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/hooks/statusline.sh"
   }
 }

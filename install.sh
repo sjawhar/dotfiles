@@ -12,10 +12,15 @@ done
 
 echo "=== Dotfiles Install ==="
 
-# Shell config
+# Shell config - insert at TOP of ~/.bashrc (before Debian's interactive check)
+# so PATH/env vars are available for non-interactive shells too
+DOTFILES_SOURCE_LINE='[ ! -f "${HOME}/.dotfiles/.bashrc" ] || . "${HOME}/.dotfiles/.bashrc"'
 if [ -f ~/.bashrc ]; then
-    echo "" >> ~/.bashrc
-    echo '[ ! -f "${HOME}/.dotfiles/.bashrc" ] || . "${HOME}/.dotfiles/.bashrc"' >> ~/.bashrc
+    if ! grep -qF '.dotfiles/.bashrc' ~/.bashrc; then
+        # Insert at top of file
+        { echo "$DOTFILES_SOURCE_LINE"; echo ""; cat ~/.bashrc; } > ~/.bashrc.tmp
+        mv ~/.bashrc.tmp ~/.bashrc
+    fi
 fi
 . "${DOTFILES_DIR}/.bashrc"
 
@@ -105,6 +110,58 @@ if ! command -v claude &>/dev/null; then
     echo "Installing Claude Code..."
     curl -fsSL https://claude.ai/install.sh | bash
 fi
+
+# ------------------------------------------------------------------------------
+# OpenCode
+# ------------------------------------------------------------------------------
+
+if ! command -v opencode &>/dev/null; then
+    echo "Installing OpenCode..."
+    curl -fsSL https://opencode.ai/install | bash
+fi
+
+# ------------------------------------------------------------------------------
+# OpenCode Plugins
+# ------------------------------------------------------------------------------
+
+OPENCODE_DIR="${HOME}/.config/opencode"
+mkdir -p "$OPENCODE_DIR"
+
+if [ ! -d "${OPENCODE_DIR}/compound-engineering/.git" ]; then
+    echo "Cloning compound-engineering plugin..."
+    git clone --depth 1 https://github.com/EveryInc/compound-engineering-plugin "${OPENCODE_DIR}/compound-engineering"
+fi
+
+if [ ! -d "${OPENCODE_DIR}/superpowers/.git" ]; then
+    echo "Cloning superpowers plugin..."
+    git clone --depth 1 https://github.com/obra/superpowers.git "${OPENCODE_DIR}/superpowers"
+fi
+
+if ! command -v oh-my-opencode &>/dev/null; then
+    echo "Installing oh-my-opencode..."
+    npm install -g oh-my-opencode
+fi
+
+if [ ! -f "${OPENCODE_DIR}/opencode.json" ]; then
+    if [ -t 0 ]; then
+        echo "Running oh-my-opencode install..."
+        oh-my-opencode install
+    else
+        echo "Skipping oh-my-opencode install (non-interactive). Run 'oh-my-opencode install' manually."
+    fi
+fi
+
+# Add antigravity-auth plugin if not already registered
+if [ -f "${OPENCODE_DIR}/opencode.json" ]; then
+    if ! grep -q 'opencode-antigravity-auth' "${OPENCODE_DIR}/opencode.json"; then
+        echo "Adding opencode-antigravity-auth plugin..."
+        TMPFILE=$(mktemp)
+        jq '.plugin += ["opencode-antigravity-auth@beta"]' "${OPENCODE_DIR}/opencode.json" > "$TMPFILE" \
+            && mv "$TMPFILE" "${OPENCODE_DIR}/opencode.json"
+    fi
+fi
+
+ln -sf "${DOTFILES_DIR}/oh-my-opencode.json" "${OPENCODE_DIR}/oh-my-opencode.json"
 
 # ------------------------------------------------------------------------------
 # Completions
