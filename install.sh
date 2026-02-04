@@ -60,6 +60,12 @@ ln -sf "${DOTFILES_DIR}/.gitconfig" ~/.gitconfig
 ln -sf "${DOTFILES_DIR}/.tmux.conf" ~/.tmux.conf
 ln -sf "${DOTFILES_DIR}/nvim/init.lua" ~/.config/nvim/init.lua
 
+# Claude Code plugins (skills & agents from sjawhar plugin)
+[ -d "${DOTFILES_DIR}/.claude/skills" ] && ! [ -L "${DOTFILES_DIR}/.claude/skills" ] && rm -rf "${DOTFILES_DIR}/.claude/skills"
+[ -d "${DOTFILES_DIR}/.claude/agents" ] && ! [ -L "${DOTFILES_DIR}/.claude/agents" ] && rm -rf "${DOTFILES_DIR}/.claude/agents"
+ln -sf "../plugins/sjawhar/skills" "${DOTFILES_DIR}/.claude/skills"
+ln -sf "../plugins/sjawhar/agents" "${DOTFILES_DIR}/.claude/agents"
+
 # Install nvim plugins
 if command -v nvim &>/dev/null; then
     echo "Installing nvim plugins..."
