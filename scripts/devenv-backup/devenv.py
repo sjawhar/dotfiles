@@ -15,7 +15,7 @@ Usage:
     uv run ~/.dotfiles/scripts/devenv-backup/devenv.py manifest --no-include-files
 
     # Backup to S3
-    # Path structure: {base}/{machine}/{name}/ for backup, {base}/claude-code/{machine}/ for Claude
+    # Path structure: {base}/{machine}/{name}/ for backup, {base}/claude-code/{machine}/ for Claude, {base}/opencode/{machine}/ for OpenCode
     uv run ~/.dotfiles/scripts/devenv-backup/devenv.py backup --base s3://bucket/users/sami@metr.org/
     uv run ~/.dotfiles/scripts/devenv-backup/devenv.py backup --base s3://bucket/users/sami@metr.org/ --name 2026-01-20
     uv run ~/.dotfiles/scripts/devenv-backup/devenv.py backup --base s3://bucket/users/sami@metr.org/ --machine devpod --dry-run
@@ -133,28 +133,59 @@ class Manifest(BaseModel):
         return v
 
 
-SKIP_DIRS = frozenset([
-    "node_modules", ".venv", "venv", "__pycache__", ".cache",
-    "target", "dist", ".cargo", ".rustup", ".mise", ".local",
-    ".npm", ".bun", "go", ".gradle", ".m2",
-])
+SKIP_DIRS = frozenset(
+    [
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".cache",
+        "target",
+        "dist",
+        ".cargo",
+        ".rustup",
+        ".mise",
+        ".local",
+        ".npm",
+        ".bun",
+        "go",
+        ".gradle",
+        ".m2",
+    ]
+)
 
 # Dot-directories that should be searched for jj repos
 ALLOWED_DOT_DIRS = frozenset([".dotfiles"])
 
 # Claude Code files/dirs to sync (relative to claude dir)
 # NOTE: .credentials.json is intentionally EXCLUDED (sensitive)
-CLAUDE_SYNC_PATHS = frozenset([
-    ".claude.json",
-    ".claude.json.backup",
-    "history.jsonl",
-    "projects",
-    "plans",
-    "todos",
-    "file-history",
-    "plugins/installed_plugins.json",
-    "plugins/known_marketplaces.json",
-])
+CLAUDE_SYNC_PATHS = frozenset(
+    [
+        ".claude.json",
+        ".claude.json.backup",
+        "history.jsonl",
+        "projects",
+        "plans",
+        "todos",
+        "file-history",
+        "plugins/installed_plugins.json",
+        "plugins/known_marketplaces.json",
+    ]
+)
+
+# OpenCode storage directory (session data, messages, parts)
+OPENCODE_STORAGE_DIR = Path.home() / ".local" / "share" / "opencode" / "storage"
+
+# Subdirectories within opencode storage to sync
+OPENCODE_SYNC_DIRS = frozenset(
+    [
+        "session",
+        "message",
+        "part",
+        "project",
+        "todo",
+    ]
+)
 
 
 def should_skip_dir(name: str) -> bool:
@@ -337,7 +368,9 @@ async def get_git_remotes(repo_path: Path) -> dict[str, str]:
     if returncode != 0 and "stale" in stderr.lower():
         success, _ = await update_stale_workspace(repo_path)
         if success:
-            returncode, stdout, stderr = await run_jj(["git", "remote", "list"], repo_path)
+            returncode, stdout, stderr = await run_jj(
+                ["git", "remote", "list"], repo_path
+            )
 
     if returncode != 0:
         return {}
@@ -356,9 +389,14 @@ async def update_stale_workspace(workspace_path: Path) -> tuple[bool, bool]:
 
     Returns (success, has_divergent) tuple.
     """
-    returncode, stdout, stderr = await run_jj(["workspace", "update-stale"], workspace_path)
+    returncode, stdout, stderr = await run_jj(
+        ["workspace", "update-stale"], workspace_path
+    )
     if returncode != 0:
-        print(f"Warning: Failed to update stale workspace {workspace_path}: {stderr}", file=sys.stderr)
+        print(
+            f"Warning: Failed to update stale workspace {workspace_path}: {stderr}",
+            file=sys.stderr,
+        )
         return False, False
 
     # Check for divergent commits after update
@@ -366,7 +404,10 @@ async def update_stale_workspace(workspace_path: Path) -> tuple[bool, bool]:
     has_divergent = "divergent" in stdout.lower() if returncode == 0 else False
 
     if has_divergent:
-        print(f"Warning: Divergent commits detected in {workspace_path} after updating stale workspace", file=sys.stderr)
+        print(
+            f"Warning: Divergent commits detected in {workspace_path} after updating stale workspace",
+            file=sys.stderr,
+        )
 
     return True, has_divergent
 
@@ -374,7 +415,14 @@ async def update_stale_workspace(workspace_path: Path) -> tuple[bool, bool]:
 async def get_current_state(workspace_path: Path) -> tuple[str, str, str | None]:
     """Get current change_id, commit_id, and bookmark for a workspace."""
     returncode, stdout, stderr = await run_jj(
-        ["log", "-r", "@", "-T", r'change_id ++ "\n" ++ commit_id ++ "\n"', "--no-graph"],
+        [
+            "log",
+            "-r",
+            "@",
+            "-T",
+            r'change_id ++ "\n" ++ commit_id ++ "\n"',
+            "--no-graph",
+        ],
         workspace_path,
     )
     if returncode != 0:
@@ -384,7 +432,14 @@ async def get_current_state(workspace_path: Path) -> tuple[str, str, str | None]
             if success:
                 # Retry after updating
                 returncode, stdout, stderr = await run_jj(
-                    ["log", "-r", "@", "-T", r'change_id ++ "\n" ++ commit_id ++ "\n"', "--no-graph"],
+                    [
+                        "log",
+                        "-r",
+                        "@",
+                        "-T",
+                        r'change_id ++ "\n" ++ commit_id ++ "\n"',
+                        "--no-graph",
+                    ],
                     workspace_path,
                 )
         if returncode != 0:
@@ -396,7 +451,9 @@ async def get_current_state(workspace_path: Path) -> tuple[str, str, str | None]
 
     lines = stdout.split("\n")
     if len(lines) < 2:
-        raise JJOutputError(f"Expected 2 lines from jj log, got {len(lines)}: {stdout!r}")
+        raise JJOutputError(
+            f"Expected 2 lines from jj log, got {len(lines)}: {stdout!r}"
+        )
 
     change_id = lines[0].strip()
     commit_id = lines[1].strip()
@@ -425,8 +482,11 @@ async def get_uncommitted_changes(repo_path: Path) -> list[dict[str, str | None]
     """Get changes that haven't been pushed to remote."""
     returncode, stdout, _ = await run_jj(
         [
-            "log", "-r", "remote_bookmarks()..@",
-            "-T", r'change_id ++ "\t" ++ commit_id ++ "\t" ++ description.first_line() ++ "\n"',
+            "log",
+            "-r",
+            "remote_bookmarks()..@",
+            "-T",
+            r'change_id ++ "\t" ++ commit_id ++ "\t" ++ description.first_line() ++ "\n"',
             "--no-graph",
         ],
         repo_path,
@@ -441,14 +501,20 @@ async def get_uncommitted_changes(repo_path: Path) -> list[dict[str, str | None]
 
     # Get all bookmarks once
     bm_returncode, bm_stdout, _ = await run_jj(["bookmark", "list"], repo_path)
-    bookmark_lines = [line for line in bm_stdout.strip().split("\n") if line.strip()] if bm_returncode == 0 else []
+    bookmark_lines = (
+        [line for line in bm_stdout.strip().split("\n") if line.strip()]
+        if bm_returncode == 0
+        else []
+    )
 
     for line in stdout.strip().split("\n"):
         if not line.strip():
             continue
         parts = line.split("\t", 2)
         if len(parts) < 2:
-            raise JJOutputError(f"Expected at least 2 tab-separated fields, got: {line!r}")
+            raise JJOutputError(
+                f"Expected at least 2 tab-separated fields, got: {line!r}"
+            )
 
         change_id = parts[0]
         commit_id = parts[1]
@@ -466,12 +532,14 @@ async def get_uncommitted_changes(repo_path: Path) -> list[dict[str, str | None]
                     bookmark = extract_bookmark_name(bm_line)
                 break
 
-        changes.append({
-            "change_id": change_id,
-            "commit_id": commit_id,
-            "description": description,
-            "bookmark": bookmark,
-        })
+        changes.append(
+            {
+                "change_id": change_id,
+                "commit_id": commit_id,
+                "description": description,
+                "bookmark": bookmark,
+            }
+        )
 
     return changes
 
@@ -513,7 +581,9 @@ def resolve_primary_repo(jj_dir: Path) -> Path | None:
         return None
 
 
-def find_jj_directories(root_dir: Path) -> tuple[dict[Path, Path], list[tuple[Path, Path]]]:
+def find_jj_directories(
+    root_dir: Path,
+) -> tuple[dict[Path, Path], list[tuple[Path, Path]]]:
     """Find all .jj directories and categorize them.
 
     Returns:
@@ -645,7 +715,9 @@ def collect_symlinks(
         dir_path = Path(dirpath)
 
         # Skip workspace internals
-        if dir_path in workspace_paths or any(dir_path.is_relative_to(ws) for ws in workspace_paths):
+        if dir_path in workspace_paths or any(
+            dir_path.is_relative_to(ws) for ws in workspace_paths
+        ):
             dirnames.clear()
             continue
 
@@ -686,7 +758,9 @@ def collect_symlinks(
                 rel_target = resolved_target.relative_to(root_dir)
 
                 # Skip symlinks inside .dotfiles (managed by install.sh)
-                if str(rel_path).startswith(".dotfiles/") or str(rel_path).startswith(".dotfiles\\"):
+                if str(rel_path).startswith(".dotfiles/") or str(rel_path).startswith(
+                    ".dotfiles\\"
+                ):
                     continue
 
                 symlinks.append(
@@ -812,9 +886,14 @@ async def build_repo_data(
         return None
 
     # Filter to remotes with valid URL schemes
-    valid_remotes = {name: url for name, url in remotes.items() if validate_url_scheme(url)}
+    valid_remotes = {
+        name: url for name, url in remotes.items() if validate_url_scheme(url)
+    }
     if not valid_remotes:
-        print(f"Warning: Skipping {primary_path} - no remotes with supported URL schemes", file=sys.stderr)
+        print(
+            f"Warning: Skipping {primary_path} - no remotes with supported URL schemes",
+            file=sys.stderr,
+        )
         return None
 
     repo_data = RepoData(remotes=valid_remotes)
@@ -839,7 +918,15 @@ async def build_repo_data(
             continue
 
         returncode, stdout, _ = await run_jj(
-            ["log", "-r", "@", "--ignore-working-copy", "-T", "working_copies", "--no-graph"],
+            [
+                "log",
+                "-r",
+                "@",
+                "--ignore-working-copy",
+                "-T",
+                "working_copies",
+                "--no-graph",
+            ],
             ws_path,
         )
         if returncode != 0 or not stdout.strip():
@@ -871,7 +958,13 @@ async def discover_repos(root_dir: Path) -> dict[str, RepoData]:
     tasks: list[tuple[Path, Path, Coroutine[Any, Any, RepoData | None]]] = []
 
     for repo_store, primary_path in primary_repos.items():
-        tasks.append((repo_store, primary_path, build_repo_data(repo_store, primary_path, workspace_dirs)))
+        tasks.append(
+            (
+                repo_store,
+                primary_path,
+                build_repo_data(repo_store, primary_path, workspace_dirs),
+            )
+        )
 
     results: list[RepoData | None | BaseException] = await asyncio.gather(
         *[t[2] for t in tasks], return_exceptions=True
@@ -879,7 +972,9 @@ async def discover_repos(root_dir: Path) -> dict[str, RepoData]:
 
     for (repo_store, primary_path, _), result in zip(tasks, results):
         if isinstance(result, BaseException):
-            print(f"Warning: Error processing {primary_path}: {result}", file=sys.stderr)
+            print(
+                f"Warning: Error processing {primary_path}: {result}", file=sys.stderr
+            )
             continue
         if result is None:
             continue
@@ -912,29 +1007,38 @@ async def generate_manifest(root_dir: Path, include_files: bool = True) -> Manif
     workspaces: dict[str, RepoData] = {}
     all_uncommitted: list[UncommittedChange] = []
 
-    uncommitted_tasks: list[tuple[str, Coroutine[Any, Any, list[dict[str, str | None]]]]] = []
+    uncommitted_tasks: list[
+        tuple[str, Coroutine[Any, Any, list[dict[str, str | None]]]]
+    ] = []
     for repo_name, repo_data in repos.items():
         workspaces[repo_name] = repo_data
 
         default_ws = repo_data.workspaces.get("default")
         if default_ws:
-            uncommitted_tasks.append((repo_name, get_uncommitted_changes(Path(default_ws.path))))
+            uncommitted_tasks.append(
+                (repo_name, get_uncommitted_changes(Path(default_ws.path)))
+            )
 
     uncommitted_results = await asyncio.gather(
         *[t[1] for t in uncommitted_tasks], return_exceptions=True
     )
     for (repo_name, _), result in zip(uncommitted_tasks, uncommitted_results):
         if isinstance(result, BaseException):
-            print(f"Warning: Error getting uncommitted changes for {repo_name}: {result}", file=sys.stderr)
+            print(
+                f"Warning: Error getting uncommitted changes for {repo_name}: {result}",
+                file=sys.stderr,
+            )
             continue
         for change in result:
-            all_uncommitted.append(UncommittedChange(
-                change_id=change["change_id"] or "",
-                commit_id=change["commit_id"] or "",
-                description=change["description"] or "",
-                bookmark=change["bookmark"],
-                workspace=repo_name,
-            ))
+            all_uncommitted.append(
+                UncommittedChange(
+                    change_id=change["change_id"] or "",
+                    commit_id=change["commit_id"] or "",
+                    description=change["description"] or "",
+                    bookmark=change["bookmark"],
+                    workspace=repo_name,
+                )
+            )
 
     hostname = os.uname().nodename
     files_list: list[FileEntry] | None = None
@@ -987,11 +1091,15 @@ def validate_restore_paths(
     if manifest.symlinks:
         for entry in manifest.symlinks:
             if ".." in entry.relative_path or ".." in entry.target:
-                raise RestoreError(f"Symlink path contains '..': {entry.relative_path} -> {entry.target}")
+                raise RestoreError(
+                    f"Symlink path contains '..': {entry.relative_path} -> {entry.target}"
+                )
             link = root_dir / entry.relative_path
             target = root_dir / entry.target
             if not is_path_under_root(link, root_dir):
-                raise RestoreError(f"Symlink path escapes root_dir: {entry.relative_path}")
+                raise RestoreError(
+                    f"Symlink path escapes root_dir: {entry.relative_path}"
+                )
             if not is_path_under_root(target, root_dir):
                 raise RestoreError(f"Symlink target escapes root_dir: {entry.target}")
 
@@ -1000,7 +1108,9 @@ def validate_restore_paths(
         for ws_name, ws_data in repo_data.list_workspaces():
             ws_path = Path(ws_data.path)
             if not ws_path.is_absolute():
-                raise RestoreError(f"Workspace path must be absolute: {ws_data.path} (in {repo_name}/{ws_name})")
+                raise RestoreError(
+                    f"Workspace path must be absolute: {ws_data.path} (in {repo_name}/{ws_name})"
+                )
             if not is_path_under_root(ws_path, root_dir):
                 raise RestoreError(f"Workspace path escapes root_dir: {ws_path}")
 
@@ -1032,11 +1142,16 @@ def restore_symlinks(
 
         # Validate both are within root_dir (defense in depth)
         if not is_path_under_root(link_path, root_dir):
-            print(f"Skipping symlink outside root: {entry.relative_path}", file=sys.stderr)
+            print(
+                f"Skipping symlink outside root: {entry.relative_path}", file=sys.stderr
+            )
             failed += 1
             continue
         if not is_path_under_root(target_path, root_dir):
-            print(f"Skipping symlink with target outside root: {entry.target}", file=sys.stderr)
+            print(
+                f"Skipping symlink with target outside root: {entry.target}",
+                file=sys.stderr,
+            )
             failed += 1
             continue
 
@@ -1056,7 +1171,9 @@ def restore_symlinks(
             link_path.symlink_to(rel_target)
             successful += 1
         except OSError as e:
-            print(f"Failed to create symlink {entry.relative_path}: {e}", file=sys.stderr)
+            print(
+                f"Failed to create symlink {entry.relative_path}: {e}", file=sys.stderr
+            )
             failed += 1
 
     return successful, failed, skipped
@@ -1104,12 +1221,17 @@ async def clone_repo(
                 default_path,
             )
             if returncode != 0:
-                print(f"Warning: Failed to add remote {remote_name} to {repo_name}: {stderr}", file=sys.stderr)
+                print(
+                    f"Warning: Failed to add remote {remote_name} to {repo_name}: {stderr}",
+                    file=sys.stderr,
+                )
 
         return True, None
 
 
-async def check_workspace_state(ws_path: Path, expected_change_id: str) -> tuple[bool, bool]:
+async def check_workspace_state(
+    ws_path: Path, expected_change_id: str
+) -> tuple[bool, bool]:
     """Check if workspace is on expected change and if there are divergent changes.
 
     Returns (is_correct, has_divergent) tuple.
@@ -1140,11 +1262,17 @@ async def restore_workspace(
     is_correct, has_divergent = await check_workspace_state(ws_path, change_id)
 
     if is_correct:
-        print(f"Workspace {ws_name} already on correct change {change_id[:8]}", file=sys.stderr)
+        print(
+            f"Workspace {ws_name} already on correct change {change_id[:8]}",
+            file=sys.stderr,
+        )
         return True, None
 
     if has_divergent:
-        print(f"Warning: Workspace {ws_name} has divergent changes, manual resolution may be needed", file=sys.stderr)
+        print(
+            f"Warning: Workspace {ws_name} has divergent changes, manual resolution may be needed",
+            file=sys.stderr,
+        )
 
     # Use jj edit for consistent behavior across all workspaces
     returncode, _, stderr = await run_jj(["edit", change_id], ws_path)
@@ -1157,7 +1285,10 @@ async def restore_workspace(
         return False, f"Workspace {ws_name} not on expected change after edit"
 
     if has_divergent:
-        print(f"Warning: Divergent changes detected in {ws_name} after restore", file=sys.stderr)
+        print(
+            f"Warning: Divergent changes detected in {ws_name} after restore",
+            file=sys.stderr,
+        )
 
     return True, None
 
@@ -1193,7 +1324,9 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
                 print(f"  {p}", file=sys.stderr)
 
     # First pass: clone primary repos
-    clone_tasks: list[tuple[str, RepoData, Path, Coroutine[Any, Any, tuple[bool, str | None]]]] = []
+    clone_tasks: list[
+        tuple[str, RepoData, Path, Coroutine[Any, Any, tuple[bool, str | None]]]
+    ] = []
     repos_to_process: list[tuple[str, RepoData, Path]] = []
 
     for repo_name, repo_data in workspaces.items():
@@ -1203,9 +1336,13 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
             continue
 
         # Filter to valid URL schemes
-        valid_remotes = {name: url for name, url in remotes.items() if validate_url_scheme(url)}
+        valid_remotes = {
+            name: url for name, url in remotes.items() if validate_url_scheme(url)
+        }
         if not valid_remotes:
-            errors.append(f"Skipping {repo_name} - no remotes with supported URL schemes")
+            errors.append(
+                f"Skipping {repo_name} - no remotes with supported URL schemes"
+            )
             continue
 
         default_ws = repo_data.workspaces.get("default")
@@ -1219,17 +1356,23 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
             print(f"Repository {repo_name} exists at {default_path}", file=sys.stderr)
             repos_to_process.append((repo_name, repo_data, default_path))
         else:
-            clone_tasks.append((
-                repo_name,
-                repo_data,
-                default_path,
-                clone_repo(repo_name, valid_remotes, default_path, semaphore),
-            ))
+            clone_tasks.append(
+                (
+                    repo_name,
+                    repo_data,
+                    default_path,
+                    clone_repo(repo_name, valid_remotes, default_path, semaphore),
+                )
+            )
 
     # Run clones concurrently
     if clone_tasks:
-        results = await asyncio.gather(*[t[3] for t in clone_tasks], return_exceptions=True)
-        for (repo_name, repo_data, default_path, _), result in zip(clone_tasks, results):
+        results = await asyncio.gather(
+            *[t[3] for t in clone_tasks], return_exceptions=True
+        )
+        for (repo_name, repo_data, default_path, _), result in zip(
+            clone_tasks, results
+        ):
             if isinstance(result, BaseException):
                 errors.append(f"Clone failed for {repo_name}: {result}")
             else:
@@ -1240,17 +1383,27 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
                     errors.append(error_msg)
 
     # Restore default workspaces to correct change - PARALLEL
-    default_restore_tasks: list[tuple[str, Coroutine[Any, Any, tuple[bool, str | None]]]] = []
+    default_restore_tasks: list[
+        tuple[str, Coroutine[Any, Any, tuple[bool, str | None]]]
+    ] = []
     for repo_name, repo_data, default_path in repos_to_process:
         default_ws = repo_data.workspaces.get("default")
         if default_ws and default_ws.current_change_id:
-            default_restore_tasks.append((
-                f"{repo_name}/default",
-                restore_workspace(default_path, default_ws.current_change_id, f"{repo_name}/default")
-            ))
+            default_restore_tasks.append(
+                (
+                    f"{repo_name}/default",
+                    restore_workspace(
+                        default_path,
+                        default_ws.current_change_id,
+                        f"{repo_name}/default",
+                    ),
+                )
+            )
 
     if default_restore_tasks:
-        results = await asyncio.gather(*[t[1] for t in default_restore_tasks], return_exceptions=True)
+        results = await asyncio.gather(
+            *[t[1] for t in default_restore_tasks], return_exceptions=True
+        )
         for (ws_name, _), result in zip(default_restore_tasks, results):
             if isinstance(result, BaseException):
                 errors.append(f"Restore failed for {ws_name}: {result}")
@@ -1278,7 +1431,9 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
             if ws_path.exists():
                 # Workspace exists, check if it needs restoration
                 if change_id:
-                    success, error_msg = await restore_workspace(ws_path, change_id, f"{repo_name}/{ws_name}")
+                    success, error_msg = await restore_workspace(
+                        ws_path, change_id, f"{repo_name}/{ws_name}"
+                    )
                     if not success and error_msg:
                         repo_errors.append(error_msg)
                 continue
@@ -1291,12 +1446,16 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
                 default_path,
             )
             if returncode != 0:
-                repo_errors.append(f"Error creating workspace {repo_name}/{ws_name}: {stderr}")
+                repo_errors.append(
+                    f"Error creating workspace {repo_name}/{ws_name}: {stderr}"
+                )
                 continue
 
             # Restore to correct change
             if change_id:
-                success, error_msg = await restore_workspace(ws_path, change_id, f"{repo_name}/{ws_name}")
+                success, error_msg = await restore_workspace(
+                    ws_path, change_id, f"{repo_name}/{ws_name}"
+                )
                 if not success and error_msg:
                     repo_errors.append(error_msg)
 
@@ -1306,7 +1465,9 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
     workspace_tasks = []
     for repo_name, repo_data, default_path in repos_to_process:
         if default_path.exists():
-            workspace_tasks.append(create_repo_workspaces(repo_name, repo_data, default_path))
+            workspace_tasks.append(
+                create_repo_workspaces(repo_name, repo_data, default_path)
+            )
 
     if workspace_tasks:
         results = await asyncio.gather(*workspace_tasks, return_exceptions=True)
@@ -1319,11 +1480,18 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
     # Report uncommitted changes
     uncommitted = manifest.uncommitted
     if uncommitted:
-        print("\nNote: The following uncommitted changes were recorded:", file=sys.stderr)
+        print(
+            "\nNote: The following uncommitted changes were recorded:", file=sys.stderr
+        )
         for change in uncommitted:
             desc = change.description or "(no description)"
-            print(f"  - {change.workspace}: {change.change_id[:8]} - {desc}", file=sys.stderr)
-        print("These may not exist if they were discarded before backup.", file=sys.stderr)
+            print(
+                f"  - {change.workspace}: {change.change_id[:8]} - {desc}",
+                file=sys.stderr,
+            )
+        print(
+            "These may not exist if they were discarded before backup.", file=sys.stderr
+        )
 
     print("\nRestore complete!", file=sys.stderr)
     return errors
@@ -1337,7 +1505,9 @@ def load_manifest(path: Path | None) -> Manifest:
                 data: dict[str, Any] = json.load(f)
         else:
             if sys.stdin.isatty():
-                raise ManifestError("No manifest provided. Use --manifest-file or pipe JSON to stdin.")
+                raise ManifestError(
+                    "No manifest provided. Use --manifest-file or pipe JSON to stdin."
+                )
             data = json.load(sys.stdin)
     except FileNotFoundError:
         raise ManifestError(f"Manifest file not found: {path}")
@@ -1397,8 +1567,10 @@ def validate_relative_path(rel_path: str) -> str:
     return rel_path
 
 
-def build_s3_paths(s3_base: str, machine: str, backup_name: str) -> tuple[str, str]:
-    """Build backup and claude S3 destination paths.
+def build_s3_paths(
+    s3_base: str, machine: str, backup_name: str
+) -> tuple[str, str, str]:
+    """Build backup, claude, and opencode S3 destination paths.
 
     Args:
         s3_base: Base S3 path (e.g., s3://bucket/users/sami@metr.org/)
@@ -1406,12 +1578,13 @@ def build_s3_paths(s3_base: str, machine: str, backup_name: str) -> tuple[str, s
         backup_name: Backup name (e.g., "2026-01-20")
 
     Returns:
-        Tuple of (backup_path, claude_path)
+        Tuple of (backup_path, claude_path, opencode_path)
     """
     base = s3_base.rstrip("/")
     return (
         f"{base}/{machine}/{backup_name}/",
         f"{base}/claude-code/{machine}/",
+        f"{base}/opencode/{machine}/",
     )
 
 
@@ -1688,7 +1861,9 @@ async def restore_files_from_s3(
     async def download_file(s3: "S3Client", s3_key: str, local_path: Path) -> bool:
         return await s3_download_file(s3, bucket, s3_key, local_path, force=True)
 
-    successful, failed = await run_parallel_s3_ops(tasks, download_file, "Download error", errors_list)
+    successful, failed = await run_parallel_s3_ops(
+        tasks, download_file, "Download error", errors_list
+    )
     return successful, failed, skipped
 
 
@@ -1722,7 +1897,7 @@ async def list_backups(s3_base: str, machine: str) -> list[str]:
                     # Extract backup name from prefix like "users/sami@metr.org/devpod/2026-01-20/"
                     prefix_str = prefix.get("Prefix")
                     if prefix_str:
-                        name = prefix_str[len(base_key):].rstrip("/")
+                        name = prefix_str[len(base_key) :].rstrip("/")
                         if name:
                             backup_names.add(name)
     except ClientError as e:
@@ -1798,7 +1973,10 @@ async def sync_claude_dir_to_s3(
         return 0, 0
 
     if dry_run:
-        print(f"Would upload {len(local_files)} Claude Code files to s3://{bucket}/{base_key}", file=sys.stderr)
+        print(
+            f"Would upload {len(local_files)} Claude Code files to s3://{bucket}/{base_key}",
+            file=sys.stderr,
+        )
         for filepath, s3_key in local_files[:10]:
             print(f"  {filepath.relative_to(local_claude_dir)}", file=sys.stderr)
         if len(local_files) > 10:
@@ -1808,7 +1986,9 @@ async def sync_claude_dir_to_s3(
     async def upload_file(s3: "S3Client", local_path: Path, s3_key: str) -> bool:
         return await s3_upload_file(s3, local_path, bucket, s3_key)
 
-    return await run_parallel_s3_ops(local_files, upload_file, "Claude dir upload error", errors_list)
+    return await run_parallel_s3_ops(
+        local_files, upload_file, "Claude dir upload error", errors_list
+    )
 
 
 async def restore_claude_dir_from_s3(
@@ -1852,7 +2032,7 @@ async def restore_claude_dir_from_s3(
         s3_key = obj.get("Key")
         if not s3_key:
             continue
-        rel_path = s3_key[len(base_key):]
+        rel_path = s3_key[len(base_key) :]
         # Validate the path is safe
         if rel_path.startswith("/") or ".." in rel_path:
             print(f"Skipping unsafe path: {rel_path}", file=sys.stderr)
@@ -1871,9 +2051,12 @@ async def restore_claude_dir_from_s3(
         return 0, 0, skipped_by_date, skipped_existing
 
     if dry_run:
-        print(f"Would download {len(to_download)} Claude Code files from s3://{bucket}/{base_key}", file=sys.stderr)
+        print(
+            f"Would download {len(to_download)} Claude Code files from s3://{bucket}/{base_key}",
+            file=sys.stderr,
+        )
         for s3_key, _ in to_download[:10]:
-            rel_path = s3_key[len(base_key):]
+            rel_path = s3_key[len(base_key) :]
             print(f"  {rel_path}", file=sys.stderr)
         if len(to_download) > 10:
             print(f"  ... and {len(to_download) - 10} more", file=sys.stderr)
@@ -1882,7 +2065,140 @@ async def restore_claude_dir_from_s3(
     async def download_file(s3: "S3Client", s3_key: str, local_path: Path) -> bool:
         return await s3_download_file(s3, bucket, s3_key, local_path, force=True)
 
-    successful, failed = await run_parallel_s3_ops(to_download, download_file, "Claude dir download error", errors_list)
+    successful, failed = await run_parallel_s3_ops(
+        to_download, download_file, "Claude dir download error", errors_list
+    )
+    return successful, failed, skipped_by_date, skipped_existing
+
+
+def _should_sync_opencode_path(rel_path: Path) -> bool:
+    """Check if a path relative to opencode storage dir should be synced."""
+    if not rel_path.parts:
+        return False
+    return rel_path.parts[0] in OPENCODE_SYNC_DIRS
+
+
+async def sync_opencode_dir_to_s3(
+    local_opencode_dir: Path,
+    s3_destination: str,
+    dry_run: bool = False,
+    errors_list: list[str] | None = None,
+) -> tuple[int, int]:
+    """Sync OpenCode session data to S3.
+
+    Only syncs directories listed in OPENCODE_SYNC_DIRS.
+
+    Returns (successful, failed) counts.
+    """
+    bucket, base_key = parse_s3_url(s3_destination, ensure_trailing_slash=True)
+
+    if not local_opencode_dir.exists():
+        return 0, 0
+
+    local_files: list[tuple[Path, str]] = []
+    for root, _dirs, files in os.walk(local_opencode_dir):
+        root_path = Path(root)
+        for filename in files:
+            filepath = root_path / filename
+            if filepath.is_symlink():
+                continue
+            rel_path = filepath.relative_to(local_opencode_dir)
+
+            if not _should_sync_opencode_path(rel_path):
+                continue
+
+            s3_key = base_key + PurePosixPath(rel_path).as_posix()
+            local_files.append((filepath, s3_key))
+
+    if not local_files:
+        return 0, 0
+
+    if dry_run:
+        print(
+            f"Would upload {len(local_files)} OpenCode files to s3://{bucket}/{base_key}",
+            file=sys.stderr,
+        )
+        for filepath, _s3_key in local_files[:10]:
+            print(f"  {filepath.relative_to(local_opencode_dir)}", file=sys.stderr)
+        if len(local_files) > 10:
+            print(f"  ... and {len(local_files) - 10} more", file=sys.stderr)
+        return len(local_files), 0
+
+    async def upload_file(s3: "S3Client", local_path: Path, s3_key: str) -> bool:
+        return await s3_upload_file(s3, local_path, bucket, s3_key)
+
+    return await run_parallel_s3_ops(
+        local_files, upload_file, "OpenCode dir upload error", errors_list
+    )
+
+
+async def restore_opencode_dir_from_s3(
+    s3_source: str,
+    local_opencode_dir: Path,
+    after: datetime | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+    errors_list: list[str] | None = None,
+) -> tuple[int, int, int, list[str]]:
+    """Restore OpenCode session data from S3.
+
+    Returns (successful, failed, skipped_by_date, skipped_paths) counts.
+    """
+    bucket, base_key = parse_s3_url(s3_source, ensure_trailing_slash=True)
+
+    session = aioboto3.Session()
+    async with session.client("s3") as s3:
+        objects = await s3_list_objects(s3, bucket, base_key)
+
+    to_download: list[tuple[str, Path]] = []
+    skipped_by_date = 0
+    skipped_existing: list[str] = []
+
+    for obj in objects:
+        if after is not None:
+            last_modified = obj.get("LastModified")
+            if last_modified and last_modified < after:
+                skipped_by_date += 1
+                continue
+        s3_key = obj.get("Key")
+        if not s3_key or s3_key.endswith("/"):
+            continue
+        rel_path = s3_key[len(base_key) :]
+        if rel_path.startswith("/") or ".." in rel_path:
+            print(f"Skipping unsafe path: {rel_path}", file=sys.stderr)
+            skipped_by_date += 1
+            continue
+        if not _should_sync_opencode_path(Path(rel_path)):
+            continue
+        local_file = local_opencode_dir / rel_path
+
+        if local_file.exists() and not force:
+            skipped_existing.append(rel_path)
+            continue
+
+        to_download.append((s3_key, local_file))
+
+    if not to_download:
+        return 0, 0, skipped_by_date, skipped_existing
+
+    if dry_run:
+        print(
+            f"Would download {len(to_download)} OpenCode files from s3://{bucket}/{base_key}",
+            file=sys.stderr,
+        )
+        for s3_key, _ in to_download[:10]:
+            rel_path = s3_key[len(base_key) :]
+            print(f"  {rel_path}", file=sys.stderr)
+        if len(to_download) > 10:
+            print(f"  ... and {len(to_download) - 10} more", file=sys.stderr)
+        return len(to_download), 0, skipped_by_date, skipped_existing
+
+    async def download_file(s3: "S3Client", s3_key: str, local_path: Path) -> bool:
+        return await s3_download_file(s3, bucket, s3_key, local_path, force=True)
+
+    successful, failed = await run_parallel_s3_ops(
+        to_download, download_file, "OpenCode dir download error", errors_list
+    )
     return successful, failed, skipped_by_date, skipped_existing
 
 
@@ -1892,6 +2208,7 @@ async def run_backup(
     machine: str,
     manifest: Manifest,
     claude_dir_source: Path,
+    opencode_dir_source: Path,
     dry_run: bool = False,
 ) -> list[str]:
     """Run full backup.
@@ -1899,6 +2216,7 @@ async def run_backup(
     Uploads to:
     - Backup: {s3_base}/{machine}/{backup_name}/
     - Claude: {s3_base}/claude-code/{machine}/
+    - OpenCode: {s3_base}/opencode/{machine}/
 
     Returns list of error messages.
     """
@@ -1906,7 +2224,9 @@ async def run_backup(
     root_dir = Path(manifest.root_dir)
 
     # Construct S3 paths
-    backup_destination, claude_destination = build_s3_paths(s3_base, machine, backup_name)
+    backup_destination, claude_destination, opencode_destination = build_s3_paths(
+        s3_base, machine, backup_name
+    )
 
     bucket, backup_key = parse_s3_url(backup_destination, ensure_trailing_slash=True)
     manifest_key = backup_key + "manifest.json"
@@ -1915,17 +2235,70 @@ async def run_backup(
         print(f"[DRY RUN] Would backup to:", file=sys.stderr)
         print(f"  Backup: s3://{bucket}/{backup_key}", file=sys.stderr)
         print(f"  Claude: {claude_destination}", file=sys.stderr)
+        print(f"  OpenCode: {opencode_destination}", file=sys.stderr)
         print(f"  Manifest: {len(manifest.workspaces)} workspaces", file=sys.stderr)
 
         if manifest.files:
-            print(f"  Files: {len(manifest.files)} files would be uploaded", file=sys.stderr)
+            print(
+                f"  Files: {len(manifest.files)} files would be uploaded",
+                file=sys.stderr,
+            )
 
         if manifest.symlinks:
-            print(f"  Symlinks: {len(manifest.symlinks)} symlinks recorded", file=sys.stderr)
+            print(
+                f"  Symlinks: {len(manifest.symlinks)} symlinks recorded",
+                file=sys.stderr,
+            )
 
         if claude_dir_source.exists():
-            await sync_claude_dir_to_s3(claude_dir_source, claude_destination, dry_run=True)
+            await sync_claude_dir_to_s3(
+                claude_dir_source, claude_destination, dry_run=True
+            )
+        if opencode_dir_source.exists():
+            await sync_opencode_dir_to_s3(
+                opencode_dir_source, opencode_destination, dry_run=True
+            )
         return errors
+
+    print(f"Backing up to s3://{bucket}/{backup_key}", file=sys.stderr)
+
+    if manifest.files:
+        successful, failed = await sync_files_to_s3(
+            manifest.files, backup_destination, root_dir, errors
+        )
+        print(f"  Uploaded {successful} files ({failed} failed)", file=sys.stderr)
+
+    if claude_dir_source.exists():
+        uploaded, failed = await sync_claude_dir_to_s3(
+            claude_dir_source, claude_destination, errors_list=errors
+        )
+        print(
+            f"  Synced {uploaded} Claude Code files to {claude_destination} ({failed} failed)",
+            file=sys.stderr,
+        )
+
+    if opencode_dir_source.exists():
+        uploaded, failed = await sync_opencode_dir_to_s3(
+            opencode_dir_source, opencode_destination, errors_list=errors
+        )
+        print(
+            f"  Synced {uploaded} OpenCode files to {opencode_destination} ({failed} failed)",
+            file=sys.stderr,
+        )
+
+    session = aioboto3.Session()
+    async with session.client("s3") as s3:
+        manifest_json = manifest.model_dump_json(indent=2, exclude_none=True)
+        success = await s3_upload_bytes(
+            s3, bucket, manifest_key, manifest_json.encode()
+        )
+        if not success:
+            errors.append("Failed to upload manifest after retries")
+            raise DevEnvError("Failed to upload manifest after retries")
+        print("  Uploaded manifest.json", file=sys.stderr)
+
+    print(f"\nBackup complete: s3://{bucket}/{backup_key}", file=sys.stderr)
+    return errors
 
     print(f"Backing up to s3://{bucket}/{backup_key}", file=sys.stderr)
 
@@ -1934,19 +2307,28 @@ async def run_backup(
 
     # 1. Upload files if present
     if manifest.files:
-        successful, failed = await sync_files_to_s3(manifest.files, backup_destination, root_dir, errors)
+        successful, failed = await sync_files_to_s3(
+            manifest.files, backup_destination, root_dir, errors
+        )
         print(f"  Uploaded {successful} files ({failed} failed)", file=sys.stderr)
 
     # 2. Sync Claude directory
     if claude_dir_source.exists():
-        uploaded, failed = await sync_claude_dir_to_s3(claude_dir_source, claude_destination, errors_list=errors)
-        print(f"  Synced {uploaded} Claude Code files to {claude_destination} ({failed} failed)", file=sys.stderr)
+        uploaded, failed = await sync_claude_dir_to_s3(
+            claude_dir_source, claude_destination, errors_list=errors
+        )
+        print(
+            f"  Synced {uploaded} Claude Code files to {claude_destination} ({failed} failed)",
+            file=sys.stderr,
+        )
 
     # 3. Upload manifest last (commit point) with retry
     session = aioboto3.Session()
     async with session.client("s3") as s3:
         manifest_json = manifest.model_dump_json(indent=2, exclude_none=True)
-        success = await s3_upload_bytes(s3, bucket, manifest_key, manifest_json.encode())
+        success = await s3_upload_bytes(
+            s3, bucket, manifest_key, manifest_json.encode()
+        )
         if not success:
             errors.append("Failed to upload manifest after retries")
             raise DevEnvError("Failed to upload manifest after retries")
@@ -1961,6 +2343,7 @@ async def run_restore(
     backup_name: str,
     machine: str,
     claude_dir_destination: Path,
+    opencode_dir_destination: Path,
     sessions_after: datetime | None,
     force: bool,
     dry_run: bool = False,
@@ -1970,13 +2353,16 @@ async def run_restore(
     Downloads from:
     - Backup: {s3_base}/{machine}/{backup_name}/
     - Claude: {s3_base}/claude-code/{machine}/
+    - OpenCode: {s3_base}/opencode/{machine}/
 
     Returns list of error messages.
     """
     errors: list[str] = []
 
     # Construct S3 paths
-    backup_source, claude_source = build_s3_paths(s3_base, machine, backup_name)
+    backup_source, claude_source, opencode_source = build_s3_paths(
+        s3_base, machine, backup_name
+    )
 
     bucket, backup_key = parse_s3_url(backup_source, ensure_trailing_slash=True)
     manifest_key = backup_key + "manifest.json"
@@ -1991,7 +2377,9 @@ async def run_restore(
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
             if error_code == "NoSuchKey":
-                raise RestoreError(f"Manifest not found at s3://{bucket}/{manifest_key}")
+                raise RestoreError(
+                    f"Manifest not found at s3://{bucket}/{manifest_key}"
+                )
             raise
 
     manifest = validate_manifest(manifest_data)
@@ -2013,13 +2401,28 @@ async def run_restore(
         print(f"\n[DRY RUN] Would restore from:", file=sys.stderr)
         print(f"  Backup: {backup_source}", file=sys.stderr)
         print(f"  Claude: {claude_source}", file=sys.stderr)
+        print(f"  OpenCode: {opencode_source}", file=sys.stderr)
 
         if manifest.files:
-            print(f"  Files: {len(manifest.files)} files would be downloaded", file=sys.stderr)
+            print(
+                f"  Files: {len(manifest.files)} files would be downloaded",
+                file=sys.stderr,
+            )
         if manifest.symlinks:
-            print(f"  Symlinks: {len(manifest.symlinks)} symlinks would be created", file=sys.stderr)
+            print(
+                f"  Symlinks: {len(manifest.symlinks)} symlinks would be created",
+                file=sys.stderr,
+            )
 
-        await restore_claude_dir_from_s3(claude_source, claude_dir_destination, after=sessions_after, dry_run=True)
+        await restore_claude_dir_from_s3(
+            claude_source, claude_dir_destination, after=sessions_after, dry_run=True
+        )
+        await restore_opencode_dir_from_s3(
+            opencode_source,
+            opencode_dir_destination,
+            after=sessions_after,
+            dry_run=True,
+        )
         return errors
 
     # Validate all restore paths upfront
@@ -2037,28 +2440,70 @@ async def run_restore(
         )
         print(f"  Downloaded {successful} files ({failed} failed)", file=sys.stderr)
         if skipped:
-            print(f"  Skipped {len(skipped)} existing files (use --force to overwrite)", file=sys.stderr)
+            print(
+                f"  Skipped {len(skipped)} existing files (use --force to overwrite)",
+                file=sys.stderr,
+            )
 
     # Restore symlinks last (after all files exist)
     if manifest.symlinks:
         print("\nRestoring symlinks...", file=sys.stderr)
-        successful, failed, skipped = restore_symlinks(manifest.symlinks, root_dir, force=force)
+        successful, failed, skipped = restore_symlinks(
+            manifest.symlinks, root_dir, force=force
+        )
         print(f"  Created {successful} symlinks ({failed} failed)", file=sys.stderr)
         if skipped:
-            print(f"  Skipped {len(skipped)} existing symlinks (use --force to overwrite)", file=sys.stderr)
+            print(
+                f"  Skipped {len(skipped)} existing symlinks (use --force to overwrite)",
+                file=sys.stderr,
+            )
 
     # Restore Claude directory
     print(f"\nRestoring Claude Code data from {claude_source}...", file=sys.stderr)
-    downloaded, failed, skipped_date, skipped_existing = await restore_claude_dir_from_s3(
+    (
+        downloaded,
+        failed,
+        skipped_date,
+        skipped_existing,
+    ) = await restore_claude_dir_from_s3(
         claude_source,
         claude_dir_destination,
         after=sessions_after,
         force=force,
         errors_list=errors,
     )
-    print(f"  Downloaded {downloaded} Claude Code files ({failed} failed, {skipped_date} skipped by date filter)", file=sys.stderr)
+    print(
+        f"  Downloaded {downloaded} Claude Code files ({failed} failed, {skipped_date} skipped by date filter)",
+        file=sys.stderr,
+    )
     if skipped_existing:
-        print(f"  Skipped {len(skipped_existing)} existing files (use --force to overwrite)", file=sys.stderr)
+        print(
+            f"  Skipped {len(skipped_existing)} existing files (use --force to overwrite)",
+            file=sys.stderr,
+        )
+
+    print(f"\nRestoring OpenCode data from {opencode_source}...", file=sys.stderr)
+    (
+        downloaded,
+        failed,
+        skipped_date,
+        skipped_existing,
+    ) = await restore_opencode_dir_from_s3(
+        opencode_source,
+        opencode_dir_destination,
+        after=sessions_after,
+        force=force,
+        errors_list=errors,
+    )
+    print(
+        f"  Downloaded {downloaded} OpenCode files ({failed} failed, {skipped_date} skipped by date filter)",
+        file=sys.stderr,
+    )
+    if skipped_existing:
+        print(
+            f"  Skipped {len(skipped_existing)} existing files (use --force to overwrite)",
+            file=sys.stderr,
+        )
 
     # Print error summary if any
     if errors:
@@ -2095,6 +2540,7 @@ async def cmd_backup(args: argparse.Namespace) -> int:
         machine=machine,
         manifest=manifest,
         claude_dir_source=args.claude_dir_source,
+        opencode_dir_source=args.opencode_dir_source,
         dry_run=args.dry_run,
     )
     return 1 if errors else 0
@@ -2134,12 +2580,15 @@ async def cmd_restore(args: argparse.Namespace) -> int:
         backup_name = validate_safe_name(args.name, "Backup name")
 
         # S3 restore
-        sessions_after = parse_sessions_after(args.sessions_after) if args.sessions_after else None
+        sessions_after = (
+            parse_sessions_after(args.sessions_after) if args.sessions_after else None
+        )
         errors = await run_restore(
             s3_base=args.base,
             backup_name=backup_name,
             machine=machine,
             claude_dir_destination=args.claude_dir_destination,
+            opencode_dir_destination=args.opencode_dir_destination,
             sessions_after=sessions_after,
             force=args.force,
             dry_run=args.dry_run,
@@ -2210,6 +2659,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Local Claude directory (default: ~/.dotfiles/.claude)",
     )
     backup_parser.add_argument(
+        "--opencode-dir-source",
+        type=Path,
+        default=OPENCODE_STORAGE_DIR,
+        help=f"OpenCode storage directory (default: {OPENCODE_STORAGE_DIR})",
+    )
+    backup_parser.add_argument(
         "--no-include-files",
         action="store_true",
         help="Exclude files from backup",
@@ -2234,7 +2689,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     # restore subcommand
-    restore_parser = subparsers.add_parser("restore", help="Restore from S3 backup or manifest file")
+    restore_parser = subparsers.add_parser(
+        "restore", help="Restore from S3 backup or manifest file"
+    )
     restore_parser.add_argument(
         "--base",
         help="S3 base path (e.g., s3://bucket/users/sami@metr.org/)",
@@ -2253,6 +2710,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path.home() / ".dotfiles" / ".claude",
         help="Local Claude directory (default: ~/.dotfiles/.claude)",
+    )
+    restore_parser.add_argument(
+        "--opencode-dir-destination",
+        type=Path,
+        default=OPENCODE_STORAGE_DIR,
+        help=f"OpenCode storage directory (default: {OPENCODE_STORAGE_DIR})",
     )
     restore_parser.add_argument(
         "--manifest-file",

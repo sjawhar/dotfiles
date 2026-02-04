@@ -69,6 +69,7 @@ export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 # Claude Code
 export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+export ANTHROPIC_1M_CONTEXT=true
 
 # ==============================================================================
 # INTERACTIVE GUARD
@@ -141,6 +142,13 @@ alias ccd='claude --dangerously-skip-permissions'
 alias ccc='claude --dangerously-skip-permissions --continue'
 
 # ------------------------------------------------------------------------------
+# OpenCode aliases
+# ------------------------------------------------------------------------------
+
+alias oc='opencode'
+alias occ='opencode --continue'
+
+# ------------------------------------------------------------------------------
 # Python development (UV-based)
 # ------------------------------------------------------------------------------
 
@@ -193,6 +201,78 @@ fi
 
 # AWS SSO login
 alias alog='aws sso login --use-device-code'
+
+# ------------------------------------------------------------------------------
+# Oh My OpenCode config switching
+# ------------------------------------------------------------------------------
+
+# Usage: omo [profile]  — switch config profile (tab-completable)
+#        omo             — show current profile and available profiles
+omo() {
+    local dotfiles="${DOTFILES_DIR:-${HOME}/.dotfiles}"
+    local config="${HOME}/.config/opencode/oh-my-opencode.json"
+
+    if [ -z "$1" ]; then
+        # Show current profile
+        local current="(unknown)"
+        if [ -L "$config" ]; then
+            local resolved
+            resolved=$(readlink -f "$config")
+            current=$(basename "$resolved" | sed 's/^oh-my-opencode\.//; s/\.json$//')
+        elif [ -f "$config" ]; then
+            current="(not a symlink)"
+        fi
+        echo "Current: $current"
+
+        # List available profiles
+        echo "Available profiles:"
+        for f in "${dotfiles}"/oh-my-opencode.*.json; do
+            [ -f "$f" ] || continue
+            local name
+            name=$(basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//')
+            if [ "$name" = "$current" ]; then
+                echo "  $name (active)"
+            else
+                echo "  $name"
+            fi
+        done
+        return
+    fi
+
+    local target="${dotfiles}/oh-my-opencode.${1}.json"
+    if [ ! -f "$target" ]; then
+        echo "Profile not found: $1" >&2
+        echo "Run 'omo' to see available profiles." >&2
+        return 1
+    fi
+    ln -sf "$target" "$config"
+    echo "oh-my-opencode: switched to $1 (restart opencode to apply)"
+}
+
+# Tab completion for omo
+if [ -n "${ZSH_VERSION:-}" ]; then
+    _omo_complete() {
+        local dotfiles="${DOTFILES_DIR:-${HOME}/.dotfiles}"
+        local profiles=()
+        for f in "${dotfiles}"/oh-my-opencode.*.json; do
+            [ -f "$f" ] || continue
+            profiles+=($(basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//'))
+        done
+        _describe 'omo profile' profiles
+    }
+    compdef _omo_complete omo
+else
+    _omo_complete() {
+        local dotfiles="${DOTFILES_DIR:-${HOME}/.dotfiles}"
+        local profiles
+        profiles=$(for f in "${dotfiles}"/oh-my-opencode.*.json; do
+            [ -f "$f" ] || continue
+            basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//'
+        done)
+        COMPREPLY=($(compgen -W "$profiles" -- "${COMP_WORDS[COMP_CWORD]}"))
+    }
+    complete -F _omo_complete omo
+fi
 
 # ------------------------------------------------------------------------------
 # Environment file loading

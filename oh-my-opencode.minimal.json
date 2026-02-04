@@ -10,44 +10,44 @@
     "plugins": true
   },
 
+  "sisyphus_agent": {
+    "disabled": true,
+    "planner_enabled": false
+  },
+
   "disabled_agents": [
     "sisyphus",
+    "hephaestus",
     "oracle",
     "librarian",
     "explore",
     "prometheus",
     "metis",
     "momus",
-    "hephaestus",
     "atlas",
-    "multimodal-looker",
-    "sisyphus-junior"
+    "multimodal-looker"
   ],
 
   "disabled_hooks": [
     "todo-continuation-enforcer",
     "context-window-monitor",
-    "comment-checker",
-    "directory-agents-injector",
     "directory-readme-injector",
-    "empty-task-response-detector",
     "think-mode",
     "preemptive-compaction",
     "rules-injector",
-    "background-notification",
     "agent-usage-reminder",
     "keyword-detector",
     "interactive-bash-session",
     "category-skill-reminder",
     "ralph-loop",
-    "auto-slash-command",
-    "delegate-task-retry",
     "prometheus-md-only",
     "sisyphus-junior-notepad",
     "start-work",
     "atlas",
     "unstable-agent-babysitter",
-    "tasks-todowrite-disabler"
+    "tasks-todowrite-disabler",
+    "delegate-task-retry",
+    "empty-task-response-detector"
   ],
 
   "disabled_mcps": [],
@@ -55,9 +55,6 @@
   "disabled_skills": [],
 
   "disabled_commands": [
-    "ralph-loop",
-    "ulw-loop",
-    "cancel-ralph",
     "start-work"
   ],
 
