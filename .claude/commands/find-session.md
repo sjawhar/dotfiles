@@ -9,32 +9,39 @@ Find Claude Code session(s) matching: **$ARGUMENTS**
 
 **Search location:** `~/.dotfiles/.claude/projects/*/`
 
-**Search approach:**
-1. Find `.jsonl` session files in the projects directory
-2. Use `grep` to find sessions containing the search terms
-3. For each match, extract:
-   - Session ID (filename without extension)
-   - Project directory
-   - Start timestamp (from file or first entry)
-   - First user message (to understand what the session was about)
-   - Match count (more matches = more relevant)
+## Search Algorithm
 
-**Common search patterns:**
-- jj change IDs (e.g., "ttyomtpu", "xvyyvltz")
-- jj bookmarks (e.g., "fix-cli-explicit-targets", "typed-deps-outs")
-- Issue references (e.g., "Issue #62", "#77")
-- Topics (e.g., "fingerprint", "remote caching")
+**Step 1: Parse arguments**
+- Extract `--after DATE` or `--project DIR` flags if present
+- Everything else is the **search phrase** (keep as literal text, don't interpret as project names)
 
-**Filters:**
-- Timeframe: "yesterday", "last week", "after Jan 5" → filter by mtime
-- Project: limit to that project's subdirectory
+**Step 2: Find matching files**
 
-**Output:**
-- Sort by: match count (desc), then recency (desc)
-- **Limit to top 10 results**
-- If no matches: "No sessions found matching '<terms>'. Try broader search terms."
+Search strategy (flexible):
+1. Try **exact phrase** first: `grep -l -i "thread inversion" ...`
+2. If no results, try **all words (AND)**: files containing every word
+3. Rank by match count
 
-Format each result:
+```bash
+# Search ALL projects (don't filter by assumed project names)
+grep -l -i "SEARCH_PHRASE" ~/.dotfiles/.claude/projects/*/*.jsonl 2>/dev/null
+```
+
+**Critical rules:**
+- Do NOT assume words in the search are project names to filter by
+- Only use `--project` flag for explicit project filtering
+
+**Step 3: For each matching file, extract:**
+- Session ID (filename without extension)
+- Project (parent directory name)
+- Date (file mtime)
+- Topic (first non-system user message, truncated to 80 chars)
+- Match count (`grep -c`)
+
+**Step 4: Output**
+- Sort by: match count (desc), then date (desc)
+- Limit to top 10 results
+- Format:
 ```
 Session: <session-id>
 Project: <project-name>
@@ -44,4 +51,14 @@ Matches: <count>
 Resume: claude -r <session-id>
 ```
 
-**Done when:** Results are presented (or "no matches" reported).
+If no matches: "No sessions found matching '<terms>'. Try broader search terms."
+
+## Common Search Patterns
+- jj change IDs: "ttyomtpu"
+- jj bookmarks: "fix-cli-explicit-targets"
+- Issue references: "Issue #62"
+- Topics: "thread inversion", "fingerprint"
+
+## Filters (only when explicitly requested)
+- `--after DATE`: filter by mtime
+- `--project DIR`: limit to specific project directory
