@@ -18,3 +18,4 @@ completions.d/
 !.claude/project-instructions/
 !.claude/settings.json
 
+/ignore

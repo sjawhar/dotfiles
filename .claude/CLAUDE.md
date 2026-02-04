@@ -80,3 +80,10 @@ When resolving conflicts after rebase:
 - When a remote branch is deleted (e.g., after PR merge), the local bookmark tracking it is automatically deleted
 - No need to run `jj bookmark forget` manually for tracked bookmarks
 - Untracked local bookmarks must be deleted manually if desired
+
+## Compact Instructions
+When compacting, preserve:
+- Current task state and file changes
+- Architectural decisions made this session
+- Test results and error patterns encountered
+
