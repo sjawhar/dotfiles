@@ -126,6 +126,7 @@ Ask for:
 - S3 base path (e.g., `s3://bucket/users/sami@metr.org/`)
 - The backup will be stored at `{base}/{machine}/{name}/`
 - Claude Code data will be stored at `{base}/claude-code/{machine}/`
+- OpenCode session data will be stored at `{base}/opencode/{machine}/`
 
 Optional settings (mention defaults):
 - `--name`: Backup name (default: today's date YYYY-MM-DD)
@@ -162,6 +163,7 @@ This single command:
 - Uploads manifest.json to `{base}/{machine}/{name}/`
 - Uploads files to `{base}/{machine}/{name}/files/`
 - Syncs Claude Code data to `{base}/claude-code/{machine}/` (only session data, not git-tracked config or credentials)
+- Syncs OpenCode session data to `{base}/opencode/{machine}/` (session, message, part, project, and todo directories from `~/.local/share/opencode/storage/`)
 
 **9. Summary:**
 
@@ -171,6 +173,7 @@ Print:
 - Number of files uploaded (if any)
 - Number of symlinks captured (if any)
 - Claude Code data synced
+- OpenCode session data synced
 - Any uncommitted changes that were skipped
 
 **Done when:** Backup is uploaded to S3.

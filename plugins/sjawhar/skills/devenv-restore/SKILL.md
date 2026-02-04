@@ -79,6 +79,7 @@ This single command:
 - Downloads files to their original locations
 - Restores symlinks
 - Restores Claude Code session data
+- Restores OpenCode session data (from `{base}/opencode/{machine}/` to `~/.local/share/opencode/storage/`)
 
 **5. Follow agent instructions:**
 
@@ -91,8 +92,9 @@ Report:
 - Workspaces created
 - Files/symlinks restored
 - Claude Code sessions restored
+- OpenCode sessions restored
 - Any errors or warnings
 
 Note any uncommitted changes recorded in the manifest.
 
-**Done when:** All repositories cloned, workspaces created, files restored, and Claude Code data restored.
+**Done when:** All repositories cloned, workspaces created, files restored, Claude Code data restored, and OpenCode session data restored.
