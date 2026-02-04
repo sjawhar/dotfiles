@@ -199,8 +199,23 @@ else
     complete -F _aprof_complete aprof
 fi
 
-# AWS SSO login
-alias alog='aws sso login --use-device-code'
+# Copy text to system clipboard via OSC 52 (works through SSH + tmux)
+osc-copy() {
+    local seq
+    seq=$(printf '\033]52;c;%s\a' "$(printf '%s' "$1" | base64)")
+    [ -n "$TMUX" ] && seq=$(printf '\033Ptmux;\033%s\033\\' "$seq")
+    printf '%s' "$seq" > /dev/tty
+}
+
+# AWS SSO login (auto-copies device code to clipboard via OSC 52)
+alog() {
+    aws sso login --use-device-code 2>&1 | while IFS= read -r line; do
+        printf '%s\n' "$line"
+        if [[ "$line" =~ ([A-Z]{4}-[A-Z]{4}) ]]; then
+            osc-copy "${BASH_REMATCH[1]}"
+        fi
+    done
+}
 
 # ------------------------------------------------------------------------------
 # Oh My OpenCode config switching
