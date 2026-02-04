@@ -1,5 +1,8 @@
 {
-  "cleanupPeriodDays": 99999,
+  "cleanupPeriodDays": 14,
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
   "permissions": {
     "defaultMode": "plan"
   },
@@ -7,9 +10,6 @@
   "statusLine": {
     "type": "command",
     "command": "~/.claude/hooks/statusline.sh"
-  },
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
   "enabledPlugins": {
     "ralph-loop@claude-plugins-official": true,
