@@ -141,6 +141,13 @@ if [ ! -d "${OPENCODE_DIR}/compound-engineering/.git" ]; then
     git clone --depth 1 https://github.com/EveryInc/compound-engineering-plugin "${OPENCODE_DIR}/compound-engineering"
 fi
 
+# Symlink compound-engineering agents into OpenCode
+mkdir -p "${OPENCODE_DIR}/agents"
+find "${OPENCODE_DIR}/compound-engineering/plugins/compound-engineering/agents" \
+    -type f -name '*.md' -exec sh -c '
+    ln -sf "$1" "'"${OPENCODE_DIR}"'/agents/$(basename "$1")"
+' sh {} \;
+
 if [ ! -d "${OPENCODE_DIR}/superpowers/.git" ]; then
     echo "Cloning superpowers plugin..."
     git clone --depth 1 https://github.com/obra/superpowers.git "${OPENCODE_DIR}/superpowers"
@@ -160,7 +167,6 @@ if [ ! -f "${OPENCODE_DIR}/opencode.json" ]; then
     fi
 fi
 
-# Add antigravity-auth plugin if not already registered
 if [ -f "${OPENCODE_DIR}/opencode.json" ]; then
     if ! grep -q 'opencode-antigravity-auth' "${OPENCODE_DIR}/opencode.json"; then
         echo "Adding opencode-antigravity-auth plugin..."
@@ -168,9 +174,27 @@ if [ -f "${OPENCODE_DIR}/opencode.json" ]; then
         jq '.plugin += ["opencode-antigravity-auth@beta"]' "${OPENCODE_DIR}/opencode.json" > "$TMPFILE" \
             && mv "$TMPFILE" "${OPENCODE_DIR}/opencode.json"
     fi
+
+    # Override Anthropic Opus 4.6 context limit to 1M (models.dev reports 200k but API supports 1M with beta header)
+    CURRENT_CONTEXT=$(jq -r '.provider.anthropic.models["claude-opus-4-6"].limit.context // 0' "${OPENCODE_DIR}/opencode.json")
+    if [ "$CURRENT_CONTEXT" != "1000000" ]; then
+        echo "Setting Opus 4.6 context limit to 1M..."
+        TMPFILE=$(mktemp)
+        jq '.provider.anthropic.models["claude-opus-4-6"].limit = {"context": 1000000, "output": 128000}' \
+            "${OPENCODE_DIR}/opencode.json" > "$TMPFILE" \
+            && mv "$TMPFILE" "${OPENCODE_DIR}/opencode.json"
+    fi
+
+    # Disable auto-upgrade (we run a patched binary with the 1M context beta header fix)
+    if [ "$(jq -r '.autoupdate // true' "${OPENCODE_DIR}/opencode.json")" != "false" ]; then
+        echo "Disabling autoupdate..."
+        TMPFILE=$(mktemp)
+        jq '.autoupdate = false' "${OPENCODE_DIR}/opencode.json" > "$TMPFILE" \
+            && mv "$TMPFILE" "${OPENCODE_DIR}/opencode.json"
+    fi
 fi
 
-ln -sf "${DOTFILES_DIR}/oh-my-opencode.json" "${OPENCODE_DIR}/oh-my-opencode.json"
+ln -sf "${DOTFILES_DIR}/oh-my-opencode.minimal.json" "${OPENCODE_DIR}/oh-my-opencode.json"
 
 # ------------------------------------------------------------------------------
 # Completions
