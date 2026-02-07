@@ -1,0 +1,51 @@
+[devpod]
+image = "sjawhar/devpod"
+memory = "64Gi"
+cpu = "24"
+ephemeral_storage = "150Gi"
+
+[devbox]
+ssh_user = "sami"
+cpu = 24
+memory = 64
+disk_gb = 250
+user_data = """#!/bin/bash
+set -eux
+
+# Install Tailscale (install early, connect later so URL stays in console buffer)
+curl -fsSL https://tailscale.com/install.sh | sh
+systemctl enable --now tailscaled
+
+# Install build tools (needed by cargo/mise for compiling from source)
+apt-get update && apt-get install -y build-essential
+
+# Download and install nvim, k9s, helm, kubectl
+ARCH=$(dpkg --print-architecture)
+UNAME_ARCH=$(uname -m)
+NVIM_ARCH=$([ "$UNAME_ARCH" = "aarch64" ] && echo "arm64" || echo "x86_64")
+
+# Install nvim 0.11.5
+curl -fsSL "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-${NVIM_ARCH}.tar.gz" \
+  | tar -xz -C /usr/local --strip-components=1
+
+# Install k9s 0.50.18
+curl -fsSL "https://github.com/derailed/k9s/releases/download/v0.50.18/k9s_Linux_${ARCH}.tar.gz" \
+  | tar -xz -C /usr/local/bin k9s
+
+# Install helm 4.0.5
+curl -fsSL "https://get.helm.sh/helm-v4.0.5-linux-${ARCH}.tar.gz" \
+  | tar -xz -C /usr/local/bin --strip-components=1 linux-${ARCH}/helm
+
+# Install kubectl 1.34.3
+curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.34.3/bin/linux/${ARCH}/kubectl"
+chmod +x /usr/local/bin/kubectl
+
+# Clone and install dotfiles
+DOTFILES_REPO="https://github.com/sjawhar/dotfiles"
+DOTFILES_DIR="/home/sami/.dotfiles"
+runuser -u sami -- git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
+runuser -u sami -- bash "$DOTFILES_DIR/install.sh"
+
+# Connect Tailscale last so login URL is visible in console output
+tailscale up --ssh --accept-routes --accept-dns 2>&1 | tee /dev/console &
+"""
