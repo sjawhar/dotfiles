@@ -1,8 +1,8 @@
 ---
-description: "Analyze Claude Code sessions for patterns and improvements"
+description: "Analyze Claude Code and OpenCode sessions for patterns and improvements"
 ---
 
-Analyze my Claude Code session transcripts to identify patterns in corrections and feedback, then generate actionable improvements.
+Analyze session transcripts from both Claude Code and OpenCode to identify patterns in corrections and feedback, then generate actionable improvements.
 
 ## Arguments
 
@@ -17,10 +17,12 @@ Example: `/reflect 14` to analyze the past 2 weeks.
 - Extract previous improvements and expected results for comparison
 - If no previous report exists, note this is the first run
 
-**1.2 Run indexing**:
+**1.2 Run indexing** (indexes both Claude Code and OpenCode sessions):
 ```bash
 python3 ~/.dotfiles/.claude/skills/reflect/index-sessions.py --days {N}
 ```
+
+Use `--source claude` or `--source opencode` to limit to one source. Default indexes both.
 
 **1.3 Query flagged turns** from SQLite database at `~/.dotfiles/.claude/sessions.db`:
 
@@ -31,8 +33,8 @@ conn = sqlite3.connect(str(Path.home() / '.dotfiles' / '.claude' / 'sessions.db'
 # Get all flagged turns from the past N days
 query = '''
 SELECT
-    s.project, s.id as session_id, s.source_path, s.initial_prompt_preview,
-    t.turn_number, t.type, t.line_start, t.line_end,
+    s.source, s.project, s.id as session_id, s.source_path, s.initial_prompt_preview,
+    t.turn_number, t.type, t.line_start, t.line_end, t.source_path as turn_source_path,
     f.flag_type
 FROM flags f
 JOIN turns t ON f.turn_id = t.id
@@ -44,9 +46,12 @@ ORDER BY s.timestamp DESC
 
 ## Phase 2: Content Extraction
 
-**2.1 Fetch flagged content** from source files using line numbers:
+**2.1 Fetch flagged content** from source files:
 
-For each flagged turn, read the content from the source JSONL file using the `line_start` and `line_end` values. The indexing script provides a `fetch_turn_content()` function that handles this.
+- **Claude Code turns** (`s.source = 'claude-code'`): Use `line_start`/`line_end` with `fetch_turn_content()` to read from the source JSONL file.
+- **OpenCode turns** (`s.source = 'opencode'`): Use `turn_source_path` (the message JSON file path) with `fetch_opencode_turn_content()` — reads the message file and assembles text from its parts.
+
+Both functions are provided by the indexing script.
 
 **2.2 Apply secret redaction** before agent access:
 - API keys (sk-*, ANTHROPIC_API_KEY, etc.)
@@ -75,7 +80,7 @@ Launch 5 specialized agents **in parallel** using the Task tool:
 
 **Agent prompt template**:
 ```
-You are analyzing Claude Code session transcripts to find {AGENT_FOCUS}.
+You are analyzing Claude Code and OpenCode session transcripts to find {AGENT_FOCUS}.
 
 Context: {PREVIOUS_REPORT_SUMMARY}
 
