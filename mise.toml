@@ -3,7 +3,7 @@
 # All versions pinned for reproducibility
 
 [tools]
-"cargo:https://github.com/jj-vcs/jj" = { version = "branch:workspace-forget-cleanup", crate = "jj-cli", bin = "jj" }
+"cargo:https://github.com/jj-vcs/jj" = { version = "branch:workspace-cli", crate = "jj-cli", bin = "jj" }
 "npm:@openai/codex" = "0.92.0"  # OpenAI coding agent CLI
 bat = "0.26.1"      # Cat with syntax highlighting
 bun = "1.3.8"       # JavaScript runtime & package manager

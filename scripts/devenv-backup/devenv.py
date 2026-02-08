@@ -1918,8 +1918,18 @@ def _should_sync_claude_path(rel_path: Path) -> bool:
 
     Returns True if the path matches any entry in CLAUDE_SYNC_PATHS.
     Matches exact files (e.g., ".claude.json") or paths under directories (e.g., "projects/...").
+    Rejects nested duplicates (e.g., "projects/projects/...").
     """
-    path_str = str(rel_path)
+    path_str = PurePosixPath(rel_path).as_posix()
+
+    # Reject nested duplicates that can accumulate from bad backup/restore cycles
+    # (e.g., projects/projects/..., projects/file-history/..., projects/todos/...)
+    if path_str.startswith("projects/"):
+        subpath = path_str[len("projects/") :]
+        for sync_path in CLAUDE_SYNC_PATHS:
+            if subpath == sync_path or subpath.startswith(sync_path + "/"):
+                return False
+
     for sync_path in CLAUDE_SYNC_PATHS:
         # Exact match (e.g., ".claude.json" or "plugins/installed_plugins.json")
         if path_str == sync_path:
@@ -2030,13 +2040,16 @@ async def restore_claude_dir_from_s3(
                 skipped_by_date += 1
                 continue
         s3_key = obj.get("Key")
-        if not s3_key:
+        if not s3_key or s3_key.endswith("/"):
             continue
         rel_path = s3_key[len(base_key) :]
         # Validate the path is safe
         if rel_path.startswith("/") or ".." in rel_path:
             print(f"Skipping unsafe path: {rel_path}", file=sys.stderr)
             skipped_by_date += 1
+            continue
+        # Only restore files matching CLAUDE_SYNC_PATHS (same filter as backup)
+        if not _should_sync_claude_path(Path(rel_path)):
             continue
         local_file = local_claude_dir / rel_path
 
@@ -2286,43 +2299,6 @@ async def run_backup(
             file=sys.stderr,
         )
 
-    session = aioboto3.Session()
-    async with session.client("s3") as s3:
-        manifest_json = manifest.model_dump_json(indent=2, exclude_none=True)
-        success = await s3_upload_bytes(
-            s3, bucket, manifest_key, manifest_json.encode()
-        )
-        if not success:
-            errors.append("Failed to upload manifest after retries")
-            raise DevEnvError("Failed to upload manifest after retries")
-        print("  Uploaded manifest.json", file=sys.stderr)
-
-    print(f"\nBackup complete: s3://{bucket}/{backup_key}", file=sys.stderr)
-    return errors
-
-    print(f"Backing up to s3://{bucket}/{backup_key}", file=sys.stderr)
-
-    # Upload order: files first, manifest last (atomic commit point)
-    # If files fail, we don't upload manifest, so restore won't see partial backup
-
-    # 1. Upload files if present
-    if manifest.files:
-        successful, failed = await sync_files_to_s3(
-            manifest.files, backup_destination, root_dir, errors
-        )
-        print(f"  Uploaded {successful} files ({failed} failed)", file=sys.stderr)
-
-    # 2. Sync Claude directory
-    if claude_dir_source.exists():
-        uploaded, failed = await sync_claude_dir_to_s3(
-            claude_dir_source, claude_destination, errors_list=errors
-        )
-        print(
-            f"  Synced {uploaded} Claude Code files to {claude_destination} ({failed} failed)",
-            file=sys.stderr,
-        )
-
-    # 3. Upload manifest last (commit point) with retry
     session = aioboto3.Session()
     async with session.client("s3") as s3:
         manifest_json = manifest.model_dump_json(indent=2, exclude_none=True)
