@@ -1,0 +1,57 @@
+#!/bin/bash
+# opencode crash monitor shim
+# Wraps opencode to capture stderr logs and exit information.
+# Logs to /tmp/opencode-crash-monitor/<PID>.log
+#
+# Remove this file to disable monitoring.
+
+LOGDIR="/tmp/opencode-crash-monitor"
+mkdir -p "$LOGDIR"
+
+# Find the real opencode binary (skip this shim directory)
+real_opencode() {
+    local IFS=':'
+    local dotfiles_shims="${DOTFILES_DIR:-$HOME/.dotfiles}/shims"
+    for dir in $PATH; do
+        [[ "$dir" == "$dotfiles_shims" ]] && continue
+        [[ -x "$dir/opencode" ]] && { echo "$dir/opencode"; return; }
+    done
+    echo "opencode" # fallback
+}
+
+OPENCODE="$(real_opencode)"
+LOGFILE="$LOGDIR/$$.log"
+
+# Record startup context
+{
+    echo "=== OPENCODE SESSION ==="
+    echo "PID: $$"
+    echo "PPID: $PPID"
+    echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Args: $*"
+    echo "TTY: $(tty 2>/dev/null || echo none)"
+    echo "PWD: $PWD"
+    echo "Binary: $OPENCODE"
+    echo "=== STDERR LOG ==="
+} > "$LOGFILE"
+
+# Run opencode with --print-logs, capturing stderr to the log file.
+# Use a subshell + wait so we can capture the exact exit status even if signaled.
+"$OPENCODE" --print-logs --log-level DEBUG "$@" 2>>"$LOGFILE"
+EXIT_CODE=$?
+
+# Record exit info
+{
+    echo ""
+    echo "=== EXIT ==="
+    echo "Exited: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Exit code: $EXIT_CODE"
+    if (( EXIT_CODE > 128 )); then
+        echo "Signal: $((EXIT_CODE - 128)) ($(kill -l $((EXIT_CODE - 128)) 2>/dev/null || echo unknown))"
+    fi
+} >> "$LOGFILE"
+
+# Clean up logs from sessions that exited normally and ran for a while
+# (keep all logs for now — only clean up on explicit request)
+
+exit $EXIT_CODE
