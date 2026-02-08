@@ -63,10 +63,33 @@ ln -sf "${DOTFILES_DIR}/.gitconfig" ~/.gitconfig
 ln -sf "${DOTFILES_DIR}/.tmux.conf" ~/.tmux.conf
 ln -sf "${DOTFILES_DIR}/nvim/init.lua" ~/.config/nvim/init.lua
 
+# Clone vendor repositories (agent-skills, etc.)
+if [ ! -d "${DOTFILES_DIR}/vendor/agent-skills/.git" ]; then
+    echo "Cloning agent-skills vendor repo..."
+    mkdir -p "${DOTFILES_DIR}/vendor"
+    git clone --depth 1 https://github.com/intellectronica/agent-skills.git "${DOTFILES_DIR}/vendor/agent-skills"
+fi
+
 # Claude Code plugins (skills & agents from sjawhar plugin)
-[ -d "${DOTFILES_DIR}/.claude/skills" ] && ! [ -L "${DOTFILES_DIR}/.claude/skills" ] && rm -rf "${DOTFILES_DIR}/.claude/skills"
+# NEW: Real directory with individual symlinks from all sources
+[ -L "${DOTFILES_DIR}/.claude/skills" ] && rm "${DOTFILES_DIR}/.claude/skills"
+mkdir -p "${DOTFILES_DIR}/.claude/skills"
+
+# Symlink each sjawhar skill individually (flat, top-level)
+if [ -d "${DOTFILES_DIR}/plugins/sjawhar/skills" ]; then
+    for skill_dir in "${DOTFILES_DIR}/plugins/sjawhar/skills"/*/; do
+        [ -d "$skill_dir" ] || continue
+        skill_name=$(basename "$skill_dir")
+        ln -sf "../../plugins/sjawhar/skills/${skill_name}" "${DOTFILES_DIR}/.claude/skills/${skill_name}"
+    done
+fi
+
+# Symlink vendor skills (added by later tasks)
+if [ -d "${DOTFILES_DIR}/vendor/agent-skills/skills/notion-api" ]; then
+    ln -sf "../../vendor/agent-skills/skills/notion-api" "${DOTFILES_DIR}/.claude/skills/notion-api"
+fi
+
 [ -d "${DOTFILES_DIR}/.claude/agents" ] && ! [ -L "${DOTFILES_DIR}/.claude/agents" ] && rm -rf "${DOTFILES_DIR}/.claude/agents"
-ln -sf "../plugins/sjawhar/skills" "${DOTFILES_DIR}/.claude/skills"
 ln -sf "../plugins/sjawhar/agents" "${DOTFILES_DIR}/.claude/agents"
 
 # Install nvim plugins
@@ -190,6 +213,15 @@ if [ -f "${OPENCODE_DIR}/opencode.json" ]; then
         echo "Disabling autoupdate..."
         TMPFILE=$(mktemp)
         jq '.autoupdate = false' "${OPENCODE_DIR}/opencode.json" > "$TMPFILE" \
+            && mv "$TMPFILE" "${OPENCODE_DIR}/opencode.json"
+    fi
+
+    # Configure Streamlinear MCP
+    if ! jq -e '.mcp.linear' "${OPENCODE_DIR}/opencode.json" > /dev/null 2>&1; then
+        echo "Adding Streamlinear MCP config..."
+        TMPFILE=$(mktemp)
+        jq '.mcp.linear = {"type": "local", "command": ["npx", "-y", "github:obra/streamlinear"], "environment": {"LINEAR_API_TOKEN": "$LINEAR_API_TOKEN"}, "enabled": true}' \
+            "${OPENCODE_DIR}/opencode.json" > "$TMPFILE" \
             && mv "$TMPFILE" "${OPENCODE_DIR}/opencode.json"
     fi
 fi
