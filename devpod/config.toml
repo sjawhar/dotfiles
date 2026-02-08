@@ -46,6 +46,12 @@ DOTFILES_DIR="/home/sami/.dotfiles"
 runuser -u sami -- git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
 runuser -u sami -- bash "$DOTFILES_DIR/install.sh"
 
+# Add policy route so VPC-sourced replies use ens5 instead of tailscale0.
+# Without this, traffic arriving via the subnet router gets replies sent back
+# through the Tailscale tunnel (asymmetric routing), breaking TCP connections.
+DEVICE_IP=$(ip -4 addr show dev ens5 | grep -oP 'inet \K[0-9.]+')
+ip rule add from "$DEVICE_IP" table main priority 5200
+
 # Connect Tailscale last so login URL is visible in console output
 tailscale up --ssh --accept-routes --accept-dns 2>&1 | tee /dev/console &
 """

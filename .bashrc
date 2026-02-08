@@ -335,7 +335,7 @@ jj-refresh-workspaces() {
 
     # 1. Get root workspace path
     root_path=$(jj workspace root 2>/dev/null) || return 1
-    [ -f "$root_path/.jj/repo" ] && root_path="$(cat "$root_path/.jj/repo")" && root_path="${root_path%/.jj/repo}"
+    [ -f "$root_path/.jj/repo" ] && root_path="$(cd "$root_path/.jj" && realpath "$(cat repo)")" && root_path="${root_path%/.jj/repo}"
 
     # 2. Refresh root workspace
     echo "Refreshing workspace $root_path..."
