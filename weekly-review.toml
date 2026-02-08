@@ -1,0 +1,52 @@
+# Shared ontology for TimeTracker skills
+# Defines the user's vocabulary of projects and activities.
+# Skills use this to classify streams, generate reports, and conduct reviews.
+#
+# Consumers: classify-streams, weekly-review, daily-standup (and future skills)
+# Purpose: Provides a single source of truth for project and activity taxonomy
+# Usage: Skills read this file to understand valid project and activity names
+
+[projects]
+# Project names that streams can be tagged with.
+# These map to git repositories, directories, or logical projects.
+# Add your own projects as needed.
+names = [
+  "time-tracker",
+  "pivot",
+  "legion",
+  "dotfiles",
+  "3pra",
+  "capabilities",
+  "data_pipeline",
+  "hiring",
+  "human_uplift",
+  "infra",
+  "inspect_action",
+  "managing",
+  "middleman",
+  "monitorability",
+  "org",
+  "tasks_agents",
+  "vivaria",
+]
+
+[activities]
+# Activity types describing the nature of work.
+# Streams can be tagged with one or more activity types.
+# Add your own activities as needed.
+names = [
+  "admin",
+  "code_review",
+  "data",
+  "design",
+  "development",
+  "events",
+  "meetings",
+  "messages",
+  "ops",
+  "planning",
+  "reading",
+  "research",
+  "training",
+  "writing",
+]
