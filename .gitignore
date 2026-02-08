@@ -8,10 +8,12 @@ completions.d/
 .node/
 .claudeforge/
 /ignore/
+vendor/
 
 # Claude Code - ignore all machine-specific state, whitelist config
 .claude/*
 !.claude/CLAUDE.md
+!.claude/AGENTS.md
 !.claude/agents/
 !.claude/commands/
 !.claude/skills/

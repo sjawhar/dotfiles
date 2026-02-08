@@ -75,6 +75,16 @@ When resolving conflicts after rebase:
 2. **Never lose functionality** — review what changed in the commits being merged
 3. **Don't delete local changes** without explicit permission
 
+### Pushing Changes
+
+**Before pushing, ALWAYS run `jj bookmark list` to see what bookmarks actually exist.**
+
+- `jj git push` — pushes all tracked bookmarks that have changes
+- `jj git push --bookmark <name>` — pushes an **existing** bookmark (fails if it doesn't exist)
+- `jj git push --named <name>=@` — **creates** a new remote branch from the current change
+
+**Common mistake**: Seeing a name in `jj log` output and assuming it's a bookmark. Labels ending with `@` (e.g. `default@`, `my-workspace@`) are **workspace markers**, NOT bookmarks. They indicate which change a workspace's working copy points to. Only names without `@` that appear in the bookmark position are actual bookmarks (like `main`). **Always verify with `jj bookmark list` before assuming a bookmark exists.**
+
 ### Bookmarks and Remote Branches
 
 - When a remote branch is deleted (e.g., after PR merge), the local bookmark tracking it is automatically deleted
