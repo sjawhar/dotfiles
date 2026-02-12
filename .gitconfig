@@ -17,3 +17,6 @@
 [credential "https://gist.github.com"]
 	helper =
 	helper = !~/.dotfiles/scripts/git-credential-gh
+[user]
+	email = sjawhar@github.com
+	name = sjawhar
