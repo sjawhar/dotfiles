@@ -18,6 +18,18 @@ ensure_clone() {
     git clone --depth 1 "$url" "$dir"
 }
 
+ensure_vendor() {
+    local url="$1" name="$2"
+    local dir="${DOTFILES_DIR}/vendor/${name}"
+    if [ -e "${dir}/.git" ]; then
+        [ -e "${dir}/.jj" ] || ( cd "$dir" && jj git init --colocate )
+        return 0
+    fi
+    mkdir -p "$(dirname "$dir")"
+    git clone --depth 1 "$url" "$dir"
+    ( cd "$dir" && jj git init --colocate )
+}
+
 ensure_command() {
     local name="$1" install_cmd="$2"
     command -v "$name" &>/dev/null && return 0
