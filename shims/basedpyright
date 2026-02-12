@@ -1,7 +1,20 @@
 #!/bin/bash
 # Wrapper: use venv basedpyright if available, else fall back to mise
-if [[ -x .venv/bin/basedpyright ]]; then
-    exec .venv/bin/basedpyright "$@"
-else
-    exec mise exec basedpyright -- basedpyright "$@"
+# Searches: $VIRTUAL_ENV > walk up from cwd to find .venv > mise
+
+# Check $VIRTUAL_ENV first (most explicit signal)
+if [[ -n "$VIRTUAL_ENV" && -x "$VIRTUAL_ENV/bin/basedpyright" ]]; then
+    exec "$VIRTUAL_ENV/bin/basedpyright" "$@"
 fi
+
+# Walk up from cwd to find nearest .venv with the binary
+dir="$PWD"
+while [[ "$dir" != "/" ]]; do
+    if [[ -x "$dir/.venv/bin/basedpyright" ]]; then
+        exec "$dir/.venv/bin/basedpyright" "$@"
+    fi
+    dir="$(dirname "$dir")"
+done
+
+# Fall back to mise
+exec mise exec basedpyright -- basedpyright "$@"
