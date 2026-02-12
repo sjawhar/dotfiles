@@ -4,7 +4,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ensure_command claude "curl -fsSL https://claude.ai/install.sh | bash"
 
-ensure_clone https://github.com/intellectronica/agent-skills.git "${DOTFILES_DIR}/vendor/agent-skills"
+ensure_vendor https://github.com/intellectronica/agent-skills.git agent-skills
 
 [ -L "${DOTFILES_DIR}/.claude/skills" ] && rm "${DOTFILES_DIR}/.claude/skills"
 mkdir -p "${DOTFILES_DIR}/.claude/skills"

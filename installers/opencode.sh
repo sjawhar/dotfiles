@@ -5,18 +5,41 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 ensure_command opencode "curl -fsSL https://opencode.ai/install | bash"
 
 OPENCODE_DIR="${HOME}/.config/opencode"
+VENDOR_DIR="${DOTFILES_DIR}/vendor"
 OC_JSON="${OPENCODE_DIR}/opencode.json"
 mkdir -p "$OPENCODE_DIR"
 
-ensure_clone https://github.com/EveryInc/compound-engineering-plugin "${OPENCODE_DIR}/compound-engineering"
+ensure_vendor https://github.com/obra/superpowers.git superpowers
+ensure_vendor https://github.com/EveryInc/compound-engineering-plugin compound-engineering
+ensure_vendor https://github.com/obra/streamlinear.git streamlinear
 
-AGENTS_SRC="${OPENCODE_DIR}/compound-engineering/plugins/compound-engineering/agents"
-mkdir -p "${OPENCODE_DIR}/agents"
-if [ -d "$AGENTS_SRC" ]; then
-    find "$AGENTS_SRC" -type f -name '*.md' -exec ln -sfn {} "${OPENCODE_DIR}/agents/" \;
+mkdir -p "${OPENCODE_DIR}/skills"
+ensure_link "${VENDOR_DIR}/superpowers/skills" "${OPENCODE_DIR}/skills/superpowers"
+ensure_link "${DOTFILES_DIR}/plugins/sjawhar/skills" "${OPENCODE_DIR}/skills/sjawhar"
+
+mkdir -p "${OPENCODE_DIR}/plugins"
+ensure_link "${VENDOR_DIR}/superpowers/.opencode/plugins/superpowers.js" "${OPENCODE_DIR}/plugins/superpowers.js"
+
+CE_DIR="${VENDOR_DIR}/compound-engineering"
+CE_PLUGIN="${CE_DIR}/plugins/compound-engineering"
+
+# CE commands: symlink under namespaced directory
+mkdir -p "${OPENCODE_DIR}/command"
+ensure_link "${CE_PLUGIN}/commands" "${OPENCODE_DIR}/command/compound-engineering"
+
+# CE skills: install only model-invocable skills (skip disable-model-invocation: true)
+mkdir -p "${OPENCODE_DIR}/skills/compound-engineering"
+if [ -d "${CE_PLUGIN}/skills" ]; then
+    for skill_dir in "${CE_PLUGIN}/skills"/*/; do
+        [ -d "$skill_dir" ] || continue
+        skill_md="${skill_dir}SKILL.md"
+        [ -f "$skill_md" ] || continue
+        if grep -q "disable-model-invocation: true" "$skill_md" 2>/dev/null; then
+            continue
+        fi
+        ensure_link "$skill_dir" "${OPENCODE_DIR}/skills/compound-engineering/$(basename "$skill_dir")"
+    done
 fi
-
-ensure_clone https://github.com/obra/superpowers.git "${OPENCODE_DIR}/superpowers"
 
 ensure_command oh-my-opencode "npm install -g oh-my-opencode"
 
@@ -44,17 +67,6 @@ if [ -f "$OC_JSON" ] && command -v jq &>/dev/null; then
         '.autoupdate == false' \
         '.autoupdate = false' \
         "Disabling autoupdate"
-
-    ensure_json "$OC_JSON" \
-        '.mcp.linear' \
-        '.mcp.linear = {"type": "local", "command": ["npx", "-y", "github:obra/streamlinear"], "environment": {"LINEAR_API_TOKEN": "$LINEAR_API_TOKEN"}, "enabled": true}' \
-        "Adding Streamlinear MCP config"
 fi
 
 ensure_link "${DOTFILES_DIR}/oh-my-opencode.minimal.json" "${OPENCODE_DIR}/oh-my-opencode.json"
-
-mkdir -p "${OPENCODE_DIR}/skills"
-for skill_dir in "${DOTFILES_DIR}"/opencode-skills/*/; do
-    [ -d "$skill_dir" ] || continue
-    ensure_link "$skill_dir" "${OPENCODE_DIR}/skills/$(basename "$skill_dir")"
-done

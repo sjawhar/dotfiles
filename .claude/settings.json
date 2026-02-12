@@ -18,5 +18,6 @@
     "superpowers@claude-plugins-official": true,
     "compound-engineering@every-marketplace": true,
     "notion-api@intellectronica-skills": true
-  }
+  },
+  "skipDangerousModePermissionPrompt": true
 }

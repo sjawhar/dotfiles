@@ -2,11 +2,11 @@
   "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
   "claude_code": {
     "mcp": true,
-    "commands": true,
-    "skills": true,
-    "agents": true,
-    "hooks": true,
-    "plugins": true
+    "commands": false,
+    "skills": false,
+    "agents": false,
+    "hooks": false,
+    "plugins": false
   },
   "sisyphus_agent": {
     "default_builder_enabled": true,
@@ -88,7 +88,8 @@
     "preemptive-compaction",
     "rules-injector",
     "ralph-loop",
-    "tasks-todowrite-disabler"
+    "tasks-todowrite-disabler",
+    "auto-slash-command"
   ],
   "disabled_commands": [],
   "disabled_mcps": [],
