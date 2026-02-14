@@ -352,6 +352,28 @@ jj-refresh-workspaces() {
     done
 }
 
+# Rebase all jj workspaces onto main
+jj-rebase-workspaces() {
+    local root_path ws path base_branch
+
+    base_branch="${1:-main}"
+
+    # 1. Get root workspace path
+    root_path=$(jj workspace root 2>/dev/null) || return 1
+    [ -f "$root_path/.jj/repo" ] && root_path="$(cd "$root_path/.jj" && realpath "$(cat repo)")" && root_path="${root_path%/.jj/repo}"
+
+    # 2. Fetch latest base branch once
+    jj -R "$root_path" git fetch --remote origin --branch "$base_branch" || return 1
+
+    # 3. Rebase each workspace by running within its root
+    jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null | while IFS= read -r ws; do
+        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || continue
+        echo "Rebasing workspace $path onto $base_branch..."
+        jj -R "$path" workspace update-stale &>/dev/null || true
+        (cd "$path" && jj rebase -d "$base_branch")
+    done
+}
+
 # ------------------------------------------------------------------------------
 # Kubernetes pod monitoring
 # ------------------------------------------------------------------------------
