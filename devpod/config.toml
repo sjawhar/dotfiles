@@ -40,6 +40,13 @@ curl -fsSL "https://get.helm.sh/helm-v4.0.5-linux-${ARCH}.tar.gz" \
 curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.34.3/bin/linux/${ARCH}/kubectl"
 chmod +x /usr/local/bin/kubectl
 
+# Install tmux 3.6a from source (need 3.5+ for allow-passthrough filter)
+apt-get install -y --no-install-recommends libevent-dev libncurses-dev bison
+curl -fsSL "https://github.com/tmux/tmux/releases/download/3.6a/tmux-3.6a.tar.gz" \
+  | tar -xz -C /tmp
+cd /tmp/tmux-3.6a && ./configure && make -j"$(nproc)" && make install
+rm -rf /tmp/tmux-3.6a
+
 # Clone and install dotfiles
 DOTFILES_REPO="https://github.com/sjawhar/dotfiles"
 DOTFILES_DIR="/home/sami/.dotfiles"

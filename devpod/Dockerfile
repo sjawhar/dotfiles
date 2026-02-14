@@ -4,6 +4,7 @@ ARG HELM_VERSION=4.0.5
 ARG K9S_VERSION=0.50.18
 ARG KUBECTL_VERSION=1.34.3
 ARG NEOVIM_VERSION=0.11.5
+ARG TMUX_VERSION=3.6a
 ARG PYTHON_VERSION=3.13.11
 ARG UV_VERSION=0.9.26
 
@@ -48,6 +49,7 @@ ARG BUILDX_VERSION
 ARG HELM_VERSION
 ARG K9S_VERSION
 ARG NEOVIM_VERSION
+ARG TMUX_VERSION
 
 RUN NVIM_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x86_64") \
  && mkdir -p /build/nvim \
@@ -59,6 +61,19 @@ RUN curl -fsSL "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION
 
 RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz" \
     | tar -xz -C /usr/local/bin --strip-components=1 linux-${TARGETARCH}/helm
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        libevent-dev \
+        libncurses-dev \
+        bison \
+ && curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz" \
+    | tar -xz -C /tmp \
+ && cd /tmp/tmux-${TMUX_VERSION} \
+ && ./configure && make -j"$(nproc)" \
+ && cp tmux /usr/local/bin/tmux \
+ && rm -rf /tmp/tmux-${TMUX_VERSION}
 
 RUN mkdir -p /usr/local/libexec/docker/cli-plugins \
  && curl -fsSL "https://github.com/docker/buildx-desktop/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${TARGETARCH}" \
@@ -102,7 +117,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         netcat-openbsd \
         openssh-server \
         ripgrep \
-        tmux \
+        libevent-core-2.1-7t64 \
         unzip \
         xz-utils \
  && ln -sf /usr/bin/fdfind /usr/local/bin/fd
@@ -123,6 +138,7 @@ RUN mkdir -p /var/run/sshd \
  && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
 
 # Copy binaries from builders and source images
+COPY --link --from=builder-downloads /usr/local/bin/tmux /usr/local/bin/tmux
 COPY --link --from=builder-downloads /build/nvim/ /usr/local/
 COPY --link --from=builder-downloads /usr/local/bin/helm /usr/local/bin/helm
 COPY --link --from=builder-downloads /usr/local/bin/k9s /usr/local/bin/k9s
