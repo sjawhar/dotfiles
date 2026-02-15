@@ -82,6 +82,7 @@
       "variant": "high"
     }
   },
+  "auto_update": false,
   "disabled_hooks": [
     "directory-readme-injector",
     "think-mode",
@@ -89,7 +90,8 @@
     "rules-injector",
     "ralph-loop",
     "tasks-todowrite-disabler",
-    "auto-slash-command"
+    "auto-slash-command",
+    "auto-update-checker"
   ],
   "disabled_commands": [],
   "disabled_mcps": [],

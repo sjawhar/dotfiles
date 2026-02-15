@@ -22,12 +22,16 @@ ensure_vendor() {
     local url="$1" name="$2"
     local dir="${DOTFILES_DIR}/vendor/${name}"
     if [ -e "${dir}/.git" ]; then
-        [ -e "${dir}/.jj" ] || ( cd "$dir" && jj git init --colocate )
+        if [ ! -e "${dir}/.jj" ] && command -v jj &>/dev/null; then
+            ( cd "$dir" && jj git init --colocate )
+        fi
         return 0
     fi
     mkdir -p "$(dirname "$dir")"
     git clone --depth 1 "$url" "$dir"
-    ( cd "$dir" && jj git init --colocate )
+    if command -v jj &>/dev/null; then
+        ( cd "$dir" && jj git init --colocate )
+    fi
 }
 
 ensure_command() {
