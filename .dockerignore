@@ -2,6 +2,8 @@
 *
 
 !install.sh
+!installers/
+!AGENTS.md
 
 !devpod/entrypoint.sh
 !devpod/proxy.sh
@@ -12,16 +14,18 @@
 !.tmux.conf
 !mise.toml
 !nvim/init.lua
+!oh-my-opencode.*.json
 !starship.toml
 !scripts/
 !shims/
+
+!plugins/
 
 !.claude/agents/
 !.claude/CLAUDE.md
 !.claude/commands/
 !.claude/mcp.json
 !.claude/settings.json
-!code-review-jj/
 
 # Re-exclude build artifacts from un-ignored directories
 **/.venv/
