@@ -353,6 +353,31 @@ jj-refresh-workspaces() {
     done
 }
 
+# Sync a bookmark from upstream to origin and push tags
+jj-sync-upstream() {
+    local bookmark="$1"
+
+    # Verify upstream remote exists
+    jj git remote list 2>/dev/null | grep -q '^upstream ' || {
+        echo "Error: no 'upstream' remote configured" >&2
+        return 1
+    }
+
+    # Auto-detect bookmark: explicit arg > dev@upstream > main
+    if [ -z "$bookmark" ]; then
+        if jj log -r 'dev@upstream' --no-graph --limit 1 &>/dev/null; then
+            bookmark="dev"
+        else
+            bookmark="main"
+        fi
+    fi
+
+    jj git fetch --all-remotes || return 1
+    jj bookmark set "$bookmark" --to "${bookmark}@upstream" || return 1
+    jj git push --bookmark "$bookmark" || return 1
+    git push --tags
+}
+
 # Rebase all jj workspaces onto main
 jj-rebase-workspaces() {
     local root_path ws path base_branch

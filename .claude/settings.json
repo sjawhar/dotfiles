@@ -1,12 +1,24 @@
 {
   "cleanupPeriodDays": 14,
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|Bash|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jj root > /dev/null 2>&1 && jj st > /dev/null 2>&1; exit 0"
+          }
+        ]
+      }
+    ]
+  },
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
   "permissions": {
     "defaultMode": "plan"
   },
-  "model": "opus[1m]",
   "statusLine": {
     "type": "command",
     "command": "~/.claude/hooks/statusline.sh"
