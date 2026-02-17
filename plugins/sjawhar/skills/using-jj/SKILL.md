@@ -1,11 +1,11 @@
 ---
 name: using-jj
-description: MUST USE for ANY version control operations. This user uses jj (Jujutsu) instead of git. Triggers on commit, push, pull, branch, rebase, merge, diff, log, status, conflict, bookmark, or workspace operations.
+description: Use when performing ANY version control operation — including when tempted to use git commands (commit, push, pull, branch, checkout, rebase, merge, diff, log, status, stash, reset, cherry-pick). This user uses jj instead of git. Also triggers on bookmark, workspace, or conflict resolution.
 ---
 
 # Using jj (Jujutsu)
 
-This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Never use git commands** unless explicitly told to.
+This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Never use git commands** unless explicitly told to. If you're thinking `git commit`, `git push`, `git checkout`, `git rebase`, etc. — STOP and use the jj equivalent from this skill.
 
 ## Core Mental Model
 
@@ -14,6 +14,23 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Ne
 - **`@` = working copy change.** Not like git HEAD — it represents what's on disk right now, including uncommitted work. `@-` is its parent.
 - **Rebases always succeed.** Conflicts are recorded in the commit, not blocking. Descendants auto-rebase when parents change.
 - **Commands operate on the repo, not the working copy** — rebase doesn't touch your files or move `@` unless asked.
+
+## CRITICAL: No Undo Loops
+
+**If a jj command doesn't do what you expected, STOP. Do not chain `jj undo` → retry → `jj undo` → retry.**
+
+Every jj operation (including undo) writes to a shared operation log. Undo loops create operation churn that causes divergent commits across all workspaces. One agent running 10 undo/redo cycles in 5 minutes can corrupt the history for every other workspace.
+
+**When something goes wrong:**
+1. Run `jj log -r @` to understand your current state
+2. If you understand the state, make ONE deliberate fix
+3. If you don't understand the state, **ask the user** — don't guess
+
+**Red flags — STOP and ask the user:**
+- You're about to run `jj undo` for the second time
+- You see `/0`, `/4` suffixes on change IDs (divergent commits)
+- `jj log` shows something unexpected and you're not sure why
+- You're tempted to `jj op restore` to an earlier state
 
 ## Squash Workflow (How This User Works)
 
@@ -126,13 +143,22 @@ In non-default workspaces:
 - If the workspace is stale, run `jj workspace update-stale`
 - After updating a stale workspace, check `jj log -r @` to confirm your working copy is where you expect
 
-### Parallel Workspaces
+### Parallel Workspaces and Shared Operation Log
 
-Multiple jj workspaces may be active simultaneously (potentially with other Claude sessions).
+Multiple jj workspaces share **one operation log and one commit store**. Every jj command you run — including `jj st`, `jj undo`, `jj rebase` — writes to that shared log. Other Claude sessions in other workspaces see your operations and vice versa.
 
-- **Main branch moves frequently** — rebase often with `jj git fetch && jj rebase -d main`
-- **Expect merge conflicts** — resolve without losing others' work
-- **Verify your workspace** — confirm you're operating on the right directory
+**Consequences:**
+- Concurrent operations from two sessions create **divergent operations** that jj must reconcile
+- Each reconciliation can create divergent commit IDs (the `/0`, `/4` suffixes)
+- A rebase that rewrites another workspace's `@` (or its ancestors) makes that workspace stale — this only matters when workspaces share lineage, not when they're on independent branches
+- **This is why undo loops are so destructive** — each undo is another shared operation that may trigger reconciliation
+
+**Rules for parallel workspaces:**
+- Keep operations minimal and deliberate — don't experiment
+- Never chain undos (see "No Undo Loops" above)
+- If your workspace is stale, run `jj workspace update-stale` before doing anything else
+- Rebase onto main with `jj git fetch && jj rebase -d main`
+- Verify your workspace — confirm you're operating on the right directory
 
 ## Merge Conflict Resolution
 
