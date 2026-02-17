@@ -30,19 +30,6 @@ del_stopped()
     fi
 }
 
-npm()
-{
-    local dirCache="${HOME}/.npm"
-    mkdir -p "${dirCache}"
-
-    drunmt \
-        --log-driver none \
-        --user node \
-        --volume "${dirCache}:/home/node/.npm" \
-        node:22 \
-        npm $@
-}
-
 export AWSCLI_DOCKER_ARGS="-v ${HOME}/.aws:/home/aws/.aws"
 export AWSCLI_DOCKER_BIN="`which winpty` docker"
 
@@ -71,7 +58,7 @@ aws()
         _aws "${@}"
 }
 
-export -f npm _aws aws
+export -f _aws aws
 
 dkeepassxc()
 {

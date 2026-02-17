@@ -1,7 +1,3 @@
-## Dotfiles Repo
-
-The `~/.dotfiles` repo is a personal dotfiles repo. Push directly to main—no PRs needed.
-
 ## Working Style
 
 ### Planning
