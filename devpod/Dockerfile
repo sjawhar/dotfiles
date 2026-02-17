@@ -135,7 +135,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN mkdir -p /var/run/sshd \
  && ssh-keygen -A \
  && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
- && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+ && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config \
+ && sed -i 's/^AcceptEnv LANG LC_\*/AcceptEnv LANG LC_* SOPS_AGE_KEY/' /etc/ssh/sshd_config
 
 # Copy binaries from builders and source images
 COPY --link --from=builder-downloads /usr/local/bin/tmux /usr/local/bin/tmux

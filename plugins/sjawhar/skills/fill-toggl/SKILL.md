@@ -1,4 +1,11 @@
+---
+name: fill-toggl
+description: Use when auto-filling missing Toggl time entries from desktop activity, Claude Code sessions, and existing patterns
+---
+
 # Fill Toggl Time Entries
+
+**REQUIRED SUB-SKILL:** Use `using-toggl` for Toggl MCP tools.
 
 Auto-fill missing Toggl time entries from desktop activity, Claude Code sessions, and existing entry patterns.
 

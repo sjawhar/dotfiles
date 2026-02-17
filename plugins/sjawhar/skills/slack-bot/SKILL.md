@@ -3,10 +3,9 @@ name: slack-bot
 description: Use when reading Slack messages, searching conversations, sending messages, listing channels, or interacting with Slack workspaces
 mcp:
   slack:
-    command: slack-mcp-server
-    args: []
+    command: secrets
+    args: ["SLACK_MCP_XOXP_TOKEN", "--", "slack-mcp-server"]
     env:
-      SLACK_MCP_XOXP_TOKEN: "${SLACK_MCP_XOXP_TOKEN}"
       SLACK_MCP_ADD_MESSAGE_TOOL: "true"
 ---
 
