@@ -47,6 +47,9 @@ curl -fsSL "https://github.com/tmux/tmux/releases/download/3.6a/tmux-3.6a.tar.gz
 cd /tmp/tmux-3.6a && ./configure && make -j"$(nproc)" && make install
 rm -rf /tmp/tmux-3.6a
 
+# Accept SOPS_AGE_KEY forwarded via SSH SendEnv (for sops + age secrets)
+sed -i 's/^AcceptEnv LANG LC_\*/AcceptEnv LANG LC_* SOPS_AGE_KEY/' /etc/ssh/sshd_config
+
 # Clone and install dotfiles
 DOTFILES_REPO="https://github.com/sjawhar/dotfiles"
 DOTFILES_DIR="/home/sami/.dotfiles"

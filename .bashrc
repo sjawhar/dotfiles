@@ -70,6 +70,7 @@ export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
+
 # ==============================================================================
 # INTERACTIVE GUARD
 # Everything below this point only runs for interactive shells
@@ -160,6 +161,7 @@ alias ucheck='uv run ruff format && uv run ruff check --fix && uv run basedpyrig
 
 # Attach to main session (creates if doesn't exist), like: mosh server -- tm
 alias tm='tmux attach -t main || tmux new -s main'
+alias s='secrets'
 
 # Proxy toggle (for Tailscale userspace networking)
 alias proxy-on='. "${DOTFILES_DIR}/devpod/proxy.sh"'

@@ -6,6 +6,7 @@ echo "=== Dotfiles Install ==="
 
 source "${DOTFILES_DIR}/installers/shell.sh"
 source "${DOTFILES_DIR}/installers/mise.sh" "$@"
+source "${DOTFILES_DIR}/installers/sops.sh"
 source "${DOTFILES_DIR}/installers/jj.sh"
 source "${DOTFILES_DIR}/installers/tmux.sh"
 source "${DOTFILES_DIR}/installers/nvim.sh"
