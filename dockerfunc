@@ -1,0 +1,189 @@
+# export GDK_SCALE=2
+# export GDK_DPI_SCALE=0.5
+# export QT_DEVICE_PIXEL_RATIO=2
+
+DOCKER_TIME=/etc/localtime
+DOCKER_XAUTH=/tmp/.docker.xauth
+DOCKER_XSOCK=/tmp/.X11-unix
+export DOCKER_BUILDKIT=1
+
+dauth()
+{
+    test -f $DOCKER_XAUTH && return
+    test -d $DOCKER_XAUTH && sudo rm -rf $DOCKER_XAUTH
+    touch $DOCKER_XAUTH
+    xauth nlist $DISPLAY | sed -e 's/^..../ffff/' | xauth -f $DOCKER_XAUTH nmerge -
+}
+
+container_running()
+{
+    docker inspect --format "{{.State.Running}}" "$1" 2>/dev/null
+}
+
+del_stopped()
+{
+    local name=$1
+    local state=$(container_running "$name")
+
+    if [[ "$state" == "false" ]]; then
+        docker rm "$name"
+    fi
+}
+
+npm()
+{
+    local dirCache="${HOME}/.npm"
+    mkdir -p "${dirCache}"
+
+    drunmt \
+        --log-driver none \
+        --user node \
+        --volume "${dirCache}:/home/node/.npm" \
+        node:22 \
+        npm $@
+}
+
+export AWSCLI_DOCKER_ARGS="-v ${HOME}/.aws:/home/aws/.aws"
+export AWSCLI_DOCKER_BIN="`which winpty` docker"
+
+_aws()
+{
+    local use_tty=""
+    [ -t 0 ] && use_tty="-it"
+    ${AWSCLI_DOCKER_BIN} run --rm ${use_tty} \
+        --env AWS_CLI_AUTO_PROMPT=${AWS_CLI_AUTO_PROMPT:-on-partial} \
+        --env AWS_DEFAULT_OUTPUT=${AWS_DEFAULT_OUTPUT:-yaml} \
+        --env AWS_DEFAULT_REGION \
+        --env AWS_PAGER=${AWS_PAGER:-} \
+        --env AWS_PROFILE \
+        --log-driver none \
+        --volume "`pwd`:/aws" \
+        --workdir /aws \
+        ${AWSCLI_DOCKER_ARGS} awscli "${@}"
+}
+
+aws()
+{
+    AWSCLI_DOCKER_ARGS="$AWSCLI_DOCKER_ARGS
+        --env AWS_ACCESS_KEY_ID
+        --env AWS_SECRET_ACCESS_KEY
+        --env AWS_SESSION_TOKEN" \
+        _aws "${@}"
+}
+
+export -f npm _aws aws
+
+dkeepassxc()
+{
+    local name="keepassxc"
+
+    del_stopped $name
+    docker run \
+        --env DISPLAY=unix$DISPLAY \
+        --env SSH_AUTH_SOCK \
+        --env XDG_RUNTIME_DIR \
+        --name $name \
+        --hostname "$(hostname)" \
+        --volume "$(dirname $SSH_AUTH_SOCK):$(dirname $SSH_AUTH_SOCK)" \
+        --volume "${DOCKER_TIME}:${DOCKER_TIME}:ro" \
+        --volume "${DOCKER_XAUTH}:${DOCKER_XAUTH}" \
+        --volume "${DOCKER_XSOCK}:${DOCKER_XSOCK}" \
+        --volume "${HOME}/.config/keepassxc:/home/keepassxc/.config/keepassxc" \
+        --volume "${HOME}/.cache/keepassxc:/home/keepassxc/.cache/keepassxc" \
+        --volume "${HOME}/.passwords-key:/home/keepassxc/.passwords-key" \
+        --volume "${HOME}/.legacy-key:/home/keepassxc/.legacy-key" \
+        --volume "${HOME}/.vaults:/home/keepassxc/vaults" \
+        --volume "${XDG_RUNTIME_DIR}:${XDG_RUNTIME_DIR}" \
+        --volume /etc/machine-id:/etc/machine-id:ro \
+        --volume /usr/share/X11/xkb:/usr/share/X11/xkb/:ro \
+        sjawhar/keepassxc
+}
+
+donedrive()
+{
+    local name="onedrive"
+
+    if [ "$(container_running "$name")" == "true" ]
+    then
+        echo "Restarting $name..."
+        docker container restart $name
+        return
+    fi
+
+    local conf_vol="onedrive-conf"
+    local run_mode='-d'
+
+    del_stopped $name
+    docker inspect $conf_vol > /dev/null || { docker volume create $conf_vol; run_mode='-it'; }
+
+    docker run $run_mode \
+        --name onedrive \
+        --restart unless-stopped \
+        --volume "${HOME}/OneDrive:/onedrive/data" \
+        --volume $conf_vol:/onedrive/conf \
+        driveone/onedrive:alpine-v2.4.13
+}
+
+drclone()
+{
+    local name="rclone"
+    if [ "$(container_running "$name")" == "true" ]
+    then
+        echo "Restarting $name..."
+        docker container restart $name
+        return
+    fi
+
+    local cache_vol="rclone-cache"
+    local conf_vol="rclone-config"
+    local mount_dir="${HOME}/GDrive"
+    local run_mode="--detach"
+
+    del_stopped $name
+    docker inspect $cache_vol > /dev/null || docker volume create $cache_vol
+    docker inspect $conf_vol > /dev/null || { docker volume create $conf_vol; run_mode='-it'; }
+    mkdir -p "${mount_dir}"
+
+    docker run \
+        $run_mode \
+        --cap-add SYS_ADMIN \
+        --device /dev/fuse \
+        --name rclone \
+        --restart unless-stopped \
+        --security-opt apparmor:unconfined \
+        --user $(id -u):$(id -g) \
+        --volume /etc/group:/etc/group:ro \
+        --volume /etc/passwd:/etc/passwd:ro \
+        --volume "${cache_vol}:/cache" \
+        --volume "${conf_vol}:/config/rclone" \
+        --volume "${mount_dir}:/data:shared" \
+        rclone/rclone:1.59.1 \
+        mount -v \
+            --allow-non-empty \
+            --cache-dir=/cache \
+            --vfs-cache-mode full \
+            kernelgdrive: /data
+}
+
+dslack()
+{
+    local name="slack"
+
+    del_stopped $name
+    docker run -d \
+        --device /dev/dri \
+        --device /dev/snd \
+        --device /dev/video0 \
+        --env "DISPLAY=unix${DISPLAY}" \
+        --env "XAUTHORITY=${DOCKER_XAUTH}" \
+        --group-add audio \
+        --group-add video \
+        --ipc host \
+        --name $name \
+        --volume "${DOCKER_TIME}:${DOCKER_TIME}:ro" \
+        --volume "${DOCKER_XAUTH}:${DOCKER_XAUTH}" \
+        --volume "${DOCKER_XSOCK}:${DOCKER_XSOCK}" \
+        --volume "${HOME}/.slack:/root/.config/Slack" \
+        jess/slack "$@"
+}
+

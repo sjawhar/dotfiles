@@ -19,6 +19,10 @@ else
     DOTFILES_SHELL="bash"
 fi
 
+if [ -f "${DOTFILES_DIR}/dockerfunc" ]; then
+    source "${DOTFILES_DIR}/dockerfunc"
+fi
+
 # ------------------------------------------------------------------------------
 # Mise (tool version manager) - data stored in ~/.mise
 # ------------------------------------------------------------------------------
