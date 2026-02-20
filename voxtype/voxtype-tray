@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Tray indicator for voxtype recording state."""
+
+import gi
+import os
+import signal
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("AyatanaAppIndicator3", "0.1")
+from gi.repository import AyatanaAppIndicator3, Gtk, GLib
+
+STATE_FILE = os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
+    "voxtype",
+    "state",
+)
+
+ICONS = {
+    "idle": "audio-input-microphone-symbolic",
+    "recording": "media-record-symbolic",
+    "transcribing": "emblem-synchronizing-symbolic",
+}
+
+LABELS = {
+    "idle": "",
+    "recording": "REC",
+    "transcribing": "...",
+}
+
+
+class VoxtypeTray:
+    def __init__(self):
+        self.indicator = AyatanaAppIndicator3.Indicator.new(
+            "voxtype-tray",
+            ICONS["idle"],
+            AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+        )
+        self.indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
+        self.indicator.set_label("", "")
+
+        menu = Gtk.Menu()
+        item_toggle = Gtk.MenuItem(label="Toggle Recording")
+        item_toggle.connect("activate", self._toggle)
+        menu.append(item_toggle)
+        item_quit = Gtk.MenuItem(label="Quit Indicator")
+        item_quit.connect("activate", lambda _: Gtk.main_quit())
+        menu.append(item_quit)
+        menu.show_all()
+        self.indicator.set_menu(menu)
+
+        self.last_state = None
+        GLib.timeout_add(250, self._poll_state)
+
+    def _poll_state(self):
+        try:
+            with open(STATE_FILE) as f:
+                state = f.read().strip()
+        except FileNotFoundError:
+            state = "idle"
+
+        if state != self.last_state:
+            self.last_state = state
+            self.indicator.set_icon_full(
+                ICONS.get(state, ICONS["idle"]), state
+            )
+            self.indicator.set_label(LABELS.get(state, ""), "")
+
+        return True
+
+    def _toggle(self, _):
+        os.system("voxtype record toggle")
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    VoxtypeTray()
+    Gtk.main()

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Voxtype Tray
+Exec=/home/sami/.dotfiles/voxtype/voxtype-tray
+Icon=audio-input-microphone-symbolic
+Comment=Tray indicator for voxtype recording state
+X-GNOME-Autostart-enabled=true
