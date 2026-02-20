@@ -1,0 +1,28 @@
+{
+    (modifiers: [Alt], key: "space", description: Some("voxtype")): Spawn("voxtype record toggle"),
+
+    (modifiers: [Alt], key: "1", description: Some("Aerospace WS 1")): Spawn("/home/sami/.local/bin/aerospace-ws 1"),
+    (modifiers: [Alt], key: "2", description: Some("Aerospace WS 2")): Spawn("/home/sami/.local/bin/aerospace-ws 2"),
+    (modifiers: [Alt], key: "3", description: Some("Aerospace WS 3")): Spawn("/home/sami/.local/bin/aerospace-ws 3"),
+    (modifiers: [Alt], key: "4", description: Some("Aerospace WS 4")): Spawn("/home/sami/.local/bin/aerospace-ws 4"),
+    (modifiers: [Alt], key: "5", description: Some("Aerospace WS 5")): Spawn("/home/sami/.local/bin/aerospace-ws 5"),
+    (modifiers: [Alt], key: "6", description: Some("Aerospace WS 6")): Spawn("/home/sami/.local/bin/aerospace-ws 6"),
+    (modifiers: [Alt], key: "7", description: Some("Aerospace WS 7")): Spawn("/home/sami/.local/bin/aerospace-ws 7"),
+    (modifiers: [Alt], key: "8", description: Some("Aerospace WS 8")): Spawn("/home/sami/.local/bin/aerospace-ws 8"),
+    (modifiers: [Alt], key: "9", description: Some("Aerospace WS 9")): Spawn("/home/sami/.local/bin/aerospace-ws 9"),
+
+    (modifiers: [Ctrl, Alt], key: "Left"):  SwitchOutput(Left),
+    (modifiers: [Ctrl, Alt], key: "Right"): SwitchOutput(Right),
+    (modifiers: [Ctrl, Alt], key: "Up"):    SwitchOutput(Up),
+    (modifiers: [Ctrl, Alt], key: "Down"):  SwitchOutput(Down),
+
+    (modifiers: [Super, Alt], key: "1"): Workspace(1),
+    (modifiers: [Super, Alt], key: "2"): Workspace(2),
+    (modifiers: [Super, Alt], key: "3"): Workspace(3),
+    (modifiers: [Super, Alt], key: "4"): Workspace(4),
+    (modifiers: [Super, Alt], key: "5"): Workspace(5),
+    (modifiers: [Super, Alt], key: "6"): Workspace(6),
+    (modifiers: [Super, Alt], key: "7"): Workspace(7),
+    (modifiers: [Super, Alt], key: "8"): Workspace(8),
+    (modifiers: [Super, Alt], key: "9"): Workspace(9),
+}

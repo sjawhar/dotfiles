@@ -1,0 +1,56 @@
+#!/bin/bash
+# Restore monitor layout for docked configuration:
+#   Dell P3223QE (4K portrait) — left
+#   LG HDR WQHD (ultrawide)   — center
+#   eDP-1 (laptop)             — below center
+
+set -euo pipefail
+
+# Parse cosmic-randr list to find connector name for a given model substring
+find_connector() {
+    local model="$1"
+    cosmic-randr list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk -v model="$model" '
+        /^[A-Za-z]/ { connector = $1 }
+        /Model:/ && index($0, model) { print connector; exit }
+    '
+}
+
+DELL=$(find_connector "DELL P3223QE")
+LG=$(find_connector "LG HDR WQHD")
+LAPTOP="eDP-1"
+
+if [[ -z "$DELL" ]]; then
+    echo "Warning: Dell P3223QE not found, skipping"
+fi
+if [[ -z "$LG" ]]; then
+    echo "Warning: LG HDR WQHD not found, skipping"
+fi
+
+# Apply layout
+# Dell 4K portrait on the left
+if [[ -n "$DELL" ]]; then
+    cosmic-randr mode "$DELL" 3840 2160 \
+        --refresh 60.000 \
+        --pos-x 0 --pos-y 0 \
+        --transform rotate90 \
+        --scale 1
+    echo "Configured $DELL (Dell P3223QE) — portrait left at 0,0"
+fi
+
+# LG ultrawide center-right
+if [[ -n "$LG" ]]; then
+    cosmic-randr mode "$LG" 3840 1600 \
+        --refresh 59.993 \
+        --pos-x 2160 --pos-y 812 \
+        --transform normal \
+        --scale 1
+    echo "Configured $LG (LG HDR WQHD) — center at 2160,812"
+fi
+
+# Laptop below
+cosmic-randr mode "$LAPTOP" 1920 1200 \
+    --refresh 60.000 \
+    --pos-x 2353 --pos-y 2412 \
+    --transform normal \
+    --scale 1
+echo "Configured $LAPTOP (laptop) — below at 2353,2412"
