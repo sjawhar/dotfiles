@@ -16,10 +16,11 @@ real_opencode() {
         [[ "$dir" == "$dotfiles_shims" ]] && continue
         [[ -x "$dir/opencode" ]] && { echo "$dir/opencode"; return; }
     done
-    echo "opencode" # fallback
+    echo "ERROR: opencode binary not found in PATH (shim at $dotfiles_shims skipped)" >&2
+    return 1
 }
 
-OPENCODE="$(real_opencode)"
+OPENCODE="$(real_opencode)" || exit 1
 LOGFILE="$LOGDIR/$$.log"
 
 # Record startup context
