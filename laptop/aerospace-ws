@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# aerospace-ws - Aerospace-style globally-numbered workspace switching for COSMIC
+#
+# Reads workspace-to-monitor mapping from aerospace-ws.conf (same directory).
+# Changes to the config take effect immediately — no reload needed.
+#
+# Usage: aerospace-ws <workspace-number>
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+CONF="${SCRIPT_DIR}/aerospace-ws.conf"
+
+# Source config (provides nav_paths[] and workspace_monitor[])
+declare -a nav_paths
+declare -A workspace_monitor
+source "$CONF"
+
+# 2 lefts + 2 ups guarantees top-left with 3 monitors
+RESET="ctrl+alt+Left ctrl+alt+Up ctrl+alt+Left ctrl+alt+Up"
+
+WS="${1:-}"
+[[ -n "$WS" ]] || { echo "usage: aerospace-ws <workspace-number>" >&2; exit 1; }
+[[ -v "workspace_monitor[$WS]" ]] || { echo "aerospace-ws: unknown workspace $WS" >&2; exit 1; }
+
+MON="${workspace_monitor[$WS]}"
+
+# Compute local workspace number: count how many lower-numbered workspaces
+# share this monitor, then add 1.
+LOCAL_WS=0
+for (( i = 1; i <= WS; i++ )); do
+    [[ "${workspace_monitor[$i]:-}" == "$MON" ]] && (( LOCAL_WS++ ))
+done
+
+NAV="${nav_paths[$MON]:-}"
+NAV_KEYS="$RESET"
+[[ -n "$NAV" ]] && NAV_KEYS="$NAV_KEYS $NAV"
+
+# Navigate to target monitor, settle, then switch workspace.
+# Uses super+alt+N so it works even if Alt is still held from the trigger.
+# shellcheck disable=SC2086
+ydotool key --delay 20 --key-delay 15 $NAV_KEYS && sleep 0.1 && ydotool key super+alt+${LOCAL_WS}
