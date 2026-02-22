@@ -4,10 +4,14 @@
 # Problem: gh CLI uses `git symbolic-ref HEAD` to detect current branch.
 # jj operates in detached HEAD mode, so this detection fails.
 #
-# Solution: For pr subcommands that need branch context, inject the
-# jj bookmark pointing at the current change (@).
+# Solution: Two-layer fix for pr subcommands in jj repos:
+#   1. Git wrapper: intercepts `git symbolic-ref HEAD` (and similar) to
+#      return the jj bookmark name, preventing gh's "could not determine
+#      current branch" error.
+#   2. Arg injection: for commands that need branch context, inject the
+#      bookmark as --head flag or positional argument.
 #
-# Commands handled:
+# Commands with arg injection:
 #   gh pr create           -> adds --head <bookmark>
 #   gh pr view             -> adds <bookmark> positional arg
 #   gh pr checks           -> adds <bookmark> positional arg
@@ -71,6 +75,61 @@ die_no_bookmark() {
     echo "Or push and create in one step:" >&2
     echo "  jj git push --named=<name>=@" >&2
     exit 1
+}
+
+# Run gh with a git wrapper that makes symbolic-ref HEAD return the bookmark.
+# This prevents gh's "could not determine current branch" error in jj repos.
+# If bookmark is empty, uses a placeholder so gh can proceed.
+exec_with_jj_git() {
+    local bookmark="${1:-__jj_detached__}"
+    shift
+
+    local wrapper_dir
+    wrapper_dir=$(mktemp -d)
+
+    cat > "$wrapper_dir/git" << 'GITEOF'
+#!/bin/bash
+case "$1" in
+    symbolic-ref)
+        # Only intercept reads (HEAD is last arg), not writes (HEAD followed by ref)
+        if [[ "${!#}" == "HEAD" ]]; then
+            if [[ " $* " == *" --short "* ]]; then
+                printf '%s\n' "$_JJ_BOOKMARK"
+            else
+                printf 'refs/heads/%s\n' "$_JJ_BOOKMARK"
+            fi
+            exit 0
+        fi
+        ;;
+    rev-parse)
+        if [[ "${!#}" == "HEAD" && " $* " == *" --abbrev-ref "* ]]; then
+            printf '%s\n' "$_JJ_BOOKMARK"
+            exit 0
+        fi
+        ;;
+    branch)
+        if [[ " $* " == *" --show-current "* ]]; then
+            printf '%s\n' "$_JJ_BOOKMARK"
+            exit 0
+        fi
+        ;;
+esac
+# Pass through to real git
+IFS=':' read -ra _path_dirs <<< "$PATH"
+for _d in "${_path_dirs[@]}"; do
+    [[ "$_d" == "$_JJ_WRAPPER_DIR" ]] && continue
+    [[ -x "$_d/git" ]] && exec "$_d/git" "$@"
+done
+echo "error: git not found" >&2
+exit 127
+GITEOF
+    chmod +x "$wrapper_dir/git"
+
+    local rc=0
+    _JJ_BOOKMARK="$bookmark" _JJ_WRAPPER_DIR="$wrapper_dir" \
+        PATH="$wrapper_dir:$PATH" "$GH" "$@" || rc=$?
+    rm -rf "$wrapper_dir" 2>/dev/null || true
+    exit "$rc"
 }
 
 # Parse arguments to find pr subcommand
@@ -184,33 +243,39 @@ main() {
         exec "$GH" "$@"
     fi
 
+    # Get bookmark for jj-git compatibility (empty string if none)
+    local bookmark
+    bookmark=$(get_current_bookmark 2>/dev/null) || bookmark=""
+
     case "$PR_SUBCOMMAND" in
         # Command using --head flag
         create)
             if has_head_flag "$@"; then
-                exec "$GH" "$@"
+                exec_with_jj_git "$bookmark" "$@"
             fi
-            bookmark=$(get_current_bookmark) || die_no_bookmark
-            exec "$GH" "$@" --head "$bookmark"
+            [[ -z "$bookmark" ]] && die_no_bookmark
+            exec_with_jj_git "$bookmark" "$@" --head "$bookmark"
             ;;
 
         # Commands with optional positional target (default to current branch)
         view|checks|diff|merge|checkout|edit|comment|ready|review|update-branch)
             if has_positional_target "$PR_SUBCOMMAND" "$@"; then
-                exec "$GH" "$@"
+                # Even with an explicit target (e.g., PR number), gh still
+                # checks current branch internally — use git wrapper
+                exec_with_jj_git "$bookmark" "$@"
             fi
-            bookmark=$(get_current_bookmark) || die_no_bookmark
+            [[ -z "$bookmark" ]] && die_no_bookmark
             # Build new args array with bookmark inserted after subcommand
-            new_args=()
+            local -a new_args=()
             build_args_with_bookmark new_args "$PR_SUBCOMMAND" "$bookmark" "$@"
-            exec "$GH" "${new_args[@]}"
+            exec_with_jj_git "$bookmark" "${new_args[@]}"
             ;;
 
         # Commands that require explicit target (no injection needed)
         # close, lock, unlock, reopen, revert
         # Also: list, status (don't take branch target)
         *)
-            exec "$GH" "$@"
+            exec_with_jj_git "$bookmark" "$@"
             ;;
     esac
 }
