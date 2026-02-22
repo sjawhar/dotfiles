@@ -1,0 +1,115 @@
+#!/bin/bash
+# Post-process hook: refine transcription via Groq LLM, log to history, pass through.
+# Falls back to raw text on any error.
+set -euo pipefail
+
+HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/history.jsonl"
+GROQ_API="https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL="llama-3.3-70b-versatile"
+
+# Find jq binary, skipping mise shims (which hang in daemon context)
+JQ=""
+IFS=: read -ra path_dirs <<< "$PATH"
+for dir in "${path_dirs[@]}"; do
+    [[ "$dir" == *shims* ]] && continue
+    [[ -x "$dir/jq" ]] && JQ="$dir/jq" && break
+done
+[[ -z "$JQ" ]] && { echo "jq not found" >&2; exit 1; }
+
+SYSTEM_PROMPT='You are an intelligent text formatter specializing in cleaning up transcribed speech. Your task is to transform raw transcribed text into well-formatted, readable content while maintaining the speaker'\''s original intent and voice.
+
+Core Principles:
+
+1. Preserve authenticity: Keep the original wording and phrasing as much as possible
+2. Add clarity: Make intelligent corrections only where needed for comprehension
+3. Enhance readability: Apply proper formatting, punctuation, and structure
+
+Formatting Guidelines:
+
+Punctuation & Grammar:
+- Add appropriate punctuation (periods, commas, question marks)
+- Correct obvious transcription errors while preserving speaking style
+- Fix run-on sentences by adding natural breaks
+- Maintain conversational tone and personal speaking patterns
+
+Structure & Organization:
+- Create paragraph breaks at natural topic transitions
+- Use bullet points or numbered lists when the speaker is listing items
+- Add headings if the content has clear sections
+- Preserve emphasis through italics or bold when the speaker stresses words
+
+Intelligent Corrections:
+- Fix homophones (e.g., "there/their/they'\''re")
+- Complete interrupted thoughts when the intention is clear
+- Remove excessive filler words (um, uh) unless they add meaning
+- Correct obvious misspeaks while noting significant ones in [brackets]
+
+Special Handling:
+- Technical terms: Research and correct spelling if unclear
+- Names/places: Make best guess and mark uncertain ones with [?]
+- Numbers: Convert spoken numbers to digits when appropriate
+- Time references: Standardize format (e.g., "3 PM" not "three in the afternoon")
+
+Preserve Original Intent:
+- Keep colloquialisms and regional expressions
+- Maintain the speaker'\''s level of formality
+- Don'\''t "upgrade" simple language to sound more sophisticated
+- Preserve humor, sarcasm, and emotional tone
+
+Output Format:
+Return the formatted text with:
+- Clear paragraph breaks
+- Proper punctuation and capitalization
+- Any structural elements (lists, headings) that improve clarity
+- [Bracketed notes] for unclear sections or editorial decisions
+- Original meaning and voice intact
+
+Remember: You'\''re a translator from spoken to written form, not an editor trying to improve the content. Make it readable while keeping it real.'
+
+mkdir -p "$(dirname "$HISTORY_FILE")"
+
+raw=$(cat)
+
+# Attempt LLM refinement, fall back to raw on any failure
+refined=""
+if [ -n "${VOXTYPE_WHISPER_API_KEY:-}" ] && [ -n "$raw" ]; then
+    payload=$("$JQ" -n \
+        --arg model "$GROQ_MODEL" \
+        --arg system "$SYSTEM_PROMPT" \
+        --arg user "$raw" \
+        '{
+            model: $model,
+            messages: [
+                {role: "system", content: $system},
+                {role: "user", content: $user}
+            ],
+            temperature: 0.1
+        }')
+
+    response=$(curl -sS --max-time 8 \
+        -H "Authorization: Bearer $VOXTYPE_WHISPER_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        "$GROQ_API" 2>/dev/null) || true
+
+    if [ -n "$response" ]; then
+        refined=$(printf '%s' "$response" | "$JQ" -r '.choices[0].message.content // empty' 2>/dev/null) || true
+    fi
+fi
+
+# Use refined text if we got it, otherwise fall back to raw
+# Safety: if refined is >50% longer than raw, the model hallucinated — use raw
+if [ -n "$refined" ] && [ ${#refined} -gt $(( ${#raw} * 3 / 2 )) ]; then
+    refined=""
+fi
+output="${refined:-$raw}"
+
+# Log to JSONL history
+timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+"$JQ" -cn \
+    --arg ts "$timestamp" \
+    --arg text "$output" \
+    --arg raw "$raw" \
+    '{ts: $ts, text: $text, raw: $raw}' >> "$HISTORY_FILE"
+
+printf '%s' "$output"

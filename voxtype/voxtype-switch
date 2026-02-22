@@ -1,0 +1,37 @@
+#!/bin/bash
+# Switch voxtype between remote (Groq API) and local (Vulkan GPU) transcription.
+set -euo pipefail
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/voxtype/config.toml"
+
+current_mode() {
+    grep '^mode = ' "$CONFIG" | head -1 | sed 's/mode = "\(.*\)"/\1/'
+}
+
+case "${1:-}" in
+    local)
+        # Check model is downloaded
+        MODEL_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/models/ggml-large-v3-turbo.bin"
+        if [ ! -f "$MODEL_FILE" ]; then
+            echo "Downloading large-v3-turbo model (~1.6 GB)..."
+            voxtype setup --download --model large-v3-turbo
+        fi
+        sed --follow-symlinks -i 's/^mode = "remote"/mode = "local"/' "$CONFIG"
+        sed --follow-symlinks -i 's/^model = "whisper-large-v3-turbo"/model = "large-v3-turbo"/' "$CONFIG"
+        systemctl --user restart voxtype
+        echo "Switched to local (Vulkan GPU) transcription"
+        ;;
+    remote)
+        sed --follow-symlinks -i 's/^mode = "local"/mode = "remote"/' "$CONFIG"
+        sed --follow-symlinks -i 's/^model = "large-v3-turbo"/model = "whisper-large-v3-turbo"/' "$CONFIG"
+        systemctl --user restart voxtype
+        echo "Switched to remote (Groq API) transcription"
+        ;;
+    "")
+        echo "voxtype backend: $(current_mode)"
+        ;;
+    *)
+        echo "Usage: voxtype-switch [local|remote]" >&2
+        exit 1
+        ;;
+esac
