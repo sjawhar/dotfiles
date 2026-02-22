@@ -9,4 +9,4 @@ VOXTYPE_WHISPER_API_KEY=$("$MISE" exec sops age -- \
     sops -d --output-type dotenv "$HOME/.dotfiles/secrets.env" \
     | grep '^GROQ_API_KEY=' | cut -d= -f2-)
 
-exec /usr/lib/voxtype/voxtype-avx512 daemon
+exec voxtype daemon

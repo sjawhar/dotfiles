@@ -19,8 +19,8 @@ if [ "$installed_version" != "${VOXTYPE_VERSION}-1" ]; then
 fi
 
 # --- apt dependencies ---
-if ! dpkg -s ydotool gir1.2-ayatanaappindicator3-0.1 &>/dev/null; then
-    sudo apt-get install -y -qq ydotool gir1.2-ayatanaappindicator3-0.1 >/dev/null
+if ! dpkg -s ydotool gir1.2-ayatanaappindicator3-0.1 wl-clipboard &>/dev/null; then
+    sudo apt-get install -y -qq ydotool gir1.2-ayatanaappindicator3-0.1 wl-clipboard >/dev/null
 fi
 
 # --- udev rule for /dev/uinput access (ydotool) ---
@@ -43,9 +43,16 @@ mkdir -p ~/.config/voxtype
 mkdir -p ~/.config/autostart
 mkdir -p ~/.config/systemd/user/voxtype.service.d
 
-ensure_link "${DOTFILES_DIR}/voxtype/config.toml"            ~/.config/voxtype/config.toml
-ensure_link "${DOTFILES_DIR}/voxtype/voxtype-tray.desktop"    ~/.config/autostart/voxtype-tray.desktop
-ensure_link "${DOTFILES_DIR}/voxtype/groq.conf"               ~/.config/systemd/user/voxtype.service.d/groq.conf
+ensure_link "${DOTFILES_DIR}/voxtype/config.toml"               ~/.config/voxtype/config.toml
+ensure_link "${DOTFILES_DIR}/voxtype/voxtype-tray.desktop"     ~/.config/autostart/voxtype-tray.desktop
+ensure_link "${DOTFILES_DIR}/voxtype/groq.conf"                ~/.config/systemd/user/voxtype.service.d/groq.conf
+
+# --- Whisper model for local fallback ---
+MODEL_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/models/ggml-large-v3-turbo.bin"
+if [ ! -f "$MODEL_FILE" ]; then
+    echo "Downloading whisper large-v3-turbo model (~1.6 GB)..."
+    voxtype setup --download --model large-v3-turbo --quiet
+fi
 
 # --- Services ---
 sudo systemctl enable --now ydotool 2>/dev/null || true

@@ -1,0 +1,24 @@
+#!/bin/bash
+# Paste the last voxtype transcription into the focused window.
+# Copies to clipboard then simulates Ctrl+Shift+V.
+set -euo pipefail
+
+HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/history.jsonl"
+
+if [ ! -f "$HISTORY_FILE" ]; then
+    notify-send "Voxtype" "No transcription history found"
+    exit 0
+fi
+
+# Extract text from last JSONL entry
+last=$(tail -n1 "$HISTORY_FILE" | jq -r '.text // empty')
+
+if [ -z "$last" ]; then
+    notify-send "Voxtype" "History is empty"
+    exit 0
+fi
+
+# Copy to clipboard and paste into focused window
+printf '%s' "$last" | wl-copy
+sleep 0.15  # allow shortcut keys to release + clipboard to settle
+ydotool key ctrl+shift+v

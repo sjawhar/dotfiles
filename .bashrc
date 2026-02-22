@@ -408,7 +408,7 @@ jj-rebase-workspaces() {
 # Security: idle shell timeout (skip inside tmux)
 # ------------------------------------------------------------------------------
 
-if [ -z "${TMUX:-}" ]; then
+if [ -n "${SSH_CONNECTION:-}" ] && [ -z "${TMUX:-}" ]; then
     TMOUT=900
 fi
 
