@@ -1,0 +1,14 @@
+[Unit]
+Description=Voxtype push-to-talk voice-to-text daemon
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.service pipewire-pulse.service
+Wants=ydotoold.service
+
+[Service]
+Type=simple
+ExecStart=%h/.dotfiles/voxtype/voxtype-daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
