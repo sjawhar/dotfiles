@@ -1,0 +1,13 @@
+[Unit]
+Description=ydotool daemon (uinput keyboard/mouse emulation)
+Documentation=https://github.com/ReimuNotMoe/ydotool
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.dotfiles/bin/ydotoold
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

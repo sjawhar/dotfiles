@@ -127,7 +127,7 @@ type_delay_ms = 5
 
 # Convert newlines to Shift+Enter instead of regular Enter
 # Useful for applications where Enter submits (e.g., Cursor IDE, Slack, Discord)
-# shift_enter_newlines = false
+shift_enter_newlines = true
 
 # Pre/post output hooks (optional)
 # Commands to run before and after typing output. Useful for compositor integration.

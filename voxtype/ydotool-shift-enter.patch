@@ -1,0 +1,204 @@
+diff --git a/src/output/mod.rs b/src/output/mod.rs
+index 376cc98..ae000fc 100644
+--- a/src/output/mod.rs
++++ b/src/output/mod.rs
+@@ -199,6 +199,7 @@ fn create_driver_output(
+             show_notification,
+             config.auto_submit,
+             config.append_text.clone(),
++            config.shift_enter_newlines,
+         )),
+         OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(
+             show_notification,
+diff --git a/src/output/ydotool.rs b/src/output/ydotool.rs
+index a5de470..0ddb413 100644
+--- a/src/output/ydotool.rs
++++ b/src/output/ydotool.rs
+@@ -28,6 +28,8 @@ pub struct YdotoolOutput {
+     auto_submit: bool,
+     /// Text to append after transcription (before auto_submit)
+     append_text: Option<String>,
++    /// Convert newlines to Shift+Enter (for apps where Enter submits)
++    shift_enter_newlines: bool,
+ }
+ 
+ impl YdotoolOutput {
+@@ -40,6 +42,7 @@ impl YdotoolOutput {
+         notify: bool,
+         auto_submit: bool,
+         append_text: Option<String>,
++        shift_enter_newlines: bool,
+     ) -> Self {
+         let supports_key_hold = Self::detect_key_hold_support();
+         if supports_key_hold {
+@@ -54,6 +57,7 @@ impl YdotoolOutput {
+             supports_key_hold,
+             auto_submit,
+             append_text,
++            shift_enter_newlines,
+         }
+     }
+ 
+@@ -95,49 +99,21 @@ impl YdotoolOutput {
+             .status()
+             .await;
+     }
+-}
+ 
+-#[async_trait::async_trait]
+-impl TextOutput for YdotoolOutput {
+-    async fn output(&self, text: &str) -> Result<(), OutputError> {
++    /// Type a segment of text (no newline handling)
++    async fn type_text(&self, text: &str) -> Result<(), OutputError> {
+         if text.is_empty() {
+             return Ok(());
+         }
+ 
+-        // Pre-typing delay if configured
+-        if self.pre_type_delay_ms > 0 {
+-            tracing::debug!(
+-                "ydotool: sleeping {}ms before typing",
+-                self.pre_type_delay_ms
+-            );
+-            tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
+-        }
+-
+         let mut cmd = Command::new("ydotool");
+         cmd.arg("type");
+-
+-        // Always set delay explicitly (ydotool defaults to 12ms if not specified)
+         cmd.arg("--key-delay").arg(self.type_delay_ms.to_string());
+-
+-        // Use --key-hold only if supported (older versions silently ignore unknown flags)
+         if self.supports_key_hold {
+             cmd.arg("--key-hold").arg(self.type_delay_ms.to_string());
+         }
+-
+-        // The -- ensures text starting with - isn't treated as an option
+         cmd.arg("--").arg(text);
+ 
+-        tracing::debug!(
+-            "Running: ydotool type --key-delay {} {} -- \"{}\"",
+-            self.type_delay_ms,
+-            if self.supports_key_hold {
+-                format!("--key-hold {}", self.type_delay_ms)
+-            } else {
+-                String::new()
+-            },
+-            text.chars().take(20).collect::<String>()
+-        );
+-
+         let output = cmd
+             .stdout(Stdio::null())
+             .stderr(Stdio::piped())
+@@ -153,16 +129,78 @@ impl TextOutput for YdotoolOutput {
+ 
+         if !output.status.success() {
+             let stderr = String::from_utf8_lossy(&output.stderr);
+-
+-            // Check for common errors
+-            if stderr.contains("socket") || stderr.contains("connect") || stderr.contains("daemon")
+-            {
++            if stderr.contains("socket") || stderr.contains("connect") || stderr.contains("daemon") {
+                 return Err(OutputError::YdotoolNotRunning);
+             }
+-
+             return Err(OutputError::InjectionFailed(stderr.to_string()));
+         }
+ 
++        Ok(())
++    }
++
++    /// Send Shift+Enter key combination using ydotool
++    /// evdev keycodes: KEY_LEFTSHIFT=42, KEY_ENTER=28
++    async fn send_shift_enter(&self) -> Result<(), OutputError> {
++        let output = Command::new("ydotool")
++            .args(["key", "42:1", "28:1", "28:0", "42:0"])
++            .stdout(Stdio::null())
++            .stderr(Stdio::piped())
++            .output()
++            .await
++            .map_err(|e| {
++                OutputError::InjectionFailed(format!("ydotool Shift+Enter failed: {}", e))
++            })?;
++
++        if !output.status.success() {
++            let stderr = String::from_utf8_lossy(&output.stderr);
++            tracing::warn!("Failed to send Shift+Enter: {}", stderr);
++        }
++
++        Ok(())
++    }
++
++    /// Output text with newlines converted to Shift+Enter
++    async fn output_with_shift_enter_newlines(&self, text: &str) -> Result<(), OutputError> {
++        let segments: Vec<&str> = text.split('\n').collect();
++
++        for (i, segment) in segments.iter().enumerate() {
++            if !segment.is_empty() {
++                self.type_text(segment).await?;
++            }
++
++            // Send Shift+Enter between segments (not after the last one)
++            if i < segments.len() - 1 {
++                self.send_shift_enter().await?;
++            }
++        }
++
++        Ok(())
++    }
++
++}
++#[async_trait::async_trait]
++impl TextOutput for YdotoolOutput {
++    async fn output(&self, text: &str) -> Result<(), OutputError> {
++        if text.is_empty() {
++            return Ok(());
++        }
++
++        // Pre-typing delay if configured
++        if self.pre_type_delay_ms > 0 {
++            tracing::debug!(
++                "ydotool: sleeping {}ms before typing",
++                self.pre_type_delay_ms
++            );
++            tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
++        }
++
++        // If shift_enter_newlines is enabled, process text with Shift+Enter for newlines
++        if self.shift_enter_newlines && text.contains('\n') {
++            self.output_with_shift_enter_newlines(text).await?;
++        } else {
++            self.type_text(text).await?;
++        }
++
+         // Append text if configured (e.g., a space to separate sentences)
+         if let Some(ref append) = self.append_text {
+             let mut append_cmd = Command::new("ydotool");
+@@ -256,7 +294,7 @@ mod tests {
+ 
+     #[test]
+     fn test_new() {
+-        let output = YdotoolOutput::new(10, 0, true, false, None);
++        let output = YdotoolOutput::new(10, 0, true, false, None, false);
+         assert_eq!(output.type_delay_ms, 10);
+         assert_eq!(output.pre_type_delay_ms, 0);
+         assert!(output.notify);
+@@ -267,7 +305,7 @@ mod tests {
+ 
+     #[test]
+     fn test_new_with_enter() {
+-        let output = YdotoolOutput::new(0, 0, false, true, None);
++        let output = YdotoolOutput::new(0, 0, false, true, None, false);
+         assert_eq!(output.type_delay_ms, 0);
+         assert!(!output.notify);
+         assert!(output.auto_submit);
+@@ -275,7 +313,7 @@ mod tests {
+ 
+     #[test]
+     fn test_new_with_pre_type_delay() {
+-        let output = YdotoolOutput::new(0, 200, false, false, None);
++        let output = YdotoolOutput::new(0, 200, false, false, None, false);
+         assert_eq!(output.type_delay_ms, 0);
+         assert_eq!(output.pre_type_delay_ms, 200);
+     }
