@@ -20,4 +20,6 @@ vendor/
 !.claude/project-instructions/
 !.claude/settings.json
 
+.sisyphus/
+
 /ignore

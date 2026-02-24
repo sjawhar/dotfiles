@@ -1,5 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
+  "auto_update": false,
   "claude_code": {
     "mcp": true,
     "commands": false,
@@ -19,7 +20,7 @@
       "variant": "max"
     },
     "hephaestus": {
-      "model": "openai/gpt-5.2-codex",
+      "model": "openai/gpt-5.3-codex",
       "variant": "high"
     },
     "prometheus": {
@@ -27,7 +28,7 @@
       "variant": "max"
     },
     "metis": {
-      "model": "openai/gpt-5.2-codex",
+      "model": "openai/gpt-5.3-codex",
       "variant": "high"
     },
     "momus": {
@@ -39,8 +40,7 @@
       "variant": "high"
     },
     "atlas": {
-      "model": "anthropic/claude-opus-4-6",
-      "variant": "max"
+      "model": "anthropic/claude-sonnet-4-6"
     },
     "librarian": {
       "model": "anthropic/claude-sonnet-4-6"
@@ -50,6 +50,15 @@
     },
     "multimodal-looker": {
       "model": "google/gemini-3-flash"
+    },
+    "athena": {
+      "council": {
+        "members": [
+          { "model": "anthropic/claude-opus-4-6", "name": "Claude", "variant": "max" },
+          { "model": "openai/gpt-5.3-codex", "name": "GPT" },
+          { "model": "google/gemini-3.1-pro-preview", "name": "Gemini" }
+        ]
+      }
     }
   },
   "categories": {
@@ -58,11 +67,12 @@
       "variant": "max"
     },
     "deep": {
-      "model": "openai/gpt-5.2-codex",
+      "model": "openai/gpt-5.3-codex",
       "variant": "medium"
     },
     "visual-engineering": {
-      "model": "google/gemini-3-pro"
+      "model": "google/gemini-3-pro",
+      "variant": "high"
     },
     "quick": {
       "model": "anthropic/claude-haiku-4-5"
@@ -95,13 +105,14 @@
   "disabled_mcps": [],
   "disabled_skills": [],
   "disabled_tools": [],
+  "hashline_edit": true,
+  "runtime_fallback": true,
   "tmux": {
     "enabled": true,
     "layout": "main-vertical"
   },
   "_migrations": [
     "model-version:openai/gpt-5.2-codex->openai/gpt-5.3-codex",
-    "model-version:anthropic/claude-sonnet-4-5->anthropic/claude-sonnet-4-6",
     "model-version:anthropic/claude-sonnet-4-5->anthropic/claude-sonnet-4-6"
   ]
 }
