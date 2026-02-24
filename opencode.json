@@ -5,7 +5,7 @@
     "messages_last": "ctrl+alt+g,ctrl+end"
   },
   "plugin": [
-    "file:///home/ubuntu/oh-my-opencode/original",
+    "file://{env:HOME}/oh-my-opencode/original",
     "opencode-antigravity-auth@1.6.0"
   ],
   "provider": {
@@ -163,5 +163,8 @@
         }
       }
     }
-  }
+  },
+  "instructions": [
+    "~/.dotfiles/.claude/CLAUDE.md"
+  ]
 }

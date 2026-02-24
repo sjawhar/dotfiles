@@ -71,7 +71,7 @@
       "variant": "medium"
     },
     "visual-engineering": {
-      "model": "google/gemini-3-pro",
+      "model": "google/gemini-3.1-pro-preview",
       "variant": "high"
     },
     "quick": {
