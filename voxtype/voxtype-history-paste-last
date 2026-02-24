@@ -21,4 +21,4 @@ fi
 # Copy to clipboard and paste into focused window
 printf '%s' "$last" | wl-copy
 sleep 0.15  # allow shortcut keys to release + clipboard to settle
-ydotool key ctrl+shift+v
+ydotool key 29:1 42:1 47:1 47:0 42:0 29:0  # Ctrl+Shift+V
