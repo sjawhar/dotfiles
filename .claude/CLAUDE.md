@@ -33,9 +33,29 @@ The only legitimate reasons to defer:
 
 When asked to file an issue for deferred work, do it immediately — before continuing with remaining tasks. Don't defer the filing itself.
 
-### Don't Assume Issues Are Pre-existing
+### Goal Integrity
 
-When you encounter a failing test, a lint error, a broken import, or any other issue — **do not assume it was already broken unless you have proof.** Check diffs and logs to determine whether the issue exists on main. If you introduced it (even indirectly), fix it. Saying "this appears to be a pre-existing issue" without checking is a way to avoid work.
+**The user's goal is the goal.** Not your subtask, not your diagnosis, not your theory about what the problem is. If the user's original problem isn't solved, you're not done.
+
+Before claiming work is complete or suggesting next steps:
+1. Restate the user's original goal (not your subtask or diagnosis)
+2. Verify the original goal is actually met
+3. If blocked, propose a workaround — don't reclassify the blocker as "out of scope"
+
+**Red Flags — if you're thinking any of these, STOP:**
+
+| Thought | What's actually happening |
+|---------|--------------------------|
+| "That's an infrastructure issue" | You're reclassifying a blocker as someone else's problem |
+| "The component tests cover this" | You're substituting a proxy for the actual verification |
+| "The user probably wants to move fast" | You're negotiating down a standard the user already set |
+| "We already tested this earlier" | Different code = different test. Previous results don't carry over |
+| "This isn't related to our changes" | The user's goal doesn't care whose fault it is |
+| "I'll suggest they can skip this" | You're offering an off-ramp from a commitment they already made |
+
+### Use Your Context
+
+Tasks often require long-running, agentic capabilities. When you encounter a user request that feels time-consuming or extensive in scope, you should be persistent and use all available context needed to accomplish the task. The user is aware of your context constraints and expects you to work autonomously until the task is complete. Use the full context window if the task requires it.
 
 ### Scope Awareness
 
