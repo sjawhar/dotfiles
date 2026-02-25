@@ -4,8 +4,11 @@
 # ///
 """Markdown preview server with live reload."""
 
+import base64
 import hashlib
 import http.server
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -60,13 +63,35 @@ TEMPLATE = """\
 </html>"""
 
 
+def osc_copy(text):
+    """Copy text to system clipboard via OSC 52 (works through SSH + tmux)."""
+    b64 = base64.b64encode(text.encode()).decode()
+    seq = f"\033]52;c;{b64}\a"
+    if os.environ.get("TMUX"):
+        seq = f"\033Ptmux;\033{seq}\033\\"
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write(seq)
+    except OSError:
+        pass  # no tty (non-interactive)
+
+
+def get_ip():
+    """Get Tailscale IP, falling back to localhost."""
+    try:
+        return subprocess.check_output(
+            ["tailscale", "ip", "-4"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "localhost"
+
+
 def main():
     if len(sys.argv) < 2:
-        print("Usage: mdview-server.py <file.md> [port]", file=sys.stderr)
+        print("Usage: mdview-server.py <file.md>", file=sys.stderr)
         sys.exit(1)
 
     file = Path(sys.argv[1]).resolve()
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8090
 
     if not file.exists():
         print(f"File not found: {file}", file=sys.stderr)
@@ -105,8 +130,13 @@ def main():
     class Server(http.server.HTTPServer):
         allow_reuse_address = True
 
-    with Server(("0.0.0.0", port), Handler) as httpd:
-        print(f"Serving {file.name} on port {port}", file=sys.stderr)
+    # Bind to port 0 — OS assigns next available
+    with Server(("0.0.0.0", 0), Handler) as httpd:
+        port = httpd.server_address[1]
+        url = f"http://{get_ip()}:{port}"
+        osc_copy(url)
+        print(f"Serving: {url} (copied to clipboard)", file=sys.stderr)
+        print("Ctrl+C to stop", file=sys.stderr)
         httpd.serve_forever()
 
 
