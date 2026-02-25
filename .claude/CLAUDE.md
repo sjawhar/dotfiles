@@ -22,17 +22,17 @@ Invoke the `using-jj` skill before any version control operation for full comman
 This includes (but is not limited to):
 - overwriting credentials/auth state
 - deleting branches, workspaces, files, or user data
-- force pushes or history rewrites
+- force pushes or history rewrites **in git** (jj rewrites are safe — the operation log makes everything recoverable via `jj undo`)
 - disabling plugins/safety systems to "get unstuck"
 - changing shared/global configuration in ways that can break other workflows
 
-Before any destructive action:
+
+Before any actually destructive action (credentials, data deletion, git force push):
 1. State exactly what will change and what could break
 2. Propose the safest viable alternative first
 3. Get explicit approval
 4. Execute only the approved action
 
-If there is any uncertainty, stop and ask. Preserving known-good behavior outranks speed.
 
 ### Writing Plans
 
