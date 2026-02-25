@@ -40,6 +40,23 @@ All changes accumulate in the working copy change (`@`). Don't create new commit
 2. When done, push with `jj git push` (see Pushing Changes)
 3. For fixes after pushing: just edit files and push again — don't create new commits or re-describe
 
+### Modifying Existing Changes
+
+To modify a change that already has a description, **do NOT make changes in `@`, describe `@`, then squash.** This opens an interactive editor that fails in agent contexts.
+
+**Option 1: Edit the target directly** (preferred)
+```bash
+jj edit <change_id>    # Move @ to the change you want to modify
+# Make your changes directly
+jj new                 # Create new empty change when done
+```
+
+**Option 2: Squash without describing**
+```bash
+# Make changes in @ — do NOT run jj describe
+jj squash              # Content moves to @-, parent keeps its description
+```
+
 ## Commands (use these instead of git)
 
 | Task | Command |
@@ -188,6 +205,16 @@ jj squash --into qzmzpxyl -- tasks/my-task/
 1. `jj absorb` — routes edits to existing lines via blame
 2. `jj squash --into <change_id> -- <paths>` — routes new files by path
 3. `jj diff` — verify `@` is empty (nothing left unrouted)
+
+### `jj squash` opens editor when both changes have descriptions
+
+When both `@` and `@-` have non-empty descriptions, `jj squash` opens an interactive editor to combine them. **This always fails in agent/non-TTY contexts.**
+
+If you already described `@` and need to squash:
+- `jj squash -m "description"` — set the final description directly
+- `jj squash -u` — keep the destination's description, discard source's
+
+But the real fix is to not get into this state — see "Modifying Existing Changes" above.
 
 ### `jj diff` in non-TTY / agent contexts
 
