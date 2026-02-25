@@ -19,6 +19,7 @@ rust = "1.92.0"  # Required to build jj from source
 starship = "1.24.2" # Shell prompt
 yq = "4.50.1"       # YAML processor
 zoxide = "0.9.8"    # Smart directory jumping (z command)
+neovim = "0.11.6"  # Text editor
 
 # Development
 "npm:basedpyright" = "1.29.1"  # Python LSP (pyright fork with extras)
