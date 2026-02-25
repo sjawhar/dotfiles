@@ -1,0 +1,334 @@
+#!/bin/bash
+set -euo pipefail
+
+CONFIG_FILE="${SYNC_REPOS_CONFIG:-/home/ubuntu/.dotfiles/sync-repos.json}"
+RESULTS='[]'
+
+log() {
+  printf '%s\n' "$*" >&2
+}
+
+expand_path() {
+  local input="$1"
+  case "$input" in
+    "~")
+      printf '%s\n' "$HOME"
+      ;;
+    "~/"*)
+      printf '%s\n' "$HOME/${input#\~/}"
+      ;;
+    *)
+      printf '%s\n' "$input"
+      ;;
+  esac
+}
+
+add_result() {
+  local item_json="$1"
+  RESULTS="$(jq -c --argjson item "$item_json" '. + [$item]' <<<"$RESULTS")"
+}
+
+current_change_id() {
+  local change_id
+  change_id="$(jj log -r '@' --no-graph -T 'change_id' 2>/dev/null || true)"
+  change_id="${change_id//$'\n'/}"
+  change_id="${change_id//$'\r'/}"
+  change_id="${change_id// /}"
+  printf '%s\n' "$change_id"
+}
+
+has_conflicts() {
+  jj status 2>/dev/null | grep -qi 'conflict'
+}
+
+is_ancestor() {
+  local ancestor_rev="$1"
+  local descendant_rev="$2"
+  local match
+  match="$(jj log -r "${ancestor_rev} & ::${descendant_rev}" --no-graph -T 'change_id' 2>/dev/null || true)"
+  match="${match//$'\n'/}"
+  match="${match//$'\r'/}"
+  match="${match// /}"
+  [ -n "$match" ]
+}
+
+get_conflicting_files() {
+  local list
+  list="$(jj resolve --list 2>/dev/null || true)"
+  if [ -z "$list" ]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  printf '%s\n' "$list" | jq -R -s '
+    split("\n")
+    | map(select(length > 0))
+    | map(capture("^(?<file>[^\\t]+?)(\\t|\\s{2,}|$)").file)
+    | map(select(length > 0))
+    | unique
+  '
+}
+
+detect_upstream_branch() {
+  local remote_name="$1"
+  local candidate
+  for candidate in "dev@${remote_name}" "main@${remote_name}" "main@origin"; do
+    if jj log -r "$candidate" --no-graph -T 'change_id' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_latest_release() {
+  local latest
+  latest="$(git tag -l 'v*' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' | sort -V | tail -n 1 || true)"
+  printf '%s\n' "$latest"
+}
+
+ensure_remotes() {
+  local remotes_json="$1"
+  local remote_name
+  local remote_url
+
+  while IFS= read -r remote_name; do
+    [ -n "$remote_name" ] || continue
+    remote_url="$(jq -r --arg key "$remote_name" '.[$key]' <<<"$remotes_json")"
+    if ! jj git remote list 2>/dev/null | grep -q "^${remote_name}[[:space:]]"; then
+      log "Adding missing remote ${remote_name}"
+      if ! jj git remote add "$remote_name" "$remote_url" >/dev/null 2>&1; then
+        return 1
+      fi
+    fi
+  done < <(jq -r 'keys[]' <<<"$remotes_json")
+
+  return 0
+}
+
+run_post_sync_hooks() {
+  local hooks_json="$1"
+  local failed="false"
+  local failed_messages="[]"
+  local cmd_json
+  local -a raw_args
+  local -a expanded_args
+  local arg
+
+  while IFS= read -r cmd_json; do
+    mapfile -t raw_args < <(jq -r '.[]' <<<"$cmd_json")
+    if [ "${#raw_args[@]}" -eq 0 ]; then
+      continue
+    fi
+
+    expanded_args=()
+    for arg in "${raw_args[@]}"; do
+      expanded_args+=("$(expand_path "$arg")")
+    done
+
+    log "Running post_sync: ${expanded_args[*]}"
+    if ! "${expanded_args[@]}"; then
+      failed="true"
+      failed_messages="$(jq -c --arg cmd "${expanded_args[*]}" '. + [$cmd]' <<<"$failed_messages")"
+      log "post_sync command failed: ${expanded_args[*]}"
+    fi
+  done < <(jq -c '.[]' <<<"$hooks_json")
+
+  jq -cn --argjson failed "$failed" --argjson messages "$failed_messages" '{failed: $failed, messages: $messages}'
+}
+
+process_repo() {
+  local name="$1"
+  local cfg_json="$2"
+  local path_raw
+  local path
+  local remotes_json
+  local method
+  local target
+  local bookmark
+  local before
+  local after
+  local status
+  local error_message=""
+  local reverted="false"
+  local conflicting_files='[]'
+  local has_upstream="false"
+  local upstream_branch=""
+  local default_branch=""
+  local branch_name=""
+  local base=""
+  local post_sync_json='[]'
+  local post_sync_result
+  local post_failed
+  local post_messages
+
+  path_raw="$(jq -r '.path // empty' <<<"$cfg_json")"
+  remotes_json="$(jq -c '.remotes // {}' <<<"$cfg_json")"
+  method="$(jq -r '.method // "rebase"' <<<"$cfg_json")"
+  target="$(jq -r '.target // "branch"' <<<"$cfg_json")"
+  bookmark="$(jq -r '.bookmark // ""' <<<"$cfg_json")"
+  post_sync_json="$(jq -c '.post_sync // []' <<<"$cfg_json")"
+
+  if [ -z "$path_raw" ] || [ "$remotes_json" = "{}" ]; then
+    jq -cn --arg name "$name" --arg path "$(expand_path "$path_raw")" --arg status "error" --arg error "invalid config: path/remotes required" '{name: $name, status: $status, path: $path, error: $error}'
+    return 0
+  fi
+
+  path="$(expand_path "$path_raw")"
+  if [ ! -d "$path" ]; then
+    jq -cn --arg name "$name" --arg status "missing" --arg path "$path" '{name: $name, status: $status, path: $path}'
+    return 0
+  fi
+
+  (
+    cd "$path"
+    log "Syncing ${name} (${path})"
+
+    if ! ensure_remotes "$remotes_json"; then
+      jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg error "failed to ensure remotes" '{name: $name, status: $status, path: $path, error: $error}'
+      return 0
+    fi
+
+    before="$(current_change_id)"
+
+    if jq -e '.upstream != null' <<<"$remotes_json" >/dev/null 2>&1; then
+      has_upstream="true"
+    fi
+
+    if [ "$has_upstream" = "false" ]; then
+      if ! jj git fetch >/dev/null 2>&1; then
+        jq -cn --arg name "$name" --arg status "fetch_failed" --arg path "$path" --arg before "$before" '{name: $name, status: $status, path: $path, before: $before, error: "jj git fetch failed"}'
+        return 0
+      fi
+
+      if jj log -r 'main@origin' --no-graph -T 'change_id' >/dev/null 2>&1; then
+        default_branch='main@origin'
+      elif jj log -r 'master@origin' --no-graph -T 'change_id' >/dev/null 2>&1; then
+        default_branch='master@origin'
+      else
+        jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg before "$before" --arg error "could not detect main/master at origin" '{name: $name, status: $status, path: $path, before: $before, error: $error}'
+        return 0
+      fi
+
+      if ! jj rebase -d "$default_branch" >/dev/null 2>&1; then
+        error_message="jj rebase failed"
+      fi
+
+      if has_conflicts; then
+        conflicting_files="$(get_conflicting_files)"
+        jj undo >/dev/null 2>&1 || true
+        after="$(current_change_id)"
+        jq -cn --arg name "$name" --arg status "conflict" --arg path "$path" --arg before "$before" --arg after "$after" --argjson files "$conflicting_files" --argjson reverted true '{name: $name, status: $status, path: $path, before: $before, after: $after, conflicting_files: $files, reverted: $reverted}'
+        return 0
+      fi
+
+      if [ -n "$error_message" ]; then
+        after="$(current_change_id)"
+        jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg before "$before" --arg after "$after" --arg error "$error_message" '{name: $name, status: $status, path: $path, before: $before, after: $after, error: $error}'
+        return 0
+      fi
+    else
+      if ! jj git fetch --all-remotes >/dev/null 2>&1; then
+        jq -cn --arg name "$name" --arg status "fetch_failed" --arg path "$path" --arg before "$before" '{name: $name, status: $status, path: $path, before: $before, error: "jj git fetch --all-remotes failed"}'
+        return 0
+      fi
+
+      if ! upstream_branch="$(detect_upstream_branch 'upstream')"; then
+        jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg before "$before" --arg error "could not detect upstream branch" '{name: $name, status: $status, path: $path, before: $before, error: $error}'
+        return 0
+      fi
+
+      branch_name="${upstream_branch%@*}"
+      if ! jj bookmark set "$branch_name" --to "$upstream_branch" >/dev/null 2>&1; then
+        jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg before "$before" --arg error "failed to set local bookmark for upstream branch" '{name: $name, status: $status, path: $path, before: $before, error: $error}'
+        return 0
+      fi
+
+      jj git push --bookmark "$branch_name" >/dev/null 2>&1 || true
+
+      if [ -n "$bookmark" ]; then
+        if [ "$target" = "release" ]; then
+          base="$(find_latest_release)"
+          if [ -z "$base" ]; then
+            jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg before "$before" --arg error "release target requested but no semver v* tags found" '{name: $name, status: $status, path: $path, before: $before, error: $error}'
+            return 0
+          fi
+        else
+          base="$upstream_branch"
+        fi
+
+        if [ "$method" = "merge" ]; then
+          if ! is_ancestor "$base" "$bookmark"; then
+            if ! jj new "$bookmark" "$base" >/dev/null 2>&1; then
+              jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg before "$before" --arg error "jj new merge setup failed" '{name: $name, status: $status, path: $path, before: $before, error: $error}'
+              return 0
+            fi
+
+            if has_conflicts; then
+              conflicting_files="$(get_conflicting_files)"
+              jj undo >/dev/null 2>&1 || true
+              after="$(current_change_id)"
+              jq -cn --arg name "$name" --arg status "conflict" --arg path "$path" --arg before "$before" --arg after "$after" --argjson files "$conflicting_files" --argjson reverted true '{name: $name, status: $status, path: $path, before: $before, after: $after, conflicting_files: $files, reverted: $reverted}'
+              return 0
+            fi
+
+            if ! jj bookmark set "$bookmark" >/dev/null 2>&1; then
+              jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg before "$before" --arg error "failed to move bookmark after merge" '{name: $name, status: $status, path: $path, before: $before, error: $error}'
+              return 0
+            fi
+          fi
+        else
+          if ! jj rebase -b "$bookmark" -d "$base" >/dev/null 2>&1; then
+            error_message="jj rebase -b failed"
+          fi
+
+          if has_conflicts; then
+            conflicting_files="$(get_conflicting_files)"
+            jj undo >/dev/null 2>&1 || true
+            after="$(current_change_id)"
+            jq -cn --arg name "$name" --arg status "conflict" --arg path "$path" --arg before "$before" --arg after "$after" --argjson files "$conflicting_files" --argjson reverted true '{name: $name, status: $status, path: $path, before: $before, after: $after, conflicting_files: $files, reverted: $reverted}'
+            return 0
+          fi
+
+          if [ -n "$error_message" ]; then
+            after="$(current_change_id)"
+            jq -cn --arg name "$name" --arg status "error" --arg path "$path" --arg before "$before" --arg after "$after" --arg error "$error_message" '{name: $name, status: $status, path: $path, before: $before, after: $after, error: $error}'
+            return 0
+          fi
+        fi
+      fi
+    fi
+
+    after="$(current_change_id)"
+    if [ "$before" = "$after" ]; then
+      status="up_to_date"
+    else
+      status="synced"
+    fi
+
+    post_sync_result="$(run_post_sync_hooks "$post_sync_json")"
+    post_failed="$(jq -r '.failed' <<<"$post_sync_result")"
+    post_messages="$(jq -c '.messages' <<<"$post_sync_result")"
+
+    if [ "$post_failed" = "true" ]; then
+      jq -cn --arg name "$name" --arg status "post_sync_failed" --arg path "$path" --arg before "$before" --arg after "$after" --arg error "post_sync command(s) failed" --argjson messages "$post_messages" '{name: $name, status: $status, path: $path, before: $before, after: $after, error: $error, post_sync_failures: $messages}'
+      return 0
+    fi
+
+    jq -cn --arg name "$name" --arg status "$status" --arg path "$path" --arg before "$before" --arg after "$after" '{name: $name, status: $status, path: $path, before: $before, after: $after}'
+  )
+}
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  log "Config not found: $CONFIG_FILE"
+  printf '[]\n'
+  exit 1
+fi
+
+while IFS= read -r repo_name; do
+  repo_cfg="$(jq -c --arg name "$repo_name" '.[$name]' "$CONFIG_FILE")"
+  result="$(process_repo "$repo_name" "$repo_cfg")"
+  add_result "$result"
+done < <(jq -r 'keys[]' "$CONFIG_FILE")
+
+jq . <<<"$RESULTS"

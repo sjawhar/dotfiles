@@ -1,0 +1,85 @@
+{
+  "superpowers": {
+    "path": "~/.dotfiles/vendor/superpowers",
+    "remotes": {
+      "origin": "https://github.com/obra/superpowers.git"
+    }
+  },
+  "compound-engineering": {
+    "path": "~/.dotfiles/vendor/compound-engineering",
+    "remotes": {
+      "origin": "https://github.com/EveryInc/compound-engineering-plugin"
+    },
+    "post_sync": [
+      ["bash", "~/.dotfiles/scripts/vendor-update-ce"]
+    ]
+  },
+  "streamlinear": {
+    "path": "~/.dotfiles/vendor/streamlinear",
+    "remotes": {
+      "origin": "https://github.com/obra/streamlinear.git",
+      "fork": "https://github.com/sjawhar/streamlinear.git"
+    }
+  },
+  "agent-skills": {
+    "path": "~/.dotfiles/vendor/agent-skills",
+    "remotes": {
+      "origin": "https://github.com/intellectronica/agent-skills.git"
+    }
+  },
+  "legion-vendor": {
+    "path": "~/.dotfiles/vendor/legion",
+    "remotes": {
+      "origin": "https://github.com/sjawhar/legion"
+    }
+  },
+  "opencode": {
+    "path": "~/opencode/default",
+    "remotes": {
+      "origin": "https://github.com/sjawhar/opencode",
+      "upstream": "https://github.com/anomalyco/opencode"
+    },
+    "bookmark": "sami",
+    "method": "merge",
+    "target": "release"
+  },
+  "oh-my-opencode": {
+    "path": "~/oh-my-opencode/original",
+    "remotes": {
+      "origin": "https://github.com/sjawhar/oh-my-opencode",
+      "upstream": "https://github.com/code-yeongyu/oh-my-opencode"
+    },
+    "bookmark": "sami",
+    "method": "merge",
+    "target": "release"
+  },
+  "slack-mcp-server": {
+    "path": "~/slack-mcp-server",
+    "remotes": {
+      "origin": "https://github.com/sjawhar/slack-mcp-server",
+      "upstream": "https://github.com/CHANGEME/slack-mcp-server"
+    },
+    "bookmark": "sami",
+    "post_sync": [
+      ["go", "build", "-o", "/usr/local/bin/slack-mcp-server", "."]
+    ]
+  },
+  "legion": {
+    "path": "~/legion/default",
+    "remotes": {
+      "origin": "https://github.com/sjawhar/legion"
+    }
+  },
+  "jj": {
+    "path": "~/jj/default",
+    "remotes": {
+      "origin": "https://github.com/jj-vcs/jj"
+    }
+  },
+  "dotfiles": {
+    "path": "~/.dotfiles",
+    "remotes": {
+      "origin": "https://github.com/sjawhar/dotfiles"
+    }
+  }
+}
