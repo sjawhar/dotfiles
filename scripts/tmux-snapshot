@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Snapshot tmux workspace: capture pane state and AI session IDs."""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+POLL_INTERVAL_SECONDS = 1.0
+CLAUDE_SECOND_INTERRUPT_DELAY_SECONDS = 0.5
+POLL_TIMEOUT_SECONDS = 30.0
+
+AI_TYPE_OPENCODE = "opencode"
+AI_TYPE_CLAUDE = "claude"
+
+OPENCODE_SESSION_RE = re.compile(r"opencode -s (ses_\S+)")
+CLAUDE_SESSION_RE = re.compile(r"claude -r (\S+)")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+@dataclass
+class Pane:
+    pane_id: str
+    window_index: int
+    window_name: str
+    pane_index: int
+    cwd: str
+    command: str
+    title: str
+    ai_type: str | None
+
+
+def eprint(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def run_tmux(*args: str) -> str:
+    proc = subprocess.run(
+        ["tmux", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout
+
+
+def detect_ai_type(title: str) -> str | None:
+    if title.startswith("OC | ") or title == "OpenCode":
+        return AI_TYPE_OPENCODE
+    if "claude" in title.lower():
+        return AI_TYPE_CLAUDE
+    return None
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", text)
+
+
+def extract_opencode_title(captured_output: str) -> str | None:
+    for raw_line in captured_output.splitlines():
+        line = strip_ansi(raw_line).strip()
+        if not line:
+            continue
+        if "Session" in line and "Continue" not in line:
+            _, _, remainder = line.partition("Session")
+            cleaned = remainder.strip()
+            return cleaned or None
+    return None
+
+
+def get_tmux_session_name() -> str:
+    output = run_tmux("display-message", "-p", "#S")
+    return output.strip()
+
+
+def list_panes_for_session(tmux_session: str, own_pane_id: str | None) -> list[Pane]:
+    separator = "\x1f"
+    fmt = separator.join(
+        [
+            "#{pane_id}",
+            "#{window_index}",
+            "#{window_name}",
+            "#{pane_index}",
+            "#{pane_current_path}",
+            "#{pane_current_command}",
+            "#{pane_title}",
+        ]
+    )
+    output = run_tmux("list-panes", "-s", "-t", tmux_session, "-F", fmt)
+
+    panes: list[Pane] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(separator)
+        if len(parts) != 7:
+            eprint(f"warning: unable to parse pane metadata row: {line!r}")
+            continue
+
+        pane_id, window_index, window_name, pane_index, cwd, command, title = parts
+        if own_pane_id and pane_id == own_pane_id:
+            continue
+
+        try:
+            pane = Pane(
+                pane_id=pane_id,
+                window_index=int(window_index),
+                window_name=window_name,
+                pane_index=int(pane_index),
+                cwd=cwd,
+                command=command,
+                title=title,
+                ai_type=detect_ai_type(title),
+            )
+            panes.append(pane)
+        except ValueError as exc:
+            eprint(f"warning: invalid pane index metadata for {pane_id}: {exc}")
+
+    panes.sort(key=lambda p: (p.window_index, p.pane_index))
+    return panes
+
+
+def capture_pane_text(pane_id: str) -> str:
+    return run_tmux("capture-pane", "-t", pane_id, "-p")
+
+
+def send_interrupts(pane: Pane) -> None:
+    if pane.ai_type == AI_TYPE_OPENCODE:
+        run_tmux("send-keys", "-t", pane.pane_id, "C-c")
+        return
+
+    if pane.ai_type == AI_TYPE_CLAUDE:
+        run_tmux("send-keys", "-t", pane.pane_id, "C-c")
+        time.sleep(CLAUDE_SECOND_INTERRUPT_DELAY_SECONDS)
+        run_tmux("send-keys", "-t", pane.pane_id, "C-c")
+
+
+def poll_for_ai_session(pane: Pane) -> dict[str, str] | None:
+    deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            captured = capture_pane_text(pane.pane_id)
+        except subprocess.CalledProcessError as exc:
+            eprint(f"warning: capture-pane failed for {pane.pane_id}: {exc}")
+            return None
+
+        if pane.ai_type == AI_TYPE_OPENCODE:
+            match = OPENCODE_SESSION_RE.search(captured)
+            if match:
+                session_id = match.group(1)
+                extracted_title = extract_opencode_title(captured)
+                # Fall back to pane title with OC prefix stripped
+                if not extracted_title:
+                    extracted_title = pane.title.removeprefix("OC | ")
+                return {
+                    "type": AI_TYPE_OPENCODE,
+                    "session_id": session_id,
+                    "title": extracted_title,
+                    "resume_cmd": f"opencode -s {session_id}",
+                }
+        elif pane.ai_type == AI_TYPE_CLAUDE:
+            match = CLAUDE_SESSION_RE.search(captured)
+            if match:
+                session_id = match.group(1)
+                return {
+                    "type": AI_TYPE_CLAUDE,
+                    "session_id": session_id,
+                    "title": pane.title,
+                    "resume_cmd": f"claude -r {session_id}",
+                }
+
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    eprint(
+        f"warning: timeout waiting for {pane.ai_type or 'ai'} session id in pane {pane.pane_id}"
+    )
+    return None
+
+
+def build_snapshot(panes: list[Pane], tmux_session: str) -> dict[str, object]:
+    pane_entries: list[dict[str, object]] = []
+    for pane in panes:
+        pane_entries.append(
+            {
+                "window_index": pane.window_index,
+                "window_name": pane.window_name,
+                "pane_index": pane.pane_index,
+                "cwd": pane.cwd,
+                "command": pane.command,
+                "ai_session": None,
+            }
+        )
+
+    for index, pane in enumerate(panes):
+        if not pane.ai_type:
+            continue
+
+        try:
+            eprint(f"capturing {pane.ai_type} session from pane {pane.pane_id}")
+            send_interrupts(pane)
+            pane_entries[index]["ai_session"] = poll_for_ai_session(pane)
+        except subprocess.CalledProcessError as exc:
+            eprint(f"warning: failed tmux interaction for pane {pane.pane_id}: {exc}")
+            pane_entries[index]["ai_session"] = None
+        except Exception as exc:  # defensive: never fail entire snapshot on one pane
+            eprint(f"warning: unexpected pane error for {pane.pane_id}: {exc}")
+            pane_entries[index]["ai_session"] = None
+
+    captured_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    captured_at = captured_at.replace("+00:00", "Z")
+
+    return {
+        "version": 1,
+        "captured_at": captured_at,
+        "hostname": socket.gethostname(),
+        "tmux_session": tmux_session,
+        "panes": pane_entries,
+    }
+
+
+def write_snapshot(snapshot: dict[str, object]) -> None:
+    output_dir = Path.home() / ".tmux-workspace"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "snapshot.json"
+
+    serialized = json.dumps(snapshot, indent=2)
+    output_path.write_text(serialized + "\n", encoding="utf-8")
+    print(serialized)
+
+
+def main() -> int:
+    if "TMUX" not in os.environ:
+        eprint("error: not running inside tmux")
+        return 1
+
+    own_pane_id = os.environ.get("TMUX_PANE")
+    try:
+        tmux_session = get_tmux_session_name()
+        panes = list_panes_for_session(tmux_session, own_pane_id)
+        ai_count = sum(1 for p in panes if p.ai_type)
+        eprint(f"Snapshotting tmux session: {tmux_session}")
+        eprint(f"Found {len(panes)} pane(s), {ai_count} AI session(s)")
+        snapshot = build_snapshot(panes, tmux_session)
+        write_snapshot(snapshot)
+        captured = sum(1 for p in snapshot["panes"] if p["ai_session"])
+        eprint(f"Captured {captured}/{ai_count} session ID(s)")
+        eprint(f"Saved to {SNAPSHOT_DIR / 'snapshot.json'}")
+        return 0
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else str(exc)
+        eprint(f"error: tmux command failed: {stderr}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
