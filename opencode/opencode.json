@@ -6,6 +6,7 @@
   },
   "plugin": [
     "file://{env:HOME}/oh-my-opencode/original",
+    "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "opencode-antigravity-auth@1.6.0"
   ],
   "provider": {
