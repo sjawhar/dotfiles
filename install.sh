@@ -12,8 +12,6 @@ source "${DOTFILES_DIR}/installers/tmux.sh"
 source "${DOTFILES_DIR}/installers/nvim.sh"
 source "${DOTFILES_DIR}/installers/claude.sh"
 source "${DOTFILES_DIR}/installers/opencode.sh"
-source "${DOTFILES_DIR}/installers/voxtype.sh"
-source "${DOTFILES_DIR}/installers/ghostty.sh"
 
 echo "Generating completions..."
 COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"

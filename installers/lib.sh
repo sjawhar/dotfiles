@@ -36,7 +36,12 @@ ensure_vendor() {
 
 ensure_command() {
     local name="$1" install_cmd="$2"
-    command -v "$name" &>/dev/null && return 0
+    local found
+    found=$(command -v "$name" 2>/dev/null) || true
+    # Skip shims — they wrap the real binary but don't mean it's installed
+    if [ -n "$found" ] && [[ "$found" != "${DOTFILES_DIR}/shims/"* ]]; then
+        return 0
+    fi
     echo "Installing ${name}..."
     eval "$install_cmd"
     hash -r

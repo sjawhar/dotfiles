@@ -174,3 +174,21 @@ dslack()
         jess/slack "$@"
 }
 
+doc()
+{
+    docker run --rm -it \
+        --user "$(id -u):$(id -g)" \
+        -e HOME \
+        -e TERM \
+        -v "${HOME}/.config/opencode:${HOME}/.config/opencode" \
+        -v "${HOME}/.local/share/opencode:${HOME}/.local/share/opencode" \
+        -v "${HOME}/.local/state/opencode:${HOME}/.local/state/opencode" \
+        -v "${HOME}/.cache/opencode:${HOME}/.cache/opencode" \
+        -v "${HOME}/.opencode:${HOME}/.opencode" \
+        -v "${HOME}/oh-my-opencode:${HOME}/oh-my-opencode" \
+        -v "${HOME}/.dotfiles:${HOME}/.dotfiles" \
+        -v "${HOME}/Code:${HOME}/Code" \
+        -w "$(pwd)" \
+        sjawhar/devpod:next \
+        "${HOME}/.opencode/bin/opencode" "$@"
+}

@@ -16,3 +16,7 @@ ensure_link "${DOTFILES_DIR}/pipewire/10-video-quality.conf" ~/.config/pipewire/
 mkdir -p ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1
 ensure_link "${LAPTOP_DIR}/shortcuts-custom" \
     ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom
+
+# --- Desktop apps (not installed in devcontainers) ---
+source "${DOTFILES_DIR}/installers/ghostty.sh"
+source "${DOTFILES_DIR}/installers/voxtype.sh"
