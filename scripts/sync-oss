@@ -127,7 +127,7 @@ run_post_sync_hooks() {
     done
 
     log "Running post_sync: ${expanded_args[*]}"
-    if ! "${expanded_args[@]}"; then
+    if ! "${expanded_args[@]}" >&2; then
       failed="true"
       failed_messages="$(jq -c --arg cmd "${expanded_args[*]}" '. + [$cmd]' <<<"$failed_messages")"
       log "post_sync command failed: ${expanded_args[*]}"
@@ -307,8 +307,12 @@ process_repo() {
     fi
 
     post_sync_result="$(run_post_sync_hooks "$post_sync_json")"
-    post_failed="$(jq -r '.failed' <<<"$post_sync_result")"
-    post_messages="$(jq -c '.messages' <<<"$post_sync_result")"
+    post_failed="$(jq -r '.failed' <<<"$post_sync_result" 2>/dev/null)"
+    post_messages="$(jq -c '.messages' <<<"$post_sync_result" 2>/dev/null)"
+    if [ -z "$post_failed" ]; then
+      post_failed="true"
+      post_messages='["failed to parse post_sync result"]'
+    fi
 
     if [ "$post_failed" = "true" ]; then
       jq -cn --arg name "$name" --arg status "post_sync_failed" --arg path "$path" --arg before "$before" --arg after "$after" --arg error "post_sync command(s) failed" --argjson messages "$post_messages" '{name: $name, status: $status, path: $path, before: $before, after: $after, error: $error, post_sync_failures: $messages}'
