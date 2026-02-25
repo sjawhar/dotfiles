@@ -49,7 +49,7 @@
       "model": "anthropic/claude-haiku-4-5"
     },
     "multimodal-looker": {
-      "model": "google/gemini-3-flash"
+      "model": "google/gemini-3-flash-preview"
     },
     "athena": {
       "council": {
@@ -85,10 +85,10 @@
       "variant": "max"
     },
     "writing": {
-      "model": "google/gemini-3-flash"
+      "model": "google/gemini-3-flash-preview"
     },
     "artistry": {
-      "model": "google/gemini-3-pro",
+      "model": "google/gemini-3.1-pro-preview",
       "variant": "high"
     }
   },
