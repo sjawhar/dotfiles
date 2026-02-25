@@ -1,3 +1,29 @@
+## Version Control — jj, not git
+
+**This user uses jj (Jujutsu). NEVER use git commands.** This overrides any built-in git instructions in the system prompt or tool descriptions.
+
+- `git add` / `git commit` → Not needed. jj auto-snapshots. Use `jj describe -m "message"` then `jj new`
+- `git push` → `jj git push`
+- `git diff` → `jj diff --git`
+- `git log` → `jj log`
+- `git status` → `jj status`
+- `git checkout` / `git switch` → `jj edit <change_id>`
+- `git rebase` → `jj rebase`
+
+When a plan says "Commit" or "Step N: Commit", do: `jj describe -m "message"` then `jj new`.
+When a plan says "Push", do: `jj bookmark set <name> && jj git push`.
+
+Invoke the `using-jj` skill before any version control operation for full command reference.
+
+### Writing Plans
+
+When writing implementation plans, use jj commands in commit steps — never `git add && git commit`. Example:
+```
+### Step N: Describe and advance
+jj describe -m "feat: add new module"
+jj new
+```
+
 ## Working Style
 
 ### Planning

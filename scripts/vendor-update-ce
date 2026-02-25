@@ -1,0 +1,43 @@
+#!/bin/bash
+# Regenerate compound-engineering OpenCode agents after vendor update
+set -euo pipefail
+
+CE_DIR="${HOME}/.dotfiles/vendor/compound-engineering"
+CE_OC="${HOME}/.dotfiles/vendor/compound-engineering-opencode"
+
+if [ ! -d "$CE_DIR" ]; then
+    echo "compound-engineering vendor dir not found" >&2
+    exit 1
+fi
+
+if ! command -v bun &>/dev/null; then
+    echo "bun not found — skipping CE agent regeneration" >&2
+    exit 0
+fi
+
+echo "Regenerating compound-engineering agents..."
+( cd "$CE_DIR" && [ -d node_modules ] || bun install --silent )
+rm -rf "$CE_OC"
+( cd "$CE_DIR" && bun run src/index.ts install compound-engineering --to opencode --output "$CE_OC" 2>/dev/null )
+
+# Refresh CE skill/command symlinks (just the CE-specific parts, not the full installer)
+OPENCODE_DIR="${HOME}/.config/opencode"
+CE_PLUGIN="${CE_DIR}/plugins/compound-engineering"
+
+# Re-symlink CE commands
+mkdir -p "${OPENCODE_DIR}/command"
+ln -sfn "${CE_PLUGIN}/commands" "${OPENCODE_DIR}/command/compound-engineering"
+
+# Re-symlink CE skills (only model-invocable ones)
+mkdir -p "${OPENCODE_DIR}/skills/compound-engineering"
+if [ -d "${CE_PLUGIN}/skills" ]; then
+    for skill_dir in "${CE_PLUGIN}/skills"/*/; do
+        [ -d "$skill_dir" ] || continue
+        skill_md="${skill_dir}SKILL.md"
+        [ -f "$skill_md" ] || continue
+        if grep -q "disable-model-invocation: true" "$skill_md" 2>/dev/null; then
+            continue
+        fi
+        ln -sfn "$skill_dir" "${OPENCODE_DIR}/skills/compound-engineering/$(basename "$skill_dir")"
+    done
+fi
