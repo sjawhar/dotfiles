@@ -42,3 +42,34 @@ Your job is to continuously monitor and resolve conflicts:
    - Current state of the merge commit
 
 If you encounter issues you can't resolve (ambiguous conflicts, broken code after resolution), stop and ask for help.
+
+## Revset Recipes for Parent Manipulation
+
+Use these when you need to add or remove parents from the octopus merge commit (e.g., a new task branch was added, or a task was completed and its branch merged to main).
+
+**Key revset operators:**
+- `<rev>-` — all parents of `<rev>`
+- `all:` prefix — required when a revset resolves to multiple revisions
+- `~` — set difference (remove from set)
+
+### Add a parent
+
+```bash
+# Add <new_parent> as an additional parent of <merge>
+jj rebase -s <merge> -d "all:<merge>-" -d <new_parent>
+```
+
+### Remove a parent
+
+```bash
+# Remove <parent_to_remove> from <merge>'s parents
+jj rebase -s <merge> -d "all:<merge>- ~ <parent_to_remove>"
+```
+
+### Check current parents
+
+```bash
+jj log -r 'parents(<merge>)'
+```
+
+**Note:** Keeping a merge with only 1 parent is valid in jj and simpler than rebuilding it when a second task is added again. Don't abandon the merge just because it temporarily has one parent.

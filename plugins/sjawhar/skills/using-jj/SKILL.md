@@ -58,7 +58,7 @@ All changes accumulate in the working copy change (`@`). Don't create new commit
 | Move to next/prev change | `jj next --edit` / `jj prev --edit` |
 | Squash `@` into parent | `jj squash` |
 | Squash interactively (TUI) | `jj squash -i` |
-| Redistribute edits to ancestors | `jj absorb` |
+| Redistribute edits to ancestors | `jj absorb` (see Gotchas) |
 | Abandon a change | `jj abandon <rev>` |
 | Undo last operation | `jj undo` |
 | Redo undone operation | `jj redo` |
@@ -167,3 +167,36 @@ When resolving conflicts after rebase:
 2. **Never lose functionality** — review what changed in the commits being merged
 3. **Don't delete local changes** without explicit permission
 4. **Verify after rebase** — compare the current diff (against main) with the pre-rebase diff to confirm no functionality was lost or accidentally reverted
+
+## Gotchas
+
+### `jj absorb` silently skips new files
+
+`jj absorb` routes edits to ancestors using **blame** — it only moves changes to lines that already exist in a parent commit. **New files have no blame history and are silently ignored.**
+
+After running `jj absorb`, always check `jj diff` to see if anything remains in `@`. If new files are still there, route them manually with path-based squash:
+
+```bash
+# Route specific new files to a target change
+jj squash --into <change_id> -- <file1> <file2>
+
+# Example: route all files under tasks/my-task/ to a specific change
+jj squash --into qzmzpxyl -- tasks/my-task/
+```
+
+**Two-phase save pattern** (when absorb isn't enough):
+1. `jj absorb` — routes edits to existing lines via blame
+2. `jj squash --into <change_id> -- <paths>` — routes new files by path
+3. `jj diff` — verify `@` is empty (nothing left unrouted)
+
+### `jj diff` in non-TTY / agent contexts
+
+Standard `jj diff` uses **word-level diffs** that concatenate old and new text without ANSI color codes in non-TTY output. This makes diffs unreadable — e.g. `trajectory-labs-pbc/tasksagent-c` is actually `[deleted:tasks][added:agent-c]` rendered without color.
+
+**Always use `--git` for verification in agent/piped contexts:**
+
+```bash
+jj diff --git          # Standard unified diff format (readable without color)
+jj diff --git -r <rev> # For a specific revision
+jj diff --git --stat   # Summary of changed files
+```
