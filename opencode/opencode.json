@@ -163,5 +163,14 @@
   },
   "instructions": [
     "~/.dotfiles/.claude/CLAUDE.md"
-  ]
+  ],
+  "voice": {
+    "type": "whisper",
+    "whisper": {
+      "url": "https://api.groq.com/openai/v1/audio/transcriptions",
+      "apiKey": "{env:GROQ_API_KEY}",
+      "model": "whisper-large-v3-turbo",
+      "language": "en"
+    }
+  }
 }
