@@ -1,0 +1,41 @@
+#!/bin/bash
+# Markdown preview server over Tailscale
+# Renders markdown to styled HTML with live reload.
+# URL is copied to clipboard via OSC 52.
+
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-${HOME}/.dotfiles}"
+PORT="${MDVIEW_PORT:-8090}"
+
+osc_copy() {
+    local seq
+    seq=$(printf '\033]52;c;%s\a' "$(printf '%s' "$1" | base64)")
+    [ -n "${TMUX:-}" ] && seq=$(printf '\033Ptmux;\033%s\033\\' "$seq")
+    printf '%s' "$seq" > /dev/tty
+}
+
+
+case "${1:-}" in
+    --help|-h|"")
+        echo "Usage: mdview <file.md>" >&2
+        exit 1
+        ;;
+esac
+
+file="$(realpath "$1")"
+if [ ! -f "$file" ]; then
+    echo "File not found: $file" >&2
+    exit 1
+fi
+
+# Build URL (prefer Tailscale IP, fall back to localhost)
+ip="$(tailscale ip -4 2>/dev/null || echo localhost)"
+url="http://${ip}:${PORT}"
+
+osc_copy "$url"
+echo "Serving: $url (copied to clipboard)"
+echo "Ctrl+C to stop"
+
+# Run in foreground — Ctrl+C to stop
+exec uv run "${DOTFILES_DIR}/scripts/mdview-server.py" "$file" "$PORT"
