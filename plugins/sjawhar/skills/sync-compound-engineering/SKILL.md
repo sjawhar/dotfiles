@@ -5,54 +5,41 @@ description: Use when updating compound-engineering after upstream changes. Conv
 
 # Sync Compound Engineering
 
-The installer (`installers/opencode.sh`) symlinks CE commands and enabled skills but skips disabled skills (`disable-model-invocation: true`). This skill fills the gap: disabled skills get converted to command files.
+Compound Engineering (CE) is automatically synced via `sync-oss` — it fetches the CE repo and runs `vendor-update-ce` as a post-sync hook. This skill documents both the automated flow and manual steps if you need to update CE outside of `sync-oss`.
 
-## Step 1: Update vendor
+## Automated (Preferred)
+
+`sync-oss` handles everything:
+1. Fetches `vendor/compound-engineering`
+2. Runs `vendor-update-ce` as a post_sync hook
+3. Converter output → `~/.local/share/ce-opencode/`
+4. Enabled commands → `~/.config/opencode/commands/` (with `ce:` prefix)
+5. Disabled commands + disabled skills → `~/.config/opencode/commands/ce/`
+6. Enabled skills → `~/.config/opencode/skills/ce/`
+7. Agents → `~/.config/opencode/agents/`
+8. Cleans up stale `compound-engineering/` prefixed directories
+
+## Manual Update
+
+If you want to update CE outside of `sync-oss`:
+
+### Step 1: Update vendor
 
 ```bash
 cd ~/.dotfiles/vendor/compound-engineering
 jj git fetch && jj rebase -d main@origin
 ```
 
-## Step 2: Create command files for disabled skills
-
-Find disabled skills missing a command file, show the list, confirm with user, then create:
+### Step 2: Run the converter
 
 ```bash
-CE_PLUGIN="$HOME/.dotfiles/vendor/compound-engineering/plugins/compound-engineering"
-
-for skill_dir in "$CE_PLUGIN/skills"/*/; do
-    [ -d "$skill_dir" ] || continue
-    skill_md="${skill_dir}SKILL.md"
-    [ -f "$skill_md" ] || continue
-    grep -q "disable-model-invocation: true" "$skill_md" 2>/dev/null || continue
-
-    name=$(awk '/^---$/{n++; if(n==2) exit} n>=1 && /^name:/{sub(/^name: */, ""); print}' "$skill_md")
-    cmd_file="${CE_PLUGIN}/commands/${name}.md"
-    [ -f "$cmd_file" ] && continue
-
-    echo "NEW: $name"
-
-    desc=$(awk '/^---$/{n++; if(n==2) exit} n>=1 && /^description:/{sub(/^description: */, ""); print}' "$skill_md")
-    hint=$(awk '/^---$/{n++; if(n==2) exit} n>=1 && /^argument-hint:/{sub(/^argument-hint: */, ""); print}' "$skill_md")
-
-    {
-        echo "---"
-        echo "name: ${name}"
-        echo "description: ${desc}"
-        [ -n "$hint" ] && echo "argument-hint: ${hint}"
-        echo "---"
-        awk '/^---$/{n++; if(n==2){found=1; next}} found{print}' "$skill_md"
-    } > "$cmd_file"
-done
+bash ~/.dotfiles/scripts/vendor-update-ce
 ```
 
-These files are untracked in the vendor git repo — they survive `jj git fetch` as local additions.
-
-## Step 3: Refresh skill symlinks
-
-Re-run the installer to pick up any new/removed skills and commands:
-
-```bash
-bash ~/.dotfiles/installers/opencode.sh
-```
+This script:
+- Runs the CE converter → `~/.local/share/ce-opencode/`
+- Symlinks enabled commands (with `ce:` prefix) → `~/.config/opencode/commands/`
+- Symlinks disabled commands + disabled skills → `~/.config/opencode/commands/ce/`
+- Symlinks enabled skills → `~/.config/opencode/skills/ce/`
+- Symlinks agents → `~/.config/opencode/agents/`
+- Cleans up stale `compound-engineering/` prefixed directories

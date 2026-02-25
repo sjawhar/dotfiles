@@ -20,25 +20,9 @@ ensure_link "${DOTFILES_DIR}/plugins/sjawhar/skills" "${OPENCODE_DIR}/skills/sja
 mkdir -p "${OPENCODE_DIR}/plugins"
 ensure_link "${VENDOR_DIR}/superpowers/.opencode/plugins/superpowers.js" "${OPENCODE_DIR}/plugins/superpowers.js"
 
-CE_DIR="${VENDOR_DIR}/compound-engineering"
-CE_PLUGIN="${CE_DIR}/plugins/compound-engineering"
-
-# CE commands: symlink under namespaced directory
-mkdir -p "${OPENCODE_DIR}/command"
-ensure_link "${CE_PLUGIN}/commands" "${OPENCODE_DIR}/command/compound-engineering"
-
-# CE skills: install only model-invocable skills (skip disable-model-invocation: true)
-mkdir -p "${OPENCODE_DIR}/skills/compound-engineering"
-if [ -d "${CE_PLUGIN}/skills" ]; then
-    for skill_dir in "${CE_PLUGIN}/skills"/*/; do
-        [ -d "$skill_dir" ] || continue
-        skill_md="${skill_dir}SKILL.md"
-        [ -f "$skill_md" ] || continue
-        if grep -q "disable-model-invocation: true" "$skill_md" 2>/dev/null; then
-            continue
-        fi
-        ensure_link "$skill_dir" "${OPENCODE_DIR}/skills/compound-engineering/$(basename "$skill_dir")"
-    done
+# CE integration: delegate to vendor-update-ce (handles converter, commands, skills, agents)
+if [ -d "${VENDOR_DIR}/compound-engineering" ]; then
+    bash "${DOTFILES_DIR}/scripts/vendor-update-ce"
 fi
 
 ensure_command oh-my-opencode "npm install -g oh-my-opencode"
