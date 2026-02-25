@@ -18,5 +18,5 @@
 	helper =
 	helper = !~/.dotfiles/scripts/git-credential-gh
 [user]
-	email = sjawhar@github.com
-	name = sjawhar
+	email = sami@thecybermonk.com
+	name = Sami Jawhar
