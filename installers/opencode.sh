@@ -59,6 +59,11 @@ if [ -f "$OC_JSON" ] && command -v jq &>/dev/null; then
         "Adding opencode-antigravity-auth plugin"
 
     ensure_json "$OC_JSON" \
+        '(.plugin // []) | any(contains("jj-snapshot"))' \
+        '(.plugin //= []) | .plugin += ["file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts"]' \
+        "Adding jj-snapshot plugin"
+
+    ensure_json "$OC_JSON" \
         '.provider.anthropic.models["claude-opus-4-6"].limit.context == 1000000' \
         '.provider.anthropic.models["claude-opus-4-6"].limit = {"context": 1000000, "output": 128000}' \
         "Setting Opus 4.6 context limit to 1M"
@@ -69,4 +74,4 @@ if [ -f "$OC_JSON" ] && command -v jq &>/dev/null; then
         "Disabling autoupdate"
 fi
 
-ensure_link "${DOTFILES_DIR}/oh-my-opencode.minimal.json" "${OPENCODE_DIR}/oh-my-opencode.json"
+ensure_link "${DOTFILES_DIR}/opencode/oh-my-opencode.minimal.json" "${OPENCODE_DIR}/oh-my-opencode.json"

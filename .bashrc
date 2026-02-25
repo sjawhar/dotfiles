@@ -246,7 +246,7 @@ omo() {
 
         # List available profiles
         echo "Available profiles:"
-        for f in "${dotfiles}"/oh-my-opencode.*.json; do
+        for f in "${dotfiles}"/opencode/oh-my-opencode.*.json; do
             [ -f "$f" ] || continue
             local name
             name=$(basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//')
@@ -259,7 +259,7 @@ omo() {
         return
     fi
 
-    local target="${dotfiles}/oh-my-opencode.${1}.json"
+    local target="${dotfiles}/opencode/oh-my-opencode.${1}.json"
     if [ ! -f "$target" ]; then
         echo "Profile not found: $1" >&2
         echo "Run 'omo' to see available profiles." >&2
@@ -274,7 +274,7 @@ if [ -n "${ZSH_VERSION:-}" ]; then
     _omo_complete() {
         local dotfiles="${DOTFILES_DIR:-${HOME}/.dotfiles}"
         local profiles=()
-        for f in "${dotfiles}"/oh-my-opencode.*.json; do
+        for f in "${dotfiles}"/opencode/oh-my-opencode.*.json; do
             [ -f "$f" ] || continue
             profiles+=($(basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//'))
         done
@@ -285,7 +285,7 @@ else
     _omo_complete() {
         local dotfiles="${DOTFILES_DIR:-${HOME}/.dotfiles}"
         local profiles
-        profiles=$(for f in "${dotfiles}"/oh-my-opencode.*.json; do
+        profiles=$(for f in "${dotfiles}"/opencode/oh-my-opencode.*.json; do
             [ -f "$f" ] || continue
             basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//'
         done)

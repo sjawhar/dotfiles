@@ -13,8 +13,10 @@ Personal development environment configuration. Targets Linux devcontainers/devp
 starship.toml        # Starship prompt config
 aerospace.toml       # macOS window manager (AeroSpace)
 mise.toml            # Tool version manager — pinned versions for all CLI tools
-opencode.json        # OpenCode config (models, plugins, commands, permissions)
-oh-my-opencode.*.json # OpenCode plugin profiles (switchable via `omo` shell function)
+opencode/            # OpenCode config, OMO profiles, and plugins
+opencode/opencode.json       # Main OpenCode config (models, plugins, commands, permissions)
+opencode/oh-my-opencode.*.json # OMO profiles (switchable via `omo` shell function)
+opencode/plugins/    # OpenCode plugin scripts (jj-snapshot, etc.)
 nvim/init.lua        # Neovim config (single file)
 install.sh           # Main installer — runs all installers/* in order
 installers/          # Per-tool install scripts (shell.sh, mise.sh, jj.sh, tmux.sh, nvim.sh, claude.sh, opencode.sh)
