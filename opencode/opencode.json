@@ -1,9 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "keybinds": {
-    "messages_first": "ctrl+g,ctrl+home",
-    "messages_last": "ctrl+alt+g,ctrl+end"
-  },
   "plugin": [
     "file://{env:HOME}/oh-my-opencode/original",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
