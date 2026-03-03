@@ -13,7 +13,8 @@ if ! command -v ghostty &>/dev/null; then
     gh release download "${GHOSTTY_VERSION}-0-ppa1" \
         --repo mkasberg/ghostty-ubuntu \
         --pattern "ghostty_${GHOSTTY_VERSION}-0.ppa1_amd64_${GHOSTTY_UBUNTU}.deb" \
-        --output "$tmp_deb"
+        --output "$tmp_deb" \
+        --clobber
     sudo dpkg -i "$tmp_deb" || sudo apt-get install -f -y
     rm -f "$tmp_deb"
     trap - EXIT

@@ -59,6 +59,7 @@ fi
 # --- Symlinks ---
 mkdir -p ~/.config/voxtype
 mkdir -p ~/.config/autostart
+mkdir -p ~/.config/systemd/user
 ensure_link "${DOTFILES_DIR}/voxtype/config.toml"               ~/.config/voxtype/config.toml
 ensure_link "${DOTFILES_DIR}/voxtype/voxtype-tray.desktop"     ~/.config/autostart/voxtype-tray.desktop
 ensure_link "${DOTFILES_DIR}/voxtype/voxtype.service"          ~/.config/systemd/user/voxtype.service

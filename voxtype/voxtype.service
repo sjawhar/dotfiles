@@ -1,11 +1,15 @@
 [Unit]
 Description=Voxtype push-to-talk voice-to-text daemon
 PartOf=graphical-session.target
-After=graphical-session.target pipewire.service pipewire-pulse.service
+After=graphical-session.target pipewire.service pipewire-pulse.service wireplumber.service
 Wants=ydotoold.service
 
 [Service]
 Type=simple
+# Brief delay to let WirePlumber finish ACP probing of ALSA cards.
+# Without this, voxtype can grab raw ALSA devices before PipeWire claims
+# them, blocking the HiFi profile and hiding devices from desktop applets.
+ExecStartPre=/usr/bin/sleep 3
 ExecStart=%h/.dotfiles/voxtype/voxtype-daemon
 Restart=on-failure
 RestartSec=5

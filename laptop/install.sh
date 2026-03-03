@@ -83,6 +83,20 @@ REPO
     NEEDS_APT_UPDATE=true
 fi
 
+# PipeWire/WirePlumber upgrade (Ubuntu only, not Pop!_OS)
+# Pop!_OS ships modern PipeWire (1.5+) and WirePlumber (0.5+) in its own repos.
+# Stock Ubuntu 24.04 ships PipeWire 1.0.5 + WirePlumber 0.4.17, which has a
+# completely broken bluez5 audio monitor — Bluetooth audio devices (e.g. DJI Mic
+# Mini over HFP) never appear in PipeWire. The savoury1 PPA provides PipeWire
+# 1.4.x + WirePlumber 0.5.x with working Bluetooth audio support.
+if [[ "$(. /etc/os-release && echo "${ID}")" == "ubuntu" ]] && ! grep -qi 'pop' /etc/os-release 2>/dev/null; then
+    if ! grep -rq 'savoury1/pipewire' /etc/apt/sources.list.d/ 2>/dev/null; then
+        echo "Adding savoury1/pipewire PPA (Ubuntu needs newer PipeWire for BT audio)..."
+        sudo add-apt-repository -y ppa:savoury1/pipewire
+        NEEDS_APT_UPDATE=true
+    fi
+fi
+
 # --- Single apt update if any repos were added ---
 if $NEEDS_APT_UPDATE; then
     sudo apt-get update -qq
@@ -103,6 +117,36 @@ done
 if [ ${#MISSING[@]} -gt 0 ]; then
     echo "Installing: ${MISSING[*]}..."
     sudo apt-get install -y -qq "${MISSING[@]}" >/dev/null
+fi
+
+# --- Upgrade PipeWire/WirePlumber from savoury1 PPA (Ubuntu only) ---
+# The savoury1 PPA renames some transient packages (libopenfec, libwebrtc-audio-
+# processing1) which conflict with the stock Ubuntu versions. Remove the old ones
+# first, then install the full set. This is idempotent — on Pop!_OS or if already
+# upgraded, the PPA block above is skipped and these packages are already correct.
+if grep -rq 'savoury1/pipewire' /etc/apt/sources.list.d/ 2>/dev/null; then
+    PIPEWIRE_PKGS=(
+        pipewire pipewire-bin pipewire-pulse pipewire-alsa pipewire-audio
+        gstreamer1.0-pipewire
+        libpipewire-0.3-0t64 libpipewire-0.3-common libpipewire-0.3-modules
+        libspa-0.2-bluetooth libspa-0.2-modules
+        wireplumber libwireplumber-0.5-0
+    )
+    # Remove conflicting transitional packages from stock Ubuntu if present
+    for old_pkg in libpipewire-0.3-0 libwebrtc-audio-processing1 libopenfec; do
+        if dpkg -s "$old_pkg" &>/dev/null 2>&1; then
+            echo "Removing conflicting package: $old_pkg"
+            sudo dpkg --remove --force-depends "$old_pkg"
+        fi
+    done
+    MISSING=()
+    for pkg in "${PIPEWIRE_PKGS[@]}"; do
+        dpkg -s "$pkg" &>/dev/null || MISSING+=("$pkg")
+    done
+    if [ ${#MISSING[@]} -gt 0 ]; then
+        echo "Upgrading PipeWire/WirePlumber from savoury1: ${MISSING[*]}..."
+        sudo apt-get install -y -qq "${MISSING[@]}"
+    fi
 fi
 
 # --- Post-install: Docker group ---
