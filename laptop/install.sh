@@ -119,7 +119,14 @@ fi
 # =============================================================================
 # Flatpak apps
 # =============================================================================
+if ! command -v flatpak &>/dev/null; then
+    sudo apt-get install -y -qq flatpak >/dev/null
+fi
 if command -v flatpak &>/dev/null; then
+    if ! flatpak remote-list 2>/dev/null | grep -q flathub; then
+        echo "Adding Flathub remote..."
+        flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+    fi
     FLATPAK_APPS=(
         com.slack.Slack
         org.keepassxc.KeePassXC
