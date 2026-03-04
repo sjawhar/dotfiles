@@ -108,7 +108,7 @@ donedrive()
         --restart unless-stopped \
         --volume "${HOME}/OneDrive:/onedrive/data" \
         --volume $conf_vol:/onedrive/conf \
-        driveone/onedrive:alpine-v2.4.13
+        driveone/onedrive:2.5.10-alpine
 }
 
 drclone()
@@ -178,6 +178,7 @@ doc()
 {
     docker run --rm -it \
         -v "${HOME}:${HOME}" \
+        -e "GH_TOKEN=$(gh auth token)" \
         -w "$(pwd)" \
         --user sami \
         sjawhar/devpod:latest \
