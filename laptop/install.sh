@@ -106,9 +106,11 @@ fi
 LAPTOP_PKGS=(
     1password
     brave-browser
-    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    tailscale
+    build-essential
     code
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    git
+    tailscale
 )
 MISSING=()
 for pkg in "${LAPTOP_PKGS[@]}"; do
