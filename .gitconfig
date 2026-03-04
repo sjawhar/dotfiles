@@ -11,12 +11,12 @@
         autoSetupRemote = true
 
 [credential "https://github.com"]
-	helper =
-	helper = !~/.dotfiles/scripts/git-credential-gh
+	helper = 
+	helper = !/home/sami/.mise/installs/gh/2.85.0/gh_2.85.0_linux_amd64/bin/gh auth git-credential
 
 [credential "https://gist.github.com"]
-	helper =
-	helper = !~/.dotfiles/scripts/git-credential-gh
+	helper = 
+	helper = !/home/sami/.mise/installs/gh/2.85.0/gh_2.85.0_linux_amd64/bin/gh auth git-credential
 [user]
 	email = sami@thecybermonk.com
 	name = Sami Jawhar
