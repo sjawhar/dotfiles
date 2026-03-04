@@ -85,7 +85,10 @@ RUN mkdir -p /usr/local/libexec/docker/cli-plugins \
 # ------------------------------------------------------------------------------
 FROM base AS builder-mise
 
-RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends zstd \
+ && curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
 
 USER ${DEVPOD_USER}
 WORKDIR /home/${DEVPOD_USER}
