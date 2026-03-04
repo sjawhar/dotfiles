@@ -207,6 +207,33 @@ mkdir -p ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1
 ensure_link "${LAPTOP_DIR}/shortcuts-custom" \
     ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom
 
+# --- Sysctl: desktop performance tuning ---
+if ! diff -q "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performance.conf &>/dev/null; then
+    echo "Installing sysctl performance tuning..."
+    sudo cp "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performance.conf
+    sudo sysctl --system -q
+fi
+
+# --- COSMIC desktop settings ---
+declare -A COSMIC_SETTINGS=(
+    ["com.system76.CosmicTheme.Mode/v1/is_dark"]="theme-mode-is-dark"
+    ["com.system76.CosmicAppletTime/v1/military_time"]="applet-time-military"
+    ["com.system76.CosmicAppletTime/v1/show_date_in_top_panel"]="applet-time-show-date"
+    ["com.system76.CosmicNotifications/v1/do_not_disturb"]="notifications-do-not-disturb"
+    ["com.system76.CosmicNotifications/v1/anchor"]="notifications-anchor"
+    ["com.system76.CosmicNotifications/v1/max_notifications"]="notifications-max"
+    ["com.system76.CosmicNotifications/v1/max_per_app"]="notifications-max-per-app"
+    ["com.system76.CosmicIdle/v1/screen_off_time"]="idle-screen-off-time"
+    ["com.system76.CosmicAudio/v1/amplification_sink"]="audio-amplification-sink"
+    ["com.system76.CosmicAudio/v1/amplification_source"]="audio-amplification-source"
+    ["com.system76.CosmicComp/v1/xkb_config"]="comp-xkb-config"
+)
+for cosmic_path in "${!COSMIC_SETTINGS[@]}"; do
+    mkdir -p ~/.config/cosmic/"${cosmic_path%/*}"
+    ensure_link "${LAPTOP_DIR}/cosmic/${COSMIC_SETTINGS[$cosmic_path]}" \
+        ~/.config/cosmic/"${cosmic_path}"
+done
+
 # =============================================================================
 # Desktop apps (separate installers)
 # =============================================================================
