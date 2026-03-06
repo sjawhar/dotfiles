@@ -14,6 +14,8 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Ne
 - **`@` = working copy change.** Not like git HEAD — it represents what's on disk right now, including uncommitted work. `@-` is its parent.
 - **Rebases always succeed.** Conflicts are recorded in the commit, not blocking. Descendants auto-rebase when parents change.
 - **Commands operate on the repo, not the working copy** — rebase doesn't touch your files or move `@` unless asked.
+- **Nothing is ever lost.** Every operation is logged in `jj op log`. You can inspect any previous state with `--at-op` and restore with `jj op restore`. Run `jj st > /dev/null` frequently to create snapshot recovery points.
+- **Divergent commits are normal.** When multiple workspaces are active, concurrent operations can create divergent commits (IDs with `/0`, `/4` suffixes). This is usually fine — resolve by squashing the copies together.
 
 ## CRITICAL: No Undo Loops
 
@@ -187,18 +189,41 @@ When resolving conflicts after rebase:
 
 ## Gotchas
 
-### `jj absorb` silently skips new files
+### `jj absorb` — how it actually works
 
-`jj absorb` routes edits to ancestors using **blame** — it only moves changes to lines that already exist in a parent commit. **New files have no blame history and are silently ignored.**
+`jj absorb` distributes changes from one commit into its ancestors using **blame**. For each changed line, it finds which ancestor last modified that line and moves the edit there.
 
-After running `jj absorb`, always check `jj diff` to see if anything remains in `@`. If new files are still there, route them manually with path-based squash:
+```
+jj absorb [--from=@] [--into=mutable()]
 
+1. Diff @'s tree against @'s parent tree (what you changed)
+2. Annotate each line of the PARENT tree via blame → find which ancestor last touched it
+3. Assign each diff hunk to the ancestor that owns those lines
+4. Rewrite destination commits (3-way merge the hunks in)
+5. Rebase @ (remove absorbed hunks) and all descendants
+```
+
+**Designed for the megamerge workflow.** When `@` is on top of a merge of multiple branches, absorb distributes edits back to whichever branch commit last touched each line.
+
+**Key flags:**
+- `--from` (default `@`): which commit to absorb from
+- `--into` (default `mutable()`): which ancestors are eligible destinations. Only ancestors of `--from` within this set are considered. **Immutable commits (like main@origin) are never touched.**
+
+**What absorb CANNOT route (stays in @):**
+- **New files** — no blame history, silently skipped
+- **Ambiguous insertions** — pure insertions at the boundary between two annotation ranges
+- **File mode changes** — only content changes are absorbed
+- **Symlinks and submodules** — skipped with warning
+- **Conflicted files in source** — skipped entirely
+
+**What can go wrong:**
+- Absorb can **create conflicts** in destination commits if hunks don't apply cleanly. It does NOT abort — it records the conflict and continues.
+- After absorb, destination commits and all descendants (including @) are rebased. This can cascade through the graph.
+
+**Always verify after absorb:**
 ```bash
-# Route specific new files to a target change
-jj squash --into <change_id> -- <file1> <file2>
-
-# Example: route all files under tasks/my-task/ to a specific change
-jj squash --into qzmzpxyl -- tasks/my-task/
+jj diff          # Check what's left in @
+jj log -r ::@    # Check for (conflict) markers on ancestors
 ```
 
 **Two-phase save pattern** (when absorb isn't enough):
