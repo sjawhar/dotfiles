@@ -28,15 +28,15 @@
       "variant": "max"
     },
     "metis": {
-      "model": "openai/gpt-5.3-codex",
+      "model": "openai/gpt-5.4",
       "variant": "high"
     },
     "momus": {
-      "model": "openai/gpt-5.2",
-      "variant": "high"
+      "model": "openai/gpt-5.4",
+      "variant": "xhigh"
     },
     "oracle": {
-      "model": "openai/gpt-5.2",
+      "model": "openai/gpt-5.4",
       "variant": "high"
     },
     "atlas": {
@@ -49,13 +49,14 @@
       "model": "anthropic/claude-haiku-4-5"
     },
     "multimodal-looker": {
-      "model": "google/gemini-3-flash-preview"
+      "model": "openai/gpt-5.4",
+      "variant": "medium"
     },
     "athena": {
       "council": {
         "members": [
           { "model": "anthropic/claude-opus-4-6", "name": "Claude", "variant": "max" },
-          { "model": "openai/gpt-5.3-codex", "name": "GPT" },
+          { "model": "openai/gpt-5.4", "name": "GPT" },
           { "model": "google/gemini-3.1-pro-preview", "name": "Gemini" }
         ]
       }
@@ -99,7 +100,8 @@
     "rules-injector",
     "ralph-loop",
     "tasks-todowrite-disabler",
-    "auto-slash-command"
+    "auto-slash-command",
+    "todo-continuation-enforcer"
   ],
   "disabled_commands": [],
   "disabled_mcps": [],
