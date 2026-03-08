@@ -4,15 +4,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
 
 echo "--- Hardening ---"
 
-# --- WiFi power save: disable ---
-# Value 2 = disabled, 3 = enabled (default on Pop!_OS/Ubuntu)
-# Prevents WiFi disconnects on sleep, especially with MediaTek MT7925
-POWERSAVE_CONF="/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf"
-if [ -f "$POWERSAVE_CONF" ] && grep -q 'wifi.powersave = 3' "$POWERSAVE_CONF" 2>/dev/null; then
-    echo "Disabling WiFi power save..."
-    sudo sed -i 's/wifi.powersave = 3/wifi.powersave = 2/' "$POWERSAVE_CONF"
-    sudo systemctl restart NetworkManager
-fi
 
 # --- UFW firewall ---
 if command -v ufw &>/dev/null; then
