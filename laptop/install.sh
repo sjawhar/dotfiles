@@ -16,7 +16,7 @@ NEEDS_APT_UPDATE=false
 if [ ! -f /etc/apt/sources.list.d/1password.list ]; then
     echo "Adding 1Password repo..."
     curl -fsSL https://downloads.1password.com/linux/keys/1password.asc \
-        | sudo gpg --dearmor -o /usr/share/keyrings/1password-archive-keyring.gpg 2>/dev/null
+        | sudo gpg --yes --dearmor -o /usr/share/keyrings/1password-archive-keyring.gpg 2>/dev/null
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/1password-archive-keyring.gpg] https://downloads.1password.com/linux/debian/amd64 stable main" \
         | sudo tee /etc/apt/sources.list.d/1password.list >/dev/null
     NEEDS_APT_UPDATE=true
@@ -71,7 +71,7 @@ fi
 if [ ! -f /etc/apt/sources.list.d/vscode.sources ]; then
     echo "Adding VS Code repo..."
     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-        | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg 2>/dev/null
+        | sudo gpg --yes --dearmor -o /usr/share/keyrings/microsoft.gpg 2>/dev/null
     cat <<'REPO' | sudo tee /etc/apt/sources.list.d/vscode.sources >/dev/null
 Types: deb
 URIs: https://packages.microsoft.com/repos/code
@@ -241,6 +241,7 @@ done
 # =============================================================================
 source "${DOTFILES_DIR}/installers/ghostty.sh"
 source "${DOTFILES_DIR}/installers/voxtype.sh"
+source "${LAPTOP_DIR}/drivers.sh"
 
 echo "--- Laptop setup complete ---"
 echo "Next steps:"
