@@ -15,6 +15,25 @@ When a plan says "Push", do: `jj bookmark set <name> && jj git push`.
 
 Invoke the `using-jj` skill before any version control operation for full command reference.
 
+### Destructive Actions Prohibited
+
+**Do not perform destructive or high-blast-radius actions without explicit user approval in this session.**
+
+This includes (but is not limited to):
+- overwriting credentials/auth state
+- deleting branches, workspaces, files, or user data
+- force pushes or history rewrites
+- disabling plugins/safety systems to "get unstuck"
+- changing shared/global configuration in ways that can break other workflows
+
+Before any destructive action:
+1. State exactly what will change and what could break
+2. Propose the safest viable alternative first
+3. Get explicit approval
+4. Execute only the approved action
+
+If there is any uncertainty, stop and ask. Preserving known-good behavior outranks speed.
+
 ### Writing Plans
 
 When writing implementation plans, use jj commands in commit steps — never `git add && git commit`. Example:
@@ -43,6 +62,17 @@ If you see a cleaner alternative:
 - **Don't deviate from existing patterns without explicit approval**
 - Consistency with existing code takes priority unless the user agrees to change it
 
+### Simplicity First (YAGNI)
+
+Default to the simplest change that fully solves the user's request.
+
+- Reuse existing code before creating abstractions
+- Prefer direct fixes over new frameworks/layers
+- Do not add indirection for hypothetical future needs
+- If user direction changes, stop the old path immediately and pivot
+
+Do required adjacent cleanup caused by your change, but do not expand scope without approval.
+
 ### Do The Work
 
 **Never defer work that falls within your task.** Deferral is not a safe choice — it is a failure to do your job.
@@ -59,14 +89,41 @@ The only legitimate reasons to defer:
 
 When asked to file an issue for deferred work, do it immediately — before continuing with remaining tasks. Don't defer the filing itself.
 
+### No Excuses
+
+Do not evade goals with true-ish attribution statements. These are still failures if the user's goal remains unsolved.
+
+Forbidden excuse patterns:
+- "pre-existing issue" used to avoid remediation
+- "known bug" used to carve out required quality
+- "not a crash" used to argue wording over behavior
+- "we didn't introduce this" used to avoid ownership
+- "just take main's version" used to justify risky shortcuts
+
+If you identify one of these facts, pair it with a remediation path now.
+
 ### Goal Integrity
 
 **The user's goal is the goal.** Not your subtask, not your diagnosis, not your theory about what the problem is. If the user's original problem isn't solved, you're not done.
 
 Before claiming work is complete or suggesting next steps:
 1. Restate the user's original goal (not your subtask or diagnosis)
-2. Verify the original goal is actually met
-3. If blocked, propose a workaround — don't reclassify the blocker as "out of scope"
+2. Verify the original goal is actually met with fresh user-observable checks
+3. Provide concrete evidence from those checks
+4. If blocked, propose a workaround — don't reclassify the blocker as "out of scope"
+
+**No completion claims without fresh end-to-end verification.**
+- Unit tests and mocks are useful but are not acceptance by themselves
+- End-to-end means observable behavior changed in the way the user asked
+- If you cannot run the final verification, say that explicitly and state what remains unverified
+
+### Claims Require Evidence
+
+Never present technical claims as facts without verification.
+
+- "works", "fixed", "passing", "configured", "safe" require evidence
+- If unverified, label it as a hypothesis and verify next
+- Prefer command output, reproducible steps, or concrete traces over assertion
 
 **Red Flags — if you're thinking any of these, STOP:**
 
@@ -78,6 +135,19 @@ Before claiming work is complete or suggesting next steps:
 | "We already tested this earlier" | Different code = different test. Previous results don't carry over |
 | "This isn't related to our changes" | The user's goal doesn't care whose fault it is |
 | "I'll suggest they can skip this" | You're offering an off-ramp from a commitment they already made |
+
+### Step-Back Trigger
+
+Stop tactical looping and switch strategy when any trigger fires:
+1. 3 consecutive failures on the same issue
+2. User reports unchanged symptoms twice
+3. High tool-call volume with low information gain
+4. A known-good reference/path has not been consulted
+
+When triggered:
+- Publish a checkpoint (what was tried, what failed, what was learned)
+- Try a fundamentally different approach
+- Re-anchor on the user's original goal before continuing
 
 ### Use Your Context
 
@@ -95,6 +165,7 @@ The rule: **Do everything the task requires — including necessary adjacent wor
 - Be a good boy scout: fold mechanical cleanup into the same pass when it's a direct consequence of your change (removing now-unused imports, fixing a broken reference you just noticed, cleaning up wrappers you made redundant). Don't leave messes you walked past.
 - Don't add features, refactors, or improvements that weren't part of the request without asking first.
 - When the user says "not in scope" or "not in the plan," respect that boundary immediately.
+- When the user changes direction, stop the previous approach immediately and follow the new direction.
 - When the user says "just make a plan" or "plan only," stop at planning. Don't start reading files for implementation.
 - When the user says "skip tests" or "don't run tests," respect that immediately.
 
