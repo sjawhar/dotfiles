@@ -1,6 +1,7 @@
 {
     (modifiers: [Ctrl, Shift], key: "semicolon", description: Some("voxtype")): Spawn("voxtype record toggle"),
     (modifiers: [Ctrl, Shift], key: "apostrophe", description: Some("voxtype paste last")): Spawn("/home/sami/.dotfiles/voxtype/voxtype-history-paste-last"),
+    (modifiers: [Ctrl, Shift], key: "slash", description: Some("voxtype cancel")): Spawn("voxtype record cancel"),
 
     (modifiers: [Alt], key: "1", description: Some("Aerospace WS 1")): Spawn("/home/sami/.local/bin/aerospace-ws 1"),
     (modifiers: [Alt], key: "2", description: Some("Aerospace WS 2")): Spawn("/home/sami/.local/bin/aerospace-ws 2"),

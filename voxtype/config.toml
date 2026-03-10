@@ -89,7 +89,7 @@ translate = false
 #
 # Enable eager input processing (transcribe chunks while recording continues)
 # Reduces perceived latency on slower machines by processing audio in parallel.
-# eager_processing = false
+eager_processing = true
 #
 # Duration of each audio chunk in seconds (default: 5.0)
 # eager_chunk_secs = 5.0
@@ -104,10 +104,12 @@ remote_model = "whisper-large-v3-turbo"
 remote_timeout_secs = 10
 
 [output]
-# Primary output mode: "type" or "clipboard"
+# Primary output mode: "type", "clipboard", or "paste"
 # - type: Simulates keyboard input at cursor position (requires ydotool)
 # - clipboard: Copies text to clipboard (requires wl-copy)
-mode = "type"
+# - paste: Copies to clipboard then simulates Ctrl+V (fast, overwrites clipboard)
+mode = "paste"
+paste_keys = "ctrl+shift+v"
 
 # Fall back to clipboard if typing fails
 fallback_to_clipboard = true
@@ -116,9 +118,9 @@ fallback_to_clipboard = true
 # Using ydotool (kernel uinput) until cosmic-comp ships the fix
 driver_order = ["ydotool", "clipboard"]
 
-# Delay between typed characters in milliseconds
+# Delay between typed characters in milliseconds (type mode only)
 # 0 = fastest possible, increase if characters are dropped
-type_delay_ms = 5
+# type_delay_ms = 5
 
 # Automatically submit (send Enter key) after outputting transcribed text
 # Useful for chat applications, command lines, or forms where you want
