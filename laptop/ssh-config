@@ -9,16 +9,12 @@ Host devbox2
 Host devbox
   HostName sami-agents.tailb86685.ts.net
   User ubuntu
-  # IdentityAgent ~/.1password/agent.sock
   ForwardAgent yes
-  # SendEnv SOPS_AGE_KEY
 
 Host ghost-wispr
   HostName ghost-wispr.tailb86685.ts.net
   User ghost-wispr
-  # IdentityAgent ~/.1password/agent.sock
   ForwardAgent yes
-  # SendEnv SOPS_AGE_KEY
 
 Host devboxm
   HostName 10.0.159.217
