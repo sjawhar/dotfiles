@@ -20,8 +20,16 @@ if [ ! -x "$VOXTYPE_BIN" ]; then
     if [ -f "$VOXTYPE_PATCH" ]; then
         git -C "$VOXTYPE_SRC" apply "$VOXTYPE_PATCH" 2>/dev/null || true
     fi
-    if ! dpkg -s libasound2-dev libvulkan-dev libclang-dev cmake &>/dev/null; then
-        sudo apt-get install -y -qq libasound2-dev libvulkan-dev pkg-config libclang-dev cmake >/dev/null
+    BUILD_DEPS=(
+        cmake
+        glslc
+        libasound2-dev
+        libclang-dev
+        libvulkan-dev
+        pkg-config
+    )
+    if ! dpkg -s "${BUILD_DEPS[@]}" &>/dev/null; then
+        sudo apt-get install -y -qq "${BUILD_DEPS[@]}" >/dev/null
     fi
     (cd "$VOXTYPE_SRC" && cargo build --release --features gpu-vulkan)
     cp "${VOXTYPE_SRC}/target/release/voxtype" "$VOXTYPE_BIN"

@@ -205,9 +205,13 @@ mkdir -p ~/.config/pipewire/pipewire.conf.d
 ensure_link "${DOTFILES_DIR}/pipewire/10-video-quality.conf" ~/.config/pipewire/pipewire.conf.d/10-video-quality.conf
 
 # --- COSMIC custom shortcuts ---
-mkdir -p ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1
-ensure_link "${LAPTOP_DIR}/shortcuts-custom" \
-    ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom
+# Template uses __HOME__ placeholder since COSMIC reads files directly (no shell expansion).
+# Remove any existing symlink first — a prior ensure_link would cause sed to truncate the source.
+COSMIC_SHORTCUTS=~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1
+mkdir -p "$COSMIC_SHORTCUTS"
+rm -f "$COSMIC_SHORTCUTS/custom"
+sed "s|__HOME__|${HOME}|g" "${LAPTOP_DIR}/shortcuts-custom" \
+    > "$COSMIC_SHORTCUTS/custom"
 
 # --- Sysctl: desktop performance tuning ---
 if ! diff -q "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performance.conf &>/dev/null; then
