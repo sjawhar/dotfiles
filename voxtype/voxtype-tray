@@ -45,6 +45,10 @@ class VoxtypeTray:
         item_cancel = Gtk.MenuItem(label="Cancel Recording")
         item_cancel.connect("activate", self._cancel)
         menu.append(item_cancel)
+        item_restart = Gtk.MenuItem(label="Restart Service")
+        item_restart.connect("activate", self._restart_service)
+        menu.append(item_restart)
+        menu.append(Gtk.SeparatorMenuItem())
         item_quit = Gtk.MenuItem(label="Quit Indicator")
         item_quit.connect("activate", lambda _: Gtk.main_quit())
         menu.append(item_quit)
@@ -75,6 +79,9 @@ class VoxtypeTray:
 
     def _cancel(self, _):
         os.system("voxtype record cancel")
+
+    def _restart_service(self, _):
+        os.system("systemctl --user restart voxtype.service")
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal.SIG_DFL)
