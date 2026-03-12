@@ -186,6 +186,8 @@ When resolving conflicts after rebase:
 2. **Never lose functionality** — review what changed in the commits being merged
 3. **Don't delete local changes** without explicit permission
 4. **Verify after rebase** — compare the current diff (against main) with the pre-rebase diff to confirm no functionality was lost or accidentally reverted
+5. **REPLACE, don't DUPLICATE** — when one side is the "old version" and the other is the "new version" of the same logic, keep ONLY the new version. A common agent mistake is keeping both sides, producing duplicate code blocks. After resolving, scan for repeated logic.
+6. **Verify before squashing** — run tests, lint, and format checks BEFORE squashing commits together. Failures discovered after squash require another fix-and-squash cycle, triggering cascading rebases.
 
 ## Gotchas
 
