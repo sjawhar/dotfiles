@@ -111,6 +111,7 @@ LAPTOP_PKGS=(
     docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     git
     tailscale
+    v4l-utils
 )
 MISSING=()
 for pkg in "${LAPTOP_PKGS[@]}"; do

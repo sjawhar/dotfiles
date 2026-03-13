@@ -1,0 +1,5 @@
+# Chicony Integrated Camera (04f2:b840) — force MJPEG 1080p
+# Raw YUYV only supports 640x480 max on this sensor. Higher resolutions
+# (720p, 1080p, 1440p, 5MP) require MJPEG. Without this rule, browsers
+# and video apps default to YUYV and get stuck at 480p.
+ACTION=="add", SUBSYSTEM=="video4linux", ATTR{name}=="Integrated Camera: Integrated C", ATTR{index}=="0", RUN+="/usr/bin/v4l2-ctl -d $devnode --set-fmt-video=width=1920,height=1080,pixelformat=MJPG"
