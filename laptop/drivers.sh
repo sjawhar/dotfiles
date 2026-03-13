@@ -45,3 +45,17 @@ if lspci -n 2>/dev/null | grep -q '14c3:7925'; then
     # change across module reloads, but hash+parent-hash+connect-type is
     # sufficient for internal devices.
 fi
+
+# =============================================================================
+# Chicony Integrated Camera (04f2:b840) — MJPEG format override
+# =============================================================================
+# Raw YUYV only supports 640x480. Higher resolutions require MJPEG.
+# Without a udev rule, browsers default to YUYV and get stuck at 480p.
+WEBCAM_RULES="/etc/udev/rules.d/99-webcam-format.rules"
+if lsusb -d 04f2:b840 &>/dev/null; then
+    if ! diff -q "${LAPTOP_DIR}/99-webcam-format.rules" "$WEBCAM_RULES" &>/dev/null; then
+        echo "Installing webcam format udev rule..."
+        sudo cp "${LAPTOP_DIR}/99-webcam-format.rules" "$WEBCAM_RULES"
+        sudo udevadm control --reload-rules
+    fi
+fi

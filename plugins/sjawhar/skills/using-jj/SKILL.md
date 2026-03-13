@@ -191,10 +191,15 @@ When resolving conflicts after rebase:
 
 ## Gotchas
 
-### `jj absorb` — how it actually works
+### `jj absorb` — merge workflow only
 
-`jj absorb` distributes changes from one commit into its ancestors using **blame**. For each changed line, it finds which ancestor last modified that line and moves the edit there.
+**Absorb is for merge workflows** — when `@` sits on top of a merge of multiple branches and you want to distribute fixes back to whichever branch owns each line. It uses blame to route each changed line to the ancestor that last modified it.
 
+**Do NOT use absorb to rewrite historical commits.** To fix a specific ancestor commit, use:
+- `jj edit <change_id>` → make changes → `jj new` (preferred)
+- `jj squash --into <change_id> -- <paths>` (for routing specific files)
+
+**How it works:**
 ```
 jj absorb [--from=@] [--into=mutable()]
 
@@ -205,17 +210,10 @@ jj absorb [--from=@] [--into=mutable()]
 5. Rebase @ (remove absorbed hunks) and all descendants
 ```
 
-**Designed for the megamerge workflow.** When `@` is on top of a merge of multiple branches, absorb distributes edits back to whichever branch commit last touched each line.
-
-**Key flags:**
-- `--from` (default `@`): which commit to absorb from
-- `--into` (default `mutable()`): which ancestors are eligible destinations. Only ancestors of `--from` within this set are considered. **Immutable commits (like main@origin) are never touched.**
-
 **What absorb CANNOT route (stays in @):**
 - **New files** — no blame history, silently skipped
 - **Ambiguous insertions** — pure insertions at the boundary between two annotation ranges
 - **File mode changes** — only content changes are absorbed
-- **Symlinks and submodules** — skipped with warning
 - **Conflicted files in source** — skipped entirely
 
 **What can go wrong:**
@@ -227,11 +225,6 @@ jj absorb [--from=@] [--into=mutable()]
 jj diff          # Check what's left in @
 jj log -r ::@    # Check for (conflict) markers on ancestors
 ```
-
-**Two-phase save pattern** (when absorb isn't enough):
-1. `jj absorb` — routes edits to existing lines via blame
-2. `jj squash --into <change_id> -- <paths>` — routes new files by path
-3. `jj diff` — verify `@` is empty (nothing left unrouted)
 
 ### `jj squash` opens editor when both changes have descriptions
 
