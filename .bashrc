@@ -153,11 +153,108 @@ alias ccd='claude --dangerously-skip-permissions'
 alias ccc='claude --dangerously-skip-permissions --continue'
 
 # ------------------------------------------------------------------------------
-# OpenCode aliases
+# OpenCode instance registry (oc, occ, oc ps)
 # ------------------------------------------------------------------------------
 
-alias oc='opencode'
-alias occ='opencode --continue'
+OC_REGISTRY="${XDG_RUNTIME_DIR:-/tmp}/opencode-$(id -u)"
+mkdir -p "$OC_REGISTRY" 2>/dev/null
+
+# Background watcher: discovers port, tracks session, cleans up on exit
+_oc_enrich() {
+    local ppid=$1 file="$OC_REGISTRY/$1.json"
+    local port="" child="" tmp="$file.tmp"
+    # Phase 1: discover port (up to ~10s)
+    for _ in $(seq 1 50); do
+        child=$(pgrep -P "$ppid" 2>/dev/null | head -1)
+        if [ -n "$child" ]; then
+            port=$(ss -tlnp 2>/dev/null | grep "pid=$child," | grep -oP '(?<=:)\d+' | head -1)
+            [ -n "$port" ] && break
+        fi
+        kill -0 "$ppid" 2>/dev/null || { rm -f "$file"; return; }
+        sleep 0.2
+    done
+    [ -n "$port" ] || { rm -f "$file"; return; }
+    jq --argjson p "$port" '.port = $p' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file"
+    # Phase 2: poll session info every 5s until process dies
+    local started
+    started=$(jq -r '.started' "$file" 2>/dev/null)
+    local ms
+    ms=$(date -d "$started" +%s%3N 2>/dev/null) || ms=0
+    while kill -0 "$ppid" 2>/dev/null; do
+        sleep 5
+        kill -0 "$ppid" 2>/dev/null || break
+        local sid="" info=""
+        # Check busy first
+        sid=$(curl -sf --max-time 2 "http://localhost:$port/session/status" | jq -r 'to_entries[0] // empty | .key' 2>/dev/null)
+        if [ -n "$sid" ]; then
+            info=$(curl -sf --max-time 2 "http://localhost:$port/session/$sid" | jq -c '{id, title}' 2>/dev/null)
+        else
+            # Idle: most recent session since process started
+            info=$(curl -sf --max-time 2 "http://localhost:$port/session?start=$ms&limit=1" | jq -c '.[0] // empty | select(. != "") | {id, title}' 2>/dev/null)
+        fi
+        if [ -n "$info" ]; then
+            jq -c --argjson s "$info" '.session = $s' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file"
+        else
+            jq -c 'del(.session)' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file"
+        fi
+    done
+    rm -f "$file" "$tmp"
+}
+
+oc() {
+    case "${1:-}" in
+        ps) shift; _oc_ps "$@"; return ;;
+    esac
+    # Opt-out
+    if [ "${OPENCODE_NO_SERVE:-}" = "1" ]; then
+        opencode "$@"
+        return
+    fi
+    # Skip if user already passed --port
+    local arg
+    for arg in "$@"; do
+        [ "$arg" = "--port" ] && { opencode "$@"; return; }
+    done
+    # Write registry (port filled in async by _oc_enrich)
+    printf '{"pid":%d,"port":null,"dir":"%s","started":"%s"}\n' "$$" "$PWD" "$(date -Iseconds)" > "$OC_REGISTRY/$$.json"
+    # Enricher in subshell to suppress job control output
+    ( _oc_enrich $$ >/dev/null 2>&1 & )
+    # Clean up registry when function returns
+    trap 'rm -f "$OC_REGISTRY/$$.json"; kill 0 2>/dev/null' RETURN
+    opencode --port 0 "$@"
+}
+
+occ() { oc --continue "$@"; }
+
+
+_oc_ps() {
+    local json=false
+    [ "${1:-}" = "--json" ] && json=true
+    local entries="[]"
+    for f in "$OC_REGISTRY"/*.json; do
+        [ -f "$f" ] || continue
+        local pid
+        pid=$(jq -r .pid "$f" 2>/dev/null) || continue
+        # Stale detection: remove dead entries
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$f"
+            continue
+        fi
+        entries=$(echo "$entries" | jq -c --slurpfile e "$f" '. + $e')
+    done
+    if [ "$json" = true ]; then
+        echo "$entries" | jq .
+        return
+    fi
+    if [ "$(echo "$entries" | jq length)" = "0" ]; then
+        echo "No running instances"
+        return
+    fi
+    {
+        printf 'PID\tPORT\tDIR\tSESSION\tTITLE\tSTARTED\n'
+        echo "$entries" | jq -r '.[] | [.pid, (.port // "-"), .dir, (.session.id // "-"), (.session.title // "-"), .started] | @tsv'
+    } | column -t -s $'\t'
+}
 
 # ------------------------------------------------------------------------------
 # Python development (UV-based)
