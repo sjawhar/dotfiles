@@ -278,5 +278,14 @@
   "autoupdate": false,
   "experimental": {
     "disable_paste_summary": true
+  },
+  "voice": {
+    "type": "whisper",
+    "whisper": {
+      "apiKey": "{env:GROQ_API_KEY}",
+      "url": "https://api.groq.com/openai/v1/audio/transcriptions",
+      "model": "whisper-large-v3-turbo",
+      "language": "en"
+    }
   }
 }

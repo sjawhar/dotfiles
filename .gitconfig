@@ -20,3 +20,8 @@
 [user]
 	email = sami@thecybermonk.com
 	name = Sami Jawhar
+[filter "lfs"]
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true
+	clean = git-lfs clean -- %f
