@@ -3,7 +3,9 @@
 # All versions pinned for reproducibility
 
 [tools]
-"cargo:https://github.com/jj-vcs/jj" = { version = "branch:workspace-cli", crate = "jj-cli", bin = "jj" }
+"github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
+"github:sjawhar/opencode" = "latest"  # Custom fork with voice mode, OPENCODE_WEB_URL, session fixes
+"github:sjawhar/oh-my-opencode" = "latest"  # Custom fork
 "npm:@openai/codex" = "0.92.0"  # OpenAI coding agent CLI
 "npm:@googleworkspace/cli" = "0.7.0"  # Google Workspace CLI (Drive, Gmail, Calendar, etc.)
 bat = "0.26.1"      # Cat with syntax highlighting
@@ -18,7 +20,7 @@ neovim = "0.11.6"  # Text editor
 node = "22.22.0"    # Node.js runtime
 opentofu = "1.11.3" # Terraform alternative
 ripgrep = "15.1.0"  # Fast grep that respects .gitignore
-rust = "1.92.0"  # Required to build jj from source
+rust = "1.92.0"  # Rust toolchain for local development
 starship = "1.24.2" # Shell prompt
 uv = "0.10.9"       # Python package manager & project tool
 yq = "4.50.1"       # YAML processor
