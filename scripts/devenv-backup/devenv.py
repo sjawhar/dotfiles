@@ -173,20 +173,15 @@ CLAUDE_SYNC_PATHS = frozenset(
     ]
 )
 
-# OpenCode storage directory (session data, messages, parts)
-OPENCODE_STORAGE_DIR = Path.home() / ".local" / "share" / "opencode" / "storage"
+# OpenCode directories to sync
+OPENCODE_SHARE_DIR = Path.home() / ".local" / "share" / "opencode"
+OPENCODE_STATE_DIR = Path.home() / ".local" / "state" / "opencode"
 
-# Subdirectories within opencode storage to sync
-OPENCODE_SYNC_DIRS = frozenset(
-    [
-        "session",
-        "message",
-        "part",
-        "project",
-        "todo",
-    ]
-)
+# Subdirectories excluded from share dir sync (regenerable runtime artifacts)
+OPENCODE_SHARE_EXCLUDE = ["bin", "log", "snapshot", "tool-output", "worktree"]
 
+# SQLite database files that need WAL checkpoint before sync
+OPENCODE_DB_FILES = ["opencode.db", "opencode-local.db"]
 
 def should_skip_dir(name: str) -> bool:
     """Check if a directory should be skipped during traversal."""
@@ -1442,7 +1437,7 @@ async def restore_from_manifest(manifest: Manifest, force: bool = False) -> list
             ws_path.parent.mkdir(parents=True, exist_ok=True)
 
             returncode, _, stderr = await run_jj(
-                ["workspace", "add", "--colocate", str(ws_path), "--name", ws_name],
+                ["workspace", "add", str(ws_path), "--name", ws_name],
                 default_path,
             )
             if returncode != 0:
@@ -2084,136 +2079,192 @@ async def restore_claude_dir_from_s3(
     return successful, failed, skipped_by_date, skipped_existing
 
 
-def _should_sync_opencode_path(rel_path: Path) -> bool:
-    """Check if a path relative to opencode storage dir should be synced."""
-    if not rel_path.parts:
-        return False
-    return rel_path.parts[0] in OPENCODE_SYNC_DIRS
+async def checkpoint_opencode_dbs(opencode_share_dir: Path) -> None:
+    """Checkpoint SQLite WAL files to flush pending writes into main databases.
+
+    This ensures .db files contain all data and can be safely copied
+    without needing .wal/.shm companion files.
+    """
+    for db_name in OPENCODE_DB_FILES:
+        db_path = opencode_share_dir / db_name
+        if not db_path.exists():
+            continue
+        returncode, _, stderr = await run_with_timeout(
+            ["sqlite3", str(db_path), "PRAGMA wal_checkpoint(TRUNCATE);"],
+            timeout=60.0,
+        )
+        if returncode != 0:
+            print(
+                f"Warning: WAL checkpoint failed for {db_path.name}: {stderr}",
+                file=sys.stderr,
+            )
 
 
-async def sync_opencode_dir_to_s3(
-    local_opencode_dir: Path,
+async def _run_s3_sync(
+    local_dir: Path,
+    s3_url: str,
+    direction: str,
+    exclude: list[str] | None = None,
+    delete: bool = False,
+    dry_run: bool = False,
+    timeout: float = 600.0,
+) -> tuple[int, str, str]:
+    """Run aws s3 sync between local directory and S3.
+
+    Args:
+        local_dir: Local directory path
+        s3_url: Full S3 URL (s3://bucket/key/)
+        direction: 'upload' or 'download'
+        exclude: List of patterns to exclude
+        delete: If True, delete files in destination not in source
+        dry_run: If True, show what would be synced
+        timeout: Timeout in seconds
+
+    Returns:
+        (returncode, stdout, stderr) tuple
+    """
+    if direction == "upload":
+        args = ["aws", "s3", "sync", str(local_dir), s3_url]
+    else:
+        args = ["aws", "s3", "sync", s3_url, str(local_dir)]
+
+    for pattern in exclude or []:
+        args.extend(["--exclude", f"{pattern}/*"])
+    # Exclude SQLite WAL/SHM companion files (checkpointed before sync)
+    args.extend(["--exclude", "*.db-wal", "--exclude", "*.db-shm"])
+
+    if delete:
+        args.append("--delete")
+    if dry_run:
+        args.append("--dryrun")
+
+    return await run_with_timeout(args, timeout=timeout)
+
+
+async def sync_opencode_to_s3(
+    opencode_share_dir: Path,
+    opencode_state_dir: Path,
     s3_destination: str,
     dry_run: bool = False,
     errors_list: list[str] | None = None,
 ) -> tuple[int, int]:
-    """Sync OpenCode session data to S3.
+    """Sync OpenCode share and state directories to S3 using aws s3 sync.
 
-    Only syncs directories listed in OPENCODE_SYNC_DIRS.
+    Checkpoints SQLite WAL files first, then syncs both directories.
+    Excludes regenerable runtime artifacts (bin, log, snapshot, etc.).
 
-    Returns (successful, failed) counts.
+    Returns (successful_dirs, failed_dirs) counts.
     """
-    bucket, base_key = parse_s3_url(s3_destination, ensure_trailing_slash=True)
+    successful = 0
+    failed = 0
 
-    if not local_opencode_dir.exists():
+    if not opencode_share_dir.exists() and not opencode_state_dir.exists():
         return 0, 0
 
-    local_files: list[tuple[Path, str]] = []
-    for root, _dirs, files in os.walk(local_opencode_dir):
-        root_path = Path(root)
-        for filename in files:
-            filepath = root_path / filename
-            if filepath.is_symlink():
-                continue
-            rel_path = filepath.relative_to(local_opencode_dir)
+    base = s3_destination.rstrip("/")
+    share_s3 = f"{base}/share/"
+    state_s3 = f"{base}/state/"
 
-            if not _should_sync_opencode_path(rel_path):
-                continue
+    # Checkpoint SQLite databases before sync
+    if opencode_share_dir.exists() and not dry_run:
+        await checkpoint_opencode_dbs(opencode_share_dir)
 
-            s3_key = base_key + PurePosixPath(rel_path).as_posix()
-            local_files.append((filepath, s3_key))
-
-    if not local_files:
-        return 0, 0
-
-    if dry_run:
-        print(
-            f"Would upload {len(local_files)} OpenCode files to s3://{bucket}/{base_key}",
-            file=sys.stderr,
+    # Sync share dir
+    if opencode_share_dir.exists():
+        returncode, stdout, stderr = await _run_s3_sync(
+            opencode_share_dir,
+            share_s3,
+            direction="upload",
+            exclude=OPENCODE_SHARE_EXCLUDE,
+            dry_run=dry_run,
         )
-        for filepath, _s3_key in local_files[:10]:
-            print(f"  {filepath.relative_to(local_opencode_dir)}", file=sys.stderr)
-        if len(local_files) > 10:
-            print(f"  ... and {len(local_files) - 10} more", file=sys.stderr)
-        return len(local_files), 0
+        output = (stdout + stderr).strip()
+        if dry_run and output:
+            print(output, file=sys.stderr)
+        if returncode == 0:
+            successful += 1
+        else:
+            msg = f"Failed to sync OpenCode share dir: {stderr}"
+            print(msg, file=sys.stderr)
+            if errors_list is not None:
+                errors_list.append(msg)
+            failed += 1
 
-    async def upload_file(s3: "S3Client", local_path: Path, s3_key: str) -> bool:
-        return await s3_upload_file(s3, local_path, bucket, s3_key)
+    # Sync state dir
+    if opencode_state_dir.exists():
+        returncode, stdout, stderr = await _run_s3_sync(
+            opencode_state_dir,
+            state_s3,
+            direction="upload",
+            dry_run=dry_run,
+        )
+        output = (stdout + stderr).strip()
+        if dry_run and output:
+            print(output, file=sys.stderr)
+        if returncode == 0:
+            successful += 1
+        else:
+            msg = f"Failed to sync OpenCode state dir: {stderr}"
+            print(msg, file=sys.stderr)
+            if errors_list is not None:
+                errors_list.append(msg)
+            failed += 1
 
-    return await run_parallel_s3_ops(
-        local_files, upload_file, "OpenCode dir upload error", errors_list
-    )
+    return successful, failed
 
 
-async def restore_opencode_dir_from_s3(
+async def restore_opencode_from_s3(
     s3_source: str,
-    local_opencode_dir: Path,
-    after: datetime | None = None,
+    opencode_share_dir: Path,
+    opencode_state_dir: Path,
     force: bool = False,
     dry_run: bool = False,
     errors_list: list[str] | None = None,
-) -> tuple[int, int, int, list[str]]:
-    """Restore OpenCode session data from S3.
+) -> tuple[int, int]:
+    """Restore OpenCode share and state directories from S3.
 
-    Returns (successful, failed, skipped_by_date, skipped_paths) counts.
+    Returns (successful_dirs, failed_dirs) counts.
     """
-    bucket, base_key = parse_s3_url(s3_source, ensure_trailing_slash=True)
+    successful = 0
+    failed = 0
 
-    session = aioboto3.Session()
-    async with session.client("s3") as s3:
-        objects = await s3_list_objects(s3, bucket, base_key)
+    base = s3_source.rstrip("/")
+    share_s3 = f"{base}/share/"
+    state_s3 = f"{base}/state/"
 
-    to_download: list[tuple[str, Path]] = []
-    skipped_by_date = 0
-    skipped_existing: list[str] = []
+    for local_dir, s3_url, label in [
+        (opencode_share_dir, share_s3, "share"),
+        (opencode_state_dir, state_s3, "state"),
+    ]:
+        local_dir.mkdir(parents=True, exist_ok=True)
 
-    for obj in objects:
-        if after is not None:
-            last_modified = obj.get("LastModified")
-            if last_modified and last_modified < after:
-                skipped_by_date += 1
-                continue
-        s3_key = obj.get("Key")
-        if not s3_key or s3_key.endswith("/"):
-            continue
-        rel_path = s3_key[len(base_key) :]
-        if rel_path.startswith("/") or ".." in rel_path:
-            print(f"Skipping unsafe path: {rel_path}", file=sys.stderr)
-            skipped_by_date += 1
-            continue
-        if not _should_sync_opencode_path(Path(rel_path)):
-            continue
-        local_file = local_opencode_dir / rel_path
+        # Remove stale WAL/SHM files before restore
+        if label == "share" and not dry_run:
+            for db_name in OPENCODE_DB_FILES:
+                for suffix in ("-wal", "-shm"):
+                    companion = local_dir / (db_name + suffix)
+                    if companion.exists():
+                        companion.unlink()
 
-        if local_file.exists() and not force:
-            skipped_existing.append(rel_path)
-            continue
-
-        to_download.append((s3_key, local_file))
-
-    if not to_download:
-        return 0, 0, skipped_by_date, skipped_existing
-
-    if dry_run:
-        print(
-            f"Would download {len(to_download)} OpenCode files from s3://{bucket}/{base_key}",
-            file=sys.stderr,
+        returncode, stdout, stderr = await _run_s3_sync(
+            local_dir,
+            s3_url,
+            direction="download",
+            dry_run=dry_run,
         )
-        for s3_key, _ in to_download[:10]:
-            rel_path = s3_key[len(base_key) :]
-            print(f"  {rel_path}", file=sys.stderr)
-        if len(to_download) > 10:
-            print(f"  ... and {len(to_download) - 10} more", file=sys.stderr)
-        return len(to_download), 0, skipped_by_date, skipped_existing
+        output = (stdout + stderr).strip()
+        if dry_run and output:
+            print(output, file=sys.stderr)
+        if returncode == 0:
+            successful += 1
+        else:
+            msg = f"Failed to restore OpenCode {label} dir: {stderr}"
+            print(msg, file=sys.stderr)
+            if errors_list is not None:
+                errors_list.append(msg)
+            failed += 1
 
-    async def download_file(s3: "S3Client", s3_key: str, local_path: Path) -> bool:
-        return await s3_download_file(s3, bucket, s3_key, local_path, force=True)
-
-    successful, failed = await run_parallel_s3_ops(
-        to_download, download_file, "OpenCode dir download error", errors_list
-    )
-    return successful, failed, skipped_by_date, skipped_existing
-
+    return successful, failed
 
 async def run_backup(
     s3_base: str,
@@ -2221,7 +2272,8 @@ async def run_backup(
     machine: str,
     manifest: Manifest,
     claude_dir_source: Path,
-    opencode_dir_source: Path,
+    opencode_share_dir: Path,
+    opencode_state_dir: Path,
     dry_run: bool = False,
 ) -> list[str]:
     """Run full backup.
@@ -2267,10 +2319,10 @@ async def run_backup(
             await sync_claude_dir_to_s3(
                 claude_dir_source, claude_destination, dry_run=True
             )
-        if opencode_dir_source.exists():
-            await sync_opencode_dir_to_s3(
-                opencode_dir_source, opencode_destination, dry_run=True
-            )
+        await sync_opencode_to_s3(
+            opencode_share_dir, opencode_state_dir,
+            opencode_destination, dry_run=True,
+        )
         return errors
 
     print(f"Backing up to s3://{bucket}/{backup_key}", file=sys.stderr)
@@ -2290,15 +2342,15 @@ async def run_backup(
             file=sys.stderr,
         )
 
-    if opencode_dir_source.exists():
-        uploaded, failed = await sync_opencode_dir_to_s3(
-            opencode_dir_source, opencode_destination, errors_list=errors
-        )
-        print(
-            f"  Synced {uploaded} OpenCode files to {opencode_destination} ({failed} failed)",
-            file=sys.stderr,
-        )
-
+    print(f"\n  Syncing OpenCode data to {opencode_destination}...", file=sys.stderr)
+    synced, sync_failed = await sync_opencode_to_s3(
+        opencode_share_dir, opencode_state_dir,
+        opencode_destination, errors_list=errors,
+    )
+    print(
+        f"  Synced {synced} OpenCode dirs ({sync_failed} failed)",
+        file=sys.stderr,
+    )
     session = aioboto3.Session()
     async with session.client("s3") as s3:
         manifest_json = manifest.model_dump_json(indent=2, exclude_none=True)
@@ -2319,7 +2371,8 @@ async def run_restore(
     backup_name: str,
     machine: str,
     claude_dir_destination: Path,
-    opencode_dir_destination: Path,
+    opencode_share_dir: Path,
+    opencode_state_dir: Path,
     sessions_after: datetime | None,
     force: bool,
     dry_run: bool = False,
@@ -2393,11 +2446,9 @@ async def run_restore(
         await restore_claude_dir_from_s3(
             claude_source, claude_dir_destination, after=sessions_after, dry_run=True
         )
-        await restore_opencode_dir_from_s3(
-            opencode_source,
-            opencode_dir_destination,
-            after=sessions_after,
-            dry_run=True,
+        await sync_opencode_to_s3(
+            opencode_share_dir, opencode_state_dir,
+            opencode_source, dry_run=True,
         )
         return errors
 
@@ -2459,28 +2510,18 @@ async def run_restore(
         )
 
     print(f"\nRestoring OpenCode data from {opencode_source}...", file=sys.stderr)
-    (
-        downloaded,
-        failed,
-        skipped_date,
-        skipped_existing,
-    ) = await restore_opencode_dir_from_s3(
+    restored, restore_failed = await restore_opencode_from_s3(
         opencode_source,
-        opencode_dir_destination,
-        after=sessions_after,
+        opencode_share_dir,
+        opencode_state_dir,
         force=force,
+        dry_run=dry_run,
         errors_list=errors,
     )
     print(
-        f"  Downloaded {downloaded} OpenCode files ({failed} failed, {skipped_date} skipped by date filter)",
+        f"  Restored {restored} OpenCode dirs ({restore_failed} failed)",
         file=sys.stderr,
     )
-    if skipped_existing:
-        print(
-            f"  Skipped {len(skipped_existing)} existing files (use --force to overwrite)",
-            file=sys.stderr,
-        )
-
     # Print error summary if any
     if errors:
         print(f"\n=== ERRORS ({len(errors)}) ===", file=sys.stderr)
@@ -2516,7 +2557,8 @@ async def cmd_backup(args: argparse.Namespace) -> int:
         machine=machine,
         manifest=manifest,
         claude_dir_source=args.claude_dir_source,
-        opencode_dir_source=args.opencode_dir_source,
+        opencode_share_dir=args.opencode_share_dir,
+        opencode_state_dir=args.opencode_state_dir,
         dry_run=args.dry_run,
     )
     return 1 if errors else 0
@@ -2564,7 +2606,8 @@ async def cmd_restore(args: argparse.Namespace) -> int:
             backup_name=backup_name,
             machine=machine,
             claude_dir_destination=args.claude_dir_destination,
-            opencode_dir_destination=args.opencode_dir_destination,
+            opencode_share_dir=args.opencode_share_dir,
+            opencode_state_dir=args.opencode_state_dir,
             sessions_after=sessions_after,
             force=args.force,
             dry_run=args.dry_run,
@@ -2635,10 +2678,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Local Claude directory (default: ~/.dotfiles/.claude)",
     )
     backup_parser.add_argument(
-        "--opencode-dir-source",
+        "--opencode-share-dir",
         type=Path,
-        default=OPENCODE_STORAGE_DIR,
-        help=f"OpenCode storage directory (default: {OPENCODE_STORAGE_DIR})",
+        default=OPENCODE_SHARE_DIR,
+        dest="opencode_share_dir",
+        help=f"OpenCode share directory (default: {OPENCODE_SHARE_DIR})",
+    )
+    backup_parser.add_argument(
+        "--opencode-state-dir",
+        type=Path,
+        default=OPENCODE_STATE_DIR,
+        dest="opencode_state_dir",
+        help=f"OpenCode state directory (default: {OPENCODE_STATE_DIR})",
     )
     backup_parser.add_argument(
         "--no-include-files",
@@ -2688,10 +2739,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Local Claude directory (default: ~/.dotfiles/.claude)",
     )
     restore_parser.add_argument(
-        "--opencode-dir-destination",
+        "--opencode-share-dir",
         type=Path,
-        default=OPENCODE_STORAGE_DIR,
-        help=f"OpenCode storage directory (default: {OPENCODE_STORAGE_DIR})",
+        default=OPENCODE_SHARE_DIR,
+        dest="opencode_share_dir",
+        help=f"OpenCode share directory (default: {OPENCODE_SHARE_DIR})",
+    )
+    restore_parser.add_argument(
+        "--opencode-state-dir",
+        type=Path,
+        default=OPENCODE_STATE_DIR,
+        dest="opencode_state_dir",
+        help=f"OpenCode state directory (default: {OPENCODE_STATE_DIR})",
     )
     restore_parser.add_argument(
         "--manifest-file",
