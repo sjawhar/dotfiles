@@ -508,6 +508,72 @@ jj-rebase-workspaces() {
     done
 }
 
+# Make a repo compatible with OpenCode by symlinking .opencode -> .claude
+# and adding .opencode to the per-worktree git info/exclude
+opencode-compat() {
+    local ws_root
+    ws_root=$(jj workspace root 2>/dev/null) || { echo "Error: not in a jj repo" >&2; return 1; }
+
+    if [ ! -d "$ws_root/.claude" ]; then
+        echo "Error: no .claude directory in $ws_root" >&2
+        return 1
+    fi
+
+    # 1. Create .opencode -> .claude symlink
+    if [ -L "$ws_root/.opencode" ]; then
+        echo "Symlink already exists: $ws_root/.opencode -> $(readlink "$ws_root/.opencode")"
+    elif [ -e "$ws_root/.opencode" ]; then
+        echo "Error: $ws_root/.opencode exists but is not a symlink" >&2
+        return 1
+    else
+        ln -s .claude "$ws_root/.opencode"
+        echo "Created symlink: $ws_root/.opencode -> .claude"
+    fi
+
+    # 2. Add .opencode to per-worktree git info/exclude
+    local gitdir
+    if [ -f "$ws_root/.git" ]; then
+        gitdir=$(sed 's/^gitdir: //' "$ws_root/.git")
+        [[ "$gitdir" != /* ]] && gitdir="$ws_root/$gitdir"
+    elif [ -d "$ws_root/.git" ]; then
+        gitdir="$ws_root/.git"
+    else
+        echo "Error: no .git file or directory in $ws_root" >&2
+        return 1
+    fi
+
+    local exclude="$gitdir/info/exclude"
+    mkdir -p "$(dirname "$exclude")"
+    if grep -qxF '.opencode' "$exclude" 2>/dev/null; then
+        echo "Already in exclude: $exclude"
+    else
+        echo '.opencode' >> "$exclude"
+        echo "Added .opencode to $exclude"
+    fi
+}
+
+# Run opencode-compat across all jj workspaces in the current project
+jj-opencode-compat() {
+    local root_path ws path
+
+    root_path=$(jj workspace root 2>/dev/null) || return 1
+    [ -f "$root_path/.jj/repo" ] && root_path="$(cd "$root_path/.jj" && realpath "$(cat repo)")" && root_path="${root_path%/.jj/repo}"
+
+    # Process root workspace first (has no recorded path)
+    echo "=== default ($root_path) ==="
+    (cd "$root_path" && opencode-compat)
+    echo
+
+    # Process all other workspaces
+    for ws in $(jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null); do
+        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || continue
+        [ "$path" = "$root_path" ] && continue
+        echo "=== $ws ($path) ==="
+        (cd "$path" && opencode-compat)
+        echo
+    done
+}
+
 # ------------------------------------------------------------------------------
 # Security: idle shell timeout (skip inside tmux)
 # ------------------------------------------------------------------------------
