@@ -163,7 +163,9 @@ This single command:
 - Uploads manifest.json to `{base}/{machine}/{name}/`
 - Uploads files to `{base}/{machine}/{name}/files/`
 - Syncs Claude Code data to `{base}/claude-code/{machine}/` (only session data, not git-tracked config or credentials)
-- Syncs OpenCode session data to `{base}/opencode/{machine}/` (session, message, part, project, and todo directories from `~/.local/share/opencode/storage/`)
+- Syncs OpenCode data directories (`~/.local/share/opencode/` and `~/.local/state/opencode/`) to `{base}/opencode/{machine}/share/` and `{base}/opencode/{machine}/state/`
+  - Checkpoints SQLite WAL files before sync for consistency
+  - Excludes regenerable runtime artifacts (bin, log, snapshot, tool-output, worktree)
 
 **9. Summary:**
 
@@ -173,7 +175,7 @@ Print:
 - Number of files uploaded (if any)
 - Number of symlinks captured (if any)
 - Claude Code data synced
-- OpenCode session data synced
+- OpenCode data synced (share + state directories)
 - Any uncommitted changes that were skipped
 
 **Done when:** Backup is uploaded to S3.

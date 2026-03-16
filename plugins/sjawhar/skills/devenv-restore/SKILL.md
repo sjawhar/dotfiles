@@ -79,7 +79,7 @@ This single command:
 - Downloads files to their original locations
 - Restores symlinks
 - Restores Claude Code session data
-- Restores OpenCode session data (from `{base}/opencode/{machine}/` to `~/.local/share/opencode/storage/`)
+- Restores OpenCode data (from `{base}/opencode/{machine}/share/` to `~/.local/share/opencode/` and `{base}/opencode/{machine}/state/` to `~/.local/state/opencode/`)
 
 **5. Follow agent instructions:**
 
@@ -92,7 +92,7 @@ Report:
 - Workspaces created
 - Files/symlinks restored
 - Claude Code sessions restored
-- OpenCode sessions restored
+- OpenCode data restored (share + state directories)
 - Any errors or warnings
 
 Note any uncommitted changes recorded in the manifest.
