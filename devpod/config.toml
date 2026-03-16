@@ -39,7 +39,6 @@ echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://package
 apt-get update
 apt-get install -y \\
   build-essential \\
-  bison libevent-dev libncurses-dev \\
   containerd.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin \\
   code \\
   fail2ban \\
@@ -58,15 +57,9 @@ apt-get install -y \\
 
 usermod -aG docker sami
 
-# --- Binary installs ---
+# --- Binary installs (not managed by mise) ---
 
 ARCH=$(dpkg --print-architecture)
-UNAME_ARCH=$(uname -m)
-NVIM_ARCH=$([ "$UNAME_ARCH" = "aarch64" ] && echo "arm64" || echo "x86_64")
-
-# nvim 0.11.5
-curl -fsSL "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-${NVIM_ARCH}.tar.gz" \\
-  | tar -xz -C /usr/local --strip-components=1
 
 # k9s 0.50.18
 curl -fsSL "https://github.com/derailed/k9s/releases/download/v0.50.18/k9s_Linux_${ARCH}.tar.gz" \\
@@ -84,13 +77,6 @@ chmod +x /usr/local/bin/kubectl
 curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o /tmp/ssm-plugin.deb
 dpkg -i /tmp/ssm-plugin.deb
 rm /tmp/ssm-plugin.deb
-
-# --- tmux 3.6a from source (need 3.5+ for allow-passthrough filter) ---
-
-curl -fsSL "https://github.com/tmux/tmux/releases/download/3.6a/tmux-3.6a.tar.gz" \\
-  | tar -xz -C /tmp
-cd /tmp/tmux-3.6a && ./configure && make -j"$(nproc)" && make install
-rm -rf /tmp/tmux-3.6a
 
 # --- System config ---
 

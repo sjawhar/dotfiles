@@ -17,6 +17,7 @@ gh = "2.85.0"       # GitHub CLI
 glow = "2.1.1"      # Terminal markdown reader
 jq = "1.8.1"        # JSON processor
 neovim = "0.11.6"  # Text editor
+"github:tmux/tmux-builds" = "3.6a"  # Pre-built binary (extended keys, codepoint widths, scrollbars)
 node = "22.22.0"    # Node.js runtime
 opentofu = "1.11.3" # Terraform alternative
 ripgrep = "15.1.0"  # Fast grep that respects .gitignore
