@@ -5,7 +5,7 @@
     "messages_last": "ctrl+alt+g,ctrl+end"
   },
   "plugin": [
-    "file://{env:HOME}/oh-my-opencode/original",
+    "@sjawhar/oh-my-opencode",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "opencode-antigravity-auth@1.6.0",
     "github:sjawhar/opencode-anthropic-auth#feat/account-pool"
