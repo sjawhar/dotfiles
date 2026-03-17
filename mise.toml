@@ -6,6 +6,7 @@
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
 "github:sjawhar/opencode" = "latest"  # Custom fork with voice mode, OPENCODE_WEB_URL, session fixes
 "github:sjawhar/oh-my-opencode" = "latest"  # Custom fork
+"github:sjawhar/time-tracker" = { version = "latest", exe = "tt" }  # AI-native time tracker CLI
 "npm:@openai/codex" = "0.92.0"  # OpenAI coding agent CLI
 "npm:@googleworkspace/cli" = "0.7.0"  # Google Workspace CLI (Drive, Gmail, Calendar, etc.)
 "github:korotovsky/slack-mcp-server" = "1.2.3"  # Slack MCP server (Go binary from GitHub releases)
