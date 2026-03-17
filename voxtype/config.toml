@@ -101,7 +101,7 @@ eager_processing = true
 remote_endpoint = "https://api.groq.com/openai"
 remote_model = "whisper-large-v3-turbo"
 # API key loaded via VOXTYPE_WHISPER_API_KEY env var (injected by secrets wrapper)
-remote_timeout_secs = 10
+remote_timeout_secs = 30
 
 [output]
 # Primary output mode: "type", "clipboard", or "paste"

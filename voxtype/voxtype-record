@@ -1,0 +1,79 @@
+#!/bin/bash
+# Wrapper around voxtype record commands that also captures audio via PipeWire.
+# Audio files are saved to $XDG_DATA_HOME/voxtype/recordings/ as 16kHz mono WAV,
+# compatible with `voxtype transcribe <file>` for re-transcription.
+#
+# On stop, spawns a background check that notifies if transcription failed.
+set -euo pipefail
+
+RECORDINGS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/recordings"
+HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/history.jsonl"
+PID_FILE="/run/user/$(id -u)/voxtype/pw-record.pid"
+STATE_FILE="/run/user/$(id -u)/voxtype/state"
+
+mkdir -p "$RECORDINGS_DIR"
+
+stop_pw_record() {
+    if [ -f "$PID_FILE" ]; then
+        kill "$(cat "$PID_FILE")" 2>/dev/null || true
+        rm -f "$PID_FILE"
+    fi
+}
+
+# Wait for transcription to finish, notify on failure.
+# Runs in background so the keyboard shortcut returns immediately.
+check_transcription_result() {
+    # Snapshot history mtime before transcription
+    local history_mtime
+    history_mtime=$(stat -c %Y "$HISTORY_FILE" 2>/dev/null || echo 0)
+
+    # Wait for state to leave "transcribing" (max 60s)
+    for _ in $(seq 1 120); do
+        sleep 0.5
+        local state
+        state=$(cat "$STATE_FILE" 2>/dev/null || echo "idle")
+        [ "$state" != "transcribing" ] && break
+    done
+
+    # Small grace period for post-process to finish writing history
+    sleep 1
+
+    # If history file was updated, transcription succeeded
+    local new_mtime
+    new_mtime=$(stat -c %Y "$HISTORY_FILE" 2>/dev/null || echo 0)
+    [ "$new_mtime" -gt "$history_mtime" ] && return 0
+
+    # Transcription failed — notify with retry hint
+    notify-send --app-name=Voxtype --expire-time=10000 \
+        "Transcription Failed" \
+        "Recording saved. Press Ctrl+Shift+. to retranscribe"
+}
+
+case "${1:-}" in
+    toggle)
+        state=$(cat "$STATE_FILE" 2>/dev/null || echo "idle")
+        if [ "$state" = "idle" ]; then
+            # About to start — begin independent audio capture
+            timestamp=$(date +%Y-%m-%dT%H-%M-%S)
+            pw-record --rate=16000 --channels=1 --format=s16 \
+                "$RECORDINGS_DIR/$timestamp.wav" &
+            echo $! > "$PID_FILE"
+        else
+            # About to stop — kill pw-record (before voxtype toggle so file is finalized)
+            stop_pw_record
+        fi
+        voxtype record toggle
+        # On stop, check if transcription succeeds in the background
+        if [ "$state" != "idle" ]; then
+            check_transcription_result &
+        fi
+        ;;
+    cancel)
+        stop_pw_record
+        voxtype record cancel
+        ;;
+    *)
+        # Pass through any other subcommands unchanged
+        voxtype record "$@"
+        ;;
+esac

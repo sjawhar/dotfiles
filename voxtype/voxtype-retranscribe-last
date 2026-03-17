@@ -1,0 +1,41 @@
+#!/bin/bash
+# Retranscribe the most recent voxtype recording and paste into the focused window.
+# Uses voxtype's own transcriber, then pipes through post-processing and pastes.
+set -euo pipefail
+
+RECORDINGS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/recordings"
+POST_PROCESS="$HOME/.dotfiles/voxtype/voxtype-post-process"
+
+latest=$(find "$RECORDINGS_DIR" -name '*.wav' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2-)
+
+if [ -z "$latest" ]; then
+    notify-send --app-name=Voxtype "No Recordings" "No recordings found to retranscribe"
+    exit 0
+fi
+
+filename=$(basename "$latest")
+notify-send --app-name=Voxtype --expire-time=2000 "Retranscribing" "$filename"
+
+# Transcribe the audio file
+text=$(voxtype transcribe "$latest" 2>/dev/null) || {
+    notify-send --app-name=Voxtype "Retranscription Failed" "Could not transcribe $filename"
+    exit 1
+}
+
+if [ -z "$text" ]; then
+    notify-send --app-name=Voxtype "Empty Result" "Transcription produced no text"
+    exit 0
+fi
+
+# Post-process if the hook is available and API key is set
+if [ -x "$POST_PROCESS" ] && [ -n "${VOXTYPE_WHISPER_API_KEY:-}" ]; then
+    text=$(printf '%s' "$text" | "$POST_PROCESS") || true
+fi
+
+# Copy to clipboard and paste into focused window
+printf '%s' "$text" | wl-copy
+sleep 0.15
+ydotool key 29:1 42:1 47:1 47:0 42:0 29:0  # Ctrl+Shift+V
+
+notify-send --app-name=Voxtype --expire-time=2000 "Retranscribed" "${text:0:80}..."

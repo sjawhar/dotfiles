@@ -1,0 +1,6 @@
+[Unit]
+Description=Sync voxtype recordings to S3 and prune old local files
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/voxtype/voxtype-recordings-sync
