@@ -11,6 +11,19 @@ Host devbox
   User ubuntu
   ForwardAgent yes
 
+Host devbox-mx
+  HostName sami-agents-mx.tailb86685.ts.net
+  User ubuntu
+  ForwardAgent yes
+  Compression yes
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/%r@%h-%p
+  ControlPersist 600
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  TCPKeepAlive yes
+  IPQoS lowdelay throughput
+
 Host ghost-wispr
   HostName ghost-wispr.tailb86685.ts.net
   User ghost-wispr

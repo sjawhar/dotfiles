@@ -3,11 +3,14 @@
 
 import gi
 import os
+import subprocess
 import signal
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("AyatanaAppIndicator3", "0.1")
 from gi.repository import AyatanaAppIndicator3, Gtk, GLib
+
+DOTFILES_DIR = os.environ.get("DOTFILES_DIR", os.path.expanduser("~/.dotfiles"))
 
 STATE_FILE = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
@@ -45,6 +48,14 @@ class VoxtypeTray:
         item_cancel = Gtk.MenuItem(label="Cancel Recording")
         item_cancel.connect("activate", self._cancel)
         menu.append(item_cancel)
+        menu.append(Gtk.SeparatorMenuItem())
+        item_retranscribe = Gtk.MenuItem(label="Retranscribe Last Recording")
+        item_retranscribe.connect("activate", self._retranscribe_last)
+        menu.append(item_retranscribe)
+        item_paste_last = Gtk.MenuItem(label="Paste Last Transcription")
+        item_paste_last.connect("activate", self._paste_last)
+        menu.append(item_paste_last)
+        menu.append(Gtk.SeparatorMenuItem())
         item_restart = Gtk.MenuItem(label="Restart Service")
         item_restart.connect("activate", self._restart_service)
         menu.append(item_restart)
@@ -75,10 +86,16 @@ class VoxtypeTray:
         return True
 
     def _toggle(self, _):
-        os.system("voxtype record toggle")
+        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-record"), "toggle"])
 
     def _cancel(self, _):
-        os.system("voxtype record cancel")
+        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-record"), "cancel"])
+
+    def _retranscribe_last(self, _):
+        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-retranscribe-last")])
+
+    def _paste_last(self, _):
+        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-history-paste-last")])
 
     def _restart_service(self, _):
         os.system("systemctl --user restart voxtype.service")

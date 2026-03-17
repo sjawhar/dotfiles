@@ -1,0 +1,17 @@
+#!/bin/bash
+# Sync voxtype recordings to S3 and prune local files older than 7 days.
+# Runs as a daily systemd timer.
+set -euo pipefail
+
+RECORDINGS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/recordings"
+S3_DEST="s3://bucket/users/sami@metr.org/voxtype-recordings/"
+LOCAL_RETENTION_DAYS=7
+
+# Nothing to do if no recordings directory
+[ -d "$RECORDINGS_DIR" ] || exit 0
+
+# Sync to S3 (only uploads new/changed files)
+aws s3 sync "$RECORDINGS_DIR" "$S3_DEST" --quiet
+
+# Prune local files older than retention period
+find "$RECORDINGS_DIR" -name '*.wav' -mtime +"$LOCAL_RETENTION_DAYS" -delete 2>/dev/null || true

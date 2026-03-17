@@ -72,6 +72,8 @@ ensure_link "${DOTFILES_DIR}/voxtype/config.toml"               ~/.config/voxtyp
 ensure_link "${DOTFILES_DIR}/voxtype/voxtype-tray.desktop"     ~/.config/autostart/voxtype-tray.desktop
 ensure_link "${DOTFILES_DIR}/voxtype/voxtype.service"          ~/.config/systemd/user/voxtype.service
 ensure_link "${DOTFILES_DIR}/voxtype/ydotoold.service"          ~/.config/systemd/user/ydotoold.service
+ensure_link "${DOTFILES_DIR}/voxtype/voxtype-recordings-sync.service" ~/.config/systemd/user/voxtype-recordings-sync.service
+ensure_link "${DOTFILES_DIR}/voxtype/voxtype-recordings-sync.timer"   ~/.config/systemd/user/voxtype-recordings-sync.timer
 MODEL_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/models/ggml-large-v3-turbo.bin"
 if [ ! -f "$MODEL_FILE" ]; then
     echo "Downloading whisper large-v3-turbo model (~1.6 GB)..."
@@ -81,13 +83,10 @@ fi
 systemctl --user daemon-reload
 systemctl --user enable --now ydotoold 2>/dev/null || true
 systemctl --user enable --now voxtype 2>/dev/null || true
+systemctl --user enable --now voxtype-recordings-sync.timer 2>/dev/null || true
 if [ ! -f ~/.config/sops/age/keys.txt ]; then
     echo "WARNING: ~/.config/sops/age/keys.txt not found."
     echo "  The voxtype daemon needs this to decrypt the Groq API key."
     echo "  Write your age private key to this file."
 fi
-echo "NOTE: Configure COSMIC keyboard shortcut manually:"
-echo "  Settings > Keyboard > Custom Shortcuts"
-echo "  Name: Voxtype Toggle"
-echo "  Command: voxtype record toggle"
-echo "  Shortcut: Super+V (or your preference)"
+echo "NOTE: COSMIC keyboard shortcuts are installed via laptop/install.sh"
