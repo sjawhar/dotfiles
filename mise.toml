@@ -8,6 +8,7 @@
 "github:sjawhar/oh-my-opencode" = "latest"  # Custom fork
 "npm:@openai/codex" = "0.92.0"  # OpenAI coding agent CLI
 "npm:@googleworkspace/cli" = "0.7.0"  # Google Workspace CLI (Drive, Gmail, Calendar, etc.)
+"github:korotovsky/slack-mcp-server" = "1.2.3"  # Slack MCP server (Go binary from GitHub releases)
 bat = "0.26.1"      # Cat with syntax highlighting
 bun = "1.3.8"       # JavaScript runtime & package manager
 eza = "0.23.4"      # Modern ls with colors and git status
