@@ -5,7 +5,8 @@ mcp:
   toggl:
     command: secrets
     args: ["TOGGL_API_KEY", "--", "node", "/home/sami/toggl/dist/index.js"]
-    env: {}
+    env:
+      SOPS_AGE_KEY: "${SOPS_AGE_KEY}"
 ---
 
 # Toggl
