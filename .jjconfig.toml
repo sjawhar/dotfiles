@@ -11,3 +11,10 @@ tug = ["bookmark", "move", "--from", "closest_bookmark(@)", "--to", "@"]
 [ui]
 editor = "nvim"
 
+# Use git diff format when running inside AI agents
+# (agents can't parse color-words output)
+[[--scope]]
+--when.environments = ["AGENT", "OPENCODE", "CLAUDECODE"]
+[--scope.ui]
+diff-formatter = ":git"
+
