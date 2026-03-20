@@ -2,38 +2,25 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-VOXTYPE_VERSION="0.6.2"
 YDOTOOL_VERSION="1.0.4"
-# --- Patched voxtype binary ---
-# Builds from source with shift_enter_newlines support for ydotool driver.
-# TODO: Remove patch step once upstream merges the fix.
-VOXTYPE_PATCH="${DOTFILES_DIR}/voxtype/ydotool-shift-enter.patch"
+# --- voxtype binary from sjawhar fork release ---
+# Custom fork with eager processing wiring. Downloads latest sami-tagged release.
+# Once upstream merges PR #275 and cuts a release, switch back to peteonrails/voxtype.
+VOXTYPE_REPO="sjawhar/voxtype"
 VOXTYPE_BIN="${DOTFILES_DIR}/bin/voxtype"
-if [ ! -x "$VOXTYPE_BIN" ]; then
-    echo "Building voxtype ${VOXTYPE_VERSION} from source..."
-    VOXTYPE_SRC="${HOME}/Code/voxtype"
-    if [ ! -d "${VOXTYPE_SRC}/.git" ]; then
-        git clone --depth 1 --branch "v${VOXTYPE_VERSION}" \
-            https://github.com/peteonrails/voxtype.git "$VOXTYPE_SRC"
-    fi
-    git -C "$VOXTYPE_SRC" checkout -f "v${VOXTYPE_VERSION}" 2>/dev/null || true
-    if [ -f "$VOXTYPE_PATCH" ]; then
-        git -C "$VOXTYPE_SRC" apply "$VOXTYPE_PATCH" 2>/dev/null || true
-    fi
-    BUILD_DEPS=(
-        cmake
-        glslc
-        libasound2-dev
-        libclang-dev
-        libvulkan-dev
-        pkg-config
-    )
-    if ! dpkg -s "${BUILD_DEPS[@]}" &>/dev/null; then
-        sudo apt-get install -y -qq "${BUILD_DEPS[@]}" >/dev/null
-    fi
-    (cd "$VOXTYPE_SRC" && cargo build --release --features gpu-vulkan)
-    cp "${VOXTYPE_SRC}/target/release/voxtype" "$VOXTYPE_BIN"
+VOXTYPE_INSTALLED_TAG="${DOTFILES_DIR}/bin/.voxtype-tag"
+
+# Get latest sami release tag
+VOXTYPE_TAG=$(gh release list --repo "$VOXTYPE_REPO" --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+if [ -z "$VOXTYPE_TAG" ]; then
+    echo "WARNING: Could not fetch latest voxtype release tag from $VOXTYPE_REPO"
+    echo "  Keeping existing binary (if any)."
+elif [ ! -x "$VOXTYPE_BIN" ] || [ ! -f "$VOXTYPE_INSTALLED_TAG" ] || [ "$(cat "$VOXTYPE_INSTALLED_TAG")" != "$VOXTYPE_TAG" ]; then
+    echo "Installing voxtype ${VOXTYPE_TAG} from ${VOXTYPE_REPO}..."
+    VOXTYPE_URL="https://github.com/${VOXTYPE_REPO}/releases/download/${VOXTYPE_TAG}/voxtype-${VOXTYPE_TAG}-linux-x86_64.tar.gz"
+    curl -fSL "$VOXTYPE_URL" | tar xz -C "${DOTFILES_DIR}/bin/" voxtype
     chmod +x "$VOXTYPE_BIN"
+    echo "$VOXTYPE_TAG" > "$VOXTYPE_INSTALLED_TAG"
 fi
 
 # --- ydotool v1.x (from GitHub release) ---
