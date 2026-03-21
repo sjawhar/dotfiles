@@ -80,6 +80,7 @@ export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 # Claude Code
 export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+export ANTHROPIC_1M_CONTEXT=true
 
 
 # ==============================================================================
