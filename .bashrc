@@ -162,7 +162,17 @@ mkdir -p "$OC_REGISTRY" 2>/dev/null
 # Background watcher: discovers port, tracks session, cleans up on exit
 _oc_enrich() {
     local ppid=$1 file="$OC_REGISTRY/$1.json"
-    local port="" child="" tmp="$file.tmp"
+    local pidfile="$OC_REGISTRY/$1.enricher"
+    local port="" child="" tmp="$file.tmp.$BASHPID"
+    # Kill previous enricher for this shell PID
+    local old_pid
+    old_pid=$(cat "$pidfile" 2>/dev/null)
+    if [ -n "$old_pid" ] && [ "$old_pid" != "$BASHPID" ]; then
+        kill "$old_pid" 2>/dev/null
+    fi
+    printf '%d' "$BASHPID" > "$pidfile"
+    # Clean up stale shared tmp from previous code
+    rm -f "$file.tmp" 2>/dev/null
     # Phase 1: discover port (up to ~10s)
     for _ in $(seq 1 50); do
         child=$(pgrep -P "$ppid" 2>/dev/null | head -1)
@@ -170,10 +180,10 @@ _oc_enrich() {
             port=$(ss -tlnp 2>/dev/null | grep "pid=$child," | grep -oP '(?<=:)\d+' | head -1)
             [ -n "$port" ] && break
         fi
-        kill -0 "$ppid" 2>/dev/null || { rm -f "$file"; return; }
+        kill -0 "$ppid" 2>/dev/null || { rm -f "$file" "$tmp" "$pidfile"; return; }
         sleep 0.2
     done
-    [ -n "$port" ] || { rm -f "$file"; return; }
+    [ -n "$port" ] || { rm -f "$file" "$tmp" "$pidfile"; return; }
     jq --argjson p "$port" '.port = $p' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file"
     # Phase 2: poll session info every 5s until process dies
     local started
@@ -183,6 +193,7 @@ _oc_enrich() {
     while kill -0 "$ppid" 2>/dev/null; do
         sleep 5
         kill -0 "$ppid" 2>/dev/null || break
+        [ -f "$file" ] || break
         local sid="" info=""
         # Check busy first
         sid=$(curl -sf --max-time 2 "http://localhost:$port/session/status" | jq -r 'to_entries[0] // empty | .key' 2>/dev/null)
@@ -198,7 +209,7 @@ _oc_enrich() {
             jq -c 'del(.session)' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file"
         fi
     done
-    rm -f "$file" "$tmp"
+    rm -f "$file" "$tmp" "$pidfile"
 }
 
 oc() {
@@ -219,8 +230,8 @@ oc() {
     printf '{"pid":%d,"port":null,"dir":"%s","started":"%s"}\n' "$$" "$PWD" "$(date -Iseconds)" > "$OC_REGISTRY/$$.json"
     # Enricher in subshell to suppress job control output
     ( _oc_enrich $$ >/dev/null 2>&1 & )
-    # Clean up registry when function returns
-    trap 'rm -f "$OC_REGISTRY/$$.json"; kill 0 2>/dev/null' RETURN
+    # Clean up registry + enricher when function returns
+    trap 'rm -f "$OC_REGISTRY/$$.json"; kill "$(cat "$OC_REGISTRY/$$.enricher" 2>/dev/null)" 2>/dev/null; rm -f "$OC_REGISTRY/$$.enricher"' RETURN
     opencode --port 0 "$@"
 }
 
@@ -235,9 +246,11 @@ _oc_ps() {
         [ -f "$f" ] || continue
         local pid
         pid=$(jq -r .pid "$f" 2>/dev/null) || continue
+        # Skip corrupt entries (0-byte files, missing pid)
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
         # Stale detection: remove dead entries
         if ! kill -0 "$pid" 2>/dev/null; then
-            rm -f "$f"
+            rm -f "$f" "${f%.json}.enricher"
             continue
         fi
         entries=$(echo "$entries" | jq -c --slurpfile e "$f" '. + $e')
