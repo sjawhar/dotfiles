@@ -276,6 +276,7 @@
     }
   },
   "autoupdate": false,
+  "snapshot": false,
   "experimental": {
     "disable_paste_summary": true
   },
