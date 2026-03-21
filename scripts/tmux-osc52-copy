@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pipe tmux selections to the system clipboard via OSC 52.
+#
+# Used as tmux's `copy-command`. Reads copied text from stdin, base64-encodes
+# it, and writes the OSC 52 sequence directly to the tmux client's terminal.
+# This works over both SSH and mosh — mosh requires the explicit 'c;' clipboard
+# selector that tmux's built-in clipboard omits.
+#
+# tmux's `set-clipboard on` still sends its own OSC 52 (which works over SSH
+# natively). This script handles the mosh case where that built-in sequence
+# gets rejected.
+
+tty=$(tmux display-message -p '#{client_tty}')
+printf '\033]52;c;%s\a' "$(base64 | tr -d '\n')" > "$tty"
