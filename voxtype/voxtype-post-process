@@ -68,7 +68,11 @@ fi
 
 # Use refined text if we got it, otherwise fall back to raw
 # Safety: if refined is >50% longer than raw, the model hallucinated — use raw
+# Safety: if refined is <40% of raw length, the model over-trimmed — use raw
 if [ -n "$refined" ] && [ ${#refined} -gt $(( ${#raw} * 3 / 2 )) ]; then
+    refined=""
+fi
+if [ -n "$refined" ] && [ ${#refined} -lt $(( ${#raw} * 2 / 5 )) ]; then
     refined=""
 fi
 output="${refined:-$raw}"

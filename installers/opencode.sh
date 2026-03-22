@@ -5,25 +5,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 ensure_command opencode "curl -fsSL https://opencode.ai/install | bash"
 
 OPENCODE_DIR="${HOME}/.config/opencode"
-VENDOR_DIR="${DOTFILES_DIR}/vendor"
 OC_JSON="${OPENCODE_DIR}/opencode.json"
 mkdir -p "$OPENCODE_DIR"
 
-ensure_vendor https://github.com/obra/superpowers.git superpowers
-ensure_vendor https://github.com/EveryInc/compound-engineering-plugin compound-engineering
 ensure_vendor https://github.com/obra/streamlinear.git streamlinear
 
 mkdir -p "${OPENCODE_DIR}/skills"
-ensure_link "${VENDOR_DIR}/superpowers/skills" "${OPENCODE_DIR}/skills/superpowers"
 ensure_link "${DOTFILES_DIR}/plugins/sjawhar/skills" "${OPENCODE_DIR}/skills/sjawhar"
-
-mkdir -p "${OPENCODE_DIR}/plugins"
-ensure_link "${VENDOR_DIR}/superpowers/.opencode/plugins/superpowers.js" "${OPENCODE_DIR}/plugins/superpowers.js"
-
-# CE integration: delegate to vendor-update-ce (handles converter, commands, skills, agents)
-if [ -d "${VENDOR_DIR}/compound-engineering" ]; then
-    bash "${DOTFILES_DIR}/scripts/vendor-update-ce"
-fi
 
 ensure_command oh-my-opencode "npm install -g oh-my-opencode"
 

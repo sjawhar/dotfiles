@@ -8,7 +8,8 @@
     "@sjawhar/oh-my-opencode@sami",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "opencode-antigravity-auth@1.6.0",
-    "github:sjawhar/opencode-anthropic-auth#feat/account-pool"
+    "github:sjawhar/opencode-anthropic-auth#feat/account-pool",
+    "superpowers@git+https://github.com/obra/superpowers.git#v5.0.5"
   ],
   "provider": {
     "anthropic": {

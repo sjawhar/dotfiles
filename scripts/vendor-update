@@ -10,13 +10,3 @@ for dir in "$VENDOR_DIR"/*/; do
         jj rebase -d master@origin 2>/dev/null ||
         echo "  Warning: couldn't rebase $name (check default branch)" )
 done
-
-# Regenerate compound-engineering opencode agents
-CE_DIR="${VENDOR_DIR}/compound-engineering"
-CE_OC="${VENDOR_DIR}/compound-engineering-opencode"
-if [ -d "$CE_DIR" ] && command -v bun &>/dev/null; then
-    echo "Regenerating compound-engineering agents..."
-    ( cd "$CE_DIR" && [ -d node_modules ] || bun install --silent )
-    rm -rf "$CE_OC"
-    ( cd "$CE_DIR" && bun run src/index.ts install compound-engineering --to opencode --output "$CE_OC" 2>/dev/null )
-fi
