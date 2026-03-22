@@ -10,6 +10,7 @@ Monitors the voxtype daemon state file and provides:
 import gi
 import os
 import subprocess
+import threading
 import signal
 import time
 
@@ -71,12 +72,9 @@ class VoxtypeTray:
         item_paste_last.connect("activate", self._paste_last)
         menu.append(item_paste_last)
         menu.append(Gtk.SeparatorMenuItem())
-        item_force_reset = Gtk.MenuItem(label="Force Reset")
-        item_force_reset.connect("activate", self._force_reset)
-        menu.append(item_force_reset)
-        item_restart = Gtk.MenuItem(label="Restart Service")
-        item_restart.connect("activate", self._restart_service)
-        menu.append(item_restart)
+        item_reset = Gtk.MenuItem(label="Reset")
+        item_reset.connect("activate", self._reset)
+        menu.append(item_reset)
         menu.append(Gtk.SeparatorMenuItem())
         item_quit = Gtk.MenuItem(label="Quit Indicator")
         item_quit.connect("activate", lambda _: Gtk.main_quit())
@@ -131,59 +129,104 @@ class VoxtypeTray:
             "Transcription Stuck",
             f"State has been 'transcribing' for {secs}s.\n"
             "The Deepgram stream may have hung.\n"
-            "Use tray menu > Force Reset to recover.",
+            "Use tray menu > Reset to recover.",
         ])
 
-    def _force_reset(self, _):
-        """Kill orphan pw-record processes, restart the service, clean up state."""
-        # Kill any orphaned pw-record processes writing to our recordings dir
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", "pw-record.*voxtype/recordings"],
-                capture_output=True, text=True,
+    def _reset(self, _):
+        """Full reset: kill orphan processes, restart PipeWire + BT, restart voxtype."""
+        def _do_reset():
+            GLib.idle_add(
+                lambda: subprocess.Popen([
+                    "notify-send", "--app-name=Voxtype", "--expire-time=3000",
+                    "Resetting Voxtype", "Cleaning up, restarting audio stack...",
+                ])
             )
-            for pid in result.stdout.strip().split("\n"):
-                if pid:
-                    try:
-                        os.kill(int(pid), signal.SIGTERM)
-                    except (ProcessLookupError, ValueError):
-                        pass
-        except FileNotFoundError:
-            pass
 
-        # Clean up runtime files
-        for f in [PID_FILE, WAV_FILE]:
+            # Kill any orphaned pw-record processes
             try:
-                os.remove(f)
+                result = subprocess.run(
+                    ["pgrep", "-f", "pw-record.*voxtype/recordings"],
+                    capture_output=True, text=True,
+                )
+                for pid in result.stdout.strip().split("\n"):
+                    if pid:
+                        try:
+                            os.kill(int(pid), signal.SIGTERM)
+                        except (ProcessLookupError, ValueError):
+                            pass
             except FileNotFoundError:
                 pass
 
-        # Restart the service
-        os.system("systemctl --user restart voxtype.service")
+            # Clean up runtime files
+            for f in [PID_FILE, WAV_FILE]:
+                try:
+                    os.remove(f)
+                except FileNotFoundError:
+                    pass
 
-        self.transcribing_since = None
-        self.stuck_notified = False
+            # Detect if default source is Bluetooth, grab the address
+            bt_address = None
+            try:
+                result = subprocess.run(
+                    ["pactl", "get-default-source"],
+                    capture_output=True, text=True,
+                )
+                source = result.stdout.strip()
+                if "bluez" in source:
+                    parts = source.split(".")
+                    if len(parts) >= 2:
+                        bt_address = parts[1].replace("_", ":")
+            except (FileNotFoundError, IndexError):
+                pass
 
-        subprocess.Popen([
-            "notify-send", "--app-name=Voxtype", "--expire-time=5000",
-            "Voxtype Reset",
-            "Service restarted and orphan processes cleaned up.",
-        ])
+            # Stop voxtype
+            subprocess.run(
+                ["systemctl", "--user", "stop", "voxtype.service"],
+                capture_output=True,
+            )
 
-    def _toggle(self, _):
-        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-record"), "toggle"])
+            # Disconnect BT device so the reconnect gets a fresh handle
+            if bt_address:
+                subprocess.run(
+                    ["bluetoothctl", "disconnect", bt_address],
+                    capture_output=True, timeout=5,
+                )
+                time.sleep(1)
 
-    def _cancel(self, _):
-        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-record"), "cancel"])
+            # Restart PipeWire stack
+            subprocess.run(
+                ["systemctl", "--user", "restart",
+                 "pipewire.service", "pipewire-pulse.service", "wireplumber.service"],
+                capture_output=True,
+            )
+            time.sleep(2)
 
-    def _retranscribe_last(self, _):
-        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-retranscribe-last")])
+            # Reconnect BT device
+            if bt_address:
+                subprocess.run(
+                    ["bluetoothctl", "connect", bt_address],
+                    capture_output=True, timeout=10,
+                )
+                time.sleep(3)
 
-    def _paste_last(self, _):
-        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-history-paste-last")])
+            # Start voxtype
+            subprocess.run(
+                ["systemctl", "--user", "start", "voxtype.service"],
+                capture_output=True,
+            )
 
-    def _restart_service(self, _):
-        os.system("systemctl --user restart voxtype.service")
+            self.transcribing_since = None
+            self.stuck_notified = False
+            detail = f"Reconnected {bt_address}." if bt_address else ""
+            GLib.idle_add(
+                lambda: subprocess.Popen([
+                    "notify-send", "--app-name=Voxtype", "--expire-time=5000",
+                    "Reset Complete",
+                    f"Audio stack restarted, voxtype running. {detail}".rstrip(),
+                ])
+            )
+
+        threading.Thread(target=_do_reset, daemon=True).start()
 
 
 if __name__ == "__main__":
