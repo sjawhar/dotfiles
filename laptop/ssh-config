@@ -1,15 +1,16 @@
 Host *
   IdentityAgent ~/.1password/agent.sock
 
-Host devbox2
-  HostName i-076caf42864ed61b4
-  User ubuntu
-  ProxyCommand docker run --rm -i -v ${HOME}/.aws:/home/aws/.aws awscli ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'
-
 Host devbox
   HostName sami-agents.tailb86685.ts.net
   User ubuntu
   ForwardAgent yes
+
+Host devbox-metr
+  HostName i-0d4723fd599a8dd83
+  User sami
+  ForwardAgent yes
+  ProxyCommand docker run --rm -i -v ${HOME}/.aws:/home/aws/.aws awscli ssm start-session --profile=metr --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p' --profile metr
 
 Host devbox-mx
   HostName sami-agents-mx.tailb86685.ts.net
@@ -28,38 +29,6 @@ Host ghost-wispr
   HostName ghost-wispr.tailb86685.ts.net
   User ghost-wispr
   ForwardAgent yes
-
-Host devboxm
-  HostName 10.0.159.217
-  User sami
-  ForwardAgent yes
-
-Host devboxt
-  HostName sami-agents
-  User sami
-  ForwardAgent yes
-
-Host staging
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  HostName staging-mp4-server.koi-moth.ts.net
-  ForwardAgent yes
-  User sami
-
-Host middleman
-  HostName middleman.koi-moth.ts.net
-  ForwardAgent yes
-  User sami
-
-Host vivaria
-  HostName mp4-server.koi-moth.ts.net
-  ForwardAgent yes
-  User ubuntu
-
-Host vm-host
-  HostName production-mp4-vm-host.internal.metr.org
-  ForwardAgent yes
-  User ubuntu
 
 Host ngrok-remote
     HostName 0.tcp.us-cal-1.ngrok.io
