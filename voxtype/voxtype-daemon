@@ -1,12 +1,16 @@
 #!/bin/bash
-# Wrapper to launch voxtype daemon with Groq API key from sops secrets
+# Wrapper to launch voxtype daemon with API keys from sops secrets
 set -euo pipefail
 
 MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
 
+SECRETS=$($MISE exec sops age -- \
+    sops -d --output-type dotenv "$HOME/.dotfiles/secrets.env")
+
 export VOXTYPE_WHISPER_API_KEY
-VOXTYPE_WHISPER_API_KEY=$("$MISE" exec sops age -- \
-    sops -d --output-type dotenv "$HOME/.dotfiles/secrets.env" \
-    | grep '^GROQ_API_KEY=' | cut -d= -f2-)
+VOXTYPE_WHISPER_API_KEY=$(echo "$SECRETS" | grep '^GROQ_API_KEY=' | cut -d= -f2-)
+
+export VOXTYPE_DEEPGRAM_API_KEY
+VOXTYPE_DEEPGRAM_API_KEY=$(echo "$SECRETS" | grep '^DEEPGRAM_API_KEY=' | cut -d= -f2-)
 
 exec voxtype daemon
