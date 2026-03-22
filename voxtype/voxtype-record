@@ -4,12 +4,16 @@
 # compatible with `voxtype transcribe <file>` for re-transcription.
 #
 # On stop, spawns a background check that notifies if transcription failed.
+# Checks for empty recordings after stop and warns if no audio was captured.
 set -euo pipefail
 
 RECORDINGS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/recordings"
 HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/history.jsonl"
-PID_FILE="/run/user/$(id -u)/voxtype/pw-record.pid"
-STATE_FILE="/run/user/$(id -u)/voxtype/state"
+RUNTIME_DIR="/run/user/$(id -u)/voxtype"
+PID_FILE="$RUNTIME_DIR/pw-record.pid"
+WAV_FILE="$RUNTIME_DIR/pw-record.wav"  # Tracks current recording path across invocations
+STATE_FILE="$RUNTIME_DIR/state"
+WAV_HEADER_SIZE=44  # Bare WAV header with zero audio data
 
 mkdir -p "$RECORDINGS_DIR"
 
@@ -17,6 +21,21 @@ stop_pw_record() {
     if [ -f "$PID_FILE" ]; then
         kill "$(cat "$PID_FILE")" 2>/dev/null || true
         rm -f "$PID_FILE"
+    fi
+}
+
+
+# Check recording file size after stop. Notify if empty.
+check_recording_empty() {
+    local wav_file="$1"
+    if [ -f "$wav_file" ]; then
+        local size
+        size=$(stat -c %s "$wav_file" 2>/dev/null || echo 0)
+        if [ "$size" -le "$WAV_HEADER_SIZE" ]; then
+            notify-send --app-name=Voxtype --urgency=critical --expire-time=15000 \
+                "Empty Recording" \
+                "No audio was captured. Check your microphone connection."
+        fi
     fi
 }
 
@@ -55,12 +74,20 @@ case "${1:-}" in
         if [ "$state" = "idle" ]; then
             # About to start — begin independent audio capture
             timestamp=$(date +%Y-%m-%dT%H-%M-%S)
+            recording_file="$RECORDINGS_DIR/$timestamp.wav"
             pw-record --rate=16000 --channels=1 --format=s16 \
-                "$RECORDINGS_DIR/$timestamp.wav" &
+                "$recording_file" &
             echo $! > "$PID_FILE"
+            echo "$recording_file" > "$WAV_FILE"
         else
             # About to stop — kill pw-record (before voxtype toggle so file is finalized)
             stop_pw_record
+            # Check if recording captured any audio
+            if [ -f "$WAV_FILE" ]; then
+                recording_file=$(cat "$WAV_FILE")
+                rm -f "$WAV_FILE"
+                check_recording_empty "$recording_file" &
+            fi
         fi
         voxtype record toggle
         # On stop, check if transcription succeeds in the background
@@ -70,6 +97,7 @@ case "${1:-}" in
         ;;
     cancel)
         stop_pw_record
+        rm -f "$WAV_FILE"
         voxtype record cancel
         ;;
     *)
