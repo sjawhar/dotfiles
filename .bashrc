@@ -216,6 +216,7 @@ _oc_enrich() {
 oc() {
     case "${1:-}" in
         ps) shift; _oc_ps "$@"; return ;;
+        history) shift; _oc_sessions "$@"; return ;;
     esac
     # Opt-out
     if [ "${OPENCODE_NO_SERVE:-}" = "1" ]; then
@@ -268,6 +269,66 @@ _oc_ps() {
         printf 'PID\tPORT\tDIR\tSESSION\tTITLE\tSTARTED\n'
         echo "$entries" | jq -r '.[] | [.pid, (.port // "-"), .dir, (.session.id // "-"), (.session.title // "-"), .started] | @tsv'
     } | column -t -s $'\t'
+}
+
+# List recent OpenCode sessions from the database (not live instances)
+# Usage: oc sessions [HOURS]       — default 24h, parent sessions only, excludes Legion workers
+#        oc sessions --json         — JSON output
+#        oc sessions 48 --json      — last 48h, JSON
+#        oc sessions --legion       — include Legion worker sessions
+_oc_sessions() {
+    local hours=24 json=false legion=false
+    local args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --json) json=true ;;
+            --legion) legion=true ;;
+            *) args+=("$arg") ;;
+        esac
+    done
+    [ ${#args[@]} -gt 0 ] && hours="${args[0]}"
+    local db="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
+    if [ ! -f "$db" ]; then
+        echo "error: database not found: $db" >&2
+        return 1
+    fi
+    local cutoff_ms
+    cutoff_ms=$(( ($(date -u +%s) - hours * 3600) * 1000 ))
+    local legion_filter=""
+    if [ "$legion" = false ]; then
+        legion_filter="AND directory NOT LIKE '$HOME/.legion/workspaces/%'"
+        legion_filter+=" AND directory NOT LIKE '$HOME/.local/share/legion/workspaces/%'"
+        legion_filter+=" AND directory NOT LIKE '$HOME/legion/work/%'"
+    fi
+    local query
+    read -r -d '' query <<-SQL || true
+		SELECT
+		  id,
+		  REPLACE(directory, '$HOME', '~') as dir,
+		  title,
+		  strftime('%Y-%m-%d %H:%M', time_created/1000, 'unixepoch', 'localtime') as created,
+		  strftime('%Y-%m-%d %H:%M', time_updated/1000, 'unixepoch', 'localtime') as updated,
+		  (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) as msgs
+		FROM session s
+		WHERE parent_id IS NULL
+		  $legion_filter
+		  AND time_updated >= $cutoff_ms
+		ORDER BY time_created DESC
+	SQL
+    if [ "$json" = true ]; then
+        sqlite3 -json "$db" "$query"
+    else
+        local result
+        result=$(sqlite3 -separator $'\t' "$db" "$query")
+        if [ -z "$result" ]; then
+            echo "No sessions in the last ${hours}h"
+            return
+        fi
+        {
+            printf 'ID\tDIR\tTITLE\tCREATED\tUPDATED\tMSGS\n'
+            echo "$result"
+        } | column -t -s $'\t'
+    fi
 }
 
 # ------------------------------------------------------------------------------
