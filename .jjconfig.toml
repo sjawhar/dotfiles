@@ -18,3 +18,22 @@ editor = "nvim"
 [--scope.ui]
 diff-formatter = ":git"
 
+# Watchman-based filesystem monitor — avoids full tree walk on every command.
+# Requires watchman installed (see installers/jj.sh).
+[fsmonitor]
+backend = "watchman"
+
+# Git LFS support via jj fork (github.com/sjawhar/jj).
+# ignore-filters skips LFS-tracked files during snapshot (no smudge/clean overhead).
+# filter.drivers.lfs defines the filter commands for checkout/checkin when needed.
+[git]
+ignore-filters = ["lfs"]
+
+[git.filter]
+enabled = true
+
+[git.filter.drivers.lfs]
+required = true
+clean = ["git-lfs", "clean", "--", "$path"]
+smudge = ["git-lfs", "smudge", "--", "$path"]
+
