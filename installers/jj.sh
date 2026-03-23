@@ -4,6 +4,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ensure_link "${DOTFILES_DIR}/.jjconfig.toml" ~/.jjconfig.toml
 
+# Watchman is required for fsmonitor (avoids full tree walk on every jj command)
+ensure_command watchman "sudo apt-get install -y watchman"
+
 mkdir -p ~/.config/jj
 if [ ! -f ~/.config/jj/config.toml ]; then
     if [ -t 0 ]; then
