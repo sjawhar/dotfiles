@@ -39,14 +39,14 @@ volume = 0.5
 # Transcription backend: "local" or "remote"
 # - local: Use whisper.cpp locally (default)
 # - remote: Send audio to a remote whisper.cpp server or OpenAI-compatible API
-mode = "remote"
+mode = "streaming"
 
 # Model to use for transcription (local backend)
 # Options: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3, large-v3-turbo
 # .en models are English-only but faster and more accurate for English
 # large-v3-turbo is faster than large-v3 with minimal accuracy loss (recommended for GPU)
 # Or provide absolute path to a custom .bin model file
-model = "whisper-large-v3-turbo"
+model = "large-v3-turbo"
 
 # Language for transcription
 # Options:
@@ -89,7 +89,8 @@ translate = false
 #
 # Enable eager input processing (transcribe chunks while recording continues)
 # Reduces perceived latency on slower machines by processing audio in parallel.
-eager_processing = true
+eager_processing = false
+# eager_tick_secs = 2.0
 #
 # Duration of each audio chunk in seconds (default: 5.0)
 # eager_chunk_secs = 5.0
@@ -102,6 +103,14 @@ remote_endpoint = "https://api.groq.com/openai"
 remote_model = "whisper-large-v3-turbo"
 # API key loaded via VOXTYPE_WHISPER_API_KEY env var (injected by secrets wrapper)
 remote_timeout_secs = 30
+
+# --- Streaming backend settings (Deepgram) ---
+# API key loaded via VOXTYPE_DEEPGRAM_API_KEY env var (injected by secrets wrapper)
+streaming_model = "nova-3"
+streaming_endpoint = "wss://api.deepgram.com/v1/listen"
+# Endpointing: how long Deepgram waits after silence before finalizing a segment.
+# Default (10ms) is too aggressive — 300ms gives much better sentence-level quality.
+streaming_endpointing_ms = 300
 
 [output]
 # Primary output mode: "type", "clipboard", or "paste"
