@@ -49,22 +49,21 @@ if [ -f "$RESOLVED_CONF" ] && ! grep -q '^DNSOverTLS=opportunistic' "$RESOLVED_C
 fi
 
 # --- USBGuard (block rogue USB devices) ---
-# See laptop/usbguard.md for policy design and new-dock workflow.
+# See usbguard-rules.conf for policy design and new-dock workflow.
 # We do NOT use generate-policy — it over-constrains with parent-hash and
 # via-port, which breaks when you change docks. The rules.conf is manually
-# curated. This block only handles first-time installation.
+# curated.
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 if ! dpkg -s usbguard &>/dev/null; then
     echo "Installing USBGuard..."
     sudo apt-get install -y -qq usbguard >/dev/null
     sudo systemctl enable --now usbguard
-    echo ""
-    echo "WARNING: USBGuard installed but no policy configured."
-    echo "  All USB devices are blocked by default."
-    echo "  See laptop/usbguard.md for how to write your rules.conf."
-    echo "  Quick start:"
-    echo "    sudo usbguard list-devices              # see what's connected"
-    echo "    sudo usbguard allow-device <ID>         # temporarily allow a device"
-    echo "    sudo usbguard allow-device -p <ID>      # allow permanently (needs manual cleanup)"
+fi
+if [ -f "$SCRIPT_DIR/usbguard-rules.conf" ]; then
+    echo "Installing USBGuard rules..."
+    sudo cp "$SCRIPT_DIR/usbguard-rules.conf" /etc/usbguard/rules.conf
+    sudo chmod 600 /etc/usbguard/rules.conf
+    sudo systemctl restart usbguard
 fi
 
 # --- Firmware updates ---
