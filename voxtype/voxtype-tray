@@ -132,6 +132,18 @@ class VoxtypeTray:
             "Use tray menu > Reset to recover.",
         ])
 
+    def _toggle(self, _):
+        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-record"), "toggle"])
+
+    def _cancel(self, _):
+        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-record"), "cancel"])
+
+    def _retranscribe_last(self, _):
+        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-retranscribe-last")])
+
+    def _paste_last(self, _):
+        subprocess.Popen([os.path.join(DOTFILES_DIR, "voxtype/voxtype-history-paste-last")])
+
     def _reset(self, _):
         """Full reset: kill orphan processes, restart PipeWire + BT, restart voxtype."""
         def _do_reset():
