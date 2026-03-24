@@ -274,17 +274,6 @@
       "type": "remote",
       "url": "https://mcp.context7.com/mcp",
       "enabled": true
-    },
-    "whatsapp": {
-      "type": "local",
-      "command": ["npx", "tsx", "/home/sami/projects/whatsapp-mcp/src/index.ts"],
-      "environment": {
-        "ALLOWED_SEND_DIR": "/home/sami/projects/whatsapp-mcp/uploads",
-        "DOWNLOADS_DIR": "/home/sami/projects/whatsapp-mcp/downloads",
-        "WHISPER_API_URL": "{env:WHISPER_API_URL}",
-        "WHISPER_API_KEY": "{env:WHISPER_API_KEY}"
-      },
-      "enabled": true
     }
   },
   "autoupdate": false,
