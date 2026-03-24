@@ -528,7 +528,7 @@ jj-refresh-workspaces() {
 
     # 3. Refresh all other workspaces
     for ws in $(jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null); do
-        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || continue
+        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || path="$root_path"
         [ "$path" = "$root_path" ] && continue
         echo "Refreshing workspace $path..."
         jj -R "$path" workspace update-stale &>/dev/null
@@ -574,9 +574,9 @@ jj-rebase-workspaces() {
     # 2. Fetch latest base branch once
     jj -R "$root_path" git fetch --remote origin --branch "$base_branch" || return 1
 
-    # 3. Rebase each workspace by running within its root
+    # 3. Rebase each workspace
     jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null | while IFS= read -r ws; do
-        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || continue
+        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || path="$root_path"
         echo "Rebasing workspace $path onto $base_branch..."
         jj -R "$path" workspace update-stale &>/dev/null || true
         (cd "$path" && jj rebase -d "$base_branch")
