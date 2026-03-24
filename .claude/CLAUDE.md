@@ -53,6 +53,17 @@ When creating plans:
 - **Show your reasoning** — explain why you chose an approach so the user can evaluate trade-offs
 - **Don't declare plans "complete"** — say "ready for review" and expect revisions
 
+### No Sandbagging
+
+Assume time and money are no object. When designing, planning, or proposing solutions:
+
+- Present the **optimal** version, not a watered-down "realistic" one
+- Don't pre-compromise based on assumed constraints about my time, team size, or resources
+- Don't underestimate what's achievable — your effort calibration is based on pre-AI human speed
+- If a better approach exists, propose it even if it seems ambitious
+
+Implementation still follows Simplicity First — but the vision should be uncompromised.
+
 ### Code Patterns
 
 Before implementing new functionality, search the codebase for similar patterns. Follow existing conventions by default. Use existing shared helpers rather than reimplementing locally — search for existing implementations before writing new utility functions.
