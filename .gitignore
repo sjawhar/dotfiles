@@ -21,5 +21,8 @@ vendor/
 !.claude/settings.json
 
 .sisyphus/
+.tmux-workspace/
 
 /ignore
+.superpowers
+.overseer/
