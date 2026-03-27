@@ -3,11 +3,9 @@ name: whatsapp
 description: Use when reading WhatsApp messages, searching conversations, sending messages, listing chats, or interacting with WhatsApp workspaces
 mcp:
   whatsapp:
-    command: npx
-    args: ["--yes", "@sjawhar/whatsapp-mcp"]
-    env:
-      WHISPER_API_URL: "${WHISPER_API_URL}"
-      WHISPER_API_KEY: "${WHISPER_API_KEY}"
+    url: "${WHATSAPP_MCP_URL}"
+    headers:
+      Authorization: "Bearer ${WHATSAPP_MCP_SECRET}"
 ---
 
 # WhatsApp
@@ -16,11 +14,19 @@ Interact with WhatsApp via the whatsapp-mcp server. Use `skill_mcp(mcp_name="wha
 
 ## Setup
 
-```bash
-npm install -g @sjawhar/whatsapp-mcp
-```
+The WhatsApp MCP runs as a persistent HTTP server. It's configured in your environment:
+- `WHATSAPP_MCP_URL` — URL of the WhatsApp MCP server (e.g., `http://ghost-wispr.tailb86685.ts.net:3456/mcp`)
+- `WHATSAPP_MCP_SECRET` — Bearer token for authentication
 
-First run requires QR code pairing — run `whatsapp-mcp` in a terminal, scan with WhatsApp > Linked Devices.
+For first-time setup of the daemon, see the [deployment docs](~/.dotfiles/whatsapp/).
+
+### Local Development (stdio mode)
+
+For local development or testing, you can run the server directly in stdio mode:
+```bash
+npx --yes @sjawhar/whatsapp-mcp
+```
+First run requires QR code pairing — run the command in a terminal, scan with WhatsApp > Linked Devices.
 
 ## Tools
 
@@ -34,7 +40,7 @@ First run requires QR code pairing — run `whatsapp-mcp` in a terminal, scan wi
 | `get_message_context`    | Get messages surrounding a specific message          |
 | `get_my_profile`         | Get authenticated user's phone number and JID        |
 | `update_contact`         | Set display name for a contact                       |
-| `sync_contacts`          | Import phone contacts from VCF file                  |
+| `sync_contacts`          | Import phone contacts from VCF file or string        |
 | `send_message`           | Send text message (requires `confirmed: true`)       |
 | `send_file`              | Send file (requires `confirmed: true`, path restricted to uploads dir) |
 | `delete_message`         | Delete a message (requires `confirmed: true`)        |
@@ -66,6 +72,18 @@ skill_mcp(mcp_name="whatsapp", tool_name="download_media", arguments='{"jid": "1
 - Individual: `1234567890@s.whatsapp.net` (phone number without +)
 - Group: `120363XXX@g.us`
 - Use `search_contacts` to find JIDs by name
+
+## Resolving Unknown Contacts
+
+If contacts show as phone numbers instead of names, sync them from Google Contacts:
+
+1. Load the `google-workspace` skill
+2. Export Google Contacts as VCF using `gws contacts export`
+3. Pass the VCF content to `sync_contacts` via the `vcf_content` parameter:
+   ```
+   skill_mcp(mcp_name="whatsapp", tool_name="sync_contacts", arguments='{"vcf_content": "<vcard data>"}')
+   ```
+4. Review results — the tool reports `exactMatches`, `fuzzyMatches`, and `totalUpdated`
 
 ## Security Notes
 

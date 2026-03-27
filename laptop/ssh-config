@@ -12,6 +12,12 @@ Host devbox-metr
   ForwardAgent yes
   ProxyCommand docker run --rm -i -v ${HOME}/.aws:/home/aws/.aws awscli ssm start-session --profile=metr --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p' --profile metr
 
+Host devbox-mx-ssm
+  HostName i-0902f554f5c8909e6
+  User sami
+  ForwardAgent yes
+  ProxyCommand docker run --rm -i -v ${HOME}/.aws:/home/aws/.aws awscli ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'
+
 Host devbox-mx
   HostName sami-agents-mx.tailb86685.ts.net
   User ubuntu

@@ -1,0 +1,8 @@
+#!/bin/bash
+# Launch Brave with hardware video encoding enabled.
+# The GPU blocklist disables VA-API encode on Linux by default.
+# These flags override that and enable HW-accelerated WebRTC encoding.
+exec brave-browser-stable \
+  --ignore-gpu-blocklist \
+  --enable-features=AcceleratedVideoEncoder,VaapiIgnoreDriverChecks,WebRtcPipeWireCamera,WebRtcAV1HWEncode \
+  "$@"
