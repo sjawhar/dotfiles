@@ -458,27 +458,44 @@ codecat() {
 # jj (Jujutsu) workspace utilities
 # ------------------------------------------------------------------------------
 
-# Refresh all jj workspaces in current project
-# Uses jj's workspace list and path lookup (requires workspaces to have recorded paths)
-jj-refresh-workspaces() {
-    local root_path ws path
+# Refresh all jj workspaces (update-stale + status snapshot)
+# With --rebase: also fetch and rebase each workspace onto a base branch
+# Usage: jj-refresh [--rebase [BRANCH]]
+jj-refresh() {
+    local rebase=false base_branch="main" root_path ws path
 
-    # 1. Get root workspace path
+    # Parse args
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --rebase)
+                rebase=true; shift
+                if [[ $# -gt 0 && "$1" != -* ]]; then
+                    base_branch="$1"; shift
+                fi
+                ;;
+            *) echo "Usage: jj-refresh [--rebase [BRANCH]]" >&2; return 1 ;;
+        esac
+    done
+
+    # Get root workspace path
     root_path=$(jj workspace root 2>/dev/null) || return 1
     [ -f "$root_path/.jj/repo" ] && root_path="$(cd "$root_path/.jj" && realpath "$(cat repo)")" && root_path="${root_path%/.jj/repo}"
 
-    # 2. Refresh root workspace
-    echo "Refreshing workspace $root_path..."
-    jj -R "$root_path" workspace update-stale &>/dev/null
-    jj -R "$root_path" st &>/dev/null
+    # Fetch if rebasing
+    if [ "$rebase" = true ]; then
+        jj -R "$root_path" git fetch --remote origin --branch "$base_branch" || return 1
+    fi
 
-    # 3. Refresh all other workspaces
-    for ws in $(jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null); do
+    # Process all workspaces
+    jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null | while IFS= read -r ws; do
         path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || path="$root_path"
-        [ "$path" = "$root_path" ] && continue
         echo "Refreshing workspace $path..."
-        jj -R "$path" workspace update-stale &>/dev/null
+        jj -R "$path" workspace update-stale &>/dev/null || true
         jj -R "$path" st &>/dev/null
+        if [ "$rebase" = true ]; then
+            echo "  Rebasing onto $base_branch..."
+            (cd "$path" && jj rebase -d "$base_branch")
+        fi
     done
 }
 
@@ -505,28 +522,6 @@ jj-sync-upstream() {
     jj bookmark set "$bookmark" --to "${bookmark}@upstream" || return 1
     jj git push --bookmark "$bookmark" || return 1
     git push --tags
-}
-
-# Rebase all jj workspaces onto main
-jj-rebase-workspaces() {
-    local root_path ws path base_branch
-
-    base_branch="${1:-main}"
-
-    # 1. Get root workspace path
-    root_path=$(jj workspace root 2>/dev/null) || return 1
-    [ -f "$root_path/.jj/repo" ] && root_path="$(cd "$root_path/.jj" && realpath "$(cat repo)")" && root_path="${root_path%/.jj/repo}"
-
-    # 2. Fetch latest base branch once
-    jj -R "$root_path" git fetch --remote origin --branch "$base_branch" || return 1
-
-    # 3. Rebase each workspace
-    jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null | while IFS= read -r ws; do
-        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || path="$root_path"
-        echo "Rebasing workspace $path onto $base_branch..."
-        jj -R "$path" workspace update-stale &>/dev/null || true
-        (cd "$path" && jj rebase -d "$base_branch")
-    done
 }
 
 # Make a repo compatible with OpenCode by symlinking .opencode -> .claude
