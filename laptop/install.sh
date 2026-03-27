@@ -205,6 +205,10 @@ ensure_link "${LAPTOP_DIR}/aerospace-ws" ~/.local/bin/aerospace-ws
 mkdir -p ~/.config/pipewire/pipewire.conf.d
 ensure_link "${DOTFILES_DIR}/pipewire/10-video-quality.conf" ~/.config/pipewire/pipewire.conf.d/10-video-quality.conf
 
+# --- WirePlumber: force MJPG passthrough for webcam (YUY2 raw caps at 640x480) ---
+mkdir -p ~/.config/wireplumber/wireplumber.conf.d
+ensure_link "${DOTFILES_DIR}/wireplumber/51-camera-mjpg.conf" ~/.config/wireplumber/wireplumber.conf.d/51-camera-mjpg.conf
+
 # --- COSMIC custom shortcuts ---
 # Template uses __HOME__ placeholder since COSMIC reads files directly (no shell expansion).
 # Remove any existing symlink first — a prior ensure_link would cause sed to truncate the source.

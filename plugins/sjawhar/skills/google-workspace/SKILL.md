@@ -4,7 +4,7 @@ description: Use when reading, searching, uploading, downloading, sharing, or or
 mcp:
   gws:
     command: gws
-    args: ["mcp", "-s", "drive"]
+    args: ["mcp", "-s", "drive,gmail,sheets,calendar,docs,slides,people,tasks,chat,forms,keep,meet", "-w", "-e"]
 ---
 
 # Google Workspace (gws)
