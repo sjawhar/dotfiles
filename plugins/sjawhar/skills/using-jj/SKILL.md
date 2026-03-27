@@ -81,14 +81,129 @@ jj squash              # Content moves to @-, parent keeps its description
 | Abandon a change | `jj abandon <rev>` |
 | Undo last operation | `jj undo` |
 | Redo undone operation | `jj redo` |
-| Rebase single revision | `jj rebase -r <rev> -d <dest>` |
-| Rebase revision + descendants | `jj rebase -s <rev> -d <dest>` |
-| Rebase branch | `jj rebase -b <rev> -d <dest>` |
+| Rebase (default: branch) | `jj rebase -o <dest>` (defaults to `-b @`) |
+| Rebase revisions only | `jj rebase -r <rev> -o <dest>` |
+| Rebase revision + descendants | `jj rebase -s <rev> -o <dest>` |
+| Rebase whole branch | `jj rebase -b <rev> -o <dest>` |
+| Insert revision after target | `jj rebase -r <rev> -A <target>` |
+| Insert revision before target | `jj rebase -r <rev> -B <target>` |
+| Create merge commit | `jj rebase -s <rev> -o <parent1> -o <parent2>` |
 | List bookmarks | `jj bookmark list` |
 | Create/move bookmark to `@` | `jj bookmark set <name>` |
 | Push | `jj git push` |
 | Fetch | `jj git fetch` |
 | Update stale workspace | `jj workspace update-stale` |
+
+## Rebase
+
+`jj rebase` moves revisions to different parents while preserving their diffs. The behavior varies significantly depending on which source flag you use.
+
+### Source flags: -r vs -s vs -b
+
+**`-r` (revisions only) -- extracts and re-parents children**
+
+Rebases ONLY the specified revisions. Descendants are re-parented onto the revision's OLD parents, filling the "hole". The revision is "extracted" from the graph.
+
+```
+jj rebase -r K -o M
+
+BEFORE        AFTER
+M             K'
+|             |
+| L           M
+| |    =>     |
+| K           | L'    <-- L was re-parented from K to J (K's old parent)
+|/            |/
+J             J
+```
+
+Use `-r` when you want to move a commit without bringing its descendants. Common for rewriting octopus merge parents.
+
+**`-s` (source + descendants) -- moves subtree intact**
+
+Rebases the specified revision AND all its descendants. The whole subtree moves together.
+
+```
+jj rebase -s M -o O
+
+BEFORE        AFTER
+O             N'
+|             |
+| N           M'
+| |           |
+| M    =>     O
+| |           |
+| | L         | L
+| |/          | |
+| K           | K
+|/            |/
+J             J
+```
+
+Use `-s` when you want to transplant a whole feature branch. Multiple `-s` arguments make each a direct child of dest (flattening).
+
+**`-b` (branch) -- moves everything not already on dest**
+
+Rebases the whole "branch" relative to the destination: the set `(dest..rev)::` -- meaning revisions that aren't ancestors of dest, plus ALL their descendants.
+
+Equivalent to: `jj rebase -s 'roots(dest..rev)' -o dest`
+
+```
+jj rebase -b M -o O    (same result if you said -b L or -b K)
+
+BEFORE        AFTER
+O             N'
+|             |
+| N           M'
+| |           |
+| M           | L'
+| |    =>     |/
+| | L         K'
+| |/          |
+| K           O
+|/            |
+J             J
+```
+
+Use `-b` when rebasing after a fetch -- it moves your whole branch onto the updated trunk. **This is the default** when no flag is specified (`jj rebase -o dest` implies `-b @`).
+
+### Destination flags: -o vs -A vs -B
+
+| Flag | Behavior |
+|------|----------|
+| `-o/--onto` (alias `-d`) | Place onto targets. Existing descendants of targets unaffected. |
+| `-A/--insert-after` | Like `-o`, but also rebases targets' existing descendants onto the rebased revisions. |
+| `-B/--insert-before` | Rebases onto targets' parents, then rebases targets and their descendants onto the rebased revisions. |
+
+`-A` and `-B` can be combined to splice revisions into a specific location in the graph.
+
+### Creating merge commits
+
+Repeat `-o` to create a merge:
+
+```bash
+jj rebase -s L -o K -o M     # L now has parents K and M
+jj rebase -r @ -o A -o B -o C   # Reset @'s parents to A, B, C (octopus merge)
+```
+
+### Common patterns
+
+```bash
+# Rebase current branch onto updated trunk (most common)
+jj rebase -o trunk()
+
+# Rebase all local branches onto trunk
+jj rebase -s 'all:roots(trunk()..@)' -o trunk()
+
+# Reset a merge commit's parents (e.g., drop branches from octopus)
+jj rebase -r <merge> -o <parent1> -o <parent2> -o <parent3>
+
+# Extract a commit from middle of chain (descendants stay)
+jj rebase -r <middle> -o <new-parent>
+
+# Move whole feature branch onto new base
+jj rebase -b <branch-tip> -o <new-base>
+```
 
 ## Revsets
 
@@ -113,7 +228,7 @@ Revsets are a functional query language for selecting commits. Most commands acc
 
 **Rebase all branches onto updated trunk:**
 ```bash
-jj rebase -s 'all:roots(trunk()..@)' -d trunk()
+jj rebase -s 'all:roots(trunk()..@)' -o trunk()
 ```
 
 The `all:` prefix is required when a revset resolves to multiple revisions (confirms you intended multiple results).
@@ -176,7 +291,7 @@ Multiple jj workspaces share **one operation log and one commit store**. Every j
 - Keep operations minimal and deliberate — don't experiment
 - Never chain undos (see "No Undo Loops" above)
 - If your workspace is stale, run `jj workspace update-stale` before doing anything else
-- Rebase onto main with `jj git fetch && jj rebase -d main`
+- Rebase onto main with `jj git fetch && jj rebase -o main`
 - Verify your workspace — confirm you're operating on the right directory
 
 ## Merge Conflict Resolution
