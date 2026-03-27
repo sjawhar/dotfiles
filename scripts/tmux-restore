@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Restore tmux workspace from a snapshot file.
+
+Reads a snapshot JSON (written by tmux-snapshot) and recreates the tmux
+workspace: windows, panes, working directories, and OpenCode sessions.
+
+OpenCode sessions are resumed via the `oc` shell wrapper so they get
+registered in the instance registry automatically.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+DEFAULT_SNAPSHOT = Path.home() / ".dotfiles" / ".tmux-workspace" / "snapshot.json"
+
+
+def eprint(message: str = "") -> None:
+    print(message, file=sys.stderr)
+
+
+def run_tmux(*args: str) -> str:
+    proc = subprocess.run(
+        ["tmux", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout
+
+
+def get_tmux_session_name() -> str:
+    return run_tmux("display-message", "-p", "#S").strip()
+
+
+def load_snapshot(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data.get("panes"), list):
+        raise ValueError("invalid snapshot: missing 'panes' array")
+    return data
+
+
+def group_panes_by_window(
+    panes: list[dict],
+) -> list[tuple[int, str, list[dict]]]:
+    """Group panes by window, preserving order.
+
+    Returns list of (window_index, window_name, [pane_data, ...]).
+    """
+    windows: dict[int, tuple[str, list[dict]]] = {}
+    for pane in panes:
+        win_idx = pane["window_index"]
+        if win_idx not in windows:
+            windows[win_idx] = (pane["window_name"], [])
+        windows[win_idx][1].append(pane)
+
+    return [(idx, name, panes) for idx, (name, panes) in sorted(windows.items())]
+
+
+def restore_window(
+    session: str, window_name: str, panes: list[dict], dry_run: bool
+) -> None:
+    """Create a tmux window and populate its panes."""
+    if dry_run:
+        eprint(f"  window '{window_name}' ({len(panes)} pane(s)):")
+        for p in panes:
+            ai = p.get("ai_session")
+            if ai:
+                label = f"oc -s {ai['session_id']}"
+            else:
+                label = p.get("command", "shell")
+            eprint(f"    {p['cwd']} \u2192 {label}")
+        return
+
+    first = panes[0]
+    first_pane_id = run_tmux(
+        "new-window",
+        "-t", session,
+        "-n", window_name,
+        "-c", first["cwd"],
+        "-P", "-F", "#{pane_id}",
+    ).strip()
+    _start_pane(first_pane_id, first)
+
+    for pane_data in panes[1:]:
+        new_pane_id = run_tmux(
+            "split-window",
+            "-t", first_pane_id,
+            "-c", pane_data["cwd"],
+            "-P", "-F", "#{pane_id}",
+        ).strip()
+        _start_pane(new_pane_id, pane_data)
+
+    # Even out the layout when there are multiple panes
+    if len(panes) > 1:
+        run_tmux("select-layout", "-t", first_pane_id, "tiled")
+
+
+def _start_pane(pane_id: str, pane_data: dict) -> None:
+    """Send resume command to a pane if it has an AI session."""
+    ai = pane_data.get("ai_session")
+    if not ai or not ai.get("resume_cmd"):
+        return
+    resume_cmd = ai["resume_cmd"]
+    # Route through oc wrapper for registry integration
+    if resume_cmd.startswith("opencode "):
+        resume_cmd = "oc" + resume_cmd[len("opencode"):]
+    run_tmux("send-keys", "-t", pane_id, resume_cmd, "Enter")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Restore tmux workspace from a snapshot file.",
+    )
+    parser.add_argument(
+        "snapshot",
+        nargs="?",
+        default=str(DEFAULT_SNAPSHOT),
+        help=f"path to snapshot JSON (default: {DEFAULT_SNAPSHOT})",
+    )
+    parser.add_argument(
+        "--dry-run", "-n",
+        action="store_true",
+        help="show what would be restored without doing it",
+    )
+    args = parser.parse_args()
+
+    snapshot_path = Path(args.snapshot)
+    if not snapshot_path.is_file():
+        eprint(f"error: snapshot not found: {snapshot_path}")
+        return 1
+
+    if not args.dry_run and "TMUX" not in os.environ:
+        eprint("error: not running inside tmux (use --dry-run to preview)")
+        return 1
+
+    try:
+        snapshot = load_snapshot(snapshot_path)
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        eprint(f"error: failed to read snapshot: {exc}")
+        return 1
+
+    windows = group_panes_by_window(snapshot["panes"])
+    total_panes = sum(len(p) for _, _, p in windows)
+    ai_panes = sum(
+        1 for _, _, panes in windows for p in panes if p.get("ai_session")
+    )
+
+    if args.dry_run:
+        eprint(f"Snapshot: {snapshot_path}")
+        eprint(
+            f"  from: {snapshot.get('captured_at', '?')}"
+            f" on {snapshot.get('hostname', '?')}"
+        )
+        eprint(f"  session: {snapshot.get('tmux_session', '?')}")
+        eprint(
+            f"  {len(windows)} window(s), {total_panes} pane(s),"
+            f" {ai_panes} OC session(s)"
+        )
+        eprint("")
+        for _, name, panes in windows:
+            restore_window("", name, panes, dry_run=True)
+        return 0
+
+    session = get_tmux_session_name()
+    eprint(f"Restoring into tmux session: {session}")
+    eprint(
+        f"  {len(windows)} window(s), {total_panes} pane(s),"
+        f" {ai_panes} OC session(s)"
+    )
+
+    for _, name, panes in windows:
+        restore_window(session, name, panes, dry_run=False)
+
+    eprint("Done")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
