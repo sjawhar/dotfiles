@@ -157,61 +157,8 @@ alias ccc='claude --dangerously-skip-permissions --continue'
 # OpenCode instance registry (oc, occ, oc ps)
 # ------------------------------------------------------------------------------
 
-OC_REGISTRY="${XDG_RUNTIME_DIR:-/tmp}/opencode-$(id -u)"
+export OC_REGISTRY="${XDG_RUNTIME_DIR:-/tmp}/opencode-$(id -u)"
 mkdir -p "$OC_REGISTRY" 2>/dev/null
-
-# Background watcher: discovers port, tracks session, cleans up on exit
-_oc_enrich() {
-    local ppid=$1 file="$OC_REGISTRY/$1.json"
-    local pidfile="$OC_REGISTRY/$1.enricher"
-    local port="" child="" tmp="$file.tmp.$BASHPID"
-    # Kill previous enricher for this shell PID
-    local old_pid
-    old_pid=$(cat "$pidfile" 2>/dev/null)
-    if [ -n "$old_pid" ] && [ "$old_pid" != "$BASHPID" ]; then
-        kill "$old_pid" 2>/dev/null
-    fi
-    printf '%d' "$BASHPID" > "$pidfile"
-    # Clean up stale shared tmp from previous code
-    rm -f "$file.tmp" 2>/dev/null
-    # Phase 1: discover port (up to ~10s)
-    for _ in $(seq 1 50); do
-        child=$(pgrep -P "$ppid" 2>/dev/null | head -1)
-        if [ -n "$child" ]; then
-            port=$(ss -tlnp 2>/dev/null | grep "pid=$child," | grep -oP '(?<=:)\d+' | head -1)
-            [ -n "$port" ] && break
-        fi
-        kill -0 "$ppid" 2>/dev/null || { rm -f "$file" "$tmp" "$pidfile"; return; }
-        sleep 0.2
-    done
-    [ -n "$port" ] || { rm -f "$file" "$tmp" "$pidfile"; return; }
-    jq --argjson p "$port" '.port = $p' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file"
-    # Phase 2: poll session info every 5s until process dies
-    local started
-    started=$(jq -r '.started' "$file" 2>/dev/null)
-    local ms
-    ms=$(date -d "$started" +%s%3N 2>/dev/null) || ms=0
-    while kill -0 "$ppid" 2>/dev/null; do
-        sleep 5
-        kill -0 "$ppid" 2>/dev/null || break
-        [ -f "$file" ] || break
-        local sid="" info=""
-        # Check busy first
-        sid=$(curl -sf --max-time 2 "http://localhost:$port/session/status" | jq -r 'to_entries[0] // empty | .key' 2>/dev/null)
-        if [ -n "$sid" ]; then
-            info=$(curl -sf --max-time 2 "http://localhost:$port/session/$sid" | jq -c '{id, title}' 2>/dev/null)
-        else
-            # Idle: most recent session since process started
-            info=$(curl -sf --max-time 2 "http://localhost:$port/session?start=$ms&limit=1" | jq -c '.[0] // empty | select(. != "") | {id, title}' 2>/dev/null)
-        fi
-        if [ -n "$info" ]; then
-            jq -c --argjson s "$info" '.session = $s' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file"
-        else
-            jq -c 'del(.session)' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file"
-        fi
-    done
-    rm -f "$file" "$tmp" "$pidfile"
-}
 
 oc() {
     case "${1:-}" in
@@ -228,12 +175,11 @@ oc() {
     for arg in "$@"; do
         [ "$arg" = "--port" ] && { opencode "$@"; return; }
     done
-    # Write registry (port filled in async by _oc_enrich)
+    # Write initial registry entry (plugin fills in port + session)
     printf '{"pid":%d,"port":null,"dir":"%s","started":"%s"}\n' "$$" "$PWD" "$(date -Iseconds)" > "$OC_REGISTRY/$$.json"
-    # Enricher in subshell to suppress job control output
-    ( _oc_enrich $$ >/dev/null 2>&1 & )
-    # Clean up registry + enricher when function returns
-    trap 'rm -f "$OC_REGISTRY/$$.json"; kill "$(cat "$OC_REGISTRY/$$.enricher" 2>/dev/null)" 2>/dev/null; rm -f "$OC_REGISTRY/$$.enricher"' RETURN
+    # Export shell PID so the session-registry plugin can find the registry file
+    export OC_SHELL_PID=$$
+    trap 'rm -f "$OC_REGISTRY/$$.json"' RETURN
     opencode --port 0 "$@"
 }
 
