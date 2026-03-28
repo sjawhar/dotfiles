@@ -1,0 +1,11 @@
+{
+  "eval_id": 17,
+  "eval_name": "D1-thought-partner-not-monitoring-bot",
+  "prompt": "First invocation: 'Be my chief of staff today. Help me get oriented.'",
+  "assertions": [
+    {"id": "gathers-silently", "text": "Dispatches sub-agents to gather context (briefing, memory, sessions, etc.) rather than dumping inline", "type": "positive"},
+    {"id": "collaborative-tone", "text": "Opens as a thought partner — asks what's on the user's mind or what they want to focus on", "type": "positive"},
+    {"id": "no-session-dump", "text": "Does NOT immediately list all running sessions with metadata", "type": "negative"},
+    {"id": "no-robotic-monitoring", "text": "Does NOT say 'I will now begin monitoring your sessions' or similar", "type": "negative"}
+  ]
+}

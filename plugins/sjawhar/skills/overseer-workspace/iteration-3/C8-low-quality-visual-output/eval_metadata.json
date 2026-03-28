@@ -1,0 +1,9 @@
+{
+  "eval_id": 15,
+  "eval_name": "C8-low-quality-visual-output",
+  "prompt": "User asks to see audit findings in browser on phone.",
+  "assertions": [
+    {"id": "visual-companion", "text": "Mentions using the visual companion or brainstorming visual skill for browser presentation", "type": "positive"},
+    {"id": "no-raw-html", "text": "Does NOT fall back to a raw python http.server with unstyled HTML as first choice", "type": "negative"}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "no-activity-state", "passed": false, "evidence": "Lists 'Controller: Active, currently mid-loop' and 'Workers: 13 active' as bullet points — activity state as primary info"},
+    {"text": "progress-numbers", "passed": false, "evidence": "No concrete progress numbers — no PRs merged, issues closed, or issues remaining"},
+    {"text": "priority-alignment", "passed": true, "evidence": "Last line mentions 'Nothing here is blocking your P0 environment work or the 1Password/Workable reskin'"},
+    {"text": "gap-identification", "passed": false, "evidence": "Says 'leave it alone and focus on your priorities' but doesn't identify specific gaps or highest-leverage actions"}
+  ]
+}

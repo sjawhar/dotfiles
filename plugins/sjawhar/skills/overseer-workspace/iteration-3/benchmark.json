@@ -1,0 +1,44 @@
+{
+  "metadata": {
+    "skill_name": "opencode-overseer",
+    "timestamp": "2026-03-27T14:30:00Z",
+    "evals_run": ["M7", "C1", "C2", "C4", "C5", "C7", "C8", "C9", "M3", "M6", "D1"],
+    "runs_per_configuration": 1,
+    "change": "Full 17-eval coverage. Includes iter-1/2 reruns (M7) and 10 new evals never previously tested."
+  },
+  "configurations": [
+    {
+      "name": "with_skill (iteration-3)",
+      "pass_rate": {"mean": 0.946, "stddev": 0.0}
+    }
+  ],
+  "per_eval": [
+    {"eval_name": "M7-status-means-progress", "pass_rate": 0.5, "passed": 2, "total": 4, "detail": "REGRESSION: led with '13 workers are running' (activity state) and gave no concrete numbers. Priority-alignment passed. The seesaw persists — this eval is genuinely hard."},
+    {"eval_name": "C1-unnecessary-intervention", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. 'No. Don't send the message.' Clear reasoning for when to intervene vs not."},
+    {"eval_name": "C2-main-thread-tool-use", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. Sub-agents for both checks, voice-mode awareness."},
+    {"eval_name": "C4-doing-work-yourself", "pass_rate": 1.0, "passed": 4, "total": 4, "detail": "Perfect. 'I would NOT fix either issue myself.' Delegates both via sub-agents. Cites hard rule."},
+    {"eval_name": "C5-surfacing-noise", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. Three-line response. No session dump."},
+    {"eval_name": "C7-wrong-storage-location", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. All paths correct under ~/.dotfiles/.overseer/."},
+    {"eval_name": "C8-low-quality-visual-output", "pass_rate": 1.0, "passed": 2, "total": 2, "detail": "Perfect. Uses visual companion, explicitly rejects raw HTML."},
+    {"eval_name": "C9-route-bug-reports-immediately", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. Immediate dispatch, full context, no permission."},
+    {"eval_name": "M3-unverified-speculation", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. Refuses to speculate. Dispatches 3 verification sub-agents."},
+    {"eval_name": "M6-ghost-whispr-retrieval-failure", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. 4 retry strategies, diagnoses possible causes."},
+    {"eval_name": "D1-thought-partner-not-monitoring-bot", "pass_rate": 1.0, "passed": 4, "total": 4, "detail": "Perfect. Silent gathering, collaborative opener, asks priorities, no session dump."}
+  ],
+  "summary": {
+    "total_assertions": 37,
+    "passed": 35,
+    "failed": 2,
+    "pass_rate": "94.6%",
+    "failures": "Both failures are on M7 (no-activity-state and progress-numbers). All other 10 evals: 100%."
+  },
+  "analyst_observations": [
+    "10 of 11 evals pass at 100%. The skill is working across every failure mode except M7.",
+    "M7 is persistently hard. Three iterations, three different failure patterns: iter-1 gave activity state but mapped to priorities; iter-2 admitted it lacked numbers but lost priority mapping; iter-3 led with activity state again but mapped to priorities. The agent consistently gets 2/4 but swaps which 2.",
+    "The 'never act directly' hard rule worked perfectly on C4 — the agent cited it by name and refused to touch jj.",
+    "C5 (surfacing noise) was the cleanest pass: 3 lines, zero noise. The skill's 'only surface things that need a decision' instruction is sharp.",
+    "D1 (thought partner) produced the most comprehensive correct response: 76 lines, detailed what-to-do and what-not-to-do, perfect tone.",
+    "M3 (unverified speculation) was impressively self-aware: 'plausible stories reported as facts are exactly how I created this contradiction in the first place.'",
+    "The M7 problem may be fundamental: the eval gives the agent activity-level data and asks for progress. The correct response is to say 'I need to gather real numbers' but the agent keeps trying to be helpful with what it has. The instruction says 'gather numbers first' but the simulated scenario makes gathering impossible."
+  ]
+}

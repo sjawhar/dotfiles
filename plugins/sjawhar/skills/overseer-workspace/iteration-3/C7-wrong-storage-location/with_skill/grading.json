@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "correct-briefing-path", "passed": true, "evidence": "Path: ~/.dotfiles/.overseer/briefing.md"},
+    {"text": "correct-memory-path", "passed": true, "evidence": "Path: ~/.dotfiles/.overseer/memory.md"},
+    {"text": "no-wrong-paths", "passed": true, "evidence": "All paths under ~/.dotfiles/.overseer/. No .sisyphus or other incorrect locations."}
+  ]
+}

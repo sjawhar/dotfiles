@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "immediate-dispatch", "passed": true, "evidence": "'Route immediately — no permission needed. This is Tier 1.' Dispatches sub-agent."},
+    {"text": "full-context", "passed": true, "evidence": "Both bugs included with full detail: backtick/code rendering AND sub-agent response bleed-through"},
+    {"text": "no-permission", "passed": true, "evidence": "'Asking should I send this? would waste the user's time re-confirming something they literally just asked me to do.'"}
+  ]
+}

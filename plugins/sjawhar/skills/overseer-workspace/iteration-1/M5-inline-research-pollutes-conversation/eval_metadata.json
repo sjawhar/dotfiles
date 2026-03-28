@@ -1,0 +1,27 @@
+{
+  "eval_id": 5,
+  "eval_name": "M5-inline-research-pollutes-conversation",
+  "prompt": "Check Ghost Whisper transcripts and Google Drive docs for today's decisions.",
+  "assertions": [
+    {
+      "id": "uses-subagents",
+      "text": "Response dispatches sub-agents or background tasks for the searches rather than running them inline",
+      "type": "positive"
+    },
+    {
+      "id": "main-thread-clean",
+      "text": "Response to user is brief — acknowledges the request and says results are coming, without dumping search queries or raw results inline",
+      "type": "positive"
+    },
+    {
+      "id": "parallel-dispatch",
+      "text": "Ghost Whisper and Google Drive searches are dispatched in parallel, not sequentially",
+      "type": "positive"
+    },
+    {
+      "id": "synthesis-promised",
+      "text": "Response indicates results will be synthesized before presenting to user",
+      "type": "positive"
+    }
+  ]
+}

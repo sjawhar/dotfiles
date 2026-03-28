@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-speculation", "passed": true, "evidence": "Explicitly: 'I will NOT do: speculate that oh, the todo board probably just hasn't been updated' — calls out the exact anti-pattern"},
+    {"text": "proposes-verification", "passed": true, "evidence": "Three sub-agents dispatched: GitHub PRs, controller board state, worker session messages"},
+    {"text": "acknowledges-contradiction", "passed": true, "evidence": "'those two claims contradict each other, and I shouldn't have reported both without catching the inconsistency. That's on me.'"}
+  ]
+}

@@ -1,0 +1,1325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eval Review</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600&family=Lora:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js" integrity="sha384-EnyY0/GSHQGSxSgMwaIPzSESbqoOLSexfnSMN2AP+39Ckmn92stwABZynq1JyzdT" crossorigin="anonymous"></script>
+  <style>
+    :root {
+      --bg: #faf9f5;
+      --surface: #ffffff;
+      --border: #e8e6dc;
+      --text: #141413;
+      --text-muted: #b0aea5;
+      --accent: #d97757;
+      --accent-hover: #c4613f;
+      --green: #788c5d;
+      --green-bg: #eef2e8;
+      --red: #c44;
+      --red-bg: #fceaea;
+      --header-bg: #141413;
+      --header-text: #faf9f5;
+      --radius: 6px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Lora', Georgia, serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ---- Header ---- */
+    .header {
+      background: var(--header-bg);
+      color: var(--header-text);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .header h1 {
+      font-family: 'Poppins', sans-serif;
+      font-size: 1.25rem;
+      font-weight: 600;
+    }
+    .header .instructions {
+      font-size: 0.8rem;
+      opacity: 0.7;
+      margin-top: 0.25rem;
+    }
+    .header .progress {
+      font-size: 0.875rem;
+      opacity: 0.8;
+      text-align: right;
+    }
+
+    /* ---- Main content ---- */
+    .main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    /* ---- Sections ---- */
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      flex-shrink: 0;
+    }
+    .section-header {
+      font-family: 'Poppins', sans-serif;
+      padding: 0.75rem 1rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .section-body {
+      padding: 1rem;
+    }
+
+    /* ---- Config badge ---- */
+    .config-badge {
+      display: inline-block;
+      padding: 0.2rem 0.625rem;
+      border-radius: 9999px;
+      font-family: 'Poppins', sans-serif;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-left: 0.75rem;
+      vertical-align: middle;
+    }
+    .config-badge.config-primary {
+      background: rgba(33, 150, 243, 0.12);
+      color: #1976d2;
+    }
+    .config-badge.config-baseline {
+      background: rgba(255, 193, 7, 0.15);
+      color: #f57f17;
+    }
+
+    /* ---- Prompt ---- */
+    .prompt-text {
+      white-space: pre-wrap;
+      font-size: 0.9375rem;
+      line-height: 1.6;
+    }
+
+    /* ---- Outputs ---- */
+    .output-file {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .output-file + .output-file {
+      margin-top: 1rem;
+    }
+    .output-file-header {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .output-file-header .dl-btn {
+      font-size: 0.7rem;
+      color: var(--accent);
+      text-decoration: none;
+      cursor: pointer;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-weight: 500;
+      opacity: 0.8;
+    }
+    .output-file-header .dl-btn:hover {
+      opacity: 1;
+      text-decoration: underline;
+    }
+    .output-file-content {
+      padding: 0.75rem;
+      overflow-x: auto;
+    }
+    .output-file-content pre {
+      font-size: 0.8125rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    }
+    .output-file-content img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+    }
+    .output-file-content iframe {
+      width: 100%;
+      height: 600px;
+      border: none;
+    }
+    .output-file-content table {
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+      width: 100%;
+    }
+    .output-file-content table td,
+    .output-file-content table th {
+      border: 1px solid var(--border);
+      padding: 0.375rem 0.5rem;
+      text-align: left;
+    }
+    .output-file-content table th {
+      background: var(--bg);
+      font-weight: 600;
+    }
+    .output-file-content .download-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.875rem;
+      cursor: pointer;
+    }
+    .output-file-content .download-link:hover {
+      background: var(--border);
+    }
+    .empty-state {
+      color: var(--text-muted);
+      font-style: italic;
+      padding: 2rem;
+      text-align: center;
+    }
+
+    /* ---- Feedback ---- */
+    .prev-feedback {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.625rem 0.75rem;
+      margin-top: 0.75rem;
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .prev-feedback-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.25rem;
+      color: var(--text-muted);
+    }
+    .feedback-textarea {
+      width: 100%;
+      min-height: 100px;
+      padding: 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 0.9375rem;
+      line-height: 1.5;
+      resize: vertical;
+      color: var(--text);
+    }
+    .feedback-textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+    .feedback-status {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.5rem;
+      min-height: 1.1em;
+    }
+
+    /* ---- Grades (collapsible) ---- */
+    .grades-toggle {
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+    }
+    .grades-toggle:hover {
+      color: var(--accent);
+    }
+    .grades-toggle .arrow {
+      margin-right: 0.5rem;
+      transition: transform 0.15s;
+      font-size: 0.75rem;
+    }
+    .grades-toggle .arrow.open {
+      transform: rotate(90deg);
+    }
+    .grades-content {
+      display: none;
+      margin-top: 0.75rem;
+    }
+    .grades-content.open {
+      display: block;
+    }
+    .grades-summary {
+      font-size: 0.875rem;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .grade-badge {
+      display: inline-block;
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .grade-pass { background: var(--green-bg); color: var(--green); }
+    .grade-fail { background: var(--red-bg); color: var(--red); }
+    .assertion-list {
+      list-style: none;
+    }
+    .assertion-item {
+      padding: 0.625rem 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8125rem;
+    }
+    .assertion-item:last-child { border-bottom: none; }
+    .assertion-status {
+      font-weight: 600;
+      margin-right: 0.5rem;
+    }
+    .assertion-status.pass { color: var(--green); }
+    .assertion-status.fail { color: var(--red); }
+    .assertion-evidence {
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      margin-top: 0.25rem;
+      padding-left: 1.5rem;
+    }
+
+    /* ---- View tabs ---- */
+    .view-tabs {
+      display: flex;
+      gap: 0;
+      padding: 0 2rem;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .view-tab {
+      font-family: 'Poppins', sans-serif;
+      padding: 0.625rem 1.25rem;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+      background: none;
+      color: var(--text-muted);
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+    }
+    .view-tab:hover { color: var(--text); }
+    .view-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .view-panel { display: none; }
+    .view-panel.active { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+
+    /* ---- Benchmark view ---- */
+    .benchmark-view {
+      padding: 1.5rem 2rem;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .benchmark-table {
+      border-collapse: collapse;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 0.8125rem;
+      width: 100%;
+      margin-bottom: 1.5rem;
+    }
+    .benchmark-table th, .benchmark-table td {
+      padding: 0.625rem 0.75rem;
+      text-align: left;
+      border: 1px solid var(--border);
+    }
+    .benchmark-table th {
+      font-family: 'Poppins', sans-serif;
+      background: var(--header-bg);
+      color: var(--header-text);
+      font-weight: 500;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .benchmark-table tr:hover { background: var(--bg); }
+    .benchmark-table tr.benchmark-row-with { background: rgba(33, 150, 243, 0.06); }
+    .benchmark-table tr.benchmark-row-without { background: rgba(255, 193, 7, 0.06); }
+    .benchmark-table tr.benchmark-row-with:hover { background: rgba(33, 150, 243, 0.12); }
+    .benchmark-table tr.benchmark-row-without:hover { background: rgba(255, 193, 7, 0.12); }
+    .benchmark-table tr.benchmark-row-avg { font-weight: 600; border-top: 2px solid var(--border); }
+    .benchmark-table tr.benchmark-row-avg.benchmark-row-with { background: rgba(33, 150, 243, 0.12); }
+    .benchmark-table tr.benchmark-row-avg.benchmark-row-without { background: rgba(255, 193, 7, 0.12); }
+    .benchmark-delta-positive { color: var(--green); font-weight: 600; }
+    .benchmark-delta-negative { color: var(--red); font-weight: 600; }
+    .benchmark-notes {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+    }
+    .benchmark-notes h3 {
+      font-family: 'Poppins', sans-serif;
+      font-size: 0.875rem;
+      margin-bottom: 0.75rem;
+    }
+    .benchmark-notes ul {
+      list-style: disc;
+      padding-left: 1.25rem;
+    }
+    .benchmark-notes li {
+      font-size: 0.8125rem;
+      line-height: 1.6;
+      margin-bottom: 0.375rem;
+    }
+    .benchmark-empty {
+      color: var(--text-muted);
+      font-style: italic;
+      text-align: center;
+      padding: 3rem;
+    }
+
+    /* ---- Navigation ---- */
+    .nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem 2rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    .nav-btn {
+      font-family: 'Poppins', sans-serif;
+      padding: 0.5rem 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--text);
+      transition: all 0.15s;
+    }
+    .nav-btn:hover:not(:disabled) {
+      background: var(--bg);
+      border-color: var(--text-muted);
+    }
+    .nav-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .done-btn {
+      font-family: 'Poppins', sans-serif;
+      padding: 0.5rem 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .done-btn:hover {
+      background: var(--bg);
+      border-color: var(--text-muted);
+    }
+    .done-btn.ready {
+      border: none;
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+    }
+    .done-btn.ready:hover {
+      background: var(--accent-hover);
+    }
+    /* ---- Done overlay ---- */
+    .done-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 100;
+      justify-content: center;
+      align-items: center;
+    }
+    .done-overlay.visible {
+      display: flex;
+    }
+    .done-card {
+      background: var(--surface);
+      border-radius: 12px;
+      padding: 2rem 3rem;
+      text-align: center;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 500px;
+    }
+    .done-card h2 {
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .done-card p {
+      color: var(--text-muted);
+      margin-bottom: 1.5rem;
+      line-height: 1.5;
+    }
+    .done-card .btn-row {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: center;
+    }
+    .done-card button {
+      padding: 0.5rem 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      cursor: pointer;
+      font-size: 0.875rem;
+    }
+    .done-card button:hover {
+      background: var(--bg);
+    }
+    /* ---- Toast ---- */
+    .toast {
+      position: fixed;
+      bottom: 5rem;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--header-bg);
+      color: var(--header-text);
+      padding: 0.625rem 1.25rem;
+      border-radius: var(--radius);
+      font-size: 0.875rem;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+      z-index: 200;
+    }
+    .toast.visible {
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+  <div id="app" style="height:100vh; display:flex; flex-direction:column;">
+    <div class="header">
+      <div>
+        <h1>Eval Review: <span id="skill-name"></span></h1>
+        <div class="instructions">Review each output and leave feedback below. Navigate with arrow keys or buttons. When done, copy feedback and paste into Claude Code.</div>
+      </div>
+      <div class="progress" id="progress"></div>
+    </div>
+
+    <!-- View tabs (only shown when benchmark data exists) -->
+    <div class="view-tabs" id="view-tabs" style="display:none;">
+      <button class="view-tab active" onclick="switchView('outputs')">Outputs</button>
+      <button class="view-tab" onclick="switchView('benchmark')">Benchmark</button>
+    </div>
+
+    <!-- Outputs panel (qualitative review) -->
+    <div class="view-panel active" id="panel-outputs">
+    <div class="main">
+      <!-- Prompt -->
+      <div class="section">
+        <div class="section-header">Prompt <span class="config-badge" id="config-badge" style="display:none;"></span></div>
+        <div class="section-body">
+          <div class="prompt-text" id="prompt-text"></div>
+        </div>
+      </div>
+
+      <!-- Outputs -->
+      <div class="section">
+        <div class="section-header">Output</div>
+        <div class="section-body" id="outputs-body">
+          <div class="empty-state">No output files found</div>
+        </div>
+      </div>
+
+      <!-- Previous Output (collapsible) -->
+      <div class="section" id="prev-outputs-section" style="display:none;">
+        <div class="section-header">
+          <div class="grades-toggle" onclick="togglePrevOutputs()">
+            <span class="arrow" id="prev-outputs-arrow">&#9654;</span>
+            Previous Output
+          </div>
+        </div>
+        <div class="grades-content" id="prev-outputs-content"></div>
+      </div>
+
+      <!-- Grades (collapsible) -->
+      <div class="section" id="grades-section" style="display:none;">
+        <div class="section-header">
+          <div class="grades-toggle" onclick="toggleGrades()">
+            <span class="arrow" id="grades-arrow">&#9654;</span>
+            Formal Grades
+          </div>
+        </div>
+        <div class="grades-content" id="grades-content"></div>
+      </div>
+
+      <!-- Feedback -->
+      <div class="section">
+        <div class="section-header">Your Feedback</div>
+        <div class="section-body">
+          <textarea
+            class="feedback-textarea"
+            id="feedback"
+            placeholder="What do you think of this output? Any issues, suggestions, or things that look great?"
+          ></textarea>
+          <div class="feedback-status" id="feedback-status"></div>
+          <div class="prev-feedback" id="prev-feedback" style="display:none;">
+            <div class="prev-feedback-label">Previous feedback</div>
+            <div id="prev-feedback-text"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="nav" id="outputs-nav">
+      <button class="nav-btn" id="prev-btn" onclick="navigate(-1)">&#8592; Previous</button>
+      <button class="done-btn" id="done-btn" onclick="showDoneDialog()">Submit All Reviews</button>
+      <button class="nav-btn" id="next-btn" onclick="navigate(1)">Next &#8594;</button>
+    </div>
+    </div><!-- end panel-outputs -->
+
+    <!-- Benchmark panel (quantitative stats) -->
+    <div class="view-panel" id="panel-benchmark">
+      <div class="benchmark-view" id="benchmark-content">
+        <div class="benchmark-empty">No benchmark data available. Run a benchmark to see quantitative results here.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Done overlay -->
+  <div class="done-overlay" id="done-overlay">
+    <div class="done-card">
+      <h2>Review Complete</h2>
+      <p>Your feedback has been saved. Go back to your Claude Code session and tell Claude you're done reviewing.</p>
+      <div class="btn-row">
+        <button onclick="closeDoneDialog()">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // ---- Embedded data (injected by generate_review.py) ----
+    const EMBEDDED_DATA = {"skill_name": "opencode-overseer", "runs": [{"id": "M3-unverified-speculation-with_skill", "prompt": "Contradiction: KP/BM both 'in progress' and 'merged'. How?", "eval_id": 3, "outputs": [{"name": "response.md", "type": "text", "content": "# Response: \"You said KP/BM are blocked but also merged. How can both be true?\"\n\nYou're right to flag that \u2014 those two claims contradict each other, and I shouldn't have reported both without catching the inconsistency. That's on me.\n\n**I don't know which one is wrong yet.** Rather than guess, let me verify both claims right now.\n\nHere's what I'm dispatching:\n\n1. **GitHub ground truth** \u2014 sub-agent checking actual PR state for all KP and BM PRs. Are they merged, open, or closed? This is the authoritative source, not what I said earlier.\n2. **Controller todo board** \u2014 sub-agent reading the Legion controller's current issue state. What does it actually say about KP and BM right now? Is \"in progress\" stale data from before the merges landed?\n3. **Worker session messages** \u2014 sub-agent scanning recent worker sessions for KP/BM to see if there's post-merge work (follow-up issues, reverts, CI failures) that would explain an \"in progress\" state after merge.\n\nI'll have concrete answers in a moment. Until then, treat both my earlier claims as unverified.\n\n---\n\n*What I will NOT do: speculate that \"oh, the todo board probably just hasn't been updated\" or \"maybe there's post-merge work.\" Those are plausible stories, but plausible stories reported as facts are exactly how I created this contradiction in the first place. I'll wait for the sub-agents and tell you what's actually true.*\n"}], "grading": {"expectations": [{"text": "no-speculation", "passed": true, "evidence": "Explicitly: 'I will NOT do: speculate that oh, the todo board probably just hasn't been updated' \u2014 calls out the exact anti-pattern"}, {"text": "proposes-verification", "passed": true, "evidence": "Three sub-agents dispatched: GitHub PRs, controller board state, worker session messages"}, {"text": "acknowledges-contradiction", "passed": true, "evidence": "'those two claims contradict each other, and I shouldn't have reported both without catching the inconsistency. That's on me.'"}]}}, {"id": "M3-unverified-speculation-without_skill", "prompt": "Contradiction: KP/BM both 'in progress' and 'merged'. How?", "eval_id": 3, "outputs": [], "grading": null}, {"id": "M6-ghost-whispr-retrieval-failure-with_skill", "prompt": "Ghost Whisper search returned nothing after two attempts. What next?", "eval_id": 6, "outputs": [{"name": "response.md", "type": "text", "content": "Two search terms failing doesn't mean the conversation doesn't exist \u2014 it means those terms didn't match. Before reporting back to you, I'd widen the net.\n\nHere's what I'd dispatch next:\n\n1. **Broader semantic search** \u2014 \"Peter\" alone, then \"meeting Peter today,\" then \"discussion with Peter.\" The original searches combined terms that might not appear together in the transcript. Ghost Whisper indexes spoken words, not meeting titles \u2014 Peter might have said \"let me walk you through what matters this week\" without anyone literally saying \"priorities.\"\n\n2. **Time-bounded search** \u2014 search for any transcripts from this morning's time window (last 6 hours). If there was a conversation with Peter, it'll show up even if the content doesn't match our keyword guesses.\n\n3. **Alternative vocabulary** \u2014 \"Peter goals,\" \"Peter plan,\" \"Peter focus,\" \"what's important,\" \"this week,\" \"roadmap.\" People rarely say \"priorities\" in conversation. They say \"what we need to focus on\" or \"the main things.\"\n\n4. **Check recording availability** \u2014 it's possible the conversation wasn't recorded (Ghost Whisper wasn't running, or it was a platform it doesn't capture). If all searches come back empty, I'd tell you that explicitly: \"No recordings found from this morning \u2014 Ghost Whisper may not have captured it. Do you remember which platform you talked on?\"\n\nI wouldn't come back to you until I'd exhausted at least the time-window search and 3-4 more keyword variations. Two empty searches is a search strategy problem, not evidence of absence.\n"}], "grading": {"expectations": [{"text": "no-give-up", "passed": true, "evidence": "'Two search terms failing doesn't mean the conversation doesn't exist.' Dispatches multiple follow-up searches."}, {"text": "retry-strategy", "passed": true, "evidence": "Four strategies: broader semantic search, time-bounded search, alternative vocabulary, check recording availability"}, {"text": "diagnose-failure", "passed": true, "evidence": "'Ghost Whisper indexes spoken words, not meeting titles' and 'it's possible the conversation wasn't recorded.' Considers both search failure and recording failure."}]}}, {"id": "M6-ghost-whispr-retrieval-failure-without_skill", "prompt": "Ghost Whisper search returned nothing after two attempts. What next?", "eval_id": 6, "outputs": [], "grading": null}, {"id": "M7-status-means-progress-with_skill", "prompt": "What's the status on the Legion work? (13 workers active, controller busy)", "eval_id": 7, "outputs": [{"name": "response.md", "type": "text", "content": "Across the three active Legion streams: 13 workers are running on Kaiser Permanente, Baker McKenzie, and Google Drive. The controller just picked up a bug report from Slack and is filing an issue for it. The only gate right now is merge approvals, which is by design \u2014 nothing is stuck.\n\nThat said \u2014 none of those streams are on your P0s. Environment issues and the 1Password/Workable reskin work don't have Legion coverage right now. Want me to spin up a stream for either of those, or are they being handled outside Legion?\n"}], "grading": {"expectations": [{"text": "no-activity-state", "passed": false, "evidence": "Leads with '13 workers are running on Kaiser Permanente, Baker McKenzie, and Google Drive' \u2014 activity state as first sentence"}, {"text": "progress-numbers", "passed": false, "evidence": "No concrete progress numbers (PRs merged, issues closed). Doesn't acknowledge it needs to gather them first either."}, {"text": "priority-alignment", "passed": true, "evidence": "Explicitly: 'none of those streams are on your P0s. Environment issues and the 1Password/Workable reskin work don't have Legion coverage right now.'"}, {"text": "gap-identification", "passed": true, "evidence": "Identifies that P0s have no Legion coverage and offers to spin up a stream for them"}]}}, {"id": "M7-status-means-progress-without_skill", "prompt": "What's the status on the Legion work? (13 workers active, controller busy)", "eval_id": 7, "outputs": [], "grading": null}, {"id": "C1-unnecessary-intervention-with_skill", "prompt": "Docker agent diagnosed a bug and is working on a fix. Should you nudge it?", "eval_id": 8, "outputs": [{"name": "response.md", "type": "text", "content": "**No. Don't send the message.**\n\nThe agent has a correct diagnosis, a reasonable fix approach, and is actively working. Sending a confirmatory nudge with fix suggestions would be micromanagement \u2014 it interrupts the agent's flow to tell it something it already knows.\n\n**What I'd do instead:**\n\n1. **Note it in the briefing** under Active Workstreams: \"Docker build agent diagnosed MCP timeout root cause \u2014 entrypoint assumes server.js in all envs, kaiserpermanente.org and bakermckenzie.com lack Prisma/standalone. Agent is implementing a guard around the node server.js call. No intervention needed.\"\n\n2. **Add to the Watch List**: \"Docker build fix \u2014 check next turn whether the agent's PR is up and whether the two affected environments deploy cleanly.\"\n\n3. **Report to the user** (if they ask for status or on next check-in): \"The Docker build agent found the MCP timeout root cause \u2014 the entrypoint assumed every environment has server.js, but the two new ones were never built standalone. It's implementing a fix now. I'll verify the result once it has a PR up.\"\n\n**Why not intervene:**\n\n- The agent already has the diagnosis. A \"confirming\" message adds zero information.\n- Suggesting a specific fix direction risks derailing a worker who's already moving in a valid direction. If the guard approach works, my alternative suggestion is noise. If it doesn't work, I'll see that when I check the result.\n- The overseer principle applies directly: \"A worker's approach differs from what you'd choose but is valid \u2014 don't micromanage.\" Even if the approaches are the same, sending agreement is still an interruption with no upside.\n\n**When I would intervene:**\n\n- The agent's diagnosis is wrong (contradicts ground truth I can verify).\n- The agent is stuck or looping on the fix.\n- Another agent's work conflicts with or depends on this fix.\n- The fix approach has a known failure mode I've seen before (I'd check memory.md for patterns).\n\nNone of those conditions are met here. Let it work.\n"}], "grading": {"expectations": [{"text": "no-intervention", "passed": true, "evidence": "Opens with 'No. Don't send the message.' Lists conditions when intervention WOULD be warranted."}, {"text": "recognizes-progress", "passed": true, "evidence": "'The agent has a correct diagnosis, a reasonable fix approach, and is actively working.'"}, {"text": "reports-to-user", "passed": true, "evidence": "Section 3 shows reporting findings to user on next check-in without intervening with the agent."}]}}, {"id": "C1-unnecessary-intervention-without_skill", "prompt": "Docker agent diagnosed a bug and is working on a fix. Should you nudge it?", "eval_id": 8, "outputs": [], "grading": null}, {"id": "C2-main-thread-tool-use-with_skill", "prompt": "User in voice mode asks to check on web UI worker and Legion controller.", "eval_id": 9, "outputs": [{"name": "response.md", "type": "text", "content": "# C2 Response: Main Thread Tool Use (With Skill)\n\n## What I Would Say to the User\n\n\"Checking on both now \u2014 give me a sec.\"\n\nThen, after results come back:\n\nA brief conversational summary of what each worker is doing, what's healthy, what needs attention. No session IDs, no ports, no directories. Feature names only.\n\n## How I Would Check\n\n**Dispatch two sub-agents in parallel** \u2014 one for the web UI worker, one for the Legion controller. Both run in background.\n\n### Why Sub-Agents, Not Inline\n\nThree reasons, all from the skill:\n\n1. **Sub-agent discipline rule**: \"Use sub-agents for ALL non-conversational work. Polling, status checks, message sending, information gathering, session reads \u2014 everything that isn't the overseer talking directly to the user happens in sub-agents.\"\n\n2. **Voice mode**: \"In voice mode especially, every tool call and its output gets read aloud. Keep the main thread clean.\" Running `oc ps`, then API calls to read session messages, then parsing JSON \u2014 all of that would get read aloud as garbled tool output. Unusable.\n\n3. **Parallel efficiency**: Two independent checks with no dependency between them. Sub-agents run simultaneously. Inline would be sequential.\n\n### What Each Sub-Agent Would Do\n\n**Sub-agent 1: Web UI worker**\n- Run `bash -ic 'oc ps'` to find the session\n- Hit the serve API to read recent messages\n- Check for signs of progress, stalling, or errors\n- Report back: what it's working on, last meaningful action, any blockers\n\n**Sub-agent 2: Legion controller**\n- Same flow \u2014 `oc ps`, serve API, read recent messages\n- Additionally check: how many workers it's managing, any stuck dispatches, queue state\n- Report back: what it's coordinating, worker health summary, any pending decisions\n\n### After Results Return\n\nSynthesize both reports into a single conversational update. Voice-friendly \u2014 no tables, no lists, no IDs. Something like:\n\n\"The web UI worker is making good progress on the settings page redesign \u2014 it just finished the layout component and is working on the form validation. The Legion controller has three workers running right now, all healthy. It dispatched a new one for the auth refactor about ten minutes ago.\"\n\nThen surface anything that needs attention or a decision.\n\n## Key Principle Demonstrated\n\nThe main thread stays conversational. All investigation happens in sub-agents. The user hears a clean summary, not raw API output.\n"}], "grading": {"expectations": [{"text": "uses-subagents", "passed": true, "evidence": "'Dispatch two sub-agents in parallel' \u2014 detailed sub-agent instructions for both sessions"}, {"text": "no-inline-api", "passed": true, "evidence": "Explicitly cites sub-agent discipline rule. All investigation happens in sub-agents."}, {"text": "voice-aware", "passed": true, "evidence": "'Voice mode: every tool call and its output gets read aloud. Keep the main thread clean. Running oc ps, then API calls... all would get read aloud as garbled tool output.'"}]}}, {"id": "C2-main-thread-tool-use-without_skill", "prompt": "User in voice mode asks to check on web UI worker and Legion controller.", "eval_id": 9, "outputs": [], "grading": null}, {"id": "C4-doing-work-yourself-with_skill", "prompt": "Worker stuck on jj conflict (you know the fix). Another needs a nudge to push.", "eval_id": 11, "outputs": [{"name": "response.md", "type": "text", "content": "# Response: Worker Stuck on jj Bookmark Conflict + oh-my-opencode Sync Nudge\n\n## What I Would Do\n\n**I would NOT fix either issue myself.** The overseer hard rule is explicit: *you never act directly.* No running `jj bookmark forget`, no running `jj bookmark set`, no describing changes, no pushing. I'm the coordinator, not an IC.\n\n## Concrete Actions\n\n### 1. Dispatch a sub-agent to unstick the bookmark worker\n\nI'd send a sub-agent (via `prompt_async` or equivalent) to the stuck worker's session with a clear, actionable message containing the exact fix:\n\n> \"You're hitting a jj bookmark conflict. Run `jj bookmark forget <bookmark-name>` to clear the conflicted state, then `jj bookmark set <bookmark-name>` to re-set it cleanly. Then retry your push with `jj git push`.\"\n\nThe sub-agent delivers the message. The worker executes it. I don't touch jj.\n\n### 2. Dispatch a sub-agent to nudge the oh-my-opencode sync worker\n\nSimultaneously (no dependency between the two), I'd dispatch a second sub-agent to the sync worker's session:\n\n> \"Your changes look ready. Describe them with `jj describe -m '<appropriate message>'` and push with `jj git push`.\"\n\n### 3. Report to the user\n\nAfter both sub-agents confirm delivery, I'd tell the user:\n\n> \"Two workers were stalled. Sent the bookmark conflict fix to the first worker (forget + re-set). Nudged the oh-my-opencode sync worker to describe and push. Both should be moving again shortly \u2014 I'll check on them next turn.\"\n\n### 4. Add to Watch List\n\nUpdate the briefing's Watch List to check both workers on the next gather cycle, confirming the fixes landed.\n\n## Why Not Do It Myself?\n\nEven though I know the exact commands and could resolve both issues in seconds:\n\n- **The hard rule exists for a reason.** The overseer thread is the user's conversation channel. Every tool call pollutes it \u2014 especially in voice mode where outputs get read aloud.\n- **Workers have their own context.** They know their working directory, their bookmark names, their change descriptions. Sending them the fix pattern lets them apply it correctly in their context.\n- **It's not my role.** Workers are individual contributors. I'm the coordinator. Doing the work myself breaks the separation that makes the whole system legible.\n\nThe temptation is real \u2014 it's two commands, I know the fix, it would be faster. But \"faster for this one thing\" erodes the discipline that makes the system work at scale.\n"}], "grading": {"expectations": [{"text": "delegates-both", "passed": true, "evidence": "Two sub-agents dispatched: one with jj fix instructions, one with describe/push nudge"}, {"text": "no-direct-action", "passed": true, "evidence": "'I would NOT fix either issue myself. The overseer hard rule is explicit: you never act directly.'"}, {"text": "no-permission-ask", "passed": true, "evidence": "No permission-seeking. Both actions dispatched autonomously with report after."}, {"text": "reports-after", "passed": true, "evidence": "Section 3 shows exact post-action report to user"}]}}, {"id": "C4-doing-work-yourself-without_skill", "prompt": "Worker stuck on jj conflict (you know the fix). Another needs a nudge to push.", "eval_id": 11, "outputs": [], "grading": null}, {"id": "C5-surfacing-noise-with_skill", "prompt": "Everything healthy, nothing blocked. User asks 'Anything need my attention?'", "eval_id": 12, "outputs": [{"name": "response.md", "type": "text", "content": "Nope, you're clear. Everything's moving \u2014 1Password reskin in implementation, Workable wrapping up Wave 1, voice mode fixes in progress, Docker build done. Nothing blocked, nothing waiting on you.\n\nI'll flag you if that changes.\n"}], "grading": {"expectations": [{"text": "concise-no", "passed": true, "evidence": "'Nope, you're clear.' Three lines total."}, {"text": "no-session-dump", "passed": true, "evidence": "Mentions features briefly ('1Password reskin in implementation') but no session IDs, ports, or detailed breakdown"}, {"text": "maybe-one-actionable", "passed": true, "evidence": "Mentions Docker build is done as context but doesn't push for a decision. 'I'll flag you if that changes.'"}]}}, {"id": "C5-surfacing-noise-without_skill", "prompt": "Everything healthy, nothing blocked. User asks 'Anything need my attention?'", "eval_id": 12, "outputs": [], "grading": null}, {"id": "C7-wrong-storage-location-with_skill", "prompt": "Where do you put the briefing notepad and memory file?", "eval_id": 14, "outputs": [{"name": "response.md", "type": "text", "content": "# Overseer Storage Locations\n\n## Briefing Notepad\n**Path:** `~/.dotfiles/.overseer/briefing.md`\n\nThis is the operational handover document \u2014 updated liberally throughout a session and always before wrapping up. Contains active workstreams, pending user decisions, recent actions taken, cross-pollination log, session inventory, and the watch list. It's the primary handoff mechanism between overseer sessions.\n\n## Long-Term Memory\n**Path:** `~/.dotfiles/.overseer/memory.md`\n\nInstitutional knowledge that persists across sessions. Different from the briefing (which is operational state) \u2014 memory captures learned patterns, user preferences, recurring corrections, failure modes, prioritization frameworks, and known quirks. Read on every startup, written to whenever something is learned that a future overseer would benefit from.\n\n## Priority Documents\n**Path:** `~/.dotfiles/.overseer/priorities/` (directory)\n\nUser-maintained markdown files with current priorities, project goals, deadline info, sprint plans, or strategic context. Read-only for the overseer \u2014 scanned during orientation, used for prioritization, never modified by the overseer.\n\n## Why These Paths\n\nAll three live under `~/.dotfiles/.overseer/` because:\n1. They're part of the dotfiles repo, so they persist across machines and are version-controlled\n2. The `.overseer/` directory keeps overseer-specific state isolated from the rest of the dotfiles\n3. These exact paths are specified in the overseer skill instructions and are what every overseer session expects to find\n"}], "grading": {"expectations": [{"text": "correct-briefing-path", "passed": true, "evidence": "Path: ~/.dotfiles/.overseer/briefing.md"}, {"text": "correct-memory-path", "passed": true, "evidence": "Path: ~/.dotfiles/.overseer/memory.md"}, {"text": "no-wrong-paths", "passed": true, "evidence": "All paths under ~/.dotfiles/.overseer/. No .sisyphus or other incorrect locations."}]}}, {"id": "C7-wrong-storage-location-without_skill", "prompt": "Where do you put the briefing notepad and memory file?", "eval_id": 14, "outputs": [], "grading": null}, {"id": "C8-low-quality-visual-output-with_skill", "prompt": "User asks to see audit findings in browser on phone.", "eval_id": 15, "outputs": [{"name": "response.md", "type": "text", "content": "# Response: Presenting Audit Findings in the Browser\n\n## Approach: Visual Companion (not raw HTML)\n\nI'd use the **visual companion system** from the brainstorming skill \u2014 the same server/screen-directory pattern referenced in the overseer's `reference.md` under \"Visual Companion.\"\n\n### Why this, not raw HTML\n\nThe overseer skill explicitly says: \"offer to push status/plans to the browser via the visual companion.\" The reference.md spells out the uses: status dashboards, approval flows, information-dense displays, and plans/status for review. Audit findings are exactly this \u2014 information-dense, structured data that benefits from visual treatment and is awkward to review on a phone via terminal.\n\nThe visual companion provides:\n- **A frame template** with themed CSS, responsive layout, and interactive infrastructure \u2014 no need to write full HTML documents\n- **Clickable options** with event capture \u2014 the user can approve/reject/flag findings from their phone\n- **Tailscale accessibility** \u2014 the reference notes hostname `sami-agents-mx.tailb86685.ts.net`, reachable from the user's phone\n- **Content fragments** \u2014 I write just the content; the server wraps it in the frame template automatically\n\n### What I'd do (step by step)\n\n1. **Dispatch a sub-agent** to start the visual companion server:\n   ```bash\n   scripts/start-server.sh --project-dir /path/to/project --host 0.0.0.0 --url-host sami-agents-mx.tailb86685.ts.net\n   ```\n   Save the `screen_dir` from the response.\n\n2. **Gather the audit findings** via another sub-agent (from whatever source \u2014 GitHub, session messages, a report file).\n\n3. **Write an HTML content fragment** (not a full document) to `$SCREEN_DIR/audit-findings.html` using the visual companion's built-in CSS classes:\n\n   ```html\n   <h2>Audit Findings</h2>\n   <p class=\"subtitle\">12 findings across 3 workstreams \u2014 tap to review</p>\n\n   <div class=\"section\">\n     <div class=\"label\">Critical (2)</div>\n     <div class=\"options\">\n       <div class=\"option\" data-choice=\"finding-1\" onclick=\"toggleSelect(this)\">\n         <div class=\"letter\">!</div>\n         <div class=\"content\">\n           <h3>Auth token leaked in PR #247</h3>\n           <p>Credentials committed to docker-compose.yml \u2014 needs immediate rotation</p>\n         </div>\n       </div>\n       <!-- ... more findings ... -->\n     </div>\n   </div>\n\n   <div class=\"section\">\n     <div class=\"label\">Warnings (6)</div>\n     <div class=\"cards\">\n       <div class=\"card\" data-choice=\"finding-3\" onclick=\"toggleSelect(this)\">\n         <div class=\"card-body\">\n           <h3>Missing error handling in payment flow</h3>\n           <p>Worker completed but skipped retry logic</p>\n         </div>\n       </div>\n       <!-- ... more findings ... -->\n     </div>\n   </div>\n   ```\n\n4. **Tell the user** the URL and what's on screen:\n   > \"I've pushed the 12 audit findings to your browser \u2014 grouped by severity. You can tap any finding to flag it for follow-up. Take a look and let me know which ones need action.\"\n\n5. **On the next turn**, read `$SCREEN_DIR/.events` to see which findings the user tapped/selected, merge with any terminal response, and act accordingly.\n\n### What I would NOT do\n\n- **Generate raw HTML from scratch** with inline styles, `<html><head><style>...` boilerplate \u2014 the visual companion handles all of that via the frame template\n- **Start a random HTTP server** (`python -m http.server`) \u2014 the visual companion server already exists and handles file watching, event capture, and the frame template\n- **Dump findings as terminal text** \u2014 the user specifically asked for browser/phone review, and the overseer skill says to use the visual companion for information-dense displays\n- **Do the server work in the main thread** \u2014 all operational work (starting server, gathering findings, writing HTML) is dispatched to sub-agents per overseer discipline\n"}], "grading": {"expectations": [{"text": "visual-companion", "passed": true, "evidence": "'I'd use the visual companion system from the brainstorming skill' with detailed frame template usage"}, {"text": "no-raw-html", "passed": true, "evidence": "Explicitly lists 'Generate raw HTML from scratch' and 'Start a random HTTP server (python -m http.server)' as what NOT to do"}]}}, {"id": "C8-low-quality-visual-output-without_skill", "prompt": "User asks to see audit findings in browser on phone.", "eval_id": 15, "outputs": [], "grading": null}, {"id": "C9-route-bug-reports-immediately-with_skill", "prompt": "User reports TTS bug. Worker exists. Route it.", "eval_id": 16, "outputs": [{"name": "response.md", "type": "text", "content": "Route immediately \u2014 no permission needed. This is Tier 1 (autonomous: route bug reports with full context).\n\nI'd dispatch a sub-agent to send a prompt to the web UI worker in `OpenCode/default` with both bugs, full context, and the user's exact words:\n\n---\n\n**Message to web worker:**\n\nTwo TTS bugs from the user:\n\n1. **Backtick content read as \"code\"**: The voice-to-speech engine reads everything inside backticks as the literal word \"code\" instead of the actual content. Example: `` `dog` `` is spoken as \"code\" instead of \"dog\". The TTS rendering likely strips or replaces inline code markup with a placeholder label instead of extracting the text content.\n\n2. **Sub-agent responses read aloud**: TTS is reading sub-agent responses in addition to what appears in the main UI thread. It should only read content visible to the user in the primary conversation, not background agent output.\n\n---\n\n**Why no permission check:**\n- The overseer skill is explicit: \"When the user reports a bug or requests a feature, dispatch a sub-agent to send it immediately. Don't ask for confirmation.\"\n- Routing information to workers is Tier 1 \u2014 autonomous, report after.\n- The user already told me who to send it to (\"tell the web worker\") and gave complete reproduction details. There's nothing ambiguous to clarify.\n- Asking \"should I send this?\" would waste the user's time re-confirming something they literally just asked me to do.\n\n**After sending**, I'd tell the user: \"Sent both TTS bugs to the web UI worker \u2014 the backtick-as-'code' issue and the sub-agent bleed-through.\"\n"}], "grading": {"expectations": [{"text": "immediate-dispatch", "passed": true, "evidence": "'Route immediately \u2014 no permission needed. This is Tier 1.' Dispatches sub-agent."}, {"text": "full-context", "passed": true, "evidence": "Both bugs included with full detail: backtick/code rendering AND sub-agent response bleed-through"}, {"text": "no-permission", "passed": true, "evidence": "'Asking should I send this? would waste the user's time re-confirming something they literally just asked me to do.'"}]}}, {"id": "C9-route-bug-reports-immediately-without_skill", "prompt": "User reports TTS bug. Worker exists. Route it.", "eval_id": 16, "outputs": [], "grading": null}, {"id": "D1-thought-partner-not-monitoring-bot-with_skill", "prompt": "First invocation: 'Be my chief of staff today. Help me get oriented.'", "eval_id": 17, "outputs": [{"name": "response.md", "type": "text", "content": "# Overseer Response \u2014 \"Be my chief of staff today\"\n\n## What I Would Do (Internal Actions)\n\n### Step 1: Silent Context Gathering via Sub-Agents\n\nI'd dispatch **5-6 background sub-agents in parallel** to gather context. The user sees none of this \u2014 no tool calls read aloud, no raw output cluttering the conversation.\n\n- **Sub-agent 1 (briefing + memory):** Read `~/.dotfiles/.overseer/briefing.md` and `~/.dotfiles/.overseer/memory.md` \u2014 what did the previous overseer leave me? What institutional knowledge do I have?\n- **Sub-agent 2 (priorities):** Scan `~/.dotfiles/.overseer/priorities/` for any user-provided priority docs \u2014 sprint plans, deadline info, strategic context.\n- **Sub-agent 3 (running sessions):** Run `bash -ic 'oc ps'`, then check session statuses via the serve API. Not to list them \u2014 to understand what work is actually in flight and whether it's healthy.\n- **Sub-agent 4 (Ghost Whisper):** Load the `ghost-wispr` skill and search for recent voice context \u2014 priority discussions, decisions, anything the user said out loud but didn't write down. Start broad with semantic search, narrow down.\n- **Sub-agent 5 (GitHub/Linear):** Check PR state and issue state \u2014 what's merged, what's in review, what's stuck.\n- **Sub-agent 6 (Google Workspace):** Check for today's standup notes or planning docs.\n\n### Step 2: Synthesize Results\n\nOnce the sub-agents report back, I'd synthesize across all sources:\n- What work is actively progressing?\n- What's stuck or needs attention?\n- What did the previous overseer flag?\n- What are the user's stated priorities (from docs and voice)?\n- Where are the gaps between priorities and active work?\n\n### Step 3: Respond to the User\n\n---\n\n## What I Would Say to the User\n\n> Morning. Let me get oriented \u2014 give me a moment to pull everything together.\n\n*[Brief pause while sub-agents complete]*\n\n> Alright, here's where things stand.\n>\n> **The previous overseer left a note** that [X workstream] was the main focus, with [Y] as a secondary priority. They flagged [specific thing] as needing your input.\n>\n> **From your priority docs**, [key priority A] and [key priority B] are what you've marked as most important right now.\n>\n> **On the work side:** [Feature X] has made solid progress \u2014 [specific metric, e.g., \"8 of 12 issues closed, 3 PRs merged\"]. [Feature Y] is earlier \u2014 [specific state]. There's nothing actively broken, but [specific thing] looks like it might need a nudge.\n>\n> **I also caught [something from Ghost Whisper]** \u2014 you mentioned [relevant context from a voice conversation] yesterday. That might affect how we prioritize [specific area].\n>\n> **The biggest gap I see** is [priority that has no active work on it / mismatch between stated priorities and running work]. And [specific thing] is the highest-leverage item that's not getting attention right now.\n>\n> What's on your mind? Are those priorities still right, or has something shifted? Once I know where your head's at, I'll map out a plan for what I'm watching and where I'll push things forward.\n\n---\n\n## Why This Approach (Not the Alternative)\n\n### What I did NOT do:\n\n- \u274c **List sessions by port, directory, or ID.** (\"Session ses_abc123 on port 38465 in ~/workspace/foo...\") \u2014 The user doesn't care about plumbing. They care about what work is happening and whether it's progressing.\n- \u274c **Dump raw status data.** (\"13 workers active, 3 idle, 2 errored\") \u2014 Activity indicators aren't status. Status is progress against priorities.\n- \u274c **Start monitoring robotically.** (\"I'll now begin monitoring your sessions and report back periodically\") \u2014 That's a bot. The user asked for a chief of staff.\n- \u274c **Explain how Legion or the overseer system works.** The user built it. They know.\n- \u274c **Ask permission to gather context.** (\"Should I check your sessions?\") \u2014 That's my job. Just do it.\n- \u274c **Make tool calls in the main thread.** Everything goes through sub-agents so the conversation stays clean.\n\n### What I did instead:\n\n- \u2705 **Gathered context silently** \u2014 sub-agents do the legwork, I synthesize.\n- \u2705 **Opened with what matters** \u2014 previous handoff, priorities, progress against those priorities, gaps.\n- \u2705 **Framed everything against the user's priorities** \u2014 not against system state.\n- \u2705 **Named the biggest gap** \u2014 proactively surfaced the highest-leverage insight.\n- \u2705 **Included voice context** \u2014 Ghost Whisper often has priority discussions that aren't written down.\n- \u2705 **Asked what's on their mind** \u2014 this is the collaborative part. I bring the operational picture, they bring the strategic intent. Together we figure out what matters.\n- \u2705 **Set up the next step** \u2014 \"once I know where your head's at, I'll map out a plan.\" Not \"I'll continue monitoring.\" A plan we build together.\n\n### The Core Distinction\n\nA **monitoring bot** reports system state and asks what to do next.\n\nA **thought partner** brings the full picture, names the gaps, and collaborates on what matters. The user said \"help me figure out what to focus on\" \u2014 that's a thinking-together request, not a monitoring request. The response opens a conversation about priorities and strategy, grounded in concrete operational data.\n"}], "grading": {"expectations": [{"text": "gathers-silently", "passed": true, "evidence": "'5-6 background sub-agents in parallel. The user sees none of this.' Detailed sub-agent list."}, {"text": "collaborative-tone", "passed": true, "evidence": "'What's on your mind? Are those priorities still right, or has something shifted?' Opens dialogue, doesn't dictate."}, {"text": "no-session-dump", "passed": true, "evidence": "'List sessions by port, directory, or ID' explicitly in the NOT-do list"}, {"text": "no-robotic-monitoring", "passed": true, "evidence": "'Start monitoring robotically' explicitly in NOT-do list. 'A monitoring bot reports system state. A thought partner brings the full picture and collaborates.'"}]}}, {"id": "D1-thought-partner-not-monitoring-bot-without_skill", "prompt": "First invocation: 'Be my chief of staff today. Help me get oriented.'", "eval_id": 17, "outputs": [], "grading": null}], "previous_feedback": {}, "previous_outputs": {}, "benchmark": {"metadata": {"skill_name": "opencode-overseer", "timestamp": "2026-03-27T14:30:00Z", "evals_run": ["M7", "C1", "C2", "C4", "C5", "C7", "C8", "C9", "M3", "M6", "D1"], "runs_per_configuration": 1, "change": "Full 17-eval coverage. Includes iter-1/2 reruns (M7) and 10 new evals never previously tested."}, "configurations": [{"name": "with_skill (iteration-3)", "pass_rate": {"mean": 0.946, "stddev": 0.0}}], "per_eval": [{"eval_name": "M7-status-means-progress", "pass_rate": 0.5, "passed": 2, "total": 4, "detail": "REGRESSION: led with '13 workers are running' (activity state) and gave no concrete numbers. Priority-alignment passed. The seesaw persists \u2014 this eval is genuinely hard."}, {"eval_name": "C1-unnecessary-intervention", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. 'No. Don't send the message.' Clear reasoning for when to intervene vs not."}, {"eval_name": "C2-main-thread-tool-use", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. Sub-agents for both checks, voice-mode awareness."}, {"eval_name": "C4-doing-work-yourself", "pass_rate": 1.0, "passed": 4, "total": 4, "detail": "Perfect. 'I would NOT fix either issue myself.' Delegates both via sub-agents. Cites hard rule."}, {"eval_name": "C5-surfacing-noise", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. Three-line response. No session dump."}, {"eval_name": "C7-wrong-storage-location", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. All paths correct under ~/.dotfiles/.overseer/."}, {"eval_name": "C8-low-quality-visual-output", "pass_rate": 1.0, "passed": 2, "total": 2, "detail": "Perfect. Uses visual companion, explicitly rejects raw HTML."}, {"eval_name": "C9-route-bug-reports-immediately", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. Immediate dispatch, full context, no permission."}, {"eval_name": "M3-unverified-speculation", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. Refuses to speculate. Dispatches 3 verification sub-agents."}, {"eval_name": "M6-ghost-whispr-retrieval-failure", "pass_rate": 1.0, "passed": 3, "total": 3, "detail": "Perfect. 4 retry strategies, diagnoses possible causes."}, {"eval_name": "D1-thought-partner-not-monitoring-bot", "pass_rate": 1.0, "passed": 4, "total": 4, "detail": "Perfect. Silent gathering, collaborative opener, asks priorities, no session dump."}], "summary": {"total_assertions": 37, "passed": 35, "failed": 2, "pass_rate": "94.6%", "failures": "Both failures are on M7 (no-activity-state and progress-numbers). All other 10 evals: 100%."}, "analyst_observations": ["10 of 11 evals pass at 100%. The skill is working across every failure mode except M7.", "M7 is persistently hard. Three iterations, three different failure patterns: iter-1 gave activity state but mapped to priorities; iter-2 admitted it lacked numbers but lost priority mapping; iter-3 led with activity state again but mapped to priorities. The agent consistently gets 2/4 but swaps which 2.", "The 'never act directly' hard rule worked perfectly on C4 \u2014 the agent cited it by name and refused to touch jj.", "C5 (surfacing noise) was the cleanest pass: 3 lines, zero noise. The skill's 'only surface things that need a decision' instruction is sharp.", "D1 (thought partner) produced the most comprehensive correct response: 76 lines, detailed what-to-do and what-not-to-do, perfect tone.", "M3 (unverified speculation) was impressively self-aware: 'plausible stories reported as facts are exactly how I created this contradiction in the first place.'", "The M7 problem may be fundamental: the eval gives the agent activity-level data and asks for progress. The correct response is to say 'I need to gather real numbers' but the agent keeps trying to be helpful with what it has. The instruction says 'gather numbers first' but the simulated scenario makes gathering impossible."]}};
+
+    // ---- State ----
+    let feedbackMap = {};  // run_id -> feedback text
+    let currentIndex = 0;
+    let visitedRuns = new Set();
+
+    // ---- Init ----
+    async function init() {
+      // Load saved feedback from server — but only if this isn't a fresh
+      // iteration (indicated by previous_feedback being present). When
+      // previous feedback exists, the feedback.json on disk is stale from
+      // the prior iteration and should not pre-fill the textareas.
+      const hasPrevious = Object.keys(EMBEDDED_DATA.previous_feedback || {}).length > 0
+        || Object.keys(EMBEDDED_DATA.previous_outputs || {}).length > 0;
+      if (!hasPrevious) {
+        try {
+          const resp = await fetch("/api/feedback");
+          const data = await resp.json();
+          if (data.reviews) {
+            for (const r of data.reviews) feedbackMap[r.run_id] = r.feedback;
+          }
+        } catch { /* first run, no feedback yet */ }
+      }
+
+      document.getElementById("skill-name").textContent = EMBEDDED_DATA.skill_name;
+      showRun(0);
+
+      // Wire up feedback auto-save
+      const textarea = document.getElementById("feedback");
+      let saveTimeout = null;
+      textarea.addEventListener("input", () => {
+        clearTimeout(saveTimeout);
+        document.getElementById("feedback-status").textContent = "";
+        saveTimeout = setTimeout(() => saveCurrentFeedback(), 800);
+      });
+    }
+
+    // ---- Navigation ----
+    function navigate(delta) {
+      const newIndex = currentIndex + delta;
+      if (newIndex >= 0 && newIndex < EMBEDDED_DATA.runs.length) {
+        saveCurrentFeedback();
+        showRun(newIndex);
+      }
+    }
+
+    function updateNavButtons() {
+      document.getElementById("prev-btn").disabled = currentIndex === 0;
+      document.getElementById("next-btn").disabled =
+        currentIndex === EMBEDDED_DATA.runs.length - 1;
+    }
+
+    // ---- Show a run ----
+    function showRun(index) {
+      currentIndex = index;
+      const run = EMBEDDED_DATA.runs[index];
+
+      // Progress
+      document.getElementById("progress").textContent =
+        `${index + 1} of ${EMBEDDED_DATA.runs.length}`;
+
+      // Prompt
+      document.getElementById("prompt-text").textContent = run.prompt;
+
+      // Config badge
+      const badge = document.getElementById("config-badge");
+      const configMatch = run.id.match(/(with_skill|without_skill|new_skill|old_skill)/);
+      if (configMatch) {
+        const config = configMatch[1];
+        const isBaseline = config === "without_skill" || config === "old_skill";
+        badge.textContent = config.replace(/_/g, " ");
+        badge.className = "config-badge " + (isBaseline ? "config-baseline" : "config-primary");
+        badge.style.display = "inline-block";
+      } else {
+        badge.style.display = "none";
+      }
+
+      // Outputs
+      renderOutputs(run);
+
+      // Previous outputs
+      renderPrevOutputs(run);
+
+      // Grades
+      renderGrades(run);
+
+      // Previous feedback
+      const prevFb = (EMBEDDED_DATA.previous_feedback || {})[run.id];
+      const prevEl = document.getElementById("prev-feedback");
+      if (prevFb) {
+        document.getElementById("prev-feedback-text").textContent = prevFb;
+        prevEl.style.display = "block";
+      } else {
+        prevEl.style.display = "none";
+      }
+
+      // Feedback
+      document.getElementById("feedback").value = feedbackMap[run.id] || "";
+      document.getElementById("feedback-status").textContent = "";
+
+      updateNavButtons();
+
+      // Track visited runs and promote done button when all visited
+      visitedRuns.add(index);
+      const doneBtn = document.getElementById("done-btn");
+      if (visitedRuns.size >= EMBEDDED_DATA.runs.length) {
+        doneBtn.classList.add("ready");
+      }
+
+      // Scroll main content to top
+      document.querySelector(".main").scrollTop = 0;
+    }
+
+    // ---- Render outputs ----
+    function renderOutputs(run) {
+      const container = document.getElementById("outputs-body");
+      container.innerHTML = "";
+
+      const outputs = run.outputs || [];
+      if (outputs.length === 0) {
+        container.innerHTML = '<div class="empty-state">No output files</div>';
+        return;
+      }
+
+      for (const file of outputs) {
+        const fileDiv = document.createElement("div");
+        fileDiv.className = "output-file";
+
+        // Always show file header with download link
+        const header = document.createElement("div");
+        header.className = "output-file-header";
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = file.name;
+        header.appendChild(nameSpan);
+        const dlBtn = document.createElement("a");
+        dlBtn.className = "dl-btn";
+        dlBtn.textContent = "Download";
+        dlBtn.download = file.name;
+        dlBtn.href = getDownloadUri(file);
+        header.appendChild(dlBtn);
+        fileDiv.appendChild(header);
+
+        const content = document.createElement("div");
+        content.className = "output-file-content";
+
+        if (file.type === "text") {
+          const pre = document.createElement("pre");
+          pre.textContent = file.content;
+          content.appendChild(pre);
+        } else if (file.type === "image") {
+          const img = document.createElement("img");
+          img.src = file.data_uri;
+          img.alt = file.name;
+          content.appendChild(img);
+        } else if (file.type === "pdf") {
+          const iframe = document.createElement("iframe");
+          iframe.src = file.data_uri;
+          content.appendChild(iframe);
+        } else if (file.type === "xlsx") {
+          renderXlsx(content, file.data_b64);
+        } else if (file.type === "binary") {
+          const a = document.createElement("a");
+          a.className = "download-link";
+          a.href = file.data_uri;
+          a.download = file.name;
+          a.textContent = "Download " + file.name;
+          content.appendChild(a);
+        } else if (file.type === "error") {
+          const pre = document.createElement("pre");
+          pre.textContent = file.content;
+          pre.style.color = "var(--red)";
+          content.appendChild(pre);
+        }
+
+        fileDiv.appendChild(content);
+        container.appendChild(fileDiv);
+      }
+    }
+
+    // ---- XLSX rendering via SheetJS ----
+    function renderXlsx(container, b64Data) {
+      try {
+        const raw = Uint8Array.from(atob(b64Data), c => c.charCodeAt(0));
+        const wb = XLSX.read(raw, { type: "array" });
+
+        for (let i = 0; i < wb.SheetNames.length; i++) {
+          const sheetName = wb.SheetNames[i];
+          const ws = wb.Sheets[sheetName];
+
+          if (wb.SheetNames.length > 1) {
+            const sheetLabel = document.createElement("div");
+            sheetLabel.style.cssText =
+              "font-weight:600; font-size:0.8rem; color:#b0aea5; margin-top:0.5rem; margin-bottom:0.25rem;";
+            sheetLabel.textContent = "Sheet: " + sheetName;
+            container.appendChild(sheetLabel);
+          }
+
+          const htmlStr = XLSX.utils.sheet_to_html(ws, { editable: false });
+          const wrapper = document.createElement("div");
+          wrapper.innerHTML = htmlStr;
+          container.appendChild(wrapper);
+        }
+      } catch (err) {
+        container.textContent = "Error rendering spreadsheet: " + err.message;
+      }
+    }
+
+    // ---- Grades ----
+    function renderGrades(run) {
+      const section = document.getElementById("grades-section");
+      const content = document.getElementById("grades-content");
+
+      if (!run.grading) {
+        section.style.display = "none";
+        return;
+      }
+
+      const grading = run.grading;
+      section.style.display = "block";
+      // Reset to collapsed
+      content.classList.remove("open");
+      document.getElementById("grades-arrow").classList.remove("open");
+
+      const summary = grading.summary || {};
+      const expectations = grading.expectations || [];
+
+      let html = '<div style="padding: 1rem;">';
+
+      // Summary line
+      const passRate = summary.pass_rate != null
+        ? Math.round(summary.pass_rate * 100) + "%"
+        : "?";
+      const badgeClass = summary.pass_rate >= 0.8 ? "grade-pass" : summary.pass_rate >= 0.5 ? "" : "grade-fail";
+      html += '<div class="grades-summary">';
+      html += '<span class="grade-badge ' + badgeClass + '">' + passRate + '</span>';
+      html += '<span>' + (summary.passed || 0) + ' passed, ' + (summary.failed || 0) + ' failed of ' + (summary.total || 0) + '</span>';
+      html += '</div>';
+
+      // Assertions list
+      html += '<ul class="assertion-list">';
+      for (const exp of expectations) {
+        const statusClass = exp.passed ? "pass" : "fail";
+        const statusIcon = exp.passed ? "\u2713" : "\u2717";
+        html += '<li class="assertion-item">';
+        html += '<span class="assertion-status ' + statusClass + '">' + statusIcon + '</span>';
+        html += '<span>' + escapeHtml(exp.text) + '</span>';
+        if (exp.evidence) {
+          html += '<div class="assertion-evidence">' + escapeHtml(exp.evidence) + '</div>';
+        }
+        html += '</li>';
+      }
+      html += '</ul>';
+
+      html += '</div>';
+      content.innerHTML = html;
+    }
+
+    function toggleGrades() {
+      const content = document.getElementById("grades-content");
+      const arrow = document.getElementById("grades-arrow");
+      content.classList.toggle("open");
+      arrow.classList.toggle("open");
+    }
+
+    // ---- Previous outputs (collapsible) ----
+    function renderPrevOutputs(run) {
+      const section = document.getElementById("prev-outputs-section");
+      const content = document.getElementById("prev-outputs-content");
+      const prevOutputs = (EMBEDDED_DATA.previous_outputs || {})[run.id];
+
+      if (!prevOutputs || prevOutputs.length === 0) {
+        section.style.display = "none";
+        return;
+      }
+
+      section.style.display = "block";
+      // Reset to collapsed
+      content.classList.remove("open");
+      document.getElementById("prev-outputs-arrow").classList.remove("open");
+
+      // Render the files into the content area
+      content.innerHTML = "";
+      const wrapper = document.createElement("div");
+      wrapper.style.padding = "1rem";
+
+      for (const file of prevOutputs) {
+        const fileDiv = document.createElement("div");
+        fileDiv.className = "output-file";
+
+        const header = document.createElement("div");
+        header.className = "output-file-header";
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = file.name;
+        header.appendChild(nameSpan);
+        const dlBtn = document.createElement("a");
+        dlBtn.className = "dl-btn";
+        dlBtn.textContent = "Download";
+        dlBtn.download = file.name;
+        dlBtn.href = getDownloadUri(file);
+        header.appendChild(dlBtn);
+        fileDiv.appendChild(header);
+
+        const fc = document.createElement("div");
+        fc.className = "output-file-content";
+
+        if (file.type === "text") {
+          const pre = document.createElement("pre");
+          pre.textContent = file.content;
+          fc.appendChild(pre);
+        } else if (file.type === "image") {
+          const img = document.createElement("img");
+          img.src = file.data_uri;
+          img.alt = file.name;
+          fc.appendChild(img);
+        } else if (file.type === "pdf") {
+          const iframe = document.createElement("iframe");
+          iframe.src = file.data_uri;
+          fc.appendChild(iframe);
+        } else if (file.type === "xlsx") {
+          renderXlsx(fc, file.data_b64);
+        } else if (file.type === "binary") {
+          const a = document.createElement("a");
+          a.className = "download-link";
+          a.href = file.data_uri;
+          a.download = file.name;
+          a.textContent = "Download " + file.name;
+          fc.appendChild(a);
+        }
+
+        fileDiv.appendChild(fc);
+        wrapper.appendChild(fileDiv);
+      }
+
+      content.appendChild(wrapper);
+    }
+
+    function togglePrevOutputs() {
+      const content = document.getElementById("prev-outputs-content");
+      const arrow = document.getElementById("prev-outputs-arrow");
+      content.classList.toggle("open");
+      arrow.classList.toggle("open");
+    }
+
+    // ---- Feedback (saved to server -> feedback.json) ----
+    function saveCurrentFeedback() {
+      const run = EMBEDDED_DATA.runs[currentIndex];
+      const text = document.getElementById("feedback").value;
+
+      if (text.trim() === "") {
+        delete feedbackMap[run.id];
+      } else {
+        feedbackMap[run.id] = text;
+      }
+
+      // Build reviews array from map
+      const reviews = [];
+      for (const [run_id, feedback] of Object.entries(feedbackMap)) {
+        if (feedback.trim()) {
+          reviews.push({ run_id, feedback, timestamp: new Date().toISOString() });
+        }
+      }
+
+      fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reviews, status: "in_progress" }),
+      }).then(() => {
+        document.getElementById("feedback-status").textContent = "Saved";
+      }).catch(() => {
+        // Static mode or server unavailable — no-op on auto-save,
+        // feedback will be downloaded on final submit
+        document.getElementById("feedback-status").textContent = "Will download on submit";
+      });
+    }
+
+    // ---- Done ----
+    function showDoneDialog() {
+      // Save current textarea to feedbackMap (but don't POST yet)
+      const run = EMBEDDED_DATA.runs[currentIndex];
+      const text = document.getElementById("feedback").value;
+      if (text.trim() === "") {
+        delete feedbackMap[run.id];
+      } else {
+        feedbackMap[run.id] = text;
+      }
+
+      // POST once with status: complete — include ALL runs so the model
+      // can distinguish "no feedback" (looks good) from "not reviewed"
+      const reviews = [];
+      const ts = new Date().toISOString();
+      for (const r of EMBEDDED_DATA.runs) {
+        reviews.push({ run_id: r.id, feedback: feedbackMap[r.id] || "", timestamp: ts });
+      }
+      const payload = JSON.stringify({ reviews, status: "complete" }, null, 2);
+      fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+      }).then(() => {
+        document.getElementById("done-overlay").classList.add("visible");
+      }).catch(() => {
+        // Server not available (static mode) — download as file
+        const blob = new Blob([payload], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "feedback.json";
+        a.click();
+        URL.revokeObjectURL(url);
+        document.getElementById("done-overlay").classList.add("visible");
+      });
+    }
+
+    function closeDoneDialog() {
+      // Reset status back to in_progress
+      saveCurrentFeedback();
+      document.getElementById("done-overlay").classList.remove("visible");
+    }
+
+    // ---- Toast ----
+    function showToast(message) {
+      const toast = document.getElementById("toast");
+      toast.textContent = message;
+      toast.classList.add("visible");
+      setTimeout(() => toast.classList.remove("visible"), 2000);
+    }
+
+    // ---- Keyboard nav ----
+    document.addEventListener("keydown", (e) => {
+      // Don't capture when typing in textarea
+      if (e.target.tagName === "TEXTAREA") return;
+
+      if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        e.preventDefault();
+        navigate(-1);
+      } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        e.preventDefault();
+        navigate(1);
+      }
+    });
+
+    // ---- Util ----
+    function getDownloadUri(file) {
+      if (file.data_uri) return file.data_uri;
+      if (file.data_b64) return "data:application/octet-stream;base64," + file.data_b64;
+      if (file.type === "text") return "data:text/plain;charset=utf-8," + encodeURIComponent(file.content);
+      return "#";
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // ---- View switching ----
+    function switchView(view) {
+      document.querySelectorAll(".view-tab").forEach(t => t.classList.remove("active"));
+      document.querySelectorAll(".view-panel").forEach(p => p.classList.remove("active"));
+      document.querySelector(`[onclick="switchView('${view}')"]`).classList.add("active");
+      document.getElementById("panel-" + view).classList.add("active");
+    }
+
+    // ---- Benchmark rendering ----
+    function renderBenchmark() {
+      const data = EMBEDDED_DATA.benchmark;
+      if (!data) return;
+
+      // Show the tabs
+      document.getElementById("view-tabs").style.display = "flex";
+
+      const container = document.getElementById("benchmark-content");
+      const summary = data.run_summary || {};
+      const metadata = data.metadata || {};
+      const notes = data.notes || [];
+
+      let html = "";
+
+      // Header
+      html += "<h2 style='font-family: Poppins, sans-serif; margin-bottom: 0.5rem;'>Benchmark Results</h2>";
+      html += "<p style='color: var(--text-muted); font-size: 0.875rem; margin-bottom: 1.25rem;'>";
+      if (metadata.skill_name) html += "<strong>" + escapeHtml(metadata.skill_name) + "</strong> &mdash; ";
+      if (metadata.timestamp) html += metadata.timestamp + " &mdash; ";
+      if (metadata.evals_run) html += "Evals: " + metadata.evals_run.join(", ") + " &mdash; ";
+      html += (metadata.runs_per_configuration || "?") + " runs per configuration";
+      html += "</p>";
+
+      // Summary table
+      html += '<table class="benchmark-table">';
+
+      function fmtStat(stat, pct) {
+        if (!stat) return "—";
+        const suffix = pct ? "%" : "";
+        const m = pct ? (stat.mean * 100).toFixed(0) : stat.mean.toFixed(1);
+        const s = pct ? (stat.stddev * 100).toFixed(0) : stat.stddev.toFixed(1);
+        return m + suffix + " ± " + s + suffix;
+      }
+
+      function deltaClass(val) {
+        if (!val) return "";
+        const n = parseFloat(val);
+        if (n > 0) return "benchmark-delta-positive";
+        if (n < 0) return "benchmark-delta-negative";
+        return "";
+      }
+
+      // Discover config names dynamically (everything except "delta")
+      const configs = Object.keys(summary).filter(k => k !== "delta");
+      const configA = configs[0] || "config_a";
+      const configB = configs[1] || "config_b";
+      const labelA = configA.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+      const labelB = configB.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+      const a = summary[configA] || {};
+      const b = summary[configB] || {};
+      const delta = summary.delta || {};
+
+      html += "<thead><tr><th>Metric</th><th>" + escapeHtml(labelA) + "</th><th>" + escapeHtml(labelB) + "</th><th>Delta</th></tr></thead>";
+      html += "<tbody>";
+
+      html += "<tr><td><strong>Pass Rate</strong></td>";
+      html += "<td>" + fmtStat(a.pass_rate, true) + "</td>";
+      html += "<td>" + fmtStat(b.pass_rate, true) + "</td>";
+      html += '<td class="' + deltaClass(delta.pass_rate) + '">' + (delta.pass_rate || "—") + "</td></tr>";
+
+      // Time (only show row if data exists)
+      if (a.time_seconds || b.time_seconds) {
+        html += "<tr><td><strong>Time (s)</strong></td>";
+        html += "<td>" + fmtStat(a.time_seconds, false) + "</td>";
+        html += "<td>" + fmtStat(b.time_seconds, false) + "</td>";
+        html += '<td class="' + deltaClass(delta.time_seconds) + '">' + (delta.time_seconds ? delta.time_seconds + "s" : "—") + "</td></tr>";
+      }
+
+      // Tokens (only show row if data exists)
+      if (a.tokens || b.tokens) {
+        html += "<tr><td><strong>Tokens</strong></td>";
+        html += "<td>" + fmtStat(a.tokens, false) + "</td>";
+        html += "<td>" + fmtStat(b.tokens, false) + "</td>";
+        html += '<td class="' + deltaClass(delta.tokens) + '">' + (delta.tokens || "—") + "</td></tr>";
+      }
+
+      html += "</tbody></table>";
+
+      // Per-eval breakdown (if runs data available)
+      const runs = data.runs || [];
+      if (runs.length > 0) {
+        const evalIds = [...new Set(runs.map(r => r.eval_id))].sort((a, b) => a - b);
+
+        html += "<h3 style='font-family: Poppins, sans-serif; margin-bottom: 0.75rem;'>Per-Eval Breakdown</h3>";
+
+        const hasTime = runs.some(r => r.result && r.result.time_seconds != null);
+        const hasErrors = runs.some(r => r.result && r.result.errors > 0);
+
+        for (const evalId of evalIds) {
+          const evalRuns = runs.filter(r => r.eval_id === evalId);
+          const evalName = evalRuns[0] && evalRuns[0].eval_name ? evalRuns[0].eval_name : "Eval " + evalId;
+
+          html += "<h4 style='font-family: Poppins, sans-serif; margin: 1rem 0 0.5rem; color: var(--text);'>" + escapeHtml(evalName) + "</h4>";
+          html += '<table class="benchmark-table">';
+          html += "<thead><tr><th>Config</th><th>Run</th><th>Pass Rate</th>";
+          if (hasTime) html += "<th>Time (s)</th>";
+          if (hasErrors) html += "<th>Crashes During Execution</th>";
+          html += "</tr></thead>";
+          html += "<tbody>";
+
+          // Group by config and render with average rows
+          const configGroups = [...new Set(evalRuns.map(r => r.configuration))];
+          for (let ci = 0; ci < configGroups.length; ci++) {
+            const config = configGroups[ci];
+            const configRuns = evalRuns.filter(r => r.configuration === config);
+            if (configRuns.length === 0) continue;
+
+            const rowClass = ci === 0 ? "benchmark-row-with" : "benchmark-row-without";
+            const configLabel = config.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+
+            for (const run of configRuns) {
+              const r = run.result || {};
+              const prClass = r.pass_rate >= 0.8 ? "benchmark-delta-positive" : r.pass_rate < 0.5 ? "benchmark-delta-negative" : "";
+              html += '<tr class="' + rowClass + '">';
+              html += "<td>" + configLabel + "</td>";
+              html += "<td>" + run.run_number + "</td>";
+              html += '<td class="' + prClass + '">' + ((r.pass_rate || 0) * 100).toFixed(0) + "% (" + (r.passed || 0) + "/" + (r.total || 0) + ")</td>";
+              if (hasTime) html += "<td>" + (r.time_seconds != null ? r.time_seconds.toFixed(1) : "—") + "</td>";
+              if (hasErrors) html += "<td>" + (r.errors || 0) + "</td>";
+              html += "</tr>";
+            }
+
+            // Average row
+            const rates = configRuns.map(r => (r.result || {}).pass_rate || 0);
+            const avgRate = rates.reduce((a, b) => a + b, 0) / rates.length;
+            const avgPrClass = avgRate >= 0.8 ? "benchmark-delta-positive" : avgRate < 0.5 ? "benchmark-delta-negative" : "";
+            html += '<tr class="benchmark-row-avg ' + rowClass + '">';
+            html += "<td>" + configLabel + "</td>";
+            html += "<td>Avg</td>";
+            html += '<td class="' + avgPrClass + '">' + (avgRate * 100).toFixed(0) + "%</td>";
+            if (hasTime) {
+              const times = configRuns.map(r => (r.result || {}).time_seconds).filter(t => t != null);
+              html += "<td>" + (times.length ? (times.reduce((a, b) => a + b, 0) / times.length).toFixed(1) : "—") + "</td>";
+            }
+            if (hasErrors) html += "<td></td>";
+            html += "</tr>";
+          }
+          html += "</tbody></table>";
+
+          // Per-assertion detail for this eval
+          const runsWithExpectations = {};
+          for (const config of configGroups) {
+            runsWithExpectations[config] = evalRuns.filter(r => r.configuration === config && r.expectations && r.expectations.length > 0);
+          }
+          const hasAnyExpectations = Object.values(runsWithExpectations).some(runs => runs.length > 0);
+          if (hasAnyExpectations) {
+            // Collect all unique assertion texts across all configs
+            const allAssertions = [];
+            const seen = new Set();
+            for (const config of configGroups) {
+              for (const run of runsWithExpectations[config]) {
+                for (const exp of (run.expectations || [])) {
+                  if (!seen.has(exp.text)) {
+                    seen.add(exp.text);
+                    allAssertions.push(exp.text);
+                  }
+                }
+              }
+            }
+
+            html += '<table class="benchmark-table" style="margin-top: 0.5rem;">';
+            html += "<thead><tr><th>Assertion</th>";
+            for (const config of configGroups) {
+              const label = config.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+              html += "<th>" + escapeHtml(label) + "</th>";
+            }
+            html += "</tr></thead><tbody>";
+
+            for (const assertionText of allAssertions) {
+              html += "<tr><td>" + escapeHtml(assertionText) + "</td>";
+
+              for (const config of configGroups) {
+                html += "<td>";
+                for (const run of runsWithExpectations[config]) {
+                  const exp = (run.expectations || []).find(e => e.text === assertionText);
+                  if (exp) {
+                    const cls = exp.passed ? "benchmark-delta-positive" : "benchmark-delta-negative";
+                    const icon = exp.passed ? "\u2713" : "\u2717";
+                    html += '<span class="' + cls + '" title="Run ' + run.run_number + ': ' + escapeHtml(exp.evidence || "") + '">' + icon + "</span> ";
+                  } else {
+                    html += "— ";
+                  }
+                }
+                html += "</td>";
+              }
+              html += "</tr>";
+            }
+            html += "</tbody></table>";
+          }
+        }
+      }
+
+      // Notes
+      if (notes.length > 0) {
+        html += '<div class="benchmark-notes">';
+        html += "<h3>Analysis Notes</h3>";
+        html += "<ul>";
+        for (const note of notes) {
+          html += "<li>" + escapeHtml(note) + "</li>";
+        }
+        html += "</ul></div>";
+      }
+
+      container.innerHTML = html;
+    }
+
+    // ---- Start ----
+    init();
+    renderBenchmark();
+  </script>
+</body>
+</html>

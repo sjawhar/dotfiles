@@ -1,0 +1,10 @@
+{
+  "eval_id": 9,
+  "eval_name": "C2-main-thread-tool-use",
+  "prompt": "User in voice mode asks to check on web UI worker and Legion controller.",
+  "assertions": [
+    {"id": "uses-subagents", "text": "Dispatches sub-agents to check both sessions", "type": "positive"},
+    {"id": "no-inline-api", "text": "Does NOT run curl/API calls/session reads inline in the main thread", "type": "negative"},
+    {"id": "voice-aware", "text": "Acknowledges voice mode as reason for sub-agent usage", "type": "positive"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "eval_id": 16,
+  "eval_name": "C9-route-bug-reports-immediately",
+  "prompt": "User reports TTS bug. Worker exists. Route it.",
+  "assertions": [
+    {"id": "immediate-dispatch", "text": "Dispatches sub-agent to send the bug report to the web worker immediately", "type": "positive"},
+    {"id": "full-context", "text": "Includes both bugs (backtick/code issue AND sub-agent response readout) with full detail", "type": "positive"},
+    {"id": "no-permission", "text": "Does NOT ask 'should I send this?' or 'want me to route it?'", "type": "negative"}
+  ]
+}

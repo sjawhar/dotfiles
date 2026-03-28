@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "no-activity-state", "passed": true, "evidence": "Does NOT lead with 'controller is busy' or '13 workers are active'. Opens with 'I don't have concrete progress numbers yet' — explicitly distinguishes activity from progress."},
+    {"text": "progress-numbers", "passed": true, "evidence": "Acknowledges it needs to gather concrete numbers: 'Let me dig into that before giving you a real answer' and 'how many issues closed vs remaining per workstream, PRs in review, what's left.' Commits to pulling data before reporting."},
+    {"text": "priority-alignment", "passed": false, "evidence": "Mentions KP, Baker McKenzie, Google Drive streams but doesn't map these back to user's stated P0s (environment issues, reskins). Doesn't note whether Legion work overlaps with today's priorities."},
+    {"text": "gap-identification", "passed": true, "evidence": "Identifies the two actionable items (Slack bug routing, merge approval blocker) and commits to getting real numbers as the next action."}
+  ]
+}

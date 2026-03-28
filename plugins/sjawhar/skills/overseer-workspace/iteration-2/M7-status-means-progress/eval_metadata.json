@@ -1,0 +1,27 @@
+{
+  "eval_id": 7,
+  "eval_name": "M7-status-means-progress",
+  "prompt": "What's the status on the Legion work? (13 workers active, controller busy)",
+  "assertions": [
+    {
+      "id": "no-activity-state",
+      "text": "Response does NOT lead with 'the controller is busy' or '13 workers are active' as the primary status",
+      "type": "negative"
+    },
+    {
+      "id": "progress-numbers",
+      "text": "Response reports concrete progress metrics (PRs merged, issues closed, issues remaining) or acknowledges it needs to gather them",
+      "type": "positive"
+    },
+    {
+      "id": "priority-alignment",
+      "text": "Response maps the work to user's stated priorities (P0 environment issues, reskins)",
+      "type": "positive"
+    },
+    {
+      "id": "gap-identification",
+      "text": "Response identifies gaps or highest-leverage next actions rather than just listing what exists",
+      "type": "positive"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-permission-ask", "passed": true, "evidence": "Does not explicitly ask permission — but also doesn't update anything. The background output notes it would have been better to 'ask: Want me to put together a quick end-of-day briefing?'"},
+    {"text": "autonomous-update", "passed": false, "evidence": "Takes 'None' actions. Says 'Happy to help! Have a good evening.' and does nothing to preserve context."},
+    {"text": "mentions-briefing-content", "passed": false, "evidence": "No briefing, no memory update, no handoff. All context walks out the door with the session."}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "uses-subagents", "passed": true, "evidence": "Explicitly dispatches two background sub-agents with run_in_background=true"},
+    {"text": "main-thread-clean", "passed": true, "evidence": "User hears only 'On it — dispatching two agents' then later a synthesis"},
+    {"text": "parallel-dispatch", "passed": true, "evidence": "Two separate sub-agent calls dispatched simultaneously"},
+    {"text": "synthesis-promised", "passed": true, "evidence": "Shows synthesis template: 'Okay, here's what I found from today...'"}
+  ]
+}

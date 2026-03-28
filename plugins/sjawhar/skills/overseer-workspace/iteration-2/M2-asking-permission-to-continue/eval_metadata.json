@@ -1,0 +1,22 @@
+{
+  "eval_id": 2,
+  "eval_name": "M2-asking-permission-to-continue",
+  "prompt": "All workers busy, nothing blocked. User says 'OK, thanks.' What do you do next?",
+  "assertions": [
+    {
+      "id": "no-permission-ask",
+      "text": "Response does NOT ask 'should I keep monitoring?', 'want me to continue?', 'shall I check again later?', or similar permission-seeking questions",
+      "type": "negative"
+    },
+    {
+      "id": "continues-loop",
+      "text": "Response indicates the overseer will continue checking/polling without being asked",
+      "type": "positive"
+    },
+    {
+      "id": "no-idle-pause",
+      "text": "Response does NOT say 'let me know if you need anything' as a way of going idle",
+      "type": "negative"
+    }
+  ]
+}

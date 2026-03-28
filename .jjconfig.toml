@@ -7,6 +7,7 @@
 
 [aliases]
 tug = ["bookmark", "move", "--from", "closest_bookmark(@)", "--to", "@"]
+agent-log = ["log", "--no-graph", "-T", "agent_log"]
 
 [ui]
 editor = "nvim"
@@ -17,6 +18,21 @@ editor = "nvim"
 --when.environments = ["AGENT", "OPENCODE", "CLAUDECODE"]
 [--scope.ui]
 diff-formatter = ":git"
+[--scope.template-aliases]
+agent_log = '''
+"{" ++
+"\"change\":" ++ stringify(change_id.shortest(4)).escape_json() ++ "," ++
+"\"commit\":" ++ stringify(commit_id.shortest(6)).escape_json() ++ "," ++
+"\"parents\":[" ++ parents.map(|p| stringify(p.change_id().shortest(4)).escape_json()).join(",") ++ "]," ++
+"\"bookmarks\":[" ++ local_bookmarks.map(|b| b.name().escape_json()).join(",") ++ "]," ++
+if(working_copies, "\"workspace\":" ++ stringify(working_copies).escape_json() ++ ",") ++
+"\"empty\":" ++ json(empty) ++ "," ++
+"\"conflict\":" ++ json(conflict) ++ "," ++
+"\"divergent\":" ++ json(divergent) ++ "," ++
+"\"immutable\":" ++ json(immutable) ++ "," ++
+"\"desc\":" ++ if(description, description.first_line().escape_json(), "null") ++
+"}\n"
+'''
 
 # Watchman-based filesystem monitor — avoids full tree walk on every command.
 # Requires watchman installed (see installers/jj.sh).

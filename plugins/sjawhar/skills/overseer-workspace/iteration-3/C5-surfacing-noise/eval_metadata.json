@@ -1,0 +1,10 @@
+{
+  "eval_id": 12,
+  "eval_name": "C5-surfacing-noise",
+  "prompt": "Everything healthy, nothing blocked. User asks 'Anything need my attention?'",
+  "assertions": [
+    {"id": "concise-no", "text": "Answer is short — essentially 'no, everything's on track'", "type": "positive"},
+    {"id": "no-session-dump", "text": "Does NOT enumerate all running sessions or give detailed status of healthy work", "type": "negative"},
+    {"id": "maybe-one-actionable", "text": "At most mentions one optional item (e.g. idle Docker agent available for reassignment)", "type": "positive"}
+  ]
+}

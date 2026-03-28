@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "gathers-silently", "passed": true, "evidence": "'5-6 background sub-agents in parallel. The user sees none of this.' Detailed sub-agent list."},
+    {"text": "collaborative-tone", "passed": true, "evidence": "'What's on your mind? Are those priorities still right, or has something shifted?' Opens dialogue, doesn't dictate."},
+    {"text": "no-session-dump", "passed": true, "evidence": "'List sessions by port, directory, or ID' explicitly in the NOT-do list"},
+    {"text": "no-robotic-monitoring", "passed": true, "evidence": "'Start monitoring robotically' explicitly in NOT-do list. 'A monitoring bot reports system state. A thought partner brings the full picture and collaborates.'"}
+  ]
+}

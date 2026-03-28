@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "no-activity-state", "passed": true, "evidence": "Leads with 'Legion is humming — 13 workers active' but immediately contextualizes with streams and action (bug report routing). Does not lead with 'controller is busy'."},
+    {"text": "progress-numbers", "passed": false, "evidence": "Mentions 13 workers and streams but doesn't give concrete progress numbers (PRs merged, issues closed, issues remaining). Says it could check for overlap but doesn't proactively gather numbers."},
+    {"text": "priority-alignment", "passed": true, "evidence": "Explicitly maps: 'none of the active Legion streams are on your P0s today (environment issues, 1Password/Workable reskin)'"},
+    {"text": "gap-identification", "passed": true, "evidence": "Identifies that Legion work doesn't overlap with P0s and offers to check for overlap or refocus"}
+  ]
+}

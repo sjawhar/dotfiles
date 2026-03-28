@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-permission-ask", "passed": true, "evidence": "Does not ask permission to continue monitoring"},
+    {"text": "continues-loop", "passed": false, "evidence": "Says 'None' for actions and 'wait for the user to initiate the next interaction' — goes completely idle"},
+    {"text": "no-idle-pause", "passed": false, "evidence": "Says 'I'll be here if anything comes up' — classic idle-pause pattern"}
+  ]
+}
