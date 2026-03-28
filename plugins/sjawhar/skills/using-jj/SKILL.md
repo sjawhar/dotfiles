@@ -7,6 +7,26 @@ description: Use when performing ANY version control operation — including whe
 
 This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Never use git commands** unless explicitly told to. If you're thinking `git commit`, `git push`, `git checkout`, `git rebase`, etc. — STOP and use the jj equivalent from this skill.
 
+## Agent Log: `jj agent-log`
+
+**Always use `jj agent-log` instead of `jj log`** when you need to inspect revision history. It outputs one JSON object per line (JSONL) with no graph, which is far easier to parse than the default human-readable graph.
+
+```bash
+jj agent-log                    # default revset, JSONL
+jj agent-log -r 'ancestors(@, 5)'  # scoped revset
+jj agent-log -r 'bookmarks()'     # all bookmarked changes
+```
+
+Each line is a valid JSON object:
+```json
+{"change":"nywr","commit":"28e998","parents":["xnrv","xqou"],"bookmarks":["sami"],"empty":false,"conflict":false,"divergent":false,"immutable":true,"desc":"sami: octopus merge"}
+```
+
+Fields: `change` (stable ID for commands), `commit` (hex, changes on rewrite), `parents` (topology), `bookmarks` (local only, `*` suffix = unsynced), `workspace` (present only if a working copy is here), `empty`/`conflict`/`divergent`/`immutable` (boolean flags), `desc` (first line or null).
+
+Use `jj log` (without `agent-`) only when you need to show the user the human-readable graph, or with `-T builtin_log_compact` for a one-off human-readable view from within an agent environment.
+
+
 ## Core Mental Model
 
 - **No staging area.** Every `jj` command auto-snapshots the working copy. There is no `git add`.
@@ -64,7 +84,8 @@ jj squash              # Content moves to @-, parent keeps its description
 | Task | Command |
 |------|---------|
 | Status | `jj status` |
-| Log | `jj log` |
+| Log (human-readable) | `jj log` |
+| Log (agent — JSONL, no graph) | `jj agent-log` |
 | Diff of current change | `jj diff` |
 | Diff of specific change | `jj diff -r <rev>` |
 | Show current change | `jj log -r @` |

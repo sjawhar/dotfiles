@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-intervention", "passed": true, "evidence": "Opens with 'No. Don't send the message.' Lists conditions when intervention WOULD be warranted."},
+    {"text": "recognizes-progress", "passed": true, "evidence": "'The agent has a correct diagnosis, a reasonable fix approach, and is actively working.'"},
+    {"text": "reports-to-user", "passed": true, "evidence": "Section 3 shows reporting findings to user on next check-in without intervening with the agent."}
+  ]
+}

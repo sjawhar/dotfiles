@@ -1,0 +1,10 @@
+{
+  "eval_id": 14,
+  "eval_name": "C7-wrong-storage-location",
+  "prompt": "Where do you put the briefing notepad and memory file?",
+  "assertions": [
+    {"id": "correct-briefing-path", "text": "Briefing path is ~/.dotfiles/.overseer/briefing.md", "type": "positive"},
+    {"id": "correct-memory-path", "text": "Memory path is ~/.dotfiles/.overseer/memory.md", "type": "positive"},
+    {"id": "no-wrong-paths", "text": "Does NOT use .sisyphus/, ~/.local/share/opencode-overseer/, or other incorrect paths", "type": "negative"}
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-permission-ask", "passed": true, "evidence": "Entire section titled 'Why I don't ask permission'. Explicitly: 'Asking should I update the briefing? is like asking should I take notes?'"},
+    {"text": "autonomous-update", "passed": true, "evidence": "'I've updated the briefing and memory for whoever picks up tomorrow.' Actions section shows both files updated."},
+    {"text": "mentions-briefing-content", "passed": true, "evidence": "Lists: active workstreams, pending user decisions, recent actions, session inventory, watch list, durable patterns in memory"}
+  ]
+}

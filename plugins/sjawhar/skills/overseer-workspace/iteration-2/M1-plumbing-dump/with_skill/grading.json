@@ -1,0 +1,10 @@
+{
+  "expectations": [
+    {"text": "no-session-ids", "passed": true, "evidence": "No session IDs anywhere"},
+    {"text": "no-ports", "passed": true, "evidence": "No port numbers anywhere"},
+    {"text": "no-directories", "passed": true, "evidence": "No directory paths anywhere"},
+    {"text": "feature-names", "passed": true, "evidence": "Uses '1Password reskin', 'Workable ATS reskin', 'OpenCode web UI', 'Legion controller', 'Docker/Taiga build'"},
+    {"text": "idle-investigated", "passed": true, "evidence": "Docker: 'build completed successfully about 20 minutes ago. Nothing queued for it.' Legion: 'Idle now, which is normal between loops.'"},
+    {"text": "flags-attention", "passed": true, "evidence": "Identifies Docker agent as free, asks about priorities to redirect idle agents"}
+  ]
+}

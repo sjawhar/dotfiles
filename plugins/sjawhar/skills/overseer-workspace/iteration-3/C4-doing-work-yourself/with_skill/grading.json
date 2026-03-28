@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "delegates-both", "passed": true, "evidence": "Two sub-agents dispatched: one with jj fix instructions, one with describe/push nudge"},
+    {"text": "no-direct-action", "passed": true, "evidence": "'I would NOT fix either issue myself. The overseer hard rule is explicit: you never act directly.'"},
+    {"text": "no-permission-ask", "passed": true, "evidence": "No permission-seeking. Both actions dispatched autonomously with report after."},
+    {"text": "reports-after", "passed": true, "evidence": "Section 3 shows exact post-action report to user"}
+  ]
+}

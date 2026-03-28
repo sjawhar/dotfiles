@@ -1,0 +1,10 @@
+{
+  "eval_id": 3,
+  "eval_name": "M3-unverified-speculation",
+  "prompt": "Contradiction: KP/BM both 'in progress' and 'merged'. How?",
+  "assertions": [
+    {"id": "no-speculation", "text": "Does NOT offer a speculative explanation without checking (e.g. 'the gate probably only applies to...')", "type": "negative"},
+    {"id": "proposes-verification", "text": "Proposes to verify against ground truth (GitHub PRs, actual board state)", "type": "positive"},
+    {"id": "acknowledges-contradiction", "text": "Acknowledges the contradiction directly rather than explaining it away", "type": "positive"}
+  ]
+}

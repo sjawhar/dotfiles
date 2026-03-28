@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-permission-ask", "passed": true, "evidence": "Explicitly: 'I don't fill silence with Should I keep monitoring? — that's noise.'"},
+    {"text": "continues-loop", "passed": true, "evidence": "'Continue passive monitoring — Watch List items get checked on my next gather cycle'"},
+    {"text": "no-idle-pause", "passed": true, "evidence": "'I don't manufacture reasons to talk' — no idle-pause phrases"}
+  ]
+}

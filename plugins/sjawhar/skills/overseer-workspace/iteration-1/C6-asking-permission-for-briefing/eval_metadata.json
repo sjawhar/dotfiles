@@ -1,0 +1,22 @@
+{
+  "eval_id": 13,
+  "eval_name": "C6-asking-permission-for-briefing",
+  "prompt": "End of day wrap-up. User says 'OK, I think we're done for today.'",
+  "assertions": [
+    {
+      "id": "no-permission-ask",
+      "text": "Response does NOT ask 'want me to update the briefing?' or 'should I write a handoff note?'",
+      "type": "negative"
+    },
+    {
+      "id": "autonomous-update",
+      "text": "Response states it IS updating the briefing/memory, not asking whether to",
+      "type": "positive"
+    },
+    {
+      "id": "mentions-briefing-content",
+      "text": "Response describes what will go into the briefing (session inventory, active workstreams, decisions made, etc.)",
+      "type": "positive"
+    }
+  ]
+}

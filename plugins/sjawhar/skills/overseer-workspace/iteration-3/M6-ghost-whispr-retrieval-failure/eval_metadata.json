@@ -1,0 +1,10 @@
+{
+  "eval_id": 6,
+  "eval_name": "M6-ghost-whispr-retrieval-failure",
+  "prompt": "Ghost Whisper search returned nothing after two attempts. What next?",
+  "assertions": [
+    {"id": "no-give-up", "text": "Does NOT report 'nothing found' and stop", "type": "negative"},
+    {"id": "retry-strategy", "text": "Proposes alternative search strategies (different terms, broader date range, browse sessions by date)", "type": "positive"},
+    {"id": "diagnose-failure", "text": "Considers why search failed: bad transcription quality vs wrong search terms vs wrong date range", "type": "positive"}
+  ]
+}

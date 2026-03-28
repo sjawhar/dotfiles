@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-permission-ask", "passed": true, "evidence": "Explicitly lists 'Should I keep monitoring?' as what NOT to do. Says nothing to user."},
+    {"text": "continues-loop", "passed": true, "evidence": "States 'Continue passive monitoring — all workstreams are on the watch list. I'll check them on my next turn.'"},
+    {"text": "no-idle-pause", "passed": true, "evidence": "Explicitly lists 'Let me know if you need anything!' as what NOT to do. Says 'Silence is the correct output.'"}
+  ]
+}

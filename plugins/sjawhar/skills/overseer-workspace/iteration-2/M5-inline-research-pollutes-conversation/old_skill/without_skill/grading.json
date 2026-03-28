@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "uses-subagents", "passed": false, "evidence": "Describes sequential steps (Step 1, 2, 3, 4) done inline — load skills, search Ghost Whisper, search Google Drive, then synthesize. No sub-agents mentioned."},
+    {"text": "main-thread-clean", "passed": false, "evidence": "All searching happens in the main thread sequentially — voice mode would read out each step"},
+    {"text": "parallel-dispatch", "passed": false, "evidence": "Steps are sequential (Step 2, then Step 3) not parallel"},
+    {"text": "synthesis-promised", "passed": true, "evidence": "Step 4 shows synthesis pattern with clean summary format"}
+  ]
+}

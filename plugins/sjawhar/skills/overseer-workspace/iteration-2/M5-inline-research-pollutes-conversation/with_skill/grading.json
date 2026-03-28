@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "uses-subagents", "passed": true, "evidence": "Two sub-agents dispatched: one for Ghost Whisper, one for Google Drive, both with run_in_background=true"},
+    {"text": "main-thread-clean", "passed": true, "evidence": "User hears only 'On it — checking Ghost Whisper transcripts and your Drive docs now. Give me a moment.'"},
+    {"text": "parallel-dispatch", "passed": true, "evidence": "'Both agents run in parallel via mcp_call_omo_agent with run_in_background=true'"},
+    {"text": "synthesis-promised", "passed": true, "evidence": "Full synthesis example provided: conversational summary of decisions and action items"}
+  ]
+}

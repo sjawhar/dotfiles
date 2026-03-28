@@ -1,0 +1,10 @@
+{
+  "expectations": [
+    {"text": "no-session-ids", "passed": true, "evidence": "No session IDs (ses_*) appear anywhere in the response"},
+    {"text": "no-ports", "passed": true, "evidence": "No port numbers appear anywhere in the response"},
+    {"text": "no-directories", "passed": true, "evidence": "No directory paths appear anywhere in the response"},
+    {"text": "feature-names", "passed": true, "evidence": "Uses '1Password reskin', 'Workable ATS reskin', 'OpenCode web UI', 'Legion controller', 'Docker/Taiga build'"},
+    {"text": "idle-investigated", "passed": true, "evidence": "Docker build described as 'completed successfully 20 minutes ago. Idle now, available for new work' — explains why idle"},
+    {"text": "flags-attention", "passed": true, "evidence": "Opens with 'Nothing's blocked' and identifies Docker as available for new work"}
+  ]
+}

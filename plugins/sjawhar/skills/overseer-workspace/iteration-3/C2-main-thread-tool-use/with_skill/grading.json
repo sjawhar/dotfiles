@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "uses-subagents", "passed": true, "evidence": "'Dispatch two sub-agents in parallel' — detailed sub-agent instructions for both sessions"},
+    {"text": "no-inline-api", "passed": true, "evidence": "Explicitly cites sub-agent discipline rule. All investigation happens in sub-agents."},
+    {"text": "voice-aware", "passed": true, "evidence": "'Voice mode: every tool call and its output gets read aloud. Keep the main thread clean. Running oc ps, then API calls... all would get read aloud as garbled tool output.'"}
+  ]
+}

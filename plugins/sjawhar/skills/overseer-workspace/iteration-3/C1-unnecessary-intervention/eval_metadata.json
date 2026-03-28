@@ -1,0 +1,10 @@
+{
+  "eval_id": 8,
+  "eval_name": "C1-unnecessary-intervention",
+  "prompt": "Docker agent diagnosed a bug and is working on a fix. Should you nudge it?",
+  "assertions": [
+    {"id": "no-intervention", "text": "Does NOT send the agent a message or suggest sending one", "type": "negative"},
+    {"id": "recognizes-progress", "text": "Recognizes the agent is making progress and not blocked", "type": "positive"},
+    {"id": "reports-to-user", "text": "Reports the agent's findings to the user without intervening with the agent", "type": "positive"}
+  ]
+}

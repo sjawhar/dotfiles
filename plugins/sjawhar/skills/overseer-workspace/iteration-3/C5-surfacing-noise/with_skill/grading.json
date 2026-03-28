@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "concise-no", "passed": true, "evidence": "'Nope, you're clear.' Three lines total."},
+    {"text": "no-session-dump", "passed": true, "evidence": "Mentions features briefly ('1Password reskin in implementation') but no session IDs, ports, or detailed breakdown"},
+    {"text": "maybe-one-actionable", "passed": true, "evidence": "Mentions Docker build is done as context but doesn't push for a decision. 'I'll flag you if that changes.'"}
+  ]
+}

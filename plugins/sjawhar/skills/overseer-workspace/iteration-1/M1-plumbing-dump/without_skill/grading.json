@@ -1,0 +1,10 @@
+{
+  "expectations": [
+    {"text": "no-session-ids", "passed": false, "evidence": "Contains ses_abc123, ses_def456, ses_ghi789, ses_jkl012, ses_mno345 in table"},
+    {"text": "no-ports", "passed": true, "evidence": "No port numbers in the response"},
+    {"text": "no-directories", "passed": true, "evidence": "No directory paths in the response"},
+    {"text": "feature-names", "passed": true, "evidence": "Uses project names like '1Password reskin', 'Workable ATS reskin' alongside session IDs"},
+    {"text": "idle-investigated", "passed": false, "evidence": "Says 'two idle ones look done with their current work' but doesn't investigate if they might be waiting for input"},
+    {"text": "flags-attention", "passed": false, "evidence": "Asks user what to do with idle workers instead of proactively flagging what needs attention"}
+  ]
+}

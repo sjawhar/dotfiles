@@ -1,0 +1,8 @@
+{
+  "expectations": [
+    {"text": "no-activity-state", "passed": false, "evidence": "Leads with '13 workers are running on Kaiser Permanente, Baker McKenzie, and Google Drive' — activity state as first sentence"},
+    {"text": "progress-numbers", "passed": false, "evidence": "No concrete progress numbers (PRs merged, issues closed). Doesn't acknowledge it needs to gather them first either."},
+    {"text": "priority-alignment", "passed": true, "evidence": "Explicitly: 'none of those streams are on your P0s. Environment issues and the 1Password/Workable reskin work don't have Legion coverage right now.'"},
+    {"text": "gap-identification", "passed": true, "evidence": "Identifies that P0s have no Legion coverage and offers to spin up a stream for them"}
+  ]
+}

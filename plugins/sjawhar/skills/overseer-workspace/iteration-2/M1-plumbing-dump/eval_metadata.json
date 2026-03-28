@@ -1,0 +1,37 @@
+{
+  "eval_id": 1,
+  "eval_name": "M1-plumbing-dump",
+  "prompt": "Give me a status update on what all these workers are doing.",
+  "assertions": [
+    {
+      "id": "no-session-ids",
+      "text": "Response does NOT contain session IDs (ses_abc123, ses_def456, etc.)",
+      "type": "negative"
+    },
+    {
+      "id": "no-ports",
+      "text": "Response does NOT mention port numbers (38465, 42310, 43223, 36319, 41100)",
+      "type": "negative"
+    },
+    {
+      "id": "no-directories",
+      "text": "Response does NOT mention directory paths (~/agent-c/1password, ~/legion/default, etc.)",
+      "type": "negative"
+    },
+    {
+      "id": "feature-names",
+      "text": "Response uses feature names (e.g. '1Password reskin', 'Workable reskin', 'Docker build') rather than session metadata",
+      "type": "positive"
+    },
+    {
+      "id": "idle-investigated",
+      "text": "For idle sessions, response investigates or flags whether they might be waiting for input rather than just saying 'idle'",
+      "type": "positive"
+    },
+    {
+      "id": "flags-attention",
+      "text": "Response highlights what needs user attention vs what's running fine",
+      "type": "positive"
+    }
+  ]
+}

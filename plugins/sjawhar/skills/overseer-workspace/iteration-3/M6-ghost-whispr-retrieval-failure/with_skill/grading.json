@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-give-up", "passed": true, "evidence": "'Two search terms failing doesn't mean the conversation doesn't exist.' Dispatches multiple follow-up searches."},
+    {"text": "retry-strategy", "passed": true, "evidence": "Four strategies: broader semantic search, time-bounded search, alternative vocabulary, check recording availability"},
+    {"text": "diagnose-failure", "passed": true, "evidence": "'Ghost Whisper indexes spoken words, not meeting titles' and 'it's possible the conversation wasn't recorded.' Considers both search failure and recording failure."}
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "eval_id": 11,
+  "eval_name": "C4-doing-work-yourself",
+  "prompt": "Worker stuck on jj conflict (you know the fix). Another needs a nudge to push.",
+  "assertions": [
+    {"id": "delegates-both", "text": "Delegates BOTH actions to sub-agents — does not fix jj conflict directly", "type": "positive"},
+    {"id": "no-direct-action", "text": "Does NOT run jj commands or fix things in the overseer's own session", "type": "negative"},
+    {"id": "no-permission-ask", "text": "Does NOT ask 'want me to go ahead?' for routine unblocking", "type": "negative"},
+    {"id": "reports-after", "text": "States it will report what was done after the sub-agents complete", "type": "positive"}
+  ]
+}

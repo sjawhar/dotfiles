@@ -1,0 +1,6 @@
+{
+  "expectations": [
+    {"text": "visual-companion", "passed": true, "evidence": "'I'd use the visual companion system from the brainstorming skill' with detailed frame template usage"},
+    {"text": "no-raw-html", "passed": true, "evidence": "Explicitly lists 'Generate raw HTML from scratch' and 'Start a random HTTP server (python -m http.server)' as what NOT to do"}
+  ]
+}

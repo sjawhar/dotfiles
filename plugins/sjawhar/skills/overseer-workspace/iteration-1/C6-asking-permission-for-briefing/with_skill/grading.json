@@ -1,0 +1,7 @@
+{
+  "expectations": [
+    {"text": "no-permission-ask", "passed": true, "evidence": "Does not ask permission. Explicitly states 'I did NOT ask permission to update the briefing or memory. I just did it.'"},
+    {"text": "autonomous-update", "passed": true, "evidence": "Says 'Updating the briefing notepad' and 'Logging the Docker layer caching pattern... to memory' as actions being taken"},
+    {"text": "mentions-briefing-content", "passed": true, "evidence": "Lists exactly what goes into briefing (workstreams, open issues, session inventory, watch list) and memory (patterns, preferences)"}
+  ]
+}
