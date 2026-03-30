@@ -20,7 +20,7 @@
       "variant": "max"
     },
     "hephaestus": {
-      "model": "openai/gpt-5.3-codex",
+      "model": "openai/gpt-5.4",
       "variant": "high"
     },
     "prometheus": {
@@ -68,7 +68,7 @@
       "variant": "max"
     },
     "deep": {
-      "model": "openai/gpt-5.3-codex",
+      "model": "openai/gpt-5.4",
       "variant": "medium"
     },
     "visual-engineering": {
@@ -111,7 +111,8 @@
   "runtime_fallback": true,
   "tmux": {
     "enabled": true,
-    "layout": "main-vertical"
+    "layout": "main-vertical",
+    "isolation": "session"
   },
   "_migrations": [
     "model-version:openai/gpt-5.2-codex->openai/gpt-5.3-codex",
