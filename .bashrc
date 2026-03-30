@@ -196,11 +196,11 @@ oc() {
 
 occ() { oc --continue "$@"; }
 
-# Like oc() but using opencode-legion plugin instead of oh-my-opencode.
-# Separate config+cache (different plugins/node_modules), shared data (auth) and state.
 ocl() {
-    XDG_CONFIG_HOME="${HOME}/.config/opencode-legion" \
-    XDG_CACHE_HOME="${HOME}/.cache/opencode-legion" \
+    local opencode_bin_dir="${OPENCODE_DIST_BIN_DIR:-$HOME/opencode/default/packages/opencode/dist/opencode-linux-x64/bin}"
+
+    PATH="$opencode_bin_dir:$PATH" \
+    OPENCODE_DISABLE_CHANNEL_DB=1 \
     oc "$@"
 }
 
