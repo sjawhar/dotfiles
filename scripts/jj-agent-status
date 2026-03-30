@@ -277,7 +277,7 @@ def summary_action(changes, active, affects):
         agent = " \U0001f916" if c.get("agents") else ""
         dist = f" +{c['trunk_distance']}" if c.get("trunk_distance") is not None else ""
         ts = c.get("timestamp", "")[:10]
-        desc = c.get("desc", "")[:45]
+        desc = (c.get("desc") or "")[:45]
         print(f"  {bm_name(c)}{sync}{div}{conf}{agent}{dist}  {c['change']} {ts} {desc}")
     remaining = len(bookmarked) - 10
     if remaining > 0:
