@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenCode Web UI server (direct-load mode via GitHub Pages + Tailscale)
+
+[Service]
+Type=simple
+ExecStart=%h/.dotfiles/opencode-web/opencode-web-serve
+Restart=on-failure
+RestartSec=5
+Environment=PATH=%h/.local/share/mise/shims:%h/.dotfiles/shims:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

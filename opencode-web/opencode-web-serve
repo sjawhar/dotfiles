@@ -1,0 +1,24 @@
+#!/bin/bash
+# Wrapper to launch opencode web server with full shell environment + secrets
+set -euo pipefail
+
+# Source bash profile so mise, tools, and PATH are available
+# This ensures MCP servers can find their dependencies
+source "$HOME/.bashrc" 2>/dev/null || true
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+
+# Decrypt all secrets and export them
+eval "$(secrets list | while read key; do
+  val=$(secrets get "$key")
+  echo "export ${key}='${val}'"
+done)"
+
+export OPENCODE_DISABLE_CHANNEL_DB=1
+export OPENCODE_WEB_URL="$HOME/opencode-web-frontend"
+
+exec opencode \
+    --print-logs --log-level INFO \
+    serve \
+    --hostname 127.0.0.1 \
+    --port 4097

@@ -1,0 +1,104 @@
+#!/bin/bash
+# Deploy OpenCode web frontend
+# Usage:
+#   deploy-web          Pull latest CI build from gh-pages
+#   deploy-web --local  Build from current sami checkout (faster, for dev)
+set -euo pipefail
+
+REPO_DIR="${HOME}/opencode/default"
+FRONTEND_DIR="${HOME}/opencode-web-frontend"
+CADDY_PID=$(pgrep caddy 2>/dev/null || true)
+
+echo "=== OpenCode Web Deploy ==="
+
+if [[ "${1:-}" == "--local" ]]; then
+    echo "Mode: local build from sami"
+    
+    cd "$REPO_DIR"
+    
+    # Verify we're on sami or a descendant
+    current=$(jj log --no-graph -T 'change_id.shortest(8)' -r '@' 2>/dev/null)
+    echo "Current change: $current"
+    
+    # Install deps and build
+    echo "Installing dependencies..."
+    cd packages/app
+    bun install --frozen-lockfile 2>/dev/null || bun install
+    
+    echo "Building frontend..."
+    bun run build 2>&1 | tail -5
+    
+    BUILD_DIR="$REPO_DIR/packages/app/dist"
+    if [[ ! -d "$BUILD_DIR" ]]; then
+        echo "ERROR: Build failed — $BUILD_DIR not found"
+        exit 1
+    fi
+    
+    # Deploy
+    echo "Deploying to $FRONTEND_DIR..."
+    rm -rf "$FRONTEND_DIR"
+    cp -r "$BUILD_DIR" "$FRONTEND_DIR"
+    
+else
+    echo "Mode: pull from gh-pages (CI build)"
+    
+    cd "$REPO_DIR"
+    
+    # Fetch latest gh-pages
+    echo "Fetching latest gh-pages..."
+    git fetch origin gh-pages 2>/dev/null
+    
+    # Find latest version directory
+    LATEST=$(git ls-tree origin/gh-pages --name-only 2>/dev/null | grep "^v" | sort -V | tail -1)
+    if [[ -z "$LATEST" ]]; then
+        echo "ERROR: No version directories found on gh-pages"
+        exit 1
+    fi
+    echo "Latest CI build: $LATEST"
+    
+    # Extract to temp dir
+    TMPDIR=$(mktemp -d)
+    git archive origin/gh-pages "$LATEST" | tar -x -C "$TMPDIR"
+    
+    # Rewrite paths (gh-pages builds have versioned base paths)
+    echo "Rewriting asset paths to root-relative..."
+    cd "$TMPDIR/$LATEST"
+    
+    # Fix index.html asset references
+    if [[ -f index.html ]]; then
+        sed -i "s|/${LATEST}/|/|g" index.html
+        sed -i 's|="/assets/|="/assets/|g' index.html
+    fi
+    
+    # Fix CSS url() references
+    find assets/ -name "*.css" -exec sed -i "s|/${LATEST}/|/|g" {} \; 2>/dev/null || true
+    
+    # Deploy
+    echo "Deploying to $FRONTEND_DIR..."
+    rm -rf "$FRONTEND_DIR"
+    cp -r "$TMPDIR/$LATEST" "$FRONTEND_DIR"
+    rm -rf "$TMPDIR"
+fi
+
+# Verify deployment
+if [[ -f "$FRONTEND_DIR/index.html" ]]; then
+    ASSET_COUNT=$(find "$FRONTEND_DIR/assets" -type f 2>/dev/null | wc -l)
+    echo "Deployed: $ASSET_COUNT assets"
+else
+    echo "ERROR: Deployment failed — index.html not found"
+    exit 1
+fi
+
+# Reload Caddy if running
+if [[ -n "$CADDY_PID" ]]; then
+    echo "Reloading Caddy..."
+    caddy reload --config "$HOME/.dotfiles/opencode-web/Caddyfile" 2>/dev/null || true
+fi
+
+# Smoke test
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/ 2>/dev/null || echo "000")
+if [[ "$HTTP_CODE" == "200" ]]; then
+    echo "=== Deploy successful (HTTP $HTTP_CODE) ==="
+else
+    echo "=== WARNING: Smoke test returned HTTP $HTTP_CODE ==="
+fi
