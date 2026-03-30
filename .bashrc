@@ -35,6 +35,9 @@ elif command -v mise &>/dev/null; then
     eval "$(mise activate --shims "$DOTFILES_SHELL")"
 fi
 
+# OpenCode fork — auto-update checks our fork's releases
+export OPENCODE_GITHUB_REPO="sjawhar/opencode"
+
 # ------------------------------------------------------------------------------
 # Tmux socket directory (keep out of /tmp to avoid systemd-tmpfiles cleanup)
 # ------------------------------------------------------------------------------
@@ -89,6 +92,14 @@ export ANTHROPIC_1M_CONTEXT=true
 # ==============================================================================
 
 [[ $- == *i* ]] || return 0
+
+# Re-activate mise with hooks for interactive shells — ensures upgrades
+# take effect without needing a new shell (--shims above handles non-interactive)
+if [ -x "${DOTFILES_DIR}/bin/mise" ]; then
+    eval "$("${DOTFILES_DIR}/bin/mise" activate "$DOTFILES_SHELL")"
+elif command -v mise &>/dev/null; then
+    eval "$(mise activate "$DOTFILES_SHELL")"
+fi
 
 # ==============================================================================
 # INTERACTIVE-ONLY SECTION
@@ -184,6 +195,14 @@ oc() {
 }
 
 occ() { oc --continue "$@"; }
+
+# Like oc() but using opencode-legion plugin instead of oh-my-opencode.
+# Separate config+cache (different plugins/node_modules), shared data (auth) and state.
+ocl() {
+    XDG_CONFIG_HOME="${HOME}/.config/opencode-legion" \
+    XDG_CACHE_HOME="${HOME}/.cache/opencode-legion" \
+    oc "$@"
+}
 
 
 _oc_ps() {

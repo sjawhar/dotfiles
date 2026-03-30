@@ -180,18 +180,30 @@ def build_snapshot(panes: list[Pane], tmux_session: str) -> dict[str, object]:
 def write_snapshot(snapshot: dict[str, object]) -> Path:
     output_dir = Path.home() / ".dotfiles" / ".tmux-workspace"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "snapshot.json"
 
     serialized = json.dumps(snapshot, indent=2)
-    output_path.write_text(serialized + "\n", encoding="utf-8")
-    print(serialized)
-    return output_path
+
+    # Save per-session snapshot (multi-session safe)
+    session_name = snapshot.get("tmux_session", "unknown")
+    session_path = output_dir / f"snapshot-{session_name}.json"
+    session_path.write_text(serialized + "\n", encoding="utf-8")
+
+    # Also save as latest (backwards compatible with tmux-restore)
+    latest_path = output_dir / "snapshot.json"
+    latest_path.write_text(serialized + "\n", encoding="utf-8")
+
+    return session_path
 
 
 def main() -> int:
+    # When run via tmux run-shell (hooks/cron), TMUX env isn't set
+    # but tmux commands still work. Only bail if tmux server is unreachable.
     if "TMUX" not in os.environ:
-        eprint("error: not running inside tmux")
-        return 1
+        try:
+            run_tmux("display-message", "-p", "")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            eprint("error: tmux server not reachable")
+            return 1
 
     own_pane_id = os.environ.get("TMUX_PANE")
     try:
