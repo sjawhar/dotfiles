@@ -1,0 +1,556 @@
+#!/usr/bin/env python3
+"""Show jj repo status enriched with active agent sessions.
+
+Usage:
+  jj-agent-status                        # action-oriented summary (default)
+  jj-agent-status --branches [-r REVSET] # detailed branch view
+  jj-agent-status --json [-r REVSET]     # JSONL for programmatic use
+  jj-agent-status --full                 # don't truncate lists
+  jj-agent-status --deep                 # compute trunk distance per bookmark
+"""
+
+import json
+import subprocess
+import sys
+
+
+def run(cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def has_desc(c):
+    """Check if a change has a real description."""
+    d = c.get("desc")
+    return bool(d) and d not in ("(empty)", "(no description set)")
+
+
+def bm_name(c):
+    """Get first bookmark name from a change."""
+    bms = c.get("bookmarks", [])
+    if not bms:
+        return None
+    b = bms[0]
+    return b["name"] if isinstance(b, dict) else b
+
+
+def bm_synced(c):
+    """Check if first bookmark is synced with remote."""
+    bms = c.get("bookmarks", [])
+    if not bms:
+        return None
+    b = bms[0]
+    return b.get("synced", True) if isinstance(b, dict) else True
+
+
+def gather(args, deep=False):
+    revset = args[args.index("-r") + 1] if "-r" in args else None
+
+    cmd = ["jj", "log", "--no-graph", "-T", "agent_log"]
+    if revset:
+        cmd += ["-r", revset]
+    raw = run(cmd)
+    if not raw:
+        return [], {}, {}
+
+    changes = []
+    for line in raw.splitlines():
+        try:
+            changes.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    # Workspace name -> change_id
+    ws_list = run(["jj", "workspace", "list"])
+    workspaces = {}
+    for line in ws_list.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            workspaces[parts[0].rstrip(":")] = parts[1]
+
+    # Workspace name -> directory path
+    ws_paths = {}
+    for name in workspaces:
+        path = run(["jj", "workspace", "root", "--name", name])
+        if path:
+            ws_paths[path] = name
+
+    # Active sessions from oc ps
+    oc = run(["bash", "-ic", "oc ps --json 2>/dev/null"])
+    sessions = []
+    if oc:
+        try:
+            sessions = json.loads(oc)
+        except json.JSONDecodeError:
+            pass
+
+    # Map sessions -> workspaces
+    active = {}
+    for s in sessions:
+        ws = ws_paths.get(s.get("dir", ""))
+        if ws:
+            active.setdefault(ws, []).append({
+                "session": s.get("session", {}).get("id", ""),
+                "title": s.get("session", {}).get("title", ""),
+                "started": s.get("started", ""),
+            })
+
+    # Ancestor tracking
+    affects = {}
+    for ws, cid in workspaces.items():
+        if ws not in active:
+            continue
+        ancestors = run(["jj", "log", "--no-graph", "-T",
+                        'change_id.shortest(4) ++ "\n"',
+                        "-r", f"::{cid}"])
+        for aid in ancestors.splitlines():
+            aid = aid.strip()
+            if aid:
+                affects.setdefault(aid, set()).add(ws)
+
+    # Enrich changes
+    for c in changes:
+        ws = None
+        if "workspace" in c and c["workspace"]:
+            ws = c["workspace"].rstrip("@")
+        if ws and ws in active:
+            c["agents"] = active[ws]
+        hit = affects.get(c["change"], set())
+        if hit:
+            c["rebase_affects"] = sorted(hit)
+
+    # File counts for undescribed non-empty changes
+    for c in changes:
+        if not c["immutable"] and not c["empty"] and not has_desc(c) and c["change"] != "zzzz":
+            stat = run(["jj", "diff", "--stat", "-r", c["change"]])
+            lines = stat.strip().splitlines()
+            if lines:
+                last = lines[-1]
+                parts = last.split()
+                if len(parts) >= 3 and "changed" in last:
+                    c["files"] = int(parts[0])
+
+    if deep:
+        trunk_ref = None
+        for candidate in ["main", "dev"]:
+            test = run(["jj", "log", "--no-graph", "-T", '"x"', "-r", candidate])
+            if test:
+                trunk_ref = candidate
+                break
+        if not trunk_ref:
+            for candidate in ["main@origin", "dev@origin", "main@upstream", "dev@upstream"]:
+                test = run(["jj", "log", "--no-graph", "-T", '"x"', "-r", candidate])
+                if test:
+                    trunk_ref = candidate
+                    break
+        if trunk_ref:
+            for c in changes:
+                bms = c.get("bookmarks", [])
+                if not bms:
+                    continue
+                name = bms[0]["name"] if isinstance(bms[0], dict) else bms[0]
+                if name in ("dev", "main"):
+                    continue
+                count = run(["jj", "log", "--no-graph", "-T", '"x\n"', "-r", f"{trunk_ref}..{name}"])
+                c["trunk_distance"] = len(count.splitlines()) if count else 0
+
+    return changes, active, affects
+
+
+
+def summary_action(changes, active, affects):
+    """Action-oriented summary: what to do, not just what exists."""
+    by_id = {c["change"]: c for c in changes}
+    current = next((c for c in changes if c.get("current")), None)
+    parent = next((c for c in changes if current and c["change"] in current.get("parents", [])), None)
+    mutable = [c for c in changes if not c["immutable"] and c["change"] != "zzzz"]
+    trunk = next((c for c in changes if bm_name(c) in ("dev", "main")), None)
+
+    # Categorize
+    recovery = [c for c in mutable if "RECOVERY" in (c.get("desc") or "")]
+    undescribed = [c for c in mutable if not c["empty"] and not has_desc(c)]
+    has_agents = [c for c in changes if c.get("agents")]
+    divergent_real = [c for c in changes if c["divergent"] and "RECOVERY" not in (c.get("desc") or "")]
+    conflicted = [c for c in changes if c["conflict"]]
+    needs_push = [c for c in mutable if bm_name(c) and bm_synced(c) is False]
+    bookmarked = [c for c in mutable if bm_name(c) and not c["empty"] and "RECOVERY" not in (c.get("desc") or "")]
+    real_work = [c for c in mutable if not c["empty"] and has_desc(c) and "RECOVERY" not in c["desc"]]
+
+    # --- HEADER: where am I? ---
+    if current:
+        files = current.get("files")
+        f = f" — {files} files" if files else ""
+        par = ""
+        if current.get("parents"):
+            pids = current["parents"]
+            plabels = []
+            for pid in pids:
+                pc = by_id.get(pid)
+                if pc:
+                    bm = bm_name(pc)
+                    plabels.append(f"{pid} [{bm}]" if bm else pid)
+                else:
+                    plabels.append(pid)
+            if len(pids) == 1:
+                par = f" on {plabels[0]}"
+            else:
+                par = f" merge({len(pids)} parents)"
+        ws = current.get("workspace", "?")
+        print(f"@ {current['change']}{par}{f}")
+        print(f"  {ws}")
+        if current.get("parents") and len(current["parents"]) > 1:
+            print("  parents:")
+            for pl in plabels:
+                print(f"    {pl}")
+
+        if not current.get("empty"):
+            stat = run(["jj", "diff", "--stat", "-r", current["change"]])
+            if stat:
+                lines = stat.strip().splitlines()
+                summary = lines[-1] if lines else ""
+                count = len(lines) - 1
+                if count > 10:
+                    print(f"  {summary}")
+                else:
+                    print("  files:")
+                    for line in lines:
+                        print(f"    {line.strip()}")
+    print()
+
+    from datetime import datetime, timezone
+    def ago(iso):
+        if not iso: return ""
+        try:
+            started = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            delta = datetime.now(timezone.utc) - started
+            h = int(delta.total_seconds() // 3600)
+            m = int((delta.total_seconds() % 3600) // 60)
+            return f" ({h}h{m}m)" if h else f" ({m}m)"
+        except: return ""
+
+    # --- AGENTS: who else is here? ---
+    if has_agents:
+        print("\U0001f916 AGENTS:")
+        for c in has_agents:
+            ws = c.get("workspace", "").rstrip("@")
+            branch = bm_name(c) or c["change"]
+            for a in c.get("agents", []):
+                on_lineage = ws in affects.get(current["change"], set()) if current else False
+                warn = " \u26a0\ufe0f editing @ would rebase them" if on_lineage else ""
+                print(f"  {ws}@ \u2192 {branch}: {a['title']}{ago(a.get('started'))}{warn}")
+        print()
+
+    # --- NEEDS ATTENTION: what's broken or needs action? ---
+    actions = []
+    if undescribed:
+        total_files = sum(c.get("files", 0) for c in undescribed)
+        ids = ", ".join(c["change"] for c in undescribed[:4])
+        more = f" +{len(undescribed)-4}" if len(undescribed) > 4 else ""
+        actions.append(f"{len(undescribed)} undescribed changes ({total_files} files): {ids}{more}")
+    if divergent_real:
+        unique = list({c["change"]: c for c in divergent_real}.values())
+        ids = ", ".join(f"{c['change']} [{bm_name(c)}]" if bm_name(c) else c["change"] for c in unique[:4])
+        more = f" +{len(unique)-4}" if len(unique) > 4 else ""
+        actions.append(f"{len(unique)} divergent: {ids}{more}")
+    if conflicted:
+        actions.append(f"{len(conflicted)} conflicted changes")
+    if needs_push:
+        names = ", ".join(bm_name(c) for c in needs_push[:4])
+        more = f" +{len(needs_push)-4}" if len(needs_push) > 4 else ""
+        actions.append(f"{len(needs_push)} need push: {names}{more}")
+
+    if actions:
+        print("\u26a1 NEEDS ATTENTION:")
+        for a in actions:
+            print(f"  {a}")
+        print()
+    else:
+        print("\u2705 ALL CLEAN")
+        print()
+
+    # --- BRANCHES: what work exists? ---
+    print(f"\U0001f4e6 {len(bookmarked)} BRANCHES ({len(real_work)} changes with work)")
+    for c in sorted(bookmarked, key=lambda x: x.get("timestamp", ""), reverse=True)[:10]:
+        sync = "*" if bm_synced(c) is False else ""
+        div = " \u26a1" if c["divergent"] else ""
+        conf = " \U0001f4a5" if c["conflict"] else ""
+        agent = " \U0001f916" if c.get("agents") else ""
+        dist = f" +{c['trunk_distance']}" if c.get("trunk_distance") is not None else ""
+        ts = c.get("timestamp", "")[:10]
+        desc = c.get("desc", "")[:45]
+        print(f"  {bm_name(c)}{sync}{div}{conf}{agent}{dist}  {c['change']} {ts} {desc}")
+    remaining = len(bookmarked) - 10
+    if remaining > 0:
+        print(f"  ... and {remaining} more")
+    print()
+
+    # --- STALE: what's garbage? ---
+    if recovery:
+        print(f"\U0001f5d1\ufe0f  STALE: {len(recovery)} recovery commits (workspace debris)")
+        print()
+
+    # --- TRUNK ---
+    if trunk:
+        print(f"TRUNK: {trunk['change']} [{bm_name(trunk)}] — {trunk.get('desc', '')[:50]}")
+
+
+def summary_branches(changes, active, affects, full=False, deep=False):
+    """Detailed branch-grouped view (old default, now --branches)."""
+    by_id = {c["change"]: c for c in changes}
+    current = next((c for c in changes if c.get("current")), None)
+    parent = next((c for c in changes if current and c["change"] in current.get("parents", [])), None)
+
+    mutable = [c for c in changes if not c["immutable"] and not c["empty"] and c["change"] != "zzzz"]
+    divergent = [c for c in changes if c["divergent"]]
+    conflicts = [c for c in changes if c["conflict"]]
+    trunk = next((c for c in changes if bm_name(c) in ("dev", "main")), None)
+
+    # Header
+    if current:
+        print(f'CURRENT: {current["change"]} — {current.get("desc") or "(no description)"}')
+    if current:
+        pids = current.get("parents", [])
+        if len(pids) == 1 and parent:
+            bm = f' [{bm_name(parent)}]' if bm_name(parent) else ""
+            desc = parent.get("desc") or "(no description)"
+            print(f'PARENT: {parent["change"]}{bm} — {desc}')
+        elif len(pids) > 1:
+            strs = []
+            for pid in pids:
+                p = by_id.get(pid)
+                if p and bm_name(p):
+                    strs.append(f'{pid} [{bm_name(p)}]')
+                else:
+                    strs.append(pid)
+            print(f'PARENTS: {len(pids)} — {", ".join(strs[:5])}')
+            if len(pids) > 5:
+                print(f'  ... and {len(pids) - 5} more')
+    if current:
+        print(f'WORKSPACE: {current.get("workspace", "?")}')
+    if current and not current.get("empty"):
+        stat = run(["jj", "diff", "--stat", "-r", current["change"]])
+        lines = stat.strip().splitlines()
+        file_lines = [l.strip().split("|")[0].strip() for l in lines[:-1] if "|" in l]
+        if file_lines:
+            shown = file_lines[:5]
+            print(f'FILES: {", ".join(shown)}{"..." if len(file_lines) > 5 else ""}')
+    print()
+
+    # Branch grouping
+    groups = {}
+    def find_group(c, visited=None):
+        if visited is None:
+            visited = set()
+        if c["change"] in visited:
+            return "orphaned"
+        visited.add(c["change"])
+        if bm_name(c):
+            return "bm:" + bm_name(c)
+        for pid in c.get("parents", []):
+            p = by_id.get(pid)
+            if not p:
+                continue
+            if bm_name(p):
+                return "on:" + bm_name(p)
+            if p["immutable"]:
+                return "on:" + pid
+            result = find_group(p, visited)
+            if result != "orphaned":
+                return result
+        return "orphaned"
+
+    for c in mutable:
+        key = find_group(c)
+        groups.setdefault(key, []).append(c)
+
+    all_mutable = [c for c in changes if not c["immutable"] and c["change"] != "zzzz"]
+    empty_count = sum(1 for c in all_mutable if c["empty"])
+
+    bm_groups = {k: v for k, v in groups.items() if k.startswith("bm:")}
+    lin_groups = {k: v for k, v in groups.items() if not k.startswith("bm:")}
+
+    def show_group(key, members):
+        prefix = ""
+        if key.startswith("bm:"):
+            synced = bm_synced(members[0]) if members else True
+            sync_marker = "*" if synced is False else ""
+            prefix = f'  {bm_name(members[0])}{sync_marker}'
+        elif key.startswith("on:"):
+            label = key[3:]
+            anchor = by_id.get(label)
+            if anchor and bm_name(anchor):
+                prefix = f'  on {bm_name(anchor)}'
+            elif anchor and anchor.get("desc"):
+                raw = anchor["desc"]
+                if len(raw) > 30:
+                    cut = raw[:30].rsplit(" ", 1)[0]
+                    desc_short = cut + "..."
+                else:
+                    desc_short = raw
+                prefix = f'  on {label} "{desc_short}"'
+            else:
+                prefix = f'  on {label}'
+        else:
+            prefix = '  orphaned'
+
+        flags = []
+        if any(c.get("divergent") for c in members):
+            flags.append("divergent")
+        if any(c.get("conflict") for c in members):
+            flags.append("CONFLICT")
+        flag_str = f' ({", ".join(flags)})' if flags else ""
+
+        agent_count = sum(len(c.get("agents", [])) for c in members)
+        agent_marker = f" \U0001f916\u00d7{agent_count}" if agent_count else ""
+
+        show_count = len(members) if full else 3
+        if len(members) == 1:
+            c = members[0]
+            ts = c.get("timestamp", "")[:10]
+            files = c.get("files")
+            dist = f" +{c['trunk_distance']}" if c.get("trunk_distance") is not None else ""
+            desc = c.get("desc") if has_desc(c) else (f"\u26a0 undescribed ({files} files)" if files else "\u26a0 undescribed")
+            print(f'{prefix}: {c["change"]} {ts} {desc[:50]}{dist}{flag_str}{agent_marker}')
+        else:
+            print(f'{prefix}: {len(members)} changes{flag_str}{agent_marker}')
+            for c in members[:show_count]:
+                ts = c.get("timestamp", "")[:10]
+                files = c.get("files")
+                desc = c.get("desc") if has_desc(c) else (f"\u26a0 undescribed ({files} files)" if files else "\u26a0 undescribed")
+                print(f'    {c["change"]} {ts} {desc[:50]}')
+            if not full and len(members) > show_count:
+                print(f'    ... and {len(members) - show_count} more')
+
+    print(f'BRANCHES: {len(groups)} ({len(mutable)} changes{f", {empty_count} empty" if empty_count else ""})')
+    if bm_groups:
+        for key in sorted(bm_groups.keys()):
+            show_group(key, bm_groups[key])
+    if lin_groups:
+        print(f'  LINEAGES ({len(lin_groups)}):')
+        for key in sorted(lin_groups.keys()):
+            show_group(key, lin_groups[key])
+    print()
+
+    # Agents
+    lineage_agents = []
+    other_agents = []
+    if current:
+        my_affects = affects.get(current["change"], set())
+        for ws, sessions in active.items():
+            for s in sessions:
+                entry = {"workspace": ws, **s}
+                if ws in my_affects:
+                    lineage_agents.append(entry)
+                else:
+                    other_agents.append(entry)
+    else:
+        for ws, sessions in active.items():
+            for s in sessions:
+                other_agents.append({"workspace": ws, **s})
+
+    total = len(lineage_agents) + len(other_agents)
+    if total:
+        from datetime import datetime, timezone
+        def ago(iso):
+            if not iso: return ""
+            try:
+                started = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                delta = datetime.now(timezone.utc) - started
+                h = int(delta.total_seconds() // 3600)
+                m = int((delta.total_seconds() % 3600) // 60)
+                return f" ({h}h{m}m)" if h else f" ({m}m)"
+            except: return ""
+
+        print(f'AGENTS: {total} active')
+        if lineage_agents:
+            print(f'  On your lineage:')
+            for a in lineage_agents:
+                print(f'    {a["workspace"]}: {a["title"]}{ago(a.get("started"))}')
+        if other_agents:
+            if lineage_agents:
+                print(f'  Elsewhere:')
+            for a in other_agents:
+                print(f'    {a["workspace"]}: {a["title"]}{ago(a.get("started"))}')
+    else:
+        print("AGENTS: none active")
+    print()
+
+    # Problems
+    def fmt_change(c):
+        bm = f' [{bm_name(c)}]' if bm_name(c) else ""
+        return f'{c["change"]}{bm}'
+
+    if divergent:
+        seen = {}
+        for c in divergent:
+            if c["change"] not in seen:
+                seen[c["change"]] = c
+        unique = list(seen.values())
+        items = ", ".join(fmt_change(c) for c in unique[:8])
+        print(f'DIVERGENT: {len(unique)} — {items}')
+    if conflicts:
+        items = ", ".join(fmt_change(c) for c in conflicts[:8])
+        print(f'CONFLICTS: {len(conflicts)} — {items}')
+    if not divergent and not conflicts:
+        print("GRAPH: clean")
+
+    if trunk:
+        bm = bm_name(trunk) or "?"
+        print(f'TRUNK: {trunk["change"]} [{bm}] — {trunk.get("desc", "")[:50]}')
+
+
+def main():
+    args = sys.argv[1:]
+    if "--help" in args or "-h" in args:
+        print("""jj-agent-status — repo orientation for AI agents
+
+MODES (composable):
+  (default)    Action-oriented summary: where am I, what needs attention
+  --deep       Add trunk distance per branch (+N commits ahead)
+  --branches   Detailed branch-grouped view with lineages
+  --json       Raw JSONL for programmatic use
+  --full       Don't truncate change lists
+
+FLAGS:
+  -r REVSET    Custom revset (default: jj's configured log revset)
+  -h, --help   Show this help
+
+EXAMPLES:
+  jj-agent-status                    Quick orientation (auto-deep for <15 bookmarks)
+  jj-agent-status --deep             Force trunk distance computation
+  jj-agent-status --deep --branches  Full detail with trunk distance
+  jj-agent-status --json --deep      JSONL with trunk_distance field""")
+        return
+    json_mode = "--json" in args
+    if json_mode:
+        args.remove("--json")
+    branches_mode = "--branches" in args
+    if branches_mode:
+        args.remove("--branches")
+    full = "--full" in args
+    if full:
+        args.remove("--full")
+    deep = "--deep" in args
+    if deep:
+        args.remove("--deep")
+
+    if not deep and not json_mode:
+        bm_list = run(["jj", "bookmark", "list"])
+        bm_count = len([l for l in bm_list.splitlines() if l.strip() and not l.startswith(" ")])
+        if 0 < bm_count < 15:
+            deep = True
+    changes, active, affects = gather(args, deep=deep)
+    if not changes:
+        return
+
+    if json_mode:
+        for c in changes:
+            print(json.dumps(c))
+    elif branches_mode:
+        summary_branches(changes, active, affects, full=full, deep=deep)
+    else:
+        summary_action(changes, active, affects)
+
+
+if __name__ == "__main__":
+    main()

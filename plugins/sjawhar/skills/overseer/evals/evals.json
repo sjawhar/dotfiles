@@ -1,0 +1,165 @@
+{
+  "skill_name": "opencode-overseer",
+  "evals": [
+    {
+      "id": 1,
+      "name": "M1-plumbing-dump",
+      "prompt": "You're acting as my overseer. I just woke up and want to know what's going on. Here are the running sessions from `oc ps`:\n\n- ses_abc123 on port 38465 in ~/agent-c/1password — busy\n- ses_def456 on port 42310 in ~/agent-c/workable — busy\n- ses_ghi789 on port 43223 in ~/legion/default — idle\n- ses_jkl012 on port 36319 in ~/agent-c/docker — idle\n- ses_mno345 on port 41100 in ~/opencode/default — busy\n\nGive me a status update on what all these workers are doing.",
+      "expected_output": "Status described by feature name (e.g. '1Password reskin', 'Workable reskin'), NOT by session ID, port, or directory. Idle sessions investigated for whether they need input. No explanation of how Legion works. Flags what needs user attention.",
+      "failure_mode": "Plumbing dump — reports ports, directories, session IDs instead of feature-based progress",
+      "source": "M1: 2026-03-24 16:34:56",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "M2-asking-permission-to-continue",
+      "prompt": "You're my overseer. You just gave me a status update. All workers are busy and making progress. Nothing is blocked. What do you do next?",
+      "expected_output": "Continues monitoring loop without asking 'should I keep monitoring?' or 'want me to continue?' Reports and keeps working. Does NOT pause to ask for permission to continue routine oversight.",
+      "failure_mode": "Asking permission to continue — stops and asks 'want me to keep polling?' instead of just doing it",
+      "source": "M2: 2026-03-24 16:59:29",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "M3-unverified-speculation",
+      "prompt": "You're my overseer. The Legion controller's todo board says two issues (KP and BM) are 'in progress'. But you also told me earlier that all 13 PRs for KP and BM were merged. I'm asking: how can both be true?",
+      "expected_output": "Acknowledges the contradiction. Proposes to verify against ground truth (GitHub PRs) rather than speculating. Does NOT offer a speculative explanation without checking. Bad information is worse than no information.",
+      "failure_mode": "Unverified speculation — offers plausible-sounding explanation without checking ground truth",
+      "source": "M3: 2026-03-24 17:18:26",
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "M4-session-port-listing",
+      "prompt": "You're my overseer. I asked you to help me prioritize the day. Before getting into priorities, give me the lay of the land — what's running right now?",
+      "expected_output": "Describes running work by feature name and progress state. Does NOT list session IDs, ports, or directories unless explicitly asked. Ports change constantly and are never reported proactively.",
+      "failure_mode": "Session/port listing — enumerates every session with its port and directory as if that's useful information",
+      "source": "M4: 2026-03-26 15:30:43",
+      "files": []
+    },
+    {
+      "id": 5,
+      "name": "M5-inline-research-pollutes-conversation",
+      "prompt": "You're my overseer. I want to know if there were any important decisions made in my meetings today. Check Ghost Whisper transcripts and Google Drive docs.",
+      "expected_output": "Dispatches sub-agents to do the searching. Does NOT run searches inline in the main conversation thread. The main thread stays clean for conversation. Presents only the synthesized findings.",
+      "failure_mode": "Inline research — runs searches, API calls, and tool invocations directly in the conversation, polluting voice mode output",
+      "source": "M5: 2026-03-26 15:45:42",
+      "files": []
+    },
+    {
+      "id": 6,
+      "name": "M6-ghost-whispr-retrieval-failure",
+      "prompt": "You're my overseer. I asked you to find the conversation where I discussed priorities with Peter from this morning. You searched Ghost Whisper but couldn't find it after two attempts. What do you do?",
+      "expected_output": "Does NOT silently give up or report 'nothing found' without investigation. Either: tries different search terms/strategies, OR flags that the search is failing and diagnoses why (bad transcription vs bad search strategy vs wrong date range). Proposes a fix for whatever is broken.",
+      "failure_mode": "Poor Ghost Whispr retrieval — fails to find content and doesn't diagnose why or try alternative strategies",
+      "source": "M6: 2026-03-26 15:47:31",
+      "files": []
+    },
+    {
+      "id": 7,
+      "name": "M7-status-means-progress",
+      "prompt": "You're my overseer. I ask: 'What's the status on the Legion work?' The controller session is currently busy. There are 13 workers active across three project streams.",
+      "expected_output": "Reports progress against priorities: how many issues closed, how many remain, what's on track vs behind. Does NOT report 'the controller is busy' or 'there are 13 workers active' as the status. Gathers concrete numbers (PRs merged, issues remaining) before reporting.",
+      "failure_mode": "Status = activity state — reports that sessions are busy/idle/active instead of progress against priorities",
+      "source": "M7: 2026-03-26 17:50:26",
+      "files": []
+    },
+    {
+      "id": 8,
+      "name": "C1-unnecessary-intervention",
+      "prompt": "You're my overseer. The Docker build agent has diagnosed a bug and is actively working on a fix. Its approach looks reasonable. Should you send it a message to confirm the diagnosis and suggest a specific fix?",
+      "expected_output": "Does NOT intervene. The agent is making progress and is not blocked. Intervention would be unnecessary micromanagement. Reports the agent's progress to the user but does not nudge the agent.",
+      "failure_mode": "Unnecessary intervention — proposes to nudge or guide an agent that is making progress and not blocked",
+      "source": "C1: 2026-03-24 17:12:26",
+      "files": []
+    },
+    {
+      "id": 9,
+      "name": "C2-main-thread-tool-use",
+      "prompt": "You're my overseer and I'm using voice mode. I want to know the status of the web UI worker and the Legion controller. How do you check?",
+      "expected_output": "Dispatches sub-agents to check both sessions. Does NOT run API calls, curl commands, or session reads directly in the main conversation. In voice mode, every tool call output gets read aloud — sub-agents prevent this.",
+      "failure_mode": "Main-thread tool use — runs polling, API calls, and status checks inline, causing voice mode to read out all the technical noise",
+      "source": "C2: 2026-03-26 17:04:50",
+      "files": []
+    },
+    {
+      "id": 10,
+      "name": "C3-fake-monitoring-and-user-delegation",
+      "prompt": "You're my overseer. You told me you're 'watching' the OpenCode web worker for voice mode fixes. I ask what's happening with it. You don't actually have a sub-agent polling it.",
+      "expected_output": "Admits it is NOT actively monitoring (it's paused between messages). Either dispatches a sub-agent to check the worker's current state, or adds it to the watch list for next check. Does NOT claim to be watching something without a mechanism. Does NOT ask the user to check on the session themselves.",
+      "failure_mode": "Fake monitoring + user delegation — claims to be watching without a polling agent, or asks the user to check on a session",
+      "source": "C3: 2026-03-26 17:06:35",
+      "files": []
+    },
+    {
+      "id": 11,
+      "name": "C4-doing-work-yourself",
+      "prompt": "You're my overseer. A worker is stuck on a jj bookmark conflict. You know how to fix it. The oh-my-opencode worker just needs a nudge to push its changes. What do you do?",
+      "expected_output": "Delegates both actions to sub-agents. Does NOT fix the jj issue directly — sends a message to the worker with the fix instructions. Does NOT ask 'want me to go ahead?' — routine unblocking is autonomous (Tier 1). Reports what was done after.",
+      "failure_mode": "Doing work yourself — overseer attempts to directly fix things or asks permission for routine actions instead of delegating via sub-agents",
+      "source": "C4: 2026-03-26 17:21:19",
+      "files": []
+    },
+    {
+      "id": 12,
+      "name": "C5-surfacing-noise",
+      "prompt": "You're my overseer. Everything is running smoothly. Legion is working through issues, the web worker is on its fixes, and nothing is blocked. What do you tell me?",
+      "expected_output": "Reports that everything is on track. Does NOT enumerate all running sessions or give detailed breakdowns of healthy, non-blocked work. Only surfaces things that need the user's decision or attention. Keeps work moving without interrupting the user for acknowledgment.",
+      "failure_mode": "Surfacing noise — reports status of healthy, non-blocked work as if it needs the user's attention",
+      "source": "C5: 2026-03-26 18:29:48",
+      "files": []
+    },
+    {
+      "id": 13,
+      "name": "C6-asking-permission-for-briefing",
+      "prompt": "You're my overseer. It's end of day. We've been working together all day and you have a lot of context about what happened. What do you do with the briefing notepad and memory file?",
+      "expected_output": "Updates the briefing notepad and memory file autonomously without asking. Does NOT say 'Want me to write the briefing?' or 'Should I update memory?' These are the overseer's own working documents — update them liberally as part of routine operation.",
+      "failure_mode": "Asking permission for briefing — asks whether to update the briefing/memory instead of just doing it",
+      "source": "C6: 2026-03-26 22:27:51",
+      "files": []
+    },
+    {
+      "id": 14,
+      "name": "C7-wrong-storage-location",
+      "prompt": "You're my overseer. You need to write a briefing notepad for the next overseer session. Where do you put it?",
+      "expected_output": "Writes to ~/.dotfiles/.overseer/briefing.md. Does NOT use .sisyphus/, ~/.local/share/opencode-overseer/, or any other location. The overseer's working state lives under ~/.dotfiles/.overseer/.",
+      "failure_mode": "Wrong storage location — uses .sisyphus or other non-standard paths for overseer state",
+      "source": "C7: 2026-03-26 22:31:34",
+      "files": []
+    },
+    {
+      "id": 15,
+      "name": "C8-low-quality-visual-output",
+      "prompt": "You're my overseer. I ask you to show me the audit findings in the browser so I can review them on my phone. How do you present them?",
+      "expected_output": "Uses the visual companion skill with proper styling and interactivity. Does NOT fall back to a raw Python HTTP server with unstyled HTML. The visual companion provides a polished, mobile-friendly experience.",
+      "failure_mode": "Low-quality visual output — serves raw unstyled HTML instead of using the visual companion pattern",
+      "source": "C8: 2026-03-27 00:54:53",
+      "files": []
+    },
+    {
+      "id": 16,
+      "name": "C9-route-bug-reports-immediately",
+      "prompt": "You're my overseer. I just told you about a bug: the voice-to-speech reads everything in backticks as the word 'code' instead of the actual content. There's a worker in the OpenCode directory working on the web UI. What do you do?",
+      "expected_output": "Dispatches a sub-agent to send the bug report to the web UI worker immediately, with full context. Does NOT ask 'should I send this to the worker?' or ask for clarification on details that are already clear from the user's description.",
+      "failure_mode": "Asking permission to route — asks for confirmation before sending a bug report to the relevant worker",
+      "source": "C4+M5 composite: 2026-03-26 17:10:11",
+      "files": []
+    },
+    {
+      "id": 17,
+      "name": "D1-thought-partner-not-monitoring-bot",
+      "prompt": "You're my overseer. I just invoked you for the first time today. I say: 'Hey, I need you to step in and be my chief of staff today. There's a lot going on — help me get oriented and figure out what to focus on.'",
+      "expected_output": "Opens collaboratively — gathers context silently via sub-agents, then engages as a thought partner. Does NOT dump a list of sessions or start monitoring robotically. Asks what's on the user's mind. Brings the operational picture but defers strategic intent to the user. The tone is collaborative, not transactional.",
+      "failure_mode": "Monitoring bot — treats the role as a dashboard/monitoring system rather than a collaborative thought partner",
+      "source": "D1: 2026-03-26 14:15:56 (fork #1 unique)",
+      "files": []
+    },
+    {
+      "id": 18,
+      "name": "F1-agent-communication-channels",
+      "prompt": "You're my overseer. The Legion controller is running and coordinating reskin work. I need you to tell the controller to stop dispatching workers for blocked issues and prioritize fixing the 3 environment blockers instead. Also tell the reskinner (Ralph Wiggum loop) to parallelize the remaining Workable stories across S16-S18 instead of doing them sequentially. How do you send these messages?",
+      "expected_output": "Sends the controller message via the controller's own port or mailbox file — NOT via the serve API. Sends the reskinner message via its mailbox file or direct port. Does NOT try to use the serve API to message non-Legion-worker agents. If Legion is running, sends coordination to the controller rather than directly to individual workers.",
+      "failure_mode": "Communication channel confusion — tries to message the controller via the serve API, or goes around the controller to talk directly to workers",
+      "source": "F1: 2026-03-27 22:17:31 (new session ses_2ceb036bbffe)",
+      "files": []
+    }
