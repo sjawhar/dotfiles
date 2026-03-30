@@ -1,0 +1,16 @@
+:8080 {
+	root * /home/ubuntu/opencode-web-frontend
+
+	# If file exists on disk, serve it (JS, CSS, fonts, images, etc.)
+	@static file
+	handle @static {
+		file_server
+	}
+
+	# Everything else goes to the opencode serve backend.
+	# This covers all API routes AND SPA deep links (which the
+	# backend serves as its own index.html via the proxy/catch-all).
+	handle {
+		reverse_proxy 127.0.0.1:4097
+	}
+}
