@@ -1,11 +1,53 @@
 ---
 name: using-jj
-description: Use when performing ANY version control operation — including when tempted to use git commands (commit, push, pull, branch, checkout, rebase, merge, diff, log, status, stash, reset, cherry-pick). This user uses jj instead of git. Also triggers on bookmark, workspace, or conflict resolution.
+description: "Use when performing ANY version control operation, starting a work session, checking repo state, or orienting to a codebase. This user uses jj instead of git — NEVER use git commands. Triggers on: commit, push, pull, branch, checkout, rebase, merge, diff, log, status, stash, reset, cherry-pick, bookmark, workspace, conflict resolution, 'what's the repo state', 'are other agents working here', 'what branches exist', 'starting work', 'orient me'."
 ---
 
 # Using jj (Jujutsu)
 
 This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Never use git commands** unless explicitly told to. If you're thinking `git commit`, `git push`, `git checkout`, `git rebase`, etc. — STOP and use the jj equivalent from this skill.
+
+
+## Repo Orientation: `jj-agent-status`
+
+`jj-agent-status` gives you a complete repo orientation in one command — where you are, what needs attention, who else is working here, and what branches exist. Useful when starting a session, checking for other agents, or triaging repo state. Not needed for routine operations like push, describe, or rebase.
+
+```bash
+jj-agent-status                    # Quick orientation (auto-deep for <15 bookmarks)
+jj-agent-status --deep             # Add trunk distance per branch (+N)
+jj-agent-status --deep --branches  # Full detail with trunk distance
+jj-agent-status --json             # Machine-readable JSONL
+jj-agent-status --help             # See all options
+```
+
+Example output:
+```
+@ uzpy on nywr [sami] — 9 files
+  default@
+  files: session.ts, bus/index.ts, serve.ts...
+
+🤖 AGENTS:
+  reskin@ → workable-route-merge: reskin ralph v2-3 (2h8m) ⚠️ editing @ would rebase them
+
+⚡ NEEDS ATTENTION:
+  6 undescribed changes (31 files)
+  5 divergent
+  1 need push: feat/memory-telemetry
+
+📦 5 BRANCHES (13 changes with work)
+  1password-reskin-ralph +8  tsqm 2026-03-28 fix: subtle borders...
+  fix/sse-backpressure ⚡ +1  xsmw 2026-03-27 fix: add SSE backpressure...
+
+TRUNK: pyxl [dev]
+```
+
+This tells you:
+- **Where you are** — current change, parent, workspace, files being edited
+- **Who else is here** — active agents with session duration and rebase warnings  
+- **What needs attention** — undescribed changes, divergent/conflicted, unpushed branches
+- **What branches exist** — sorted by recency, with sync status (`*`), divergence (`⚡`), agents (`🤖`), and trunk distance (`+N`)
+
+`jj-agent-status` combines `jj log`, `jj status`, `jj workspace list`, and `oc ps` into one view. Reach for it when you need the big picture, not for every jj interaction.
 
 ## Agent Log: `jj agent-log`
 
@@ -44,7 +86,7 @@ Use `jj log` (without `agent-`) only when you need to show the user the human-re
 Every jj operation (including undo) writes to a shared operation log. Undo loops create operation churn that causes divergent commits across all workspaces. One agent running 10 undo/redo cycles in 5 minutes can corrupt the history for every other workspace.
 
 **When something goes wrong:**
-1. Run `jj log -r @` to understand your current state
+1. Run `jj-agent-status` to understand your current state
 2. If you understand the state, make ONE deliberate fix
 3. If you don't understand the state, **ask the user** — don't guess
 

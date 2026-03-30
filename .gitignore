@@ -26,3 +26,6 @@ vendor/
 /ignore
 .superpowers
 .overseer/
+plugins/sjawhar/skills/overseer-workspace/
+.opencode/skills/fork-maintenance-skill-*/
+plugins/sjawhar/skills/*-workspace/
