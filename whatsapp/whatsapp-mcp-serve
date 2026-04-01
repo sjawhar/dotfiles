@@ -18,5 +18,5 @@ WHISPER_API_URL=$(echo "$SECRETS" | grep '^WHISPER_API_URL=' | cut -d= -f2-)
 export WHISPER_API_KEY
 WHISPER_API_KEY=$(echo "$SECRETS" | grep '^WHISPER_API_KEY=' | cut -d= -f2-)
 
-# Launch the WhatsApp MCP server
-exec node "$HOME/Code/whatsapp-mcp/dist/index.js" --http --port ${WHATSAPP_MCP_PORT:-3456}
+# Launch the WhatsApp MCP server via mise (node is managed by mise, not on systemd PATH)
+exec $MISE exec node -- node "$HOME/Code/whatsapp-mcp/dist/index.js" --http --port ${WHATSAPP_MCP_PORT:-3456}
