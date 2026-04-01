@@ -9,7 +9,7 @@
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "@sjawhar/opencode-legion-envoy@0.1.0-alpha.0",
     "opencode-antigravity-auth@1.6.0",
-    "file://{env:HOME}/opencode/anthropic-auth/opencode",
+    "@sjawhar/opencode-anthropic-auth",
     "superpowers@git+https://github.com/obra/superpowers.git#v5.0.5"
   ],
   "provider": {
