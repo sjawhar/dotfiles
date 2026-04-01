@@ -3,9 +3,17 @@ name: whatsapp
 description: Use when reading WhatsApp messages, searching conversations, sending messages, listing chats, or interacting with WhatsApp workspaces
 mcp:
   whatsapp:
-    url: "${WHATSAPP_MCP_URL}"
-    headers:
-      Authorization: "Bearer ${WHATSAPP_MCP_SECRET}"
+    command: secrets
+    args:
+      - WHATSAPP_MCP_URL
+      - WHATSAPP_MCP_SECRET
+      - "--"
+      - npx
+      - -y
+      - mcp-remote
+      - "${WHATSAPP_MCP_URL}"
+      - "--header"
+      - "Authorization:Bearer ${WHATSAPP_MCP_SECRET}"
 ---
 
 # WhatsApp

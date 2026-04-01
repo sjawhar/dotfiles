@@ -72,7 +72,9 @@ case "${1:-}" in
     toggle)
         state=$(cat "$STATE_FILE" 2>/dev/null || echo "idle")
         if [ "$state" = "idle" ]; then
-            # About to start — begin independent audio capture
+            # Clean up any orphaned pw-record from previous sessions
+            stop_pw_record
+            # Begin independent audio capture
             timestamp=$(date +%Y-%m-%dT%H-%M-%S)
             recording_file="$RECORDINGS_DIR/$timestamp.wav"
             pw-record --rate=16000 --channels=1 --format=s16 \

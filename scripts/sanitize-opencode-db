@@ -1,0 +1,134 @@
+#!/bin/bash
+# sanitize-opencode-db — Remove leaked secrets from OpenCode SQLite database
+#
+# Extracts secret values from sops-encrypted secrets.env, then searches the
+# OpenCode database for any occurrences and replaces them with [REDACTED:<KEY>].
+#
+# USAGE:
+#   sanitize-opencode-db                  # Dry run — shows what would change
+#   sanitize-opencode-db --apply          # Modify the database (with backup)
+#   sanitize-opencode-db --apply --no-backup  # Modify without backup
+
+set -euo pipefail
+
+DB_PATH="${HOME}/.local/share/opencode/opencode.db"
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+MISE="${DOTFILES_DIR}/bin/mise"
+MIN_SECRET_LENGTH=8  # Skip short values to avoid false positive replacements
+DRY_RUN=true
+DO_BACKUP=true
+
+for arg in "$@"; do
+    case "$arg" in
+        --apply) DRY_RUN=false ;;
+        --no-backup) DO_BACKUP=false ;;
+        --help|-h)
+            echo "Usage: sanitize-opencode-db [--apply] [--no-backup]"
+            echo ""
+            echo "  (default)      Dry run — show what would be redacted"
+            echo "  --apply        Actually modify the database"
+            echo "  --no-backup    Skip creating a backup (use with --apply)"
+            exit 0
+            ;;
+        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+    esac
+done
+
+# ─── Preflight checks ───────────────────────────────────────────────────────
+
+if [[ ! -f "$DB_PATH" ]]; then
+    echo "ERROR: OpenCode database not found at $DB_PATH" >&2
+    exit 1
+fi
+
+if [[ ! -f "$DOTFILES_DIR/secrets.env" ]]; then
+    echo "ERROR: secrets.env not found at $DOTFILES_DIR/secrets.env" >&2
+    exit 1
+fi
+
+if ! command -v sqlite3 &>/dev/null; then
+    echo "ERROR: sqlite3 not found" >&2
+    exit 1
+fi
+
+# ─── Extract secrets ─────────────────────────────────────────────────────────
+
+echo "Extracting secrets from sops..."
+SECRETS=$($MISE exec sops age -- sops -d --output-type dotenv "$DOTFILES_DIR/secrets.env")
+
+declare -a SECRET_KEYS=()
+declare -a SECRET_VALUES=()
+
+while IFS='=' read -r key value; do
+    [[ -z "$key" || "$key" =~ ^# ]] && continue
+    if [[ ${#value} -lt $MIN_SECRET_LENGTH ]]; then
+        echo "  SKIP: $key (${#value} chars < min $MIN_SECRET_LENGTH)"
+        continue
+    fi
+    SECRET_KEYS+=("$key")
+    SECRET_VALUES+=("$value")
+done <<< "$SECRETS"
+
+echo "Found ${#SECRET_KEYS[@]} secrets to search for"
+echo ""
+
+# ─── Backup ──────────────────────────────────────────────────────────────────
+
+if [[ "$DRY_RUN" == false && "$DO_BACKUP" == true ]]; then
+    BACKUP_PATH="${DB_PATH}.backup-$(date +%Y%m%d-%H%M%S)"
+    echo "Backup: $BACKUP_PATH"
+    cp "$DB_PATH" "$BACKUP_PATH"
+    echo ""
+elif [[ "$DRY_RUN" == false && "$DO_BACKUP" == false ]]; then
+    echo "Backup: SKIPPED (--no-backup)"
+    echo ""
+fi
+
+# ─── Scan and replace ────────────────────────────────────────────────────────
+
+TOTAL_AFFECTED=0
+
+for i in "${!SECRET_KEYS[@]}"; do
+    key="${SECRET_KEYS[$i]}"
+    value="${SECRET_VALUES[$i]}"
+    redaction="[REDACTED:${key}]"
+    escaped_value="${value//\'/\'\'}"
+
+    count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM part WHERE data LIKE '%${escaped_value}%';")
+
+    if [[ "$count" -gt 0 ]]; then
+        echo "  FOUND: $key → $count rows"
+        TOTAL_AFFECTED=$((TOTAL_AFFECTED + count))
+
+        if [[ "$DRY_RUN" == false ]]; then
+            sqlite3 "$DB_PATH" "UPDATE part SET data = REPLACE(data, '${escaped_value}', '${redaction}') WHERE data LIKE '%${escaped_value}%';"
+            echo "         → replaced with $redaction"
+        fi
+    fi
+done
+
+echo ""
+echo "═══════════════════════════════════════════"
+
+if [[ "$DRY_RUN" == true ]]; then
+    echo "DRY RUN — $TOTAL_AFFECTED rows would be modified"
+    echo "Run with --apply to redact"
+else
+    echo "DONE — $TOTAL_AFFECTED rows modified"
+
+    echo "Verifying..."
+    REMAINING=0
+    for i in "${!SECRET_KEYS[@]}"; do
+        escaped_value="${SECRET_VALUES[$i]//\'/\'\'}"
+        count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM part WHERE data LIKE '%${escaped_value}%';")
+        if [[ "$count" -gt 0 ]]; then
+            echo "  WARNING: ${SECRET_KEYS[$i]} still in $count rows"
+            REMAINING=$((REMAINING + count))
+        fi
+    done
+    if [[ "$REMAINING" -eq 0 ]]; then
+        echo "  ✓ All secrets removed"
+    else
+        echo "  ✗ $REMAINING rows still contain secrets"
+    fi
+fi
