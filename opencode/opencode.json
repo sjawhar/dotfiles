@@ -207,15 +207,6 @@
       "type": "remote",
       "url": "https://mcp.context7.com/mcp",
       "enabled": true
-    },
-    "whatsapp": {
-      "type": "remote",
-      "url": "{env:WHATSAPP_MCP_URL}",
-      "headers": {
-        "Authorization": "Bearer {env:WHATSAPP_MCP_SECRET}"
-      },
-      "enabled": true,
-      "timeout": 60000
     }
   },
   "autoupdate": false,
