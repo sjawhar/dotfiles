@@ -4,16 +4,9 @@ description: Use when reading WhatsApp messages, searching conversations, sendin
 mcp:
   whatsapp:
     command: secrets
-    args:
-      - WHATSAPP_MCP_URL
-      - WHATSAPP_MCP_SECRET
-      - "--"
-      - npx
-      - -y
-      - mcp-remote
-      - "${WHATSAPP_MCP_URL}"
-      - "--header"
-      - "Authorization:Bearer ${WHATSAPP_MCP_SECRET}"
+    args: ["WHATSAPP_MCP_URL", "WHATSAPP_MCP_SECRET", "--", "npx", "-y", "@sjawhar/whatsapp-mcp", "--connect"]
+    env:
+      SOPS_AGE_KEY: "${SOPS_AGE_KEY}"
 ---
 
 # WhatsApp
