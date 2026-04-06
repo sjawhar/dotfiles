@@ -17,7 +17,8 @@
       "@sjawhar/opencode-postgres-sync",
       {
         "url": "postgresql://postgres:testpass@100.117.175.119:5433/opencode_test",
-        "backfill": -1
+        "backfill": -1,
+        "db": "{env:HOME}/.local/share/opencode/opencode.db"
       }
     ]
   ],
