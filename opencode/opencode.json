@@ -1,8 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "keybinds": {
-    "messages_first": "ctrl+g,ctrl+home",
-    "messages_last": "ctrl+alt+g,ctrl+end"
+    "input_line_home": "home",
+    "input_line_end": "end",
+    "messages_first": "ctrl+home",
+    "messages_last": "ctrl+end"
   },
   "plugin": [
     "@sjawhar/oh-my-opencode@sami",
