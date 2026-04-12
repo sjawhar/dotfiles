@@ -63,7 +63,7 @@ IFS=':' read -ra _parts <<< "$PATH"
 for _p in "${_parts[@]}"; do
     [[ "$_p" != "${DOTFILES_DIR}/bin" && "$_p" != "${DOTFILES_DIR}/shims" ]] && _path="${_path:+$_path:}$_p"
 done
-export PATH="${DOTFILES_DIR}/shims:${DOTFILES_DIR}/bin:$_path"
+export PATH="${DOTFILES_DIR}/shims:${DOTFILES_DIR}/bin:${DOTFILES_DIR}/scripts:$_path"
 unset _path _parts _p
 
 # ------------------------------------------------------------------------------
@@ -168,133 +168,7 @@ alias ccc='claude --dangerously-skip-permissions --continue'
 # OpenCode instance registry (oc, occ, oc ps)
 # ------------------------------------------------------------------------------
 
-export OC_REGISTRY="${XDG_RUNTIME_DIR:-/tmp}/opencode-$(id -u)"
-mkdir -p "$OC_REGISTRY" 2>/dev/null
-
-oc() {
-    case "${1:-}" in
-        ps) shift; _oc_ps "$@"; return ;;
-        history) shift; _oc_sessions "$@"; return ;;
-    esac
-    # Opt-out
-    if [ "${OPENCODE_NO_SERVE:-}" = "1" ]; then
-        opencode "$@"
-        return
-    fi
-    # Skip if user already passed --port
-    local arg
-    for arg in "$@"; do
-        [ "$arg" = "--port" ] && { opencode "$@"; return; }
-    done
-    # Write initial registry entry (plugin fills in port + session)
-    printf '{"pid":%d,"port":null,"dir":"%s","started":"%s"}\n' "$$" "$PWD" "$(date -Iseconds)" > "$OC_REGISTRY/$$.json"
-    # Export shell PID so the session-registry plugin can find the registry file
-    export OC_SHELL_PID=$$
-    trap 'rm -f "$OC_REGISTRY/$$.json"' RETURN
-    opencode --port 0 "$@"
-}
-
 occ() { oc --continue "$@"; }
-
-ocl() {
-    local opencode_bin_dir="${OPENCODE_DIST_BIN_DIR:-$HOME/opencode/default/packages/opencode/dist/opencode-linux-x64/bin}"
-
-    PATH="$opencode_bin_dir:$PATH" \
-    OPENCODE_DISABLE_CHANNEL_DB=1 \
-    oc "$@"
-}
-
-
-_oc_ps() {
-    local json=false
-    [ "${1:-}" = "--json" ] && json=true
-    local entries="[]"
-    for f in "$OC_REGISTRY"/*.json; do
-        [ -f "$f" ] || continue
-        local pid
-        pid=$(jq -r .pid "$f" 2>/dev/null) || continue
-        # Skip corrupt entries (0-byte files, missing pid)
-        [[ "$pid" =~ ^[0-9]+$ ]] || continue
-        # Stale detection: remove dead entries
-        if ! kill -0 "$pid" 2>/dev/null; then
-            rm -f "$f" "${f%.json}.enricher"
-            continue
-        fi
-        entries=$(echo "$entries" | jq -c --slurpfile e "$f" '. + $e')
-    done
-    if [ "$json" = true ]; then
-        echo "$entries" | jq .
-        return
-    fi
-    if [ "$(echo "$entries" | jq length)" = "0" ]; then
-        echo "No running instances"
-        return
-    fi
-    {
-        printf 'PID\tPORT\tDIR\tSESSION\tTITLE\tSTARTED\n'
-        echo "$entries" | jq -r '.[] | [.pid, (.port // "-"), .dir, (.session.id // "-"), (.session.title // "-"), .started] | @tsv'
-    } | column -t -s $'\t'
-}
-
-# List recent OpenCode sessions from the database (not live instances)
-# Usage: oc sessions [HOURS]       — default 24h, parent sessions only, excludes Legion workers
-#        oc sessions --json         — JSON output
-#        oc sessions 48 --json      — last 48h, JSON
-#        oc sessions --legion       — include Legion worker sessions
-_oc_sessions() {
-    local hours=24 json=false legion=false
-    local args=()
-    for arg in "$@"; do
-        case "$arg" in
-            --json) json=true ;;
-            --legion) legion=true ;;
-            *) args+=("$arg") ;;
-        esac
-    done
-    [ ${#args[@]} -gt 0 ] && hours="${args[0]}"
-    local db="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
-    if [ ! -f "$db" ]; then
-        echo "error: database not found: $db" >&2
-        return 1
-    fi
-    local cutoff_ms
-    cutoff_ms=$(( ($(date -u +%s) - hours * 3600) * 1000 ))
-    local legion_filter=""
-    if [ "$legion" = false ]; then
-        legion_filter="AND directory NOT LIKE '$HOME/.legion/workspaces/%'"
-        legion_filter+=" AND directory NOT LIKE '$HOME/.local/share/legion/workspaces/%'"
-        legion_filter+=" AND directory NOT LIKE '$HOME/legion/work/%'"
-    fi
-    local query
-    read -r -d '' query <<-SQL || true
-		SELECT
-		  id,
-		  REPLACE(directory, '$HOME', '~') as dir,
-		  title,
-		  strftime('%Y-%m-%d %H:%M', time_created/1000, 'unixepoch', 'localtime') as created,
-		  strftime('%Y-%m-%d %H:%M', time_updated/1000, 'unixepoch', 'localtime') as updated,
-		  (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) as msgs
-		FROM session s
-		WHERE parent_id IS NULL
-		  $legion_filter
-		  AND time_updated >= $cutoff_ms
-		ORDER BY time_created DESC
-	SQL
-    if [ "$json" = true ]; then
-        sqlite3 -json "$db" "$query"
-    else
-        local result
-        result=$(sqlite3 -separator $'\t' "$db" "$query")
-        if [ -z "$result" ]; then
-            echo "No sessions in the last ${hours}h"
-            return
-        fi
-        {
-            printf 'ID\tDIR\tTITLE\tCREATED\tUPDATED\tMSGS\n'
-            echo "$result"
-        } | column -t -s $'\t'
-    fi
-}
 
 # ------------------------------------------------------------------------------
 # Python development (UV-based)
@@ -374,7 +248,7 @@ alog() {
 #        omo             — show current profile and available profiles
 omo() {
     local dotfiles="${DOTFILES_DIR:-${HOME}/.dotfiles}"
-    local config="${HOME}/.config/opencode/oh-my-opencode.json"
+    local config="${HOME}/.config/opencode/oh-my-openagent.json"
 
     if [ -z "$1" ]; then
         # Show current profile
@@ -390,7 +264,7 @@ omo() {
 
         # List available profiles
         echo "Available profiles:"
-        for f in "${dotfiles}"/opencode/oh-my-opencode.*.json; do
+        for f in "${dotfiles}"/opencode/oh-my-openagent.*.json; do
             [ -f "$f" ] || continue
             local name
             name=$(basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//')
@@ -403,7 +277,7 @@ omo() {
         return
     fi
 
-    local target="${dotfiles}/opencode/oh-my-opencode.${1}.json"
+    local target="${dotfiles}/opencode/oh-my-openagent.${1}.json"
     if [ ! -f "$target" ]; then
         echo "Profile not found: $1" >&2
         echo "Run 'omo' to see available profiles." >&2
@@ -418,7 +292,7 @@ if [ -n "${ZSH_VERSION:-}" ]; then
     _omo_complete() {
         local dotfiles="${DOTFILES_DIR:-${HOME}/.dotfiles}"
         local profiles=()
-        for f in "${dotfiles}"/opencode/oh-my-opencode.*.json; do
+        for f in "${dotfiles}"/opencode/oh-my-openagent.*.json; do
             [ -f "$f" ] || continue
             profiles+=($(basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//'))
         done
@@ -429,7 +303,7 @@ else
     _omo_complete() {
         local dotfiles="${DOTFILES_DIR:-${HOME}/.dotfiles}"
         local profiles
-        profiles=$(for f in "${dotfiles}"/opencode/oh-my-opencode.*.json; do
+        profiles=$(for f in "${dotfiles}"/opencode/oh-my-openagent.*.json; do
             [ -f "$f" ] || continue
             basename "$f" | sed 's/^oh-my-opencode\.//; s/\.json$//'
         done)

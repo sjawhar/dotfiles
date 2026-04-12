@@ -7,20 +7,10 @@
     "messages_last": "ctrl+end"
   },
   "plugin": [
-    "@sjawhar/oh-my-opencode@sami",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
-    "@sjawhar/opencode-legion-envoy",
+    "@sjawhar/opencode-legion-envoy@latest",
     "@sjawhar/opencode-anthropic-auth",
-    "opencode-antigravity-auth@1.6.0",
-    "superpowers@git+https://github.com/obra/superpowers.git#v5.0.7",
-    [
-      "@sjawhar/opencode-postgres-sync",
-      {
-        "url": "postgresql://postgres:testpass@100.117.175.119:5433/opencode_test",
-        "backfill": -1,
-        "db": "{env:HOME}/.local/share/opencode/opencode.db"
-      }
-    ]
+    "superpowers@git+https://github.com/obra/superpowers.git#v5.0.7"
   ],
   "provider": {
     "anthropic": {
