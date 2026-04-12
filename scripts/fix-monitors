@@ -1,8 +1,11 @@
 #!/bin/bash
 # Restore monitor layout for docked configuration:
-#   eDP-1 (laptop)             — left (primary)
-#   AOC U34G2G4R3 (ultrawide)  — center
-#   ASUS VG248 (1080p)         — right
+#
+#   [  LG 4K portrait  ] [     LG Ultrawide      ]
+#                       [ Xebec  ] [  Laptop*  ]
+#
+# Identifies monitors by EDID model name so connector names (DP-6, DP-10, etc.)
+# can change across reboots without breaking the layout.
 
 set -euo pipefail
 
@@ -15,43 +18,66 @@ find_connector() {
     '
 }
 
-AOC=$(find_connector "U34G2G4R3")
-ASUS=$(find_connector "VG248")
+LG4K=$(find_connector "LG HDR 4K")
+ULTRAWIDE=$(find_connector "LG ULTRAWIDE")
+XEBEC=$(find_connector "Xebec Snap 13")
 LAPTOP="eDP-1"
 
-if [[ -z "$AOC" ]]; then
-    echo "Warning: AOC U34G2G4R3 not found, skipping"
+errors=0
+if [[ -z "$LG4K" ]]; then
+    echo "Warning: LG HDR 4K not found, skipping"
+    errors=1
 fi
-if [[ -z "$ASUS" ]]; then
-    echo "Warning: ASUS VG248 not found, skipping"
+if [[ -z "$ULTRAWIDE" ]]; then
+    echo "Warning: LG ULTRAWIDE not found, skipping"
+    errors=1
+fi
+if [[ -z "$XEBEC" ]]; then
+    echo "Warning: Xebec Snap 13 not found, skipping"
+    errors=1
 fi
 
-# Apply layout (bottom-aligned, AOC is tallest at 1440px)
-# Laptop 1920x1200 on the left (primary)
+# LG 4K — portrait (rotate270), far left
+if [[ -n "$LG4K" ]]; then
+    cosmic-randr mode "$LG4K" 3840 2160 \
+        --refresh 59.997 \
+        --pos-x 0 --pos-y 0 \
+        --transform rotate270 \
+        --scale 1
+    echo "Configured $LG4K (LG HDR 4K) — left portrait at 0,0"
+fi
+
+# LG Ultrawide — right of the 4K portrait (2160px wide), vertically centered
+if [[ -n "$ULTRAWIDE" ]]; then
+    cosmic-randr mode "$ULTRAWIDE" 3440 1440 \
+        --refresh 99.997 \
+        --pos-x 2160 --pos-y 1081 \
+        --transform normal \
+        --scale 1
+    echo "Configured $ULTRAWIDE (LG ULTRAWIDE) — center at 2160,1081"
+fi
+
+# Xebec — below the ultrawide
+if [[ -n "$XEBEC" ]]; then
+    cosmic-randr mode "$XEBEC" 1920 1080 \
+        --refresh 60.000 \
+        --pos-x 2160 --pos-y 2521 \
+        --transform normal \
+        --scale 1
+    echo "Configured $XEBEC (Xebec Snap 13) — below ultrawide at 2160,2521"
+fi
+
+# Laptop — right of the Xebec, bottom-aligned
 cosmic-randr mode "$LAPTOP" 1920 1200 \
-    --refresh 60.000 \
-    --pos-x 0 --pos-y 133 \
+    --refresh 60.003 \
+    --pos-x 4080 --pos-y 2521 \
     --transform normal \
     --scale 1
 cosmic-randr xwayland --primary "$LAPTOP"
-echo "Configured $LAPTOP (laptop) — left (primary) at 0,133"
+echo "Configured $LAPTOP (laptop) — right of Xebec at 4080,2521 (primary)"
 
-# AOC ultrawide center
-if [[ -n "$AOC" ]]; then
-    cosmic-randr mode "$AOC" 3440 1440 \
-        --refresh 59.973 \
-        --pos-x 1920 --pos-y 0 \
-        --transform normal \
-        --scale 1
-    echo "Configured $AOC (AOC U34G2G4R3) — center at 1920,0"
-fi
-
-# ASUS 1080p right
-if [[ -n "$ASUS" ]]; then
-    cosmic-randr mode "$ASUS" 1920 1080 \
-        --refresh 60.000 \
-        --pos-x 5360 --pos-y 204 \
-        --transform normal \
-        --scale 1
-    echo "Configured $ASUS (ASUS VG248) — right at 5360,204"
+if [[ $errors -eq 0 ]]; then
+    echo "All monitors configured successfully"
+else
+    echo "Layout applied with warnings (see above)"
 fi
