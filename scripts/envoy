@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Envoy CLI — query and manage the Envoy notification system.
+#
+# Subcommands:
+#   envoy ps         — list live sessions registered with Envoy
+#   envoy ps --json  — JSON output
+#   envoy ps --local — filter to local machine only
+#   envoy send <t> <msg> — send message (ses_* = direct, else publish to topic)
+set -euo pipefail
+
+ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
+HOSTNAME="${HOSTNAME:-$(hostname)}"
+
+_envoy_ps() {
+    local json=false local_only=false
+    for arg in "$@"; do
+        case "$arg" in
+            --json) json=true ;;
+            --local) local_only=true ;;
+        esac
+    done
+    local raw
+    raw=$(curl -fsS "$ENVOY_URL/v1/sessions" 2>/dev/null) || {
+        echo "error: could not reach Envoy at $ENVOY_URL" >&2
+        return 1
+    }
+    if [ "$local_only" = true ]; then
+        raw=$(echo "$raw" | jq --arg m "$HOSTNAME" '[.[] | select(.machine_id == $m)]')
+    fi
+    if [ "$json" = true ]; then
+        echo "$raw" | jq .
+        return
+    fi
+    if [ "$(echo "$raw" | jq length)" = "0" ]; then
+        echo "No live sessions"
+        return
+    fi
+    {
+        printf 'SESSION\tPORT\tMACHINE\tDIR\tTOPICS\tUPDATED\n'
+        echo "$raw" | jq -r '.[] | [.session_id, .port, .machine_id, .dir, (.topics | length | tostring), ((.updated_at / 1000) | strftime("%Y-%m-%d %H:%M"))] | @tsv'
+    } | column -t -s $'\t'
+}
+
+_envoy_send() {
+    if [ $# -lt 2 ]; then
+        echo "Usage: envoy send <target> <message>" >&2
+        echo "  target: session ID (ses_...) for direct send, or topic for publish" >&2
+        return 1
+    fi
+    local target="$1"; shift
+    local message="$*"
+
+    local endpoint payload
+    if [[ "$target" == ses_* ]]; then
+        endpoint="/v1/messages/send"
+        payload=$(jq -n --arg t "$target" --arg m "$message" \
+            '{ target_session: $t, message: $m }')
+    else
+        endpoint="/v1/messages/publish"
+        payload=$(jq -n --arg t "$target" --arg m "$message" \
+            '{ topic: $t, message: $m }')
+    fi
+
+    curl -fsS -X POST "$ENVOY_URL$endpoint" \
+        -H "Content-Type: application/json" \
+        -d "$payload" 2>/dev/null || {
+        echo "error: could not reach Envoy at $ENVOY_URL" >&2
+        return 1
+    }
+}
+
+case "${1:-}" in
+    ps)      shift; _envoy_ps "$@"; exit ;;
+    send)    shift; _envoy_send "$@"; exit ;;
+    "")      echo "Usage: envoy <ps|send>" >&2; exit 1 ;;
+    *)       echo "Unknown command: $1" >&2; exit 1 ;;
+esac
