@@ -111,6 +111,10 @@ streaming_endpoint = "wss://api.deepgram.com/v1/listen"
 # Endpointing: how long Deepgram waits after silence before finalizing a segment.
 # Default (10ms) is too aggressive — 300ms gives much better sentence-level quality.
 streaming_endpointing_ms = 300
+# Timeout for finalizing the stream after recording stops.
+# Longer recordings may need more time for Deepgram to flush remaining segments.
+# Default: 15 seconds.
+streaming_finish_timeout_secs = 15
 
 [output]
 # Primary output mode: "type", "clipboard", or "paste"
