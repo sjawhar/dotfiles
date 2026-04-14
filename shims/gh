@@ -32,17 +32,41 @@
 
 set -euo pipefail
 
-# --- GitHub App identity ---
-# When GH_APP is set, generate an installation token and export GH_TOKEN
-# so all gh API calls authenticate as the app. Reuses the same token
-# generator and cache as the git credential helper.
-if [[ -n "${GH_APP:-}" && -z "${GH_TOKEN:-}" ]]; then
-    _gh_app_token=$(printf 'protocol=https\nhost=github.com\n\n' | git-credential-gh-app get 2>/dev/null) || true
-    if [[ -n "$_gh_app_token" ]]; then
-        GH_TOKEN=$(echo "$_gh_app_token" | grep '^password=' | cut -d= -f2-)
-        export GH_TOKEN
+# --- GitHub App identity (route-driven) ---
+# When invoked from a directory inside a git repo, look up the credential
+# helper that would match the repo's remote URL. If it's a `!gh-app-token
+# <profile>` helper, mint an installation token and export GH_TOKEN so
+# subsequent gh API calls authenticate as that profile. In interactive
+# shells (no agent include loaded) this finds the default user-helper
+# and skips token export.
+if [[ -z "${GH_TOKEN:-}" ]]; then
+    _gh_remote_url=$(git remote get-url origin 2>/dev/null || true)
+    if [[ -n "$_gh_remote_url" ]]; then
+        # Normalize SSH form (git@host:owner/repo[.git]) to https URL.
+        if [[ "$_gh_remote_url" =~ ^git@([^:]+):(.+)$ ]]; then
+            _gh_remote_url="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+        fi
+        # Strip ssh:// prefix if present.
+        _gh_remote_url="${_gh_remote_url/#ssh:\/\/git@/https://}"
+        # Ensure trailing .git for stable matching (matches credential URL git uses).
+        [[ "$_gh_remote_url" == *.git ]] || _gh_remote_url="${_gh_remote_url}.git"
+
+        _gh_helper=$(git config --get-urlmatch credential.helper "$_gh_remote_url" 2>/dev/null || true)
+        if [[ "$_gh_helper" == "!gh-app-token "* ]]; then
+            _gh_profile="${_gh_helper#!gh-app-token }"
+            # Build path for the credential request from the URL.
+            _gh_path="${_gh_remote_url#https://*/}"
+            _gh_token=$(printf 'protocol=https\nhost=github.com\npath=%s\n\n' "$_gh_path" \
+                        | gh-app-token "$_gh_profile" get 2>/dev/null \
+                        | sed -n 's/^password=//p') || true
+            if [[ -n "$_gh_token" ]]; then
+                export GH_TOKEN="$_gh_token"
+            fi
+            unset _gh_profile _gh_path _gh_token
+        fi
+        unset _gh_helper
     fi
-    unset _gh_app_token
+    unset _gh_remote_url
 fi
 
 # Find the real gh binary (skip this specific shim directory)

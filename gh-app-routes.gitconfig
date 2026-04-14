@@ -1,0 +1,14 @@
+# Per-org credential routes.
+# This file is included into git config only by agent launchers (cc/oc),
+# never by interactive shells. See docs/superpowers/specs/2026-05-03-gh-credential-routing-design.md.
+
+[credential "https://github.com/sjawhar/"]
+	helper =
+	helper = !gh-app-token legion-personal
+
+[credential "https://github.com/trajectory-labs-pbc/"]
+	helper =
+	helper = !gh-app-token legion-work
+
+# Anything else: no entry here. Falls through to the default
+# `!gh auth git-credential` configured in ~/.gitconfig.
