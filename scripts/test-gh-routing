@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Smoke test for per-repo GitHub credential routing.
+#
+# Asserts that with the gh-app-routes.gitconfig include active,
+# `git config --get-urlmatch credential.helper <URL>` returns the
+# expected helper for each test URL.
+#
+# Robust to being run from agent shells: explicitly clears any inherited
+# GIT_CONFIG_* env vars before each git config call, then sets only the
+# include we want to test.
+
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+ROUTES_FILE="$DOTFILES_DIR/gh-app-routes.gitconfig"
+
+pass=0
+fail=0
+
+# List GIT_CONFIG_* env var names currently set, for `env -u` scrubbing.
+list_git_config_env() {
+    compgen -e | grep '^GIT_CONFIG_' || true
+}
+
+assert_helper() {
+    local url="$1" expected="$2"
+    local got
+    # Run git config in a clean env: scrub leaked GIT_CONFIG_* from the parent,
+    # then inject only our routes-file include.
+    local -a unset_args=()
+    while IFS= read -r v; do
+        [[ -n "$v" ]] && unset_args+=(-u "$v")
+    done < <(list_git_config_env)
+    got=$(env "${unset_args[@]}" \
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=include.path \
+          GIT_CONFIG_VALUE_0="$ROUTES_FILE" \
+          git config --get-urlmatch credential.helper "$url" 2>/dev/null \
+          | tail -n 1) || got="<error>"
+    if [[ "$got" == "$expected" ]]; then
+        printf '  PASS  %-55s -> %s\n' "$url" "$got"
+        ((pass++)) || true
+    else
+        printf '  FAIL  %s\n        expected: %s\n        got:      %s\n' \
+               "$url" "$expected" "$got"
+        ((fail++)) || true
+    fi
+}
+
+echo "== gh credential routing assertions =="
+assert_helper "https://github.com/sjawhar/dotfiles.git"          "!gh-app-token legion-personal"
+assert_helper "https://github.com/trajectory-labs-pbc/agent-c.git" "!gh-app-token legion-work"
+assert_helper "https://github.com/theorem-labs/whatever.git"     "!gh auth git-credential"
+
+echo
+echo "summary: $pass passed, $fail failed"
+[[ $fail -eq 0 ]]

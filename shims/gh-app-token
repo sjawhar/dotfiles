@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Profile-aware GitHub App credential helper.
+
+Used as a git credential helper:
+  helper = !gh-app-token <profile>
+
+The profile name is looked up in `git config`:
+  [gh-app "<profile>"]
+      app-id          = ...
+      installation-id = ...
+      key-secret      = NAME_OF_SECRET   ; resolved via `secrets get`
+
+Generates an installation token, caches it per profile in
+~/.cache/gh-app-tokens/<profile>.json, and emits a git-credential
+formatted response on stdout.
+"""
+
+import base64
+import binascii
+import json
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+CACHE_DIR = Path.home() / ".cache" / "gh-app-tokens"
+TOKEN_REFRESH_MARGIN = 300  # refresh 5 minutes before expiry
+
+
+def git_config(key: str) -> str:
+    """Read a single git config value or exit with a helpful message."""
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", key],
+            capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        print(f"gh-app-token: missing git config: {key}", file=sys.stderr)
+        sys.exit(1)
+
+
+def generate_jwt(app_id: str, private_key: str) -> str:
+    # Lazy import: avoid pulling cryptography on cache-hit fast path.
+    import jwt
+    now = int(time.time())
+    payload = {
+        "iat": now - 60,
+        "exp": now + 600,
+        "iss": app_id,
+    }
+    return jwt.encode(payload, private_key, algorithm="RS256")
+
+
+def get_installation_token(app_id: str, installation_id: str, private_key: str) -> dict:
+    token = generate_jwt(app_id, private_key)
+    req = urllib.request.Request(
+        f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"gh-app-token: GitHub API {e.code}: {body}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"gh-app-token: network error: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+
+def get_cached_token(profile: str) -> str | None:
+    cache_file = CACHE_DIR / f"{profile}.json"
+    if not cache_file.exists():
+        return None
+    try:
+        data = json.loads(cache_file.read_text())
+        expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
+        if (expires_at - datetime.now(timezone.utc)).total_seconds() > TOKEN_REFRESH_MARGIN:
+            return data["token"]
+    except (json.JSONDecodeError, KeyError, ValueError):
+        pass
+    return None
+
+
+def cache_token(profile: str, token_data: dict) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = CACHE_DIR / f"{profile}.json"
+    cache_file.write_text(json.dumps(token_data))
+    cache_file.chmod(0o600)
+
+
+def resolve_private_key(key_secret: str) -> str:
+    try:
+        b64_key = subprocess.run(
+            ["secrets", "get", key_secret],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"gh-app-token: failed to fetch secret {key_secret}: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not b64_key:
+        print(f"gh-app-token: empty secret {key_secret}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        return base64.b64decode(b64_key).decode()
+    except (binascii.Error, UnicodeDecodeError) as e:
+        print(f"gh-app-token: secret {key_secret} is not valid base64-encoded UTF-8: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def get_token(profile: str) -> str:
+    cached = get_cached_token(profile)
+    if cached:
+        return cached
+    app_id = git_config(f"gh-app.{profile}.app-id")
+    installation_id = git_config(f"gh-app.{profile}.installation-id")
+    key_secret = git_config(f"gh-app.{profile}.key-secret")
+    private_key = resolve_private_key(key_secret)
+    print(f"gh-app-token: minting token for profile {profile}...", file=sys.stderr)
+    token_data = get_installation_token(app_id, installation_id, private_key)
+    cache_token(profile, token_data)
+    return token_data["token"]
+
+
+def main() -> None:
+    if len(sys.argv) < 3:
+        print("usage: gh-app-token <profile> <get|store|erase>", file=sys.stderr)
+        sys.exit(1)
+    profile = sys.argv[1]
+    action = sys.argv[2]
+    if action != "get":
+        sys.exit(0)
+
+    # Read the credential request (host, protocol, path) from stdin.
+    request = {}
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            break
+        if "=" in line:
+            key, _, value = line.partition("=")
+            request[key] = value
+    if "github.com" not in request.get("host", ""):
+        sys.exit(0)
+
+    token = get_token(profile)
+    print(f"protocol={request.get('protocol', 'https')}")
+    print(f"host={request.get('host', 'github.com')}")
+    print("username=x-access-token")
+    print(f"password={token}")
+
+
+if __name__ == "__main__":
+    main()
