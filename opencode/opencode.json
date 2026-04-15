@@ -22,6 +22,13 @@
             "output": 128000
           }
         },
+        "claude-opus-4-7": {
+          "limit": {
+            "context": 1000000,
+            "input": 820000,
+            "output": 128000
+          }
+        },
         "claude-sonnet-4-6": {
           "limit": {
             "context": 1000000,
