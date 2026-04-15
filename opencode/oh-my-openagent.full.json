@@ -16,7 +16,7 @@
   },
   "agents": {
     "sisyphus": {
-      "model": "anthropic/claude-opus-4-6",
+      "model": "anthropic/claude-opus-4-7",
       "variant": "max"
     },
     "hephaestus": {
@@ -24,7 +24,7 @@
       "variant": "high"
     },
     "prometheus": {
-      "model": "anthropic/claude-opus-4-6",
+      "model": "anthropic/claude-opus-4-7",
       "variant": "max"
     },
     "metis": {
@@ -55,16 +55,26 @@
     "athena": {
       "council": {
         "members": [
-          { "model": "anthropic/claude-opus-4-6", "name": "Claude", "variant": "max" },
-          { "model": "openai/gpt-5.4", "name": "GPT" },
-          { "model": "google/gemini-3.1-pro-preview", "name": "Gemini" }
+          {
+            "model": "anthropic/claude-opus-4-7",
+            "name": "Claude",
+            "variant": "max"
+          },
+          {
+            "model": "openai/gpt-5.4",
+            "name": "GPT"
+          },
+          {
+            "model": "google/gemini-3.1-pro-preview",
+            "name": "Gemini"
+          }
         ]
       }
     }
   },
   "categories": {
     "ultrabrain": {
-      "model": "anthropic/claude-opus-4-6",
+      "model": "anthropic/claude-opus-4-7",
       "variant": "max"
     },
     "deep": {
@@ -82,7 +92,7 @@
       "model": "anthropic/claude-sonnet-4-6"
     },
     "unspecified-high": {
-      "model": "anthropic/claude-opus-4-6",
+      "model": "anthropic/claude-opus-4-7",
       "variant": "max"
     },
     "writing": {
@@ -112,9 +122,5 @@
     "enabled": true,
     "layout": "main-vertical",
     "isolation": "session"
-  },
-  "_migrations": [
-    "model-version:openai/gpt-5.2-codex->openai/gpt-5.3-codex",
-    "model-version:anthropic/claude-sonnet-4-5->anthropic/claude-sonnet-4-6"
-  ]
+  }
 }
