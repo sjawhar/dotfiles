@@ -80,7 +80,9 @@ unset _path _parts _p
 # jj (Jujutsu) - load config from both user-specific and shared dotfiles
 export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 
-# Claude Code
+# Claude Code — state lives in ${DOTFILES_DIR}/.claude/. Swap accounts with `cco <name>`,
+# which rewrites .credentials.json + .claude.json in place; Claude Code re-reads them
+# within ~60s without needing a restart.
 export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export ANTHROPIC_1M_CONTEXT=true
@@ -170,14 +172,6 @@ fi
 if command -v bat &>/dev/null; then
     alias cat='bat --paging=never'
 fi
-
-# ------------------------------------------------------------------------------
-# Claude Code aliases (Harper Reed workflow for mobile voice dictation)
-# ------------------------------------------------------------------------------
-
-alias cc='claude'
-alias ccd='claude --dangerously-skip-permissions'
-alias ccc='claude --dangerously-skip-permissions --continue'
 
 # ------------------------------------------------------------------------------
 # OpenCode instance registry (oc, occ, oc ps)

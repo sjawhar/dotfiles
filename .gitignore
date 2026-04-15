@@ -16,9 +16,13 @@ vendor/
 !.claude/AGENTS.md
 !.claude/agents/
 !.claude/commands/
+!.claude/hooks/
 !.claude/mcp.json
 !.claude/project-instructions/
 !.claude/settings.json
+
+# Claude Code account pool (OAuth tokens — must not be committed)
+/.claude-oauth/
 
 .sisyphus/
 .tmux-workspace/

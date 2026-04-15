@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# cco: Claude Code account pool manager.
+#
+# Swaps OAuth account credentials in and out of the active $CLAUDE_CONFIG_DIR
+# without restarting Claude Code. Running sessions re-read .credentials.json
+# periodically (~60s), so a swap takes effect on the next heartbeat.
+#
+# Subcommands:
+#   cco                     — show active account and pool with live usage
+#   cco add NAME [--from D] — capture credentials+identity into pool/NAME
+#   cco rm NAME             — delete pool/NAME
+#   cco swap NAME           — save current back to its pool entry, then load NAME
+#
+# Auto-rotation is triggered by the Claude Code statusline hook: when the
+# active account hits 5h≥100% or 7d≥100%, the statusline spawns
+# `cco __rotate` in the background, which picks the lowest-util pool
+# account under 100/100 and swaps to it. Only one rotation runs at a time
+# (flock on /tmp/cco-rotate.<uid>.lock).
+set -euo pipefail
+
+POOL_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}/.claude-oauth"
+ACTIVE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+ROTATE_LOCK="/tmp/cco-rotate.$(id -u).lock"
+
+# --- helpers ----------------------------------------------------------------
+
+# Copy $1 → $2 atomically (temp + rename) with mode 600.
+copy_atomic() {
+    local src="$1" dest="$2"
+    local tmp="$dest.tmp.$$"
+    cp "$src" "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$dest"
+}
+
+# Run jq with args from $2..end on file $1, write output to $2 (LAST arg) atomically
+# with mode $3. Aborts without overwriting $2 if jq fails or output is empty.
+jq_to_file() {
+    local src="$1" dest="$2" mode="$3"
+    shift 3
+    local tmp="$dest.tmp.$$"
+    jq "$@" "$src" > "$tmp"
+    if [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        echo "cco: jq produced empty output (would overwrite $dest)" >&2
+        return 1
+    fi
+    chmod "$mode" "$tmp"
+    mv "$tmp" "$dest"
+}
+
+# Read oauthAccount field from .claude.json of a config dir (arg 1).
+read_account_field() {
+    local dir="$1" field="$2"
+    jq -r ".oauthAccount.${field} // empty" "$dir/.claude.json" 2>/dev/null
+}
+
+# Find pool entry whose oauth-account.json matches the given accountUuid.
+# Echoes the entry name, or nothing.
+find_pool_entry_by_uuid() {
+    local uuid="$1"
+    [[ -z "$uuid" ]] && return
+    local d
+    for d in "$POOL_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        local f="$d/oauth-account.json"
+        [[ -r "$f" ]] || continue
+        if [[ "$(jq -r '.oauthAccount.accountUuid // empty' "$f" 2>/dev/null)" == "$uuid" ]]; then
+            basename "$d"
+            return
+        fi
+    done
+}
+
+# Capture credentials+identity from source dir (arg 1) into pool/NAME (arg 2).
+capture_to_pool() {
+    local src="$1" name="$2"
+    local dest="$POOL_DIR/$name"
+    [[ -r "$src/.credentials.json" ]] || { echo "cco: $src has no .credentials.json" >&2; exit 1; }
+    [[ -r "$src/.claude.json"      ]] || { echo "cco: $src has no .claude.json"      >&2; exit 1; }
+    mkdir -p "$dest"
+    chmod 700 "$dest"
+    copy_atomic "$src/.credentials.json" "$dest/credentials.json"
+    jq_to_file "$src/.claude.json" "$dest/oauth-account.json" 600 '{oauthAccount, userID}'
+}
+
+# Overwrite $ACTIVE_DIR's credentials+identity from pool/NAME.
+load_from_pool() {
+    local name="$1"
+    local src="$POOL_DIR/$name"
+    [[ -d "$src" ]] || { echo "cco: no such account: $name" >&2; exit 1; }
+    [[ -r "$src/credentials.json"   ]] || { echo "cco: pool entry incomplete: $name (credentials)" >&2; exit 1; }
+    [[ -r "$src/oauth-account.json" ]] || { echo "cco: pool entry incomplete: $name (oauth-account)" >&2; exit 1; }
+    copy_atomic "$src/credentials.json" "$ACTIVE_DIR/.credentials.json"
+    local claude_mode
+    claude_mode=$(stat -c %a "$ACTIVE_DIR/.claude.json" 2>/dev/null || echo 600)
+    jq_to_file "$ACTIVE_DIR/.claude.json" "$ACTIVE_DIR/.claude.json" "$claude_mode" \
+        --slurpfile ident "$src/oauth-account.json" '. + $ident[0]'
+}
+
+# --- subcommands ------------------------------------------------------------
+
+cmd_status() {
+    mkdir -p "$POOL_DIR"
+    local label email uuid
+    label=$(read_account_field "$ACTIVE_DIR" displayName)
+    email=$(read_account_field "$ACTIVE_DIR" emailAddress)
+    uuid=$(read_account_field "$ACTIVE_DIR" accountUuid)
+    if [[ -n "$label" || -n "$email" ]]; then
+        echo "active: ${label:-(no displayName)}${email:+ ($email)}"
+    else
+        echo "active: (unknown — no oauthAccount in $ACTIVE_DIR/.claude.json)"
+    fi
+    local active_entry
+    active_entry=$(find_pool_entry_by_uuid "$uuid")
+    local entries=()
+    local d
+    for d in "$POOL_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        entries+=("$d")
+    done
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        echo "pool: (empty)"
+        return
+    fi
+    {
+        local name marker creds
+        for d in "${entries[@]}"; do
+            name=$(basename "$d")
+            marker=""; [[ "$name" == "$active_entry" ]] && marker=" *"
+            creds="$d/credentials.json"
+            # Active account's tokens in the pool may be stale; the live tokens
+            # (refreshed by Claude Code) are in $ACTIVE_DIR/.credentials.json.
+            [[ "$name" == "$active_entry" ]] && creds="$ACTIVE_DIR/.credentials.json"
+            _usage_row "${name}${marker}" "$creds"
+        done
+    } | column -t -s $'\t'
+}
+
+# Fetch usage for one credentials file; print a one-line row.
+# Args: label (padded by caller), path-to-credentials.json
+_usage_row() {
+    local label="$1" creds="$2"
+    local token five seven http
+    token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds" 2>/dev/null)
+    if [[ -z "$token" ]]; then
+        printf '  %s\t(no token)\n' "$label"
+        return
+    fi
+    local tmp; tmp=$(mktemp)
+    http=$(curl -sS -m 5 -o "$tmp" -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            "https://api.anthropic.com/api/oauth/usage" 2>/dev/null) || http="000"
+    if [[ "$http" != "200" ]]; then
+        local err_type
+        err_type=$(jq -r '.error.type // empty' "$tmp" 2>/dev/null)
+        rm -f "$tmp"
+        printf '  %s\t(http %s%s)\n' "$label" "$http" "${err_type:+ $err_type}"
+        return
+    fi
+    if ! jq -e '.five_hour.utilization | numbers' "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        printf '  %s\t(unexpected response)\n' "$label"
+        return
+    fi
+    read -r five seven < <(jq -r '[.five_hour.utilization, .seven_day.utilization] | @tsv' "$tmp")
+    rm -f "$tmp"
+    local color reset=$'\033[0m'
+    local five_int; five_int=$(printf '%.0f' "$five")
+    if   (( five_int >= 90 )); then color=$'\033[31m'
+    elif (( five_int >= 70 )); then color=$'\033[33m'
+    else                            color=$'\033[32m'
+    fi
+    printf '  %s\t%s%3.0f%%%s 5h · %3.0f%% 7d\n' "$label" "$color" "$five" "$reset" "$seven"
+}
+
+
+cmd_add() {
+    local name="" from="$ACTIVE_DIR"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --from) from="$2"; shift 2 ;;
+            -*)     echo "cco add: unknown flag: $1" >&2; exit 1 ;;
+            *)      [[ -z "$name" ]] && { name="$1"; shift; } || { echo "cco add: extra arg: $1" >&2; exit 1; } ;;
+        esac
+    done
+    [[ -n "$name" ]] || { echo "usage: cco add NAME [--from DIR]" >&2; exit 1; }
+    mkdir -p "$POOL_DIR"; chmod 700 "$POOL_DIR"
+    [[ -e "$POOL_DIR/$name" ]] && { echo "cco add: $name already exists (use 'cco rm $name' first)" >&2; exit 1; }
+    capture_to_pool "$from" "$name"
+    echo "added: $name (from $from)"
+}
+
+cmd_rm() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || { echo "usage: cco rm NAME" >&2; exit 1; }
+    local dir="$POOL_DIR/$name"
+    [[ -d "$dir" ]] || { echo "cco rm: no such account: $name" >&2; exit 1; }
+    rm -rf "$dir"
+    echo "removed: $name"
+}
+
+# --- auto-rotation ----------------------------------------------------------
+
+# Query /oauth/usage with a given access token. Echo "5h 7d" ints on stdout.
+# Exit non-zero on HTTP/parse errors. When the account is at/past the limit,
+# the API returns null for utilization (not >=100), so default null → 100
+# so the threshold check in rotate_if_over fires.
+fetch_usage_ints() {
+    local token="$1"
+    local tmp; tmp=$(mktemp)
+    local http
+    http=$(curl -sS -m 10 -o "$tmp" -w '%{http_code}' \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        "https://api.anthropic.com/api/oauth/usage" 2>/dev/null) || { rm -f "$tmp"; return 1; }
+    if [[ "$http" != "200" ]] || ! jq -e 'has("five_hour")' "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"; return 1
+    fi
+    jq -r '[((.five_hour.utilization // 100) | floor), ((.seven_day.utilization // 100) | floor)] | @tsv' "$tmp"
+    rm -f "$tmp"
+}
+
+rotate_if_over() {
+    local active_creds="$ACTIVE_DIR/.credentials.json"
+    [[ -r "$active_creds" ]] || return
+    local token; token=$(jq -r '.claudeAiOauth.accessToken // empty' "$active_creds" 2>/dev/null)
+    [[ -n "$token" ]] || return
+    local active_usage
+    active_usage=$(fetch_usage_ints "$token") || return
+    local five seven
+    read -r five seven <<<"$active_usage"
+    (( five < 100 && seven < 100 )) && return  # under threshold
+    local current_uuid current_entry
+    current_uuid=$(read_account_field "$ACTIVE_DIR" accountUuid)
+    current_entry=$(find_pool_entry_by_uuid "$current_uuid")
+    local best="" best_score=200 d name pool_token pu p5 p7 score
+    for d in "$POOL_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        name=$(basename "$d")
+        [[ "$name" == "$current_entry" ]] && continue
+        pool_token=$(jq -r '.claudeAiOauth.accessToken // empty' "$d/credentials.json" 2>/dev/null)
+        [[ -n "$pool_token" ]] || continue
+        pu=$(fetch_usage_ints "$pool_token") || continue
+        read -r p5 p7 <<<"$pu"
+        (( p5 >= 100 || p7 >= 100 )) && continue
+        score=$p5; (( p7 > score )) && score=$p7
+        if (( score < best_score )); then
+            best="$name"; best_score=$score
+        fi
+    done
+    [[ -n "$best" ]] && cmd_swap "$best" >/dev/null 2>&1 || true
+}
+
+# Run rotate_if_over under an exclusive flock so concurrent statusline
+# renders don't race (swap clobbers .credentials.json and .claude.json).
+cmd_rotate() {
+    exec 9>"$ROTATE_LOCK"
+    flock -n 9 || exit 0
+    rotate_if_over
+}
+
+cmd_swap() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || { echo "usage: cco swap NAME" >&2; exit 1; }
+    [[ -d "$POOL_DIR/$name" ]] || { echo "cco swap: no such account: $name" >&2; exit 1; }
+    # Save current account back to its pool entry (best-effort) before swapping.
+    local current_uuid current_entry
+    current_uuid=$(read_account_field "$ACTIVE_DIR" accountUuid)
+    current_entry=$(find_pool_entry_by_uuid "$current_uuid")
+    if [[ -n "$current_entry" && "$current_entry" != "$name" ]]; then
+        capture_to_pool "$ACTIVE_DIR" "$current_entry"
+        echo "saved current: $current_entry"
+    fi
+    load_from_pool "$name"
+    echo "swapped → $name (effective within ~60s)"
+}
+
+# --- dispatch ---------------------------------------------------------------
+
+case "${1:-status}" in
+    status|list|ls|usage|u|"") shift || true; cmd_status "$@" ;;
+    __rotate)        cmd_rotate ;;
+    add)             shift;          cmd_add      "$@" ;;
+    rm|remove|del)   shift;          cmd_rm       "$@" ;;
+    swap|switch)     shift;          cmd_swap     "$@" ;;
+    -h|--help|help)
+        sed -n '2,12p' "$0" | sed 's/^# \?//'
+        ;;
+    *) echo "cco: unknown subcommand: $1 (try 'cco help')" >&2; exit 1 ;;
+esac
