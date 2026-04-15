@@ -36,8 +36,8 @@ _envoy_ps() {
         return
     fi
     {
-        printf 'SESSION\tPORT\tMACHINE\tDIR\tTOPICS\tUPDATED\n'
-        echo "$raw" | jq -r '.[] | [.session_id, .port, .machine_id, .dir, (.topics | length | tostring), ((.updated_at / 1000) | strftime("%Y-%m-%d %H:%M"))] | @tsv'
+        printf 'SESSION\tPORT\tMACHINE\tDIR\tTITLE\tTOPICS\tUPDATED\n'
+        echo "$raw" | jq -r '.[] | [.session_id, .port, .machine_id, .dir, (.title // "-"), (.topics | length | tostring), ((.updated_at / 1000) | strftime("%Y-%m-%d %H:%M"))] | @tsv'
     } | column -t -s $'\t'
 }
 

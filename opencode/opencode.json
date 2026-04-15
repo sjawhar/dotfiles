@@ -7,10 +7,10 @@
     "messages_last": "ctrl+end"
   },
   "plugin": [
-    "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "@sjawhar/opencode-legion-envoy@latest",
-    "@sjawhar/opencode-anthropic-auth",
-    "superpowers@git+https://github.com/obra/superpowers.git#v5.0.7"
+    "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
+    "superpowers@git+https://github.com/obra/superpowers.git#v5.0.7",
+    "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.3.0-rc.7/sjawhar-opencode-anthropic-auth-0.3.0-rc.7.tgz"
   ],
   "provider": {
     "anthropic": {
