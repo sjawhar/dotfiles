@@ -101,6 +101,21 @@ elif command -v mise &>/dev/null; then
     eval "$(mise activate "$DOTFILES_SHELL")"
 fi
 
+# Mise activation registers a PROMPT_COMMAND hook that re-prepends its tool
+# install dirs to PATH every prompt, which would shadow our shims (e.g. the
+# gh wrapper that sets up GitHub App auth). Append our own hook so shims
+# always end up first, regardless of what mise just did.
+_ensure_dotfiles_shims_first() {
+    local p _newpath="" _parts
+    IFS=':' read -ra _parts <<< "$PATH"
+    for p in "${_parts[@]}"; do
+        [[ "$p" != "${DOTFILES_DIR}/shims" ]] && _newpath="${_newpath:+$_newpath:}$p"
+    done
+    export PATH="${DOTFILES_DIR}/shims:$_newpath"
+}
+_ensure_dotfiles_shims_first
+PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}_ensure_dotfiles_shims_first"
+
 # ==============================================================================
 # INTERACTIVE-ONLY SECTION
 # Completions, prompts, aliases, functions - things that need a terminal

@@ -92,6 +92,23 @@ esac
 # Add oh-my-opencode plugin for interactive use
 export OPENCODE_CONFIG_CONTENT='{"plugin":["@sjawhar/oh-my-opencode@sami"]}'
 
+# --- GitHub App identity for agent sessions ---
+# Agents push/create PRs as legion-implementer[bot] instead of the user's
+# personal account. The git credential helper and gh shim handle token
+# generation lazily on first use.
+export GH_APP=legion-implementer
+export GH_APP_ID=3202636
+export GH_APP_INSTALLATION_ID=119469290
+# Private key is injected via secrets wrapper (see below)
+
+# Configure git to use the GitHub App credential helper for github.com
+export GIT_CONFIG_COUNT=${GIT_CONFIG_COUNT:-0}
+GIT_CONFIG_COUNT=$((GIT_CONFIG_COUNT + 2))
+export GIT_CONFIG_KEY_$((GIT_CONFIG_COUNT - 2))=credential.https://github.com.helper
+export GIT_CONFIG_VALUE_$((GIT_CONFIG_COUNT - 2))=gh-app
+export GIT_CONFIG_KEY_$((GIT_CONFIG_COUNT - 1))=credential.https://github.com.useHttpPath
+export GIT_CONFIG_VALUE_$((GIT_CONFIG_COUNT - 1))=true
+
 # Opt-out
 if [ "${OPENCODE_NO_SERVE:-}" = "1" ]; then
     exec opencode "$@"
