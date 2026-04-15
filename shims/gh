@@ -32,6 +32,19 @@
 
 set -euo pipefail
 
+# --- GitHub App identity ---
+# When GH_APP is set, generate an installation token and export GH_TOKEN
+# so all gh API calls authenticate as the app. Reuses the same token
+# generator and cache as the git credential helper.
+if [[ -n "${GH_APP:-}" && -z "${GH_TOKEN:-}" ]]; then
+    _gh_app_token=$(printf 'protocol=https\nhost=github.com\n\n' | git-credential-gh-app get 2>/dev/null) || true
+    if [[ -n "$_gh_app_token" ]]; then
+        GH_TOKEN=$(echo "$_gh_app_token" | grep '^password=' | cut -d= -f2-)
+        export GH_TOKEN
+    fi
+    unset _gh_app_token
+fi
+
 # Find the real gh binary (skip this specific shim directory)
 real_gh() {
     local IFS=':'
