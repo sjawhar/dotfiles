@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# Manage a tmux "dev" session by grouping/ungrouping windows.
+#
+# Subcommands:
+#   tmux-dev-group group [session...]   — merge sessions into one "dev" session
+#   tmux-dev-group ungroup [session]    — split a session's windows into separate sessions
+#
+# With no arguments, "group" launches fzf for interactive selection.
+# "ungroup" defaults to the "dev" session if none specified.
+set -euo pipefail
+
+SESSION_NAME="${TMUX_DEV_GROUP_NAME:-dev}"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# ungroup: split each window in a session into its own session
+# ---------------------------------------------------------------------------
+cmd_ungroup() {
+    local source="${1:-$SESSION_NAME}"
+    tmux has-session -t "$source" 2>/dev/null || die "session '$source' not found"
+
+    local base_index
+    base_index=$(tmux show-option -gv base-index)
+
+    # Collect window info before we start mutating
+    local -a win_indices win_names
+    while IFS='|' read -r idx name; do
+        win_indices+=("$idx")
+        win_names+=("$name")
+    done < <(tmux list-windows -t "$source" -F '#{window_index}|#{window_name}')
+
+    local count=${#win_indices[@]}
+    if [[ $count -eq 0 ]]; then
+        die "session '$source' has no windows"
+    fi
+    if [[ $count -eq 1 ]]; then
+        # Single window — just rename the session to the window name
+        local only_name="${win_names[0]}"
+        if [[ "$source" != "$only_name" ]]; then
+            tmux rename-session -t "$source" "$only_name"
+            echo "renamed '$source' → '$only_name'"
+        else
+            echo "nothing to ungroup (single window)"
+        fi
+        return
+    fi
+
+    # Break out all windows except the last one (which stays and becomes
+    # the renamed source session). Iterate in original order — we always
+    # reference by window ID so shifting indices don't matter.
+    for ((i = 0; i < count - 1; i++)); do
+        local idx="${win_indices[$i]}"
+        local name="${win_names[$i]}"
+
+        # Deduplicate: if a session with this name already exists, suffix it
+        local target="$name"
+        local n=2
+        while tmux has-session -t "$target" 2>/dev/null; do
+            target="${name}-${n}"
+            ((n++))
+        done
+
+        # Create a temporary session, move the window in, kill the placeholder
+        tmux new-session -d -s "$target"
+        tmux move-window -s "$source:$idx" -t "$target:"
+        tmux kill-window -t "$target:$base_index"
+
+        echo "  $name → session '$target'"
+    done
+
+    # Rename the source session to the last remaining window
+    local last_name="${win_names[$((count - 1))]}"
+    local final="$last_name"
+    local n=2
+    while tmux has-session -t "$final" 2>/dev/null && [[ "$final" != "$source" ]]; do
+        final="${last_name}-${n}"
+        ((n++))
+    done
+    tmux rename-session -t "$source" "$final"
+    echo "  $last_name → session '$final'"
+    echo "ungrouped $count windows from '$source'"
+}
+
+# ---------------------------------------------------------------------------
+# group: merge sessions into a single dev session
+# ---------------------------------------------------------------------------
+cmd_group() {
+    local -a sessions=("$@")
+
+    # Interactive selection via fzf if no args given
+    if [[ ${#sessions[@]} -eq 0 ]]; then
+        command -v fzf >/dev/null || die "fzf required for interactive selection (or pass session names as arguments)"
+        local available
+        available=$(tmux list-sessions -F '#{session_name}')
+        if [[ -z "$available" ]]; then
+            die "no tmux sessions found"
+        fi
+        local selected
+        selected=$(echo "$available" | fzf --multi --prompt="select sessions to group> " --header="TAB to multi-select, ENTER to confirm") || exit 0
+        mapfile -t sessions <<< "$selected"
+    fi
+
+    if [[ ${#sessions[@]} -lt 2 ]]; then
+        die "need at least 2 sessions to group (got ${#sessions[@]})"
+    fi
+
+    # Validate all sessions exist
+    for s in "${sessions[@]}"; do
+        tmux has-session -t "$s" 2>/dev/null || die "session '$s' not found"
+    done
+
+    # Use the first session as the base — rename it to dev
+    local base="${sessions[0]}"
+    if [[ "$base" != "$SESSION_NAME" ]]; then
+        if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+            die "session '$SESSION_NAME' already exists and isn't one of the selected sessions"
+        fi
+        tmux rename-session -t "$base" "$SESSION_NAME"
+    fi
+
+    # Rename the base session's windows to match the original session name
+    # (only if the session had a single window — multi-window sessions keep their window names)
+    local base_win_count
+    base_win_count=$(tmux list-windows -t "$SESSION_NAME" | wc -l)
+    if [[ $base_win_count -eq 1 ]]; then
+        tmux rename-window -t "$SESSION_NAME" "$base"
+    fi
+
+    echo "  $base (base)"
+
+    # Move windows from remaining sessions into dev
+    for ((i = 1; i < ${#sessions[@]}; i++)); do
+        local s="${sessions[$i]}"
+        local win_count
+        win_count=$(tmux list-windows -t "$s" | wc -l)
+
+        if [[ $win_count -eq 1 ]]; then
+            # Single window — rename it to the session name before moving
+            tmux rename-window -t "$s" "$s"
+        fi
+
+        # Move all windows from this session into dev
+        while tmux has-session -t "$s" 2>/dev/null; do
+            local first_idx
+            first_idx=$(tmux list-windows -t "$s" -F '#{window_index}' | head -1)
+            tmux move-window -s "$s:$first_idx" -t "$SESSION_NAME:"
+        done
+
+        echo "  $s"
+    done
+
+    echo "grouped ${#sessions[@]} sessions → '$SESSION_NAME'"
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+    ungroup) shift; cmd_ungroup "$@" ;;
+    group)   shift; cmd_group "$@" ;;
+    -h|--help|help)
+        echo "usage: tmux-dev-group <group|ungroup> [args...]"
+        echo ""
+        echo "  group [session...]   merge sessions into '$SESSION_NAME' (fzf if no args)"
+        echo "  ungroup [session]    split windows into separate sessions (default: '$SESSION_NAME')"
+        echo ""
+        echo "Set TMUX_DEV_GROUP_NAME to change the target session name (default: dev)"
+        ;;
+    *)  die "usage: tmux-dev-group <group|ungroup> [args...]" ;;
+esac
