@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "keybinds": {
+    "messages_first": "ctrl+g,ctrl+home",
+    "messages_last": "ctrl+alt+g,ctrl+end"
+  },
+  "plugin": [
+    "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.4.0/sjawhar-opencode-anthropic-auth-0.4.0.tgz"
+  ]
+}

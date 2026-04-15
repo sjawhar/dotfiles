@@ -4,7 +4,7 @@
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
   "permissions": {
-    "defaultMode": "plan"
+    "defaultMode": "auto"
   },
   "model": "opus[1m]",
   "hooks": {
@@ -22,7 +22,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/hooks/statusline.sh"
+    "command": "~/.dotfiles/.claude/hooks/statusline.sh"
   },
   "enabledPlugins": {
     "ralph-loop@claude-plugins-official": true,
@@ -33,5 +33,6 @@
     "typescript-lsp@claude-plugins-official": true,
     "skill-creator@claude-plugins-official": true
   },
-  "skipDangerousModePermissionPrompt": true
+  "skipDangerousModePermissionPrompt": true,
+  "skipAutoPermissionPrompt": true
 }
