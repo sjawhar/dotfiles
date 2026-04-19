@@ -119,6 +119,9 @@
   "disabled_tools": [],
   "hashline_edit": true,
   "runtime_fallback": true,
+  "team_mode": {
+    "enabled": true
+  },
   "tmux": {
     "enabled": true,
     "layout": "main-vertical",

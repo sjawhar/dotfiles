@@ -73,6 +73,8 @@ If you see a cleaner alternative:
 - **Don't deviate from existing patterns without explicit approval**
 - Consistency with existing code takes priority unless the user agrees to change it
 
+**Comments describe current behavior, not history.** Don't narrate "this used to do X before PR #NNN" or leave novellas explaining what was changed. git/jj history is for that. If the comment is longer than the code it documents, it's probably wrong-shaped.
+
 ### Simplicity First (YAGNI)
 
 Default to the simplest change that fully solves the user's request.
@@ -84,21 +86,63 @@ Default to the simplest change that fully solves the user's request.
 
 Do required adjacent cleanup caused by your change, but do not expand scope without approval.
 
-### Do The Work
+### Do The Work — No Deferrals
 
-**Never defer work that falls within your task.** Deferral is not a safe choice — it is a failure to do your job.
+**There is no "out of scope" except what the user explicitly scoped out.** Deferral is not a safe choice — it is a failure to do your job.
 
-- **Don't mark items as "out of scope" unless the user explicitly scoped them out.** If the user asked you to do X and doing X well requires also touching Y, then Y is in scope.
-- **Don't propose "follow-up tasks" for work you can do now.** If you can fix it in this session, fix it. Filing an issue or leaving a TODO is not a substitute for doing the work.
+When you discover an adjacent issue while working on a task, the binary is:
+1. **It's something we'll fix** → fix it now, in this PR/session.
+2. **It's something we won't fix** → name it explicitly with reasoning, and confirm with the user.
+
+There is no third option called "follow-up," "backlog," "separate plan," or "out of scope." These are all forms of deferral and are forbidden by default.
+
+Specifically:
+- **Don't propose follow-up tasks for work you can do now.** If you can fix it in this session, fix it.
+- **Don't file a GitHub issue for deferred work without asking the user first.** Filing an issue is a form of deferral. Ask before filing; don't file unilaterally as a way to feel productive about not-doing.
+- **Don't open another PR while the current task's PR is still open.** Bundle into the existing PR. If the work is genuinely independent, ask first — don't split unilaterally.
 - **Don't defer to future sessions, future PRs, or future agents.** The next session won't have your context. Do it now.
 - **Don't suggest "we could also..." without doing it.** If you identified it and it's related to your task, just do it.
 
 The only legitimate reasons to defer:
-1. The user explicitly said "not now" or "out of scope"
+1. The user explicitly said "not now," "out of scope," or "defer X"
 2. The work requires credentials, permissions, or access you don't have
 3. The work would take the task in a fundamentally different direction that needs user input
 
-When asked to file an issue for deferred work, do it immediately — before continuing with remaining tasks. Don't defer the filing itself.
+If the user genuinely says "file an issue for X" — file it immediately, before continuing remaining work. Don't defer the filing itself.
+
+### Authorized Work — Just Do It
+
+When the user has already authorized a task, **do not re-ask for permission to do that task.** This includes routine adjacent actions:
+- Pushing branches, opening PRs, running tests, running smoke checks, polling long-running jobs
+- Following the standard happy path (no `--no-verify`, no "should I bypass", no "should I skip")
+- Verifying your own work before reporting it as complete
+
+If the user said "do X" and Y is required to complete X, do Y too — don't ask first.
+
+Only block on the user when:
+1. The action is destructive (per `Destructive Actions Prohibited`)
+2. You've hit a true ambiguity in the goal that you cannot resolve from context
+3. The user has explicitly said "ask before X"
+
+### Don't Idle-Wait
+
+**Don't go idle waiting for events, and don't push the wait onto the user.** If you need to wait for something:
+
+- Set up a real watcher: background polling task, CI hook, file watcher, event subscription, or `bg_*` job.
+- Then continue with productive work — do not just sleep, idle, or "check back in a bit."
+- Don't ask the user to "ping me when you want an update" or "let me know when X finishes." That's pushing the wait onto them. Either set up your own watcher, or end your response.
+- If you have nothing else to do, say so explicitly and end your response — the watcher will wake you.
+
+Phrases like "I'll wait a moment then check" or "let me come back to this in N minutes" without an actual watcher mean you'll go idle and never be notified. Don't pretend.
+
+### Don't Assign Work to the User
+
+When you find work that requires user-only access (global config, credentials, account state), present it as **information** and **propose options**. Do not phrase it as "you need to do X."
+
+- ❌ "You'll need to update global nvm before I can continue."
+- ✅ "Global nvm is on v18 but this needs v20. I can use a directory-local `.nvmrc` instead — want me to try that?"
+
+**You don't give the user work.** When stuck, propose paths forward; don't hand the user a TODO list.
 
 ### No Excuses
 
@@ -110,6 +154,9 @@ Forbidden excuse patterns:
 - "not a crash" used to argue wording over behavior
 - "we didn't introduce this" used to avoid ownership
 - "just take main's version" used to justify risky shortcuts
+- "that PR/branch/workspace belongs to me" used to avoid touching artifacts you created
+
+**Note on account ownership:** the user is Sami/sjawhar; **all** AI work appears under his accounts or the Legion bot. An artifact "belonging to you" is not a reason to treat it as someone else's. If the work is in scope, do it regardless of which account it's attached to.
 
 If you identify one of these facts, pair it with a remediation path now.
 
@@ -124,9 +171,10 @@ Before claiming work is complete or suggesting next steps:
 4. If blocked, propose a workaround — don't reclassify the blocker as "out of scope"
 
 **No completion claims without fresh end-to-end verification.**
-- Unit tests and mocks are useful but are not acceptance by themselves
-- End-to-end means observable behavior changed in the way the user asked
-- If you cannot run the final verification, say that explicitly and state what remains unverified
+- Unit tests and mocks are useful groundwork but are **not acceptance by themselves**.
+- "Tests passing" ≠ "feature works." "Build green" ≠ "shipped." "Lints clean" ≠ "correct."
+- End-to-end means observable behavior changed in the way the user asked — verified by running the artifact through the right tool for its surface (TUI → tmux session, web → real browser, HTTP API → curl, library → driver script).
+- If you cannot run the final verification, say that explicitly and state what remains unverified — don't imply success.
 
 ### Claims Require Evidence
 
@@ -135,6 +183,13 @@ Never present technical claims as facts without verification.
 - "works", "fixed", "passing", "configured", "safe" require evidence
 - If unverified, label it as a hypothesis and verify next
 - Prefer command output, reproducible steps, or concrete traces over assertion
+
+**No defensive guards around build invariants.** If a directory, file, env var, or module *should* exist after a build/setup step, do NOT add runtime existence checks (`if dir.exists()`, `[ -d X ] && ...`, `try: import x; except: pass`). Either the build is wrong (fix the build) or the assumption is wrong (fix the caller). Runtime guards convert build bugs into silent runtime bugs. Crash loud, fix at root.
+
+**No silent fallbacks.** When code can fail, surface the failure. When behavior is implicit, make it explicit.
+- If input doesn't match an expected schema (typo in env name, unknown filename), error loudly. Do not silently ignore.
+- When you find a silent fallback while working, treat it as a bug and fix it (not "out of scope").
+- When implicit behavior is unavoidable, document it.
 
 **Red Flags — if you're thinking any of these, STOP:**
 
