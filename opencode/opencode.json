@@ -10,7 +10,8 @@
     "@sjawhar/opencode-legion-envoy@latest",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "superpowers@git+https://github.com/obra/superpowers.git#v5.0.7",
-    "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.4.0/sjawhar-opencode-anthropic-auth-0.4.0.tgz"
+    "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.4.2/sjawhar-opencode-anthropic-auth-0.4.2.tgz",
+    "file://{env:HOME}/.dotfiles/opencode/plugins/dotfiles-bridge.ts"
   ],
   "provider": {
     "anthropic": {
@@ -282,19 +283,15 @@
       "type": "remote",
       "url": "https://mcp.context7.com/mcp",
       "enabled": true
+    },
+    "ceramic": {
+      "type": "remote",
+      "url": "https://mcp.ceramic.ai/mcp",
+      "enabled": true
     }
   },
   "autoupdate": false,
   "experimental": {
     "disable_paste_summary": true
-  },
-  "voice": {
-    "type": "whisper",
-    "whisper": {
-      "apiKey": "{env:GROQ_API_KEY}",
-      "url": "https://api.groq.com/openai/v1/audio/transcriptions",
-      "model": "whisper-large-v3-turbo",
-      "language": "en"
-    }
   }
 }

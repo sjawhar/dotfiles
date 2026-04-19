@@ -5,6 +5,6 @@
     "messages_last": "ctrl+alt+g,ctrl+end"
   },
   "plugin": [
-    "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.4.0/sjawhar-opencode-anthropic-auth-0.4.0.tgz"
+    "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.4.2/sjawhar-opencode-anthropic-auth-0.4.2.tgz"
   ]
 }
