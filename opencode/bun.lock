@@ -5,7 +5,7 @@
     "": {
       "name": "dotfiles-opencode-plugins",
       "dependencies": {
-        "@sjawhar/opencode-claude-bridge": "^0.1.0",
+        "@sjawhar/opencode-claude-bridge": "latest",
       },
     },
   },
@@ -26,7 +26,7 @@
 
     "@opencode-ai/sdk": ["@opencode-ai/sdk@1.14.19", "", { "dependencies": { "cross-spawn": "7.0.6" } }, "sha512-9sTGsi8/HlBBeaWfsUjdJ2yi/SqpRvqSld0IFXc3ldaPb1w1uIPvgCGzhlHYQtqatXxSaX5lTN7zpudMaE21aw=="],
 
-    "@sjawhar/opencode-claude-bridge": ["@sjawhar/opencode-claude-bridge@0.1.0", "", { "dependencies": { "@opencode-ai/plugin": "^1.1.19" } }, "sha512-yRT9M/nIcpl2IvJ5B+gv98fj7RQLyVkahFdrLxu5KS4bROmDIzF9RIVhuVtu0t3IQMf/KNx834HIoMKCAzLtJQ=="],
+    "@sjawhar/opencode-claude-bridge": ["@sjawhar/opencode-claude-bridge@0.2.0", "", { "dependencies": { "@opencode-ai/plugin": "^1.1.19", "yaml": "^2.8.3" } }, "sha512-hEA1/dWuoOk9SiT3+9NALNbHQG9LWkN10W6dmWiLs6xOckhtDcGFhPhwbiTb8TgsW+MJTk6P6mBsbjgcpOrcqA=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
