@@ -110,7 +110,8 @@
     "rules-injector",
     "ralph-loop",
     "tasks-todowrite-disabler",
-    "auto-slash-command"
+    "auto-slash-command",
+    "todo-continuation-enforcer"
   ],
   "disabled_commands": [],
   "disabled_mcps": [],

@@ -1,0 +1,7 @@
+{
+  "name": "dotfiles-opencode-plugins",
+  "private": true,
+  "dependencies": {
+    "@sjawhar/opencode-claude-bridge": "^0.1.0"
+  }
+}

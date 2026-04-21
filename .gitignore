@@ -33,3 +33,4 @@ vendor/
 plugins/sjawhar/skills/overseer-workspace/
 .opencode/skills/fork-maintenance-skill-*/
 plugins/sjawhar/skills/*-workspace/
+opencode/node_modules/
