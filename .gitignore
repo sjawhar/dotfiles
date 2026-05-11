@@ -21,8 +21,8 @@ vendor/
 !.claude/project-instructions/
 !.claude/settings.json
 
-# Claude Code account pool (OAuth tokens — must not be committed)
 /.claude-oauth/
+/.opencode-profiles/
 
 .sisyphus/
 .tmux-workspace/

@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# oco: OpenCode profile launcher.
+#
+# Runs `oc` against a profile data directory that mostly mirrors the canonical
+# XDG_DATA_HOME/opencode dir via symlinks, EXCEPT for the auth files — those
+# are real files unique to the profile. Each profile is therefore a different
+# set of credentials over the same shared sessions, plans, worktrees, etc.
+#
+# Subcommands:
+#   oco                   — launch oc against the default XDG location (no profile)
+#   oco ls                — list profiles
+#   oco NAME [args...]    — launch oc with profile NAME (creates it if missing)
+#   oco rm NAME           — delete profile NAME (requires confirmation)
+#
+# Layout (profile dir is ${DOTFILES_DIR:-$HOME/.dotfiles}/.opencode-profiles/<NAME>):
+#   data/opencode/auth.json, mcp-auth.json, anthropic-pool.*
+#       — real files, profile-specific
+#   data/opencode/<anything else in canonical XDG_DATA_HOME/opencode>
+#       — symlinks back to the canonical entry, resynced on each launch
+set -euo pipefail
+
+POOL_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}/.opencode-profiles"
+
+usage() {
+    cat >&2 <<'USAGE'
+usage: oco                  — launch oc at the default XDG location (no profile)
+       oco ls               — list profiles
+       oco NAME [args...]   — launch oc with profile NAME (creates it on first use)
+       oco rm NAME          — delete profile NAME
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: list (default with no args)
+# ---------------------------------------------------------------------------
+list_profiles() {
+    if [ ! -d "$POOL_DIR" ]; then
+        echo "No profiles yet. Try: oco <name>"
+        return
+    fi
+    local rows='' d name has_auth size
+    for d in "$POOL_DIR"/*/; do
+        [ -d "$d" ] || continue
+        name=$(basename "$d")
+        if [ -f "$d/data/opencode/auth.json" ]; then
+            has_auth=yes
+        else
+            has_auth=no
+        fi
+        size=$(du -sh "$d" 2>/dev/null | cut -f1)
+        rows+=$(printf '%s\t%s\t%s\n' "$name" "$has_auth" "$size")$'\n'
+    done
+    if [ -z "$rows" ]; then
+        echo "No profiles in $POOL_DIR"
+        return
+    fi
+    {
+        printf 'NAME\tAUTH\tSIZE\n'
+        printf '%s' "$rows"
+    } | column -t -s $'\t'
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: rm
+# ---------------------------------------------------------------------------
+rm_profile() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        echo "oco rm: missing profile name" >&2
+        return 1
+    fi
+    local dir="$POOL_DIR/$name"
+    if [ ! -d "$dir" ]; then
+        echo "oco rm: no such profile: $name" >&2
+        return 1
+    fi
+    printf 'Delete profile "%s" at %s? [y/N] ' "$name" "$dir"
+    local reply
+    read -r reply
+    case "$reply" in
+        y|Y|yes|YES) rm -rf -- "$dir"; echo "Deleted $name" ;;
+        *) echo "Aborted" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+    "")
+        # No args: launch oc with default XDG paths (no profile).
+        exec "$(dirname "$0")/oc"
+        ;;
+    -h|--help|help)
+        usage
+        exit 0
+        ;;
+    ls|list)
+        list_profiles
+        exit 0
+        ;;
+    rm)
+        shift
+        rm_profile "$@"
+        exit
+        ;;
+esac
+
+# Validate profile name (alnum, dash, underscore, dot — keep it filesystem-safe).
+NAME="$1"
+shift
+if ! [[ "$NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "oco: invalid profile name: $NAME" >&2
+    echo "      use letters, digits, '.', '-', '_'" >&2
+    exit 1
+fi
+
+PROFILE_ROOT="$POOL_DIR/$NAME"
+PROFILE_DATA="$PROFILE_ROOT/data/opencode"
+mkdir -p "$PROFILE_DATA"
+
+# Sync symlinks from canonical XDG_DATA_HOME/opencode into the profile dir.
+# Auth files in AUTH_FILES are skipped so each profile keeps its own creds.
+# Anything already present in the profile (real file or existing symlink) is
+# left alone, so opencode-created profile-local files survive.
+CANONICAL_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+mkdir -p "$CANONICAL_DATA"
+AUTH_FILES=(auth.json mcp-auth.json anthropic-pool.db anthropic-pool.db-shm anthropic-pool.db-wal anthropic-pool.log)
+is_auth_file() {
+    local n="$1" a
+    for a in "${AUTH_FILES[@]}"; do
+        [ "$n" = "$a" ] && return 0
+    done
+    return 1
+}
+for entry in "$CANONICAL_DATA"/*; do
+    [ -e "$entry" ] || continue
+    name=$(basename "$entry")
+    is_auth_file "$name" && continue
+    # Skip SQLite runtime artifacts: realpath resolution means SQLite creates
+    # -shm/-wal next to the canonical DB anyway; profile-side symlinks would
+    # be vestigial.
+    case "$name" in *-shm|*-wal|*-journal) continue ;; esac
+    target="$PROFILE_DATA/$name"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        continue
+    fi
+    ln -s "$entry" "$target"
+done
+
+export XDG_DATA_HOME="$PROFILE_ROOT/data"
+
+# Surface profile in env in case downstream tools want it (e.g. shell prompts).
+export OPENCODE_PROFILE="$NAME"
+
+exec "$(dirname "$0")/oc" "$@"
