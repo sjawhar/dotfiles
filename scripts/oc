@@ -91,6 +91,7 @@ esac
 
 # Add oh-my-opencode plugin for interactive use
 export OPENCODE_CONFIG_CONTENT='{"plugin":["@sjawhar/oh-my-opencode@sami"]}'
+# export OPENCODE_CONFIG_CONTENT='{"plugin":["file://${HOME}/oh-my-opencode/original"]}'
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
 # Agents authenticate via per-repo routing (sjawhar/* uses legion-personal
