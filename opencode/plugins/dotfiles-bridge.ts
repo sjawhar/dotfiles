@@ -9,6 +9,7 @@ export const DotfilesBridge = createClaudeBridge({
     { dir: path.join(DF, "plugins/sjawhar"), namespace: "sjawhar" },
     { dir: path.join(DF, "vendor/legion/.opencode"), namespace: "legion" },
     { dir: path.join(DF, "vendor/sentry-for-ai"), namespace: "sentry" },
+    { dir: path.join(DF, "vendor/claude-ai-music-skills"), namespace: "music" },
     { dir: path.join(DF, "vendor/ghost-wispr/.opencode"), namespace: "wispr" },
   ],
 });

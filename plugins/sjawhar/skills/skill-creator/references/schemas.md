@@ -140,11 +140,11 @@ Output from the grader agent. Located at `<run-dir>/grading.json`.
   "eval_feedback": {
     "suggestions": [
       {
-        "assertion": "The output includes the name 'John Smith'",
+        "expectation": "The output includes the name 'John Smith'",
         "reason": "A hallucinated document that mentions the name would also pass"
       }
     ],
-    "overall": "Assertions check presence but not correctness."
+    "overall": "Expectations check presence but not correctness."
   }
 }
 ```
@@ -277,7 +277,7 @@ Output from Benchmark mode. Located at `benchmarks/<timestamp>/benchmark.json`.
   },
 
   "notes": [
-    "Assertion 'Output is a PDF file' passes 100% in both configurations - may not differentiate skill value",
+    "Expectation 'Output is a PDF file' passes 100% in both configurations - may not differentiate skill value",
     "Eval 3 shows high variance (50% ± 40%) - may be flaky or model-dependent",
     "Without-skill runs consistently fail on table extraction expectations",
     "Skill adds 13s average execution time but improves pass rate by 50%"
