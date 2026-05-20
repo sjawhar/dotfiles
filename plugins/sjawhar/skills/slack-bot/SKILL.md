@@ -42,7 +42,7 @@ skill_mcp(mcp_name="slack", tool_name="conversations_history", arguments='{"chan
 
 skill_mcp(mcp_name="slack", tool_name="conversations_search_messages", arguments='{"search_query": "deploy", "filter_in_channel": "#engineering"}')
 
-skill_mcp(mcp_name="slack", tool_name="conversations_add_message", arguments='{"channel_id": "#general", "payload": "Hello from the bot!", "content_type": "text/plain"}')
+skill_mcp(mcp_name="slack", tool_name="conversations_add_message", arguments='{"channel_id": "#general", "text": "Hello from the bot!", "content_type": "text/plain"}')
 ```
 
 ## History Limits
@@ -51,13 +51,65 @@ The `limit` param on history/replies accepts time ranges (`1d`, `1w`, `30d`, `90
 
 ## Formatting Messages
 
-`conversations_add_message` with `content_type: "text/plain"` renders Slack mrkdwn correctly (`*bold*`, `` `code` ``, `_italic_`, `<url|text>` links, `~strike~`). The tool's response text appears stripped, but the actual Slack message renders formatting fine. Use this for all messages.
+`conversations_add_message` accepts three rendering paths. **Default to `blocks` for anything with structure** (lists, sections, mixed bold/links). Plain `text` is fine for one-liners; `content_type: "text/markdown"` is a trap for non-trivial messages — see below.
 
-Slack mrkdwn differs from markdown: `*bold*` (not `**bold**`), `_italic_`, `~strike~`, `<url|text>` for links. No heading syntax.
+Slack mrkdwn syntax (used inside text and inside `rich_text` element `text` fields): `*bold*` (not `**bold**`), `_italic_`, `~strike~`, `` `code` ``, `<url|text>` for links. No heading syntax.
 
-**Avoid Block Kit `section` blocks** — they cause 80-character word wrapping. If you need Block Kit (headers, dividers, context footers), use `header`, `divider`, and `context` blocks only.
+### Path 1 — Block Kit `blocks` parameter (preferred for structured messages)
 
-Use `conversations_search_messages` or the Slack API `conversations.list` to find channel IDs when `#channel-name` lookup fails (common with Slack Connect / Enterprise Grid channels).
+Requires **slack-mcp-server v1.3.0+** ([release notes](https://github.com/korotovsky/slack-mcp-server/releases/tag/v1.3.0), PR [#294](https://github.com/korotovsky/slack-mcp-server/pull/294)). The MCP tool accepts a `blocks` parameter (JSON-stringified Block Kit array). When supplied, the server bypasses the markdown converter entirely and posts the blocks as-is; `text` becomes the notification fallback only.
+
+Use **one `rich_text` block** containing a mix of `rich_text_section` (for headers and paragraphs) and `rich_text_list` (for bulleted lists). Each indent level is its OWN `rich_text_list` block placed directly after its parent — Slack does not support nested-list-inside-list.
+
+```
+skill_mcp(mcp_name="slack", tool_name="conversations_add_message", arguments='{
+  "channel_id": "C...",
+  "text": "Standup - Fri May 22",
+  "blocks": "[{\"type\":\"rich_text\",\"elements\":[ ... ]}]"
+}')
+```
+
+Element reference inside `rich_text`:
+
+| Element | Purpose | Key fields |
+|---------|---------|-----------|
+| `rich_text_section` | Header line, section label, or free-form paragraph | `elements` array of `text` / `link` / `emoji` |
+| `rich_text_list` | Bulleted (or ordered) list at a single indent level | `style`: `bullet` or `ordered`, `indent`: 0/1/2, `elements`: array of `rich_text_section` (one per bullet) |
+| `text` | Plain text run | `text` string, optional `style: {bold, italic, code, strike}` |
+| `link` | Hyperlink | `url`, `text` (display label) |
+| `emoji` | Emoji shortcode | `name` (e.g. `"musical_note"`) |
+
+Section transitions (`*Yesterday*` → `*Today*`) are a `rich_text_section` with `\n`, bold label, `\n`. No literal `•` / `◦` characters — Slack renders the bullets from the list structure.
+
+### Path 2 — Plain text + Slack mrkdwn
+
+```
+skill_mcp(mcp_name="slack", tool_name="conversations_add_message", arguments='{"channel_id": "#general", "text": "Quick note: *deploy* ready in <https://example.com|staging>", "content_type": "text/plain"}')
+```
+
+Fine for short messages with light formatting. For lists, literal `•` / `◦` characters render visually but produce no semantic list structure (breaks copy/paste, accessibility, search) — use `blocks` instead.
+
+### Path 3 — `content_type: "text/markdown"` (AVOID for structured messages)
+
+The server converts markdown via `takara2314/slack-go-util` (uses goldmark). Each top-level markdown element becomes its own Slack block:
+
+| Markdown | Resulting block | Issue |
+|----------|----------------|-------|
+| `# Heading` | `HeaderBlock` (plain_text) | Loses inline formatting |
+| `**bold paragraph**` | `SectionBlock` (mrkdwn) | Causes 80-character word wrapping |
+| `- bullet` | `RichTextBlock` containing `RichTextList` | OK in isolation |
+| `  - nested` (2-space indent) | Same `RichTextBlock`, `indent: 1` | **Must be 2 spaces, not 4** (4 spaces = code block per CommonMark) |
+
+Result: a message with section + heading + paragraph + list becomes 4+ separate blocks. Bold section labels render as standalone `section` blocks (80-char wrap). There is no merge path to a single `rich_text` block. Use Path 1 instead.
+
+## Inspecting message structure
+
+The MCP `conversations_history` response strips Block Kit structure to a flat text representation. To see the actual block JSON (for replicating a hand-edited message), use Slack's API directly — this is debug-only, not the send path:
+
+```bash
+secrets SLACK_MCP_XOXP_TOKEN -- sh -c 'curl -s "https://slack.com/api/conversations.history?channel=$CH&latest=$TS&oldest=$TS&inclusive=true&limit=1" -H "Authorization: Bearer $SLACK_MCP_XOXP_TOKEN"' \
+  | jq '.messages[0].blocks'
+```
 
 To delete a message:
 ```bash
