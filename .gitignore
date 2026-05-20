@@ -25,6 +25,7 @@ vendor/
 /.opencode-profiles/
 
 .sisyphus/
+.omo/
 .tmux-workspace/
 
 /ignore
