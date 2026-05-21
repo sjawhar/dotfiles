@@ -119,6 +119,9 @@
   "disabled_tools": [],
   "hashline_edit": true,
   "runtime_fallback": true,
+  "keyword_detector": {
+    "disabled_keywords": ["team"]
+  },
   "team_mode": {
     "enabled": true
   },
