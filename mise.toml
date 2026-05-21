@@ -39,3 +39,5 @@ awscli = "2.33.2"   # AWS command-line interface
 age = "1.3.1"       # Modern file encryption (for sops)
 sops = "3.11.0"     # Encrypted secrets management (sops + age)
 cmake = "4.3.0"
+go = "1.24.0"
+actionlint = "latest"
