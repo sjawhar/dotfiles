@@ -1,6 +1,6 @@
 config:
   envoy:registry: ghcr.io/sjawhar/legion
-  envoy:imageTag: 23fb96ff3c91d45f642844923da2ff743d4a9181
+  envoy:imageTag: 5ec59f65d9d403ca0201e42897f9e3cc3e236536
   envoy:machines:
     # On-prem listeners are stateless NATS subscribers. They connect outbound
     # to the AWS Fargate `envoy-nats` over the host's existing Tailscale.
@@ -18,15 +18,14 @@ config:
       sshHost: "ssh://claude@sami-claude"
       machineId: sami-claude
       listener: {}
-      # ghost-wispr: currently offline (last seen >4d ago). Re-add when online.
-      # When re-adding, the ghostwispr webhook handler runs on this host because
-      # the Ghost Wispr app POSTs to its local listener at 127.0.0.1:9020.
-      # - name: ghost-wispr
-      #   sshHost: "ssh://ghost-wispr@ghost-wispr"
-      #   machineId: ghost-wispr
-      #   listener:
-      #     webhooks:
-      #       ghostwispr: true
+    # ghost-wispr serves the ghostwispr webhook on its local listener
+    # (the Ghost Wispr app POSTs to 127.0.0.1:9020).
+    - name: ghost-wispr
+      sshHost: "ssh://ghost-wispr@ghost-wispr"
+      machineId: ghost-wispr
+      listener:
+        webhooks:
+          ghostwispr: true
   envoy:githubWebhookSecret:
     secure: v1:DHpfNE2vubEaxKtd:sDJqUeZA3l2UW4w4NGRLEHKUvLraLygVoWB9MaqagpRBL8lAN5U1tjmZSBNj1COepP3AKYV+OwY=
   envoy:slackSigningSecret:
