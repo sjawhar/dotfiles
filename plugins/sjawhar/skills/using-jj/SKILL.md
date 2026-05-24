@@ -414,6 +414,16 @@ If you already described `@` and need to squash:
 
 But the real fix is to not get into this state — see "Modifying Existing Changes" above.
 
+### `jj split` opens an interactive TUI by default
+
+`jj split` with no arguments opens an interactive TUI to choose which changes go into the new commit. **This times out in agent bash sessions.**
+
+To split non-interactively, pass file paths or a revset:
+- `jj split <path> [<path>...]` — move named files into the first commit
+- `jj split -r <rev> <path>` — split a specific revision
+
+Per the global `Commits` AGENTS.md rule, prefer not splitting at all — one commit per PR is the default.
+
 ### `jj diff` in non-TTY / agent contexts
 
 Standard `jj diff` uses **word-level diffs** that concatenate old and new text without ANSI color codes in non-TTY output. This makes diffs unreadable — e.g. `my-org/aboreturn-value` is actually `[deleted:ab][added:return-value]` rendered without color.

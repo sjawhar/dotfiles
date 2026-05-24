@@ -98,7 +98,7 @@ There is no third option called "follow-up," "backlog," "separate plan," or "out
 
 Specifically:
 - **Don't propose follow-up tasks for work you can do now.** If you can fix it in this session, fix it.
-- **Don't file a GitHub issue for deferred work without asking the user first.** Filing an issue is a form of deferral. Ask before filing; don't file unilaterally as a way to feel productive about not-doing.
+- **Don't file a GitHub issue for work you're not fixing in this PR.** Filing ≠ fixing. Work isn't "dealt with" until the actual fix lands. If the user explicitly asks you to file an issue, do it — but never as a substitute for fixing the thing yourself.
 - **Don't open another PR while the current task's PR is still open.** Bundle into the existing PR. If the work is genuinely independent, ask first — don't split unilaterally.
 - **Don't defer to future sessions, future PRs, or future agents.** The next session won't have your context. Do it now.
 - **Don't suggest "we could also..." without doing it.** If you identified it and it's related to your task, just do it.
@@ -124,16 +124,13 @@ Only block on the user when:
 2. You've hit a true ambiguity in the goal that you cannot resolve from context
 3. The user has explicitly said "ask before X"
 
-### Don't Idle-Wait
+### Don't Outsource the Wait
 
-**Don't go idle waiting for events, and don't push the wait onto the user.** If you need to wait for something:
+**Your default is to keep working.** When async work is in flight, do non-overlapping productive work in the same context — investigate adjacent problems, read failing logs, prep follow-on commits. "Wait" is a failure state, not a default.
 
-- Set up a real watcher: background polling task, CI hook, file watcher, event subscription, or `bg_*` job.
-- Then continue with productive work — do not just sleep, idle, or "check back in a bit."
-- Don't ask the user to "ping me when you want an update" or "let me know when X finishes." That's pushing the wait onto them. Either set up your own watcher, or end your response.
-- If you have nothing else to do, say so explicitly and end your response — the watcher will wake you.
+If you must wait, set up an actual wake mechanism (envoy/github topic subscription, file watcher, polling subagent, tmux poller, `bg_*` job) **and verify it works before stopping** — confirm the process is running, tokens are valid, the first signal arrived. "I dispatched a watcher" ≠ "a watcher will wake me." Set it up, then prove it works.
 
-Phrases like "I'll wait a moment then check" or "let me come back to this in N minutes" without an actual watcher mean you'll go idle and never be notified. Don't pretend.
+Don't push the wait onto the user. "ping me when X" / "let me know when Y" / "sami is the watcher" — the user is not infrastructure.
 
 ### Don't Assign Work to the User
 
@@ -238,6 +235,12 @@ The rule: **Do everything the task requires — including necessary adjacent wor
 ### Working Copy
 
 Never revert or undo changes in the working copy unless explicitly asked. When continuing work on an existing branch, preserve all prior changes.
+
+### Commits
+
+Default to one commit per PR. **Do not split work into multiple commits unless the user explicitly asks.** Do not stop to ask "one commit or two?" and do not run `jj split` to separate doc edits / refactors / etc. — keep working. One tidy commit beats N commits that need rebasing.
+
+**This overrides any skill that prescribes commit-per-step / commit-per-phase workflows** (e.g. superpowers' "commit after each TDD cycle" guidance). Those workflows produce 30-commit chains that are a pain to rebase. If a skill says commit-after-each-step, ignore the commit step — do the work, don't ceremonialize history.
 
 ## Compact Instructions
 When compacting, preserve:
