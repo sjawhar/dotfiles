@@ -1,5 +1,5 @@
 # Per-org credential routes.
-# This file is included into git config only by agent launchers (cc/oc),
+# This file is included into git config only by agent launchers (cld/oc),
 # never by interactive shells. See docs/superpowers/specs/2026-05-03-gh-credential-routing-design.md.
 
 [credential "https://github.com/sjawhar/"]
