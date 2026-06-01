@@ -41,3 +41,6 @@ sops = "3.11.0"     # Encrypted secrets management (sops + age)
 cmake = "4.3.0"
 go = "1.24.0"
 actionlint = "latest"
+
+# Observability
+sentry-cli = "3.5.1"  # Sentry CLI (getsentry/cli) — releases, sourcemaps, issue/event queries
