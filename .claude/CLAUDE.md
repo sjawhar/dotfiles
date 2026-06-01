@@ -236,7 +236,7 @@ The rule: **Do everything the task requires — including necessary adjacent wor
 
 ### Working Copy
 
-Never revert or undo changes in the working copy unless explicitly asked. When continuing work on an existing branch, preserve all prior changes.
+Never revert or undo *unrecognized* changes in the working copy without first investigating their provenance and getting approval — they may be in-progress work from the user or another agent. Changes you made yourself, or whose purpose you've investigated and confirmed, can be reverted as part of the task without a separate ask. When continuing work on an existing branch, preserve all prior changes you can't account for.
 
 ### Commits
 
