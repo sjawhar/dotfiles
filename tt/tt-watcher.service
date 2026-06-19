@@ -1,0 +1,24 @@
+# Systemd user service for the tt COSMIC window/idle watcher.
+#
+# Invokes the wrapper at ~/.dotfiles/tt/tt-watcher which dispatches via
+# `mise exec` — never references mise's internal install paths directly,
+# so version bumps stay transparent.
+#
+# Companion symlink:
+#   ~/.config/systemd/user/tt-watcher.service -> this file
+
+[Unit]
+Description=tt COSMIC window/idle activity watcher
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Let WAYLAND_DISPLAY / DBus env import finish on session start.
+ExecStartPre=/bin/sleep 5
+ExecStart=%h/.dotfiles/tt/tt-watcher
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

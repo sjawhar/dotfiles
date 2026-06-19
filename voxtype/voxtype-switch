@@ -1,14 +1,38 @@
 #!/bin/bash
-# Switch voxtype between remote (Groq API) and local (Vulkan GPU) transcription.
+# Switch voxtype between Deepgram (cloud streaming), remote (Groq API), and
+# local (Vulkan GPU) transcription.
+#
+# The active backend is selected by the top-level `engine` field:
+#   - engine = "deepgram"  -> Deepgram cloud streaming (buffered paste)
+#   - engine = "whisper"   -> the [whisper] backend, whose `mode` picks
+#                             remote (Groq) vs local (Vulkan GPU)
 set -euo pipefail
 
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/voxtype/config.toml"
 
-current_mode() {
-    grep '^mode = ' "$CONFIG" | head -1 | sed 's/mode = "\(.*\)"/\1/'
+current_engine() {
+    grep '^engine = ' "$CONFIG" | head -1 | sed 's/engine = "\(.*\)"/\1/'
+}
+
+# The [whisper] backend's mode (only meaningful when engine = "whisper").
+current_whisper_mode() {
+    awk '
+        /^\[whisper\]/ { in_whisper = 1; next }
+        /^\[/          { in_whisper = 0 }
+        in_whisper && /^mode = / { sub(/^mode = "/, ""); sub(/"$/, ""); print; exit }
+    ' "$CONFIG"
+}
+
+set_engine() {
+    sed --follow-symlinks -i "s/^engine = \".*\"/engine = \"$1\"/" "$CONFIG"
 }
 
 case "${1:-}" in
+    deepgram)
+        set_engine deepgram
+        systemctl --user restart voxtype
+        echo "Switched to Deepgram (cloud streaming) transcription"
+        ;;
     local)
         # Check model is downloaded
         MODEL_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/models/ggml-large-v3-turbo.bin"
@@ -16,22 +40,29 @@ case "${1:-}" in
             echo "Downloading large-v3-turbo model (~1.6 GB)..."
             voxtype setup --download --model large-v3-turbo
         fi
+        set_engine whisper
         sed --follow-symlinks -i 's/^mode = "remote"/mode = "local"/' "$CONFIG"
         sed --follow-symlinks -i 's/^model = "whisper-large-v3-turbo"/model = "large-v3-turbo"/' "$CONFIG"
         systemctl --user restart voxtype
         echo "Switched to local (Vulkan GPU) transcription"
         ;;
     remote)
+        set_engine whisper
         sed --follow-symlinks -i 's/^mode = "local"/mode = "remote"/' "$CONFIG"
         sed --follow-symlinks -i 's/^model = "large-v3-turbo"/model = "whisper-large-v3-turbo"/' "$CONFIG"
         systemctl --user restart voxtype
         echo "Switched to remote (Groq API) transcription"
         ;;
     "")
-        echo "voxtype backend: $(current_mode)"
+        engine="$(current_engine)"
+        if [ "$engine" = "whisper" ]; then
+            echo "voxtype backend: whisper ($(current_whisper_mode))"
+        else
+            echo "voxtype backend: $engine"
+        fi
         ;;
     *)
-        echo "Usage: voxtype-switch [local|remote]" >&2
+        echo "Usage: voxtype-switch [deepgram|local|remote]" >&2
         exit 1
         ;;
 esac

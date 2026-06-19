@@ -12,6 +12,10 @@ done
 mkdir -p ~/.config/mise
 ensure_link "${DOTFILES_DIR}/mise.toml" ~/.config/mise/config.toml
 
+# Make MISE_DATA_DIR (set in .bashrc) also visible to systemd --user services.
+mkdir -p ~/.config/environment.d
+ensure_link "${DOTFILES_DIR}/mise/mise.conf" ~/.config/environment.d/mise.conf
+
 ensure_command mise "curl -fsSL https://mise.run | MISE_INSTALL_PATH=\"${DOTFILES_DIR}/bin/mise\" sh"
 mise trust ~/.config/mise/config.toml || echo "MISE TRUST FAILED"
 
