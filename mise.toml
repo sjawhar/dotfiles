@@ -6,7 +6,6 @@
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
 "github:sjawhar/opencode" = "latest"
 "github:sjawhar/oh-my-opencode" = "latest"  # Custom fork
-"github:sjawhar/time-tracker" = { version = "latest", exe = "tt" }  # AI-native time tracker CLI
 "npm:@openai/codex" = "0.92.0"  # OpenAI coding agent CLI
 "npm:@googleworkspace/cli" = "0.7.0"  # Google Workspace CLI (Drive, Gmail, Calendar, etc.)
 "github:korotovsky/slack-mcp-server" = "1.3.0"
@@ -44,3 +43,24 @@ actionlint = "latest"
 
 # Observability
 sentry-cli = "3.5.1"  # Sentry CLI (getsentry/cli) — releases, sourcemaps, issue/event queries
+
+# AI-native time tracker — one release publishes two binaries as separate assets:
+#   tt-{arch}-unknown-linux-musl.tar.gz  (CLI, static)
+#   tt-watcher-{arch}-unknown-linux-gnu.tar.gz  (COSMIC daemon, glibc)
+# Use [tool_alias] + per-platform asset_pattern (the documented mise pattern for
+# multiple assets from one release). Distinct aliases give each binary its own
+# install dir; bare "github:sjawhar/time-tracker" entry must NOT coexist or it
+# collides on the install path.
+[tool_alias]
+tt = "github:sjawhar/time-tracker"
+tt-watcher = "github:sjawhar/time-tracker"
+
+[tools.tt]
+version = "latest"
+platforms.linux-x64   = { asset_pattern = "tt-x86_64-unknown-linux-musl.tar.gz" }
+platforms.linux-arm64 = { asset_pattern = "tt-aarch64-unknown-linux-musl.tar.gz" }
+
+[tools.tt-watcher]
+version = "latest"
+platforms.linux-x64   = { asset_pattern = "tt-watcher-x86_64-unknown-linux-gnu.tar.gz" }
+platforms.linux-arm64 = { asset_pattern = "tt-watcher-aarch64-unknown-linux-gnu.tar.gz" }

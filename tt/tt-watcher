@@ -1,0 +1,9 @@
+#!/bin/bash
+# Launch tt-watcher via mise. Uses `mise exec --` (no explicit @version) so
+# mise resolves the version through the config's [tools.tt-watcher] block,
+# instead of re-querying the GitHub backend with @latest (which can pick a
+# stale cached release).
+set -euo pipefail
+
+MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+exec "$MISE" exec -- tt-watcher "$@"
