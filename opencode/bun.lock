@@ -5,7 +5,7 @@
     "": {
       "name": "dotfiles-opencode-plugins",
       "dependencies": {
-        "@sjawhar/opencode-claude-bridge": "^0.5.3",
+        "@sjawhar/opencode-claude-bridge": "latest",
       },
     },
   },
