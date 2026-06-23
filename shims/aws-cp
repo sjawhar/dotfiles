@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# AWS credential_process bridge for `aws login` (IAM Identity Center
+# cross-device flow). The Go and Python AWS SDKs (and Pulumi, by extension)
+# do not yet support `login_session` in ~/.aws/config; this shim forwards
+# the credential request to AWS CLI v2 inside the awscli docker image,
+# which DOES understand it. AWS CLI's silent token refresh kicks in
+# automatically as long as the refresh token in ~/.aws/login/cache/ is valid.
+#
+# Wired in by ~/.aws/config:
+#   [profile pulumi]
+#   credential_process = bash -c 'exec "$HOME/.dotfiles/shims/aws-cp"'
+#   (bash -c + $HOME so the AWS Go SDK, which execs credential_process with a
+#    minimal PATH lacking ~/.dotfiles/shims, can still resolve this shim)
+#   region = us-west-1
+#
+# AWS_CLI_AUTO_PROMPT=off: bypass auto-prompt which chokes on non-TTY stdin.
+# -i:                      attach stdin so AWS CLI sees a usable fd 0.
+# --log-driver none:       match Sami's `_aws` (no docker log noise).
+set -euo pipefail
+exec docker run --rm -i \
+    --env AWS_CLI_AUTO_PROMPT=off \
+    --log-driver none \
+    -v "${HOME}/.aws:/home/aws/.aws" \
+    awscli configure export-credentials --format process
