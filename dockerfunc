@@ -49,16 +49,11 @@ _aws()
         ${AWSCLI_DOCKER_ARGS} awscli "${@}"
 }
 
-aws()
-{
-    AWSCLI_DOCKER_ARGS="$AWSCLI_DOCKER_ARGS
-        --env AWS_ACCESS_KEY_ID
-        --env AWS_SECRET_ACCESS_KEY
-        --env AWS_SESSION_TOKEN" \
-        _aws "${@}"
-}
-
-export -f _aws aws
+# No `aws()` wrapper: use the native mise awscli. The docker wrapper forwarded
+# AWS_PROFILE into the container, which broke credential_process profiles (the
+# process path resolved inside the container at /home/aws, not the host $HOME).
+# `_aws` remains for the rare need to run the awscli image directly (e.g. login).
+export -f _aws
 
 dkeepassxc()
 {
