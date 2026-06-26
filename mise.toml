@@ -64,3 +64,14 @@ platforms.linux-arm64 = { asset_pattern = "tt-aarch64-unknown-linux-musl.tar.gz"
 version = "latest"
 platforms.linux-x64   = { asset_pattern = "tt-watcher-x86_64-unknown-linux-gnu.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "tt-watcher-aarch64-unknown-linux-gnu.tar.gz" }
+
+# Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
+# binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl
+# archive; the release tag is prefixed "fleet-v". The npm "fleetctl" package is
+# only a runtime binary downloader, so the github backend gives a pinned static binary.
+[tools."github:fleetdm/fleet"]
+version = "fleet-v4.87.0"
+platforms.linux-x64   = { asset_pattern = "fleetctl_v4.87.0_linux_amd64.tar.gz" }
+platforms.linux-arm64 = { asset_pattern = "fleetctl_v4.87.0_linux_arm64.tar.gz" }
+platforms.macos-x64   = { asset_pattern = "fleetctl_v4.87.0_macos.tar.gz" }
+platforms.macos-arm64 = { asset_pattern = "fleetctl_v4.87.0_macos.tar.gz" }
