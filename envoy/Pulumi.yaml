@@ -1,3 +1,8 @@
 name: envoy
 runtime: nodejs
 description: Envoy fleet deployment via Docker over Tailscale SSH
+
+# Pinned self-managed backend (workload account, us-west-2). Without this, a fresh
+# machine silently defaults to the local ~/.pulumi backend and uses stale state.
+backend:
+  url: s3://trajectory-labs-pulumi-state-workload?region=us-west-2

@@ -7,8 +7,8 @@ config:
     # No tsnet sidecar — listeners are not their own Tailscale devices.
     # Webhook ingress (GitHub/Slack) lives on the Fargate envoy-listener
     # behind the ALB, NOT on on-prem listeners.
-    - name: sami-agents-mx
-      machineId: sami-agents-mx
+    - name: devbox-sami
+      machineId: devbox-sami
       listener: {}
     - name: sami
       sshHost: "ssh://sami@sami"
