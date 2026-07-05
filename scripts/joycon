@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# joycon: on-demand toggle for the joycond + evsieve Luna button-remap stack.
+#   joycon on      arm the stack: start joycond + the remap path-watcher.
+#                  Press L+R whenever; the remap launches automatically.
+#   joycon off     stop everything (nothing left running).
+#   joycon status  show what is currently active.
+# See laptop/joycon/README.md for the why. Installed by laptop/joycon.sh.
+set -euo pipefail
+
+LINK=/dev/input/joycon-combined
+
+need_root() {
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
+}
+
+cmd_on() {
+  systemctl start joycond joycon-remap.path
+  echo "Armed. Press L + R together on the Joy-Cons whenever you like -"
+  echo "the remapped controller ('Joy-Cons Luna Virtual') will appear automatically."
+  echo "Select it in Luna. Run 'joycon off' when you're done."
+}
+
+cmd_off() {
+  systemctl stop joycon-remap.path joycon-remap.service 2>/dev/null || true
+  systemctl stop joycond 2>/dev/null || true
+  echo "joycon stack stopped (nothing left running)."
+}
+
+cmd_status() {
+  echo "joycond:           $(systemctl is-active joycond 2>/dev/null || true)"
+  echo "joycon-remap.path: $(systemctl is-active joycon-remap.path 2>/dev/null || true)"
+  echo "joycon-remap.svc:  $(systemctl is-active joycon-remap.service 2>/dev/null || true)"
+  if [ -e "$LINK" ]; then
+    echo "combined dev:      present ($LINK -> $(readlink -f "$LINK"))"
+  else
+    echo "combined dev:      absent"
+  fi
+}
+
+case "${1:-status}" in
+  on)     need_root "$@"; cmd_on ;;
+  off)    need_root "$@"; cmd_off ;;
+  status) cmd_status ;;
+  *)      echo "usage: joycon {on|off|status}" >&2; exit 2 ;;
+esac

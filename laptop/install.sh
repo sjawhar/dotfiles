@@ -251,6 +251,7 @@ done
 source "${DOTFILES_DIR}/installers/ghostty.sh"
 source "${DOTFILES_DIR}/installers/voxtype.sh"
 source "${LAPTOP_DIR}/drivers.sh"
+source "${LAPTOP_DIR}/joycon.sh"
 
 echo "--- Laptop setup complete ---"
 echo "Next steps:"

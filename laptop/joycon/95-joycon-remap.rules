@@ -1,0 +1,9 @@
+# evsieve's remapped output is "Joy-Cons Luna Virtual" (device-id 057e:2008).
+# Grant uaccess so the logged-in user (Brave) can read it. joycond does not
+# touch it (2008 is not in joycond's grab list, and the "Virtual" name matches
+# joycond's own *Virtual* exclusion), so this rule only guarantees read access.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Joy-Cons Luna Virtual", TAG+="uaccess"
+
+# Stable symlink for joycond's combined device (evsieve's input target; the
+# event number changes per connection).
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Nintendo Switch Combined Joy-Cons", SYMLINK+="input/joycon-combined"
