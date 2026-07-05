@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch for joycond's combined Joy-Con device and start the Luna remap
+
+[Path]
+# When you press L+R and joycond creates the combined device (udev makes this
+# symlink), start the remap automatically. No timing window required.
+PathExists=/dev/input/joycon-combined
+Unit=joycon-remap.service

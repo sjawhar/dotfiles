@@ -1,0 +1,10 @@
+[Unit]
+Description=Joy-Con -> Luna remap + rumble forwarding
+
+[Service]
+# Grabs joycond's combined device, emits the browser-correct remapped pad WITH
+# force-feedback, and forwards rumble uploads/plays back to the combined device
+# (joycond drives the physical motors). See laptop/joycon/joycon-remap.c and
+# README.md for the mapping + FF rationale.
+ExecStart=/usr/local/bin/joycon-remap /dev/input/joycon-combined
+Restart=on-failure
