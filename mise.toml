@@ -33,6 +33,7 @@ zoxide = "0.9.8"    # Smart directory jumping (z command)
 
 # Cloud
 awscli = "2.33.2"   # AWS command-line interface
+depot = "2.101.67"   # Depot remote container builds / registry auth (github:depot/cli)
 
 # Secrets management
 age = "1.3.1"       # Modern file encryption (for sops)
@@ -43,6 +44,7 @@ actionlint = "latest"
 
 # Observability
 sentry-cli = "3.5.1"  # Sentry CLI (getsentry/cli) — releases, sourcemaps, issue/event queries
+"github:DataDog/pup" = "1.6.2"  # Datadog CLI (pup) — OAuth2 metrics/logs/monitors/traces for agents
 
 # AI-native time tracker — one release publishes two binaries as separate assets:
 #   tt-{arch}-unknown-linux-musl.tar.gz  (CLI, static)

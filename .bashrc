@@ -250,6 +250,32 @@ alog() {
 }
 
 # ------------------------------------------------------------------------------
+# GNOME keyring / Secret Service unlock (headless boxes)
+# ------------------------------------------------------------------------------
+
+# On a headless SSH box there is no GUI prompter and PAM never receives a login
+# password (public-key auth), so the Secret Service "login" keyring loads locked
+# and tools like `pup` fail with "result not returned from SS API". This unlocks
+# it with a real password you type: the first run creates the keyring encrypted
+# with that password, later runs just unlock it. Linger is on, so you unlock
+# once per boot and it stays unlocked for every SSH session until reboot.
+# (An already-running daemon can't be unlocked via the CLI, so we kill+restart.)
+unlock-keyring() {
+    local pw
+    read -rsp 'Keyring password: ' pw; echo
+    killall -q gnome-keyring-daemon 2>/dev/null
+    sleep 0.3
+    eval "$(printf '%s' "$pw" | gnome-keyring-daemon --replace --daemonize --components=secrets --unlock 2>/dev/null)"
+    unset pw
+    if printf 'x' | secret-tool store --label=_probe _keyring_probe 1 >/dev/null 2>&1; then
+        secret-tool clear _keyring_probe 1 >/dev/null 2>&1
+        echo 'keyring unlocked'
+    else
+        echo 'keyring still locked — wrong password? re-run unlock-keyring' >&2
+        return 1
+    fi
+}
+# ------------------------------------------------------------------------------
 # Oh My OpenCode config switching
 # ------------------------------------------------------------------------------
 
