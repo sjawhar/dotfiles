@@ -11,6 +11,16 @@ mcp:
 
 Manage Google Drive (and other Workspace APIs) via MCP tools or the `gws` CLI. All output is structured JSON.
 
+## Docs & Sheets Formatting Rules
+
+When writing to Docs/Sheets that humans read, formatting mistakes are recurring and costly — follow these without exception:
+
+- **Native structure, not lookalike characters.** Use real bullet lists via the API (`createParagraphBullets`), never literal `•`/`◦` characters pasted into text.
+- **Hyperlinked display text, not bare URLs.** Write "transcript" or "link" with a hyperlink, never the full Drive URL inline.
+- **Match adjacent content.** Before inserting rows/cells/sections, inspect the formatting of existing neighbors and replicate it (text style, hyperlink pattern, column conventions). Table cells use normal text style — never heading styles (Header 2 in a table cell renders huge).
+- **Never overwrite concurrent human edits.** Sami often edits shared docs live while you work — re-read the target range before writing and merge around his changes.
+- **Check the audience before writing** (see CLAUDE.md Audience Boundaries): customer-shared files live in the shared drive, never My Drive; internal ops detail never goes into customer-visible docs/tabs.
+
 ## MCP Tools
 
 Use `skill_mcp(mcp_name="gws", ...)` to invoke Drive operations. Discover available tools:

@@ -29,6 +29,10 @@ Push my current changes and create a pull request.
   - Body: brief description of what changed and why
   - Include `Closes #N` if this addresses a known issue
 
-**Done when:** Changes are pushed and PR exists (new or updated).
+**5. Oracle review and CI (part of this command by default):**
+- Have the oracle review the PR diff; address findings now — fix, don't document
+- Watch CI (`gh pr checks --watch`); on failure, reproduce the failing check locally, fix, and push again — don't iterate blind against CI
 
-If any command fails, report the error and stop.
+**Done when:** PR exists (one PR — never split), oracle findings are addressed, and all CI checks are green. Pushing, PR creation, review, and CI fixes are pre-authorized — do not stop to ask permission between steps.
+
+If a command fails, diagnose and fix it; report only errors you cannot resolve yourself.

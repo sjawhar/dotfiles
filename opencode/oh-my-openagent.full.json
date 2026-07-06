@@ -15,7 +15,7 @@
     "replace_plan": true
   },
   "goal": {
-    "enabled": false,
+    "enabled": true,
     "auto_start": false,
     "default_max_iterations": 100
   },

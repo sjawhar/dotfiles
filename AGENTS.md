@@ -23,13 +23,26 @@ installers/          # Per-tool install scripts (shell.sh, mise.sh, jj.sh, tmux.
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
 shims/               # PATH-priority wrappers (gh, opencode, pyright, basedpyright)
-scripts/             # Utility scripts (devenv-backup, git-credential-gh, ephemeral-monitor, etc.)
+scripts/             # Utility scripts (git-credential-gh, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
 devpod/              # DevPod container setup (Dockerfile, entrypoint, proxy config)
 plugins/             # OpenCode/Claude plugins (sjawhar/ has all custom skills, agents, and commands)
 vendor/              # Third-party vendored content
 docs/                # Documentation and plans
 ```
+
+## Subdirectory Guides
+
+Each major subdirectory has its own AGENTS.md with details and conventions:
+
+| Directory | What it's for |
+|-----------|---------------|
+| `envoy/` | Agent messaging/notification service (GitHub + Slack webhooks) |
+| `opencode/` | OpenCode config, OMO profiles, plugin scripts |
+| `plugins/` | Custom skills, agents, and commands (`sjawhar/`) |
+| `installers/` | Per-tool install scripts run by `install.sh` |
+| `scripts/` | Standalone utility scripts |
+| `devpod/` | DevPod container setup (Dockerfile, entrypoint, proxy) |
 
 ## How Install Works
 
@@ -56,3 +69,8 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 - **Shell config has two zones**: non-interactive (PATH, env vars, mise) above the `[[ $- == *i* ]] || return 0` guard, interactive (aliases, completions, prompts) below it
 - **Shims wrap binaries** with extra logic (e.g., the gh shim handles auth token sourcing)
 - **Config files are symlinked** from this repo to their expected locations, not copied
+
+## Environment Facts
+
+- **Personal vs. company boundary:** company infra repos must not reference `~/.dotfiles`, and the dotfiles install is not part of standard company machine provisioning.
+- **Envoy** source/config lives in `envoy/` here. It receives external GitHub and Slack webhooks — hardening must preserve webhook delivery. Envoy tools exist only in Sami's own sessions; never instruct other users to use them.
