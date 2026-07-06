@@ -15,6 +15,13 @@ mcp:
 
 Interact with Slack workspaces via the slack-mcp-server. Use `skill_mcp(mcp_name="slack", ...)` to invoke tools.
 
+## Ground Rules
+
+- **Default to identifying yourself as Claude** in outbound messages, unless otherwise instructed — you message on Sami's behalf.
+- **Read threads, not just top-level messages.** A history scan without `conversations_replies` on active threads misses most of the conversation, so don't conclude "no response" from top-level messages alone.
+- **Before messaging someone, read your recent DM/thread history with them** (replies included) to avoid repeating what Sami already told them or double-pinging for the same request.
+- **Get the latest.** History calls return a window — paginate to the newest messages before summarizing current state.
+
 ## Tools
 
 | Tool                            | Purpose                                            |

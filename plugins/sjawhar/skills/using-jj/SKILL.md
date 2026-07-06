@@ -79,6 +79,17 @@ Use `jj log` (without `agent-`) only when you need to show the user the human-re
 - **Nothing is ever lost.** Every operation is logged in `jj op log`. You can inspect any previous state with `--at-op` and restore with `jj op restore`. Run `jj st > /dev/null` frequently to create snapshot recovery points.
 - **Divergent commits are normal.** When multiple workspaces are active, concurrent operations can create divergent commits (IDs with `/0`, `/4` suffixes). This is usually fine — resolve by squashing the copies together.
 
+## Edit in place, not via throwaway commits
+
+**It is correct and safe for `@` to sit on the commit (or bookmark) you intend to edit.** Auto-snapshot putting your working-copy edits into that commit IS the editing mechanism — there is no staging area, no detached-HEAD danger, and nothing to "protect" the target from. Every state is in the op log, so nothing is lost.
+
+**Git-brain antipattern to avoid:** creating a throwaway child commit on top of the thing you actually mean to edit (`jj new <target>` → edit → `jj squash` back down), or avoiding editing `@` because it "has a bookmark" or "is a merge." It is pure ceremony that produces churn and cascading rebases. Editing `@` while it points at a bookmark just updates that bookmark's commit — which is what you want.
+
+- Edit an existing commit/bookmark: `jj edit <change>`, then edit the files. Done.
+- Edit a merge/octopus commit: `jj new <parents...>` creates it; then edit `@` directly (resolve conflicts, tweak content). `@` **is** the merge — you are not sitting "on top of" it.
+- A working copy showing uncommitted files on a bookmarked commit is not a hazard; letting a normal `jj` command snapshot them into that commit is the intended behavior, not something to warn about.
+- `--ignore-working-copy` is only for read-only inspection when you deliberately don't want to snapshot. It is not a safety ritual for normal editing.
+
 ## CRITICAL: No Undo Loops
 
 **If a jj command doesn't do what you expected, STOP. Do not chain `jj undo` → retry → `jj undo` → retry.**

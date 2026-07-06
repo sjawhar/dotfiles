@@ -131,6 +131,12 @@ jj rebase -b <branch> -d <new-common-base>
 jj git fetch && jj log --no-graph -T 'conflict' -r sami
 ```
 
+## Release Bookmarks
+
+Some forks (mainly work repos) pin deployments to dated release bookmarks (`release/YYYY-MM-DD`); many personal repos don't use this at all. Check the repo's AGENTS.md or existing bookmarks (`jj bookmark list`) to see which convention applies.
+
+Where dated release bookmarks are used: leave existing ones in place. To ship a new release, create a new bookmark dated today on the current sami merge and re-pin consumers to it. Some of these forks also use a `chore/` branch as their equivalent of the `ci` branch — non-PR glue (workflows, deploy config) that doesn't belong on any feature branch.
+
 ## Conflict Resolution in Octopus Merges
 
 When sami has conflicts after adding/removing parents or syncing:
