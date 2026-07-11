@@ -33,29 +33,106 @@
 set -euo pipefail
 
 # --- GitHub App identity (route-driven) ---
-# When invoked from a directory inside a git repo, look up the credential
-# helper that would match the repo's remote URL. If it's a `!gh-app-token
-# <profile>` helper, mint an installation token and export GH_TOKEN so
-# subsequent gh API calls authenticate as that profile. In interactive
-# shells (no agent include loaded) this finds the default user-helper
-# and skips token export.
-if [[ -z "${GH_TOKEN:-}" ]]; then
-    _gh_remote_url=$(git remote get-url origin 2>/dev/null || true)
-    if [[ -n "$_gh_remote_url" ]]; then
-        # Normalize SSH form (git@host:owner/repo[.git]) to https URL.
-        if [[ "$_gh_remote_url" =~ ^git@([^:]+):(.+)$ ]]; then
-            _gh_remote_url="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-        fi
-        # Strip ssh:// prefix if present.
-        _gh_remote_url="${_gh_remote_url/#ssh:\/\/git@/https://}"
-        # Ensure trailing .git for stable matching (matches credential URL git uses).
-        [[ "$_gh_remote_url" == *.git ]] || _gh_remote_url="${_gh_remote_url}.git"
+# Resolve the repo a gh command will act on -- mirroring gh's own base-repo
+# resolution -- then look up the credential helper that matches it. If that
+# helper is `!gh-app-token <profile>`, mint an installation token and export
+# GH_TOKEN so gh authenticates as that profile. When nothing matches (e.g. a
+# fork whose base repo is an unrouted upstream), GH_TOKEN is left unset and gh
+# falls back to the user's own auth. In interactive shells (no agent include
+# loaded) only the default user-helper matches, so no token is exported.
 
-        _gh_helper=$(git config --get-urlmatch credential.helper "$_gh_remote_url" 2>/dev/null || true)
+# Normalize a remote URL to https form with a trailing .git.
+_gh_normalize_url() {
+    local url="$1"
+    if [[ -z "$url" ]]; then return 0; fi
+    # SSH form git@host:owner/repo[.git] -> https://host/owner/repo[.git]
+    if [[ "$url" =~ ^git@([^:]+):(.+)$ ]]; then
+        url="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    fi
+    # Strip ssh:// prefix if present.
+    url="${url/#ssh:\/\/git@/https://}"
+    # Ensure trailing .git for stable matching (matches git's credential URL).
+    [[ "$url" == *.git ]] || url="${url}.git"
+    printf '%s\n' "$url"
+}
+
+# Build an https URL from a gh repo spec: a URL, host/owner/repo, or owner/repo.
+_gh_url_from_spec() {
+    local spec="$1"
+    if [[ -z "$spec" ]]; then return 0; fi
+    if [[ "$spec" == *://* ]]; then
+        _gh_normalize_url "$spec"
+        return 0
+    fi
+    local slashes="${spec//[^\/]/}"
+    if [[ "${#slashes}" -ge 2 ]]; then
+        _gh_normalize_url "https://${spec}"
+    else
+        _gh_normalize_url "https://github.com/${spec}"
+    fi
+}
+
+# Resolve the repo a gh invocation targets, matching gh's base-repo resolution:
+#   1. explicit -R/--repo argument
+#   2. `gh repo set-default` (remote.<name>.gh-resolved in git config)
+#   3. remote preference order: upstream, github, origin, then any other remote
+# Emits a normalized https URL, or nothing if it can't be determined.
+_gh_resolve_target_url() {
+    local -a args=("$@")
+    local argc=$# i=0 a
+    # 1. explicit -R / --repo
+    while [[ $i -lt $argc ]]; do
+        a="${args[$i]}"
+        case "$a" in
+            -R|--repo)
+                if [[ $((i + 1)) -lt $argc ]]; then
+                    _gh_url_from_spec "${args[$((i + 1))]}"
+                    return 0
+                fi
+                ;;
+            --repo=*) _gh_url_from_spec "${a#--repo=}"; return 0 ;;
+            -R=*)     _gh_url_from_spec "${a#-R=}"; return 0 ;;
+        esac
+        i=$((i + 1))
+    done
+    # 2. gh repo set-default (remote.<name>.gh-resolved)
+    local line name value
+    line=$(git config --get-regexp '^remote\..*\.gh-resolved$' 2>/dev/null | head -n1 || true)
+    if [[ -n "$line" ]]; then
+        value="${line##* }"
+        name="${line#remote.}"
+        name="${name%.gh-resolved *}"
+        if [[ "$value" == "base" ]]; then
+            _gh_normalize_url "$(git remote get-url "$name" 2>/dev/null || true)"
+        else
+            _gh_url_from_spec "$value"
+        fi
+        return 0
+    fi
+    # 3. remote preference order, then any remaining remote
+    local r url
+    for r in upstream github origin; do
+        url=$(git remote get-url "$r" 2>/dev/null || true)
+        if [[ -n "$url" ]]; then
+            _gh_normalize_url "$url"
+            return 0
+        fi
+    done
+    r=$(git remote 2>/dev/null | head -n1 || true)
+    if [[ -n "$r" ]]; then
+        _gh_normalize_url "$(git remote get-url "$r" 2>/dev/null || true)"
+    fi
+    return 0
+}
+
+if [[ -z "${GH_TOKEN:-}" ]]; then
+    _gh_target_url=$(_gh_resolve_target_url "$@")
+    if [[ -n "$_gh_target_url" ]]; then
+        _gh_helper=$(git config --get-urlmatch credential.helper "$_gh_target_url" 2>/dev/null || true)
         if [[ "$_gh_helper" == "!gh-app-token "* ]]; then
             _gh_profile="${_gh_helper#!gh-app-token }"
             # Build path for the credential request from the URL.
-            _gh_path="${_gh_remote_url#https://*/}"
+            _gh_path="${_gh_target_url#https://*/}"
             _gh_token=$(printf 'protocol=https\nhost=github.com\npath=%s\n\n' "$_gh_path" \
                         | gh-app-token "$_gh_profile" get 2>/dev/null \
                         | sed -n 's/^password=//p') || true
@@ -66,7 +143,7 @@ if [[ -z "${GH_TOKEN:-}" ]]; then
         fi
         unset _gh_helper
     fi
-    unset _gh_remote_url
+    unset _gh_target_url
 fi
 
 # Find the real gh binary (skip this specific shim directory)
