@@ -36,3 +36,6 @@ plugins/sjawhar/skills/overseer-workspace/
 plugins/sjawhar/skills/*-workspace/
 opencode/node_modules/
 .playwright-mcp/
+
+# local-only secrets (never committed; `secrets` shim reads this on top of secrets.env)
+secrets.local.env
