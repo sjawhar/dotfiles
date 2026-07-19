@@ -29,12 +29,6 @@
 [credential]
 	useHttpPath = true
 
-[gh-app "legion-personal"]
+[gh-app "agent"]
 	app-id = 3202636
-	installation-id = 119465532
-	key-secret = GH_AGENT_APP_PRIVATE_KEY_B64
-
-[gh-app "legion-work"]
-	app-id = 3202636
-	installation-id = 119469290
 	key-secret = GH_AGENT_APP_PRIVATE_KEY_B64

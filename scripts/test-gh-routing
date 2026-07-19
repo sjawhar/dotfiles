@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Smoke test for per-repo GitHub credential routing.
+# Smoke test for GitHub App credential routing.
 #
-# Asserts that with the gh-app-routes.gitconfig include active,
-# `git config --get-urlmatch credential.helper <URL>` returns the
-# expected helper for each test URL.
+# The route is a single catch-all helper chain (gh-app-token, then the user's
+# gh auth fallback), so per-URL owner selection happens inside gh-app-token
+# and is covered by shims/tests/test_gh_app_token.py. This script asserts the
+# git-config layer around it:
+#   1. with the gh-app-routes.gitconfig include active, github.com credential
+#      requests see the app helper chain;
+#   2. without the include (interactive shells), gh-app-token is not wired up.
 #
 # Robust to being run from agent shells: explicitly clears any inherited
-# GIT_CONFIG_* env vars before each git config call, then sets only the
-# include we want to test.
+# GIT_CONFIG_* env vars, then sets only the include under test.
 
 set -euo pipefail
 
@@ -17,40 +20,38 @@ ROUTES_FILE="$DOTFILES_DIR/gh-app-routes.gitconfig"
 pass=0
 fail=0
 
-# List GIT_CONFIG_* env var names currently set, for `env -u` scrubbing.
-list_git_config_env() {
-    compgen -e | grep '^GIT_CONFIG_' || true
-}
+# `env -u` args scrubbing all GIT_CONFIG_* leaked from the parent shell.
+scrub_args=()
+while IFS= read -r v; do
+    [[ -n "$v" ]] && scrub_args+=(-u "$v")
+done < <(compgen -e | grep '^GIT_CONFIG_' || true)
 
-assert_helper() {
-    local url="$1" expected="$2"
-    local got
-    # Run git config in a clean env: scrub leaked GIT_CONFIG_* from the parent,
-    # then inject only our routes-file include.
-    local -a unset_args=()
-    while IFS= read -r v; do
-        [[ -n "$v" ]] && unset_args+=(-u "$v")
-    done < <(list_git_config_env)
-    got=$(env "${unset_args[@]}" \
-          GIT_CONFIG_COUNT=1 \
-          GIT_CONFIG_KEY_0=include.path \
-          GIT_CONFIG_VALUE_0="$ROUTES_FILE" \
-          git config --get-urlmatch credential.helper "$url" 2>/dev/null \
-          | tail -n 1) || got="<error>"
+report() {
+    local label="$1" expected="$2" got="$3"
     if [[ "$got" == "$expected" ]]; then
-        printf '  PASS  %-55s -> %s\n' "$url" "$got"
+        printf '  PASS  %-35s -> %s\n' "$label" "${got:-<no app helper>}"
         ((pass++)) || true
     else
         printf '  FAIL  %s\n        expected: %s\n        got:      %s\n' \
-               "$url" "$expected" "$got"
+               "$label" "$expected" "$got"
         ((fail++)) || true
     fi
 }
 
 echo "== gh credential routing assertions =="
-assert_helper "https://github.com/sjawhar/dotfiles.git"          "!gh-app-token legion-personal"
-assert_helper "https://github.com/trajectory-labs-pbc/agent-c.git" "!gh-app-token legion-work"
-assert_helper "https://github.com/theorem-labs/whatever.git"     "!gh auth git-credential"
+
+got=$(env "${scrub_args[@]}" \
+      GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=include.path \
+      GIT_CONFIG_VALUE_0="$ROUTES_FILE" \
+      git config --get-regexp '^credential\.https://github\.com/\.helper$' 2>/dev/null \
+      | cut -d ' ' -f2- | grep .) || got="<error>"
+report "agent shell (include active)" $'!gh-app-token agent\n!gh auth git-credential' "$got"
+
+got=$(env "${scrub_args[@]}" \
+      git config --get-regexp '^credential\..*\.helper$' 2>/dev/null \
+      | cut -d ' ' -f2- | grep '^!gh-app-token ') || got=""
+report "interactive shell (no include)" "" "$got"
 
 echo
 echo "summary: $pass passed, $fail failed"

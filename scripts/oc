@@ -94,16 +94,29 @@ export OPENCODE_CONFIG_CONTENT='{"plugin":["@sjawhar/oh-my-opencode@sami"]}'
 # export OPENCODE_CONFIG_CONTENT='{"plugin":["file://${HOME}/oh-my-opencode/original"]}'
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
-# Agents authenticate via per-repo routing (sjawhar/* uses legion-personal
-# installation, trajectory-labs-pbc/* uses legion-work, others fall through
-# to your gh user auth). Only loaded by agent shells; interactive shells
-# are unaffected. See gh-app-routes.gitconfig and shims/gh-app-token.
+# Agents authenticate as the GitHub App installation matching each repo's
+# owner; owners without an installation fall through to your gh user auth.
+# Only loaded by agent shells; interactive shells are unaffected.
+# See gh-app-routes.gitconfig and shims/gh-app-token.
 GIT_CONFIG_COUNT=$((${GIT_CONFIG_COUNT:-0} + 1))
 _idx=$((GIT_CONFIG_COUNT - 1))
 export GIT_CONFIG_COUNT
 export "GIT_CONFIG_KEY_${_idx}"=include.path
 export "GIT_CONFIG_VALUE_${_idx}"="${DOTFILES_DIR:-$HOME/.dotfiles}/gh-app-routes.gitconfig"
 unset _idx
+
+# --- dotfiles shims must lead PATH ---
+# The gh App routing above only works when `gh` resolves to shims/gh. The
+# launching shell's mise hook may have prepended tool install dirs (including
+# the real gh) ahead of the shims; agent serves inherit PATH forever, so
+# re-front the shims here or agents silently act as the user on GitHub.
+_newpath=""
+IFS=':' read -ra _parts <<< "$PATH"
+for _p in "${_parts[@]}"; do
+    [ -n "$_p" ] && [ "$_p" != "${DOTFILES_DIR:-$HOME/.dotfiles}/shims" ] && _newpath="${_newpath:+$_newpath:}$_p"
+done
+export PATH="${DOTFILES_DIR:-$HOME/.dotfiles}/shims:$_newpath"
+unset _newpath _parts _p
 
 # Opt-out
 if [ "${OPENCODE_NO_SERVE:-}" = "1" ]; then

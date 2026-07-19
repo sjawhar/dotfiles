@@ -1,23 +1,35 @@
 #!/usr/bin/env python3
-"""Profile-aware GitHub App credential helper.
+"""Owner-aware GitHub App credential helper.
 
-Used as a git credential helper:
-  helper = !gh-app-token <profile>
+Git credential-helper usage (wired up in gh-app-routes.gitconfig):
+  gh-app-token <profile> get
 
-The profile name is looked up in `git config`:
+Direct usage prints a raw installation token:
+  gh-app-token <profile> [--owner <login>]
+
+A profile lives in git config and needs only the app and its key:
   [gh-app "<profile>"]
-      app-id          = ...
-      installation-id = ...
-      key-secret      = NAME_OF_SECRET   ; resolved via `secrets get`
+      app-id     = ...
+      key-secret = NAME_OF_SECRET   ; resolved via `secrets get`
 
-Generates an installation token, caches it per profile in
-~/.cache/gh-app-tokens/<profile>.json, and emits a git-credential
-formatted response on stdout.
+The target owner comes from --owner, then GH_APP_OWNER, then the owner
+segment of the credential request's path (requires credential.useHttpPath).
+The app's installation for that owner is discovered via the GitHub API and
+cached for a day. Failure semantics in credential mode:
+
+- Owner without an installation: exit 0 with no output, so git falls through
+  to the next configured helper (`gh auth git-credential`, the user).
+- Any other failure (missing secret, network, GitHub error): emit `quit=1`,
+  which stops git's helper chain. Agents must fail loudly rather than
+  silently push as the user.
 """
 
+import argparse
 import base64
 import binascii
 import json
+import os
+import re
 import subprocess
 import sys
 import time
@@ -25,61 +37,93 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-CACHE_DIR = Path.home() / ".cache" / "gh-app-tokens"
-TOKEN_REFRESH_MARGIN = 300  # refresh 5 minutes before expiry
+CACHE_DIR = Path.home() / ".cache" / "gh-app-token"
+TOKEN_REFRESH_MARGIN = 300  # Refresh five minutes before expiry.
+INSTALLATION_CACHE_TTL = 24 * 60 * 60
+
+
+class AppTokenError(Exception):
+    """A configuration, secret, or GitHub API failure."""
+
+
+class ApiError(AppTokenError):
+    def __init__(self, code: int, body: str):
+        super().__init__(f"GitHub API {code}: {body}")
+        self.code = code
+
+
+class UninstalledOwnerError(AppTokenError):
+    """The configured app is not installed for the requested GitHub owner."""
 
 
 def git_config(key: str) -> str:
-    """Read a single git config value or exit with a helpful message."""
-    try:
-        result = subprocess.run(
-            ["git", "config", "--get", key],
-            capture_output=True, text=True, check=True,
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError:
-        print(f"gh-app-token: missing git config: {key}", file=sys.stderr)
-        sys.exit(1)
+    result = subprocess.run(
+        ["git", "config", "--get", key],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        raise AppTokenError(f"missing git config: {key}")
+    return value
 
 
 def generate_jwt(app_id: str, private_key: str) -> str:
-    # Lazy import: avoid pulling cryptography on cache-hit fast path.
+    # Lazy import keeps a valid token-cache hit independent of PyJWT.
     import jwt
+
     now = int(time.time())
-    payload = {
-        "iat": now - 60,
-        "exp": now + 600,
-        "iss": app_id,
+    return jwt.encode(
+        {"iat": now - 60, "exp": now + 600, "iss": app_id},
+        private_key,
+        algorithm="RS256",
+    )
+
+
+def api_json(request: urllib.request.Request) -> Any:
+    try:
+        with urllib.request.urlopen(request) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise ApiError(error.code, error.read().decode("utf-8", errors="replace")) from error
+    except urllib.error.URLError as error:
+        raise AppTokenError(f"network error: {error.reason}") from error
+
+
+def api_headers(bearer: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
-    return jwt.encode(payload, private_key, algorithm="RS256")
 
 
-def get_installation_token(app_id: str, installation_id: str, private_key: str) -> dict:
-    token = generate_jwt(app_id, private_key)
-    req = urllib.request.Request(
+def get_installation_token(app_id: str, installation_id: int, private_key: str) -> dict[str, Any]:
+    request = urllib.request.Request(
         f"https://api.github.com/app/installations/{installation_id}/access_tokens",
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=api_headers(generate_jwt(app_id, private_key)),
     )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        print(f"gh-app-token: GitHub API {e.code}: {body}", file=sys.stderr)
-        sys.exit(1)
-    except urllib.error.URLError as e:
-        print(f"gh-app-token: network error: {e.reason}", file=sys.stderr)
-        sys.exit(1)
+    token_data = api_json(request)
+    if not isinstance(token_data, dict) or not token_data.get("token") or not token_data.get("expires_at"):
+        raise AppTokenError("GitHub returned an invalid installation-token response")
+    return token_data
 
 
-def get_cached_token(profile: str) -> str | None:
-    cache_file = CACHE_DIR / f"{profile}.json"
+def cache_component(value: str) -> str:
+    """Make a profile or owner safe and stable for use in a cache-file name."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value.lower())
+
+
+def token_cache_file(profile: str, owner: str) -> Path:
+    return CACHE_DIR / f"token-{cache_component(profile)}--{cache_component(owner)}.json"
+
+
+def get_cached_token(profile: str, owner: str) -> str | None:
+    cache_file = token_cache_file(profile, owner)
     if not cache_file.exists():
         return None
     try:
@@ -87,78 +131,199 @@ def get_cached_token(profile: str) -> str | None:
         expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
         if (expires_at - datetime.now(timezone.utc)).total_seconds() > TOKEN_REFRESH_MARGIN:
             return data["token"]
-    except (json.JSONDecodeError, KeyError, ValueError):
-        pass
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
     return None
 
 
-def cache_token(profile: str, token_data: dict) -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = CACHE_DIR / f"{profile}.json"
-    cache_file.write_text(json.dumps(token_data))
+def write_cache_file(cache_file: Path, data: dict[str, Any]) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cache_file.write_text(json.dumps(data))
     cache_file.chmod(0o600)
+
+
+def installation_cache_file(app_id: str) -> Path:
+    return CACHE_DIR / f"installations-{cache_component(app_id)}.json"
+
+
+def get_cached_installations(app_id: str) -> dict[str, int] | None:
+    """Return {owner_casefolded: installation_id}, or None when missing or stale."""
+    cache_file = installation_cache_file(app_id)
+    if not cache_file.exists():
+        return None
+    try:
+        data = json.loads(cache_file.read_text())
+        if time.time() - float(data.pop("fetched_at")) >= INSTALLATION_CACHE_TTL:
+            return None
+        return {k: v for k, v in data.items() if isinstance(v, int)}
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def discover_installations(app_id: str, private_key: str) -> dict[str, int]:
+    """Fetch every installation for this app and cache {owner: installation_id}."""
+    bearer = generate_jwt(app_id, private_key)
+    installations: dict[str, int] = {}
+    page = 1
+    while True:
+        request = urllib.request.Request(
+            f"https://api.github.com/app/installations?per_page=100&page={page}",
+            headers=api_headers(bearer),
+        )
+        response = api_json(request)
+        if not isinstance(response, list):
+            raise AppTokenError("GitHub returned an invalid installations response")
+        for item in response:
+            login = item.get("account", {}).get("login") if isinstance(item, dict) else None
+            if isinstance(login, str) and isinstance(item.get("id"), int):
+                installations[login.casefold()] = item["id"]
+        if len(response) < 100:
+            break
+        page += 1
+    write_cache_file(
+        installation_cache_file(app_id),
+        {"fetched_at": time.time(), **installations},
+    )
+    return installations
+
+
+def resolve_installation(
+    app_id: str, private_key: str, owner: str, *, refresh: bool = False
+) -> tuple[int, bool]:
+    """Resolve an owner to (installation_id, came_from_cache).
+
+    A cache miss for an owner is not authoritative: refresh once before saying
+    the app is uninstalled, so newly installed owners begin working promptly.
+    """
+    target = owner.casefold()
+    if not refresh:
+        cached = get_cached_installations(app_id)
+        if cached is not None and target in cached:
+            return cached[target], True
+    installations = discover_installations(app_id, private_key)
+    if target not in installations:
+        raise UninstalledOwnerError(f"GitHub App is not installed for owner {owner}")
+    return installations[target], False
 
 
 def resolve_private_key(key_secret: str) -> str:
     try:
-        b64_key = subprocess.run(
+        result = subprocess.run(
             ["secrets", "get", key_secret],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"gh-app-token: failed to fetch secret {key_secret}: {e}", file=sys.stderr)
-        sys.exit(1)
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as error:
+        raise AppTokenError(f"failed to fetch secret {key_secret}: {error}") from error
+    b64_key = result.stdout.strip()
     if not b64_key:
-        print(f"gh-app-token: empty secret {key_secret}", file=sys.stderr)
-        sys.exit(1)
+        raise AppTokenError(f"empty secret {key_secret}")
     try:
         return base64.b64decode(b64_key).decode()
-    except (binascii.Error, UnicodeDecodeError) as e:
-        print(f"gh-app-token: secret {key_secret} is not valid base64-encoded UTF-8: {e}", file=sys.stderr)
-        sys.exit(1)
+    except (binascii.Error, UnicodeDecodeError) as error:
+        raise AppTokenError(
+            f"secret {key_secret} is not valid base64-encoded UTF-8: {error}"
+        ) from error
 
 
-def get_token(profile: str) -> str:
-    cached = get_cached_token(profile)
-    if cached:
-        return cached
+def select_owner(explicit_owner: str | None, request: dict[str, str]) -> str | None:
+    """Apply --owner > GH_APP_OWNER > credential-request-path precedence."""
+    path_owner = request.get("path", "").lstrip("/").split("/", 1)[0]
+    return explicit_owner or os.environ.get("GH_APP_OWNER") or path_owner or None
+
+
+def get_token(profile: str, owner: str) -> str:
+    """Return a token for one owner, never reusing another owner's cache."""
+    owner = owner.casefold()
+    cached_token = get_cached_token(profile, owner)
+    if cached_token:
+        return cached_token
+
     app_id = git_config(f"gh-app.{profile}.app-id")
-    installation_id = git_config(f"gh-app.{profile}.installation-id")
-    key_secret = git_config(f"gh-app.{profile}.key-secret")
-    private_key = resolve_private_key(key_secret)
-    print(f"gh-app-token: minting token for profile {profile}...", file=sys.stderr)
-    token_data = get_installation_token(app_id, installation_id, private_key)
-    cache_token(profile, token_data)
-    return token_data["token"]
+    private_key = resolve_private_key(git_config(f"gh-app.{profile}.key-secret"))
+    installation_id, from_cache = resolve_installation(app_id, private_key, owner)
+    print(f"gh-app-token: minting token for profile {profile} (owner={owner})...", file=sys.stderr)
+    try:
+        token_data = get_installation_token(app_id, installation_id, private_key)
+    except ApiError as error:
+        if error.code != 404 or not from_cache:
+            raise
+        # The cached installation no longer exists (app reinstalled or removed
+        # within the cache TTL). Rediscover once; a genuinely uninstalled owner
+        # surfaces as UninstalledOwnerError from resolve_installation.
+        installation_id, _ = resolve_installation(app_id, private_key, owner, refresh=True)
+        token_data = get_installation_token(app_id, installation_id, private_key)
+    write_cache_file(token_cache_file(profile, owner), token_data)
+    return str(token_data["token"])
 
 
-def main() -> None:
-    if len(sys.argv) < 3:
-        print("usage: gh-app-token <profile> <get|store|erase>", file=sys.stderr)
-        sys.exit(1)
-    profile = sys.argv[1]
-    action = sys.argv[2]
-    if action != "get":
-        sys.exit(0)
-
-    # Read the credential request (host, protocol, path) from stdin.
-    request = {}
-    for line in sys.stdin:
-        line = line.strip()
+def read_credential_request() -> dict[str, str]:
+    request: dict[str, str] = {}
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
         if not line:
             break
         if "=" in line:
             key, _, value = line.partition("=")
             request[key] = value
-    if "github.com" not in request.get("host", ""):
-        sys.exit(0)
+    return request
 
-    token = get_token(profile)
-    print(f"protocol={request.get('protocol', 'https')}")
-    print(f"host={request.get('host', 'github.com')}")
-    print("username=x-access-token")
-    print(f"password={token}")
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Mint a target-owner GitHub App installation token."
+    )
+    parser.add_argument("profile")
+    parser.add_argument("action", choices=("get", "store", "erase"), nargs="?")
+    parser.add_argument("--owner", metavar="LOGIN")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.action in {"store", "erase"}:
+        return 0
+
+    credential_mode = args.action == "get"
+    request = read_credential_request() if credential_mode else {}
+    if credential_mode and request.get("host", "").casefold() != "github.com":
+        return 0
+
+    owner = select_owner(args.owner, request)
+    if owner is None:
+        # No owner signal at all (e.g. useHttpPath disabled). In credential
+        # mode this is indistinguishable from an unrouted request: fall through.
+        if credential_mode:
+            return 0
+        print("gh-app-token: target owner required: pass --owner or set GH_APP_OWNER", file=sys.stderr)
+        return 1
+
+    try:
+        token = get_token(args.profile, owner)
+    except UninstalledOwnerError as error:
+        if credential_mode:
+            # Let the next configured helper, `gh auth git-credential`, answer.
+            return 0
+        print(f"gh-app-token: {error}", file=sys.stderr)
+        return 1
+    except AppTokenError as error:
+        print(f"gh-app-token: {error}", file=sys.stderr)
+        if credential_mode:
+            # Stop git's helper chain: a broken app setup must fail loudly,
+            # never silently fall back to the user's own credentials.
+            print("quit=1")
+        return 1
+
+    if credential_mode:
+        print(f"protocol={request.get('protocol', 'https')}")
+        print(f"host={request.get('host', 'github.com')}")
+        print("username=x-access-token")
+        print(f"password={token}")
+    else:
+        print(token)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
