@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Extract URLs from the current pane and copy one to the local clipboard.
+#
+# Exists because click-to-open can't work through this stack: mosh (< the
+# release that ships PR #1360) strips OSC 8 hyperlinks, and both mosh and
+# tmux repaint the screen row-by-row, which breaks Ghostty's regex URL
+# detection on wrapped lines. `capture-pane -J` re-joins wrapped lines from
+# tmux's logical-line data, so long URLs come out whole. Copying goes
+# through tmux-osc52-copy (mosh-safe OSC 52).
+#
+# Usage:
+#   tmux-urls menu         Show a display-menu of URLs in the current pane
+#   tmux-urls copy <n>     Copy URL number <n> from the cached list
+set -euo pipefail
+
+cache="${TMUX_TMPDIR:-/tmp}/tmux-urls-$(id -u)"
+copy_cmd="$(cd "$(dirname "$0")" && pwd)/tmux-osc52-copy"
+
+case "${1:-menu}" in
+menu)
+    # Visible pane + recent scrollback, wrapped lines joined, most recent
+    # first, deduplicated, trailing punctuation stripped.
+    tmux capture-pane -p -J -S -200 \
+        | grep -oE '(https?|ftp)://[^[:space:]<>"'\''`]+' \
+        | sed -e 's/[].,;:!?)]*$//' \
+        | tac \
+        | awk '!seen[$0]++' \
+        | head -30 >"$cache" || true
+
+    if [ ! -s "$cache" ]; then
+        tmux display-message "tmux-urls: no URLs in pane"
+        exit 0
+    fi
+
+    keys=(1 2 3 4 5 6 7 8 9 0 a b c d e f g h i j k l m n o p q r s t)
+    args=()
+    i=0
+    while IFS= read -r url; do
+        i=$((i + 1))
+        [ "$i" -le "${#keys[@]}" ] || break
+        label=${url:0:75}
+        [ "${#url}" -gt 75 ] && label="${label}..."
+        label=${label//'#'/'##'}  # '#' starts a format expansion in menu labels
+        args+=("$label" "${keys[$((i - 1))]}" "run-shell '$0 copy $i'")
+    done <"$cache"
+
+    tmux display-menu -T "Copy URL" "${args[@]}"
+    ;;
+copy)
+    url=$(sed -n "${2}p" "$cache")
+    [ -n "$url" ] || exit 1
+    printf %s "$url" | "$copy_cmd"
+    msg=${url:0:60}
+    tmux display-message "Copied: ${msg//'#'/'##'}"
+    ;;
+*)
+    echo "usage: tmux-urls [menu|copy <n>]" >&2
+    exit 64
+    ;;
+esac
