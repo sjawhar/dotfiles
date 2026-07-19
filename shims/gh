@@ -77,9 +77,62 @@ _gh_url_from_spec() {
 #   2. `gh repo set-default` (remote.<name>.gh-resolved in git config)
 #   3. remote preference order: upstream, github, origin, then any other remote
 # Emits a normalized https URL, or nothing if it can't be determined.
+# Extract the target owner from `gh api` arguments: REST paths like
+# repos/{owner}/{repo}/..., orgs/{owner}/..., users/{owner}/..., or GraphQL
+# query bodies containing repository(owner:"X") / organization(login:"X").
+# Emits the owner, or nothing when the invocation carries no owner signal
+# (then remote-based resolution applies). Pure node-ID GraphQL mutations
+# (e.g. addProjectV2ItemById) have no owner signal; prefix those with
+# GH_APP_OWNER=<owner>, which gh-app-token honors ahead of the path.
+_gh_owner_from_api_args() {
+    local -a args=("$@")
+    local a owner
+    for a in "${args[@]:1}"; do
+        case "$a" in
+            -*) continue ;;
+        esac
+        case "$a" in
+            repos/*|/repos/*|orgs/*|/orgs/*|users/*|/users/*)
+                owner="${a#/}"
+                owner="${owner#repos/}"; owner="${owner#orgs/}"; owner="${owner#users/}"
+                owner="${owner%%/*}"
+                # Strip query strings on bare segments like orgs/foo?page=2
+                owner="${owner%%\?*}"
+                # gh expands {owner}/{repo} placeholders from the current repo;
+                # emit nothing so remote-based resolution handles those.
+                if [[ -n "$owner" && "$owner" != *"{"* ]]; then printf '%s\n' "$owner"; fi
+                return 0
+                ;;
+        esac
+    done
+    # GraphQL: scan flag values for the first repository(owner:...) or
+    # organization(login:...) target. Whitespace-tolerant, single or double
+    # quotes. First match wins.
+    local joined
+    joined="${args[*]}"
+    if [[ "$joined" =~ (repository[[:space:]]*\([[:space:]]*owner[[:space:]]*:[[:space:]]*[\"\']([A-Za-z0-9._-]+)[\"\'])|(organization[[:space:]]*\([[:space:]]*login[[:space:]]*:[[:space:]]*[\"\']([A-Za-z0-9._-]+)[\"\']) ]]; then
+        owner="${BASH_REMATCH[2]:-${BASH_REMATCH[4]}}"
+        if [[ -n "$owner" ]]; then printf '%s\n' "$owner"; return 0; fi
+    fi
+    return 0
+}
+
 _gh_resolve_target_url() {
     local -a args=("$@")
     local argc=$# i=0 a
+    # 0. gh api: derive the owner from the REST path or GraphQL query body.
+    #    These invocations carry no -R and often run outside the target repo's
+    #    checkout, so remote-based resolution would route to the wrong owner.
+    if [[ "${args[0]:-}" == "api" ]]; then
+        local api_owner
+        api_owner=$(_gh_owner_from_api_args "$@")
+        if [[ -n "$api_owner" ]]; then
+            # Only the first path segment (the owner) matters for credential
+            # routing; "gh-api" is a placeholder repo segment.
+            _gh_url_from_spec "${api_owner}/gh-api"
+            return 0
+        fi
+    fi
     # 1. explicit -R / --repo
     while [[ $i -lt $argc ]]; do
         a="${args[$i]}"
@@ -128,7 +181,11 @@ _gh_resolve_target_url() {
 if [[ -z "${GH_TOKEN:-}" ]]; then
     _gh_target_url=$(_gh_resolve_target_url "$@")
     if [[ -n "$_gh_target_url" ]]; then
-        _gh_helper=$(git config --get-urlmatch credential.helper "$_gh_target_url" 2>/dev/null || true)
+        # Git reports only the final helper for --get-urlmatch, and the dynamic
+        # route is a chain ending in the user fallback -- so pick the app
+        # helper out of the chain directly.
+        _gh_helper=$(git config --get-all 'credential.https://github.com/.helper' 2>/dev/null \
+            | grep -m1 '^!gh-app-token ' || true)
         if [[ "$_gh_helper" == "!gh-app-token "* ]]; then
             _gh_profile="${_gh_helper#!gh-app-token }"
             # Build path for the credential request from the URL.
@@ -394,4 +451,7 @@ main() {
     esac
 }
 
-main "$@"
+# Allow tests to source this file for the resolution helpers without running gh.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
