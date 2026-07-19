@@ -45,6 +45,8 @@ actionlint = "latest"
 # Observability
 sentry-cli = "3.5.1"  # Sentry CLI (getsentry/cli) — releases, sourcemaps, issue/event queries
 "github:DataDog/pup" = "1.6.2"  # Datadog CLI (pup) — OAuth2 metrics/logs/monitors/traces for agents
+"github:syncthing/syncthing" = "latest"
+"cargo:cargo-deny" = "latest"
 
 # AI-native time tracker — one release publishes two binaries as separate assets:
 #   tt-{arch}-unknown-linux-musl.tar.gz  (CLI, static)
