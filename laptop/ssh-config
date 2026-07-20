@@ -5,6 +5,8 @@ Host devbox
   HostName sami-agents.tailb86685.ts.net
   User ubuntu
   ForwardAgent yes
+  # YubiKey access for sops human tier: use the `devbox` command (laptop/devbox),
+  # which ensures the pcscd tunnel below exists before connecting. Works with mosh.
   Compression yes
   ControlMaster auto
   ControlPath ~/.ssh/sockets/%r@%h-%p
@@ -13,6 +15,22 @@ Host devbox
   ServerAliveCountMax 3
   TCPKeepAlive yes
   IPQoS lowdelay throughput
+
+# YubiKey tunnel: exposes laptop pcscd on devbox loopback :12799 so the devbox can
+# decrypt sops human-tier secrets (devbox/pcscd-bridge.service converts the port to
+# a user-owned unix socket; sshd binds forwarded unix sockets root-only, hence TCP).
+# Owned by the `devbox` wrapper (laptop/devbox): created on demand at connect time,
+# checked via its dedicated control socket, never a polling daemon. Dies with the
+# network (ServerAlive 15x3=45s) and is recreated on the next `devbox` invocation.
+Host devbox-tunnel
+  HostName sami-agents.tailb86685.ts.net
+  User ubuntu
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/tunnel-%r@%h
+  ExitOnForwardFailure yes
+  ServerAliveInterval 15
+  ServerAliveCountMax 3
+  RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
 
 Host devbox-metr
   HostName i-0d4723fd599a8dd83

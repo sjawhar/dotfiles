@@ -1,0 +1,12 @@
+[Unit]
+Description=Bridge ~/.pcscd/pcscd.comm to SSH-forwarded TCP 12799 (YubiKey PC/SC over SSH)
+
+[Service]
+# unlink-early: replace stale socket on restart. fork: one child per client.
+# When no SSH session is forwarding 12799, clients get connection-refused (loud).
+ExecStart=/usr/bin/socat UNIX-LISTEN:%h/.pcscd/pcscd.comm,fork,unlink-early TCP:127.0.0.1:12799
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

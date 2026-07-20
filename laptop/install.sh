@@ -201,6 +201,10 @@ chmod 600 ~/.ssh/config
 chmod +x "${LAPTOP_DIR}/aerospace-ws"
 ensure_link "${LAPTOP_DIR}/aerospace-ws" ~/.local/bin/aerospace-ws
 
+# --- devbox connect wrapper (ensures YubiKey pcscd tunnel, then mosh/ssh) ---
+chmod +x "${LAPTOP_DIR}/devbox"
+ensure_link "${LAPTOP_DIR}/devbox" ~/.local/bin/devbox
+
 # --- PipeWire: default webcam to 1080p30 instead of 480p25 ---
 mkdir -p ~/.config/pipewire/pipewire.conf.d
 ensure_link "${DOTFILES_DIR}/pipewire/10-video-quality.conf" ~/.config/pipewire/pipewire.conf.d/10-video-quality.conf
@@ -252,6 +256,7 @@ source "${DOTFILES_DIR}/installers/ghostty.sh"
 source "${DOTFILES_DIR}/installers/voxtype.sh"
 source "${LAPTOP_DIR}/drivers.sh"
 source "${LAPTOP_DIR}/joycon.sh"
+source "${LAPTOP_DIR}/pam-u2f.sh"
 
 echo "--- Laptop setup complete ---"
 echo "Next steps:"

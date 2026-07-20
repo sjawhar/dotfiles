@@ -1,0 +1,21 @@
+#!/bin/bash
+# devbox — connect to the devbox, ensuring the YubiKey pcscd tunnel exists first.
+#
+# The tunnel (Host devbox-tunnel in ssh config) lets the devbox decrypt sops
+# human-tier secrets with the YubiKey plugged into this laptop. Mosh can't carry
+# SSH forwards, so the tunnel is a separate background ssh held by a dedicated
+# control socket — created here on demand, no polling daemon. If the tunnel dies
+# mid-session (Wi-Fi change, laptop sleep), just run `devbox` again.
+#
+# Args pass through to mosh, e.g.: devbox -- tm
+set -euo pipefail
+
+if ! ssh -O check devbox-tunnel 2>/dev/null; then
+    # Dead or stale control socket — clear it so we don't spawn a masterless dup.
+    rm -f ~/.ssh/sockets/tunnel-ubuntu@sami-agents.tailb86685.ts.net
+    echo "devbox: starting YubiKey tunnel..." >&2
+    # -f backgrounds only after the forward is up (ExitOnForwardFailure).
+    ssh -N -f devbox-tunnel
+fi
+
+exec mosh devbox "$@"
