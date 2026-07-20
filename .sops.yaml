@@ -1,2 +1,16 @@
+# Recipient roster (rotated 2026-07-20; old age1ma0j4m... key retired):
+#   yubikey   age1yubikey1qw4p... — hardware-backed (laptop YubiKey, touch to decrypt)
+#   recovery  age18fg9c... — break-glass key; private half lives ONLY in 1Password
+#   agent     age1jf63n... — devbox-resident, unattended agent decryption
 creation_rules:
-  - age: 'age1ma0j4m3gpflm3pldnjxv4ez3fe9rpuewk4g5ut6wxc4nfy33g5pquytecq'
+  # Human tier: YubiKey (daily) or 1Password recovery. No machine-resident key.
+  - path_regex: secrets\.human\.env$
+    age:
+      - age1yubikey1qw4p2g0ae4hgl52y9s24v4lslv0w405apdltcty8edk4gn230ggz5wffym8
+      - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
+  # Agent tier (default): also decryptable unattended on the devbox.
+  - age:
+      - age1jf63nvl6uenkwalyysa5hqv0k7ks5k6mjggqxlj7fwwp0gnkfvxszyxd2q
+      - age1qz0v8s5fnwvq9g4u49jkl8jdzejmssxxh6rw3cz0yxa370c05ynsak3gkk
+      - age1yubikey1qw4p2g0ae4hgl52y9s24v4lslv0w405apdltcty8edk4gn230ggz5wffym8
+      - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
