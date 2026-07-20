@@ -14,6 +14,11 @@
     "planner_enabled": true,
     "replace_plan": true
   },
+  "goal": {
+    "enabled": false,
+    "auto_start": false,
+    "default_max_iterations": 100
+  },
   "agents": {
     "sisyphus": {
       "model": "anthropic/claude-opus-4-8",
@@ -93,7 +98,6 @@
     "think-mode",
     "preemptive-compaction",
     "rules-injector",
-    "ralph-loop",
     "tasks-todowrite-disabler",
     "auto-slash-command",
     "todo-continuation-enforcer"
@@ -104,6 +108,11 @@
   "disabled_tools": [],
   "hashline_edit": true,
   "runtime_fallback": true,
+  "experimental": {
+    "dynamic_context_pruning": {
+      "enabled": true
+    }
+  },
   "keyword_detector": {
     "disabled_keywords": ["team"]
   },

@@ -8,12 +8,55 @@
   },
   "plugin": [
     "@sjawhar/opencode-legion-envoy@latest",
+    "file://{env:HOME}/.dotfiles/opencode/plugins/dotfiles-bridge.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/session-env.ts",
-    "superpowers@git+https://github.com/obra/superpowers.git#v6.1.1",
     "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.5.1/sjawhar-opencode-anthropic-auth-0.5.1.tgz",
-    "file://{env:HOME}/.dotfiles/opencode/plugins/dotfiles-bridge.ts"
+    "opencody-pty@latest",
+    "superpowers@git+https://github.com/obra/superpowers.git#v6.1.1"
   ],
+  "references": {
+    "inspect_ai": {
+      "repository": "github.com/UKGovernmentBEIS/inspect_ai",
+      "description": "Inspect AI eval framework (official upstream)"
+    },
+    "inspect_ai_tl": {
+      "repository": "github.com/trajectory-labs-pbc/inspect_ai",
+      "description": "Inspect AI eval framework (Trajectory Labs fork)"
+    },
+    "inspect_evals": {
+      "repository": "github.com/UKGovernmentBEIS/inspect_evals",
+      "description": "Inspect evals (official upstream)"
+    },
+    "inspect_flow": {
+      "repository": "github.com/meridianlabs-ai/inspect_flow",
+      "description": "Inspect Flow (official upstream)"
+    },
+    "inspect_k8s_sandbox": {
+      "repository": "github.com/UKGovernmentBEIS/inspect_k8s_sandbox",
+      "description": "Inspect Kubernetes sandbox provider (official upstream)"
+    },
+    "inspect_k8s_sandbox_tl": {
+      "repository": "github.com/trajectory-labs-pbc/inspect_k8s_sandbox",
+      "description": "Inspect Kubernetes sandbox provider (Trajectory Labs fork)"
+    },
+    "inspect_scout": {
+      "repository": "github.com/meridianlabs-ai/inspect_scout",
+      "description": "Inspect Scout (official upstream)"
+    },
+    "inspect_swe": {
+      "repository": "github.com/meridianlabs-ai/inspect_swe",
+      "description": "Inspect SWE (official upstream)"
+    },
+    "inspect_swe_tl": {
+      "repository": "github.com/trajectory-labs-pbc/inspect_swe",
+      "description": "Inspect SWE (Trajectory Labs fork)"
+    },
+    "inspect_action": {
+      "repository": "github.com/METR/inspect-action",
+      "description": "METR inspect-action / hawk (official upstream)"
+    }
+  },
   "provider": {
     "anthropic": {
       "models": {
