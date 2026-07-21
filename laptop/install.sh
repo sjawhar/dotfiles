@@ -257,6 +257,7 @@ source "${DOTFILES_DIR}/installers/voxtype.sh"
 source "${LAPTOP_DIR}/drivers.sh"
 source "${LAPTOP_DIR}/joycon.sh"
 source "${LAPTOP_DIR}/pam-u2f.sh"
+source "${LAPTOP_DIR}/cosmic-greeter-fork.sh"
 
 echo "--- Laptop setup complete ---"
 echo "Next steps:"
