@@ -1,15 +1,17 @@
 #!/bin/bash
 # Restore monitor layout for docked configuration:
 #
-#   [  LG 4K portrait  ] [     LG Ultrawide      ]
-#                       [ Xebec  ] [  Laptop*  ]
+#   [ laptop ] [ Samsung  ] [    AOC UW        ] [ Samsung  ]
+#              [ LS32A70  ] [    Sceptre UW    ] [ U32J59x  ]
+#              [ portrait ] [    [ ASUS ]      ] [ portrait ]
 #
-# Identifies monitors by EDID model name so connector names (DP-6, DP-10, etc.)
-# can change across reboots without breaking the layout.
+# Identifies monitors by EDID model name so connector names (DP-12, DVI-I-3,
+# etc.) can change across replugs/reboots without breaking the layout.
+# Applies in two passes: COSMIC's layout engine re-normalizes positions when
+# intermediate states overlap, so stage everything far away first.
 
 set -euo pipefail
 
-# Parse cosmic-randr list to find connector name for a given model substring
 find_connector() {
     local model="$1"
     cosmic-randr list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk -v model="$model" '
@@ -18,66 +20,81 @@ find_connector() {
     '
 }
 
-LG4K=$(find_connector "LG HDR 4K")
-ULTRAWIDE=$(find_connector "LG ULTRAWIDE")
-XEBEC=$(find_connector "Xebec Snap 13")
+SAM_LEFT=$(find_connector "LS32A70")
+SAM_RIGHT=$(find_connector "U32J59x")
+SCEPTRE=$(find_connector "O34")
+AOC=$(find_connector "U34G2G4R3")
+ASUS=$(find_connector "MB16AC")
 LAPTOP="eDP-1"
 
 errors=0
-if [[ -z "$LG4K" ]]; then
-    echo "Warning: LG HDR 4K not found, skipping"
-    errors=1
-fi
-if [[ -z "$ULTRAWIDE" ]]; then
-    echo "Warning: LG ULTRAWIDE not found, skipping"
-    errors=1
-fi
-if [[ -z "$XEBEC" ]]; then
-    echo "Warning: Xebec Snap 13 not found, skipping"
-    errors=1
+for pair in "LS32A70:$SAM_LEFT" "U32J59x:$SAM_RIGHT" "Sceptre O34:$SCEPTRE" "AOC U34G2G4R3:$AOC" "ASUS MB16AC:$ASUS"; do
+    if [[ -z "${pair#*:}" ]]; then
+        echo "Warning: ${pair%%:*} not found, skipping"
+        errors=1
+    fi
+done
+
+# Fast path: if every found connector is already at its target position,
+# there is nothing to do.
+current_layout() {
+    cosmic-randr list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk '
+        /^[A-Za-z]/ { connector = $1 }
+        /Position:/ { gsub(",", " ", $2); print connector, $2 }
+    ' | sort
+}
+target_layout() {
+    {
+        echo "$LAPTOP 0 0"
+        [[ -n "$SAM_LEFT" ]]  && echo "$SAM_LEFT 1920 0"
+        [[ -n "$AOC" ]]       && echo "$AOC 4080 0"
+        [[ -n "$SCEPTRE" ]]   && echo "$SCEPTRE 4080 1440"
+        [[ -n "$SAM_RIGHT" ]] && echo "$SAM_RIGHT 7520 0"
+        [[ -n "$ASUS" ]]      && echo "$ASUS 4840 2880"
+    } | sort
+}
+if [[ "$(current_layout)" == "$(target_layout)" ]]; then
+    echo "Layout already correct"
+    exit 0
 fi
 
-# LG 4K — portrait (rotate270), far left
-if [[ -n "$LG4K" ]]; then
-    cosmic-randr mode "$LG4K" 3840 2160 \
-        --refresh 59.997 \
-        --pos-x 0 --pos-y 0 \
-        --transform rotate270 \
-        --scale 1
-    echo "Configured $LG4K (LG HDR 4K) — left portrait at 0,0"
-fi
+# place <connector> <w> <h> <refresh> <x> <y> <transform>
+place() {
+    local conn="$1" w="$2" h="$3" hz="$4" x="$5" y="$6" tf="$7"
+    [[ -n "$conn" ]] || return 0
+    cosmic-randr mode "$conn" "$w" "$h" --refresh "$hz" \
+        --pos-x "$x" --pos-y "$y" --transform "$tf" --scale 1 >/dev/null
+}
 
-# LG Ultrawide — right of the 4K portrait (2160px wide), vertically centered
-if [[ -n "$ULTRAWIDE" ]]; then
-    cosmic-randr mode "$ULTRAWIDE" 3440 1440 \
-        --refresh 99.997 \
-        --pos-x 2160 --pos-y 1081 \
-        --transform normal \
-        --scale 1
-    echo "Configured $ULTRAWIDE (LG ULTRAWIDE) — center at 2160,1081"
-fi
+# Pass 1: stage far apart so no intermediate state overlaps
+i=0
+for spec in \
+    "$LAPTOP 1920 1200 60.003 normal" \
+    "$SAM_LEFT 3840 2160 60.000 rotate90" \
+    "$SCEPTRE 3440 1440 60.001 normal" \
+    "$AOC 3440 1440 59.973 normal" \
+    "$SAM_RIGHT 3840 2160 59.997 rotate270" \
+    "$ASUS 1920 1080 60.000 rotate180"; do
+    read -r conn w h hz tf <<< "$spec"
+    place "$conn" "$w" "$h" "$hz" $((i * 12000)) 20000 "$tf"
+    i=$((i + 1))
+done
 
-# Xebec — below the ultrawide
-if [[ -n "$XEBEC" ]]; then
-    cosmic-randr mode "$XEBEC" 1920 1080 \
-        --refresh 60.000 \
-        --pos-x 2160 --pos-y 2521 \
-        --transform normal \
-        --scale 1
-    echo "Configured $XEBEC (Xebec Snap 13) — below ultrawide at 2160,2521"
+# Pass 2: final positions
+place "$LAPTOP"    1920 1200 60.003    0    0 normal
+place "$SAM_LEFT"  3840 2160 60.000 1920    0 rotate90
+place "$AOC"       3440 1440 59.973 4080    0 normal
+place "$SCEPTRE"   3440 1440 60.001 4080 1440 normal
+place "$SAM_RIGHT" 3840 2160 59.997 7520    0 rotate270
+place "$ASUS"      1920 1080 60.000 4840 2880 rotate180
+# cosmic-randr xwayland can block indefinitely waiting on the compositor
+# (observed 2026-07); the layout is already applied by this point, so cap it.
+if ! timeout 3 cosmic-randr xwayland --primary "$LAPTOP"; then
+    echo "Warning: failed to set Xwayland primary output (timed out)"
 fi
-
-# Laptop — right of the Xebec, bottom-aligned
-cosmic-randr mode "$LAPTOP" 1920 1200 \
-    --refresh 60.003 \
-    --pos-x 4080 --pos-y 2521 \
-    --transform normal \
-    --scale 1
-cosmic-randr xwayland --primary "$LAPTOP"
-echo "Configured $LAPTOP (laptop) — right of Xebec at 4080,2521 (primary)"
 
 if [[ $errors -eq 0 ]]; then
-    echo "All monitors configured successfully"
+    echo "All monitors configured"
 else
     echo "Layout applied with warnings (see above)"
 fi
