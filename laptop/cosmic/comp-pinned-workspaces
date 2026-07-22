@@ -1,0 +1,237 @@
+[
+    (
+        output: (
+            name: "DVI-I-3",
+            edid: Some((
+                manufacturer: ('A', 'U', 'S'),
+                product: 5697,
+                serial: Some(89038),
+                manufacture_week: 50,
+                manufacture_year: 2017,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("1f0dac9"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DVI-I-3",
+            edid: Some((
+                manufacturer: ('A', 'U', 'S'),
+                product: 5697,
+                serial: Some(89038),
+                manufacture_week: 50,
+                manufacture_year: 2017,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("1aadcb1"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DVI-I-3",
+            edid: Some((
+                manufacturer: ('A', 'U', 'S'),
+                product: 5697,
+                serial: Some(89038),
+                manufacture_week: 50,
+                manufacture_year: 2017,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("e1f35a"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DP-10",
+            edid: Some((
+                manufacturer: ('S', 'P', 'T'),
+                product: 34114,
+                serial: None,
+                manufacture_week: 46,
+                manufacture_year: 2024,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("85b751"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DP-10",
+            edid: Some((
+                manufacturer: ('S', 'P', 'T'),
+                product: 34114,
+                serial: None,
+                manufacture_week: 46,
+                manufacture_year: 2024,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("16d6e8a"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DP-10",
+            edid: Some((
+                manufacturer: ('S', 'P', 'T'),
+                product: 34114,
+                serial: None,
+                manufacture_week: 46,
+                manufacture_year: 2024,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("b3f538"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DP-17",
+            edid: Some((
+                manufacturer: ('S', 'A', 'M'),
+                product: 29029,
+                serial: Some(809646411),
+                manufacture_week: 41,
+                manufacture_year: 2021,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("14b4132"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DP-17",
+            edid: Some((
+                manufacturer: ('S', 'A', 'M'),
+                product: 29029,
+                serial: Some(809646411),
+                manufacture_week: 41,
+                manufacture_year: 2021,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("3a93e0"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DP-15",
+            edid: Some((
+                manufacturer: ('S', 'A', 'M'),
+                product: 3893,
+                serial: Some(810828890),
+                manufacture_week: 50,
+                manufacture_year: 2018,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("67dde9"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DP-15",
+            edid: Some((
+                manufacturer: ('S', 'A', 'M'),
+                product: 3893,
+                serial: Some(810828890),
+                manufacture_week: 50,
+                manufacture_year: 2018,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("1a1d944"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "eDP-1",
+            edid: None,
+        ),
+        tiling_enabled: true,
+        id: Some("177cfdd"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "eDP-1",
+            edid: None,
+        ),
+        tiling_enabled: true,
+        id: Some("2125e0"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "eDP-1",
+            edid: None,
+        ),
+        tiling_enabled: true,
+        id: Some("1e5b37d"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DVI-I-1",
+            edid: Some((
+                manufacturer: ('A', 'O', 'C'),
+                product: 13314,
+                serial: Some(1600),
+                manufacture_week: 3,
+                manufacture_year: 2021,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("321b7a"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DVI-I-1",
+            edid: Some((
+                manufacturer: ('A', 'O', 'C'),
+                product: 13314,
+                serial: Some(1600),
+                manufacture_week: 3,
+                manufacture_year: 2021,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("7bd16a"),
+        name: None,
+    ),
+    (
+        output: (
+            name: "DVI-I-1",
+            edid: Some((
+                manufacturer: ('A', 'O', 'C'),
+                product: 13314,
+                serial: Some(1600),
+                manufacture_week: 3,
+                manufacture_year: 2021,
+                model_year: None,
+            )),
+        ),
+        tiling_enabled: true,
+        id: Some("d43f46"),
+        name: None,
+    ),
+]
