@@ -6,11 +6,11 @@ creation_rules:
   # Human tier: YubiKey (daily) or 1Password recovery. No machine-resident key.
   - path_regex: secrets\.human\.env$
     age:
-      - age1yubikey1qw4p2g0ae4hgl52y9s24v4lslv0w405apdltcty8edk4gn230ggz5wffym8
+      - age1yubikey1q266wjyhf0vfcjmy0g40m5hzadmjcqcdxdruru3gk62q39rk33xa2rd2llw
       - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
   # Agent tier (default): also decryptable unattended on the devbox.
   - age:
       - age1jf63nvl6uenkwalyysa5hqv0k7ks5k6mjggqxlj7fwwp0gnkfvxszyxd2q
       - age1qz0v8s5fnwvq9g4u49jkl8jdzejmssxxh6rw3cz0yxa370c05ynsak3gkk
-      - age1yubikey1qw4p2g0ae4hgl52y9s24v4lslv0w405apdltcty8edk4gn230ggz5wffym8
+      - age1yubikey1q266wjyhf0vfcjmy0g40m5hzadmjcqcdxdruru3gk62q39rk33xa2rd2llw
       - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
