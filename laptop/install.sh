@@ -197,10 +197,6 @@ chmod 700 ~/.ssh
 ensure_link "${LAPTOP_DIR}/ssh-config" ~/.ssh/config
 chmod 600 ~/.ssh/config
 
-# --- Aerospace-style workspace switching ---
-chmod +x "${LAPTOP_DIR}/aerospace-ws"
-ensure_link "${LAPTOP_DIR}/aerospace-ws" ~/.local/bin/aerospace-ws
-
 # --- devbox connect wrapper (ensures YubiKey pcscd tunnel, then mosh/ssh) ---
 chmod +x "${LAPTOP_DIR}/devbox"
 ensure_link "${LAPTOP_DIR}/devbox" ~/.local/bin/devbox
@@ -214,13 +210,8 @@ mkdir -p ~/.config/wireplumber/wireplumber.conf.d
 ensure_link "${DOTFILES_DIR}/wireplumber/51-camera-mjpg.conf" ~/.config/wireplumber/wireplumber.conf.d/51-camera-mjpg.conf
 
 # --- COSMIC custom shortcuts ---
-# Template uses __HOME__ placeholder since COSMIC reads files directly (no shell expansion).
-# Remove any existing symlink first — a prior ensure_link would cause sed to truncate the source.
-COSMIC_SHORTCUTS=~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1
-mkdir -p "$COSMIC_SHORTCUTS"
-rm -f "$COSMIC_SHORTCUTS/custom"
-sed "s|__HOME__|${HOME}|g" "${LAPTOP_DIR}/shortcuts-custom" \
-    > "$COSMIC_SHORTCUTS/custom"
+chmod +x "${LAPTOP_DIR}/generate-shortcuts"
+"${LAPTOP_DIR}/generate-shortcuts" --apply
 
 # --- Sysctl: desktop performance tuning ---
 if ! diff -q "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performance.conf &>/dev/null; then
@@ -249,6 +240,16 @@ for cosmic_path in "${!COSMIC_SETTINGS[@]}"; do
         ~/.config/cosmic/"${cosmic_path}"
 done
 
+# --- COSMIC pinned workspaces (seed only; cosmic-comp owns this file at runtime) ---
+# Snapshot of the 15-global-workspace pin layout (see laptop/workspaces.conf).
+# Refresh the snapshot after re-pinning:
+#   cp ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces "${LAPTOP_DIR}/cosmic/comp-pinned-workspaces"
+if [ ! -f ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces ]; then
+    echo "Seeding COSMIC pinned workspaces..."
+    mkdir -p ~/.config/cosmic/com.system76.CosmicComp/v1
+    cp "${LAPTOP_DIR}/cosmic/comp-pinned-workspaces" ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces
+fi
+
 # =============================================================================
 # Desktop apps (separate installers)
 # =============================================================================
@@ -258,6 +259,7 @@ source "${LAPTOP_DIR}/drivers.sh"
 source "${LAPTOP_DIR}/joycon.sh"
 source "${LAPTOP_DIR}/pam-u2f.sh"
 source "${LAPTOP_DIR}/cosmic-greeter-fork.sh"
+source "${LAPTOP_DIR}/cosmic-comp-fork.sh"
 
 echo "--- Laptop setup complete ---"
 echo "Next steps:"

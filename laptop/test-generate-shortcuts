@@ -1,0 +1,82 @@
+#!/bin/bash
+set -euo pipefail
+
+LAPTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GENERATOR="${LAPTOP_DIR}/generate-shortcuts"
+mkdir -p /tmp/opencode
+TMPDIR="$(mktemp -d /tmp/opencode/generate-shortcuts-test.XXXXXX)"
+trap 'rm -rf "${TMPDIR}"' EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+OUTPUT="${TMPDIR}/custom"
+"${GENERATOR}" --check > "${OUTPUT}"
+
+[[ "$(grep -c '): WorkspaceOnOutput(' "${OUTPUT}")" -eq 15 ]] \
+    || fail 'expected 15 workspace bindings'
+[[ "$(grep -c '): MoveToWorkspaceOnOutput(' "${OUTPUT}")" -eq 15 ]] \
+    || fail 'expected 15 move bindings'
+! grep -q '__WORKSPACE_BINDINGS__\|__HOME__' "${OUTPUT}" \
+    || fail 'template placeholders remain in generated output'
+
+open_parens="$(tr -cd '(' < "${OUTPUT}" | wc -c)"
+close_parens="$(tr -cd ')' < "${OUTPUT}" | wc -c)"
+[[ "${open_parens}" -eq "${close_parens}" ]] || fail 'unbalanced parentheses'
+
+awk '
+    /WorkspaceOnOutput\(|MoveToWorkspaceOnOutput\(/ {
+        if ($0 !~ /,$/) exit 1
+        generated++
+    }
+    END { exit generated == 30 ? 0 : 1 }
+' "${OUTPUT}" || fail 'generated bindings must end with commas'
+
+bad_modifier="${TMPDIR}/bad-modifier.conf"
+sed 's/Alt+1/Meta+1/' "${LAPTOP_DIR}/workspaces.conf" > "${bad_modifier}"
+if "${GENERATOR}" --conf "${bad_modifier}" > /dev/null 2>&1; then
+    fail 'unsupported modifier must fail'
+fi
+
+duplicate_workspace="${TMPDIR}/duplicate-workspace.conf"
+sed 's/^2[[:space:]]\+/1   /' "${LAPTOP_DIR}/workspaces.conf" > "${duplicate_workspace}"
+if "${GENERATOR}" --conf "${duplicate_workspace}" > /dev/null 2>&1; then
+    fail 'duplicate global workspace must fail'
+fi
+
+too_many_local="${TMPDIR}/too-many-local.conf"
+for workspace in $(seq 1 11); do
+    printf '%s MONITOR Alt+%s Alt+Shift+%s\n' "${workspace}" "${workspace}" "${workspace}"
+done > "${too_many_local}"
+if "${GENERATOR}" --conf "${too_many_local}" > /dev/null 2>&1; then
+    fail 'more than 10 local workspaces must fail'
+fi
+
+ten_local="${TMPDIR}/ten-local.conf"
+for workspace in $(seq 1 10); do
+    printf '%s MONITOR Alt+%s Alt+Shift+%s\n' "${workspace}" "${workspace}" "${workspace}"
+done > "${ten_local}"
+ten_local_output="${TMPDIR}/ten-local-custom"
+"${GENERATOR}" --check --conf "${ten_local}" > "${ten_local_output}"
+grep -Fq 'WorkspaceOnOutput("MONITOR", 0),' "${ten_local_output}" \
+    || fail 'tenth local workspace must switch to key 0'
+grep -Fq 'MoveToWorkspaceOnOutput("MONITOR", 0),' "${ten_local_output}" \
+    || fail 'tenth local workspace must move to key 0'
+
+duplicate_chord="${TMPDIR}/duplicate-chord.conf"
+printf '%s\n' \
+    '1 MONITOR Alt+Shift+1 Ctrl+1' \
+    '2 MONITOR Shift+Alt+1 Ctrl+2' > "${duplicate_chord}"
+if "${GENERATOR}" --check --conf "${duplicate_chord}" > /dev/null 2>&1; then
+    fail 'duplicate chord across rows must fail'
+fi
+
+template_collision="${TMPDIR}/template-collision.conf"
+printf '%s\n' '1 MONITOR Ctrl+Alt+Left Alt+1' > "${template_collision}"
+if "${GENERATOR}" --check --conf "${template_collision}" > /dev/null 2>&1; then
+    fail 'chord colliding with template binding must fail'
+fi
+
+printf 'PASS: generate-shortcuts\n'

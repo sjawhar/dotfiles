@@ -1,0 +1,266 @@
+#!/bin/bash
+set -euo pipefail
+
+LAPTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE="${LAPTOP_DIR}/shortcuts-custom"
+CONF="${LAPTOP_DIR}/workspaces.conf"
+MODE="stdout"
+
+error() {
+    printf 'generate-shortcuts: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'USAGE'
+Usage: generate-shortcuts [--apply | --check] [--conf PATH]
+
+Generate COSMIC custom shortcuts from laptop/workspaces.conf.
+  --apply      write the generated shortcuts to COSMIC's custom shortcuts file
+  --check      validate the generated RON sanity checks, then print it
+  --conf PATH  read workspace mappings from PATH instead of workspaces.conf
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --apply)
+            [[ "${MODE}" == "stdout" ]] || error 'choose only one of --apply or --check'
+            MODE="apply"
+            ;;
+        --check)
+            [[ "${MODE}" == "stdout" ]] || error 'choose only one of --apply or --check'
+            MODE="check"
+            ;;
+        --conf)
+            [[ $# -ge 2 ]] || error '--conf requires a path'
+            CONF="$2"
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            error "unknown argument: $1"
+            ;;
+    esac
+    shift
+done
+
+[[ -r "${CONF}" ]] || error "cannot read workspace config: ${CONF}"
+[[ -r "${TEMPLATE}" ]] || error "cannot read shortcut template: ${TEMPLATE}"
+
+ron_escape() {
+    local escaped="$1"
+    escaped="${escaped//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    printf '%s' "${escaped}"
+}
+
+parse_chord() {
+    local chord="$1"
+    local context="$2"
+    local token
+    local index
+    local -a parts
+    local -a modifiers=()
+
+    [[ -n "${chord}" && "${chord}" != +* && "${chord}" != *+ && "${chord}" != *'++'* ]] \
+        || error "invalid ${context} chord: ${chord}"
+
+    IFS='+' read -r -a parts <<< "${chord}"
+    index=$((${#parts[@]} - 1))
+    RON_KEY="${parts[$index]}"
+    [[ -n "${RON_KEY}" ]] || error "invalid ${context} chord: ${chord}"
+
+    for ((index = 0; index < ${#parts[@]} - 1; index++)); do
+        token="${parts[$index]}"
+        case "${token}" in
+            Super|Alt|Ctrl|Shift)
+                modifiers+=("${token}")
+                ;;
+            *)
+                error "invalid modifier in ${context} chord: ${token}"
+                ;;
+        esac
+    done
+
+    RON_MODIFIERS=""
+    for token in "${modifiers[@]}"; do
+        if [[ -n "${RON_MODIFIERS}" ]]; then
+            RON_MODIFIERS+=", "
+        fi
+        RON_MODIFIERS+="${token}"
+    done
+}
+
+declare -A seen_workspaces=()
+declare -A seen_chords=()
+declare -A local_counts=()
+declare -a bindings=()
+
+line_number=0
+row_count=0
+while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
+    ((++line_number))
+    line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "${line}" || "${line:0:1}" == "#" ]] && continue
+
+    read -r workspace monitor switch_chord move_chord extra <<< "${line}"
+    [[ -n "${workspace:-}" && -n "${monitor:-}" && -n "${switch_chord:-}" && -n "${move_chord:-}" && -z "${extra:-}" ]] \
+        || error "${CONF}:${line_number}: expected <global-ws> <monitor-query> <switch-chord> <move-chord>"
+    [[ "${workspace}" =~ ^[1-9][0-9]*$ ]] \
+        || error "${CONF}:${line_number}: global workspace must be a positive integer: ${workspace}"
+    [[ -z "${seen_workspaces[${workspace}]+x}" ]] \
+        || error "${CONF}:${line_number}: duplicate global workspace: ${workspace}"
+    seen_workspaces[${workspace}]=1
+
+    for chord in "${switch_chord}" "${move_chord}"; do
+        [[ -z "${seen_chords[${chord}]+x}" ]] \
+            || error "${CONF}:${line_number}: duplicate chord: ${chord}"
+        seen_chords[${chord}]=1
+    done
+
+    local_index=$((${local_counts[${monitor}]:-0} + 1))
+    local_counts[${monitor}]="${local_index}"
+    case "${local_index}" in
+        [1-9])
+            key_num="${local_index}"
+            ;;
+        10)
+            key_num=0
+            ;;
+        *)
+            error "${CONF}:${line_number}: monitor ${monitor} has more than 10 local workspaces"
+            ;;
+    esac
+
+    monitor_ron="$(ron_escape "${monitor}")"
+
+    parse_chord "${switch_chord}" 'switch'
+    bindings+=("    (modifiers: [${RON_MODIFIERS}], key: \"${RON_KEY}\", description: Some(\"WS${workspace} — ${monitor_ron} (${local_index})\")): WorkspaceOnOutput(\"${monitor_ron}\", ${key_num}),")
+
+    parse_chord "${move_chord}" 'move'
+    bindings+=("    (modifiers: [${RON_MODIFIERS}], key: \"${RON_KEY}\", description: Some(\"Move to WS${workspace}\")): MoveToWorkspaceOnOutput(\"${monitor_ron}\", ${key_num}),")
+
+    ((++row_count))
+done < "${CONF}"
+
+((row_count > 0)) || error "${CONF}: no workspace mappings found"
+
+render_template() {
+    local template_line
+    local marker_count=0
+
+    while IFS= read -r template_line || [[ -n "${template_line}" ]]; do
+        if [[ "${template_line}" == '__WORKSPACE_BINDINGS__' ]]; then
+            ((++marker_count))
+            printf '%s\n' "${bindings[@]}"
+        else
+            printf '%s\n' "${template_line//__HOME__/${HOME}}"
+        fi
+    done < "${TEMPLATE}"
+
+    ((marker_count == 1)) || error "${TEMPLATE}: expected exactly one __WORKSPACE_BINDINGS__ line"
+}
+
+canonicalize_modifiers() {
+    local modifiers="$1"
+    local modifier
+    local canonical_modifiers=""
+    local -a modifier_parts
+    local -A modifier_set=()
+
+    IFS=',' read -r -a modifier_parts <<< "${modifiers}"
+    for modifier in "${modifier_parts[@]}"; do
+        modifier="${modifier//[[:space:]]/}"
+        [[ -z "${modifier}" ]] && continue
+        case "${modifier}" in
+            Alt|Ctrl|Shift|Super)
+                modifier_set[${modifier}]=1
+                ;;
+            *)
+                error "generated output has invalid modifier: ${modifier}"
+                ;;
+        esac
+    done
+
+    for modifier in Alt Ctrl Shift Super; do
+        [[ -n "${modifier_set[${modifier}]+x}" ]] || continue
+        [[ -z "${canonical_modifiers}" ]] || canonical_modifiers+=", "
+        canonical_modifiers+="${modifier}"
+    done
+
+    printf '%s' "${canonical_modifiers}"
+}
+
+validate_output() {
+    local output="$1"
+    local generated_line
+    local binding_modifiers
+    local binding_key
+    local binding_tuple
+    local canonical_modifiers
+    local open_parens
+    local close_parens
+    local open_braces
+    local close_braces
+    local generated_count=0
+    local binding_pattern='^[[:space:]]*\(modifiers:[[:space:]]*\[([^]]*)\],[[:space:]]*key:[[:space:]]*"([^"]*)"'
+    local -A seen_binding_tuples=()
+
+    open_parens="$(tr -cd '(' <<< "${output}" | wc -c)"
+    close_parens="$(tr -cd ')' <<< "${output}" | wc -c)"
+    [[ "${open_parens}" -eq "${close_parens}" ]] || error 'generated output has unbalanced parentheses'
+
+    open_braces="$(tr -cd '{' <<< "${output}" | wc -c)"
+    close_braces="$(tr -cd '}' <<< "${output}" | wc -c)"
+    [[ "${open_braces}" -eq "${close_braces}" ]] || error 'generated output has unbalanced braces'
+
+    while IFS= read -r generated_line; do
+        if [[ "${generated_line}" =~ ${binding_pattern} ]]; then
+            binding_modifiers="${BASH_REMATCH[1]}"
+            binding_key="${BASH_REMATCH[2]}"
+            canonical_modifiers="$(canonicalize_modifiers "${binding_modifiers}")"
+            binding_tuple="${canonical_modifiers}|${binding_key}"
+            [[ -z "${seen_binding_tuples[${binding_tuple}]+x}" ]] \
+                || error "generated output has duplicate binding tuple: (modifiers: [${canonical_modifiers}], key: \"${binding_key}\")"
+            seen_binding_tuples[${binding_tuple}]=1
+        fi
+
+        if [[ "${generated_line}" == *'WorkspaceOnOutput('* || "${generated_line}" == *'MoveToWorkspaceOnOutput('* ]]; then
+            [[ "${generated_line}" == *, ]] || error 'generated workspace binding does not end with a comma'
+            ((++generated_count))
+        fi
+    done <<< "${output}"
+
+    [[ "${generated_count}" -eq "${#bindings[@]}" ]] \
+        || error "generated output is missing workspace bindings"
+}
+
+case "${MODE}" in
+    stdout)
+        render_template
+        ;;
+    check)
+        output="$(render_template)"
+        validate_output "${output}"
+        printf '%s\n' "${output}"
+        ;;
+    apply)
+        cosmic_shortcuts="${HOME}/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1"
+        target="${cosmic_shortcuts}/custom"
+        temp_target=""
+        mkdir -p "${cosmic_shortcuts}"
+        temp_target="$(mktemp "${cosmic_shortcuts}/.custom.XXXXXX")"
+        trap 'rm -f "${temp_target}"' EXIT
+        render_template > "${temp_target}"
+        output="$(< "${temp_target}")"
+        validate_output "${output}"
+        mv -f "${temp_target}" "${target}"
+        trap - EXIT
+        printf 'Generated COSMIC shortcuts: %s\n' "${target}"
+        ;;
+esac
