@@ -54,3 +54,16 @@ enabled = true
 required = true
 clean = ["git-lfs", "clean", "--", "$path"]
 smudge = ["git-lfs", "smudge", "--", "$path"]
+
+# Commit signing: per-machine software key (~/.ssh/jj-signing), registered on
+# GitHub as a signing key for each machine. "own" re-signs silently on every
+# rewrite - no interaction, agent-safe. Pair with GitHub vigilant mode so
+# unsigned commits claiming this identity get flagged. A touch-gated
+# ceremonial key (ed25519-sk + `jj sign -r <revset>`) can layer on later.
+[signing]
+behavior = "own"
+backend = "ssh"
+key = "~/.ssh/jj-signing.pub"
+
+[signing.backends.ssh]
+allowed-signers = "~/.dotfiles/jj-allowed-signers"
