@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-export DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export DOTFILES_DIR
 
 echo "=== Dotfiles Install ==="
 
@@ -12,6 +13,7 @@ source "${DOTFILES_DIR}/installers/tmux.sh"
 source "${DOTFILES_DIR}/installers/nvim.sh"
 source "${DOTFILES_DIR}/installers/claude.sh"
 source "${DOTFILES_DIR}/installers/opencode.sh"
+source "${DOTFILES_DIR}/installers/secretsd.sh"
 
 echo "Generating completions..."
 COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"

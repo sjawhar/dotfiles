@@ -79,6 +79,17 @@ Use `jj log` (without `agent-`) only when you need to show the user the human-re
 - **Nothing is ever lost.** Every operation is logged in `jj op log`. You can inspect any previous state with `--at-op` and restore with `jj op restore`. Run `jj st > /dev/null` frequently to create snapshot recovery points.
 - **Divergent commits are normal.** When multiple workspaces are active, concurrent operations can create divergent commits (IDs with `/0`, `/4` suffixes). This is usually fine — resolve by squashing the copies together.
 
+## CRITICAL: Scope Destructive Commands
+
+Before any jj command that reverts, discards, or rewrites, ask its blast radius and scope it to a path or revision. An instruction not to touch a file does not protect it from an unscoped command that affects the whole tree.
+
+- **`jj restore` without a path reverts the WHOLE working copy.** Always name a path: `jj restore --from <rev> <path>`. If you mean one file, name that file.
+- **`jj abandon`** discards a whole change.
+- **`jj undo` / `jj op restore`** are repo-wide time travel: they also undo unrelated work since that operation, including other agents' work in other workspaces.
+- Newly created, untracked-but-snapshotted files are most vulnerable: they exist only in the working copy.
+
+**Recover an accidental restore:** run `jj op log` to find the offending operation, then use a **path-scoped** `jj restore --from <commit-before-it> <path>`. Before restoring, `jj op log --limit N` plus `jj --at-op=<op> file list` lets you inspect what existed at a past operation.
+
 ## Edit in place, not via throwaway commits
 
 **It is correct and safe for `@` to sit on the commit (or bookmark) you intend to edit.** Auto-snapshot putting your working-copy edits into that commit IS the editing mechanism — there is no staging area, no detached-HEAD danger, and nothing to "protect" the target from. Every state is in the op log, so nothing is lost.

@@ -209,7 +209,7 @@ def resolve_installation(
 def resolve_private_key(key_secret: str) -> str:
     try:
         result = subprocess.run(
-            ["secrets", "get", key_secret],
+        ["secrets", "get", key_secret, "--value"],
             capture_output=True,
             text=True,
             check=True,
