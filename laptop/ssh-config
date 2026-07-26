@@ -32,38 +32,8 @@ Host devbox-tunnel
   ServerAliveCountMax 3
   RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
 
-Host devbox-metr
-  HostName i-0d4723fd599a8dd83
-  User sami
-  ForwardAgent yes
-  ProxyCommand docker run --rm -i -v ${HOME}/.aws:/home/aws/.aws awscli ssm start-session --profile=metr --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p' --region us-west-1 
-
-Host devbox-mx-ssm
-  HostName i-0902f554f5c8909e6
-  User sami
-  ForwardAgent yes
-  ProxyCommand docker run --rm -i -v ${HOME}/.aws:/home/aws/.aws awscli ssm start-session --region mx-central-1 --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'
-
-Host devbox-mx
-  HostName sami-agents-mx.tailb86685.ts.net
-  User ubuntu
-  ForwardAgent yes
-  Compression yes
-  ControlMaster auto
-  ControlPath ~/.ssh/sockets/%r@%h-%p
-  ControlPersist 600
-  ServerAliveInterval 30
-  ServerAliveCountMax 3
-  TCPKeepAlive yes
-  IPQoS lowdelay throughput
-
 Host ghost-wispr
   HostName ghost-wispr.tailb86685.ts.net
   User ghost-wispr
   ForwardAgent yes
 
-Host ngrok-remote
-    HostName 0.tcp.us-cal-1.ngrok.io
-    Port 14337
-    User sami
-    StrictHostKeyChecking no

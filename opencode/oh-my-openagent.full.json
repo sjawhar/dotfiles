@@ -21,7 +21,7 @@
   },
   "agents": {
     "sisyphus": {
-      "model": "anthropic/claude-opus-4-8",
+      "model": "anthropic/claude-opus-5",
       "variant": "max"
     },
     "hephaestus": {
@@ -29,7 +29,7 @@
       "variant": "medium"
     },
     "prometheus": {
-      "model": "anthropic/claude-opus-4-8",
+      "model": "anthropic/claude-opus-5",
       "variant": "max"
     },
     "metis": {
@@ -60,7 +60,7 @@
   },
   "categories": {
     "ultrabrain": {
-      "model": "anthropic/claude-opus-4-8",
+      "model": "anthropic/claude-opus-5",
       "variant": "max"
     },
     "deep": {
@@ -82,7 +82,7 @@
       "model": "anthropic/claude-sonnet-5"
     },
     "unspecified-high": {
-      "model": "anthropic/claude-opus-4-8",
+      "model": "anthropic/claude-opus-5",
       "variant": "max"
     },
     "writing": {

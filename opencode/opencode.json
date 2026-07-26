@@ -29,10 +29,6 @@
       "repository": "github.com/UKGovernmentBEIS/inspect_evals",
       "description": "Inspect evals (official upstream)"
     },
-    "inspect_flow": {
-      "repository": "github.com/meridianlabs-ai/inspect_flow",
-      "description": "Inspect Flow (official upstream)"
-    },
     "inspect_k8s_sandbox": {
       "repository": "github.com/UKGovernmentBEIS/inspect_k8s_sandbox",
       "description": "Inspect Kubernetes sandbox provider (official upstream)"
@@ -53,11 +49,15 @@
       "repository": "github.com/trajectory-labs-pbc/inspect_swe",
       "description": "Inspect SWE (Trajectory Labs fork)"
     },
-    "inspect_action": {
-      "repository": "github.com/METR/inspect-action",
-      "description": "METR inspect-action / hawk (official upstream)"
+    "hawk": {
+      "repository": "github.com/METR/hawk",
+      "description": "METR hawk (official upstream)"
+    },
+     "hawk_tl": {
+      "repository": "github.com/trajectory-labs-pbc/hawk",
+      "description": "METR hawk (Trajectory Labs fork)"
     }
-  },
+ },
   "provider": {
     "anthropic": {
       "models": {
