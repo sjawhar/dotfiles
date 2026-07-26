@@ -8,6 +8,7 @@ Personal development environment configuration. Targets Linux devcontainers/devp
 .bashrc              # Shell config — sourced by ~/.bashrc, has non-interactive + interactive sections
 .gitconfig           # Git config — symlinked to ~/.gitconfig
 .jjconfig.toml       # Shared jj config — loaded via JJ_CONFIG env var
+jj-allowed-signers   # Signing keys trusted for local verification (both identities, all machines)
 .tmux.conf           # Tmux config
 .claude/CLAUDE.md    # User-level Claude/OpenCode instructions — symlinked to ~/.claude/CLAUDE.md
 starship.toml        # Starship prompt config
@@ -23,7 +24,7 @@ installers/          # Per-tool install scripts (shell.sh, mise.sh, jj.sh, tmux.
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
 shims/               # PATH-priority wrappers (gh, opencode, pyright, basedpyright)
-scripts/             # Utility scripts (git-credential-gh, ephemeral-monitor, etc.)
+scripts/             # Utility scripts (git-identity, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
 devpod/              # DevPod container setup (Dockerfile, entrypoint, proxy config)
 plugins/             # OpenCode/Claude plugins (sjawhar/ has all custom skills, agents, and commands)
@@ -74,3 +75,37 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 
 - **Personal vs. company boundary:** company infra repos must not reference `~/.dotfiles`, and the dotfiles install is not part of standard company machine provisioning.
 - **Envoy** source/config lives in `envoy/` here. It receives external GitHub and Slack webhooks — hardening must preserve webhook delivery. Envoy tools exist only in Sami's own sessions; never instruct other users to use them.
+
+## Commit Signing and Identity
+
+Commits are signed with a per-machine ssh key at `~/.ssh/jj-signing`, registered on GitHub as a *signing* key for each machine. jj and git each need their own configuration — git knows nothing about jj's — so the setup is mirrored in two versioned files:
+
+- **jj** — `.jjconfig.toml` `[signing]`: `behavior = "own"`, `key`, `allowed-signers`.
+- **git** — `.gitconfig`: `gpg.format = ssh`, `allowedSignersFile`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`.
+
+Both are plain versioned config, symlinked into place — no install step. The key path is identical on every machine, so there is nothing machine-specific to factor out. A machine missing the key fails to commit rather than committing unsigned, in both tools; that is the desired failure, since an unsigned commit under vigilant mode looks like impersonation.
+
+Git needs configuring even though day-to-day work is all jj: agent worktrees under `~/.cache`, scripts, and throwaway clones commit with plain `git commit`, and those were the commits showing up unsigned.
+
+### Two identities
+
+`sami@trajectorylabs.net` is the default for both tools. `sami@thecybermonk.com` is opt-in per repo. `jj-allowed-signers` lists both as principals on every key, so a commit verifies under either one.
+
+Within a repo the two tools must **agree**. jj's `behavior = "own"` signs a commit only when its author email matches jj's configured `user.email`, and on mismatch it *drops* the signature when rewriting rather than preserving it. That is why the defaults are aligned rather than left to differ per tool: a git-authored commit under one identity would lose its signature the first time jj rewrote it under the other — which is what happens when an agent's commit gets rebased into a jj repo.
+
+`scripts/git-identity` is what keeps them in sync — it sets both tools at once and re-authors the working-copy change, since config alone only affects future commits:
+
+```bash
+git-identity        # show the effective identity for both tools, flag a mismatch
+git-identity tl     # sami@trajectorylabs.net for this repo
+git-identity cm     # sami@thecybermonk.com for this repo
+```
+
+### Setting up a new machine
+
+Two manual steps, the same ones jj already needed:
+
+1. `ssh-keygen -t ed25519 -N "" -C "jj-signing-$(hostname -s)" -f ~/.ssh/jj-signing`
+2. Add the pubkey to `jj-allowed-signers` under both identities, then register it at <https://github.com/settings/ssh/new> as a **Signing Key** — the first is needed for local verification, the second for GitHub to show Verified.
+
+Both emails also have to be *verified* on the GitHub account — an unverified committer email shows Unverified even with a good signature. GitHub vigilant mode makes any unsigned commit claiming these identities visibly Unverified, which is the intended tripwire.

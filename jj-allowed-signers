@@ -1,2 +1,11 @@
-sami@trajectorylabs.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICA4IzBOyaJmzAm3kPsjH0cVQFjEysEMinjo3uvFh31U
-sami@trajectorylabs.net ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKiFZITI3UIN1TAOOR3tsQThfs7egEpIqEryqnIVQbz5 jj-signing-devbox
+# Signing keys trusted for local verification, one line per machine key.
+#
+# Both identities are listed as principals on every key, so a commit verifies
+# whichever email the repo is configured with. Two things must stay in sync on
+# GitHub or the commit shows Unverified there even though it verifies locally:
+#   1. each key below is registered as a *signing* key (not just an auth key)
+#   2. each email below is a *verified* address on the account
+#
+# Add a new machine's key here after generating ~/.ssh/jj-signing on it.
+sami@trajectorylabs.net,sami@thecybermonk.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICA4IzBOyaJmzAm3kPsjH0cVQFjEysEMinjo3uvFh31U laptop
+sami@trajectorylabs.net,sami@thecybermonk.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKiFZITI3UIN1TAOOR3tsQThfs7egEpIqEryqnIVQbz5 jj-signing-devbox
