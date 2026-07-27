@@ -75,6 +75,7 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 
 - **Personal vs. company boundary:** company infra repos must not reference `~/.dotfiles`, and the dotfiles install is not part of standard company machine provisioning.
 - **Envoy** source/config lives in `envoy/` here. It receives external GitHub and Slack webhooks — hardening must preserve webhook delivery. Envoy tools exist only in Sami's own sessions; never instruct other users to use them.
+- **YubiKey pcscd tunnel:** the `devbox-tunnel` SSH connection carries `RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm` for human-tier secret decryption. Ubuntu's polkit gates pcscd access to active logind sessions only. The tunnel MUST be created from a local, active terminal session on the laptop — never from a non-interactive SSH session (e.g. agent over SSH). If started over SSH, the process goes inactive and pcscd silently rejects all access (`IsClientAuthorized() Process is NOT authorized`), while TCP forwards keep working, making the failure confusing. If an agent created a stale tunnel, kill it with `ssh -O exit devbox-tunnel` and run `devbox` from a terminal.
 
 ## Commit Signing and Identity
 
