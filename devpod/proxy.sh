@@ -1,6 +1,6 @@
 # Tailscale proxy environment variables
-# Usage: source ~/.dotfiles/proxy.sh
-#    or: . proxy.sh
+# Usage: proxy-on   (alias in .bashrc)
+#    or: . "${DOTFILES_DIR}/devpod/proxy.sh"
 
 export HTTP_PROXY="http://localhost:1080"
 export HTTPS_PROXY="http://localhost:1080"
