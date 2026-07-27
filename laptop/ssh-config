@@ -31,9 +31,11 @@ Host devbox-tunnel
   ServerAliveInterval 15
   ServerAliveCountMax 3
   RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
+  # forward: URL channel (devbox → laptop daemon) and file preview (laptop → devbox serve)
+  RemoteForward 127.0.0.1:12800 127.0.0.1:12800
+  LocalForward  127.0.0.1:12802 127.0.0.1:12802
 
 Host ghost-wispr
   HostName ghost-wispr.tailb86685.ts.net
   User ghost-wispr
   ForwardAgent yes
-

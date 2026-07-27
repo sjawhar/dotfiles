@@ -1,0 +1,10 @@
+[Unit]
+Description=forward opener daemon (loopback :12800; receives URLs from the devbox tunnel)
+
+[Service]
+ExecStart=%h/.dotfiles/forward/forward-daemon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

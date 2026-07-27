@@ -1,0 +1,12 @@
+mode = "allowlist"
+
+# Entries are the only remote URLs that open without a desktop confirmation.
+allow = [
+  "localhost:12802",               # File-preview server only; other local ports require approval
+  "d-9267c4f5db.awsapps.com",      # Trajectory's IAM Identity Center tenant; deliberately not wildcarded
+  "device.sso.*.amazonaws.com",    # AWS device-authorization endpoints
+  "github.com/login",              # GitHub's login route and its child paths
+  "accounts.google.com",           # Google OAuth sign-in
+  "claude.ai",                     # Claude web authentication
+  "*.anthropic.com",               # Anthropic-owned subdomains used by authentication
+]

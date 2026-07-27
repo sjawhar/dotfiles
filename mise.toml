@@ -2,6 +2,9 @@
 # Symlinked to ~/.config/mise/config.toml
 # All versions pinned for reproducibility
 
+[settings]
+minimum_release_age_excludes = ["forward", "github:sjawhar/forward"]  # forward is released and installed in the same workflow, so fresh releases must be installable immediately; the age filter stays in force for all third-party tools
+
 [tools]
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
 "github:sjawhar/opencode" = "latest"
@@ -58,9 +61,12 @@ shellcheck = "0.11.0"
 # multiple assets from one release). Distinct aliases give each binary its own
 # install dir; bare "github:sjawhar/time-tracker" entry must NOT coexist or it
 # collides on the install path.
+# `forward` has one release asset, but its alias supplies the short name used by
+# the installer guard and `mise exec -- forward`.
 [tool_alias]
 tt = "github:sjawhar/time-tracker"
 tt-watcher = "github:sjawhar/time-tracker"
+forward = "github:sjawhar/forward"
 
 [tools.tt]
 version = "latest"
@@ -71,6 +77,12 @@ platforms.linux-arm64 = { asset_pattern = "tt-aarch64-unknown-linux-musl.tar.gz"
 version = "latest"
 platforms.linux-x64   = { asset_pattern = "tt-watcher-x86_64-unknown-linux-gnu.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "tt-watcher-aarch64-unknown-linux-gnu.tar.gz" }
+
+[tools.forward]
+version = "latest"
+# Public releases are verified with GitHub build attestations during installation.
+platforms.linux-x64   = { asset_pattern = "forward-x86_64-unknown-linux-musl.tar.gz" }
+platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.tar.gz" }
 
 # Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
 # binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl

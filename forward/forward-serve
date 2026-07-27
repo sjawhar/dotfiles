@@ -1,0 +1,7 @@
+#!/bin/bash
+set -euo pipefail
+
+MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+export MISE_AUTO_INSTALL=0
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+exec "$MISE" exec -- forward serve "$@"

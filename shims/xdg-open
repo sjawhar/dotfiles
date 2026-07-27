@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+# Route xdg-open through forward so URLs/files open in the laptop browser.
+# Hard-fails with forward's tunnel-down message until the laptop daemon runs.
+MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+export MISE_AUTO_INSTALL=0
+if ! "$MISE" which forward &>/dev/null; then
+    echo "forward is not installed; run bash ${DOTFILES_DIR:-$HOME/.dotfiles}/installers/forward.sh" >&2
+    exit 1
+fi
+exec "$MISE" exec -- forward open "$@"

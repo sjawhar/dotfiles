@@ -1,0 +1,10 @@
+[Unit]
+Description=forward file server (loopback :12802, read-only, for laptop preview via devbox-tunnel)
+
+[Service]
+ExecStart=%h/.dotfiles/forward/forward-serve
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

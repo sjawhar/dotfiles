@@ -1,6 +1,7 @@
 # installers
 
-Per-tool install scripts sourced in order by the root `install.sh`.
+Per-tool install scripts sourced in order by the root `install.sh`, plus a few
+dual-mode helpers reused by machine-specific installers.
 
 ## Key files
 
@@ -15,4 +16,8 @@ Per-tool install scripts sourced in order by the root `install.sh`.
 
 ## How changes take effect
 
-A new installer only runs once it is `source`d from the root `install.sh`. Config symlinks it creates apply on next tool start; binaries install into `PATH` immediately.
+Root `install.sh` sources its listed installers. Machine-specific installers can
+source a dual-mode helper such as `forward.sh`: sourcing it installs the shared
+binary, while executing it directly also sets up the devbox file server. Config
+symlinks it creates apply on next tool start; binaries install into `PATH`
+immediately.

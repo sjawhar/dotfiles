@@ -79,6 +79,7 @@ unset _path _parts _p
 
 # jj (Jujutsu) - load config from both user-specific and shared dotfiles
 export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
+export BROWSER="${DOTFILES_DIR}/shims/xdg-open"
 
 # Claude Code — state lives in ${DOTFILES_DIR}/.claude/. Swap accounts with `cco <name>`,
 # which rewrites .credentials.json + .claude.json in place; Claude Code re-reads them
@@ -247,9 +248,10 @@ osc-copy() {
     printf '%s' "$seq" > /dev/tty
 }
 
-# AWS SSO login (auto-copies device code to clipboard via OSC 52)
+# AWS SSO login: device-code flow opens the pre-filled code on the laptop;
+# any printed code is still OSC 52 copied as the tunnel-down fallback.
 alog() {
-    aws sso login --use-device-code 2>&1 | while IFS= read -r line; do
+    aws sso login --use-device-code "$@" 2>&1 | while IFS= read -r line; do
         printf '%s\n' "$line"
         if [[ "$line" =~ ([A-Z]{4}-[A-Z]{4}) ]]; then
             osc-copy "${BASH_REMATCH[1]}"

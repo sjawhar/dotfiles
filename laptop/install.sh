@@ -110,6 +110,7 @@ LAPTOP_PKGS=(
     code
     docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     git
+    libnotify-bin
     tailscale
     v4l-utils
 )
@@ -249,6 +250,22 @@ if [ ! -f ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces ]; then
     mkdir -p ~/.config/cosmic/com.system76.CosmicComp/v1
     cp "${LAPTOP_DIR}/cosmic/comp-pinned-workspaces" ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces
 fi
+
+# =============================================================================
+# forward daemon (URL opener for devbox tunnel)
+# =============================================================================
+# Requires root install.sh first for the mise tool alias and systemd MISE_DATA_DIR.
+echo "--- forward daemon ---"
+source "${DOTFILES_DIR}/installers/forward.sh"
+mkdir -p ~/.config/forward ~/.config/systemd/user
+ensure_link "${DOTFILES_DIR}/forward/config.toml" ~/.config/forward/config.toml
+ensure_link "${DOTFILES_DIR}/forward/forward-daemon.service" ~/.config/systemd/user/forward-daemon.service
+systemctl --user daemon-reload 2>/dev/null \
+    || echo "NOTE: could not reload forward-daemon (no user systemd session here?) — reload it on the target machine."
+systemctl --user enable --now forward-daemon 2>/dev/null \
+    || echo "NOTE: could not enable forward-daemon (no user systemd session here?) — enable it on the target machine."
+systemctl --user try-restart forward-daemon 2>/dev/null \
+    || echo "NOTE: could not restart forward-daemon (no user systemd session here?) — restart it on the target machine."
 
 # =============================================================================
 # Desktop apps (separate installers)

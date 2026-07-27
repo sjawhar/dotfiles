@@ -22,6 +22,7 @@ nvim/init.lua        # Neovim config (single file)
 install.sh           # Main installer — runs all installers/* in order
 installers/          # Per-tool install scripts (shell.sh, mise.sh, jj.sh, tmux.sh, nvim.sh, claude.sh, opencode.sh)
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
+forward/             # Browser-forwarding policy plus devbox serve and laptop daemon user units
 bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
 shims/               # PATH-priority wrappers (gh, opencode, pyright, basedpyright)
 scripts/             # Utility scripts (git-identity, ephemeral-monitor, etc.)
@@ -75,6 +76,7 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 
 - **Personal vs. company boundary:** company infra repos must not reference `~/.dotfiles`, and the dotfiles install is not part of standard company machine provisioning.
 - **Envoy** source/config lives in `envoy/` here. It receives external GitHub and Slack webhooks — hardening must preserve webhook delivery. Envoy tools exist only in Sami's own sessions; never instruct other users to use them.
+- **Linking devbox files:** when the `forward` tunnel is deployed, link files as `http://localhost:12802/<abs-path>` (get one with `forward url <path>`) instead of `file:///` links, which the laptop resolves against the wrong filesystem.
 
 ## Commit Signing and Identity
 
