@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Extract URLs from the current pane and copy one to the local clipboard.
+# Extract URLs from the current pane, then copy one to the local clipboard or
+# open one in the laptop browser via `forward open`.
 #
 # Exists because click-to-open can't work through this stack: mosh (< the
 # release that ships PR #1360) strips OSC 8 hyperlinks, and both mosh and
@@ -8,9 +9,21 @@
 # tmux's logical-line data, so long URLs come out whole. Copying goes
 # through tmux-osc52-copy (mosh-safe OSC 52).
 #
+# The pane must be passed in explicitly. `capture-pane` with no -t resolves to
+# whatever the server last considered current, which is not the pane the key was
+# pressed in once more than one client is attached — so the bindings pass
+# #{pane_id}, which run-shell expands.
+#
+# Full-screen apps (an editor, an agent TUI) use the alternate screen, which has
+# no tmux scrollback at all: history_size is 0 and only the visible rows can be
+# captured. A URL that has scrolled out of view is unreachable, and one the app
+# itself broke across rows cannot be rejoined, because those are real newlines
+# rather than tmux soft wraps. Both are reported rather than failing silently.
+#
 # Usage:
-#   tmux-urls menu         Show a display-menu of URLs in the current pane
-#   tmux-urls copy <n>     Copy URL number <n> from the cached list
+#   tmux-urls menu <copy|open> <pane>  Show a display-menu of URLs in <pane>
+#   tmux-urls copy <n>                 Copy URL number <n> from the cached list
+#   tmux-urls open <n>                 Open URL number <n> in the laptop browser
 set -euo pipefail
 
 cache="${TMUX_TMPDIR:-/tmp}/tmux-urls-$(id -u)"
@@ -18,17 +31,27 @@ copy_cmd="$(cd "$(dirname "$0")" && pwd)/tmux-osc52-copy"
 
 case "${1:-menu}" in
 menu)
+    action="${2:-copy}"
+    # Explicit pane: see the header. Fall back to the current pane so a manual
+    # run still does something sensible.
+    pane="${3:-}"
+    [ -n "$pane" ] || pane="$(tmux display-message -p '#{pane_id}')"
+
     # Visible pane + recent scrollback, wrapped lines joined, most recent
     # first, deduplicated, trailing punctuation stripped.
-    tmux capture-pane -p -J -S -200 \
+    tmux capture-pane -p -J -S -200 -t "$pane" \
         | grep -oE '(https?|ftp)://[^[:space:]<>"'\''`]+' \
-        | sed -e 's/[].,;:!?)]*$//' \
+        | sed -e 's/[].,;:!?)'\'']*$//' \
         | tac \
         | awk '!seen[$0]++' \
         | head -30 >"$cache" || true
 
     if [ ! -s "$cache" ]; then
-        tmux display-message "tmux-urls: no URLs in pane"
+        if [ "$(tmux display-message -p -t "$pane" '#{alternate_on}')" = 1 ]; then
+            tmux display-message "tmux-urls: no URLs on screen (full-screen app: only visible rows are searchable)"
+        else
+            tmux display-message "tmux-urls: no URLs in pane"
+        fi
         exit 0
     fi
 
@@ -41,10 +64,10 @@ menu)
         label=${url:0:75}
         [ "${#url}" -gt 75 ] && label="${label}..."
         label=${label//'#'/'##'}  # '#' starts a format expansion in menu labels
-        args+=("$label" "${keys[$((i - 1))]}" "run-shell '$0 copy $i'")
+        args+=("$label" "${keys[$((i - 1))]}" "run-shell '$0 $action $i'")
     done <"$cache"
 
-    tmux display-menu -T "Copy URL" "${args[@]}"
+    tmux display-menu -T "${action^} URL" "${args[@]}"
     ;;
 copy)
     url=$(sed -n "${2}p" "$cache")
@@ -52,6 +75,19 @@ copy)
     printf %s "$url" | "$copy_cmd"
     msg=${url:0:60}
     tmux display-message "Copied: ${msg//'#'/'##'}"
+    ;;
+open)
+    url=$(sed -n "${2}p" "$cache")
+    [ -n "$url" ] || exit 1
+    # Hand the URL to the laptop browser. If that fails the channel to the
+    # laptop is down, so fall back to the clipboard rather than losing the URL.
+    if forward open "$url" 2>/dev/null; then
+        msg=${url:0:60}
+        tmux display-message "Opened: ${msg//'#'/'##'}"
+    else
+        printf %s "$url" | "$copy_cmd"
+        tmux display-message "forward open failed; copied instead"
+    fi
     ;;
 *)
     echo "usage: tmux-urls [menu|copy <n>]" >&2

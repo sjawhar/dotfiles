@@ -5,7 +5,7 @@ Host devbox
   HostName sami-agents.tailb86685.ts.net
   User ubuntu
   ForwardAgent yes
-  # YubiKey access for sops human tier: use the `devbox` command (laptop/devbox),
+  # YubiKey access for sops human tier: use the `devbox` command (scripts/devbox),
   # which ensures the pcscd tunnel below exists before connecting. Works with mosh.
   Compression yes
   ControlMaster auto
@@ -19,7 +19,7 @@ Host devbox
 # YubiKey tunnel: exposes laptop pcscd on devbox loopback :12799 so the devbox can
 # decrypt sops human-tier secrets (devbox/pcscd-bridge.service converts the port to
 # a user-owned unix socket; sshd binds forwarded unix sockets root-only, hence TCP).
-# Owned by the `devbox` wrapper (laptop/devbox): created on demand at connect time,
+# Owned by the `devbox` wrapper (scripts/devbox): created on demand at connect time,
 # checked via its dedicated control socket, never a polling daemon. Dies with the
 # network (ServerAlive 15x3=45s) and is recreated on the next `devbox` invocation.
 Host devbox-tunnel
@@ -36,4 +36,3 @@ Host ghost-wispr
   HostName ghost-wispr.tailb86685.ts.net
   User ghost-wispr
   ForwardAgent yes
-

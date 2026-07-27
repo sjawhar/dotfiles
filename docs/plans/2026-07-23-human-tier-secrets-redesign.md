@@ -34,7 +34,7 @@ constraint below.
   squatted by an ephemeral allocation) → devbox socat bridge
   (`devbox/pcscd-bridge.service`) → user-owned socket at `~/.pcscd/pcscd.comm`
   (`PCSCLITE_CSOCK_NAME`, set in `.bashrc` keyed on the `~/.pcscd` marker dir).
-  The tunnel is created on demand by the `devbox` wrapper (`laptop/devbox`) —
+  The tunnel is created on demand by the `devbox` wrapper (`scripts/devbox`) —
   it exists only while the user has connected via that wrapper. No polling
   daemons (user explicitly rejected an always-on tunnel service; it also hits
   Tailscale SSH's periodic browser re-check).

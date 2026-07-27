@@ -23,6 +23,12 @@ if [ -f "${DOTFILES_DIR}/dockerfunc" ]; then
     source "${DOTFILES_DIR}/dockerfunc"
 fi
 
+# systemd's per-user runtime dir. pam_systemd sets this for login sessions, but
+# shells inside a tmux server that was itself started without it (e.g. by an
+# agent over SSH) inherit the gap, which breaks systemctl --user and anything
+# that looks for sockets there (forward's arming socket among them).
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
 # ------------------------------------------------------------------------------
 # Mise (tool version manager) - data stored in ~/.mise
 # ------------------------------------------------------------------------------
@@ -79,6 +85,10 @@ unset _path _parts _p
 
 # jj (Jujutsu) - load config from both user-specific and shared dotfiles
 export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
+
+# Route xdg-open through forward to the laptop browser. The daemon pins an
+# absolute opener path, so this is safe on both machines.
+export BROWSER="${DOTFILES_DIR}/shims/xdg-open"
 
 # Claude Code — state lives in ${DOTFILES_DIR}/.claude/. Swap accounts with `cco <name>`,
 # which rewrites .credentials.json + .claude.json in place; Claude Code re-reads them
@@ -182,6 +192,42 @@ if command -v bat &>/dev/null; then
 fi
 
 # ------------------------------------------------------------------------------
+# Auth CLIs that won't open a browser headless — route them through forward
+# ------------------------------------------------------------------------------
+
+# gws prints its OAuth URL instead of opening a browser: the login flow in
+# github.com/googleworkspace/cli has no opener at all (PR #888 adds one
+# upstream), and it ignores $BROWSER. Sniff the URL out of the output and
+# hand it to `forward open`, which arms the ephemeral callback port and opens
+# the page on the laptop. `script` gives gws a real PTY so its interactive
+# behavior (scope picker) is unchanged. Drop this once upstream opens the URL
+# itself.
+gws() {
+    if [ "${1:-}" = "auth" ] && [ "${2:-}" = "login" ] && command -v forward &>/dev/null; then
+        script -qefc "command gws $(printf '%q ' "$@")" /dev/null \
+            | tee >(grep --line-buffered -oE 'https://accounts\.google\.com/o/oauth2/[^[:space:]]+' \
+                | head -n1 | xargs -r -d '\n' forward open >/dev/null 2>&1)
+    else
+        command gws "$@"
+    fi
+}
+
+# gcloud refuses to launch ANY browser on Linux unless DISPLAY/WAYLAND_DISPLAY/
+# MIR_SOCKET is set (check_browser._DISPLAY_VARIABLES), even with $BROWSER
+# pointing somewhere valid — headless it falls into the paste-the-URL,
+# paste-back-a-code flow. Satisfy the check with a fake display scoped to
+# gcloud alone, and point BROWSER straight at `forward open` — NOT the
+# xdg-open shim, whose display branch would see the fake value and exec the
+# real xdg-open on a machine with no browser.
+gcloud() {
+    if command -v forward &>/dev/null && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+        DISPLAY=:0 BROWSER="forward open %s" command gcloud "$@"
+    else
+        command gcloud "$@"
+    fi
+}
+
+# ------------------------------------------------------------------------------
 # OpenCode instance registry (oc, occ, oc ps)
 # ------------------------------------------------------------------------------
 
@@ -247,9 +293,10 @@ osc-copy() {
     printf '%s' "$seq" > /dev/tty
 }
 
-# AWS SSO login (auto-copies device code to clipboard via OSC 52)
+# AWS SSO login: device-code flow opens the pre-filled code on the laptop;
+# any printed code is still OSC 52 copied as the tunnel-down fallback.
 alog() {
-    aws sso login --use-device-code 2>&1 | while IFS= read -r line; do
+    aws sso login --use-device-code "$@" 2>&1 | while IFS= read -r line; do
         printf '%s\n' "$line"
         if [[ "$line" =~ ([A-Z]{4}-[A-Z]{4}) ]]; then
             osc-copy "${BASH_REMATCH[1]}"

@@ -1,0 +1,10 @@
+[Unit]
+Description=forward file server and callback bridge (tailnet :12802 and :12801, read-only preview)
+
+[Service]
+ExecStart=%h/.dotfiles/forward/forward-serve
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

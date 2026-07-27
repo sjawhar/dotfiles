@@ -628,7 +628,7 @@ SOPS_AGE_KEY="$(op read 'op://Private/sops-recovery-age/private-key')" \
 - Touch locations/counts stated (exactly one in Task 3; each annotated in Task 4) → Task 3 header + Task 4 annotations. ✓
 - Run `verify-sops-recipients` and require pass **before** removing the old file → Task 3 Step 4 gates Task 5. ✓
 - Confirm no human key in either agent-tier file (`secrets.env` and conditional `secrets.local.env`) → Task 3 Step 4 §(b) + Task 5 Step 3. ✓
-- Full design.md Verification checklist plus laptop/devbox unattended-decrypt and tunnel-up/down gates → Task 4 Steps 1–9. ✓
+- Full design.md Verification checklist plus scripts/devbox unattended-decrypt and tunnel-up/down gates → Task 4 Steps 1–9. ✓
 - Explicit rollback before deletion, immediately after uncommitted deletion, after commit, and 1Password break-glass never on devbox → Task 5 rollback blocks. ✓
 - Global Constraints: jj-not-git, one installer commit, agent-tier zero-interaction, no textual sops merge, recovery key off devbox, shellcheck clean → Global Constraints + Task 1 Step 3 + Task 4 Step 1. ✓
 - Ordering: nothing destructive before its verification → removal (Task 5) strictly after Tasks 3–4. ✓
