@@ -7,6 +7,7 @@
 #   oc            \u2014 launch opencode with --port 0
 #   oc ps         — list running instances
 #   oc history    — list recent sessions from DB
+#   oc kill PANE  — kill the opencode running in a tmux pane
 #
 # Env vars:
 #   ENVOY_URL          \u2014 Envoy listener base URL (default: http://127.0.0.1:9020)
@@ -78,11 +79,156 @@ _oc_sessions() {
 }
 
 # ---------------------------------------------------------------------------
+# Subcommand: kill
+# ---------------------------------------------------------------------------
+
+# Print "<pid> <comm>" for every descendant of $1, depth-first.
+_oc_proc_tree() {
+    local pid comm
+    while read -r pid comm; do
+        [ -n "$pid" ] || continue
+        printf '%s %s\n' "$pid" "$comm"
+        _oc_proc_tree "$pid"
+    done < <(ps -o pid=,comm= --ppid "$1" 2>/dev/null || true)
+}
+
+# Envoy's session registry, fetched at most once per run.
+_oc_envoy_registry() {
+    if [ -z "${_OC_ENVOY_REG+x}" ]; then
+        _OC_ENVOY_REG=$(curl -fsS --max-time 2 "$ENVOY_URL/v1/sessions" 2>/dev/null || true)
+    fi
+    printf '%s' "$_OC_ENVOY_REG"
+}
+
+# Print "<session-id><TAB><title>" for each top-level session belonging to
+# opencode process $1, deduped, most authoritative first. No single source is
+# complete: launch args only carry a session when one was named,
+# /api/session/active only reports sessions mid-turn, and Envoy only knows
+# sessions that got as far as registering. Must run while the process is still
+# alive. Envoy also reports every subagent session that ever registered on the
+# port, so the DB drops anything with a parent — a pane's session is a root one.
+_oc_pane_sessions() {
+    local pid=$1 port args ports ids words=() i
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    ports=$(ss -tlnp 2>/dev/null | grep -oP "(?<=127.0.0.1:)[0-9]+(?=.*pid=$pid,)" | sort -u || true)
+    # An instance that has never done anything has no session at all, so finding
+    # nothing is a valid answer here, not a failure: never let it fail the kill.
+    ids=$(
+        {
+            read -r -a words <<<"$args"
+            for ((i = 0; i < ${#words[@]}; i++)); do
+                case "${words[i]}" in
+                    -s | --session) echo "${words[i + 1]:-}" ;;
+                    --session=*) echo "${words[i]#*=}" ;;
+                esac
+            done
+            for port in $ports; do
+                # Any ses_* in this payload is by definition an active session.
+                curl -fsS --max-time 2 "http://127.0.0.1:$port/api/session/active" 2>/dev/null |
+                    grep -oE 'ses_[A-Za-z0-9]+' || true
+            done
+            for port in $ports; do
+                _oc_envoy_registry |
+                    jq -r --argjson p "$port" '.[]? | select(.port == $p) | .session_id' 2>/dev/null || true
+            done
+        } | grep -xE 'ses_[A-Za-z0-9]+' | awk '!seen[$0]++' || true
+    )
+    _oc_session_rows <<<"$ids"
+}
+
+# Annotate session IDs on stdin with their titles, dropping subagent sessions.
+# IDs the DB has never heard of are kept, untitled, rather than silently lost.
+_oc_session_rows() {
+    local ids db rows in_list
+    ids=$(cat)
+    [ -n "$ids" ] || return 0
+    db="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
+    if [ ! -f "$db" ]; then
+        printf '%s\n' "$ids"
+        return 0
+    fi
+    # Safe to interpolate: every id matched ^ses_[A-Za-z0-9]+$ above.
+    in_list=$(printf "'%s'," $ids | sed 's/,$//')
+    rows=$(sqlite3 -separator $'\t' "$db" \
+        "SELECT id, CASE WHEN parent_id IS NULL THEN 1 ELSE 0 END, COALESCE(title, '')
+         FROM session WHERE id IN ($in_list);" 2>/dev/null || true)
+    awk -F'\t' '
+        NR == FNR { root[$1] = $2; title[$1] = $3; next }
+        !($1 in root) { print $1 "\t"; next }
+        root[$1] == "1" { print $1 "\t" title[$1] }
+    ' <(printf '%s\n' "$rows") <(printf '%s\n' "$ids")
+}
+
+# Kill the opencode process running in each given tmux pane. A pane runs
+# opencode as a grandchild (pane shell -> this script -> opencode), so walk
+# the whole subtree rather than guessing the depth.
+_oc_kill() {
+    if [ $# -eq 0 ]; then
+        echo "usage: oc kill <tmux-pane> [<tmux-pane>...]" >&2
+        return 2
+    fi
+    local status=0 pane pane_pid pid comm args i sessions ses title
+    for pane in "$@"; do
+        # tmux exits 0 printing nothing for a target it cannot resolve, so
+        # check the pid rather than the exit status.
+        pane_pid=$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>&1 || true)
+        if [[ ! $pane_pid =~ ^[0-9]+$ ]]; then
+            echo "oc kill: ${pane_pid:-no such tmux pane: $pane}" >&2
+            status=1
+            continue
+        fi
+        local found=()
+        while read -r pid comm; do
+            if [ "$comm" = "opencode" ]; then
+                found+=("$pid")
+            fi
+        done < <(_oc_proc_tree "$pane_pid")
+        if [ ${#found[@]} -eq 0 ]; then
+            echo "oc kill: $pane: no opencode process under pane pid $pane_pid" >&2
+            status=1
+            continue
+        fi
+        for pid in "${found[@]}"; do
+            args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+            # Collect while it can still answer for itself. Reporting is a
+            # nicety; it must never stand between you and killing the process.
+            sessions=$(_oc_pane_sessions "$pid" || true)
+            if ! kill "$pid" 2>/dev/null; then
+                echo "oc kill: $pane: could not signal $pid" >&2
+                status=1
+                continue
+            fi
+            # Give it 5s to shut down, then stop asking nicely.
+            for ((i = 0; i < 50; i++)); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.1
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+                echo "$pane: SIGKILLed opencode $pid ($args)"
+            else
+                echo "$pane: killed opencode $pid ($args)"
+            fi
+            if [ -z "$sessions" ]; then
+                echo "$pane:   (no session id found)"
+                continue
+            fi
+            while IFS=$'\t' read -r ses title; do
+                [ -n "$ses" ] || continue
+                echo "$pane:   session $ses${title:+  $title}"
+            done <<<"$sessions"
+        done
+    done
+    return $status
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch subcommands
 # ---------------------------------------------------------------------------
 case "${1:-}" in
     ps)      shift; exec "$(dirname "$0")/envoy" ps "$@" ;;
     history) shift; _oc_sessions "$@"; exit ;;
+    kill)    shift; _oc_kill "$@"; exit ;;
 esac
 
 # ---------------------------------------------------------------------------
