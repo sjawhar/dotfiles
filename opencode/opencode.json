@@ -7,10 +7,12 @@
     "messages_last": "ctrl+end"
   },
   "plugin": [
+    "file://{env:HOME}/knives/default/plugin/knives.ts",
     "@sjawhar/opencode-legion-envoy@latest",
     "file://{env:HOME}/.dotfiles/opencode/plugins/dotfiles-bridge.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/session-env.ts",
+    "file://{env:HOME}/.dotfiles/opencode/plugins/thinking-probe.ts",
     "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.5.1/sjawhar-opencode-anthropic-auth-0.5.1.tgz",
     "opencode-pty@git+https://github.com/sjawhar/opencode-pty.git#ts-entrypoint",
     "secretsd@git+https://github.com/sjawhar/secretsd.git#v1.0.2",
@@ -62,28 +64,18 @@
     "anthropic": {
       "models": {
         "claude-fable-5": {
-          "name": "Claude Fable 5",
-          "limit": {
-            "context": 1000000,
-            "input": 1000000,
-            "output": 128000
+          "headers": {
+            "anthropic-beta": "server-side-fallback-2026-07-01"
           },
-          "modalities": {
-            "input": [
-              "text",
-              "image",
-              "pdf"
-            ],
-            "output": [
-              "text"
+          "options": {
+            "fallbacks": [
+              {
+                "model": "claude-opus-5"
+              },
+              {
+                "model": "claude-opus-4-8"
+              }
             ]
-          },
-          "variants": {
-            "low": {},
-            "medium": {},
-            "high": {},
-            "xhigh": {},
-            "max": {}
           }
         }
       }
