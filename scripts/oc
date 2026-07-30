@@ -1,277 +1,400 @@
-#!/usr/bin/env bash
-# OpenCode launcher with subcommands.
-# Replaces the interactive-only oc() bash function so that agents
-# (non-interactive shells) can also use it.
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 #
-# Subcommands:
-#   oc            \u2014 launch opencode with --port 0
-#   oc ps         — list running instances
-#   oc history    — list recent sessions from DB
-#   oc kill PANE  — kill the opencode running in a tmux pane
-#
-# Env vars:
-#   ENVOY_URL          \u2014 Envoy listener base URL (default: http://127.0.0.1:9020)
-#   OPENCODE_NO_SERVE  \u2014 set to "1" to skip --port 0 (raw opencode)
-set -euo pipefail
+# ─── How to run ───
+# On PATH as `oc` (scripts/ is prepended in .bashrc); uv is pinned in mise.toml.
+#   oc [ARGS]              — launch opencode with --port 0 (ARGS pass through)
+#   oc ps [--json|--local] — list running instances (delegates to `envoy ps`)
+#   oc history [HOURS] [--json] [--legion] — list recent sessions from the DB
+#   oc kill PANE [PANE...] — kill the opencode running in tmux pane(s)
+# ──────────────────
+"""OpenCode launcher with subcommands.
 
-ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
+Python (PEP 723 + uv) rather than bash so that editing this file no longer
+breaks tmux panes launched before the edit: bash reads scripts lazily from
+the same fd it executes, so an edit shifts its byte offsets mid-run, whereas
+Python parses the whole file up front — and the launch path exec()s opencode,
+leaving no interpreter behind at all.
 
-# ---------------------------------------------------------------------------
-# Subcommand: ps
-# ---------------------------------------------------------------------------
+Env vars:
+  ENVOY_URL          — Envoy listener base URL (default: http://127.0.0.1:9020)
+  OPENCODE_NO_SERVE  — set to "1" to skip --port 0 (raw opencode)
+  OPENCODE_DB        — override the sessions DB path
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+from contextlib import closing
+from dataclasses import dataclass
+from functools import cache
+from pathlib import Path
+from typing import NoReturn, assert_never
+
+ENVOY_URL = os.environ.get("ENVOY_URL", "http://127.0.0.1:9020")
+SESSION_ID_RE = re.compile(r"ses_[A-Za-z0-9]+")
+HOME = Path.home()
+
+
+def db_path() -> Path:
+    return Path(os.environ.get("OPENCODE_DB", str(HOME / ".local/share/opencode/opencode.db")))
+
 
 # ---------------------------------------------------------------------------
 # Subcommand: history
 # ---------------------------------------------------------------------------
-_oc_sessions() {
-    local hours=24 json=false legion=false
-    local args=()
-    for arg in "$@"; do
-        case "$arg" in
-            --json) json=true ;;
-            --legion) legion=true ;;
-            *) args+=("$arg") ;;
-        esac
-    done
-    [ ${#args[@]} -gt 0 ] && hours="${args[0]}"
-    local db="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
-    if [ ! -f "$db" ]; then
-        echo "error: database not found: $db" >&2
+
+LEGION_WORKSPACE_PATTERNS = (
+    f"{HOME}/.legion/workspaces/%",
+    f"{HOME}/.local/share/legion/workspaces/%",
+    f"{HOME}/legion/work/%",
+)
+
+HISTORY_COLUMNS = ("id", "dir", "title", "created", "updated", "msgs")
+
+
+def history_rows(hours: int, *, legion: bool) -> list[tuple[str, str, str | None, str, str, int]]:
+    """Top-level sessions updated in the last `hours`, newest first."""
+    cutoff_ms = (int(time.time()) - hours * 3600) * 1000
+    legion_filter, params = "", [str(HOME), cutoff_ms]
+    if not legion:
+        legion_filter = "AND directory NOT LIKE ? " * len(LEGION_WORKSPACE_PATTERNS)
+        params.extend(LEGION_WORKSPACE_PATTERNS)
+    query = f"""
+        SELECT id,
+               REPLACE(directory, ?, '~'),
+               title,
+               strftime('%Y-%m-%d %H:%M', time_created/1000, 'unixepoch', 'localtime'),
+               strftime('%Y-%m-%d %H:%M', time_updated/1000, 'unixepoch', 'localtime'),
+               (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id)
+        FROM session s
+        WHERE parent_id IS NULL AND time_updated >= ? {legion_filter}
+        ORDER BY time_created DESC
+    """  # noqa: S608 — placeholders only; legion_filter is a literal
+    with closing(sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)) as conn:
+        return conn.execute(query, params).fetchall()
+
+
+def print_table(rows: list[tuple[str, ...]]) -> None:
+    """Left-aligned columns joined by two spaces, like `column -t`."""
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)).rstrip())
+
+
+def cmd_history(args: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="oc history", description="List recent sessions from the local DB.")
+    parser.add_argument("hours", nargs="?", type=int, default=24, help="look-back window in hours (default: 24)")
+    parser.add_argument("--json", action="store_true", dest="as_json", help="output as a JSON array")
+    parser.add_argument("--legion", action="store_true", help="include Legion workspace sessions")
+    opts = parser.parse_args(args)
+    hours: int = opts.hours
+    if not db_path().is_file():
+        print(f"error: database not found: {db_path()}", file=sys.stderr)
         return 1
-    fi
-    local cutoff_ms
-    cutoff_ms=$(( ($(date -u +%s) - hours * 3600) * 1000 ))
-    local legion_filter=""
-    if [ "$legion" = false ]; then
-        legion_filter="AND directory NOT LIKE '$HOME/.legion/workspaces/%'"
-        legion_filter+=" AND directory NOT LIKE '$HOME/.local/share/legion/workspaces/%'"
-        legion_filter+=" AND directory NOT LIKE '$HOME/legion/work/%'"
-    fi
-    local query
-    read -r -d '' query <<-SQL || true
-		SELECT
-		  id,
-		  REPLACE(directory, '$HOME', '~') as dir,
-		  title,
-		  strftime('%Y-%m-%d %H:%M', time_created/1000, 'unixepoch', 'localtime') as created,
-		  strftime('%Y-%m-%d %H:%M', time_updated/1000, 'unixepoch', 'localtime') as updated,
-		  (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) as msgs
-		FROM session s
-		WHERE parent_id IS NULL
-		  $legion_filter
-		  AND time_updated >= $cutoff_ms
-		ORDER BY time_created DESC
-	SQL
-    if [ "$json" = true ]; then
-        sqlite3 -json "$db" "$query"
-    else
-        local result
-        result=$(sqlite3 -separator $'\t' "$db" "$query")
-        if [ -z "$result" ]; then
-            echo "No sessions in the last ${hours}h"
-            return
-        fi
-        {
-            printf 'ID\tDIR\tTITLE\tCREATED\tUPDATED\tMSGS\n'
-            echo "$result"
-        } | column -t -s $'\t'
-    fi
-}
+    rows = history_rows(hours, legion=opts.legion)
+    if opts.as_json:
+        print(json.dumps([dict(zip(HISTORY_COLUMNS, row, strict=True)) for row in rows]))
+    elif not rows:
+        print(f"No sessions in the last {hours}h")
+    else:
+        header = tuple(name.upper() for name in HISTORY_COLUMNS)
+        print_table([header] + [tuple("" if cell is None else str(cell) for cell in row) for row in rows])
+    return 0
+
 
 # ---------------------------------------------------------------------------
 # Subcommand: kill
 # ---------------------------------------------------------------------------
 
-# Print "<pid> <comm>" for every descendant of $1, depth-first.
-_oc_proc_tree() {
-    local pid comm
-    while read -r pid comm; do
-        [ -n "$pid" ] || continue
-        printf '%s %s\n' "$pid" "$comm"
-        _oc_proc_tree "$pid"
-    done < <(ps -o pid=,comm= --ppid "$1" 2>/dev/null || true)
-}
 
-# Envoy's session registry, fetched at most once per run.
-_oc_envoy_registry() {
-    if [ -z "${_OC_ENVOY_REG+x}" ]; then
-        _OC_ENVOY_REG=$(curl -fsS --max-time 2 "$ENVOY_URL/v1/sessions" 2>/dev/null || true)
-    fi
-    printf '%s' "$_OC_ENVOY_REG"
-}
+def pane_root_pid(pane: str) -> int | str:
+    """Resolve the pane's root pid, or return an error message.
 
-# Print "<session-id><TAB><title>" for each top-level session belonging to
-# opencode process $1, deduped, most authoritative first. No single source is
-# complete: launch args only carry a session when one was named,
-# /api/session/active only reports sessions mid-turn, and Envoy only knows
-# sessions that got as far as registering. Must run while the process is still
-# alive. Envoy also reports every subagent session that ever registered on the
-# port, so the DB drops anything with a parent — a pane's session is a root one.
-_oc_pane_sessions() {
-    local pid=$1 port args ports ids words=() i
-    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
-    ports=$(ss -tlnp 2>/dev/null | grep -oP "(?<=127.0.0.1:)[0-9]+(?=.*pid=$pid,)" | sort -u || true)
-    # An instance that has never done anything has no session at all, so finding
-    # nothing is a valid answer here, not a failure: never let it fail the kill.
-    ids=$(
-        {
-            read -r -a words <<<"$args"
-            for ((i = 0; i < ${#words[@]}; i++)); do
-                case "${words[i]}" in
-                    -s | --session) echo "${words[i + 1]:-}" ;;
-                    --session=*) echo "${words[i]#*=}" ;;
-                esac
-            done
-            for port in $ports; do
-                # Any ses_* in this payload is by definition an active session.
-                curl -fsS --max-time 2 "http://127.0.0.1:$port/api/session/active" 2>/dev/null |
-                    grep -oE 'ses_[A-Za-z0-9]+' || true
-            done
-            for port in $ports; do
-                _oc_envoy_registry |
-                    jq -r --argjson p "$port" '.[]? | select(.port == $p) | .session_id' 2>/dev/null || true
-            done
-        } | grep -xE 'ses_[A-Za-z0-9]+' | awk '!seen[$0]++' || true
+    tmux exits 0 printing nothing for a target it cannot resolve, so judge by
+    the output rather than the exit status.
+    """
+    proc = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", pane, "#{pane_pid}"],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    _oc_session_rows <<<"$ids"
-}
+    out = proc.stdout.strip()
+    return int(out) if out.isdigit() else (proc.stderr.strip() or f"no such tmux pane: {pane}")
 
-# Annotate session IDs on stdin with their titles, dropping subagent sessions.
-# IDs the DB has never heard of are kept, untitled, rather than silently lost.
-_oc_session_rows() {
-    local ids db rows in_list
-    ids=$(cat)
-    [ -n "$ids" ] || return 0
-    db="${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
-    if [ ! -f "$db" ]; then
-        printf '%s\n' "$ids"
-        return 0
-    fi
-    # Safe to interpolate: every id matched ^ses_[A-Za-z0-9]+$ above.
-    in_list=$(printf "'%s'," $ids | sed 's/,$//')
-    rows=$(sqlite3 -separator $'\t' "$db" \
-        "SELECT id, CASE WHEN parent_id IS NULL THEN 1 ELSE 0 END, COALESCE(title, '')
-         FROM session WHERE id IN ($in_list);" 2>/dev/null || true)
-    awk -F'\t' '
-        NR == FNR { root[$1] = $2; title[$1] = $3; next }
-        !($1 in root) { print $1 "\t"; next }
-        root[$1] == "1" { print $1 "\t" title[$1] }
-    ' <(printf '%s\n' "$rows") <(printf '%s\n' "$ids")
-}
 
-# Kill the opencode process running in each given tmux pane. A pane runs
-# opencode as a grandchild (pane shell -> this script -> opencode), so walk
-# the whole subtree rather than guessing the depth.
-_oc_kill() {
-    if [ $# -eq 0 ]; then
-        echo "usage: oc kill <tmux-pane> [<tmux-pane>...]" >&2
-        return 2
-    fi
-    local status=0 pane pane_pid pid comm args i sessions ses title
-    for pane in "$@"; do
-        # tmux exits 0 printing nothing for a target it cannot resolve, so
-        # check the pid rather than the exit status.
-        pane_pid=$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>&1 || true)
-        if [[ ! $pane_pid =~ ^[0-9]+$ ]]; then
-            echo "oc kill: ${pane_pid:-no such tmux pane: $pane}" >&2
-            status=1
-            continue
-        fi
-        local found=()
-        while read -r pid comm; do
-            if [ "$comm" = "opencode" ]; then
-                found+=("$pid")
-            fi
-        done < <(_oc_proc_tree "$pane_pid")
-        if [ ${#found[@]} -eq 0 ]; then
-            echo "oc kill: $pane: no opencode process under pane pid $pane_pid" >&2
-            status=1
-            continue
-        fi
-        for pid in "${found[@]}"; do
-            args=$(ps -o args= -p "$pid" 2>/dev/null || true)
-            # Collect while it can still answer for itself. Reporting is a
-            # nicety; it must never stand between you and killing the process.
-            sessions=$(_oc_pane_sessions "$pid" || true)
-            if ! kill "$pid" 2>/dev/null; then
-                echo "oc kill: $pane: could not signal $pid" >&2
-                status=1
-                continue
-            fi
-            # Give it 5s to shut down, then stop asking nicely.
-            for ((i = 0; i < 50; i++)); do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 0.1
-            done
-            if kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-                echo "$pane: SIGKILLed opencode $pid ($args)"
-            else
-                echo "$pane: killed opencode $pid ($args)"
-            fi
-            if [ -z "$sessions" ]; then
-                echo "$pane:   (no session id found)"
-                continue
-            fi
-            while IFS=$'\t' read -r ses title; do
-                [ -n "$ses" ] || continue
-                echo "$pane:   session $ses${title:+  $title}"
-            done <<<"$sessions"
-        done
-    done
-    return $status
-}
+def opencode_descendants(root: int) -> list[int]:
+    """Pids of every `opencode` process anywhere under `root`.
 
-# ---------------------------------------------------------------------------
-# Dispatch subcommands
-# ---------------------------------------------------------------------------
-case "${1:-}" in
-    ps)      shift; exec "$(dirname "$0")/envoy" ps "$@" ;;
-    history) shift; _oc_sessions "$@"; exit ;;
-    kill)    shift; _oc_kill "$@"; exit ;;
-esac
+    A pane usually runs opencode as pane shell -> opencode (this script execs),
+    but walk the whole subtree rather than guessing the depth.
+    """
+    ps = subprocess.run(["ps", "-eo", "pid=,ppid=,comm="], capture_output=True, text=True, check=False)
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in ps.stdout.splitlines():
+        match line.split(None, 2):
+            case [pid, ppid, comm] if pid.isdigit() and ppid.isdigit():
+                children.setdefault(int(ppid), []).append((int(pid), comm))
+            case _:
+                pass  # ps header/garbage line
+    found: list[int] = []
+    queue = [root]
+    while queue:
+        for pid, comm in children.get(queue.pop(), []):
+            if comm == "opencode":
+                found.append(pid)
+            queue.append(pid)
+    return found
+
+
+def cmdline(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [arg for arg in raw.decode(errors="replace").split("\0") if arg]
+
+
+def listen_ports(pid: int) -> list[int]:
+    """Loopback ports `pid` is listening on, via `ss -tlnp`."""
+    ss = subprocess.run(["ss", "-tlnp"], capture_output=True, text=True, check=False)
+    needle = f"pid={pid},"
+    matches = (re.search(r"127\.0\.0\.1:(\d+)\s", line) for line in ss.stdout.splitlines() if needle in line)
+    return sorted({int(m.group(1)) for m in matches if m})
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryEntry:
+    """One Envoy-registered session: which port it lives on, and its id."""
+
+    port: int
+    session_id: str
+
+
+@cache
+def envoy_registry() -> tuple[RegistryEntry, ...]:
+    """Envoy's live-session registry; empty on any failure (Envoy is optional)."""
+    try:
+        with urllib.request.urlopen(f"{ENVOY_URL}/v1/sessions", timeout=2) as resp:  # noqa: S310
+            entries = json.load(resp)
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(entries, list):
+        return ()
+    return tuple(
+        RegistryEntry(port=port, session_id=session_id)
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(port := entry.get("port"), int)
+        and isinstance(session_id := entry.get("session_id"), str)
+    )
+
+
+def active_session_ids(port: int) -> list[str]:
+    """Session IDs mid-turn on this instance; any ses_* in the payload counts."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/session/active", timeout=2) as resp:
+            return SESSION_ID_RE.findall(resp.read().decode(errors="replace"))
+    except OSError:
+        return []
+
+
+@dataclass(frozen=True, slots=True)
+class PaneSession:
+    """A top-level session that was running in a killed pane."""
+
+    session_id: str
+    title: str
+
+
+def annotate_sessions(ids: list[str]) -> list[PaneSession]:
+    """Title each id from the DB, dropping subagent sessions.
+
+    Envoy reports every subagent session that ever registered on a port; a
+    pane's own session is a root one (parent_id IS NULL). IDs the DB has never
+    heard of are kept, untitled, rather than silently lost.
+    """
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    try:
+        with closing(sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)) as conn:
+            rows = conn.execute(
+                f"SELECT id, parent_id IS NULL, COALESCE(title, '') FROM session WHERE id IN ({placeholders})",  # noqa: S608
+                ids,
+            ).fetchall()
+    except sqlite3.Error:
+        return [PaneSession(session_id, "") for session_id in ids]
+    known = {row[0]: (bool(row[1]), row[2]) for row in rows}
+    kept: list[PaneSession] = []
+    for session_id in ids:
+        match known.get(session_id):
+            case None:
+                kept.append(PaneSession(session_id, ""))
+            case (True, title):
+                kept.append(PaneSession(session_id, title))
+            case (False, _):
+                pass  # subagent session
+    return kept
+
+
+def pane_sessions(pid: int) -> list[PaneSession]:
+    """Top-level sessions of opencode process `pid`, most authoritative first.
+
+    No single source is complete: launch args only carry a session when one was
+    named, /api/session/active only reports sessions mid-turn, and Envoy only
+    knows sessions that got as far as registering. Must run while the process
+    is still alive.
+    """
+    argv = cmdline(pid)
+    ids = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg in ("-s", "--session")]
+    ids += [arg.split("=", 1)[1] for arg in argv if arg.startswith("--session=")]
+    ports = listen_ports(pid)
+    for port in ports:
+        ids += active_session_ids(port)
+    for port in ports:
+        ids += [entry.session_id for entry in envoy_registry() if entry.port == port]
+    deduped = dict.fromkeys(i for i in ids if SESSION_ID_RE.fullmatch(i))
+    return annotate_sessions(list(deduped))
+
+
+def process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def terminate(pid: int) -> str:
+    """SIGTERM, give it 5s to shut down, then stop asking nicely."""
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not process_is_alive(pid):
+            return "killed"
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return "killed"
+    return "SIGKILLed"
+
+
+def kill_one(pane: str, pid: int) -> bool:
+    args = " ".join(cmdline(pid))
+    # Collect while it can still answer for itself. Reporting is a nicety; it
+    # must never stand between you and killing the process, whatever breaks.
+    try:
+        sessions = pane_sessions(pid)
+    except Exception as exc:  # noqa: BLE001 — deliberate boundary, see above
+        print(f"oc kill: {pane}: session lookup failed: {exc}", file=sys.stderr)
+        sessions = []
+    try:
+        verb = terminate(pid)
+    except (ProcessLookupError, PermissionError):
+        print(f"oc kill: {pane}: could not signal {pid}", file=sys.stderr)
+        return False
+    print(f"{pane}: {verb} opencode {pid} ({args})")
+    if not sessions:
+        print(f"{pane}:   (no session id found)")
+    for session in sessions:
+        title = f"  {session.title}" if session.title else ""
+        print(f"{pane}:   session {session.session_id}{title}")
+    return True
+
+
+def kill_pane(pane: str) -> bool:
+    match pane_root_pid(pane):
+        case str(error):
+            print(f"oc kill: {error}", file=sys.stderr)
+            return False
+        case int(root):
+            pids = opencode_descendants(root)
+            if not pids:
+                print(f"oc kill: {pane}: no opencode process under pane pid {root}", file=sys.stderr)
+                return False
+            results = [kill_one(pane, pid) for pid in pids]
+            return all(results)
+        case unreachable:
+            assert_never(unreachable)
+
+
+def cmd_kill(args: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="oc kill",
+        description="Kill the opencode running in tmux pane(s) and report which sessions were active.",
+    )
+    parser.add_argument("panes", nargs="+", metavar="PANE", help="tmux target-pane (%%18, dev:3.1, ...)")
+    opts = parser.parse_args(args)
+    results = [kill_pane(pane) for pane in opts.panes]
+    return 0 if all(results) else 1
+
 
 # ---------------------------------------------------------------------------
 # Main: launch opencode (with oh-my-opencode for interactive sessions)
 # ---------------------------------------------------------------------------
 
-# Add oh-my-opencode plugin for interactive use
-export OPENCODE_CONFIG_CONTENT='{"plugin":["@sjawhar/oh-my-opencode@sami"]}'
-# export OPENCODE_CONFIG_CONTENT='{"plugin":["file://${HOME}/oh-my-opencode/original"]}'
 
-# --- gh-app routing config (per-repo credential routing for git+gh) ---
-# Agents authenticate as the GitHub App installation matching each repo's
-# owner; owners without an installation fall through to your gh user auth.
-# Only loaded by agent shells; interactive shells are unaffected.
-# See gh-app-routes.gitconfig and shims/gh-app-token.
-GIT_CONFIG_COUNT=$((${GIT_CONFIG_COUNT:-0} + 1))
-_idx=$((GIT_CONFIG_COUNT - 1))
-export GIT_CONFIG_COUNT
-export "GIT_CONFIG_KEY_${_idx}"=include.path
-export "GIT_CONFIG_VALUE_${_idx}"="${DOTFILES_DIR:-$HOME/.dotfiles}/gh-app-routes.gitconfig"
-unset _idx
+def launch(args: list[str]) -> NoReturn:
+    env = os.environ
+    dotfiles = Path(env.get("DOTFILES_DIR", str(HOME / ".dotfiles")))
 
-# --- dotfiles shims must lead PATH ---
-# The gh App routing above only works when `gh` resolves to shims/gh. The
-# launching shell's mise hook may have prepended tool install dirs (including
-# the real gh) ahead of the shims; agent serves inherit PATH forever, so
-# re-front the shims here or agents silently act as the user on GitHub.
-_newpath=""
-IFS=':' read -ra _parts <<< "$PATH"
-for _p in "${_parts[@]}"; do
-    [ -n "$_p" ] && [ "$_p" != "${DOTFILES_DIR:-$HOME/.dotfiles}/shims" ] && _newpath="${_newpath:+$_newpath:}$_p"
-done
-export PATH="${DOTFILES_DIR:-$HOME/.dotfiles}/shims:$_newpath"
-unset _newpath _parts _p
+    # Add oh-my-opencode plugin for interactive use
+    env["OPENCODE_CONFIG_CONTENT"] = '{"plugin":["@sjawhar/oh-my-opencode@sami"]}'
 
-# Opt-out
-if [ "${OPENCODE_NO_SERVE:-}" = "1" ]; then
-    exec opencode "$@"
-fi
+    # --- gh-app routing config (per-repo credential routing for git+gh) ---
+    # Agents authenticate as the GitHub App installation matching each repo's
+    # owner; owners without an installation fall through to your gh user auth.
+    # See gh-app-routes.gitconfig and shims/gh-app-token.
+    index = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    env[f"GIT_CONFIG_KEY_{index}"] = "include.path"
+    env[f"GIT_CONFIG_VALUE_{index}"] = str(dotfiles / "gh-app-routes.gitconfig")
+    env["GIT_CONFIG_COUNT"] = str(index + 1)
 
-# Skip if user already passed --port
-for arg in "$@"; do
-    [ "$arg" = "--port" ] && exec opencode "$@"
-done
+    # --- dotfiles shims must lead PATH ---
+    # The gh App routing above only works when `gh` resolves to shims/gh. The
+    # launching shell's mise hook may have prepended tool install dirs
+    # (including the real gh) ahead of the shims; agent serves inherit PATH
+    # forever, so re-front the shims here or agents silently act as the user
+    # on GitHub.
+    shims = str(dotfiles / "shims")
+    rest = [p for p in env.get("PATH", "").split(":") if p and p != shims]
+    env["PATH"] = ":".join([shims, *rest])
 
-opencode --port 0 "$@"
+    # OPENCODE_NO_SERVE=1 opts out; an explicit --port wins over our --port 0.
+    serve_args = [] if env.get("OPENCODE_NO_SERVE") == "1" or "--port" in args else ["--port", "0"]
+    try:
+        os.execvp("opencode", ["opencode", *serve_args, *args])
+    except OSError as exc:
+        print(f"oc: cannot exec opencode: {exc}", file=sys.stderr)
+        sys.exit(127)
+
+
+def main() -> int:  # noqa: RET503 — every match arm returns or exec()s away
+    match sys.argv[1:]:
+        case ["ps", *rest]:
+            envoy = Path(__file__).resolve().parent / "envoy"
+            os.execv(str(envoy), [str(envoy), "ps", *rest])
+        case ["history", *rest]:
+            return cmd_history(rest)
+        case ["kill", *rest]:
+            return cmd_kill(rest)
+        case args:
+            launch(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
