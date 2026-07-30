@@ -24,7 +24,26 @@ if ! ssh -O check devbox-tunnel 2>/dev/null; then
     rm -f ~/.ssh/sockets/tunnel-ubuntu@sami-agents.tailb86685.ts.net
     echo "devbox: starting YubiKey tunnel..." >&2
     # -f backgrounds only after the forward is up (ExitOnForwardFailure).
-    ssh -N -f devbox-tunnel
+    # stderr goes to a file, not a pipe: the backgrounded child keeps the fd,
+    # and a pipe would make command substitution block for the tunnel's life.
+    tunnel_err=$(mktemp)
+    if ! ssh -N -f devbox-tunnel 2>"$tunnel_err"; then
+        cat "$tunnel_err" >&2
+        if grep -q "remote port forwarding failed" "$tunnel_err"; then
+            cat >&2 <<'MSG'
+
+devbox: port 12799 on the devbox is still held by the previous tunnel's dying
+session. The tunnel rides the devbox's real sshd (port 2222), which reaps a
+dead session in ~45s — wait a minute and re-run devbox. If it STILL fails,
+something else grabbed 12799 on the devbox; look with:
+
+  ssh devbox 'sudo ss -lntp sport = :12799'
+MSG
+        fi
+        rm -f "$tunnel_err"
+        exit 1
+    fi
+    rm -f "$tunnel_err"
 fi
 
 exec mosh devbox "$@"

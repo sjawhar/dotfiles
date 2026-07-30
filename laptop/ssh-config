@@ -22,9 +22,23 @@ Host devbox
 # Owned by the `devbox` wrapper (scripts/devbox): created on demand at connect time,
 # checked via its dedicated control socket, never a polling daemon. Dies with the
 # network (ServerAlive 15x3=45s) and is recreated on the next `devbox` invocation.
+#
+# Port 2222 is the devbox's REAL sshd (a tailnet-bound second port), not
+# Tailscale SSH on 22: the tailnet's SSH check policy interrupts long-lived
+# tailscale-ssh sessions at check expiry, and tailscaled then holds the dead
+# session's 12799 listener forever, blocking every rebuild. Plain sshd reaps a
+# dead tunnel in ~45s (Match LocalPort 2222 on the devbox) and has no check
+# interruptions. Interactive `Host devbox` stays on Tailscale SSH.
 Host devbox-tunnel
   HostName sami-agents.tailb86685.ts.net
   User ubuntu
+  Port 2222
+  # Dedicated key, not the 1Password identity: its authorized_keys entry is
+  # restrict + permitlisten 127.0.0.1:12799 + a forced command, so the ONLY
+  # thing it can do is hold the tunnel's listener - no shell, no other
+  # forwards, no bypass of the check policy that governs interactive SSH.
+  IdentityFile ~/.ssh/devbox-tunnel
+  IdentitiesOnly yes
   ControlMaster auto
   ControlPath ~/.ssh/sockets/tunnel-%r@%h
   ExitOnForwardFailure yes
