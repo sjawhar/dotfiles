@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenChamber mobile web application
+After=network-online.target openchamber-fanin.service
+Wants=openchamber-fanin.service
+
+[Service]
+WorkingDirectory=%h
+Environment=OPENCODE_HOST=http://127.0.0.1:5199
+Environment=OPENCODE_SKIP_START=true
+Environment=PATH=%h/.npm-global/bin:%h/.mise/shims:%h/.dotfiles/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=%h/.config/openchamber-stack/env
+ExecStart=%h/.npm-global/bin/openchamber serve --foreground --port 3210
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
