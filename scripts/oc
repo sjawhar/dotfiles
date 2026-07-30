@@ -7,7 +7,7 @@
 # ─── How to run ───
 # On PATH as `oc` (scripts/ is prepended in .bashrc); uv is pinned in mise.toml.
 #   oc [ARGS]              — launch opencode with --port 0 (ARGS pass through)
-#   oc ps [--json|--local] — list running instances (delegates to `envoy ps`)
+#   oc ps [--json|--local|--sub-agents] — list running instances (delegates to `envoy ps`)
 #   oc history [HOURS] [--json] [--legion] — list recent sessions from the DB
 #   oc kill PANE [PANE...] — kill the opencode running in tmux pane(s)
 # ──────────────────
