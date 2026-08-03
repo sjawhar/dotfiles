@@ -71,6 +71,7 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 - **Shell config has two zones**: non-interactive (PATH, env vars, mise) above the `[[ $- == *i* ]] || return 0` guard, interactive (aliases, completions, prompts) below it
 - **Shims wrap binaries** with extra logic (e.g., the gh shim handles auth token sourcing)
 - **Config files are symlinked** from this repo to their expected locations, not copied
+- **Consolidate commits before pushing** — batch a session's related changes into one described commit per topic. Do not push per-step or per-file; a work session should land on main as 1-2 coherent commits, not a trail of fragments.
 
 ## Environment Facts
 
