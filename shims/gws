@@ -1,0 +1,108 @@
+#!/bin/bash
+# gws wrapper: machine identity (keyless DWD via google-user-token) for Workspace.
+#
+# Resolution order (first match wins):
+#   1. GOOGLE_WORKSPACE_CLI_TOKEN or GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE already
+#      set -> caller knows best; exec through untouched.
+#   2. GMAIL_OAUTH_CREDENTIALS set (secretsd-injected authorized_user JSON; the
+#      YubiKey-gated Gmail-send path: `secrets GMAIL_OAUTH_CREDENTIALS -- gws ...`)
+#      -> materialize to a 0600 tempfile, run real gws, clean up.
+#   3. Otherwise -> mint a DWD user token for the box owner via google-user-token
+#      and exec real gws with GOOGLE_WORKSPACE_CLI_TOKEN (highest-priority auth,
+#      verified against gws 0.22.5).
+#
+# Doctrine (matches gh -> gh-app-token): fail LOUD. If the broker fails we exit with
+# its error; we never fall through to ~/.config/gws user credentials.
+set -euo pipefail
+
+find_real_gws() {
+    local self candidate
+    self="$(readlink -f "${BASH_SOURCE[0]}")"
+    while IFS= read -r candidate; do
+        [[ "$(readlink -f "$candidate")" == "$self" ]] && continue
+        printf '%s\n' "$candidate"
+        return 0
+    done < <(type -ap gws)
+    # MCP servers and other spawners run with PATHs that carry neither the dotfiles
+    # nor the mise shims; fall back to known install locations before failing. The
+    # direct install binary comes FIRST: mise's own shim needs mise's env and dies
+    # under a minimal environment ("gws is not a valid shim").
+    for candidate in "$HOME"/.mise/installs/npm-googleworkspace-cli/*/bin/gws "$HOME/.mise/shims/gws"; do
+        if [[ -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    echo "gws shim: real gws binary not found on PATH or in mise installs" >&2
+    return 127
+}
+
+find_broker() {
+    # PATH first so the routing tests can stub the broker; then this shim's own
+    # directory (minimal-PATH spawners again).
+    local self_dir
+    if command -v google-user-token; then
+        return 0
+    fi
+    self_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+    if [[ -x "$self_dir/google-user-token" ]]; then
+        printf '%s\n' "$self_dir/google-user-token"
+        return 0
+    fi
+    echo "gws shim: google-user-token not found on PATH or beside this shim" >&2
+    return 127
+}
+
+find_uv() {
+    local candidate
+    if command -v uv; then
+        return 0
+    fi
+    for candidate in "$HOME/.mise/shims/uv" "$HOME"/.mise/installs/uv/*/uv-*/uv; do
+        if [[ -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    echo "gws shim: uv not found on PATH or in mise installs" >&2
+    return 127
+}
+
+main() {
+    local real_gws
+    # split is load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
+    real_gws="$(find_real_gws)"
+
+    if [[ -n "${GOOGLE_WORKSPACE_CLI_TOKEN:-}" || -n "${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}" ]]; then
+        exec "$real_gws" "$@"
+    fi
+
+    if [[ -n "${GMAIL_OAUTH_CREDENTIALS:-}" ]]; then
+        local creds_file
+        creds_file="$(mktemp)"
+        trap "rm -f -- '$creds_file'" EXIT
+        chmod 600 "$creds_file"
+        printf '%s' "$GMAIL_OAUTH_CREDENTIALS" > "$creds_file"
+        GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" "$real_gws" "$@"
+        exit
+    fi
+
+    local broker token uv
+    # splits are load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
+    broker="$(find_broker)"
+    if command -v uv >/dev/null 2>&1; then
+        token="$("$broker")"
+    else
+        uv="$(find_uv)"
+        token="$("$uv" run --quiet --script "$broker")"
+    fi
+    if [[ -z "$token" ]]; then
+        echo "gws shim: google-user-token returned an empty token" >&2
+        exit 1
+    fi
+    GOOGLE_WORKSPACE_CLI_TOKEN="$token" exec "$real_gws" "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

@@ -1,15 +1,11 @@
 ---
 name: google-workspace
 description: Use when reading, searching, uploading, downloading, sharing, or organizing files on Google Drive. Also for Google Docs, Sheets, Gmail, or Calendar access. Triggers on "google drive", "gdrive", "workspace", Drive/Docs URLs (drive.google.com, docs.google.com), file IDs, or requests to find, list, export, share, or manage cloud documents and spreadsheets.
-mcp:
-  gws:
-    command: gws
-    args: ["mcp", "-s", "drive,gmail,sheets,calendar,docs,slides,people,tasks,chat,forms,keep,meet", "-w", "-e"]
 ---
 
 # Google Workspace (gws)
 
-Manage Google Drive (and other Workspace APIs) via MCP tools or the `gws` CLI. All output is structured JSON.
+Manage Google Drive (and other Workspace APIs) via the `gws` CLI. All output is structured JSON. Auth is automatic on admin devboxes (machine identity — see the Auth section); there is NO MCP server mode (upstream removed the `mcp` command).
 
 ## Docs & Sheets Formatting Rules
 
@@ -21,23 +17,9 @@ When writing to Docs/Sheets that humans read, formatting mistakes are recurring 
 - **Never overwrite concurrent human edits.** Sami often edits shared docs live while you work — re-read the target range before writing and merge around his changes.
 - **Check the audience before writing** (see CLAUDE.md Audience Boundaries): customer-shared files live in the shared drive, never My Drive; internal ops detail never goes into customer-visible docs/tabs.
 
-## MCP Tools
+## No MCP Mode
 
-Use `skill_mcp(mcp_name="gws", ...)` to invoke Drive operations. Discover available tools:
-
-```
-skill_mcp(mcp_name="gws")
-```
-
-Tool names match CLI structure. Example MCP calls:
-
-```
-skill_mcp(mcp_name="gws", tool_name="drive_files_list", arguments='{"pageSize": 10}')
-
-skill_mcp(mcp_name="gws", tool_name="drive_files_list", arguments='{"q": "name contains \"report\""}')
-```
-
-If tool names don't match expectations, discover via CLI: `gws drive --help`.
+Upstream removed the `gws mcp` command (CHANGELOG: "Remove `mcp` command"); `skill_mcp` and any `mcp:` frontmatter for gws will fail with "Connection closed". Use the CLI below — same operations, same JSON.
 
 ## CLI Quick Start
 
@@ -97,28 +79,37 @@ sharedWithMe = true                       # Shared with me
 
 Combine with `and`: `name contains 'report' and mimeType = 'application/pdf'`
 
-## Auth
+## Auth (automatic on admin devboxes)
 
-```bash
-# Interactive (needs browser)
-gws auth login -s drive
+`gws` on PATH is the dotfiles shim (`~/.dotfiles/shims/gws`), which authenticates
+unattended via machine identity: it mints a domain-wide-delegation token for the box
+owner through `google-user-token` (instance role → WIF → native google-auth user
+impersonation; no stored keys). The broker reads its service account, default scopes,
+and federation config from an AWS Secrets Manager entry named in the script; it uses
+no local configuration files.
 
-# Headless: export from authenticated machine, then use on server
-gws auth export --unmasked > ~/.config/gws/credentials.json
-export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=~/.config/gws/credentials.json
-
-# Service account
-export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/path/to/service-account.json
-```
-
-## Expanding to Other Services
-
-Add services to the MCP args (edit this skill's frontmatter) and auth scope:
-
-```bash
-gws auth login -s drive,gmail,sheets
-gws mcp -s drive,gmail,sheets
-```
+- **Do NOT run `gws auth login`/`export` for day-to-day auth** — the broker handles
+  it. The login flow exists only to provision the gated Gmail-send credential below.
+- **Available scopes** (the DWD grant): `drive`, `documents`, `spreadsheets`,
+  `calendar`, `gmail.readonly`. Other services (slides, tasks, chat, forms, keep,
+  meet, people) fail with insufficient-scope until the Admin-console grant is
+  extended — update that grant and the `default_scopes` list in the broker's config
+  secret together.
+- **Sending Gmail is deliberately impossible unattended** (the grant omits
+  `gmail.send`). The gated path (one YubiKey touch per command):
+  `secrets GMAIL_OAUTH_CREDENTIALS -- gws gmail +send --to a@b --subject S --body B`.
+  The credential exists only YubiKey-encrypted in the human tier. To re-provision:
+  `gws auth login --scopes https://www.googleapis.com/auth/gmail.send` (tunnel the
+  printed localhost port), then `gws auth export --unmasked` (default output MASKS
+  `client_secret` and `refresh_token` as `xxxx...yyyy` — storing it breaks refresh),
+  compact to a single line, store via `secrets edit-human GMAIL_OAUTH_CREDENTIALS`
+  (multi-line values are rejected), then `gws auth logout` and shred the plaintext.
+- **Escape hatches** (both bypass the broker): preset `GOOGLE_WORKSPACE_CLI_TOKEN`
+  (an access token) or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` (a credentials JSON).
+- **If `gws` resolves to the raw binary** (stale session PATH), call the shim by
+  absolute path: `/home/ubuntu/.dotfiles/shims/gws …` — it works from any
+  environment. Failures are loud by design; there is no silent fallback to human
+  credentials.
 
 ## Gotchas
 
