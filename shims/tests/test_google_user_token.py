@@ -1,4 +1,8 @@
-#!/usr/bin/python3
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["google-auth>=2.38", "requests>=2.32", "boto3>=1.34"]
+# ///
 import importlib.machinery
 import importlib.util
 import io
