@@ -91,10 +91,10 @@ no local configuration files.
 - **Do NOT run `gws auth login`/`export` for day-to-day auth** — the broker handles
   it. The login flow exists only to provision the gated Gmail-send credential below.
 - **Available scopes** (the DWD grant): `drive`, `documents`, `spreadsheets`,
-  `calendar`, `gmail.readonly`. Other services (slides, tasks, chat, forms, keep,
-  meet, people) fail with insufficient-scope until the Admin-console grant is
-  extended — update that grant and the `default_scopes` list in the broker's config
-  secret together.
+  `presentations`, `calendar`, `gmail.readonly`. Other services (tasks, chat, forms,
+  keep, meet, people) fail with insufficient-scope until three things are extended
+  together: the Admin-console DWD grant, the `default_scopes` list in the broker's
+  config secret, and the enabled-API list on the GCP project (both Pulumi-managed).
 - **Sending Gmail is deliberately impossible unattended** (the grant omits
   `gmail.send`). The gated path (one YubiKey touch per command):
   `secrets GMAIL_OAUTH_CREDENTIALS -- gws gmail +send --to a@b --subject S --body B`.
