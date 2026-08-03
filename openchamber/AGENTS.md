@@ -6,4 +6,6 @@ The fan-in proxy merges backend SSE and status data, routes session requests to 
 
 The stack runs as systemd user units, so user lingering must stay enabled (`loginctl enable-linger`) or the whole stack dies when the last login session ends and stays down after reboots. The installer enables it; do not disable it while these units are in use.
 
+`openchamber-web.service` must keep `Restart=always` and `KillMode=process`: the in-app updater exits 0 expecting the service manager to restart it, and its detached npm process must survive the main process exit. With the defaults, tapping update in the UI kills the service permanently (502) without applying the update.
+
 Deploy with `install.sh`, which links the user units and creates the password env file only when absent. Then use `systemctl --user daemon-reload` and enable/restart the three units in dependency order. The password belongs only in `~/.config/openchamber-stack/env`, never this repository.

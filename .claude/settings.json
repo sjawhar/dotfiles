@@ -32,13 +32,20 @@
     "notion-api@intellectronica-skills": true,
     "typescript-lsp@claude-plugins-official": true,
     "skill-creator@claude-plugins-official": true,
-    "sjawhar@sjawhar": true
+    "sjawhar@sjawhar": true,
+    "knives@knives": true
   },
   "extraKnownMarketplaces": {
     "sjawhar": {
       "source": {
         "source": "github",
         "repo": "sjawhar/dotfiles"
+      }
+    },
+    "knives": {
+      "source": {
+        "source": "directory",
+        "path": "/home/ubuntu/knives/default"
       }
     }
   },

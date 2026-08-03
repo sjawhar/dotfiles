@@ -10,7 +10,7 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Ne
 
 ## Repo Orientation: `jj-agent-status`
 
-`jj-agent-status` gives you a complete repo orientation in one command — where you are, what needs attention, who else is working here, and what branches exist. Useful when starting a session, checking for other agents, or triaging repo state. Not needed for routine operations like push, describe, or rebase.
+`jj-agent-status` is a Sami-local helper, not a stock `jj` command. It gives you a complete repo orientation in one command — where you are, what needs attention, who else is working here, and what branches exist. Useful when starting a session, checking for other agents, or triaging repo state. On machines without it, use `jj status`, `jj log`, and `jj workspace list`. Not needed for routine operations like push, describe, or rebase.
 
 ```bash
 jj-agent-status                    # Quick orientation (auto-deep for <15 bookmarks)
@@ -51,12 +51,13 @@ This tells you:
 
 ## Agent Log: `jj agent-log`
 
-**Always use `jj agent-log` instead of `jj log`** when you need to inspect revision history. It outputs one JSON object per line (JSONL) with no graph, which is far easier to parse than the default human-readable graph.
+`jj agent-log` is a Sami-local alias for `jj log --no-graph -T agent_log`. When Sami's config is installed, it emits one JSON object per line (JSONL). Stock `jj` has no `agent-log` command; use `jj log --no-graph` with an explicit template there.
 
 ```bash
 jj agent-log                    # default revset, JSONL
 jj agent-log -r 'ancestors(@, 5)'  # scoped revset
 jj agent-log -r 'bookmarks()'     # all bookmarked changes
+jj log --no-graph -r 'ancestors(@, 5)'  # stock fallback
 ```
 
 Each line is a valid JSON object:
@@ -128,7 +129,7 @@ Resolution, in order:
 
 1. **Forget the reference you no longer need, then abandon the copy you don't want:** `jj bookmark forget <name>`, then `jj abandon <commit-id>`. Address commits by **commit ID, not change ID** — a divergent change ID is ambiguous; use `jj log -r 'change_id(abc)'` to list every copy.
 2. **If jj refuses because the commit is immutable,** pass `--ignore-immutable`. (Tracking the bookmark and forgetting it again also clears the immutability, but the flag is the direct tool.)
-3. **If an empty, bookmark-less commit reappears every time you abandon it,** it is another workspace's working copy, not cruft. Check `jj workspace list`. Retire the workspace with `jj workspace forget --force --cleanup <name>`; abandoning its `@` only makes jj recreate one.
+3. **If an empty, bookmark-less commit reappears every time you abandon it,** it is another workspace's working copy, not cruft. Check `jj workspace list`. Retire it with `jj workspace forget <name>`; stock jj only stops tracking the workspace and leaves its directory alone. Abandoning its `@` only makes jj recreate one.
 4. **Before abandoning anything non-empty, check it is not unsalvaged work.** Read its diff and confirm the content exists elsewhere (a current branch, or a branch on origin). Empty commits and empty octopus merges for superseded releases are always safe.
 5. **Verify you destroyed nothing:** capture `git ls-remote --heads origin` before and after, diff the two, and confirm every open PR head commit still resolves.
 
@@ -165,7 +166,8 @@ jj squash              # Content moves to @-, parent keeps its description
 |------|---------|
 | Status | `jj status` |
 | Log (human-readable) | `jj log` |
-| Log (agent — JSONL, no graph) | `jj agent-log` |
+| Log (agent — Sami JSONL alias) | `jj agent-log` |
+| Log (stock, flat) | `jj log --no-graph` |
 | Diff of current change | `jj diff` |
 | Diff of specific change | `jj diff -r <rev>` |
 | Show current change | `jj log -r @` |
@@ -291,10 +293,10 @@ jj rebase -r @ -o A -o B -o C   # Reset @'s parents to A, B, C (octopus merge)
 
 ```bash
 # Rebase current branch onto updated trunk (most common)
-jj rebase -o trunk()
+jj rebase -o 'trunk()'
 
 # Rebase all local branches onto trunk
-jj rebase -s 'all:roots(trunk()..@)' -o trunk()
+jj rebase -s 'roots(trunk()..@)' -o 'trunk()'
 
 # Reset a merge commit's parents (e.g., drop branches from octopus)
 jj rebase -r <merge> -o <parent1> -o <parent2> -o <parent3>
@@ -315,13 +317,13 @@ Revsets are a functional query language for selecting commits. Most commands acc
 | `@` | Working copy change |
 | `@-` | Parent of `@` |
 | `@+` | Child of `@` |
-| `trunk()` | Main/master/trunk on remote |
+| `trunk()` | Default remote bookmark, or `root()` if none resolves |
 | `root()` | Root commit (`zzzzzzzz`) |
 | `mine()` | Changes authored by current user |
 | `heads(all())` | All branch heads |
 | `::x` | Ancestors of x |
 | `x::` | Descendants of x |
-| `x..y` | Range between x and y |
+| `x..y` | Ancestors of y that are not ancestors of x |
 | `ancestors(x, depth)` | Ancestors with depth limit |
 | `description(substring:x)` | Changes with x in description |
 | `bookmarks()` | Changes with bookmarks |
@@ -329,10 +331,8 @@ Revsets are a functional query language for selecting commits. Most commands acc
 
 **Rebase all branches onto updated trunk:**
 ```bash
-jj rebase -s 'all:roots(trunk()..@)' -o trunk()
+jj rebase -s 'roots(trunk()..@)' -o 'trunk()'
 ```
-
-The `all:` prefix is required when a revset resolves to multiple revisions (confirms you intended multiple results).
 
 ## Conflicts
 
@@ -349,24 +349,58 @@ To resolve: edit the file to remove all markers, keeping the correct content. Re
 
 | Action | Command |
 |--------|---------|
-| Push all tracked bookmarks | `jj git push` |
-| Push specific bookmark | `jj git push --bookmark <name>` |
-| **Create** new remote branch | `jj git push --named <name>=@` |
+| Push tracked bookmarks that are ahead of the selected remote | `jj git push` |
+| Push all tracked bookmarks | `jj git push --tracked` |
+| Push a specific local bookmark, including its first remote publication | `jj git push --bookmark <name>` |
+| Create and publish a named remote bookmark | `jj git push --named <name>=@` |
 
-- `--named` does not require `--allow-new`
+- A plain `jj git push` refuses a local bookmark the remote has never seen. With a local `feature` bookmark and an `origin` remote, stock jj says:
+  ```text
+  Warning: Refusing to create new remote bookmark feature@origin
+  Hint: Run `jj bookmark track feature --remote=origin` and try again.
+  Nothing changed.
+  ```
+- Publish that existing local bookmark with `jj git push --bookmark feature`, or create a named remote bookmark with `jj git push --named feature=@`.
+- **There is no `--allow-new`.** Stock jj reports `error: unexpected argument '--allow-new' found`.
 - Don't re-describe commits when pushing — just push
+
+### Identity is a push precondition
+
+Configure identity before creating commits you may push. jj rejects any commit in the pushed ancestry with an empty author or committer:
+
+```text
+Error: Won't push commit <commit> since it has no author and/or committer set
+```
+
+```bash
+# User default
+jj config set --user user.name "Your Name"
+jj config set --user user.email "you@example.com"
+
+# Repository-specific override
+jj config set --repo user.name "Your Name"
+jj config set --repo user.email "you@example.com"
+
+# One command / CI
+JJ_USER="Your Name" JJ_EMAIL="you@example.com" jj new -m "message"
+```
+
+`--repo` and user settings affect future commits; set them before the first commit. Redirecting `XDG_CONFIG_HOME` does **not** disable the legacy `~/.jjconfig.toml`, which jj loads before the XDG config. For a hermetic invocation, use `JJ_CONFIG= jj ...`.
 
 **Common mistake**: Labels ending with `@` in `jj log` output (e.g. `default@`, `my-workspace@`) are **workspace markers**, NOT bookmarks. Only names in the bookmark position (without trailing `@`) are actual bookmarks. **Always verify with `jj bookmark list`.**
 
 ## Bookmarks
 
-- Bookmarks do **not** auto-advance (unlike git branches) — use `jj bookmark set <name>` to move them
+- Bookmarks do **not** auto-advance (unlike git branches).
+- `jj bookmark create <name>` creates only a new bookmark and fails if that name exists.
+- `jj bookmark set <name>` creates or updates a bookmark by name; it targets `@` by default.
+- `jj bookmark move <name> --to <rev>` moves existing bookmarks only; use `--allow-backwards` for a backwards or sideways move.
 - When a remote branch is deleted (e.g., after PR merge), the local tracking bookmark is automatically deleted
 - Untracked local bookmarks must be deleted manually if desired
 
 ### `tug` alias
 
-This user has a custom alias: `jj tug` moves the closest bookmark to `@`. Use it to update a bookmark to point at the current change before pushing.
+This user has a custom alias: `jj tug` moves the closest bookmark to `@`. It is not a stock command; on other machines, identify the bookmark with `jj bookmark list`, then run `jj bookmark move <name> --to @`.
 
 ## Workspaces
 
@@ -457,7 +491,7 @@ But the real fix is to not get into this state — see "Modifying Existing Chang
 `jj split` with no arguments opens an interactive TUI to choose which changes go into the new commit. **This times out in agent bash sessions.**
 
 To split non-interactively, pass file paths or a revset:
-- `jj split <path> [<path>...]` — move named files into the first commit
+- `jj split <path> [<path>...]` — keep named files in the selected original commit and put the remaining changes in its new child
 - `jj split -r <rev> <path>` — split a specific revision
 
 Per the global `Commits` AGENTS.md rule, prefer not splitting at all — one commit per PR is the default.

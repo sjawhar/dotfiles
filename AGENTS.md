@@ -92,9 +92,9 @@ Both are plain versioned config, symlinked into place — no install step. The k
 
 Git needs configuring even though day-to-day work is all jj: agent worktrees under `~/.cache`, scripts, and throwaway clones commit with plain `git commit`, and those were the commits showing up unsigned.
 
-### Two identities
+### Identity
 
-`sami@trajectorylabs.net` is the default for both tools. `sami@thecybermonk.com` is opt-in per repo. `jj-allowed-signers` lists both as principals on every key, so a commit verifies under either one.
+`sami@thecybermonk.com` is the default for both tools and the principal on every signing key.
 
 Within a repo the two tools must **agree**. jj's `behavior = "own"` signs a commit only when its author email matches jj's configured `user.email`, and on mismatch it *drops* the signature when rewriting rather than preserving it. That is why the defaults are aligned rather than left to differ per tool: a git-authored commit under one identity would lose its signature the first time jj rewrote it under the other — which is what happens when an agent's commit gets rebased into a jj repo.
 
@@ -102,8 +102,7 @@ Within a repo the two tools must **agree**. jj's `behavior = "own"` signs a comm
 
 ```bash
 git-identity        # show the effective identity for both tools, flag a mismatch
-git-identity tl     # sami@trajectorylabs.net for this repo
-git-identity cm     # sami@thecybermonk.com for this repo
+git-identity default # default identity for this repo
 ```
 
 ### Setting up a new machine
@@ -111,6 +110,6 @@ git-identity cm     # sami@thecybermonk.com for this repo
 Two manual steps, the same ones jj already needed:
 
 1. `ssh-keygen -t ed25519 -N "" -C "jj-signing-$(hostname -s)" -f ~/.ssh/jj-signing`
-2. Add the pubkey to `jj-allowed-signers` under both identities, then register it at <https://github.com/settings/ssh/new> as a **Signing Key** — the first is needed for local verification, the second for GitHub to show Verified.
+2. Add the pubkey to `jj-allowed-signers` under the configured identity, then register it at <https://github.com/settings/ssh/new> as a **Signing Key** — the first is needed for local verification, the second for GitHub to show Verified.
 
-Both emails also have to be *verified* on the GitHub account — an unverified committer email shows Unverified even with a good signature. GitHub vigilant mode makes any unsigned commit claiming these identities visibly Unverified, which is the intended tripwire.
+The configured email must be *verified* on the GitHub account — an unverified committer email shows Unverified even with a good signature. GitHub vigilant mode makes any unsigned commit claiming that identity visibly Unverified, which is the intended tripwire.

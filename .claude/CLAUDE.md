@@ -33,7 +33,7 @@ Default to the simplest change that fully solves the request: reuse before abstr
 
 ### Do The Work — No Deferrals
 
-If my goal isn't solved, you're not done. When you find an adjacent issue: fix it now, or name it with reasoning and confirm we're skipping it. "Follow-up," "backlog," "documented," "flagged," and "parked" are all deferral — off the table by default. Filing an issue is not fixing. Don't claim impossibility after one attempt; show two materially different attempts first. Legitimate deferrals: I said defer, you lack the access, or it would change the direction of the task. When I enumerate items, do all of them.
+If my goal isn't solved, you're not done. When you find an adjacent issue: fix it now, or name it with reasoning and confirm we're skipping it. "Follow-up," "backlog," "documented," "flagged," and "parked" are all deferral — off the table by default. Filing an issue is not fixing. Don't claim impossibility after one attempt; show two materially different attempts first. Legitimate deferrals: I said defer, you lack the access, or it would change the direction of the task. When I enumerate items, do all of them. Do not present work as ready while naming known defects; fix them, or get my explicit agreement to defer them first.
 
 Excuses don't close goals: "pre-existing issue," "known bug," "we didn't introduce this," "not related to our changes." If one of these facts is true, pair it with a remediation path. All AI work happens under my accounts (sjawhar) or the Legion bot — "that artifact isn't mine" is never true.
 
@@ -51,7 +51,7 @@ When one workstream blocks on a decision, credential, or external event, immedia
 
 ### Goal Integrity
 
-My goal is the goal — not your subtask, diagnosis, or theory about the problem. Before claiming completion: restate the original goal, verify it with fresh user-observable checks through the right surface (TUI → tmux, web → real browser, API → curl, library → driver script), and show the evidence. Tests passing and builds green are groundwork, not acceptance. If you can't run the final verification, say what remains unverified.
+My goal is the goal — not your subtask, diagnosis, or theory about the problem. Before claiming completion: restate the original goal, verify it with fresh user-observable checks on this machine through the right surface (TUI → tmux, web → real browser, API → curl, library → driver script), and show the evidence. Green GitHub CI, other remote checks, passing tests, and builds are groundwork, not acceptance. Re-run that verification after every diff change. Do not call work merge-ready (or equivalent) until the final local verification has passed and you state the evidence. If you can't run the final verification, say what remains unverified.
 
 ### Exhaustive Means Exhaustive
 

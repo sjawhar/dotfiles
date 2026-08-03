@@ -7,15 +7,14 @@
     "messages_last": "ctrl+end"
   },
   "plugin": [
-    "file://{env:HOME}/knives/default/plugin/knives.ts",
     "@sjawhar/opencode-legion-envoy@latest",
     "file://{env:HOME}/.dotfiles/opencode/plugins/dotfiles-bridge.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/session-env.ts",
-    "file://{env:HOME}/.dotfiles/opencode/plugins/thinking-probe.ts",
-    "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.5.1/sjawhar-opencode-anthropic-auth-0.5.1.tgz",
+    "file://{env:HOME}/knives/default/plugin/knives.ts",
+    "file://{env:HOME}/opencode/anthropic-auth/opencode",
     "opencode-pty@git+https://github.com/sjawhar/opencode-pty.git#ts-entrypoint",
-    "secretsd@git+https://github.com/sjawhar/secretsd.git#v2.1.0",
+    "secretsd@git+https://github.com/sjawhar/secretsd.git#v2.2.0",
     "superpowers@git+https://github.com/obra/superpowers.git#v6.1.1"
   ],
   "references": {

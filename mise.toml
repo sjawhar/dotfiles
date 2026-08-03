@@ -17,6 +17,7 @@
 minimum_release_age_excludes = [
   "github:sjawhar/forward",
   "github:sjawhar/jj",
+  "github:sjawhar/knives",
   "github:sjawhar/oh-my-opencode",
   "github:sjawhar/opencode",
   "github:sjawhar/secretsd",
@@ -28,6 +29,7 @@ minimum_release_age_excludes = [
 
 [tools]
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
+"github:sjawhar/knives" = "latest"  # Fork maintenance status; OpenCode/Claude Code plugins ship separately from the repo
 "github:sjawhar/secretsd" = "latest"  # Session secrets broker; ships bin/secrets + systemd units
 "github:syncthing/syncthing" = "latest"
 "github:tmux/tmux-builds" = "3.7b"
