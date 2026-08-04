@@ -124,8 +124,18 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
         # Emit %h rather than an absolute home so the same drop-in is valid on
         # every machine regardless of the account name.
         echo "ExecStart=${SECRETSD_BIN/#${HOME}/%h} serve"
-        # Source roots come from ~/.config/secretsd/config.toml (written above),
-        # not the environment: SECRETSD_HUMAN_DIR was removed in secretsd v2.
+        # Source roots come from ~/.config/secretsd/config.toml (written above).
+        # secretsd v2 removed SECRETSD_HUMAN_DIR, but v1 *refuses to start*
+        # without it, and this installer must leave a working daemon whichever
+        # binary is installed -- including mid-upgrade, when the config is
+        # already written but mise still has v1, and after a rollback. So emit
+        # the variable exactly while the installed binary needs it. v2 ignores
+        # it if a stale drop-in still carries one.
+        case "$SECRETSD_VERSION" in
+            1.*)
+                echo "Environment=SECRETSD_HUMAN_DIR=${DOTFILES_DIR/#${HOME}/%h}/secrets.human.d"
+                ;;
+        esac
         if [ -n "$SOPS_ABS" ]; then
             echo "Environment=SECRETSD_SOPS_BIN=${SOPS_ABS/#${HOME}/%h}"
         fi
