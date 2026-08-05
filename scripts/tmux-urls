@@ -39,8 +39,10 @@ menu)
 
     # Visible pane + recent scrollback, wrapped lines joined, most recent
     # first, deduplicated, trailing punctuation stripped.
+    # file:// is included because `forward open` converts it to a devbox preview
+    # URL before the laptop ever sees it.
     tmux capture-pane -p -J -S -200 -t "$pane" \
-        | grep -oE '(https?|ftp)://[^[:space:]<>"'\''`]+' \
+        | grep -oE '(https?|ftp|file)://[^[:space:]<>"'\''`]+' \
         | sed -e 's/[].,;:!?)'\'']*$//' \
         | tac \
         | awk '!seen[$0]++' \
