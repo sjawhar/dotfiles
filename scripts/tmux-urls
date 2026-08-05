@@ -76,6 +76,7 @@ copy)
     [ -n "$url" ] || exit 1
     printf %s "$url" | "$copy_cmd"
     msg=${url:0:60}
+    [ "${#url}" -gt 60 ] && msg="${msg}..."
     tmux display-message "Copied: ${msg//'#'/'##'}"
     ;;
 open)
@@ -85,6 +86,7 @@ open)
     # laptop is down, so fall back to the clipboard rather than losing the URL.
     if forward open "$url" 2>/dev/null; then
         msg=${url:0:60}
+        [ "${#url}" -gt 60 ] && msg="${msg}..."
         tmux display-message "Opened: ${msg//'#'/'##'}"
     else
         printf %s "$url" | "$copy_cmd"
