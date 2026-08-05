@@ -19,9 +19,11 @@ Host devbox
 # YubiKey tunnel: exposes laptop pcscd on devbox loopback :12799 so the devbox can
 # decrypt sops human-tier secrets (devbox/pcscd-bridge.service converts the port to
 # a user-owned unix socket; sshd binds forwarded unix sockets root-only, hence TCP).
-# Owned by the `devbox` wrapper (scripts/devbox): created on demand at connect time,
-# checked via its dedicated control socket, never a polling daemon. Dies with the
-# network (ServerAlive 15x3=45s) and is recreated on the next `devbox` invocation.
+# Owned by the `devbox` wrapper (scripts/devbox): created on demand at connect
+# time, checked via its dedicated control socket. Dies with the network
+# (ServerAlive 15x3=45s); devbox's session-scoped supervisor loop rebuilds it
+# automatically while the login session lasts (see scripts/devbox for why it
+# must live in the session and not in a systemd unit).
 #
 # Port 2222 is the devbox's REAL sshd (a tailnet-bound second port), not
 # Tailscale SSH on 22: the tailnet's SSH check policy interrupts long-lived

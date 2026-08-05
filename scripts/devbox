@@ -4,8 +4,9 @@
 # The tunnel (Host devbox-tunnel in ssh config) lets the devbox decrypt sops
 # human-tier secrets with the YubiKey plugged into this laptop. Mosh can't carry
 # SSH forwards, so the tunnel is a separate background ssh held by a dedicated
-# control socket — created here on demand, no polling daemon. If the tunnel dies
-# mid-session (Wi-Fi change, laptop sleep), just run `devbox` again.
+# control socket — created here on demand. A reconnect supervisor (below) then
+# keeps it alive across laptop sleep and Wi-Fi changes for the lifetime of this
+# login session; after a logout or reboot, run `devbox` once to restart both.
 #
 # CRITICAL: The tunnel MUST be created from an active local session (a terminal on
 # the laptop). If started from a non-interactive SSH session (e.g. by an agent over
@@ -16,12 +17,49 @@
 # explicitly:
 # `ssh -O exit devbox-tunnel`, then run `devbox` from a terminal.
 #
+# The supervisor exists for the same reason it is NOT a systemd unit: systemd
+# --user processes never belong to a seat session, so polkit would refuse them
+# pcscd access even while you sit at the machine. A loop spawned from this
+# terminal inherits the active session's scope, which is precisely what pcscd
+# demands, and it only reconnects while loginctl reports the session active —
+# so it cannot recreate the silent inactive-session failure described above.
+#
 # Args pass through to mosh, e.g.: devbox -- tm
 set -euo pipefail
 
+readonly tunnel_control=~/.ssh/sockets/tunnel-ubuntu@sami-agents.tailb86685.ts.net
+readonly supervisor_lock=~/.ssh/sockets/devbox-tunnel-supervisor.lock
+readonly supervisor_log=~/.ssh/sockets/devbox-tunnel-supervisor.log
+
+if [[ "${1:-}" == --tunnel-supervisor ]]; then
+    # One supervisor per laptop: the lock holder is it, everyone else leaves.
+    exec 9>"$supervisor_lock"
+    flock -n 9 || exit 0
+    : > "$supervisor_log"
+    while true; do
+        # ssh's own keepalives (ServerAlive 15x3) declare a dead network in
+        # ~45s and release the control socket; this loop then rebuilds. The
+        # devbox-side sshd reaps a dead session's 12799 listener in ~45s too,
+        # so a failed rebuild here is just retried on the next tick.
+        sleep 15
+        if [[ -n "${XDG_SESSION_ID:-}" ]]; then
+            state=$(loginctl show-session "$XDG_SESSION_ID" --property State --value 2>/dev/null) \
+                || { printf '%s session gone; exiting\n' "$(date -Is)" >> "$supervisor_log"; exit 0; }
+            # Not active (mid-suspend, VT switch): a tunnel built now would be
+            # refused by pcscd anyway, so wait for the session to come back.
+            [[ "$state" == active ]] || continue
+        fi
+        ssh -O check devbox-tunnel 2>/dev/null && continue
+        rm -f "$tunnel_control"
+        if ssh -N -f devbox-tunnel 2>>"$supervisor_log"; then
+            printf '%s tunnel reconnected\n' "$(date -Is)" >> "$supervisor_log"
+        fi
+    done
+fi
+
 if ! ssh -O check devbox-tunnel 2>/dev/null; then
     # Dead or stale control socket — clear it so we don't spawn a masterless dup.
-    rm -f ~/.ssh/sockets/tunnel-ubuntu@sami-agents.tailb86685.ts.net
+    rm -f "$tunnel_control"
     echo "devbox: starting YubiKey tunnel..." >&2
     # -f backgrounds only after the forward is up (ExitOnForwardFailure).
     # stderr goes to a file, not a pipe: the backgrounded child keeps the fd,
@@ -45,5 +83,10 @@ MSG
     fi
     rm -f "$tunnel_err"
 fi
+
+# Spawn the reconnect supervisor in its own process session, detached from this
+# terminal (no SIGHUP when it closes) but still inside this logind session's
+# scope, which is what keeps pcscd authorizing it. flock makes re-runs no-ops.
+setsid "$0" --tunnel-supervisor < /dev/null > /dev/null 2>&1 &
 
 exec mosh devbox "$@"

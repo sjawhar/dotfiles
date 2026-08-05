@@ -147,6 +147,21 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
         # environment, which would not survive a manager restart.
         if [ -S "${HOME}/.pcscd/pcscd.comm" ]; then
             echo "Environment=PCSCLITE_CSOCK_NAME=%h/.pcscd/pcscd.comm"
+            # The tunnel socket can be live while its far end is dead, so have
+            # the daemon probe the key itself before queueing a request. Gated
+            # on 2.1+: only there is the probe timeout configurable, and the 2s
+            # hardcoded before that is shorter than a healthy probe through the
+            # tunnel (2.4-3.4s), so wiring the probe on an older daemon would
+            # falsely condemn a working key.
+            case "$SECRETSD_VERSION" in
+                1.*|2.0.*) ;;
+                *)
+                    if [ -d "$AGE_DIR" ]; then
+                        echo "Environment=\"SECRETSD_YUBIKEY_PROBE_CMD=${AGE_DIR/#${HOME}/%h}/age-plugin-yubikey --list\""
+                        echo "Environment=SECRETSD_YUBIKEY_PROBE_TIMEOUT_SECS=10"
+                    fi
+                    ;;
+            esac
         fi
     } > "${SECRETSD_DROPIN}.new"
     if cmp -s "${SECRETSD_DROPIN}.new" "$SECRETSD_DROPIN" 2>/dev/null; then
