@@ -163,6 +163,19 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
                     ;;
             esac
         fi
+        # The YubiKey identity is touch-policy Always (rotated 2026-08-06), so
+        # no touch cache exists and the anti-piggyback cooldown adds only dead
+        # time between requests. Declaring the policy lets the daemon accept a
+        # 2s cooldown. Gated on 2.2+: older daemons refuse to start when the
+        # cooldown sits at or below the 15s floor, and they do not read the
+        # declaration that would make it safe.
+        case "$SECRETSD_VERSION" in
+            1.*|2.0.*|2.1.*) ;;
+            *)
+                echo "Environment=SECRETSD_TOUCH_POLICY=always"
+                echo "Environment=SECRETSD_COOLDOWN_SECS=2"
+                ;;
+        esac
     } > "${SECRETSD_DROPIN}.new"
     if cmp -s "${SECRETSD_DROPIN}.new" "$SECRETSD_DROPIN" 2>/dev/null; then
         rm -f "${SECRETSD_DROPIN}.new"
