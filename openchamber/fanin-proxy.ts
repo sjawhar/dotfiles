@@ -12,7 +12,7 @@
 const PROXY_PORT = 5199
 const FALLBACK_PORT = 5096
 const ENVOY_URL = Bun.env["ENVOY_URL"] ?? "http://127.0.0.1:9020"
-const MACHINE_ID = Bun.env["ENVOY_MACHINE_ID"] ?? "devbox-sami"
+const MACHINE_ID = Bun.env["ENVOY_MACHINE_ID"] ?? "sami-agents"
 const DISCOVERY_INTERVAL_MS = 10_000
 const TAP_RETRY_MS = 3_000
 const HEARTBEAT_MS = 15_000
