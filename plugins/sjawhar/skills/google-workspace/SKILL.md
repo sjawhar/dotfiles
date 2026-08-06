@@ -83,6 +83,8 @@ Combine with `and`: `name contains 'report' and mimeType = 'application/pdf'`
 
 There are **three** distinct Google auth paths on this box. Pick by what you're doing. The two `*_OAUTH*` keys are human-tier (secretsd, one YubiKey touch per use); the third is automatic.
 
+**The two human-tier keys are the same *kind* of object** — both are OAuth 2.0 authorized-user bundles (`{client_id, client_secret, refresh_token}`), both used the same way (POST a `refresh_token` grant → 1-hour access token → call an API). They are **not** interchangeable, but the difference is in the grant, not the format: they were consented under **different OAuth clients**, carry **disjoint scopes**, and act as **different identities**. `GMAIL_OAUTH_CREDENTIALS` acts as `sami@trajectorylabs.net` with only `gmail.send` (+ userinfo/openid); `GOOGLE_ADMIN_OAUTH` carries only the three `admin.directory.*` scopes and no mailbox identity. Each 403s on the other's job.
+
 > **Naming caveat (known inconsistency):** the secretsd keys are `GMAIL_OAUTH_CREDENTIALS` (Gmail *send*) and `GOOGLE_ADMIN_OAUTH` (Admin Directory). The word order differs (`GMAIL_OAUTH` vs `GOOGLE_..._OAUTH`) and neither says what it can actually do. Do **not** guess or abbreviate them — `GMAIL_AUTH_CREDENTIALS`, `GOOGLE_ADMIN_OAUTH_CREDENTIALS`, etc. are all wrong and will fail. Copy the exact key from `secrets list`. If these are ever renamed, make them parallel (e.g. `GWS_GMAIL_SEND_OAUTH` / `GWS_ADMIN_DIRECTORY_OAUTH`) and update this skill + the onboarding skill together.
 
 | Task | Credential | How |
@@ -115,7 +117,7 @@ secrets GMAIL_OAUTH_CREDENTIALS -- gws gmail +reply --message-id '<GMAIL_MSG_ID>
 - **Re-provisioning the credential** (rare): `gws auth login --scopes https://www.googleapis.com/auth/gmail.send` (tunnel the printed localhost port), then `gws auth export --unmasked` (default output MASKS `client_secret`/`refresh_token` as `xxxx...yyyy` — storing the masked form breaks refresh), compact to a single line, store via `secrets edit-human GMAIL_OAUTH_CREDENTIALS` (multi-line values are rejected), then `gws auth logout` and shred the plaintext.
 
 ### 3. `GOOGLE_ADMIN_OAUTH` — Workspace admin (human tier, YubiKey-gated)
-A separate `{client_id, client_secret, refresh_token}` bundle carrying ONLY the Admin SDK Directory scopes (`admin.directory.user`, `admin.directory.group`, `admin.directory.group.member`). Used for creating/suspending `@trajectorylabs.net` accounts and managing Google Group membership — the contractor-onboarding path. This one is **not** a gws credential: mint a token via the `refresh_token` grant and call the Admin SDK REST API directly.
+A separate OAuth authorized-user bundle (same `{client_id, client_secret, refresh_token}` format as the Gmail one, but a **different OAuth client** and disjoint scopes) carrying ONLY the Admin SDK Directory scopes (`admin.directory.user`, `admin.directory.group`, `admin.directory.group.member`) and no mailbox identity. Used for creating/suspending `@trajectorylabs.net` accounts and managing Google Group membership — the contractor-onboarding path. **You call the Admin SDK REST API directly with it, not through gws** — not because it's a different *kind* of credential (the gws shim would accept it via `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` just like the Gmail one), but because gws has no admin-directory command surface to route through. Mint a token via the `refresh_token` grant and hit the REST endpoints.
 
 ```bash
 # token → Admin Directory REST
@@ -125,7 +127,7 @@ secrets GOOGLE_ADMIN_OAUTH -- python3 -c 'mint refresh_token grant → POST admi
 Full recipe (account creation, recovery email, group add, the propagation-lag re-read) lives in the **onboarding skill** (`core-ops/onboarding` → *Google Admin over the API*). Do not duplicate the mechanics here; this row exists so the three creds are distinguishable in one place.
 
 ### Escape hatches (bypass the broker)
-Preset `GOOGLE_WORKSPACE_CLI_TOKEN` (a raw access token) or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` (a credentials JSON) and the shim execs straight through untouched. This is exactly the mechanism path 2 uses under the hood.
+Preset `GOOGLE_WORKSPACE_CLI_TOKEN` (a raw access token) or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` (an authorized-user JSON) and the shim execs straight through untouched. This is exactly the mechanism path 2 uses under the hood — and it's why the credential *format* is the same across all the human-tier keys: any of them could ride this hatch; the difference is only which scopes/identity the grant carries and whether the target API has a gws command surface at all.
 
 ## Gotchas
 
