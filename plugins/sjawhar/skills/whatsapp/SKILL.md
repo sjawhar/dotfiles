@@ -5,8 +5,6 @@ mcp:
   whatsapp:
     command: secrets
     args: ["WHATSAPP_MCP_URL", "WHATSAPP_MCP_SECRET", "--", "npx", "-y", "@sjawhar/whatsapp-mcp", "--connect"]
-    env:
-      SOPS_AGE_KEY: "${SOPS_AGE_KEY}"
 ---
 
 # WhatsApp

@@ -5,8 +5,6 @@ mcp:
   home-assistant:
     command: secrets
     args: ["HA_MCP_URL", "--", "bash", "-c", "exec npx -y mcp-remote \"$HA_MCP_URL\" --allow-http"]
-    env:
-      SOPS_AGE_KEY: "${SOPS_AGE_KEY}"
 ---
 
 # Home Assistant

@@ -13,7 +13,7 @@
     "file://{env:HOME}/.dotfiles/opencode/plugins/session-env.ts",
     "file://{env:HOME}/knives/default/plugin/knives.ts",
     "file://{env:HOME}/opencode/anthropic-auth/opencode",
-    "opencode-pty@git+https://github.com/sjawhar/opencode-pty.git#ts-entrypoint",
+    "opencode-pty@git+https://github.com/sjawhar/opencode-pty.git#sami",
     "secretsd@git+https://github.com/sjawhar/secretsd.git#v2.2.0",
     "superpowers@git+https://github.com/obra/superpowers.git#v6.1.1"
   ],
