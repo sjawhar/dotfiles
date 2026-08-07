@@ -156,10 +156,17 @@ async function collectStatus(pathAndQuery: string, directory: string | null): Pr
 }
 
 
-async function forward(port: number, req: Request, pathAndQuery: string): Promise<Response> {
+// Takes the body as bytes rather than reading it here: a Request body can only
+// be read once, so re-reading it on the fallback retry threw "Body already
+// used" and turned an unreachable owner into a 500 on the client's send.
+async function forward(
+  port: number,
+  req: Request,
+  pathAndQuery: string,
+  body: ArrayBuffer | undefined,
+): Promise<Response> {
   const headers = new Headers(req.headers)
   headers.delete("host")
-  const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer()
   const res = await fetch(backendUrl(port, pathAndQuery), {
     method: req.method,
     headers,
@@ -216,12 +223,13 @@ Bun.serve({
     const sessionMatch = SESSION_PATH.exec(url.pathname)
     const owner = sessionMatch?.[1] !== undefined ? registry.owners.get(sessionMatch[1]) : undefined
     const port = owner ?? FALLBACK_PORT
+    const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer()
     try {
-      return await forward(port, req, pathAndQuery)
+      return await forward(port, req, pathAndQuery, body)
     } catch (e) {
       if (port !== FALLBACK_PORT) {
         log(`owner :${port} unreachable (${e instanceof Error ? e.message : String(e)}), falling back`)
-        return forward(FALLBACK_PORT, req, pathAndQuery)
+        return forward(FALLBACK_PORT, req, pathAndQuery, body)
       }
       throw e
     }
