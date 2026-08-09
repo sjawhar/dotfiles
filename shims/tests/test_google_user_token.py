@@ -12,7 +12,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from botocore.exceptions import ClientError
+try:
+    from botocore.exceptions import ClientError
+except ImportError:  # laptops have no AWS tooling; the broker is devbox-only
+    raise unittest.SkipTest("botocore unavailable (google-user-token runs only on the devbox)")
 
 SHIM = Path(__file__).resolve().parent.parent / "google-user-token"
 spec = importlib.util.spec_from_loader(
