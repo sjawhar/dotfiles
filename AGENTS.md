@@ -20,7 +20,7 @@ opencode/oh-my-opencode.*.json # OMO profiles (switchable via `omo` shell functi
 opencode/plugins/    # OpenCode plugin scripts (jj-snapshot, etc.)
 nvim/init.lua        # Neovim config (single file)
 install.sh           # Main installer — runs all installers/* in order
-installers/          # Per-tool install scripts (shell.sh, mise.sh, jj.sh, tmux.sh, nvim.sh, claude.sh, opencode.sh)
+installers/          # Per-tool install scripts (shell.sh, mise.sh, docker.sh, jj.sh, tmux.sh, nvim.sh, claude.sh, opencode.sh)
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 forward/             # Browser-forwarding policy plus devbox serve and laptop daemon user units
 bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
