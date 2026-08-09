@@ -5,6 +5,7 @@ LAPTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${LAPTOP_DIR}/shortcuts-custom"
 CONF="${LAPTOP_DIR}/workspaces.conf"
 MODE="stdout"
+MONITORS_FILE=""
 
 error() {
     printf 'generate-shortcuts: %s\n' "$*" >&2
@@ -13,12 +14,16 @@ error() {
 
 usage() {
     cat <<'USAGE'
-Usage: generate-shortcuts [--apply | --check] [--conf PATH]
+Usage: generate-shortcuts [--apply | --check] [--conf PATH] [--monitors PATH]
 
 Generate COSMIC custom shortcuts from laptop/workspaces.conf.
   --apply      write the generated shortcuts to COSMIC's custom shortcuts file
   --check      validate the generated RON sanity checks, then print it
   --conf PATH  read workspace mappings from PATH instead of workspaces.conf
+  --monitors PATH
+               read connected output fixtures from PATH instead of cosmic-randr
+               list; rows are <connector> [model words...] [(disabled)|(enabled)]
+               and an omitted state means enabled
 USAGE
 }
 
@@ -35,6 +40,11 @@ while [[ $# -gt 0 ]]; do
         --conf)
             [[ $# -ge 2 ]] || error '--conf requires a path'
             CONF="$2"
+            shift
+            ;;
+        --monitors)
+            [[ $# -ge 2 ]] || error '--monitors requires a path'
+            MONITORS_FILE="$2"
             shift
             ;;
         --help|-h)
@@ -95,10 +105,157 @@ parse_chord() {
     done
 }
 
+declare -A monitor_models=()
+declare -a monitor_connectors=()
+
+add_monitor() {
+    local connector="$1"
+    local model="$2"
+
+    [[ "${connector}" =~ ^[[:alnum:]][[:alnum:]-]*$ ]] \
+        || error "invalid monitor connector: ${connector}"
+    [[ -z "${monitor_models["${connector}"]+x}" ]] \
+        || error "duplicate connected monitor connector: ${connector}"
+
+    monitor_connectors+=("${connector}")
+    monitor_models["${connector}"]="${model}"
+}
+
+load_monitor_file() {
+    local raw_line
+    local line
+    local connector
+    local model
+    local state
+    local state_pattern='[[:space:]]+\(([^)]*)\)$'
+
+    [[ -r "${MONITORS_FILE}" ]] || error "cannot read monitor fixture: ${MONITORS_FILE}"
+
+    while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
+        line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "${line}" || "${line:0:1}" == "#" ]] && continue
+
+        state="enabled"
+        if [[ "${line}" =~ ${state_pattern} ]]; then
+            state="${BASH_REMATCH[1]}"
+            case "${state}" in
+                enabled|disabled)
+                    line="${line%" (${state})"}"
+                    ;;
+                *)
+                    error "${MONITORS_FILE}: invalid monitor fixture state: (${state})"
+                    ;;
+            esac
+        fi
+
+        connector=""
+        model=""
+        read -r connector model <<< "${line}"
+        [[ -n "${connector}" ]] || error "${MONITORS_FILE}: invalid monitor fixture row"
+        [[ "${state}" == "enabled" ]] && add_monitor "${connector}" "${model}"
+    done < "${MONITORS_FILE}"
+}
+
+load_live_monitors() {
+    local output
+    local line
+    local connector=""
+    local model=""
+    local state=""
+    local next_connector
+    local next_state
+    local head_pattern='^([[:alnum:]][[:alnum:]-]*)[[:space:]]+\(([^)]*)\)[[:space:]]*$'
+
+    output="$(cosmic-randr list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')" \
+        || error 'failed to list connected monitors with cosmic-randr'
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" =~ ${head_pattern} ]]; then
+            next_connector="${BASH_REMATCH[1]}"
+            next_state="${BASH_REMATCH[2]}"
+            if [[ -n "${connector}" && "${state}" == "enabled" ]]; then
+                add_monitor "${connector}" "${model}"
+            fi
+            connector="${next_connector}"
+            state="${next_state}"
+            model=""
+        elif [[ -n "${connector}" && "${line}" =~ ^[[:space:]]+Model:[[:space:]]*(.*)$ ]]; then
+            model="${BASH_REMATCH[1]}"
+        fi
+    done <<< "${output}"
+
+    [[ -z "${connector}" || "${state}" != "enabled" ]] || add_monitor "${connector}" "${model}"
+}
+
+load_monitors() {
+    if [[ -n "${MONITORS_FILE}" ]]; then
+        load_monitor_file
+    else
+        load_live_monitors
+    fi
+}
+
+resolve_monitor() {
+    local fallback_list="$1"
+    local context="$2"
+    local query
+    local connector
+    local model
+    local query_lower
+    local model_lower
+    local match_list
+    local -a queries=()
+    local -a matches=()
+
+    IFS=',' read -r -a queries <<< "${fallback_list}"
+    [[ "${#queries[@]}" -gt 0 ]] || error "${context}: monitor fallback list is empty"
+
+    for query in "${queries[@]}"; do
+        [[ -n "${query}" ]] || error "${context}: monitor fallback list contains an empty query"
+
+        if [[ -n "${monitor_models["${query}"]+x}" ]]; then
+            RESOLVED_CONNECTOR="${query}"
+            RESOLVED_QUERY="${query}"
+            return 0
+        fi
+
+        query_lower="${query,,}"
+        matches=()
+        for connector in "${monitor_connectors[@]}"; do
+            model="${monitor_models["${connector}"]}"
+            model_lower="${model,,}"
+            [[ "${model_lower}" == *"${query_lower}"* ]] && matches+=("${connector}")
+        done
+
+        case "${#matches[@]}" in
+            0)
+                ;;
+            1)
+                RESOLVED_CONNECTOR="${matches[0]}"
+                RESOLVED_QUERY="${query}"
+                return 0
+                ;;
+            *)
+                match_list=""
+                for connector in "${matches[@]}"; do
+                    [[ -z "${match_list}" ]] || match_list+=', '
+                    match_list+="${connector}"
+                done
+                error "${context}: ambiguous monitor query: ${query} matches connected outputs: ${match_list}; use connector names"
+                ;;
+        esac
+    done
+
+    return 1
+}
+
 declare -A seen_workspaces=()
 declare -A seen_chords=()
 declare -A local_counts=()
 declare -a bindings=()
+
+load_monitors
 
 line_number=0
 row_count=0
@@ -108,9 +265,9 @@ while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
     line="${line%"${line##*[![:space:]]}"}"
     [[ -z "${line}" || "${line:0:1}" == "#" ]] && continue
 
-    read -r workspace monitor switch_chord move_chord extra <<< "${line}"
-    [[ -n "${workspace:-}" && -n "${monitor:-}" && -n "${switch_chord:-}" && -n "${move_chord:-}" && -z "${extra:-}" ]] \
-        || error "${CONF}:${line_number}: expected <global-ws> <monitor-query> <switch-chord> <move-chord>"
+    read -r workspace monitor_fallbacks switch_chord move_chord extra <<< "${line}"
+    [[ -n "${workspace:-}" && -n "${monitor_fallbacks:-}" && -n "${switch_chord:-}" && -n "${move_chord:-}" && -z "${extra:-}" ]] \
+        || error "${CONF}:${line_number}: expected <global-ws> <monitor-fallback-list> <switch-chord> <move-chord>"
     [[ "${workspace}" =~ ^[1-9][0-9]*$ ]] \
         || error "${CONF}:${line_number}: global workspace must be a positive integer: ${workspace}"
     [[ -z "${seen_workspaces[${workspace}]+x}" ]] \
@@ -123,8 +280,15 @@ while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
         seen_chords[${chord}]=1
     done
 
-    local_index=$((${local_counts[${monitor}]:-0} + 1))
-    local_counts[${monitor}]="${local_index}"
+    ((++row_count))
+    if ! resolve_monitor "${monitor_fallbacks}" "${CONF}:${line_number}"; then
+        printf 'generate-shortcuts: %s:%d: no connected monitor matches fallback list: %s; skipping workspace %s\n' \
+            "${CONF}" "${line_number}" "${monitor_fallbacks}" "${workspace}" >&2
+        continue
+    fi
+
+    local_index=$((${local_counts["${RESOLVED_CONNECTOR}"]:-0} + 1))
+    local_counts["${RESOLVED_CONNECTOR}"]="${local_index}"
     case "${local_index}" in
         [1-9])
             key_num="${local_index}"
@@ -133,11 +297,13 @@ while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
             key_num=0
             ;;
         *)
-            error "${CONF}:${line_number}: monitor ${monitor} has more than 10 local workspaces"
+            printf 'generate-shortcuts: %s:%d: resolved monitor %s has more than 10 local workspaces; skipping workspace %s (10-slot encoding cap)\n' \
+                "${CONF}" "${line_number}" "${RESOLVED_CONNECTOR}" "${workspace}" >&2
+            continue
             ;;
     esac
 
-    monitor_ron="$(ron_escape "${monitor}")"
+    monitor_ron="$(ron_escape "${RESOLVED_QUERY}")"
 
     parse_chord "${switch_chord}" 'switch'
     bindings+=("    (modifiers: [${RON_MODIFIERS}], key: \"${RON_KEY}\", description: Some(\"WS${workspace} — ${monitor_ron} (${local_index})\")): WorkspaceOnOutput(\"${monitor_ron}\", ${key_num}),")
@@ -145,10 +311,10 @@ while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
     parse_chord "${move_chord}" 'move'
     bindings+=("    (modifiers: [${RON_MODIFIERS}], key: \"${RON_KEY}\", description: Some(\"Move to WS${workspace}\")): MoveToWorkspaceOnOutput(\"${monitor_ron}\", ${key_num}),")
 
-    ((++row_count))
 done < "${CONF}"
 
 ((row_count > 0)) || error "${CONF}: no workspace mappings found"
+(( ${#bindings[@]} > 0 )) || error 'no workspace bindings resolved for the connected monitors'
 
 render_template() {
     local template_line
@@ -157,7 +323,9 @@ render_template() {
     while IFS= read -r template_line || [[ -n "${template_line}" ]]; do
         if [[ "${template_line}" == '__WORKSPACE_BINDINGS__' ]]; then
             ((++marker_count))
-            printf '%s\n' "${bindings[@]}"
+            if ((${#bindings[@]})); then
+                printf '%s\n' "${bindings[@]}"
+            fi
         else
             printf '%s\n' "${template_line//__HOME__/${HOME}}"
         fi

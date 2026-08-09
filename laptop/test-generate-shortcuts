@@ -3,6 +3,12 @@ set -euo pipefail
 
 LAPTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENERATOR="${LAPTOP_DIR}/generate-shortcuts"
+FIXTURES="${LAPTOP_DIR}/testdata/generate-shortcuts"
+DOCKED_MONITORS="${FIXTURES}/docked.monitors"
+PORTABLE_MONITORS="${FIXTURES}/portable.monitors"
+SINGLE_MONITORS="${FIXTURES}/single.monitors"
+LAPTOP_ONLY_MONITORS="${FIXTURES}/laptop-only.monitors"
+DISABLED_LAPTOP_MONITORS="${FIXTURES}/disabled-laptop.monitors"
 mkdir -p /tmp/opencode
 TMPDIR="$(mktemp -d /tmp/opencode/generate-shortcuts-test.XXXXXX)"
 trap 'rm -rf "${TMPDIR}"' EXIT
@@ -13,14 +19,38 @@ fail() {
 }
 
 OUTPUT="${TMPDIR}/custom"
-"${GENERATOR}" --check > "${OUTPUT}"
+"${GENERATOR}" --check --monitors "${DOCKED_MONITORS}" > "${OUTPUT}"
 
 [[ "$(grep -c '): WorkspaceOnOutput(' "${OUTPUT}")" -eq 15 ]] \
     || fail 'expected 15 workspace bindings'
 [[ "$(grep -c '): MoveToWorkspaceOnOutput(' "${OUTPUT}")" -eq 15 ]] \
     || fail 'expected 15 move bindings'
+grep -Fq 'WorkspaceOnOutput("O34", 1),' "${OUTPUT}" \
+    || fail 'docked workspace 1 must retain its O34 target'
+grep -Fq 'WorkspaceOnOutput("U34G2G4R3", 1),' "${OUTPUT}" \
+    || fail 'docked workspace 4 must retain its U34G2G4R3 target'
+grep -Fq 'WorkspaceOnOutput("eDP-1", 1),' "${OUTPUT}" \
+    || fail 'docked laptop workspace must retain its eDP-1 target'
 ! grep -q '__WORKSPACE_BINDINGS__\|__HOME__' "${OUTPUT}" \
     || fail 'template placeholders remain in generated output'
+
+laptop_only_output="${TMPDIR}/laptop-only-custom"
+laptop_only_stderr="${TMPDIR}/laptop-only.stderr"
+if ! "${GENERATOR}" --check --monitors "${LAPTOP_ONLY_MONITORS}" > "${laptop_only_output}" 2> "${laptop_only_stderr}"; then
+    fail 'laptop-only mode must warn and exit successfully'
+fi
+[[ "$(grep -c '): WorkspaceOnOutput(' "${laptop_only_output}")" -eq 10 ]] \
+    || fail 'laptop-only mode must emit 10 workspace bindings'
+[[ "$(grep -c '): MoveToWorkspaceOnOutput(' "${laptop_only_output}")" -eq 10 ]] \
+    || fail 'laptop-only mode must emit 10 move bindings'
+for workspace in $(seq 1 10); do
+    grep -Fq "WS${workspace} — eDP-1 (${workspace})" "${laptop_only_output}" \
+        || fail "laptop-only mode must retain global workspace ${workspace}"
+done
+for workspace in $(seq 11 15); do
+    grep -Fq "resolved monitor eDP-1 has more than 10 local workspaces; skipping workspace ${workspace} (10-slot encoding cap)" "${laptop_only_stderr}" \
+        || fail "laptop-only mode must warn when skipping workspace ${workspace}"
+done
 
 open_parens="$(tr -cd '(' < "${OUTPUT}" | wc -c)"
 close_parens="$(tr -cd ')' < "${OUTPUT}" | wc -c)"
@@ -36,13 +66,13 @@ awk '
 
 bad_modifier="${TMPDIR}/bad-modifier.conf"
 sed 's/Alt+1/Meta+1/' "${LAPTOP_DIR}/workspaces.conf" > "${bad_modifier}"
-if "${GENERATOR}" --conf "${bad_modifier}" > /dev/null 2>&1; then
+if "${GENERATOR}" --monitors "${DOCKED_MONITORS}" --conf "${bad_modifier}" > /dev/null 2>&1; then
     fail 'unsupported modifier must fail'
 fi
 
 duplicate_workspace="${TMPDIR}/duplicate-workspace.conf"
 sed 's/^2[[:space:]]\+/1   /' "${LAPTOP_DIR}/workspaces.conf" > "${duplicate_workspace}"
-if "${GENERATOR}" --conf "${duplicate_workspace}" > /dev/null 2>&1; then
+if "${GENERATOR}" --monitors "${DOCKED_MONITORS}" --conf "${duplicate_workspace}" > /dev/null 2>&1; then
     fail 'duplicate global workspace must fail'
 fi
 
@@ -50,16 +80,22 @@ too_many_local="${TMPDIR}/too-many-local.conf"
 for workspace in $(seq 1 11); do
     printf '%s MONITOR Alt+%s Alt+Shift+%s\n' "${workspace}" "${workspace}" "${workspace}"
 done > "${too_many_local}"
-if "${GENERATOR}" --conf "${too_many_local}" > /dev/null 2>&1; then
-    fail 'more than 10 local workspaces must fail'
+too_many_local_output="${TMPDIR}/too-many-local-custom"
+too_many_local_stderr="${TMPDIR}/too-many-local.stderr"
+if ! "${GENERATOR}" --check --monitors "${SINGLE_MONITORS}" --conf "${too_many_local}" > "${too_many_local_output}" 2> "${too_many_local_stderr}"; then
+    fail 'more than 10 local workspaces must warn and exit successfully'
 fi
+[[ "$(grep -c '): WorkspaceOnOutput(' "${too_many_local_output}")" -eq 10 ]] \
+    || fail 'overflow must retain only the first 10 workspace bindings'
+grep -Fq 'resolved monitor MONITOR has more than 10 local workspaces; skipping workspace 11 (10-slot encoding cap)' "${too_many_local_stderr}" \
+    || fail 'overflow warning must name the resolved monitor and encoding cap'
 
 ten_local="${TMPDIR}/ten-local.conf"
 for workspace in $(seq 1 10); do
     printf '%s MONITOR Alt+%s Alt+Shift+%s\n' "${workspace}" "${workspace}" "${workspace}"
 done > "${ten_local}"
 ten_local_output="${TMPDIR}/ten-local-custom"
-"${GENERATOR}" --check --conf "${ten_local}" > "${ten_local_output}"
+"${GENERATOR}" --check --monitors "${SINGLE_MONITORS}" --conf "${ten_local}" > "${ten_local_output}"
 grep -Fq 'WorkspaceOnOutput("MONITOR", 0),' "${ten_local_output}" \
     || fail 'tenth local workspace must switch to key 0'
 grep -Fq 'MoveToWorkspaceOnOutput("MONITOR", 0),' "${ten_local_output}" \
@@ -69,14 +105,76 @@ duplicate_chord="${TMPDIR}/duplicate-chord.conf"
 printf '%s\n' \
     '1 MONITOR Alt+Shift+1 Ctrl+1' \
     '2 MONITOR Shift+Alt+1 Ctrl+2' > "${duplicate_chord}"
-if "${GENERATOR}" --check --conf "${duplicate_chord}" > /dev/null 2>&1; then
+if "${GENERATOR}" --check --monitors "${SINGLE_MONITORS}" --conf "${duplicate_chord}" > /dev/null 2>&1; then
     fail 'duplicate chord across rows must fail'
 fi
 
 template_collision="${TMPDIR}/template-collision.conf"
 printf '%s\n' '1 MONITOR Ctrl+Alt+Left Alt+1' > "${template_collision}"
-if "${GENERATOR}" --check --conf "${template_collision}" > /dev/null 2>&1; then
+if "${GENERATOR}" --check --monitors "${SINGLE_MONITORS}" --conf "${template_collision}" > /dev/null 2>&1; then
     fail 'chord colliding with template binding must fail'
 fi
+
+portable_output="${TMPDIR}/portable-custom"
+"${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" > "${portable_output}"
+[[ "$(grep -c '): WorkspaceOnOutput(' "${portable_output}")" -eq 15 ]] \
+    || fail 'portable mode must emit 15 workspace bindings'
+[[ "$(grep -c '): MoveToWorkspaceOnOutput(' "${portable_output}")" -eq 15 ]] \
+    || fail 'portable mode must emit 15 move bindings'
+grep -Fq '(modifiers: [Alt], key: "1", description: Some("WS1 — eDP-1 (1)")): WorkspaceOnOutput("eDP-1", 1),' "${portable_output}" \
+    || fail 'workspace 1 must resolve to eDP-1 with its first local index'
+grep -Fq '(modifiers: [Alt], key: "4", description: Some("WS4 — DP-2 (1)")): WorkspaceOnOutput("DP-2", 1),' "${portable_output}" \
+    || fail 'workspace 4 must resolve to DP-2 with its first local index'
+grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — DP-1 (1)")): WorkspaceOnOutput("DP-1", 1),' "${portable_output}" \
+    || fail 'workspace 7 must resolve to DP-1'
+grep -Fq '(modifiers: [Super, Alt], key: "5", description: Some("WS15 — eDP-1 (8)")): WorkspaceOnOutput("eDP-1", 8),' "${portable_output}" \
+    || fail 'workspace 15 must finish the laptop local index sequence'
+
+disabled_laptop_output="${TMPDIR}/disabled-laptop-custom"
+"${GENERATOR}" --check --monitors "${DISABLED_LAPTOP_MONITORS}" > "${disabled_laptop_output}"
+[[ "$(grep -c '): WorkspaceOnOutput(' "${disabled_laptop_output}")" -eq 4 ]] \
+    || fail 'only the enabled external monitor must receive workspace bindings'
+[[ "$(grep -c '): MoveToWorkspaceOnOutput(' "${disabled_laptop_output}")" -eq 4 ]] \
+    || fail 'only the enabled external monitor must receive move bindings'
+! grep -q 'WorkspaceOnOutput("eDP-1"\|MoveToWorkspaceOnOutput("eDP-1"' "${disabled_laptop_output}" \
+    || fail 'disabled eDP-1 must not win a workspace resolution'
+
+fake_bin="${TMPDIR}/bin"
+mkdir -p "${fake_bin}"
+fake_cosmic_randr="${fake_bin}/cosmic-randr"
+printf '%s\n' \
+    '#!/bin/bash' \
+    'printf "%s\n" "eDP-1 (disabled)" "    Model: Builtin" "DP-1 (enabled)" "    Model: External" "DP-2 (enabled)" "    Model: External"' \
+    > "${fake_cosmic_randr}"
+chmod +x "${fake_cosmic_randr}"
+live_disabled_laptop_output="${TMPDIR}/live-disabled-laptop-custom"
+PATH="${fake_bin}:${PATH}" "${GENERATOR}" --check > "${live_disabled_laptop_output}"
+[[ "$(grep -c '): WorkspaceOnOutput(' "${live_disabled_laptop_output}")" -eq 7 ]] \
+    || fail 'live monitor parsing must retain only enabled outputs'
+! grep -q 'WorkspaceOnOutput("eDP-1"\|MoveToWorkspaceOnOutput("eDP-1"' "${live_disabled_laptop_output}" \
+    || fail 'live monitor parsing must ignore disabled eDP-1'
+
+ambiguous="${TMPDIR}/ambiguous.conf"
+printf '%s\n' '1 Xebec Alt+1 Alt+Shift+1' > "${ambiguous}"
+ambiguous_stderr="${TMPDIR}/ambiguous.stderr"
+if "${GENERATOR}" --monitors "${PORTABLE_MONITORS}" --conf "${ambiguous}" > /dev/null 2> "${ambiguous_stderr}"; then
+    fail 'ambiguous model query must fail'
+fi
+grep -Fq 'ambiguous monitor query: Xebec matches connected outputs: DP-1, DP-2; use connector names' "${ambiguous_stderr}" \
+    || fail 'ambiguous model query must name colliding connectors'
+
+disconnected="${TMPDIR}/disconnected.conf"
+printf '%s\n' '1 ABSENT Alt+1 Alt+Shift+1' > "${disconnected}"
+disconnected_output="${TMPDIR}/disconnected-custom"
+disconnected_stderr="${TMPDIR}/disconnected.stderr"
+if "${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" --conf "${disconnected}" > "${disconnected_output}" 2> "${disconnected_stderr}"; then
+    fail 'all-disconnected rows must fail without workspace bindings'
+fi
+grep -Fq 'no connected monitor matches fallback list: ABSENT; skipping workspace 1' "${disconnected_stderr}" \
+    || fail 'all-disconnected row must produce a warning'
+grep -Fq 'no workspace bindings resolved for the connected monitors' "${disconnected_stderr}" \
+    || fail 'all-disconnected rows must report that no bindings resolved'
+[[ ! -s "${disconnected_output}" ]] \
+    || fail 'all-disconnected rows must not emit a blank generated file'
 
 printf 'PASS: generate-shortcuts\n'
