@@ -26,7 +26,7 @@ bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
 shims/               # PATH-priority wrappers (gh, opencode, pyright, basedpyright)
 scripts/             # Utility scripts (git-identity, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
-devpod/              # DevPod container setup (Dockerfile, entrypoint, proxy config)
+devpod/              # Remote dev machine provisioning: container image + cloud-init for a bare VM (dormant)
 plugins/             # OpenCode/Claude plugins (sjawhar/ has all custom skills, agents, and commands)
 vendor/              # Third-party vendored content
 docs/                # Documentation and plans
@@ -43,7 +43,7 @@ Each major subdirectory has its own AGENTS.md with details and conventions:
 | `plugins/` | Custom skills, agents, and commands (`sjawhar/`) |
 | `installers/` | Per-tool install scripts run by `install.sh` |
 | `scripts/` | Standalone utility scripts |
-| `devpod/` | DevPod container setup (Dockerfile, entrypoint, proxy) |
+| `devpod/` | Remote dev machine provisioning — container image and bare-VM cloud-init (dormant) |
 
 ## How Install Works
 
