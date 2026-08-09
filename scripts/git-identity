@@ -1,0 +1,75 @@
+#!/bin/bash
+# Set (or show) the commit identity for the current repo, for git and jj at once.
+#
+# Both identities sign with the same key and both are trusted in
+# jj-allowed-signers, so either one verifies. The catch is that they must AGREE
+# within a repo: jj's signing.behavior = "own" only signs when a commit's author
+# email matches jj's configured user.email, and when it doesn't match it DROPS
+# the signature on rewrite rather than keeping it. A repo where git says
+# cybermonk and jj says trajectorylabs therefore produces commits that silently
+# lose their signature the first time jj rewrites them. Setting both together is
+# what prevents that.
+#
+#   git-identity                 show the effective identity for both tools
+#   git-identity tl|trajectory   use sami@trajectorylabs.net for this repo
+#   git-identity cm|cybermonk    use sami@thecybermonk.com for this repo
+set -euo pipefail
+
+NAME="Sami Jawhar"
+TL_EMAIL="sami@trajectorylabs.net"
+CM_EMAIL="sami@thecybermonk.com"
+
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "not a git repo" >&2; exit 1; }
+in_jj() { jj root >/dev/null 2>&1; }
+
+show() {
+    local g j
+    g=$(git config user.email 2>/dev/null || echo "(unset)")
+    echo "git: ${g}"
+    if in_jj; then
+        j=$(jj config get user.email 2>/dev/null || echo "(unset)")
+        echo "jj:  ${j}"
+        [ "$g" = "$j" ] || echo "MISMATCH — jj will drop signatures on rewrite. Run: git-identity tl|cm" >&2
+    else
+        echo "jj:  (not a jj repo)"
+    fi
+}
+
+case "${1-}" in
+    "") show ;;
+    tl | trajectory | trajectorylabs) EMAIL="$TL_EMAIL" ;;
+    cm | cybermonk | thecybermonk) EMAIL="$CM_EMAIL" ;;
+    -h | --help)
+        sed -n '2,15p' "$0" | sed 's/^# \?//'
+        exit 0
+        ;;
+    *)
+        echo "unknown identity: $1 (want tl or cm)" >&2
+        exit 1
+        ;;
+esac
+
+if [ -n "${EMAIL-}" ]; then
+    git config --local user.email "$EMAIL"
+    git config --local user.name "$NAME"
+    if in_jj; then
+        jj config set --repo user.email "$EMAIL"
+        jj config set --repo user.name "$NAME"
+
+        # Config only affects future commits, so the change already in the
+        # working copy keeps the old author — leaving it mismatched, which is
+        # exactly the state where jj drops the signature on the next rewrite.
+        # Re-author @ to close that gap. Skipped when @ is immutable or carries
+        # a bookmark, since re-authoring changes the commit id and that would
+        # mean a force push for anything already pushed.
+        marks=$(jj log --no-graph -r @ -T 'if(immutable, "immutable ") ++ bookmarks.map(|b| b.name()).join(",")' 2>/dev/null || true)
+        if [ -z "$marks" ]; then
+            jj metaedit --update-author --quiet 2>/dev/null || true
+        else
+            echo "note: @ is ${marks% } — left its author alone." >&2
+            echo "      re-author it yourself if you want it signed under the new identity:" >&2
+            echo "      jj metaedit --update-author" >&2
+        fi
+    fi
+    show
+fi
