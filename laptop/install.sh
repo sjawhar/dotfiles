@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+# shellcheck source=laptop/../installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
 
 LAPTOP_DIR="${DOTFILES_DIR}/laptop"
@@ -110,6 +111,7 @@ LAPTOP_PKGS=(
     code
     docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     git
+    libnotify-bin
     tailscale
     v4l-utils
 )
@@ -250,15 +252,23 @@ if [ ! -f ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces ]; then
     cp "${LAPTOP_DIR}/cosmic/comp-pinned-workspaces" ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces
 fi
 
+# Laptop daemon role opens tunneled URLs without colliding with the SSH LocalForward on 12802.
+bash "${DOTFILES_DIR}/installers/forward.sh" daemon
+
 # =============================================================================
 # Desktop apps (separate installers)
 # =============================================================================
 source "${DOTFILES_DIR}/installers/ghostty.sh"
 source "${DOTFILES_DIR}/installers/voxtype.sh"
+# shellcheck source=laptop/drivers.sh
 source "${LAPTOP_DIR}/drivers.sh"
+# shellcheck source=laptop/joycon.sh
 source "${LAPTOP_DIR}/joycon.sh"
+# shellcheck source=laptop/pam-u2f.sh
 source "${LAPTOP_DIR}/pam-u2f.sh"
+# shellcheck source=laptop/cosmic-greeter-fork.sh
 source "${LAPTOP_DIR}/cosmic-greeter-fork.sh"
+# shellcheck source=laptop/cosmic-comp-fork.sh
 source "${LAPTOP_DIR}/cosmic-comp-fork.sh"
 
 echo "--- Laptop setup complete ---"

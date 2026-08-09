@@ -1,0 +1,16 @@
+[Unit]
+Description=forward opener daemon (tailnet :12800; receives URLs from the devbox)
+# Needs the compositor: it opens a browser and copies to the clipboard via wl-copy.
+# Under default.target this raced the compositor at boot and started without
+# WAYLAND_DISPLAY, after which every clipboard handoff failed for the life of the
+# process -- so non-allowlisted URLs were neither opened nor copied, they vanished.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.dotfiles/forward/forward-daemon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

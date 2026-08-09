@@ -1,6 +1,7 @@
 #!/bin/bash
 # Devbox-specific setup (remote dev machine). Not sourced from the main install.sh.
 set -euo pipefail
+# shellcheck source=devbox/../installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
 
 DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -18,5 +19,8 @@ mkdir -p ~/.pcscd ~/.config/systemd/user
 ensure_link "${DEVBOX_DIR}/pcscd-bridge.service" ~/.config/systemd/user/pcscd-bridge.service
 systemctl --user daemon-reload
 systemctl --user enable --now pcscd-bridge.service
+
+# Devbox serve role exposes files through the laptop tunnel without binding the laptop's forwarded port.
+bash "${DOTFILES_DIR}/installers/forward.sh" serve
 
 echo "--- Devbox setup complete ---"

@@ -1,0 +1,17 @@
+# Devbox role: forward serve (file preview + callback bridge), forward url,
+# forward open.
+#
+# listen is this machine's literal tailnet address, and it is what preview URLs
+# are minted against — never peer, which is the laptop, where the browser is
+# rather than where the file is. peer is the laptop's literal tailnet address:
+# dialled for the URL channel, and compared against for every inbound
+# connection. Literal addresses only; a MagicDNS name is mutable from the admin
+# console and must never sit inside a security decision.
+listen = "100.113.243.90"
+peer = "100.100.92.97"
+
+# The single tailnet port the laptop asks for OAuth callback hops on. Only ports
+# a local `forward open` armed, from a URL that actually named them, are
+# reachable through it, and only until the lease expires.
+bridge_port = 12801
+forward_ttl_secs = 300
