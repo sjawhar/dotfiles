@@ -1,0 +1,74 @@
+#!/bin/bash
+# Detect and heal broken Watchman roots.
+#
+# Watchman 4.9 (the Ubuntu package) pins each watch to the directory inode it
+# saw at watch time. When a watched directory is deleted and recreated - which
+# happens routinely here as jj workspaces and /tmp worktrees get recycled - the
+# watch survives but points at the dead inode. Watchman still reports the root
+# as watched, so nothing looks wrong. Every client query then writes a cookie
+# file into the *new* directory and waits for an inotify event that can never
+# arrive, failing only once the sync timeout expires (60s by default).
+#
+# jj issues a Watchman query on every command (fsmonitor.backend = "watchman"
+# in .jjconfig.toml), so one stale root adds ~60s to every jj invocation in
+# that workspace, and leaves a cookie file behind on each attempt.
+#
+# Each root is probed with a short sync timeout. Anything that fails to sync is
+# unwatched along with its orphaned cookies; Watchman then re-establishes the
+# watch against the correct inode the next time a client asks for it (a full
+# crawl is typically ~1s).
+
+set -euo pipefail
+
+SYNC_TIMEOUT_MS="${WATCHMAN_HEAL_SYNC_TIMEOUT_MS:-5000}"
+
+if ! command -v watchman >/dev/null 2>&1; then
+    echo "watchman is not installed" >&2
+    exit 1
+fi
+
+roots=$(watchman watch-list |
+    python3 -c 'import json, sys; print("\n".join(json.load(sys.stdin)["roots"]))')
+
+checked=0
+healed=0
+
+while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    checked=$((checked + 1))
+
+    reason=""
+    if [ ! -d "$root" ]; then
+        reason="path no longer exists"
+    else
+        probe=$(watchman -j <<EOF || echo '{"error": "probe failed"}'
+["query", "$root", {"sync_timeout": $SYNC_TIMEOUT_MS, "fields": ["name"], "expression": ["name", "__watchman_heal_probe__"]}]
+EOF
+        )
+        case "$probe" in
+        *'"error"'*)
+            reason=$(printf '%s' "$probe" |
+                python3 -c 'import json, sys; print(json.load(sys.stdin).get("error", "unknown"))' 2>/dev/null) ||
+                reason="sync failed within ${SYNC_TIMEOUT_MS}ms"
+            ;;
+        esac
+    fi
+
+    [ -n "$reason" ] || continue
+
+    echo "broken: $root ($reason)"
+    if ! watchman watch-del "$root" >/dev/null; then
+        echo "  warning: watch-del failed" >&2
+        continue
+    fi
+    healed=$((healed + 1))
+
+    if [ -d "$root" ]; then
+        cookies=$(find "$root" -maxdepth 1 -name '.watchman-cookie-*' -print -delete 2>/dev/null | wc -l)
+        if [ "$cookies" -gt 0 ]; then
+            echo "  removed $cookies orphaned cookie file(s)"
+        fi
+    fi
+done <<<"$roots"
+
+echo "checked $checked root(s), healed $healed"
