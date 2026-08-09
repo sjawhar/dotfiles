@@ -2,7 +2,8 @@
 # Envoy CLI — query and manage the Envoy notification system.
 #
 # Subcommands:
-#   envoy ps         — list live sessions registered with Envoy
+#   envoy ps         — list live sessions registered with Envoy (subagent sessions hidden)
+#   envoy ps --sub-agents — include subagent sessions
 #   envoy ps --json  — JSON output
 #   envoy ps --local — filter to local machine only
 #   envoy send <t> <msg> — send message (ses_* = direct, else publish to topic)
@@ -10,13 +11,17 @@ set -euo pipefail
 
 ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
 HOSTNAME="${HOSTNAME:-$(hostname)}"
+# --local matches the listener's configured machine_id, which may differ from
+# hostname (it comes from Pulumi's ENVOY_MACHINE_ID). Override when they diverge.
+MACHINE_ID="${ENVOY_MACHINE_ID:-$HOSTNAME}"
 
 _envoy_ps() {
-    local json=false local_only=false
+    local json=false local_only=false sub_agents=false
     for arg in "$@"; do
         case "$arg" in
             --json) json=true ;;
             --local) local_only=true ;;
+            --sub-agents|--subagents) sub_agents=true ;;
         esac
     done
     local raw
@@ -24,8 +29,11 @@ _envoy_ps() {
         echo "error: could not reach Envoy at $ENVOY_URL" >&2
         return 1
     }
+    if [ "$sub_agents" = false ]; then
+        raw=$(echo "$raw" | jq '[.[] | select((.title // "") | test("\\(@[^)]+ subagent\\)$") | not)]')
+    fi
     if [ "$local_only" = true ]; then
-        raw=$(echo "$raw" | jq --arg m "$HOSTNAME" '[.[] | select(.machine_id == $m)]')
+        raw=$(echo "$raw" | jq --arg m "$MACHINE_ID" '[.[] | select(.machine_id == $m)]')
     fi
     if [ "$json" = true ]; then
         echo "$raw" | jq .

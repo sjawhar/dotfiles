@@ -1,5 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Owner-aware GitHub App credential helper.
+
+Interpreter is pinned to the system python3, NOT `env python3`: git invokes a credential
+helper with the caller's environment, so under any activated virtualenv (a uv run, an agent
+shell, a project venv) `env python3` resolves to an interpreter without PyJWT and token
+minting dies with ModuleNotFoundError. The failure is invisible until the token cache misses,
+because generate_jwt imports lazily.
 
 Git credential-helper usage (wired up in gh-app-routes.gitconfig):
   gh-app-token <profile> get

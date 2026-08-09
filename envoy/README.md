@@ -34,7 +34,8 @@ provision, no per-listener identity.
 
 - [Pulumi CLI](https://www.pulumi.com/docs/install/)
 - Node.js (Pulumi uses ts-node)
-- Docker on each target machine
+- Docker on each target machine, with the SSH user in the `docker` group (the
+  provider runs `docker` as that user, not via sudo)
 - Tailscale on each target machine, joined to the same tailnet as `envoy-nats`
 - SSH access from the deploy machine to remote hosts
 
@@ -43,15 +44,15 @@ provision, no per-listener identity.
 ```bash
 cd ~/.dotfiles/envoy
 npm install
-export PULUMI_CONFIG_PASSPHRASE="<your-passphrase>"
-pulumi up --stack prod
+secrets PULUMI_CONFIG_PASSPHRASE -- pulumi up --stack prod
 ```
 
 ## Secrets
 
-Pulumi encrypts secrets in `Pulumi.prod.yaml` using a passphrase that must be
-exported as `PULUMI_CONFIG_PASSPHRASE` for any Pulumi command. Persist it via
-SOPS-encrypted dotfiles (`~/.dotfiles/secrets.env`).
+Pulumi encrypts secrets in `Pulumi.prod.yaml` using a passphrase it reads from
+`PULUMI_CONFIG_PASSPHRASE`. The passphrase is a human-tier key in secretsd, so
+run every Pulumi command through `secrets PULUMI_CONFIG_PASSPHRASE -- pulumi …`
+— the first request in a session needs a YubiKey touch, the rest are free.
 
 | Config key | Purpose |
 |---|---|
@@ -77,16 +78,36 @@ pulumi config set --secret envoy:githubWebhookSecret "<value>" --stack prod
 | Field | Required | Description |
 |---|---|---|
 | `name` | yes | Logical name (used in Pulumi resource URNs) |
-| `machineId` | yes | Passed as `ENVOY_MACHINE_ID` to the listener |
+| `machineId` | yes | Passed as `ENVOY_MACHINE_ID` to the listener. Also names the listener's durable NATS consumer (`listener-<machineId>`) and gates delivery — the listener only serves sessions registered under its own machine ID. Changing it orphans the old consumer on the stream and forces live sessions to re-subscribe, so treat it as stable. |
 | `sshHost` | no | SSH URI (e.g. `ssh://user@host`). Omit for the local machine — Docker uses the local socket. |
-| `listener.webhooks.{github,slack,ghostwispr}` | no | Enable on-prem webhook ingress for that source. **Only set when the webhook source POSTs locally to this host** (e.g. ghost-wispr's app POSTs to its own listener). GitHub/Slack webhooks ingress through Fargate, not on-prem. |
+| `listener.webhooks.{github,slack,ghostwispr}` | no | Enable on-prem webhook ingress for that source. **Only set when the webhook source POSTs locally to this host** (e.g. a Ghost Wispr host whose app POSTs to its own listener). GitHub/Slack webhooks ingress through Fargate, not on-prem. |
 
-### Adding a transient host
+### Adding a host
 
-1. Make sure the host is on the tailnet and Docker is installed
-2. Add SSH access from the deploy machine
-3. Add a `machines:` entry in `Pulumi.prod.yaml`
+1. Confirm the host is on the tailnet and can reach the bus:
+   `bash -c 'echo > /dev/tcp/envoy-nats/4222'`
+2. Confirm Docker works as the SSH user (`docker info`). A fresh devbox often has
+   Docker installed but the login user outside the `docker` group —
+   `sudo usermod -aG docker <user>` fixes it.
+3. Add a `machines:` entry in `Pulumi.prod.yaml`. For `sshHost`, use the host's
+   MagicDNS FQDN (`ssh://user@host.tailb86685.ts.net`) when a `~/.ssh/config`
+   entry of the same bare name carries a `ProxyCommand` — otherwise the deploy
+   inherits that proxy's credential requirements (e.g. AWS SSO for SSM).
 4. Run `pulumi up --stack prod`
+
+### Removing a host that is already gone
+
+Deleting a `machines:` entry makes Pulumi delete the container, which needs the
+host to answer. For a host that no longer exists, drop the resources from state
+instead so the apply never dials it:
+
+```bash
+pulumi state delete --stack prod --force '<container URN>'
+pulumi state delete --stack prod --force '<remote image URN>'
+pulumi state delete --stack prod --force '<docker provider URN>'
+```
+
+`pulumi stack --show-urns --stack prod` lists them.
 
 ## Watchdog (opt-in)
 
