@@ -78,6 +78,7 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 - **Personal vs. company boundary:** company infra repos must not reference `~/.dotfiles`, and the dotfiles install is not part of standard company machine provisioning.
 - **Envoy** source/config lives in `envoy/` here. It receives external GitHub and Slack webhooks — hardening must preserve webhook delivery. Envoy tools exist only in Sami's own sessions; never instruct other users to use them.
 - **Linking devbox files:** when the `forward` tunnel is deployed, link files as `http://localhost:12802/<abs-path>` (get one with `forward url <path>`) instead of `file:///` links, which the laptop resolves against the wrong filesystem.
+- **systemd user lingering must stay enabled** (`loginctl enable-linger ubuntu`): the openchamber stack (and any other `systemctl --user` services) dies when the last login session ends without it. "Lingering processes" cleanup is unrelated to systemd linger; do not disable it. `installers/openchamber.sh` enables it idempotently.
 
 ## Commit Signing and Identity
 

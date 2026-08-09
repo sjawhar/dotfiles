@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenChamber OpenCode fan-in proxy
+After=network-online.target openchamber-serve.service
+
+[Service]
+WorkingDirectory=%h
+Environment=ENVOY_MACHINE_ID=sami-agents
+ExecStart=/home/ubuntu/.mise/installs/bun/1.3.14/bin/bun run %h/.dotfiles/openchamber/fanin-proxy.ts
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
