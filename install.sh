@@ -1,11 +1,13 @@
 #!/bin/bash
 set -euo pipefail
-export DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export DOTFILES_DIR
 
 echo "=== Dotfiles Install ==="
 
 source "${DOTFILES_DIR}/installers/shell.sh"
 source "${DOTFILES_DIR}/installers/mise.sh" "$@"
+source "${DOTFILES_DIR}/installers/docker.sh"
 source "${DOTFILES_DIR}/installers/sops.sh"
 source "${DOTFILES_DIR}/installers/jj.sh"
 source "${DOTFILES_DIR}/installers/tmux.sh"
