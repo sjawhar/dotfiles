@@ -11,6 +11,7 @@
     "file://{env:HOME}/.dotfiles/opencode/plugins/dotfiles-bridge.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/session-env.ts",
+    "@sjawhar/opencode-knives@git+https://github.com/sjawhar/knives.git#v0.6.2",
     "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.5.1/sjawhar-opencode-anthropic-auth-0.5.1.tgz",
     "opencode-pty@git+https://github.com/sjawhar/opencode-pty.git#sami",
     "secretsd@git+https://github.com/sjawhar/secretsd.git#v2.2.0",
