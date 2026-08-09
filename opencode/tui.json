@@ -7,6 +7,7 @@
   },
   "plugin": [
     "@sjawhar/opencode-legion-envoy@latest",
+    "file://{env:HOME}/.dotfiles/opencode/plugins/pr-status.tsx",
     "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.5.1/sjawhar-opencode-anthropic-auth-0.5.1.tgz"
   ]
 }

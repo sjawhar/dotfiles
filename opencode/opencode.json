@@ -12,7 +12,7 @@
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/session-env.ts",
     "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.5.1/sjawhar-opencode-anthropic-auth-0.5.1.tgz",
-    "opencody-pty",
+    "opencode-pty@git+https://github.com/sjawhar/opencode-pty.git#sami",
     "secretsd@git+https://github.com/sjawhar/secretsd.git#v2.2.0",
     "superpowers@git+https://github.com/obra/superpowers.git#v6.1.1"
   ],
@@ -28,10 +28,6 @@
     "inspect_evals": {
       "repository": "github.com/UKGovernmentBEIS/inspect_evals",
       "description": "Inspect evals (official upstream)"
-    },
-    "inspect_flow": {
-      "repository": "github.com/meridianlabs-ai/inspect_flow",
-      "description": "Inspect Flow (official upstream)"
     },
     "inspect_k8s_sandbox": {
       "repository": "github.com/UKGovernmentBEIS/inspect_k8s_sandbox",
@@ -53,37 +49,51 @@
       "repository": "github.com/trajectory-labs-pbc/inspect_swe",
       "description": "Inspect SWE (Trajectory Labs fork)"
     },
-    "inspect_action": {
-      "repository": "github.com/METR/inspect-action",
-      "description": "METR inspect-action / hawk (official upstream)"
+    "hawk": {
+      "repository": "github.com/METR/hawk",
+      "description": "METR hawk (official upstream)"
+    },
+    "hawk_tl": {
+      "repository": "github.com/trajectory-labs-pbc/hawk",
+      "description": "METR hawk (Trajectory Labs fork)"
     }
   },
   "provider": {
     "anthropic": {
       "models": {
         "claude-fable-5": {
-          "name": "Claude Fable 5",
-          "limit": {
-            "context": 1000000,
-            "input": 1000000,
-            "output": 128000
+          "headers": {
+            "anthropic-beta": "server-side-fallback-2026-07-01"
           },
-          "modalities": {
-            "input": [
-              "text",
-              "image",
-              "pdf"
+          "options": {
+            "fallbacks": [
+              {
+                "model": "claude-opus-5"
+              },
+              {
+                "model": "claude-opus-4-8"
+              }
             ],
-            "output": [
-              "text"
-            ]
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            }
+          }
+        },
+        "claude-opus-5": {
+          "headers": {
+            "anthropic-beta": "server-side-fallback-2026-07-01"
           },
-          "variants": {
-            "low": {},
-            "medium": {},
-            "high": {},
-            "xhigh": {},
-            "max": {}
+          "options": {
+            "fallbacks": [
+              {
+                "model": "claude-opus-4-8"
+              }
+            ],
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            }
           }
         }
       }
