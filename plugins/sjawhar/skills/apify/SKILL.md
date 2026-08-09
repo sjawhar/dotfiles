@@ -5,8 +5,6 @@ mcp:
   apify:
     command: secrets
     args: ["APIFY_TOKEN", "--", "npx", "-y", "@apify/actors-mcp-server"]
-    env:
-      SOPS_AGE_KEY: "${SOPS_AGE_KEY}"
 ---
 
 # Apify

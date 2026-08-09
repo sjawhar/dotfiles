@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Verify sops recipient integrity for the (per-key) human secret tier.
+#
+# A key's sops recipient set IS its access policy, so two invariants must hold
+# before any human-tier secret can be trusted as "human-only":
+#
+#   (a) every secrets.human.d/<KEY>.env is encrypted to EXACTLY the human-tier
+#       recipients (YubiKey + recovery) and to NEITHER agent key. Otherwise a
+#       secret meant to require a physical touch would be silently readable by
+#       the unattended, disk-resident machine key.
+#   (b) no key NAME under secrets.human.d/ also exists in either agent-tier
+#       file (secrets.env or, when present, secrets.local.env). The `secrets`
+#       shim resolves the agent tier first, so a duplicate would hand out the
+#       agent-tier copy and bypass the human gate.
+#
+# Both checks run WITHOUT decrypting anything: age recipients and dotenv key
+# names are plaintext sops metadata. This script therefore NEVER runs `sops -d`
+# and NEVER triggers a YubiKey touch. Recipient fingerprints are read from
+# .sops.yaml — the single source of truth — never hardcoded here.
+
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+SOPS_YAML="${DOTFILES_DIR}/.sops.yaml"
+HUMAN_DIR="${DOTFILES_DIR}/secrets.human.d"
+AGENT_FILE="${DOTFILES_DIR}/secrets.env"
+LOCAL_AGENT_FILE="${DOTFILES_DIR}/secrets.local.env"
+
+fail=0
+note() { printf '  %s\n' "$*"; }
+ok()   { printf '  PASS  %s\n' "$*"; }
+# Report lines all go to stdout so the top-to-bottom report stays correctly
+# ordered and attributed (mixing stdout+stderr interleaves under buffering). The
+# non-zero exit code is the machine-readable failure signal.
+bad()  { printf '  FAIL  %s\n' "$*"; fail=1; }
+
+[ -f "$SOPS_YAML" ] || { echo "verify-sops-recipients: $SOPS_YAML not found" >&2; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "verify-sops-recipients: yq not found on PATH" >&2; exit 2; }
+
+# --- Recipient roster, straight from .sops.yaml (never hardcoded) -------------
+# human tier = recipients of every restricted (path_regex) rule: YubiKey+recovery
+# all        = every recipient mentioned in the file
+# agent-only = all - human  (the machine keys that must NEVER see a human file)
+human_recipients="$(yq -r '.creation_rules[] | select(.path_regex // "" | test("human")) | .age[]' "$SOPS_YAML" 2>/dev/null | sort -u || true)"
+all_recipients="$(yq -r '.creation_rules[].age[]' "$SOPS_YAML" 2>/dev/null | sort -u || true)"
+agent_recipients="$(comm -23 <(printf '%s\n' "$all_recipients") <(printf '%s\n' "$human_recipients") | grep -v '^$' || true)"
+
+if [ -z "$human_recipients" ]; then
+    echo "verify-sops-recipients: could not read human-tier recipients from $SOPS_YAML" >&2
+    exit 2
+fi
+
+echo "== recipient roster (from .sops.yaml) =="
+note "human tier : $(printf '%s' "$human_recipients" | tr '\n' ' ')"
+note "agent keys : $(printf '%s' "$agent_recipients" | tr '\n' ' ')"
+echo
+
+# Print secret key NAMES from a sops dotenv file without decrypting it: each
+# secret is stored as `KEY=ENC[...]` in plaintext; sops's own metadata lines are
+# prefixed `sops_` and are excluded.
+plaintext_keys() {
+    grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$1" 2>/dev/null | grep -v '^sops_' | cut -d= -f1 || true
+}
+
+# Collect candidate files once (nullglob -> empty array when none match / no dir).
+shopt -s nullglob
+human_files=("$HUMAN_DIR"/*.env)
+shopt -u nullglob
+
+# --- (a) recipients of each human.d file -------------------------------------
+echo "== (a) secrets.human.d/*.env recipients =="
+if [ ! -d "$HUMAN_DIR" ]; then
+    note "secrets.human.d/ does not exist yet — nothing to check."
+elif [ "${#human_files[@]}" -eq 0 ]; then
+    note "secrets.human.d/ contains no *.env files — nothing to check."
+else
+    for f in "${human_files[@]}"; do
+        rel="${f#"$DOTFILES_DIR"/}"
+        got="$(grep -iE 'recipient' "$f" 2>/dev/null | grep -oE 'age1[a-z0-9]+' | sort -u || true)"
+        if [ "$got" = "$human_recipients" ]; then
+            ok "$rel -> $(printf '%s' "$got" | tr '\n' ' ')"
+        else
+            bad "$rel recipient set does not match the human tier"
+            note "    expected: $(printf '%s' "$human_recipients" | tr '\n' ' ')"
+            note "    got:      $(printf '%s' "${got:-(none)}" | tr '\n' ' ')"
+        fi
+        # Defensive, explicit message if an agent key ever appears in a human file.
+        while IFS= read -r a; do
+            [ -n "$a" ] || continue
+            if printf '%s\n' "$got" | grep -qxF "$a"; then
+                bad "$rel is encrypted to AGENT key $a — human gate defeated"
+            fi
+        done <<< "$agent_recipients"
+    done
+fi
+echo
+
+# --- (b) key-name collisions with both agent-tier files ----------------------
+echo "== (b) human.d key names vs agent tier (secrets.env + secrets.local.env if present) =="
+if [ ! -d "$HUMAN_DIR" ] || [ "${#human_files[@]}" -eq 0 ]; then
+    note "no human.d key files — nothing to check."
+else
+    agent_files=()
+    for agent_file in "$AGENT_FILE" "$LOCAL_AGENT_FILE"; do
+        [ -f "$agent_file" ] && agent_files+=("$agent_file")
+    done
+
+    if [ "${#agent_files[@]}" -eq 0 ]; then
+        note "no agent-tier files found — nothing to compare against."
+    else
+        collision=0
+        human_keys="$(
+            for f in "${human_files[@]}"; do
+                b="${f##*/}"; printf '%s\n' "${b%.env}"   # filename-derived key
+                plaintext_keys "$f"                         # key(s) stored inside the file
+            done | sort -u
+        )"
+        for agent_file in "${agent_files[@]}"; do
+            agent_keys="$(plaintext_keys "$agent_file" | sort -u || true)"
+            dupes="$(comm -12 <(printf '%s\n' "$agent_keys") <(printf '%s\n' "$human_keys") | grep -v '^$' || true)"
+            if [ -n "$dupes" ]; then
+                while IFS= read -r k; do
+                    [ -n "$k" ] || continue
+                    bad "key '$k' is in BOTH ${agent_file#"$DOTFILES_DIR"/} and human.d — a consumer would read the agent-tier copy and bypass the human gate"
+                    collision=1
+                done <<< "$dupes"
+            fi
+        done
+        if [ "$collision" -eq 0 ]; then
+            ok "no human.d key name also appears in either agent-tier file."
+        fi
+    fi
+fi
+echo
+
+if [ "$fail" -eq 0 ]; then
+    echo "verify-sops-recipients: OK"
+else
+    echo "verify-sops-recipients: FAILED"
+fi
+exit "$fail"
