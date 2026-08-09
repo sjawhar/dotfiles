@@ -8,7 +8,6 @@ mcp:
     env:
       SLACK_MCP_ADD_MESSAGE_TOOL: "true"
       SLACK_MCP_ATTACHMENT_TOOL: "true"
-      SOPS_AGE_KEY: "${SOPS_AGE_KEY}"
 ---
 
 # Slack Bot
