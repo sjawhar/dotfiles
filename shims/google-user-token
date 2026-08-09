@@ -1,0 +1,80 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["google-auth>=2.38", "requests>=2.32", "boto3>=1.34"]
+# ///
+"""Mint a Workspace token: instance role -> WIF -> native DWD impersonation.
+
+Configuration comes from the production/devbox/machine-identity-google-wif Secrets Manager entry; no human credential is used.
+"""
+import argparse, json, sys
+import urllib.error, urllib.request
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+from google.auth import aws as gauth_aws, exceptions as google_auth_exceptions, impersonated_credentials
+from google.auth.transport.requests import Request
+
+SECRET = "production/devbox/machine-identity-google-wif"
+SCOPE_PREFIX, IMDS_BASE = "https://www.googleapis.com/auth/", "http://169.254.169.254/latest"
+
+class UserTokenError(Exception): pass
+
+def load_config() -> dict:
+    try:
+        secret = boto3.client("secretsmanager", region_name="us-west-2").get_secret_value(SecretId=SECRET)["SecretString"]
+    except ClientError as error:
+        code = error.response["Error"]["Code"]
+        if code == "ResourceNotFoundException": raise UserTokenError("config secret missing; apply the production Pulumi stack") from error
+        if code in {"AccessDenied", "AccessDeniedException"}: raise UserTokenError("cannot read config secret; is this an admin-tier devbox?") from error
+        raise UserTokenError(f"failed to fetch {SECRET}: {error}") from error
+    except BotoCoreError as error: raise UserTokenError(f"failed to fetch {SECRET}: {error}") from error
+    try: config = json.loads(secret)
+    except (TypeError, json.JSONDecodeError) as error: raise UserTokenError(f"{SECRET} must contain valid JSON") from error
+    if not isinstance(config, dict): raise UserTokenError(f"{SECRET} must contain a JSON object")
+    sa_email, default_scopes, adc = config.get("sa_email"), config.get("default_scopes"), config.get("adc")
+    if not isinstance(sa_email, str) or not sa_email: raise UserTokenError(f"{SECRET}.sa_email must be a non-empty string")
+    if not isinstance(default_scopes, list) or not default_scopes or not all(isinstance(scope, str) and scope for scope in default_scopes): raise UserTokenError(f"{SECRET}.default_scopes must be a non-empty list of strings")
+    if not isinstance(adc, dict) or adc.get("type") != "external_account": raise UserTokenError(f"{SECRET}.adc must be an external_account object")
+    return config
+
+def expand_scopes(raw: str) -> tuple[str, ...]:
+    scopes = set()
+    for scope in (part.strip() for part in raw.split(",")):
+        if not scope: continue
+        if "://" in scope and not scope.startswith("https://"): raise UserTokenError(f"scope URL must use https: {scope}")
+        scopes.add(scope if scope.startswith("https://") else SCOPE_PREFIX + scope)
+    if not scopes: raise UserTokenError("no scopes requested")
+    return tuple(sorted(scopes))
+
+def _imds(path: str, token: str | None = None, method: str = "GET") -> str:
+    headers = {"X-aws-ec2-metadata-token": token} if token else {}
+    if method == "PUT": headers["X-aws-ec2-metadata-token-ttl-seconds"] = "60"
+    with urllib.request.urlopen(urllib.request.Request(f"{IMDS_BASE}/{path}", method=method, headers=headers), timeout=2) as response: return response.read().decode()
+
+def owner_email() -> str:
+    try: owner = _imds("meta-data/tags/instance/owner-email", _imds("api/token", method="PUT")).strip()
+    except (OSError, urllib.error.URLError) as error: raise UserTokenError("cannot read owner-email from IMDS; pass --subject explicitly") from error
+    if not owner: raise UserTokenError("owner-email is empty; pass --subject explicitly")
+    return owner
+
+def mint_token(subject: str, scopes: tuple[str, ...], config: dict) -> str:
+    try:
+        source = gauth_aws.Credentials.from_info(config["adc"], scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        credentials = impersonated_credentials.Credentials(source_credentials=source, target_principal=config["sa_email"], target_scopes=scopes, subject=subject)
+        credentials.refresh(Request())
+    except google_auth_exceptions.GoogleAuthError as error: raise UserTokenError(f"WIF/DWD failed: {error}") from error
+    if not credentials.token: raise UserTokenError("WIF/DWD failed: credential refresh returned no token")
+    return credentials.token
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Mint a keyless Google Workspace user token.")
+    parser.add_argument("--subject", metavar="EMAIL"); parser.add_argument("--scopes", metavar="CSV")
+    args = parser.parse_args(argv)
+    try:
+        config = load_config(); subject = args.subject or owner_email()
+        print(mint_token(subject, expand_scopes(args.scopes) if args.scopes else tuple(config["default_scopes"]), config))
+    except UserTokenError as error:
+        print(f"google-user-token: {error}", file=sys.stderr); return 1
+    return 0
+
+if __name__ == "__main__": sys.exit(main())
