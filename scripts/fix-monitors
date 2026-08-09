@@ -35,8 +35,8 @@ for pair in "LS32A70:$SAM_LEFT" "U32J59x:$SAM_RIGHT" "Sceptre O34:$SCEPTRE" "AOC
     fi
 done
 
-# Fast path: if every found connector is already at its target position,
-# there is nothing to do.
+# Skip layout placement when every found connector is already at its target
+# position; shortcut regeneration still runs afterward in either case.
 current_layout() {
     cosmic-randr list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk '
         /^[A-Za-z]/ { connector = $1 }
@@ -55,43 +55,48 @@ target_layout() {
 }
 if [[ "$(current_layout)" == "$(target_layout)" ]]; then
     echo "Layout already correct"
-    exit 0
+else
+
+    # place <connector> <w> <h> <refresh> <x> <y> <transform>
+    place() {
+        local conn="$1" w="$2" h="$3" hz="$4" x="$5" y="$6" tf="$7"
+        [[ -n "$conn" ]] || return 0
+        cosmic-randr mode "$conn" "$w" "$h" --refresh "$hz" \
+            --pos-x "$x" --pos-y "$y" --transform "$tf" --scale 1 >/dev/null
+    }
+
+    # Pass 1: stage far apart so no intermediate state overlaps
+    i=0
+    for spec in \
+        "$LAPTOP 1920 1200 60.003 normal" \
+        "$SAM_LEFT 3840 2160 60.000 rotate90" \
+        "$SCEPTRE 3440 1440 60.001 normal" \
+        "$AOC 3440 1440 59.973 normal" \
+        "$SAM_RIGHT 3840 2160 59.997 rotate270" \
+        "$ASUS 1920 1080 60.000 rotate180"; do
+        read -r conn w h hz tf <<< "$spec"
+        place "$conn" "$w" "$h" "$hz" $((i * 12000)) 20000 "$tf"
+        i=$((i + 1))
+    done
+
+    # Pass 2: final positions
+    place "$LAPTOP"    1920 1200 60.003    0    0 normal
+    place "$SAM_LEFT"  3840 2160 60.000 1920    0 rotate90
+    place "$AOC"       3440 1440 59.973 4080    0 normal
+    place "$SCEPTRE"   3440 1440 60.001 4080 1440 normal
+    place "$SAM_RIGHT" 3840 2160 59.997 7520    0 rotate270
+    place "$ASUS"      1920 1080 60.000 4840 2880 rotate180
+    # cosmic-randr xwayland can block indefinitely waiting on the compositor
+    # (observed 2026-07); the layout is already applied by this point, so cap it.
+    if ! timeout 3 cosmic-randr xwayland --primary "$LAPTOP"; then
+        echo "Warning: failed to set Xwayland primary output (timed out)"
+    fi
 fi
 
-# place <connector> <w> <h> <refresh> <x> <y> <transform>
-place() {
-    local conn="$1" w="$2" h="$3" hz="$4" x="$5" y="$6" tf="$7"
-    [[ -n "$conn" ]] || return 0
-    cosmic-randr mode "$conn" "$w" "$h" --refresh "$hz" \
-        --pos-x "$x" --pos-y "$y" --transform "$tf" --scale 1 >/dev/null
+"${HOME}/.dotfiles/laptop/generate-shortcuts" --apply || {
+    echo "Warning: shortcut regeneration failed"
+    errors=1
 }
-
-# Pass 1: stage far apart so no intermediate state overlaps
-i=0
-for spec in \
-    "$LAPTOP 1920 1200 60.003 normal" \
-    "$SAM_LEFT 3840 2160 60.000 rotate90" \
-    "$SCEPTRE 3440 1440 60.001 normal" \
-    "$AOC 3440 1440 59.973 normal" \
-    "$SAM_RIGHT 3840 2160 59.997 rotate270" \
-    "$ASUS 1920 1080 60.000 rotate180"; do
-    read -r conn w h hz tf <<< "$spec"
-    place "$conn" "$w" "$h" "$hz" $((i * 12000)) 20000 "$tf"
-    i=$((i + 1))
-done
-
-# Pass 2: final positions
-place "$LAPTOP"    1920 1200 60.003    0    0 normal
-place "$SAM_LEFT"  3840 2160 60.000 1920    0 rotate90
-place "$AOC"       3440 1440 59.973 4080    0 normal
-place "$SCEPTRE"   3440 1440 60.001 4080 1440 normal
-place "$SAM_RIGHT" 3840 2160 59.997 7520    0 rotate270
-place "$ASUS"      1920 1080 60.000 4840 2880 rotate180
-# cosmic-randr xwayland can block indefinitely waiting on the compositor
-# (observed 2026-07); the layout is already applied by this point, so cap it.
-if ! timeout 3 cosmic-randr xwayland --primary "$LAPTOP"; then
-    echo "Warning: failed to set Xwayland primary output (timed out)"
-fi
 
 if [[ $errors -eq 0 ]]; then
     echo "All monitors configured"
