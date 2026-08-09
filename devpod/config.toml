@@ -90,6 +90,17 @@ DOTFILES_DIR="/home/sami/.dotfiles"
 runuser -u sami -- git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
 runuser -u sami -- bash "$DOTFILES_DIR/install.sh"
 
+# --- Commit signing ---
+
+# A VM is a machine like any other, so it needs its own signing key: .gitconfig
+# and .jjconfig.toml both set commit signing unconditionally, and both tools
+# fail to commit when the key is absent rather than committing unsigned. Print
+# the pubkey to the console -- it must be added to jj-allowed-signers and
+# registered at https://github.com/settings/ssh/new as a Signing Key before
+# commits from here show as Verified.
+runuser -u sami -- ssh-keygen -t ed25519 -N "" -C "jj-signing-$(hostname -s)" -f /home/sami/.ssh/jj-signing
+cat /home/sami/.ssh/jj-signing.pub | tee /dev/console
+
 # --- Networking ---
 
 # Add policy route so VPC-sourced replies use ens5 instead of tailscale0.
