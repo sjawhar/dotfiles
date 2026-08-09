@@ -1,31 +1,31 @@
 config:
   envoy:registry: ghcr.io/sjawhar/legion
-  envoy:imageTag: 824d120e6426dcdf87eb9623e0a4cc7a87363c9b
+  envoy:imageTag: ee236edee5221d8293633a2a86d1e7e6e0ad3c8d
   envoy:machines:
     # On-prem listeners are stateless NATS subscribers. They connect outbound
     # to the AWS Fargate `envoy-nats` over the host's existing Tailscale.
     # No tsnet sidecar — listeners are not their own Tailscale devices.
     # Webhook ingress (GitHub/Slack) lives on the Fargate envoy-listener
     # behind the ALB, NOT on on-prem listeners.
+    # machineId matches this host's tailnet name so anything holding a registry
+    # entry can reach the machine by that name. `name` stays `devbox-sami`: it is
+    # the Pulumi URN component, and renaming it would replace the resource, which
+    # collides on the fixed `envoy-listener` container name.
     - name: devbox-sami
-      machineId: devbox-sami
+      machineId: sami-agents
       listener: {}
     - name: sami
       sshHost: "ssh://sami@sami"
       machineId: sami
       listener: {}
-    - name: sami-claude
-      sshHost: "ssh://claude@sami-claude"
-      machineId: sami-claude
+    # evalrunner is reached over Tailscale SSH by MagicDNS FQDN, not by the bare
+    # `evalrunner` alias: ~/.ssh/config has a Host evalrunner block that routes
+    # through an AWS SSM ProxyCommand, so the bare name would make the deploy
+    # depend on valid SSO credentials.
+    - name: evalrunner
+      sshHost: "ssh://ubuntu@evalrunner.tailb86685.ts.net"
+      machineId: evalrunner
       listener: {}
-    # ghost-wispr serves the ghostwispr webhook on its local listener
-    # (the Ghost Wispr app POSTs to 127.0.0.1:9020).
-    - name: ghost-wispr
-      sshHost: "ssh://ghost-wispr@ghost-wispr"
-      machineId: ghost-wispr
-      listener:
-        webhooks:
-          ghostwispr: true
   envoy:githubWebhookSecret:
     secure: v1:DHpfNE2vubEaxKtd:sDJqUeZA3l2UW4w4NGRLEHKUvLraLygVoWB9MaqagpRBL8lAN5U1tjmZSBNj1COepP3AKYV+OwY=
   envoy:slackSigningSecret:
