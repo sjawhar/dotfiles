@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Watches webcam usage and posts meeting state to a Home Assistant webhook.
+# The office lamp automation turns the lamp on (video lighting) while any
+# camera device is open, and off when it closes.
+# Webhook URL lives in ~/.config/meeting-lamp/url (untracked; contains the secret id).
+set -u
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/meeting-lamp/url"
+URL="$(cat "$CONF")" || exit 1
+last=""
+while true; do
+    if fuser -s /dev/video* 2>/dev/null; then cur=on; else cur=off; fi
+    if [[ "$cur" != "$last" ]]; then
+        if curl -sS -m 10 -o /dev/null -X POST -H 'Content-Type: application/json' \
+            -d "{\"state\":\"$cur\"}" "$URL"; then
+            last="$cur"
+        fi
+    fi
+    sleep 5
+done
