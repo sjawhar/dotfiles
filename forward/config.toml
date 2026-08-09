@@ -1,0 +1,40 @@
+# Listed URLs open straight in the browser. Everything else fires a critical
+# notification and lands in the clipboard, so it costs one paste and cannot open
+# by itself. Allowlist was unusable before forward learned that handoff, because
+# unlisted URLs were dropped silently. COSMIC renders no notification buttons, so
+# there is no ask-me-first option on this machine; paste is the gate.
+mode = "allowlist"
+
+# Use the system opener on the laptop: bare xdg-open resolves to the dotfiles
+# shim, which re-enters `forward open` and creates an opener feedback loop.
+opener = ["/usr/bin/xdg-open"]
+
+# COSMIC notifications are not clickable, so non-allowlisted URLs are handed over via clipboard.
+clipboard = ["wl-copy"]
+
+# Laptop role: forward daemon. listen is this machine's literal tailnet address,
+# bound by the daemon and compared against by nothing; peer is the devbox's
+# literal tailnet address, compared against every inbound connection and dialled
+# for nothing on this side. Literal addresses only — a MagicDNS name is mutable
+# from the admin console and must never sit inside a security decision.
+listen = "100.100.92.97"
+peer = "100.113.243.90"
+bridge_port = 12801
+
+# Entries are the only remote URLs that open without a paste. Chosen from 14 days
+# of daemon logs, so routine traffic does not turn into constant pasting.
+allow = [
+  "100.113.243.90:12802",         # Devbox file-preview server; must match the devbox's `listen`
+  "d-9267c4f5db.awsapps.com",      # Trajectory's IAM Identity Center tenant; deliberately not wildcarded
+  "device.sso.*.amazonaws.com",    # AWS device-authorization endpoints
+  "github.com",                    # Whole host, not just /login: PR and issue links are the single
+                                   # largest source of opens, and a github.com page cannot phish a
+                                   # credential any more than browsing there yourself can. User
+                                   # content lives on other hosts (gist., raw.githubusercontent.)
+  "accounts.google.com",           # Google OAuth sign-in
+  "auth.openai.com",               # Codex / OpenAI sign-in
+  "agent-c-hawk-nonprod.auth.us-west-2.amazoncognito.com",  # hawk auth login; pinned, not wildcarded
+  "agent-c-hawk-prod.auth.us-west-2.amazoncognito.com",     # hawk login (prod Cognito pool)
+  "claude.ai",                     # Claude web authentication
+  "*.anthropic.com",               # Anthropic-owned subdomains used by authentication
+]

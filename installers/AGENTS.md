@@ -6,6 +6,7 @@ Per-tool install scripts sourced in order by the root `install.sh`.
 
 - **`lib.sh`** — shared helpers sourced by every installer: `ensure_link` (symlink), `ensure_clone` / `ensure_vendor` (shallow git clone, jj-colocate for vendor), `ensure_command` (install a binary if absent, ignoring shims), `ensure_json` (idempotent jq patch). Also exports `DOTFILES_DIR` and prepends `bin`/`~/.local/bin` to `PATH`.
 - **Tool installers** — `shell.sh`, `mise.sh`, `sops.sh`, `jj.sh`, `tmux.sh`, `nvim.sh`, `claude.sh`, `opencode.sh`, plus others (`ghostty.sh`, `voxtype.sh`, `tt.sh`, `whatsapp.sh`).
+- **Role-specific installer** — `forward.sh` is invoked as a command by machine installers: `serve` installs the devbox file server, while `daemon` installs the laptop URL opener and config. Root `install.sh` does not invoke it because the role must be explicit.
 
 ## Conventions
 
@@ -15,4 +16,7 @@ Per-tool install scripts sourced in order by the root `install.sh`.
 
 ## How changes take effect
 
-A new installer only runs once it is `source`d from the root `install.sh`. Config symlinks it creates apply on next tool start; binaries install into `PATH` immediately.
+Root `install.sh` sources its listed installers. Machine-specific setup belongs
+in the corresponding `devbox/install.sh` or `laptop/install.sh`; those scripts
+can use `lib.sh` for shared installer behavior. Config symlinks apply on next
+tool start; binaries install into `PATH` immediately.

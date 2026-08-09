@@ -1,0 +1,25 @@
+#!/bin/bash
+set -euo pipefail
+
+MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+export MISE_AUTO_INSTALL=0
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+
+# The clipboard handoff shells out to wl-copy, which needs a compositor. A systemd
+# user unit only has WAYLAND_DISPLAY if the session had already imported it into the
+# manager environment when this unit started -- and at boot this races the compositor
+# and loses, leaving the daemon permanently unable to copy. The symptom is nasty:
+# non-allowlisted URLs are then neither opened nor copied, so they vanish, which is
+# exactly the silent-drop behaviour allowlist mode exists to avoid. Discover the
+# socket instead of trusting the inherited environment. The unit also orders itself
+# after graphical-session.target; this is the belt to that braces, and it also covers
+# a compositor restart.
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    for socket in "${XDG_RUNTIME_DIR}"/wayland-[0-9]*; do
+        case "$socket" in *.lock | *-renderD*) continue ;; esac
+        [ -S "$socket" ] || continue
+        export WAYLAND_DISPLAY="${socket##*/}"
+        break
+    done
+fi
+exec "$MISE" exec -- forward daemon "$@"

@@ -1,0 +1,14 @@
+#!/bin/bash
+# Open URLs on whichever machine can actually show a browser.
+#
+# With a display, hand off to the real xdg-open: this machine has a browser, so
+# routing through forward would be a pointless round trip AND would subject local
+# clicks to the daemon's allowlist, silently turning them into notifications.
+# The headless devbox has no display, so it tunnels the URL to the laptop instead.
+set -euo pipefail
+
+if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+    exec /usr/bin/xdg-open "$@"
+fi
+
+exec forward open "$@"
