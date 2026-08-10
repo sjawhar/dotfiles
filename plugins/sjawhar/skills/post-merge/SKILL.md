@@ -13,6 +13,6 @@ A PR just merged. Run the closing sweep — execute each item, don't present a l
 4. **Deploy**: if the repo has a deployment step (check AGENTS.md), follow it and verify the change is live.
 5. **Report**: the short list of items you just handled (or "nothing left"), then **clearly state any applicable follow-ups or cleanups that remain** — full sentences with context, not bare issue numbers or shorthand.
 
-PR record accuracy and doc updates are the `post-pr` skill's job, done while the PR was open. If you find drift anyway, fix it now and note that the post-pr sweep missed it.
+PR record accuracy, doc updates, and end-to-end verification belong to the `opening-a-pr` and `landing-a-pr` skills, done while the PR was open. Confirm the merged PR actually carried a `## Verification` section describing end-to-end use; if it did not, the gate was skipped — say so plainly in your report, because that is a process breach and not a footnote. Fix any drift you find here rather than leaving it.
 
 The bar is "pristine clean."
