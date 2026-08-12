@@ -87,4 +87,6 @@ if [ -f "$OC_JSON" ] && command -v jq &>/dev/null; then
         "Disabling autoupdate"
 fi
 
-ensure_link "${DOTFILES_DIR}/opencode/oh-my-opencode.full.json" "${OPENCODE_DIR}/oh-my-opencode.json"
+# OMO unified config (read from ~/.omo/omo.jsonc since the OMO 4.19 config unification)
+mkdir -p "${HOME}/.omo"
+ensure_link "${DOTFILES_DIR}/opencode/omo.jsonc" "${HOME}/.omo/omo.jsonc"
