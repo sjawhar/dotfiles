@@ -41,3 +41,6 @@ opencode/node_modules/
 # committed files in the same root)
 secrets.local.env
 secrets.human.d/*.local.env
+
+# Planning artifacts stay local-only — never committed
+docs/superpowers/
