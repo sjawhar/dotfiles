@@ -1,22 +1,14 @@
-# Recipient roster (rotated 2026-07-20; old age1ma0j4m... key retired):
-#   yubikey   age1yubikey1qw82g... — hardware-backed (laptop YubiKey, touch REQUIRED per decrypt; rotated 2026-08-06 from cached-touch age1yubikey1q266w...)
-#   recovery  age18fg9c... — break-glass key; private half lives ONLY in 1Password
-#   agent     age1jf63n... — devbox-resident, unattended agent decryption
 creation_rules:
-  # Human tier: YubiKey (daily) or 1Password recovery. No machine-resident key.
   - path_regex: secrets\.human\.env$
     age:
       - age1yubikey1qw82gvkljy5h07l7nrrgnqsma7np8ple5xntnq30d2qztdjvzfcqzdu80xr
       - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
-  # Human tier, per-key split: secrets.human.d/<KEY>.env. Same recipients as the
-  # single-file human rule above (YubiKey + recovery only, NO machine key). Must
-  # stay ABOVE the default rule — sops uses the first matching rule, so ordering
-  # is the security boundary that keeps these files off the agent key.
+  # Must stay ABOVE the default rule: sops uses the first matching rule, so this
+  # ordering is what keeps these files off the machine keys.
   - path_regex: secrets\.human\.d/[^/]+\.env$
     age:
       - age1yubikey1qw82gvkljy5h07l7nrrgnqsma7np8ple5xntnq30d2qztdjvzfcqzdu80xr
       - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
-  # Agent tier (default): also decryptable unattended on the devbox.
   - age:
       - age1jf63nvl6uenkwalyysa5hqv0k7ks5k6mjggqxlj7fwwp0gnkfvxszyxd2q
       - age1qz0v8s5fnwvq9g4u49jkl8jdzejmssxxh6rw3cz0yxa370c05ynsak3gkk
