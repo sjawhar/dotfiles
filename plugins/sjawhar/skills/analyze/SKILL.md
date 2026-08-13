@@ -1,4 +1,5 @@
 ---
+name: analyze
 description: "Run code quality agents on recent changes"
 ---
 

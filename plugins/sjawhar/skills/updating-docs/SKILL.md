@@ -1,11 +1,9 @@
 ---
 name: updating-docs
-description: "Use when creating or updating documentation, READMEs, AGENTS.md files, skills, runbooks, or any prose that describes how a system works. Covers rewriting docs after a code change, consolidating overlapping sections, and reviewing docs for staleness. Trigger whenever a change touches documented behavior, even if the user only asked for the code change."
+description: "Use when creating or updating documentation, READMEs, AGENTS.md files, skills, runbooks, or any prose that describes how a system works. Trigger whenever a change touches documented behavior, even if the user only asked for the code change."
 ---
 
 # Updating Docs
-
-Docs describe the current state of the system, as one cohesive story. They are not a changelog and not a narrative of how we got here — version control holds the history.
 
 ## Evergreen, not archaeological
 

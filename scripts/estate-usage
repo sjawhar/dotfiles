@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Usage report for the agent estate: skills, agents, commands.
+
+Scans OpenCode session DBs (~/.local/share/opencode/sessions/*.db) for
+skill loads (skill tool calls + load_skills arrays), agent dispatches
+(subagent_type), and command invocations.
+
+Usage: estate-usage [--days 90]
+"""
+import argparse
+import datetime as dt
+import re
+import sqlite3
+from pathlib import Path
+
+DF = Path.home() / ".dotfiles/plugins/sjawhar"
+SESSIONS = Path.home() / ".local/share/opencode/sessions"
+
+
+def population():
+    skills = sorted(p.name for p in (DF / "skills").iterdir() if (p / "SKILL.md").exists())
+    agents = sorted(p.stem for p in (DF / "agents").glob("*.md"))
+    commands = sorted(p.stem for p in (DF / "commands").glob("*.md"))
+    return skills, agents, commands
+
+
+def scan_opencode(days, names):
+    """Return {name: set(iso_dates)} for artifact appearances as skill
+    load, load_skills entry, subagent_type, or command invocation."""
+    cutoff = dt.datetime.now() - dt.timedelta(days=days)
+    hits = {n: set() for n in names}
+    pats = {
+        n: re.compile(
+            r'("name"\s*:\s*"' + re.escape(n) + r'"'
+            r'|"load_skills"\s*:\s*\[[^\]]*"' + re.escape(n) + r'"'
+            r'|"subagent_type"\s*:\s*"' + re.escape(n) + r'"'
+            r'|"command"\s*:\s*"/?' + re.escape(n) + r'")'
+        )
+        for n in names
+    }
+    dbs = [p for p in SESSIONS.glob("*.db")
+           if dt.datetime.fromtimestamp(p.stat().st_mtime) > cutoff]
+    for db in dbs:
+        day = dt.datetime.fromtimestamp(db.stat().st_mtime).date().isoformat()
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+            rows = con.execute(
+                "SELECT data FROM part WHERE data LIKE '%tool%'"
+            ).fetchall()
+            con.close()
+        except Exception:
+            continue
+        blob = "\n".join(r[0] for r in rows)
+        for n, pat in pats.items():
+            if pat.search(blob):
+                hits[n].add(day)
+    return hits, len(dbs)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--days", type=int, default=90)
+    args = ap.parse_args()
+    skills, agents, commands = population()
+    groups = [("skill", skills), ("agent", agents), ("command", commands)]
+    all_names = [n for _, ns in groups for n in ns]
+    oc, n_dbs = scan_opencode(args.days, all_names)
+    print(f"# scanned {n_dbs} OpenCode DBs, window {args.days}d; "
+          f"counts are sessions-touched (floor, not exact)")
+    print("group\tname\tsessions_90d\tlast_fired")
+    for group, names in groups:
+        for n in names:
+            dates = sorted(oc[n])
+            print(f"{group}\t{n}\t{len(dates)}\t{dates[-1] if dates else '-'}")
+
+
+if __name__ == "__main__":
+    main()

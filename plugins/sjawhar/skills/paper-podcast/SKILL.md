@@ -43,23 +43,14 @@ similar-papers, comments, AI overview), `litground.py` (citation-graph grounding
 via Semantic Scholar + OpenAlex: citation counts, influential citations, TLDRs,
 reception), `arxiv_search.py` (arXiv metadata + abstracts), `tts.py` (render).
 
-## Phase 0 — Read the feed config
+## Phase 0 — Resolve the source and optional feed config
 
-Topics, queries, and per-feed instructions live in a well-known **Markdown** file,
-NOT in this skill. Read it first:
-
-1. Path: `$PAPER_PODCAST_CONFIG` if set, else `~/.config/paper-podcast/config.md`.
-2. Choose the feed: the `## Feed: NAME` section the user named, else the one
-   marked **Default feed** at the top.
-3. From that feed section take the **Query** (the code block — use it verbatim),
-   **Since**, **Max**, **Voices**, and the **Instructions** prose. **Carry the
-   instructions into Phase 3 (what to emphasize when extracting) and Phase 5
-   (script audience + style), and use the feed's voices in Phase 6.** A feed may
-   instead list **IDs** or **PDFs** as its source.
-
-If the config or the named feed is missing, tell the user and ask for the source —
-never invent a topic. A user may also give a one-off source inline, which
-overrides the config for that run.
+Inline user-supplied query, IDs, PDFs, instructions, and voices are the default.
+If `$PAPER_PODCAST_CONFIG` or `~/.config/paper-podcast/config.md` exists, use the
+named `## Feed: NAME` or its **Default feed**. Take its verbatim **Query** (or
+**IDs**/**PDFs**), **Since**, **Max**, **Voices**, and **Instructions**; carry
+instructions into Phases 3 and 5 and voices into Phase 6. Inline inputs override
+the config. If neither supplies a source, ask; never invent a topic.
 
 ## Phase 1 — Resolve the source into candidate papers
 
@@ -210,24 +201,11 @@ limitations → open questions**, and spend real time on each. Lead with qualita
 meaning: the listener wants to understand what happened and why it matters more
 than they want a recital of figures.
 
-Tone and number discipline — this is where episodes most often go wrong:
-- **Numbers earn airtime by changing the takeaway.** A contrast like 80% versus
-  20% is worth stating because the gap carries the point; a run of decimals (85.42
-  vs 0.7159 vs 22.9 …) does not — summarize those qualitatively ("roughly four
-  times the baseline", "a large drop", "essentially unchanged") and speak at most
-  the one or two figures that anchor the magnitude. The full numbers live in the
-  JSON; the script is a guided tour, not a readout.
-- **Measured register, not superlatives.** Avoid "the best / the worst / the
-  most", "collapses", "extraordinary", "killer result", "staged", "damning". Prefer
-  plain, specific language — "notably higher", "a meaningful gap", "weaker than it
-  looks". Extremity reads as hype and erodes trust; understatement is more credible.
-- **Limitations are limitations, not moral failings.** Weak or unfavorably-
-  configured baselines are near-universal, so note the specific gap and move on
-  without dwelling or implying misconduct — assume good faith.
-- **Don't litigate recency.** A new model or recent paper having little
-  search/citation footprint is expected, not a story; never spend script time
-  doubting that a recently-released thing is real or "really" novel. If something
-  is genuinely unverifiable, say so in a sentence and continue.
+Tone constraints:
+- Speak only numbers whose magnitude changes the takeaway; summarize the rest.
+- Use measured, specific language; avoid superlatives and hype.
+- State limitations plainly, assume good faith, and do not allege misconduct.
+- Treat thin evidence for recent work as expected; name genuine uncertainty once and continue.
 
 Conventions: open with a concrete hook; attribute to authors in third person; no
 filler affirmations, no Q&A rhythm.
@@ -249,30 +227,3 @@ don't block on it.
 - Report the **local paths** of `episode.mp3` and `ground-truth.json`; remind the
   user they can paste the JSON into any voice-enabled AI to be quizzed.
 - **No Drive / cloud upload unless the user explicitly asks** (then confirm where).
-
-## Common mistakes
-
-| Mistake | Fix |
-|---------|-----|
-| Inventing or narrowing the query | The user supplies the source. Don't substitute your own topic; widen title-only queries to `abs:`. |
-| Capping `--max` too low | Fetch wide (~40), curate in Phase 2. A low cap silently drops strong papers. |
-| Choosing the papers yourself | Phase 2 is mandatory: present the full candidate list, let the user pick. |
-| Thin / short script | Long-form: ~8-12 min per paper. Word count = runtime. Don't compress. |
-| Parroting the authors | Phase 4 grounding: check claims against baselines + competing work. |
-| Uploading to Drive / cloud unprompted | Deliver locally. Only upload if explicitly asked. |
-| Extracting from the abstract only | Read the full `text/<id>.txt`. |
-| Inventing numbers/benchmarks | Use only numbers present in the source; omit otherwise. |
-| Dropping limitations / open questions | Mandatory per paper, in JSON and script. |
-| Two co-equal hosts | Use the skeptic/explainer asymmetry. |
-| Reciting every number | Speak only the figures whose magnitude carries the point; summarize the rest qualitatively. The complete numbers live in the JSON, not the audio. |
-| Superlative / bombastic tone | Measured register. Avoid "best/worst/most", "collapses", "extraordinary". Understatement reads as more credible than hype. |
-| Treating recency as suspicious | New releases and recent papers naturally have thin search/citation footprints. Don't doubt a recent thing is real or spend airtime litigating novelty. |
-| Moralizing weak baselines | Weak/unfair baselines are near-universal. Note the specific gap to calibrate the real delta; assume good faith, don't allege misconduct. |
-
-## Done when
-
-1. The user confirmed the paper lineup (Phase 2).
-2. `ground-truth.json` has, per paper: claims, limitations, open questions, AND grounding against related work.
-3. `script.txt` is long-form (~8-12 min/paper) and covers claim→mechanism→numbers→critique→limitations→open-questions.
-4. `episode.mp3` is produced, plays, and hits the target duration.
-5. Artifacts reported by **local path** (no cloud upload unless the user asked).

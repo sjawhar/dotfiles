@@ -1,195 +1,35 @@
 ---
-description: "Analyze Claude Code and OpenCode sessions for patterns and improvements"
+name: reflect
+description: "Analyze recent Claude Code and OpenCode sessions for recurring corrections, preferences, and automation opportunities. Use for a retrospective over recent agent work."
 ---
 
-Analyze session transcripts from both Claude Code and OpenCode to identify patterns in corrections and feedback, then generate actionable improvements.
+# Reflect
 
-## Arguments
+For the requested number of days (default: 7), index both sources and inspect flagged
+turns without copying session content into the database:
 
-Optional: Number of days to analyze (default: 7)
-
-Example: `/reflect 14` to analyze the past 2 weeks.
-
-## Phase 1: Setup
-
-**1.1 Load previous report** (if exists):
-- Check for latest report in `~/.dotfiles/.claude/session-analysis/`
-- Extract previous improvements and expected results for comparison
-- If no previous report exists, note this is the first run
-
-**1.2 Run indexing** (indexes both Claude Code and OpenCode sessions):
 ```bash
-python3 ~/.dotfiles/.claude/skills/reflect/index-sessions.py --days {N}
+INDEXER=~/.dotfiles/plugins/sjawhar/skills/reflect/index-sessions.py
+python3 "$INDEXER" --days <N>
+SESSION_DB="$(python3 -c 'import runpy,sys; print(runpy.run_path(sys.argv[1])["get_db_path"]())' "$INDEXER")"
+sqlite3 "$SESSION_DB" "SELECT s.source,s.project,s.id,t.turn_number,f.flag_type FROM flags f JOIN turns t ON t.id=f.turn_id JOIN sessions s ON s.id=t.session_id WHERE s.timestamp > datetime('now','-<N> days') ORDER BY s.timestamp DESC;"
 ```
 
-Use `--source claude` or `--source opencode` to limit to one source. Default indexes both.
+Redact secrets before sharing flagged content. Keep the initial prompt and adjacent
+turns; compare with the newest prior report.
 
-**1.3 Query flagged turns** from SQLite database at `~/.dotfiles/.claude/sessions.db`:
+Run five agents in parallel; each gets: focus + flagged content + prior-report context.
 
-```python
-import sqlite3
-conn = sqlite3.connect(str(Path.home() / '.dotfiles' / '.claude' / 'sessions.db'))
+- **Mistake Finder:** corrected agent errors.
+- **Preference Learner:** recurring user preferences.
+- **Command Repeater:** workflow candidates.
+- **Prompt Repeater:** similar initial requests.
+- **CLAUDE.md Miner:** project-specific durable rules.
 
-# Get all flagged turns from the past N days
-query = '''
-SELECT
-    s.source, s.project, s.id as session_id, s.source_path, s.initial_prompt_preview,
-    t.turn_number, t.type, t.line_start, t.line_end, t.source_path as turn_source_path,
-    f.flag_type
-FROM flags f
-JOIN turns t ON f.turn_id = t.id
-JOIN sessions s ON t.session_id = s.id
-WHERE s.timestamp > datetime('now', '-{N} days')
-ORDER BY s.timestamp DESC
-'''
-```
+Deduplicate and rank patterns by frequency and impact. Assess earlier improvements as
+improved, unchanged, or regressed, then present actionable examples and choices. Put
+approved skills in `plugins/sjawhar/skills/`, agents in `plugins/sjawhar/agents/`,
+commands in `plugins/sjawhar/commands/`, and global rules in `.claude/CLAUDE.md`.
 
-## Phase 2: Content Extraction
-
-**2.1 Fetch flagged content** from source files:
-
-- **Claude Code turns** (`s.source = 'claude-code'`): Use `line_start`/`line_end` with `fetch_turn_content()` to read from the source JSONL file.
-- **OpenCode turns** (`s.source = 'opencode'`): Use `turn_source_path` (the message JSON file path) with `fetch_opencode_turn_content()` — reads the message file and assembles text from its parts.
-
-Both functions are provided by the indexing script.
-
-**2.2 Apply secret redaction** before agent access:
-- API keys (sk-*, ANTHROPIC_API_KEY, etc.)
-- GitHub tokens (ghp_*, gho_*)
-- AWS credentials
-- Passwords and secrets
-- Bearer tokens
-- Private keys
-
-**2.3 Group by session** for context preservation:
-- Include initial_prompt_preview for each session
-- Include surrounding turns (1-2 turns before/after flagged turn) for context
-- Write to temporary markdown files for agent consumption
-
-## Phase 3: Parallel Agent Analysis
-
-Launch 5 specialized agents **in parallel** using the Task tool:
-
-| Agent | Mandate |
-|-------|---------|
-| **Mistake Finder** | Find Claude errors that user corrected: wrong file, wrong approach, misunderstood request. Focus on `rejection` and `interrupt` flags. |
-| **Preference Learner** | Identify implicit user preferences: formatting, communication style, tool choices, workflow patterns. Look for repeated `clarification` patterns. |
-| **Command Repeater** | Find repeated slash commands or multi-step workflows that could become skills. Look for patterns in initial prompts. |
-| **Prompt Repeater** | Find similar initial prompts across sessions suggesting a skill opportunity. Use `initial_prompt_preview` from sessions table. |
-| **CLAUDE.md Miner** | Find project-specific concepts, patterns, or rules that should be documented. Group findings by project. |
-
-**Agent prompt template**:
-```
-You are analyzing Claude Code and OpenCode session transcripts to find {AGENT_FOCUS}.
-
-Context: {PREVIOUS_REPORT_SUMMARY}
-
-Here are the flagged turns from the past {N} days:
-
-{FLAGGED_CONTENT_MARKDOWN}
-
-For each pattern you find:
-1. Describe the pattern clearly
-2. Provide 2-3 specific examples with session IDs
-3. Explain the root cause
-4. Suggest a concrete improvement (skill, CLAUDE.md update, alias, etc.)
-
-Focus on actionable patterns that appear at least 2-3 times.
-```
-
-## Phase 4: Consolidation
-
-After all agents complete:
-
-**4.1 Deduplicate findings**:
-- Merge similar patterns identified by multiple agents
-- Group by improvement type: skill, CLAUDE.md, alias, agent, prompt change
-
-**4.2 Assess previous improvements** (if previous report exists):
-- For each prior improvement with an "expected result", check if current data shows improvement
-- Mark as: improved, unchanged, or regressed
-
-**4.3 Rank by frequency and impact**:
-- Count how many sessions each pattern appears in
-- Prioritize patterns that cause most corrections/interrupts
-
-## Phase 5: Interactive Presentation
-
-Present findings to user for decision:
-
-```
-## Pattern: {PATTERN_NAME}
-Frequency: {COUNT} sessions
-Type: {IMPROVEMENT_TYPE}
-Root cause: {ANALYSIS}
-
-Examples:
-- Session abc123: "{example_excerpt}"
-- Session def456: "{example_excerpt}"
-
-Suggested improvement:
-{DETAILED_SUGGESTION}
-
-Options:
-1. Implement now
-2. Defer (add to next week's list)
-3. Dismiss (not actionable)
-```
-
-For each pattern, ask the user to choose using the AskUserQuestion tool with options.
-
-## Phase 6: Execute Approved Changes
-
-For each "implement now" decision:
-
-**Skills**: Create new file in `~/.dotfiles/.claude/commands/{skill-name}.md`
-
-**CLAUDE.md updates**:
-- Global: Edit `~/.dotfiles/.claude/CLAUDE.md`
-- Project-specific: Edit `~/.dotfiles/.claude/project-instructions/{project}/CLAUDE.md`
-
-**Bash aliases**: Add to `~/.dotfiles/bash/aliases.sh`
-
-**Agents**: Create new file in `~/.dotfiles/.claude/agents/{agent-name}.md`
-
-## Phase 7: Generate Report
-
-Save report to `~/.dotfiles/.claude/session-analysis/YYYY-MM-DD.md`:
-
-```markdown
-# Session Analysis Report - {DATE}
-
-## Summary
-- Sessions analyzed: {COUNT}
-- Date range: {START} to {END}
-- Projects covered: {PROJECT_LIST}
-- Flags detected: {interrupt: N, rejection: N, clarification: N}
-
-## Previous Improvements Assessment
-{For each prior improvement: status (improved/unchanged/regressed), evidence}
-
-## Patterns Observed
-{For each pattern: frequency, examples, root cause, suggested improvement}
-
-## Improvements Made
-{For each implemented change: type, file, reason, expected result}
-
-## Improvements Deferred
-{For each deferred: reason, trigger to revisit}
-
-## Notes for Next Analysis
-{Context that future runs should consider}
-```
-
-## Fallback Handling
-
-- **Empty database**: Run indexing first, report if no sessions found
-- **No flags detected**: Report healthy session patterns, no corrections needed
-- **Agent failures**: Continue with remaining agents, note failures in report
-- **Large data volumes**: If >100 flagged turns, chunk into groups of 30 per agent call
-
-## Done When
-
-1. Report is generated and saved
-2. All approved improvements are implemented
-3. User has reviewed all significant patterns
+Save reports as `YYYY-MM-DD.md` in `~/.dotfiles/.claude/session-analysis/`. If there
+are no flags, report that healthy result; if an agent fails, continue and record it.

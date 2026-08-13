@@ -1,4 +1,5 @@
 ---
+name: design-review
 description: "Review a plan from architecture, security, UX, performance, and bug perspectives"
 ---
 

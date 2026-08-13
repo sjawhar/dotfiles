@@ -21,7 +21,6 @@ ElevenLabs API → per-section MP3 narration
 ffmpeg sync (speed-adjust video to match audio)
     ↓
 Normalize + concatenate → final MP4
-    Normalize + concatenate → final MP4
 ```
 
 ## Setup
@@ -265,21 +264,6 @@ ffmpeg -y -f concat -safe 0 -i concat.txt -c copy final.mp4
 ```
 
 
-## Multi-Agent Coordination
-
-For recording + production split across agents, use file-based mailbox:
-
-```
-~/.agent-mail/project-name/
-  001-recording-requests.md   # Production → Recording: what to record
-  002-recording-status.md     # Recording → Production: what's done, issues
-  003-followup.md             # Iterate as needed
-```
-
-Each message includes: date, what's done, what's needed, file locations.
-
-New recordings go directly to the shared recordings directory. Production agent polls for new files.
-
 ## Common Mistakes
 
 | Mistake | Fix |
@@ -292,53 +276,16 @@ New recordings go directly to the shared recordings directory. Production agent 
 | Concat produces garbage | Normalize ALL clips to same resolution/fps/pix_fmt/audio first |
 | Writing narration before recording | Record first, write narration to match |
 | Picking voice without samples | Always generate A/B comparison video for user |
-| Picking voice without samples | Always generate A/B comparison video for user |
 
 ## Quick PR Demo Videos (Lightweight)
 
-For simple feature demo recordings attached to PRs (no narration needed):
-
-### Record
+For simple, un-narrated PR demos:
 
 ```bash
 asciinema rec /tmp/demo.cast --cols 120 --rows 35
-# Demonstrate the feature, then exit
-```
-
-### Convert to MP4
-
-```bash
 agg --font-size 24 --theme monokai /tmp/demo.cast /tmp/demo.gif
-ffmpeg -y -i /tmp/demo.gif \
-  -movflags faststart -pix_fmt yuv420p \
-  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' \
-  -c:v libx264 -preset slow -crf 15 -tune stillimage \
-  /tmp/demo.mp4
+ffmpeg -y -i /tmp/demo.gif -movflags faststart -pix_fmt yuv420p \
+  -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libx264 -preset slow \
+  -crf 15 -tune stillimage /tmp/demo.mp4
+asciinema upload /tmp/demo.cast  # preferred; post the returned URL in the PR
 ```
-
-### Upload and Attach to PR
-
-**Option 1 (preferred): Upload to asciinema.org + post as PR comment**
-
-```bash
-asciinema upload /tmp/demo.cast
-# Copy the URL, then post as a PR comment:
-gh pr comment $PR_NUM --repo $OWNER/$REPO --body '## Demo Video
-
-https://asciinema.org/a/XXXXX'
-```
-
-**Option 2: Post mp4 URL as PR comment (GitHub auto-renders inline)**
-
-Post the raw .mp4 URL on its own line in a PR comment. GitHub renders it as an
-inline video player.
-
-```bash
-gh pr comment $PR_NUM --repo $OWNER/$REPO --body '## Demo Video
-
-https://github.com/OWNER/REPO/releases/download/TAG/demo.mp4'
-```
-
-**DO NOT create GitHub releases just to host demo videos.** Release assets pollute
-the releases page and do not render inline. Prefer asciinema.org for terminal
-recordings.

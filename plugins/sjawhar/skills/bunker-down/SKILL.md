@@ -1,4 +1,5 @@
 ---
+name: bunker-down
 description: Harden an EC2 instance used as a development machine
 ---
 

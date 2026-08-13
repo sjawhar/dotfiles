@@ -1,6 +1,6 @@
 ---
 name: post-merge
-description: "Use after a PR is merged — when the user says 'merged', 'PR is merged', 'any cleanup or follow-up?', or a merge notification arrives for work from this session. Runs the closing sweep: local pruning, tracking state, deploy, and a clear statement of remaining follow-ups."
+description: "Use after a PR is merged — when the user says 'merged', 'PR is merged', 'any cleanup or follow-up?', or a merge notification arrives for work from this session."
 ---
 
 # Post-Merge Sweep
@@ -13,6 +13,6 @@ A PR just merged. Run the closing sweep — execute each item, don't present a l
 4. **Deploy**: if the repo has a deployment step (check AGENTS.md), follow it and verify the change is live.
 5. **Report**: the short list of items you just handled (or "nothing left"), then **clearly state any applicable follow-ups or cleanups that remain** — full sentences with context, not bare issue numbers or shorthand.
 
-PR record accuracy, doc updates, and end-to-end verification belong to the `opening-a-pr` and `landing-a-pr` skills, done while the PR was open. Confirm the merged PR actually carried a `## Verification` section describing end-to-end use; if it did not, the gate was skipped — say so plainly in your report, because that is a process breach and not a footnote. Fix any drift you find here rather than leaving it.
+PR-record and verification drift is the `opening-a-pr`/`landing-a-pr` skills' job; if you find it anyway, fix it and note the gate missed it. Confirm the merged PR carried a `## Verification` section — missing means the gate was skipped; say so plainly.
 
 The bar is "pristine clean."
