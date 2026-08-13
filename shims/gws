@@ -111,6 +111,20 @@ find_secrets() {
     return 127
 }
 
+find_jq() {
+    local candidate
+    if command -v jq; then
+        return 0
+    fi
+    candidate="$HOME/.mise/installs/jq/1.8.2/jq"
+    if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    echo "gws shim: jq not found on PATH or in mise installs" >&2
+    return 127
+}
+
 reexec_under_secrets() {
     # Agent-tier credentials enter only through secrets' environment injection.
     # The guard turns a successful-but-empty secrets invocation into a loud error.
@@ -160,7 +174,7 @@ materialize_and_run() {
     # and select the per-account store so token caches never mix.
     local real_gws="$1" account="$2" creds_json="$3"
     shift 3
-    local creds_file
+    local creds_file jq client_id client_secret
     creds_file="$(mktemp)"
     # Single-quoted so $creds_file expands when the trap FIRES, not when it is set
     # (SC2064). Double quotes here would expand it immediately, to the empty string.
@@ -175,12 +189,33 @@ materialize_and_run() {
     else
         exit "$?"
     fi
+    jq="$(find_jq)"
+    if client_id="$("$jq" -r '.client_id // empty' "$creds_file")"; then
+        :
+    else
+        exit "$?"
+    fi
+    if [[ -z "$client_id" ]]; then
+        echo "gws shim: credential is missing a non-empty client_id" >&2
+        exit 1
+    fi
+    if client_secret="$("$jq" -r '.client_secret // empty' "$creds_file")"; then
+        :
+    else
+        exit "$?"
+    fi
+    if [[ -z "$client_secret" ]]; then
+        echo "gws shim: credential is missing a non-empty client_secret" >&2
+        exit 1
+    fi
     # Task 4's `secrets KEY -- <self>` re-exec EXPORTS the credential JSON into our
     # own environment, and a plain exec would hand all of it to real gws. Pass the
     # credential by file only, and unset every credential key for the child. `env -u`
     # on a name that is not set is a no-op, so the shared list covers every path.
     if GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${HOME}/.config/gws/${account}" \
+        GOOGLE_WORKSPACE_CLI_CLIENT_ID="$client_id" \
+        GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="$client_secret" \
         env "${GWS_CREDENTIAL_ENV_UNSET_ARGS[@]}" "$real_gws" "$@"; then
         exit
     else

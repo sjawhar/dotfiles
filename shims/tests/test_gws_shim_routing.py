@@ -34,6 +34,8 @@ class GwsRouting(unittest.TestCase):
             'echo "TOKEN=${GOOGLE_WORKSPACE_CLI_TOKEN:-}"\n'
             'echo "FILE=${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}"\n'
             'echo "DIR=${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-}"\n'
+            'echo "CLIENT_ID=${GOOGLE_WORKSPACE_CLI_CLIENT_ID:-}"\n'
+            'echo "CLIENT_SECRET=${GOOGLE_WORKSPACE_CLI_CLIENT_SECRET:-}"\n'
             '[[ -v GWS_ACCOUNT ]] && echo "ACCOUNT=$GWS_ACCOUNT" || echo "ACCOUNT=<unset>"\n'
             'printf "ARG=%s\\n" "$@"\n'
             'for v in GWS_WORK_READ_OAUTH GWS_WORK_SEND_OAUTH GWS_WORK_ADMIN_OAUTH GWS_PERSONAL_READ_OAUTH GWS_PERSONAL_SEND_OAUTH GWS_SHIM_SECRETS_REEXEC; do\n'
@@ -161,9 +163,16 @@ class GwsRouting(unittest.TestCase):
 
     def test_work_send_env_materializes_credentials_file(self):
         write_stub(self.stub_dir, "google-user-token", "echo SHOULD-NOT-RUN >&2; exit 1")
-        result = self.run_shim({"GWS_WORK_SEND_OAUTH": '{"type":"authorized_user"}'})
+        result = self.run_shim(
+            {
+                "GWS_WORK_SEND_OAUTH": (
+                    '{"type":"authorized_user","client_id":"work-client-id",'
+                    '"client_secret":"work-client-secret"}'
+                )
+            }
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('{"type":"authorized_user"}', result.stdout)
+        self.assertIn('"client_id":"work-client-id"', result.stdout)
         self.assertIn("TOKEN=\n", result.stdout)
         self.assertIn("MODE=600", result.stdout)
         self.assertIn(f"DIR={os.environ['HOME']}/.config/gws/work", result.stdout)
@@ -173,11 +182,18 @@ class GwsRouting(unittest.TestCase):
 
     def test_personal_send_env_selects_personal_store(self):
         write_stub(self.stub_dir, "google-user-token", "echo SHOULD-NOT-RUN >&2; exit 1")
-        result = self.run_shim({"GWS_PERSONAL_SEND_OAUTH": '{"type":"authorized_user"}'})
+        result = self.run_shim(
+            {
+                "GWS_PERSONAL_SEND_OAUTH": (
+                    '{"type":"authorized_user","client_id":"personal-client-id",'
+                    '"client_secret":"personal-client-secret"}'
+                )
+            }
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"DIR={os.environ['HOME']}/.config/gws/personal", result.stdout)
         self.assertIn("MODE=600", result.stdout)
-        self.assertIn('{"type":"authorized_user"}', result.stdout)
+        self.assertIn('"client_id":"personal-client-id"', result.stdout)
         self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
         creds_file = Path(next(line[5:] for line in result.stdout.splitlines() if line.startswith("FILE=")))
         self.assertFalse(creds_file.exists())
@@ -186,7 +202,10 @@ class GwsRouting(unittest.TestCase):
         write_stub(self.stub_dir, "google-user-token", "echo SHOULD-NOT-RUN >&2; exit 1")
         result = self.run_shim(
             {
-                "GWS_WORK_SEND_OAUTH": '{"type":"authorized_user"}',
+                "GWS_WORK_SEND_OAUTH": (
+                    '{"type":"authorized_user","client_id":"work-client-id",'
+                    '"client_secret":"work-client-secret"}'
+                ),
                 "STUB_EXIT": "42",
             }
         )
@@ -274,7 +293,14 @@ class GwsRouting(unittest.TestCase):
     def test_work_off_ec2_fetches_read_credential_via_secrets(self):
         write_stub(self.stub_dir, "google-user-token", "echo SHOULD-NOT-RUN >&2; exit 1")
         self.dmi_file.write_text("LENOVO\n", encoding="utf-8")
-        result = self.run_shim({"STUB_SECRET_VALUE": '{"type":"authorized_user","id":"work-read"}'})
+        result = self.run_shim(
+            {
+                "STUB_SECRET_VALUE": (
+                    '{"type":"authorized_user","id":"work-read",'
+                    '"client_id":"work-client-id","client_secret":"work-client-secret"}'
+                )
+            }
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"id":"work-read"', result.stdout)
         self.assertIn(f"DIR={os.environ['HOME']}/.config/gws/work", result.stdout)
@@ -283,7 +309,14 @@ class GwsRouting(unittest.TestCase):
 
     def test_read_credential_reexec_does_not_poison_nested_invocations(self):
         self.dmi_file.write_text("LENOVO\n", encoding="utf-8")
-        result = self.run_shim({"STUB_SECRET_VALUE": '{"type":"authorized_user","id":"work-read"}'})
+        result = self.run_shim(
+            {
+                "STUB_SECRET_VALUE": (
+                    '{"type":"authorized_user","id":"work-read",'
+                    '"client_id":"work-client-id","client_secret":"work-client-secret"}'
+                )
+            }
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("LEAKED=GWS_SHIM_SECRETS_REEXEC", result.stdout)
 
@@ -292,7 +325,10 @@ class GwsRouting(unittest.TestCase):
         result = self.run_shim(
             {
                 "GWS_SHIM_DMI_SYS_VENDOR": str(self.stub_dir / "does-not-exist"),
-                "STUB_SECRET_VALUE": '{"type":"authorized_user","id":"work-read"}',
+                "STUB_SECRET_VALUE": (
+                    '{"type":"authorized_user","id":"work-read",'
+                    '"client_id":"work-client-id","client_secret":"work-client-secret"}'
+                ),
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -304,7 +340,10 @@ class GwsRouting(unittest.TestCase):
         result = self.run_shim(
             {
                 "GWS_ACCOUNT": "personal",
-                "STUB_SECRET_VALUE": '{"type":"authorized_user","id":"personal-read"}',
+                "STUB_SECRET_VALUE": (
+                    '{"type":"authorized_user","id":"personal-read",'
+                    '"client_id":"personal-client-id","client_secret":"personal-client-secret"}'
+                ),
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -360,7 +399,12 @@ class GwsRouting(unittest.TestCase):
         write_stub(self.stub_dir, "google-user-token", "echo SHOULD-NOT-RUN >&2; exit 1")
         self.dmi_file.write_text("LENOVO\n", encoding="utf-8")
         result = self.run_shim(
-            {"STUB_SECRET_VALUE": '{"type":"authorized_user","id":"work-read"}'},
+            {
+                "STUB_SECRET_VALUE": (
+                    '{"type":"authorized_user","id":"work-read",'
+                    '"client_id":"work-client-id","client_secret":"work-client-secret"}'
+                )
+            },
             args=["drive", "files", "list", "--params", '{"q": "name contains hello there"}'],
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -369,9 +413,16 @@ class GwsRouting(unittest.TestCase):
 
     def test_work_send_credentials_work_on_non_ec2(self):
         self.dmi_file.write_text("LENOVO\n", encoding="utf-8")
-        result = self.run_shim({"GWS_WORK_SEND_OAUTH": '{"type":"authorized_user"}'})
+        result = self.run_shim(
+            {
+                "GWS_WORK_SEND_OAUTH": (
+                    '{"type":"authorized_user","client_id":"work-client-id",'
+                    '"client_secret":"work-client-secret"}'
+                )
+            }
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('{"type":"authorized_user"}', result.stdout)
+        self.assertIn('"client_id":"work-client-id"', result.stdout)
 
     def test_send_credential_does_not_leak_into_real_gws_env(self):
         # The credential must reach real gws as a 0600 file and by no other route.
@@ -380,13 +431,39 @@ class GwsRouting(unittest.TestCase):
         write_stub(self.stub_dir, "google-user-token", "echo SHOULD-NOT-RUN >&2; exit 1")
         result = self.run_shim(
             {
-                "GWS_WORK_SEND_OAUTH": '{"type":"authorized_user"}',
+                "GWS_WORK_SEND_OAUTH": (
+                    '{"type":"authorized_user","client_id":"work-client-id",'
+                    '"client_secret":"work-client-secret"}'
+                ),
                 "GWS_WORK_ADMIN_OAUTH": '{"type":"authorized_user","id":"work-admin"}',
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('{"type":"authorized_user"}', result.stdout)  # reached the file
+        self.assertIn('"client_id":"work-client-id"', result.stdout)  # reached the file
         self.assertNotIn("LEAKED=", result.stdout)  # and nothing else
+
+    def test_materialized_credential_exports_its_client_config(self):
+        credential = (
+            '{"type":"authorized_user","refresh_token":"refresh-token",'
+            '"client_id":"credential-client-id","client_secret":"credential-client-secret"}'
+        )
+
+        result = self.run_shim({"GWS_WORK_SEND_OAUTH": credential})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CLIENT_ID=credential-client-id", result.stdout)
+        self.assertIn("CLIENT_SECRET=credential-client-secret", result.stdout)
+
+    def test_materialization_fails_loudly_when_client_id_is_missing(self):
+        credential = (
+            '{"type":"authorized_user","refresh_token":"refresh-token",'
+            '"client_secret":"credential-client-secret"}'
+        )
+
+        result = self.run_shim({"GWS_WORK_SEND_OAUTH": credential})
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("client_id", result.stderr)
 
     def test_both_send_credentials_set_is_loud(self):
         # Resolution order checks work before personal, so without this guard

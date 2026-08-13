@@ -109,14 +109,16 @@ Combine with `and`: `name contains 'report' and mimeType = 'application/pdf'`
 - work: `~/.config/gws/work`
 - personal: `~/.config/gws/personal`
 
-A credential has **two halves, stored differently**. The refresh token lives in `secrets` and
-reaches every machine that source root serves. The OAuth client config does not: each store needs
-its own `~/.config/gws/<account>/client_secret.json`, which is machine-local file state.
+An `authorized_user` credential in `secrets` contains the refresh token and the OAuth client config.
+For normal reads and sends, the shim materializes the credential privately and passes its `client_id`
+and `client_secret` directly to the real CLI. A machine consuming a credential therefore needs no
+per-account `~/.config/gws/<account>/client_secret.json` file.
 
-So bringing a new machine online means both halves. With only the token, the identity half-works in
-a confusing way: `secrets` resolves it, then the API call fails `403 Caller does not have required
-permission to use project ...` naming whatever unrelated client config gws found instead. If you see
-that 403, the client config for that account is missing on that machine, not the credential.
+That file remains machine-local **provisioning** state: `gws auth login` needs it to start a consent
+flow and create or replace a credential. Create the client config in the target account store before
+running that command, but do not add a different local client config to troubleshoot a credential
+consumer. A `403 Caller does not have required permission to use project ...` on the credential path
+means the credential's embedded client config or that project's permissions need investigation.
 
 The work store on the EC2 devbox is the exception — it needs neither half, because the broker mints
 its token.
