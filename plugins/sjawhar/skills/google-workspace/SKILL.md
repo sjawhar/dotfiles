@@ -15,47 +15,11 @@ When writing to Docs/Sheets that humans read, formatting mistakes are recurring 
 - **Hyperlinked display text, not bare URLs.** Write "transcript" or "link" with a hyperlink, never the full Drive URL inline.
 - **Match adjacent content.** Before inserting rows/cells/sections, inspect the formatting of existing neighbors and replicate it (text style, hyperlink pattern, column conventions). Table cells use normal text style — never heading styles (Header 2 in a table cell renders huge).
 - **Never overwrite concurrent human edits.** Sami often edits shared docs live while you work — re-read the target range before writing and merge around his changes.
-- **Check the audience before writing** (see CLAUDE.md Audience Boundaries): customer-shared files live in the shared drive, never My Drive; internal ops detail never goes into customer-visible docs/tabs.
+- **Audience boundaries:** follow `AGENTS.md`.
 
 ## No MCP Mode
 
-Upstream removed the `gws mcp` command (CHANGELOG: "Remove `mcp` command"); `skill_mcp` and any `mcp:` frontmatter for gws will fail with "Connection closed". Use the CLI below — same operations, same JSON.
-
-## CLI Quick Start
-
-```bash
-# List files
-gws drive files list --params '{"pageSize": 10}'
-
-# Search files
-gws drive files list --params '{"q": "name contains \"report\"", "pageSize": 10}'
-
-# Download a file
-gws drive files get --params '{"fileId": "FILE_ID", "alt": "media"}' -o ./output.pdf
-
-# Upload a file
-gws drive files create --json '{"name": "report.pdf"}' --upload ./report.pdf
-
-# Share a file
-gws drive permissions create \
-  --params '{"fileId": "FILE_ID"}' \
-  --json '{"role": "reader", "type": "user", "emailAddress": "user@example.com"}'
-```
-
-## CLI Syntax
-
-```
-gws <service> <resource> <method> [flags]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--params '{...}'` | URL/query parameters |
-| `--json '{...}'` | Request body |
-| `--upload <PATH>` | Upload file (multipart) |
-| `-o, --output <PATH>` | Save response to file |
-| `--page-all` | Auto-paginate (NDJSON) |
-| `--dry-run` | Preview without calling API |
+**Gotcha:** MCP mode was removed upstream; `gws` CLI is the only path.
 
 **stdout is pure JSON; never merge stderr into it.** Advisory output (`Using keyring backend: keyring`, `Tip: ...`) goes to **stderr**, on both the automatic and the credential path. Verified: with stderr discarded, stdout parses as JSON with zero advisory lines. So pipe stdout straight into `jq`/`json.load`, and if you want the advisories, capture them separately.
 
@@ -76,19 +40,6 @@ gws schema drive.files.list         # Inspect params/types for a method
 ```
 
 Use `gws schema` output to build `--params` and `--json` flags.
-
-## Common Drive Queries (q parameter)
-
-```
-name contains 'budget'                    # Name search
-mimeType = 'application/pdf'              # By type
-modifiedTime > '2025-01-01T00:00:00'      # Recently modified
-'FOLDER_ID' in parents                    # Files in folder
-trashed = false                           # Exclude trash
-sharedWithMe = true                       # Shared with me
-```
-
-Combine with `and`: `name contains 'report' and mimeType = 'application/pdf'`
 
 ## Auth — account-scoped credentials
 

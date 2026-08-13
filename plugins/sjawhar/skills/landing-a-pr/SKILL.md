@@ -1,6 +1,6 @@
 ---
 name: landing-a-pr
-description: "Use after opening or updating a PR, and whenever CI results or review comments arrive on one — a failed check, a bot finding like CodeRabbit or Sentry, a human review, or a PR that has gone quiet with nothing running. Shepherds an open PR to merge-ready. Owns the whole post-open phase: review comments, CI failures, re-verification, and the merge-ready report all route through here. Sami merges; this skill never does."
+description: "Use after opening or updating a PR, and whenever CI results or review comments arrive on one — a failed check, a bot finding like CodeRabbit or Sentry, a human review, or a PR that has gone quiet with nothing running. Sami merges; this skill never does."
 ---
 
 # Landing a PR

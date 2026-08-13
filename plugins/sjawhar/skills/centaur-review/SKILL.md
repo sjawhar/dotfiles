@@ -1,474 +1,112 @@
 ---
-description: "Collaborative code review: you narrate, Claude tracks, challenges your ideas, then we generate a friendly GitHub review together"
+name: centaur-review
+description: "Use when reviewing someone else's PR together — Sami narrates his review and wants comments tracked, challenged, and posted as inline GitHub review comments."
 args: "<pr_url_or_number>"
 ---
 
-Human-AI collaborative code review. You lead the review by narrating your thoughts as you read the code. Claude tracks your comments, runs background analysis, and when you're done, challenges your suggestions and helps craft a polished GitHub review.
+# Centaur Review
 
-> **jj workspace note:** You may be in a non-default jj workspace with no `.git` directory. If `gh` commands fail, set `GIT_DIR` to point to the default workspace: `GIT_DIR=/path/to/default/.git gh pr view ...`
+Sami leads the review by narrating as he reads. Track his observations, find their
+exact diff locations, challenge weak suggestions after he finishes, and compose a
+friendly review together. Do not replace his judgment with unsolicited analysis.
 
----
+> **jj workspace note:** You may be in a non-default jj workspace with no `.git`
+> directory. If `gh` fails, set `GIT_DIR` to the default workspace's `.git` directory.
 
-## Phase 1: Setup
+## Set up the review
 
-**1. Parse PR argument** (required):
-- The user must provide a PR URL or number as an argument
-- If missing, ask: "Which PR should we review? Please provide the URL or number."
+Require a PR URL or number. Fetch its metadata, changed files, diff, linked issues,
+and existing reviews, line comments, and conversation comments:
 
-**2. Fetch PR context:**
 ```bash
-gh pr view <pr> --json number,title,body,url,headRefName,baseRefName,additions,deletions,changedFiles,files
+gh pr view <pr> --json number,title,body,url,headRefName,baseRefName,headRefOid,files
 gh pr diff <pr>
-```
-
-**Store the file list and diff in memory** - you'll use this constantly to understand what the user is referring to.
-
-**3. Fetch existing reviews and comments:**
-```bash
-# Get repo info
 REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
-
-# Get all reviews
 gh api repos/$REPO/pulls/<number>/reviews
-
-# Get all review comments (line-level)
 gh api repos/$REPO/pulls/<number>/comments
-
-# Get conversation comments (top-level)
 gh pr view <pr> --comments
 ```
 
-**Summarize the review history:**
+For a re-review, summarize outstanding requests, unanswered questions, unresolved
+threads, changes since Sami's review, and material concerns from other reviewers.
 
-For re-reviews, this is critical context. Analyze and categorize:
+Launch these agents in parallel and hold their results until consolidation:
 
-- **🔴 Your unaddressed change requests** - Changes you requested that don't appear to be fixed yet
-- **❓ Open questions for you** - Questions from author or other reviewers awaiting your response
-- **💬 Unresolved threads** - Discussion threads not marked resolved
-- **✅ Resolved threads** - What's been addressed since your last review
-- **📝 Other reviewers' concerns** - Issues raised by others you should be aware of
+- **bug-finder** — significant correctness, security, concurrency, and edge-case defects.
+- **code-simplifier** — consequential unnecessary complexity or avoidable abstraction.
+- **code-architect** — structural implications, pattern drift, and cross-module effects.
+- **code-reviewer** — compare the diff with linked issue requirements; identify omissions,
+  scope creep, and material deviations.
 
-**Detect if this is a re-review:**
-- Check if you have any previous reviews on this PR
-- If yes, note what changed since your last review (commits after your review timestamp)
+## Narrated review
 
-**4. Extract linked issues from PR body:**
-- GitHub issues: Look for patterns like `Fixes #123`, `Closes #456`, `Resolves #789`
-- Linear issues: Look for `linear.app` URLs (e.g., `https://linear.app/team/issue/TEAM-123`)
+Keep a private tracker: `# | file:start_line-end_line | severity | observation`.
+Resolve locations from explicit references or the diff; if a quote or concept is
+ambiguous, ask which changed file or line Sami means. Never guess a location.
 
-**5. Fetch issue details:**
-- For GitHub issues: `gh issue view <number> --json title,body,labels`
-- For Linear issues: Use Linear MCP tools if available, otherwise WebFetch the URL
+Briefly acknowledge each observation without interrupting flow. On request, show the
+tracker, show analysis, or drop the last item. Interpret severity words as follows:
 
-**6. Launch background analysis agents** (all in parallel, non-blocking):
+| Label | Signals |
+| --- | --- |
+| BLOCKING | blocking, must fix, cannot merge |
+| IMPORTANT | important, should fix, concern |
+| SUGGESTION | suggestion, could, maybe, idea |
+| QUESTION | question, wondering, why |
+| NITPICK | nitpick, minor, tiny |
 
-Launch five Task agents with `run_in_background: true`. **Do not present these results until Phase 3.**
+Use actual new-file line numbers for additions and old-file lines for deletions.
 
-1. **Bug Finder** (subagent_type: bug-finder):
-   ```
-   Find bugs, edge cases, and potential failure modes in this PR:
-   - Logic errors and incorrect assumptions
-   - Edge cases that aren't handled
-   - Error handling gaps
-   - Race conditions or concurrency issues
-   - Security vulnerabilities
+## Consolidate and write
 
-   Focus on significant issues. If nothing notable, say "Nothing to add."
+When Sami says he is done, verify every tracked location. Ask the **red-teamer** to
+challenge each comment—not to review the PR—checking whether it is correct, has
+missing context, or would improve the code. Gather the four background results,
+discarding “Nothing to add,” then show Sami his comments, challenges, and candidate
+findings. He decides what remains.
 
-   PR diff: [include diff]
-   ```
-
-2. **Code Simplifier** (subagent_type: code-simplifier):
-   ```
-   Review this PR for unnecessary complexity:
-   - Over-engineered solutions
-   - Abstractions that aren't needed
-   - Code that could be more elegant or direct
-   - Opportunities to simplify without losing functionality
-
-   Focus on significant issues, not style preferences. If nothing notable, say "Nothing to add."
-
-   PR diff: [include diff]
-   ```
-
-3. **Architecture Reviewer** (subagent_type: code-architect):
-   ```
-   Review the structural/architectural implications of this PR:
-   - Does it change how modules interact?
-   - Does it introduce new patterns or deviate from existing ones?
-   - Are there changes that affect multiple parts of the codebase?
-   - Anything that deserves discussion before merging?
-
-   If nothing notable, say "Nothing to add."
-
-   PR diff: [include diff]
-   ```
-
-4. **Requirements Checker** (subagent_type: general-purpose):
-   ```
-   Compare this PR to the linked issue requirements. Identify:
-   - Requirements that are implemented correctly
-   - Requirements that are missing or incomplete
-   - Things the PR does that weren't in the requirements (scope creep?)
-   - Deviations that might need discussion
-
-   If everything looks good, say "Nothing to add."
-
-   PR diff: [include diff]
-   Issue: [include issue body]
-   ```
-
-5. **CLAUDE.md Compliance** (subagent_type: general-purpose):
-   ```
-   Check if this PR follows the conventions in the repo's CLAUDE.md file:
-   - Coding patterns and styles mentioned
-   - Architectural guidelines
-   - Testing requirements
-   - Any other repo-specific rules
-
-   First, read the CLAUDE.md file in the repo root (if it exists).
-   Then check the PR against those guidelines.
-
-   If compliant or no CLAUDE.md exists, say "Nothing to add."
-
-   PR diff: [include diff]
-   ```
-
-**7. Display summary and enter review mode:**
-
-Show the user:
-- PR title and description
-- Files changed (list them with additions/deletions)
-- Linked issue summary
-- **Review history summary** (if this is a re-review):
-  - 🔴 Your unaddressed change requests
-  - ❓ Open questions awaiting your response
-  - 💬 Unresolved discussion threads
-  - 📝 Other reviewers' concerns to be aware of
-- "Background analysis running... I'll track your comments as you review. 🚀"
-
-**Then prompt:** "Ready when you are - start narrating your thoughts as you read through the code."
-
----
-
-## Phase 2: Interactive Review Session
-
-Track the user's observations as they narrate. **Do not show background agent results unless explicitly asked.**
-
-**Maintain a comment tracker** with this structure:
-```
-Comments:
-1. [file:line] [SEVERITY] - comment text
-2. [file:start_line-end_line] [SEVERITY] - comment text (for multi-line)
-...
-```
-
-**Line numbers must be actual file line numbers** (from the new version of the file for additions, old version for deletions). These will be used directly in the GitHub API call.
-
-### Identifying File/Line Locations
-
-**Use the PR context you fetched.** When the user makes an observation:
-
-1. **Check if they mentioned a file or line explicitly** - use it directly
-2. **If they quoted code**, search the PR diff for that snippet
-3. **If they mentioned a concept** (e.g., "the error handling", "the new endpoint"), check which files in the PR diff contain related code
-4. **If still unclear, ask immediately.** Have a LOW bar for asking: "Which file is this about? I see changes in `api.py`, `models.py`, and `tests/test_api.py`"
-
-**Never silently guess wrong.** It's much better to ask than to track a comment on the wrong file.
-
-### Interaction Cadence
-
-- **Brief acknowledgment** after each observation: "Got it - tracking on `api.py:45` as a suggestion 👍"
-- **If the user is in flow** (rapid observations), batch: "Tracking all three! 🚀"
-- Keep it brief - don't interrupt the user's flow with lengthy responses
-
-### User Commands During Review
-
-- Say a severity word to tag the last comment: "blocking", "important", "suggestion", "question", "nitpick"
-- "show comments" or "what do you have" - display current comment list
-- "show analysis" - check background agent results (only if explicitly requested)
-- "drop last" or "nevermind" - remove the last tracked comment
-- "ready" or "done reviewing" - move to Phase 3
-
-### Severity Mapping
-
-- BLOCKING - "blocking", "must fix", "can't merge"
-- IMPORTANT - "important", "should fix", "concern"
-- SUGGESTION - "suggestion", "idea", "could", "maybe"
-- QUESTION - "question", "wondering", "curious", "why"
-- NITPICK - "nitpick", "minor", "tiny", "small thing"
-
----
-
-## Phase 3: Consolidation
-
-When the user says "ready" or "done":
-
-**1. Verify comment locations:**
-- For each comment, confirm it's associated with a specific file and line range
-- If any are unclear, ask now: "A few comments need locations - which file/lines for [comment]?"
-
-**2. Launch Red Teamer:**
-
-Use the **red-teamer** agent (subagent_type: red-teamer) to challenge the user's comments:
-
-```
-The user has reviewed this PR and made the following observations. Your job is to challenge these - push back on anything that might be wrong, questionable, or not actually a good suggestion.
-
-For each comment, consider:
-- Is this actually a problem, or is the code correct?
-- Could the reviewer be misreading the code?
-- Is there context in the PR that explains why it's done this way?
-- Would this suggestion actually improve the code, or make it worse?
-- Are there counterarguments the PR author might raise?
-
-Be direct. If a comment is solid, say so briefly. If it's weak or wrong, explain why.
-
-User's comments:
-[list each comment with file/line and observation]
-
-PR diff:
-[include relevant portions of diff]
-```
-
-**3. Gather background agent results:**
-- Check all five background agents using TaskOutput
-- Filter out any that said "Nothing to add"
-
-**4. Present consolidated findings:**
+Write each retained inline comment with a clear observation, a concrete question or
+change when appropriate, and a friendly, direct tone. Clarity and actionability come
+before softening; do not use emojis as a substitute for precision. Example:
 
 ```markdown
-## Your Comments
-
-| # | Location | Severity | Comment | Red Team Notes |
-|---|----------|----------|---------|----------------|
-| 1 | file.py:42 | BLOCKING | ... | [any challenges] |
-| 2 | file.py:55-60 | SUGGESTION | ... | [any challenges] |
-
-## AI Findings Worth Considering
-
-### Bug Finder
-[findings or "Nothing notable"]
-
-### Code Simplifier
-[findings or "Nothing notable"]
-
-### Architecture
-[findings or "Nothing notable"]
-
-### Requirements
-[findings or "Nothing notable"]
-
-### CLAUDE.md Compliance
-[findings or "Nothing notable"]
-
----
-
-## Items Needing Your Input
-
-1. [Red teamer challenged comment #2 - do you want to keep it?]
-2. [Bug finder found X - should we add this to the review?]
-3. [Any other decisions needed]
+**Suggestion:** Could we return early when `items` is empty? The caller can supply
+an empty list, so indexing `items[0]` would raise here. Let me know if I missed an
+invariant.
 ```
 
-**Then ask:** "Take a look and let me know your decisions on the items above."
+Write a concise overall summary after the inline comments. Ask for explicit approval
+before posting.
 
----
+## Post inline review comments
 
-## Phase 4: Refinement
+Get the PR head SHA and post to the **reviews** endpoint. Use `-f` array notation:
 
-After the user provides input:
-
-**1. Finalize the comment list** based on their decisions
-
-**2. Write up each line-level comment:**
-
-For each comment, format as:
-
-```markdown
-**[Location: file.py:42-45]**
-
-[SEVERITY_BADGE] **[SEVERITY_WORD]**
-
-[Clear, direct observation]
-
-[If suggesting a change, use GitHub suggestion syntax:]
-\`\`\`suggestion
-[suggested code]
-\`\`\`
-
-[Optional: brief rationale or question]
-```
-
-### Severity Badges
-- 🛑 BLOCKING
-- ⚠️ IMPORTANT
-- 💡 SUGGESTION
-- 🔍 QUESTION
-- 😹 NITPICK
-
-### Tone Guidelines
-
-**Priorities (in order):**
-1. **Clarity** - the author should understand exactly what you mean
-2. **Actionability** - they should know what to do (or what question to answer)
-3. **Friendliness** - don't be harsh, but don't sacrifice clarity for niceness
-
-**Emojis:** Use liberally to lighten tone, especially on critical comments: 😂 😹 😅 🙈 🚀 💪 ⚡ 🤔 👀
-
-**Good patterns:**
-- "I think this might [problem] because [reason]. What do you think? 🤔"
-- "Could we [suggestion]? I'm thinking [rationale]."
-- "Question: why [thing]? I expected [other thing]."
-- "Tiny thing: [observation] 😅"
-- End critical comments with softeners: "Let me know if I'm missing context! 😅" or "100% feel free to ignore 🙈"
-
-**Avoid:**
-- "This must change" / "Please fix this" / "This is wrong" / "You should..."
-- Unnecessarily harsh or commanding tone
-- Burying the point in excessive softening (clarity first, then soften)
-
-### Example Comments by Severity
-
-**🛑 BLOCKING:**
-```markdown
-🛑 **Blocking**
-
-I think this could throw an IndexError if `items` is empty - and based on `caller.py:30`, that's a realistic scenario.
-
-\`\`\`suggestion
-if not items:
-    return None
-return items[0]
-\`\`\`
-
-Let me know if I'm missing context! 😅
-```
-
-**💡 SUGGESTION:**
-```markdown
-💡 **Suggestion**
-
-Would it make sense to extract this into a helper? Similar logic exists in `other_file.py:123` 👀
-
-Just a thought for maintainability - not blocking!
-```
-
-**🔍 QUESTION:**
-```markdown
-🔍 **Question**
-
-Why `dict.get()` here instead of direct access? Is this defensive against a missing key case? 🤔
-
-If so, maybe worth a brief comment for future readers.
-```
-
-**😹 NITPICK:**
-```markdown
-😹 **Nitpick**
-
-The variable name `x` is a bit mysterious - maybe `user_count`?
-
-100% feel free to ignore 🙈
-```
-
-**3. Write the top-level summary:**
-
-```markdown
-## 🎯 Review Summary
-
-[1-2 sentence overall assessment - be genuine and direct]
-
-### 🚧 Key Discussion Points
-- [List BLOCKING and IMPORTANT items briefly]
-
-### 📝 Inline Comments
-- 🛑 X blocking | ⚠️ X important | 💡 X suggestions | 🔍 X questions | 😹 X nitpicks
-```
-
-Skip "What's Great" section unless something is genuinely impressive.
-
-**Display everything** - all line comments followed by the top-level summary.
-
----
-
-## Phase 5: Post
-
-**1. Ask for approval:**
-"Here's the complete review. Ready to post to GitHub?"
-
-**2. If approved, post via GitHub API:**
-
-First get the commit SHA and repo info:
 ```bash
 COMMIT_SHA=$(gh pr view <pr> --json headRefOid -q '.headRefOid')
 REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
-```
 
-**Post review with inline comments using `-f` flags with array notation:**
-
-```bash
 gh api repos/$REPO/pulls/<number>/reviews \
   --method POST \
-  -f body="## 🎯 Review Summary..." \
+  -f body="## Review Summary\n\n<concise assessment>" \
   -f event="COMMENT" \
   -f commit_id="$COMMIT_SHA" \
   -f 'comments[0][path]=src/example.py' \
   -f 'comments[0][line]=42' \
-  -f 'comments[0][body]=💡 **Suggestion**
-
-Consider extracting this...' \
+  -f 'comments[0][body]=**Suggestion:** Could we handle the empty case here?' \
   -f 'comments[1][path]=src/other.py' \
   -f 'comments[1][line]=89' \
-  -f 'comments[1][body]=🔍 **Question**
-
-Why is this done this way?'
+  -f 'comments[1][body]=**Question:** What invariant makes this safe?'
 ```
 
-**Comment fields (for each `comments[N]`):**
-- `path` (required): File path relative to repo root
-- `line` (required): Line number in the file (the new version for additions)
-- `body` (required): Comment text (markdown supported)
+Each `comments[N]` needs only `path`, `line`, and `body`; `path` must match the diff
+and `line` must exist in the new file. Do not silently fall back to a top-level PR
+comment: the purpose is line-level feedback.
 
-**That's it.** Just `path`, `line`, and `body`. No `side`, no `position`, no `start_line`.
+| Error | Cause and correction |
+| --- | --- |
+| `"line" is not a permitted key` | Wrong endpoint. Use `/pulls/{number}/reviews`, **not** `/pulls/{number}/comments`. |
+| HTTP 422 | Check the exact `comments[0][path]`, `[line]`, and `[body]` array notation. |
+| Inline comment missing | Confirm the precise diff path and a valid line in the new file. |
 
-**Common errors:**
-- `"line" is not a permitted key` → You're using the wrong endpoint. Use `/pulls/{number}/reviews`, NOT `/pulls/{number}/comments`
-- `HTTP 422` → Check array notation syntax: `comments[0][path]`, `comments[0][line]`, `comments[0][body]`
-- Comments not appearing → Verify `path` matches exact file path from PR diff, and `line` exists in the new version of the file
-
-**🛑 DO NOT silently fall back to a plain PR comment.** If the API call fails, debug the JSON payload and fix it. The whole point is to post *inline* comments on specific lines. A single PR comment with all feedback lumped together defeats the purpose.
-
-**3. Confirm success:**
-- Show link to the posted review
-- "Review posted! 🚀 [link]"
-
----
-
-## Quick Reference
-
-| User Says | Claude Does |
-|-----------|-------------|
-| [narrates observation] | Track comment, infer file/line from PR context (ask if unclear) |
-| "blocking" / "nitpick" / etc. | Update severity of last comment |
-| "show comments" | Display current comment list |
-| "show analysis" | Show background agent findings (only when asked) |
-| "drop last" | Remove last comment |
-| "ready" / "done" | Move to Phase 3 (consolidation) |
-| [after consolidation decisions] | Move to Phase 4 (write up comments) |
-| "post it" / "looks good" | Move to Phase 5 (post to GitHub) |
-
----
-
-## Key Principles
-
-1. **Hold back AI findings until Phase 3** - let the user form their own opinions first
-2. **Low bar for asking clarification** - better to ask "which file?" than guess wrong
-3. **Red team challenges user's comments** - not the PR itself
-4. **Clarity over niceness** - be friendly but don't bury the point
-5. **Line comments before summary** - specifics first, then overview
-6. **Explicit approval required** - never post without user confirmation
-
----
-
-**Done when:** Review is posted to GitHub and link is shared with user.
+Confirm the resulting review URL after GitHub accepts the request.

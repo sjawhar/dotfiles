@@ -47,20 +47,9 @@ Every line in the left column is a real thing an agent said in a real session on
 | "The QA agent couldn't run it either, so I'll describe the code instead." | Two agents failing to reach the surface is twice the evidence that it is unverified. Escalate the blocker; do not narrate the source. |
 | "The unit tests exercise the same code path." | They exercise it with your assumptions wired in. The surface is where the assumptions get tested. |
 | "Sami wanted this fast." | He wants it working. He has said so about every fast thing you ever shipped broken. |
+| A `## Verification` section that describes anything other than actual use by you or the QA agent. | A heading is not evidence; describe the real surface that was exercised and what happened. |
+| "Verified by inspection", "verified by reading the code", or "the frontmatter parses" offered as end-to-end evidence. | Inspection can establish syntax or intent, not the user-observable result. |
 
-## Red flags — you are about to skip the gate
-
-Stop if you catch yourself writing any of these:
-
-- "should work", "expected to work", "works as intended" — with nothing you actually ran behind it
-- "blocked on your merge" — before step 4 has passed
-- "follow-up", "separate PR", "track it as an issue", "left for later"
-- "post-merge", "once this lands", "on the next deploy" — attached to any verification
-- asking Sami whether to run a test instead of running it
-- a `## Verification` section describing anything other than you or the QA agent using the thing
-- "verified by inspection", "verified by reading the code", "the frontmatter parses" — offered as end-to-end evidence
-- "nothing to run here" — about any artifact whatsoever
-
-All of these mean the same thing: go run step 4.
+Catch yourself writing any excuse above → go run step 4.
 
 > **jj workspace note:** in a non-default workspace there may be no `.git` directory. If `gh` fails, point it at the default workspace: `GIT_DIR=/path/to/default/.git gh ...`

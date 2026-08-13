@@ -16,10 +16,7 @@ Interact with Slack workspaces via the slack-mcp-server. Use `skill_mcp(mcp_name
 
 ## Ground Rules
 
-- **Default to identifying yourself as Claude** in outbound messages, unless otherwise instructed — you message on Sami's behalf.
 - **Read threads, not just top-level messages.** A history scan without `conversations_replies` on active threads misses most of the conversation, so don't conclude "no response" from top-level messages alone.
-- **Before messaging someone, read your recent DM/thread history with them** (replies included) to avoid repeating what Sami already told them or double-pinging for the same request.
-- **Get the latest.** History calls return a window — paginate to the newest messages before summarizing current state.
 
 ## Tools
 
@@ -42,13 +39,7 @@ Channels can be referenced by ID (`C1234567890`) or name (`#general`, `@username
 ## Usage Examples
 
 ```
-skill_mcp(mcp_name="slack", tool_name="channels_list", arguments='{"channel_types": "public_channel,private_channel"}')
-
 skill_mcp(mcp_name="slack", tool_name="conversations_history", arguments='{"channel_id": "#general", "limit": "1d"}')
-
-skill_mcp(mcp_name="slack", tool_name="conversations_search_messages", arguments='{"search_query": "deploy", "filter_in_channel": "#engineering"}')
-
-skill_mcp(mcp_name="slack", tool_name="conversations_add_message", arguments='{"channel_id": "#general", "text": "Hello from the bot!", "content_type": "text/plain"}')
 ```
 
 ## History Limits
@@ -63,7 +54,7 @@ Slack mrkdwn syntax (used inside text and inside `rich_text` element `text` fiel
 
 ### Path 1 — Block Kit `blocks` parameter (preferred for structured messages)
 
-Requires **slack-mcp-server v1.3.0+** ([release notes](https://github.com/korotovsky/slack-mcp-server/releases/tag/v1.3.0), PR [#294](https://github.com/korotovsky/slack-mcp-server/pull/294)). The MCP tool accepts a `blocks` parameter (JSON-stringified Block Kit array). When supplied, the server bypasses the markdown converter entirely and posts the blocks as-is; `text` becomes the notification fallback only.
+Needs **slack-mcp-server v1.3.0+**. The MCP tool accepts a `blocks` parameter (JSON-stringified Block Kit array). When supplied, the server bypasses the markdown converter entirely and posts the blocks as-is; `text` becomes the notification fallback only.
 
 Use **one `rich_text` block** containing a mix of `rich_text_section` (for headers and paragraphs) and `rich_text_list` (for bulleted lists). Each indent level is its OWN `rich_text_list` block placed directly after its parent — Slack does not support nested-list-inside-list.
 
@@ -97,16 +88,7 @@ Fine for short messages with light formatting. For lists, literal `•` / `◦` 
 
 ### Path 3 — `content_type: "text/markdown"` (AVOID for structured messages)
 
-The server converts markdown via `takara2314/slack-go-util` (uses goldmark). Each top-level markdown element becomes its own Slack block:
-
-| Markdown | Resulting block | Issue |
-|----------|----------------|-------|
-| `# Heading` | `HeaderBlock` (plain_text) | Loses inline formatting |
-| `**bold paragraph**` | `SectionBlock` (mrkdwn) | Causes 80-character word wrapping |
-| `- bullet` | `RichTextBlock` containing `RichTextList` | OK in isolation |
-| `  - nested` (2-space indent) | Same `RichTextBlock`, `indent: 1` | **Must be 2 spaces, not 4** (4 spaces = code block per CommonMark) |
-
-Result: a message with section + heading + paragraph + list becomes 4+ separate blocks. Bold section labels render as standalone `section` blocks (80-char wrap). There is no merge path to a single `rich_text` block. Use Path 1 instead.
+Do not use content_type text/markdown for structured messages — the converter splits every element into separate blocks (80-char wraps, lost formatting); use blocks instead.
 
 ## Inspecting message structure
 

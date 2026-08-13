@@ -28,13 +28,4 @@ Preserve his wording unless something is actually wrong with it — the result s
 
 ## Formatting in external tools
 
-Use each tool's native primitives, matching adjacent existing content:
-
-- Real bullet lists — not unicode bullet characters pasted into text
-- Hyperlinked display text ("transcript", "link") — not bare URLs
-- Slack: Block Kit for structured messages (see the `slack-bot` skill)
-- Docs/Sheets: match neighboring rows/sections; normal text style in table cells (see the `google-workspace` skill)
-
-## Identity and audience
-
-Default to identifying yourself as Claude when messaging humans, unless instructed otherwise. Before writing to a shared surface, check who can see it (customers and contractors get no internal ops detail) and read the recent DM/thread history so you don't repeat what Sami already told them.
+Use each tool's native primitives, matching adjacent content; see `slack-bot` for Slack and `google-workspace` for Docs/Sheets.

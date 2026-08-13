@@ -35,21 +35,6 @@ secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli <tool> --help
 secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli whoami
 ```
 
-## Common tools
-
-Verified against the live server (run `tools` to confirm current names):
-
-| Tool | Purpose |
-| --- | --- |
-| `list-bases` | List bases you can access (get the `baseId`) |
-| `search-bases` | Find a base by partial name |
-| `list-tables-for-base` | Tables + field schemas for a base |
-| `get-table-schema` | Detailed field IDs/types/config (needed for select-field choice IDs) |
-| `list-records-for-table` | List/query records. Pass `fieldIds` for the fields you want |
-| `search-records` | Free-text search within a table |
-| `create-records-for-table` | Create records (max 10/request) |
-| `update-records-for-table` | Patch records (only specified fields change) |
-
 ## Pinned base — hiring applicants
 
 ```
@@ -62,15 +47,6 @@ view:     viwyGwAUe0E5k3FXF
 # List applicant records (page through with --pageSize / --cursor)
 secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli list-records-for-table \
   --baseId appvSQts63ngMSoCP --tableId tblTAe1moooa5Lsoy --pageSize 20
-
-# Discover field IDs + names (run this before filtering/sorting by field)
-secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli list-tables-for-base \
-  --baseId appvSQts63ngMSoCP
-
-# Detailed schema for specific fields (--tables is a JSON array of {tableId, fieldIds})
-secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli get-table-schema \
-  --baseId appvSQts63ngMSoCP \
-  --tables '[{"tableId":"tblTAe1moooa5Lsoy","fieldIds":["fldFK9Pv35FUE4FrX"]}]'
 ```
 
 ## Tips
