@@ -109,6 +109,18 @@ Combine with `and`: `name contains 'report' and mimeType = 'application/pdf'`
 - work: `~/.config/gws/work`
 - personal: `~/.config/gws/personal`
 
+A credential has **two halves, stored differently**. The refresh token lives in `secrets` and
+reaches every machine that source root serves. The OAuth client config does not: each store needs
+its own `~/.config/gws/<account>/client_secret.json`, which is machine-local file state.
+
+So bringing a new machine online means both halves. With only the token, the identity half-works in
+a confusing way: `secrets` resolves it, then the API call fails `403 Caller does not have required
+permission to use project ...` naming whatever unrelated client config gws found instead. If you see
+that 403, the client config for that account is missing on that machine, not the credential.
+
+The work store on the EC2 devbox is the exception — it needs neither half, because the broker mints
+its token.
+
 ```bash
 # Work is the default
 gws drive files list --params '{"pageSize": 10}'
