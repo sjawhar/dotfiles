@@ -167,7 +167,9 @@ Preset `GOOGLE_WORKSPACE_CLI_TOKEN` (a raw access token) or `GOOGLE_WORKSPACE_CL
 - **`fields` parameter required** for some methods (`about.get`, `comments.*`). Check `gws schema` if you get empty responses.
 - **Sheets ranges use `!`** which bash interprets as history expansion. Always single-quote: `'Sheet1!A1:C10'`
 - **OAuth scope limits**: Unverified apps (testing mode) limited to ~25 scopes. Use `-s drive` not `-s all` for personal use.
-- **Google Docs/Sheets aren't directly downloadable** — use `files.export` with a target MIME type (`application/pdf`, `text/csv`), not `files.get`.
+- **Getting file content depends on how the file was stored.** Native Docs/Sheets aren't downloadable — use `files.export` with a target MIME type (`application/pdf`, `text/csv`), not `files.get`. Office files *uploaded* to Drive (`.docx`/`.xlsx`, shown as `rtpof=true` in the browser URL) are the opposite: `files.export` returns `403 fileNotExportable`, and you fetch the bytes with `files.get` + `alt: media`.
+- **A `404 File not found` on a file you can open in the browser usually means you omitted `supportsAllDrives: true`**, not that you lack access. Shared-drive files are invisible without it. Add it to every Drive call — get, list, copy, delete.
+- **Download/copy restrictions have one legitimate way through**: an uploaded Office file with `canDownload: false` / `canCopy: false` still yields to `files.copy` with `mimeType: application/vnd.google-apps.document`, because conversion produces a new file you own. Used for counterparty contracts we need to redline — see the `drive-locked-files` skill for when that's appropriate and where the copy may land.
 - **Pre-v1.0**: `gws` is under active development. Expect occasional breaking changes in flags or MCP tool names.
 
 ## Full API Reference
