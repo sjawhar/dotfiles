@@ -111,14 +111,15 @@ Combine with `and`: `name contains 'report' and mimeType = 'application/pdf'`
 
 An `authorized_user` credential in `secrets` contains the refresh token and the OAuth client config.
 For normal reads and sends, the shim materializes the credential privately and passes its `client_id`
-and `client_secret` directly to the real CLI. A machine consuming a credential therefore needs no
-per-account `~/.config/gws/<account>/client_secret.json` file.
+and `client_secret` directly to the real CLI. Consuming a credential needs no
+`~/.config/gws/<account>/client_secret.json` file at all.
 
-That file remains machine-local **provisioning** state: `gws auth login` needs it to start a consent
-flow and create or replace a credential. Create the client config in the target account store before
-running that command, but do not add a different local client config to troubleshoot a credential
-consumer. A `403 Caller does not have required permission to use project ...` on the credential path
-means the credential's embedded client config or that project's permissions need investigation.
+That file remains machine-local **provisioning** state: `gws auth login` runs a consent flow and
+needs it to create or replace a credential. Create the client config in the target account store
+before running that command, but do not add a different local client config to troubleshoot a
+credential consumer. If a `403 Caller does not have required permission to use project ...` names an
+unrelated project, Application Default Credentials leaked that machine's quota project; the
+credential is not broken.
 
 The work store on the EC2 devbox is the exception — it needs neither half, because the broker mints
 its token.

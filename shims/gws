@@ -212,7 +212,10 @@ materialize_and_run() {
     # own environment, and a plain exec would hand all of it to real gws. Pass the
     # credential by file only, and unset every credential key for the child. `env -u`
     # on a name that is not set is a no-op, so the shared list covers every path.
-    if GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
+    # Without this, gws uses the machine ADC's quota project; another account's ADC
+    # produces a 403 that names that unrelated project.
+    if GOOGLE_APPLICATION_CREDENTIALS="$creds_file" \
+        GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${HOME}/.config/gws/${account}" \
         GOOGLE_WORKSPACE_CLI_CLIENT_ID="$client_id" \
         GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="$client_secret" \

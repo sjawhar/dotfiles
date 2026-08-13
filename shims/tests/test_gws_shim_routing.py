@@ -33,6 +33,7 @@ class GwsRouting(unittest.TestCase):
             "gws",
             'echo "TOKEN=${GOOGLE_WORKSPACE_CLI_TOKEN:-}"\n'
             'echo "FILE=${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}"\n'
+            'echo "ADC=${GOOGLE_APPLICATION_CREDENTIALS:-}"\n'
             'echo "DIR=${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-}"\n'
             'echo "CLIENT_ID=${GOOGLE_WORKSPACE_CLI_CLIENT_ID:-}"\n'
             'echo "CLIENT_SECRET=${GOOGLE_WORKSPACE_CLI_CLIENT_SECRET:-}"\n'
@@ -123,6 +124,12 @@ class GwsRouting(unittest.TestCase):
         self.assertIn("TOKEN=\n", result.stdout)
         self.assertIn(f"DIR={os.environ['HOME']}/.config/gws/work", result.stdout)
         self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+
+    def test_auth_subcommand_does_not_set_application_default_credentials(self):
+        result = self.run_shim(args=["auth", "status"])
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ADC=\n", result.stdout)
 
     def test_auth_subcommand_personal_account_selects_personal_store(self):
         write_stub(self.stub_dir, "google-user-token", "echo SHOULD-NOT-RUN >&2; exit 1")
@@ -453,6 +460,23 @@ class GwsRouting(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CLIENT_ID=credential-client-id", result.stdout)
         self.assertIn("CLIENT_SECRET=credential-client-secret", result.stdout)
+
+    def test_materialized_credential_is_the_application_default_credentials_file(self):
+        credential = (
+            '{"type":"authorized_user","refresh_token":"refresh-token",'
+            '"client_id":"credential-client-id","client_secret":"credential-client-secret"}'
+        )
+
+        result = self.run_shim({"GWS_WORK_SEND_OAUTH": credential})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        credentials_file = next(
+            line[5:] for line in result.stdout.splitlines() if line.startswith("FILE=")
+        )
+        application_default_credentials_file = next(
+            line[4:] for line in result.stdout.splitlines() if line.startswith("ADC=")
+        )
+        self.assertEqual(application_default_credentials_file, credentials_file)
 
     def test_materialization_fails_loudly_when_client_id_is_missing(self):
         credential = (
