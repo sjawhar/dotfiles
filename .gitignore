@@ -44,3 +44,6 @@ secrets.human.d/*.local.env
 
 # Planning artifacts stay local-only — never committed
 docs/superpowers/
+
+# Private secrets repo (its own git repo, never part of dotfiles)
+.private/

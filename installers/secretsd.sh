@@ -81,10 +81,10 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
         # A private secrets repo is an optional second root: declare it only once
         # it is actually cloned, because the daemon refuses to start when a
         # configured root is missing.
-        if [ -d "${HOME}/Code/secrets-private/secrets.human.d" ]; then
+        if [ -d "${DOTFILES_DIR}/.private/secrets.human.d" ]; then
             echo ""
             echo "[source.private]"
-            echo "path = \"${HOME}/Code/secrets-private\""
+            echo "path = \"${DOTFILES_DIR}/.private\""
         fi
     } > "${SECRETSD_CONFIG_FILE}.new"
     if cmp -s "${SECRETSD_CONFIG_FILE}.new" "$SECRETSD_CONFIG_FILE" 2>/dev/null; then
