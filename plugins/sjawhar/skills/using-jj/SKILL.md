@@ -179,6 +179,7 @@ jj squash              # Content moves to @-, parent keeps its description
 | Edit an existing change | `jj edit <rev>` |
 | Move to next/prev change | `jj next --edit` / `jj prev --edit` |
 | Squash `@` into parent | `jj squash` |
+| Collapse a stack into one commit | `jj squash --from 'aaa::eee' --into zzz -m "msg"` (`-m` required) |
 | Squash interactively (TUI) | `jj squash -i` |
 | Redistribute edits to ancestors | `jj absorb` (see Gotchas) |
 | Abandon a change | `jj abandon <rev>` |
@@ -476,15 +477,25 @@ jj diff          # Check what's left in @
 jj log -r ::@    # Check for (conflict) markers on ancestors
 ```
 
-### `jj squash` opens editor when both changes have descriptions
+### `jj squash` needs `-m` whenever it would have to combine descriptions
 
-When both `@` and `@-` have non-empty descriptions, `jj squash` opens an interactive editor to combine them. **This always fails in agent/non-TTY contexts.**
+`jj squash` opens an interactive editor to merge descriptions whenever more than one non-empty description is involved. **That always fails in agent/non-TTY contexts.** It hits two cases:
 
-If you already described `@` and need to squash:
+- `jj squash` when both `@` and `@-` are described
+- `jj squash --from <range> --into <rev>` collapsing a stack of described commits into one — the everyday "one commit per PR" case, where every commit in the range has a message
+
+Always pass a description when squashing a range:
+
+```bash
+jj squash --from 'aaa::eee' --into zzz -m "the combined message"
+```
+
 - `jj squash -m "description"` — set the final description directly
-- `jj squash -u` — keep the destination's description, discard source's
+- `jj squash -u` — keep the destination's description, discard the source's
 
-But the real fix is to not get into this state — see "Modifying Existing Changes" above.
+**The failure is easy to miss.** `jj squash` writes the error to stderr and exits non-zero without touching the repo, so if the command is piped (`| tail`) or its stderr discarded, it looks like it worked. Never pipe a rewriting `jj` command; check `jj log` afterwards, or `jj op log` to confirm the operation was actually recorded.
+
+For the two-commit case, the real fix is to not get into this state — see "Modifying Existing Changes" above.
 
 ### `jj split` opens an interactive TUI by default
 
