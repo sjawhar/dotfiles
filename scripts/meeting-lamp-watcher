@@ -6,9 +6,38 @@
 set -u
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/meeting-lamp/url"
 URL="$(cat "$CONF")" || exit 1
+
+# Automation browsers (Playwright/headless Chromium: grocery CLI, agent QA) touch
+# /dev/video* during startup device enumeration and were blinking the lamp.
+# They always carry --headless or --remote-debugging-*; real meeting apps never do.
+# Markers can live on an ancestor (cage compositor, Playwright-launched chrome
+# main process) while the device is held by a marker-less subprocess, so walk up.
+automation_browser() {
+    local pid="$1" depth=0 cmdline
+    while [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && $depth -lt 15 ]]; do
+        cmdline="/proc/${pid}/cmdline"
+        if [[ -r "$cmdline" ]] && tr '\0' ' ' < "$cmdline" | grep -qE -- '--headless|--remote-debugging-(pipe|port)|(^|/)cage '; then
+            return 0
+        fi
+        pid=$(awk '/^PPid:/{print $2}' "/proc/${pid}/status" 2>/dev/null) || return 1
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
+camera_in_use() {
+    local raw pid
+    for raw in $(fuser /dev/video* 2>/dev/null); do
+        pid="${raw//[^0-9]/}"
+        [[ -n "$pid" ]] || continue
+        automation_browser "$pid" || return 0
+    done
+    return 1
+}
+
 last=""
 while true; do
-    if fuser -s /dev/video* 2>/dev/null; then cur=on; else cur=off; fi
+    if camera_in_use; then cur=on; else cur=off; fi
     if [[ "$cur" != "$last" ]]; then
         if curl -sS -m 10 -o /dev/null -X POST -H 'Content-Type: application/json' \
             -d "{\"state\":\"$cur\"}" "$URL"; then
