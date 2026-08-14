@@ -65,8 +65,32 @@ LEGION_WORKSPACE_PATTERNS = (
 HISTORY_COLUMNS = ("id", "dir", "title", "created", "updated", "msgs")
 
 
+def sessions_dir() -> Path:
+    return Path(os.environ.get("OPENCODE_SESSIONS_DIR", str(db_path().parent / "sessions")))
+
+
+def shard_message_count(session_id: str) -> int | None:
+    """Messages in this session's own shard DB, or None when it has no shard.
+
+    OpenCode moved message storage out of the main DB into per-session shards
+    under `sessions/`; the main `message` table stopped gaining rows at the
+    migration and reports 0 for every session started after it. Sessions older
+    than the migration have no shard, and are still counted from the main DB.
+    """
+    shard = sessions_dir() / f"{session_id}.db"
+    if not shard.is_file():
+        return None
+    with closing(sqlite3.connect(f"file:{shard}?mode=ro", uri=True)) as conn:
+        return conn.execute("SELECT COUNT(*) FROM message WHERE session_id = ?", (session_id,)).fetchone()[0]
+
+
 def history_rows(hours: int, *, legion: bool) -> list[tuple[str, str, str | None, str, str, int]]:
-    """Top-level sessions updated in the last `hours`, newest first."""
+    """Top-level sessions active in the last `hours`, most recently active first.
+
+    Ordered by last activity rather than creation time: a session started
+    weeks ago but used an hour ago is recent history, and sorting by
+    time_created buries it under every session merely created today.
+    """
     cutoff_ms = (int(time.time()) - hours * 3600) * 1000
     legion_filter, params = "", [str(HOME), cutoff_ms]
     if not legion:
@@ -81,10 +105,14 @@ def history_rows(hours: int, *, legion: bool) -> list[tuple[str, str, str | None
                (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id)
         FROM session s
         WHERE parent_id IS NULL AND time_updated >= ? {legion_filter}
-        ORDER BY time_created DESC
+        ORDER BY time_updated DESC
     """  # noqa: S608 — placeholders only; legion_filter is a literal
     with closing(sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)) as conn:
-        return conn.execute(query, params).fetchall()
+        rows = conn.execute(query, params).fetchall()
+    return [
+        (session_id, directory, title, created, updated, sharded if (sharded := shard_message_count(session_id)) is not None else msgs)
+        for session_id, directory, title, created, updated, msgs in rows
+    ]
 
 
 def print_table(rows: list[tuple[str, ...]]) -> None:
