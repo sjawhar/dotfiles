@@ -1,0 +1,17 @@
+providers:
+  anthropic:
+    modelOverrides:
+      # Installed pi-catalog is stale: claude-opus-5 supports xhigh per Anthropic docs
+      # (https://platform.claude.com/docs/en/build-with-claude/effort - "Claude Opus 5
+      # supports all five effort levels"). Patch replaces thinking wholesale, so this
+      # carries the full base config plus xhigh. Remove when pi-catalog ships it.
+      claude-opus-5:
+        thinking:
+          mode: anthropic-adaptive
+          efforts:
+            - low
+            - medium
+            - high
+            - xhigh
+            - max
+          supportsDisplay: true

@@ -1,0 +1,1 @@
+/home/ubuntu/.dotfiles/plugins/sjawhar/agents/type-checker.md

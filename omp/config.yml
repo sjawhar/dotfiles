@@ -1,0 +1,55 @@
+modelRoles: 
+  default: anthropic/claude-fable-5:xhigh
+  plan: anthropic/claude-fable-5:max
+  smol: anthropic/claude-haiku-4-5
+  slow: openai/gpt-5.6-terra:xhigh
+  task: anthropic/claude-sonnet-5
+  vision: google/gemini-3.7-flash:medium
+  review: openai/gpt-5.5:high
+  advisor: anthropic/claude-sonnet-5:medium
+retry: 
+  modelFallback: true
+  fallbackChains: 
+    anthropic/claude-fable-5: 
+      - anthropic/claude-opus-5
+    default: 
+      - anthropic/claude-opus-5
+      - anthropic/claude-opus-4-8
+    plan: 
+      - anthropic/claude-opus-5
+      - anthropic/claude-opus-4-8
+task: 
+  agentModelOverrides: 
+    bug-finder: anthropic/claude-opus-5
+    code-architect: anthropic/claude-opus-5
+    code-reviewer: anthropic/claude-opus-5
+    code-simplifier: anthropic/claude-opus-5
+    comment-analyzer: anthropic/claude-opus-5
+    cybersecurity-expert: anthropic/claude-opus-5
+    gpt-reviewer: openai/gpt-5.6-terra:xhigh
+    performance-engineer: anthropic/claude-opus-5
+    prompt-engineer: anthropic/claude-opus-5
+    red-teamer: anthropic/claude-opus-5
+    test-analyzer: anthropic/claude-opus-5
+    type-checker: anthropic/claude-opus-5
+    ux-designer: anthropic/claude-opus-5
+  isolation: 
+    mode: auto
+    merge: patch
+advisor: 
+  enabled: false
+bashInterceptor: 
+  enabled: true
+memory: 
+  backend: mnemopi
+mnemopi: 
+  scoping: per-project-tagged
+theme: 
+  dark: titanium
+symbolPreset: unicode
+hideThinkingBlock: false
+dev: 
+  autoqaConsent: granted
+setupVersion: 1
+tui: 
+  resizeScrollback: rebuild

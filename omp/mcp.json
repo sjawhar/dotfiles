@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "slack": {
+      "command": "secrets",
+      "args": ["SLACK_MCP_XOXP_TOKEN", "--", "slack-mcp-server"],
+      "env": {
+        "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
+        "SLACK_MCP_ATTACHMENT_TOOL": "true"
+      }
+    },
+    "apify": {
+      "command": "secrets",
+      "args": ["APIFY_TOKEN", "--", "npx", "-y", "@apify/actors-mcp-server"]
+    },
+    "home-assistant": {
+      "command": "secrets",
+      "args": ["HA_MCP_URL", "--", "bash", "-c", "exec npx -y mcp-remote \"$HA_MCP_URL\" --allow-http"]
+    }
+  }
+}
