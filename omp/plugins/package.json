@@ -1,0 +1,8 @@
+{
+  "name": "omp-plugins",
+  "private": true,
+  "dependencies": {
+    "@bopstack/pi-codegraph": "^0.1.1",
+    "superpowers": "https://github.com/obra/superpowers"
+  }
+}

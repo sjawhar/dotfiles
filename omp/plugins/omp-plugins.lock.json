@@ -1,0 +1,15 @@
+{
+  "plugins": {
+    "superpowers": {
+      "version": "6.3.0",
+      "enabledFeatures": null,
+      "enabled": true
+    },
+    "@bopstack/pi-codegraph": {
+      "version": "0.1.1",
+      "enabledFeatures": null,
+      "enabled": true
+    }
+  },
+  "settings": {}
+}

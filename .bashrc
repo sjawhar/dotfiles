@@ -44,6 +44,10 @@ fi
 # OpenCode fork — auto-update checks our fork's releases
 export OPENCODE_GITHUB_REPO="sjawhar/opencode"
 
+# Envoy NATS lives on the tailnet host; consumers (OMP extension, Claude monitor)
+# have no baked-in default and disable inbound messaging when this is unset.
+export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
+
 # ------------------------------------------------------------------------------
 # Tmux socket directory (keep out of /tmp to avoid systemd-tmpfiles cleanup)
 # ------------------------------------------------------------------------------

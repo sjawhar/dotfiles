@@ -1,0 +1,1 @@
+/home/ubuntu/secrets/default/omp/extensions/secretsd.ts

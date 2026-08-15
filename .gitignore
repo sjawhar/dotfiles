@@ -45,3 +45,4 @@ docs/superpowers/
 
 # Private secrets repo (its own git repo, never part of dotfiles)
 .private/
+omp/plugins/node_modules/
