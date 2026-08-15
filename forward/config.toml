@@ -33,8 +33,15 @@ allow = [
                                    # content lives on other hosts (gist., raw.githubusercontent.)
   "accounts.google.com",           # Google OAuth sign-in
   "auth.openai.com",               # Codex / OpenAI sign-in
-  "agent-c-hawk-nonprod.auth.us-west-2.amazoncognito.com",  # hawk auth login; pinned, not wildcarded
-  "agent-c-hawk-prod.auth.us-west-2.amazoncognito.com",     # hawk login (prod Cognito pool)
+  # hawk login Cognito hosted UI, one host per Hawk environment, pinned rather than
+  # wildcarded: `*.auth.us-west-2.amazoncognito.com` would admit every AWS tenant's
+  # hosted UI in the region. Each host is the `authorization_endpoint` the Hawk API
+  # itself reports at `https://<HAWK_API_URL>/auth/config`, which is what the CLI
+  # opens; read it there when a new environment appears, because the deployed
+  # domains do not match the current `cognito_domain_prefix` template in Hawk's
+  # infra (`infra/hawk/cognito.py`).
+  "production-trajectory-labs.auth.us-west-2.amazoncognito.com",  # api.hawk.internal.trajectorylabs.com
+  "staging-trajectory-labs.auth.us-west-2.amazoncognito.com",     # api.hawk.staging.trajectorylabs.com
   "claude.ai",                     # Claude web authentication
   "*.anthropic.com",               # Anthropic-owned subdomains used by authentication
 ]
