@@ -19,6 +19,7 @@ minimum_release_age_excludes = [
   "github:sjawhar/jj",
   "github:sjawhar/knives",
   "github:sjawhar/oh-my-opencode",
+  "github:sjawhar/oh-my-pi",
   "github:sjawhar/opencode",
   "github:sjawhar/secretsd",
   "github:sjawhar/time-tracker",
@@ -30,7 +31,7 @@ minimum_release_age_excludes = [
 [tools]
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
 "github:sjawhar/knives" = "latest"
-"github:sjawhar/oh-my-pi" = "fork-v17.3.5-resize.1"  # omp daily driver: fork release = upstream + tmux resize fixes (wrapper execs this)
+"github:sjawhar/oh-my-pi" = "latest"  # omp daily driver: fork release (sami build), upstream + our fixes; wrapper execs this
 "github:sjawhar/secretsd" = "latest"  # Session secrets broker; ships bin/secrets + systemd units
 "github:syncthing/syncthing" = "latest"
 "github:tmux/tmux-builds" = "3.7b"

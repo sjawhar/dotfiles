@@ -9,6 +9,21 @@
       "version": "0.1.1",
       "enabledFeatures": null,
       "enabled": true
+    },
+    "@sjawhar/opencode-knives": {
+      "version": "0.12.0",
+      "enabledFeatures": null,
+      "enabled": true
+    },
+    "secretsd": {
+      "version": "2.4.0",
+      "enabledFeatures": null,
+      "enabled": true
+    },
+    "legion": {
+      "version": "0.16.1",
+      "enabledFeatures": null,
+      "enabled": true
     }
   },
   "settings": {}

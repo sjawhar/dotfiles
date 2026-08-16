@@ -15,6 +15,7 @@ starship.toml        # Starship prompt config
 aerospace.toml       # macOS window manager (AeroSpace)
 mise.toml            # Tool version manager — pinned versions for all CLI tools
 opencode/            # OpenCode config, OMO profiles, and plugins
+omp/                 # oh-my-pi config, agents, and plugin pins (binary is mise-managed; wrapper in shims/)
 opencode/opencode.json       # Main OpenCode config (models, plugins, commands, permissions)
 opencode/oh-my-opencode.*.json # OMO profiles (switchable via `omo` shell function)
 opencode/plugins/    # OpenCode plugin scripts (jj-snapshot, etc.)
@@ -41,6 +42,7 @@ Each major subdirectory has its own AGENTS.md with details and conventions:
 |-----------|---------------|
 | `envoy/` | Agent messaging/notification service (GitHub + Slack webhooks) |
 | `opencode/` | OpenCode config, OMO profiles, plugin scripts |
+| `omp/` | oh-my-pi config, agents, extensions, GitHub-pinned plugin tree |
 | `plugins/` | Custom skills, agents, and commands (`sjawhar/`) |
 | `installers/` | Per-tool install scripts run by `install.sh` |
 | `scripts/` | Standalone utility scripts |
@@ -66,11 +68,14 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 
 ## Key Conventions
 
-- **All tool versions pinned** in `mise.toml` — no floating versions
+- **All tool versions pinned** in `mise.toml` — no floating versions. My own repos must also be listed in `minimum_release_age_excludes` there, or `latest` silently refuses to resolve their releases.
 - **Idempotent installers** — running `install.sh` twice is safe
 - **Shell config has two zones**: non-interactive (PATH, env vars, mise) above the `[[ $- == *i* ]] || return 0` guard, interactive (aliases, completions, prompts) below it
-- **Shims wrap binaries** with extra logic (e.g., the gh shim handles auth token sourcing)
+- **Shims wrap binaries** with extra logic (e.g., the gh shim handles auth token sourcing). Wrappers that launch agent harnesses (`scripts/oc`, `shims/omp`) must set up the same session environment — gh-app `GIT_CONFIG_*` routing, shims-first `PATH` — or sessions silently act as the user on GitHub.
 - **Config files are symlinked** from this repo to their expected locations, not copied
+- **Everything committed is portable.** No committed file may contain an absolute path, and committed symlinks may only point inside this repo with relative targets. Per-machine links (skill farms, checkout-backed paths) are created at install time by installers or `scripts/omp-sync-*`, never committed.
+- **My own software installs from GitHub, pinned** — `opencode.json` plugin entries, `omp/plugins/package.json`, `mise.toml` all reference `github:sjawhar/...` at a tag or SHA. Installing from a local file path or checkout symlink is for prototyping only and never lands.
+- **Placement is fixed**: `shims/` for PATH-priority wrappers, `scripts/` for utilities, `installers/` for setup, `bin/` for standalone binaries (gitignored — nothing hand-written goes there), config dirs for config only. Read the sibling files in a directory before adding to it.
 - **Consolidate commits before pushing** — batch a session's related changes into one described commit per topic. Do not push per-step or per-file; a work session should land on main as 1-2 coherent commits, not a trail of fragments.
 
 ## Environment Facts
