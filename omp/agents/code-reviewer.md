@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/code-reviewer.md
+../../plugins/sjawhar/agents/code-reviewer.md

@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/test-analyzer.md
+../../plugins/sjawhar/agents/test-analyzer.md

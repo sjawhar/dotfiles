@@ -29,11 +29,12 @@ vendor/
 .tmux-workspace/
 
 /ignore
-.superpowers
-.overseer/
 .opencode/skills/fork-maintenance-skill-*/
-opencode/node_modules/
+.overseer/
 .playwright-mcp/
+.superpowers
+omp/plugins/node_modules
+opencode/node_modules/
 
 # local-only secrets (never committed; `secrets` reads these on top of the
 # committed files in the same root)
@@ -44,5 +45,4 @@ secrets.human.d/*.local.env
 docs/superpowers/
 
 # Private secrets repo (its own git repo, never part of dotfiles)
-.private/
-omp/plugins/node_modules/
+.secrets/

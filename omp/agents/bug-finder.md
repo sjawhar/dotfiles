@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/bug-finder.md
+../../plugins/sjawhar/agents/bug-finder.md

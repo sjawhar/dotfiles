@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/code-simplifier.md
+../../plugins/sjawhar/agents/code-simplifier.md
