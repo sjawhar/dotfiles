@@ -12,6 +12,7 @@ export const DotfilesBridge = createClaudeBridge({
     { dir: path.join(DF, "vendor/gh-stack"), namespace: "gh" },
     { dir: path.join(DF, "vendor/legion/.opencode"), namespace: "legion" },
     { dir: path.join(DF, "vendor/pup"), namespace: "pup" },
+    { dir: path.join(DF, "plugins/cursor-harvest"), namespace: "cursor-harvest" },
     { dir: path.join(DF, "vendor/sentry-for-ai"), namespace: "sentry" },
     { dir: path.join(DF, "vendor/sentry-cli/plugins/sentry-cli"), namespace: "sentry-cli" },
   ],
