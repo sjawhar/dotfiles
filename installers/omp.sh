@@ -16,26 +16,16 @@ ensure_link "${DOTFILES_DIR}/omp/models.yml"  "${OMP_AGENT_DIR}/models.yml"
 ensure_link "${DOTFILES_DIR}/omp/mcp.json"    "${OMP_AGENT_DIR}/mcp.json"
 ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
 
-# Extensions: dotfiles-owned ones link straight into omp/extensions/; the
-# repo-backed ones point at their checkouts under $HOME, so the links are
-# created here (per machine) rather than committed. Warn when a checkout is
-# missing instead of silently skipping.
+# Extensions: jj-snapshot is dotfiles-owned; everything else is an OMP plugin
+# installed from GitHub. The pins live in the committed omp/plugins/package.json
+# (same idea as opencode.json's git-pinned plugin entries); bun install
+# materializes them. Manage pins with omp plugin install/upgrade - the
+# resulting package.json/lockfile changes get committed here.
 if [ -L "${OMP_AGENT_DIR}/extensions" ]; then rm "${OMP_AGENT_DIR}/extensions"; fi
 mkdir -p "${OMP_AGENT_DIR}/extensions"
 ensure_link "${DOTFILES_DIR}/omp/extensions/jj-snapshot.ts" "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
-REPO_EXTENSIONS=(
-  "envoy.ts:${HOME}/legion/default/packages/envoy-omp-extension/extensions/envoy.ts"
-  "knives-omp.ts:${HOME}/knives/default/omp/extensions/knives.ts"
-  "secretsd-omp.ts:${HOME}/secrets/default/omp/extensions/secretsd.ts"
-)
-for pair in "${REPO_EXTENSIONS[@]}"; do
-    name="${pair%%:*}"; target="${pair#*:}"
-    if [ -e "$target" ]; then
-        ensure_link "$target" "${OMP_AGENT_DIR}/extensions/${name}"
-    else
-        echo "omp: extension ${name} -> missing checkout (${target}); clone that repo and re-run" >&2
-    fi
-done
+ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
+(cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
 
 # Skills: OMP discovers <skills-dir>/<name>/SKILL.md; the flat farm is built
 # by scanning dotfiles plugins/ + vendor/ at runtime (portable, no manifest).

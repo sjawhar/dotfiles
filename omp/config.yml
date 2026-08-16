@@ -20,19 +20,17 @@ retry:
       - anthropic/claude-opus-4-8
 task: 
   agentModelOverrides: 
-    bug-finder: anthropic/claude-opus-5
+    bug-finder: "@review"
     code-architect: anthropic/claude-opus-5
-    code-reviewer: anthropic/claude-opus-5
-    code-simplifier: anthropic/claude-opus-5
-    comment-analyzer: anthropic/claude-opus-5
+    code-reviewer: "@review"
+    code-simplifier: anthropic/claude-fable-5
+    comment-analyzer: "@review"
     cybersecurity-expert: anthropic/claude-opus-5
-    gpt-reviewer: openai/gpt-5.6-terra:xhigh
-    performance-engineer: anthropic/claude-opus-5
-    prompt-engineer: anthropic/claude-opus-5
+    performance-engineer: "@slow"
     red-teamer: anthropic/claude-opus-5
-    test-analyzer: anthropic/claude-opus-5
+    test-analyzer: "@review"
     type-checker: anthropic/claude-opus-5
-    ux-designer: anthropic/claude-opus-5
+    ux-designer: "@vision"
   isolation: 
     mode: auto
     merge: patch
@@ -52,4 +50,4 @@ dev:
   autoqaConsent: granted
 setupVersion: 1
 tui: 
-  resizeScrollback: rebuild
+  resizeScrollback: preserve

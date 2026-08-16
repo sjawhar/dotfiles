@@ -4,9 +4,35 @@
 # Keys never touch disk or global env; they exist only in the child process.
 # Anthropic auth is deliberately API-key (no Claude Pro/Max OAuth emulation).
 set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+
 # Register OMP sessions in the envoy listener registry (self_subscribed, port 0).
 export ENVOY_REGISTER_SESSION="${ENVOY_REGISTER_SESSION:-1}"
 # Envoy NATS lives on the tailnet; guarantee it for every omp launch (sessions
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
+
+# --- gh-app routing config (per-repo credential routing for git+gh) ---
+# Agents authenticate as the GitHub App installation matching each repo's
+# owner; owners without an installation fall through to your gh user auth.
+# Mirrors scripts/oc. See gh-app-routes.gitconfig and shims/gh-app-token.
+_gc_index="${GIT_CONFIG_COUNT:-0}"
+export "GIT_CONFIG_KEY_${_gc_index}=include.path"
+export "GIT_CONFIG_VALUE_${_gc_index}=${DOTFILES_DIR}/gh-app-routes.gitconfig"
+export GIT_CONFIG_COUNT="$((_gc_index + 1))"
+
+# --- dotfiles shims must lead PATH ---
+# gh App routing only works when `gh` resolves to shims/gh; a launching shell's
+# mise hook may have prepended tool dirs (including the real gh) ahead of the
+# shims, and sessions inherit PATH forever. Mirrors scripts/oc.
+_shims="${DOTFILES_DIR}/shims"
+_path=""
+IFS=':' read -ra _dirs <<< "$PATH"
+for _p in "${_dirs[@]}"; do
+    [[ -z "$_p" || "$_p" == "$_shims" ]] && continue
+    _path="${_path:+$_path:}$_p"
+done
+export PATH="${_shims}:${_path}"
+
 exec secrets ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY -- mise x "github:sjawhar/oh-my-pi" -- omp "$@"

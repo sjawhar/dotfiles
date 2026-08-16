@@ -59,7 +59,8 @@ _envoy_send() {
     local message="$*"
 
     local endpoint payload
-    if [[ "$target" == ses_* ]]; then
+    # Direct send for session ids: opencode ses_* and OMP UUID session ids.
+    if [[ "$target" == ses_* || "$target" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
         endpoint="/v1/messages/send"
         payload=$(jq -n --arg t "$target" --arg m "$message" \
             '{ target_session: $t, message: $m }')
