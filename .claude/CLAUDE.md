@@ -89,7 +89,7 @@ Don't revert or undo unrecognized working-copy changes without investigating the
 
 ### Commits
 
-One commit per PR by default. Don't split into multiple commits, don't ask "one or two?", don't run `jj split` for doc/refactor separation, and don't bring up commit structure with me at all. This overrides skills that prescribe commit-per-step workflows (e.g. superpowers' TDD cycle commits) — do the work, skip the ceremony. One PR per repo per line of work; never open a PR I didn't ask for.
+Structure commits to serve the reviewer: multiple logical, self-contained commits are welcome when they make a PR easier to review (setup vs. behavior change vs. tests), and commit-per-step workflows from skills are fine. A single commit is still right for small changes — judge by reviewability, not ceremony. Don't ask me about commit structure either way; decide and move. One PR per repo per line of work; never open a PR I didn't ask for.
 
 ### Shipping
 
