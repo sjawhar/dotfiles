@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/code-architect.md
+../../plugins/sjawhar/agents/code-architect.md

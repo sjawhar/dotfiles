@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/vendor/pup/agents/incident-response.md
+../../vendor/pup/agents/incident-response.md

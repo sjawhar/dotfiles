@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Mirror skill sources from dotfiles (plugins/ + vendor/) into oh-my-pi's flat
+# skills dir as symlinks. OMP discovers <skills-dir>/<name>/SKILL.md, so the
+# farm is flat; collisions across sources are renamed <namespace>--<basename>,
+# matching the omp-sync-prompts convention. Sources are discovered at runtime
+# by scanning for SKILL.md, so this is portable across machines and picks up
+# new vendor clones with no list to maintain.
+# Idempotent: safe to re-run; refreshes links and prunes dangling ones.
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SKILLS_DIR="${SKILLS_DIR:-$HOME/.omp/agent/skills}"
+
+mkdir -p "$SKILLS_DIR"
+
+linked=0; collided=0; pruned=0
+declare -A OWNER=()
+
+while IFS= read -r manifest; do
+  dir=$(dirname "$manifest")
+  case "$dir" in
+    */.venv/*|*/site-packages/*|*/node_modules/*|*/.git/*) continue ;;
+  esac
+  base=$(basename "$dir")
+  # Namespace = first path component after plugins/ or vendor/ (the repo name).
+  rel="${dir#"$DOTFILES_DIR"/plugins/}"
+  rel="${rel#"$DOTFILES_DIR"/vendor/}"
+  ns="${rel%%/*}"
+  name="$base"
+  if [ -n "${OWNER[$name]:-}" ] && [ "${OWNER[$name]}" != "$dir" ]; then
+    name="${ns}--${base}"
+    collided=$((collided + 1))
+  fi
+  OWNER[$name]="$dir"
+  ln -sfn "$dir" "$SKILLS_DIR/$name"
+  linked=$((linked + 1))
+done < <(find "$DOTFILES_DIR/plugins" "$DOTFILES_DIR/vendor" -name SKILL.md 2>/dev/null | sort)
+
+# Prune links whose target vanished (removed vendor, renamed skill).
+for link in "$SKILLS_DIR"/*; do
+  [ -L "$link" ] || continue
+  [ -e "$link" ] || { rm "$link"; pruned=$((pruned + 1)); }
+done
+
+echo "linked=$linked collision-renamed=$collided pruned=$pruned"

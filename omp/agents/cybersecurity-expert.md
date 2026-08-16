@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/cybersecurity-expert.md
+../../plugins/sjawhar/agents/cybersecurity-expert.md

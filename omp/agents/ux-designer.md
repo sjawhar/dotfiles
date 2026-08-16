@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/ux-designer.md
+../../plugins/sjawhar/agents/ux-designer.md

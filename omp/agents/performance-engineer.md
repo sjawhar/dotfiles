@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/performance-engineer.md
+../../plugins/sjawhar/agents/performance-engineer.md

@@ -1,1 +1,0 @@
-/home/ubuntu/legion/default/packages/envoy-omp-extension/extensions/envoy.ts

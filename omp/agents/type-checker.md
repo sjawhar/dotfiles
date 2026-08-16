@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/type-checker.md
+../../plugins/sjawhar/agents/type-checker.md

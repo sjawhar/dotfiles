@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/comment-analyzer.md
+../../plugins/sjawhar/agents/comment-analyzer.md

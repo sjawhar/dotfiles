@@ -9,41 +9,37 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 OMP_AGENT_DIR="${HOME}/.omp/agent"
 mkdir -p "$OMP_AGENT_DIR" "${HOME}/.omp/agent/prompts"
 
-# Config, agents, and extension entries are canonical in dotfiles (same layout
-# idea as ~/.config/opencode -> dotfiles/opencode).
+# Config and agents are canonical in dotfiles (same layout idea as
+# ~/.config/opencode -> dotfiles/opencode).
 ensure_link "${DOTFILES_DIR}/omp/config.yml"  "${OMP_AGENT_DIR}/config.yml"
 ensure_link "${DOTFILES_DIR}/omp/models.yml"  "${OMP_AGENT_DIR}/models.yml"
 ensure_link "${DOTFILES_DIR}/omp/mcp.json"    "${OMP_AGENT_DIR}/mcp.json"
 ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
-ensure_link "${DOTFILES_DIR}/omp/extensions"  "${OMP_AGENT_DIR}/extensions"
 
-# Extension entries are symlinks into repo checkouts (legion, knives, secrets);
-# warn for any target missing on this machine.
-for link in "${DOTFILES_DIR}"/omp/extensions/*; do
-    [ -L "$link" ] || continue
-    [ -e "$(readlink -f "$link" 2>/dev/null || true)" ] || \
-        echo "omp: extension $(basename "$link") -> missing target ($(readlink "$link")); clone that repo" >&2
+# Extensions: dotfiles-owned ones link straight into omp/extensions/; the
+# repo-backed ones point at their checkouts under $HOME, so the links are
+# created here (per machine) rather than committed. Warn when a checkout is
+# missing instead of silently skipping.
+if [ -L "${OMP_AGENT_DIR}/extensions" ]; then rm "${OMP_AGENT_DIR}/extensions"; fi
+mkdir -p "${OMP_AGENT_DIR}/extensions"
+ensure_link "${DOTFILES_DIR}/omp/extensions/jj-snapshot.ts" "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
+REPO_EXTENSIONS=(
+  "envoy.ts:${HOME}/legion/default/packages/envoy-omp-extension/extensions/envoy.ts"
+  "knives-omp.ts:${HOME}/knives/default/omp/extensions/knives.ts"
+  "secretsd-omp.ts:${HOME}/secrets/default/omp/extensions/secretsd.ts"
+)
+for pair in "${REPO_EXTENSIONS[@]}"; do
+    name="${pair%%:*}"; target="${pair#*:}"
+    if [ -e "$target" ]; then
+        ensure_link "$target" "${OMP_AGENT_DIR}/extensions/${name}"
+    else
+        echo "omp: extension ${name} -> missing checkout (${target}); clone that repo and re-run" >&2
+    fi
 done
 
-# Skills farm: OMP discovers .claude/marketplace/opencode skills natively, but
-# some sources (opencode-claude-bridge cache, vendor pools) are outside its
-# discovery. ~/.omp/agent/skills/ is a flat dir of symlinks built from the
-# manifest; link what resolves on this machine, skip the rest (re-run after
-# OpenCode has run once so the bridge cache exists).
-if [ -f "${DOTFILES_DIR}/omp/skills-farm.manifest" ]; then
-    mkdir -p "${HOME}/.omp/agent/skills"
-    missing=0
-    while IFS=$'\t' read -r name target; do
-        [ -n "$name" ] || continue
-        expanded="${target/#\~/$HOME}"
-        if [ -e "$expanded" ]; then
-            ensure_link "$expanded" "${HOME}/.omp/agent/skills/${name}"
-        else
-            missing=$((missing + 1))
-        fi
-    done < "${DOTFILES_DIR}/omp/skills-farm.manifest"
-    [ "$missing" -gt 0 ] && echo "omp: ${missing} manifest skills had no local source yet" >&2
-fi
+# Skills: OMP discovers <skills-dir>/<name>/SKILL.md; the flat farm is built
+# by scanning dotfiles plugins/ + vendor/ at runtime (portable, no manifest).
+"${DOTFILES_DIR}/scripts/omp-sync-skills" || echo "omp: skill sync reported issues" >&2
 
 # Prompt templates (shared command sources synced as symlinks).
 "${DOTFILES_DIR}/scripts/omp-sync-prompts" || echo "omp: prompt sync reported issues" >&2

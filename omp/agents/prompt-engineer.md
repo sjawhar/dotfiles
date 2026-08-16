@@ -1,1 +1,1 @@
-/home/ubuntu/.dotfiles/plugins/sjawhar/agents/prompt-engineer.md
+../../plugins/sjawhar/agents/prompt-engineer.md
