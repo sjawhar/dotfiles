@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Re-run each failed GitHub Actions workflow run for one pull request once.
+# External checks are reported but cannot be retried through `gh run rerun`.
+set -euo pipefail
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: gh-rerun-failed-pr PR_NUMBER [--repo OWNER/REPO]
+
+Lists failed PR checks, deduplicates GitHub Actions workflow run IDs, then
+runs `gh run rerun <id> --failed` once for each. Non-Actions failures are
+reported and skipped.
+EOF
+    exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+pr_number="$1"
+shift
+[[ "$pr_number" =~ ^[0-9]+$ ]] || usage
+
+repo_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)
+            [[ $# -ge 2 && -n "$2" ]] || usage
+            repo_args=(--repo "$2")
+            shift 2
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
+checks=$(gh pr checks "$pr_number" "${repo_args[@]}" --json name,state,link)
+failed=$(jq -c '[.[] | select(.state | IN("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"))]' <<<"$checks")
+
+if [[ "$failed" == "[]" ]]; then
+    printf 'no failed checks on PR %s\n' "$pr_number" >&2
+    exit 1
+fi
+
+printf 'failed checks on PR %s:\n' "$pr_number"
+jq -r '.[] | "  \(.state)  \(.name)  \(.link)"' <<<"$failed"
+
+mapfile -t run_ids < <(
+    jq -r '.[] | select(.link | test("github\\.com/.+/actions/runs/[0-9]+")) | .link | capture("/actions/runs/(?<id>[0-9]+)").id' \
+        <<<"$failed" | sort -u
+)
+
+while IFS=$'\t' read -r name state link; do
+    [[ -n "$name" ]] || continue
+    if [[ ! "$link" =~ github\.com/.+/actions/runs/[0-9]+ ]]; then
+        printf 'skipping non-Actions failure: %s (%s)\n' "$name" "$link" >&2
+    fi
+done < <(jq -r '.[] | [.name, .state, .link] | @tsv' <<<"$failed")
+
+if [[ ${#run_ids[@]} -eq 0 ]]; then
+    printf 'no failed GitHub Actions runs to rerun on PR %s\n' "$pr_number" >&2
+    exit 1
+fi
+
+printf 'rerunning failed jobs in workflow run(s): %s\n' "${run_ids[*]}"
+for run_id in "${run_ids[@]}"; do
+    gh run rerun "$run_id" "${repo_args[@]}" --failed
+done

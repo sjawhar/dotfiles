@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Regression test for scripts/gh-rerun-failed-pr. Uses a fake gh binary: no
+# network, no credentials, and proves retry selection rather than shell text.
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+TARGET="$DOTFILES_DIR/scripts/gh-rerun-failed-pr"
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+mkdir -p "$tmpdir/bin"
+
+cat >"$tmpdir/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+    "pr checks")
+        if [[ "${FAKE_GH_SCENARIO:-failed}" == "failed" ]]; then
+            cat <<'JSON'
+[{"name":"classify","state":"FAILURE","link":"https://github.com/acme/widgets/actions/runs/101/job/1"},{"name":"detect-changes","state":"ERROR","link":"https://github.com/acme/widgets/actions/runs/101/job/2"},{"name":"lint","state":"CANCELLED","link":"https://github.com/acme/widgets/actions/runs/202/job/3"},{"name":"external","state":"FAILURE","link":"https://vercel.example/deployment"},{"name":"passing","state":"SUCCESS","link":"https://github.com/acme/widgets/actions/runs/303/job/4"}]
+JSON
+        else
+            printf '[{"name":"passing","state":"SUCCESS","link":"https://github.com/acme/widgets/actions/runs/303/job/4"}]\n'
+        fi
+        ;;
+    "run rerun")
+        printf '%s\n' "$*" >>"$FAKE_GH_CALLS"
+        ;;
+    *)
+        printf 'unexpected gh call: %s\n' "$*" >&2
+        exit 99
+        ;;
+esac
+EOF
+chmod +x "$tmpdir/bin/gh"
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+export PATH="$tmpdir/bin:$PATH"
+export FAKE_GH_CALLS="$tmpdir/calls"
+
+output=$("$TARGET" 15684 --repo acme/widgets 2>&1) || fail "failed Actions runs should rerun"
+expected=$'run rerun 101 --repo acme/widgets --failed\nrun rerun 202 --repo acme/widgets --failed'
+[[ "$(cat "$FAKE_GH_CALLS")" == "$expected" ]] || fail "expected unique failed workflow reruns"
+[[ "$output" == *"skipping non-Actions failure: external"* ]] || fail "external failure should be reported"
+
+: >"$FAKE_GH_CALLS"
+if FAKE_GH_SCENARIO=clean "$TARGET" 15684 --repo acme/widgets >/dev/null 2>&1; then
+    fail "no failed Actions runs must return nonzero"
+fi
+[[ ! -s "$FAKE_GH_CALLS" ]] || fail "clean PR must not rerun anything"
+
+printf 'PASS: failed GitHub Actions runs are deduplicated and clean PRs do not rerun\n'
