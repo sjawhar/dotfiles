@@ -2,7 +2,7 @@
   "mcpServers": {
     "slack": {
       "command": "secrets",
-      "args": ["SLACK_MCP_XOXP_TOKEN", "--", "slack-mcp-server"],
+      "args": ["SLACK_MCP_XOXP_TOKEN", "--", "slack-mcp-server", "--no-cache"],
       "env": {
         "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
         "SLACK_MCP_ATTACHMENT_TOOL": "true"
