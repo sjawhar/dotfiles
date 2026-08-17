@@ -22,6 +22,7 @@ minimum_release_age_excludes = [
   "github:sjawhar/oh-my-pi",
   "github:sjawhar/opencode",
   "github:sjawhar/secretsd",
+  "github:sjawhar/slack-mcp-server",
   "github:sjawhar/time-tracker",
   "forward",
   "tt",
@@ -51,7 +52,7 @@ uv = "0.11.32"
 yq = "4.53.3"
 zoxide = "0.10.0"
 
-"github:korotovsky/slack-mcp-server" = "1.3.0"
+"github:sjawhar/slack-mcp-server" = "v1.3.0-sami.20260817-170849"
 "github:sjawhar/oh-my-opencode" = "latest"  # Custom fork
 "github:sjawhar/opencode" = "latest"
 "npm:@googleworkspace/cli" = "0.22.5"
