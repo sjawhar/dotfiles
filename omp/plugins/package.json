@@ -3,9 +3,9 @@
   "private": true,
   "dependencies": {
     "@bopstack/pi-codegraph": "^0.1.1",
-    "@sjawhar/opencode-knives": "github:sjawhar/knives#08898900cf7d",
-    "legion": "github:sjawhar/legion#eb8db653",
-    "secretsd": "github:sjawhar/secretsd#v2.4.0",
+    "@sjawhar/opencode-knives": "github:sjawhar/knives#d61cf4262973",
+    "legion": "github:sjawhar/legion#606154bce76c",
+    "secretsd": "github:sjawhar/secretsd#62941f6fc5ef",
     "superpowers": "https://github.com/obra/superpowers"
   }
 }
