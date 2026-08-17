@@ -9,3 +9,4 @@
 # Add a new machine's key here after generating ~/.ssh/jj-signing on it.
 sami@trajectorylabs.net,sami@thecybermonk.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICA4IzBOyaJmzAm3kPsjH0cVQFjEysEMinjo3uvFh31U laptop
 sami@trajectorylabs.net,sami@thecybermonk.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKiFZITI3UIN1TAOOR3tsQThfs7egEpIqEryqnIVQbz5 jj-signing-devbox
+sami@trajectorylabs.net,sami@thecybermonk.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICff1ryx0+ULTCQDUsYR/8G/OdeYtmtpnIbyZ84Ssszo jj-signing-oryx
