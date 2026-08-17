@@ -26,6 +26,12 @@ config:
       sshHost: "ssh://ubuntu@evalrunner.tailb86685.ts.net"
       machineId: evalrunner
       listener: {}
+    # oryx is reached over Tailscale SSH by MagicDNS FQDN; the bare name has no
+    # ~/.ssh/config entry today, and the FQDN keeps it that way deliberately.
+    - name: oryx
+      sshHost: "ssh://agent@oryx.tailb86685.ts.net"
+      machineId: oryx
+      listener: {}
   envoy:githubWebhookSecret:
     secure: v1:DHpfNE2vubEaxKtd:sDJqUeZA3l2UW4w4NGRLEHKUvLraLygVoWB9MaqagpRBL8lAN5U1tjmZSBNj1COepP3AKYV+OwY=
   envoy:slackSigningSecret:
