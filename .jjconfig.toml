@@ -10,7 +10,10 @@ tug = ["bookmark", "move", "--from", "closest_bookmark(@)", "--to", "@"]
 agent-log = ["log", "--no-graph", "-T", "agent_log"]
 
 [ui]
-editor = "nvim"
+# Interactive users receive nvim. `jj-editor` refuses to launch any editor without
+# stdin/stdout/stderr TTYs and tells agents to use -m/-u instead, preventing a missing
+# noninteractive flag from spawning an unusable IDE.
+editor = "jj-editor"
 
 # Use git diff format when running inside AI agents
 # (agents can't parse color-words output)

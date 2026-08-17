@@ -180,35 +180,31 @@ JJ_USER="Your Name" JJ_EMAIL="you@example.com" jj new -m "message"
 - When a remote branch is deleted (e.g., after PR merge), the local tracking bookmark is automatically deleted
 - Untracked local bookmarks must be deleted manually if desired
 
-### `jj squash` needs `-m` whenever it would have to combine descriptions
+### `jj split` and `jj squash`: `-m`/`-u` is mandatory in non-TTY runs
 
-`jj squash` opens an interactive editor to merge descriptions whenever more than one non-empty description is involved. **That always fails in agent/non-TTY contexts.** It hits two cases:
-
-- `jj squash` when both `@` and `@-` are described
-- `jj squash --from <range> --into <rev>` collapsing a stack of described commits into one — the everyday "one commit per PR" case, where every commit in the range has a message
-
-Always pass a description when squashing a range:
+**Never invoke either command bare in an agent/piped shell.** `jj split` needs a fileset
+AND a description policy; paths alone do not prevent an editor launch. `jj squash` likewise
+needs an explicit resulting-description policy.
 
 ```bash
-jj squash --from 'aaa::eee' --into zzz -m "the combined message"
+# Keep named paths in the current/original change; move every other changed path to its child.
+jj split -m "child change description" <path1> <path2>
+
+# Split a specific revision by path.
+jj split -r <rev> -m "child change description" <path1>
+
+# Squash with an explicit resulting description, or deliberately retain the destination's.
+jj squash -m "resulting description"
+jj squash -u
+jj squash --from 'aaa::eee' --into zzz -m "combined description"
 ```
 
-- `jj squash -m "description"` — set the final description directly
-- `jj squash -u` — keep the destination's description, discard the source's
+`jj-editor` is configured to reject editor launches without a TTY and prints these forms. That
+is a fail-safe only: **always pass `-m` or `-u` yourself.** Never pipe a rewriting `jj` command;
+check `jj log` afterward to confirm the operation actually occurred.
 
-**The failure is easy to miss.** `jj squash` writes the error to stderr and exits non-zero without touching the repo, so if the command is piped (`| tail`) or its stderr discarded, it looks like it worked. Never pipe a rewriting `jj` command; check `jj log` afterwards, or `jj op log` to confirm the operation was actually recorded.
-
-For the two-commit case, the real fix is to not get into this state — see "Modifying Existing Changes" above.
-
-### `jj split` opens an interactive TUI by default
-
-`jj split` with no arguments opens an interactive TUI to choose which changes go into the new commit. **This times out in agent bash sessions.**
-
-To split non-interactively, pass file paths or a revset:
-- `jj split <path> [<path>...]` — keep named files in the selected original commit and put the remaining changes in its new child
-- `jj split -r <rev> <path>` — split a specific revision
-
-Per the global `Commits` AGENTS.md rule, prefer not splitting at all — one commit per PR is the default.
+Prefer not splitting at all — one commit per PR is the default — but when independent changes
+must separate, the forms above are the only agent-safe split commands.
 
 ### `jj diff` in non-TTY / agent contexts
 
