@@ -18,14 +18,6 @@ config:
       sshHost: "ssh://sami@sami"
       machineId: sami
       listener: {}
-    # evalrunner is reached over Tailscale SSH by MagicDNS FQDN, not by the bare
-    # `evalrunner` alias: ~/.ssh/config has a Host evalrunner block that routes
-    # through an AWS SSM ProxyCommand, so the bare name would make the deploy
-    # depend on valid SSO credentials.
-    - name: evalrunner
-      sshHost: "ssh://ubuntu@evalrunner.tailb86685.ts.net"
-      machineId: evalrunner
-      listener: {}
     # oryx is reached over Tailscale SSH by MagicDNS FQDN; the bare name has no
     # ~/.ssh/config entry today, and the FQDN keeps it that way deliberately.
     - name: oryx
