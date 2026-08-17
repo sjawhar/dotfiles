@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# jj's default editor is a human affordance. In a non-TTY agent command it is
+# an unattended IDE launch that can only hang or fail. Refuse loudly so callers
+# pass the subcommand's explicit noninteractive flag instead.
+set -euo pipefail
+
+if [[ -t 0 && -t 1 && -t 2 ]]; then
+    exec nvim "$@"
+fi
+
+cat >&2 <<'EOF'
+jj refused to open an editor without a TTY.
+Use an explicit noninteractive form instead:
+  jj describe -m "message"
+  jj squash -m "message"  # or -u to keep the destination description
+  jj split -m "message" <paths...>
+EOF
+exit 2
