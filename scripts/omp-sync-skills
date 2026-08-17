@@ -10,17 +10,22 @@ set -euo pipefail
 DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.omp/agent/skills}"
 
-# Keep in sync with the sources list in opencode/plugins/dotfiles-bridge.ts.
+# Keep in sync with the sources list in opencode/plugins/dotfiles-bridge.ts,
+# PLUS the namespaces OpenCode discovers natively through the
+# ~/.config/opencode/skills/* symlinks (no bridge entry). Those are mirrored
+# here from their canonical sources, or OMP never sees them.
 NAMESPACES=(
   "sjawhar:$DOTFILES_DIR/plugins/sjawhar/skills"
   "music:$DOTFILES_DIR/vendor/claude-ai-music-skills/skills"
   "wispr:$DOTFILES_DIR/vendor/ghost-wispr/.opencode/skills"
   "gh:$DOTFILES_DIR/vendor/gh-stack/skills"
-  "legion:$DOTFILES_DIR/vendor/legion/.opencode/skills"
   "pup:$DOTFILES_DIR/vendor/pup/skills"
   "cursor-harvest:$DOTFILES_DIR/plugins/cursor-harvest/skills"
   "sentry:$DOTFILES_DIR/vendor/sentry-for-ai/skills"
   "sentry-cli:$DOTFILES_DIR/vendor/sentry-cli/plugins/sentry-cli/skills"
+  "core-ops:$HOME/core-ops/skills"
+  "time-tracker:$DOTFILES_DIR/vendor/time-tracker/.opencode/skills"
+  "compound-engineering:$DOTFILES_DIR/vendor/compound-engineering/skills"
 )
 
 mkdir -p "$SKILLS_DIR"

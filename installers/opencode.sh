@@ -24,7 +24,7 @@ ensure_vendor https://github.com/sjawhar/legion.git legion
 # (The bridge still scans the same dirs for disable-model-invocation handling and command registration.)
 mkdir -p "${HOME}/.claude/skills"
 ensure_link "${DOTFILES_DIR}/plugins/sjawhar/skills"                              "${HOME}/.claude/skills/sjawhar"
-ensure_link "${DOTFILES_DIR}/vendor/legion/.opencode/skills"                      "${HOME}/.claude/skills/legion"
+ensure_link "${DOTFILES_DIR}/vendor/legion/skills"                                 "${HOME}/.claude/skills/legion"
 ensure_link "${DOTFILES_DIR}/vendor/sentry-for-ai/skills"                         "${HOME}/.claude/skills/sentry-for-ai"
 ensure_link "${DOTFILES_DIR}/vendor/ghost-wispr/.opencode/skills"                 "${HOME}/.claude/skills/ghost-wispr"
 
