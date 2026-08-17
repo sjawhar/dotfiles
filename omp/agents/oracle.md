@@ -5,7 +5,7 @@ description: |
   decisions, plan review, PR review, and complex debugging where correctness matters more
   than speed. Dispatched by the /sdd workflow to review plans and PRs.
 model:
-  - "openai/gpt-5.5:high"
+  - "openai-codex/gpt-5.5:high"
 tools: read, glob, grep, todo
 color: cyan
 ---

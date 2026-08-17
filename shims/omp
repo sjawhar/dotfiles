@@ -35,4 +35,4 @@ for _p in "${_dirs[@]}"; do
 done
 export PATH="${_shims}:${_path}"
 
-exec secrets ANTHROPIC_API_KEY GEMINI_API_KEY -- mise x "github:sjawhar/oh-my-pi" -- omp "$@"
+exec secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- mise x "github:sjawhar/oh-my-pi" -- omp "$@"
