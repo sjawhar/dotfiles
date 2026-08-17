@@ -25,13 +25,28 @@
 # so it cannot recreate the silent inactive-session failure described above.
 #
 # Args pass through to mosh, e.g.: devbox -- tm
+# Targets: bare `devbox` is the EC2 devbox; `devbox oryx` is the oryx laptop.
+# Each target has a Host <target>-tunnel block in ssh config and its own
+# supervisor instance.
 set -euo pipefail
 
-readonly tunnel_control=~/.ssh/sockets/tunnel-ubuntu@sami-agents.tailb86685.ts.net
-readonly supervisor_lock=~/.ssh/sockets/devbox-tunnel-supervisor.lock
-readonly supervisor_log=~/.ssh/sockets/devbox-tunnel-supervisor.log
-
 if [[ "${1:-}" == --tunnel-supervisor ]]; then
+    supervisor=1
+    target="${2:?--tunnel-supervisor needs a target}"
+else
+    supervisor=0
+    target=devbox
+    case "${1:-}" in devbox|oryx) target="$1"; shift ;; esac
+fi
+tunnel_host="${target}-tunnel"
+readonly tunnel_control="$(ssh -G "$tunnel_host" | awk '/^controlpath /{print $2}')"
+# The devbox target keeps the legacy lock/log names, so a supervisor started
+# before this script learned targets still holds the same lock.
+suffix=""; [[ "$target" != devbox ]] && suffix="-${target}"
+readonly supervisor_lock=~/.ssh/sockets/devbox-tunnel-supervisor${suffix}.lock
+readonly supervisor_log=~/.ssh/sockets/devbox-tunnel-supervisor${suffix}.log
+
+if [[ "$supervisor" == 1 ]]; then
     # One supervisor per laptop: the lock holder is it, everyone else leaves.
     exec 9>"$supervisor_lock"
     flock -n 9 || exit 0
@@ -49,33 +64,33 @@ if [[ "${1:-}" == --tunnel-supervisor ]]; then
             # refused by pcscd anyway, so wait for the session to come back.
             [[ "$state" == active ]] || continue
         fi
-        ssh -O check devbox-tunnel 2>/dev/null && continue
+        ssh -O check "$tunnel_host" 2>/dev/null && continue
         rm -f "$tunnel_control"
-        if ssh -N -f devbox-tunnel 2>>"$supervisor_log"; then
+        if ssh -N -f "$tunnel_host" 2>>"$supervisor_log"; then
             printf '%s tunnel reconnected\n' "$(date -Is)" >> "$supervisor_log"
         fi
     done
 fi
 
-if ! ssh -O check devbox-tunnel 2>/dev/null; then
+if ! ssh -O check "$tunnel_host" 2>/dev/null; then
     # Dead or stale control socket — clear it so we don't spawn a masterless dup.
     rm -f "$tunnel_control"
-    echo "devbox: starting YubiKey tunnel..." >&2
+    echo "${target}: starting YubiKey tunnel..." >&2
     # -f backgrounds only after the forward is up (ExitOnForwardFailure).
     # stderr goes to a file, not a pipe: the backgrounded child keeps the fd,
     # and a pipe would make command substitution block for the tunnel's life.
     tunnel_err=$(mktemp)
-    if ! ssh -N -f devbox-tunnel 2>"$tunnel_err"; then
+    if ! ssh -N -f "$tunnel_host" 2>"$tunnel_err"; then
         cat "$tunnel_err" >&2
         if grep -q "remote port forwarding failed" "$tunnel_err"; then
-            cat >&2 <<'MSG'
+            cat >&2 <<MSG
 
-devbox: port 12799 on the devbox is still held by the previous tunnel's dying
-session. The tunnel rides the devbox's real sshd (port 2222), which reaps a
-dead session in ~45s — wait a minute and re-run devbox. If it STILL fails,
-something else grabbed 12799 on the devbox; look with:
+${target}: port 12799 on ${target} is still held by the previous tunnel's dying
+session. The tunnel rides the target's real sshd (port 2222), which reaps a
+dead session in ~45s — wait a minute and re-run \`devbox ${target}\`. If it
+STILL fails, something else grabbed 12799 on ${target}; look with:
 
-  ssh devbox 'sudo ss -lntp sport = :12799'
+  ssh ${target} 'sudo ss -lntp sport = :12799'
 MSG
         fi
         rm -f "$tunnel_err"
@@ -87,6 +102,6 @@ fi
 # Spawn the reconnect supervisor in its own process session, detached from this
 # terminal (no SIGHUP when it closes) but still inside this logind session's
 # scope, which is what keeps pcscd authorizing it. flock makes re-runs no-ops.
-setsid "$0" --tunnel-supervisor < /dev/null > /dev/null 2>&1 &
+setsid "$0" --tunnel-supervisor "$target" < /dev/null > /dev/null 2>&1 &
 
-exec mosh devbox "$@"
+exec mosh "$target" "$@"
