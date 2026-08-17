@@ -26,6 +26,13 @@ mkdir -p "${OMP_AGENT_DIR}/extensions"
 ensure_link "${DOTFILES_DIR}/omp/extensions/jj-snapshot.ts" "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 (cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
+# legion is a monorepo: its envoy extension imports @legion/contracts, a
+# workspace package that the top-level install does not materialize. Without
+# this nested install the extension fails to load and sessions never register.
+if [ -d "${DOTFILES_DIR}/omp/plugins/node_modules/legion" ]; then
+    (cd "${DOTFILES_DIR}/omp/plugins/node_modules/legion" && bun install) \
+        || echo "omp: legion workspace install failed; envoy extension will not load" >&2
+fi
 
 # Skills: OMP discovers <skills-dir>/<name>/SKILL.md; the flat farm is built
 # by scanning dotfiles plugins/ + vendor/ at runtime (portable, no manifest).
