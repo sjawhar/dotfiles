@@ -28,6 +28,16 @@ NAMESPACES=(
   "compound-engineering:$DOTFILES_DIR/vendor/compound-engineering/skills"
 )
 
+# Deliberately hidden from the OMP farm even though their namespace is linked:
+# git-workflow and auto-runner skills that conflict with this jj/omp harness.
+EXCLUDES=(
+  "compound-engineering:ce-commit-push-pr"
+  "compound-engineering:ce-debug"
+  "compound-engineering:ce-work"
+  "compound-engineering:ce-worktree"
+  "compound-engineering:lfg"
+)
+
 mkdir -p "$SKILLS_DIR"
 
 linked=0; collided=0; pruned=0
@@ -40,6 +50,10 @@ for pair in "${NAMESPACES[@]}"; do
     dir="${dir%/}"
     [ -f "$dir/SKILL.md" ] || continue
     base=$(basename "$dir")
+    if [[ " ${EXCLUDES[*]} " == *" ${ns}:${base} "* ]]; then
+      echo "skip ${ns}/${base} (excluded)"
+      continue
+    fi
     name="$base"
     if [ -n "${OWNER[$name]:-}" ] && [ "${OWNER[$name]}" != "$dir" ]; then
       name="${ns}--${base}"
