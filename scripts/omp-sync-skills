@@ -38,6 +38,12 @@ EXCLUDES=(
   "compound-engineering:lfg"
 )
 
+# Namespaces where ONLY the listed skills are linked (keep-few-of-many pools).
+# sentry-for-ai ships ~25 per-platform SDK skills; Sami keeps only the Python SDK.
+declare -A ONLY=(
+  ["sentry"]="sentry-python-sdk"
+)
+
 mkdir -p "$SKILLS_DIR"
 
 linked=0; collided=0; pruned=0
@@ -52,6 +58,9 @@ for pair in "${NAMESPACES[@]}"; do
     base=$(basename "$dir")
     if [[ " ${EXCLUDES[*]} " == *" ${ns}:${base} "* ]]; then
       echo "skip ${ns}/${base} (excluded)"
+      continue
+    fi
+    if [ -n "${ONLY[$ns]:-}" ] && [[ " ${ONLY[$ns]} " != *" ${base} "* ]]; then
       continue
     fi
     name="$base"

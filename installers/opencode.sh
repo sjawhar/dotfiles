@@ -32,19 +32,44 @@ ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
 mkdir -p "${HOME}/.claude/skills"
 ensure_link "${DOTFILES_DIR}/plugins/sjawhar/skills"                              "${HOME}/.claude/skills/sjawhar"
 ensure_link "${DOTFILES_DIR}/vendor/legion/skills"                                 "${HOME}/.claude/skills/legion"
-ensure_link "${DOTFILES_DIR}/vendor/sentry-for-ai/skills"                         "${HOME}/.claude/skills/sentry-for-ai"
+# sentry-for-ai ships ~25 per-platform SDK skills; Sami wants only the Python SDK
+# (sentry-cli is its own vendor below). Curate: real dir + one link, replacing the
+# old whole-dir symlink if present.
+[ -L "${HOME}/.claude/skills/sentry-for-ai" ] && rm "${HOME}/.claude/skills/sentry-for-ai"
+mkdir -p "${HOME}/.claude/skills/sentry-for-ai"
+ensure_link "${DOTFILES_DIR}/vendor/sentry-for-ai/skills/sentry-python-sdk"       "${HOME}/.claude/skills/sentry-for-ai/sentry-python-sdk"
+for stale in "${HOME}/.claude/skills/sentry-for-ai"/*; do
+    [ -L "$stale" ] && [ "$(basename "$stale")" != "sentry-python-sdk" ] && rm "$stale"
+done
 ensure_link "${DOTFILES_DIR}/vendor/ghost-wispr/.opencode/skills"                 "${HOME}/.claude/skills/ghost-wispr"
 
 # Remove legacy OpenCode-specific symlinks that are now redundant. The bridge
 # handles agent/command registration; native ~/.claude/skills/ discovery handles skills.
-# Keep compound-engineering alone — it intentionally exposes skills as commands as a
-# workaround for OpenCode not honoring Claude's disable-model-invocation field.
+# compound-engineering is managed separately below (curated command exposure).
 for legacy_skill in sjawhar skill-creator using-jj legion github linear sentry-for-ai ghost-wispr; do
     [ -L "${OPENCODE_DIR}/skills/${legacy_skill}" ] && rm "${OPENCODE_DIR}/skills/${legacy_skill}"
 done
 for legacy_cmd_link in sjawhar sentry-for-ai plan-review.md; do
     target="${OPENCODE_DIR}/commands/${legacy_cmd_link}"
     [ -L "$target" ] && rm "$target"
+done
+
+# compound-engineering stays under OPENCODE_DIR/skills — it intentionally exposes
+# skills as commands (workaround for OpenCode not honoring Claude's
+# disable-model-invocation field). Curate: real dir + per-skill links, replacing
+# the old whole-dir symlink. Skip list mirrors EXCLUDES in scripts/omp-sync-skills.
+CE_DIR="${OPENCODE_DIR}/skills/compound-engineering"
+[ -L "$CE_DIR" ] && rm "$CE_DIR"
+mkdir -p "$CE_DIR"
+for dir in "${DOTFILES_DIR}/vendor/compound-engineering/skills"/*/; do
+    dir="${dir%/}"
+    name=$(basename "$dir")
+    case "$name" in
+        ce-commit-push-pr|ce-debug|ce-work|ce-worktree|lfg)
+            [ -L "${CE_DIR}/${name}" ] && rm "${CE_DIR}/${name}" ;;
+        *)
+            ensure_link "$dir" "${CE_DIR}/${name}" ;;
+    esac
 done
 
 # Instructions: share the same markdown between Claude Code and OpenCode.
