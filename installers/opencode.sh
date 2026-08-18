@@ -16,12 +16,14 @@ if [ -d "${DOTFILES_DIR}/vendor/streamlinear/.git" ]; then
         git -C "${DOTFILES_DIR}/vendor/streamlinear" remote add upstream https://github.com/obra/streamlinear.git
 fi
 ensure_vendor https://github.com/anthropics/skills.git anthropic-skills
-ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compound-engineering
+# Pinned: upstreams restructured after these commits (skills moved under
+# packages/); consumers below and in scripts/omp-sync-skills expect this layout.
+ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compound-engineering d3f35297adccea3ad8735e988253966ffa8cf74c
 ensure_vendor https://github.com/sjawhar/legion.git legion
 ensure_vendor https://github.com/github/gh-stack.git gh-stack
 ensure_vendor https://github.com/DataDog/pup.git pup
-ensure_vendor https://github.com/getsentry/sentry-for-ai.git sentry-for-ai
-ensure_vendor https://github.com/getsentry/cli.git sentry-cli
+ensure_vendor https://github.com/getsentry/sentry-for-ai.git sentry-for-ai 2c34b9a2ecff03005d381e60013d7d5849801a62
+ensure_vendor https://github.com/getsentry/cli.git sentry-cli 33028c2ac93e027ce3faa9045efc91d895deae1a
 ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
 
 # Native skill discovery: both OpenCode and Claude Code read skills from ~/.claude/skills/<name>/SKILL.md.
