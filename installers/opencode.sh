@@ -18,6 +18,11 @@ fi
 ensure_vendor https://github.com/anthropics/skills.git anthropic-skills
 ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compound-engineering
 ensure_vendor https://github.com/sjawhar/legion.git legion
+ensure_vendor https://github.com/github/gh-stack.git gh-stack
+ensure_vendor https://github.com/DataDog/pup.git pup
+ensure_vendor https://github.com/getsentry/sentry-for-ai.git sentry-for-ai
+ensure_vendor https://github.com/getsentry/cli.git sentry-cli
+ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
 
 # Native skill discovery: both OpenCode and Claude Code read skills from ~/.claude/skills/<name>/SKILL.md.
 # Symlink each source dir under ~/.claude/skills/ so both tools find them with zero plugin code.
