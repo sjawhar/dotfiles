@@ -6,6 +6,7 @@ GENERATOR="${LAPTOP_DIR}/generate-shortcuts"
 FIXTURES="${LAPTOP_DIR}/testdata/generate-shortcuts"
 DOCKED_MONITORS="${FIXTURES}/docked.monitors"
 PORTABLE_MONITORS="${FIXTURES}/portable.monitors"
+INNOVIEW_MONITORS="${FIXTURES}/portable-innoview.monitors"
 SINGLE_MONITORS="${FIXTURES}/single.monitors"
 LAPTOP_ONLY_MONITORS="${FIXTURES}/laptop-only.monitors"
 DISABLED_LAPTOP_MONITORS="${FIXTURES}/disabled-laptop.monitors"
@@ -125,16 +126,29 @@ grep -Fq '(modifiers: [Alt], key: "1", description: Some("WS1 — eDP-1 (1)")): 
     || fail 'workspace 1 must resolve to eDP-1 with its first local index'
 grep -Fq '(modifiers: [Alt], key: "4", description: Some("WS4 — DP-2 (1)")): WorkspaceOnOutput("DP-2", 1),' "${portable_output}" \
     || fail 'workspace 4 must resolve to DP-2 with its first local index'
-grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — DP-1 (1)")): WorkspaceOnOutput("DP-1", 1),' "${portable_output}" \
-    || fail 'workspace 7 must resolve to DP-1'
-grep -Fq '(modifiers: [Super, Alt], key: "5", description: Some("WS15 — eDP-1 (8)")): WorkspaceOnOutput("eDP-1", 8),' "${portable_output}" \
+grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — MB16AC (1)")): WorkspaceOnOutput("MB16AC", 1),' "${portable_output}" \
+    || fail 'workspace 7 must resolve to the ASUS portrait'
+grep -Fq '(modifiers: [Alt], key: "9", description: Some("WS9 — DP-1 (1)")): WorkspaceOnOutput("DP-1", 1),' "${portable_output}" \
+    || fail 'workspace 9 must resolve to DP-1 with its first local index'
+grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — MB16AC (3)")): WorkspaceOnOutput("MB16AC", 3),' "${portable_output}" \
+    || fail 'workspace 11 must continue the ASUS local index sequence'
+grep -Fq '(modifiers: [Super, Alt], key: "5", description: Some("WS15 — eDP-1 (5)")): WorkspaceOnOutput("eDP-1", 5),' "${portable_output}" \
     || fail 'workspace 15 must finish the laptop local index sequence'
+
+innoview_output="${TMPDIR}/innoview-custom"
+"${GENERATOR}" --check --monitors "${INNOVIEW_MONITORS}" > "${innoview_output}"
+[[ "$(grep -c '): WorkspaceOnOutput(' "${innoview_output}")" -eq 15 ]] \
+    || fail 'innoview mode must emit 15 workspace bindings'
+grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — InnoView (1)")): WorkspaceOnOutput("InnoView", 1),' "${innoview_output}" \
+    || fail 'workspace 7 must prefer the InnoView over the ASUS'
+grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — MB16AC (1)")): WorkspaceOnOutput("MB16AC", 1),' "${innoview_output}" \
+    || fail 'workspace 11 must fall through to the ASUS when both are connected'
 
 disabled_laptop_output="${TMPDIR}/disabled-laptop-custom"
 "${GENERATOR}" --check --monitors "${DISABLED_LAPTOP_MONITORS}" > "${disabled_laptop_output}"
-[[ "$(grep -c '): WorkspaceOnOutput(' "${disabled_laptop_output}")" -eq 4 ]] \
+[[ "$(grep -c '): WorkspaceOnOutput(' "${disabled_laptop_output}")" -eq 2 ]] \
     || fail 'only the enabled external monitor must receive workspace bindings'
-[[ "$(grep -c '): MoveToWorkspaceOnOutput(' "${disabled_laptop_output}")" -eq 4 ]] \
+[[ "$(grep -c '): MoveToWorkspaceOnOutput(' "${disabled_laptop_output}")" -eq 2 ]] \
     || fail 'only the enabled external monitor must receive move bindings'
 ! grep -q 'WorkspaceOnOutput("eDP-1"\|MoveToWorkspaceOnOutput("eDP-1"' "${disabled_laptop_output}" \
     || fail 'disabled eDP-1 must not win a workspace resolution'
@@ -149,7 +163,7 @@ printf '%s\n' \
 chmod +x "${fake_cosmic_randr}"
 live_disabled_laptop_output="${TMPDIR}/live-disabled-laptop-custom"
 PATH="${fake_bin}:${PATH}" "${GENERATOR}" --check > "${live_disabled_laptop_output}"
-[[ "$(grep -c '): WorkspaceOnOutput(' "${live_disabled_laptop_output}")" -eq 7 ]] \
+[[ "$(grep -c '): WorkspaceOnOutput(' "${live_disabled_laptop_output}")" -eq 5 ]] \
     || fail 'live monitor parsing must retain only enabled outputs'
 ! grep -q 'WorkspaceOnOutput("eDP-1"\|MoveToWorkspaceOnOutput("eDP-1"' "${live_disabled_laptop_output}" \
     || fail 'live monitor parsing must ignore disabled eDP-1'
