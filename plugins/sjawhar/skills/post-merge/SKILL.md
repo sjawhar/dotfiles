@@ -13,6 +13,4 @@ A PR just merged. Run the closing sweep — execute each item, don't present a l
 4. **Deploy**: if the repo has a deployment step (check AGENTS.md), follow it and verify the change is live.
 5. **Report**: the short list of items you just handled (or "nothing left"), then **clearly state any applicable follow-ups or cleanups that remain** — full sentences with context, not bare issue numbers or shorthand.
 
-PR-record and verification drift is the `opening-a-pr`/`landing-a-pr` skills' job; if you find it anyway, fix it and note the gate missed it. Confirm the merged PR carried a `## Verification` section — missing means the gate was skipped; say so plainly.
-
 The bar is "pristine clean."

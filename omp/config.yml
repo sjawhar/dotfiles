@@ -31,6 +31,7 @@ task:
     test-analyzer: "@review"
     type-checker: anthropic/claude-opus-5
     ux-designer: "@vision"
+    sol-drafter: openai-codex/gpt-5.6-sol:xhigh
   isolation: 
     mode: auto
     merge: patch
@@ -51,16 +52,12 @@ dev:
 setupVersion: 1
 display: 
   smoothStreaming: false
-  hideToolActivity: true
+  hideToolActivity: false
   shimmer: disabled
 tui: 
   resizeScrollback: preserve
-skills:
-  # Git-workflow / auto-runner skills that conflict with this jj/omp harness.
-  # Applies to native discovery of the compound-engineering pool (nested
-  # namespace scan); mirrors the skip list in installers/opencode.sh's curated
-  # CE_DIR.
-  ignoredSkills:
+skills: 
+  ignoredSkills: 
     - ce-commit-push-pr
     - ce-debug
     - ce-work
