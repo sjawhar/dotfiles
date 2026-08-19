@@ -1,0 +1,12 @@
+{
+  "$comment": "Single source of truth for vendored/adopted skill pools consumed by BOTH harness bridges: opencode/plugins/dotfiles-bridge.ts (OpenCode; skills+commands+agents) and omp/extensions/dotfiles-skills.ts (OMP; resources_discover skillPaths). Marketplace-installed pools do NOT belong here - Claude's installed_plugins.json is their source of truth and both harnesses ingest it natively. Fields: root = package root relative to the dotfiles dir (skills expected at <root>/skills); namespace = bridge namespace; skills=false = bridge skips skills (OpenCode loads them natively from ~/.claude/skills); omp=false = OMP skips this pool (it gets it via its own plugin install); ompSkillsDir = OMP scans this dir instead of <root>/skills (supports ~/ prefix; used for installer-curated subsets).",
+  "sources": [
+    { "root": "plugins/sjawhar", "namespace": "sjawhar" },
+    { "root": "vendor/gh-stack", "namespace": "gh" },
+    { "root": "vendor/legion", "namespace": "legion", "omp": false },
+    { "root": "vendor/pup", "namespace": "pup" },
+    { "root": "plugins/cursor-harvest", "namespace": "cursor-harvest" },
+    { "root": "vendor/sentry-for-ai", "namespace": "sentry", "skills": false, "ompSkillsDir": "~/.claude/skills/sentry-for-ai" },
+    { "root": "vendor/sentry-cli/plugins/sentry-cli", "namespace": "sentry-cli" }
+  ]
+}
