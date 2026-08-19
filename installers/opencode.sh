@@ -17,7 +17,7 @@ if [ -d "${DOTFILES_DIR}/vendor/streamlinear/.git" ]; then
 fi
 ensure_vendor https://github.com/anthropics/skills.git anthropic-skills
 # Pinned: upstreams restructured after these commits (skills moved under
-# packages/); consumers below and in scripts/omp-sync-skills expect this layout.
+# packages/); consumers below and in skills-sources.json expect this layout.
 ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compound-engineering d3f35297adccea3ad8735e988253966ffa8cf74c
 ensure_vendor https://github.com/sjawhar/legion.git legion
 ensure_vendor https://github.com/github/gh-stack.git gh-stack
@@ -57,7 +57,8 @@ done
 # compound-engineering stays under OPENCODE_DIR/skills — it intentionally exposes
 # skills as commands (workaround for OpenCode not honoring Claude's
 # disable-model-invocation field). Curate: real dir + per-skill links, replacing
-# the old whole-dir symlink. Skip list mirrors EXCLUDES in scripts/omp-sync-skills.
+# the old whole-dir symlink. Skip list mirrors omp's skills.ignoredSkills
+# entries in omp/config.yml (compound-engineering exclusions).
 CE_DIR="${OPENCODE_DIR}/skills/compound-engineering"
 [ -L "$CE_DIR" ] && rm "$CE_DIR"
 mkdir -p "$CE_DIR"
