@@ -6,6 +6,7 @@ export DOTFILES_DIR
 echo "=== Dotfiles Install ==="
 
 source "${DOTFILES_DIR}/installers/shell.sh"
+source "${DOTFILES_DIR}/installers/mailbox.sh"
 source "${DOTFILES_DIR}/installers/mise.sh" "$@"
 source "${DOTFILES_DIR}/installers/docker.sh"
 source "${DOTFILES_DIR}/installers/sops.sh"

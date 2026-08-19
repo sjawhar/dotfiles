@@ -3,6 +3,11 @@
 # All versions pinned for reproducibility
 
 [settings]
+# 14d soak for third-party releases. The mise default (24h) let an accidental
+# blanket `mise upgrade --bump` (2026-08-25) pull bun 1.4.0 at 5 days old and
+# non-LTS node 26. Exact pins bypass this filter, so deliberate fresh installs
+# still work; only fuzzy resolution (latest / --bump) waits out the window.
+minimum_release_age = "14d"
 # My own repos are exempt from the release-age filter. That delay exists so a
 # third-party compromise has time to surface before I install it, which buys
 # nothing for code my own attested CI just built -- and mise still verifies
@@ -18,6 +23,7 @@ minimum_release_age_excludes = [
   "github:sjawhar/forward",
   "github:sjawhar/jj",
   "github:sjawhar/knives",
+  "github:sjawhar/mailbox",
   "github:sjawhar/oh-my-opencode",
   "github:sjawhar/oh-my-pi",
   "github:sjawhar/opencode",
@@ -72,7 +78,7 @@ depot = "2.102.7"
 go = "1.27.0"
 helm = "latest"
 kubectl = "latest"
-node = "22.22.2"
+node = "22.22.2"  # HOLD: 22 is LTS; 26 is non-LTS Current until Oct 2026 (ABI 147). Next deliberate upgrade target: 24 LTS
 opentofu = "1.12.6"
 shellcheck = "0.11.0"
 
@@ -127,6 +133,12 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 [tools.secrets]
 version = "latest"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
+
+# Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
+[tools."github:sjawhar/mailbox"]
+version = "latest"
+platforms.linux-x64   = { asset_pattern = "mailbox-linux-amd64.tar.gz" }
+platforms.macos-arm64 = { asset_pattern = "mailbox-darwin-arm64.tar.gz" }
 
 # Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
 # binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl
