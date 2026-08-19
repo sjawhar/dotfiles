@@ -19,17 +19,19 @@ ensure_clone() {
 }
 
 ensure_vendor() {
-    local url="$1" name="$2"
+    local url="$1" name="$2" ref="${3:-}"
     local dir="${DOTFILES_DIR}/vendor/${name}"
-    if [ -e "${dir}/.git" ]; then
-        if [ ! -e "${dir}/.jj" ] && command -v jj &>/dev/null; then
-            ( cd "$dir" && jj git init --colocate )
-        fi
-        return 0
+    if [ ! -e "${dir}/.git" ]; then
+        mkdir -p "$(dirname "$dir")"
+        git clone --depth 1 "$url" "$dir"
     fi
-    mkdir -p "$(dirname "$dir")"
-    git clone --depth 1 "$url" "$dir"
-    if command -v jj &>/dev/null; then
+    # Pinned vendors converge every machine on one commit; unpinned ones stay
+    # at whatever HEAD they were cloned at (never auto-updated).
+    if [ -n "$ref" ] && [ "$(git -C "$dir" rev-parse HEAD)" != "$ref" ]; then
+        git -C "$dir" fetch --depth 1 origin "$ref"
+        git -C "$dir" checkout --detach "$ref"
+    fi
+    if [ ! -e "${dir}/.jj" ] && command -v jj &>/dev/null; then
         ( cd "$dir" && jj git init --colocate )
     fi
 }

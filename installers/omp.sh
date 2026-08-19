@@ -24,6 +24,7 @@ ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
 if [ -L "${OMP_AGENT_DIR}/extensions" ]; then rm "${OMP_AGENT_DIR}/extensions"; fi
 mkdir -p "${OMP_AGENT_DIR}/extensions"
 ensure_link "${DOTFILES_DIR}/omp/extensions/jj-snapshot.ts" "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/dotfiles-skills.ts" "${OMP_AGENT_DIR}/extensions/dotfiles-skills.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 (cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
 # legion is a monorepo: its envoy extension imports @legion/contracts, a
@@ -34,9 +35,12 @@ if [ -d "${DOTFILES_DIR}/omp/plugins/node_modules/legion" ]; then
         || echo "omp: legion workspace install failed; envoy extension will not load" >&2
 fi
 
-# Skills: OMP discovers <skills-dir>/<name>/SKILL.md; the flat farm is built
-# by scanning dotfiles plugins/ + vendor/ at runtime (portable, no manifest).
-"${DOTFILES_DIR}/scripts/omp-sync-skills" || echo "omp: skill sync reported issues" >&2
+# Skills: pools are declared once in skills-sources.json (shared with the
+# OpenCode dotfiles-bridge); omp/extensions/dotfiles-skills.ts feeds them to
+# OMP via resources_discover at session start and /reload-plugins. The old
+# flat symlink farm (scripts/omp-sync-skills -> ~/.omp/agent/skills) is
+# retired: live sessions snapshotted farm paths, so every re-sync prune broke
+# them mid-flight.
 
 # Prompt templates (shared command sources synced as symlinks).
 "${DOTFILES_DIR}/scripts/omp-sync-prompts" || echo "omp: prompt sync reported issues" >&2

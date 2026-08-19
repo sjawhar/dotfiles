@@ -8,12 +8,12 @@ oh-my-pi (omp) configuration. The binary is mise-managed (`"github:sjawhar/oh-my
 - **`models.yml`** — model catalog patches (xhigh thinking tiers). Symlinked alongside.
 - **`mcp.json`** — MCP servers, launched through the `secrets` CLI so tokens never sit in config.
 - **`agents/`** — agent definition files, all real files. Some originate in `plugins/sjawhar/agents/` or vendor repos; they are copied in, not linked. Update by re-copying deliberately.
-- **`extensions/`** — dotfiles-owned extension source only (`jj-snapshot.ts`). Everything else reaches omp as an installed plugin (below), never as a path or symlink to a checkout.
+- **`extensions/`** — dotfiles-owned extension source only (`jj-snapshot.ts`, `dotfiles-skills.ts`). Everything else reaches omp as an installed plugin (below), never as a path or symlink to a checkout.
 - **`plugins/`** — the omp plugin tree, symlinked to `~/.omp/plugins`. `package.json` pins each plugin to a GitHub ref (`github:sjawhar/knives#<sha>`, `github:sjawhar/secretsd#<tag>`, ...) exactly like `opencode.json`'s plugin entries. `bun install` here materializes them; `omp plugin install`/`upgrade` manage the pins, and the resulting `package.json`/lockfile changes get committed.
 
-## Runtime state built per machine (not in this repo)
+## Skill pools (shared with OpenCode)
 
-`~/.omp/agent/skills/` and `~/.omp/agent/prompts/` are flat symlink farms built at install time by `scripts/omp-sync-skills` and `scripts/omp-sync-prompts`, which scan the curated sources (the same list as `opencode/plugins/dotfiles-bridge.ts`) at run time. Nothing about them is committed — no manifests, no frozen paths.
+Vendored/adopted skill pools are declared once in `skills-sources.json` at the dotfiles root and consumed by both harness bridges: `opencode/plugins/dotfiles-bridge.ts` (OpenCode) and `omp/extensions/dotfiles-skills.ts` (OMP, via the `resources_discover` extension event at session start and `/reload-plugins`; needs a fork build ≥ v17.3.8-sami.20260820). Marketplace-installed pools stay out of the manifest — Claude's `installed_plugins.json` is their source of truth and both harnesses ingest it natively. The old flat symlink farm (`scripts/omp-sync-skills` → `~/.omp/agent/skills/`) is retired: live sessions snapshotted farm paths, so every re-sync prune broke them mid-flight. `~/.omp/agent/prompts/` is still a farm built by `scripts/omp-sync-prompts`.
 
 ## Conventions
 
