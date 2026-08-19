@@ -1,0 +1,14 @@
+# Regenerates COSMIC custom shortcuts from laptop/workspaces.conf against the
+# currently connected monitors. Triggered by workspace-shortcuts.path; run
+# manually with `systemctl --user start workspace-shortcuts` if needed.
+#
+# Companion symlink:
+#   ~/.config/systemd/user/workspace-shortcuts.service -> this file
+
+[Unit]
+Description=Regenerate COSMIC workspace shortcuts from connected monitors
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/laptop/generate-shortcuts --apply
