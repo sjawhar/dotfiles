@@ -1,4 +1,4 @@
-modelRoles: 
+modelRoles:
   default: anthropic/claude-fable-5:xhigh
   plan: anthropic/claude-fable-5:max
   smol: anthropic/claude-sonnet-5
@@ -7,23 +7,23 @@ modelRoles:
   vision: google/gemini-3.7-flash:medium
   review: openai-codex/gpt-5.5:xhigh
   advisor: anthropic/claude-sonnet-5:medium
-retry: 
+retry:
   modelFallback: true
-  fallbackChains: 
-    anthropic/claude-fable-5: 
+  fallbackChains:
+    anthropic/claude-fable-5:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
-    anthropic/claude-opus-5: 
+    anthropic/claude-opus-5:
       - anthropic/claude-opus-4-8
-    default: 
+    default:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
-    plan: 
+    plan:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
-task: 
+task:
   maxRecursionDepth: 3
-  agentModelOverrides: 
+  agentModelOverrides:
     bug-finder: "@review"
     code-architect: anthropic/claude-opus-5
     code-reviewer: "@review"
@@ -35,44 +35,43 @@ task:
     test-analyzer: "@review"
     type-checker: anthropic/claude-opus-5
     ux-designer: "@vision"
-    sol-drafter: openai-codex/gpt-5.6-sol:xhigh
-  isolation: 
+  isolation:
     mode: auto
     merge: patch
-advisor: 
+advisor:
   enabled: false
-bashInterceptor: 
+bashInterceptor:
   enabled: true
-memory: 
+memory:
   backend: mnemopi
-mnemopi: 
+mnemopi:
   scoping: per-project-tagged
-theme: 
+theme:
   dark: titanium
 symbolPreset: unicode
-hideThinkingBlock: true
-dev: 
+hideThinkingBlock: false
+dev:
   autoqaConsent: granted
 setupVersion: 2
-display: 
+display:
   smoothStreaming: false
   hideToolActivity: false
   shimmer: disabled
-tui: 
+tui:
   resizeScrollback: preserve
   rewindScrollback: preserve
-skills: 
-  ignoredSkills: 
+skills:
+  ignoredSkills:
     - ce-commit-push-pr
     - ce-debug
     - ce-work
     - ce-worktree
     - lfg
-providers: 
-  anthropic: 
+providers:
+  anthropic:
     serverSideFallback: true
-    serverSideFallbackModels: 
+    serverSideFallbackModels:
       - claude-opus-5
       - claude-opus-4-8
-composer: 
+composer:
   shape: box

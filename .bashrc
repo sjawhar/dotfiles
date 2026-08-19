@@ -100,6 +100,15 @@ if [ -d "${HOME}/.pcscd" ]; then
     export PCSCLITE_CSOCK_NAME="${HOME}/.pcscd/pcscd.comm"
 fi
 
+# Remote audio: forward serve owns $XDG_RUNTIME_DIR/forward/pulse.sock on serve-role
+# machines (pulse channel to the laptop's pipewire-pulse). Explicit opt-in only —
+# deliberately not PulseAudio's default path — so clients size buffers for a network
+# round trip. When the channel is down, audio tools see a connection failure rather
+# than "no audio system", which is the more honest error.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${HOME}/.config/systemd/user/forward-serve.service" ]; then
+    export PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/forward/pulse.sock"
+fi
+
 
 # ==============================================================================
 # INTERACTIVE GUARD
