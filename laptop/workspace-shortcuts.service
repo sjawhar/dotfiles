@@ -8,6 +8,10 @@
 [Unit]
 Description=Regenerate COSMIC workspace shortcuts from connected monitors
 After=graphical-session.target
+# Dock enumeration rewrites outputs.ron many times in quick bursts; every
+# trigger must run so the final output state is the one applied. The default
+# start limit (5 in 10s) ate triggers and left stale shortcuts applied.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

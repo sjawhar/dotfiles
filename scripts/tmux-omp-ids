@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Extract oh-my-pi session IDs (UUIDs) from the current pane, then copy one to
+# the local clipboard — either bare, or wrapped as `omp --resume <id>`.
+#
+# Sibling of tmux-urls, built for the moment omp exits and prints its resume
+# hint: the pane is back on the normal screen, the hint is the most recent
+# UUID in scrollback, so it lands on menu key 1. IDs are matched generically
+# (any UUID in the pane), so envoy session IDs and history:// IDs work too.
+#
+# The pane must be passed in explicitly, same as tmux-urls: `capture-pane`
+# with no -t resolves to whatever pane the server last considered current,
+# which is wrong once more than one client is attached.
+#
+# Usage:
+#   tmux-omp-ids menu <copy|resume> <pane>  Show a display-menu of UUIDs in <pane>
+#   tmux-omp-ids copy <n>                   Copy UUID number <n> (bare)
+#   tmux-omp-ids resume <n>                 Copy `omp --resume <UUID number n>`
+set -euo pipefail
+
+cache="${TMUX_TMPDIR:-/tmp}/tmux-omp-ids-$(id -u)"
+copy_cmd="$(cd "$(dirname "$0")" && pwd)/tmux-osc52-copy"
+
+case "${1:-menu}" in
+menu)
+    action="${2:-resume}"
+    pane="${3:-}"
+    [ -n "$pane" ] || pane="$(tmux display-message -p '#{pane_id}')"
+
+    # Visible pane + recent scrollback, wrapped lines joined, most recent
+    # first, deduplicated.
+    tmux capture-pane -p -J -S -200 -t "$pane" \
+        | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' \
+        | tac \
+        | awk '!seen[$0]++' \
+        | head -30 >"$cache" || true
+
+    if [ ! -s "$cache" ]; then
+        if [ "$(tmux display-message -p -t "$pane" '#{alternate_on}')" = 1 ]; then
+            tmux display-message "tmux-omp-ids: no session IDs on screen (full-screen app: only visible rows are searchable)"
+        else
+            tmux display-message "tmux-omp-ids: no session IDs in pane"
+        fi
+        exit 0
+    fi
+
+    keys=(1 2 3 4 5 6 7 8 9 0 a b c d e f g h i j k l m n o p q r s t)
+    args=()
+    i=0
+    while IFS= read -r id; do
+        i=$((i + 1))
+        [ "$i" -le "${#keys[@]}" ] || break
+        args+=("$id" "${keys[$((i - 1))]}" "run-shell '$0 $action $i'")
+    done <"$cache"
+
+    title="Copy session ID"
+    [ "$action" = resume ] && title="Copy resume command"
+    tmux display-menu -T "$title" "${args[@]}"
+    ;;
+copy)
+    id=$(sed -n "${2}p" "$cache")
+    [ -n "$id" ] || exit 1
+    printf %s "$id" | "$copy_cmd"
+    tmux display-message "Copied: $id"
+    ;;
+resume)
+    id=$(sed -n "${2}p" "$cache")
+    [ -n "$id" ] || exit 1
+    printf 'omp --resume %s' "$id" | "$copy_cmd"
+    tmux display-message "Copied: omp --resume $id"
+    ;;
+*)
+    echo "usage: tmux-omp-ids [menu <copy|resume> <pane>|copy <n>|resume <n>]" >&2
+    exit 64
+    ;;
+esac

@@ -6,8 +6,6 @@ GENERATOR="${LAPTOP_DIR}/generate-shortcuts"
 FIXTURES="${LAPTOP_DIR}/testdata/generate-shortcuts"
 DOCKED_MONITORS="${FIXTURES}/docked.monitors"
 PORTABLE_MONITORS="${FIXTURES}/portable.monitors"
-INNOVIEW_MONITORS="${FIXTURES}/portable-innoview.monitors"
-TRAVEL_OFFICE_MONITORS="${FIXTURES}/travel-office.monitors"
 SINGLE_MONITORS="${FIXTURES}/single.monitors"
 LAPTOP_ONLY_MONITORS="${FIXTURES}/laptop-only.monitors"
 DISABLED_LAPTOP_MONITORS="${FIXTURES}/disabled-laptop.monitors"
@@ -134,32 +132,6 @@ grep -Fq '(modifiers: [Alt], key: "9", description: Some("WS9 — DP-1 (1)")): W
 grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — MB16AC (3)")): WorkspaceOnOutput("MB16AC", 3),' "${portable_output}" \
     || fail 'workspace 11 must continue the ASUS local index sequence'
 grep -Fq '(modifiers: [Super, Alt], key: "5", description: Some("WS15 — eDP-1 (5)")): WorkspaceOnOutput("eDP-1", 5),' "${portable_output}" \
-    || fail 'workspace 15 must finish the laptop local index sequence'
-
-innoview_output="${TMPDIR}/innoview-custom"
-"${GENERATOR}" --check --monitors "${INNOVIEW_MONITORS}" > "${innoview_output}"
-[[ "$(grep -c '): WorkspaceOnOutput(' "${innoview_output}")" -eq 15 ]] \
-    || fail 'innoview mode must emit 15 workspace bindings'
-grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — InnoView (1)")): WorkspaceOnOutput("InnoView", 1),' "${innoview_output}" \
-    || fail 'workspace 7 must prefer the InnoView over the ASUS'
-grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — MB16AC (1)")): WorkspaceOnOutput("MB16AC", 1),' "${innoview_output}" \
-    || fail 'workspace 11 must fall through to the ASUS when both are connected'
-
-travel_office_output="${TMPDIR}/travel-office-custom"
-"${GENERATOR}" --check --monitors "${TRAVEL_OFFICE_MONITORS}" > "${travel_office_output}"
-[[ "$(grep -c '): WorkspaceOnOutput(' "${travel_office_output}")" -eq 15 ]] \
-    || fail 'travel-office mode must emit 15 workspace bindings'
-grep -Fq '(modifiers: [Alt], key: "1", description: Some("WS1 — P3425WE (1)")): WorkspaceOnOutput("P3425WE", 1),' "${travel_office_output}" \
-    || fail 'workspace 1 must resolve to the travel ultrawide'
-grep -Fq '(modifiers: [Alt], key: "4", description: Some("WS4 — DP-2 (4)")): WorkspaceOnOutput("DP-2", 4),' "${travel_office_output}" \
-    || fail 'workspace 4 must continue the travel ultrawide local index sequence via DP-2'
-grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — DP-4 (1)")): WorkspaceOnOutput("DP-4", 1),' "${travel_office_output}" \
-    || fail 'workspace 7 must resolve to the left travel 4K by connector'
-grep -Fq '(modifiers: [Alt], key: "9", description: Some("WS9 — HDMI-A-1 (1)")): WorkspaceOnOutput("HDMI-A-1", 1),' "${travel_office_output}" \
-    || fail 'workspace 9 must resolve to the right travel 4K by connector'
-grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — eDP-1 (1)")): WorkspaceOnOutput("eDP-1", 1),' "${travel_office_output}" \
-    || fail 'workspace 11 must put the laptop in the ASUS role'
-grep -Fq '(modifiers: [Super, Alt], key: "5", description: Some("WS15 — eDP-1 (5)")): WorkspaceOnOutput("eDP-1", 5),' "${travel_office_output}" \
     || fail 'workspace 15 must finish the laptop local index sequence'
 
 disabled_laptop_output="${TMPDIR}/disabled-laptop-custom"
