@@ -32,7 +32,7 @@ minimum_release_age_excludes = [
 [tools]
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
 "github:sjawhar/knives" = "latest"
-"github:sjawhar/oh-my-pi" = { version = "latest", version_prefix = "release-" }  # omp daily driver: fork releases are knives cut names (release-<date>); wrapper execs this
+"github:sjawhar/oh-my-pi" = "latest"  # omp daily driver: fork release (sami build v<upstream>-sami.<timestamp>, same pattern as sjawhar/opencode); wrapper execs this
 "github:sjawhar/secretsd" = "latest"  # Session secrets broker; ships bin/secrets + systemd units
 "github:syncthing/syncthing" = "latest"
 "github:tmux/tmux-builds" = "3.7b"
@@ -67,7 +67,7 @@ depot = "2.101.75"
 go = "1.26.5"
 helm = "latest"
 kubectl = "latest"
-node = "26.5.0"
+node = "22.22.2"
 opentofu = "1.12.5"
 shellcheck = "0.11.0"
 
