@@ -1,0 +1,21 @@
+# Watches cosmic-comp's persisted output state and the workspace map, and
+# regenerates the COSMIC workspace shortcuts whenever either changes.
+# cosmic-comp rewrites outputs.ron on every output change (connect, disconnect,
+# rotate, scale, position), so docking changes and conf edits both re-resolve
+# laptop/workspaces.conf automatically — no manual `generate-shortcuts --apply`.
+#
+# Companion symlink:
+#   ~/.config/systemd/user/workspace-shortcuts.path -> this file
+
+[Unit]
+Description=Watch cosmic-comp output state to regenerate workspace shortcuts
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Path]
+PathChanged=%h/.local/state/cosmic-comp/outputs.ron
+PathChanged=%h/.dotfiles/laptop/workspaces.conf
+Unit=workspace-shortcuts.service
+
+[Install]
+WantedBy=graphical-session.target

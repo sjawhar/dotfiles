@@ -214,6 +214,14 @@ ensure_link "${DOTFILES_DIR}/wireplumber/51-camera-mjpg.conf" ~/.config/wireplum
 # --- COSMIC custom shortcuts ---
 chmod +x "${LAPTOP_DIR}/generate-shortcuts"
 "${LAPTOP_DIR}/generate-shortcuts" --apply
+# Regenerate automatically on output changes: cosmic-comp rewrites outputs.ron
+# on every connect/disconnect/rotate/rescale, and the path unit reacts to it.
+mkdir -p ~/.config/systemd/user
+ensure_link "${LAPTOP_DIR}/workspace-shortcuts.service" ~/.config/systemd/user/workspace-shortcuts.service
+ensure_link "${LAPTOP_DIR}/workspace-shortcuts.path" ~/.config/systemd/user/workspace-shortcuts.path
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user enable --now workspace-shortcuts.path 2>/dev/null \
+    || echo "NOTE: could not enable workspace-shortcuts.path (no user systemd session here?) — enable it on the target machine."
 
 # --- Sysctl: desktop performance tuning ---
 if ! diff -q "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performance.conf &>/dev/null; then
