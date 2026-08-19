@@ -1,0 +1,3 @@
+app.display.reset:
+  - alt+l
+  - ctrl+n

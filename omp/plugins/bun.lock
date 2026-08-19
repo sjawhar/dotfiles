@@ -7,7 +7,7 @@
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
         "@sjawhar/opencode-knives": "github:sjawhar/knives#5d9e519f4d74",
-        "legion": "github:sjawhar/legion#f0a0e5f2e64b",
+        "legion": "github:sjawhar/legion#4ee2211fc22a",
         "secretsd": "github:sjawhar/forward#v3.0.2",
         "superpowers": "https://github.com/obra/superpowers",
       },
@@ -168,6 +168,8 @@
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
+    "@toon-format/toon": ["@toon-format/toon@4.1.1", "", {}, "sha512-SGCkS7IjVpwRmGPgnY8ENKpAf0EdAnZDOQkvFW0d2cgOpdn9FEFl7sTgryESyypXrWr0YajHGpwsAUX4zw9ZvA=="],
+
     "@types/node": ["@types/node@26.2.0", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-5IviulTZeRNp2vAJ514cc/HUlY5nZ9fCbq9DMyC52BrhFZACo3nI0R7qBxhQmo/d27NFe96ur/b7Wwxklda+kg=="],
 
     "@types/retry": ["@types/retry@0.12.0", "", {}, "sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA=="],
@@ -256,7 +258,7 @@
 
     "kubernetes-types": ["kubernetes-types@1.30.0", "", {}, "sha512-Dew1okvhM/SQcIa2rcgujNndZwU8VnSapDgdxlYoB84ZlpAD43U6KLAFqYo17ykSFGHNPrg0qry0bP+GJd9v7Q=="],
 
-    "legion": ["legion@github:sjawhar/legion#f0a0e5f", { "dependencies": { "nats": "^2.29.2", "zod": "^4.1.8" } }, "sjawhar-legion-f0a0e5f", "sha512-vX78PY3cW020mst+NndkL9299xov7m1Q1gqnEN6JiPd1RvHBZYMX7czfkRvD7dk7oCHgWVozPsKMi+NIjt8S9Q=="],
+    "legion": ["legion@github:sjawhar/legion#4ee2211", { "dependencies": { "@toon-format/toon": "^4.1.1", "nats": "^2.29.2", "zod": "^4.1.8" } }, "sjawhar-legion-4ee2211", "sha512-wxie+Bpx4auNfyghExNaUM1RcwWePhCMdqOQDDf9KNyiSsc51TFwP/rhqw36KYISreKvST7fjlUpAj6PdOqkGw=="],
 
     "long": ["long@5.3.2", "", {}, "sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA=="],
 

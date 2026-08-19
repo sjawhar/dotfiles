@@ -4,24 +4,48 @@
 # KNIVES_GH_BYPASS=1 skips knives entirely (emergency hatch if knives gh misbehaves).
 set -euo pipefail
 
+# Content decides what is "real", never the path: any candidate carrying the
+# knives-gh-shim marker in its first 512 bytes is a shim. The old dir-string
+# skip broke whenever HOME or DOTFILES_DIR spelled this shim's directory
+# differently from PATH, and knives gh re-entered this shim in an unbounded
+# fork chain (2026-08-27, ~300k processes). Mirrors real_gh() in knives
+# src/commands/gh.rs.
 real_gh() {
     local IFS=':'
-    local dotfiles_shims="${DOTFILES_DIR:-$HOME/.dotfiles}/shims"
+    local dir candidate header
     for dir in $PATH; do
-        [[ "$dir" == "$dotfiles_shims" ]] && continue
-        [[ -x "$dir/gh" ]] && { echo "$dir/gh"; return; }
+        candidate="$dir/gh"
+        [[ -f "$candidate" && -x "$candidate" ]] || continue
+        # Pure bash on purpose: this must work on a PATH too broken to find
+        # head or grep. read stops at the first NUL, so an ELF gh yields a
+        # short marker-free header and is accepted.
+        header=""
+        IFS= read -r -n 512 -d '' header < "$candidate" || true
+        [[ "$header" == *knives-gh-shim* ]] && continue
+        echo "$candidate"
+        return
     done
     return 1
 }
 
-# Oracle amendments: resolve the real gh FIRST and refuse to proceed without it
-# (a bare `gh` fallback would re-enter this shim and recurse), and honor the
-# bypass before involving knives at all.
+# Resolve the real gh FIRST and refuse to proceed without it (a bare `gh`
+# fallback would re-enter this shim and recurse), and honor the bypass before
+# involving knives at all.
 if ! _real="$(real_gh)"; then
     echo "gh shim: no real gh found on PATH" >&2
     exit 127
 fi
 if [[ -z "${KNIVES_GH_BYPASS:-}" ]] && command -v knives > /dev/null 2>&1; then
-    KNIVES_REAL_GH="$_real" exec knives gh -- "$@"
+    # Backstop: a resolution bug must fail loudly here, never fork-bomb the
+    # machine. Legit flows re-enter this shim at most twice (knives runs bare
+    # `gh` for forge queries); depth 3 is a loop.
+    _depth="${KNIVES_GH_SHIM_DEPTH:-0}"
+    [[ "$_depth" =~ ^[0-9]+$ ]] || _depth=0
+    if ((_depth >= 3)); then
+        echo "gh shim: re-entered $_depth times — knives gh is looping through this shim" >&2
+        echo "gh shim: refusing to recurse; KNIVES_GH_BYPASS=1 runs $_real directly" >&2
+        exit 70
+    fi
+    KNIVES_GH_SHIM_DEPTH=$((_depth + 1)) KNIVES_REAL_GH="$_real" exec knives gh -- "$@"
 fi
 exec "$_real" "$@"
