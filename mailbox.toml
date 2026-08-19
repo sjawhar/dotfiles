@@ -1,0 +1,21 @@
+default_account = "work"
+
+# mailbox <= v0.3.0 scrubbed GWS_*_OAUTH by hardcoded pattern and these names explicitly
+# (F-H2: every previously-pattern-covered variable must be enumerated here).
+scrub_env = ["SECRETSD_SESSION_TOKEN_FILE"]
+scrub_env_patterns = ["GWS_*_OAUTH"]
+
+[accounts.work]
+# <= v0.3.0: work reads on EC2 via the keyless broker.
+read_credential_cmd  = ["google-user-token", "--scopes", "gmail.readonly"]
+# <= v0.3.0: write unlock via secrets-wrapped __mint (human tier, YubiKey).
+write_credential_cmd = ["secrets", "GWS_WORK_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_WORK_MODIFY_OAUTH"]
+write_label          = "YubiKey touch (secretsd)"
+credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
+
+[accounts.personal]
+# <= v0.3.0: personal reads re-exec'd under secrets (agent tier, no touch).
+read_credential_cmd  = ["secrets", "GWS_PERSONAL_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_READ_OAUTH"]
+write_credential_cmd = ["secrets", "GWS_PERSONAL_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_MODIFY_OAUTH"]
+write_label          = "YubiKey touch (secretsd)"
+credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
