@@ -16,7 +16,7 @@ You are the coordinator: dispatch, verify results file-by-file, integrate, and m
 
 **Parallelize aggressively.** Structure the plan itself to maximize independent tasks; dispatch independent tasks in the same turn; a blocked lane never idles the pipeline.
 
-Pipeline: plan (writing-plans skill, dispatched to `task(category="ultrabrain")`) → oracle reviews the plan → subagents implement → the `opening-a-pr` skill → the `landing-a-pr` skill. Every plan carries a `## Hardening ledger` section, empty at the start.
+Pipeline: plan (writing-plans skill, dispatched to the `ultrabrain` agent) → oracle reviews the plan → subagents implement → the `opening-a-pr` skill → the `landing-a-pr` skill. Every plan carries a `## Hardening ledger` section, empty at the start.
 
 **The ledger is the implementer's contract, not a suggestion.** Every implementer prompt says: *take the shortcut if it gets the feature working, but log it in the hardening ledger the moment you take it, and return your ledger entries with your report.* You accumulate those entries across subagents and hand the whole list to `opening-a-pr`, which is where they get paid off — before Sami ever looks at the PR. An implementer who hid a hack instead of logging it has broken the contract; send it back.
 
