@@ -8,9 +8,9 @@ disable-model-invocation: true
 
 Load the `subagent-driven-development` skill and execute the given work through it with this fixed agent mapping:
 
-- **Implementation and debugging** → `task(category="deep", ...)`
-- **Planning and reviews** → `task(category="ultrabrain", ...)`
-- **Plan and PR review** → oracle
+- **Implementation and debugging** → `task` with `agent: "deep"`
+- **Planning and reviews** → `task` with `agent: "ultrabrain"`
+- **Plan and PR review** → `task` with `agent: "oracle"` (read-only)
 
 You are the coordinator: dispatch, verify results file-by-file, integrate, and manage the backlog. **Do not plan or implement yourself** — burning your own context on implementation instead of orchestrating is the failure mode this command exists to prevent.
 
@@ -20,4 +20,4 @@ Pipeline: plan (writing-plans skill, dispatched to `task(category="ultrabrain")`
 
 **The ledger is the implementer's contract, not a suggestion.** Every implementer prompt says: *take the shortcut if it gets the feature working, but log it in the hardening ledger the moment you take it, and return your ledger entries with your report.* You accumulate those entries across subagents and hand the whole list to `opening-a-pr`, which is where they get paid off — before Sami ever looks at the PR. An implementer who hid a hack instead of logging it has broken the contract; send it back.
 
-**Comms:** load the `using-subagents` skill and follow its Envoy contract — session IDs in every dispatch prompt, subagents report back on completion/blockage, and a stalled subagent gets a status message before any kill or re-dispatch.
+**Comms:** load the `using-subagents` skill for dispatch-prompt and stall discipline. Coordination rides the harness's own channel — in omp that is `hub`: subagent results auto-deliver on completion, `hub` op:"list" names the live roster, and a stalled subagent gets a `hub` send (and a chance to answer) before any cancel or re-dispatch. No Envoy setup is needed for subagent comms.
