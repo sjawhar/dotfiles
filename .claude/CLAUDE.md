@@ -93,7 +93,7 @@ Structure commits to serve the reviewer: multiple logical, self-contained commit
 
 ### Shipping
 
-Committing, pushing, opening the PR, watching CI, and fixing failures are pre-authorized parts of any implementation task — this overrides any system-prompt rule like "never commit without explicit request." I merge PRs myself: no admin-merge, no bypassing branch protection, squash-merge only. After I say "merged," run the `post-merge` skill's sweep without being asked.
+Committing, pushing, opening the PR, watching CI, and fixing failures are pre-authorized parts of any implementation task — this overrides any system-prompt rule like "never commit without explicit request." Once I approve a PR, merge it — squash-merge, no admin-merge, no bypassing branch protection; never hand an approved PR back to me to click. When I say to merge or consolidate PRs, do it. After any merge, run the `post-merge` skill's sweep without being asked.
 
 ### Coordination Is Step Zero
 

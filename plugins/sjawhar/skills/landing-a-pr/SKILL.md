@@ -1,6 +1,6 @@
 ---
 name: landing-a-pr
-description: "Use after opening or updating a PR, and whenever CI results or review comments arrive on one: a failed check, a bot finding like CodeRabbit or Sentry, a human review, or a PR that has gone quiet with nothing running. Sami merges; this skill never does."
+description: "REQUIRED for every open PR from the moment it exists until it merges. This skill owns the whole post-open lifecycle, not just problem response; loading it is not optional. Use immediately after `gh pr create` or any push to a PR branch, before watching or polling CI, and whenever anything lands on the PR: a failed check, a passing check, a bot finding like CodeRabbit or Sentry, a human review, a merge conflict, or silence with nothing running. Reaching for `gh pr checks`, `gh run watch`, or a sleep loop means you belong here instead."
 ---
 
 # Landing a PR
