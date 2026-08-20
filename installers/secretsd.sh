@@ -12,8 +12,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #     are live on a dev machine;
 #   * the socket-activated *.socket* is enabled (enabling the .service is wrong);
 #   * the OpenCode plugin is registered in opencode.json via ensure_json.
-# Override to point at a checkout elsewhere; only its systemd/ directory is used.
-SECRETSD_SRC="${SECRETSD_SRC:-${HOME}/Code/secretsd}"
+# Optional: set SECRETSD_SRC to a checkout to make unit edits live on a dev
+# machine; only its systemd/ directory is used. Unset, units come from the
+# pinned release -- installers never assume a machine-local checkout path.
+SECRETSD_SRC="${SECRETSD_SRC:-}"
 # The plugin is owned by the secretsd repo, not this one: it speaks a versioned
 # wire protocol to the broker, so it ships from the same source as the binary and
 # is installed here rather than duplicated in dotfiles.
