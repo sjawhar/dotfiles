@@ -81,7 +81,7 @@ def parser() -> CaptureArgumentParser:
     argument_parser.add_argument("--tab", metavar="SUBSTRING")
     argument_parser.add_argument(
         "--relay-url",
-        default=os.environ.get("BROWSER_RELAY_URL", "http://100.100.92.97:12803"),
+        default=os.environ.get("BROWSER_RELAY_URL"),
         metavar="URL",
     )
     argument_parser.add_argument("--source", default="private", metavar="NAME")
@@ -358,6 +358,12 @@ def format_status(secret_key: str, cookie_domain: str, expires: int | float) -> 
 
 def run(args: argparse.Namespace) -> int:
     """Capture one value and report only storage metadata."""
+    if not args.relay_url:
+        raise CaptureError(
+            1,
+            "browser-capture: relay URL is required; "
+            "supply --relay-url URL or set BROWSER_RELAY_URL",
+        )
     verify_secrets_stdin_support(args.source)
     version_url, websocket_url = cdp_endpoint(args.relay_url)
     probe_relay(version_url)

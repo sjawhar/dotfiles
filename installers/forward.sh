@@ -9,6 +9,27 @@ usage() {
 
 MISE="${DOTFILES_DIR}/bin/mise"
 
+install_relay_shell_environment() {
+    local relay_config="$1"
+    local relay_url=""
+    local line
+    local environment_dir
+
+    while IFS= read -r line; do
+        case "$line" in
+            "  relayUrl: "*) relay_url="${line#  relayUrl: }"; break ;;
+        esac
+    done < "$relay_config"
+    if [ -z "$relay_url" ]; then
+        echo "ERROR: ${relay_config} does not define browser.relayUrl" >&2
+        return 1
+    fi
+
+    environment_dir="${XDG_CONFIG_HOME:-$HOME/.config}/environment.d"
+    mkdir -p "$environment_dir"
+    printf 'BROWSER_RELAY_URL=%s\n' "$relay_url" > "${environment_dir}/browser-relay.conf"
+}
+
 case "${1:-}" in
     serve)
         units=(forward-serve.service)
@@ -42,6 +63,7 @@ if [ -n "$omp_config_source" ]; then
     # OMP loads this only through PI_CONFIG_FILES in shims/omp, so the relay URL
     # is present only on the devbox serve role, never in shared config.yml.
     ln -sfn "${DOTFILES_DIR}/omp/${omp_config_source}" "${omp_config_dir}/browser-relay.yml"
+    install_relay_shell_environment "${DOTFILES_DIR}/omp/${omp_config_source}"
 fi
 for unit in "${units[@]}"; do
     ln -sfn "${DOTFILES_DIR}/forward/${unit}" "${HOME}/.config/systemd/user/${unit}"

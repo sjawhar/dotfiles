@@ -59,6 +59,31 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("browser-capture did not terminate the stalled secrets process")
 
+    def run_capture(
+        self, *extra_args: str, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        env = dict(self.env)
+        env.pop("BROWSER_RELAY_URL", None)
+        env.update(extra_env or {})
+        return subprocess.run(
+            [
+                sys.executable,
+                str(CAPTURE),
+                "--domain",
+                "example.test",
+                "--cookie",
+                "session",
+                "--secret",
+                "TEST_COOKIE",
+                *extra_args,
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=5,
+            check=False,
+        )
+
     def test_incapable_secrets_stops_before_contacting_the_relay(self) -> None:
         """An editor-only secrets CLI is rejected before browser access begins."""
         write_stub(self.stub_dir, "secrets", "import time\ntime.sleep(60)")
@@ -106,6 +131,64 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
         )
 
         self.assertIn("7:browser-capture: secrets edit-human timed out", result.stdout)
+
+    def test_relay_flag_supplies_the_relay_url(self) -> None:
+        """Removing the flag must not make an explicit relay endpoint unreachable."""
+        write_stub(
+            self.stub_dir,
+            "secrets",
+            "import sys\n"
+            "sys.stdin.buffer.read()\n"
+            'sys.stderr.write("piped secret \'BROWSER_CAPTURE_STDIN_PROBE\' value must not be empty")\n'
+            "sys.exit(1)",
+        )
+
+        result = self.run_capture("--relay-url", "http://127.0.0.1:9")
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(
+            "browser relay unreachable at http://127.0.0.1:9/json/version",
+            result.stderr,
+        )
+
+    def test_relay_environment_supplies_the_relay_url(self) -> None:
+        """Removing environment lookup must not discard the configured endpoint."""
+        write_stub(
+            self.stub_dir,
+            "secrets",
+            "import sys\n"
+            "sys.stdin.buffer.read()\n"
+            'sys.stderr.write("piped secret \'BROWSER_CAPTURE_STDIN_PROBE\' value must not be empty")\n'
+            "sys.exit(1)",
+        )
+
+        result = self.run_capture(
+            extra_env={"BROWSER_RELAY_URL": "http://127.0.0.1:10"}
+        )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(
+            "browser relay unreachable at http://127.0.0.1:10/json/version",
+            result.stderr,
+        )
+
+    def test_missing_relay_url_stops_before_secrets_or_relay_access(self) -> None:
+        """Adding a default URL would make unconfigured capture dial a relay."""
+        secrets_called = self.stub_dir / "secrets-called"
+        write_stub(
+            self.stub_dir,
+            "secrets",
+            f"from pathlib import Path\nPath({str(secrets_called)!r}).touch()",
+        )
+
+        result = self.run_capture()
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "supply --relay-url URL or set BROWSER_RELAY_URL",
+            result.stderr,
+        )
+        self.assertFalse(secrets_called.exists())
 
 
 if __name__ == "__main__":
