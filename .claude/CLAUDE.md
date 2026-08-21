@@ -61,6 +61,8 @@ Before calling anything blocked on me, check whether it already works somewhere 
 
 My goal is the goal — not your subtask, diagnosis, or theory about the problem. Before claiming completion: restate the original goal, verify it with fresh user-observable checks on this machine through the right surface (TUI → tmux, web → real browser, API → curl, library → driver script), and show the evidence. Green GitHub CI, other remote checks, passing tests, and builds are groundwork, not acceptance. Re-run that verification after every diff change. If you can't run the final verification, say what remains unverified.
 
+Passing builds and green tests are never the proof. Build and run the actual app, and exercise the changed behavior yourself, before claiming anything works — every change, every time.
+
 ### Exhaustive Means Exhaustive
 
 For search/verify/sweep/audit tasks: state the population size and account for every item — no sampling unless asked. If an ID lookup fails, escalate to content-based search before reporting "not found," and list what you tried. Watch pagination — "latest N" is not "all." Delegate breadth to subagents instead of shrinking scope.
