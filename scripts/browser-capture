@@ -153,6 +153,7 @@ def response_for(
     command_id: int,
     method: str,
     parameters: dict[str, object] | None,
+    session_id: str | None = None,
 ) -> dict[str, object]:
     """Send one CDP request and return its matching result, skipping events."""
     global cdp_active
@@ -160,6 +161,8 @@ def response_for(
     command: dict[str, object] = {"id": command_id, "method": method}
     if parameters is not None:
         command["params"] = parameters
+    if session_id is not None:
+        command["sessionId"] = session_id
     cdp_active = True
     connection.send(json.dumps(command))
 
@@ -250,7 +253,8 @@ def store_matching_cookie(
         connection,
         3,
         "Network.getCookies",
-        {"sessionId": session_id},
+        None,
+        session_id,
     )
     raw_cookies = result.get("cookies")
     if not isinstance(raw_cookies, list):
