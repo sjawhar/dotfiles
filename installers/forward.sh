@@ -53,6 +53,6 @@ done
 if [ "${1:-}" = daemon ]; then
     "$MISE" exec "github:sjawhar/oh-my-pi" -- omp browser-relay install
     echo "Chrome (manual, once): chrome://extensions -> enable Developer mode -> Load unpacked -> ~/.omp/browser-relay/extension"
-    echo "Load the unpacked extension ONLY. Ignore any 'omp config set browser.relay true' line above:"
+    echo "Load the unpacked extension ONLY. If the output above told you to run 'omp config set browser.relay true', ignore it."
     echo "dotfiles supplies browser.relayUrl; browser.relay intentionally stays false (agents opt in per call with app.relay)."
 fi
