@@ -22,7 +22,7 @@
 """Capture one scoped browser cookie directly into the human secret store.
 
 Cookie values are intentionally never formatted, logged, written to a file, or
-returned to the caller. Their only egress is stdin to ``secrets set-human``.
+returned to the caller. Their only egress is stdin to ``secrets edit-human``.
 """
 
 from __future__ import annotations
@@ -78,36 +78,6 @@ def parser() -> CaptureArgumentParser:
     )
     argument_parser.add_argument("--source", default="private", metavar="NAME")
     return argument_parser
-
-
-def preflight_secrets() -> None:
-    """Require the value-safe secretsd writer before contacting the browser."""
-    try:
-        result = subprocess.run(
-            ["secrets", "--help"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-    except OSError:
-        raise CaptureError(7, "browser-capture: could not inspect the secrets CLI") from None
-
-    output = result.stdout.decode(errors="replace")
-    if "usage: secrets get KEY" in output:
-        if "set-human" not in output:
-            raise CaptureError(
-                7,
-                "browser-capture: secrets set-human is unavailable — the installed secretsd "
-                "predates it; run: mise upgrade github:sjawhar/secretsd && "
-                "bash $HOME/.dotfiles/installers/secretsd.sh",
-            )
-        return
-
-    first_line = output.splitlines()[0] if output.splitlines() else ""
-    message = "browser-capture: could not inspect the secrets CLI"
-    if first_line:
-        message = f"{message}: {first_line}"
-    raise CaptureError(7, message)
 
 
 def cdp_endpoint(relay_url: str) -> tuple[str, str]:
@@ -304,14 +274,19 @@ def store_matching_cookie(
 
     index, cookie_domain, _, expires = matches[0]
     secret_value = raw_cookies[index]["value"]
-    write_result = subprocess.run(
-        ["secrets", "set-human", secret_key, "--source", source],
-        input=secret_value.encode(),
-        capture_output=True,
-        check=False,
-    )
+    try:
+        write_result = subprocess.run(
+            ["secrets", "edit-human", secret_key, "--source", source],
+            input=secret_value.encode(),
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        raise CaptureError(
+            7, "browser-capture: secrets edit-human is unavailable or could not store the cookie"
+        ) from None
     if write_result.returncode != 0:
-        raise CaptureError(7, write_result.stderr.decode(errors="replace"))
+        raise CaptureError(7, "browser-capture: secrets edit-human could not store the cookie")
     return cookie_domain, expires
 
 
@@ -324,8 +299,7 @@ def format_status(secret_key: str, cookie_domain: str, expires: int | float) -> 
 
 
 def run(args: argparse.Namespace) -> int:
-    """Preflight the sink, capture one value, and report only storage metadata."""
-    preflight_secrets()
+    """Capture one value and report only storage metadata."""
     version_url, websocket_url = cdp_endpoint(args.relay_url)
     probe_relay(version_url)
     try:
