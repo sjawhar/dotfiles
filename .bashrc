@@ -87,6 +87,16 @@ export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 # absolute opener path, so this is safe on both machines.
 export BROWSER="${DOTFILES_DIR}/shims/xdg-open"
 
+# The serve role writes this environment.d file from its devbox-only OMP overlay.
+# Other machines never receive it, so browser-capture must instead be configured
+# with --relay-url or BROWSER_RELAY_URL by its caller.
+_browser_relay_environment="${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/browser-relay.conf"
+if [ -r "$_browser_relay_environment" ]; then
+    . "$_browser_relay_environment"
+    export BROWSER_RELAY_URL
+fi
+unset _browser_relay_environment
+
 # Claude Code — state lives in ${DOTFILES_DIR}/.claude/. Swap accounts with `cco <name>`,
 # which rewrites .credentials.json + .claude.json in place; Claude Code re-reads them
 # within ~60s without needing a restart.

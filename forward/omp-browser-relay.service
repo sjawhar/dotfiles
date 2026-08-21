@@ -1,0 +1,10 @@
+[Unit]
+Description=omp browser relay (loopback :9224; unscoped CDP facade)
+
+[Service]
+ExecStart=%h/.dotfiles/forward/omp-browser-relay
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
