@@ -1,0 +1,504 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["websockets>=13"]
+# ///
+#
+# ─── How to run ───
+# On PATH as `browser-capture` (scripts/ is prepended in .bashrc); uv is pinned in mise.toml.
+#   browser-capture --domain DOMAIN --cookie NAME --secret KEY [--tab SUBSTRING]
+#                   [--relay-url URL] [--source NAME]
+#
+# Exit codes:
+#   0 — cookie stored
+#   1 — invalid invocation, hardening failure, or safe internal failure
+#   2 — browser relay unreachable or extension disconnected
+#   3 — no tab matches the domain
+#   4 — several tabs match the domain
+#   5 — no matching-domain cookie has the requested name
+#   6 — several matching-domain cookies have the requested name
+#   7 — secrets CLI unavailable or could not store the cookie
+# ──────────────────
+"""Capture one browser cookie selected by tab and cookie-domain matching.
+
+Cookie values are intentionally never formatted, logged, written to a file, or
+returned to the caller. Their only egress is stdin to ``secrets edit-human``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import datetime
+import json
+import logging
+import os
+import resource
+import signal
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from websockets.exceptions import WebSocketException
+from websockets.sync.client import ClientConnection, connect
+
+cdp_active = False
+
+CAPABILITY_TIMEOUT_SECONDS = 3
+STORE_TIMEOUT_SECONDS = 15
+CAPABILITY_PROBE_KEY = "BROWSER_CAPTURE_STDIN_PROBE"
+CAPABILITY_REJECTION = (
+    f"piped secret '{CAPABILITY_PROBE_KEY}' value must not be empty".encode()
+)
+
+
+class CaptureError(Exception):
+    """A user-safe failure that carries its documented process exit code."""
+
+    def __init__(self, exit_code: int, message: str) -> None:
+        super().__init__()
+        self.exit_code = exit_code
+        self.message = message
+
+
+class CaptureArgumentParser(argparse.ArgumentParser):
+    """Use exit 1 so argparse failures do not collide with relay failures."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
+def parser() -> CaptureArgumentParser:
+    argument_parser = CaptureArgumentParser(
+        description="Capture a cookie from a Chrome tab selected by domain and optional title matching."
+    )
+    argument_parser.add_argument("--domain", required=True, metavar="DOMAIN")
+    argument_parser.add_argument("--cookie", required=True, metavar="NAME")
+    argument_parser.add_argument("--secret", required=True, metavar="KEY")
+    argument_parser.add_argument("--tab", metavar="SUBSTRING")
+    argument_parser.add_argument(
+        "--relay-url",
+        default=os.environ.get("BROWSER_RELAY_URL"),
+        metavar="URL",
+    )
+    argument_parser.add_argument("--source", default="private", metavar="NAME")
+    return argument_parser
+
+
+def cdp_endpoint(relay_url: str) -> tuple[str, str, str]:
+    """Derive relay endpoints locally; never trust an advertised debugger URL."""
+    parsed = urllib.parse.urlsplit(relay_url.rstrip("/"))
+    version_url = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, "/json/version", "", "")
+    )
+    target_list_url = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, "/json/list", "", "")
+    )
+    websocket_scheme = "wss" if parsed.scheme == "https" else "ws"
+    websocket_url = urllib.parse.urlunsplit(
+        (websocket_scheme, parsed.netloc, "/cdp", "", "")
+    )
+    return version_url, target_list_url, websocket_url
+
+
+def probe_relay(version_url: str) -> None:
+    """Distinguish an unavailable relay from an unconnected Chrome extension."""
+    try:
+        with urllib.request.urlopen(version_url, timeout=5):  # noqa: S310 — caller chooses relay endpoint
+            pass
+    except urllib.error.HTTPError as error:
+        if error.code == 503:
+            raise CaptureError(
+                2,
+                "browser-capture: relay is up but the extension is not connected — "
+                "check the omp extension badge in Chrome",
+            ) from None
+        raise CaptureError(
+            2,
+            f"browser-capture: browser relay unreachable at {version_url} — laptop asleep, "
+            "forward daemon down, or the channel is not deployed",
+        ) from None
+    except (OSError, TimeoutError, urllib.error.URLError):
+        raise CaptureError(
+            2,
+            f"browser-capture: browser relay unreachable at {version_url} — laptop asleep, "
+            "forward daemon down, or the channel is not deployed",
+        ) from None
+
+
+def response_for(
+    connection: ClientConnection,
+    command_id: int,
+    method: str,
+    parameters: dict[str, object] | None,
+    session_id: str | None = None,
+) -> dict[str, object]:
+    """Send one CDP request and return its matching result, skipping events."""
+    global cdp_active
+
+    command: dict[str, object] = {"id": command_id, "method": method}
+    if parameters is not None:
+        command["params"] = parameters
+    if session_id is not None:
+        command["sessionId"] = session_id
+    cdp_active = True
+    connection.send(json.dumps(command))
+
+    while True:
+        response = json.loads(connection.recv())
+        response_id = response.get("id")
+        if response_id != command_id:
+            continue
+        if "error" in response:
+            protocol_error = response["error"]
+            error_message = (
+                protocol_error.get("message")
+                if isinstance(protocol_error, dict)
+                else None
+            )
+            if not isinstance(error_message, str):
+                raise CaptureError(
+                    1,
+                    f"browser-capture: CDP command {method} failed: invalid protocol error",
+                )
+            raise CaptureError(
+                1, f"browser-capture: CDP command {method} failed: {error_message}"
+            )
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise CaptureError(
+                1, "browser-capture: CDP command returned an invalid result"
+            )
+        return result
+
+
+def matching_target(
+    target_list_url: str,
+    domain: str,
+    tab_substring: str | None,
+) -> tuple[str, str]:
+    """Return the sole page target matching the domain and optional URL/title substring."""
+    try:
+        with urllib.request.urlopen(target_list_url, timeout=5) as response:
+            raw_targets = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code == 503:
+            raise CaptureError(
+                2,
+                "browser-capture: relay is up but the extension is not connected — "
+                "check the omp extension badge in Chrome",
+            ) from None
+        raise CaptureError(
+            2,
+            f"browser-capture: browser relay unreachable at {target_list_url} — laptop asleep, "
+            "forward daemon down, or the channel is not deployed",
+        ) from None
+    except (OSError, TimeoutError, urllib.error.URLError):
+        raise CaptureError(
+            2,
+            f"browser-capture: browser relay unreachable at {target_list_url} — laptop asleep, "
+            "forward daemon down, or the channel is not deployed",
+        ) from None
+    except (TypeError, ValueError):
+        raise CaptureError(
+            1, "browser-capture: relay returned an invalid target list"
+        ) from None
+
+    if not isinstance(raw_targets, list):
+        raise CaptureError(1, "browser-capture: relay returned an invalid target list")
+
+    normalized_domain = domain.lower()
+    normalized_tab = tab_substring.lower() if tab_substring is not None else None
+    targets: list[tuple[str, str]] = []
+    for raw_target in raw_targets:
+        if not isinstance(raw_target, dict):
+            raise CaptureError(
+                1, "browser-capture: relay returned an invalid target list"
+            )
+        target_id = raw_target.get("id")
+        target_type = raw_target.get("type")
+        url = raw_target.get("url")
+        title = raw_target.get("title", "")
+        if not all(
+            isinstance(item, str) for item in (target_id, target_type, url, title)
+        ):
+            raise CaptureError(
+                1, "browser-capture: relay returned an invalid target list"
+            )
+        hostname = urllib.parse.urlsplit(url).hostname
+        if hostname is None or not (
+            hostname.lower() == normalized_domain
+            or hostname.lower().endswith(f".{normalized_domain}")
+        ):
+            continue
+        if (
+            normalized_tab is not None
+            and normalized_tab not in url.lower()
+            and normalized_tab not in title.lower()
+        ):
+            continue
+        targets.append((target_id, url))
+
+    if not targets:
+        raise CaptureError(
+            3,
+            f"browser-capture: no tab matches {domain}; open a matching tab",
+        )
+    if len(targets) > 1:
+        urls = ", ".join(url for _, url in targets)
+        raise CaptureError(
+            4,
+            f"browser-capture: several tabs match {domain}: {urls}; pass --tab SUBSTRING",
+        )
+    return targets[0]
+
+
+def attached_session(connection: ClientConnection, target_id: str) -> str:
+    """Attach through the relay's browser target and return its flattened session id."""
+    result = response_for(
+        connection,
+        2,
+        "Target.attachToTarget",
+        {"targetId": target_id, "flatten": True},
+    )
+    session_id = result.get("sessionId")
+    if not isinstance(session_id, str):
+        raise CaptureError(1, "browser-capture: CDP command returned an invalid result")
+    return session_id
+
+
+def verify_secrets_stdin_support(source: str) -> None:
+    """Require the non-TTY edit-human path before collecting a cookie."""
+    try:
+        probe_result = subprocess.run(
+            ["secrets", "edit-human", CAPABILITY_PROBE_KEY, "--source", source],
+            input=b"",
+            capture_output=True,
+            check=False,
+            timeout=CAPABILITY_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        raise CaptureError(
+            7,
+            "browser-capture: secrets edit-human is unavailable; "
+            "cannot verify non-interactive stdin support",
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise CaptureError(
+            7,
+            "browser-capture: secrets edit-human capability check timed out; "
+            "installed secrets lacks non-interactive stdin support",
+        ) from None
+    except OSError:
+        raise CaptureError(
+            7,
+            "browser-capture: secrets edit-human capability check could not run; "
+            "cannot verify non-interactive stdin support",
+        ) from None
+
+    if probe_result.returncode != 0 and CAPABILITY_REJECTION in probe_result.stderr:
+        return
+    raise CaptureError(
+        7,
+        "browser-capture: secrets edit-human did not prove non-interactive stdin support; "
+        "update secretsd or fix its configured source",
+    )
+
+
+def store_matching_cookie(
+    connection: ClientConnection,
+    domain: str,
+    cookie_name: str,
+    secret_key: str,
+    source: str,
+    session_id: str,
+) -> tuple[str, int | float]:
+    """Select one scoped cookie and send its value only to secretsd stdin."""
+    result = response_for(
+        connection,
+        3,
+        "Network.getCookies",
+        None,
+        session_id,
+    )
+    raw_cookies = result.get("cookies")
+    if not isinstance(raw_cookies, list):
+        raise CaptureError(1, "browser-capture: CDP command returned an invalid result")
+
+    normalized_domain = domain.lower()
+    names: set[str] = set()
+    matches: list[tuple[int, str, str, int | float]] = []
+    for index, raw_cookie in enumerate(raw_cookies):
+        if not isinstance(raw_cookie, dict):
+            raise CaptureError(
+                1, "browser-capture: CDP command returned an invalid result"
+            )
+        name = raw_cookie.get("name")
+        cookie_domain = raw_cookie.get("domain")
+        path = raw_cookie.get("path")
+        expires = raw_cookie.get("expires")
+        if (
+            not isinstance(name, str)
+            or not isinstance(cookie_domain, str)
+            or not isinstance(path, str)
+            or isinstance(expires, bool)
+            or not isinstance(expires, (int, float))
+        ):
+            raise CaptureError(
+                1, "browser-capture: CDP command returned an invalid result"
+            )
+        cookie_scope = cookie_domain.removeprefix(".").lower()
+        if not (
+            normalized_domain == cookie_scope
+            or normalized_domain.endswith(f".{cookie_scope}")
+        ):
+            continue
+        names.add(name)
+        if name == cookie_name:
+            matches.append((index, cookie_domain, path, expires))
+
+    if not matches:
+        available_names = ", ".join(sorted(names)) if names else "(none)"
+        raise CaptureError(
+            5,
+            f"browser-capture: no cookie named {cookie_name} on {domain}; "
+            f"available names: {available_names}",
+        )
+    if len(matches) > 1:
+        scopes = ", ".join(
+            f"({cookie_domain}, {path})" for _, cookie_domain, path, _ in matches
+        )
+        raise CaptureError(
+            6,
+            f"browser-capture: several cookies named {cookie_name} match {domain}: {scopes}",
+        )
+
+    index, cookie_domain, _, expires = matches[0]
+    secret_value = raw_cookies[index]["value"]
+    try:
+        write_process = subprocess.Popen(
+            ["secrets", "edit-human", secret_key, "--source", source],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError:
+        raise CaptureError(
+            7,
+            "browser-capture: secrets edit-human is unavailable or could not store the cookie",
+        ) from None
+    try:
+        write_process.communicate(secret_value.encode(), timeout=STORE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(write_process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        write_process.communicate()
+        raise CaptureError(
+            7, "browser-capture: secrets edit-human timed out while storing the cookie"
+        ) from None
+    except OSError:
+        raise CaptureError(
+            7, "browser-capture: secrets edit-human could not store the cookie"
+        ) from None
+    if write_process.returncode != 0:
+        raise CaptureError(
+            7, "browser-capture: secrets edit-human could not store the cookie"
+        )
+    return cookie_domain, expires
+
+
+def format_status(secret_key: str, cookie_domain: str, expires: int | float) -> str:
+    """Describe storage without exposing any cookie content."""
+    if expires == -1:
+        return f"stored {secret_key} (domain {cookie_domain}, session cookie)"
+    expires_on = datetime.datetime.fromtimestamp(expires, tz=datetime.UTC).strftime(
+        "%Y-%m-%d"
+    )
+    return f"stored {secret_key} (domain {cookie_domain}, expires {expires_on})"
+
+
+def run(args: argparse.Namespace) -> int:
+    """Capture one value and report only storage metadata."""
+    if not args.relay_url:
+        raise CaptureError(
+            1,
+            "browser-capture: relay URL is required; "
+            "supply --relay-url URL or set BROWSER_RELAY_URL",
+        )
+    verify_secrets_stdin_support(args.source)
+    version_url, target_list_url, websocket_url = cdp_endpoint(args.relay_url)
+    probe_relay(version_url)
+    try:
+        connection = connect(websocket_url, open_timeout=10, max_size=None)
+    except (OSError, WebSocketException):
+        raise CaptureError(
+            2,
+            f"browser-capture: browser relay unreachable at {version_url} — laptop asleep, "
+            "forward daemon down, or the channel is not deployed",
+        ) from None
+
+    with connection:
+        target_id, _ = matching_target(target_list_url, args.domain, args.tab)
+        session_id = attached_session(connection, target_id)
+        cookie_domain, expires = store_matching_cookie(
+            connection,
+            args.domain,
+            args.cookie,
+            args.secret,
+            args.source,
+            session_id,
+        )
+    print(format_status(args.secret, cookie_domain, expires))
+    return 0
+
+
+def main() -> int:
+    """Harden before any preflight or browser I/O, then render only safe failures."""
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        prctl_result = ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)
+    except (AttributeError, OSError, ValueError):
+        print("browser-capture: could not disable core dumps", file=sys.stderr)
+        return 1
+    if prctl_result != 0:
+        print("browser-capture: could not disable core dumps", file=sys.stderr)
+        return 1
+
+    websockets_logger = logging.getLogger("websockets")
+    websockets_logger.setLevel(logging.CRITICAL)
+    websockets_logger.propagate = False
+    websockets_logger.addHandler(logging.NullHandler())
+
+    args = parser().parse_args()
+    try:
+        return run(args)
+    except CaptureError as error:
+        print(
+            error.message,
+            end="" if error.message.endswith("\n") else "\n",
+            file=sys.stderr,
+        )
+        return error.exit_code
+    except Exception as error:
+        if cdp_active:
+            print(
+                "browser-capture: internal error "
+                "(details withheld: a CDP response may hold cookie values)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"browser-capture: internal error: {type(error).__name__}",
+                file=sys.stderr,
+            )
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

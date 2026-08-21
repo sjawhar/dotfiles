@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+
+MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+export MISE_AUTO_INSTALL=0
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+
+# Loopback CDP facade for the Chrome profile. forward's :12803 channel is the
+# only remote way in; the extension dials ws://127.0.0.1:9224/ext itself.
+# The relay exposes every tab and enforces no browser-side access boundary.
+exec "$MISE" exec "github:sjawhar/oh-my-pi" -- omp browser-relay --port 9224

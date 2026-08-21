@@ -12,6 +12,7 @@ retry:
   fallbackChains: 
     anthropic/claude-fable-5: 
       - anthropic/claude-opus-5
+      - anthropic/claude-opus-4-8
     default: 
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
@@ -63,3 +64,9 @@ skills:
     - ce-work
     - ce-worktree
     - lfg
+providers: 
+  anthropic: 
+    serverSideFallback: true
+    serverSideFallbackModels: 
+      - claude-opus-5
+      - claude-opus-4-8
