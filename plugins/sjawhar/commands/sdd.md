@@ -37,7 +37,7 @@ On the planning side, a task's verification step is written as a user-observable
 
 That's alongside, not instead of, writing-plans' discipline of giving exact commands and expected output for each step.
 
-**Final review pass.** Once the smoke test is clean and before the `opening-a-pr` skill runs, dispatch a reviewer with one mandate only: find compatibility shims, re-exports, aliases, dual old/new code paths, half-finished migrations, and any "v1" / "MVP" / "follow-up" scoping language left in the delivered work. Its findings are must-fix, not noted, before the PR opens.
+**Final review pass.** Once the smoke test is clean and before the `opening-a-pr` skill runs, dispatch a reviewer with one mandate only: find compatibility shims, re-exports, aliases, dual old/new code paths, half-finished migrations, dead code left behind by the change (unreferenced functions, unused exports, orphaned files), leftover TODO/FIXME markers, and any "v1" / "MVP" / "follow-up" scoping language left in the delivered work. Its findings are must-fix, not noted, before the PR opens.
 
 **Model routing.** Reserve quick/smol/cheap model tiers for the simplest, purely mechanical work — a single-file transcription job, nothing that needs judgment. Agents habitually reach for the cheap tiers anyway and turn in bad work; anything requiring judgment goes to the mapped agents above.
 
