@@ -39,8 +39,6 @@ advisor:
   enabled: false
 bashInterceptor: 
   enabled: true
-browser: 
-  relayUrl: http://100.100.92.97:12803
 memory: 
   backend: mnemopi
 mnemopi: 

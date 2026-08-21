@@ -13,10 +13,12 @@ case "${1:-}" in
     serve)
         units=(forward-serve.service)
         config_source=config-serve.toml
+        omp_config_source=config-serve.yml
         ;;
     daemon)
         units=(forward-daemon.service omp-browser-relay.service)
         config_source=config.toml
+        omp_config_source=
         "$MISE" which omp >/dev/null 2>&1 || "$MISE" install "github:sjawhar/oh-my-pi@latest"
         ;;
     *)
@@ -34,6 +36,13 @@ mkdir -p "${HOME}/.config/forward"
 # The two roles run on different machines, so both use the same well-known
 # config path and neither wrapper nor unit ExecStart has to know its role.
 ln -sfn "${DOTFILES_DIR}/forward/${config_source}" "${HOME}/.config/forward/config.toml"
+if [ -n "$omp_config_source" ]; then
+    omp_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omp"
+    mkdir -p "$omp_config_dir"
+    # OMP loads this only through PI_CONFIG_FILES in shims/omp, so the relay URL
+    # is present only on the devbox serve role, never in shared config.yml.
+    ln -sfn "${DOTFILES_DIR}/omp/${omp_config_source}" "${omp_config_dir}/browser-relay.yml"
+fi
 for unit in "${units[@]}"; do
     ln -sfn "${DOTFILES_DIR}/forward/${unit}" "${HOME}/.config/systemd/user/${unit}"
 done

@@ -13,13 +13,13 @@
 #   0 — cookie stored
 #   1 — invalid invocation, hardening failure, or safe internal failure
 #   2 — browser relay unreachable or extension disconnected
-#   3 — no omp-grouped tab matches the domain
-#   4 — several omp-grouped tabs match the domain
-#   5 — no scoped cookie has the requested name
-#   6 — several scoped cookies have the requested name
+#   3 — no tab matches the domain
+#   4 — several tabs match the domain
+#   5 — no matching-domain cookie has the requested name
+#   6 — several matching-domain cookies have the requested name
 #   7 — secrets CLI unavailable or could not store the cookie
 # ──────────────────
-"""Capture one scoped browser cookie directly into the human secret store.
+"""Capture one browser cookie selected by tab and cookie-domain matching.
 
 Cookie values are intentionally never formatted, logged, written to a file, or
 returned to the caller. Their only egress is stdin to ``secrets edit-human``.
@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import resource
+import signal
 import subprocess
 import sys
 import urllib.error
@@ -44,6 +45,13 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import ClientConnection, connect
 
 cdp_active = False
+
+CAPABILITY_TIMEOUT_SECONDS = 3
+STORE_TIMEOUT_SECONDS = 15
+CAPABILITY_PROBE_KEY = "BROWSER_CAPTURE_STDIN_PROBE"
+CAPABILITY_REJECTION = (
+    f"piped secret '{CAPABILITY_PROBE_KEY}' value must not be empty".encode()
+)
 
 
 class CaptureError(Exception):
@@ -65,7 +73,7 @@ class CaptureArgumentParser(argparse.ArgumentParser):
 
 def parser() -> CaptureArgumentParser:
     argument_parser = CaptureArgumentParser(
-        description="Capture a cookie from an omp-grouped Chrome tab into secretsd."
+        description="Capture a cookie from a Chrome tab selected by domain and optional title matching."
     )
     argument_parser.add_argument("--domain", required=True, metavar="DOMAIN")
     argument_parser.add_argument("--cookie", required=True, metavar="NAME")
@@ -154,7 +162,7 @@ def matching_target(
     domain: str,
     tab_substring: str | None,
 ) -> tuple[str, str]:
-    """Return the sole grouped page target matching the requested domain."""
+    """Return the sole page target matching the domain and optional URL/title substring."""
     result = response_for(connection, 1, "Target.getTargets", None)
     raw_targets = result.get("targetInfos")
     if not isinstance(raw_targets, list):
@@ -185,13 +193,13 @@ def matching_target(
     if not targets:
         raise CaptureError(
             3,
-            f"browser-capture: no grouped tab matches {domain} — drag the tab into the omp tab group",
+            f"browser-capture: no tab matches {domain}; open a matching tab",
         )
     if len(targets) > 1:
         urls = ", ".join(url for _, url in targets)
         raise CaptureError(
             4,
-            f"browser-capture: several grouped tabs match {domain}: {urls}; pass --tab SUBSTRING",
+            f"browser-capture: several tabs match {domain}: {urls}; pass --tab SUBSTRING",
         )
     return targets[0]
 
@@ -208,6 +216,44 @@ def attached_session(connection: ClientConnection, target_id: str) -> str:
     if not isinstance(session_id, str):
         raise CaptureError(1, "browser-capture: CDP command returned an invalid result")
     return session_id
+
+
+def verify_secrets_stdin_support(source: str) -> None:
+    """Require the non-TTY edit-human path before collecting a cookie."""
+    try:
+        probe_result = subprocess.run(
+            ["secrets", "edit-human", CAPABILITY_PROBE_KEY, "--source", source],
+            input=b"",
+            capture_output=True,
+            check=False,
+            timeout=CAPABILITY_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        raise CaptureError(
+            7,
+            "browser-capture: secrets edit-human is unavailable; "
+            "cannot verify non-interactive stdin support",
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise CaptureError(
+            7,
+            "browser-capture: secrets edit-human capability check timed out; "
+            "installed secrets lacks non-interactive stdin support",
+        ) from None
+    except OSError:
+        raise CaptureError(
+            7,
+            "browser-capture: secrets edit-human capability check could not run; "
+            "cannot verify non-interactive stdin support",
+        ) from None
+
+    if probe_result.returncode != 0 and CAPABILITY_REJECTION in probe_result.stderr:
+        return
+    raise CaptureError(
+        7,
+        "browser-capture: secrets edit-human did not prove non-interactive stdin support; "
+        "update secretsd or fix its configured source",
+    )
 
 
 def store_matching_cookie(
@@ -275,17 +321,29 @@ def store_matching_cookie(
     index, cookie_domain, _, expires = matches[0]
     secret_value = raw_cookies[index]["value"]
     try:
-        write_result = subprocess.run(
+        write_process = subprocess.Popen(
             ["secrets", "edit-human", secret_key, "--source", source],
-            input=secret_value.encode(),
-            capture_output=True,
-            check=False,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except OSError:
         raise CaptureError(
             7, "browser-capture: secrets edit-human is unavailable or could not store the cookie"
         ) from None
-    if write_result.returncode != 0:
+    try:
+        write_process.communicate(secret_value.encode(), timeout=STORE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(write_process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        write_process.communicate()
+        raise CaptureError(7, "browser-capture: secrets edit-human timed out while storing the cookie") from None
+    except OSError:
+        raise CaptureError(7, "browser-capture: secrets edit-human could not store the cookie") from None
+    if write_process.returncode != 0:
         raise CaptureError(7, "browser-capture: secrets edit-human could not store the cookie")
     return cookie_domain, expires
 
@@ -300,6 +358,7 @@ def format_status(secret_key: str, cookie_domain: str, expires: int | float) -> 
 
 def run(args: argparse.Namespace) -> int:
     """Capture one value and report only storage metadata."""
+    verify_secrets_stdin_support(args.source)
     version_url, websocket_url = cdp_endpoint(args.relay_url)
     probe_relay(version_url)
     try:

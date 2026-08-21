@@ -1,5 +1,5 @@
 [Unit]
-Description=omp browser relay (loopback :9224; CDP facade for the omp tab group)
+Description=omp browser relay (loopback :9224; unscoped CDP facade)
 
 [Service]
 ExecStart=%h/.dotfiles/forward/omp-browser-relay
