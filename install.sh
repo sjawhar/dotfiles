@@ -15,7 +15,6 @@ source "${DOTFILES_DIR}/installers/nvim.sh"
 source "${DOTFILES_DIR}/installers/claude.sh"
 source "${DOTFILES_DIR}/installers/opencode.sh"
 source "${DOTFILES_DIR}/installers/omp.sh"
-source "${DOTFILES_DIR}/installers/openchamber.sh"
 source "${DOTFILES_DIR}/installers/secretsd.sh"
 
 echo "Generating completions..."
