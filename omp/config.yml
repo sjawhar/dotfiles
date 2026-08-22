@@ -13,6 +13,8 @@ retry:
     anthropic/claude-fable-5: 
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+    anthropic/claude-opus-5: 
+      - anthropic/claude-opus-4-8
     default: 
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
@@ -50,13 +52,14 @@ symbolPreset: unicode
 hideThinkingBlock: false
 dev: 
   autoqaConsent: granted
-setupVersion: 1
+setupVersion: 2
 display: 
   smoothStreaming: false
   hideToolActivity: false
   shimmer: disabled
 tui: 
   resizeScrollback: preserve
+  rewindScrollback: preserve
 skills: 
   ignoredSkills: 
     - ce-commit-push-pr
@@ -70,3 +73,5 @@ providers:
     serverSideFallbackModels: 
       - claude-opus-5
       - claude-opus-4-8
+composer: 
+  shape: box
