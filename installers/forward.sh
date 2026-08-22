@@ -83,6 +83,17 @@ done
 
 if [ "${1:-}" = daemon ]; then
     "$MISE" exec "github:sjawhar/oh-my-pi" -- omp browser-relay install
+    # A Flatpak Chrome cannot see ~/.omp by default, so "Load unpacked" below
+    # would not even be able to open the directory. Grant read-only access to
+    # exactly that path; the sandbox already shares the network namespace, so
+    # the extension can still reach the relay on host loopback.
+    if command -v flatpak >/dev/null 2>&1 \
+        && flatpak info com.google.Chrome >/dev/null 2>&1; then
+        flatpak override --user \
+            --filesystem="${HOME}/.omp/browser-relay/extension:ro" \
+            com.google.Chrome \
+            && echo "Granted Flatpak Chrome read-only access to the extension directory."
+    fi
     echo "Chrome (manual, once): chrome://extensions -> enable Developer mode -> Load unpacked -> ~/.omp/browser-relay/extension"
     echo "Load the unpacked extension ONLY. If the output above told you to run 'omp config set browser.relay true', ignore it."
     echo "dotfiles supplies browser.relayUrl; browser.relay intentionally stays false (agents opt in per call with app.relay)."
