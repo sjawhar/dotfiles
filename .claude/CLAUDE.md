@@ -7,10 +7,10 @@
 Do not perform destructive or high-blast-radius actions without explicit user approval in this session:
 
 - overwriting credentials/auth state
-- deleting branches, workspaces, files, or user data — and never re-point, merge, close, or delete a branch or PR you didn't create
+- deleting branches, workspaces, files, or user data that a HUMAN created or whose provenance you haven't established — and never re-point, merge, close, or delete a branch or PR a human created. Cleaning up after agent work is the opposite: artifacts agents created that are now superseded (branches whose content landed elsewhere, QA rigs, scratch dirs, stale release bookmarks) are yours to delete without asking, provided the content stays reachable (tags, ledger anchors, supersession notes) and you say what you deleted
 - force pushes or history rewrites in git (jj rewrites are safe — everything is recoverable via `jj undo`)
 - disabling plugins/safety systems to "get unstuck"
-- changing shared/global configuration in ways that can break other workflows
+- changing shared/global configuration in ways that can break other workflows — including upgrading shared tools (mise itself, bun, anything in mise.toml) or churning shared runtime state that live sessions resolve through (plugin node_modules, tool version dirs). Installing a new fork-build version as part of an authorized build task is fine; tool-manager self-updates and version bumps of other tools are not, ask first
 - `pkill opencode`, `tmux kill-server`, or other high-blast-radius process termination
 
 Target the narrowest possible scope: kill the specific pane or process ID, not the window or the server. Treat auth/config files (`~/.docker`, `~/.config`, keyrings) the same way — read first, change minimally, don't overwrite auth state.
