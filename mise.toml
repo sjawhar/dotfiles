@@ -29,10 +29,13 @@ minimum_release_age_excludes = [
   "tt-watcher",
 ]
 
+[settings.upgrade]
+auto_prune = false
+
 [tools]
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
 "github:sjawhar/knives" = "latest"
-"github:sjawhar/oh-my-pi" = "latest"  # omp daily driver: fork release (sami build v<upstream>-sami.<timestamp>, same pattern as sjawhar/opencode); wrapper execs this
+"github:sjawhar/oh-my-pi" = "latest"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 "github:sjawhar/secretsd" = "latest"  # Session secrets broker; ships bin/secrets + systemd units
 "github:syncthing/syncthing" = "latest"
 "github:tmux/tmux-builds" = "3.7b"
