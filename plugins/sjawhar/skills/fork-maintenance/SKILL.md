@@ -150,31 +150,6 @@ When sami has conflicts after adding/removing parents or syncing:
    jj squash  # Moves resolution from @ into sami (parent)
    ```
 
-## Build & Deploy (Web Frontend)
-
-If the fork includes a web frontend:
-
-```bash
-deploy-web          # Pull latest CI build from gh-pages
-deploy-web --local  # Build from current sami checkout
-```
-
-**After ANY web UI code change, deploy.** Code changes in jj branches are invisible until built and deployed. This is the #1 source of "it doesn't work" reports.
-
-### Manual Build
-
-```bash
-jj new sami                          # Checkout sami merge
-cd packages/app && bun run build     # Build
-# Verify your code is in the bundle:
-grep "unique_string_from_your_change" dist/assets/*.js
-# Deploy:
-rm -rf ~/opencode-web-frontend && cp -r dist ~/opencode-web-frontend
-caddy reload --config ~/.dotfiles/opencode-web/Caddyfile
-# Smoke test:
-curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/
-```
-
 ## Orientation
 
 Run `jj-agent-status` to see the repo state: current position, active agents, branches, divergent/conflicted changes, and what needs attention.
@@ -185,7 +160,6 @@ Ship via the `opening-a-pr` skill.
 
 - **Basing a branch on `dev@upstream` instead of common-base** → lockfile conflicts in sami. Always use the same base as existing branches.
 - **Committing on sami instead of a branch** → can't be merged upstream, hard to isolate. Always work on named branches.
-- **Forgetting to deploy** → code changes are invisible in the web app. Always `deploy-web` after frontend changes.
 - **Leaving changes as sami children** → they should be on a named branch that's a sami parent. Rebase onto the right branch.
 - **Using `jj rebase` with change IDs when divergent changes exist** → use commit IDs instead, or the `all:sami-` revset pattern.
 - **Cross-branch conflicts aren't inherited** — resolving conflicts in individual parent branches does NOT resolve the octopus merge. Sibling branches can conflict with each other in ways not visible in either parent. Verify the merge separately.
@@ -194,4 +168,3 @@ Ship via the `opening-a-pr` skill.
 - **Never edit a conflicted jj change directly** — use `jj new <conflicted>`, resolve in the child, then `jj squash` back. This preserves change identity.
 - **Verify files exist before investigating** — if you're debugging a feature, check the files exist in your current checkout first. They may only be in the merge or a specific branch.
 - **jj conflict format**: `+++++++` = snapshot (full file state), `%%%%%%%` = diff (branch's changes to apply). For semantic merges, preserve the diff side's intent.
-- **"Done" means deployed** — code changes in jj branches are invisible until built and deployed. For web UI changes, run `deploy-web` and verify your code is in the bundle.
