@@ -1,6 +1,6 @@
 # omp
 
-oh-my-pi (omp) configuration. The binary is mise-managed (`"github:sjawhar/oh-my-pi"` in `mise.toml`, a fork release built by the fork's `fork-release.yml`); the wrapper at `shims/omp` injects secretsd keys, envoy env, and the gh-app routing gitconfig, then execs it. `installers/omp.sh` wires everything below into `~/.omp/agent/`.
+oh-my-pi (omp) configuration. The binary is mise-managed (`"github:sjawhar/oh-my-pi"` in `mise.toml`, a fork release auto-built from the fork's `sami` branch by `sami-build.yml` (which lives on the `ci` branch)); the wrapper at `shims/omp` injects secretsd keys, envoy env, and the gh-app routing gitconfig, then execs it. `installers/omp.sh` wires everything below into `~/.omp/agent/`.
 
 ## Key files
 
@@ -24,4 +24,4 @@ Vendored/adopted skill pools are declared once in `skills-sources.json` at the d
 
 ## How changes take effect
 
-Config files are symlinked, so edits apply on next omp start. Plugin pin changes need `bun install` in `plugins/` (or re-run `installers/omp.sh`). New fork releases: cut via `knives release` in `~/oh-my-pi`, tag `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>` (the `sami build` pattern, same as the opencode fork), then `mise install` picks up `latest` — new own-repos must be listed in `mise.toml`'s `minimum_release_age_excludes` or `latest` will not resolve.
+Config files are symlinked, so edits apply on next omp start. Plugin pin changes need `bun install` in `plugins/` (or re-run `installers/omp.sh`). New fork releases: `knives release cut` in `~/oh-my-pi` (fixed scheme, `release_branch = "sami"`) advances the `sami` branch in place; pushing it triggers `sami-build.yml`, which computes the version/tag (shared `sjawhar/.github` sami-version + sami-release actions - never tag by hand) and publishes the GitHub release; `mise upgrade` then picks up `latest`. `[settings.upgrade] auto_prune = false` (mise.toml, needs mise >= 2026.8) keeps the replaced version's install dir - live sessions re-exec their own binary path for hub brokers, hub-launched apps, and mnemopi workers, so pruning it breaks them all with spawn ENOENT. Never `mise prune` or remove a version dir while a running omp process references it — new own-repos must be listed in `mise.toml`'s `minimum_release_age_excludes` or `latest` will not resolve.
