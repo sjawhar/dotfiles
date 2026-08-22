@@ -10,6 +10,7 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
 ## Non-negotiable traps
 
 - **Auto-snapshot:** there is no staging; every `jj` command snapshots. `@` is the on-disk working-copy change; change IDs stay stable across rewrites, commit IDs do not.
+- **Colocated repos look dirty to git:** jj parks git HEAD at `@`'s parent, so `@`'s content shows in `git status` as uncommitted changes. That is expected state, not a mess to clean up: `git reset --hard`, `git checkout -- .`, `git clean`, or `git stash` there destroys `@`'s work, recoverable only up to the last jj snapshot.
 - **CRITICAL scope:** unscoped `jj restore` reverts the **whole tree**. Name the path: `jj restore --from <rev> <path>`. `abandon`, `undo`, and `op restore` have whole-change/repo-wide blast radii.
 - **CRITICAL no undo loops:** the operation log is shared across workspaces. After a failed command, inspect state and make one deliberate fix; stop and ask before a second `jj undo`.
 - **Edit in place:** use `jj edit <change>` and edit `@`; do not make throwaway child commits just to squash them back.
