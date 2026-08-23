@@ -13,13 +13,6 @@ export ENVOY_REGISTER_SESSION="${ENVOY_REGISTER_SESSION:-1}"
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 
-# The relay endpoint exists only on the devbox, where the serve-role installer
-# links this OMP-native overlay. Preserve caller overlays because OMP applies
-# them in order.
-_relay_config="${XDG_CONFIG_HOME:-$HOME/.config}/omp/browser-relay.yml"
-if [ -f "$_relay_config" ]; then
-    export PI_CONFIG_FILES="${PI_CONFIG_FILES:+${PI_CONFIG_FILES}:}${_relay_config}"
-fi
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
 # Agents authenticate as the GitHub App installation matching each repo's
