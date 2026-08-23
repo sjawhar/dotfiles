@@ -155,29 +155,27 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
             result.stderr,
         )
 
-    def test_relay_environment_supplies_the_relay_url(self) -> None:
-        """Removing environment lookup must not discard the configured endpoint."""
+    def test_environment_variable_no_longer_supplies_the_relay_url(self) -> None:
+        """BROWSER_RELAY_URL is retired; only an explicit --relay-url reaches a relay."""
+        secrets_called = self.stub_dir / "secrets-called"
         write_stub(
             self.stub_dir,
             "secrets",
-            "import sys\n"
-            "sys.stdin.buffer.read()\n"
-            "sys.stderr.write(\"piped secret 'BROWSER_CAPTURE_STDIN_PROBE' value must not be empty\")\n"
-            "sys.exit(1)",
+            f"from pathlib import Path\nPath({str(secrets_called)!r}).touch()",
         )
 
         result = self.run_capture(
             extra_env={"BROWSER_RELAY_URL": "http://127.0.0.1:10"}
         )
 
-        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
-            "browser relay unreachable at http://127.0.0.1:10/json/version",
-            result.stderr,
+            "the following arguments are required: --relay-url", result.stderr
         )
+        self.assertFalse(secrets_called.exists())
 
     def test_missing_relay_url_stops_before_secrets_or_relay_access(self) -> None:
-        """Adding a default URL would make unconfigured capture dial a relay."""
+        """Argparse rejects an unconfigured capture before any secrets or relay I/O."""
         secrets_called = self.stub_dir / "secrets-called"
         write_stub(
             self.stub_dir,
@@ -189,8 +187,7 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
-            "supply --relay-url URL or set BROWSER_RELAY_URL",
-            result.stderr,
+            "the following arguments are required: --relay-url", result.stderr
         )
         self.assertFalse(secrets_called.exists())
 

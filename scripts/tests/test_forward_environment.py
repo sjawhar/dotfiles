@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression coverage for the forward serve-role shell environment."""
+"""Regression coverage for forward roles with no ambient relay environment."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "forward.sh"
 BASHRC = DOTFILES / ".bashrc"
-RELAY_URL = "http://relay.test:12803"
 
 
 def write_executable(path: Path, body: str) -> None:
@@ -31,7 +30,6 @@ class ForwardServeEnvironment(unittest.TestCase):
         self.stub_dir = self.root / "bin"
         (self.dotfiles / "bin").mkdir(parents=True)
         (self.dotfiles / "forward").mkdir()
-        (self.dotfiles / "omp").mkdir()
         self.home.mkdir()
         self.stub_dir.mkdir()
 
@@ -48,9 +46,6 @@ class ForwardServeEnvironment(unittest.TestCase):
             "omp-browser-relay.service",
         ):
             (self.dotfiles / "forward" / name).write_text("test\n", encoding="utf-8")
-        (self.dotfiles / "omp" / "config-serve.yml").write_text(
-            f"browser:\n  relayUrl: {RELAY_URL}\n", encoding="utf-8"
-        )
         self.env = {
             **os.environ,
             "DOTFILES_DIR": str(self.dotfiles),
@@ -80,31 +75,45 @@ class ForwardServeEnvironment(unittest.TestCase):
             check=False,
         )
 
-    def test_serve_role_provides_the_relay_url_to_interactive_shells(self) -> None:
-        """Removing the serve-only environment file makes capture unconfigured."""
+    def test_serve_role_installs_no_relay_environment_or_overlay(self) -> None:
+        """The ambient relay endpoint is gone; grants supply per-session endpoints."""
         install = self.install("serve")
 
         self.assertEqual(install.returncode, 0, install.stderr)
-        environment_file = self.config_home / "environment.d" / "browser-relay.conf"
-        self.assertEqual(
-            environment_file.read_text(encoding="utf-8"),
-            f"BROWSER_RELAY_URL={RELAY_URL}\n",
+        self.assertFalse(
+            (self.config_home / "environment.d" / "browser-relay.conf").exists()
         )
+        self.assertFalse((self.config_home / "omp" / "browser-relay.yml").exists())
         shell = self.shell_relay_url()
         self.assertEqual(shell.returncode, 0, shell.stderr)
-        self.assertEqual(shell.stdout, RELAY_URL)
+        self.assertEqual(shell.stdout, "")
 
-    def test_daemon_role_does_not_install_the_relay_environment(self) -> None:
-        """Adding the environment file outside serve would leak devbox routing."""
+    def test_serve_role_removes_a_stale_relay_environment_and_overlay(self) -> None:
+        """Reinstalling cleans up what bypass-era installs wrote."""
+        environment_dir = self.config_home / "environment.d"
+        environment_dir.mkdir(parents=True)
+        (environment_dir / "browser-relay.conf").write_text(
+            "BROWSER_RELAY_URL=http://stale.test\n", encoding="utf-8"
+        )
+        omp_dir = self.config_home / "omp"
+        omp_dir.mkdir(parents=True)
+        (omp_dir / "browser-relay.yml").symlink_to(self.dotfiles / "gone.yml")
+
+        install = self.install("serve")
+
+        self.assertEqual(install.returncode, 0, install.stderr)
+        self.assertFalse((environment_dir / "browser-relay.conf").exists())
+        self.assertFalse((omp_dir / "browser-relay.yml").is_symlink())
+
+    def test_daemon_role_installs_no_relay_environment(self) -> None:
+        """The laptop role never had the ambient endpoint and must not gain one."""
         install = self.install("daemon")
 
         self.assertEqual(install.returncode, 0, install.stderr)
         self.assertFalse(
             (self.config_home / "environment.d" / "browser-relay.conf").exists()
         )
-        shell = self.shell_relay_url()
-        self.assertEqual(shell.returncode, 0, shell.stderr)
-        self.assertEqual(shell.stdout, "")
+        self.assertFalse((self.config_home / "omp" / "browser-relay.yml").exists())
 
 
 if __name__ == "__main__":

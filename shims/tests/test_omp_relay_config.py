@@ -41,6 +41,7 @@ class OmpRelayConfig(unittest.TestCase):
             "PATH": f"{self.stub_dir}:{os.environ['PATH']}",
             "XDG_CONFIG_HOME": str(self.config_home),
         }
+        self.env.pop("PI_CONFIG_FILES", None)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -61,15 +62,17 @@ class OmpRelayConfig(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "<unset>\n")
 
-    def test_loads_the_devbox_overlay_without_discarding_caller_overlays(self) -> None:
-        """The devbox-only relay URL composes with existing OMP config overlays."""
+    def test_ignores_a_stray_relay_overlay(self) -> None:
+        """The overlay contract is retired; a leftover file must not re-enter config."""
         relay_config = self.config_home / "omp" / "browser-relay.yml"
-        relay_config.write_text("browser:\n  relayUrl: http://100.100.92.97:12803\n", encoding="utf-8")
+        relay_config.write_text(
+            "browser:\n  relayUrl: http://100.100.92.97:12803\n", encoding="utf-8"
+        )
 
         result = self.run_shim({"PI_CONFIG_FILES": "/tmp/caller.yml"})
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, f"/tmp/caller.yml:{relay_config}\n")
+        self.assertEqual(result.stdout, "/tmp/caller.yml\n")
 
 
 if __name__ == "__main__":
