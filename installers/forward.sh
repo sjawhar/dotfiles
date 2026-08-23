@@ -70,5 +70,6 @@ if [ "${1:-}" = daemon ]; then
     fi
     echo "Chrome (manual, once): chrome://extensions -> enable Developer mode -> Load unpacked -> ~/.omp/browser-relay/extension"
     echo "Load the unpacked extension ONLY. If the output above told you to run 'omp config set browser.relay true', ignore it."
+    echo "First-time token setup (run from the devbox): ssh sami@sami forward browser init-token | secrets edit-human FORWARD_BROWSER_GRANT"
     echo "Browser access is per-session: secrets FORWARD_BROWSER_GRANT -- forward browser grant --ttl 30m, then pass the printed URL as app.cdp_url. browser.relay intentionally stays false."
 fi
