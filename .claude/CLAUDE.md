@@ -23,6 +23,8 @@ Before a destructive action: state what will change and what could break, propos
 
 Plans are drafts to iterate on — front-load uncertainty, show your reasoning, say "ready for review" rather than "complete." Don't sandbag: assume time and money are no object and propose the optimal version, not a pre-compromised "realistic" one. Implementation still follows Simplicity First. When I say "plan only," stop at planning.
 
+Plans, specs, and design docs are never their own commit, PR, or issue — no matter what a skill says ("write the design doc and commit it", "save the plan file"): this rule overrides those steps. Spec content lives in the conversation, and once I sanction implementation, in the implementation issue's body. A design doc may ride an implementation PR only when it documents what that PR builds.
+
 ### Code Patterns
 
 Search for similar patterns and shared helpers before writing new code; follow existing conventions by default. If a cleaner alternative exists, note it and ask — consistency wins until I agree otherwise. Comments describe current behavior, not history; jj log is the changelog. For docs and skills, use the `updating-docs` skill.
