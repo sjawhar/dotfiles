@@ -425,12 +425,6 @@ def format_status(secret_key: str, cookie_domain: str, expires: int | float) -> 
 
 def run(args: argparse.Namespace) -> int:
     """Capture one value and report only storage metadata."""
-    if not args.relay_url:
-        raise CaptureError(
-            1,
-            "browser-capture: relay URL is required; pass --relay-url "
-            "http://127.0.0.1:<grant port> from the session holding the grant",
-        )
     verify_secrets_stdin_support(args.source)
     version_url, target_list_url, websocket_url = cdp_endpoint(args.relay_url)
     probe_relay(version_url)
