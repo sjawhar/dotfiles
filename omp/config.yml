@@ -1,7 +1,7 @@
 modelRoles: 
   default: anthropic/claude-fable-5:xhigh
   plan: anthropic/claude-fable-5:max
-  smol: anthropic/claude-haiku-4-5
+  smol: anthropic/claude-sonnet-5
   slow: openai-codex/gpt-5.6-terra:xhigh
   task: anthropic/claude-sonnet-5
   vision: google/gemini-3.7-flash:medium

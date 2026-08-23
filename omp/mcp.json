@@ -2,7 +2,12 @@
   "mcpServers": {
     "slack": {
       "command": "secrets",
-      "args": ["SLACK_MCP_XOXP_TOKEN", "--", "slack-mcp-server", "--no-cache"],
+      "args": [
+        "SLACK_MCP_XOXP_TOKEN",
+        "--",
+        "slack-mcp-server",
+        "--no-cache"
+      ],
       "env": {
         "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
         "SLACK_MCP_ATTACHMENT_TOOL": "true"
@@ -10,11 +15,34 @@
     },
     "apify": {
       "command": "secrets",
-      "args": ["APIFY_TOKEN", "--", "npx", "-y", "@apify/actors-mcp-server"]
+      "args": [
+        "APIFY_TOKEN",
+        "--",
+        "npx",
+        "-y",
+        "@apify/actors-mcp-server"
+      ]
     },
     "home-assistant": {
       "command": "secrets",
-      "args": ["HA_MCP_URL", "--", "bash", "-c", "exec npx -y mcp-remote \"$HA_MCP_URL\" --allow-http"]
+      "args": [
+        "HA_MCP_URL",
+        "--",
+        "bash",
+        "-c",
+        "exec npx -y mcp-remote \"$HA_MCP_URL\" --allow-http"
+      ]
+    },
+    "deel": {
+      "lazy": true,
+      "command": "secrets",
+      "args": [
+        "DEEL_API_KEY",
+        "--",
+        "bash",
+        "-c",
+        "exec npx -y mcp-remote https://api.letsdeel.com/mcp --header \"Authorization: Bearer $DEEL_API_KEY\""
+      ]
     }
   }
 }
