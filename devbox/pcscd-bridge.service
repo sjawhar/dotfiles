@@ -1,3 +1,5 @@
+# ORYX ONLY. The sami-agents devbox uses forward's pcsc channel instead
+# (forward serve owns ~/.pcscd/pcscd.comm); its installer removes this unit.
 [Unit]
 Description=Bridge ~/.pcscd/pcscd.comm to SSH-forwarded TCP 12799 (YubiKey PC/SC over SSH)
 

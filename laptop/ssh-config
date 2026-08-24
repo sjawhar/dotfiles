@@ -5,8 +5,6 @@ Host devbox
   HostName sami-agents.tailb86685.ts.net
   User ubuntu
   ForwardAgent yes
-  # YubiKey access for sops human tier: use the `devbox` command (scripts/devbox),
-  # which ensures the pcscd tunnel below exists before connecting. Works with mosh.
   Compression yes
   ControlMaster auto
   ControlPath ~/.ssh/sockets/%r@%h-%p
@@ -31,41 +29,7 @@ Host oryx
   TCPKeepAlive yes
   IPQoS lowdelay throughput
 
-# YubiKey tunnel: exposes laptop pcscd on devbox loopback :12799 so the devbox can
-# decrypt sops human-tier secrets (devbox/pcscd-bridge.service converts the port to
-# a user-owned unix socket; sshd binds forwarded unix sockets root-only, hence TCP).
-# Owned by the `devbox` wrapper (scripts/devbox): created on demand at connect
-# time, checked via its dedicated control socket. Dies with the network
-# (ServerAlive 15x3=45s); devbox's session-scoped supervisor loop rebuilds it
-# automatically while the login session lasts (see scripts/devbox for why it
-# must live in the session and not in a systemd unit).
-#
-# Port 2222 is the devbox's REAL sshd (a tailnet-bound second port), not
-# Tailscale SSH on 22: the tailnet's SSH check policy interrupts long-lived
-# tailscale-ssh sessions at check expiry, and tailscaled then holds the dead
-# session's 12799 listener forever, blocking every rebuild. Plain sshd reaps a
-# dead tunnel in ~45s (Match LocalPort 2222 on the devbox) and has no check
-# interruptions. Interactive `Host devbox` stays on Tailscale SSH.
-Host devbox-tunnel
-  HostName sami-agents.tailb86685.ts.net
-  User ubuntu
-  Port 2222
-  # Dedicated key, not the 1Password identity: its authorized_keys entry is
-  # restrict + permitlisten 127.0.0.1:12799 + a forced command, so the ONLY
-  # thing it can do is hold the tunnel's listener - no shell, no other
-  # forwards, no bypass of the check policy that governs interactive SSH.
-  IdentityFile ~/.ssh/devbox-tunnel
-  IdentitiesOnly yes
-  ControlMaster auto
-  ControlPath ~/.ssh/sockets/tunnel-%r@%h
-  ExitOnForwardFailure yes
-  ServerAliveInterval 15
-  ServerAliveCountMax 3
-  RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
-
-# Same tunnel pattern as devbox-tunnel above, for oryx: real sshd on a
-# tailnet-bound port 2222, dedicated restricted key, pcscd forwarded to
-# loopback 12799 where oryx's pcscd-bridge.service picks it up.
+# YubiKey tunnel for oryx; the devbox pair uses forward's pcsc channel.
 Host oryx-tunnel
   HostName oryx.tailb86685.ts.net
   User agent
