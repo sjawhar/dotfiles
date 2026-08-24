@@ -1,12 +1,13 @@
 ---
 name: reflect
-description: "Analyze recent Claude Code and OpenCode sessions for recurring corrections, preferences, and automation opportunities. Use for a retrospective over recent agent work."
+description: "Analyze recent Claude Code, OpenCode, and Oh My Pi sessions for recurring corrections, preferences, and automation opportunities. Use for a retrospective over recent agent work."
 ---
 
 # Reflect
 
-For the requested number of days (default: 7), index both sources and inspect flagged
-turns without copying session content into the database:
+For the requested number of days (default: 7), index all three sources (Claude Code,
+OpenCode, Oh My Pi) and inspect flagged turns without copying session content into
+the database:
 
 ```bash
 INDEXER=~/.dotfiles/plugins/sjawhar/skills/reflect/index-sessions.py
@@ -27,12 +28,54 @@ Run six agents in parallel; each gets: focus + flagged content + prior-report co
 - **CLAUDE.md Miner:** project-specific durable rules.
 - **Memory Groomer:** long-term memory cleanup (procedure below).
 
+
+## The primary analysis: read Sami's own words, yourself
+
+Sami sends few enough messages in any window that the orchestrating agent can and MUST
+read every single one personally — extract all genuine user messages (drop injected
+notifications, goal-loop re-prompts, slash-command bodies) in chronological order and
+read them end to end. Never delegate this reading; subagents may pre-filter noise
+mechanically, but a summary of Sami's words is not Sami's words.
+
+The highest-value learnings are the TURNING POINTS: the small fraction of his messages
+that demonstrably changed an architecture or implementation direction, or unstuck an
+agent that was spinning. For each one, pull the surrounding session context and answer:
+what was the agent doing or stuck on, what did Sami say (verbatim), what changed after,
+and what would have let the agent get there without him. Those write-ups are the core
+deliverable; correction taxonomies and frequency counts are secondary supporting
+material, not the product.
+
+Model floor: no smol/cheap-tier models anywhere judgment is involved — readers,
+verifiers, synthesis, grooming. Fast models are only for mechanical inventory
+(counting, globbing, symlink maps). A cheap reader produces confident shallow output
+that poisons every downstream step.
+
 Deduplicate and rank patterns by frequency and impact. Assess earlier improvements as
-improved, unchanged, or regressed, then present actionable examples and choices. Put
-approved skills in `plugins/sjawhar/skills/`, agents in `plugins/sjawhar/agents/`,
-commands in `plugins/sjawhar/commands/`, and global rules in `.claude/CLAUDE.md`.
-Distill the period into 3–5 durable summary facts (recurring corrections, changed
-decisions) and store them with `retain`.
+improved, unchanged, or regressed. Put approved skills in `plugins/sjawhar/skills/`,
+agents in `plugins/sjawhar/agents/`, commands in `plugins/sjawhar/commands/`, and
+global rules in `.claude/CLAUDE.md`. Distill the period into 3–5 durable summary facts
+(recurring corrections, changed decisions) and store them with `retain`.
+
+## Presenting findings and decisions
+
+Never end the retro by dumping a numbered menu of every open decision. That format is
+itself one of the failure patterns this skill exists to catch (buried context, zero
+explanation, cognitive offload onto Sami).
+
+- **At most 3 decisions per message**, each as current state → what changed / what the
+  evidence says → concrete options with tradeoffs → your recommendation. If more are
+  pending, present the top ones and say what's queued; bring the rest in later messages
+  as the earlier ones resolve.
+- **Every decision gets its explanation inline.** A one-line label plus a section
+  reference ("§D, 9 items") is not a presentable decision. If a decision needs the
+  report open in another window to understand, it isn't ready to present.
+- **Rule proposals are reviewed one at a time, not as a batch**, and CLAUDE.md is not
+  the default home — it is the last resort. Prefer, in order: an existing skill's text,
+  a new/edited skill, a mechanical gate (CI check, lint, tool default), and only then a
+  global rule. Say for each proposal why the cheaper homes don't fit.
+- **Plain language throughout**: no counts-as-argument ("57 rows say…") without one
+  concrete example, no internal shorthand from the analysis (reader names, category
+  labels) unless defined in the same sentence.
 
 The Memory Groomer cleans long-term memory instead of reading sessions. Banks are
 SQLite under `~/.omp/agent/memories/mnemopi/` (`mnemopi.db` global, `banks/*/mnemopi.db`

@@ -63,6 +63,8 @@ Before calling anything blocked on me, check whether it already works somewhere 
 
 My goal is the goal — not your subtask, diagnosis, or theory about the problem. Before claiming completion: restate the original goal, verify it with fresh user-observable checks on this machine through the right surface (TUI → tmux, web → real browser, API → curl, library → driver script), and show the evidence. Green GitHub CI, other remote checks, passing tests, and builds are groundwork, not acceptance. Re-run that verification after every diff change. If you can't run the final verification, say what remains unverified.
 
+If verification is blocked by environment or access, the deliverable is blocked — never downgrade blocked verification into a "remaining work" item on a merge-ready report; surface it as a pre-merge decision or report not done.
+
 Passing builds and green tests are never the proof. Build and run the actual app, and exercise the changed behavior yourself, before claiming anything works — every change, every time.
 
 ### Exhaustive Means Exhaustive
@@ -127,3 +129,4 @@ When compacting, preserve:
 - Designs I rejected, and why — so nobody re-proposes them
 - Topics I parked, in my own words — I will raise them again when I'm ready
 - Credential grants, with their scope (single-use unless I said otherwise)
+- Provenance on every constraint and rule you pass forward: **verbatim** (quote my actual words) or **inferred** (state the reasoning). A successor treats an inferred constraint as a hypothesis to verify, never as law — agents keep inheriting rules I never stated and obeying them.

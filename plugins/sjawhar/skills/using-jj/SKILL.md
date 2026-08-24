@@ -10,6 +10,24 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
 ## Non-negotiable traps
 
 - **Auto-snapshot:** there is no staging; every `jj` command snapshots. `@` is the on-disk working-copy change; change IDs stay stable across rewrites, commit IDs do not.
+- **CRITICAL — `jj new` comes BEFORE the work, never after:** auto-snapshot puts edits into
+  whatever `@` is *now*. If the next piece of work deserves its own commit, run `jj new` first,
+  then edit. Running `jj new -m "msg"` after editing creates an **empty** commit with your
+  message and strands the work in the previous change — and there is no after-the-fact way to
+  separate "my new edits" from "@'s prior content" short of path surgery.
+- **CRITICAL — bare `jj describe` rewrites `@`'s existing message:** it does not "commit your
+  work"; it renames whatever `@` already is. Before describing, check
+  `jj log -r @ --no-graph -T 'description.first_line()'` — if `@` already carries a message that
+  matters, you are about to destroy it. One session lost the same long-form commit message three
+  times this way, each time after a `squash --into` had quietly moved `@` back onto that commit.
+  Recovery: `jj op log` shows the describe op naming the old commit id;
+  `jj log -r <that-commit-id> --no-graph -T 'description'` still prints the pre-rewrite text.
+- **CRITICAL — never path-extract from a merge commit:** `jj split <paths>` and
+  `jj squash --from <merge> <paths>` do not move "the change to those paths"; a merge commit's
+  path content *is* its merge resolution, so extraction deletes those files from the merged tree
+  and leaves the parent unbuildable (whole files vanish, manifests revert to a parent's version).
+  Work that auto-snapshotted into a merge commit stays there or gets **recreated** on a fresh
+  child — carving it out is not a recoverable operation short of `jj op restore`.
 - **Colocated repos look dirty to git:** jj parks git HEAD at `@`'s parent, so `@`'s content shows in `git status` as uncommitted changes. That is expected state, not a mess to clean up: `git reset --hard`, `git checkout -- .`, `git clean`, or `git stash` there destroys `@`'s work, recoverable only up to the last jj snapshot.
 - **CRITICAL scope:** unscoped `jj restore` reverts the **whole tree**. Name the path: `jj restore --from <rev> <path>`. `abandon`, `undo`, and `op restore` have whole-change/repo-wide blast radii.
 - **CRITICAL no undo loops:** the operation log is shared across workspaces. After a failed command, inspect state and make one deliberate fix; stop and ask before a second `jj undo`.
