@@ -7,7 +7,7 @@
     "messages_last": "ctrl+end"
   },
   "plugin": [
-    "@sjawhar/opencode-knives@git+https://github.com/sjawhar/knives.git#v0.11.0",
+    "@sjawhar/opencode-knives@git+https://github.com/sjawhar/knives.git#v0.13.3",
     "@sjawhar/opencode-legion-envoy@latest",
     "file://{env:HOME}/.dotfiles/opencode/plugins/dotfiles-bridge.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",

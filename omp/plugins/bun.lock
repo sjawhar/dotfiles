@@ -6,7 +6,7 @@
       "name": "omp-plugins",
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
-        "@sjawhar/opencode-knives": "github:sjawhar/knives#d61cf4262973",
+        "@sjawhar/opencode-knives": "github:sjawhar/knives#5d9e519f4d74",
         "legion": "github:sjawhar/legion#f0a0e5f2e64b",
         "secretsd": "github:sjawhar/secretsd#fb9a9954b9ac",
         "superpowers": "https://github.com/obra/superpowers",
@@ -146,7 +146,7 @@
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
-    "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#d61cf42", {}, "sjawhar-knives-d61cf42", "sha512-3xCnStDDoj/bOMW3FkyZt841sFdk8c3OSWff9XftY08j9/OgMVtwcMMdvtZCF9xDtX+xuD9x6HnYI128fyGq4g=="],
+    "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#5d9e519", {}, "sjawhar-knives-5d9e519", "sha512-3OIigDv746ycsvKxEV4vH9vKDBkI2TQo6JHlZ5chpD+EPD32GzkQh/OGI+x1tgwsFrNwc4llgmMb85pWGurlDQ=="],
 
     "@smithy/core": ["@smithy/core@3.33.2", "", { "dependencies": { "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-CUGXpnPkVdjUCbix+83sWLW9VFgQOm44MDOx/ihITJMAnOZKvL8YYIc7DR9pP/tZ8CIRvMiON/TucvygqbHO3w=="],
 
