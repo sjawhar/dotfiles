@@ -95,10 +95,7 @@ export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export ANTHROPIC_1M_CONTEXT=true
 
-# YubiKey-over-SSH: when this machine receives a forwarded pcscd socket (devbox;
-# see RemoteForward in laptop/ssh-config), point PC/SC clients (age-plugin-yubikey)
-# at it. The ~/.pcscd dir is the per-machine marker — only created on machines
-# that receive the forward.
+# YubiKey PC/SC: forward serve owns ~/.pcscd/pcscd.comm on machines with the marker dir (devbox: forward's pcsc channel to the laptop; oryx: SSH-forwarded socat bridge).
 if [ -d "${HOME}/.pcscd" ]; then
     export PCSCLITE_CSOCK_NAME="${HOME}/.pcscd/pcscd.comm"
 fi
