@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Build SQLite index from Claude Code and OpenCode session files.
+Build SQLite index from Claude Code, OpenCode, and Oh My Pi session files.
 
 Design: DB is an index only - no content duplication. Content is read on-demand
-from source files using line numbers (Claude Code) or file paths (OpenCode).
+from source files using line numbers (Claude Code, Oh My Pi) or file paths (OpenCode).
 
 Sources:
   - Claude Code: ~/.dotfiles/.claude/projects/*/*.jsonl (one JSONL per session)
   - OpenCode: ~/.local/share/opencode/storage/ (structured directories)
+  - Oh My Pi: ~/.omp/agent/sessions/*/*.jsonl (one JSONL per session)
 
 Usage:
-    python index-sessions.py [--days N] [--db PATH] [--source claude|opencode|all]
+    python index-sessions.py [--days N] [--db PATH] [--source claude|opencode|omp|all]
 """
 
 import argparse
@@ -109,6 +110,10 @@ def get_projects_dir() -> Path:
 
 def get_opencode_storage_dir() -> Path:
     return Path.home() / ".local" / "share" / "opencode" / "storage"
+
+
+def get_omp_sessions_dir() -> Path:
+    return Path.home() / ".omp" / "agent" / "sessions"
 
 
 def get_db_path() -> Path:
@@ -281,6 +286,101 @@ def index_session(conn: sqlite3.Connection, jsonl_path: Path, project: str) -> d
         "INSERT INTO sessions (id, project, timestamp, source_path, source_size, total_turns, initial_prompt_preview) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             session_id,
+            project,
+            session_timestamp,
+            str(jsonl_path),
+            source_size,
+            turns_count,
+            initial_prompt_preview,
+        ),
+    )
+
+    return {"skipped": False, "turns": turns_count, "flags": flags_count}
+
+
+def index_omp_session(conn: sqlite3.Connection, jsonl_path: Path, project: str) -> dict:
+    """Index a single Oh My Pi session JSONL file.
+
+    Entries are {"type": "message", "message": {"role": ..., "content": [...]}}.
+    Only user and assistant roles are indexed (toolResult etc. are skipped).
+    fetch_turn_content works unchanged: omp nests message.content the same way.
+    """
+    session_id = jsonl_path.stem
+    source_size = jsonl_path.stat().st_size
+
+    existing = get_session_info(conn, session_id)
+    if existing and existing["source_size"] == source_size:
+        return {"skipped": True, "reason": "unchanged"}
+
+    if existing:
+        conn.execute(
+            "DELETE FROM flags WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ?)",
+            (session_id,),
+        )
+        conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+    turns_count = 0
+    flags_count = 0
+    session_timestamp = None
+    initial_prompt_preview = None
+    turn_number = 0
+
+    with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+        for line_num, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            entry_type = data.get("type")
+
+            if entry_type == "session" and session_timestamp is None:
+                session_timestamp = data.get("timestamp")
+                continue
+
+            if entry_type != "message":
+                continue
+
+            message = data.get("message", {})
+            msg_role = message.get("role") if isinstance(message, dict) else None
+            if msg_role not in ("user", "assistant"):
+                continue
+
+            turn_number += 1
+            turns_count += 1
+
+            if msg_role == "user" and session_timestamp is None:
+                session_timestamp = data.get("timestamp")
+
+            text_content = extract_text_content(message.get("content"))
+
+            if msg_role == "user" and initial_prompt_preview is None and text_content:
+                initial_prompt_preview = text_content[:200]
+
+            cursor = conn.execute(
+                "INSERT INTO turns (session_id, turn_number, type, line_start, line_end) VALUES (?, ?, ?, ?, ?)",
+                (session_id, turn_number, msg_role, line_num, line_num),
+            )
+            turn_id = cursor.lastrowid
+
+            detected_flags = detect_flags(text_content, msg_role)
+            for flag_type in detected_flags:
+                conn.execute(
+                    "INSERT INTO flags (turn_id, flag_type) VALUES (?, ?)",
+                    (turn_id, flag_type),
+                )
+                flags_count += 1
+
+    conn.execute(
+        "INSERT INTO sessions (id, source, project, timestamp, source_path, source_size, total_turns, initial_prompt_preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            session_id,
+            "oh-my-pi",
             project,
             session_timestamp,
             str(jsonl_path),
@@ -466,6 +566,17 @@ def index_opencode_session(
 
 
 def fetch_opencode_turn_content(source_path: str, redact: bool = True) -> str:
+    if "::" in source_path:
+        db_path, _, message_id = source_path.rpartition("::")
+        try:
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.OperationalError:
+            return ""
+        try:
+            text = extract_opencode_db_text(db, message_id)
+        finally:
+            db.close()
+        return redact_secrets(text) if redact else text
     try:
         with open(source_path, "r", encoding="utf-8") as f:
             msg = json.load(f)
@@ -478,6 +589,124 @@ def fetch_opencode_turn_content(source_path: str, redact: bool = True) -> str:
     if redact:
         text = redact_secrets(text)
     return text
+
+
+def get_opencode_db_dir() -> Path:
+    return Path.home() / ".local" / "share" / "opencode" / "sessions"
+
+
+def extract_opencode_db_text(db: sqlite3.Connection, message_id: str) -> str:
+    texts = []
+    for (data,) in db.execute(
+        "SELECT data FROM part WHERE message_id = ? ORDER BY time_created", (message_id,)
+    ):
+        try:
+            part = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if part.get("type") == "text" and part.get("text"):
+            texts.append(part["text"])
+    return "\n".join(texts)
+
+
+def index_opencode_db(conn: sqlite3.Connection, db_path: Path) -> dict:
+    """Index top-level sessions from a per-session OpenCode SQLite db.
+
+    Newer OpenCode stores each session tree as one SQLite file under
+    ~/.local/share/opencode/sessions/ (tables: session, message, part).
+    Child sessions (parent_id set: subagents, fork replays) are skipped.
+    Turn source_path is "<db-path>::<message-id>" for on-demand fetch.
+    """
+    source_size = db_path.stat().st_size
+    stats = {"skipped": True, "reason": "no top-level sessions", "turns": 0, "flags": 0}
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return {"skipped": True, "reason": "unreadable"}
+    try:
+        try:
+            sessions = db.execute(
+                "SELECT id, directory, title, time_created FROM session WHERE parent_id IS NULL"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {"skipped": True, "reason": "not a session db"}
+
+        for session_id, directory, _title, time_created in sessions:
+            existing = get_session_info(conn, session_id)
+            if existing and existing["source_size"] == source_size:
+                continue
+            if existing:
+                conn.execute(
+                    "DELETE FROM flags WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ?)",
+                    (session_id,),
+                )
+                conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
+                conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+            project = Path(directory).name if directory else "unknown"
+            session_timestamp = (
+                datetime.fromtimestamp(time_created / 1000, tz=timezone.utc).isoformat()
+                if time_created
+                else None
+            )
+            turns_count = 0
+            flags_count = 0
+            initial_prompt_preview = None
+            turn_number = 0
+
+            for message_id, data in db.execute(
+                "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created",
+                (session_id,),
+            ):
+                try:
+                    msg = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                msg_role = msg.get("role")
+                if msg_role not in ("user", "assistant"):
+                    continue
+
+                turn_number += 1
+                turns_count += 1
+                text_content = extract_opencode_db_text(db, message_id)
+
+                if msg_role == "user" and initial_prompt_preview is None and text_content:
+                    initial_prompt_preview = text_content[:200]
+
+                cursor = conn.execute(
+                    "INSERT INTO turns (session_id, turn_number, type, line_start, line_end, source_path) VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, turn_number, msg_role, 0, 0, f"{db_path}::{message_id}"),
+                )
+                turn_id = cursor.lastrowid
+
+                for flag_type in detect_flags(text_content, msg_role):
+                    conn.execute(
+                        "INSERT INTO flags (turn_id, flag_type) VALUES (?, ?)",
+                        (turn_id, flag_type),
+                    )
+                    flags_count += 1
+
+            conn.execute(
+                "INSERT INTO sessions (id, source, project, timestamp, source_path, source_size, total_turns, initial_prompt_preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    "opencode",
+                    project,
+                    session_timestamp,
+                    str(db_path),
+                    source_size,
+                    turns_count,
+                    initial_prompt_preview,
+                ),
+            )
+            stats = {
+                "skipped": False,
+                "turns": stats.get("turns", 0) + turns_count,
+                "flags": stats.get("flags", 0) + flags_count,
+            }
+    finally:
+        db.close()
+    return stats
 
 
 def main():
@@ -506,7 +735,7 @@ def main():
         "--source",
         type=str,
         default="all",
-        choices=["claude", "opencode", "all"],
+        choices=["claude", "opencode", "omp", "all"],
         help="Which session source to index (default: all)",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
@@ -624,9 +853,92 @@ def main():
                                 file=sys.stderr,
                             )
                             continue
-        elif args.source == "opencode":
+        elif args.source == "opencode" and not get_opencode_db_dir().exists():
             print(
                 f"Error: OpenCode storage not found: {storage_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Newer per-session SQLite layout (~/.local/share/opencode/sessions/*.db)
+        db_dir = get_opencode_db_dir()
+        if db_dir.exists():
+            for db_file in sorted(db_dir.glob("*.db")):
+                total_sessions += 1
+
+                if cutoff_time:
+                    file_mtime = datetime.fromtimestamp(
+                        db_file.stat().st_mtime, tz=timezone.utc
+                    )
+                    if file_mtime < cutoff_time:
+                        skipped_sessions += 1
+                        continue
+
+                try:
+                    stats = index_opencode_db(conn, db_file)
+                    if stats.get("skipped"):
+                        skipped_sessions += 1
+                        if args.verbose:
+                            print(f"  Skipped ({stats.get('reason', 'unchanged')}): {db_file.name}")
+                    else:
+                        indexed_sessions += 1
+                        total_turns += stats.get("turns", 0)
+                        total_flags += stats.get("flags", 0)
+                        if args.verbose:
+                            print(
+                                f"  Indexed [opencode-db]: {db_file.name} ({stats.get('turns', 0)} turns, {stats.get('flags', 0)} flags)"
+                            )
+                except Exception as e:
+                    print(f"  Error indexing {db_file}: {e}", file=sys.stderr)
+                    continue
+
+    # --- Oh My Pi sessions ---
+    if args.source in ("omp", "all"):
+        omp_dir = get_omp_sessions_dir()
+        if omp_dir.exists():
+            if args.project:
+                project_dirs = (
+                    [omp_dir / args.project]
+                    if (omp_dir / args.project).exists()
+                    else []
+                )
+            else:
+                project_dirs = [d for d in omp_dir.iterdir() if d.is_dir()]
+
+            for project_dir in sorted(project_dirs):
+                project_name = project_dir.name
+
+                for jsonl_path in sorted(project_dir.glob("*.jsonl")):
+                    total_sessions += 1
+
+                    if cutoff_time:
+                        file_mtime = datetime.fromtimestamp(
+                            jsonl_path.stat().st_mtime, tz=timezone.utc
+                        )
+                        if file_mtime < cutoff_time:
+                            skipped_sessions += 1
+                            continue
+
+                    try:
+                        stats = index_omp_session(conn, jsonl_path, project_name)
+                        if stats.get("skipped"):
+                            skipped_sessions += 1
+                            if args.verbose:
+                                print(f"  Skipped (unchanged): {jsonl_path.name}")
+                        else:
+                            indexed_sessions += 1
+                            total_turns += stats.get("turns", 0)
+                            total_flags += stats.get("flags", 0)
+                            if args.verbose:
+                                print(
+                                    f"  Indexed [oh-my-pi]: {jsonl_path.name} ({stats.get('turns', 0)} turns, {stats.get('flags', 0)} flags)"
+                                )
+                    except Exception as e:
+                        print(f"  Error indexing {jsonl_path}: {e}", file=sys.stderr)
+                        continue
+        elif args.source == "omp":
+            print(
+                f"Error: Oh My Pi sessions directory not found: {omp_dir}",
                 file=sys.stderr,
             )
             sys.exit(1)
