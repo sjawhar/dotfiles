@@ -5,7 +5,7 @@
     "@bopstack/pi-codegraph": "^0.1.1",
     "@sjawhar/opencode-knives": "github:sjawhar/knives#5d9e519f4d74",
     "legion": "github:sjawhar/legion#f0a0e5f2e64b",
-    "secretsd": "github:sjawhar/secretsd#fb9a9954b9ac",
+    "secretsd": "github:sjawhar/forward#v3.0.2",
     "superpowers": "https://github.com/obra/superpowers"
   }
 }

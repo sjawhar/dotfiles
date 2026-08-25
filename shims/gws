@@ -102,7 +102,7 @@ find_secrets() {
     if command -v secrets; then
         return 0
     fi
-    candidate="$HOME/.mise/installs/github-sjawhar-secretsd/latest/bin/secrets"
+    candidate="$HOME/.mise/installs/secrets/latest/bin/secrets"
     if [[ -x "$candidate" ]]; then
         printf '%s\n' "$candidate"
         return 0
