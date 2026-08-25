@@ -16,16 +16,18 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # machine; only its systemd/ directory is used. Unset, units come from the
 # pinned release -- installers never assume a machine-local checkout path.
 SECRETSD_SRC="${SECRETSD_SRC:-}"
-# The plugin is owned by the secretsd repo, not this one: it speaks a versioned
-# wire protocol to the broker, so it ships from the same source as the binary and
-# is installed here rather than duplicated in dotfiles.
-# The plugin is distributed by the secretsd repo as an installable package, so
-# OpenCode fetches it from GitHub and resolves @opencode-ai/plugin itself. Nothing
-# about the plugin is stored in dotfiles beyond this reference.
+# The plugin is owned by the same repo as the binary, not this one: it speaks a
+# versioned wire protocol to the broker, so it ships from the same source and is
+# installed here rather than duplicated in dotfiles. OpenCode fetches it from
+# GitHub and resolves @opencode-ai/plugin itself; nothing about the plugin is
+# stored in dotfiles beyond this reference.
 # The plugin is pinned to the tag matching the installed binary. They speak a
 # versioned wire protocol, so they must move together -- and a moving ref like
 # #main would never refresh anyway, because the package manager caches it.
-SECRETSD_PLUGIN_REPO="secretsd@git+https://github.com/sjawhar/secretsd.git"
+# The repo is sjawhar/forward as of the consolidation: one tag now publishes
+# `secrets`, `forward`, and this plugin together. The package is still named
+# secretsd, so the dependency spec keeps that name.
+SECRETSD_PLUGIN_REPO="secretsd@git+https://github.com/sjawhar/forward.git"
 OPENCODE_JSON="${DOTFILES_DIR}/opencode/opencode.json"
 # Set when the binary version, the generated drop-in, or a unit file changed.
 secretsd_restart_needed=0
@@ -41,7 +43,10 @@ SECRETSD_VERSION=""
 # stable across updates and needs no wrapper, shim, or symlink of our own. The
 # same release also ships the systemd units next to the binary.
 MISE_INSTALLS="${MISE_DATA_DIR:-${HOME}/.mise}/installs"
-SECRETSD_MISE_DIR="${MISE_INSTALLS}/github-sjawhar-secretsd/latest"
+# `secrets` is a mise tool_alias onto sjawhar/forward (the consolidation ships
+# the broker as a second release asset); the alias gives it its own install
+# dir next to forward's. Pre-merge this was github-sjawhar-secretsd.
+SECRETSD_MISE_DIR="${MISE_INSTALLS}/secrets/latest"
 SECRETSD_BIN="${SECRETSD_MISE_DIR}/bin/secrets"
 if [ ! -x "$SECRETSD_BIN" ]; then
     echo "WARNING: ${SECRETSD_BIN} is absent; run 'mise install' to fetch the pinned release."
@@ -140,6 +145,14 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
         esac
         if [ -n "$SOPS_ABS" ]; then
             echo "Environment=SECRETSD_SOPS_BIN=${SOPS_ABS/#${HOME}/%h}"
+        fi
+        # sops resolves age identities from env locations first; the 2.x broker
+        # implied the default keys file when invoking sops, the 3.x broker does
+        # not, and without it every yubikey stanza fails "undecryptable" before
+        # the touch. Name the default explicitly so the decrypt env is complete
+        # regardless of broker version.
+        if [ -f "${HOME}/.config/sops/age/keys.txt" ]; then
+            echo "Environment=SOPS_AGE_KEY_FILE=%h/.config/sops/age/keys.txt"
         fi
         if [ -d "$AGE_DIR" ]; then
             echo "Environment=PATH=${AGE_DIR/#${HOME}/%h}:/usr/local/bin:/usr/bin"
