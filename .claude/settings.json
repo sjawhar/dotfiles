@@ -32,9 +32,9 @@
     "notion-api@intellectronica-skills": true,
     "typescript-lsp@claude-plugins-official": true,
     "skill-creator@claude-plugins-official": true,
-    "sjawhar@sjawhar": true,
     "knives@knives": true,
-    "claude-envoy-bridge@legion-plugins": true
+    "claude-envoy-bridge@legion-plugins": true,
+    "sjawhar@sjawhar": true
   },
   "extraKnownMarketplaces": {
     "sjawhar": {

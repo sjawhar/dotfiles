@@ -43,6 +43,12 @@ for stale in "${HOME}/.claude/skills/sentry-for-ai"/*; do
 done
 ensure_link "${DOTFILES_DIR}/vendor/ghost-wispr/.opencode/skills"                 "${HOME}/.claude/skills/ghost-wispr"
 
+# Checkout-backed team skill pools for OpenCode only (linked only on machines
+# that have the checkout). OMP gets these via skills-sources.json ompSkillsDir
+# entries (omp/extensions/dotfiles-skills.ts) — never via this config dir.
+[ -d "${HOME}/core-ops/skills" ] && ensure_link "${HOME}/core-ops/skills" "${OPENCODE_DIR}/skills/core-ops"
+[ -d "${HOME}/core-context/skills" ] && ensure_link "${HOME}/core-context/skills" "${OPENCODE_DIR}/skills/core-context"
+
 # Remove legacy OpenCode-specific symlinks that are now redundant. The bridge
 # handles agent/command registration; native ~/.claude/skills/ discovery handles skills.
 # compound-engineering is managed separately below (curated command exposure).
