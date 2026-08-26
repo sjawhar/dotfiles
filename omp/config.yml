@@ -22,6 +22,7 @@ retry:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
 task: 
+  maxRecursionDepth: 3
   agentModelOverrides: 
     bug-finder: "@review"
     code-architect: anthropic/claude-opus-5
@@ -49,7 +50,7 @@ mnemopi:
 theme: 
   dark: titanium
 symbolPreset: unicode
-hideThinkingBlock: false
+hideThinkingBlock: true
 dev: 
   autoqaConsent: granted
 setupVersion: 2

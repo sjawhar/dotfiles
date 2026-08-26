@@ -35,7 +35,7 @@ auto_prune = false
 [tools]
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
 "github:sjawhar/knives" = "latest"
-"github:sjawhar/oh-my-pi" = "18.0.4-sami.20260825-170108"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
+"github:sjawhar/oh-my-pi" = "18.0.5-sami.20260826-192930"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.

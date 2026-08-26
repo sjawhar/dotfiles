@@ -57,3 +57,5 @@
 	gpgsign = true
 [safe]
 	directory = *
+[protocol "file"]
+	allow = always
