@@ -42,6 +42,10 @@ fi
 # flat symlink farm (scripts/omp-sync-skills -> ~/.omp/agent/skills) is
 # retired: live sessions snapshotted farm paths, so every re-sync prune broke
 # them mid-flight.
+# Convergence: prune leftover farm symlinks on machines that predate the
+# retirement (real user-authored skill dirs in ~/.omp/agent/skills survive).
+[ -d "${HOME}/.omp/agent/skills" ] && find "${HOME}/.omp/agent/skills" -maxdepth 1 -type l -delete
+
 
 # Prompt templates (shared command sources synced as symlinks).
 "${DOTFILES_DIR}/scripts/omp-sync-prompts" || echo "omp: prompt sync reported issues" >&2
