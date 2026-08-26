@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""pr-inbox — a per-session review inbox for a GitHub PR.
+
+Checking CI is one command; checking reviews completely is three obscure ones
+(reviews, review-thread comments, issue comments — different endpoints). This
+makes the review road one command too, and makes it an *inbox*: every review,
+thread comment, and issue comment is an item keyed by its GitHub databaseId,
+and each session tracks which items it has seen. A fresh session sees the full
+surface with its own eyes; the same session polls deltas.
+
+Usage:
+  pr-inbox <N> [--repo OWNER/REPO]        unread view (default)
+  pr-inbox OWNER/REPO#<N>
+  pr-inbox <N> --all                      everything, regardless of read state
+  pr-inbox <N> --full ID [ID...]          named items, unclipped, any state
+  pr-inbox <N> --mark ID [ID...] [--note TEXT]
+  pr-inbox <N> --mark-all                 mark everything currently unread
+  pr-inbox <N> --session KEY              override session key
+
+Session key: --session > $PR_INBOX_SESSION > $OMP_SESSION_ID > "default".
+State: ~/.local/state/pr-inbox/<owner>/<repo>/<N>/<session>.json (local
+acknowledgment only — never resolves/minimizes anything on GitHub).
+Always exits 0 unless the fetch or arguments fail; content is the signal.
+
+If this grows further (event push, cross-session ledgers), it belongs in an
+envoy-backed plugin; the databaseId item model here is chosen to survive that.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+CLIP_CHARS = 4000
+STATE_TTL_DAYS = 30
+
+_QUERY_HEADER = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      title state isDraft mergeable reviewDecision
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+    }
+  }
+}
+"""
+
+_QUERY_REVIEWS = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(first: 100, after: $cursor) {
+        nodes { databaseId author { login } state submittedAt body }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+_QUERY_THREADS = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $cursor) {
+        nodes {
+          id isResolved isOutdated path line
+          comments(first: 100) {
+            nodes { databaseId author { login } createdAt body }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+_QUERY_THREAD_COMMENTS = """
+query($id: ID!, $cursor: String) {
+  node(id: $id) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $cursor) {
+        nodes { databaseId author { login } createdAt body }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+_QUERY_COMMENTS = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      comments(first: 100, after: $cursor) {
+        nodes { databaseId author { login } createdAt body }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+@dataclass
+class Item:
+    id: int
+    kind: str  # review | thread-comment | issue-comment
+    author: str
+    when: str
+    body: str
+    review_state: str = ""
+
+
+@dataclass
+class Thread:
+    path: str
+    line: str
+    resolved: bool
+    outdated: bool
+    comments: list[Item] = field(default_factory=list)
+
+
+def gh_graphql(query: str, **variables: object) -> dict:
+    cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for key, value in variables.items():
+        flag = "-F" if isinstance(value, (int, bool)) else "-f"
+        cmd += [flag, f"{key}={value}"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(f"pr-inbox: gh api graphql failed (exit {proc.returncode})")
+    return json.loads(proc.stdout)["data"]
+
+
+def paginate(query: str, path: list[str], **variables: object) -> list[dict]:
+    nodes: list[dict] = []
+    cursor: str | None = None
+    while True:
+        data = gh_graphql(query, **variables, **({"cursor": cursor} if cursor else {}))
+        conn = data
+        for key in path:
+            conn = conn[key]
+        nodes.extend(node for node in conn["nodes"] if node is not None)
+        page = conn["pageInfo"]
+        if not page["hasNextPage"]:
+            return nodes
+        cursor = page["endCursor"]
+
+
+def author_of(node: dict) -> str:
+    author = node.get("author")
+    return author["login"] if author else "ghost"
+
+
+def fetch(owner: str, name: str, number: int) -> tuple[dict, list[Item], list[Thread], list[Item]]:
+    pr_path = ["repository", "pullRequest"]
+    header = gh_graphql(_QUERY_HEADER, owner=owner, name=name, number=number)
+    pr = header["repository"]["pullRequest"]
+    if pr is None:
+        raise SystemExit(f"pr-inbox: {owner}/{name}#{number} not found")
+
+    reviews: list[Item] = []
+    for node in paginate(_QUERY_REVIEWS, [*pr_path, "reviews"], owner=owner, name=name, number=number):
+        body = (node.get("body") or "").strip()
+        state = node["state"]
+        if state == "PENDING":
+            continue
+        if state == "COMMENTED" and not body:
+            continue  # carrier review: its content renders in the threads section
+        reviews.append(
+            Item(id=node["databaseId"], kind="review", author=author_of(node),
+                 when=node["submittedAt"], body=body, review_state=state)
+        )
+
+    threads: list[Thread] = []
+    for node in paginate(_QUERY_THREADS, [*pr_path, "reviewThreads"], owner=owner, name=name, number=number):
+        comments = list(node["comments"]["nodes"])
+        page = node["comments"]["pageInfo"]
+        cursor = page["endCursor"]
+        while page["hasNextPage"]:
+            extra = gh_graphql(_QUERY_THREAD_COMMENTS, id=node["id"], cursor=cursor)
+            conn = extra["node"]["comments"]
+            comments.extend(conn["nodes"])
+            page = conn["pageInfo"]
+            cursor = page["endCursor"]
+        threads.append(
+            Thread(
+                path=node.get("path") or "?",
+                line=str(node.get("line") or "?"),
+                resolved=node["isResolved"],
+                outdated=node["isOutdated"],
+                comments=[
+                    Item(id=c["databaseId"], kind="thread-comment", author=author_of(c),
+                         when=c["createdAt"], body=(c.get("body") or "").strip())
+                    for c in comments
+                ],
+            )
+        )
+
+    issue_comments = [
+        Item(id=node["databaseId"], kind="issue-comment", author=author_of(node),
+             when=node["createdAt"], body=(node.get("body") or "").strip())
+        for node in paginate(_QUERY_COMMENTS, [*pr_path, "comments"], owner=owner, name=name, number=number)
+    ]
+    return pr, reviews, threads, issue_comments
+
+
+def resolve_session(explicit: str | None) -> str:
+    return (
+        explicit
+        or os.environ.get("PR_INBOX_SESSION")
+        or os.environ.get("OMP_SESSION_ID")
+        or "default"
+    )
+
+
+def state_path(owner: str, name: str, number: int, session: str) -> Path:
+    root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    return root / "pr-inbox" / owner / name / str(number) / f"{session}.json"
+
+
+def load_state(path: Path) -> dict:
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {"items": {}}
+
+
+def save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
+    cutoff = time.time() - STATE_TTL_DAYS * 86400
+    for sibling in path.parent.glob("*.json"):
+        if sibling != path and sibling.stat().st_mtime < cutoff:
+            sibling.unlink()
+
+
+def clip(body: str, pr_ref: str, item_id: int, full: bool) -> str:
+    if full or len(body) <= CLIP_CHARS:
+        return body
+    extra = len(body) - CLIP_CHARS
+    return body[:CLIP_CHARS] + f"\n[... clipped, {extra} more chars — pr-inbox {pr_ref} --full {item_id}]"
+
+
+def render_item(item: Item, pr_ref: str, full: bool, note: str | None = None) -> str:
+    if item.kind == "review":
+        head = f"--- [id {item.id}] {item.author} {item.review_state} @ {item.when}"
+    else:
+        head = f"--- [id {item.id}] {item.author} @ {item.when}"
+    if note:
+        head += f"  (read; note: {note})"
+    body = clip(item.body, pr_ref, item.id, full)
+    return head + ("\n" + body if body else "")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="pr-inbox", add_help=True)
+    parser.add_argument("pr", help="PR number, or OWNER/REPO#N")
+    parser.add_argument("--repo", help="OWNER/REPO (default: gh repo view in cwd)")
+    parser.add_argument("--all", action="store_true", help="show everything regardless of read state")
+    parser.add_argument("--full", nargs="+", type=int, metavar="ID", help="show named items unclipped")
+    parser.add_argument("--mark", nargs="+", type=int, metavar="ID", help="mark items read")
+    parser.add_argument("--mark-all", action="store_true", help="mark all currently-unread items read")
+    parser.add_argument("--note", help="disposition note stored with --mark/--mark-all")
+    parser.add_argument("--session", help="session key override")
+    args = parser.parse_args()
+
+    if "#" in args.pr:
+        repo, _, num = args.pr.partition("#")
+    else:
+        repo, num = args.repo or "", args.pr
+    if not repo:
+        proc = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            raise SystemExit("pr-inbox: no --repo given and cwd is not a GitHub repo")
+        repo = proc.stdout.strip()
+    owner, _, name = repo.partition("/")
+    number = int(num)
+    pr_ref = f"{repo}#{number}"
+
+    session = resolve_session(args.session)
+    spath = state_path(owner, name, number, session)
+    state = load_state(spath)
+    seen: dict[str, dict] = state["items"]
+
+    pr, reviews, threads, issue_comments = fetch(owner, name, number)
+
+    all_items = {item.id: item for item in reviews}
+    for thread in threads:
+        all_items.update({c.id: c for c in thread.comments})
+    all_items.update({item.id: item for item in issue_comments})
+
+    def is_unread(item: Item) -> bool:
+        return str(item.id) not in seen
+
+    # --mark / --mark-all: write state, print summary, done.
+    if args.mark or getattr(args, "mark_all", False):
+        ids = args.mark or [item.id for item in all_items.values() if is_unread(item)]
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        marked, unknown = [], []
+        for item_id in ids:
+            if item_id in all_items:
+                entry = {"marked_at": now}
+                if args.note:
+                    entry["note"] = args.note
+                seen[str(item_id)] = entry
+                marked.append(item_id)
+            else:
+                unknown.append(item_id)
+        save_state(spath, state)
+        print(f"marked {len(marked)} item(s) read (session {session})")
+        if unknown:
+            print(f"WARNING: not part of {pr_ref}, ignored: {unknown}")
+        remaining = sum(1 for item in all_items.values() if is_unread(item))
+        print(f"remaining unread: {remaining}")
+        return 0
+
+    full_ids = set(args.full or [])
+
+    def wanted(item: Item) -> bool:
+        if full_ids:
+            return item.id in full_ids
+        return args.all or is_unread(item)
+
+    def note_for(item: Item) -> str | None:
+        entry = seen.get(str(item.id))
+        return entry.get("note") if entry and (args.all or full_ids) else None
+
+    checks = "none"
+    commit_nodes = pr["commits"]["nodes"]
+    if commit_nodes and commit_nodes[0]["commit"]["statusCheckRollup"]:
+        checks = commit_nodes[0]["commit"]["statusCheckRollup"]["state"]
+
+    unread_count = sum(1 for item in all_items.values() if is_unread(item))
+    unresolved = [t for t in threads if not t.resolved]
+    changes_requested = any(r.review_state == "CHANGES_REQUESTED" for r in reviews)
+
+    out: list[str] = []
+    out.append(f"== {pr_ref}: {pr['title']}")
+    out.append(
+        f"state={pr['state']}{' DRAFT' if pr['isDraft'] else ''}  mergeable={pr['mergeable']}"
+        f"  reviewDecision={pr['reviewDecision'] or 'none'}  checks={checks}"
+    )
+    out.append(f"inbox session: {session}  ({len(seen)} item(s) read, {unread_count} unread)")
+
+    shown_reviews = [r for r in reviews if wanted(r)]
+    out.append("")
+    out.append(f"== Reviews ({len(shown_reviews)} shown / {len(reviews)} total)")
+    for review in shown_reviews:
+        out.append(render_item(review, pr_ref, review.id in full_ids, note_for(review)))
+
+    out.append("")
+    resolved_count = len(threads) - len(unresolved)
+    out.append(f"== Review threads ({len(unresolved)} unresolved, {resolved_count} resolved)")
+    fully_read_unresolved = 0
+    for thread in sorted(threads, key=lambda t: t.resolved):
+        if thread.resolved and not (args.all or any(c.id in full_ids for c in thread.comments)):
+            continue
+        shown = [c for c in thread.comments if wanted(c)]
+        if not shown:
+            if not thread.resolved:
+                fully_read_unresolved += 1
+            continue
+        hidden = len(thread.comments) - len(shown)
+        flags = f"{' RESOLVED' if thread.resolved else ''}{' (outdated diff)' if thread.outdated else ''}"
+        out.append(f"--- thread {thread.path}:{thread.line}{flags}")
+        if hidden:
+            out.append(f"    ({hidden} earlier read comment(s) in this thread — --all for context)")
+        for comment in shown:
+            out.append(render_item(comment, pr_ref, comment.id in full_ids, note_for(comment)))
+    if fully_read_unresolved:
+        out.append(f"({fully_read_unresolved} unresolved thread(s) fully read — no new comments; --all for context)")
+
+    shown_comments = [c for c in issue_comments if wanted(c)]
+    out.append("")
+    out.append(f"== Issue comments ({len(shown_comments)} shown / {len(issue_comments)} total)")
+    for comment in shown_comments:
+        out.append(render_item(comment, pr_ref, comment.id in full_ids, note_for(comment)))
+
+    out.append("")
+    if unread_count or unresolved or changes_requested:
+        parts = [f"{unread_count} unread item(s)", f"{len(unresolved)} unresolved thread(s)"]
+        if changes_requested:
+            parts.append("changes requested")
+        out.append(f"ACTION NEEDED: {', '.join(parts)}, reviewDecision={pr['reviewDecision'] or 'none'}")
+    else:
+        out.append(
+            "CLEAN: no unread items, no unresolved threads, no changes-requested reviews, "
+            f"reviewDecision={pr['reviewDecision'] or 'none'}"
+        )
+    print("\n".join(out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

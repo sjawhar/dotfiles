@@ -46,7 +46,7 @@ Work the steps in order. Each produces evidence; step 8 assembles it. **Every st
 
     **If the change touches a user-visible surface, that section must SHOW it, not describe it.** Embed the render in the body — screenshot, before/after pair, or a recording where motion is the point. A reviewer cannot see a diff, and a prose description or a hand-drawn markdown table of what it looks like is the author asking to be believed. "Frontend-only" is the case where this matters most, because the diff is then the least informative thing in the PR. Name what the image is evidence of: a component in a harness proves the component and its stylesheet, not the API wiring behind it. Both are legitimate; conflating them is not. In agent-c, publish via the `pr-screenshots` skill so the images survive.
 
-Then hand off to the `landing-a-pr` skill.
+Then run `pr-inbox <N>` (dotfiles `scripts/`, on PATH) once before leaving this skill — automated reviewers post within minutes of open, and a review that lands while you are still here is yours, not the babysitter's — and hand off to the `landing-a-pr` skill, which re-runs the inbox at every touchpoint: after every push, after every check completion, and always before the words "merge-ready".
 
 ## The excuses, and why none of them work
 
