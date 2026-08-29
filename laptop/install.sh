@@ -222,6 +222,10 @@ ensure_link "${LAPTOP_DIR}/workspace-shortcuts.path" ~/.config/systemd/user/work
 systemctl --user daemon-reload 2>/dev/null || true
 systemctl --user enable --now workspace-shortcuts.path 2>/dev/null \
     || echo "NOTE: could not enable workspace-shortcuts.path (no user systemd session here?) — enable it on the target machine."
+# The service also runs once per login: the boot-time outputs.ron write lands
+# before the path unit arms its watch, so the path unit alone misses it.
+systemctl --user enable workspace-shortcuts.service 2>/dev/null \
+    || echo "NOTE: could not enable workspace-shortcuts.service (no user systemd session here?) — enable it on the target machine."
 
 # --- Sysctl: desktop performance tuning ---
 if ! diff -q "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performance.conf &>/dev/null; then

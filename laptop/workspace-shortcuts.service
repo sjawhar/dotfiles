@@ -1,5 +1,10 @@
 # Regenerates COSMIC custom shortcuts from laptop/workspaces.conf against the
-# currently connected monitors. Triggered by workspace-shortcuts.path; run
+# currently connected monitors. Triggered by workspace-shortcuts.path, and run
+# once per login: cosmic-comp writes outputs.ron during session bring-up,
+# BEFORE the path unit arms its inotify watch (observed 70ms apart), so the
+# login-time write is invisible to the watcher. Ordering After= the path unit
+# closes the race from both sides: writes before this run are covered by the
+# run itself, writes after are covered by the already-armed watch. Run
 # manually with `systemctl --user start workspace-shortcuts` if needed.
 #
 # Companion symlink:
@@ -7,7 +12,7 @@
 
 [Unit]
 Description=Regenerate COSMIC workspace shortcuts from connected monitors
-After=graphical-session.target
+After=graphical-session.target workspace-shortcuts.path
 # Dock enumeration rewrites outputs.ron many times in quick bursts; every
 # trigger must run so the final output state is the one applied. The default
 # start limit (5 in 10s) ate triggers and left stale shortcuts applied.
@@ -15,4 +20,10 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
+# Let WAYLAND_DISPLAY / DBus env import finish on session start (same guard as
+# tt-watcher); doubles as a debounce for dock-enumeration write bursts.
+ExecStartPre=/bin/sleep 5
 ExecStart=%h/.dotfiles/laptop/generate-shortcuts --apply
+
+[Install]
+WantedBy=graphical-session.target
