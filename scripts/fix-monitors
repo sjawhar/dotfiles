@@ -3,7 +3,7 @@
 #
 #   [ laptop ] [ Samsung  ] [    AOC UW        ] [ Samsung  ]
 #              [ LS32A70  ] [    Sceptre UW    ] [ U32J59x  ]
-#              [ portrait ] [    [ ASUS ]      ] [ portrait ]
+#              [ portrait ] [   [ InnoView ]   ] [ portrait ]
 #
 # Identifies monitors by EDID model name so connector names (DP-12, DVI-I-3,
 # etc.) can change across replugs/reboots without breaking the layout.
@@ -24,11 +24,11 @@ SAM_LEFT=$(find_connector "LS32A70")
 SAM_RIGHT=$(find_connector "U32J59x")
 SCEPTRE=$(find_connector "O34")
 AOC=$(find_connector "U34G2G4R3")
-ASUS=$(find_connector "MB16AC")
+INNOVIEW=$(find_connector "InnoView")
 LAPTOP="eDP-1"
 
 errors=0
-for pair in "LS32A70:$SAM_LEFT" "U32J59x:$SAM_RIGHT" "Sceptre O34:$SCEPTRE" "AOC U34G2G4R3:$AOC" "ASUS MB16AC:$ASUS"; do
+for pair in "LS32A70:$SAM_LEFT" "U32J59x:$SAM_RIGHT" "Sceptre O34:$SCEPTRE" "AOC U34G2G4R3:$AOC" "InnoView:$INNOVIEW"; do
     if [[ -z "${pair#*:}" ]]; then
         echo "Warning: ${pair%%:*} not found, skipping"
         errors=1
@@ -36,56 +36,58 @@ for pair in "LS32A70:$SAM_LEFT" "U32J59x:$SAM_RIGHT" "Sceptre O34:$SCEPTRE" "AOC
 done
 
 # Skip layout placement when every found connector is already at its target
-# position; shortcut regeneration still runs afterward in either case.
+# position and scale; shortcut regeneration still runs afterward in either case.
 current_layout() {
     cosmic-randr list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk '
         /^[A-Za-z]/ { connector = $1 }
-        /Position:/ { gsub(",", " ", $2); print connector, $2 }
+        /Position:/ { gsub(",", " ", $2); pos = $2 }
+        /Scale:/    { gsub("%", "", $2); print connector, pos, $2 }
     ' | sort
 }
 target_layout() {
     {
-        echo "$LAPTOP 0 0"
-        [[ -n "$SAM_LEFT" ]]  && echo "$SAM_LEFT 1920 0"
-        [[ -n "$AOC" ]]       && echo "$AOC 4080 0"
-        [[ -n "$SCEPTRE" ]]   && echo "$SCEPTRE 4080 1440"
-        [[ -n "$SAM_RIGHT" ]] && echo "$SAM_RIGHT 7520 0"
-        [[ -n "$ASUS" ]]      && echo "$ASUS 4840 2880"
+        echo "$LAPTOP 0 0 100"
+        [[ -n "$SAM_LEFT" ]]  && echo "$SAM_LEFT 1920 0 100"
+        [[ -n "$AOC" ]]       && echo "$AOC 4080 0 100"
+        [[ -n "$SCEPTRE" ]]   && echo "$SCEPTRE 4080 1440 100"
+        [[ -n "$SAM_RIGHT" ]] && echo "$SAM_RIGHT 7520 0 100"
+        [[ -n "$INNOVIEW" ]]  && echo "$INNOVIEW 4636 2880 110"
     } | sort
 }
 if [[ "$(current_layout)" == "$(target_layout)" ]]; then
     echo "Layout already correct"
 else
 
-    # place <connector> <w> <h> <refresh> <x> <y> <transform>
+    # place <connector> <w> <h> <refresh> <x> <y> <transform> <scale>
     place() {
-        local conn="$1" w="$2" h="$3" hz="$4" x="$5" y="$6" tf="$7"
+        local conn="$1" w="$2" h="$3" hz="$4" x="$5" y="$6" tf="$7" scale="$8"
         [[ -n "$conn" ]] || return 0
         cosmic-randr mode "$conn" "$w" "$h" --refresh "$hz" \
-            --pos-x "$x" --pos-y "$y" --transform "$tf" --scale 1 >/dev/null
+            --pos-x "$x" --pos-y "$y" --transform "$tf" --scale "$scale" >/dev/null
     }
 
     # Pass 1: stage far apart so no intermediate state overlaps
     i=0
     for spec in \
-        "$LAPTOP 1920 1200 60.003 normal" \
-        "$SAM_LEFT 3840 2160 60.000 rotate90" \
-        "$SCEPTRE 3440 1440 60.001 normal" \
-        "$AOC 3440 1440 59.973 normal" \
-        "$SAM_RIGHT 3840 2160 59.997 rotate270" \
-        "$ASUS 1920 1080 60.000 rotate180"; do
-        read -r conn w h hz tf <<< "$spec"
-        place "$conn" "$w" "$h" "$hz" $((i * 12000)) 20000 "$tf"
+        "$LAPTOP 1920 1200 60.003 normal 1" \
+        "$SAM_LEFT 3840 2160 60.000 rotate90 1" \
+        "$SCEPTRE 3440 1440 165.001 normal 1" \
+        "$AOC 3440 1440 59.973 normal 1" \
+        "$SAM_RIGHT 3840 2160 60.000 rotate270 1" \
+        "$INNOVIEW 2560 1440 60.000 rotate180 1.1"; do
+        read -r conn w h hz tf sc <<< "$spec"
+        place "$conn" "$w" "$h" "$hz" $((i * 12000)) 20000 "$tf" "$sc"
         i=$((i + 1))
     done
 
-    # Pass 2: final positions
-    place "$LAPTOP"    1920 1200 60.003    0    0 normal
-    place "$SAM_LEFT"  3840 2160 60.000 1920    0 rotate90
-    place "$AOC"       3440 1440 59.973 4080    0 normal
-    place "$SCEPTRE"   3440 1440 60.001 4080 1440 normal
-    place "$SAM_RIGHT" 3840 2160 59.997 7520    0 rotate270
-    place "$ASUS"      1920 1080 60.000 4840 2880 rotate180
+    # Pass 2: final positions (InnoView: logical 2328x1310 at 1.1, centered
+    # under the Sceptre like the ASUS it replaced, same flipped mount)
+    place "$LAPTOP"    1920 1200 60.003     0    0 normal    1
+    place "$SAM_LEFT"  3840 2160 60.000  1920    0 rotate90  1
+    place "$AOC"       3440 1440 59.973  4080    0 normal    1
+    place "$SCEPTRE"   3440 1440 165.001 4080 1440 normal    1
+    place "$SAM_RIGHT" 3840 2160 60.000  7520    0 rotate270 1
+    place "$INNOVIEW"  2560 1440 60.000  4636 2880 rotate180 1.1
     # cosmic-randr xwayland can block indefinitely waiting on the compositor
     # (observed 2026-07); the layout is already applied by this point, so cap it.
     if ! timeout 3 cosmic-randr xwayland --primary "$LAPTOP"; then
