@@ -1,0 +1,74 @@
+#!/bin/bash
+# Paste stdin into the focused window: copy to clipboard, wait for the keys of
+# the triggering shortcut to be released, then send Ctrl+Shift+V via ydotool.
+#
+# Callers run from COSMIC shortcuts, so Ctrl+Shift are still physically held
+# when we start; a Ctrl+Shift+V synthesized under a held chord is swallowed by
+# the compositor. Same guard the daemon uses (voxtype src/output/modifier_guard.rs):
+# poll the kernel key-state bitmap (EVIOCGKEY) of every readable input device
+# until no modifier is down. Needs the `input` group; with no readable devices
+# the wait is a no-op, matching the daemon.
+set -euo pipefail
+
+MODIFIER_TIMEOUT_S=3
+
+text=$(cat)
+printf '%s' "$text" | wl-copy
+
+if ! python3 -I -S - "$MODIFIER_TIMEOUT_S" <<'EOF'
+import array, fcntl, glob, os, sys, time
+
+# linux/input.h: EVIOCGKEY(len) = _IOC(_IOC_READ, 'E', 0x18, len), KEY_MAX = 0x2ff
+KEY_BYTES = (0x2FF + 1) // 8
+EVIOCGKEY = (2 << 30) | (KEY_BYTES << 16) | (ord("E") << 8) | 0x18
+MODIFIERS = (29, 97, 56, 100, 42, 54, 125, 126)  # L/R ctrl, alt, shift, meta
+KEYBOARD_KEYS = (30, 44, 28)  # KEY_A, KEY_Z, KEY_ENTER: the daemon's keyboard test
+
+def is_keyboard(path):
+    # sysfs bitmap: space-separated hex words, most significant first, one
+    # unsigned long (64 bits) each. Checked before open() because every evdev
+    # open/close pair costs ~15ms and most event nodes are not keyboards.
+    name = os.path.basename(path)
+    try:
+        with open(f"/sys/class/input/{name}/device/capabilities/key") as f:
+            words = f.read().split()
+    except OSError:
+        return False
+    bits = 0
+    for word in words:
+        bits = (bits << 64) | int(word, 16)
+    return all(bits >> k & 1 for k in KEYBOARD_KEYS)
+
+fds = []
+for path in glob.glob("/dev/input/event*"):
+    if not is_keyboard(path):
+        continue
+    try:
+        fds.append(os.open(path, os.O_RDONLY | os.O_NONBLOCK))
+    except OSError:
+        pass
+
+def modifier_held():
+    buf = array.array("B", bytes(KEY_BYTES))
+    for fd in fds:
+        try:
+            fcntl.ioctl(fd, EVIOCGKEY, buf, True)
+        except OSError:
+            continue
+        if any(buf[k >> 3] & (1 << (k & 7)) for k in MODIFIERS):
+            return True
+    return False
+
+deadline = time.monotonic() + float(sys.argv[1])
+while modifier_held():
+    if time.monotonic() >= deadline:
+        sys.exit(1)
+    time.sleep(0.015)
+EOF
+then
+    notify-send --app-name=Voxtype --urgency=critical "Copied to clipboard" \
+        "Modifier keys still held after ${MODIFIER_TIMEOUT_S}s; paste manually with Ctrl+Shift+V"
+    exit 0
+fi
+
+ydotool key 29:1 42:1 47:1 47:0 42:0 29:0  # Ctrl+Shift+V
