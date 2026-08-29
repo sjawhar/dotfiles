@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# ompo: omp profile launcher — `oco` for omp.
+#
+#   ompo                  — list profiles and the provider keys each one bills to
+#   ompo ls               — same
+#   ompo NAME [args...]   — launch omp under profile NAME (omp creates it on first use)
+#
+# omp's own --profile already isolates auth, sessions, and config under
+# ~/.omp/profiles/NAME/agent. This adds two things:
+#
+# 1. Billing, via shims/omp: under a profile the secrets named <KEY>_<NAME> are
+#    injected in place of the personal keys (OPENAI_API_KEY_THEOREM becomes
+#    OPENAI_API_KEY). Add a profile's keys with
+#    `secrets edit-local --source dotfiles` (this machine) or
+#    `secrets edit --source dotfiles` (every machine); the name is the provider
+#    variable, then the profile uppercased with `-`/`.` as `_`. Anything else
+#    in the environment is left alone: `secrets ANTHROPIC_API_KEY -- ompo NAME`
+#    uses the personal Anthropic account for that session. Credentials pasted
+#    with /login inside the profile work too, and need no secret.
+# 2. Shared config, the way oco mirrors the canonical opencode dir: every
+#    symlink in ~/.omp/agent (agents, prompts, models.yml, mcp.json,
+#    WATCHDOG.md, keybindings.yml, extensions/*) is mirrored into the profile
+#    with the same target, so it follows installers/omp.sh. Real files and dirs
+#    there are runtime state (agent.db, sessions, cache) and stay per-profile.
+#    config.yml is never shared: it carries the model roles, which name the
+#    credentials a session bills, and omp writes /model picks back into it, so
+#    a shared file would let one profile rewrite the other's default. Entries
+#    already present in the profile are left alone.
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+PROFILES_DIR="$HOME/.omp/profiles"
+
+usage() {
+    cat >&2 <<'USAGE'
+usage: ompo                 — list profiles and their scoped keys
+       ompo ls              — same
+       ompo NAME [args...]  — launch omp under profile NAME
+USAGE
+}
+
+list_profiles() {
+    local available d name suffix scoped
+    available="$(secrets list | awk '{print $1}')"
+    {
+        printf 'NAME\tKEYS\n'
+        for d in "$PROFILES_DIR"/*/; do
+            [ -d "$d" ] || continue
+            name=$(basename "$d")
+            suffix="_$(tr 'a-z.-' 'A-Z__' <<< "$name")"
+            scoped=$(awk -v s="$suffix" 'substr($0, length($0) - length(s) + 1) == s' <<< "$available" | paste -sd, -)
+            printf '%s\t%s\n' "$name" "${scoped:-(none)}"
+        done
+    } | column -t -s $'\t'
+}
+
+case "${1:-}" in
+    ""|ls|list)
+        list_profiles
+        exit 0
+        ;;
+    -h|--help|help)
+        usage
+        exit 0
+        ;;
+esac
+
+NAME="$1"
+shift
+if ! [[ "$NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ompo: invalid profile name: $NAME" >&2
+    echo "      use letters, digits, '.', '-', '_'" >&2
+    exit 1
+fi
+
+CANONICAL_ROOT="$HOME/.omp"
+PROFILE_ROOT="$PROFILES_DIR/$NAME"
+
+mirror_links() { # mirror_links SRC_DIR DST_DIR
+    local src="$1" dst="$2" entry name target
+    mkdir -p "$dst"
+    for entry in "$src"/*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        name=$(basename "$entry")
+        [ "$name" = config.yml ] && continue
+        target="$dst/$name"
+        if [ -L "$entry" ]; then
+            [ -e "$target" ] || [ -L "$target" ] || ln -s "$(readlink "$entry")" "$target"
+        elif [ "$name" = extensions ]; then
+            # A real dir of per-file links (installers/omp.sh); mirror one level down.
+            mirror_links "$entry" "$target"
+        fi
+    done
+}
+# A profile relocates the whole user base, not just agent/: installed plugins
+# (envoy, knives, codegraph, secretsd, superpowers) are read from
+# <root>/plugins, so the root-level link has to be mirrored too.
+mirror_links "$CANONICAL_ROOT" "$PROFILE_ROOT"
+mirror_links "$CANONICAL_ROOT/agent" "$PROFILE_ROOT/agent"
+
+OMP_PROFILE="$NAME" exec "$DOTFILES_DIR/shims/omp" "$@"

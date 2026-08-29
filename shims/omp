@@ -3,6 +3,9 @@
 # (the fork release binary, mise-managed: "github:sjawhar/oh-my-pi" in mise.toml).
 # Keys never touch disk or global env; they exist only in the child process.
 # Anthropic auth is deliberately API-key (no Claude Pro/Max OAuth emulation).
+# Under `--profile NAME` / OMP_PROFILE the profile's own <KEY>_<NAME> secrets
+# are injected instead of the personal keys — see "provider keys" below and
+# scripts/ompo.
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -76,6 +79,58 @@ for _p in "${_cands[@]}"; do
 done
 
 if [[ -n "$_omp" ]]; then
-    exec secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- "$_omp" "$@"
+    _cmd=("$_omp")
+else
+    _cmd=(mise x "github:sjawhar/oh-my-pi" -- omp)
 fi
-exec secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- mise x "github:sjawhar/oh-my-pi" -- omp "$@"
+
+# --- provider keys: personal by default, profile-scoped under a profile ---
+# `omp --profile NAME` (or OMP_PROFILE=NAME) isolates auth, sessions, and
+# config; billing follows. Under a named profile the shim injects the secrets
+# called <KEY>_<NAME> (suffix = profile name uppercased, `-`/`.` as `_`:
+# theorem → OPENAI_API_KEY_THEOREM) as <KEY>, instead of the personal keys.
+# Anything else already in the environment is left alone, so
+# `secrets ANTHROPIC_API_KEY -- omp --profile theorem` bills the personal
+# Anthropic account for that session.
+# OMP_PROFILE wins over --profile whenever it is defined, even when empty
+# (empty and "default" both mean the default profile), matching omp itself.
+_keys=(ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY)
+if [[ -n "${OMP_PROFILE+x}" ]]; then
+    _profile="$OMP_PROFILE"
+else
+    _profile=""
+    _args=("$@")
+    for ((_i = 0; _i < ${#_args[@]}; _i++)); do
+        case "${_args[_i]}" in
+            --profile=*) _profile="${_args[_i]#--profile=}" ;;
+            --profile) _profile="${_args[_i + 1]:-}" ;;
+        esac
+    done
+fi
+_profile="${_profile//[[:space:]]/}"
+case "$_profile" in
+    ""|default)
+        exec secrets "${_keys[@]}" -- "${_cmd[@]}" "$@"
+        ;;
+esac
+
+_suffix="_$(tr 'a-z.-' 'A-Z__' <<< "$_profile")"
+_available="$(secrets list | awk '{print $1}')"
+_scoped=()
+for _k in "${_keys[@]}"; do
+    grep -qx "${_k}${_suffix}" <<< "$_available" && _scoped+=("${_k}${_suffix}")
+done
+if [[ ${#_scoped[@]} -eq 0 ]]; then
+    exec "${_cmd[@]}" "$@"
+fi
+# secrets exposes the scoped names; rename them to the provider names omp reads.
+exec secrets "${_scoped[@]}" -- bash -c '
+    suffix="$1"; shift
+    for k in ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY; do
+        scoped="${k}${suffix}"
+        [[ -n "${!scoped+x}" ]] || continue
+        export "$k=${!scoped}"
+        unset "$scoped"
+    done
+    exec "$@"
+' _ "$_suffix" "${_cmd[@]}" "$@"
