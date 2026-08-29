@@ -115,6 +115,41 @@ if "${GENERATOR}" --check --monitors "${SINGLE_MONITORS}" --conf "${template_col
     fail 'chord colliding with template binding must fail'
 fi
 
+# A '?' query keeps its own group's rows together when the monitor is otherwise unused.
+unused_group="${TMPDIR}/unused-group.conf"
+printf '%s\n' \
+    '1 MB16AC?,eDP-1 Alt+1 Alt+Shift+1' \
+    '2 MB16AC?,eDP-1 Alt+2 Alt+Shift+2' > "${unused_group}"
+unused_group_output="${TMPDIR}/unused-group-custom"
+"${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" --conf "${unused_group}" > "${unused_group_output}"
+grep -Fq 'WorkspaceOnOutput("MB16AC", 1),' "${unused_group_output}" \
+    || fail 'unused-only query must match a monitor that holds no other rows'
+grep -Fq 'WorkspaceOnOutput("MB16AC", 2),' "${unused_group_output}" \
+    || fail 'unused-only query must keep its own group rows on the same monitor'
+
+# ... and yields to a monitor that already won a different fallback list's rows.
+claimed_group="${TMPDIR}/claimed-group.conf"
+printf '%s\n' \
+    '1 MB16AC Alt+1 Alt+Shift+1' \
+    '2 MB16AC?,eDP-1 Alt+2 Alt+Shift+2' \
+    '3 MB16AC?,eDP-1 Alt+3 Alt+Shift+3' > "${claimed_group}"
+claimed_group_output="${TMPDIR}/claimed-group-custom"
+"${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" --conf "${claimed_group}" > "${claimed_group_output}"
+grep -Fq 'WorkspaceOnOutput("MB16AC", 1),' "${claimed_group_output}" \
+    || fail 'plain query must still claim the monitor for its own group'
+! grep -Fq 'WorkspaceOnOutput("MB16AC", 2),' "${claimed_group_output}" \
+    || fail 'unused-only query must not absorb a monitor owned by another group'
+grep -Fq 'WorkspaceOnOutput("eDP-1", 1),' "${claimed_group_output}" \
+    || fail 'unused-only query must fall through when the monitor is already owned'
+grep -Fq 'WorkspaceOnOutput("eDP-1", 2),' "${claimed_group_output}" \
+    || fail 'both yielded rows must continue on the fallback monitor'
+
+bare_marker="${TMPDIR}/bare-marker.conf"
+printf '%s\n' '1 ? Alt+1 Alt+Shift+1' > "${bare_marker}"
+if "${GENERATOR}" --check --monitors "${SINGLE_MONITORS}" --conf "${bare_marker}" > /dev/null 2>&1; then
+    fail 'a bare ? query must fail'
+fi
+
 portable_output="${TMPDIR}/portable-custom"
 "${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" > "${portable_output}"
 [[ "$(grep -c '): WorkspaceOnOutput(' "${portable_output}")" -eq 15 ]] \

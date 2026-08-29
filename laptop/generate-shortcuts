@@ -196,10 +196,21 @@ load_monitors() {
     fi
 }
 
+# True when the connector already holds rows resolved from a fallback list other
+# than this one, i.e. it owns a different chord group's workspaces.
+other_group_rows() {
+    local connector="$1"
+    local fallback_list="$2"
+
+    ((${local_counts["${connector}"]:-0} > ${group_counts["${connector}|${fallback_list}"]:-0}))
+}
+
 resolve_monitor() {
     local fallback_list="$1"
     local context="$2"
     local query
+    local name
+    local unused_only
     local connector
     local model
     local query_lower
@@ -214,13 +225,27 @@ resolve_monitor() {
     for query in "${queries[@]}"; do
         [[ -n "${query}" ]] || error "${context}: monitor fallback list contains an empty query"
 
-        if [[ -n "${monitor_models["${query}"]+x}" ]]; then
-            RESOLVED_CONNECTOR="${query}"
-            RESOLVED_QUERY="${query}"
+        # A trailing '?' means "only if this monitor holds no rows from a different
+        # fallback list": a screen that already won another chord group yields these
+        # rows to the next query, while this group's own rows still stay together.
+        unused_only=0
+        name="${query}"
+        if [[ "${name}" == *'?' ]]; then
+            unused_only=1
+            name="${name%'?'}"
+            [[ -n "${name}" ]] || error "${context}: monitor fallback list contains an empty query"
+        fi
+
+        if [[ -n "${monitor_models["${name}"]+x}" ]]; then
+            if ((unused_only)) && other_group_rows "${name}" "${fallback_list}"; then
+                continue
+            fi
+            RESOLVED_CONNECTOR="${name}"
+            RESOLVED_QUERY="${name}"
             return 0
         fi
 
-        query_lower="${query,,}"
+        query_lower="${name,,}"
         matches=()
         for connector in "${monitor_connectors[@]}"; do
             model="${monitor_models["${connector}"]}"
@@ -232,8 +257,11 @@ resolve_monitor() {
             0)
                 ;;
             1)
+                if ((unused_only)) && other_group_rows "${matches[0]}" "${fallback_list}"; then
+                    continue
+                fi
                 RESOLVED_CONNECTOR="${matches[0]}"
-                RESOLVED_QUERY="${query}"
+                RESOLVED_QUERY="${name}"
                 return 0
                 ;;
             *)
@@ -253,6 +281,7 @@ resolve_monitor() {
 declare -A seen_workspaces=()
 declare -A seen_chords=()
 declare -A local_counts=()
+declare -A group_counts=()
 declare -a bindings=()
 
 load_monitors
@@ -289,6 +318,8 @@ while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
 
     local_index=$((${local_counts["${RESOLVED_CONNECTOR}"]:-0} + 1))
     local_counts["${RESOLVED_CONNECTOR}"]="${local_index}"
+    group_key="${RESOLVED_CONNECTOR}|${monitor_fallbacks}"
+    group_counts["${group_key}"]=$((${group_counts["${group_key}"]:-0} + 1))
     case "${local_index}" in
         [1-9])
             key_num="${local_index}"
