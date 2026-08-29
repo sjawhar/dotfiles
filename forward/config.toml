@@ -23,8 +23,12 @@ bridge_port = 12801
 
 # Entries are the only remote URLs that open without a paste. Chosen from 14 days
 # of daemon logs, so routine traffic does not turn into constant pasting.
+# Pattern grammar (crates/forward/src/policy.rs): `host[:port][/path-prefix]`;
+# `*` stands for exactly ONE label, so `*.example.com` admits `a.example.com`
+# but not `a.b.example.com` — pin deep hosts by name.
 allow = [
-  "100.113.243.90:12802",         # Devbox file-preview server; must match the devbox's `listen`
+  "100.113.243.90",                # Devbox tailnet address, any port: the :12802 file-preview
+                                   # server plus whatever dev servers agents run there
   "d-9267c4f5db.awsapps.com",      # Trajectory's IAM Identity Center tenant; deliberately not wildcarded
   "device.sso.*.amazonaws.com",    # AWS device-authorization endpoints
   "github.com",                    # Whole host, not just /login: PR and issue links are the single
@@ -42,6 +46,7 @@ allow = [
   # infra (`infra/hawk/cognito.py`).
   "production-trajectory-labs.auth.us-west-2.amazoncognito.com",  # api.hawk.internal.trajectorylabs.com
   "staging-trajectory-labs.auth.us-west-2.amazoncognito.com",     # api.hawk.staging.trajectorylabs.com
+  "viewer.hawk.internal.trajectorylabs.com",  # Hawk eval viewer links from agent sessions
   "claude.ai",                     # Claude web authentication
   "*.anthropic.com",               # Anthropic-owned subdomains used by authentication
 ]
