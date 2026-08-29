@@ -3,8 +3,14 @@
 # Uses voxtype's own transcriber, then pipes through post-processing and pastes.
 set -euo pipefail
 
+VOXTYPE_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}/voxtype"
 RECORDINGS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/recordings"
-POST_PROCESS="$HOME/.dotfiles/voxtype/voxtype-post-process"
+POST_PROCESS="$VOXTYPE_DIR/voxtype-post-process"
+PASTE="$VOXTYPE_DIR/voxtype-paste"
+
+# The engine API key normally reaches voxtype through voxtype-daemon; a COSMIC
+# shortcut has no such environment.
+source "$VOXTYPE_DIR/secrets.sh"
 
 latest=$(find "$RECORDINGS_DIR" -name '*.wav' -printf '%T@ %p\n' 2>/dev/null \
     | sort -rn | head -1 | cut -d' ' -f2-)
@@ -17,25 +23,25 @@ fi
 filename=$(basename "$latest")
 notify-send --app-name=Voxtype --expire-time=2000 "Retranscribing" "$filename"
 
-# Transcribe the audio file
-text=$(voxtype transcribe "$latest" 2>/dev/null) || {
-    notify-send --app-name=Voxtype "Retranscription Failed" "Could not transcribe $filename"
+# `voxtype transcribe` prints progress lines to stdout, then a blank line, then
+# the text (src/app/transcribe_file.rs). Errors go to stderr as the last line.
+stderr_file=$(mktemp)
+trap 'rm -f "$stderr_file"' EXIT
+if ! raw=$(voxtype transcribe "$latest" 2>"$stderr_file"); then
+    notify-send --app-name=Voxtype --urgency=critical "Retranscription Failed" \
+        "$filename: $(tail -n1 "$stderr_file")"
     exit 1
-}
+fi
+text=$(sed '1,/^$/d' <<<"$raw")
 
 if [ -z "$text" ]; then
     notify-send --app-name=Voxtype "Empty Result" "Transcription produced no text"
     exit 0
 fi
 
-# Post-process if the hook is available and API key is set
-if [ -x "$POST_PROCESS" ] && [ -n "${VOXTYPE_WHISPER_API_KEY:-}" ]; then
-    text=$(printf '%s' "$text" | "$POST_PROCESS") || true
-fi
+# Refine and log to history; post-process falls back to raw text on its own
+refined=$(printf '%s' "$text" | "$POST_PROCESS") && text=$refined
 
-# Copy to clipboard and paste into focused window
-printf '%s' "$text" | wl-copy
-sleep 0.15
-ydotool key 29:1 42:1 47:1 47:0 42:0 29:0  # Ctrl+Shift+V
+printf '%s' "$text" | "$PASTE"
 
 notify-send --app-name=Voxtype --expire-time=2000 "Retranscribed" "${text:0:80}..."

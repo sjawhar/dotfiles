@@ -1,12 +1,12 @@
 #!/bin/bash
 # Paste the last voxtype transcription into the focused window.
-# Copies to clipboard then simulates Ctrl+Shift+V.
 set -euo pipefail
 
 HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/history.jsonl"
+PASTE="${DOTFILES_DIR:-$HOME/.dotfiles}/voxtype/voxtype-paste"
 
 if [ ! -f "$HISTORY_FILE" ]; then
-    notify-send "Voxtype" "No transcription history found"
+    notify-send --app-name=Voxtype "No transcription history found"
     exit 0
 fi
 
@@ -14,11 +14,8 @@ fi
 last=$(tail -n1 "$HISTORY_FILE" | jq -r '.text // empty')
 
 if [ -z "$last" ]; then
-    notify-send "Voxtype" "History is empty"
+    notify-send --app-name=Voxtype "History is empty"
     exit 0
 fi
 
-# Copy to clipboard and paste into focused window
-printf '%s' "$last" | wl-copy
-sleep 0.15  # allow shortcut keys to release + clipboard to settle
-ydotool key 29:1 42:1 47:1 47:0 42:0 29:0  # Ctrl+Shift+V
+printf '%s' "$last" | "$PASTE"
