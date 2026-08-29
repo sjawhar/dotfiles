@@ -1,0 +1,92 @@
+#!/bin/bash
+# gcloud wrapper: select a named gcloud configuration via GCLOUD_ACCOUNT,
+# instead of typing CLOUDSDK_ACTIVE_CONFIG_NAME=<name> per command or mutating
+# global state with `gcloud config configurations activate`.
+#
+# Resolution:
+#   - GCLOUD_ACCOUNT unset/empty -> exec real gcloud untouched. gcloud is used
+#     by every session and agent on this machine, so this path must be
+#     trivially, obviously byte-identical to no shim existing at all: no env
+#     manipulation, no validation, no output.
+#   - GCLOUD_ACCOUNT set -> validate that config_<name> exists as a file under
+#     ${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations. That is a
+#     filesystem check, not `gcloud config configurations list`, which would
+#     recurse into this very shim and is slow.
+#       exists    -> export CLOUDSDK_ACTIVE_CONFIG_NAME=<name>, exec real gcloud.
+#       missing   -> fail loud, naming the bad value and listing the
+#                    configurations that DO exist. Never fall back to `default`:
+#                    a command meant for one identity must never silently run
+#                    as another.
+#
+# Doctrine matches shims/gws: fail LOUD where an identity is supposed to exist,
+# never fall through to a different one.
+set -euo pipefail
+
+find_real_gcloud() {
+    local self candidate
+    self="$(readlink -f "${BASH_SOURCE[0]}")"
+    while IFS= read -r candidate; do
+        [[ "$(readlink -f "$candidate")" == "$self" ]] && continue
+        printf '%s\n' "$candidate"
+        return 0
+    done < <(type -ap gcloud)
+    # Minimal-PATH spawners (MCP servers, cron, etc.) carry neither the
+    # dotfiles shims nor the SDK's own bin dir; fall back to the documented
+    # install location before failing.
+    candidate="$HOME/.gcloud/google-cloud-sdk/bin/gcloud"
+    if [[ -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    echo "gcloud shim: real gcloud binary not found on PATH or at the default SDK install location" >&2
+    return 127
+}
+
+main() {
+    local real_gcloud
+    # split is load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
+    real_gcloud="$(find_real_gcloud)"
+
+    local account="${GCLOUD_ACCOUNT:-}"
+    if [[ -z "$account" ]]; then
+        exec "$real_gcloud" "$@"
+    fi
+
+    # Reject path separators and dot-segments before they ever touch a
+    # filesystem path: an account name is a bare configuration name, never a
+    # traversal into an arbitrary file.
+    case "$account" in
+        */* | . | ..)
+            echo "gcloud shim: GCLOUD_ACCOUNT '${account}' is not a valid gcloud configuration name" >&2
+            exit 1
+            ;;
+    esac
+
+    local config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations"
+    local config_file="${config_dir}/config_${account}"
+
+    if [[ ! -f "$config_file" ]]; then
+        local candidate available
+        local -a names=()
+        if [[ -d "$config_dir" ]]; then
+            for candidate in "$config_dir"/config_*; do
+                [[ -f "$candidate" ]] || continue
+                names+=("${candidate##*/config_}")
+            done
+        fi
+        if [[ "${#names[@]}" -gt 0 ]]; then
+            available="$(IFS=', '; echo "${names[*]}")"
+        else
+            available="(none found in ${config_dir})"
+        fi
+        echo "gcloud shim: GCLOUD_ACCOUNT '${account}' has no gcloud configuration at ${config_file}; available configurations: ${available}" >&2
+        exit 1
+    fi
+
+    export CLOUDSDK_ACTIVE_CONFIG_NAME="$account"
+    exec "$real_gcloud" "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
