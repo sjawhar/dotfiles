@@ -238,3 +238,8 @@ on_transcription = true
 
 [vocabulary]
 terms_file = "~/.dotfiles/voxtype/vocabulary.json"
+
+[osd]
+# Native OSD frontend renders broken on COSMIC at fork base v0.7.5; disabled
+# until the fork picks up upstream OSD fixes (see knives notch ci in voxtype repo).
+enabled = false

@@ -31,6 +31,8 @@ TRANSCRIBE_TIMEOUT_SECS = 45
 ICONS = {
     "idle": "audio-input-microphone-symbolic",
     "recording": "media-record-symbolic",
+    # Deepgram streaming engine reports "streaming" while dictating
+    "streaming": "media-record-symbolic",
     "transcribing": "emblem-synchronizing-symbolic",
     "error": "dialog-warning-symbolic",
 }
@@ -38,6 +40,7 @@ ICONS = {
 LABELS = {
     "idle": "",
     "recording": "REC",
+    "streaming": "REC",
     "transcribing": "...",
     "error": "ERR",
 }

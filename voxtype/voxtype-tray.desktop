@@ -1,7 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Voxtype Tray
-Exec=sh -c "$HOME/.dotfiles/voxtype/voxtype-tray"
+# sh expands ~; $HOME breaks here: systemd's xdg-autostart generator
+# escapes it to \$HOME, which sh then never expands (exit 127).
+Exec=sh -c "exec ~/.dotfiles/voxtype/voxtype-tray"
 Icon=audio-input-microphone-symbolic
 Comment=Tray indicator for voxtype recording state
 X-GNOME-Autostart-enabled=true
