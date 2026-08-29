@@ -11,7 +11,10 @@ Type=simple
 # them, blocking the HiFi profile and hiding devices from desktop applets.
 ExecStartPre=/usr/bin/sleep 3
 ExecStart=%h/.dotfiles/voxtype/voxtype-daemon
-Restart=on-failure
+# "always", not "on-failure": systemd treats SIGPIPE as a *clean* exit
+# signal, and the daemon dies via SIGPIPE when its audio device vanishes
+# (e.g. dock USB flap mid-recording).
+Restart=always
 RestartSec=5
 
 [Install]
