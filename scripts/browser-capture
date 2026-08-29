@@ -274,7 +274,7 @@ def verify_secrets_stdin_support(source: str) -> None:
     """Require the non-TTY edit-human path before collecting a cookie."""
     try:
         probe_result = subprocess.run(
-            ["secrets", "edit-human", CAPABILITY_PROBE_KEY, "--source", source],
+            ["secrets", "edit-human", CAPABILITY_PROBE_KEY, "--source", source, "--local"],
             input=b"",
             capture_output=True,
             check=False,
@@ -380,7 +380,7 @@ def store_matching_cookie(
     secret_value = raw_cookies[index]["value"]
     try:
         write_process = subprocess.Popen(
-            ["secrets", "edit-human", secret_key, "--source", source],
+            ["secrets", "edit-human", secret_key, "--source", source, "--local"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
