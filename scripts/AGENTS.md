@@ -6,7 +6,7 @@ Standalone utility scripts and small tools.
 
 Executables covering several areas:
 
-- **OpenCode/Claude sessions** — `oc`, `oco`, `cco`, `cld`, `claude-session-repair.py`, `claude-transcript-times`, `sanitize-opencode-db`, `claudeforge-install`.
+- **OpenCode/Claude/omp sessions** — `oc`, `oco`, `ompo` (omp under a named profile, billed only to that profile's `*_API_KEY_<NAME>` secrets; see `shims/omp`), `cco`, `cld`, `claude-session-repair.py`, `claude-transcript-times`, `sanitize-opencode-db`, `claudeforge-install`.
 - **tmux** — `tmux-dev-group`, `tmux-restore`, `tmux-snapshot`, `tmux-osc52-copy`, `tmux-urls`, `tmux-resurrect-omp` (tmux-resurrect save hook: records each omp pane as `omp --resume <id>` so a server restart brings the sessions back, not just the layout).
 - **Monitoring / system** — `ephemeral-monitor`, `mem-usage`, `resource-warnings`, `fix-monitors`, `jj-agent-status`, `fix-watchman` (unwatches Watchman roots whose sync is broken, which otherwise adds ~60s to every jj command in that workspace).
 - **Version control** — `git-identity` (sets the git *and* jj commit identity for a repo together, so signing stays intact).
