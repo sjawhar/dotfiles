@@ -13,12 +13,12 @@ Run `envoy_whoami`. If it returns a session ID, Envoy is available and the rest 
 
 **In every dispatch prompt, include:**
 
-1. Your session ID, with the instruction: *message me via `envoy_send(target_session="<your-id>", ...)` when you finish, hit a blocker, or need a decision you cannot make yourself. Include your own session ID (from `envoy_whoami`) so I can reply.*
+1. Your session ID, with the instruction: *message me via `envoy_send(session_id="<your-id>", ...)` when you finish, hit a blocker, or need a decision you cannot make yourself. Include your own session ID (from `envoy_whoami`) so I can reply.*
 2. That a clarification question sent this way beats guessing. A subagent that guessed wrong burns its whole run; one that asked lost a minute.
 
 **Stalled subagent? Message it before you kill it.** A subagent that looks stuck may be deep in legitimate work — killing it burns everything it learned. `envoy_send` a status request and give it ~10 minutes to answer (longer if its task involves builds or long test suites); re-dispatch only on silence or a reply confirming it is wedged. Kill-then-redispatch without asking is the last resort, not the reflex.
 
-**Replies arrive as turns in your session** with a reply-to session ID — respond with `envoy_send(target_session="<their-id>", ...)`.
+**Replies arrive as turns in your session** with a reply-to session ID — respond with `envoy_send(session_id="<their-id>", ...)`.
 
 ## Dispatch prompts
 
