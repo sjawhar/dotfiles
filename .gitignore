@@ -22,6 +22,17 @@ vendor/
 !.claude/settings.json
 
 /.claude-oauth/
+
+# Eval case data — session-derived, contains verbatim messages, tool output, and
+# third-party names. This repo is PUBLIC and jj auto-snapshots, so there is no
+# commit moment to gate: the bodies live outside the tree entirely
+# (~/.local/share/skill-evals/). These entries are the backstop for a stray copy.
+**/skill-evals/cases*.jsonl
+**/skill-evals/data/
+**/skill-evals/**/*.eval
+**/skill-evals/results*.jsonl
+**/skill-evals/judged*.jsonl
+**/skill-evals/baseline-*/
 /.opencode-profiles/
 
 .sisyphus/

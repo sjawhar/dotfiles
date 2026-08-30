@@ -11,6 +11,11 @@ read_credential_cmd  = ["google-user-token", "--scopes", "gmail.readonly"]
 # <= v0.3.0: write unlock via secrets-wrapped __mint (human tier, YubiKey).
 write_credential_cmd = ["secrets", "GWS_WORK_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_WORK_MODIFY_OAUTH"]
 write_label          = "YubiKey touch (secretsd)"
+# >= v1.1.0: send unlock via secrets-wrapped __mint (human tier, YubiKey).
+# Send unlock works from ANY surface; every use costs a hardware-key touch via
+# the broker.
+send_credential_cmd  = ["secrets", "GWS_WORK_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_WORK_SEND_OAUTH"]
+send_label           = "YubiKey touch (secretsd)"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
 [accounts.personal]
@@ -18,4 +23,9 @@ credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 read_credential_cmd  = ["secrets", "GWS_PERSONAL_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_READ_OAUTH"]
 write_credential_cmd = ["secrets", "GWS_PERSONAL_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_MODIFY_OAUTH"]
 write_label          = "YubiKey touch (secretsd)"
+send_credential_cmd  = ["secrets", "GWS_PERSONAL_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_SEND_OAUTH"]
+send_label           = "YubiKey touch (secretsd)"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
+
+[filters.github]
+from = "notifications@github\\.com"

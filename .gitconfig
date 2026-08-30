@@ -12,11 +12,11 @@
 
 [credential "https://github.com"]
 	helper = 
-	helper = !gh auth git-credential
+	helper = !/home/ubuntu/.mise/installs/gh/2.98.0/gh_2.98.0_linux_amd64/bin/gh auth git-credential
 
 [credential "https://gist.github.com"]
 	helper = 
-	helper = !gh auth git-credential
+	helper = !/home/ubuntu/.mise/installs/gh/2.98.0/gh_2.98.0_linux_amd64/bin/gh auth git-credential
 # Default identity. Matches jj's user.email so the two tools agree out of the
 # box; per-repo overrides go through `git-identity cm`. Tools that commit with
 # plain git (agent worktrees, scripts) inherit this, which is what keeps their
