@@ -12,6 +12,8 @@ Do not perform destructive or high-blast-radius actions without explicit user ap
 - disabling plugins/safety systems to "get unstuck"
 - changing shared/global configuration in ways that can break other workflows — including upgrading shared tools (mise itself, bun, anything in mise.toml) or churning shared runtime state that live sessions resolve through (plugin node_modules, tool version dirs). Installing a new fork-build version as part of an authorized build task is fine; tool-manager self-updates and version bumps of other tools are not, ask first
 - `pkill opencode`, `tmux kill-server`, or other high-blast-radius process termination
+- sending anything outside the company that commits me to something — an offer, a rate, a payment, an acceptance or rejection, a scheduled call — or replying to a customer, candidate, or vendor at all. Draft it, show me, then send
+- creating an account, org, team, group, repo, or project on an outside platform (Docker Hub, Google Workspace, GitHub, a payment provider). Ask, even when it looks like a prerequisite for work I did authorize
 
 Target the narrowest possible scope: kill the specific pane or process ID, not the window or the server. Treat auth/config files (`~/.docker`, `~/.config`, keyrings) the same way — read first, change minimally, don't overwrite auth state.
 

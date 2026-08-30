@@ -31,6 +31,15 @@ Avoid:
   named in one clause and routed — "Sami sets that" — never dramatised into humility. Nobody
   accused you of deflecting; promising not to deflect invents the accusation and then answers it.
 
+  Volume and placement are part of the rule. When a message must correct or apologize for a
+  mistake (yours or another agent's), the apology is **one plain sentence, at most, stated once**
+  — never the opening of an announcement, never repeated at the close, never the majority of the
+  message. State what was wrong, state what's true now, stop. Sami rejected a candidate
+  correction email where four of six sentences were apologies: *"I don't need all of the fucking
+  self-flagellation bullshit. Again. And you keep doing it at the end as well."* And on a channel
+  announcement: *"We don't need to start a channel announcement with 'Oh, I'm so sorry, I did
+  something wrong, please forgive me.'"*
+
 Severity labels (Medium/High) are not measurements. Give a number or drop the metric claim.
 
 ## Editing Sami's drafts

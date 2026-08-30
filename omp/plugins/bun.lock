@@ -7,7 +7,7 @@
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
         "@sjawhar/opencode-knives": "github:sjawhar/knives#5d9e519f4d74",
-        "legion": "github:sjawhar/legion#4ee2211fc22a",
+        "legion": "github:sjawhar/legion#3fbca54c9e59",
         "secretsd": "github:sjawhar/forward#v3.0.2",
         "superpowers": "https://github.com/obra/superpowers",
       },
@@ -258,7 +258,7 @@
 
     "kubernetes-types": ["kubernetes-types@1.30.0", "", {}, "sha512-Dew1okvhM/SQcIa2rcgujNndZwU8VnSapDgdxlYoB84ZlpAD43U6KLAFqYo17ykSFGHNPrg0qry0bP+GJd9v7Q=="],
 
-    "legion": ["legion@github:sjawhar/legion#4ee2211", { "dependencies": { "@toon-format/toon": "^4.1.1", "nats": "^2.29.2", "zod": "^4.1.8" } }, "sjawhar-legion-4ee2211", "sha512-wxie+Bpx4auNfyghExNaUM1RcwWePhCMdqOQDDf9KNyiSsc51TFwP/rhqw36KYISreKvST7fjlUpAj6PdOqkGw=="],
+    "legion": ["legion@github:sjawhar/legion#3fbca54", { "dependencies": { "@toon-format/toon": "^4.1.1", "nats": "^2.29.2", "zod": "^4.1.8" } }, "sjawhar-legion-3fbca54", "sha512-Zt85DT47cA3UY0NANkHlGZR3AUaSqFaTzAU8NaNWmsy7ZHTo680wAJSRrfH/DNNJ+HBhJRNI0f/stN3lsmS9cg=="],
 
     "long": ["long@5.3.2", "", {}, "sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA=="],
 
