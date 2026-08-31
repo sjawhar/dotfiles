@@ -19,11 +19,6 @@
       "version": "2.5.2",
       "enabledFeatures": null,
       "enabled": true
-    },
-    "legion": {
-      "version": "0.16.1",
-      "enabledFeatures": null,
-      "enabled": true
     }
   },
   "settings": {}
