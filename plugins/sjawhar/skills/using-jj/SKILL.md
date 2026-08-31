@@ -38,7 +38,12 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
   description"` or `jj squash -u`. `jj-editor` rejects editor launches without a TTY as a
   last-resort guard; it does not make omitted flags acceptable. Use `jj diff --git` in agent/piped
   contexts.
-- **Publishing:** new bookmarks need `jj git push --named <name>=@`; there is no `--allow-new`.
+- **CRITICAL — publishing a new bookmark, and the trap jj sets for you:** the form is
+  `jj git push --named <name>=@`. `--allow-new` does not exist (it was a flag in older jj
+  releases, which is why it keeps coming to mind). When you try it, jj replies *"tip: a similar
+  argument exists: '--all'"* — **do not take that suggestion.** `--all` pushes every local
+  bookmark in the repo; agent-c currently has 179, mostly other agents' work. The tool's own
+  error message is steering you into a mass push. Ignore it and use `--named`.
 - **Divergence is bookkeeping, not damage:** resolve it deliberately; do not panic or delete remote history.
 
 Details:

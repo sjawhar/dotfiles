@@ -31,6 +31,8 @@ Plans, specs, and design docs are never their own commit, PR, or issue — no ma
 
 Search for similar patterns and shared helpers before writing new code; follow existing conventions by default. If a cleaner alternative exists, note it and ask — consistency wins until I agree otherwise. Comments describe current behavior, not history; jj log is the changelog. For docs and skills, use the `updating-docs` skill.
 
+Before building infrastructure, establish whether it is a solved problem with a standard answer — layer caching, semantic versioning and release automation, password protection, queueing, retries. Agents have hand-rolled every one of those here while the boring standard mechanism sat unused. Research what people actually do first, and don't shape the search to the solution you already have in mind.
+
 No defensive guards around build invariants: if something should exist after a build step, a runtime existence check just converts a build bug into a silent runtime bug — crash loud, fix at root. No silent fallbacks: schema mismatches and unexpected input error loudly; a silent fallback you find while working is a bug to fix.
 
 ### Simplicity First (YAGNI)
