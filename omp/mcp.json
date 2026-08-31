@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
   "mcpServers": {
     "slack": {
       "command": "secrets",
@@ -42,7 +43,8 @@
         "bash",
         "-c",
         "exec npx -y mcp-remote https://api.letsdeel.com/mcp --header \"Authorization: Bearer $DEEL_API_KEY\""
-      ]
+      ],
+      "enabled": false
     }
   }
 }
