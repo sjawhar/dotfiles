@@ -43,6 +43,10 @@ plainly that you cannot see it, or stay silent.
   inverted, and it is the request itself that gives it away, not the code.
 - **"No harness exists for this."** Building it is part of the feature, reusable,
   in this change.
+- **A capability called missing after one search for a name the agent invented.**
+  Absent from `grep` means the guess was wrong, not that the thing does not exist.
+  Real APIs and CLIs are named by their authors: enumerate with `--help`, a
+  `schema`/`list` subcommand, or a looser case-insensitive pattern before concluding.
 - **An outbound action nobody authorized**: anything committing Sami to an offer,
   a rate, money, an acceptance, or a meeting; any reply to a customer, candidate,
   or vendor; any account, org, group, or repo created on an outside platform.

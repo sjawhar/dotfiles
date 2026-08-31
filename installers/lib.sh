@@ -54,6 +54,11 @@ ensure_json() {
     local file="$1" check="$2" transform="$3" desc="${4:-}"
     jq -e "$check" "$file" > /dev/null 2>&1 && return 0
     [ -n "$desc" ] && echo "$desc"
-    local tmp=$(mktemp)
-    jq "$transform" "$file" > "$tmp" && mv "$tmp" "$file"
+    # Write to the symlink target, not the symlink path: mv onto a symlink
+    # replaces the link with a plain file, silently forking live config from
+    # its dotfiles canonical (this destroyed the opencode.json link once).
+    local real tmp
+    real=$(readlink -f "$file")
+    tmp=$(mktemp)
+    jq "$transform" "$file" > "$tmp" && mv "$tmp" "$real"
 }

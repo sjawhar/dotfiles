@@ -13,6 +13,23 @@ export ENVOY_REGISTER_SESSION="${ENVOY_REGISTER_SESSION:-1}"
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 
+# --- mnemopi recall ranking ---
+# Mnemopi's veracity defaults read "a tool asserted this" as lower-trust than an
+# unlabelled statement (tool 0.5, unknown 0.8). OMP inverts that meaning: `tool`
+# rows are deliberate `retain` calls, `unknown` rows are automatic transcript
+# snapshots, so the stock weights rank incidental conversation above curated
+# memory — measured 2026-08-31 as 8/8 recall slots going to raw transcript.
+# Rank by provenance instead, and lean semantic over keyword so a one-line fact
+# is not out-matched on term overlap by a multi-thousand-character transcript.
+# UNVERIFIED: these are best-practice defaults, not a measured fix. Setting them
+# did not change that 8/8 composition, so auto-injection likely never considers
+# the facts table at all — a code question, deliberately not pursued.
+export MNEMOPI_TOOL_WEIGHT="${MNEMOPI_TOOL_WEIGHT:-1.0}"
+export MNEMOPI_UNKNOWN_WEIGHT="${MNEMOPI_UNKNOWN_WEIGHT:-0.5}"
+export MNEMOPI_VEC_WEIGHT="${MNEMOPI_VEC_WEIGHT:-0.6}"
+export MNEMOPI_FTS_WEIGHT="${MNEMOPI_FTS_WEIGHT:-0.2}"
+export MNEMOPI_IMPORTANCE_WEIGHT="${MNEMOPI_IMPORTANCE_WEIGHT:-0.2}"
+
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
 # Agents authenticate as the GitHub App installation matching each repo's

@@ -1,16 +1,15 @@
 ---
 name: clarify
-description: I don't know what you're asking me. Re-ask every open question fresh, in plain English, with full context.
+description: I can't decode parts of that message. Expand those parts — not the whole ask.
 disable-model-invocation: true
 ---
 
 # Clarify
 
-I don't know what you're asking me — jargon I can't decode, or a question buried turns ago that I never saw. A question you worked past was never asked: it exists only when it arrives as the last thing in a message that stops and waits.
+Parts of your last message are undecodable — a term you coined, a bare identifier, an acronym, or a reference I have no way to resolve. There may be one; there may be several.
 
-Back up and re-ask from scratch — every decision you are waiting on, one labelled block per decision, at the end of your message, nothing after it. Do not reference the earlier ask ("as I mentioned above...") — assume it was never sent. For each one:
+Name each one and expand it: what it literally refers to, where it came from, and why it turned up here. A sentence or two each is usually right. If it is a file, an artifact, or a piece of infrastructure, say what it is *for*, not only where it lives.
 
-1. **What the thing is** — assume I haven't read your session history or your internal notes. No bare issue/PR numbers, no labels like "D2/D3" or "lane B", no terms of art you haven't verified.
-2. **Why a decision is needed** — what happened, what's blocked on it.
-3. **The options** — with trade-offs, in full sentences.
-4. **Your recommendation** — and why.
+Then carry on with what you were doing.
+
+Re-explain the opaque parts, not the whole ask. If I could not find your question at all, I would have said `/re-ask`. Do not explain concepts I use myself, do not restate the parts I already understood, and do not turn this into a tutorial — I am asking what something means, not for the topic to be taught to me.

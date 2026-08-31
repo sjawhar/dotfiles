@@ -46,6 +46,9 @@ memory:
   backend: mnemopi
 mnemopi:
   scoping: per-project-tagged
+  polyphonicRecall: true
+  enhancedRecall: true
+  proactiveLinking: true
 theme:
   dark: titanium
 symbolPreset: unicode
