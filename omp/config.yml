@@ -39,7 +39,7 @@ task:
     mode: auto
     merge: patch
 advisor:
-  enabled: false
+  enabled: true
 bashInterceptor:
   enabled: true
 memory:
