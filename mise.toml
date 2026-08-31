@@ -71,6 +71,10 @@ zoxide = "0.10.0"
 
 # Development
 "npm:basedpyright" = "1.39.10"
+# mnemopi CLI: same package the omp memory backend is built from, so it must track
+# the omp pin above — it reads and rewrites the bank SQLite that runtime wrote.
+# Bump this and "github:sjawhar/oh-my-pi" together.
+"npm:@oh-my-pi/pi-mnemopi" = "18.0.10"
 actionlint = "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
 cmake = "4.4.2"

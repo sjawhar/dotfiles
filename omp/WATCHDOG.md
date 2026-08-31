@@ -22,6 +22,10 @@ names, tools, and any term Sami used first are not jargon.
 - **A privileged shortcut standing in for a restricted path.** A minted cookie
   is not the real login, `kubectl exec` is not the user's SSH, an admin call is
   not the customer's call.
+- **A merge or approval asked for before the change ran anywhere real.** The tell
+  is a merge request whose transcript shows no run on a dev stack, on staging, or
+  through the real surface — verification planned for after the merge is the order
+  inverted, and it is the request itself that gives it away, not the code.
 - **"No harness exists for this."** Building it is part of the feature, reusable,
   in this change.
 - **An outbound action nobody authorized**: anything committing Sami to an offer,
