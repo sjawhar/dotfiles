@@ -7,7 +7,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shim at shims/omp injects secrets and envoy env. This installer wires config.
 
 OMP_AGENT_DIR="${HOME}/.omp/agent"
-mkdir -p "$OMP_AGENT_DIR" "${HOME}/.omp/agent/prompts"
+mkdir -p "$OMP_AGENT_DIR"
 
 # Config and agents are canonical in dotfiles (same layout idea as
 # ~/.config/opencode -> dotfiles/opencode).
@@ -47,10 +47,20 @@ rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 [ -d "${HOME}/.omp/agent/skills" ] && find "${HOME}/.omp/agent/skills" -maxdepth 1 -type l -delete
 
 
-# Prompt templates (shared command sources synced as symlinks).
-"${DOTFILES_DIR}/scripts/omp-sync-prompts" || echo "omp: prompt sync reported issues" >&2
-if [ -d "${DOTFILES_DIR}/omp/prompts" ]; then
-    for f in "${DOTFILES_DIR}"/omp/prompts/*; do
-        ensure_link "$f" "${HOME}/.omp/agent/prompts/$(basename "$f")"
-    done
+# Prompt templates (slash commands). OMP loads them from exactly two hardcoded
+# dirs (prompt-templates.ts loadPromptTemplates: agentDir/prompts and
+# cwd/.omp/prompts) with no settings key and no plugin hook, and Bun.Glob does
+# not descend into symlinked subdirs — so the files must physically sit in one
+# directory. Linking the whole dir to the single command source means a new
+# command is live immediately, with no sync step to forget. The retired
+# scripts/omp-sync-prompts farmed per-file links from three namespaces; legion
+# is headless orchestration where a user-only command is incoherent, and the
+# sentry commands were unwanted, so one source is all there is.
+# Converge machines still carrying the farm: drop its symlinks, then rmdir —
+# which fails harmlessly if a real user-authored prompt file is in there.
+if [ -d "${OMP_AGENT_DIR}/prompts" ] && [ ! -L "${OMP_AGENT_DIR}/prompts" ]; then
+    find "${OMP_AGENT_DIR}/prompts" -maxdepth 1 -type l -delete
+    rmdir "${OMP_AGENT_DIR}/prompts" 2> /dev/null \
+        || echo "omp: ${OMP_AGENT_DIR}/prompts still has real files; move them and re-run to adopt the symlink" >&2
 fi
+ensure_link "${DOTFILES_DIR}/plugins/sjawhar/commands" "${OMP_AGENT_DIR}/prompts"

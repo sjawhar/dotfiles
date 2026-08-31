@@ -12,6 +12,7 @@ interface SkillSource {
   root: string;
   namespace: string;
   skills?: boolean;
+  commands?: boolean;
   omp?: boolean;
   ompSkillsDir?: string;
 }
@@ -25,5 +26,6 @@ export const DotfilesBridge = createClaudeBridge({
     dir: path.join(DF, source.root),
     namespace: source.namespace,
     ...(source.skills === false && { skills: false }),
+    ...(source.commands === false && { commands: false }),
   })),
 });

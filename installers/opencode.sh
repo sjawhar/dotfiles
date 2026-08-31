@@ -22,6 +22,9 @@ ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compou
 ensure_vendor https://github.com/sjawhar/legion.git legion
 ensure_vendor https://github.com/github/gh-stack.git gh-stack
 ensure_vendor https://github.com/DataDog/pup.git pup
+# pup ships ~11 dd-* skills (plus 50 agents, pruned from omp/agents); only
+# dd-pup is wanted — the rest swamp session context. Converge fresh clones.
+find "${DOTFILES_DIR}/vendor/pup/skills" -mindepth 1 -maxdepth 1 -type d -name 'dd-*' ! -name 'dd-pup' -exec rm -rf {} +
 ensure_vendor https://github.com/getsentry/sentry-for-ai.git sentry-for-ai 2c34b9a2ecff03005d381e60013d7d5849801a62
 ensure_vendor https://github.com/getsentry/cli.git sentry-cli 33028c2ac93e027ce3faa9045efc91d895deae1a
 ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
@@ -84,14 +87,10 @@ ensure_link "${DOTFILES_DIR}/.claude/CLAUDE.md" "${OPENCODE_DIR}/AGENTS.md"
 
 ensure_command oh-my-opencode "npm install -g oh-my-opencode"
 
-if [ ! -f "$OC_JSON" ]; then
-    if [ -t 0 ]; then
-        echo "Running oh-my-opencode install..."
-        oh-my-opencode install
-    else
-        echo "Skipping oh-my-opencode install (non-interactive). Run 'oh-my-opencode install' manually."
-    fi
-fi
+# Canonical config lives in dotfiles (see opencode/AGENTS.md); the old
+# oh-my-opencode bootstrap predates this and is obsolete. ensure_json patches
+# below write through the link (see lib.sh).
+ensure_link "${DOTFILES_DIR}/opencode/opencode.json" "$OC_JSON"
 
 # Install the Claude bridge wrapper's dep.
 # opencode/package.json declares @sjawhar/opencode-claude-bridge; bun fetches it here.

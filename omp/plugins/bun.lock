@@ -9,7 +9,7 @@
         "@sjawhar/opencode-knives": "github:sjawhar/knives#5d9e519f4d74",
         "@sjawhar/pi-legion-envoy": "^0.3.0",
         "secretsd": "github:sjawhar/forward#v3.0.2",
-        "superpowers": "https://github.com/obra/superpowers",
+        "superpowers": "github:obra/superpowers#v6.3.0",
       },
     },
   },
@@ -312,7 +312,7 @@
 
     "signal-exit": ["signal-exit@3.0.7", "", {}, "sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ=="],
 
-    "superpowers": ["superpowers@github:obra/superpowers#b36e082", {}, "obra-superpowers-b36e082", "sha512-06fzocF7rvYuGOPTl0pDOnfl97MM1NlOwMu1WN31yaoZ799cUEPX9gjiYwY6NQQeEmnVaALg0d2qqQ7P1B5Y0g=="],
+    "superpowers": ["superpowers@github:obra/superpowers#86babb6", {}, "obra-superpowers-86babb6", "sha512-JBj44HOtQPnfUmjg1oo1UiZlbZRTyrD5a+SkCzcPh/C0WK8VL9pcq2fZRbI7hF/cjNvo7H+K9dad8mgvUtpq8A=="],
 
     "toml": ["toml@4.3.0", "", {}, "sha512-lVb8X9BsPVuH0M4BKeS91tXAmJvCjQ5UIyAbQFaxkKGyUFK2RPkhwaFSQH8vbpl1d23eu/IBH+dwVMHWaq9A5A=="],
 
