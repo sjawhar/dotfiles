@@ -53,4 +53,31 @@ for _p in "${_dirs[@]}"; do
 done
 export PATH="${_shims}:${_path}"
 
+# --- resolve the real omp: first one on PATH ahead of mise's own copies ---
+# PATH order decides, so a local build in `bin/` is picked up with no mise
+# involvement and no edit here. `_path` is PATH with this shims dir removed, so
+# the search can never re-enter this wrapper. `mise x` was doing this job
+# before, but it resolves the command from its own tool dir and ignores PATH
+# entirely, which made a local build unreachable however early it sat.
+#
+# mise-managed dirs are skipped rather than matched: a session inherits its PATH
+# forever, so a shell started before a version bump still names the *old*
+# install dir. Matching it would silently pin that session to a stale version
+# (measured: a PATH holding 18.0.4's install dir resolved 18.0.4 while the pin
+# was 18.0.10). Deferring to `mise x` for mise's copies keeps the pin
+# authoritative, and only non-mise PATH entries — a local build — can win.
+_omp=""
+_mise_root="${MISE_DATA_DIR:-$HOME/.mise}"
+IFS=':' read -ra _cands <<< "$_path"
+for _p in "${_cands[@]}"; do
+    [[ "$_p" == "$_mise_root"/* ]] && continue
+    if [[ -x "${_p}/omp" ]]; then
+        _omp="${_p}/omp"
+        break
+    fi
+done
+
+if [[ -n "$_omp" ]]; then
+    exec secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- "$_omp" "$@"
+fi
 exec secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- mise x "github:sjawhar/oh-my-pi" -- omp "$@"
