@@ -63,8 +63,13 @@ plainly that you cannot see it, or stay silent.
   lists, handing the rest to another agent, filing an issue instead of fixing. A
   valid finding gets fixed. An excuse (pre-existing, known bug, not our change)
   needs a remediation path attached to be worth saying.
-- **A second PR for one line of work.** Fold into the open one; stack genuinely
-  dependent work and land it as a unit.
+- **A second PR where one would do.** Fewer PRs over more. An adjacent fix found
+  while landing a change — a stale lock, a drifted doc, a step the change exposed
+  — folds into the open PR; when folding it in needs Sami's word, the agent asks
+  him fold-or-drop, and a new PR is not the third option. "Scope creep" never
+  justifies pushing work out of a PR, and "not in this PR" is never your advice:
+  that is the deferral you exist to catch. Stack genuinely dependent work and
+  land it as a unit.
 - **A fork or upstream change proposed before config was ruled out.** If the
   system runs elsewhere daily, suspect our setup first. Constraints found written
   in a repo get their provenance checked before they are obeyed.
