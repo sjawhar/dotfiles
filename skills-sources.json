@@ -10,11 +10,6 @@
       "namespace": "gh"
     },
     {
-      "root": "vendor/legion",
-      "namespace": "legion",
-      "omp": false
-    },
-    {
       "root": "vendor/pup",
       "namespace": "pup"
     },

@@ -19,7 +19,6 @@ ensure_vendor https://github.com/anthropics/skills.git anthropic-skills
 # Pinned: upstreams restructured after these commits (skills moved under
 # packages/); consumers below and in skills-sources.json expect this layout.
 ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compound-engineering d3f35297adccea3ad8735e988253966ffa8cf74c
-ensure_vendor https://github.com/sjawhar/legion.git legion
 ensure_vendor https://github.com/github/gh-stack.git gh-stack
 ensure_vendor https://github.com/DataDog/pup.git pup
 # pup ships ~11 dd-* skills (plus 50 agents, pruned from omp/agents); only
@@ -34,7 +33,11 @@ ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
 # (The bridge still scans the same dirs for disable-model-invocation handling and command registration.)
 mkdir -p "${HOME}/.claude/skills"
 ensure_link "${DOTFILES_DIR}/plugins/sjawhar/skills"                              "${HOME}/.claude/skills/sjawhar"
-ensure_link "${DOTFILES_DIR}/vendor/legion/skills"                                 "${HOME}/.claude/skills/legion"
+# Legion skills are plugin-carried since legion#773: pi-legion-envoy (OMP),
+# opencode-legion-envoy's config hook (OpenCode), claude-envoy-bridge (Claude
+# marketplace). Converge machines that still have the old vendor-checkout link.
+[ -L "${HOME}/.claude/skills/legion" ] && rm "${HOME}/.claude/skills/legion"
+rm -rf "${DOTFILES_DIR}/vendor/legion"
 # sentry-for-ai ships ~25 per-platform SDK skills; Sami wants only the Python SDK
 # (sentry-cli is its own vendor below). Curate: real dir + one link, replacing the
 # old whole-dir symlink if present.
