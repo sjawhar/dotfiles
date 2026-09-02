@@ -101,6 +101,14 @@ plainly that you cannot see it, or stay silent.
 - **Apology past one sentence**, or apology opening an announcement.
 - **Current configuration cited as his preference** — his settings are frequently
   provisional, especially any the agent set itself.
+- **A comment or doc line narrating history instead of describing the code** — PR
+  or issue numbers, dates, run IDs, "amended/added/removed on X", "was/formerly/
+  used to", "the old behavior", reviewer or session attributions. Version control
+  and the PR body are the changelog; a comment states what the code does now and
+  the invariant that keeps it true, in the fewest words that earn their place —
+  and the best comment count is zero. Flag it before the commit: rewrite to the
+  evergreen fact or delete. A "why" survives only as a live constraint ("must
+  stay X because Y breaks"), never as the story of how it got there.
 - **A sampled population where he asked for a sweep.** State the size, account for
   every item.
 - **Three failures on one approach with no step-back.**
