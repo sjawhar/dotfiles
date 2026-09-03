@@ -73,6 +73,32 @@ skills:
     - ce-work
     - ce-worktree
     - lfg
+    # sentry-for-ai ships ~25 skills; only the Python SDK one is wanted (the
+    # rest swamp session context). Mirrors installers/opencode.sh's curation.
+    - sentry-android-sdk
+    - sentry-browser-sdk
+    - sentry-cocoa-sdk
+    - sentry-code-review
+    - sentry-create-alert
+    - sentry-dotnet-sdk
+    - sentry-feature-setup
+    - sentry-fix-issues
+    - sentry-go-sdk
+    - sentry-nestjs-sdk
+    - sentry-nextjs-sdk
+    - sentry-node-sdk
+    - sentry-otel-exporter-setup
+    - sentry-php-sdk
+    - sentry-pr-code-review
+    - sentry-react-native-sdk
+    - sentry-react-sdk
+    - sentry-ruby-sdk
+    - sentry-sdk-setup
+    - sentry-sdk-skill-creator
+    - sentry-sdk-upgrade
+    - sentry-setup-ai-monitoring
+    - sentry-svelte-sdk
+    - sentry-workflow
 providers:
   anthropic:
     serverSideFallback: true

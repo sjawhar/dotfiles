@@ -1,5 +1,5 @@
 {
-  "$comment": "Single source of truth for vendored/adopted skill pools consumed by BOTH harness bridges: opencode/plugins/dotfiles-bridge.ts (OpenCode; skills+commands+agents) and omp/extensions/dotfiles-skills.ts (OMP; resources_discover skillPaths). Marketplace-installed pools do NOT belong here - Claude's installed_plugins.json is their source of truth and both harnesses ingest it natively. Fields: root = package root relative to the dotfiles dir (skills expected at <root>/skills); namespace = bridge namespace; skills=false = bridge skips skills (OpenCode loads them natively from ~/.claude/skills); commands=false = OpenCode bridge skips <root>/commands (a pool whose commands we do not want exposed); OMP ignores this field entirely - it takes commands only from plugins/sjawhar/commands via a single ~/.omp/agent/prompts symlink, see omp/AGENTS.md; omp=false = OMP skips this pool (it gets it via its own plugin install); ompSkillsDir = OMP scans this dir instead of <root>/skills (supports ~/ prefix; used for installer-curated subsets).",
+  "$comment": "Single source of truth for vendored/adopted skill pools consumed by BOTH harness bridges: opencode/plugins/dotfiles-bridge.ts (OpenCode; skills+commands+agents) and omp/extensions/dotfiles-skills.ts (OMP; resources_discover skillPaths). Marketplace-installed pools do NOT belong here - Claude's installed_plugins.json is their source of truth and both harnesses ingest it natively. Fields: root = package root relative to the dotfiles dir (skills expected at <root>/skills); namespace = bridge namespace; skills=false = bridge skips skills (OpenCode loads them natively from ~/.claude/skills); commands=false = OpenCode bridge skips <root>/commands (a pool whose commands we do not want exposed); OMP ignores this field entirely - it takes commands only from plugins/sjawhar/commands via a single ~/.omp/agent/prompts symlink, see omp/AGENTS.md; omp=false = OMP skips this pool (it gets it via its own plugin install); ompSkillsDir = OMP scans this dir instead of <root>/skills (supports ~/ prefix; for pools living outside the dotfiles tree, e.g. ~/core-ops). OMP never reads a harness-curated dir (~/.claude, ~/.config/opencode): unwanted skills from a vendor pool are excluded via omp/config.yml skills.ignoredSkills.",
   "sources": [
     {
       "root": "plugins/sjawhar",
@@ -21,8 +21,7 @@
       "root": "vendor/sentry-for-ai",
       "namespace": "sentry",
       "skills": false,
-      "commands": false,
-      "ompSkillsDir": "~/.claude/skills/sentry-for-ai"
+      "commands": false
     },
     {
       "root": "vendor/sentry-cli/plugins/sentry-cli",
