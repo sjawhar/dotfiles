@@ -44,7 +44,7 @@
         "-c",
         "exec npx -y mcp-remote https://api.letsdeel.com/mcp --header \"Authorization: Bearer $DEEL_API_KEY\""
       ],
-      "enabled": false
+      "enabled": true
     }
   }
 }
