@@ -1,0 +1,104 @@
+[repos.ai]
+path = "~/inspect/ai/default"
+upstream = "https://github.com/UKGovernmentBEIS/inspect_ai"
+origin = "https://github.com/sjawhar/inspect_ai.git"
+release = "https://github.com/trajectory-labs-pbc/inspect_ai.git"
+consumers = ["trajectory-labs-pbc/agent-c"]
+
+[repos.fleet]
+path = "~/fleet/default"
+upstream = "https://github.com/fleetdm/fleet"
+origin = "https://github.com/sjawhar/fleet.git"
+
+[repos.hawk]
+path = "~/inspect/hawk/default"
+upstream = "https://github.com/METR/hawk"
+origin = "https://github.com/sjawhar/hawk.git"
+release = "https://github.com/trajectory-labs-pbc/hawk"
+consumers = ["trajectory-labs-pbc/agent-c"]
+
+[repos.jj]
+path = "~/jj/default"
+upstream = "https://github.com/jj-vcs/jj"
+origin = "https://github.com/sjawhar/jj"
+
+[repos.k8s-sandbox]
+path = "~/inspect/k8s-sandbox/default"
+upstream = "https://github.com/UKGovernmentBEIS/inspect_k8s_sandbox"
+origin = "https://github.com/sjawhar/inspect_k8s_sandbox.git"
+release = "https://github.com/trajectory-labs-pbc/inspect_k8s_sandbox"
+consumers = ["trajectory-labs-pbc/agent-c"]
+
+[repos.luthien-proxy]
+path = "~/luthien-proxy"
+upstream = "https://github.com/LuthienResearch/luthien-proxy.git"
+origin = "https://github.com/trajectory-labs-pbc/luthien-proxy.git"
+consumers = ["trajectory-labs-pbc/agent-c"]
+
+[repos.oh-my-openagent]
+path = "~/oh-my-openagent/default"
+upstream = "https://github.com/code-yeongyu/oh-my-opencode"
+origin = "https://github.com/sjawhar/oh-my-opencode"
+base = "dev"
+release_branch = "sami"
+
+[repos.oh-my-pi]
+path = "~/oh-my-pi"
+upstream = "https://github.com/can1357/oh-my-pi"
+origin = "https://github.com/sjawhar/oh-my-pi"
+release_branch = "sami"
+
+[repos.openchamber]
+path = "~/openchamber/default"
+upstream = "https://github.com/openchamber/openchamber.git"
+origin = "https://github.com/sjawhar/openchamber.git"
+
+[repos.opencode]
+path = "~/opencode/default"
+upstream = "https://github.com/anomalyco/opencode"
+origin = "https://github.com/sjawhar/opencode"
+base = "dev"
+release_branch = "sami"
+
+[repos.opencode-pty]
+path = "~/opencode/opencode-pty"
+upstream = "https://github.com/shekohex/opencode-pty"
+origin = "https://github.com/sjawhar/opencode-pty"
+release_branch = "sami"
+
+[repos.sandboxes]
+path = "~/inspect/sandboxes/default"
+upstream = "https://github.com/meridianlabs-ai/inspect_sandboxes.git"
+origin = "https://github.com/sjawhar/inspect_sandboxes.git"
+release = "https://github.com/trajectory-labs-pbc/inspect_sandboxes.git"
+consumers = ["trajectory-labs-pbc/agent-c"]
+
+[repos.scout]
+path = "~/inspect/scout/default"
+upstream = "https://github.com/meridianlabs-ai/inspect_scout"
+origin = "https://github.com/sjawhar/inspect_scout.git"
+release = "https://github.com/trajectory-labs-pbc/inspect_scout.git"
+consumers = ["trajectory-labs-pbc/agent-c"]
+
+[repos.swe]
+path = "~/inspect/swe/default"
+upstream = "https://github.com/meridianlabs-ai/inspect_swe.git"
+origin = "https://github.com/sjawhar/inspect_swe.git"
+release = "https://github.com/trajectory-labs-pbc/inspect_swe.git"
+consumers = ["trajectory-labs-pbc/agent-c"]
+
+[repos.toon-rust]
+path = "~/toon-rust/default"
+upstream = "https://github.com/toon-format/toon-rust"
+origin = "https://github.com/sjawhar/toon-rust"
+
+[repos.ts-mono]
+path = "~/inspect/ts-mono/default"
+upstream = "https://github.com/meridianlabs-ai/ts-mono"
+origin = "https://github.com/trajectory-labs-pbc/ts-mono"
+
+[trusted.agent-c]
+path = "~/agent-c/default"
+
+[trusted.cybertasks]
+path = "~/cybertasks/default"
