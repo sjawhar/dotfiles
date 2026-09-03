@@ -39,6 +39,18 @@
       "namespace": "core-context",
       "skills": false,
       "ompSkillsDir": "~/core-context/skills"
+    },
+    {
+      "root": "vendor/compound-engineering",
+      "namespace": "compound-engineering",
+      "skills": false,
+      "commands": false
+    },
+    {
+      "root": "vendor/time-tracker/.opencode",
+      "namespace": "time-tracker",
+      "skills": false,
+      "commands": false
     }
   ]
 }
