@@ -45,6 +45,19 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
   bookmark in the repo; agent-c currently has 179, mostly other agents' work. The tool's own
   error message is steering you into a mass push. Ignore it and use `--named`.
 - **Divergence is bookkeeping, not damage:** resolve it deliberately; do not panic or delete remote history.
+- **CRITICAL — `Commit X is immutable` on a rebase in a fork is a stale pin, not a
+  protection:** jj's default `immutable_heads()` includes `untracked_remote_bookmarks()`, so a
+  superseded release ref a fetch re-materialized, or another fork's PR head, freezes every
+  commit beneath it — your branch tips included. NEVER `--ignore-immutable` a rebase (it
+  rewrites whatever the pin is; last time, the release merges), and NEVER substitute
+  `jj duplicate` (new commit ids; the release can no longer match the branch by change id).
+  Find the pin: `jj log -r 'immutable_heads() & descendants(<rev>)'`. In a knives-managed
+  fork, `knives start` sets the repo's rule to trunk, tags, and the trunk by name on every
+  knives remote (`trunk() | tags() | remote_bookmarks(exact:"<trunk>", exact:"upstream") |
+  remote_bookmarks(exact:"<trunk>", exact:"origin")`, …) where the repo config states
+  none (a rule someone already stated is left, and `knives status` reports it as
+  `immutable-heads-rule`); the rebase then goes through. Moving many members at once is
+  `knives release rebase`, never per-branch jj.
 
 Details:
 - `references/commands.md`
