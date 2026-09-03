@@ -9,7 +9,7 @@ mcp:
 
 # Home Assistant
 
-Full read/write access to Home Assistant via [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) (~87 tools). Use `skill_mcp(mcp_name="home-assistant", ...)` to invoke tools.
+Full read/write access to Home Assistant via [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) (78 tools on HA 2026.8). Use `skill_mcp(mcp_name="home-assistant", ...)` to invoke tools.
 
 ## Setup
 
@@ -33,7 +33,7 @@ The ha-mcp server runs **in-process inside Home Assistant** (HACS custom compone
 | Helpers/Areas/Zones/Labels | `ha_config_set_helper`, `ha_set_area_or_floor`, `ha_set_zone` |
 | History/Debug | `ha_get_automation_traces`, `ha_get_history`, `ha_get_logs` |
 | Registry | `ha_get_entity`, `ha_set_entity`, `ha_get_device` |
-| System | `ha_manage_backup`, `ha_manage_updates`, `ha_manage_addon`, `ha_manage_hacs`, `ha_restart` |
+| System | `ha_manage_backup`, `ha_manage_updates`, `ha_get_app`/`ha_manage_app` (add-ons: info, options, lifecycle, ingress proxy), `ha_manage_hacs`, `ha_restart` |
 | Media | `ha_get_camera_image`, `ha_get_dashboard_screenshot` (beta) |
 
 File/YAML editing tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and require the separate "HA-MCP File & YAML Tools" entry plus feature flags — not currently enabled.
@@ -46,7 +46,8 @@ File/YAML editing tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and
 
 ## Operational notes (hard-won, Aug 2026)
 
-- **Remote access**: `HA_MCP_URL` holds the remote webhook form (`https://dojo.thecybermonk.com/api/webhook/<id>`), which works from any network. For batch/scripted tool calls use [ha-mcp-call.sh](ha-mcp-call.sh): `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'`.
+- **Access**: `HA_MCP_URL` is a webhook URL with the credential embedded. The shared agent-tier secret holds the LAN form (`http://10.0.51.23:8123/api/webhook/<id>`), which works from oryx and any host on the home LAN; the same webhook id served at `https://dojo.thecybermonk.com/api/webhook/<id>` works from any network. For batch/scripted tool calls use [ha-mcp-call.sh](ha-mcp-call.sh): `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'`.
+- **Add-on options carry secrets**: `ha_get_app(slug=...)` returns the add-on's full `options`, including fields such as the Advanced SSH add-on's `ssh.password`. Select the fields you need with `jq` (e.g. `.addon.options.ssh.authorized_keys`); never print the raw options object. `ha_manage_app` config mode merges one nested level, so writing `{"ssh": {"authorized_keys": [...]}}` preserves the other `ssh.*` fields.
 - **Gated writes need a BestPracticeKey**: config-writing tools (`ha_config_set_automation/_script/_scene/_helper/_dashboard`) reject calls until you read the current key from `ha_get_skill_guide(skill='home-assistant-best-practices', file='references/automation-patterns.md')`. The key rotates hourly — re-read it per session/hour. Pass `MandatoryBPS=false` to skip re-receiving the reference content.
 - **Tool parameter quirks**: automations use `identifier` (updates need `identifier` + `config.id`; omit `identifier` to create). `ha_manage_backup` wants `scope: "snapshot"`; snapshot deletion is gated by a human-set server flag AND refuses backups with unprovable provenance. `ha_set_entity` does renames (`new_entity_id`), `name`, `enabled`, `area_id`. `ha_remove_helpers_integrations` deletes config entries (`target` = entry_id) and helpers (`target` + `helper_type`), always with `confirm: true`. `ha_manage_hacs` can only `add_repository`/`download` — removal is UI-only. `ha_get_history` takes `entity_ids` (list), returns states WITHOUT attributes, ~24h, 100-point cap. `ha_manage_energy_prefs` needs `mode` + fresh `config_hash`. Update installs: use `ha_call_service` `update.install` (not ha_manage_updates).
 - **Restarts**: `ha_restart` times out at the transport when HA goes down — expected. Poll the base URL for HTTP 200 (~60-90s).
