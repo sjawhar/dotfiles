@@ -73,9 +73,9 @@ zoxide = "0.10.0"
 "npm:basedpyright" = "1.39.10"
 # mnemopi CLI: same package the omp memory backend is built from, so it must track
 # the omp pin above — it reads and rewrites the bank SQLite that runtime wrote.
-# Bump this and "github:sjawhar/oh-my-pi" together. Use the nearest version npm actually
-# has: upstream does not publish this package for every tag (18.1.7 was never published;
-# packages/mnemopi is identical between 18.1.6 and 18.1.7 apart from its version field).
+# Bump this and "github:sjawhar/oh-my-pi" together. Upstream does not publish this
+# package for every tag: if the exact version is missing from npm, pin the nearest
+# published one after confirming packages/mnemopi is unchanged between the two tags.
 "npm:@oh-my-pi/pi-mnemopi" = "18.1.6"
 actionlint = "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
