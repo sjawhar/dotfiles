@@ -7,6 +7,12 @@
 #   envoy ps --json  — JSON output
 #   envoy ps --local — filter to local machine only
 #   envoy send <t> <msg> — send message (ses_* = direct, else publish to topic)
+#
+# `envoy send` identifies the sender. From an interactive shell the message is
+# stamped source=human. Inside an agent harness (the bash tool of an OMP,
+# Claude Code, or OpenCode session exports one of the markers below) it is
+# stamped source=agent with that session's id as source_session, so the
+# recipient's reply hint names a real inbox instead of an anonymous "agent".
 set -euo pipefail
 
 ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
@@ -58,16 +64,29 @@ _envoy_send() {
     local target="$1"; shift
     local message="$*"
 
+    # OMP exports OMP_SESSION_ID (and OMPCODE); Claude Code exports
+    # CLAUDE_CODE_SESSION_ID (and CLAUDECODE). OpenCode exports no session
+    # marker to its bash tool, so an OpenCode agent using this CLI is stamped
+    # human — OpenCode agents have the native envoy_send tool and should use it.
+    local source="human" source_session=""
+    if [ -n "${OMP_SESSION_ID:-}" ]; then
+        source="agent"; source_session="$OMP_SESSION_ID"
+    elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+        source="agent"; source_session="$CLAUDE_CODE_SESSION_ID"
+    elif [ -n "${CLAUDECODE:-}${OMPCODE:-}" ]; then
+        source="agent"
+    fi
+
     local endpoint payload
     # Direct send for session ids: opencode ses_* and OMP UUID session ids.
     if [[ "$target" == ses_* || "$target" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
         endpoint="/v1/messages/send"
-        payload=$(jq -n --arg t "$target" --arg m "$message" \
-            '{ target_session: $t, message: $m }')
+        payload=$(jq -n --arg t "$target" --arg m "$message" --arg s "$source" --arg ss "$source_session" \
+            '{ target_session: $t, message: $m, source: $s } + (if $ss == "" then {} else { source_session: $ss } end)')
     else
         endpoint="/v1/messages/publish"
-        payload=$(jq -n --arg t "$target" --arg m "$message" \
-            '{ topic: $t, message: $m }')
+        payload=$(jq -n --arg t "$target" --arg m "$message" --arg s "$source" --arg ss "$source_session" \
+            '{ topic: $t, message: $m, source: $s } + (if $ss == "" then {} else { source_session: $ss } end)')
     fi
 
     curl -fsS -X POST "$ENVOY_URL$endpoint" \

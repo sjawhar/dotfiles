@@ -14,6 +14,7 @@ retry:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
     anthropic/claude-fable-5-1:
+      - anthropic/claude-fable-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
     anthropic/claude-opus-5:
@@ -39,10 +40,10 @@ task:
     type-checker: anthropic/claude-opus-5
     ux-designer: "@vision"
   isolation:
-    mode: auto
     merge: patch
+    enabled: true
 advisor:
-  enabled: true
+  enabled: false
 bashInterceptor:
   enabled: true
 memory:
@@ -55,7 +56,7 @@ mnemopi:
 theme:
   dark: titanium
 symbolPreset: unicode
-hideThinkingBlock: false
+hideThinkingBlock: true
 doubleEscapeAction: tree
 dev:
   autoqaConsent: granted
@@ -74,8 +75,6 @@ skills:
     - ce-work
     - ce-worktree
     - lfg
-    # sentry-for-ai ships ~25 skills; only the Python SDK one is wanted (the
-    # rest swamp session context). Mirrors installers/opencode.sh's curation.
     - sentry-android-sdk
     - sentry-browser-sdk
     - sentry-cocoa-sdk
@@ -108,3 +107,5 @@ providers:
       - claude-opus-4-8
 composer:
   shape: box
+isolation:
+  backend: auto
