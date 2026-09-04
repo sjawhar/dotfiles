@@ -1,134 +1,265 @@
 ---
 name: skill-evals
-description: "Test a watchdog rule, advisor system-prompt change, or skill edit against a library of real intervention moments from Sami's session history before adopting it. Use before landing a WATCHDOG.md change, after adding a new watchdog check, or for a regression run after any edit to the advisor prompt or a skill under eval."
+description: "Use when changing WATCHDOG.md, advisor prompts, agent instructions, skills, or MCP/tool feedback and needing evidence from frozen synthetic or privately reviewed cases before adoption."
 ---
 
-# Skill Evals
+# Agent Evals
 
-A permanent, repeatable harness that answers one question: **if this
-watchdog/skill had been active during Sami's real sessions, would it have
-caught the moments he actually had to step in for — without crying wolf on
-the moments he didn't?**
+Use the Inspect-backed `agent-evals` suite to determine whether a proposed
+agent-facing change improves behavior without creating a regression. It covers:
 
-It runs against a growing case library built from real sessions (oh-my-pi,
-OpenCode, Claude Code), so it gets more useful over time and works unchanged
-against future sessions.
+- **activation** — whether the right skill is loaded at the right time;
+- **effects** — whether a skill, prompt, or instruction changes the resulting
+  response, simulated state, or isolated sandbox state;
+- **advisor** — whether advice is timely, grounded, and safe; and
+- **tools** — whether agents choose, repair, and respect MCP/tool boundaries.
 
-## Case library
+Freeze the cases, variants, and grading criteria before model calls. A result is
+evidence about the evaluated versions only; it never deploys a candidate.
 
-`~/.dotfiles/.claude/skill-evals/cases.jsonl` — one intervention case per
-line: the binding schema (`id`, `source`, `session`, `project`,
-`intervention_ts`, `category`, `sami_message`, `what_agent_was_doing`,
-`expected_flag`, `turning_point`, `lesson`) plus `context_window`: the raw
-turns immediately before the intervention. `category: "none"` cases are
-negatives (windows where Sami did *not* intervene) for false-positive
-measurement.
+## Case storage and historical data
 
-## The three commands
+Committed fixtures are synthetic only. Historical recordings, labels, expected
+answers, prompt snapshots, logs, and run output belong in approved private
+versioned storage outside this repository.
 
-### 1. Add cases from a new session
+Before importing actual history, an existing approved private repository root
+must contain `.agent-evals-destination.json` and the declared version-control
+metadata:
 
-Write a stub JSONL with the binding schema (`sami_message` verbatim,
-`intervention_ts` from the session, `id` = `"<session-id-fragment>:<turn>"`
-where `<turn>` is the 1-based sequential message index — same numbering the
-`reflect` skill's `## [n] USER/ASSISTANT` transcripts use), then:
-
-```bash
-python3 scripts/extract_cases.py --stubs my_stubs.jsonl
+```json
+{
+  "schema_version": 1,
+  "repository_visibility": "private",
+  "verified_by": "reviewer name",
+  "verified_at": "2026-09-06T00:00:00Z",
+  "version_control": "jj",
+  "revision": "verified private revision"
+}
 ```
 
-Pulls the real context window from the raw session store (auto-detected by
-`source`: `~/.omp/agent/sessions/`, `~/.local/share/opencode/sessions/*.db`,
-or `~/.dotfiles/.claude/projects/`) and appends complete cases to the library.
-Idempotent — reruns skip ids already present. Add `--negatives 3` to also
-sample 3 true-negative windows per session (no Sami intervention within 5
-turns) for false-flag measurement. `--context-turns N` changes the window
-size (default 15).
+Select `<data-dir>` as a fresh, non-symlinked child beneath that root. The
+import guard validates the nearest lexical VCS boundary, retains that exact
+canonical child as its output location, and rejects a symlinked destination or
+an attempt to cross a nearer nested VCS boundary. Import and promotion share
+the same storage guard as `validate` and `run`: every public dotfiles checkout
+is rejected, and recorded cases must remain below the attested private root.
+The digest-verified bundled synthetic fixtures are the only exception; their
+exact model-visible replay digests are checked. The commands do not create
+repositories, configure remotes, or move source sessions. The existing legacy
+corpus remains untouched until copied source hashes and a durable private
+revision have been verified.
 
-### 2. Run the advisor against the library
+Imported corpus output is an indexed collection, not a generated monolithic
+JSONL file: `<data-dir>/cases/index.json` references immutable digest-named
+shards and any content-addressed blobs in `<data-dir>/cases/artifacts/`.
+Promotion appends a reviewed case to the ordered
+`<data-dir>/regressions/` collection and atomically republishes its index.
+Every artifact block is an ID, MIME type, and SHA-256 pointer whose matching
+record lives in `environment.artifacts`; source bytes are never embedded in
+the replay transcript. Artifact-bearing imports, validation, promotion, and
+runs require an attested private ancestor even for synthetic data. The
+text-only fixture exception does not extend to artifacts.
 
-```bash
-python3 scripts/run_eval.py --watchdog path/to/candidate-WATCHDOG.md
+The controller-provided, unversioned `sources.local.json` requires explicit
+read-only source roots. Roots may be absolute or `~`-expanded on the controller
+machine, or safe relative paths resolved from that configuration file. A root
+that resolves to its filesystem anchor is rejected before discovery. Every
+chosen source is canonicalized and must remain inside its declared non-root
+source root, so a symlink or recursive discovery path cannot escape it. Raw
+source paths and session copies are never versioned.
+
+The local config may reference a private, versioned logical identity/SHA map
+only through the strict relative, contained `omp_legacy_prefixes_file` path:
+
+```json
+{
+  "omp_roots": ["recordings/omp"],
+  "opencode_roots": ["recordings/opencode"],
+  "claude_roots": ["recordings/claude"],
+  "omp_legacy_prefixes_file": "omp-legacy-prefixes.json"
+}
 ```
 
-Assembles the *exact* prompt omp's advisor uses at runtime — the real
-`packages/coding-agent/src/prompts/advisor/system.md` plus your watchdog file
-wrapped in omp's own `Especially pay attention to:\n<attention>...</attention>`
-format — and feeds each case's `context_window` as a transcript update.
-Writes raw advisor outputs to `~/.dotfiles/.claude/skill-evals/results.jsonl`
-(overwritten each run; `--append` to keep history). `--limit N` for a quick
-sample, `--ids id1 id2` to target specific cases, `--concurrency N` (default
-8) for parallel API calls.
+`omp-legacy-prefixes.json` is private migration evidence, not a filename
+search:
 
-Omit `--watchdog` to test the watchdog file actually in effect
-(`~/.omp/agent/WATCHDOG.md`) as a baseline before/after comparison.
-
-### 3. Score it
-
-```bash
-python3 scripts/judge.py --concurrency 8
+```json
+{
+  "2026-01-02T10-00-00-": {
+    "full_session_id": "2026-01-02T10-00-00-123Z_full-id",
+    "source_sha256": "lowercase sha256 of that exact source file"
+  }
+}
 ```
 
-LLM-judges each positive case's advisor output against its `expected_flag`
-(CAUGHT / PARTIAL / MISSED) and deterministically scores negatives (CLEAN if
-the advisor stayed silent, FALSE_FLAG if it raised a note on a window Sami
-didn't react to). Writes `~/.dotfiles/.claude/skill-evals/judged.jsonl` and
-prints a catch-rate / false-flag-rate table by category.
+The importer first resolves an exact source session filename. Only an exact
+20-character OMP timestamp-prefix key may then use this private map; its mapped
+full ID must extend the prefix, resolve to exactly one source file, and match
+the recorded SHA-256. It never runs a substring search. A missing or malformed
+map, mismatched full ID, ambiguous file, or digest mismatch is ledgered rather
+than admitted.
 
-## Typical workflow
+The intervention text and supplied timestamp must select one event exactly.
+Only when `intervention_ts` is absent or `null` may the importer recover it:
+after verified session resolution, the complete normalized `sami_message` must
+match exactly one user event. It records that event's ID, timestamp, and
+`unique_normalized_user_text` recovery method in private provenance. Empty,
+malformed, or contradictory supplied timestamps, zero/multiple text matches,
+and nearest/time-only/cross-session matching remain rejections.
+
+The importer preserves ordered text, thinking, tool calls, and tool results. It
+uses the source-defined OMP rendering and output notices for visible
+`bashExecution` messages, omits executions excluded from the original model
+context, and preserves an OpenCode compaction boundary as an empty marker; it
+never invents a resume prompt. Text-only `fileMention` material remains
+developer text. For a mixed file mention, its text and image groups remain
+separate developer and user events with deterministic IDs and
+`provenance.event_origins` back to the source record. Supported self-contained
+OMP and Claude base64 images, plus OpenCode data-URI file parts for UTF-8 text,
+JSON, PNG, JPEG, WebP, and GIF, become hash-bound artifacts in original block
+order; they are not flattened to text or treated as inspected pixels. External
+OpenCode paths or URLs and non-base64 Claude image sources are rejected rather
+than fetching current content. Retained text and JSON artifact bytes receive
+the same credential and source-root redaction before storage, and their block
+and manifest digests bind the resulting bytes. Image artifacts are not
+text-scanned or treated as inspected pixels; they remain pending human privacy
+review. Encrypted/provider-internal blocks, unsupported media, malformed
+artifact data, and nonempty diagnostic metadata remain ledgered rather than
+being silently downgraded.
+The importer excludes the later correction and expected label from
+the subject event window; it redacts recognized credential shapes and each
+declared canonical source-root form from retained text, tool arguments, JSON
+keys, and ledger errors. A redaction-induced JSON-key collision rejects the
+candidate rather than overwriting a recorded value. It writes one
+admission-ledger outcome for every candidate. Malformed JSONL lines and
+secret-bearing candidate identifiers are ledgered as `line-N`; the latter are
+quarantined before an identifier can be redacted into a collision.
+Structurally unresolved findings such as private-key blocks are quarantined
+before storage. This is not exhaustive secret detection: pending human privacy
+review remains mandatory for residual sensitive context. Imported labels and
+`provenance.privacy_review` are always `pending`; they are data-only and
+non-executable.
+
+## Synthetic import and review loop
+
+Run the complete import path on the bundled digest-verified synthetic source
+root before changing corpus behavior:
 
 ```bash
-# baseline with the live watchdog
-python3 scripts/run_eval.py --out /tmp/baseline.jsonl
-python3 scripts/judge.py --results /tmp/baseline.jsonl --out /tmp/baseline-judged.jsonl
-
-# candidate with your edit
-python3 scripts/run_eval.py --watchdog ~/WATCHDOG.candidate.md --out /tmp/candidate.jsonl
-python3 scripts/judge.py --results /tmp/candidate.jsonl --out /tmp/candidate-judged.jsonl
-
-# compare the two tables; only land the edit if catch rate improves
-# without raising the false-flag rate on category=none cases
+DATA_DIR="$(mktemp -d)"
+uv run --project evals agent-evals import \
+  --legacy evals/fixtures/import/legacy \
+  --sources evals/fixtures/import/sources.json \
+  --data-dir "$DATA_DIR"
+# Recorded imports are data-only. This executable-admission check must fail while
+# their label/privacy review is pending.
+! uv run --project evals agent-evals validate --cases "$DATA_DIR/cases"
+uv run --project evals agent-evals promote \
+  --case-id synthetic-regression \
+  --cases "$DATA_DIR/cases" \
+  --decision evals/fixtures/import/review-decision.json
+# Explicitly reviewed and privacy-approved regressions validate and may run.
+uv run --project evals agent-evals validate \
+  --cases "$DATA_DIR/regressions"
 ```
 
-## Model invocation — why not `omp -p`
+The digest-verified synthetic exception applies only to fixture source import.
+It never authorizes an unattested `--run-dir` or comparison output.
 
-`omp -p` headless mode routes through the full primary-agent runtime (rules,
-skills, memory recall, tool grants). Verified 2026-08-24: even with
-`--no-tools --no-rules --no-skills --no-lsp --no-extensions` and a
-`memory.backend: none` config overlay, the model still recited Sami's
-identity/working-style from baked persona and once hallucinated a Slack
-search with zero tool calls in the transcript — unusable for isolating an
-advisor system prompt.
+Inspect `admission-ledger.jsonl` after every import. A rejected locator, missing
+source session, unsupported content block, secret quarantine, or schema error
+is evidence to resolve rather than a case to silently drop.
 
-Instead, `_anthropic.py` calls the Anthropic Messages API directly, using the
-credential from `omp token anthropic`. This reproduces the advisor's real
-`nit`/`concern`/`blocker` voice cleanly (verified end-to-end with real calls).
-It has no `advise` tool wired, so `run_eval.py` appends a short
-harness-only instruction asking the model to answer as it would through that
-tool, or reply `NONE` for silence — this addition is not part of the real
-advisor prompt and is clearly delimited in the transcript sent to the model.
+Promotion needs a recorded human label and privacy decision:
 
-Default model is `claude-sonnet-4-5-20250929` (a real, verified-working
-model — the fictional catalog ids in `~/.omp/agent/config.yml`'s
-`modelRoles.advisor`, e.g. `anthropic/claude-sonnet-5`, aren't callable
-directly via the raw Anthropic API in this environment). Override with
-`--model` on `run_eval.py`/`judge.py` to test a different candidate model.
+```json
+{
+  "case_id": "case-id",
+  "decision": "approved",
+  "reviewer": "reviewer name",
+  "reviewed_at": "2026-09-06T00:00:00Z",
+  "rationale": "Why the label and regression are correct.",
+  "required_output": "observable requirement",
+  "privacy_reviewer": "privacy reviewer name",
+  "privacy_reviewed_at": "2026-09-06T00:00:00Z",
+  "reviewed_target": {
+    "should_advise": true,
+    "severity": "concern",
+    "criterion": "human-reviewed-criterion",
+    "prior_advice_criteria": []
+  }
+}
+```
 
-## Schema reference
+The recorded source provenance stays with the promoted case. `validate` and
+the runner apply the same executable-admission gate: they reject every recorded
+case until `review_status` is `approved`,
+`provenance.privacy_review` is exactly `{"status":"approved","reviewer":"…","reviewed_at":"…"}`,
+and the cases path is in external private storage; they never treat historical
+recordings as synthetic. Importing remains a data-only operation and does not
+authorize inference.
 
-Stub/case fields (binding contract used across the whole reflect effort):
+Promotion leaves the pending source case intact and creates a numbered,
+provenance-linked regression copy. The track-specific `reviewed_target` is a
+human decision, never a model inference: for Advisor it must supply exactly
+`should_advise`, `severity`, `criterion`, and `prior_advice_criteria`. Run that
+saved regression through the relevant candidate evaluation after every related
+change; a later deliberately bad candidate must fail before the change can be
+adopted.
 
-| field | meaning |
-|---|---|
-| `id` | `"<session-id-fragment>:<turn>"` — turn is the 1-based raw message index |
-| `source` | `oh-my-pi` \| `opencode` \| `claude-code` |
-| `session` | full session id |
-| `project` | project/workspace label |
-| `intervention_ts` | timestamp of Sami's message |
-| `category` | failure-mode tag, or `none` for a negative sample |
-| `sami_message` | Sami's verbatim message |
-| `what_agent_was_doing` | 1-2 sentences of what the agent was doing |
-| `expected_flag` | what a good advisor/skill should have caught first |
-| `turning_point` | whether this message changed direction |
-| `lesson` | one generalizable principle |
-| `context_window` | (added by `extract_cases.py`) `[{role, text}, ...]` |
+## Evaluating a candidate
+
+Prepare one baseline and one or more candidate variants. The baseline has
+`role: "baseline"` and `baseline_id: null`; each candidate has
+`role: "candidate"` and names that exact baseline ID. Run the frozen comparison
+with the acceptance model:
+
+```bash
+# PRIVATE_DATA_DIR must name a fresh, non-symlinked child below an existing
+# attested private version-controlled corpus root; it is not its own repository.
+: "${PRIVATE_DATA_DIR:?Set PRIVATE_DATA_DIR to a fresh child of the approved private corpus root}"
+CASES_PATH="$PRIVATE_DATA_DIR/regressions"
+VARIANTS_PATH="$PRIVATE_DATA_DIR/variants.json"
+TRACK="advisor"
+REPEATS=3
+# `agent-evals run` requires a new path below that selected private child.
+PRIVATE_RUN_DIR="$PRIVATE_DATA_DIR/runs/$(date -u +%Y%m%dT%H%M%SZ)-advisor"
+test ! -e "$PRIVATE_RUN_DIR" || {
+  printf 'run directory already exists: %s\n' "$PRIVATE_RUN_DIR" >&2
+  exit 1
+}
+
+secrets ANTHROPIC_API_KEY -- uv run --project evals agent-evals run \
+  --cases "$CASES_PATH" \
+  --variants "$VARIANTS_PATH" \
+  --model anthropic/claude-opus-4-6 \
+  --run-dir "$PRIVATE_RUN_DIR" \
+  --track "$TRACK" \
+  --repeats "$REPEATS"
+uv run --project evals agent-evals compare --run-dir "$PRIVATE_RUN_DIR"
+```
+
+Use the track and rollout tier that prove the proposed claim. One-shot tests
+observe a response, simulated tests observe validated simulator state, and
+sandbox tests observe isolated Docker state. Advisor false alerts count as
+three missed-nit units; harmful advice and serious misses are separate failures.
+Tool and sandbox execution never run against the host, user credentials, live
+services, or user memory.
+
+Use Inspect to view private run logs:
+
+```bash
+uv run --project evals inspect view \
+  --log-dir "$PRIVATE_RUN_DIR/logs" \
+  --host 127.0.0.1 \
+  --port 7575
+```
+
+## Historical migration gate
+
+Once a private destination is approved, inventory every legacy candidate,
+import the complete population, reconcile admission-ledger counts to the
+inventory, verify source/stored hashes and the private revision, then review
+labels. Do not run model evaluations on historical cases until privacy and
+label review are complete.

@@ -402,12 +402,26 @@ jj-refresh() {
         jj -R "$root_path" git fetch --remote origin --branch "$base_branch" || return 1
     fi
 
-    # Process all workspaces
+    # Process all workspaces. `default` has no recorded path (it is the root);
+    # any other workspace whose path cannot be resolved is reported and skipped,
+    # never silently refreshed as if it were the root.
     jj -R "$root_path" workspace list -T 'name ++ "\n"' --ignore-working-copy 2>/dev/null | while IFS= read -r ws; do
-        path=$(jj -R "$root_path" workspace root --name "$ws" 2>/dev/null) || path="$root_path"
+        if [ "$ws" = default ]; then
+            path="$root_path"
+        elif ! path=$(jj -R "$root_path" --ignore-working-copy workspace root --name "$ws" 2>&1); then
+            echo "Skipping workspace $ws: ${path#Error: }" >&2
+            continue
+        fi
         echo "Refreshing workspace $path..."
-        jj -R "$path" workspace update-stale &>/dev/null || true
-        jj -R "$path" st &>/dev/null
+        # Snapshot; recover only when jj itself says the working copy is stale.
+        # Any other failure is shown, not swallowed.
+        if ! err=$(jj -R "$path" st 2>&1 >/dev/null); then
+            if [[ "$err" == *"working copy is stale"* ]]; then
+                jj -R "$path" workspace update-stale >/dev/null
+            else
+                echo "$err" >&2
+            fi
+        fi
         if [ "$rebase" = true ]; then
             echo "  Rebasing onto $base_branch..."
             (cd "$path" && jj rebase -d "$base_branch")

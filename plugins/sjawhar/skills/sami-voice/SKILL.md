@@ -42,6 +42,13 @@ Avoid:
 
 Severity labels (Medium/High) are not measurements. Give a number or drop the metric claim.
 
+## Banned words
+
+Never use these — they are meaningless and read like AI slop. Say what actually happened instead of reaching for them.
+
+- **land / lands / landing / landed** — "the message lands", "work that landed", "whether it landed with the customer". State the concrete result, not that something vaguely "landed".
+- **ride / riding** — same reason.
+
 ## Editing Sami's drafts
 
 Preserve his wording unless something is actually wrong with it — the result should sound like him, not you. When a colleague's style is the reference (e.g. sales copy), match that colleague's prior messages. Watch for his live edits in shared docs and merge around them rather than overwriting.

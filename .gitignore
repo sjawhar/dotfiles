@@ -2,6 +2,14 @@ __pycache__
 *.pyc
 .venv/
 uv.lock
+!/evals/uv.lock
+
+# Eval output is required to be external; retain a narrow ignore backstop for
+# accidental generated artifacts without hiding fixtures or lockfiles.
+/evals/**/*.eval
+/evals/**/comparison.json
+/evals/**/execution.json
+/evals/**/manifest.json
 
 bin/
 completions.d/
@@ -40,7 +48,6 @@ vendor/
 .tmux-workspace/
 
 /ignore
-.opencode/skills/fork-maintenance-skill-*/
 .overseer/
 .playwright-mcp/
 .superpowers

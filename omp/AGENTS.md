@@ -8,7 +8,8 @@ oh-my-pi (omp) configuration. The binary is mise-managed (`"github:sjawhar/oh-my
 - **`models.yml`** — model catalog patches (xhigh thinking tiers). Symlinked alongside.
 - **`mcp.json`** — MCP servers, launched through the `secrets` CLI so tokens never sit in config.
 - **`agents/`** — agent definition files, all real files. Some originate in `plugins/sjawhar/agents/` or vendor repos; they are copied in, not linked. Update by re-copying deliberately.
-- **`extensions/`** — dotfiles-owned extension source only (`jj-snapshot.ts`, `dotfiles-skills.ts`). Everything else reaches omp as an installed plugin (below), never as a path or symlink to a checkout.
+- **`extensions/`** — dotfiles-owned extension source only (`dotfiles-skills.ts`, `session-env.ts`). Everything else reaches omp as an installed plugin (below), never as a path or symlink to a checkout.
+- **`hooks/post/jj-snapshot.ts`** — the jj working-copy snapshot after each mutating tool call: fire-and-forget `jj util snapshot` with a per-repo in-flight guard, so it never blocks the tool loop. It must stay the only snapshotter, and no snapshotter may await jj: every colocated snapshot takes the repository-wide `git_import_export.lock`, shared by every workspace of that repository, so an awaited call queues behind every other workspace's snapshot and can exceed the 30 s extension-handler deadline.
 - **`plugins/`** — the omp plugin tree, symlinked to `~/.omp/plugins`. `package.json` pins each plugin to a GitHub ref (`github:sjawhar/knives#<sha>`, `github:sjawhar/secretsd#<tag>`, ...) exactly like `opencode.json`'s plugin entries. `bun install` here materializes them; `omp plugin install`/`upgrade` manage the pins, and the resulting `package.json`/lockfile changes get committed.
 
 ## Skill pools (shared with OpenCode)

@@ -17,14 +17,16 @@ ensure_link "${DOTFILES_DIR}/omp/mcp.json"    "${OMP_AGENT_DIR}/mcp.json"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.md" "${OMP_AGENT_DIR}/WATCHDOG.md"
 ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
 
-# Extensions: jj-snapshot is dotfiles-owned; everything else is an OMP plugin
-# installed from GitHub. The pins live in the committed omp/plugins/package.json
-# (same idea as opencode.json's git-pinned plugin entries); bun install
-# materializes them. Manage pins with omp plugin install/upgrade - the
-# resulting package.json/lockfile changes get committed here.
+# Extensions: dotfiles-owned sources are linked here; everything else is an OMP
+# plugin installed from GitHub. The pins live in the committed
+# omp/plugins/package.json (same idea as opencode.json's git-pinned plugin
+# entries); bun install materializes them. Manage pins with omp plugin
+# install/upgrade - the resulting package.json/lockfile changes get committed here.
+# jj snapshotting is omp/hooks/post/jj-snapshot.ts alone (see omp/AGENTS.md);
+# a stale extension copy is pruned so no second, awaited snapshotter loads.
 if [ -L "${OMP_AGENT_DIR}/extensions" ]; then rm "${OMP_AGENT_DIR}/extensions"; fi
 mkdir -p "${OMP_AGENT_DIR}/extensions"
-ensure_link "${DOTFILES_DIR}/omp/extensions/jj-snapshot.ts" "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
+rm -f "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/dotfiles-skills.ts" "${OMP_AGENT_DIR}/extensions/dotfiles-skills.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/session-env.ts" "${OMP_AGENT_DIR}/extensions/session-env.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
