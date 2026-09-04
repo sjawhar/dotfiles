@@ -40,7 +40,7 @@ auto_prune = false
 
 [tools]
 "github:sjawhar/jj" = "latest"  # Custom fork with workspace-cli, LFS ignore-filters, gitattr filter fixes
-"github:sjawhar/knives" = "latest"
+"github:sjawhar/knives" = "1.0.0"
 "github:sjawhar/oh-my-pi" = "18.1.7-sami.20260903-193013"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
@@ -67,7 +67,7 @@ zoxide = "0.10.0"
 "github:sjawhar/oh-my-opencode" = "latest"  # Custom fork
 "github:sjawhar/opencode" = "latest"
 "npm:@googleworkspace/cli" = "0.22.5"
-"npm:@openai/codex" = "0.149.1"
+"npm:@openai/codex" = "0.153.1"
 
 # Development
 "npm:basedpyright" = "1.39.10"
