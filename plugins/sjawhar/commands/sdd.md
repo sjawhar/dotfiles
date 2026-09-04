@@ -1,6 +1,6 @@
 ---
 name: sdd
-description: Execute work via subagent-driven development with Sami's fixed agent mapping (planner plans, reviewer gates, deep implements).
+description: Execute work via subagent-driven development with Sami's fixed agent mapping (you plan, reviewer gates, deep implements).
 disable-model-invocation: true
 ---
 
@@ -8,16 +8,16 @@ disable-model-invocation: true
 
 Load the `subagent-driven-development` skill and execute the given work through it with this fixed agent mapping:
 
+- **Planning** → **you**, in this session, with the `writing-plans` skill. You hold the brainstorm, the spec, and every decision Sami made getting here; a fresh planner starts from zero and spends an hour re-reading the codebase to recover context you already have. Planning is the one job where your context is the asset, not the cost.
 - **Implementation and debugging** → `task` with `agent: "deep"`
-- **Planning** → `task` with `agent: "planner"`
 - **Plan and PR review** → `task` with `agent: "reviewer"` (built-in; returns a verdict plus findings)
 - **Strategy consults** (architecture calls, gnarly tradeoffs, stuck debugging) → `task` with `agent: "oracle"` (read-only)
 
-You are the coordinator: dispatch, verify results file-by-file, integrate, and manage the backlog. **Do not plan or implement yourself** — burning your own context on implementation instead of orchestrating is the failure mode this command exists to prevent.
+You are the coordinator: write the plan, dispatch, verify results file-by-file, integrate, and manage the backlog. **Do not implement yourself** — burning your own context on implementation instead of orchestrating is the failure mode this command exists to prevent.
 
 **Parallelize aggressively.** Structure the plan itself to maximize independent tasks; dispatch independent tasks in the same turn; a blocked lane never idles the pipeline.
 
-Pipeline: plan (writing-plans skill, dispatched to the `planner` agent) → `reviewer` gates the plan → subagents implement — a multi-PR plan stacks via the `gh-stack` skill, each PR opened with the `opening-a-pr` skill and agent-reviewed as it lands — → acceptance run → final review pass → single-PR work opens its PR now via `opening-a-pr`; stacked work collapses via the `squash-stack` skill → the `landing-a-pr` skill. Every plan carries a `## Hardening ledger` section, empty at the start.
+Pipeline: you write the plan (writing-plans skill) → `reviewer` gates the plan → subagents implement — a multi-PR plan stacks via the `gh-stack` skill, each PR opened with the `opening-a-pr` skill and agent-reviewed as it lands — → acceptance run → final review pass → single-PR work opens its PR now via `opening-a-pr`; stacked work collapses via the `squash-stack` skill → the `landing-a-pr` skill. Every plan carries a `## Hardening ledger` section, empty at the start.
 
 **End-to-end verification plan (required in every plan, not optional).** Every plan carries a `## End-to-end verification plan` section, filled in during planning, not deferred to the acceptance run. For each deliverable:
 
@@ -26,7 +26,7 @@ Pipeline: plan (writing-plans skill, dispatched to the `planner` agent) → `rev
 3. **If no: building that tooling is a task IN THIS PLAN, not a follow-up.** Add it as its own plan unit, scoped as *general and reusable* (a fixture, a CLI subcommand, a skill workflow — not a one-shot script scoped to this PR's exact diff), with its own verification step. A plan that ships the feature and defers "how we'll test it" to "future work" has planned half the feature. This is not new work invented while implementing; it is scope that was always part of the ask, made explicit now instead of discovered late.
 4. **Where a deliverable genuinely cannot be exercised outside a shared/expensive resource** (production-only integration, paid third-party sandbox), say so explicitly and name the cheapest real substitute (a Taiga run on a branch build, a staging apply, a Modal run) — never "I read the code" or "the unit tests pass."
 
-The `reviewer` gate reviews this section with the rest of the plan: a plan whose deliverables have no named end-to-end path, or whose verification is a proxy (log presence, code inspection, an internal/admin shortcut standing in for the restricted real path), is rejected back to the `planner` like any other incomplete plan.
+The `reviewer` gate reviews this section with the rest of the plan: a plan whose deliverables have no named end-to-end path, or whose verification is a proxy (log presence, code inspection, an internal/admin shortcut standing in for the restricted real path), is rejected back to you like any other incomplete plan — fix it and re-gate.
 
 **The ledger is the implementer's contract, not a suggestion.** Every implementer dispatch includes: *take the shortcut if it gets the feature working, but log it in the hardening ledger the moment you take it, and return your ledger entries with your report.* You accumulate the entries across subagents. You — the coordinator — run the `opening-a-pr` skill yourself (once for single-PR work; per stacked PR as it lands); at its empty-the-ledger step, dispatch each unpaid entry to `deep` as its own bounded fix task and fold the results in before that PR opens. An implementer who hid a hack instead of logging it has broken the contract; send that task back to `deep` with the gap named.
 
