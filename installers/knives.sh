@@ -7,9 +7,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # ~/.config/knives (ledger/, state.json, seen.json, hook-sessions/) is
 # per-machine state knives writes itself and stays out of version control.
 #
-# repos.toml names repositories by their upstream remote, not by path, so one
-# registry serves every machine: knives finds each checkout by its remotes and
-# reports one that is absent here as `not on this machine`. `knives register`
-# prints a paste-ready entry for the checkout you stand in.
+# repos.toml paths are written with `~/` (knives expands it), so one registry
+# serves every machine; a repo listed here but absent on this machine is
+# simply reported as such by `knives status`. `knives register` prints
+# absolute paths - rewrite to `~/` before pasting into knives/repos.toml.
 mkdir -p ~/.config/knives
 ensure_link "${DOTFILES_DIR}/knives/repos.toml" ~/.config/knives/repos.toml
