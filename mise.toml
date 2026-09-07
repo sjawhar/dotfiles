@@ -38,6 +38,9 @@ minimum_release_age_excludes = [
 [settings.upgrade]
 auto_prune = false
 
+[env]
+AGENT_EVAL_VERSION = "0.1.1"
+
 [tools]
 "github:sjawhar/jj" = "0.45.1-sami.20260906-180417"  # upstream main + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10127 + #10129 + #10130
 "github:sjawhar/knives" = "2.0.1"
