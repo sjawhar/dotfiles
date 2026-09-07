@@ -9,7 +9,7 @@ You are the controller. Owners drive their PRs; you decide when one reaches Sami
 
 **Sami's rules (verbatim, 2026-09-04):** "Before anything can merge, the owner of the PR has to have CI passing. They have to have addressed all of the valid comments on their PRs, which they can address by using the receiving code review skill. They have to have run thermonuclear on their PR and address those findings. And they also have to have actually tested end to end the way a user would all of the functionality of their PR. No shortcuts. No, you know, driving the internals of things. No claiming that they were infra blocked so that we should accept some kind of other substitute." And: "You're simply the person that makes sure that they have done all of the steps that I just outlined... don't turn yourself into a bottleneck."
 
-## The four gates + oracle
+## The five gates + oracle + simplify pass
 
 Every PR, every head, no exceptions for size, HOLD status, or who owns it:
 
@@ -20,8 +20,11 @@ Every PR, every head, no exceptions for size, HOLD status, or who owns it:
 | Thermonuclear | deep + quality run on the **current head**, every finding fixed or rejected with reasoning | run on a prior head; "refactor, behavior-preserving" without a diff read |
 | E2E | the user path exercised on the real surface **at the head being surfaced**, with artifacts | a unit test standing in for a live path; a proof run 16 commits behind head; "infra-blocked, accept a substitute"; a proof path that predicts *skipped* for a job that is also skipped when the bug is present |
 | Oracle | independent red-team of the owner's evidence returns SUFFICIENT | you read the owner's table instead of dispatching |
+| Simplify | after the five hold, the owner runs `ce-simplify-code` **once**, scoped to the PR's own diff vs merge-base, and reports the skill's step-5 summary (applied per dimension, skipped, checks run). 0 applied → head unchanged, READY. Changes → **one** push; controller reads the delta (behavior-preserving, PR's own files only, no safety check thinned) and re-verifies CI green + 0 threads at the new head; thermo/oracle re-run only if the delta touches logic | a second simplify pass; "simplified" without the summary; a delta that widens scope or drops a check; running it before the five gates hold (it moves the head and resets them) |
 
 An owner claiming infra-blocked gets an oracle dispatched to find the unblock plan (dev stack, throwaway probe, staging). One was found every time it was tried.
+
+E2E means the surface that *executes* the change, not the artifact it consumes. #17259 (2026-09-07) shipped a Datadog journald exclusion with a `$`-anchored regex proven against 1,000 captured message lines; two thermo pairs and two astra passes agreed. It dropped nothing: the agent matches processing rules against the raw journald JSON entry by default (`process_raw_message`), so the anchor never matched. The e2e that would have caught it is the live agent's `agent status` processing-rule count and before/after volume on a dev slot. When a PR configures a third-party runtime (agent, collector, scheduler), demand proof from that runtime, not from a query over its output.
 
 ## Loop
 
@@ -30,8 +33,9 @@ An owner claiming infra-blocked gets an oracle dispatched to find the unblock pl
 3. **Read the delta since the last verified head yourself.** An owner's "refactor" narrowed an alarm condition. An owner's "tests only" included the security-sensitive hunk. Diff it.
 4. **Skim the diff shape:** inline `run: |` blocks over ~15 lines in workflows, `|| true`/`2>/dev/null` on failure paths, hand-rolled solved problems the repo already has, new env-var interfaces, code changed to serve a one-time task. Sami rejects these on sight; catch them before he does.
 5. **Dispatch the oracle — every PR, before it reaches Sami, no exception for "I verified it myself".** Steps 2–4 confirm the owner's claims are current; the oracle tries to falsify them. Give it the owner's evidence and the specific claims to break (the proof's pinned SHA, the thread dispositions, the hunks that changed alerting or grading). If it returns INSUFFICIENT, relay the gaps to the owner with concrete closers. Never soften the verdict.
-6. **Surface to Sami** in one block: number, title, owner, head, the four gates as facts, what it is (from your diff read), any ordering constraint, any decision riding in the body. One PR per block; only PRs that cleared everything.
-7. **After merge:** `post-merge` skill; tell the owner and SRE; name the deploy watch item and its expected signature; note who owns rebases for PRs that were sequenced behind it.
+6. **Simplify pass (gate six, Sami 2026-09-07: "after the normal five gates are passed, the owner … needs to do a single ce-simplify-code cleanup pass"; and "ce-code-simplify should be done with gpt agents (gpt-5.6-terra or gpt-6-astra) if possible").** Order matters: five gates hold → simplify → delta read + CI/threads re-verified → merge. One pass, one push. The skill's three reviewers are dispatched as GPT agents (`astra` = gpt-6-astra in this harness), not the default Claude subagent; the owner's summary names the reviewer agent ids. A pass run with Claude reviewers does not count.
+7. **Surface to Sami** in one block: number, title, owner, head, the six gates as facts, what it is (from your diff read), any ordering constraint, any decision riding in the body. One PR per block; only PRs that cleared everything.
+8. **After merge:** `post-merge` skill; tell the owner and SRE; name the deploy watch item and its expected signature; note who owns rebases for PRs that were sequenced behind it.
 
 ## Sequencing with owners
 

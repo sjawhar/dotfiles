@@ -101,7 +101,7 @@ Don't revert or undo unrecognized working-copy changes without investigating the
 
 ### Commits
 
-Structure commits to serve the reviewer: multiple logical, self-contained commits are welcome when they make a PR easier to review (setup vs. behavior change vs. tests), and commit-per-step workflows from skills are fine. A single commit is still right for small changes — judge by reviewability, not ceremony. Don't ask me about commit structure either way; decide and move. One PR per repo per line of work: the PR that lands authorized work is pre-authorized (see Shipping); a second PR while yours is still open, or a PR for work I didn't authorize, is what needs my word.
+Structure commits to serve the reviewer: multiple logical, self-contained commits are welcome when they make a PR easier to review (setup vs. behavior change vs. tests), and commit-per-step workflows from skills are fine. A single commit is still right for small changes — judge by reviewability, not ceremony. Don't ask me about commit structure either way; decide and move. Prefer one PR per repo per line of work, but that is about keeping a PR reviewable — it is not a permission gate. **Opening a PR never needs my approval**, including a second one while another of yours is still open. If you found something broken, fix it and open the PR; asking me first is the failure, not the safeguard.
 
 ### Shipping
 
