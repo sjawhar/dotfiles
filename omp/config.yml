@@ -56,7 +56,7 @@ mnemopi:
 theme:
   dark: titanium
 symbolPreset: unicode
-hideThinkingBlock: true
+hideThinkingBlock: false
 doubleEscapeAction: tree
 dev:
   autoqaConsent: granted
@@ -70,6 +70,7 @@ tui:
   rewindScrollback: preserve
 skills:
   ignoredSkills:
+    - ce-babysit-pr
     - ce-commit-push-pr
     - ce-debug
     - ce-work

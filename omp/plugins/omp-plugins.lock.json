@@ -19,6 +19,11 @@
       "version": "2.5.2",
       "enabledFeatures": null,
       "enabled": true
+    },
+    "compound-engineering": {
+      "version": "3.24.0",
+      "enabledFeatures": null,
+      "enabled": true
     }
   },
   "settings": {}
