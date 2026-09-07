@@ -11,7 +11,7 @@ without hiding choices that genuinely belong to them.
 ## Evidence and scope
 
 Apply `~/.dotfiles/.claude/CLAUDE.md` and current explicit user instructions.
-Read relevant examples in `~/.dotfiles/.claude/proxy-dataset/precedents.md`:
+Read relevant examples in `~/.agent-eval/experiments/sami-proxy/precedents.md`:
 60 private precedents grouped by theme, with source ids, agent tails, verbatim
 replies, and lessons; 20 carry the user's own verdict on the original bucket.
 Those YES/NO/MEH verdicts judge that bucket, not permission to act and not the four
