@@ -16,14 +16,17 @@ if [ -d "${DOTFILES_DIR}/vendor/streamlinear/.git" ]; then
         git -C "${DOTFILES_DIR}/vendor/streamlinear" remote add upstream https://github.com/obra/streamlinear.git
 fi
 ensure_vendor https://github.com/anthropics/skills.git anthropic-skills
-# Pinned: upstreams restructured after these commits (skills moved under
-# packages/); consumers below and in skills-sources.json expect this layout.
-ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compound-engineering d3f35297adccea3ad8735e988253966ffa8cf74c
+# Pinned to the compound-engineering-v3.24.0 release tag. Bump deliberately:
+# check that every name in omp/config.yml skills.ignoredSkills (and the skip
+# list below) still exists upstream, and diff the skill set for new arrivals.
+ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compound-engineering 3ad9b51bceecf0158e590c882034d0398dbb9c5c
 ensure_vendor https://github.com/github/gh-stack.git gh-stack
 ensure_vendor https://github.com/DataDog/pup.git pup
 # pup ships ~11 dd-* skills (plus 50 agents, pruned from omp/agents); only
 # dd-pup is wanted — the rest swamp session context. Converge fresh clones.
 find "${DOTFILES_DIR}/vendor/pup/skills" -mindepth 1 -maxdepth 1 -type d -name 'dd-*' ! -name 'dd-pup' -exec rm -rf {} +
+# Pinned: upstreams restructured after these commits (skills moved under
+# packages/); consumers below and in skills-sources.json expect this layout.
 ensure_vendor https://github.com/getsentry/sentry-for-ai.git sentry-for-ai 2c34b9a2ecff03005d381e60013d7d5849801a62
 ensure_vendor https://github.com/getsentry/cli.git sentry-cli 33028c2ac93e027ce3faa9045efc91d895deae1a
 ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
@@ -78,7 +81,7 @@ for dir in "${DOTFILES_DIR}/vendor/compound-engineering/skills"/*/; do
     dir="${dir%/}"
     name=$(basename "$dir")
     case "$name" in
-        ce-commit-push-pr|ce-debug|ce-work|ce-worktree|lfg)
+        ce-babysit-pr|ce-commit-push-pr|ce-debug|ce-work|ce-worktree|lfg)
             [ -L "${CE_DIR}/${name}" ] && rm "${CE_DIR}/${name}" ;;
         *)
             ensure_link "$dir" "${CE_DIR}/${name}" ;;
