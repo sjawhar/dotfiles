@@ -3,7 +3,7 @@
 //
 //   OMP_SESSION_ID — the resumable session id (`omp --resume <id>`), derived
 //     from the session transcript filename, which is what resume matching
-//     scans. Keys per-session state like pr-inbox's seen-state.
+//     scans. Keys per-session state for tools that track what a session saw.
 //   JJ_CONFIG — user config chain plus a generated per-session overlay that
 //     sets `templates.commit_trailers`, so every jj commit made from an agent
 //     session automatically carries an `Omp-Session: <id>` trailer. Attribution

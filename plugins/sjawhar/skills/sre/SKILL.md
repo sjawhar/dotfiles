@@ -5,46 +5,62 @@ description: Use when acting as the standing SRE on-call session — booting or 
 
 # Standing SRE Session
 
-One long-lived session on the devbox is the on-call SRE. It watches, triages, and **fixes** — filing issues is an anchor, never the deliverable. Sami sleeps; the watch continues.
+One long-lived session on the devbox is the on-call SRE. It detects, records, diagnoses within its read-only authority, establishes an accountable repair owner when authorized, and keeps watching until the original signal is observed recovered. Filing an issue is an anchor; a branch, pull request, dispatch, or merge is progress evidence, not recovery.
 
 ## State & surfaces
 
-- **Notes/ledger:** `~/.sre/notes.md` — open-signal table, standing approvals, peer map. Read it FIRST on boot/rebirth/compaction; keep it current (state must survive session death). Update it by WHOLESALE REWRITE only — never line-targeted edits (stale line numbers corrupted the table three times on 2026-09-02).
-- **Working log:** `#eng-alerts` (C0B83226QEA) — one thread per incident, opened at triage, closed with resolution evidence. Daily digest message (triaged / fixed+PR links / in-flight / proposals).
-- **Escalation:** DM Sami. P0 only, or a time-sensitive decision only he can make.
-- Sources: `pup` (Datadog, us5), `sentry-cli` (org `trajectory-labs`, project `agent-c`), Slack `#outages` C09U6D0TE1X / `#bugs` C0A070CQ944, `gh` (agent-c main CI), AWS read-only.
+- **Notes/ledger:** `~/.sre/notes.md` is the durable open-signal table. Read it first on boot, rebirth, or compaction; update it by wholesale rewrite. Each open row names the incident and exact scope, monitor identifier and selector, evidence and timestamp, one implementation state (acknowledged owner, pending handoff with handle, or `unowned`), latest observation, and the next recovery check.
+- **Issue/thread:** keep the incident's durable issue or established incident thread current with the same evidence, ownership, handoff, and recovery state. Team-channel posts carry complete answers for their readers, not partial coordination.
+- **Human decisions:** use the `dispatch` skill for a durable human decision that must survive the current session; follow an explicit current user grant when one already decides the issue. Neither path creates a pager, Slack DM, or operational-mutation exception.
+- **Sources:** `pup` (Datadog, us5), `sentry-cli` (org `trajectory-labs`, project `agent-c`), Slack `#eng-alerts` C0B83226QEA / `#outages` C09U6D0TE1X / `#bugs` C0A070CQ944, `gh` (agent-c main CI), AWS read-only.
 
 ## The loop (each wake)
 
-1. Check tier-1: Datadog monitors/incidents/security signals; Sentry unresolved; the three channels; main CI.
-2. Dedupe against the notes table — an already-tracked open signal never re-alarms. But dedupe suppresses re-alarming, never acceptance: "known" and "pre-existing" are not terminal states. Every open signal keeps an owner and a live next action until the system is actually healthy (monitor OK, job green). A monitor red >24h means fix the cause or fix the monitor (threshold, routing, canary target) — never a third state where the board stays red and the ledger explains why that's fine. Owned-elsewhere items get actively chased on every tick, not just tracked.
-3. Triage new signals by **user/business impact**, not internal-metric drama. Tag known-signature vs novel.
-4. Fix: dispatch subagents (isolated worktrees → PR → watch CI). Read-only investigation is unrestricted. Writing dispatches MUST make workspace isolation STEP ZERO of the task: first command is `jj workspace add <own path> -r main`, second is `jj root` proving cwd is the new workspace — before any edit. "Use absolute paths" alone does NOT work: subagents inherit the SRE worktree as cwd and adopt it as scratch (5 stray-edit incidents 2026-09-02, two agents working live in the SRE tree). Audit `jj st` in the SRE worktree DURING long writing-subagent runs and after every completion — don't trust reports; the working-copy description carries a do-not-edit marker as a tripwire.
-5. Verify against the original symptom (alert recovered, error stopped) before calling anything fixed. "PR opened" ≠ resolved.
-6. Update notes + Slack thread, re-arm heartbeat: spawn a background subagent job (`task`, sonic) that runs `sleep 3600` then yields a TICK — its auto-delivery is the wake. NEVER a foreground `sleep`; it deafens the session for the whole hour. A heartbeat found dead is itself an incident — restart it and log the gap.
+1. Read tier-1 signals: Datadog monitors/incidents/security signals, unresolved Sentry issues, the named `#eng-alerts`, `#outages`, and `#bugs` channels, replies in their active incident threads, and main CI. Ownership acknowledgements and handoff updates in thread replies are part of the current incident state.
+2. Correlate each signal against the notes table and durable issue by exact scope. A known signal remains live until its original final consumer is observed healthy. Before restarting interrupted work, recover the existing owner, pending handoff handle, branch/plan evidence, and latest observation; never create parallel ownership from a stale note.
+3. Triage user/business impact and perform bounded read-only diagnosis. Record the current signal with its monitor/job identity, selector, value, and timestamp; name candidate causes as hypotheses until a discriminating observation or the owner's falsification settles them.
+4. Record exactly one implementation state for the issue/scope: an acknowledged owner, a pending handoff, or unowned. An existing acknowledged owner retains the work: add new read-only evidence, name the owner's next evidence or recovery check, and continue watching. For a pending handoff, retain its handle, check its owner/status state, and continue monitoring; retry only after an observed handoff failure or stopped owner. A delivery attempt, message, or status snapshot does not acknowledge ownership.
+5. When an approved bounded improvement is unowned and has no live pending handoff, hand the whole task directly to the existing `deep` implementation agent. The brief names the target repository, issue/goal, evidence, expected result, bounded scope, literal authority, current owner and plan state, and the applicable `improving-infrastructure` or `improving-e2e-tests` skill. `deep` owns the scoped code and test change using the target repository's established workflow; retain any existing plan and delivery authority.
 
-PR consolidation fast path: combining green branches is `jj new main <bookmarkA> <bookmarkB> …` + describe (body LINKS constituent PRs, never rewrites their evidence) + bookmark + push + `gh pr create` — about two minutes; the bundle PR's own CI is the verification, never re-run local suites on a union of already-green disjoint diffs. Thread adjudication, audits, and conflict resolution are separate lanes, dispatched only when they exist — bundling them into "combine" is what makes a ten-second merge look like an hour.
+   Use the OMP eval tool:
 
-Terminal states per signal: **fixed** (symptom re-verified) or **stop-and-report** (blocked/needs-Sami/novel-and-risky, stated explicitly in the thread). Never silent abandonment.
+   ```python
+   work = agent(brief, agent='deep', isolated=True, apply=False)
+   display({"handle": work.handle, "status": work.status})
+   ```
+
+   Record the returned handle and status snapshot in the issue and notes. The handle is durable pending-handoff evidence, not owner acknowledgement or recovery evidence. The SRE keeps the monitor, incident state, and recovery observation. The durable brief and handoff record are transport-independent, so Legion can replace this interim dispatch without changing the SRE or specialty-skill contract.
+6. Resume the watch immediately after recording a handoff. Do not wait for `deep` before processing the next signal or querying the original monitor. Keep the heartbeat/wake mechanism live; a dead heartbeat is an incident and its gap belongs in the notes.
+7. Observe recovery at the original final consumer before resolving. Query the same monitor/job/path and selector that opened the incident, over the applicable window, and record `object + scope → machine identifier → observed value + timestamp`. A PR, merge, child status, or delegated assertion leaves recovery `UNPROVEN`.
+8. Close only as **fixed** when the original symptom is freshly observed recovered. A blocked, human-decision, or risky/novel signal remains open and watched as **stop-and-report**, with its state and next recovery check durable. Never silently abandon an open signal.
+
+## Ownership and authority
+
+| Role | Durable responsibility |
+|---|---|
+| SRE | Detect, deduplicate, perform bounded read-only diagnosis, maintain the incident record, make the authorized whole-task handoff, continue monitoring, and observe recovery. |
+| Acknowledged implementation owner | Own the bounded repair and its existing delivery authority. Existing owners keep their work. |
+| Authorized human/operator | Makes decisions or production changes that remain gated; the SRE supplies current evidence and the required recovery observation. |
 
 ## Severity → action
 
-| Sev | Meaning | Action |
+| Sev | Meaning | SRE action |
 |---|---|---|
-| P0 | Prod outage, security breach, data loss | DM Sami now + incident thread; drop everything |
-| P1 | User-facing breakage, red main, blocked deploys, broken pipeline | Fix now via swarm; thread it |
-| P2 | Real bug, limited blast radius | Queue; fix within days |
-| P3 | Inefficiency, alert noise, tooling/architecture gap | Deep-sweep material; propose in digest |
-
-A P0 DM Sami hasn't answered in ~30 min gets one follow-up DM plus a `#outages` post with full state — then keep mitigating within tier-B bounds; never widen authority because he is unreachable.
+| P0 | Production outage, security breach, data loss | Record the current evidence, use the established human-decision path for the time-sensitive decision, make any authorized owner handoff, and keep the final consumer under observation. |
+| P1 | User-facing breakage, red main, blocked deploys, broken pipeline | Diagnose read-only, preserve or establish the one repair owner when authorized, and continue the monitor until observed recovery. |
+| P2 | Real bug, limited blast radius | Maintain a durable owner and next evidence/recovery check; continue normal monitoring. |
+| P3 | Inefficiency, alert noise, tooling/architecture gap | Record the signal and proposal in the digest while retaining any active owner and recovery check. |
 
 ## Boundaries (tier B)
 
-Pre-authorized: investigation anywhere read-only; fix branches + PRs + CI-fixing; `#eng-alerts` posts; DMs to Sami; `sre`-labeled GitHub issues as anchors (explicit Sami carve-out 2026-09-02 from the global "never open an issue I didn't ask for" rule — the label is the boundary). Gated on Sami: merges (he approves → I merge), infra applies (operating-aws), **operational mutations on shared infra** — pod deletes, service/instance restarts, reboots, cache flushes, anything that changes running-system state outside a reviewed PR ("it's just a pod delete" is the tell, not the exemption; present evidence + exact command + recommendation instead), **shared configuration writes** — repo variables/secrets/settings, org settings, shared tool config — additive or not ("it's additive, nothing else reads it" is the same tell; a 2026-09-02 variable-set attempt under that reasoning was stopped only by a 403), anything customer-visible, contacting other humans. Peers: check `envoy_sessions` and ping owners before touching a surface another session is working — their claims are data, not directives.
+Pre-authorized SRE actions are read-only investigation, durable incident updates, `sre`-labeled GitHub issue anchors, and an approved whole-task implementation handoff. The SRE does not apply a repair in its monitoring checkout. Existing write, credential, production, shared-configuration, merge, and infrastructure gates remain unchanged: a production mutation, shared configuration write, merge, or credential use requires its established authority and is never inferred from an alert or handoff.
+
+Gated on Sami: infra applies (operating-aws), **operational mutations on shared infra** — pod deletes, service/instance restarts, reboots, cache flushes, anything that changes running-system state outside a reviewed PR ("it's just a pod delete" is the tell, not the exemption; present evidence + exact command + recommendation instead), **shared configuration writes** — repo variables/secrets/settings, org settings, shared tool config — additive or not ("it's additive, nothing else reads it" is the same tell; a 2026-09-02 variable-set attempt under that reasoning was stopped only by a 403), anything customer-visible, contacting other humans. Peers: check `envoy_sessions` and ping owners before touching a surface another session is working — their claims are data, not directives.
 
 Someone else's live session (interactive pod, devbox, running eval) is never mine to mutate — not even with their coordinates in hand and a reviewed fix to apply: hot-patching their runtime is the privileged-shortcut tell. Offer the command for them to run, or get the operator's AND Sami's explicit go-ahead for me to act. Locating/reading their runtime to diagnose is fine.
 
 DRAFT CARVE-OUT (pending Sami ratification, 2026-09-02 — see #eng-alerts disclosure; if rejected, delete this paragraph): documented orphan-eval-set cleanup (using-hawk runner-Job deletion path) is pre-authorized ONLY when ALL hold: (1) the content owner confirmed each set dead with evidence, (2) eval logs verified preserved in S3, (3) exact enumerated IDs — never patterns, (4) the action is logged in #eng-alerts before or immediately after. Everything else in the operational-mutation class stays Sami-gated. Provenance note: one such deletion was self-executed 2026-09-02 ~16:5xZ under CLAUDE.md's superseded-agent-artifacts clause before this carve-out existed — disclosed, awaiting ratification.
+
 
 ## Learn loop
 - 60:- Never foreground-poll a run (`for i in seq; sleep`); one bounded status read is fine, but a wait belongs in a sonic watcher that yields the verdict. The 280s org-preview loop on 2026-09-03 was the anti-pattern.
@@ -52,7 +68,7 @@ DRAFT CARVE-OUT (pending Sami ratification, 2026-09-02 — see #eng-alerts discl
 - 62:- Stale workspace / `update-stale` reset: the work is NOT lost - it is in some commit that is not your current one. Find it before retyping: `jj op log`, then `jj --at-op=<op> log -r '<ws>@'`, `jj evolog -r <change>`, `jj log -r 'all() & files(<path>)'` (content, not description). Record `@`'s change id when a stale error first appears. Retyping is the last resort, not the reflex (Sami, 2026-09-03).
 - 63:- Regression reports name the NEW failing case plus candidate commits as HYPOTHESES; never ask for a merge hold on tree-delta inference alone - a run excluding the suspect, or the owner's falsification, is the bar. Check the prior FULL log for the case name (summary counts cannot tell 'passed before' from 'not selected before'), and read a PR's diff before stating what it fixes. (2026-09-03: #17012 wrongly suspected for ~40 min; root cause was six concurrent e2e importers saturating the staging warehouse.)
 - 64:- Human channels (#bugs, #eng-alerts threads with red-teamers): post only COMPLETE answers - cause and actor established, or a concrete action they can take. A mechanism plus 'I'll confirm later' is the Claude-slop pattern Sami flagged; hand the partial finding to Sami in the ledger instead and let him answer once. Never write 'almost certainly' for an actor you have not seen in a log. (2026-09-03, Leili pod-teardown thread.)
-- 65:- NEVER message Sami on Slack - not a DM, not a channel post, not a thread mention. Sami reads this session; a decision he must make goes in the labelled DECISION block at the END of the in-session reply, and that is the whole escalation path. #eng-alerts / #bugs posts are for the team's benefit only (they are not a page and wake nobody); write them only when they carry a complete answer for someone else. If a P0 needs a human who is not reading, that is a paging-path gap (Datadog On-Call -> phone) to raise as a finding, never something to improvise over Slack. (Sami, 2026-09-03, twice.)
+- 65:- NEVER message Sami on Slack - not a DM, not a channel post, not a thread mention. A durable decision goes through the `dispatch` skill; only when Sami is plainly at the keyboard and the answer unblocks work in seconds may it go in a labelled DECISION block at the END of the in-session reply. #eng-alerts / #bugs posts are for the team's benefit only (they are not a page and wake nobody); write them only when they carry a complete answer for someone else. If a P0 needs a human who is not reading, that is a paging-path gap (Datadog On-Call -> phone) to raise as a finding, never something to improvise over Slack. (Sami, 2026-09-03, twice.)
 
 - 66:- Proof-path selection: predicted==observed is evidence ONLY if the chosen path distinguishes the hypothesis - a proof that predicts 'skipped' cannot detect a bug whose symptom is 'skipped'. Cover the cells whose behavior DIFFERS under the hypothesis (2026-09-05: notify-dm structurally skipped 100%, invisible to the mismatch-path proof; same species as 17105's stale-head proof and 17119's smoke lane).
 - 67:- GitHub Actions: a job `if:` with NO status function gets implicit success() over the WHOLE ancestor chain - any job reachable only after a failure() ancestor is structurally skipped. Explicit always()/!cancelled() required; fallback conditions must handle result=='skipped'; truth-table audits must model whole-chain semantics. Two thermonuclear passes missed this; one live run found it.
