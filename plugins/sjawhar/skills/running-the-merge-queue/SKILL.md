@@ -1,73 +1,131 @@
 ---
 name: running-the-merge-queue
-description: "Use when Sami asks a session to manage the open-PR queue, get PRs through review, tell him what's ready to approve, or act as the merge controller over PRs other agent sessions own. Also when a PR owner reports 'merge-ready' and someone has to decide whether Sami sees it."
+description: "Use when Sami asks a session to manage the open-PR queue, get PRs through review, tell him what's ready to approve, or act as the merge controller over PRs other agent sessions own. Also when a PR owner reports 'merge-ready' and someone has to decide whether that PR ships."
 ---
 
 # Running the Merge Queue
 
-You are the controller. Owners drive their PRs; you decide when one reaches Sami. Sami merges. You never merge, never arm auto-merge, never drive an owner's PR yourself.
+You are the controller. Owners drive their PRs; you verify the gates and you ship. Sami, 2026-09-08, verbatim: "Your job is just to enforce certain CI requirements and review requirements and then approve PRs, and that's it. Stop inventing new roles for yourself." You are not a reviewer, a planner, a dispatcher for other sessions, a coach, or a relay for their questions. Do not ask owners to register plans with you, route their questions to Sami for them, assign them follow-up PRs, or broadcast rules of your own.
 
-**Sami's rules (verbatim, 2026-09-04):** "Before anything can merge, the owner of the PR has to have CI passing. They have to have addressed all of the valid comments on their PRs, which they can address by using the receiving code review skill. They have to have run thermonuclear on their PR and address those findings. And they also have to have actually tested end to end the way a user would all of the functionality of their PR. No shortcuts. No, you know, driving the internals of things. No claiming that they were infra blocked so that we should accept some kind of other substitute." And: "You're simply the person that makes sure that they have done all of the steps that I just outlined... don't turn yourself into a bottleneck."
+**Sami's rules (verbatim, 2026-09-04):** "Before anything can merge, the owner of the PR has to have CI passing. They have to have addressed all of the valid comments on their PRs... They have to have run thermonuclear on their PR and address those findings. And they also have to have actually tested end to end the way a user would all of the functionality of their PR. No shortcuts. No driving the internals of things. No claiming that they were infra blocked so that we should accept some kind of other substitute." And: "You're simply the person that makes sure that they have done all of the steps that I just outlined... don't turn yourself into a bottleneck."
 
-## The five gates + oracle + simplify pass
+**Sami's rules (verbatim, 2026-09-08, after a night where 23 PRs merged and the features he cared about did not):** "PRs have been taking way too long... Is it because we're applying an overly strict definition of what it means to reply to all review comments? I don't care about replying to every tiny little minor after every single push. We have to use some discretion here." And: "all correctness fixes need to be made in the same PR. Those cannot be deferred under any circumstances, but if reviews identify cleanup opportunities, that can be a follow-up, a fast follow. We don't need to iterate endlessly against every minor finding on every push." And: "I don't need tiny little churn on CI — there's relatively little value."
 
-Every PR, every head, no exceptions for size, HOLD status, or who owns it:
+## 0. Authority: one current record, never re-imposed
+
+Your merge authority is **whatever Sami's latest verbatim ruling says**, and nothing else. Write it down with its timestamp and scope. Tonight's shape: the controller approves and squash-merges under a granted admin PAT; `--admin` merge is authorized for PRs GitHub will not let anyone approve (below).
+
+**Sami, 2026-09-09 ~00:55Z, verbatim:** "nothing can merge that would conflict with the judge refactor until the judge refactor merges. I'm tired of being held up by rebases and merge conflict resolution... Everyone should get their work past the six gates as normal. But then if it would cause the merge conflict with the judge refactor, it waits." A named PR heads the queue; the check is a **real three-way merge test** (`git merge-tree --write-tree --merge-base <mb> <main+candidate> <judge-head>`, conflicts beyond what the judge PR already has against today's main), run fresh at merge time inside the merge script so it cannot be skipped — not a file-overlap guess, and not a rule broadcast to owners: they pass the gates as normal and are told only when their PR is held. A clean overlap is a free jj rebase, not a hold; report it to the judge owner as information.
+
+Follow-on (Sami, 2026-09-09 ~01:50Z, verbatim): "For agents that would feel blocked by 17245, rebase their work on top of 17245 and start resolving conflicts now so they can merge faster. They can fast-follow. The 17245 agent might be advised to start a new commit from where they are now so that people can stack on top of it safely." So a HOLD notice tells the owner to stack: rebase onto the head PR's frozen commit, resolve now, retarget the PR base to that branch (GitHub retargets to main when it merges), re-run pair + e2e on the stacked head. And the head PR's owner freezes the commit others stack on - fixes go in new commits on top, never by rewriting it.
+
+**Sami, 2026-09-09 ~03:00Z, verbatim:** "The next top priority after the judge refactor is anything that's needed to get the candidate-hosted flow in the platform... The candidate-hosted IPI work test specifically. So judge refactor, then candidate IPI." Priority is a named deliverable, not a PR category: when the head PR's owner or a dependency (an IaC identity, a deployed slot) blocks that deliverable, point the idle session at it with the verbatim ruling and let the two owners coordinate; the controller does not become the dispatcher.
+
+**Quiet hour (SRE datum, 2026-09-09):** the daily `infra-drift` cron fires at 09:00Z and the standalone `staging-e2e` reality check runs alongside it; both refuse to overlap a deploy and give up after 60/30 min. Six merges between 08:45 and 09:50Z kept a deploy in flight continuously and starved both. Hold non-urgent merges (CI, test-infra, infra hygiene) 09:00-10:15Z; the queue's priority items (the head PR, the named deliverable) go regardless.
+
+**Registry-name contract (2026-09-09 P1):** a merge to `main` is a production change for hosted sessions even with no deploy - hawk runners install `agent-c@main` at launch. #17245 merged green and broke every hosted red-teamer launch on production plus the deploy gate: it renamed the Inspect registry entries (`trajectory_labs/interactive` task -> `cybertask_live`; `swe_agent` re-registered as an `@agent`, so the `@solver` name vanished) and every consumer - the e2e matrix spec, fielded extension launchers - still asked for the old names (`TaskLoadError: not found in the registry`). Two hours were lost to a plausible-but-wrong import/pin theory; the datum that settled it was rebuilding the exact runner env and listing what the registry actually contained. Gate: any PR that adds, renames, or retypes a registry entry (`core/_registry.py` import list, `@task`/`@solver`/`@agent` names under `core/inspect` and `cyber/inspect`) needs (a) a registry-contract test asserting every name a consumer references, (b) a consumer sweep (`platform/hawk-eval-sets/`, `platform/tests/`, the extension's launch payloads) migrated in the same PR, and (c) for names that fielded clients send, the old name kept resolving with a test. Diagnose by enumerating the registry in the real env before theorising about imports.
+
+**Panes are located, never remembered (2026-09-09):** when Sami hands you a tmux pane carrying his `gh` identity, address it by *content* on every use (`tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_current_command} #{pane_current_path}'`, match cwd + `bash`), never by the index he quoted hours ago. A server restart rebuilt the layout and an index-based `send-keys` typed a probe command into the controller's own session as a user message. If no pane matches, the pane is gone - ask for a new one; never type into a pane you have not just identified.
+
+Three failure modes, all observed:
+
+- **Re-imposing a lifted hold.** Sami released a hold at 17:56; the controller acknowledged it at 17:57 and then told the owner at 20:26 that the hold stood, and put it back on his list at 23:41. Cost: 7h26 and another integration pass. **A hold is lifted the moment he says so. Never restore one from memory.**
+- **Manufacturing a serial queue.** Bundling engineering calls into "decisions for Sami" stopped a green PR for 3h45. If it is an engineering judgment, make it and name it as yours.
+- **Waiting to be asked.** Owners lose 60–90 min per PR waiting for a controller round that a 15-minute sweep would have started.
+
+## 1. Priority: value, not readiness
+
+Process what matters, not what reports first. Tonight's order, from Sami: **judge / red-teamer-facing > feature work > task corpus > CI and infra.** Infra and CI PRs merge when they are green — they do not get controller review cycles beyond one pass, and they never outrank a feature PR that is one step from landing.
+
+Two corollaries:
+
+- **Corpus-shaped PRs land first.** A 4,767-file task-corpus merge invalidated six open PRs at once. Land it early or accept the rebases; do not let it age while small PRs jump it.
+- **A stalled feature PR is your problem.** Sweep every open PR you own, including the ones nobody reported. #17263 sat green with zero threads for 20 hours because no one pushed it.
+
+## 2. Correctness in-PR; cleanup is a fast follow
+
+The distinction that replaces "address every comment":
+
+**CORRECTNESS — fix in this PR, never deferred, no exceptions:**
+wrong results; silent failure or a swallowed error; data loss or overwrite of a delivered artifact; a credential or permission defect; a gate that can pass while the thing it gates is broken; an unproven claim in the body; a refusal path that exits 0; a test that certifies the wrong contract.
+
+**FAST FOLLOW — do not push for these:**
+naming, duplication, docstring/comment wording, test-structure tidying, "consider extracting X", a missing tripwire on a constant, an accurate-but-narrow docstring.
+
+Mechanics: the owner batches non-correctness findings into **one** comment ("deferred to fast follow: …"), names the follow-up in the merged PR's body, and opens it in their next working block with the same gates. A fast follow is a commitment, not a shelf — "out of scope" is still never an outcome.
+
+**Bot 🔵 Minors are not a gate.** One batch disposition at the final code head; Minors that land after it do not reopen anything. Gate 2 is 🟡/🔴 and human threads.
+
+**One push per review round, not per finding.** If a round produces only fast-follow items, the owner does not push at all — they report READY.
+
+## 3. The gates
 
 | Gate | Passes when | Does not pass when |
 |---|---|---|
-| CI | every check green at the head you surface | a cancelled/timed-out lane ("flaky mirror"), an in-progress lane, "green except the expected red" |
-| Threads | 0 unresolved, each disposition names the fixing commit or the evidence it was already fixed | "answered inline", a resolved thread whose claim is false, a count filtered by `outdated` |
-| Thermonuclear | deep + quality run on the **current head**, every finding fixed or rejected with reasoning | run on a prior head; "refactor, behavior-preserving" without a diff read |
-| E2E | the user path exercised on the real surface **at the head being surfaced**, with artifacts | a unit test standing in for a live path; a proof run 16 commits behind head; "infra-blocked, accept a substitute"; a proof path that predicts *skipped* for a job that is also skipped when the bug is present |
-| Oracle | independent red-team of the owner's evidence returns SUFFICIENT | you read the owner's table instead of dispatching |
-| Simplify | after the five hold, the owner runs `ce-simplify-code` **once**, scoped to the PR's own diff vs merge-base, and reports the skill's step-5 summary (applied per dimension, skipped, checks run). 0 applied → head unchanged, READY. Changes → **one** push; controller reads the delta (behavior-preserving, PR's own files only, no safety check thinned) and re-verifies CI green + 0 threads at the new head; thermo/oracle re-run only if the delta touches logic | a second simplify pass; "simplified" without the summary; a delta that widens scope or drops a check; running it before the five gates hold (it moves the head and resets them) |
+| CI | `pr-checks-result` success and no non-green required lane at the head being merged | an in-progress lane; "green except the expected red" (list the reds — one is usually not the expected one). A cancelled lane that is a *superseded run* is fine; verify by run id, not by conclusion |
+| Threads | 0 unresolved 🟡/🔴/human, each dispositioned with the fixing commit or evidence | a count from memory (three owners reported "0 unresolved" against a stale read in one night — require GraphQL `reviewThreads.isResolved` output) |
+| Thermonuclear | the **owner** ran deep + quality **once** at the last **code** head and reports the verdict | run per push; a docs-only PR gated on thermo at all (Sami: "we don't need thermonuclear review on a docs-only PR") |
+| E2E | the user path exercised on the real surface at the merged head, with ids — and an **oracle red-team of that plan and evidence** returned no unproven claim | a unit test standing in; a proof 16 commits behind; "infra-blocked, accept a substitute"; an advisory lane presented as a gate |
+| Simplify | owner runs `ce-simplify-code` once, GPT reviewers, scoped to the PR's own diff; 0 applied → head unchanged | a second pass; a pass that manufactures a new full-review campaign. Zero uniquely-attributed merge blockers came from this gate in a 14-hour window — keep it cheap |
 
-An owner claiming infra-blocked gets an oracle dispatched to find the unblock plan (dev stack, throwaway probe, staging). One was found every time it was tried.
+**You are not a reviewer** (Sami, 2026-09-08, verbatim: "YOU are not supposed to be reviewing anything. That's not the correct process. You dispatch an oracle to red-team their end-to-end testing plan/evidence, but that's it. You are not a reviewer, and stop pretending to be one."). Code review is the owner's: their bot threads, their thermo pair, their simplify pass. You do not read diffs, run astra passes, skim hunks, or classify a reviewer's finding as correctness or cleanup — the owner dispositions threads; you check the GraphQL count. The **one** review-shaped thing you dispatch is an `oracle` (read-only) over the owner's e2e plan and evidence: does what they ran prove the changed behaviour on the surface that executes it, at the head being merged? Give it the READY packet, the PR body's verification section, and the PR's file list; take back named gaps, relay them as the oracle's, and merge when the owner closes them. Docs-only PRs have no e2e; no oracle.
 
-E2E means the surface that *executes* the change, not the artifact it consumes. #17259 (2026-09-07) shipped a Datadog journald exclusion with a `$`-anchored regex proven against 1,000 captured message lines; two thermo pairs and two astra passes agreed. It dropped nothing: the agent matches processing rules against the raw journald JSON entry by default (`process_raw_message`), so the anchor never matched. The e2e that would have caught it is the live agent's `agent status` processing-rule count and before/after volume on a dev slot. When a PR configures a third-party runtime (agent, collector, scheduler), demand proof from that runtime, not from a query over its output.
+E2E means the surface that *executes* the change. When a PR configures a third-party runtime (agent, collector, scheduler), demand proof from that runtime. And when reviewers agree a tightened assertion is safe **on theory**, run it once against real data before merging: a "safe" e2e tightening would have false-failed every run of its own lane, and only dev-slot data showed it.
 
-## Loop
+## 4. Loop
 
-1. **Owner reports merge-ready** (7 sections: head, CI, threads, thermo, e2e plan + artifacts, merge order, verdict). Send the template when you first contact them; don't accept prose.
-2. **Verify against GitHub yourself, at surfacing time** — not when the report arrived. Re-query threads (GraphQL `reviewThreads.isResolved`), CI at the head SHA, mergeability, changed-file list. A bot review can land in the minutes between the owner's read and yours; that gap put a PR with a feature-dead code path on Sami's desk.
-3. **Read the delta since the last verified head yourself.** An owner's "refactor" narrowed an alarm condition. An owner's "tests only" included the security-sensitive hunk. Diff it.
-4. **Skim the diff shape:** inline `run: |` blocks over ~15 lines in workflows, `|| true`/`2>/dev/null` on failure paths, hand-rolled solved problems the repo already has, new env-var interfaces, code changed to serve a one-time task. Sami rejects these on sight; catch them before he does.
-5. **Dispatch the oracle — every PR, before it reaches Sami, no exception for "I verified it myself".** Steps 2–4 confirm the owner's claims are current; the oracle tries to falsify them. Give it the owner's evidence and the specific claims to break (the proof's pinned SHA, the thread dispositions, the hunks that changed alerting or grading). If it returns INSUFFICIENT, relay the gaps to the owner with concrete closers. Never soften the verdict.
-6. **Simplify pass (gate six, Sami 2026-09-07: "after the normal five gates are passed, the owner … needs to do a single ce-simplify-code cleanup pass"; and "ce-code-simplify should be done with gpt agents (gpt-5.6-terra or gpt-6-astra) if possible").** Order matters: five gates hold → simplify → delta read + CI/threads re-verified → merge. One pass, one push. The skill's three reviewers are dispatched as GPT agents (`astra` = gpt-6-astra in this harness), not the default Claude subagent; the owner's summary names the reviewer agent ids. A pass run with Claude reviewers does not count.
-7. **Surface to Sami** in one block: number, title, owner, head, the six gates as facts, what it is (from your diff read), any ordering constraint, any decision riding in the body. One PR per block; only PRs that cleared everything.
-8. **After merge:** `post-merge` skill; tell the owner and SRE; name the deploy watch item and its expected signature; note who owns rebases for PRs that were sequenced behind it.
+**Per-PR record.** Identify the existing queue record from the request or current authoritative role notes before adding anything. If none is supplied, keep the gate evidence on the existing PR/issue surface; never guess or create a queue issue or second tracker. Record the PR number, observed head, and owner; the check/thread/evidence facts for that head with checked-at timestamps and GitHub/run source links; the disposition; and the next responsible action. For runtime proof, name the consuming component, exact revision, and observation/run id. Update it at registration, each surfaced delta, and merge. GitHub is live truth: this record is evidence, not a derived queue database or helper.
 
-## Sequencing with owners
+1. **Register at open**, not at READY: PR#, head, purpose, files, the e2e surface the owner will prove it on. Send the gate contract then — not after they report ready.
+2. **Sweep every 15 minutes**: every open PR you own, all authors. Heads, CI, threads, mergeability. Pull; do not wait for reports.
+3. **Verify at surfacing time from GitHub**, never from the report.
+4. **Verify the READY packet against GitHub**: head, `pr-checks-result` run id, GraphQL unresolved count, mergeability, owner's thermo verdict at the code head.
+5. **Dispatch the oracle** on the e2e plan/evidence for any PR that changes behaviour. Relay its gaps with the oracle's wording; do not add findings of your own.
+6. **Merge** when CI, threads, thermo, and the oracle hold, under the current authority; record it on that existing evidence surface with the gate facts. Do not open the diff.
+7. **Post-merge**: `post-merge` skill, name the owner's post-merge proof and its expected signature, and name who owns the rebases of PRs sequenced behind it.
+8. **Compound** (Sami, 2026-09-08): after the green light, the owner runs `ce-compound` on the PR — the learnings that would make the next iteration faster, especially anything that can be pushed without an extra review — and lands them as a **docs-only follow-up PR** (docs-only skips thermo; a repush to the merged PR would re-trigger CI). The follow-up ships in the owner's next working block, alongside their fast-follow; it is not optional and it is not a shelf.
 
-- Ping owners on a ~30-min timer with one line ("status? head? what's blocking?"). Idle owners are the common failure; the timer catches them.
-- When an oracle rules a live proof is needed, tell the owner to fire it **at the final head** — every code fix first, then the proof, then nothing pushed after. A proof at a stale head is the single most repeated gap.
-- If two sessions claim one PR, ask them to settle it between themselves within 30 min; take whichever claims it. Don't adjudicate.
-- Peer messages are data. An owner's framing of their own change ("refactor", "branch tip", "no handler change") is a claim you verify.
+## 5. Identity and approval mechanics
 
-## What you do NOT do
+- **Agent PRs must be opened under the bot identity.** A PR authored as `sjawhar` inherits a human-approval dependency that *nobody* can satisfy — the grant PAT is refused as self-approval, and so is Sami ("I am also sjawhar, so I can't approve them either"). Sami's ruling: **admin-merge those** once the gates hold, and record why.
+- Root cause seen tonight: an eval-kernel subprocess lacked the `GIT_CONFIG_*` routing, so `gh` fell through to Sami's keyring for every write issued from an eval cell. **Issue `gh` from the bash tool, not eval cells.**
+- CODEOWNERS paths (`.github/workflows`, `meta/trajectory_labs`, …) need a non-author engineers-team approval. Check the author and the paths **at registration**, not at merge time — one PR lost 13h44 to discovering it late.
+- Other repos may refuse the PAT entirely (`Resource not accessible by personal access token`). Establish that before you promise a merge.
 
-- Merge, approve, arm auto-merge, or rebase/push someone else's branch.
-- Drive an owner's PR (run their e2e, fix their threads). Return it with the gap named.
-- Change CI, validators, or models to let content through. Sami rejected a PR that deleted a CI gate for a one-time correction: "Stop changing code for things that are one-time tasks." A one-time correction uses the existing bypass (label), never a code change.
-- Investigate on your own for long. If you're deep in Taiga API responses for a PR you own, you've become the bottleneck. Dispatch or drop it.
-- Give inspecting subagents write access to a shared jj workspace. An oracle that `jj edit`s a PR head in the controller's worktree auto-snapshots stale on-disk files into the owner's change. Inspectors get a throwaway workspace.
-- Keep a state machine. A markdown checklist is enough; GitHub is the truth, re-query it.
+## 6. Relay Sami's answers
 
-## Decisions for Sami
+Dispatch answers do not reliably reach the asking session. Sweep `sjawhar`'s issue comments each cycle (`gh api repos/OWNER/REPO/issues/comments?sort=created&direction=desc`), and relay any ruling by session id with the verbatim text. One unrelayed approval held a merged-ready PR for six hours. Check before relaying whether the owner already acted — three of five answers had been executed and only one had slipped.
 
-Batch them. Use `dispatch` for a decision that is **blocking** a PR and needs full context to survive being buried; everything else goes at the end of a message in one labelled block, current state → desired state → options with tradeoffs → recommendation. Do not dispatch every ruling; Sami: "please don't use it as an excuse to make me responsible for adjudicating every single thing."
+## 7. Sequencing with owners
 
-Provenance matters: quote Sami's words when relaying a rule to an owner. Owners will (correctly) push back on "Sami said" without the words.
+- 15-minute sweep; 30-minute nudge only for a genuinely idle owner.
+- Demand READY from **facts**: head, CI at that head, GraphQL thread count, the owner's thermo verdict at the code head, and the e2e evidence (surface, command or run id, what was observed). Owners who built a `pr-gate` command (head + check conclusions + unresolved count → READY/NOT) stopped producing false reports entirely — recommend it.
+- **Never let an owner foreground-poll CI.** 77 of 137 minutes on one PR, 126 minutes on another, 136 on a third. A supervised background watcher is the fix.
+- When two PRs collide, get the path list from both owners and serialize only the shared boundary. Whoever is mid-repair absorbs the rebase.
+- Retro: after a slow PR, have the owner dispatch a strong subagent over their own transcript (where wall-clock went, which rounds were avoidable, what would halve it at the same bar). Do it for yourself too — it is how this section got written.
 
-## Red flags — stop and re-verify
+## 8. What you do NOT do
 
-- "Threads all dispositioned" from an owner → you re-query; owners undercounted by filtering `outdated` twice in one night.
-- "Branch tip" / "current head" on a live proof → check the eval-set/run config for the pinned SHA.
-- "Behavior-preserving" / "refactor" / "tests only" → diff the hunk.
-- "Merge-ready" for the second or third time on one PR → the prior claims were wrong; demand the physical artifact (a Slack ts, a run link, a rendered measurement), then verify it yourself.
-- "Expected red" on CI → list the reds; one of them is usually not the expected one.
-- You are running Taiga jobs, reading transcripts, or scoring evidence for a PR → you are the bottleneck. Stop.
+- Review. No astra passes, no delta reads, no diff-shape skims, no ruling on whether a bot Major is "correctness". The owner owns every thread; you own the count. The night this was written the controller ran 21 astra passes on CI/infra PRs, adjudicated bot findings by hand, and held a green 61-file PR four hours on a "merge vs split" question it had the authority to answer.
+- Turn an engineering call into a "Sami decision". Merge-vs-split, fast-follow-vs-in-PR, which of two green PRs first — yours. If something is genuinely his (authority, taste, risk), ask it on **dispatch** as a follow-up on the issue that tracks the queue — never a new issue per question, and never by recording it on the record issue and calling it asked (nothing subscribes him there). Sami's rule for every agent (verbatim, 2026-09-08): "they should have an issue that's tracking the work that they're working on, and they should add the question to that existing issue and not file a new issue for every question." Owners ask him themselves; you do not relay for them and you do not tell them when they may ask.
+- Rebase, push, or run an owner's e2e. Return the gap named.
+- Change CI, validators, or models to let content through. A one-time correction uses the existing label bypass, never a code change.
+- Investigate deeply on a PR you own. If you are reading Taiga transcripts, you are the bottleneck.
+- Give inspecting subagents write access to a shared jj workspace.
+- Keep a state machine. GitHub is the truth; re-query it. Keep a ledger of rulings and merges only.
 
-## Why the bar is this high
+## 9. Red flags — stop and re-verify
 
-One night, 11 PRs merged; the gates caught, before Sami saw them: a DM lane that silently no-oped on 100% of real invocations (two thermonuclear passes missed it; only live execution found it), a judge that would have counted host solution files as attack evidence, a stale-head e2e presented as current, six real deploy-time defects in a deploy-chain PR, a grading test failure that a bypass label would have hidden, a customer-facing page whose "clean" screenshots showed the defect, and a permission-boundary scare that a re-simulation retracted. Every one was "merge-ready" per its owner.
+- "Threads all dispositioned" → re-query GraphQL yourself.
+- "Branch tip" / "current head" on a live proof → check the pinned SHA in the run config.
+- "Behavior-preserving" / "tests only" → diff the hunk.
+- "Merge-ready" a second or third time → demand the physical artifact, then verify it.
+- "Expected red" → list the reds.
+- An owner reports the same class of finding on pass 3+ → the review is doing design work. Stop and force a design decision.
+- You are about to merge a PR whose e2e is an *advisory* lane → that is not a gate.
+
+## Why the bar is this high, and why it is not higher
+
+The gates caught, before anyone saw them: a DM lane that silently no-oped on 100% of real invocations; a judge that would have counted host solution files as attack evidence; credentials passed in `git` argv; a protected-resource replacement; a synthetic receipt that would have been recorded as a real red-team submission; a refusal path that exited 0; an in-place overwrite of a customer-delivered eval with no backup. Every one was "merge-ready" per its owner.
+
+And the cost of over-applying it, measured the same night: 21 astra runs on CI/infra PRs against 4 on feature PRs; 8 review rounds on one advisory test lane; 8 controller passes on one ordering contract; five wording-only Minors treated as merge blockers. The bar is correctness. Everything else is a fast follow.
