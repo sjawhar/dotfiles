@@ -25,6 +25,9 @@ ensure_vendor() {
         mkdir -p "$(dirname "$dir")"
         git clone --depth 1 "$url" "$dir"
     fi
+    # origin follows the URL argument, so a vendor re-pointed at a fork fetches
+    # the fork's commits on machines that cloned the original.
+    git -C "$dir" remote set-url origin "$url"
     # Pinned vendors converge every machine on one commit; unpinned ones stay
     # at whatever HEAD they were cloned at (never auto-updated).
     if [ -n "$ref" ] && [ "$(git -C "$dir" rev-parse HEAD)" != "$ref" ]; then

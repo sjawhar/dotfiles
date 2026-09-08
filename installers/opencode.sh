@@ -16,10 +16,17 @@ if [ -d "${DOTFILES_DIR}/vendor/streamlinear/.git" ]; then
         git -C "${DOTFILES_DIR}/vendor/streamlinear" remote add upstream https://github.com/obra/streamlinear.git
 fi
 ensure_vendor https://github.com/anthropics/skills.git anthropic-skills
-# Pinned to the compound-engineering-v3.24.0 release tag. Bump deliberately:
-# check that every name in omp/config.yml skills.ignoredSkills (and the skip
-# list below) still exists upstream, and diff the skill set for new arrivals.
-ensure_vendor https://github.com/EveryInc/compound-engineering-plugin.git compound-engineering 3ad9b51bceecf0158e590c882034d0398dbb9c5c
+# Our fork of compound-engineering: `sami` branch = the compound-engineering-v*
+# release tag plus fork-local patches (ce-simplify-code reviews on top-tier
+# GPT agents, not the Sonnet class). Pinned to a commit on that branch. Bump:
+# rebase `sami` onto the new tag in the vendor checkout, push, re-pin here;
+# check every omp/config.yml skills.ignoredSkills name (and the skip list
+# below) still exists upstream, and diff the skill set for new arrivals.
+ensure_vendor https://github.com/sjawhar/compound-engineering-plugin.git compound-engineering 24653aacb5cc881129725106769b9e1385585ec5
+if [ -d "${DOTFILES_DIR}/vendor/compound-engineering/.git" ]; then
+    git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote get-url upstream &>/dev/null || \
+        git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote add upstream https://github.com/EveryInc/compound-engineering-plugin.git
+fi
 ensure_vendor https://github.com/github/gh-stack.git gh-stack
 ensure_vendor https://github.com/DataDog/pup.git pup
 # pup ships ~11 dd-* skills (plus 50 agents, pruned from omp/agents); only
