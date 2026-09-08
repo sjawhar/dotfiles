@@ -70,9 +70,7 @@ tui:
   rewindScrollback: preserve
 skills:
   ignoredSkills:
-    - ce-babysit-pr
     - ce-commit-push-pr
-    - ce-debug
     - ce-work
     - ce-worktree
     - lfg

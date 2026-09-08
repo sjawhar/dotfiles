@@ -88,7 +88,7 @@ for dir in "${DOTFILES_DIR}/vendor/compound-engineering/skills"/*/; do
     dir="${dir%/}"
     name=$(basename "$dir")
     case "$name" in
-        ce-babysit-pr|ce-commit-push-pr|ce-debug|ce-work|ce-worktree|lfg)
+        ce-commit-push-pr|ce-work|ce-worktree|lfg)
             [ -L "${CE_DIR}/${name}" ] && rm "${CE_DIR}/${name}" ;;
         *)
             ensure_link "$dir" "${CE_DIR}/${name}" ;;
