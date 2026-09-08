@@ -65,6 +65,8 @@ export function createListener(
       command: ["/usr/local/bin/envoy-listener"],
       restart: "unless-stopped",
       networkMode: "host",
+      // Bounded container logs on every host (oryx had this set by hand).
+      logOpts: { "max-file": "5", "max-size": "20m" },
       envs: [
         "PORT=9020",
         `ENVOY_MACHINE_ID=${machine.machineId}`,

@@ -37,7 +37,17 @@ provision, no per-listener identity.
 - Docker on each target machine, with the SSH user in the `docker` group (the
   provider runs `docker` as that user, not via sudo)
 - Tailscale on each target machine, joined to the same tailnet as `envoy-nats`
-- SSH access from the deploy machine to remote hosts
+- SSH access from the deploy machine to remote hosts. Probe each `sshHost` with
+  a plain `ssh <host> true` before `pulumi up`: when Tailscale SSH is due for its
+  periodic check it answers with a `login.tailscale.com/a/…` URL instead of a
+  shell, and the Docker provider only reports that as a 20-minute
+  `context deadline exceeded` ping failure. The URL is bound to the pending
+  connection: SSH's default keepalives drop it after ~90 s, and Tailscale itself
+  abandons the check after ~30 min (`failed to fetch next SSH action`), either
+  of which kills the URL. Hold the probe open with
+  `ssh -o ServerAliveInterval=0 -o TCPKeepAlive=no <host> true`, visit the URL
+  within that half hour (re-run the probe for a fresh one otherwise), then run
+  the apply.
 
 ## Quick Start
 
