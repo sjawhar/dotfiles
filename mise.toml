@@ -43,8 +43,8 @@ AGENT_EVAL_VERSION = "0.1.1"
 
 [tools]
 "github:sjawhar/jj" = "0.45.1-sami.20260906-180417"  # upstream main + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10127 + #10129 + #10130
-"github:sjawhar/knives" = "2.0.1"
-"github:sjawhar/oh-my-pi" = "18.1.7-sami.20260903-193013"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
+"github:sjawhar/knives" = "2.0.5"
+"github:sjawhar/oh-my-pi" = "18.1.15-sami.20260908-220934"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
@@ -79,10 +79,11 @@ zoxide = "0.10.0"
 # Bump this and "github:sjawhar/oh-my-pi" together. Upstream does not publish this
 # package for every tag: if the exact version is missing from npm, pin the nearest
 # published one after confirming packages/mnemopi is unchanged between the two tags.
-"npm:@oh-my-pi/pi-mnemopi" = "18.1.6"
+"npm:@oh-my-pi/pi-mnemopi" = "18.1.15"
 actionlint = "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
 cmake = "4.4.2"
+ninja = "1.13.2"  # oh-my-pi's .cargo/config.toml sets CMAKE_GENERATOR=Ninja (audiopus_sys builds Opus via CMake); without a pin the mise shim has no version and `bun check` fails in check:rs
 depot = "2.102.7"
 go = "1.27.0"
 helm = "latest"
