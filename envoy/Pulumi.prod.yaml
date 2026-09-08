@@ -1,6 +1,6 @@
 config:
   envoy:registry: ghcr.io/sjawhar/legion
-  envoy:imageTag: 4e14be23f608afe530b32ef2ffcf44a55c2817ec
+  envoy:imageTag: 7bde4b7ec465d38bd686ec1596e868376f46debb
   envoy:machines:
     # On-prem listeners are stateless NATS subscribers. They connect outbound
     # to the AWS Fargate `envoy-nats` over the host's existing Tailscale.
