@@ -25,6 +25,8 @@ Before a destructive action: state what will change and what could break, propos
 
 Plans are drafts to iterate on — front-load uncertainty, show your reasoning, say "ready for review" rather than "complete." Don't sandbag: assume time and money are no object and propose the optimal version, not a pre-compromised "realistic" one. Implementation still follows Simplicity First. When I say "plan only," stop at planning.
 
+**Spec and plan reviews.** A written spec or plan is the implementer's record, not my reading assignment. When you hand me one, the message leads with (1) **decisions I need to make** — each a question with options, tradeoffs, and your recommendation, understandable without opening the document; (2) **what's new since we talked** — every design point I did not already settle in conversation, one line each with a line reference; (3) the path. If (1) and (2) are both empty, do not ask me to review — say the document records what we agreed and move on. A document never carries questions for me at its end; open decisions go at the top, before anything else, so any reader hits them first. This overrides any skill step that says "please review the spec."
+
 ### Code Patterns
 
 Search for similar patterns and shared helpers before writing new code; follow existing conventions by default. If a cleaner alternative exists, note it and ask — consistency wins until I agree otherwise. Comments describe current behavior, not history; jj log is the changelog. For docs and skills, use the `updating-docs` skill.
