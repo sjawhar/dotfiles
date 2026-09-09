@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""tmux-resurrect post-save-layout hook: save omp panes as `omp --resume <id>`.
+
+resurrect records each pane's command as the shell's child argv, which for omp
+is the resolved mise binary path plus whatever flags it was started with —
+usually nothing, since a session started fresh has no id on its command line.
+Restoring that would start a new session, not the one that was running.
+
+The omp TUI holds its current session file open, so the running session is
+read from the process's fd table: ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl.
+That is true whichever way the session was entered (fresh, --resume, -c, or the
+in-app picker). Each omp pane line is rewritten to `omp --resume <id>`, which
+`@resurrect-processes '"~omp --resume"'` then restores.
+
+Invoked by resurrect with the save file path; panes whose session cannot be
+determined (omp still starting, process gone) are left as written and come back
+as a shell in the same directory.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SESSION_FILE = re.compile(
+    r"/\.omp/agent/sessions/[^/]+/"
+    r"\d{4}-\d{2}-\d{2}T[0-9-]+Z_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
+)
+RESUME_ARG = re.compile(r"(?:^|\s)(?:--resume|-r)[=\s]+([0-9a-f-]{36})(?:\s|$)")
+MAX_DEPTH = 4
+MAX_PROCESSES = 32
+FIELD_SEP = "\t"
+
+
+def pane_pids() -> dict[tuple[str, str, str], int]:
+    out = subprocess.run(
+        ["tmux", "list-panes", "-a", "-F",
+         "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    pids: dict[tuple[str, str, str], int] = {}
+    for line in out.splitlines():
+        session, window, pane, pid = line.split(FIELD_SEP)
+        pids[(session, window, pane)] = int(pid)
+    return pids
+
+
+def children(pid: int) -> list[int]:
+    kids: list[int] = []
+    try:
+        for tid in os.listdir(f"/proc/{pid}/task"):
+            try:
+                kids += [int(c) for c in Path(f"/proc/{pid}/task/{tid}/children").read_text().split()]
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return kids
+
+
+def comm(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return ""
+
+
+def find_omp(pane_pid: int) -> int | None:
+    """Breadth-first search below the pane's shell for the omp process."""
+    frontier = [pane_pid]
+    seen = 0
+    for _ in range(MAX_DEPTH):
+        next_frontier: list[int] = []
+        for pid in frontier:
+            for kid in children(pid):
+                seen += 1
+                if seen > MAX_PROCESSES:
+                    return None
+                if comm(kid) == "omp":
+                    return kid
+                next_frontier.append(kid)
+        frontier = next_frontier
+    return None
+
+
+def open_session(pid: int) -> str | None:
+    """Session id of the newest ~/.omp session file the process holds open."""
+    best: tuple[float, str] | None = None
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return None
+    for fd in fds:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        m = SESSION_FILE.search(target)
+        if not m:
+            continue
+        try:
+            mtime = os.stat(target).st_mtime
+        except OSError:
+            mtime = 0.0
+        if best is None or mtime > best[0]:
+            best = (mtime, m.group(1))
+    return best[1] if best else None
+
+
+def session_for(pane_pid: int, full_command: str) -> str | None:
+    omp = find_omp(pane_pid)
+    if omp is not None:
+        sid = open_session(omp)
+        if sid:
+            return sid
+    m = RESUME_ARG.search(full_command)
+    return m.group(1) if m else None
+
+
+def rewrite(save_file: Path) -> tuple[int, int]:
+    pids = pane_pids()
+    lines = save_file.read_text().split("\n")
+    rewritten = 0
+    omp_panes = 0
+    for i, line in enumerate(lines):
+        # pane \t session \t window \t window_active \t flags \t pane_index
+        #      \t title \t dir \t pane_active \t command \t :full_command
+        fields = line.split(FIELD_SEP, 10)
+        if len(fields) != 11 or fields[0] != "pane" or fields[9] != "omp":
+            continue
+        omp_panes += 1
+        pane_pid = pids.get((fields[1], fields[2], fields[5]))
+        if pane_pid is None:
+            continue
+        sid = session_for(pane_pid, fields[10][1:])
+        if sid is None:
+            continue
+        fields[10] = f":omp --resume {sid}"
+        lines[i] = FIELD_SEP.join(fields)
+        rewritten += 1
+    tmp = save_file.with_suffix(save_file.suffix + ".tmp")
+    tmp.write_text("\n".join(lines))
+    os.replace(tmp, save_file)
+    return omp_panes, rewritten
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print(f"usage: {argv[0]} <resurrect-save-file>", file=sys.stderr)
+        return 2
+    save_file = Path(argv[1])
+    omp_panes, rewritten = rewrite(save_file)
+    if omp_panes != rewritten:
+        print(f"tmux-resurrect-omp: {rewritten}/{omp_panes} omp panes resolved to a session",
+              file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

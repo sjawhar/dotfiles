@@ -25,7 +25,7 @@ installers/          # Per-tool install scripts (shell.sh, mise.sh, docker.sh, j
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 forward/             # Browser-forwarding policy plus devbox serve and laptop daemon user units
 bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
-shims/               # PATH-priority wrappers (gh, opencode, pyright, basedpyright)
+shims/               # PATH-priority wrappers (gh, opencode, pyright, basedpyright, tmux)
 scripts/             # Utility scripts (git-identity, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
 devpod/              # Remote dev machine provisioning: container image + cloud-init for a bare VM (dormant)
