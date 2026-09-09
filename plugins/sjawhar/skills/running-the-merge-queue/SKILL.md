@@ -31,6 +31,8 @@ Follow-on (Sami, 2026-09-09 ~01:50Z, verbatim): "For agents that would feel bloc
 
 **Review-model billing (Sami, 2026-09-09 16:35Z, verbatim):** "stop freaking out about the billing of the OpenAI models - they already naturally fall back to the API billing, and sometimes API billing bottoms out and then has to top up. Just chill." A thermo pair that dies on a credits/usage error is re-run later; it is not an incident, not a dispatch, and does not trigger a fleet-wide substitution broadcast. The controller broadcast three contradictory pair rules in one afternoon (substitute / lifted / substitute again) before he said this.
 
+**ASR is not a verification signal for a task change (2026-09-09, grading session's self-report):** when a task PR claims a fix, the evidence is the TRANSCRIPT of the behaviour that was touched, not the run's ASR. A fix can be correct at 0/30 (the injection loads, the agent reads it and refuses it - weak tradecraft, a red-team pickup) and a task can be broken at 30/30. The owner fixing #17554 read 0/30, invented a "task-attack misalignment, the agent never sees the vector" root cause, and nearly handed a false ship-vs-redesign decision; the transcript refuted it in one read. Ask for the transcript claim on every task PR; read ASR only to catch the obvious break (a grader that crashes, an env that 404s). Encoded in the repo by #17555.
+
 Three failure modes, all observed:
 
 - **Re-imposing a lifted hold.** Sami released a hold at 17:56; the controller acknowledged it at 17:57 and then told the owner at 20:26 that the hold stood, and put it back on his list at 23:41. Cost: 7h26 and another integration pass. **A hold is lifted the moment he says so. Never restore one from memory.**
