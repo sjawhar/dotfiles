@@ -13,8 +13,11 @@
  *
  * `jj util snapshot` is self-debouncing: an unchanged working copy records
  * no new operation, so per-tool-call frequency costs nothing when idle.
- * Snapshots run fire-and-forget with an in-flight guard per repo root —
- * never adds latency to the tool loop, never breaks a tool call on failure.
+ * Snapshots run fire-and-forget with an in-flight guard per repo root — never
+ * adds latency to the tool loop, never breaks a tool call on failure. A
+ * failure is still logged: a snapshot that stops recording is exactly the
+ * thing this net exists to prevent, and silence there looks identical to
+ * working.
  */
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
@@ -54,7 +57,18 @@ export default function jjSnapshot(pi: HookAPI): void {
 		// Fire-and-forget: a missed snapshot is caught by the next tool call.
 		void pi
 			.exec("jj", ["util", "snapshot"], { cwd: root, timeout: 30_000 })
-			.catch(() => {})
+			.then((res) => {
+				if (res.code !== 0) {
+					pi.logger.warn("jj-snapshot: 'jj util snapshot' failed; this working copy is not being recorded", {
+						root,
+						code: res.code,
+						stderr: res.stderr.trim(),
+					});
+				}
+			})
+			.catch((err: unknown) => {
+				pi.logger.warn("jj-snapshot: could not run 'jj util snapshot'", { root, err: String(err) });
+			})
 			.finally(() => {
 				inflight.delete(root);
 			});
