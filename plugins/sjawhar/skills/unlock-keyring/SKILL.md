@@ -33,3 +33,34 @@ and unlinks the control directory on exit — after a few, every client fails wi
 `couldn't access control socket: No such file or directory`. Recover by killing each stray
 `gnome-keyring-daemon --unlock` by PID, `systemctl --user restart
 gnome-keyring-daemon.socket`, then running the procedure above.
+
+## Why it relocks, roughly daily
+
+A relock is the unlocked daemon **crashing**. Established 2026-09-09 from a captured core:
+the `--replace --daemonize --unlock` daemon dies with SIGABRT, and D-Bus activation brings
+back `gnome-keyring-daemon --start --foreground --components=secrets` (the stock
+`gnome-keyring-daemon.service`), which was never given the password, so the `login`
+collection reads `Locked = true` and every client fails with `KeyringLocked`.
+
+The abort is in the Ubuntu `gnome-keyring` package (46.1-2ubuntu0.2), not in any client:
+
+```
+GLib-GIO:ERROR:../../../gio/gdbusconnection.c:4749:invoke_get_property_in_idle_cb:
+  assertion failed: (error != NULL)
+```
+
+`invoke_get_property_in_idle_cb` runs only while serving a client's D-Bus
+`Properties.Get`/`GetAll`. GLib requires a registered object's `get_property` vfunc to set a
+`GError` when it returns NULL; gnome-keyring's secret-service getter returns NULL without
+one for at least one path/property, and GLib aborts the process.
+
+So **never put the `busctl get-property … Locked` check in a watch loop** — a property read
+is the exact call that aborts, and a poll every few seconds multiplies the chance of hitting
+it. One check after an unlock is what the procedure above is for. A 15-second poll ran from
+2026-09-03 to 2026-09-09 and saw six relocks in six days, each within ~20 s of a daemon exit.
+
+Note that apport keeps one report per binary, so the first crash suppresses reports for every
+later one. If `/var/crash/_usr_bin_gnome-keyring-daemon.1000.crash` exists, move it aside
+before expecting a fresh report. Read one with
+`apport-unpack <file> <dir>` then `gdb -q -batch -ex 'p (char *) __glib_assert_msg'
+-ex 'bt 12' /usr/bin/gnome-keyring-daemon <dir>/CoreDump`.
