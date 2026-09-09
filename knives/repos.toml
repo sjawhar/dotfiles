@@ -83,6 +83,11 @@ origin = "https://github.com/sjawhar/toon-rust"
 [repos.ts-mono]
 upstream = "https://github.com/meridianlabs-ai/ts-mono"
 origin = "https://github.com/trajectory-labs-pbc/ts-mono"
+consumers = ["trajectory-labs-pbc/agent-c"]
 
 [trust]
 owners = ["sjawhar", "trajectory-labs-pbc"]
+
+[repos.proof-sdk]
+upstream = "https://github.com/everyinc/proof-sdk.git"
+origin = "https://github.com/sjawhar/proof-sdk.git"
