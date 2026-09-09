@@ -29,6 +29,8 @@ Follow-on (Sami, 2026-09-09 ~01:50Z, verbatim): "For agents that would feel bloc
 
 **Packet vs PR API (2026-09-09):** before every merge, compare the READY packet's file count and file list against `gh api repos/O/R/pulls/N/files` at the head SHA. A packet said "three files"; the PR had four - a rebase artifact reverting a just-merged sibling. The squash happened to compute against current main and the revert did not land, but the owner's retraction arrived 40 s after the merge. The check costs one API call; an owner's file list is a claim, the PR API is the fact.
 
+**Review-model billing (Sami, 2026-09-09 16:35Z, verbatim):** "stop freaking out about the billing of the OpenAI models - they already naturally fall back to the API billing, and sometimes API billing bottoms out and then has to top up. Just chill." A thermo pair that dies on a credits/usage error is re-run later; it is not an incident, not a dispatch, and does not trigger a fleet-wide substitution broadcast. The controller broadcast three contradictory pair rules in one afternoon (substitute / lifted / substitute again) before he said this.
+
 Three failure modes, all observed:
 
 - **Re-imposing a lifted hold.** Sami released a hold at 17:56; the controller acknowledged it at 17:57 and then told the owner at 20:26 that the hold stood, and put it back on his list at 23:41. Cost: 7h26 and another integration pass. **A hold is lifted the moment he says so. Never restore one from memory.**
