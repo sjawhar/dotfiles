@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# tmux-guard-shim: refuse `kill-server` aimed at the default tmux server.
+#
+# The default server is the interactive workspace: every omp session runs in
+# one of its panes, and killing it SIGHUPs all of them at once (2026-09-09: a
+# scratch e2e script's cleanup did exactly that, 26 sessions). Agents are told
+# never to run it and still do, so the guard lives where the command is.
+#
+# Allowed unchanged: any command other than kill-server; kill-server on a
+# server named explicitly with -L/-S, or run from inside a non-default server
+# ($TMUX names the socket); everything when TMUX_ALLOW_KILL_SERVER=1 is set.
+set -euo pipefail
+
+refuse() {
+    cat >&2 <<'EOF'
+tmux shim: refusing `kill-server` on the default tmux server.
+  That server is the interactive workspace; killing it SIGHUPs every session in it.
+  Scope the kill to what you created: `tmux -L <name> kill-server`,
+  `tmux kill-session -t <name>`, or `tmux kill-window -t <id>`.
+  If you really mean it: TMUX_ALLOW_KILL_SERVER=1 tmux kill-server
+EOF
+    exit 1
+}
+
+# Server options precede the first command word. -L/-S name the socket.
+explicit_socket=0
+i=0
+while (( i < $# )); do
+    arg="${@:i+1:1}"
+    case "$arg" in
+        -L|-S) explicit_socket=1; i=$((i + 2)) ;;
+        -L?*|-S?*) explicit_socket=1; i=$((i + 1)) ;;
+        -c|-f|-T) i=$((i + 2)) ;;
+        --) i=$((i + 1)); break ;;
+        -*) i=$((i + 1)) ;;
+        *) break ;;
+    esac
+done
+
+# tmux accepts unambiguous command prefixes: kill-ser, kill-serv, ... Scan every
+# remaining word so `\;`-chained invocations are covered too.
+kills_server=0
+for arg in "${@:i+1}"; do
+    case "$arg" in
+        kill-ser*) kills_server=1 ;;
+    esac
+done
+
+if (( kills_server )) && [[ -z "${TMUX_ALLOW_KILL_SERVER:-}" ]] && (( ! explicit_socket )); then
+    socket="${TMUX:-}"; socket="${socket%%,*}"
+    [[ -z "$socket" || "${socket##*/}" == default ]] && refuse
+fi
+
+# Real tmux: first executable `tmux` on PATH that is not this shim. Content
+# decides, not the directory string (PATH may spell this directory differently
+# from DOTFILES_DIR); an ELF tmux yields a short marker-free header.
+IFS=':' read -ra dirs <<< "$PATH"
+for dir in "${dirs[@]}"; do
+    candidate="$dir/tmux"
+    [[ -n "$dir" && -f "$candidate" && -x "$candidate" ]] || continue
+    header=""
+    IFS= read -r -n 512 -d '' header < "$candidate" || true
+    [[ "$header" == *tmux-guard-shim* ]] && continue
+    exec "$candidate" "$@"
+done
+echo "tmux shim: no real tmux found on PATH" >&2
+exit 127
