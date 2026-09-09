@@ -9,6 +9,10 @@ modelRoles:
   advisor: anthropic/claude-sonnet-5:medium
 retry:
   modelFallback: true
+  # Coding-plan quota preflight: switch to the chain below at <=10% remaining
+  # (subagents automatically; an interactive session gets one confirm and
+  # auto-switches once depleted) instead of waiting for the 429.
+  usageAwareFallback: true
   fallbackChains:
     anthropic/claude-fable-5:
       - anthropic/claude-opus-5
@@ -19,6 +23,11 @@ retry:
       - anthropic/claude-opus-4-8
     anthropic/claude-opus-5:
       - anthropic/claude-opus-4-8
+    # Subscription quota exhausted -> same model id on API billing. Wildcard
+    # entry keeps the failing id and swaps provider; thinking level carries
+    # over.
+    openai-codex/*:
+      - openai/*
     default:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
