@@ -23,11 +23,12 @@ retry:
       - anthropic/claude-opus-4-8
     anthropic/claude-opus-5:
       - anthropic/claude-opus-4-8
-    # Subscription quota exhausted -> same model id on API billing. Wildcard
-    # entry keeps the failing id and swaps provider; thinking level carries
-    # over.
+    # Subscription quota exhausted -> same model id on API billing, then the
+    # same id via OpenCode Zen. Wildcard entries keep the failing id and swap
+    # provider; thinking level carries over.
     openai-codex/*:
       - openai/*
+      - opencode-zen/*
     default:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8

@@ -23,12 +23,24 @@ export default async (ctx) => {
       const cwd = await jjRoot();
       if (!cwd || inflight) return;
       inflight = true;
-      // Fire-and-forget: a missed snapshot is caught by the next tool call.
+      // Fire-and-forget: a missed snapshot is caught by the next tool call. A
+      // failure is still reported — silence from a safety net looks identical
+      // to the net working.
       void ctx.$`jj util snapshot`
         .cwd(cwd)
         .quiet()
         .nothrow()
-        .catch(() => {})
+        .then((res) => {
+          if (res.exitCode !== 0) {
+            console.error(
+              `jj-snapshot: 'jj util snapshot' exited ${res.exitCode} in ${cwd}; ` +
+                `this working copy is not being recorded. ${res.stderr.toString().trim()}`,
+            );
+          }
+        })
+        .catch((err) => {
+          console.error(`jj-snapshot: could not run 'jj util snapshot' in ${cwd}: ${err}`);
+        })
         .finally(() => {
           inflight = false;
         });
