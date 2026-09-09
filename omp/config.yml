@@ -68,6 +68,11 @@ theme:
 symbolPreset: unicode
 hideThinkingBlock: false
 doubleEscapeAction: tree
+# Off (the default since omp 18.0.9) caps every model with a premium long-context
+# price tier at its standard-pricing threshold: GPT-5.6/GPT-6-Astra drop from
+# 1.05M to 272K. On restores the full window; openai/* bills 2x input above 272K,
+# openai-codex/* is subscription-priced and exempt.
+extendedContext: true
 dev:
   autoqaConsent: granted
 setupVersion: 2
