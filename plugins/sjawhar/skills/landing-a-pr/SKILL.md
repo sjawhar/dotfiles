@@ -59,4 +59,4 @@ Any push after the gate invalidates the gate. When a leaf returns `fixed-and-pus
 - A red check retried without confirming the run's head SHA.
 - Watching CI without the snapshot — `gh pr checks --watch`, a `sleep` loop, or reading `gh pr view` by eye.
 
-> **jj workspace note:** in a non-default workspace there may be no `.git` directory. If `gh` fails, point it at the default workspace: `GIT_DIR=/path/to/default/.git gh ...`
+> **jj workspace note:** a non-default jj workspace has no `.git`, so `gh` cannot infer the repo. Pass it explicitly: `gh -R <owner>/<repo> ...`. Never set `GIT_DIR` or `GIT_WORK_TREE` for this — an exported `GIT_DIR` redirects every git subprocess in that shell (test fixtures' `git init && git commit` included) into the shared repo.

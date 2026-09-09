@@ -10,8 +10,10 @@ Sami leads the review by narrating as he reads. Track his observations, find the
 exact diff locations, challenge weak suggestions after he finishes, and compose a
 friendly review together. Do not replace his judgment with unsolicited analysis.
 
-> **jj workspace note:** You may be in a non-default jj workspace with no `.git`
-> directory. If `gh` fails, set `GIT_DIR` to the default workspace's `.git` directory.
+> **jj workspace note:** a non-default jj workspace has no `.git`, so `gh` cannot infer
+> the repo. Pass it explicitly: `gh -R <owner>/<repo> ...`. Never set `GIT_DIR` or
+> `GIT_WORK_TREE` — an exported `GIT_DIR` redirects every git subprocess in that shell
+> (test fixtures' `git init && git commit` included) into the shared repo.
 
 ## Set up the review
 

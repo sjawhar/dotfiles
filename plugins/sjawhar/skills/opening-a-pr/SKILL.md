@@ -81,4 +81,4 @@ Every line in the left column is a real thing an agent said in a real session on
 
 Catch yourself writing any excuse above → go run step 4.
 
-> **jj workspace note:** in a non-default workspace there may be no `.git` directory. If `gh` fails, point it at the default workspace: `GIT_DIR=/path/to/default/.git gh ...`
+> **jj workspace note:** a non-default jj workspace has no `.git`, so `gh` cannot infer the repo. Pass it explicitly: `gh -R <owner>/<repo> ...`. Never set `GIT_DIR` or `GIT_WORK_TREE` for this — an exported `GIT_DIR` redirects every git subprocess in that shell (test fixtures' `git init && git commit` included) into the shared repo.
