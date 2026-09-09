@@ -42,9 +42,9 @@ auto_prune = false
 AGENT_EVAL_VERSION = "0.1.1"
 
 [tools]
-"github:sjawhar/jj" = "0.45.1-sami.20260906-180417"  # upstream main + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10127 + #10129 + #10130
-"github:sjawhar/knives" = "2.0.7"
-"github:sjawhar/oh-my-pi" = "18.1.15-sami.20260908-220934"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
+"github:sjawhar/jj" = "0.45.1-sami.20260910-043938"  # upstream main + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10127 + #10129 + #10130 + reset_head writes HEAD after the index reset + forget unlinks only its own worktree + index write waits for index.lock (#7530) + import keeps @ when the recorded HEAD was lost + merge_view treats a lost git_heads entry as no information
+"github:sjawhar/knives" = "2.0.11"
+"github:sjawhar/oh-my-pi" = "18.1.15-sami.20260910-044004"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
