@@ -7,6 +7,29 @@ description: "Use when creating narrated product demo videos from terminal recor
 
 Produce narrated product demo videos from asciinema terminal recordings. Pipeline: `.cast` → MP4 → ElevenLabs voiceover → synced narrated video.
 
+## Production Standard (survived two-reviewer rounds, 2026-09-12)
+
+Four videos went through independent review rounds; every rule below traces to a finding that cost a re-cut. The full standard and review protocol used that night are archived beside the accepted videos (`~/newsletter-videos/process/`).
+
+1. **Never stretch video to fit narration.** No `setpts`, no frame cloning, no tail holds. A 4x stretch reads as ~5-second recordings frozen while the voice keeps talking; reviewers catch it with frame hashing every time. Cut the video hard to its real action, then write narration AFTER cutting, to each clip's measured length, placed at the moment it describes. Pad audio with silence, never video with frames. A build script should fail if a narration part overruns its clip.
+2. **Record in small independent sections** — one `.cast` and one narration MP3 per section, assembled by an edit-decision-list script (`build.py` pattern: raw-second windows + narration placement offsets, full rebuild in seconds). A weak section is re-recorded alone; review feedback costs one section, not the video.
+3. **Open on the payoff within ~5 seconds.** Leading with slow letter-by-letter setup typing buried one video's payoff at 10.7s and forced a re-cut. Show the result early; the recipe can follow (result-then-recipe reviewed as clearer than chronology).
+4. **Verify the capture rate, not the file's nominal fps.** Screen capture under load silently drops frames and produces a time-compressed file (observed: 199s of typing in a file that claims 20fps, everything appearing instantly). Compare file duration against wall clock per section; a ratio materially off 1:1 is a re-shoot. asciinema is timing-accurate by construction and exempt.
+5. **An erroring surface on camera is an automatic RESHOOT** of that section. One cut shipped with a legible `Error: ... already exists` on screen for 3.3s — every mechanical check (frame uniqueness, silence, legibility) passed; only a reviewer transcribing frames caught it. Fix the root cause (stale state from an earlier take), re-record against a clean destination.
+6. **Causality on screen: effect never precedes cause.** When splicing beats between cuts, a clip that reads a path must come after the clip that creates it. A reviewer flagged a spliced diff beat reading a directory whose compose ran five seconds later.
+7. **Narration claims only what the screen shows.** "At run time it composes…" with no run on camera is an overclaim: cut the words, not soften them. Silence gaps ≥2s are fine over live typing, never over a frozen frame nobody is reading.
+8. **Sequence local Docker sandbox boots** one at a time when multiple demo sessions share a box; concurrent boots thrashed a 247GB machine to load 539.
+
+## Review Protocol
+
+Before a video ships, run two reviewers in parallel on the finished MP4 (they answer different questions; both returned unique blocking findings):
+- **Strategic (oracle):** can the target audience do the thing afterwards; what can be cut with no loss; is anything claimed that is not shown; is this the right surface; what goes if it had to be 30% shorter.
+- **Vision (frame-reading):** sample every 2-3s plus densely at section boundaries; TRANSCRIBE what the screen says (hunt error text explicitly — frame statistics cannot read); legibility at half resolution (640x360); dead air, seams, truncation; anything sensitive on screen.
+
+Verdicts: PASS / CUT (with timestamps) / RESHOOT. Cuts are the expected outcome, not a failure. Re-reviews check the delta plus every boundary the edit shifted (EDL changes move all downstream boundaries). Authors disclose per-section wall-clock vs file-duration and any frame holds up front — disclosure is what makes timing verifiable.
+
+**Preserve the re-record path beside the accepted final:** a `<video>.src/` dir with the casts, the EDL script, narration MP3s, and a README with exact rebuild steps. `/tmp` gets swept; accepted videos and their sources belong somewhere durable.
+
 ## Pipeline Overview
 
 ```
@@ -197,28 +220,22 @@ ElevenLabs handles most acronyms. For problem terms, use alias substitution in t
 
 If no ElevenLabs key, `pip install gTTS` provides free Google TTS. Lower quality but unblocks the pipeline. Strip `<break>` tags (unsupported) and replace with periods.
 
+### Key hygiene
+
+`.strip()` the API key on read and catch transport errors without printing headers: the stored key has carried trailing whitespace, which httpx rejects as an illegal header value with a traceback that prints the raw key into the transcript.
+
 ## Video Assembly
 
 ### Syncing Video + Audio
 
-Speed-adjust video to match audio duration. Terminal recordings tolerate wide speed ranges:
+**Do not speed-adjust video to match audio** (see Production Standard rule 1 — stretched or frame-cloned video fails review). Sync the other way:
 
-```python
-video_dur = get_duration(video_path)
-audio_dur = get_duration(audio_path)
-pts = max(0.25, min(4.0, video_dur / audio_dur))
-inv_pts = 1.0 / pts
+1. Cut each clip hard to its real action (hard cuts only, constant fps, no `setpts`).
+2. Measure the cut clip's duration.
+3. Write narration to fit that length; split long lines across the clip and place each part at the moment it describes (offsets in the EDL).
+4. Pad the audio track with silence to the clip length. Silence over live typing is fine; over a frozen frame it is dead air — cut the video instead.
 
-ffmpeg ... -filter_complex
-  "[0:v]setpts={inv_pts}*PTS,...[v];[1:a]volume=2.0,aformat=channel_layouts=stereo[a]"
-  -map "[v]" -map "[a]"
-  -c:a aac -b:a 192k -ar 44100 -ac 2
-```
-
-**Acceptable speed ranges:**
-- 0.5x–2.0x: imperceptible for terminal recordings
-- 0.3x–0.5x: fine for "reading the screen" moments (diagnostics output)
-- >3x: video becomes unwatchably fast — trim the narration instead
+If narration genuinely cannot fit, shorten the words. Only when a section is unwatchably slow in reality (a sandbox boot) do you cut footage out — never slow or stretch what remains.
 
 ### Normalization for Concat
 
