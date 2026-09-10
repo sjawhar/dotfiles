@@ -23,30 +23,17 @@ bridge_port = 12801
 
 # Entries are the only remote URLs that open without a paste. Chosen from 14 days
 # of daemon logs, so routine traffic does not turn into constant pasting.
-# Pattern grammar (crates/forward/src/policy.rs): `host[:port][/path-prefix]`;
-# `*` stands for exactly ONE label, so `*.example.com` admits `a.example.com`
-# but not `a.b.example.com` — pin deep hosts by name.
 allow = [
-  "100.113.243.90",                # Devbox tailnet address, any port: the :12802 file-preview
-                                   # server plus whatever dev servers agents run there
-  "d-9267c4f5db.awsapps.com",      # Trajectory's IAM Identity Center tenant; deliberately not wildcarded
-  "device.sso.*.amazonaws.com",    # AWS device-authorization endpoints
-  "github.com",                    # Whole host, not just /login: PR and issue links are the single
-                                   # largest source of opens, and a github.com page cannot phish a
-                                   # credential any more than browsing there yourself can. User
-                                   # content lives on other hosts (gist., raw.githubusercontent.)
-  "accounts.google.com",           # Google OAuth sign-in
-  "auth.openai.com",               # Codex / OpenAI sign-in
-  # hawk login Cognito hosted UI, one host per Hawk environment, pinned rather than
-  # wildcarded: `*.auth.us-west-2.amazoncognito.com` would admit every AWS tenant's
-  # hosted UI in the region. Each host is the `authorization_endpoint` the Hawk API
-  # itself reports at `https://<HAWK_API_URL>/auth/config`, which is what the CLI
-  # opens; read it there when a new environment appears, because the deployed
-  # domains do not match the current `cognito_domain_prefix` template in Hawk's
-  # infra (`infra/hawk/cognito.py`).
-  "production-trajectory-labs.auth.us-west-2.amazoncognito.com",  # api.hawk.internal.trajectorylabs.com
-  "staging-trajectory-labs.auth.us-west-2.amazoncognito.com",     # api.hawk.staging.trajectorylabs.com
-  "viewer.hawk.internal.trajectorylabs.com",  # Hawk eval viewer links from agent sessions
-  "claude.ai",                     # Claude web authentication
-  "*.anthropic.com",               # Anthropic-owned subdomains used by authentication
+  "*.anthropic.com",
+  "100.113.243.90",
+  "accounts.google.com",
+  "auth.openai.com",
+  "claude.ai",
+  "d-9267c4f5db.awsapps.com",
+  "device.sso.*.amazonaws.com",
+  "github.com",
+  "oidc.us-west-2.amazonaws.com",
+  "production-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "staging-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "viewer.hawk.internal.trajectorylabs.com",
 ]
