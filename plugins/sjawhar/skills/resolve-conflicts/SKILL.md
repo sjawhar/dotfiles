@@ -1,6 +1,6 @@
 ---
 name: resolve-conflicts
-description: "Use when merge conflicts exist after rebase, merge, or branch integration. Also use when file moves or renames cause path-level conflicts that look scarier than they are."
+description: "Use when merge conflicts exist after rebase, merge, or branch integration; when file moves or renames cause path-level conflicts; or when verifying a reconstructed PR head even though no conflict markers remain."
 ---
 
 # Resolve Conflicts
@@ -18,7 +18,7 @@ jj resolve --list                # List all conflicted files with conflict types
 **For each parent/side of the conflict:**
 ```bash
 jj diff -r <parent-rev> --stat   # What files did this side touch?
-jj diff -r <parent-rev>          # What content changes did it make?
+jj diff --git -r <parent-rev>    # What content changes did this side make?
 ```
 
 **You must be able to answer:**
@@ -51,9 +51,25 @@ Read the conflict markers in each file:
 
 ### Phase 4: Verify
 
-Run project quality checks (types, lint, tests).
+Verify the composed tree, not only the marked conflicts:
 
-If checks fail due to resolution, fix. If unrelated, note separately.
+- Compare paths deleted by the new base with the result:
+  ```bash
+  jj diff --from <old-base> --to <new-base> --summary   # D entries are paths the new base deleted
+  ```
+  Each must be absent from the result unless the approved change deliberately restores it; say
+  so in the description. Remove accidental resurrections.
+- Check files changed on both sides for lost non-conflicting hunks, including documentation
+  accompanying a code change. Taking one whole side can discard the other side's valid work.
+- Check renamed or changed interfaces and their dynamic consumers, including string-keyed
+  registries, import loaders and monkeypatch targets. Marker-free text can still be invalid code.
+
+Run the affected packages' syntax, type, lint and test checks after integration, with the same
+commands and test layout CI uses, not only the one test beside a conflict. Use focused checks
+while repairing and the full affected set once before publishing. Compare a failure against
+the intended base with the same commands and environment before attributing its cause.
+Resolve integration defects before publishing. For a baseline defect, fix it or state the
+remediation and obtain an explicit decision to exclude it; “pre-existing” is not a resolution.
 
 ## Red Flags — STOP and Rethink
 
@@ -64,6 +80,7 @@ If checks fail due to resolution, fix. If unrelated, note separately.
 | `jj undo` then retry a different approach | Undo loops cause divergent commits in shared repos. One deliberate fix, not trial-and-error. |
 | Abandon divergent commits to clean up | Verify they're actually stale first. Check immutability. Don't touch what you don't understand. |
 | Say changes are "superseded" without checking | Read the actual file content on both sides. "Probably already covered" is not verification. |
+| Take one whole file side without comparing the discarded changes | Valid non-conflicting code or documentation can disappear with the side you discarded. |
 | Chain a second fix after the first one didn't fully work | Stop. Re-read Phase 1. You missed something. |
 
 ## When Conflicts Are Complex
