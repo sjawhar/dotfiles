@@ -28,7 +28,7 @@ bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
 shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, omp, tmux, xdg-open, pyright, basedpyright)
 scripts/             # Utility scripts (git-identity, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
-devpod/              # Remote dev machine provisioning: container image + cloud-init for a bare VM (dormant)
+devpod/              # Agent box image (every personal agent session runs in one) + cloud-init for a bare VM (dormant)
 plugins/             # OpenCode/Claude plugins (sjawhar/ has all custom skills, agents, and commands)
 vendor/              # Third-party vendored content
 docs/                # Documentation and plans
@@ -46,7 +46,7 @@ Each major subdirectory has its own AGENTS.md with details and conventions:
 | `plugins/` | Custom skills, agents, and commands (`sjawhar/`) |
 | `installers/` | Per-tool install scripts run by `install.sh` |
 | `scripts/` | Standalone utility scripts |
-| `devpod/` | Remote dev machine provisioning — container image and bare-VM cloud-init (dormant) |
+| `devpod/` | Agent box image (Sysbox container personal agent sessions run in) and bare-VM cloud-init (dormant) |
 
 ## How Install Works
 
@@ -71,7 +71,8 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 - **All tool versions pinned** in `mise.toml` — no floating versions. My own repos must also be listed in `minimum_release_age_excludes` there, or `latest` silently refuses to resolve their releases.
 - **Idempotent installers** — running `install.sh` twice is safe
 - **Shell config has two zones**: non-interactive (PATH, env vars, mise) above the `[[ $- == *i* ]] || return 0` guard, interactive (aliases, completions, prompts) below it
-- **Shims wrap binaries** with extra logic (e.g., the gh shim handles auth token sourcing). Wrappers that launch agent harnesses (`scripts/oc`, `shims/omp`) must set up the same session environment — gh-app `GIT_CONFIG_*` routing, shims-first `PATH` — or sessions silently act as the user on GitHub.
+- **Shims wrap binaries** with extra logic (e.g., the gh shim handles auth token sourcing). Wrappers that launch agent harnesses (`scripts/oc`, `scripts/agentbox`, `shims/omp`) must set up the same session environment — gh-app `GIT_CONFIG_*` routing, shims-first `PATH` — or sessions silently act as the user on GitHub.
+- **Agents run in boxes.** `shims/omp` refuses to start on the host (`/etc/agentbox-identity` absent) and names `agentbox omp <repo>`; `scripts/agentbox` runs one Sysbox container per repository from `devpod/Dockerfile` with an allow-list of home-directory mounts and no user credentials, so an agent can push only as its repo's GitHub App. `AGENTBOX_BYPASS=1 omp …` runs on the host for a session with no repo to box or for host-privileged work. tmux-resurrect saves each omp pane as `agentbox omp <repo> --resume <id>` (`scripts/tmux-resurrect-omp`), so a restore resumes sessions inside their boxes.
 - **Config files are symlinked** from this repo to their expected locations, not copied
 - **Everything committed is portable.** No committed file may contain an absolute path, and committed symlinks may only point inside this repo with relative targets. Per-machine links (skill farms, checkout-backed paths) are created at install time by installers or `scripts/omp-sync-*`, never committed.
 - **My own software installs from GitHub, pinned** — `opencode.json` plugin entries, `omp/plugins/package.json`, `mise.toml` all reference `github:sjawhar/...` at a tag or SHA. Installing from a local file path or checkout symlink is for prototyping only and never lands.

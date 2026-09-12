@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# agentbox: one disposable Sysbox container per repository for personal agent
+# sessions. The box holds none of the user's credentials (no ~/.config/gh,
+# ~/.ssh/id_*, ~/.docker, ~/.aws, ~/.kube, ~/.config/legion): only the
+# allow-list of mounts below, so an agent inside can push only as the GitHub
+# App its repo routes to (gh-app-routes.gitconfig) and never as the user.
+# Root inside is Sysbox fake-root, so `sudo apt-get` and an inner dockerd work
+# without host privileges. Image: devpod/Dockerfile.
+#
+#   agentbox up <repo>            create and start the box (builds the image on first use)
+#   agentbox omp <repo> [args…]   run omp inside (the shim injects provider keys via secretsd)
+#   agentbox sh <repo> [cmd…]     shell (or a command) inside, same session environment
+#   agentbox down <repo>          remove the box and its inner-docker volume
+#   agentbox rebuild              build the image for the current Dockerfile; list boxes on older tags
+#   agentbox ls                   running boxes
+#
+# <repo> is a directory name under $HOME (agent-c) or a path; the box is
+# agentbox-<basename> and the repo keeps its host path inside, so jj workspaces
+# and omp session files resolve identically on both sides.
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+NETWORK=agentbox
+RUNTIME="${AGENTBOX_RUNTIME:-sysbox-runc}"
+EMBED_NAME=omp-embed
+EMBED_PORT="${OMP_EMBED_PORT:-8087}"
+UID_="$(id -u)"
+
+die() { echo "agentbox: $*" >&2; exit 1; }
+
+# Image tag is the content hash of what builds it, so a Dockerfile edit yields
+# a new tag and `up` builds it; boxes on the old tag are listed by `rebuild`.
+image_tag() {
+    local h
+    h="$(cat "$DOTFILES_DIR/devpod/Dockerfile" "$DOTFILES_DIR/devpod/entrypoint.sh" | sha256sum | cut -c1-12)"
+    echo "agentbox:$h"
+}
+
+build_image() {
+    local tag="$1"
+    if [[ -z "$(docker image ls -q "$tag")" ]]; then
+        echo "agentbox: building $tag" >&2
+        # buildx with the default builder: ~/.docker/config.json may alias
+        # `docker build` to depot, which needs a project this image has none of.
+        docker buildx build --builder default --load -t "$tag" "$DOTFILES_DIR/devpod" >&2
+    fi
+}
+
+ensure_network() {
+    docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK" >/dev/null
+    # omp-embed (installers/omp-embed.sh) serves mnemopi embeddings for every
+    # session on the machine; boxes reach it by name on this network.
+    if docker inspect "$EMBED_NAME" >/dev/null 2>&1 \
+        && ! docker inspect -f '{{json .NetworkSettings.Networks}}' "$EMBED_NAME" | grep -q "\"$NETWORK\""; then
+        docker network connect "$NETWORK" "$EMBED_NAME"
+    fi
+}
+
+# The box a path belongs to. A repo is a direct child of $HOME; a path inside
+# it, or inside one of its jj workspaces under ~/.worktrees/<repo>/, resolves to
+# that repo, so `agentbox omp ~/.worktrees/agent-c/pm` and `agentbox omp
+# agent-c` name the same box. Anything else is refused: a box built from a
+# nested directory would carry a workspace without the .jj/.git it points at.
+resolve_repo() {
+    local arg="${1:-}" path rel first
+    [[ -n "$arg" ]] || die "repo name or path required"
+    if [[ "$arg" == /* ]]; then path="$arg"; else path="$HOME/$arg"; fi
+    path="$(realpath -m "$path")"
+    rel="${path#"$HOME"/}"
+    [[ "$rel" != "$path" && -n "$rel" ]] || die "not under $HOME: $path"
+    first="${rel%%/*}"
+    if [[ "$first" == .worktrees ]]; then
+        rel="${rel#.worktrees/}"
+        first="${rel%%/*}"
+        [[ "$rel" == */* || -d "$HOME/.worktrees/$first" ]] || die "no workspaces for $first under $HOME/.worktrees"
+    fi
+    REPO_NAME="$first"
+    REPO_DIR="$HOME/$REPO_NAME"
+    [[ -e "$REPO_DIR/.jj" || -e "$REPO_DIR/.git" ]] \
+        || die "$REPO_DIR is not a repository (no .jj or .git); a session with no repo to box runs on the host: AGENTBOX_BYPASS=1 omp"
+    BOX="agentbox-$REPO_NAME"
+    VOLUME="$BOX-docker"
+    # jj workspaces of a colocated repo live under ~/.worktrees/<repo>/ and point
+    # back into the repo's .jj and .git, so the box carries both trees.
+    WORKTREES_DIR="$HOME/.worktrees/$REPO_NAME"
+    # A path deeper than the repo root names where the session starts.
+    ARG_DIR="$path"
+}
+
+in_box_trees() {
+    case "$1/" in
+        "$REPO_DIR"/*|"$WORKTREES_DIR"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The working directory a session starts in: the workspace or subdirectory the
+# caller named, else the caller's cwd when it lies in one of the box's trees
+# (the repo or one of its workspaces), else the repo.
+session_cwd() {
+    if [[ "$ARG_DIR" != "$REPO_DIR" && -d "$ARG_DIR" ]] && in_box_trees "$ARG_DIR"; then
+        echo "$ARG_DIR"
+    elif in_box_trees "$PWD"; then
+        echo "$PWD"
+    else
+        echo "$REPO_DIR"
+    fi
+}
+
+box_running() { [[ "$(docker inspect -f '{{.State.Running}}' "$BOX" 2>/dev/null || true)" == true ]]; }
+
+# Mount allow-list. rw dirs are created on the host first so Docker never
+# creates them root-owned; ro files/dirs that do not exist are skipped.
+mount_args() {
+    local a=() d
+    mkdir -p "$WORKTREES_DIR"
+    a+=(-v "$REPO_DIR:$REPO_DIR" -v "$WORKTREES_DIR:$WORKTREES_DIR")
+    a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
+    for d in .mise .cache/mise .omp .cache/omp .bun .cache/uv .local/share/uv .npm .config/trajectory-labs; do
+        mkdir -p "$HOME/$d"
+        a+=(-v "$HOME/$d:$HOME/$d")
+    done
+    # Skill farms omp loads from other checkouts (omp/skills-sources.json):
+    # without them a box session silently loses the team-memory and ops skills.
+    for d in core-context core-ops; do
+        [[ -d "$HOME/$d" ]] && a+=(-v "$HOME/$d:$HOME/$d")
+    done
+    # ~/.config/secretsd names the sops source roots (both under ~/.dotfiles) and
+    # ~/.config/sops holds the machine age identity the `secrets` client decrypts
+    # agent-tier files with; human-tier keys still go through the broker socket.
+    for d in .config/mise .config/omp .config/jj .config/secretsd .config/sops .ssh/jj-signing .ssh/jj-signing.pub .config/opencode/envoy.json; do
+        [[ -e "$HOME/$d" ]] && a+=(-v "$(readlink -f "$HOME/$d"):$HOME/$d:ro")
+    done
+    [[ -e "$HOME/.gitconfig" ]] && a+=(-v "$(readlink -f "$HOME/.gitconfig"):$HOME/.gitconfig:ro")
+    # secretsd: the broker socket and the per-session token directory. Keys
+    # still arrive only through `secrets … -- cmd`; nothing is on disk. A missing
+    # socket must not become a root-owned directory the broker can never bind.
+    [[ -S "/run/user/$UID_/secretsd.sock" ]] || die "secretsd is not running (no /run/user/$UID_/secretsd.sock)"
+    a+=(-v "/run/user/$UID_/secretsd.sock:/run/user/$UID_/secretsd.sock")
+    a+=(-v "/run/user/$UID_/secretsd:/run/user/$UID_/secretsd")
+    a+=(-v "$VOLUME:/var/lib/docker")
+    printf '%s\n' "${a[@]}"
+}
+
+session_env() {
+    local e=()
+    e+=(-e "HOME=$HOME" -e USER=ubuntu -e "TERM=${TERM:-xterm-256color}" -e "DOTFILES_DIR=$DOTFILES_DIR")
+    # mise: the host's tool store, activated the way .bashrc does (shims mode).
+    e+=(-e "MISE_DATA_DIR=$HOME/.mise")
+    e+=(-e "PATH=$DOTFILES_DIR/shims:$DOTFILES_DIR/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    e+=(-e "JJ_CONFIG=$HOME/.config/jj/config.toml:$DOTFILES_DIR/.jjconfig.toml")
+    e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
+    e+=(-e "AGENTBOX_REPO=$REPO_NAME")
+    # Same gh-app routing include shims/omp and scripts/oc export on the host.
+    e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
+    # The shared embedding server, only while it answers on the host; a dead
+    # server would otherwise put every box session on keyword-only recall.
+    if curl -fsS -m 1 "http://127.0.0.1:${EMBED_PORT}/health" >/dev/null 2>&1; then
+        e+=(-e "MNEMOPI_EMBEDDING_API_URL=http://$EMBED_NAME/v1")
+    fi
+    # A plain shell inherits the caller's secretsd session; omp mints its own.
+    [[ -n "${SECRETSD_SESSION_TOKEN_FILE:-}" ]] && e+=(-e "SECRETSD_SESSION_TOKEN_FILE=$SECRETSD_SESSION_TOKEN_FILE")
+    # The pane this session lives in, so tmux-resurrect-omp can find the omp
+    # process inside the box (its environ) and save `agentbox omp … --resume`.
+    [[ -n "${TMUX_PANE:-}" ]] && e+=(-e "TMUX_PANE=$TMUX_PANE")
+    printf '%s\n' "${e[@]}"
+}
+
+# A tmux restore launches every pane of a repo at once; the lock makes the first
+# one create the box and the rest find it running.
+cmd_up() {
+    resolve_repo "$1"
+    local lock="/run/user/$UID_/agentbox-$REPO_NAME.lock"
+    exec {lock_fd}>"$lock"
+    flock "$lock_fd"
+    up_locked
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+}
+
+up_locked() {
+    box_running && { echo "agentbox: $BOX already running" >&2; return 0; }
+    docker rm -f "$BOX" >/dev/null 2>&1 || true
+    local tag; tag="$(image_tag)"
+    build_image "$tag"
+    ensure_network
+    local mounts=(); mapfile -t mounts < <(mount_args)
+    docker run -d --name "$BOX" --runtime="$RUNTIME" --init --hostname "$BOX" \
+        --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
+        -e "AGENTBOX_REPO=$REPO_NAME" "${mounts[@]}" "$tag" >/dev/null
+    local _
+    for _ in $(seq 1 60); do
+        docker logs "$BOX" 2>&1 | grep -q 'inner dockerd ready' && break
+        if [[ "$(docker inspect -f '{{.State.Running}}' "$BOX")" != true ]]; then break; fi
+        sleep 1
+    done
+    if ! docker logs "$BOX" 2>&1 | grep -q 'inner dockerd ready'; then
+        docker logs "$BOX" 2>&1 | tail -20 >&2
+        docker rm -f "$BOX" >/dev/null 2>&1 || true
+        die "$BOX did not become ready; removed"
+    fi
+    # Private agent-c images: the inner Docker logs into ghcr.io with the
+    # platform's read-only packages token (agent-tier GHCR_PULL_TOKEN). The
+    # user's own docker login is never in the box.
+    secrets GHCR_PULL_TOKEN -- sh -c \
+        'printf %s "$GHCR_PULL_TOKEN" | docker exec -i --user ubuntu "$0" docker login ghcr.io -u trajectory-labs-pbc --password-stdin >/dev/null 2>&1' "$BOX" \
+        || echo "agentbox: ghcr.io login failed; private image pulls will fail until it is fixed" >&2
+    echo "agentbox: $BOX ready ($tag)" >&2
+}
+
+# Ends every process of one box session: `docker exec` leaves its command
+# running when the client dies (a closed tmux pane, a killed tmux server), so a
+# host-omp's SIGHUP-on-hangup is replayed by hand, matched on the session id in
+# each process's environment.
+hangup_session() {
+    docker exec "$BOX" sh -c '
+        for e in /proc/[0-9]*/environ; do
+            grep -qz "^AGENTBOX_SESSION=$1\$" "$e" 2>/dev/null || continue
+            p="${e#/proc/}"; p="${p%/environ}"
+            kill -HUP -- "-$(ps -o pgid= "$p" | tr -d " ")" 2>/dev/null || kill -HUP "$p" 2>/dev/null
+        done' _ "$1" >/dev/null 2>&1 || true
+}
+
+cmd_exec() {
+    local mode="$1"; shift
+    resolve_repo "$1"; shift
+    box_running || cmd_up "$REPO_DIR"
+    local env=(); mapfile -t env < <(session_env)
+    local session; session="$(cat /proc/sys/kernel/random/uuid)"
+    env+=(-e "AGENTBOX_SESSION=$session")
+    local tty=()
+    [[ -t 0 && -t 1 ]] && tty=(-it) || tty=(-i)
+    local cmd=()
+    case "$mode" in
+        omp) cmd=("$DOTFILES_DIR/shims/omp" "$@") ;;
+        sh)  cmd=("${@:-bash}") ;;
+    esac
+    # Expanded now: the trap fires at script exit, after this function's locals are gone.
+    # shellcheck disable=SC2064
+    trap "hangup_session '$session'" EXIT HUP TERM
+    docker exec "${tty[@]}" --user ubuntu -w "$(session_cwd)" "${env[@]}" "$BOX" "${cmd[@]}"
+}
+
+cmd_down() {
+    resolve_repo "$1"
+    docker rm -f "$BOX" >/dev/null 2>&1 || true
+    docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+    echo "agentbox: $BOX removed"
+}
+
+cmd_rebuild() {
+    local tag; tag="$(image_tag)"
+    build_image "$tag"
+    local stale
+    stale="$(docker ps --filter name='^agentbox-' --format '{{.Names}} {{.Image}}' | awk -v t="$tag" '$2 != t {print $1}')"
+    if [[ -n "$stale" ]]; then
+        echo "agentbox: boxes on an older image (agentbox down/up to move them):" >&2
+        echo "$stale" >&2
+    fi
+    echo "agentbox: image $tag"
+}
+
+cmd_ls() { docker ps --filter name='^agentbox-' --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'; }
+
+case "${1:-}" in
+    up)      shift; cmd_up "${1:-}" ;;
+    omp)     shift; cmd_exec omp "$@" ;;
+    sh)      shift; cmd_exec sh "$@" ;;
+    down)    shift; cmd_down "${1:-}" ;;
+    rebuild) cmd_rebuild ;;
+    ls)      cmd_ls ;;
+    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

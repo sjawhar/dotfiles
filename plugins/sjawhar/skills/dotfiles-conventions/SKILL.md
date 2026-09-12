@@ -36,7 +36,7 @@ The layout is a fixed placement map. Before adding anything, read the sibling fi
 
 ## Wrapper parity (hard)
 
-Agent-harness launchers (`scripts/oc`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, envoy env. A capability added to one belongs in both — drift means sessions silently act as the user on GitHub or lose messaging.
+Agent-harness launchers (`scripts/oc`, `scripts/agentbox`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, envoy env. A capability added to one belongs in all of them — drift means sessions silently act as the user on GitHub or lose messaging. `agentbox` is the outermost: it builds that environment for `docker exec` and then runs `shims/omp` inside the box, so a change to what a session needs goes into `session_env()` there and into the shim.
 
 ## Commit discipline
 

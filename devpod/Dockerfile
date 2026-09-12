@@ -1,179 +1,32 @@
-ARG BUILDX_VERSION=0.30.1-desktop.2
-ARG DOCKER_VERSION=29.1.5
-ARG HELM_VERSION=4.0.5
-ARG K9S_VERSION=0.50.18
-ARG KUBECTL_VERSION=1.34.3
-ARG NEOVIM_VERSION=0.11.5
-ARG TMUX_VERSION=3.6a
-ARG PYTHON_VERSION=3.13.11
-ARG UV_VERSION=0.9.26
-
-# Source images for binary copies
-FROM docker:${DOCKER_VERSION}-cli AS docker
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
-FROM rancher/kubectl:v${KUBECTL_VERSION} AS kubectl
-
-# ------------------------------------------------------------------------------
-# Base layer - shared packages and user setup
-# ------------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-trixie AS base
-ARG DEVPOD_USER=sami
-ARG DEVPOD_UID=1000
-ARG DEVPOD_GID=1000
+# Agent box: the disposable container every personal agent session runs in.
+# Started by scripts/agentbox under the Sysbox runtime, so root inside is an
+# unprivileged user namespace on the host, the box runs its own dockerd, and
+# `sudo apt-get` changes only this box. Tools (omp, jj, gh, bun, uv, ...) are
+# not installed here: the host's mise store is mounted in, so the pins in
+# mise.toml apply inside exactly as on the host.
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV LANG=en_US.UTF-8
-ENV LC_ALL=en_US.UTF-8
-ENV SHELL=/bin/bash
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg git openssh-client sudo jq iproute2 \
+        python3 python3-jwt python3-cryptography build-essential pkg-config libssl-dev \
+        tmux less procps xz-utils unzip zstd rsync file \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        curl \
-        git \
-        locales \
- && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
- && locale-gen
+# ubuntu:24.04 ships uid/gid 1000 = ubuntu with home /home/ubuntu, matching the
+# host user whose directories are mounted in. Passwordless sudo is the whole
+# point of the box: root here is Sysbox fake-root, unprivileged on the host.
+# The marker file is what shims/omp checks to know it is inside a box.
+RUN echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu && chmod 0440 /etc/sudoers.d/ubuntu \
+    && usermod -aG docker ubuntu \
+    && echo agentbox > /etc/agentbox-identity \
+    && install -d -o ubuntu -g ubuntu /home/ubuntu/.cache /home/ubuntu/.config /home/ubuntu/.local /home/ubuntu/.local/share /home/ubuntu/.ssh
 
-RUN groupadd -g ${DEVPOD_GID} ${DEVPOD_USER} \
- && useradd -m -u ${DEVPOD_UID} -g ${DEVPOD_USER} -s /bin/bash ${DEVPOD_USER}
-
-# ------------------------------------------------------------------------------
-# Builder: Download binaries not managed by mise
-# ------------------------------------------------------------------------------
-FROM base AS builder-downloads
-ARG TARGETARCH
-ARG BUILDX_VERSION
-ARG HELM_VERSION
-ARG K9S_VERSION
-ARG NEOVIM_VERSION
-ARG TMUX_VERSION
-
-RUN NVIM_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x86_64") \
- && mkdir -p /build/nvim \
- && curl -fsSL "https://github.com/neovim/neovim/releases/download/v${NEOVIM_VERSION}/nvim-linux-${NVIM_ARCH}.tar.gz" \
-    | tar -xz -C /build/nvim --strip-components=1
-
-RUN curl -fsSL "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_${TARGETARCH}.tar.gz" \
-    | tar -xz -C /usr/local/bin k9s
-
-RUN curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz" \
-    | tar -xz -C /usr/local/bin --strip-components=1 linux-${TARGETARCH}/helm
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-        libevent-dev \
-        libncurses-dev \
-        bison \
- && curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz" \
-    | tar -xz -C /tmp \
- && cd /tmp/tmux-${TMUX_VERSION} \
- && ./configure && make -j"$(nproc)" \
- && cp tmux /usr/local/bin/tmux \
- && rm -rf /tmp/tmux-${TMUX_VERSION}
-
-RUN mkdir -p /usr/local/libexec/docker/cli-plugins \
- && curl -fsSL "https://github.com/docker/buildx-desktop/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${TARGETARCH}" \
-        -o /usr/local/libexec/docker/cli-plugins/docker-buildx \
- && chmod +x /usr/local/libexec/docker/cli-plugins/docker-buildx
-
-# ------------------------------------------------------------------------------
-# Builder: Install tools via mise
-# ------------------------------------------------------------------------------
-FROM base AS builder-mise
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends zstd \
- && curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
-
-USER ${DEVPOD_USER}
-WORKDIR /home/${DEVPOD_USER}
-ENV MISE_DATA_DIR=/home/${DEVPOD_USER}/.mise
-
-COPY --chown=${DEVPOD_USER}:${DEVPOD_USER} mise.toml .config/mise/config.toml
-RUN --mount=type=cache,target=/home/${DEVPOD_USER}/.cache/mise,uid=${DEVPOD_UID},gid=${DEVPOD_GID} \
-    mise trust \
-  && mise install
-
-# ------------------------------------------------------------------------------
-# Final image
-# ------------------------------------------------------------------------------
-FROM base
-
-# Additional packages for final image
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-        bash-completion \
-        dnsutils \
-        fd-find \
-        gnupg \
-        groff \
-        iputils-ping \
-        less \
-        man-db \
-        mosh \
-        netcat-openbsd \
-        openssh-server \
-        ripgrep \
-        libevent-core-2.1-7t64 \
-        unzip \
-        xz-utils \
- && ln -sf /usr/bin/fdfind /usr/local/bin/fd
-
-# Tailscale
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
- && curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends tailscale \
- && mkdir -p /var/lib/tailscale /var/run/tailscale
-
-# SSH server
-RUN mkdir -p /var/run/sshd \
- && ssh-keygen -A \
- && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
- && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config \
- && sed -i 's/^AcceptEnv LANG LC_\*/AcceptEnv LANG LC_* SOPS_AGE_KEY/' /etc/ssh/sshd_config
-
-# Copy binaries from builders and source images
-COPY --link --from=builder-downloads /usr/local/bin/tmux /usr/local/bin/tmux
-COPY --link --from=builder-downloads /build/nvim/ /usr/local/
-COPY --link --from=builder-downloads /usr/local/bin/helm /usr/local/bin/helm
-COPY --link --from=builder-downloads /usr/local/bin/k9s /usr/local/bin/k9s
-COPY --link --from=builder-downloads /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
-COPY --link --from=builder-mise /usr/local/bin/mise /usr/local/bin/mise
-COPY --link --from=builder-mise --chown=${DEVPOD_UID}:${DEVPOD_GID} /home/${DEVPOD_USER}/.mise /home/${DEVPOD_USER}/.mise
-COPY --link --from=docker /usr/local/bin/docker /usr/local/bin/docker
-COPY --link --from=docker /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
-COPY --link --from=kubectl /bin/kubectl /usr/local/bin/kubectl
-COPY --link --from=uv /uv /uvx /usr/local/bin/
-
-USER ${DEVPOD_USER}
-WORKDIR /home/${DEVPOD_USER}
-ENV MISE_DATA_DIR=/home/${DEVPOD_USER}/.mise
-ENV PATH="/home/${DEVPOD_USER}/.local/bin:${PATH}"
-
-COPY --chown=${DEVPOD_USER}:${DEVPOD_USER} . .dotfiles
-
-RUN ./.dotfiles/install.sh --skip-mise
-
-# Final setup
-USER root
-RUN mkdir -p /etc/bash_completion.d \
- && docker completion bash > /etc/bash_completion.d/docker \
- && helm completion bash > /etc/bash_completion.d/helm \
- && k9s completion bash > /etc/bash_completion.d/k9s \
- && kubectl completion bash > /etc/bash_completion.d/kubectl \
- && uv generate-shell-completion bash > /etc/bash_completion.d/uv
-
-RUN mkdir -p /devpod \
- && ln -sf "/home/${DEVPOD_USER}/.dotfiles/devpod/entrypoint.sh" /devpod/startup.sh
-
-EXPOSE 22
-CMD ["/devpod/startup.sh"]
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
