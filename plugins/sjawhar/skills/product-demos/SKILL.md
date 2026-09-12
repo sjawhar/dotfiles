@@ -79,17 +79,21 @@ asciinema rec /tmp/demo/recordings/section-name.cast
 
 ## Recording a GUI or an Editor (not a terminal)
 
-asciinema does not apply; you are driving a browser or an editor with an automation driver and capturing the screen. Three traps, each of which cost multiple failed takes:
+asciinema does not apply; you are driving a browser or an editor with an automation driver and capturing the screen.
 
-**Typing into an agent inside the editor's terminal needs X-level input, not the automation driver's.** Playwright's `keyboard.type` is silently swallowed by an agent running in a VS Code terminal: the prompt stays empty, and the caller then waits out its full timeout on an answer nobody asked for. `xdotool type` lands, but only after an `xdotool` click inside the terminal, because a CDP-dispatched click does not move **X input focus**, and `xdotool` types to whatever holds it. Applies to any editor driven this way, not just VS Code.
+**Automation input does not go where the driver believes. Three separate cases, one rule.** Playwright's input reaches the *page* it targets, not necessarily the thing on screen, and it fails silently. Seen three ways in one night: (1) `keyboard.type` into an agent running in the VS Code terminal is swallowed, so the prompt stays empty and the caller waits out its full timeout on an answer nobody asked for; (2) a CDP-dispatched click does not move **X input focus**, so an `xdotool type` after it lands wherever focus already was; (3) a keybinding chord (`F9`) pressed while focus sits in a sidebar webview is eaten by the webview and never reaches the workbench, so the panel does not maximize and the code carries on believing it did. The fix is the same each time: click the target with real X input (`xdotool mousemove; click`), then type or press at the X level.
 
-**Never key readiness on text that lives in a viewport-dependent region.** Waiting for Claude Code's footer hint (`bypass permissions (shift+tab to cycle)`) fails on a short panel: xterm renders only the visible rows, so that string is not in the DOM at all and the wait times out against a terminal whose prompt is plainly up in the frame. Wait on any startup line, then settle; if nothing matches, settle and continue rather than abandoning a live sandbox.
+**The rule is not "use xdotool". The rule is: after any input you cannot see land, measure the effect, never trust the keypress.** A panel's bounding-box height, a clip's duration against wall clock, the counter on a card, the text in the terminal DOM. Those three cases cost about ten takes between them, and every one ended the moment something was measured instead of assumed: the clip length that proved a typing fix had never once run, the panel height that proved `F9` had never once fired.
+
+**Never key readiness on text that lives in a viewport-dependent region.** xterm renders only the visible rows, so a footer hint (`bypass permissions (shift+tab to cycle)`) is not in the DOM on a short panel and a wait for it times out against a terminal whose prompt is plainly up in the frame. Wait on any startup line, then settle; if nothing matches, settle and continue rather than abandoning a live sandbox.
 
 **Verify the capture rate, not the file's nominal fps.** A screen capture under load silently drops frames and produces a time-compressed file: 199 seconds of real typing arrived in a file claiming 20fps with everything appearing instantly, and `frames = duration x nominal_fps` looked correct. Compare file duration against wall clock per section; a ratio materially off 1:1 is a re-shoot, not a post fix.
 
 **Compose before you record.** Panes that collapse, scroll, or resize between takes will clip a beat: a crop calibrated on a take where a side pane existed cut a later take mid-line, and a sidebar left expanded pushed the button the section is about below the fold. Check the frame, not the app.
 
-**Corollary worth keeping: read the artefact, not the theory.** Three runs failed at what looked like a typing bug. The clip length said otherwise (198s, about the 180s readiness timeout plus overhead), which meant the typing fix had never once been exercised. Measuring the artefact ended it; a fourth attempt would not have.
+**The same lesson, pointed at your own diagnosis: read the artefact, not the theory.** Three runs failed at what looked like a typing bug. The clip length said otherwise (198s, about the 180s readiness timeout plus overhead), which meant the typing fix had never once been exercised. Measuring ended it; a fourth attempt would not have.
+
+**A cleanup path must not authenticate through the same credential store as the thing it cleans up.** It fails exactly when it is needed. A harness killed by the OOM-killer took the keyring with it, so the wrapper's own eval-set sweep could not authenticate and left a live sandbox orphaned on the cluster; the namespace-protection admission policy correctly refused the blunt `kubectl delete ns` route. Give the sweep a credential path that survives the harness, or an external reaper that does not share its failure mode.
 
 ## Cast → MP4 Conversion
 
