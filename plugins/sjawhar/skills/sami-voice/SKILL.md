@@ -39,6 +39,24 @@ Avoid:
   self-flagellation bullshit. Again. And you keep doing it at the end as well."* And on a channel
   announcement: *"We don't need to start a channel announcement with 'Oh, I'm so sorry, I did
   something wrong, please forgive me.'"*
+- Over-explaining. A transactional message to a candidate or contractor (an outcome, a payment,
+  a schedule) carries only what the reader needs in order to act. Not the causal story of what
+  went wrong on our side, not reassurance that their payment "is not affected", not an
+  unrequested assessment of their work however fair it is. Each of those is a paragraph about us
+  or about them that they did not ask for, and together they turn a three-line note into a
+  letter. Sami, cutting a candidate wrap-up reply on 2026-09-13: *"Please update skills to avoid
+  all this over-explaining and apologizing."*
+
+  Worked example. Drafted: thanks; a paragraph explaining that our cleanup job had killed his
+  session and that both failures were ours; "the $600 is yours in full and is not affected by any
+  of that" followed by the invoice route; a paragraph assessing what his work did and did not
+  achieve; thanks. Sami's version: thanks for the write-up, the invoice route with our address,
+  thanks again. Everything else went.
+
+  The test: would the reader do anything differently without this sentence? If not, cut it. An
+  explanation nobody asked for reads as an apology; an assessment nobody asked for reads as a
+  verdict. If the reader needs the explanation to act (a deadline moved, a link changed), one
+  clause carries it.
 
 Severity labels (Medium/High) are not measurements. Give a number or drop the metric claim.
 
