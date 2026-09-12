@@ -14,7 +14,15 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
   whatever `@` is *now*. If the next piece of work deserves its own commit, run `jj new` first,
   then edit. Running `jj new -m "msg"` after editing creates an **empty** commit with your
   message and strands the work in the previous change — and there is no after-the-fact way to
-  separate "my new edits" from "@'s prior content" short of path surgery.
+  separate "my new edits" from "@'s prior content" short of path surgery. The switch-away form
+  is the same trap wearing git's clothes: `jj new main@origin` with uncommitted edits does NOT
+  carry them along the way `git checkout` would — they are already snapshotted into the commit
+  you left, and the new `@` is empty. They look lost; they are not. Recovery:
+  `jj log -r 'heads(@-::) | @-'` (or `jj op log`) to find the commit you left, then
+  `jj restore --from <that-commit> <paths>` naming the paths, then compare the file list
+  (`jj diff -r <that-commit> --stat` vs `jj diff --stat`) before committing — a partial restore
+  looks exactly like a complete one until the diff says otherwise. (Extension session,
+  2026-09-12, nearly lost real work this way.)
 - **CRITICAL — bare `jj describe` rewrites `@`'s existing message:** it does not "commit your
   work"; it renames whatever `@` already is. Before describing, check
   `jj log -r @ --no-graph -T 'description.first_line()'` — if `@` already carries a message that
