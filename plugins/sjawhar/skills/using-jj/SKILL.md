@@ -65,3 +65,15 @@ Details:
 - `references/revsets.md`
 - `references/workspaces.md`
 - `references/divergence.md`
+
+## Publishing from a shared stack
+
+When several sessions' commits sit in one local stack (a shared checkout, or an unpushed
+chain nobody owns whole), publish each line of work with `jj duplicate <commit> -d main@origin`
+and open the PR from the duplicate. The duplicate has its own commit id and no descendants
+in the stack, so later `jj split` / `jj describe` / `jj rebase` on the original stack rewrites
+the originals and never moves a published PR head — measured 2026-09-12: one local commit was
+rewritten three times during splits while its PR (core-ops #94) stayed put. Duplicating is
+therefore the right move for publication from a stack you cannot restructure yet; it is the
+wrong move where a release pin must follow the change id (see the fork-release rule above).
+

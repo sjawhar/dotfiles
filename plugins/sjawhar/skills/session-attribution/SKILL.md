@@ -55,3 +55,10 @@ gh api "repos/<owner>/<repo>/issues/comments" --paginate \
 - Legion phase workers are subagents of the root architect: their commits carry the **root**
   session id. Worker-level provenance lives in the comment footers and `.legion/` handoffs.
 - The trailer names the session, not the machine. Resume works where the transcript lives.
+- **In a shared checkout the trailer names who snapshotted, not who wrote.** jj snapshots every
+  pending edit in the working copy under whichever session runs the next `jj` command there,
+  so one commit can carry four sessions' edits under one trailer. Measured 2026-09-12 in
+  `~/core-ops`: hiring's 09-06 edits landed under the Gray Swan coordinator's trailer because
+  that session ran a jj command in the shared tree. Trailer attribution is reliable in a
+  per-session workspace (`jj workspace add`); in a shared checkout, attribute from content
+  and ask the candidate sessions, and split the commit on file boundaries once owners claim.
