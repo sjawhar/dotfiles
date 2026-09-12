@@ -75,7 +75,21 @@ asciinema rec /tmp/demo/recordings/section-name.cast
 - Record one logical section per file
 - Keep a script of what to type, but don't over-rehearse
 - Comments (`# Section: ...`) typed into terminal help with trim-point discovery later
-- If a command errors on camera, that's usually fine — re-record only if the error is misleading
+- **An erroring command on camera is a re-record of that section**, not a judgment call. A legible error shipped past every mechanical check once (frame uniqueness, silence, legibility) and only a frame-transcribing reviewer caught it; the usual root cause is stale state from an earlier take, so re-record against a clean destination rather than trimming around it.
+
+## Recording a GUI or an Editor (not a terminal)
+
+asciinema does not apply; you are driving a browser or an editor with an automation driver and capturing the screen. Three traps, each of which cost multiple failed takes:
+
+**Typing into an agent inside the editor's terminal needs X-level input, not the automation driver's.** Playwright's `keyboard.type` is silently swallowed by an agent running in a VS Code terminal: the prompt stays empty, and the caller then waits out its full timeout on an answer nobody asked for. `xdotool type` lands, but only after an `xdotool` click inside the terminal, because a CDP-dispatched click does not move **X input focus**, and `xdotool` types to whatever holds it. Applies to any editor driven this way, not just VS Code.
+
+**Never key readiness on text that lives in a viewport-dependent region.** Waiting for Claude Code's footer hint (`bypass permissions (shift+tab to cycle)`) fails on a short panel: xterm renders only the visible rows, so that string is not in the DOM at all and the wait times out against a terminal whose prompt is plainly up in the frame. Wait on any startup line, then settle; if nothing matches, settle and continue rather than abandoning a live sandbox.
+
+**Verify the capture rate, not the file's nominal fps.** A screen capture under load silently drops frames and produces a time-compressed file: 199 seconds of real typing arrived in a file claiming 20fps with everything appearing instantly, and `frames = duration x nominal_fps` looked correct. Compare file duration against wall clock per section; a ratio materially off 1:1 is a re-shoot, not a post fix.
+
+**Compose before you record.** Panes that collapse, scroll, or resize between takes will clip a beat: a crop calibrated on a take where a side pane existed cut a later take mid-line, and a sidebar left expanded pushed the button the section is about below the fold. Check the frame, not the app.
+
+**Corollary worth keeping: read the artefact, not the theory.** Three runs failed at what looked like a typing bug. The clip length said otherwise (198s, about the 180s readiness timeout plus overhead), which meant the typing fix had never once been exercised. Measuring the artefact ended it; a fourth attempt would not have.
 
 ## Cast → MP4 Conversion
 
