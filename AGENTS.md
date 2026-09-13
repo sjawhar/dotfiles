@@ -24,6 +24,7 @@ install.sh           # Main installer — runs all installers/* in order
 installers/          # Per-tool install scripts (shell.sh, mise.sh, docker.sh, jj.sh, tmux.sh, nvim.sh, claude.sh, opencode.sh)
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 forward/             # Browser-forwarding policy plus devbox serve and laptop daemon user units
+whatsapp/            # WhatsApp MCP daemon: wrapper + laptop user unit (holds the paired session)
 bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
 shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, omp, tmux, xdg-open, pyright, basedpyright)
 scripts/             # Utility scripts (git-identity, ephemeral-monitor, etc.)

@@ -1,0 +1,12 @@
+[Unit]
+Description=WhatsApp MCP daemon (paired Baileys session; MCP on loopback :3456)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.dotfiles/whatsapp/whatsapp-mcp-serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

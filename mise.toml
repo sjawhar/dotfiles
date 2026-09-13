@@ -71,6 +71,14 @@ zoxide = "0.10.0"
 "github:sjawhar/opencode" = "latest"
 "npm:@googleworkspace/cli" = "0.22.5"
 "npm:@openai/codex" = "0.153.1"
+# WhatsApp MCP (Baileys fork): the laptop runs it as a daemon
+# (whatsapp/whatsapp-mcp.service) and its omp reaches it with the same
+# binary's `--connect` stdio client (installers/whatsapp.sh). aube gates: the package is
+# my own (unpopular by download count); better-sqlite3 fetches its prebuilt
+# native binding in an install script; and it pins pino@9.14.0, a 9.x backport
+# matteo.collina published by hand two weeks after 10.0.0 without provenance
+# (reviewed 2026-09-13: same integrity on npmjs.org, maintainer publish).
+"npm:@sjawhar/whatsapp-mcp" = { version = "2.4.0", allow_low_downloads = true, allow_builds = ["better-sqlite3"], trust_policy_excludes = ["pino@9.14.0"] }
 
 # Development
 "npm:basedpyright" = "1.39.10"
@@ -102,6 +110,7 @@ sops = "3.13.3"
 "github:DataDog/pup" = "1.13.0"
 sentry-cli = "3.6.2"
 k9s = "latest"
+gitleaks = "latest"
 
 # AI-native time tracker — one release publishes two binaries as separate assets:
 #   tt-{arch}-unknown-linux-musl.tar.gz  (CLI, static)
