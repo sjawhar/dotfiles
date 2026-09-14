@@ -20,5 +20,13 @@ fi
 # Sessions run as uid 1000 and are in the docker group already; the socket is
 # created root:root 660 before the group exists on it, so open it to the box.
 chmod 666 /var/run/docker.sock
+# The box's own processes reach the EC2 metadata forwarder on the host
+# (AWS_EC2_METADATA_SERVICE_ENDPOINT); containers the box starts must not, or a
+# sandbox running task content would hold the instance role. Container traffic
+# leaves through FORWARD, where Docker consults DOCKER-USER first; the box's
+# processes use OUTPUT and are unaffected. The launcher always passes the
+# address, so a missing one is a launcher bug, not a box without a rule.
+[[ -n "${AGENTBOX_IMDS_FORWARDER:-}" ]] || { echo "agentbox: AGENTBOX_IMDS_FORWARDER is not set" >&2; exit 1; }
+iptables -I DOCKER-USER -d "${AGENTBOX_IMDS_FORWARDER%:*}" -p tcp --dport "${AGENTBOX_IMDS_FORWARDER##*:}" -j DROP
 echo "inner dockerd ready $(docker version --format '{{.Server.Version}}')"
 exec sleep infinity

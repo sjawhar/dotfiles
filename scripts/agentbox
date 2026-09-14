@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # agentbox: one disposable Sysbox container per repository for personal agent
-# sessions. The box holds none of the user's credentials (no ~/.config/gh,
-# ~/.ssh/id_*, ~/.docker, ~/.aws, ~/.kube, ~/.config/legion): only the
+# sessions. The box holds none of the user's GitHub or SSH identity (no
+# ~/.config/gh, ~/.ssh/id_*, ~/.docker, ~/.kube, ~/.config/legion): only the
 # allow-list of mounts below, so an agent inside can push only as the GitHub
-# App its repo routes to (gh-app-routes.gitconfig) and never as the user.
+# App its repo routes to (gh-app-routes.gitconfig) and never as the user. AWS
+# is the exception by design: ~/.aws is mounted and the box reaches the EC2
+# metadata service through a host forwarder on the box network, so every
+# profile works as on the host, while the sandboxes a box starts cannot reach
+# it (devpod/entrypoint.sh drops that traffic inside the box).
 # Root inside is Sysbox fake-root, so `sudo apt-get` and an inner dockerd work
 # without host privileges. Image: devpod/Dockerfile.
 #
@@ -24,6 +28,8 @@ NETWORK=agentbox
 RUNTIME="${AGENTBOX_RUNTIME:-sysbox-runc}"
 EMBED_NAME=omp-embed
 EMBED_PORT="${OMP_EMBED_PORT:-8087}"
+IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
+IMDS_UNIT=agentbox-imds
 UID_="$(id -u)"
 
 die() { echo "agentbox: $*" >&2; exit 1; }
@@ -54,6 +60,29 @@ ensure_network() {
         && ! docker inspect -f '{{json .NetworkSettings.Networks}}' "$EMBED_NAME" | grep -q "\"$NETWORK\""; then
         docker network connect "$NETWORK" "$EMBED_NAME"
     fi
+    NETWORK_GATEWAY="$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NETWORK")"
+    NETWORK_SUBNET="$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$NETWORK")"
+    [[ -n "$NETWORK_GATEWAY" && -n "$NETWORK_SUBNET" ]] || die "network $NETWORK has no IPv4 gateway/subnet"
+}
+
+# EC2 metadata forwarder: a host process (so the metadata service's one-hop
+# reply reaches it) listening only on the box network's gateway address and
+# only for sources inside that network. Boxes point every AWS tool at it with
+# AWS_EC2_METADATA_SERVICE_ENDPOINT (session_env); the box's own firewall
+# keeps containers started inside the box away from it. A transient user unit:
+# nothing to install, restarted if socat dies, recreated here after a reboot.
+ensure_imds_forwarder() {
+    systemctl --user is-active --quiet "$IMDS_UNIT" && return 0
+    systemctl --user reset-failed "$IMDS_UNIT" >/dev/null 2>&1 || true
+    systemd-run --user --unit "$IMDS_UNIT" --quiet --collect --property=Restart=always --property=RestartSec=1 \
+        socat "TCP4-LISTEN:$IMDS_PORT,bind=$NETWORK_GATEWAY,range=$NETWORK_SUBNET,fork,reuseaddr" \
+        TCP4:169.254.169.254:80
+    local _
+    for _ in $(seq 1 20); do
+        ss -ltn "sport = :$IMDS_PORT" 2>/dev/null | grep -q "$NETWORK_GATEWAY:$IMDS_PORT" && return 0
+        sleep 0.25
+    done
+    die "metadata forwarder $IMDS_UNIT did not bind $NETWORK_GATEWAY:$IMDS_PORT (journalctl --user -u $IMDS_UNIT)"
 }
 
 # The box a path belongs to. A repo is a direct child of $HOME; a path inside
@@ -116,7 +145,7 @@ mount_args() {
     mkdir -p "$WORKTREES_DIR"
     a+=(-v "$REPO_DIR:$REPO_DIR" -v "$WORKTREES_DIR:$WORKTREES_DIR")
     a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
-    for d in .mise .cache/mise .omp .cache/omp .bun .cache/uv .local/share/uv .npm .config/trajectory-labs; do
+    for d in .mise .cache/mise .omp .cache/omp .bun .cache/uv .local/share/uv .npm .config/trajectory-labs .aws; do
         mkdir -p "$HOME/$d"
         a+=(-v "$HOME/$d:$HOME/$d")
     done
@@ -151,6 +180,9 @@ session_env() {
     e+=(-e "JJ_CONFIG=$HOME/.config/jj/config.toml:$DOTFILES_DIR/.jjconfig.toml")
     e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
     e+=(-e "AGENTBOX_REPO=$REPO_NAME")
+    # Every AWS profile works as on the host: the SSO ones from the mounted
+    # ~/.aws, the instance-role ones through the metadata forwarder.
+    e+=(-e "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://$NETWORK_GATEWAY:$IMDS_PORT")
     # Same gh-app routing include shims/omp and scripts/oc export on the host.
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
     # The shared embedding server, only while it answers on the host; a dead
@@ -184,10 +216,12 @@ up_locked() {
     local tag; tag="$(image_tag)"
     build_image "$tag"
     ensure_network
+    ensure_imds_forwarder
     local mounts=(); mapfile -t mounts < <(mount_args)
     docker run -d --name "$BOX" --runtime="$RUNTIME" --init --hostname "$BOX" \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
-        -e "AGENTBOX_REPO=$REPO_NAME" "${mounts[@]}" "$tag" >/dev/null
+        -e "AGENTBOX_REPO=$REPO_NAME" -e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT" \
+        "${mounts[@]}" "$tag" >/dev/null
     local _
     for _ in $(seq 1 60); do
         docker logs "$BOX" 2>&1 | grep -q 'inner dockerd ready' && break
@@ -225,6 +259,7 @@ cmd_exec() {
     local mode="$1"; shift
     resolve_repo "$1"; shift
     box_running || cmd_up "$REPO_DIR"
+    ensure_network
     local env=(); mapfile -t env < <(session_env)
     local session; session="$(cat /proc/sys/kernel/random/uuid)"
     env+=(-e "AGENTBOX_SESSION=$session")
