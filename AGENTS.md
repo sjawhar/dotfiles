@@ -28,7 +28,7 @@ bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
 shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, omp, tmux, xdg-open, pyright, basedpyright)
 scripts/             # Utility scripts (git-identity, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
-devpod/              # Agent box image (every personal agent session runs in one) + cloud-init for a bare VM (dormant)
+devpod/              # Opt-in agent box image (scripts/agentbox) + cloud-init for a bare VM (dormant)
 plugins/             # OpenCode/Claude plugins (sjawhar/ has all custom skills, agents, and commands)
 vendor/              # Third-party vendored content
 docs/                # Documentation and plans
@@ -46,7 +46,7 @@ Each major subdirectory has its own AGENTS.md with details and conventions:
 | `plugins/` | Custom skills, agents, and commands (`sjawhar/`) |
 | `installers/` | Per-tool install scripts run by `install.sh` |
 | `scripts/` | Standalone utility scripts |
-| `devpod/` | Agent box image (Sysbox container personal agent sessions run in) and bare-VM cloud-init (dormant) |
+| `devpod/` | Opt-in agent box image (the Sysbox container `scripts/agentbox` runs a session in) and bare-VM cloud-init (dormant) |
 
 ## How Install Works
 

@@ -1,6 +1,6 @@
 # devpod
 
-Two independent halves: the **agent box image** (`Dockerfile` + `entrypoint.sh`), which every personal agent session on the devbox runs in, and a **cloud-init script** for a bare VM (`config.toml` `[devbox]` `user_data`), currently dormant.
+Two independent halves: the opt-in **agent box image** (`Dockerfile` + `entrypoint.sh`) that `scripts/agentbox` runs a session in, and a **cloud-init script** for a bare VM (`config.toml` `[devbox]` `user_data`), currently dormant.
 
 ## Agent box image
 
