@@ -77,7 +77,7 @@ resolve_repo() {
     REPO_NAME="$first"
     REPO_DIR="$HOME/$REPO_NAME"
     [[ -e "$REPO_DIR/.jj" || -e "$REPO_DIR/.git" ]] \
-        || die "$REPO_DIR is not a repository (no .jj or .git); a session with no repo to box runs on the host: AGENTBOX_BYPASS=1 omp"
+        || die "$REPO_DIR is not a repository (no .jj or .git)"
     BOX="agentbox-$REPO_NAME"
     VOLUME="$BOX-docker"
     # jj workspaces of a colocated repo live under ~/.worktrees/<repo>/ and point

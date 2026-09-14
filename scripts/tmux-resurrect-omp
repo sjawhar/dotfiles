@@ -10,25 +10,18 @@ The omp TUI holds its current session file open, so the running session is
 read from the process's fd table: ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl.
 That is true whichever way the session was entered (fresh, --resume, -c, or the
 in-app picker). Each omp pane line is rewritten to a command that resumes that
-session where agents run (scripts/agentbox, shims/omp):
+session where it was running:
 
-- a pane running `agentbox omp <repo>` shows the launcher as its command; the
-  omp process lives in the box under another uid, so it is found by asking the
-  box for omp processes whose TMUX_PANE names this pane, and the line becomes
-  `agentbox omp <repo> --resume <id>`;
-- on a host without the marker installers/agentbox.sh writes, every omp pane
-  becomes plain `omp --resume <id>` as before;
-- a pane running omp on the host (started before boxes, or under
-  AGENTBOX_BYPASS) becomes `agentbox omp <repo> --resume <id>` when its
-  directory is a repository under $HOME (or one of its ~/.worktrees/<repo>
-  workspaces): the next restore moves the session into its box, and the session
-  file and cwd resolve identically inside. With no repo to box, it becomes
-  `AGENTBOX_BYPASS=1 omp --resume <id>`.
+- a pane running omp on the host becomes `omp --resume <id>`;
+- a pane running `agentbox omp <repo>` (scripts/agentbox) shows the launcher as
+  its command; the omp process lives in the box under another uid, so it is
+  found by asking the box for omp processes whose TMUX_PANE names this pane, and
+  the line becomes `agentbox omp <repo> --resume <id>`.
 
-`@resurrect-processes` in .tmux.conf lists all three shapes. Invoked by
-resurrect with the save file path; panes whose session cannot be determined
-(omp still starting, process gone) are left as written and come back as a
-shell in the same directory.
+`@resurrect-processes` in .tmux.conf lists both shapes. Invoked by resurrect
+with the save file path; panes whose session cannot be determined (omp still
+starting, process gone) are left as written and come back as a shell in the
+same directory.
 """
 
 from __future__ import annotations
@@ -52,10 +45,6 @@ BOX_PANE = re.compile(r"(?:^|[\s/])agentbox(?:\s+omp(?:\s|$)|-[^\s]+)")
 MAX_DEPTH = 4
 MAX_PROCESSES = 32
 FIELD_SEP = "\t"
-HOME = Path.home()
-# installers/agentbox.sh marks a host whose sessions run in boxes; elsewhere
-# (the laptop) omp runs directly and the saved command stays `omp --resume`.
-BOX_HOST = (Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "agentbox" / "host").exists()
 
 # Run inside a box: every omp process's pane id, repo, and open session files.
 BOX_SESSIONS_SCRIPT = r"""
@@ -193,30 +182,9 @@ def box_sessions() -> dict[str, tuple[str, str]]:
     return {pane: (repo, sid) for pane, (_, repo, sid) in best.items()}
 
 
-def repo_for_dir(directory: str) -> str | None:
-    """The box a pane in `directory` belongs to: the repository under $HOME it
-    sits in (a directory with .jj or .git), or the repo a ~/.worktrees/<repo>
-    workspace belongs to. None for a directory outside any repository."""
-    try:
-        rel = Path(directory).resolve().relative_to(HOME)
-    except (ValueError, OSError):
-        return None
-    if not rel.parts:
-        return None
-    if rel.parts[0] == ".worktrees" and len(rel.parts) >= 2:
-        return rel.parts[1]
-    candidate = HOME / rel.parts[0]
-    if (candidate / ".jj").exists() or (candidate / ".git").exists():
-        return rel.parts[0]
-    return None
-
 
 def resume_command(repo: str | None, sid: str) -> str:
-    if not BOX_HOST:
-        return f"omp --resume {sid}"
-    if repo:
-        return f"agentbox omp {repo} --resume {sid}"
-    return f"AGENTBOX_BYPASS=1 omp --resume {sid}"
+    return f"agentbox omp {repo} --resume {sid}" if repo else f"omp --resume {sid}"
 
 
 def rewrite(save_file: Path) -> tuple[int, int]:
@@ -251,7 +219,7 @@ def rewrite(save_file: Path) -> tuple[int, int]:
             sid = host_session_for(pane_pid, full_command)
             if sid is None:
                 continue
-            repo = repo_for_dir(fields[7][1:])  # resurrect writes the dir as `:/path`
+            repo = None
         fields[10] = ":" + resume_command(repo, sid)
         lines[i] = FIELD_SEP.join(fields)
         rewritten += 1

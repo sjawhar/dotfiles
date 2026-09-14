@@ -15,8 +15,8 @@
 #   tmux-omp-ids menu <copy|resume> <pane>  Show a display-menu of UUIDs in <pane>
 #   tmux-omp-ids copy <n>                   Copy UUID number <n> (bare)
 #   tmux-omp-ids resume <n> [<pane>]        Copy the resume command for UUID number <n>
-#                                           (`agentbox omp <repo> --resume …` for a pane in a
-#                                           repository under $HOME, else a host bypass)
+#                                           (`agentbox omp <repo> --resume …` when <pane> runs
+#                                           a box session, else `omp --resume …`)
 set -euo pipefail
 
 cache="${TMUX_TMPDIR:-/tmp}/tmux-omp-ids-$(id -u)"
@@ -67,19 +67,14 @@ copy)
 resume)
     id=$(sed -n "${2}p" "$cache")
     [ -n "$id" ] || exit 1
-    # Sessions run in boxes (scripts/agentbox): resume inside the repo's box when
-    # the pane sits in a repository under $HOME (or one of its ~/.worktrees
-    # workspaces); a pane outside any repo gets the host bypass.
-    dir=$(tmux display-message -p ${3:+-t "$3"} '#{pane_current_path}')
-    rel=${dir#"$HOME"/}
-    repo=${rel%%/*}
-    [ "$repo" = .worktrees ] && { rel=${rel#.worktrees/}; repo=${rel%%/*}; }
-    if [ ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/agentbox/host" ]; then
-        cmd="omp --resume $id"
-    elif [ "$rel" != "$dir" ] && [ -n "$repo" ] && { [ -e "$HOME/$repo/.jj" ] || [ -e "$HOME/$repo/.git" ]; }; then
+    # A pane running `agentbox omp <repo>` (scripts/agentbox) resumes inside its
+    # box; any other pane resumes on the host.
+    repo=$(tmux display-message -p ${3:+-t "$3"} '#{pane_current_command}' >/dev/null 2>&1 && \
+        ps -o args= -p "$(tmux display-message -p ${3:+-t "$3"} '#{pane_pid}')" 2>/dev/null | sed -nE 's#.*scripts/agentbox omp ([^ ]+).*#\1#p')
+    if [ -n "$repo" ]; then
         cmd="agentbox omp $repo --resume $id"
     else
-        cmd="AGENTBOX_BYPASS=1 omp --resume $id"
+        cmd="omp --resume $id"
     fi
     printf %s "$cmd" | "$copy_cmd"
     tmux display-message "Copied: $cmd"
