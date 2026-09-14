@@ -36,6 +36,7 @@
 [gh-app "agent"]
 	app-id = 4943528
 	key-secret = GH_AGENT_APP_PRIVATE_KEY_B64
+	fallback-secret = GH_UPSTREAM_TOKEN
 
 # Commit signing, mirroring the jj setup in .jjconfig.toml: same key path, same
 # allowed-signers file, so a commit verifies the same whether jj or plain git

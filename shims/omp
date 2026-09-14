@@ -48,7 +48,8 @@ fi
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
 # Agents authenticate as the GitHub App installation matching each repo's
-# owner; owners without an installation fall through to your gh user auth.
+# owner; owners without an installation get the upstream token from the
+# secrets store (gh-app.agent.fallback-secret), never your keyring login.
 # Mirrors scripts/oc. See gh-app-routes.gitconfig and shims/gh-app-token.
 _gc_index="${GIT_CONFIG_COUNT:-0}"
 export "GIT_CONFIG_KEY_${_gc_index}=include.path"

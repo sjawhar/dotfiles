@@ -23,7 +23,19 @@ INSTALLED = {"sjawhar": 111, "trajectory-labs-pbc": 222}
 GIT_CONFIG = {
     "gh-app.agent.app-id": "3202636",
     "gh-app.agent.key-secret": "KEY",
+    "gh-app.agent.fallback-secret": "GH_UPSTREAM_TOKEN",
 }
+
+# A `secrets` CLI stand-in: knows one token, refuses every other name the way
+# the real CLI does, and logs each invocation so tests can assert it was
+# never consulted.
+SECRETS_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >> "$SECRETS_STUB_LOG"
+case "$2" in
+  GH_UPSTREAM_TOKEN) echo ghp_stub_upstream_token ;;
+  *) echo "secrets: secret '$2' not found" >&2; exit 1 ;;
+esac
+"""
 
 
 class FakeResponse:
@@ -68,11 +80,25 @@ def fake_github(installed=INSTALLED, mint_404_ids=()):
 class GhAppTokenTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        self.git_config = dict(GIT_CONFIG)
+        stub_dir = Path(self.temp_dir.name) / "bin"
+        stub_dir.mkdir()
+        (stub_dir / "secrets").write_text(SECRETS_STUB)
+        (stub_dir / "secrets").chmod(0o700)
+        self.secrets_log = Path(self.temp_dir.name) / "secrets.log"
         self.patches = [
-            patch.object(gh_app_token, "CACHE_DIR", Path(self.temp_dir.name)),
+            patch.object(gh_app_token, "CACHE_DIR", Path(self.temp_dir.name) / "cache"),
             patch.object(gh_app_token, "generate_jwt", return_value="jwt"),
             patch.object(gh_app_token, "resolve_private_key", return_value="private-key"),
-            patch.object(gh_app_token, "git_config", side_effect=lambda key: GIT_CONFIG[key]),
+            patch.object(gh_app_token, "git_config", side_effect=lambda key: self.git_config[key]),
+            patch.object(gh_app_token, "git_config_optional", side_effect=self.git_config.get),
+            patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+                    "SECRETS_STUB_LOG": str(self.secrets_log),
+                },
+            ),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -81,6 +107,9 @@ class GhAppTokenTests(unittest.TestCase):
         for patcher in reversed(self.patches):
             patcher.stop()
         self.temp_dir.cleanup()
+
+    def secrets_calls(self):
+        return self.secrets_log.read_text().splitlines() if self.secrets_log.exists() else []
 
     def run_main(self, argv, stdin=""):
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -120,18 +149,72 @@ class GhAppTokenTests(unittest.TestCase):
                 gh_app_token.resolve_installation("3202636", "pk", "missing-owner")
         self.assertEqual(len(urlopen.calls), 2)
 
-    def test_uninstalled_owner_falls_through_silently_in_credential_mode(self):
+    def test_uninstalled_owner_answers_fallback_secret_in_credential_mode(self):
         with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):
             rc, stdout, stderr = self.run_main(
-                ["agent", "get"], stdin="host=github.com\npath=missing/repo.git\n\n"
+                ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
             )
-        self.assertEqual((rc, stdout), (0, ""))
+        self.assertEqual(rc, 0)
+        self.assertIn("username=x-access-token", stdout)
+        self.assertIn("password=ghp_stub_upstream_token", stdout)
+        self.assertNotIn("quit=1", stdout)
+        self.assertEqual(self.secrets_calls(), ["get GH_UPSTREAM_TOKEN --value"])
+        # The fallback is static: no token-cache entry is written for it.
+        self.assertFalse(gh_app_token.token_cache_file("agent", "metr").exists())
 
-    def test_uninstalled_owner_is_loud_in_cli_mode(self):
+    def test_uninstalled_owner_without_fallback_secret_quits(self):
+        del self.git_config["gh-app.agent.fallback-secret"]
         with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):
-            rc, stdout, stderr = self.run_main(["agent", "--owner", "missing"])
+            rc, stdout, stderr = self.run_main(
+                ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
+            )
         self.assertEqual(rc, 1)
-        self.assertIn("not installed", stderr)
+        self.assertEqual(stdout, "quit=1\n")
+        self.assertIn(
+            "no App installation for owner METR and no fallback-secret on profile agent", stderr
+        )
+        self.assertEqual(self.secrets_calls(), [])
+
+    def test_uninstalled_owner_with_unreadable_fallback_secret_quits(self):
+        self.git_config["gh-app.agent.fallback-secret"] = "GH_MISSING_TOKEN"
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):
+            rc, stdout, stderr = self.run_main(
+                ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
+            )
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "quit=1\n")
+        self.assertIn("failed to fetch secret GH_MISSING_TOKEN", stderr)
+        self.assertIn("secret 'GH_MISSING_TOKEN' not found", stderr)
+
+    def test_covered_owner_mint_failure_never_reads_fallback_secret(self):
+        # A 500 on the mint (not a 404) is a genuine App failure for a covered
+        # owner: quit=1, and identity never swaps to the fallback token.
+        def urlopen(request):
+            if "access_tokens" in request.full_url:
+                raise gh_app_token.urllib.error.HTTPError(
+                    request.full_url, 500, "Server Error", {}, io.BytesIO(b"boom")
+                )
+            return FakeResponse([{"id": 111, "account": {"login": "sjawhar"}}])
+
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=urlopen):
+            rc, stdout, stderr = self.run_main(
+                ["agent", "get"], stdin="host=github.com\npath=sjawhar/dotfiles.git\n\n"
+            )
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "quit=1\n")
+        self.assertIn("GitHub API 500", stderr)
+        self.assertEqual(self.secrets_calls(), [])
+
+    def test_uninstalled_owner_prints_fallback_secret_in_cli_mode(self):
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):
+            rc, stdout, stderr = self.run_main(["agent", "--owner", "METR"])
+        self.assertEqual((rc, stdout), (0, "ghp_stub_upstream_token\n"))
+
+        del self.git_config["gh-app.agent.fallback-secret"]
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):
+            rc, stdout, stderr = self.run_main(["agent", "--owner", "METR"])
+        self.assertEqual((rc, stdout), (1, ""))
+        self.assertIn("no App installation for owner METR", stderr)
 
     def test_missing_owner_falls_through_in_credential_mode_only(self):
         rc, stdout, _ = self.run_main(["agent", "get"], stdin="host=github.com\n\n")
