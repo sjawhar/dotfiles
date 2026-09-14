@@ -6,11 +6,18 @@ Subcommands (all read-only except `apply`, and `tmp --apply`):
   procs                          JSON list of every process's cwd (liveness evidence)
   inventory --repo R [--root D]  every working copy of jj repo R found under roots D
                                  (default: $HOME), classified against trunk/remotes
-  plan --inventory I --protected P [--fresh-hours H] [--skip-pushed]
-                                 turn an inventory into a deletion plan JSON
-  apply --plan P --protected PR --ledger L [--io-limit PCT]
+  plan --inventory I --protected P [--fresh-hours H] [--skip-pushed] [--releases R]
+                                 turn an inventory (and/or an owner-release file)
+                                 into a deletion plan JSON; every reapable class is
+                                 freshness-gated and refusals are reported, not dropped
+  apply --plan P --protected PR --ledger L [--io-limit PCT] [--releases R]
                                  paced executor: one item at a time, ionice idle,
-                                 re-reads the protected file and live cwds per item
+                                 single-instance per store (flock), re-verifies each
+                                 item's class and disk-vs-store divergence before acting
+  release-capture --path P --repo R --kind git|jj [--name N] [--releases R]
+                                 print an owner-release entry binding the slot's
+                                 identity (HEAD hash + worktree admin id + dir mtime);
+                                 --releases appends it to the releases file (locked)
   tmp --dir D --older-than-hours H [--families REGEX] [--protected P] [--apply --ledger L]
                                  stale temp-dir families by directory mtime
   containers                     running containers with compose project, age, and
@@ -23,14 +30,23 @@ ways: an item is protected if it is under a protected path OR a protected path i
 under it. Plan items may set "subpath_release": true to bypass the prefix guard
 for a path an owner explicitly released inside a live tree; the live-process
 check still applies.
+
+Releases file format: {"releases": [entry, ...]} with entries printed (and, with
+--releases, appended) by `release-capture`. Entries are one-shot: `apply` retires an
+entry in place (adds a "retired" field) once it acts on it; `plan` only reports and
+never consumes one. Every mutation of the file (retirement, append) holds an
+exclusive flock on the file itself, so concurrent mutators never lose updates.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -231,87 +247,599 @@ def cmd_inventory(args: argparse.Namespace) -> None:
     print(Counter(str(r["class"]) for r in rows), file=sys.stderr)
 
 
+# ---------------------------------------------------------------- reaper helpers
+
+RECOVER_NOTE = (
+    "jj op revert {op} — restores the workspace registration only, never files; "
+    "reverting a forget whose name was reused since is a silent no-op"
+)
+
+
+def find_op(repo: str, description: str, limit: int | None = None) -> tuple[str, int] | None:
+    """Most recent op whose description matches exactly; (op_id, epoch_s) or None.
+
+    Exact description match, never `-n1`: on a shared store a concurrent op can land
+    between an action and its capture, so positional selection names the wrong op.
+    """
+    cmd = JJ + ["op", "log", "--no-graph", "-T", 'id.short() ++ "\\t" ++ time.start().format("%s") ++ "\\t" ++ description ++ "\\n"']
+    if limit is not None:
+        cmd += ["-n", str(limit)]
+    rc, out = run(cmd, cwd=repo)
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3 and parts[2] == description:
+            return parts[0], int(parts[1])
+    return None
+
+
+def capture_forget_op(repo: str, name: str) -> str | None:
+    hit = find_op(repo, f"forget workspace {name}", limit=50)  # forget op description is unquoted (measured)
+    return hit[0] if hit else None
+
+
+def jj_registered(repo: str) -> set[str] | None:
+    rc, out = run(JJ + ["workspace", "list"], cwd=repo)
+    if rc != 0:
+        return None
+    return {line.split(":")[0] for line in out.splitlines() if ":" in line}
+
+
+def jj_merged_state(repo: str, name: str, trunk: str) -> dict[str, Any] | None:
+    """Re-derive @-empty / unmerged / unpushed for <name>@; None = could not derive."""
+    rc, at = run(JJ + ["log", "-r", f"{name}@", "--no-graph", "-T", 'empty ++ "|" ++ description.first_line()'], cwd=repo)
+    if rc != 0:
+        return None
+    rc, um = run(
+        JJ + ["log", "-r", f"(::{name}@ ~ ::{trunk}) ~ empty()", "--no-graph", "-T",
+              'commit_id.short() ++ "|" ++ self.contained_in("::remote_bookmarks()") ++ "\\n"'],
+        cwd=repo,
+    )
+    if rc != 0:
+        return None
+    rows = [line.split("|", 1) for line in um.splitlines() if "|" in line]
+    return {"at_empty": at.split("|")[0] == "true", "unmerged": len(rows), "unpushed": sum(1 for r in rows if r[1] == "false")}
+
+
+def jj_divergence(repo: str, name: str, path: str, limit: int = 5) -> list[str] | None:
+    """Disk-vs-store divergence for <name>@ — modified/deleted/added tracked files and
+    untracked/ignored content (Decision 1). None = unverifiable; callers must refuse."""
+    rc, out = run(JJ + ["file", "list", "-r", f"{name}@"], cwd=repo)
+    if rc != 0:
+        return None
+    tracked = {line for line in out.splitlines() if line}
+    ondisk: set[str] = set()
+    for dp, dn, fn in os.walk(path):
+        if dp == path:
+            dn[:] = [d for d in dn if d not in (".jj", ".git")]
+            fn = [f for f in fn if f != ".git"]
+        for d in list(dn):
+            if os.path.islink(os.path.join(dp, d)):  # walk won't descend; the link itself is disk-only content
+                ondisk.add(os.path.relpath(os.path.join(dp, d), path))
+                dn.remove(d)
+        for f in fn:
+            ondisk.add(os.path.relpath(os.path.join(dp, f), path))
+    diffs = [f"untracked:{p}" for p in sorted(ondisk - tracked)]
+    diffs += [f"deleted:{p}" for p in sorted(tracked - ondisk)]
+    for rel in sorted(tracked & ondisk):
+        if len(diffs) >= limit:
+            break
+        full = os.path.join(path, rel)
+        if os.path.islink(full):
+            diffs.append(f"symlink:{rel}")  # `jj file show` cannot render a symlink (measured); refuse rather than guess
+            continue
+        r = subprocess.run(JJ + ["file", "show", "-r", f"{name}@", rel], cwd=repo, capture_output=True)
+        if r.returncode != 0:
+            return None
+        if Path(full).read_bytes() != r.stdout:
+            diffs.append(f"modified:{rel}")
+    return diffs[:limit]
+
+
+def git_head_pushed(path: str) -> bool | None:
+    """Every commit reachable from HEAD reachable from some remote ref? None = could not derive."""
+    rc, lo = run(["git", "-C", path, "log", "HEAD", "--not", "--remotes", "--oneline", "-n", "1"], timeout=120)
+    if rc != 0:
+        return None
+    return not lo.strip()
+
+
+def git_status_clean(path: str) -> tuple[bool, str]:
+    """(clean, refusal reason). --ignored: gitignored content (a .env, a venv) exists only on
+    disk and `worktree remove --force` destroys it (Decision 1); plain --porcelain omits it
+    (measured: `!! .env` / `!! .venv/` — directories included — appear only with --ignored)."""
+    rc, out = run(["git", "-C", path, "status", "--porcelain", "--ignored"], timeout=600)
+    if rc != 0:
+        return False, f"git status failed: {out[-200:]}"
+    lines = out.strip().splitlines()
+    if not lines:
+        return True, ""
+    cls = ("ignored content exists only on disk" if all(ln.startswith("!!") for ln in lines)
+           else "dirty git worktree")
+    return False, f"{cls} (status --porcelain --ignored non-empty): {out.strip()[:400]}"
+
+
+def slot_identity(path: str, repo: str | None = None, name: str | None = None) -> dict[str, Any] | None:
+    """A slot's identity: HEAD hash + worktree admin id + directory mtime. None = unreadable."""
+    try:
+        mtime = os.lstat(path).st_mtime
+    except OSError:
+        return None
+    gitfile = Path(path) / ".git"
+    if gitfile.is_file():
+        pointer = gitfile.read_text().strip()
+        if not pointer.startswith("gitdir:"):
+            return None
+        admin_id = os.path.basename(pointer.split(":", 1)[1].strip())
+        rc, head = run(["git", "-C", path, "rev-parse", "HEAD"], timeout=120)
+        if rc != 0:
+            return None
+        return {"head": head, "admin_id": admin_id, "mtime": mtime}
+    ws = name or jj_workspace_name(path)
+    if ws and repo:  # non-colocated jj workspace: the working-copy commit is the HEAD analogue
+        rc, head = run(JJ + ["log", "-r", f"{ws}@", "--no-graph", "-T", "commit_id"], cwd=repo)
+        if rc != 0:
+            return None
+        return {"head": head, "admin_id": ws, "mtime": mtime}
+    return None
+
+
+def apply_lock_path(repos: list[str]) -> Path:
+    """Fixed per-store lock path so every apply entry point (timer or hand-run) contends."""
+    key = "\n".join(sorted({str(Path(r).resolve()) for r in repos}))
+    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+    state = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))) / "disk-hygiene"
+    state.mkdir(parents=True, exist_ok=True)
+    return state / f"apply-{digest}.lock"
+
+
+def load_releases(path: str) -> list[dict[str, Any]]:
+    with open(path) as f:
+        fcntl.flock(f, fcntl.LOCK_SH)
+        data: dict[str, Any] = json.load(f)
+    return [dict(e) for e in data["releases"]]
+
+
+def retire_release(path: str, entry: dict[str, Any], reason: str) -> None:
+    """One-shot semantics: mark the acted-on entry retired, in place.
+
+    The read-modify-write holds LOCK_EX on the releases file itself, so concurrent
+    mutators (another apply's retirement, an operator's `release-capture --releases`
+    append) serialize instead of losing updates. The rewrite is in place (seek +
+    truncate), not os.replace: replacing the inode would hand a waiter that already
+    opened the old file a stale copy to write back.
+    """
+    with open(path, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        doc: dict[str, Any] = json.load(f)
+        for e in doc["releases"]:
+            if not e.get("retired") and (e.get("path"), e.get("head"), e.get("admin_id"), e.get("mtime")) == (
+                entry.get("path"), entry.get("head"), entry.get("admin_id"), entry.get("mtime")
+            ):
+                e["retired"] = {"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "reason": reason}
+                break
+        else:
+            raise RuntimeError(f"release entry not found for retirement: {entry.get('path')}")
+        f.seek(0)
+        json.dump(doc, f, indent=1)
+        f.truncate()
+
+
+def append_release(path: str, entry: dict[str, Any]) -> None:
+    """Append a fresh release entry under the same LOCK_EX as retire_release, so a
+    capture landing mid-apply is never lost to a concurrent rewrite. Creates the file.
+    O_CREAT without O_APPEND: append mode would force every write to the file's end,
+    breaking the in-place rewrite."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    with os.fdopen(fd, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        raw = f.read()
+        doc: dict[str, Any] = json.loads(raw) if raw.strip() else {"releases": []}
+        doc["releases"].append(entry)
+        f.seek(0)
+        json.dump(doc, f, indent=1)
+        f.truncate()
+
+
 # ---------------------------------------------------------------- plan
 
 def cmd_plan(args: argparse.Namespace) -> None:
-    inv: dict[str, Any] = json.load(open(args.inventory))
+    if not args.inventory and not args.releases:
+        sys.exit("plan needs --inventory and/or --releases")
     protected = load_protected(args.protected)
     plan: list[dict[str, Any]] = []
-    for r in inv["rows"]:
-        path, cls = r.get("path"), r["class"]
-        if not path or cls in ("LIVE", "UNPUSHED", "GIT_UNPUSHED", "STALE_REGISTRATION"):
-            continue
-        if is_protected(path, protected):
-            continue
-        idle = r.get("jj_idle_hours")
-        if cls in ("MERGED", "PUSHED") and idle is not None and idle < args.fresh_hours:
-            continue
-        if cls == "PUSHED" and args.skip_pushed:
-            continue
-        if cls == "GIT_HEAD_PUSHED" and not args.include_git_worktrees:
-            continue  # dirty-tree state is unchecked (git status is slow); opt in after checking
-        kind = "git" if r.get("git_only") else "jj"
-        reason = {
-            "MERGED": "all non-empty ancestors in trunk; @ empty",
-            "PUSHED": f"all commits on remote bookmarks {r.get('bookmarks')}",
-            "UNREGISTERED": "jj already forgot this workspace; directory is residue",
-            "GIT_HEAD_PUSHED": "git worktree whose HEAD is on a remote ref (uncommitted edits unchecked)",
-        }[cls]
-        plan.append({"path": path, "name": r.get("name"), "kind": kind, "repo": inv["repo"], "reason": f"{reason}; jj idle {idle}h"})
-    json.dump({"plan": plan, "protected": protected}, sys.stdout, indent=1)
-    print(f"\n{len(plan)} items", file=sys.stderr)
+    refused: list[dict[str, Any]] = []
+    trunk = "trunk()"
+    if args.inventory:
+        inv: dict[str, Any] = json.load(open(args.inventory))
+        trunk, repo = inv["trunk"], inv["repo"]
+        for r in inv["rows"]:
+            path, cls = r.get("path"), r["class"]
+            if cls == "STALE_REGISTRATION":
+                name = r.get("name")
+                if not name:
+                    # A git worktree admin entry whose directory is gone: there is no jj
+                    # workspace name to verify merged-ness against. A colocated jj slot's
+                    # registration is carried by its own named row; the git-side entry
+                    # itself is the owner's to clean up.
+                    refused.append({"path": path, "name": None, "class": cls,
+                                    "reason": "git worktree admin entry with no jj workspace name: nothing to verify merged-ness against; git-side cleanup left to the owner"})
+                    continue
+                st = jj_merged_state(repo, name, trunk)
+                if st is None:
+                    refused.append({"name": name, "class": cls, "reason": "cannot derive merged-ness for the registration"})
+                    continue
+                if st["unmerged"] or not st["at_empty"]:
+                    continue  # not merged: not reapable
+                reg = find_op(repo, f"add workspace '{name}'")  # add op single-quotes the name (measured)
+                if reg is None:
+                    refused.append({"name": name, "class": cls,
+                                    "reason": "registering op unfindable (op log truncated?): refusing — treating missing as old would re-open the creation race"})
+                    continue
+                age_h = (time.time() - reg[1]) / 3600
+                if age_h < args.fresh_hours:
+                    refused.append({"name": name, "class": cls,
+                                    "reason": f"registering op {age_h:.2f}h old is younger than {args.fresh_hours}h: likely the `jj workspace add` creation window"})
+                    continue
+                plan.append({"kind": "forget", "path": None, "name": name, "repo": repo, "class": cls,
+                             "reason": f"registration with no directory; {name}@ merged; registering op {age_h:.1f}h old"})
+                continue
+            if not path or cls in ("LIVE", "UNPUSHED", "GIT_UNPUSHED", "GIT_HEAD_PUSHED"):
+                continue  # keep classes; plain git worktrees are reaped only via an owner release
+            if is_protected(path, protected):
+                continue
+            idle = r.get("jj_idle_hours")
+            if idle is None:  # D1: freshness unverifiable => refuse, whatever the class
+                refused.append({"path": path, "name": r.get("name"), "class": cls,
+                                "reason": "idle unknown (no tree_state mtime): freshness unverifiable — a mid-creation slot looks exactly like this"})
+                continue
+            if idle < args.fresh_hours:
+                continue
+            if cls == "PUSHED" and args.skip_pushed:
+                continue
+            reason = {
+                "MERGED": "all non-empty ancestors in trunk; @ empty",
+                "PUSHED": f"all commits on remote bookmarks {r.get('bookmarks')}",
+                "UNREGISTERED": "jj already forgot this workspace; directory is residue",
+            }[cls]
+            plan.append({"path": path, "name": r.get("name"), "kind": "jj", "repo": repo, "class": cls,
+                         "reason": f"{reason}; jj idle {idle}h"})
+    if args.releases:
+        for e in load_releases(args.releases):
+            if e.get("retired"):
+                continue
+            note = "path absent"
+            if os.path.lexists(e["path"]):
+                ident = slot_identity(e["path"], repo=e.get("repo"), name=e.get("name"))
+                expected = {"head": e.get("head"), "admin_id": e.get("admin_id"), "mtime": e.get("mtime")}
+                note = "identity matches" if ident == expected else f"identity mismatch (read-only report; apply decides): now {ident}"
+            plan.append({"kind": "released", "path": e["path"], "name": e.get("name"), "repo": e.get("repo"),
+                         "class": "RELEASED", "release": e, "reason": f"owner-released slot; {note}"})
+    json.dump({"plan": plan, "refused": refused, "protected": protected, "trunk": trunk,
+               "fresh_hours": args.fresh_hours}, sys.stdout, indent=1)
+    print(f"\n{len(plan)} items, {len(refused)} refused", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- apply
 
+def _pace(io_limit: float, ledger: Path, path: str | None) -> None:
+    waited = 0
+    while io_full_avg10() > io_limit:
+        time.sleep(15)
+        waited += 15
+    if waited:
+        ledger_write(ledger, {"op": "paced", "path": path, "waited_s": waited})
+
+
+def _apply_forget(item: dict[str, Any], trunk: str, fresh_hours: float, ledger: Path) -> None:
+    """D8: forget a merged registration with no directory, re-verified at apply time."""
+    name, repo = item["name"], item["repo"]
+    registered = jj_registered(repo)
+    if registered is None:
+        ledger_write(ledger, {"op": "error", "name": name, "stage": "workspace-list", "out": "jj workspace list failed"})
+        return
+    if name not in registered:
+        ledger_write(ledger, {"op": "absent", "name": name, "reason": "registration already gone"})
+        return
+    st = jj_merged_state(repo, name, trunk)
+    if st is None or st["unmerged"] or not st["at_empty"]:
+        ledger_write(ledger, {"op": "skip", "name": name, "reason": f"re-verification failed: {name}@ no longer merged ({st})"})
+        return
+    reg = find_op(repo, f"add workspace '{name}'")
+    if reg is None:
+        ledger_write(ledger, {"op": "skip", "name": name, "reason": "re-verification failed: registering op unfindable"})
+        return
+    if (time.time() - reg[1]) / 3600 < fresh_hours:
+        ledger_write(ledger, {"op": "skip", "name": name, "reason": "re-verification failed: registering op younger than threshold"})
+        return
+    rc, out = run(JJ + ["workspace", "forget", name], cwd=repo)
+    if rc != 0:
+        ledger_write(ledger, {"op": "error", "name": name, "stage": "forget", "out": out[-400:]})
+        return
+    op_id = capture_forget_op(repo, name)
+    if op_id is None:
+        ledger_write(ledger, {"op": "error", "name": name, "stage": "forget-op-capture",
+                              "out": "forget succeeded but its op id was not found in the op log"})
+        return
+    ledger_write(ledger, {"op": "forgot", "name": name, "reason": item.get("reason"),
+                          "forget_op": op_id, "recover": RECOVER_NOTE.format(op=op_id)})
+
+
+def _retire_after_removal(releases_path: str, entry: dict[str, Any], ledger: Path, path: str) -> None:
+    """Retire only after the ledger line is written: the ledger is the recovery surface,
+    so a destructive action is recorded before any step that can raise. A retire failure
+    (releases file edited, replaced, or clobbered) is ledgered as its own error line
+    rather than crashing apply mid-plan."""
+    try:
+        retire_release(releases_path, entry, "removed")
+    except (RuntimeError, OSError, ValueError, KeyError) as exc:
+        ledger_write(ledger, {"op": "error", "path": path, "stage": "retire", "out": repr(exc)[-400:]})
+
+
+def _cleanup_admin_entry(repo: str, admin_id: str) -> str:
+    """Targeted removal of one worktree admin entry (.git/worktrees/<admin_id>) after the
+    rm fallback deleted its directory. Never `git worktree prune`: on a shared store a
+    prune walks every slot and can delete other sessions' admin entries. Returns a result
+    string the caller ledgers — success and failure alike, nothing discarded. Refuses any
+    admin_id that is not a single plain directory name: slot_identity captures the id as
+    basename of the slot's .git pointer, so a crafted pointer ending in '/..' (or '/', '/.')
+    plus a matching release entry would otherwise resolve the join to .git itself or the
+    whole worktrees/ dir."""
+    if admin_id != os.path.basename(admin_id) or admin_id in ("", ".", ".."):
+        return f"admin-entry cleanup refused: admin id {admin_id!r} is not a plain directory name (join would escape .git/worktrees/)"
+    rc, gitdir = run(["git", "-C", repo, "rev-parse", "--git-common-dir"], timeout=120)
+    if rc != 0:
+        return f"admin-entry cleanup failed: rev-parse --git-common-dir: {gitdir[-200:]}"
+    admin = Path(gitdir if os.path.isabs(gitdir) else os.path.join(repo, gitdir)) / "worktrees" / admin_id
+    if not admin.is_dir():
+        return f"admin entry already absent: {admin}"
+    try:
+        shutil.rmtree(admin)
+    except OSError as exc:
+        return f"admin-entry cleanup failed: {exc}"
+    return f"admin entry removed: {admin}"
+
+
+def _apply_released(args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path) -> None:
+    """Owner-released slot: verify identity, guard reachability, refuse divergence, retire one-shot."""
+    e: dict[str, Any] = item["release"]
+    path, kind, repo = e["path"], e["kind"], e.get("repo")
+    if not args.releases:
+        ledger_write(ledger, {"op": "error", "path": path, "stage": "released",
+                              "out": "released plan item but apply got no --releases file to retire entries in"})
+        return
+
+    def refuse(reason: str, retire: bool = False) -> None:
+        ledger_write(ledger, {"op": "released-refused", "path": path, "reason": reason, "retire_intended": retire})
+        if retire:
+            try:
+                retire_release(args.releases, e, f"refused: {reason}")
+            except (RuntimeError, OSError, ValueError, KeyError) as exc:
+                ledger_write(ledger, {"op": "error", "path": path, "stage": "retire", "out": repr(exc)[-400:]})
+
+    if not os.path.lexists(path):
+        ledger_write(ledger, {"op": "released-absent", "path": path})
+        try:
+            retire_release(args.releases, e, "path absent at apply")
+        except (RuntimeError, OSError, ValueError, KeyError) as exc:
+            ledger_write(ledger, {"op": "error", "path": path, "stage": "retire", "out": repr(exc)[-400:]})
+        return
+    protected = load_protected(args.protected)
+    hit = is_protected(path, protected)
+    if hit and not (item.get("subpath_release") or e.get("subpath_release")):
+        refuse(f"protected by {hit}")
+        return
+    pu = procs_under(path)
+    if pu:
+        refuse(f"live processes {pu[:4]}")
+        return
+    ident = slot_identity(path, repo=repo, name=e.get("name"))
+    if ident is None:
+        refuse("slot identity unreadable")
+        return
+    if ident["head"] != e.get("head") or ident["admin_id"] != e.get("admin_id"):
+        refuse(f"adoption evidence — HEAD/admin-id mismatch (now {ident['head'][:12]}/{ident['admin_id']})", retire=True)
+        return
+    if ident["mtime"] != e.get("mtime"):
+        refuse(f"mtime-only mismatch ({e.get('mtime')} -> {ident['mtime']}): transient toucher; keeping the entry")
+        return
+    _pace(args.io_limit, ledger, path)
+    if kind == "git":
+        if git_head_pushed(path) is not True:
+            refuse("unpushed commits reachable from HEAD (removal would make them gc-able)")
+            return
+        clean, reason = git_status_clean(path)
+        if not clean:
+            refuse(reason)
+            return
+        fallback: list[str] | None = None
+        rc, out = run(["ionice", "-c3", "nice", "-n19", "git", "-C", str(repo), "worktree", "remove", "--force", path], timeout=1800)
+        if rc != 0:
+            fallback = ["git worktree remove failed; falling back to rm + targeted admin-entry cleanup", out[-200:]]
+            r = subprocess.run(RM + [path], capture_output=True, text=True)
+            if r.returncode != 0:
+                ledger_write(ledger, {"op": "error", "path": path, "stage": "rm", "out": r.stderr[-400:]})
+                return
+            # The admin id was identity-verified against the release entry above, so this
+            # removes exactly the reaped slot's entry — never a store-wide prune.
+            fallback.append(_cleanup_admin_entry(str(repo), str(e["admin_id"])))
+        removed: dict[str, Any] = {"op": "removed", "path": path, "kind": "released-git", "reason": item.get("reason")}
+        if fallback:
+            removed["fallback"] = fallback
+        ledger_write(ledger, removed)
+        _retire_after_removal(args.releases, e, ledger, path)
+        return
+    # jj released slot: merged-ness + divergence are enforced below; staleness comes from
+    # the mtime identity match above (any touch since release refuses) — stronger than an
+    # idle threshold, so none is checked.
+    name = e.get("name") or jj_workspace_name(path)
+    if not (name and repo):
+        refuse("jj released slot without a workspace name/repo")
+        return
+    st = jj_merged_state(str(repo), name, e.get("trunk", trunk))
+    if st is None or st["unmerged"] or not st["at_empty"]:
+        refuse(f"re-verification failed: not MERGED ({st})")
+        return
+    div = jj_divergence(str(repo), name, path)
+    if div is None or div:
+        refuse(f"divergence — content exists only on disk: {div}")
+        return
+    forget_op = None
+    registered = jj_registered(str(repo))
+    if registered and name in registered:
+        rc, out = run(JJ + ["workspace", "forget", name], cwd=str(repo))
+        if rc != 0:
+            ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "forget", "out": out[-400:]})
+            return
+        forget_op = capture_forget_op(str(repo), name)
+        if forget_op is None:
+            ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "forget-op-capture",
+                                  "out": "forget succeeded but its op id was not found; refusing rm without a recovery id"})
+            return
+    r = subprocess.run(RM + [path], capture_output=True, text=True)
+    if r.returncode != 0:
+        ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "rm", "out": r.stderr[-400:]})
+        return
+    entry: dict[str, Any] = {"op": "removed", "path": path, "name": name, "kind": "released-jj", "reason": item.get("reason")}
+    if forget_op:
+        entry["forget_op"] = forget_op
+        entry["recover"] = RECOVER_NOTE.format(op=forget_op)
+    ledger_write(ledger, entry)
+    _retire_after_removal(args.releases, e, ledger, path)
+
+
+def _apply_path_item(args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path) -> None:
+    path, name, cls = item["path"], item.get("name"), item.get("class")
+    repo = item.get("repo")
+    if item["kind"] != "jj":
+        # cmd_plan emits only jj path items; plain git worktrees are reaped solely via an
+        # owner release. Anything else is a hand-authored plan this pipeline cannot verify.
+        ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "kind",
+                              "out": f"unknown plan kind {item['kind']!r}: refusing removal without a verification pipeline"})
+        return
+
+    def skip(reason: str) -> None:
+        ledger_write(ledger, {"op": "skip", "path": path, "name": name, "reason": reason})
+
+    if not os.path.lexists(path):
+        ledger_write(ledger, {"op": "absent", "path": path, "name": name})
+        return
+    protected = load_protected(args.protected)  # re-read: the agent may add to it mid-run
+    hit = is_protected(path, protected)
+    if hit and not item.get("subpath_release"):
+        skip(f"protected by {hit}")
+        return
+    pu = procs_under(path)
+    if pu:
+        skip(f"live processes {pu[:4]}")
+        return
+    # D6: the plan may be stale — re-derive the class evidence immediately before acting
+    if repo:
+        disk_name = jj_workspace_name(path)
+        if cls in ("MERGED", "PUSHED"):
+            if disk_name != name:
+                skip(f"re-verification failed: workspace name changed ({name} -> {disk_name})")
+                return
+            st = jj_merged_state(repo, str(name), trunk)
+            if st is None:
+                skip("re-verification failed: cannot derive workspace state")
+                return
+            if cls == "MERGED" and (st["unmerged"] or not st["at_empty"]):
+                skip(f"re-verification failed: no longer MERGED ({st})")
+                return
+            if cls == "PUSHED" and st["unpushed"]:
+                skip(f"re-verification failed: no longer PUSHED ({st})")
+                return
+        elif cls == "UNREGISTERED":
+            registered = jj_registered(repo)
+            if registered is None or (disk_name and disk_name in registered):
+                skip("re-verification failed: workspace is registered (again) or the registry is unreadable")
+                return
+    _pace(args.io_limit, ledger, path)
+    # D2: refuse when disk diverges from the store — content that exists only on disk (Decision 1).
+    # Runs BEFORE the forget: costless ordering that guards against forget-semantics drift.
+    if not (name and repo and cls in ("MERGED", "PUSHED")):
+        skip("no working-copy commit to verify disk contents against (unregistered residue): refusing removal")
+        return
+    div = jj_divergence(repo, name, path)
+    if div is None:
+        skip("divergence unverifiable: refusing removal")
+        return
+    if div:
+        skip(f"divergence — content exists only on disk: {div}")
+        return
+    forgot = None
+    forget_op = None
+    registered = jj_registered(repo)
+    if registered and name in registered:
+        rc, out = run(JJ + ["workspace", "forget", name], cwd=repo)
+        forgot = [rc, out[-200:]]
+        if rc != 0:
+            ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "forget", "out": out[-400:]})
+            return
+        forget_op = capture_forget_op(repo, name)
+        if forget_op is None:
+            ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "forget-op-capture",
+                                  "out": "forget succeeded but its op id was not found; refusing rm without a recovery id"})
+            return
+    r = subprocess.run(RM + [path], capture_output=True, text=True)
+    if r.returncode != 0:
+        ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "rm", "out": r.stderr[-400:]})
+        return
+    entry: dict[str, Any] = {"op": "removed", "path": path, "name": name, "kind": "jj", "reason": item.get("reason"), "forgot": forgot}
+    if forget_op:
+        entry["forget_op"] = forget_op
+        entry["recover"] = RECOVER_NOTE.format(op=forget_op)
+    ledger_write(ledger, entry)
+
+
 def cmd_apply(args: argparse.Namespace) -> None:
-    plan: list[dict[str, Any]] = json.load(open(args.plan))["plan"]
+    doc: dict[str, Any] = json.load(open(args.plan))
+    plan: list[dict[str, Any]] = doc["plan"]
+    trunk: str = doc.get("trunk", "trunk()")
+    fresh_hours: float = doc.get("fresh_hours", 24.0)
     ledger = Path(args.ledger)
-    ledger_write(ledger, {"op": "apply-start", "items": len(plan), "plan": args.plan})
-    for item in plan:
-        path, name, kind = item["path"], item.get("name"), item["kind"]
-        repo = item.get("repo")
-        if not os.path.lexists(path):
-            ledger_write(ledger, {"op": "absent", "path": path, "name": name})
-            continue
-        protected = load_protected(args.protected)  # re-read: the agent may add to it mid-run
-        hit = is_protected(path, protected)
-        if hit and not item.get("subpath_release"):
-            ledger_write(ledger, {"op": "skip", "path": path, "name": name, "reason": f"protected by {hit}"})
-            continue
-        pu = procs_under(path)
-        if pu:
-            ledger_write(ledger, {"op": "skip", "path": path, "name": name, "reason": f"live processes {pu[:4]}"})
-            continue
-        waited = 0
-        while io_full_avg10() > args.io_limit:
-            time.sleep(15)
-            waited += 15
-        if waited:
-            ledger_write(ledger, {"op": "paced", "path": path, "waited_s": waited})
-        forgot = None
-        if kind == "jj" and name and repo:
-            rc, out = run(JJ + ["workspace", "list"], cwd=repo)
-            if name in {line.split(":")[0] for line in out.splitlines() if ":" in line}:
-                rc, out = run(JJ + ["workspace", "forget", name], cwd=repo)
-                forgot = [rc, out[-200:]]
-                if rc != 0:
-                    ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "forget", "out": out[-400:]})
-                    continue
-        if kind == "git" and repo:
-            rc, out = run(["ionice", "-c3", "nice", "-n19", "git", "-C", repo, "worktree", "remove", "--force", path], timeout=1800)
-            if rc == 0:
-                ledger_write(ledger, {"op": "removed", "path": path, "kind": kind, "reason": item.get("reason")})
-                continue
-            forgot = ["git worktree remove failed; falling back to rm + prune", out[-200:]]
-        r = subprocess.run(RM + [path], capture_output=True, text=True)
-        if r.returncode != 0:
-            ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "rm", "out": r.stderr[-400:]})
-            continue
-        if kind == "git" and repo:
-            run(["git", "-C", repo, "worktree", "prune"])
-        ledger_write(ledger, {"op": "removed", "path": path, "name": name, "kind": kind, "reason": item.get("reason"), "forgot": forgot})
-    ledger_write(ledger, {"op": "apply-complete", "items": len(plan)})
+    # D5: single instance per store, whatever the entry point (timer or hand-run)
+    lock_path = apply_lock_path([item["repo"] for item in plan if item.get("repo")])
+    lock_fd = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        ledger_write(ledger, {"op": "locked", "lock": str(lock_path), "reason": "another apply holds the per-store lock; exiting"})
+        lock_fd.close()
+        return
+    try:
+        ledger_write(ledger, {"op": "apply-start", "items": len(plan), "plan": args.plan})
+        for item in plan:
+            if item["kind"] == "forget":
+                _apply_forget(item, trunk, fresh_hours, ledger)
+            elif item["kind"] == "released":
+                _apply_released(args, item, trunk, ledger)
+            else:
+                _apply_path_item(args, item, trunk, ledger)
+        ledger_write(ledger, {"op": "apply-complete", "items": len(plan)})
+    finally:
+        lock_fd.close()
+
+
+def cmd_release_capture(args: argparse.Namespace) -> None:
+    path = str(Path(args.path).resolve())
+    repo = str(Path(args.repo).resolve())
+    ident = slot_identity(path, repo=repo, name=args.name)
+    if ident is None:
+        sys.exit(f"cannot capture slot identity for {path}")
+    entry: dict[str, Any] = {
+        "path": path, "repo": repo, "kind": args.kind, "name": args.name,
+        "head": ident["head"], "admin_id": ident["admin_id"], "mtime": ident["mtime"],
+        "session": args.session, "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "source": args.message,
+    }
+    if args.trunk:
+        entry["trunk"] = args.trunk
+    if args.releases:
+        append_release(args.releases, entry)
+    json.dump(entry, sys.stdout, indent=1)
+    print(file=sys.stderr)
 
 
 # ---------------------------------------------------------------- tmp
@@ -428,16 +956,26 @@ def main() -> None:
     p.add_argument("--trunk", default="trunk()")
     p.add_argument("--max-depth", type=int, default=6)
     p = sub.add_parser("plan")
-    p.add_argument("--inventory", required=True)
+    p.add_argument("--inventory")
     p.add_argument("--protected")
-    p.add_argument("--fresh-hours", type=float, default=1.0)
+    p.add_argument("--releases")
+    p.add_argument("--fresh-hours", type=float, default=24.0)
     p.add_argument("--skip-pushed", action="store_true")
-    p.add_argument("--include-git-worktrees", action="store_true")
     p = sub.add_parser("apply")
     p.add_argument("--plan", required=True)
     p.add_argument("--protected", required=True)
     p.add_argument("--ledger", required=True)
     p.add_argument("--io-limit", type=float, default=20.0)
+    p.add_argument("--releases")
+    p = sub.add_parser("release-capture")
+    p.add_argument("--path", required=True)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--kind", required=True, choices=["git", "jj"])
+    p.add_argument("--name")
+    p.add_argument("--session")
+    p.add_argument("--message")
+    p.add_argument("--trunk")
+    p.add_argument("--releases", help="append the printed entry to this releases file (locked)")
     p = sub.add_parser("tmp")
     p.add_argument("--dir", default="/tmp")
     p.add_argument("--older-than-hours", type=float, default=24.0)
@@ -460,6 +998,8 @@ def main() -> None:
         if not args.ledger:
             sys.exit("--ledger is required")
         cmd_apply(args)
+    elif args.cmd == "release-capture":
+        cmd_release_capture(args)
     elif args.cmd == "tmp":
         if args.apply and not args.ledger:
             sys.exit("--apply requires --ledger")

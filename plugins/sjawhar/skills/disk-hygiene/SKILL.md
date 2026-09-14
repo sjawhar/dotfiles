@@ -7,7 +7,7 @@ description: Use when a shared dev box is low on disk or RAM, `df` is far above 
 
 Reclaim disk from a machine where dozens of agent sessions each left workspaces, containers, caches and scratch behind. The hard part is not deleting; it is knowing what is live. Sessions that are alive but idle look identical to dead ones on disk.
 
-**Safety principle:** nothing is deleted whose directory any live session is standing in, and nothing is deleted whose only copy of versioned work would be lost. Liveness is *asked and measured*, never inferred from age.
+**Safety principle:** nothing is deleted whose directory any live session is standing in, and nothing is deleted that holds content existing only on disk — untracked, gitignored, and modified-tracked files all count, not just versioned work. Liveness is *asked and measured*, never inferred from age.
 
 Tool: `$SKILL/scripts/disk_hygiene.py` where `$SKILL` is the directory this SKILL.md loaded from (stdlib only, `--help` for subcommands). It does the mechanical parts; the judgment steps below are yours.
 
@@ -47,7 +47,9 @@ Envoy shows your cwd as: <dir>
 "cwd only: <path>" is a complete answer. Silence after 20 min = cwd only.
 ```
 
-Replies land one per turn; drain them with `envoy_inbox`. Record three lists: **live** (protected), **released** (delete even if a heuristic would keep it), **holds** (named by a human, e.g. "Sami said keep"). Two rules resolve conflicts: a live claim beats a release from someone else; an explicit hold beats everything.
+Replies land one per turn; drain them with `envoy_inbox`. Record three lists: **live** (protected), **released** (the owner explicitly gave the slot up — a release is still guarded, not a bypass), **holds** (named by a human, e.g. "Sami said keep"). Two rules resolve conflicts: a live claim beats a release from someone else; an explicit hold beats everything.
+
+A released path is not a bare string. Capture the slot's identity — HEAD hash + worktree admin id + directory mtime — with `python3 $S release-capture --path P --repo R --kind git|jj [--name N] [--releases releases.json]`; `--releases` appends the entry to the releases file, otherwise paste the printed JSON in yourself. `plan --releases releases.json` reports each entry read-only; `apply --releases` acts on an entry once and retires it in place (one-shot). Apply still refuses when the identity no longer matches (HEAD/admin-id mismatch retires the entry as adoption evidence; an mtime-only change keeps it for the next pass), when unpushed commits are reachable from HEAD, or when any content exists only on disk — `git status --porcelain --ignored` non-empty for worktrees (a gitignored `.env` or `.venv/` blocks deletion), disk-vs-store divergence for jj slots. Every mutation of the releases file (retirement, capture append) holds an exclusive flock on the file itself, so concurrent mutators never lose each other's updates.
 
 Protected set = Envoy cwds ∪ every process cwd ∪ every reported live path ∪ holds. Write it as `{"protected": [...]}`; the script re-reads it before every item, so you can extend it mid-run when a late reply arrives.
 
@@ -56,7 +58,7 @@ Protected set = Envoy cwds ∪ every process cwd ∪ every reported live path �
 ```bash
 S=$SKILL/scripts/disk_hygiene.py
 python3 $S inventory --repo ~/REPO --root ~/.worktrees --root /tmp > inv.json
-python3 $S plan --inventory inv.json --protected protected.json > plan.json
+python3 $S plan --inventory inv.json --protected protected.json [--releases releases.json] > plan.json
 ```
 
 | Class | Meaning | Action |
@@ -65,21 +67,23 @@ python3 $S plan --inventory inv.json --protected protected.json > plan.json
 | UNPUSHED | non-empty commits not on any remote bookmark | keep; list for owner |
 | PUSHED | every non-empty commit is on a remote bookmark | forget + rm (content is on origin and in the jj store) |
 | MERGED | every non-empty ancestor is in trunk, `@` empty | forget + rm |
-| UNREGISTERED | jj already forgot it; directory is residue | rm |
-| STALE_REGISTRATION | registered, no directory | `jj workspace forget` if merged; else report |
-| GIT_HEAD_PUSHED | plain git worktree, HEAD on a remote | opt-in after `git status --porcelain` (slow) |
+| UNREGISTERED | jj already forgot it; directory is residue | planned, but apply refuses removal: no working-copy commit to verify disk contents against |
+| STALE_REGISTRATION | registered, no directory | `jj workspace forget` when `NAME@` is merged AND the registering op is older than `--fresh-hours`; refused when the op is unfindable. Unnamed git-side admin entries land in `refused` |
+| GIT_HEAD_PUSHED | plain git worktree, HEAD on a remote | keep; reaped only via an owner release (apply then checks `git status --porcelain --ignored` itself) |
 
-`jj workspace list` alone is not a safety signal: "(empty) (no description)" says nothing about the unmerged ancestors under it, and a described workspace may be fully pushed. Directory mtime is not a liveness signal either (a rebase op rewrites every working copy). The script uses `.jj/working_copy/tree_state` mtime only as a freshness tiebreaker (`--fresh-hours`, default 1).
+`jj workspace list` alone is not a safety signal: "(empty) (no description)" says nothing about the unmerged ancestors under it, and a described workspace may be fully pushed. Directory mtime is not a liveness signal either (a rebase op rewrites every working copy). `.jj/working_copy/tree_state` mtime is a hard freshness gate on every reapable class (`--fresh-hours`, default 24): a slot idle less than the threshold is skipped, and a slot whose idle is unmeasurable (no `tree_state` — exactly what a mid-creation slot looks like) is refused outright. Stale-registration forgets threshold the registering op's age the same way. Everything the plan declines to reap for a reason is listed in its `refused` array, never dropped.
 
-Not in scope of the script — leave alone: knives-managed fork checkouts (release via `knives finish`, never rm), Legion daemon state, anything a human named as a hold. Removal mechanics the script uses: `jj --ignore-working-copy --config fsmonitor.backend=none workspace forget NAME`, then `rm`, then `git worktree prune` (workspaces in colocated repos are also git worktrees).
+Not in scope of the script — leave alone: knives-managed fork checkouts (release via `knives finish`, never rm), Legion daemon state, anything a human named as a hold. Removal mechanics the script uses: `jj --ignore-working-copy --config fsmonitor.backend=none workspace forget NAME` (which itself drops the colocated git-worktree linkage), then `rm`. It never runs `git worktree prune`: on a shared store a prune walks every slot and can delete other sessions' admin entries. When a released worktree's `git worktree remove` fails and the `rm` fallback runs, the script removes exactly that slot's `.git/worktrees/<admin-id>` entry and ledgers the result.
 
 ## Phase 4: Apply
 
 ```bash
-nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger ledger.jsonl
+nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger ledger.jsonl [--releases releases.json]
 ```
 
 Run it as a supervised background process, not a foreground call: 90 workspaces took ~2 h at idle IO priority. If you chain passes with a shell `while pgrep -f ...` loop, use a pattern that cannot match its own command line (`pgrep -f 'exec3[.]py'`), or the wrapper waits on itself forever.
+
+Apply is single-instance per store: a second apply (timer or hand-run) finds the flock held, writes a `locked` ledger line, and exits. Every item is re-verified immediately before acting — existence, protection, live processes, class evidence, disk-vs-store divergence — so a plan gone stale refuses instead of deleting. A removed jj slot's ledger line carries `forget_op`: `jj op revert <forget_op>` restores the workspace registration only, never files, and reverting a forget whose name was reused since is a silent no-op.
 
 ## Phase 5: Docker
 
