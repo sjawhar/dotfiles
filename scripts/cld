@@ -2,8 +2,8 @@
 # Claude Code launcher.
 #
 # Loads gh-app-routes.gitconfig for the agent session so git push and gh CLI
-# authenticate as the GitHub App installation for the target repo's owner
-# (where the app is not installed, the upstream token from the secrets store).
+# authenticate as the GitHub App installation for the target repo's owner;
+# owners without an installation get the upstream token from the secrets store.
 # Mirrors the env setup in scripts/oc. Private key is fetched lazily by the
 # gh-app-token helper via `secrets get`.
 set -euo pipefail

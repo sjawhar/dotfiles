@@ -9,10 +9,11 @@ set -euo pipefail
 # GIT_CONFIG_*), an agentbox session, or anything launched with the gh-app
 # routing include (shims/omp, scripts/oc, scripts/cld). Two guarantees there:
 # the routing include is present even when the caller's environment was
-# scrubbed, and gh sees a config directory without hosts.yml, so a call no App
-# routes falls to "not logged in", never to the user's own login. On
-# 2026-09-14 an agent's `gh api -X POST …/reviews` from omp's eval kernel in
-# /tmp ran on the user's keyring and approved a pull request as him.
+# scrubbed, and gh sees a config directory without hosts.yml, so a call with no
+# target owner to route falls to "not logged in", never to the user's own login
+# (an owner the App does not cover gets the upstream token from the secrets
+# store). On 2026-09-14 an agent's `gh api -X POST …/reviews` from omp's eval
+# kernel in /tmp ran on the user's keyring and approved a pull request as him.
 agent_context() {
     [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
     local i v
