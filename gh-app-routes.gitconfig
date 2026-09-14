@@ -2,9 +2,10 @@
 # This file is included into git config only by agent launchers (cld/oc),
 # never by interactive shells. gh-app-token derives the owner from each
 # credential request path (useHttpPath) and mints a token for that owner's
-# app installation. Owners without an installation fall through to the
-# user's `gh auth git-credential`; any other failure emits quit=1 so git
-# stops instead of silently using the user's identity.
+# app installation. Owners without an installation fall through to
+# `gh auth git-credential`, which in an agent session (shims/gh) answers with
+# the App helper again and never with the user's login; any other failure
+# emits quit=1 so git stops instead of silently using the user's identity.
 
 [credential "https://github.com/"]
 	helper =

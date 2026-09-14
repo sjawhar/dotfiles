@@ -4,6 +4,58 @@
 # KNIVES_GH_BYPASS=1 skips knives entirely (emergency hatch if knives gh misbehaves).
 set -euo pipefail
 
+# Agent context: an omp session (its bash tool carries OMP_SESSION_ID, its
+# eval kernel PI_SESSION_FILE with an allow-listed environment that drops
+# GIT_CONFIG_*), an agentbox session, or anything launched with the gh-app
+# routing include (shims/omp, scripts/oc, scripts/cld). Two guarantees there:
+# the routing include is present even when the caller's environment was
+# scrubbed, and gh sees a config directory without hosts.yml, so a call no App
+# routes falls to "not logged in", never to the user's own login. On
+# 2026-09-14 an agent's `gh api -X POST …/reviews` from omp's eval kernel in
+# /tmp ran on the user's keyring and approved a pull request as him.
+agent_context() {
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
+    local i v
+    for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
+        v="GIT_CONFIG_VALUE_$i"
+        [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
+    done
+    return 1
+}
+if agent_context; then
+    _dotfiles="${DOTFILES_DIR:-$HOME/.dotfiles}"
+    _routed=0
+    for ((_i = 0; _i < ${GIT_CONFIG_COUNT:-0}; _i++)); do
+        _v="GIT_CONFIG_VALUE_$_i"
+        [[ "${!_v:-}" == *gh-app-routes.gitconfig ]] && _routed=1
+    done
+    if ((!_routed)); then
+        _i="${GIT_CONFIG_COUNT:-0}"
+        export "GIT_CONFIG_KEY_${_i}=include.path" "GIT_CONFIG_VALUE_${_i}=${_dotfiles}/gh-app-routes.gitconfig" GIT_CONFIG_COUNT="$((_i + 1))"
+    fi
+    _gh_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gh"
+    _agent_cfg="${_gh_cfg}-agent"
+    mkdir -p "$_agent_cfg"
+    [[ -e "$_agent_cfg/config.yml" ]] || ln -sfn "$_gh_cfg/config.yml" "$_agent_cfg/config.yml"
+    export GH_CONFIG_DIR="$_agent_cfg"
+    # The config directory hides hosts.yml from API calls, but `gh auth token`
+    # and `gh auth git-credential` still read the user's login from the OS
+    # keyring (measured: a gho_ token with hosts.yml absent). Every `gh auth`
+    # verb except status is about the user's own login; none belongs to an
+    # agent. git-credential is what ~/.gitconfig names as git's fallback helper,
+    # so a git process whose environment lost the routing include (omp's eval
+    # kernel) lands here: answer with the App helper on the same request, and
+    # let its own quit=1 stop git for an owner no App is installed on.
+    if [[ "${1:-}" == auth && "${2:-}" != status ]]; then
+        if [[ "${2:-}" == git-credential ]]; then
+            [[ "${3:-}" == get ]] && exec gh-app-token agent get
+            exit 0
+        fi
+        echo "gh shim: 'gh auth ${2:-}' is the user's own login and is refused in an agent session; gh calls are routed to the GitHub App for the repo's owner" >&2
+        exit 1
+    fi
+fi
+
 # Content decides what is "real", never the path: any candidate carrying the
 # knives-gh-shim marker in its first 512 bytes is a shim. The old dir-string
 # skip broke whenever HOME or DOTFILES_DIR spelled this shim's directory
