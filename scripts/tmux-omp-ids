@@ -14,7 +14,9 @@
 # Usage:
 #   tmux-omp-ids menu <copy|resume> <pane>  Show a display-menu of UUIDs in <pane>
 #   tmux-omp-ids copy <n>                   Copy UUID number <n> (bare)
-#   tmux-omp-ids resume <n>                 Copy `omp --resume <UUID number n>`
+#   tmux-omp-ids resume <n> [<pane>]        Copy the resume command for UUID number <n>
+#                                           (`agentbox omp <repo> --resume …` for a pane in a
+#                                           repository under $HOME, else a host bypass)
 set -euo pipefail
 
 cache="${TMUX_TMPDIR:-/tmp}/tmux-omp-ids-$(id -u)"
@@ -49,7 +51,7 @@ menu)
     while IFS= read -r id; do
         i=$((i + 1))
         [ "$i" -le "${#keys[@]}" ] || break
-        args+=("$id" "${keys[$((i - 1))]}" "run-shell '$0 $action $i'")
+        args+=("$id" "${keys[$((i - 1))]}" "run-shell '$0 $action $i $pane'")
     done <"$cache"
 
     title="Copy session ID"
@@ -65,11 +67,23 @@ copy)
 resume)
     id=$(sed -n "${2}p" "$cache")
     [ -n "$id" ] || exit 1
-    printf 'omp --resume %s' "$id" | "$copy_cmd"
-    tmux display-message "Copied: omp --resume $id"
+    # Sessions run in boxes (scripts/agentbox): resume inside the repo's box when
+    # the pane sits in a repository under $HOME (or one of its ~/.worktrees
+    # workspaces); a pane outside any repo gets the host bypass.
+    dir=$(tmux display-message -p ${3:+-t "$3"} '#{pane_current_path}')
+    rel=${dir#"$HOME"/}
+    repo=${rel%%/*}
+    [ "$repo" = .worktrees ] && { rel=${rel#.worktrees/}; repo=${rel%%/*}; }
+    if [ "$rel" != "$dir" ] && [ -n "$repo" ] && { [ -e "$HOME/$repo/.jj" ] || [ -e "$HOME/$repo/.git" ]; }; then
+        cmd="agentbox omp $repo --resume $id"
+    else
+        cmd="AGENTBOX_BYPASS=1 omp --resume $id"
+    fi
+    printf %s "$cmd" | "$copy_cmd"
+    tmux display-message "Copied: $cmd"
     ;;
 *)
-    echo "usage: tmux-omp-ids [menu <copy|resume> <pane>|copy <n>|resume <n>]" >&2
+    echo "usage: tmux-omp-ids [menu <copy|resume> <pane>|copy <n>|resume <n> [<pane>]]" >&2
     exit 64
     ;;
 esac

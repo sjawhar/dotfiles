@@ -35,7 +35,9 @@ usage() {
     cat >&2 <<'USAGE'
 usage: ompo                 — list profiles and their scoped keys
        ompo ls              — same
-       ompo NAME [args...]  — launch omp under profile NAME
+       ompo NAME [args...]  — launch omp under profile NAME (inside a box; on the
+                              host use `agentbox omp <repo> --profile NAME`, or
+                              AGENTBOX_BYPASS=1 for a session with no repo)
 USAGE
 }
 

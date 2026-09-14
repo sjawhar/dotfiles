@@ -10,6 +10,18 @@ set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 
+# --- agents run in boxes ---
+# A personal agent session belongs inside an agentbox (scripts/agentbox): a
+# Sysbox container that holds none of the user's credentials, so an agent can
+# push only as its repo's GitHub App and never as the user. The box image
+# writes /etc/agentbox-identity; on the host that file does not exist and this
+# shim refuses. AGENTBOX_BYPASS=1 runs on the host anyway, visibly, for the
+# cases with no repo to box (a session in $HOME) or when the box path is broken.
+if [[ ! -e /etc/agentbox-identity && -z "${AGENTBOX_BYPASS:-}" ]]; then
+    echo "omp: agents run in boxes: agentbox omp <repo> [args…]  (AGENTBOX_BYPASS=1 omp … runs on the host)" >&2
+    exit 2
+fi
+
 # Envoy NATS lives on the tailnet; guarantee it for every omp launch (sessions
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
@@ -31,6 +43,20 @@ export MNEMOPI_VEC_WEIGHT="${MNEMOPI_VEC_WEIGHT:-0.6}"
 export MNEMOPI_FTS_WEIGHT="${MNEMOPI_FTS_WEIGHT:-0.2}"
 export MNEMOPI_IMPORTANCE_WEIGHT="${MNEMOPI_IMPORTANCE_WEIGHT:-0.2}"
 
+# --- mnemopi shared embedding server ---
+# installers/omp-embed.sh runs one text-embeddings-inference container per
+# machine and records its URL; pointing mnemopi's OpenAI-compatible embedding
+# endpoint at it means this session spawns no ~1 GB `__omp_worker_mnemopi_embed`
+# of its own. Only when the server answers right now: a dead server would make
+# mnemopi fall back to keyword-only recall for the whole session, while an
+# unset variable keeps omp's in-process worker (memory works, costs the 1 GB).
+_embed_file="${XDG_CONFIG_HOME:-$HOME/.config}/omp-embed/endpoint"
+if [[ -z "${MNEMOPI_EMBEDDING_API_URL:-}" && -r "$_embed_file" ]]; then
+    _embed_url="$(<"$_embed_file")"
+    if curl -fsS -m 1 "${_embed_url%/v1}/health" >/dev/null 2>&1; then
+        export MNEMOPI_EMBEDDING_API_URL="$_embed_url"
+    fi
+fi
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
 # Agents authenticate as the GitHub App installation matching each repo's
