@@ -11,14 +11,16 @@ set -euo pipefail
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 
 # --- agents run in boxes ---
-# A personal agent session belongs inside an agentbox (scripts/agentbox): a
-# Sysbox container that holds none of the user's credentials, so an agent can
-# push only as its repo's GitHub App and never as the user. The box image
-# writes /etc/agentbox-identity; on the host that file does not exist and this
-# shim refuses. AGENTBOX_BYPASS=1 runs on the host anyway, visibly, for the
-# cases with no repo to box (a session in $HOME) or when the box path is broken.
-if [[ ! -e /etc/agentbox-identity && -z "${AGENTBOX_BYPASS:-}" ]]; then
-    echo "omp: agents run in boxes: agentbox omp <repo> [args…]  (AGENTBOX_BYPASS=1 omp … runs on the host)" >&2
+# On a host installers/agentbox.sh has marked, a personal agent session belongs
+# inside an agentbox (scripts/agentbox): a Sysbox container that holds none of
+# the user's credentials, so an agent can push only as its repo's GitHub App and
+# never as the user. The box image writes /etc/agentbox-identity; on the host
+# that file does not exist and this shim refuses. AGENTBOX_BYPASS=1 runs on the
+# host anyway, visibly, for the cases with no repo to box (a session in $HOME)
+# or when the box path is broken. Machines without the marker (the laptop, hosts
+# without Sysbox) run omp directly as before.
+if [[ -e "${XDG_CONFIG_HOME:-$HOME/.config}/agentbox/host" && ! -e /etc/agentbox-identity && -z "${AGENTBOX_BYPASS:-}" ]]; then
+    echo "omp: agents run in boxes on this host: agentbox omp <repo> [args…]  (AGENTBOX_BYPASS=1 omp … runs on the host)" >&2
     exit 2
 fi
 

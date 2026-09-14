@@ -16,6 +16,8 @@ session where agents run (scripts/agentbox, shims/omp):
   omp process lives in the box under another uid, so it is found by asking the
   box for omp processes whose TMUX_PANE names this pane, and the line becomes
   `agentbox omp <repo> --resume <id>`;
+- on a host without the marker installers/agentbox.sh writes, every omp pane
+  becomes plain `omp --resume <id>` as before;
 - a pane running omp on the host (started before boxes, or under
   AGENTBOX_BYPASS) becomes `agentbox omp <repo> --resume <id>` when its
   directory is a repository under $HOME (or one of its ~/.worktrees/<repo>
@@ -51,6 +53,9 @@ MAX_DEPTH = 4
 MAX_PROCESSES = 32
 FIELD_SEP = "\t"
 HOME = Path.home()
+# installers/agentbox.sh marks a host whose sessions run in boxes; elsewhere
+# (the laptop) omp runs directly and the saved command stays `omp --resume`.
+BOX_HOST = (Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "agentbox" / "host").exists()
 
 # Run inside a box: every omp process's pane id, repo, and open session files.
 BOX_SESSIONS_SCRIPT = r"""
@@ -207,6 +212,8 @@ def repo_for_dir(directory: str) -> str | None:
 
 
 def resume_command(repo: str | None, sid: str) -> str:
+    if not BOX_HOST:
+        return f"omp --resume {sid}"
     if repo:
         return f"agentbox omp {repo} --resume {sid}"
     return f"AGENTBOX_BYPASS=1 omp --resume {sid}"

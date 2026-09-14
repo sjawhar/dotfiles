@@ -74,7 +74,9 @@ resume)
     rel=${dir#"$HOME"/}
     repo=${rel%%/*}
     [ "$repo" = .worktrees ] && { rel=${rel#.worktrees/}; repo=${rel%%/*}; }
-    if [ "$rel" != "$dir" ] && [ -n "$repo" ] && { [ -e "$HOME/$repo/.jj" ] || [ -e "$HOME/$repo/.git" ]; }; then
+    if [ ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/agentbox/host" ]; then
+        cmd="omp --resume $id"
+    elif [ "$rel" != "$dir" ] && [ -n "$repo" ] && { [ -e "$HOME/$repo/.jj" ] || [ -e "$HOME/$repo/.git" ]; }; then
         cmd="agentbox omp $repo --resume $id"
     else
         cmd="AGENTBOX_BYPASS=1 omp --resume $id"
