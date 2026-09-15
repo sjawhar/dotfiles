@@ -37,4 +37,6 @@ done
 export PATH="${DOTFILES_DIR:-$HOME/.dotfiles}/shims:$_newpath"
 unset _newpath _parts _p
 
-exec claude --dangerously-skip-permissions "$@"
+# Opt the session into the Envoy channel plugin (managed settings allowlist the
+# legion-plugins marketplace); channel events reach the model as <channel> messages.
+exec claude --dangerously-skip-permissions --channels plugin:claude-envoy-bridge@legion-plugins "$@"
