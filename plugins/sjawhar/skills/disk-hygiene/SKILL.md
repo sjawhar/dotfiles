@@ -51,12 +51,13 @@ Replies land one per turn; drain them with `envoy_inbox`. Record three lists: **
 
 A released path is not a bare string. Capture the slot's identity — HEAD hash + worktree admin id + directory mtime — with `python3 $S release-capture --path P --repo R --kind git|jj [--name N] [--releases releases.json]`; `--releases` appends the entry to the releases file, otherwise paste the printed JSON in yourself. `plan --releases releases.json` reports each entry read-only; `apply --releases` acts on an entry once and retires it in place (one-shot). Apply still refuses when the identity no longer matches (HEAD/admin-id mismatch retires the entry as adoption evidence; an mtime-only change keeps it for the next pass), when unpushed commits are reachable from HEAD, or when any content exists only on disk — `git status --porcelain --ignored` non-empty for worktrees (a gitignored `.env` or `.venv/` blocks deletion), disk-vs-store divergence for jj slots. Every mutation of the releases file (retirement, capture append) holds an exclusive flock on the file itself, so concurrent mutators never lose each other's updates.
 
-Protected set = Envoy cwds ∪ every process cwd ∪ every reported live path ∪ holds. Write it as `{"protected": [...]}`; the script re-reads it before every item, so you can extend it mid-run when a late reply arrives.
+Start from the generated set — `python3 $S protected --fixed fixed.json > protected.json` (D4) — then merge in what the check-in surfaced. The generator regenerates liveness evidence per run: fixed entries ∪ container bind-mount sources (`docker inspect`, all containers) ∪ knives checkouts (the parent of a `default/`-layout path, so sibling workspace slots are covered; plus registry `workspaces` dirs) as `"protected"`, and every process cwd as an `"anchor"`. A protected entry guards both directions (under it or containing it); an anchor guards only the tree it stands IN — `/`, `$HOME` and `/tmp` are live cwds on every box, and subtree semantics for them would blanket-protect every slot. A source that cannot be read (docker down, knives missing, output unparseable) kills the run loudly rather than shrinking the set. Residual, stated in the plan: a slot driven only via `jj -R` from elsewhere has no cwd inside it and is protected by the idle threshold alone. Envoy replies, reported live paths and holds go into `"protected"` in the fixed/merged file; the script re-reads the file before every item, so you can extend it mid-run when a late reply arrives.
 
 ## Phase 3: Classify
 
 ```bash
 S=$SKILL/scripts/disk_hygiene.py
+python3 $S protected --fixed fixed.json > protected.json
 python3 $S inventory --repo ~/REPO --root ~/.worktrees --root /tmp > inv.json
 python3 $S plan --inventory inv.json --protected protected.json [--releases releases.json] > plan.json
 ```
@@ -84,6 +85,10 @@ nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger 
 Run it as a supervised background process, not a foreground call: 90 workspaces took ~2 h at idle IO priority. If you chain passes with a shell `while pgrep -f ...` loop, use a pattern that cannot match its own command line (`pgrep -f 'exec3[.]py'`), or the wrapper waits on itself forever.
 
 Apply is single-instance per store: a second apply (timer or hand-run) finds the flock held, writes a `locked` ledger line, and exits. Every item is re-verified immediately before acting — existence, protection, live processes, class evidence, disk-vs-store divergence — so a plan gone stale refuses instead of deleting. A removed jj slot's ledger line carries `forget_op`: `jj op revert <forget_op>` restores the workspace registration only, never files, and reverting a forget whose name was reused since is a silent no-op.
+
+## The hourly dry run (systemd user timer, PLAN-ONLY)
+
+`disk-hygiene-reaper.timer` (units in `$SKILL/systemd/`, installed and enabled by `installers/disk-hygiene-reaper.sh`, wired from `devbox/install.sh`) runs `scripts/reaper_plan.py run` hourly: regenerate the protected set, inventory, plan, and ledger the diff against the previous run's plan as a `plan-only-run` line. **It never invokes `apply` — no apply path exists in the driver** until the plan's scenario 14 (attended first real pass) settles. Per-machine config: `~/.config/disk-hygiene/reaper.json` (repo, roots, fresh_hours, fixed protected entries; doubles as the generator's `--fixed` file — seeded by the installer, never overwritten, never committed). Human-read surface: `~/.local/state/disk-hygiene/reaper-ledger.jsonl` plus the `plan.json`/`plan.prev.json` it names. A failed run triggers `disk-hygiene-reaper-failure.service` (`OnFailure=`), which appends a `timer-failure` line with the unit's journal tail to the same ledger. The units run through `scripts/reaper-timer` (`mise exec`): the user manager's PATH has no mise-managed tools, and a knives-less PATH is a loud generator failure, not a smaller protected set.
 
 ## Phase 5: Docker
 

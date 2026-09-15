@@ -4,6 +4,11 @@
 Subcommands (all read-only except `apply`, and `tmp --apply`):
 
   procs                          JSON list of every process's cwd (liveness evidence)
+  protected --fixed F [--knives-registry T]
+                                 regenerate the protected set (D4): fixed entries ∪
+                                 /proc cwds (as anchors) ∪ container bind-mount
+                                 sources ∪ knives checkouts, realpath-normalised;
+                                 a missing source fails loudly, never shrinks the set
   inventory --repo R [--root D]  every working copy of jj repo R found under roots D
                                  (default: $HOME), classified against trunk/remotes
   plan --inventory I --protected P [--fresh-hours H] [--skip-pushed] [--releases R]
@@ -25,11 +30,16 @@ Subcommands (all read-only except `apply`, and `tmp --apply`):
   images [--older-than-hours H]  tagged images no container uses, older than H (cheap;
                                  avoids `docker system df -v`, which stalls under IO load)
 
-Protected file format: {"protected": ["/abs/path", ...]}. Prefix semantics both
-ways: an item is protected if it is under a protected path OR a protected path is
-under it. Plan items may set "subpath_release": true to bypass the prefix guard
-for a path an owner explicitly released inside a live tree; the live-process
-check still applies.
+Protected file format: {"protected": ["/abs/path", ...], "anchors": ["/abs/path", ...]}.
+"protected" has prefix semantics both ways: an item is protected if it is under a
+protected path OR a protected path is under it. "anchors" (optional) are live-location
+evidence — a process cwd — and protect only the tree they stand IN (equal or deeper):
+/, $HOME and /tmp are live cwds on every box (measured 2026-09-15), so subtree
+semantics for them would blanket-protect every slot and neuter the reaper. Residual
+stated in the plan (D4): a slot driven only via `jj -R` from elsewhere has no cwd
+inside it and is protected by the idle threshold alone. Plan items may set
+"subpath_release": true to bypass the prefix guard for a path an owner explicitly
+released inside a live tree; the live-process check still applies.
 
 Releases file format: {"releases": [entry, ...]} with entries printed (and, with
 --releases, appended) by `release-capture`. Entries are one-shot: `apply` retires an
@@ -50,6 +60,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -114,18 +125,27 @@ def ledger_write(path: Path, entry: dict[str, Any]) -> None:
     print(json.dumps(entry), flush=True)
 
 
-def is_protected(path: str, protected: list[str]) -> str | None:
+def is_protected(path: str, protected: list[str], anchors: list[str] | None = None) -> str | None:
     for d in protected:
         if path == d or path.startswith(d + "/") or d.startswith(path + "/"):
             return d
+    # An anchor (a live process cwd) protects the tree it stands IN — equal or deeper —
+    # never its own subtree: /, $HOME and /tmp are live cwds on every box (measured
+    # 2026-09-15), and subtree semantics for them would blanket-protect every slot.
+    # Residual stated in the plan (D4): a slot driven only via `jj -R` from elsewhere
+    # has no cwd inside it and is protected by the idle threshold alone.
+    for a in anchors or []:
+        if a == path or a.startswith(path + "/"):
+            return a
     return None
 
 
-def load_protected(path: str | None) -> list[str]:
+def load_protected(path: str | None) -> tuple[list[str], list[str]]:
+    """(protected, anchors) from a protected file; "anchors" is optional in the file."""
     if not path:
-        return []
+        return [], []
     data: dict[str, Any] = json.load(open(path))
-    return [str(p) for p in data["protected"]]
+    return [str(p) for p in data["protected"]], [str(p) for p in data.get("anchors", [])]
 
 
 # jj stores the workspace name in .jj/working_copy/checkout as protobuf field 3.
@@ -160,6 +180,90 @@ def jj_workspace_name(dirpath: str) -> str | None:
         else:
             return None
     return None
+
+
+# --------------------------------------------- protected-set generator (D4)
+
+def docker_bind_sources() -> set[str]:
+    """Bind-mount sources of every container (incl. stopped: a stopped container can be
+    restarted onto its mounts). A docker failure is fatal: a protected set silently
+    missing this source would unprotect every bind-mounted slot."""
+    rc, cids = run(["timeout", "120", "docker", "ps", "-aq", "--no-trunc"])
+    if rc != 0:
+        sys.exit(f"protected: docker ps failed (rc={rc}): {cids[-400:]}")
+    if not cids.strip():
+        return set()
+    # rc is 1 when any id vanished between ps and inspect; stdout is still one JSON array
+    # (same measured contract as cmd_containers).
+    r = subprocess.run(["timeout", "120", "docker", "inspect", *cids.split()], capture_output=True, text=True)
+    if not r.stdout.strip().startswith("["):
+        sys.exit(f"protected: docker inspect returned no JSON array (rc={r.returncode}): {r.stderr[-400:]}")
+    data: list[dict[str, Any]] = json.loads(r.stdout)
+    out: set[str] = set()
+    for d in data:
+        for m in d.get("Mounts") or []:
+            if m.get("Type") == "bind" and m.get("Source"):
+                out.add(os.path.realpath(str(m["Source"])))
+    return out
+
+
+def knives_checkouts(registry: str) -> set[str]:
+    """Every knives-managed checkout location. `knives repos --json` supplies the repo
+    paths; a default-layout path (<parent>/default) contributes its PARENT, which also
+    covers the sibling per-branch workspace slots knives opens next to default/. A bare
+    path (the checkout itself, e.g. ~/oh-my-pi) contributes only itself — its parent is
+    $HOME. Workspace dirs configured per repo (`workspaces = ...`) appear only in the
+    registry file, not in the CLI output (measured 2026-09-15, knives 2.0.11), so the
+    registry is read too. Any missing piece is fatal: a set silently missing this
+    source would expose every fork checkout."""
+    if shutil.which("knives") is None:
+        sys.exit("protected: knives not on PATH — refusing to emit a protected set with the knives source missing")
+    # Measured (knives 2.0.11): exits 3 when the forge is unreachable while stdout still
+    # carries the complete local repo list — judge the JSON, not the exit code.
+    r = subprocess.run(["knives", "repos", "--json"], capture_output=True, text=True, timeout=600)
+    try:
+        doc: dict[str, Any] = json.loads(r.stdout)
+        repos: list[dict[str, Any]] = doc["repos"]
+    except (json.JSONDecodeError, KeyError):
+        sys.exit(f"protected: `knives repos --json` output unparseable (rc={r.returncode}): {r.stderr[-400:]}")
+    out: set[str] = set()
+    for repo in repos:
+        p = repo.get("path")
+        if not p:
+            continue  # registered but not checked out on this machine (measured: path is null)
+        rp = os.path.realpath(str(p))
+        out.add(os.path.dirname(rp) if os.path.basename(rp) == "default" else rp)
+    with open(os.path.expanduser(registry), "rb") as f:
+        reg: dict[str, Any] = tomllib.load(f)
+    repos_cfg: dict[str, Any] = reg.get("repos", {})
+    for cfg in repos_cfg.values():
+        ws = cfg.get("workspaces")
+        if ws:
+            out.add(os.path.realpath(os.path.expanduser(str(ws))))
+    return out
+
+
+def cmd_protected(args: argparse.Namespace) -> None:
+    """D4: regenerate the protected set for this run. Liveness is measured, never asked:
+    fixed entries ∪ container bind-mount sources ∪ knives checkouts (both-way prefix
+    protection) plus every process cwd as an anchor (protects only the tree it stands
+    in — see is_protected). Every source either contributes or kills the run."""
+    fixed_protected, fixed_anchors = load_protected(args.fixed)
+    binds = docker_bind_sources()
+    knives = knives_checkouts(args.knives_registry)
+    # A cwd whose directory was deleted reads as "<path> (deleted)"; keep the path —
+    # protecting a recreated slot some process once stood in is conservative-safe.
+    cwds = {os.path.realpath(c.removesuffix(" (deleted)")) for c in proc_cwds()}
+    protected = sorted({os.path.realpath(p) for p in fixed_protected} | binds | knives)
+    anchors = sorted({os.path.realpath(a) for a in fixed_anchors} | cwds)
+    json.dump({
+        "protected": protected,
+        "anchors": anchors,
+        "sources": {"fixed_protected": len(fixed_protected), "fixed_anchors": len(fixed_anchors),
+                    "docker_bind_sources": len(binds), "knives": len(knives), "proc_cwds": len(cwds)},
+        "generated_t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }, sys.stdout, indent=1)
+    print(f"\n{len(protected)} protected, {len(anchors)} anchors", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- inventory
@@ -447,7 +551,7 @@ def append_release(path: str, entry: dict[str, Any]) -> None:
 def cmd_plan(args: argparse.Namespace) -> None:
     if not args.inventory and not args.releases:
         sys.exit("plan needs --inventory and/or --releases")
-    protected = load_protected(args.protected)
+    protected, anchors = load_protected(args.protected)
     plan: list[dict[str, Any]] = []
     refused: list[dict[str, Any]] = []
     trunk = "trunk()"
@@ -487,7 +591,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
                 continue
             if not path or cls in ("LIVE", "UNPUSHED", "GIT_UNPUSHED", "GIT_HEAD_PUSHED"):
                 continue  # keep classes; plain git worktrees are reaped only via an owner release
-            if is_protected(path, protected):
+            if is_protected(path, protected, anchors):
                 continue
             idle = r.get("jj_idle_hours")
             if idle is None:  # D1: freshness unverifiable => refuse, whatever the class
@@ -516,8 +620,8 @@ def cmd_plan(args: argparse.Namespace) -> None:
                 note = "identity matches" if ident == expected else f"identity mismatch (read-only report; apply decides): now {ident}"
             plan.append({"kind": "released", "path": e["path"], "name": e.get("name"), "repo": e.get("repo"),
                          "class": "RELEASED", "release": e, "reason": f"owner-released slot; {note}"})
-    json.dump({"plan": plan, "refused": refused, "protected": protected, "trunk": trunk,
-               "fresh_hours": args.fresh_hours}, sys.stdout, indent=1)
+    json.dump({"plan": plan, "refused": refused, "protected": protected, "anchors": anchors,
+               "trunk": trunk, "fresh_hours": args.fresh_hours}, sys.stdout, indent=1)
     print(f"\n{len(plan)} items, {len(refused)} refused", file=sys.stderr)
 
 
@@ -625,8 +729,8 @@ def _apply_released(args: argparse.Namespace, item: dict[str, Any], trunk: str, 
         except (RuntimeError, OSError, ValueError, KeyError) as exc:
             ledger_write(ledger, {"op": "error", "path": path, "stage": "retire", "out": repr(exc)[-400:]})
         return
-    protected = load_protected(args.protected)
-    hit = is_protected(path, protected)
+    protected, anchors = load_protected(args.protected)
+    hit = is_protected(path, protected, anchors)
     if hit and not (item.get("subpath_release") or e.get("subpath_release")):
         refuse(f"protected by {hit}")
         return
@@ -725,8 +829,8 @@ def _apply_path_item(args: argparse.Namespace, item: dict[str, Any], trunk: str,
     if not os.path.lexists(path):
         ledger_write(ledger, {"op": "absent", "path": path, "name": name})
         return
-    protected = load_protected(args.protected)  # re-read: the agent may add to it mid-run
-    hit = is_protected(path, protected)
+    protected, anchors = load_protected(args.protected)  # re-read: the agent may add to it mid-run
+    hit = is_protected(path, protected, anchors)
     if hit and not item.get("subpath_release"):
         skip(f"protected by {hit}")
         return
@@ -850,7 +954,7 @@ DEFAULT_FAMILIES = r"^(tmp\.[A-Za-z0-9]{10}$|pytest-of-|xvfb-run\.|tl-preview-|w
 def cmd_tmp(args: argparse.Namespace) -> None:
     fam = re.compile(str(args.families))
     tmp_dir = str(args.dir)
-    protected = load_protected(args.protected)
+    protected, anchors = load_protected(args.protected)
     live = proc_cwds()
     now = time.time()
     targets: list[str] = []
@@ -860,7 +964,7 @@ def cmd_tmp(args: argparse.Namespace) -> None:
             continue
         if now - os.lstat(p).st_mtime < args.older_than_hours * 3600:
             continue
-        if is_protected(p, protected) or any(c == p or c.startswith(p + "/") for c in live):
+        if is_protected(p, protected, anchors) or any(c == p or c.startswith(p + "/") for c in live):
             continue
         targets.append(p)
     if not args.apply:
@@ -950,6 +1054,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("procs")
+    p = sub.add_parser("protected")
+    p.add_argument("--fixed", help='fixed entries file: {"protected": [...], "anchors": [...]} (extra keys ignored)')
+    p.add_argument("--knives-registry", default="~/.config/knives/repos.toml")
     p = sub.add_parser("inventory")
     p.add_argument("--repo", required=True)
     p.add_argument("--root", action="append")
@@ -990,6 +1097,8 @@ def main() -> None:
     args = ap.parse_args()
     if args.cmd == "procs":
         json.dump(sorted(proc_cwds()), sys.stdout, indent=1)
+    elif args.cmd == "protected":
+        cmd_protected(args)
     elif args.cmd == "inventory":
         cmd_inventory(args)
     elif args.cmd == "plan":

@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly workspace-reaper dry run (plan only until AGENTC-79 scenario 14 settles)
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

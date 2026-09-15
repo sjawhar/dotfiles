@@ -12,6 +12,7 @@ Scenario map (verification table in the plan):
   3   D2 divergence      -> test_s03_d2_divergence_survives_apply
   4   D2 positive        -> test_s04_d2_clean_merged_removed_with_restoration_id
   5   D3 revert          -> test_s05_d3_forget_op_capture_survives_concurrent_op
+  6   D4 container       -> test_s06_d4_container_bind_mount_protected
   7   D5 lock            -> test_s07_d5_second_apply_exits_on_held_lock
   8   D6 staleness       -> test_s08_d6_stale_plan_item_survives_apply
   9   released positive  -> test_s09_released_matching_identity_removed_and_retired
@@ -28,6 +29,8 @@ Scenario map (verification table in the plan):
   16  capture append     -> test_s16_release_capture_appends_to_releases_file
   17  unnamed stale reg  -> test_s17_unnamed_stale_registration_reported_not_dropped
   18  admin-id safety    -> test_s18_crafted_admin_id_never_escapes_worktrees_dir
+  19  D4 cwd anchor      -> test_s19_d4_proc_cwd_anchor_protects_only_containing_slot
+  20  D4 loud failure    -> test_s20_d4_generator_fails_loud_without_knives
 """
 
 from __future__ import annotations
@@ -50,16 +53,17 @@ SCRIPT = SCRIPTS_DIR / "disk_hygiene.py"
 GIT_ID = ["-c", "user.email=reaper-test@local", "-c", "user.name=reaper-test"]
 
 
-def sh(*cmd: str | Path, cwd: str | Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+def sh(*cmd: str | Path, cwd: str | Path | None = None, check: bool = True,
+       env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     r = subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None,
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True, timeout=300, env=env)
     if check and r.returncode != 0:
         raise AssertionError(f"command failed rc={r.returncode}: {cmd}\nstdout: {r.stdout}\nstderr: {r.stderr}")
     return r
 
 
-def script(*args: str | Path, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return sh(sys.executable, SCRIPT, *args, check=check)
+def script(*args: str | Path, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return sh(sys.executable, SCRIPT, *args, check=check, env=env)
 
 
 class ReaperScenarioTest(unittest.TestCase):
@@ -268,6 +272,115 @@ class ReaperScenarioTest(unittest.TestCase):
         desc = sh("jj", "--ignore-working-copy", "log", "-r", "main", "--no-graph",
                   "-T", "description.first_line()", cwd=repo).stdout.strip()
         self.assertEqual(desc, "concurrent", "the op landed after the forget did not survive the revert")
+
+    # ------------------------------------------------------------- D4
+
+    def fake_knives(self) -> tuple[dict[str, str], Path]:
+        """A knives CLI double emitting the measured `repos --json` shape (2026-09-15,
+        knives 2.0.11): rc 3 with the complete repo list on stdout when the forge is
+        unreachable, one default-layout path, one bare checkout path, one null path.
+        Returns (env with the double first on PATH, registry TOML path)."""
+        bindir = self.base / "bin"
+        bindir.mkdir()
+        for name in ("knives", "ai", "bare-repo"):
+            (self.base / "knives" / name).mkdir(parents=True, exist_ok=True)
+        (self.base / "knives" / "ai" / "default").mkdir()
+        (self.base / "knives-ws").mkdir()
+        payload = json.dumps({"repos": [
+            {"name": "ai", "path": str(self.base / "knives" / "ai" / "default")},
+            {"name": "bare", "path": str(self.base / "knives" / "bare-repo")},
+            {"name": "nopath", "path": None},
+        ]})
+        fake = bindir / "knives"
+        fake.write_text("#!/bin/sh\n"
+                        f"[ \"$1 $2\" = 'repos --json' ] || {{ echo \"unexpected args: $@\" >&2; exit 9; }}\n"
+                        f"cat <<'EOF'\n{payload}\nEOF\n"
+                        "echo 'forge unreachable (simulated)' >&2\n"
+                        "exit 3\n")
+        fake.chmod(0o755)
+        registry = self.base / "repos.toml"
+        registry.write_text("[repos.ai]\nupstream = \"https://example.invalid/ai\"\n\n"
+                            "[repos.bare]\nupstream = \"https://example.invalid/bare\"\n"
+                            f"workspaces = \"{self.base / 'knives-ws'}\"\n")
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        return env, registry
+
+    def generate_protected(self, env: dict[str, str], registry: Path, fixed: dict[str, Any] | None = None) -> tuple[dict[str, Any], Path]:
+        fixed_path = self.base / "fixed.json"
+        fixed_path.write_text(json.dumps(fixed or {"protected": [], "anchors": []}))
+        r = script("protected", "--fixed", fixed_path, "--knives-registry", registry, env=env)
+        doc: dict[str, Any] = json.loads(r.stdout)
+        out = self.base / "generated-protected.json"
+        out.write_text(r.stdout)
+        return doc, out
+
+    def test_s06_d4_container_bind_mount_protected(self) -> None:
+        """Scenario 6: a slot bind-mounted into a container (no host cwd inside it) is
+        protected; an identical sibling slot with no liveness evidence is still planned."""
+        repo = self.make_jj_repo()
+        ws = self.add_ws(repo, "w6")
+        control = self.add_ws(repo, "w6control")
+        cid = sh("docker", "create", "-v", f"{ws}:/mnt", "busybox", "true").stdout.strip()
+        self.addCleanup(lambda: sh("docker", "rm", "-f", cid, check=False))
+        env, registry = self.fake_knives()
+        keep = self.base / "fixedkeep"
+        keep.mkdir()
+        doc, protected_path = self.generate_protected(env, registry, {"protected": [str(keep)], "anchors": []})
+        real_ws = os.path.realpath(ws)
+        self.assertIn(real_ws, doc["protected"], "bind-mount source missing from the generated protected set")
+        self.assertIn(str(keep), doc["protected"], "fixed entry missing")
+        self.assertIn(str(self.base / "knives" / "ai"), doc["protected"],
+                      "default-layout knives checkout must protect its PARENT dir (sibling workspace slots)")
+        self.assertNotIn(str(self.base / "knives"), doc["protected"])
+        self.assertIn(str(self.base / "knives" / "bare-repo"), doc["protected"],
+                      "bare-layout knives checkout must protect the checkout itself, never its parent (= $HOME)")
+        self.assertIn(str(self.base / "knives-ws"), doc["protected"],
+                      "registry `workspaces` dir missing (repos --json does not expose it; measured)")
+        self.assertGreaterEqual(doc["sources"]["docker_bind_sources"], 1)
+        self.assertEqual(doc["sources"]["knives"], 3)
+        inv = self.inventory(repo)
+        plan_doc, _ = self.plan("--fresh-hours", "0", "--protected", protected_path, inventory=inv)
+        self.assertNotIn(str(ws), self.plan_paths(plan_doc),
+                         "bind-mounted slot with no host cwd was planned for removal")
+        self.assertIn(str(control), self.plan_paths(plan_doc),
+                      "control slot vanished from the plan: the generated set blanket-protects "
+                      "(a broad anchor/bind such as /tmp or $HOME neuters the reaper)")
+
+    def test_s19_d4_proc_cwd_anchor_protects_only_containing_slot(self) -> None:
+        """A live process cwd INSIDE a slot protects it; the ubiquitous broad cwds
+        (/, $HOME, /tmp — all measured live on the real box) protect nothing beneath
+        them. Residual stated in the plan: a slot driven only via `jj -R` from
+        elsewhere is protected by the idle threshold alone, not by D4."""
+        repo = self.make_jj_repo()
+        ws = self.add_ws(repo, "w19")
+        env, registry = self.fake_knives()
+        holder = subprocess.Popen(["sleep", "60"], cwd=str(ws))
+        try:
+            doc, protected_path = self.generate_protected(env, registry)
+            self.assertIn(str(ws), doc["anchors"], "live cwd missing from generated anchors")
+            inv = self.inventory(repo)
+            plan_doc, _ = self.plan("--fresh-hours", "0", "--protected", protected_path, inventory=inv)
+            self.assertNotIn(str(ws), self.plan_paths(plan_doc), "slot with a live cwd inside was planned")
+        finally:
+            holder.terminate()
+            holder.wait()
+        doc, protected_path = self.generate_protected(env, registry)
+        self.assertNotIn(str(ws), doc["anchors"], "anchor survived its process")
+        inv = self.inventory(repo)
+        plan_doc, _ = self.plan("--fresh-hours", "0", "--protected", protected_path, inventory=inv)
+        self.assertIn(str(ws), self.plan_paths(plan_doc),
+                      "slot with no liveness evidence missing from the plan (broad-cwd blanket protection?)")
+
+    def test_s20_d4_generator_fails_loud_without_knives(self) -> None:
+        """A missing source is a loud failure, never a silently smaller protected set."""
+        env, registry = self.fake_knives()
+        env["PATH"] = "/usr/bin:/bin"  # docker present, knives absent
+        fixed_path = self.base / "fixed.json"
+        fixed_path.write_text(json.dumps({"protected": []}))
+        r = script("protected", "--fixed", fixed_path, "--knives-registry", registry, env=env, check=False)
+        self.assertNotEqual(r.returncode, 0, "generator succeeded with the knives source missing")
+        self.assertIn("knives", r.stderr)
 
     # ------------------------------------------------------------- D5
 

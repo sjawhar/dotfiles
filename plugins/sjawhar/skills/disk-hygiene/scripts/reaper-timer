@@ -1,0 +1,10 @@
+#!/bin/bash
+# systemd entry point for the plan-only reaper units: the user manager's PATH has
+# no mise-managed tools (knives), so run the driver under `mise exec` — same
+# pattern as forward/forward-serve.
+set -euo pipefail
+
+MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+export MISE_AUTO_INSTALL=0
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+exec "$MISE" exec -- "$(dirname "${BASH_SOURCE[0]}")/reaper_plan.py" "$@"

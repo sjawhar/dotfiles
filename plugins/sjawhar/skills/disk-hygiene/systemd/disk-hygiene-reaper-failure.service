@@ -1,0 +1,6 @@
+[Unit]
+Description=Surface a workspace-reaper run failure in the reaper ledger (journal tail included)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/plugins/sjawhar/skills/disk-hygiene/scripts/reaper-timer record-failure

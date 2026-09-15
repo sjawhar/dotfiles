@@ -1,0 +1,9 @@
+[Unit]
+Description=Workspace reaper hourly dry run (PLAN-ONLY: reaper_plan.py never invokes apply)
+OnFailure=disk-hygiene-reaper-failure.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/plugins/sjawhar/skills/disk-hygiene/scripts/reaper-timer run
+Nice=19
+IOSchedulingClass=idle

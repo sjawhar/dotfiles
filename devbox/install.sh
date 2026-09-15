@@ -21,4 +21,8 @@ systemctl --user daemon-reload
 # Devbox serve role exposes files through the laptop tunnel without binding the laptop's forwarded port.
 bash "${DOTFILES_DIR}/installers/forward.sh" serve
 
+# Hourly PLAN-ONLY workspace-reaper dry run (AGENTC-79 D7; no apply path exists
+# in the timer until scenario 14's attended pass settles).
+bash "${DOTFILES_DIR}/installers/disk-hygiene-reaper.sh"
+
 echo "--- Devbox setup complete ---"
