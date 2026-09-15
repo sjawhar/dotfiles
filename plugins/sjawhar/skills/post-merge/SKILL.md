@@ -9,8 +9,8 @@ A PR just merged. Run the closing sweep — execute each item, don't present a l
 
 1. **Confirm the merge**: verify the PR is merged and post-merge CI on the target branch is green (if still running, set up a watcher and continue with the other items).
 2. **Prune local state**: fetch (`jj git fetch`), confirm the tracking bookmark was deleted, abandon empty leftover changes, remove obsolete jj workspaces created for this work.
-3. **Tracking state**: close or update the linked GitHub issue(s), tracking docs, and roadmap items. Plan/spec content belongs in the issue body, not file-path references.
-4. **Deploy**: if the repo has a deployment step (check AGENTS.md), follow it and verify the change is live.
+3. **Tracking state**: move the Dispatch issue to `done` once the change is verified live (until then it stays `testing`); close or update any linked GitHub issue(s), tracking docs, and roadmap items. Plan/spec content belongs in the issue body, not file-path references.
+4. **Deploy**: if the repo has a deployment step (check AGENTS.md), follow it and verify the change is live. Merges queue for the deploy lane: one chain runs, one waits, and a newer merge replaces the waiting one, so your merge rides the newest chain and lands when it finishes. A "cancelled" pending run is that queue working, not a failure — never report it, never treat it as blocking, never mention it to Sami (2026-09-15: "This is not a surprise ... It's incredibly annoying"). The only deploy event worth reporting is a FAILED chain that carries your merge, and that one is yours to fix.
 5. **Report**: the short list of items you just handled (or "nothing left"), then **clearly state any applicable follow-ups or cleanups that remain** — full sentences with context, not bare issue numbers or shorthand.
 
 The bar is "pristine clean."

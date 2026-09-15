@@ -46,11 +46,31 @@ After integration, dispatch `task` with `agent: "deep"` for acceptance through e
 For every acceptance scenario, record the source, dependency, and image revisions, then mark it:
 
 - `RAN` — real-surface observation;
-- `WAIVED-BY-SAMI` — Sami's exact waiver;
 - `BLOCKED` — exact blocker.
 
-`BLOCKED` stops the PR-readiness gate, not independent work. Resolve or obtain a waiver before readiness; after any fix, rerun each affected acceptance scenario.
+There is no waiver state. Verification on a production-like surface is never optional and never
+something to ask Sami to skip (Sami, 2026-09-15: "Is there any part of the sdd process that says
+it's optional or you can ask to skip it?" — no). `BLOCKED` stops the PR-readiness gate, not
+independent work; its resolution is building the missing surface or driver, never an ask. After any
+fix, rerun each affected acceptance scenario.
+
+Iterate locally. The local stack (real migrations, real fixtures, the real browser and API) is where
+every edit→see→fix loop runs; a dev stack or staging slot is the LAST proof, run once per PR, not a
+surface to iterate against. A dev-stack deploy is never the rate limiter; if it is, the missing piece
+is a local capability, and building it is part of the work. Anything that runs locally in place of a
+production path (a fixture, a stub identity, a local mode) is a drift risk: name it in the plan and
+state the check that keeps it faithful to production.
 
 After acceptance, a final `reviewer` examines integrated correctness and security, plus dead code, shims, aliases, dual paths, and half-migrations. Resolve grounded findings before PR readiness; a reviewer preference without a grounded finding is not automatically binding. Do not park a real defect as follow-up work.
 
 The coordinator owns `opening-a-pr`. On every PR open or push, including each stack layer, invoke `landing-a-pr` immediately while independent implementation continues; each stacked PR also receives `opening-a-pr` and a `reviewer` as it lands. Use `gh-stack` autonomously when multiple PRs are needed. Consolidate completed applicable stacks with `squash-stack`; if it changes the delivered diff, refresh affected acceptance and the `opening-a-pr` gate before final readiness. Do not ask whether to stack, state a PR arrangement, or pause mid-stack. Merge only after Sami approves.
+
+## Dispatch status
+
+The coordinator moves the issue's Dispatch status at every transition, the way a human moves a card:
+`in_progress` when implementation starts, `testing` when acceptance begins, `needs_review` when the
+PR is open and its merge packet is sent, `done` once the change is verified in production. An issue
+left at `triage` while work is underway is a defect: the roadmap view is read from these statuses,
+and Sami has no other way to see delivery without interrupting a session. Do this for child issues
+you own as well as the root. Deploy queueing is not a status: a merge that waits for the deploy lane
+is still `needs_review`→`done` on its own schedule, and nobody is told about the wait.

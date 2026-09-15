@@ -55,6 +55,8 @@ Any push after the gate invalidates the gate. When a leaf returns `fixed-and-pus
 
 Sami merges; that does not close your responsibility. Sami, 2026-09-13, verbatim: "the agent that developed it should be responsible for testing in production." When the merge lands, run the `post-merge` skill and, for anything that deploys — infra, platform, environments, workflows on main — watch the deploy slot that carries your merge to `production-apply` (or the equivalent publish step), then drive the changed path in production through the user's own access path and record what you observed on the PR. A staging pass is not this: on 2026-09-12 the whole staging gate passed at 00:02Z and production-apply failed at 00:12Z on a resource staging never runs. If the slot fails on your change, you own the fix and the next slot — not the SRE, not the next session.
 
+The deploy lane is a queue, and waiting in it is normal: one chain runs, one waits, a newer merge replaces the waiting one, and every merge behind the running chain deploys together on the next. A pending run shown as "cancelled" is the queue doing its job. Never report it as a blocker, an incident, or a reason a change "is not deployed" — Sami, 2026-09-15: "This is not a surprise. They merge together in bulk ... the fact that merges get canceled until the deploy lane is clear is expected." Report a chain only when it FAILS on your merge. While you wait, the Dispatch issue is `testing`; it becomes `done` when you have driven the change in production.
+
 ## Red flags — you have left the envelope
 
 - A merge commit appeared on the PR head. (`update-branch`, a local base merge.) Report it as the defect it is; never undo with a force-push.
