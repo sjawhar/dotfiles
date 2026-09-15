@@ -110,7 +110,7 @@ sops = "3.13.3"
 "github:DataDog/pup" = "1.13.0"
 sentry-cli = "3.6.2"
 k9s = "latest"
-gitleaks = "latest"
+gitleaks = "8.30.1"
 
 # AI-native time tracker — one release publishes two binaries as separate assets:
 #   tt-{arch}-unknown-linux-musl.tar.gz  (CLI, static)
