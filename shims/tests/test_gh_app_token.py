@@ -23,7 +23,7 @@ INSTALLED = {"sjawhar": 111, "trajectory-labs-pbc": 222}
 GIT_CONFIG = {
     "gh-app.agent.app-id": "3202636",
     "gh-app.agent.key-secret": "KEY",
-    "gh-app.agent.fallback-secret": "GH_UPSTREAM_TOKEN",
+    "gh-app.agent.fallback-secret": "GH_PUBLIC_REPO_PAT",
 }
 
 # A `secrets` CLI stand-in: knows one token, refuses every other name the way
@@ -32,7 +32,7 @@ GIT_CONFIG = {
 SECRETS_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$SECRETS_STUB_LOG"
 case "$2" in
-  GH_UPSTREAM_TOKEN) echo ghp_stub_upstream_token ;;
+  GH_PUBLIC_REPO_PAT) echo ghp_stub_upstream_token ;;
   *) echo "secrets: secret '$2' not found" >&2; exit 1 ;;
 esac
 """
@@ -158,7 +158,7 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn("username=x-access-token", stdout)
         self.assertIn("password=ghp_stub_upstream_token", stdout)
         self.assertNotIn("quit=1", stdout)
-        self.assertEqual(self.secrets_calls(), ["get GH_UPSTREAM_TOKEN --value"])
+        self.assertEqual(self.secrets_calls(), ["get GH_PUBLIC_REPO_PAT --value"])
         # The fallback is static: no token-cache entry is written for it.
         self.assertFalse(gh_app_token.token_cache_file("agent", "metr").exists())
 
