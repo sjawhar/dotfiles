@@ -53,6 +53,16 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
   argument exists: '--all'"* — **do not take that suggestion.** `--all` pushes every local
   bookmark in the repo; agent-c currently has 179, mostly other agents' work. The tool's own
   error message is steering you into a mass push. Ignore it and use `--named`.
+- **CRITICAL — deleting a remote bookmark is per-name; `--deleted` is always repo-wide:** the
+  form is `jj bookmark delete <name>` then `jj git push --remote origin --bookmark <name>` —
+  a named push of a locally deleted bookmark deletes it on the remote. `--deleted` means
+  "push ALL deleted bookmarks and tags" (`jj git push --help`, 0.45) and has no per-name
+  variant: bare or combined with `--bookmark`, it carries every pending deletion in the shared
+  repo — every bookmark any session has `jj bookmark delete`d since its last push — and the
+  output merely lists the refs, which nobody reads on a cleanup push. One worker's
+  single-branch cleanup this way also deleted a human's closed-PR branch (2026-09-15; content
+  stayed reachable, restored with one command). Same failure shape as `--all` above: a
+  repo-wide flag in a repo shared by a hundred sessions.
 - **Divergence is bookkeeping, not damage:** resolve it deliberately; do not panic or delete remote history.
 - **CRITICAL — `Commit X is immutable` on a rebase in a fork is a stale pin, not a
   protection:** jj's default `immutable_heads()` includes `untracked_remote_bookmarks()`, so a
