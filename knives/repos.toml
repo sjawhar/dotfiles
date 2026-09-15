@@ -41,6 +41,10 @@ upstream = "https://github.com/can1357/oh-my-pi"
 origin = "https://github.com/sjawhar/oh-my-pi"
 release_branch = "sami"
 workspaces = "~/.worktrees/oh-my-pi"
+# Internal names an upstream-bound diff must not add (knives audit scans added lines; a
+# fork-only branch is exempt). "sjawhar" is not listed: it is the required changelog attribution.
+# "agent-c" is matched only as a path/slug segment: bare it collides with upstream's @oh-my-pi/pi-agent-core.
+forbidden = ["trajectory-labs", "trajectory_labs", "trajectorylabs", "/agent-c", "agent-c/", "cybertask", "legion", "luthien", "taiga", "middleman", "sami-agents", ".worktrees/", "secretsd", "envoy", "dispatch://", "knives", "notch", "orchestrator"]
 
 [repos.openchamber]
 upstream = "https://github.com/openchamber/openchamber.git"
