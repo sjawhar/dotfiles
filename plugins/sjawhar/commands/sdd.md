@@ -65,6 +65,13 @@ After acceptance, a final `reviewer` examines integrated correctness and securit
 
 The coordinator owns `opening-a-pr`. On every PR open or push, including each stack layer, invoke `landing-a-pr` immediately while independent implementation continues; each stacked PR also receives `opening-a-pr` and a `reviewer` as it lands. Use `gh-stack` autonomously when multiple PRs are needed. Consolidate completed applicable stacks with `squash-stack`; if it changes the delivered diff, refresh affected acceptance and the `opening-a-pr` gate before final readiness. Do not ask whether to stack, state a PR arrangement, or pause mid-stack. Merge only after Sami approves.
 
+A PR waiting in the merge queue or the deploy lane never idles the lane. Unless you are revising that
+PR, the next change stacks on its branch (`gh-stack`) and work continues; a dependency on another
+lane's open PR is handled the same way, based on their branch. Merging and deploying are never a
+reason to wait (Sami, 2026-09-15: "Why is merging a blocker here? ... can't they simply stack on top
+of it and keep going?"). The one thing that genuinely waits for the merge is driving the change in
+production afterwards, and that runs alongside the next stacked change, not instead of it.
+
 ## Dispatch status
 
 The coordinator moves the issue's Dispatch status at every transition, the way a human moves a card:
