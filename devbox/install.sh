@@ -21,6 +21,10 @@ systemctl --user daemon-reload
 # Devbox serve role exposes files through the laptop tunnel without binding the laptop's forwarded port.
 bash "${DOTFILES_DIR}/installers/forward.sh" serve
 
+# One embedding server for every omp session on the box (see installers/omp-embed.sh):
+# without it each session loads its own ~1 GB copy of the mnemopi embedding model.
+bash "${DOTFILES_DIR}/installers/omp-embed.sh"
+
 # Hourly PLAN-ONLY workspace-reaper dry run (AGENTC-79 D7; no apply path exists
 # in the timer until scenario 14's attended pass settles).
 bash "${DOTFILES_DIR}/installers/disk-hygiene-reaper.sh"
