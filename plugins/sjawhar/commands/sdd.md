@@ -19,6 +19,10 @@ This mapping is mandatory: never delegate plan authorship, substitute a cheap ti
 
 The coordinator does not implement. Bounded research and advice may inform the plan or resolve a concrete gap, but do not restart an approved design or turn the researcher into a planner. Reuse existing specs, plans, and reviews; repair an actual gap, then re-review the affected work. A `reviewer` gates every new or materially changed plan before implementation.
 
+## Skill catalog
+
+Planning starts with an explicit skill search (Sami, 2026-09-16, verbatim: "an explicit step where the planner searches for all of the relevant skills in the repo that each downstream step should use"). Enumerate the repo's skill directories — list them, never recall from memory — and select per role: skills for designing, for implementing, for testing, and for operating infrastructure. The planner loads the ones planning itself needs, and the plan carries a `## Skill catalog` section mapping each step to the skills its worker is required to load (Sami, 2026-09-16, verbatim: "the planner should explicitly tell each step to have a catalog of the relevant skills that they're required to load"). Every worker brief names its step's catalog entries: a subagent does not inherit the coordinator's loaded skills, so a skill absent from the brief does not exist for that worker (inferred — the dispatch-context rule in `using-subagents`).
+
 ## Plan contract
 
 Plan the full request. Divide parallel work only into disjoint ownership units and name every shared contract before dispatch. Finish every cutover: migrate all callers and remove obsolete paths, shims, aliases, compatibility exports, and dead code unless Sami explicitly requires compatibility.
@@ -27,13 +31,15 @@ Every plan includes:
 
 - `## Hardening ledger`, initially empty.
 - `## End-to-end verification plan`, with one scenario per deliverable: the real user/operator surface; the existing end-to-end driver and its location; a reusable driver task when none exists; and, for a required shared or costly resource, the cheapest genuine substitute (for example staging or a branch run).
+- `## Skill catalog`, mapping each step to the skills its worker is required to load (see above).
 
 Plan verification describes a user-observable outcome. A reviewer rejects missing, proxy-only, or internal-only verification paths.
 
-Every worker brief requires both:
+Every worker brief requires all of:
 
 1. **Shortcut ledger:** log each shortcut immediately in the hardening ledger and return its entries. Group repayment by root cause and file ownership, while preserving the resolution of every entry; the ledger is empty before the coordinator's PR gate.
 2. **Real-surface evidence:** drive the named user/operator path and report what was observed. A pytest fixture qualifies only when it drives the real product path. Green counts, internal shortcuts, substituted implementations, unit-only checks, and code inspection do not qualify.
+3. **Required skills:** the step's entries from the plan's `## Skill catalog`, loaded before work starts.
 
 Track each work item separately as **implemented**, **integrated**, and **acceptance-verified**. Do not report completion from unresolved dependency evidence.
 
@@ -42,6 +48,10 @@ Track each work item separately as **implemented**, **integrated**, and **accept
 Dispatch independent work in parallel. Use native, event-driven subagent results; do not poll. Continue other dispatchable work when a lane blocks. Send one direct clarification to a genuinely blocking, silent worker, then re-dispatch only if needed.
 
 After integration, dispatch `task` with `agent: "deep"` for acceptance through each exact driver named in the plan.
+
+The acceptance dispatch is the tester, and it starts skeptical: the work is broken until the tester proves otherwise on the real surface (Sami, 2026-09-16, verbatim: the tester needs "a strong skeptical assumption that it's broken until proven otherwise"). Acceptance means driving the changed surface end to end, climbing the repo's smoke-testing/verification ladder where one exists — unit tests, type checks, and reading the diff are not acceptance (inferred from the 2026-09-16 tester audit: 79.9% of 4,282 tester-population dispatches never touched a running surface, and 51.7% ran no verification command at all). The tester dispatches no extra review-agent layers nobody mandated — the same audit found an un-mandated thermonuclear-* layer on 63% of those dispatches; review belongs to the `reviewer` gate below (inferred).
+
+When the tester finds a defect, the tester writes the failing red test itself, in the repo tree, and hands it to the resumed implementer, who makes it pass and may not change that test (Sami, 2026-09-16, verbatim: the tester "[s]hould write the red test, but then the implementer, when resumed, needs to make a pass. The implementer should be given strong guidance not to change that test that the tester wrote"). Mark tester-authored tests as tester-authored in the handoff; an implementer weakening, rewriting, or deleting one is a ledger entry, never a quiet fix.
 
 For every acceptance scenario, record the source, dependency, and image revisions, then mark it:
 
