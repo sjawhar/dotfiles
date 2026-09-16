@@ -16,6 +16,7 @@ ensure_link "${DOTFILES_DIR}/omp/models.yml"  "${OMP_AGENT_DIR}/models.yml"
 ensure_link "${DOTFILES_DIR}/omp/mcp.json"    "${OMP_AGENT_DIR}/mcp.json"
 ensure_link "${DOTFILES_DIR}/omp/lsp.json"    "${OMP_AGENT_DIR}/lsp.json"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.md" "${OMP_AGENT_DIR}/WATCHDOG.md"
+ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.yml" "${OMP_AGENT_DIR}/WATCHDOG.yml"
 ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
