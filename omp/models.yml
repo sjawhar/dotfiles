@@ -9,9 +9,9 @@ providers:
     # `Authorization: Bearer <apiKey>` to a non-Anthropic base and adds
     # `X-Api-Key` only when it is given explicitly, so the same command backs
     # both (one cached invocation; both re-run on a 401).
-    # `hawk-token` (scripts/) pairs the Hawk API URL with this gateway: staging
-    # today, production once its gateway is armed — change both together.
-    baseUrl: https://middleman.hawk.staging.trajectorylabs.com/anthropic
+    # `hawk-token` (scripts/) pairs the Hawk API URL with this gateway: both
+    # name the production stack (armed 2026-09-15); change both together.
+    baseUrl: https://middleman.hawk.internal.trajectorylabs.com/anthropic
     apiKey: "!hawk-token"
     headers:
       X-Api-Key: "!hawk-token"

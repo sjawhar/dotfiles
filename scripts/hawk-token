@@ -18,11 +18,11 @@
 set -euo pipefail
 
 # The Hawk API that issues the token. It must belong to the same stack as the
-# gateway baseUrl in omp/models.yml: production pairs with
-# https://api.hawk.internal.trajectorylabs.com, staging with
-# https://api.hawk.staging.trajectorylabs.com. Tokens are stored per stack, so
-# `hawk login` is needed once per API URL.
-export HAWK_API_URL="${HAWK_API_URL:-https://api.hawk.staging.trajectorylabs.com}"
+# gateway baseUrl in omp/models.yml: production (the default here, armed
+# 2026-09-15) pairs with https://api.hawk.internal.trajectorylabs.com, staging
+# with https://api.hawk.staging.trajectorylabs.com. Tokens are stored per
+# stack, so `hawk login` is needed once per API URL.
+export HAWK_API_URL="${HAWK_API_URL:-https://api.hawk.internal.trajectorylabs.com}"
 
 agent_c="${AGENT_C_DIR:-$HOME/agent-c}"
 hawk="$agent_c/.venv/bin/hawk"
