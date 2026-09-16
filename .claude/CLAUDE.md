@@ -137,4 +137,5 @@ When compacting, preserve:
 - Designs I rejected, and why — so nobody re-proposes them
 - Topics I parked, in my own words — I will raise them again when I'm ready
 - Credential grants, with their scope (single-use unless I said otherwise)
+- The upstream-PR rule (`opening-a-pr` step 10: no upstream PR without `maintaining-inspect` loaded, a written placement answer, and my explicit go after evidence), verbatim, in every handoff and compaction — successors have opened upstream PRs in my name without it
 - Provenance on every constraint and rule you pass forward: **verbatim** (quote my actual words) or **inferred** (state the reasoning). A successor treats an inferred constraint as a hypothesis to verify, never as law — agents keep inheriting rules I never stated and obeying them.
