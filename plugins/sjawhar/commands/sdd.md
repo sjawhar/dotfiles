@@ -56,10 +56,13 @@ fix, rerun each affected acceptance scenario.
 
 Iterate locally. The local stack (real migrations, real fixtures, the real browser and API) is where
 every edit→see→fix loop runs; a dev stack or staging slot is the LAST proof, run once per PR, not a
-surface to iterate against. A dev-stack deploy is never the rate limiter; if it is, the missing piece
-is a local capability, and building it is part of the work. Anything that runs locally in place of a
-production path (a fixture, a stub identity, a local mode) is a drift risk: name it in the plan and
-state the check that keeps it faithful to production.
+surface to iterate against. That proof runs against a slot YOU applied at the head under test: a gate
+run against a slot deployed from someone else's branch compares your tree with their build and reds
+on their schema (dev2, 2026-09-15: a 55-field parquet diff that was one column from another lane's
+merge). A dev-stack deploy is never the rate limiter; if it is, the missing piece is a local
+capability, and building it is part of the work. Anything that runs locally in place of a production
+path (a fixture, a stub identity, a local mode) is a drift risk: name it in the plan and state the
+check that keeps it faithful to production.
 
 After acceptance, a final `reviewer` examines integrated correctness and security, plus dead code, shims, aliases, dual paths, and half-migrations. Resolve grounded findings before PR readiness; a reviewer preference without a grounded finding is not automatically binding. Do not park a real defect as follow-up work.
 
