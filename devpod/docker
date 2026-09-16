@@ -1,0 +1,49 @@
+#!/bin/bash
+# In-box docker client wrapper (/usr/local/bin/docker, PATH-first over
+# /usr/bin/docker): start the inner dockerd lazily on the first call, then
+# hand over to the real client. `docker info` is the readiness test — socket
+# existence is not readiness — and the flock makes two concurrent first calls
+# both block and re-check, so exactly one starts the daemon and both proceed.
+# The lock file is baked into the image world-writable because /run is
+# root-owned and this wrapper runs as ubuntu.
+set -euo pipefail
+
+LOCK=/run/agentbox-docker.lock
+
+if ! /usr/bin/docker info >/dev/null 2>&1; then
+    (
+        flock 9
+        if ! /usr/bin/docker info >/dev/null 2>&1; then
+            sudo /usr/local/libexec/agentbox-dockerd "${AGENTBOX_IMDS_FORWARDER:?}"
+            # First start only: log the inner Docker into ghcr.io with the
+            # platform's read-only packages token, as ubuntu — under sudo the
+            # secrets client, the age key, and ~/.docker are all absent. The
+            # login lands in the per-box ~/.docker hide and dies with the box.
+            # A failed login is a warning, not a dead docker: public pulls
+            # still work.
+            if command -v secrets >/dev/null 2>&1 && ! grep -qs ghcr.io "$HOME/.docker/config.json"; then
+                # The single quotes are the point: the token expands in the
+                # child sh that secrets spawns, not here.
+                # shellcheck disable=SC2016
+                secrets GHCR_PULL_TOKEN -- sh -c \
+                    'printf %s "$GHCR_PULL_TOKEN" | /usr/bin/docker login ghcr.io -u trajectory-labs-pbc --password-stdin >/dev/null' \
+                    || echo "agentbox: ghcr.io login failed; private image pulls will fail until it is fixed" >&2
+            fi
+        fi
+    ) 9>>"$LOCK"
+fi
+
+# Record the session→docker-volume mapping so a later `agentbox omp --resume`
+# (or `-c`) reattaches this session's image store. omp's tool subprocesses
+# carry OMP_SESSION_ID — the same fact shims/gh relies on — and $HOME is the
+# host's, so the file lands host-side with no poller. Never overwritten: the
+# first mapping a session records is the volume it launched with.
+if [[ -n "${OMP_SESSION_ID:-}" && -n "${AGENTBOX_DOCKER_VOLUME:-}" ]]; then
+    map_dir="$HOME/.local/state/agentbox/sessions"
+    if [[ ! -e "$map_dir/$OMP_SESSION_ID" ]]; then
+        mkdir -p "$map_dir"
+        printf '%s\n' "$AGENTBOX_DOCKER_VOLUME" >"$map_dir/$OMP_SESSION_ID"
+    fi
+fi
+
+exec /usr/bin/docker "$@"

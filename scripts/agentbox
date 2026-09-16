@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
-# agentbox: one disposable Sysbox container per repository for personal agent
-# sessions. The box holds none of the user's GitHub or SSH identity (no
-# ~/.config/gh, ~/.ssh/id_*, ~/.docker, ~/.kube, ~/.config/legion): only the
-# allow-list of mounts below, so an agent inside can push only as the GitHub
-# App its repo routes to (gh-app-routes.gitconfig) and never as the user. AWS
-# is the exception by design: ~/.aws is mounted and the box reaches the EC2
-# metadata service through a host forwarder on the box network, so every
-# profile works as on the host, while the sandboxes a box starts cannot reach
-# it (devpod/entrypoint.sh drops that traffic inside the box).
-# Root inside is Sysbox fake-root, so `sudo apt-get` and an inner dockerd work
+# agentbox: one disposable Sysbox container per agent session. The whole home
+# directory is mounted in, minus a hidden list of the user's personal
+# third-party logins (each shadowed by an empty per-box directory), so a
+# session behaves like a host session — checkouts, worktrees, omp state and
+# memory, dotfiles, mise tools, secrets, AWS, forward, gws, envoy — while
+# pushing to GitHub only as the App its repo routes to
+# (gh-app-routes.gitconfig) and never as the user. AWS is the exception by
+# design: ~/.aws is visible and the box reaches the EC2 metadata service
+# through a host forwarder on the box network, so every profile works as on
+# the host, while the containers a box starts are firewalled off it inside
+# the box (devpod/agentbox-dockerd). Root inside is Sysbox fake-root: `sudo
+# apt` and an inner dockerd (started lazily on the first `docker` call) work
 # without host privileges. Image: devpod/Dockerfile.
 #
-#   agentbox up <repo>            create and start the box (builds the image on first use)
-#   agentbox omp <repo> [args…]   run omp inside (the shim injects provider keys via secretsd)
-#   agentbox sh <repo> [cmd…]     shell (or a command) inside, same session environment
-#   agentbox down <repo>          remove the box and its inner-docker volume
-#   agentbox rebuild              build the image for the current Dockerfile; list boxes on older tags
-#   agentbox ls                   running boxes
+#   agentbox omp [DIR] [omp args…]       run one omp session in its own box;
+#                                        DIR defaults to $PWD, must be under $HOME
+#   agentbox sh <BOX|SESSION-ID> [cmd…]  exec into a running session's box
+#   agentbox ls                          running boxes
+#   agentbox doctor [BOX]                health checks, host side and box side
+#   agentbox gc                          reap session volumes and per-box hide dirs
+#   agentbox rebuild                     build the image now; list boxes on older tags
 #
-# <repo> is a directory name under $HOME (agent-c) or a path; the box is
-# agentbox-<basename> and the repo keeps its host path inside, so jj workspaces
-# and omp session files resolve identically on both sides.
+# The box lives exactly as long as its session: omp is the container's main
+# process and --rm cleans up on exit or pane kill. --resume/-c reattach the
+# session's inner-docker image store through the mapping the in-box docker
+# wrapper records (devpod/docker).
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -30,15 +34,44 @@ EMBED_NAME=omp-embed
 EMBED_PORT="${OMP_EMBED_PORT:-8087}"
 IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
 IMDS_UNIT=agentbox-imds
+HAWK_UNIT=agentbox-hawk-token
 UID_="$(id -u)"
+RUN_BASE="/run/user/$UID_/agentbox"
+# A directory rather than the bare socket so a box sees the socket socat
+# recreates after a restart of the unit; a bind of the file would pin the
+# dead inode. scripts/hawk-token reads the same path inside the box.
+HAWK_SOCK_DIR="$RUN_BASE/hawk-token"
+HAWK_SOCK="$HAWK_SOCK_DIR/hawk-token.sock"
+MAP_DIR="$HOME/.local/state/agentbox/sessions"
+OMP_SESSIONS_DIR="$HOME/.omp/agent/sessions"
+
+# Hidden: the user's personal login to a third party, where an agent-tier
+# equivalent already exists (gh-app routing / GH_PUBLIC_REPO_PAT,
+# GHCR_PULL_TOKEN, provider API keys via secretsd). Each entry is shadowed in
+# the box by an empty ubuntu-owned dir or file under $RUN_BASE/<box>/, bound
+# rw over the target: writes land in the per-box dir and die with `agentbox
+# gc` or a reboot (/run/user is tmpfs). Kept visible on purpose: ~/.aws,
+# ~/.kube, ~/.config/trajectory-labs, ~/.config/taiga, ~/.pulumi, ~/.npmrc,
+# and the top-level ~/.config/gws/token_cache.json minted by
+# google-user-token. The jj-signing pair is re-exposed on top of the hidden
+# ~/.ssh so commits inside a box carry the host's registered signature.
+HIDDEN_DIRS=(
+    .config/gh .ssh .docker .gnupg .local/share/keyrings .config/legion
+    .config/gcloud .codex .config/anthropic .local/share/opencode
+    .config/gws/personal .config/gws/work .config/google-chrome
+)
+HIDDEN_FILES=(.config/pup/sessions.json .config/opencode/mcp-oauth.json)
 
 die() { echo "agentbox: $*" >&2; exit 1; }
 
-# Image tag is the content hash of what builds it, so a Dockerfile edit yields
-# a new tag and `up` builds it; boxes on the old tag are listed by `rebuild`.
+# Image tag is the content hash of what builds it, so an edit to any image
+# input yields a new tag built on the next launch; running boxes on the old
+# tag are listed by `rebuild` and move when their sessions restart.
 image_tag() {
     local h
-    h="$(cat "$DOTFILES_DIR/devpod/Dockerfile" "$DOTFILES_DIR/devpod/entrypoint.sh" | sha256sum | cut -c1-12)"
+    h="$(cat "$DOTFILES_DIR/devpod/Dockerfile" "$DOTFILES_DIR/devpod/entrypoint.sh" \
+        "$DOTFILES_DIR/devpod/docker" "$DOTFILES_DIR/devpod/jj" \
+        "$DOTFILES_DIR/devpod/agentbox-dockerd" | sha256sum | cut -c1-12)"
     echo "agentbox:$h"
 }
 
@@ -85,211 +118,597 @@ ensure_imds_forwarder() {
     die "metadata forwarder $IMDS_UNIT did not bind $NETWORK_GATEWAY:$IMDS_PORT (journalctl --user -u $IMDS_UNIT)"
 }
 
-# The box a path belongs to. A repo is a direct child of $HOME; a path inside
-# it, or inside one of its jj workspaces under ~/.worktrees/<repo>/, resolves to
-# that repo, so `agentbox omp ~/.worktrees/agent-c/pm` and `agentbox omp
-# agent-c` name the same box. Anything else is refused: a box built from a
-# nested directory would carry a workspace without the .jj/.git it points at.
-resolve_repo() {
-    local arg="${1:-}" path rel first
-    [[ -n "$arg" ]] || die "repo name or path required"
-    if [[ "$arg" == /* ]]; then path="$arg"; else path="$HOME/$arg"; fi
-    path="$(realpath -m "$path")"
-    rel="${path#"$HOME"/}"
-    [[ "$rel" != "$path" && -n "$rel" ]] || die "not under $HOME: $path"
-    first="${rel%%/*}"
-    if [[ "$first" == .worktrees ]]; then
-        rel="${rel#.worktrees/}"
-        first="${rel%%/*}"
-        [[ "$rel" == */* || -d "$HOME/.worktrees/$first" ]] || die "no workspaces for $first under $HOME/.worktrees"
+# Hawk token forwarder: hawk keeps the user's Cognito session in the GNOME
+# keyring, which stays out of the box (it also holds the gh login), so the
+# host mints instead. socat runs scripts/hawk-token once per connection and
+# streams the one JWT back; the box side of hawk-token connects here. The
+# user manager's environment carries the session bus, so the keyring answers
+# from the unit exactly as from a shell. Same lifecycle as the IMDS unit.
+ensure_hawk_forwarder() {
+    mkdir -p "$HAWK_SOCK_DIR"
+    if ! systemctl --user is-active --quiet "$HAWK_UNIT"; then
+        if systemctl --user is-failed --quiet "$HAWK_UNIT"; then
+            systemctl --user reset-failed "$HAWK_UNIT"
+        fi
+        systemd-run --user --unit "$HAWK_UNIT" --quiet --collect --property=Restart=always --property=RestartSec=1 \
+            socat "UNIX-LISTEN:$HAWK_SOCK,fork,mode=600,unlink-early" \
+            EXEC:"$DOTFILES_DIR/scripts/hawk-token"
     fi
-    REPO_NAME="$first"
-    REPO_DIR="$HOME/$REPO_NAME"
-    [[ -e "$REPO_DIR/.jj" || -e "$REPO_DIR/.git" ]] \
-        || die "$REPO_DIR is not a repository (no .jj or .git)"
-    BOX="agentbox-$REPO_NAME"
-    VOLUME="$BOX-docker"
-    # jj workspaces of a colocated repo live under ~/.worktrees/<repo>/ and point
-    # back into the repo's .jj and .git, so the box carries both trees.
-    WORKTREES_DIR="$HOME/.worktrees/$REPO_NAME"
-    # A path deeper than the repo root names where the session starts.
-    ARG_DIR="$path"
+    local _
+    for _ in $(seq 1 20); do
+        [[ -S "$HAWK_SOCK" ]] && return 0
+        sleep 0.25
+    done
+    die "hawk-token forwarder $HAWK_UNIT did not open $HAWK_SOCK (journalctl --user -u $HAWK_UNIT)"
 }
 
-in_box_trees() {
-    case "$1/" in
-        "$REPO_DIR"/*|"$WORKTREES_DIR"/*) return 0 ;;
-        *) return 1 ;;
-    esac
+# Hide mounts. NOT tmpfs: under sysbox-runc --tmpfs mounts are applied before
+# binds and end up shadowed by the $HOME bind. Each hide is a bind of an
+# empty, ubuntu-owned per-box host dir (or file); binds sort by destination
+# depth, so they land on top of the home bind and the jj-signing re-exposure
+# lands on top of them. Every hidden target — and every mountpoint inside a
+# hide — is pre-created on the host as ubuntu first, or the runtime would
+# create it root-mapped-owned inside the rw home bind.
+hide_mounts() {
+    local box="$1" a=() p src
+    local box_dir="$RUN_BASE/$box"
+    for p in "${HIDDEN_DIRS[@]}"; do
+        mkdir -p "$HOME/$p"
+        src="$box_dir/${p//\//-}"
+        mkdir -p "$src"
+        a+=(-v "$src:$HOME/$p")
+    done
+    for p in "${HIDDEN_FILES[@]}"; do
+        # No host file means nothing to hide; pre-creating one would leave a
+        # 0-byte sessions.json/mcp-oauth.json that pup and opencode on the
+        # host fail to parse, where a missing file means "no logins".
+        [[ -e "$HOME/$p" ]] || continue
+        src="$box_dir/${p//\//-}"
+        touch "$src"
+        a+=(-v "$src:$HOME/$p")
+    done
+    [[ -r "$HOME/.ssh/jj-signing" && -r "$HOME/.ssh/jj-signing.pub" ]] \
+        || die "missing ~/.ssh/jj-signing pair; commits inside the box could not sign"
+    touch "$box_dir/.ssh/jj-signing" "$box_dir/.ssh/jj-signing.pub"
+    a+=(-v "$HOME/.ssh/jj-signing:$HOME/.ssh/jj-signing:ro")
+    a+=(-v "$HOME/.ssh/jj-signing.pub:$HOME/.ssh/jj-signing.pub:ro")
+    printf '%s\n' "${a[@]}"
 }
 
-# The working directory a session starts in: the workspace or subdirectory the
-# caller named, else the caller's cwd when it lies in one of the box's trees
-# (the repo or one of its workspaces), else the repo.
-session_cwd() {
-    if [[ "$ARG_DIR" != "$REPO_DIR" && -d "$ARG_DIR" ]] && in_box_trees "$ARG_DIR"; then
-        echo "$ARG_DIR"
-    elif in_box_trees "$PWD"; then
-        echo "$PWD"
-    else
-        echo "$REPO_DIR"
-    fi
-}
-
-box_running() { [[ "$(docker inspect -f '{{.State.Running}}' "$BOX" 2>/dev/null || true)" == true ]]; }
-
-# Mount allow-list. rw dirs are created on the host first so Docker never
-# creates them root-owned; ro files/dirs that do not exist are skipped.
+# All mounts for one box. $2 is the inner-docker volume; empty means an
+# anonymous volume that dies with the box (--no-session).
 mount_args() {
-    local a=() d
-    mkdir -p "$WORKTREES_DIR"
-    a+=(-v "$REPO_DIR:$REPO_DIR" -v "$WORKTREES_DIR:$WORKTREES_DIR")
-    a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
-    for d in .mise .cache/mise .omp .cache/omp .bun .cache/uv .local/share/uv .npm .config/trajectory-labs .aws; do
-        mkdir -p "$HOME/$d"
-        a+=(-v "$HOME/$d:$HOME/$d")
-    done
-    # Skill farms omp loads from other checkouts (omp/skills-sources.json):
-    # without them a box session silently loses the team-memory and ops skills.
-    for d in core-context core-ops; do
-        [[ -d "$HOME/$d" ]] && a+=(-v "$HOME/$d:$HOME/$d")
-    done
-    # ~/.config/secretsd names the sops source roots (both under ~/.dotfiles) and
-    # ~/.config/sops holds the machine age identity the `secrets` client decrypts
-    # agent-tier files with; human-tier keys still go through the broker socket.
-    for d in .config/mise .config/omp .config/jj .config/secretsd .config/sops .ssh/jj-signing .ssh/jj-signing.pub .config/opencode/envoy.json; do
-        [[ -e "$HOME/$d" ]] && a+=(-v "$(readlink -f "$HOME/$d"):$HOME/$d:ro")
-    done
-    [[ -e "$HOME/.gitconfig" ]] && a+=(-v "$(readlink -f "$HOME/.gitconfig"):$HOME/.gitconfig:ro")
-    # secretsd: the broker socket and the per-session token directory. Keys
-    # still arrive only through `secrets … -- cmd`; nothing is on disk. A missing
-    # socket must not become a root-owned directory the broker can never bind.
+    local box="$1" volume="$2" a=() hides=() s
+    a+=(-v "$HOME:$HOME")
+    [[ "$DOTFILES_DIR" == "$HOME"/* ]] || a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
+    mapfile -t hides < <(hide_mounts "$box")
+    a+=("${hides[@]}")
+    # /run/user/$UID_ itself is an empty per-box dir owned by ubuntu: without it
+    # docker creates the intermediate root-owned around the socket binds below,
+    # and omp refuses to register its secretsd session ("runtime directory
+    # unusable: not owned by this user"). Every mountpoint the binds below need
+    # is pre-created inside it as ubuntu too, or docker creates the chain
+    # root-owned and close_box cannot remove the box's dir.
+    local run_user="$RUN_BASE/$box/run-user"
+    mkdir -p "$run_user/secretsd" "$run_user/forward" "$run_user/agentbox/hawk-token"
+    touch "$run_user/secretsd.sock" "$run_user/forward-arm.sock" "$run_user/forward-browser-grant.sock"
+    a+=(-v "$run_user:/run/user/$UID_")
+    # secretsd: the broker socket and the per-session token directory; keys
+    # still arrive only through `secrets … -- cmd`, nothing is on disk.
+    # forward: the channel socket dir and the arm/browser-grant sockets.
+    # hawk-token: the host mint socket (ensure_hawk_forwarder). Never the
+    # whole /run/user/$UID_ — the gnupg and keyring sockets there are identity.
     [[ -S "/run/user/$UID_/secretsd.sock" ]] || die "secretsd is not running (no /run/user/$UID_/secretsd.sock)"
     a+=(-v "/run/user/$UID_/secretsd.sock:/run/user/$UID_/secretsd.sock")
     a+=(-v "/run/user/$UID_/secretsd:/run/user/$UID_/secretsd")
-    a+=(-v "$VOLUME:/var/lib/docker")
+    for s in forward forward-arm.sock forward-browser-grant.sock; do
+        [[ -e "/run/user/$UID_/$s" ]] && a+=(-v "/run/user/$UID_/$s:/run/user/$UID_/$s")
+    done
+    [[ -S "$HAWK_SOCK" ]] || die "hawk-token forwarder socket missing ($HAWK_SOCK); run \`agentbox doctor\`"
+    a+=(-v "$HAWK_SOCK_DIR:$HAWK_SOCK_DIR")
+    if [[ -n "$volume" ]]; then
+        a+=(-v "$volume:/var/lib/docker")
+    else
+        a+=(-v /var/lib/docker)
+    fi
     printf '%s\n' "${a[@]}"
 }
 
 session_env() {
-    local e=()
+    local box="$1" session="$2" volume="$3" e=()
     e+=(-e "HOME=$HOME" -e USER=ubuntu -e "TERM=${TERM:-xterm-256color}" -e "DOTFILES_DIR=$DOTFILES_DIR")
     # mise: the host's tool store, activated the way .bashrc does (shims mode).
+    # /usr/local/bin sits right after the dotfiles shims — box-only — so the
+    # image's jj and docker wrappers win over every real copy (a local build in
+    # $DOTFILES_DIR/bin, the mise shims); the jj wrapper re-resolves the real
+    # one from the rest of PATH, preserving the host's resolution order.
     e+=(-e "MISE_DATA_DIR=$HOME/.mise")
-    e+=(-e "PATH=$DOTFILES_DIR/shims:$DOTFILES_DIR/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    e+=(-e "PATH=$DOTFILES_DIR/shims:/usr/local/bin:$DOTFILES_DIR/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:$HOME/.pulumi/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin")
     e+=(-e "JJ_CONFIG=$HOME/.config/jj/config.toml:$DOTFILES_DIR/.jjconfig.toml")
     e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
-    e+=(-e "AGENTBOX_REPO=$REPO_NAME")
-    # Every AWS profile works as on the host: the SSO ones from the mounted
-    # ~/.aws, the instance-role ones through the metadata forwarder.
+    # Every AWS profile works as on the host: the SSO ones from the visible
+    # ~/.aws, the instance-role ones through the metadata forwarder. The
+    # forwarder address also feeds the inner dockerd's firewall rule.
     e+=(-e "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://$NETWORK_GATEWAY:$IMDS_PORT")
+    e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
     # Same gh-app routing include shims/omp and scripts/oc export on the host.
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
+    e+=(-e "AGENTBOX_BOX=$box" -e "AGENTBOX_SESSION=$session")
+    # Names the inner-docker image store so the in-box docker wrapper can
+    # record the session→volume mapping (devpod/docker).
+    [[ -n "$volume" ]] && e+=(-e "AGENTBOX_DOCKER_VOLUME=$volume")
     # The shared embedding server, only while it answers on the host; a dead
     # server would otherwise put every box session on keyword-only recall.
     if curl -fsS -m 1 "http://127.0.0.1:${EMBED_PORT}/health" >/dev/null 2>&1; then
         e+=(-e "MNEMOPI_EMBEDDING_API_URL=http://$EMBED_NAME/v1")
     fi
-    # A plain shell inherits the caller's secretsd session; omp mints its own.
+    # A launching shell may carry a secretsd session; omp mints its own inside.
     [[ -n "${SECRETSD_SESSION_TOKEN_FILE:-}" ]] && e+=(-e "SECRETSD_SESSION_TOKEN_FILE=$SECRETSD_SESSION_TOKEN_FILE")
     # The pane this session lives in, so tmux-resurrect-omp can find the omp
-    # process inside the box (its environ) and save `agentbox omp … --resume`.
+    # process inside the box (its environ) and save `agentbox omp --resume`.
     [[ -n "${TMUX_PANE:-}" ]] && e+=(-e "TMUX_PANE=$TMUX_PANE")
     printf '%s\n' "${e[@]}"
 }
 
-# A tmux restore launches every pane of a repo at once; the lock makes the first
-# one create the box and the rest find it running.
-cmd_up() {
-    resolve_repo "$1"
-    local lock="/run/user/$UID_/agentbox-$REPO_NAME.lock"
-    exec {lock_fd}>"$lock"
-    flock "$lock_fd"
-    up_locked
-    flock -u "$lock_fd"
-    exec {lock_fd}>&-
+# omp's per-directory session store name for a host path: the path relative to
+# $HOME with slashes as dashes (kept: the leading one), '-' for $HOME itself.
+session_dir_key() {
+    local rel="${1#"$HOME"}"
+    rel="${rel//\//-}"
+    printf '%s\n' "${rel:--}"
 }
 
-up_locked() {
-    box_running && { echo "agentbox: $BOX already running" >&2; return 0; }
-    docker rm -f "$BOX" >/dev/null 2>&1 || true
-    local tag; tag="$(image_tag)"
+session_id_from_path() {
+    local base="${1##*/}"
+    base="${base%.jsonl}"
+    printf '%s\n' "${base##*_}"
+}
+
+# Newest omp session id recorded for a directory — the same lookup omp's -c
+# does, run on the host so the volume mapping is deterministic before the
+# container starts.
+newest_session_id() {
+    local key newest="" f
+    key="$(session_dir_key "$1")"
+    local files=("$OMP_SESSIONS_DIR/$key/"*.jsonl)
+    [[ -e "${files[0]}" ]] || return 1
+    for f in "${files[@]}"; do
+        [[ -z "$newest" || "$f" -nt "$newest" ]] && newest="$f"
+    done
+    session_id_from_path "$newest"
+}
+
+# A --resume value may be a full id, an id prefix, or a session-file path.
+# Resolve it to a full id: a path names the id in its basename; a prefix is
+# matched against the recorded volume mappings first, then the omp session
+# store, and counts only when it names exactly one session. An unresolvable
+# or ambiguous value passes through (omp resolves it itself) and simply gets
+# a fresh volume and no workspace restore.
+resolve_resume() {
+    local v="$1"
+    if [[ "$v" == */* || "$v" == *.jsonl ]]; then
+        session_id_from_path "$v"
+        return 0
+    fi
+    if [[ "${#v}" -eq 36 ]]; then
+        printf '%s\n' "$v"
+        return 0
+    fi
+    local m=() f
+    for f in "$MAP_DIR/$v"*; do
+        [[ -e "$f" && "$f" != *.workspaces ]] && m+=("$f")
+    done
+    if [[ ${#m[@]} -eq 1 ]]; then
+        printf '%s\n' "${m[0]##*/}"
+        return 0
+    fi
+    m=("$OMP_SESSIONS_DIR"/*/*_"$v"*.jsonl)
+    if [[ -e "${m[0]}" ]]; then
+        if (( ${#m[@]} == 1 )); then
+            session_id_from_path "${m[0]}"
+            return 0
+        fi
+        echo "agentbox: --resume $v matches ${#m[@]} sessions; passed through unresolved (fresh volume, no workspace restore)" >&2
+    fi
+    printf '%s\n' "$v"
+}
+
+# --- workspace lifecycle (§ workspaces are cleaned up on close, restored on
+# resume). The in-box jj wrapper (devpod/jj) appends `repo, name, path,
+# identity` rows to $MAP_DIR/<session>.workspaces for every `jj workspace
+# add` a session runs (repo is the main repo root, identity the inode and
+# birth time of the workspace's .jj); the close phase below snapshots each
+# one, records where its @ sat, and removes it; the resume phase recreates
+# the missing ones before the container starts. Rows gain two columns over a
+# workspace's life: the change id to sit back on, and the knives branch when
+# the workspace belonged to a claim.
+
+# Same format as devpod/jj records.
+ws_ident() { stat -c '%i:%.9W' "$1/.jj" 2>/dev/null; }
+
+ws_row() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"; }
+
+# The knives branch a workspace of a repo belongs to, when the repo is
+# knives-managed and the branch is claimed with that workspace; fails
+# otherwise. The registry lookup comes first because `knives status` in an
+# unregistered repo burns its whole timeout scanning (measured 60s).
+knives_branch_for() {
+    local repo="$1" name="$2" reg
+    command -v knives >/dev/null 2>&1 || return 1
+    reg="$(timeout 30 knives repos --json 2>/dev/null \
+        | jq -r --arg p "$repo" '.repos[] | select(.path == $p) | .name' | head -1)"
+    [[ -n "$reg" ]] || return 1
+    timeout 60 knives status --json "$reg" 2>/dev/null \
+        | jq -r --arg ws "$name" '.branches[] | select(.workspace == $ws) | .name' 2>/dev/null \
+        | head -1 | grep .
+}
+
+# The box's graceful shutdown (MCP servers, session flush) takes tens of
+# seconds after a hangup; the close phase snapshots workspaces only once the
+# container is gone, or after a minute if it wedges.
+wait_box_gone() {
+    local box="$1" _
+    for _ in $(seq 1 120); do
+        docker inspect "$box" >/dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+}
+
+cleanup_workspaces() {
+    local sid="$1"
+    local wf="$MAP_DIR/$sid.workspaces"
+    [[ -s "$wf" ]] || return 0
+    local tmp="$wf.tmp.$$" repo name path ident change branch empty desc
+    : >"$tmp"
+    while IFS=$'\t' read -r repo name path ident change branch; do
+        [[ -n "$repo" && -n "$path" ]] || continue
+        if [[ ! -d "$path" ]]; then
+            # Already gone: removed by an earlier close (restore brings it
+            # back), or by the session itself — then the repo no longer lists
+            # it and there is nothing to bring back.
+            if [[ -d "$repo" ]] && ! jj -R "$repo" workspace list -T 'name ++ "\n"' 2>/dev/null | grep -qxF "$name"; then
+                continue
+            fi
+            ws_row "$repo" "$name" "$path" "$ident" "$change" "$branch" >>"$tmp"
+            continue
+        fi
+        # The row names a path, not a directory: only the workspace this
+        # session created is removed, never one another session put at the
+        # same path after this one forgot its own.
+        if [[ "$(ws_ident "$path")" != "$ident" ]]; then
+            echo "agentbox: workspace $name at $path is not the one this session created; left in place" >&2
+            continue
+        fi
+        jj -R "$path" workspace update-stale >/dev/null 2>&1 || true
+        # `jj st` snapshots the working copy into @; nothing tracked is lost by
+        # removing the directory afterwards.
+        if ! jj -R "$path" st >/dev/null 2>&1; then
+            echo "agentbox: workspace $name: snapshot failed; left in place" >&2
+            ws_row "$repo" "$name" "$path" "$ident" "$change" "$branch" >>"$tmp"
+            continue
+        fi
+        # `workspace forget` abandons an empty undescribed @ (confirmed, jj
+        # 0.45): record the parent instead for that case, ^-marked so resume
+        # rebuilds the same state with `jj new` — `edit` on a mutable parent
+        # would put @ on the parent itself and later edits would amend it.
+        empty="$(jj -R "$path" log --no-graph -r @ -T 'empty' 2>/dev/null)"
+        desc="$(jj -R "$path" log --no-graph -r @ -T 'description' 2>/dev/null)"
+        if [[ "$empty" == true && -z "$desc" ]]; then
+            change="^$(jj -R "$path" log --no-graph -r 'parents(@)' -T 'change_id ++ "\n"' | head -1)"
+        else
+            change="$(jj -R "$path" log --no-graph -r @ -T 'change_id')"
+        fi
+        branch="$(knives_branch_for "$repo" "$name" || true)"
+        if [[ -n "$branch" ]]; then
+            # The claim belongs to the box session; release it as that session
+            # (knives anchors claims to OMP_SESSION_ID), not as a foreign actor.
+            if ! (cd "$repo" && OMP_SESSION_ID="$sid" knives finish "$branch"); then
+                echo "agentbox: knives finish $branch failed; workspace $name left in place" >&2
+                ws_row "$repo" "$name" "$path" "$ident" "$change" "$branch" >>"$tmp"
+                continue
+            fi
+        else
+            if ! jj -R "$repo" workspace forget "$name"; then
+                echo "agentbox: workspace forget $name failed; left in place" >&2
+                ws_row "$repo" "$name" "$path" "$ident" "$change" "$branch" >>"$tmp"
+                continue
+            fi
+            rm -rf "$path"
+        fi
+        ws_row "$repo" "$name" "$path" "$ident" "$change" "$branch" >>"$tmp"
+    done <"$wf"
+    mv "$tmp" "$wf"
+}
+
+restore_workspaces() {
+    local sid="$1"
+    local wf="$MAP_DIR/$sid.workspaces"
+    [[ -s "$wf" ]] || return 0
+    local tmp="$wf.tmp.$$" repo name path ident change branch
+    : >"$tmp"
+    while IFS=$'\t' read -r repo name path ident change branch; do
+        [[ -n "$repo" && -n "$path" ]] || continue
+        if [[ ! -d "$repo" ]]; then
+            echo "agentbox: workspace $name: repo $repo is gone; dropped" >&2
+            continue
+        fi
+        if [[ ! -e "$path" ]]; then
+            if [[ -n "$branch" ]]; then
+                if ! (cd "$repo" && OMP_SESSION_ID="$sid" knives start "$branch" --why "resumed session $sid"); then
+                    echo "agentbox: knives start $branch failed; workspace not restored" >&2
+                    ws_row "$repo" "$name" "$path" "$ident" "$change" "$branch" >>"$tmp"
+                    continue
+                fi
+            elif ! jj -R "$repo" workspace add --name "$name" "$path"; then
+                echo "agentbox: workspace add $name failed; not restored" >&2
+                ws_row "$repo" "$name" "$path" "$ident" "$change" "$branch" >>"$tmp"
+                continue
+            fi
+            # The recreated workspace is a new directory: re-record its
+            # identity or the next close would refuse to touch it.
+            [[ -d "$path/.jj" ]] && ident="$(ws_ident "$path")"
+            # `knives start` opens the workspace on trunk; a plain add on the
+            # default workspace's parent. Either way @ moves back to where the
+            # session left off.
+            if [[ "$change" == ^* ]]; then
+                # A discardable @ was abandoned by forget; recreate an empty
+                # child of the recorded parent.
+                jj -R "$path" new "${change#^}" \
+                    || echo "agentbox: workspace $name: could not return to ${change#^}" >&2
+            elif [[ -n "$change" ]]; then
+                # Sit back where the session left off; an immutable change
+                # gets a fresh child instead.
+                jj -R "$path" edit "$change" 2>/dev/null \
+                    || jj -R "$path" new "$change" \
+                    || echo "agentbox: workspace $name: could not return to $change" >&2
+            fi
+        fi
+        ws_row "$repo" "$name" "$path" "$ident" "$change" "$branch" >>"$tmp"
+    done <"$wf"
+    mv "$tmp" "$wf"
+}
+
+# After the container is gone: find the session's workspaces file — via the
+# breadcrumb the in-box jj wrapper leaves for fresh sessions, else the resumed
+# id — clean its workspaces up, and drop the box's hide dir.
+close_box() {
+    local box="$1" resume_id="$2" sid=""
+    wait_box_gone "$box"
+    local crumb="$HOME/.local/state/agentbox/boxes/$box"
+    [[ -s "$crumb" ]] && sid="$(<"$crumb")"
+    rm -f "$crumb"
+    [[ -n "$sid" ]] || sid="$resume_id"
+    [[ -n "$sid" ]] && cleanup_workspaces "$sid"
+    rm -rf "${RUN_BASE:?}/$box"
+}
+
+cmd_omp() {
+    local dir="" cand
+    if [[ $# -gt 0 && "$1" != -* ]]; then
+        cand="$1"
+        if [[ -d "$cand" ]]; then
+            dir="$(realpath "$cand")"; shift
+        elif [[ -d "$HOME/$cand" ]]; then
+            dir="$(realpath "$HOME/$cand")"; shift
+        fi
+    fi
+    [[ -n "$dir" ]] || dir="$(realpath "$PWD")"
+    [[ "$dir" == "$HOME" || "$dir" == "$HOME"/* ]] || die "not under $HOME: $dir"
+
+    # Volume selection happens here, before the container starts: --resume
+    # names a session whose recorded mapping picks its image store back up; -c
+    # is resolved to the newest session for DIR so it never orphans the prior
+    # volume; --no-session gets an anonymous volume that dies with the box.
+    # Bare -r opens omp's picker inside — the choice cannot be known here, so
+    # it runs on a fresh volume.
+    local args=() resume_id="" no_session=0 i a v sid
+    local in=("$@")
+    for ((i = 0; i < ${#in[@]}; i++)); do
+        a="${in[i]}"
+        case "$a" in
+            --no-session) no_session=1; args+=("$a") ;;
+            --resume=*) resume_id="$(resolve_resume "${a#--resume=}")"; args+=("$a") ;;
+            --resume|-r)
+                v="${in[i + 1]:-}"
+                [[ -n "$v" && "$v" != -* ]] && resume_id="$(resolve_resume "$v")"
+                args+=("$a") ;;
+            -c|--continue)
+                sid="$(newest_session_id "$dir")" || die "no session to continue in $dir"
+                resume_id="$sid"
+                args+=(--resume "$sid") ;;
+            *) args+=("$a") ;;
+        esac
+    done
+
+    local box session volume=""
+    box="agentbox-$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-12)"
+    session="${resume_id:-$(cat /proc/sys/kernel/random/uuid)}"
+    if (( !no_session )); then
+        [[ -n "$resume_id" && -s "$MAP_DIR/$resume_id" ]] && volume="$(<"$MAP_DIR/$resume_id")"
+        [[ -n "$volume" ]] || volume="$box-docker"
+    fi
+
+    # A resumed session gets its workspaces back before the container starts.
+    [[ -n "$resume_id" ]] && restore_workspaces "$resume_id"
+
+    local tag
+    tag="$(image_tag)"
     build_image "$tag"
     ensure_network
     ensure_imds_forwarder
-    local mounts=(); mapfile -t mounts < <(mount_args)
-    docker run -d --name "$BOX" --runtime="$RUNTIME" --init --hostname "$BOX" \
+    ensure_hawk_forwarder
+    local mounts=() env=()
+    mapfile -t mounts < <(mount_args "$box" "$volume")
+    mapfile -t env < <(session_env "$box" "$session" "$volume")
+    (( no_session )) && env+=(-e AGENTBOX_EPHEMERAL=1)
+    local tty=(-i)
+    [[ -t 0 && -t 1 ]] && tty=(-it)
+    # Not exec'd: the close phase must run after the container exits, whatever
+    # the exit reason. docker run runs as a background child (same process
+    # group — no job control — so it keeps the terminal); a tmux pane kill or
+    # TERM lands here too, and the trap forwards a hangup into the box, because
+    # the in-box omp does not die with its docker client (verified: the TUI
+    # keeps running after a pane kill). --init forwards the signal to omp, the
+    # session ends, --rm fires, and close still runs.
+    trap 'docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' HUP TERM INT
+    local rc=0 child
+    # The explicit stdin dup matters: a job-control-less background child gets
+    # /dev/null for stdin, which -it refuses ("stdin is not a terminal").
+    local stdin_fd
+    exec {stdin_fd}<&0
+    docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
-        -e "AGENTBOX_REPO=$REPO_NAME" -e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT" \
-        "${mounts[@]}" "$tag" >/dev/null
-    local _
-    for _ in $(seq 1 60); do
-        docker logs "$BOX" 2>&1 | grep -q 'inner dockerd ready' && break
-        if [[ "$(docker inspect -f '{{.State.Running}}' "$BOX")" != true ]]; then break; fi
-        sleep 1
+        --user ubuntu -w "$dir" "${tty[@]}" \
+        "${mounts[@]}" "${env[@]}" "$tag" "$DOTFILES_DIR/shims/omp" "${args[@]}" <&"$stdin_fd" &
+    child=$!
+    # An interrupted wait re-waits: the first return after a signal carries
+    # 128+sig, the child's real status arrives once it is reaped.
+    while :; do
+        if wait "$child"; then rc=0; else rc=$?; fi
+        kill -0 "$child" 2>/dev/null || break
     done
-    if ! docker logs "$BOX" 2>&1 | grep -q 'inner dockerd ready'; then
-        docker logs "$BOX" 2>&1 | tail -20 >&2
-        docker rm -f "$BOX" >/dev/null 2>&1 || true
-        die "$BOX did not become ready; removed"
-    fi
-    # Private agent-c images: the inner Docker logs into ghcr.io with the
-    # platform's read-only packages token (agent-tier GHCR_PULL_TOKEN). The
-    # user's own docker login is never in the box.
-    secrets GHCR_PULL_TOKEN -- sh -c \
-        'printf %s "$GHCR_PULL_TOKEN" | docker exec -i --user ubuntu "$0" docker login ghcr.io -u trajectory-labs-pbc --password-stdin >/dev/null 2>&1' "$BOX" \
-        || echo "agentbox: ghcr.io login failed; private image pulls will fail until it is fixed" >&2
-    echo "agentbox: $BOX ready ($tag)" >&2
+    trap - HUP TERM INT
+    close_box "$box" "$resume_id"
+    exit "$rc"
 }
 
-# Ends every process of one box session: `docker exec` leaves its command
-# running when the client dies (a closed tmux pane, a killed tmux server), so a
-# host-omp's SIGHUP-on-hangup is replayed by hand, matched on the session id in
-# each process's environment.
-hangup_session() {
-    docker exec "$BOX" sh -c '
-        for e in /proc/[0-9]*/environ; do
-            grep -qz "^AGENTBOX_SESSION=$1\$" "$e" 2>/dev/null || continue
-            p="${e#/proc/}"; p="${p%/environ}"
-            kill -HUP -- "-$(ps -o pgid= "$p" | tr -d " ")" 2>/dev/null || kill -HUP "$p" 2>/dev/null
-        done' _ "$1" >/dev/null 2>&1 || true
+# The box a target names: a running box (exact name or unique prefix), or an
+# omp session id or prefix — matched first against the AGENTBOX_SESSION each
+# box was launched with (the resolved id on --resume), then by asking each box
+# which session files its processes hold open, the same fd-table fact
+# tmux-resurrect-omp relies on.
+resolve_box() {
+    local target="$1" b sid
+    local boxes=() m=()
+    mapfile -t boxes < <(docker ps --filter name='^agentbox-' --format '{{.Names}}')
+    for b in "${boxes[@]}"; do
+        [[ "$b" == "$target" ]] && { printf '%s\n' "$b"; return 0; }
+    done
+    for b in "${boxes[@]}"; do
+        [[ "$b" == "$target"* || "$b" == "agentbox-$target"* ]] && m+=("$b")
+    done
+    (( ${#m[@]} == 1 )) && { printf '%s\n' "${m[0]}"; return 0; }
+    for b in "${boxes[@]}"; do
+        sid="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$b" | sed -n 's/^AGENTBOX_SESSION=//p')"
+        [[ -n "$sid" && "$sid" == "$target"* ]] && { printf '%s\n' "$b"; return 0; }
+    done
+    for b in "${boxes[@]}"; do
+        if docker exec "$b" sh -c '
+            for f in /proc/[0-9]*/fd/*; do
+                t="$(readlink "$f" 2>/dev/null)" || continue
+                case "$t" in */.omp/agent/sessions/*_"$1"*.jsonl) exit 0 ;; esac
+            done
+            exit 1' _ "$target" 2>/dev/null; then
+            printf '%s\n' "$b"
+            return 0
+        fi
+    done
+    return 1
 }
 
-cmd_exec() {
-    local mode="$1"; shift
-    resolve_repo "$1"; shift
-    box_running || cmd_up "$REPO_DIR"
-    ensure_network
-    local env=(); mapfile -t env < <(session_env)
-    local session; session="$(cat /proc/sys/kernel/random/uuid)"
-    env+=(-e "AGENTBOX_SESSION=$session")
-    local tty=()
-    [[ -t 0 && -t 1 ]] && tty=(-it) || tty=(-i)
-    local cmd=()
-    case "$mode" in
-        omp) cmd=("$DOTFILES_DIR/shims/omp" "$@") ;;
-        sh)  cmd=("${@:-bash}") ;;
-    esac
-    # Expanded now: the trap fires at script exit, after this function's locals are gone.
-    # shellcheck disable=SC2064
-    trap "hangup_session '$session'" EXIT HUP TERM
-    docker exec "${tty[@]}" --user ubuntu -w "$(session_cwd)" "${env[@]}" "$BOX" "${cmd[@]}"
+cmd_sh() {
+    local target="${1:-}"
+    [[ -n "$target" ]] || die "box name or session id required"
+    shift
+    local box wdir
+    box="$(resolve_box "$target")" || die "no running box matches $target"
+    wdir="$(docker inspect -f '{{.Config.WorkingDir}}' "$box")"
+    local tty=(-i)
+    [[ -t 0 && -t 1 ]] && tty=(-it)
+    local cmd=("$@")
+    (( ${#cmd[@]} )) || cmd=(bash)
+    # docker exec carries the container's launch env (PATH, routing, sockets);
+    # only the caller's terminal needs passing through.
+    exec docker exec "${tty[@]}" --user ubuntu -e "TERM=${TERM:-xterm-256color}" -w "$wdir" "$box" "${cmd[@]}"
 }
 
-cmd_down() {
-    resolve_repo "$1"
-    docker rm -f "$BOX" >/dev/null 2>&1 || true
-    docker volume rm "$VOLUME" >/dev/null 2>&1 || true
-    echo "agentbox: $BOX removed"
+# Reap what --rm cannot: named inner-docker volumes, session state files, and
+# per-box hide dirs. A volume survives when a running box uses it or a fresh
+# (<30 days) mapping whose omp session file still exists names it; everything
+# else — including mappings and workspace records whose session was deleted —
+# goes. Anything younger than a minute is left alone: a launch in flight has
+# hide dirs before its container exists, and a session's mapping and
+# workspace records before omp writes its session file on the first turn.
+GC_GRACE=60
+
+younger_than_grace() { (( now - $(stat -c %Y "$1") < GC_GRACE )); }
+
+cmd_gc() {
+    local now b f vol sid keep running
+    now="$(date +%s)"
+    running=" $(docker ps --filter name='^agentbox-' --format '{{.Names}}' | tr '\n' ' ')"
+    local in_use=" "
+    for b in $(docker ps --filter name='^agentbox-' --format '{{.Names}}'); do
+        in_use+="$(docker inspect -f '{{range .Mounts}}{{.Name}} {{end}}' "$b") "
+    done
+    local -A mapped=()
+    for f in "$MAP_DIR"/*; do
+        [[ -e "$f" ]] || continue
+        younger_than_grace "$f" && continue
+        sid="${f##*/}"
+        # Scratch from an interrupted close (mv never ran): plain garbage.
+        if [[ "$f" == *.tmp.* ]]; then
+            rm -f "$f"
+            continue
+        fi
+        # Workspace records follow the same staleness policy as mappings.
+        if [[ "$f" == *.workspaces ]]; then
+            sid="${sid%.workspaces}"
+            local wsess=("$OMP_SESSIONS_DIR"/*/*_"$sid".jsonl)
+            if [[ ! -e "${wsess[0]}" ]] || (( now - $(stat -c %Y "$f") > 30 * 86400 )); then
+                rm -f "$f"
+                echo "agentbox: dropped workspace record $sid"
+            fi
+            continue
+        fi
+        vol="$(<"$f")"
+        keep=1
+        (( now - $(stat -c %Y "$f") > 30 * 86400 )) && keep=0
+        local sess=("$OMP_SESSIONS_DIR"/*/*_"$sid".jsonl)
+        [[ -e "${sess[0]}" ]] || keep=0
+        if (( keep )); then
+            mapped["$vol"]=1
+        else
+            rm -f "$f"
+            echo "agentbox: dropped mapping $sid -> $vol"
+        fi
+    done
+    for vol in $(docker volume ls -q --filter name=agentbox-); do
+        [[ "$vol" == agentbox-* ]] || continue
+        [[ "$in_use" == *" $vol "* ]] && continue
+        [[ -n "${mapped[$vol]:-}" ]] && continue
+        docker volume rm "$vol" >/dev/null
+        echo "agentbox: removed volume $vol"
+    done
+    local d box
+    for d in "$RUN_BASE"/*/; do
+        [[ -d "$d" ]] || continue
+        younger_than_grace "$d" && continue
+        box="$(basename "$d")"
+        # Only per-box hide dirs; the hawk-token socket dir shares this parent.
+        [[ "$box" == agentbox-* ]] || continue
+        [[ "$running" == *" $box "* ]] && continue
+        rm -rf "$d"
+        echo "agentbox: removed ${d%/}"
+    done
+    local crumb
+    for crumb in "$HOME/.local/state/agentbox/boxes"/*; do
+        [[ -e "$crumb" ]] || continue
+        younger_than_grace "$crumb" && continue
+        box="$(basename "$crumb")"
+        [[ "$running" == *" $box "* ]] && continue
+        rm -f "$crumb"
+    done
 }
 
 cmd_rebuild() {
-    local tag; tag="$(image_tag)"
+    local tag
+    tag="$(image_tag)"
     build_image "$tag"
     local stale
     stale="$(docker ps --filter name='^agentbox-' --format '{{.Names}} {{.Image}}' | awk -v t="$tag" '$2 != t {print $1}')"
     if [[ -n "$stale" ]]; then
-        echo "agentbox: boxes on an older image (agentbox down/up to move them):" >&2
+        echo "agentbox: boxes on an older image (they move when their sessions restart):" >&2
         echo "$stale" >&2
     fi
     echo "agentbox: image $tag"
@@ -297,12 +716,233 @@ cmd_rebuild() {
 
 cmd_ls() { docker ps --filter name='^agentbox-' --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'; }
 
+FAILS=0
+ok() { echo "ok   $*"; }
+fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
+
+# The box side of doctor, run under bash inside a throwaway or named box.
+# Arguments: the hidden dirs, --, the hidden files, --, then flags: embed=0|1
+# (host embed answered). Rows print as ok/FAIL; @forward: rows carry the
+# forward doctor row names out for the host-side parity check.
+# The single quotes are the point: everything expands inside the box.
+# shellcheck disable=SC2016
+DOCTOR_BOX_SCRIPT='
+set -u
+fails=0
+ok() { echo "ok   box: $*"; }
+fail() { echo "FAIL box: $*"; fails=$((fails + 1)); }
+
+pgrep -x dockerd >/dev/null 2>&1 && fail "dockerd running before first docker call" || ok "idle: no dockerd"
+
+for t in pulumi pip psql sqlite3 socat wget google-chrome jj gh aws forward; do
+    command -v "$t" >/dev/null 2>&1 && ok "tool $t" || fail "tool $t does not resolve"
+done
+
+[ "$(command -v jj)" = /usr/local/bin/jj ] && ok "jj resolves to the recording wrapper" || fail "jj resolves to $(command -v jj), not the wrapper"
+[ "$(command -v docker)" = /usr/local/bin/docker ] && ok "docker resolves to the lazy-start wrapper" || fail "docker resolves to $(command -v docker), not the wrapper"
+
+probe="$HOME/.agentbox-doctor.$$"
+if touch "$probe" 2>/dev/null; then ok "home rw"; rm -f "$probe"; else fail "home not writable"; fi
+if touch "$HOME/.omp/.agentbox-doctor.$$" 2>/dev/null; then ok "~/.omp writable"; rm -f "$HOME/.omp/.agentbox-doctor.$$"; else fail "~/.omp not writable"; fi
+
+mode=dirs
+embed=1
+for p in "$@"; do
+    if [ "$p" = -- ]; then mode=files; continue; fi
+    case "$p" in embed=*) embed="${p#embed=}"; continue ;; esac
+    t="$HOME/$p"
+    case "$p" in
+        .ssh)
+            entries="$(ls -A "$t" | sort | tr "\n" " ")"
+            [ "$entries" = "jj-signing jj-signing.pub " ] && ok "hidden $p shows exactly the jj-signing pair" \
+                || fail "hidden $p contents: $entries"
+            ;;
+        .docker)
+            if touch "$t/.agentbox-doctor" 2>/dev/null; then rm -f "$t/.agentbox-doctor"; ok "hidden $p writable by ubuntu"
+            else fail "hidden $p not writable by ubuntu"; fi
+            extra="$(ls -A "$t" | grep -v "^config\.json$" | tr "\n" " ")"
+            [ -z "$extra" ] && ok "hidden $p empty (config.json allowed)" || fail "hidden $p contents: $extra"
+            ;;
+        *)
+            if [ "$mode" = dirs ]; then
+                [ -z "$(ls -A "$t" 2>/dev/null)" ] && ok "hidden $p empty" || fail "hidden $p not empty: $(ls -A "$t" | tr "\n" " ")"
+            else
+                if [ ! -e "$t" ]; then ok "hidden $p absent (no host file to hide)"
+                elif [ ! -s "$t" ]; then ok "hidden $p empty"
+                else fail "hidden $p not empty"; fi
+            fi
+            ;;
+    esac
+done
+
+[ -r "$HOME/.ssh/jj-signing" ] && [ -r "$HOME/.ssh/jj-signing.pub" ] && ok "jj-signing pair readable" || fail "jj-signing pair not readable"
+[ -e "$HOME/.ssh/id_ed25519" ] && fail "id_ed25519 visible" || ok "no id_ed25519"
+[ -e "$HOME/.config/gh/hosts.yml" ] && fail "gh hosts.yml visible" || ok "no gh hosts.yml"
+
+# gh-app routing picks the App from the repo owner, so the check runs from the
+# dotfiles checkout; outside a repo the shim has no owner to route to.
+if out="$(cd "$DOTFILES_DIR" && gh api user 2>&1)"; then fail "gh api user succeeded as a user"
+elif echo "$out" | grep -qi "403\|integration\|Resource not accessible"; then ok "gh api user refused (integration)"
+else fail "gh api user failed unexpectedly: $(echo "$out" | head -1)"; fi
+(cd "$DOTFILES_DIR" && gh auth status >/dev/null 2>&1) && fail "gh auth status: logged in" || ok "gh auth status: not logged in"
+
+secrets GHCR_PULL_TOKEN -- sh -c "[ -n \"\$GHCR_PULL_TOKEN\" ]" >/dev/null 2>&1 \
+    && ok "secrets agent tier (GHCR_PULL_TOKEN len>0)" || fail "secrets agent tier (GHCR_PULL_TOKEN) empty or failed"
+
+out="$(timeout 10 secrets DD_API_KEY -- true 2>&1)" && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then ok "secrets human tier: broker accepted"
+elif [ "$rc" -eq 124 ]; then ok "secrets human tier: broker registered, approval pending"
+elif echo "$out" | grep -qi "reject\|foreign uid\|denied\|unauthorized\|unknown peer\|could not communicate with secretsd"; then
+    ok "secrets human tier: known rejection until sjawhar/forward lands (spec §9): $(echo "$out" | head -1)"
+else fail "secrets human tier unexpected: $(echo "$out" | head -1)"; fi
+
+if arn="$(aws sts get-caller-identity --query Arn --output text 2>&1)" && [ "${arn#arn:aws:}" != "$arn" ]; then
+    ok "aws sts: $arn"
+else fail "aws sts: $(echo "$arn" | head -1)"; fi
+
+# The host mints through the forwarder socket (scripts/hawk-token in box
+# mode); the value is a credential and never printed.
+if tok="$(hawk-token 2>&1)" && [[ "$tok" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+    ok "hawk-token prints one JWT (${#tok} bytes)"
+else fail "hawk-token: $(echo "$tok" | head -1)"; fi
+
+if tok="$(google-user-token 2>&1)" && [ -n "$tok" ]; then ok "google-user-token mints a token"
+else fail "google-user-token: $(echo "$tok" | head -1)"; fi
+
+if timeout 3 bash -c "exec 3<>/dev/tcp/envoy-nats/4222" 2>/dev/null; then ok "envoy NATS reachable"
+else fail "envoy NATS (envoy-nats:4222) unreachable"; fi
+
+if [ "$embed" = 1 ]; then
+    curl -fsS -m 3 http://omp-embed/health >/dev/null && ok "mnemopi embed 200" || fail "mnemopi embed unreachable from box"
+fi
+
+forward doctor 2>/dev/null | cut -d: -f1 | while IFS= read -r row; do echo "@forward:$row"; done
+
+if docker info >/dev/null 2>&1; then ok "docker info lazy-starts the inner dockerd"
+else fail "docker info failed to lazy-start dockerd"; fi
+pgrep -x dockerd >/dev/null 2>&1 && ok "dockerd running after first call" || fail "no dockerd after docker info"
+
+echo "@fails:$fails"
+'
+
+cmd_doctor() {
+    local named="${1:-}"
+    local tag
+    tag="$(image_tag)"
+
+    if docker info -f '{{json .Runtimes}}' 2>/dev/null | grep -q '"sysbox-runc"'; then
+        ok "host: sysbox-runc runtime"
+    else
+        fail "host: sysbox-runc runtime not registered"
+    fi
+    if [[ -n "$(docker image ls -q "$tag")" ]]; then
+        ok "host: image $tag built"
+    else
+        echo "note host: image $tag not built (built on next launch)"
+    fi
+    ensure_network
+    ok "host: network $NETWORK ($NETWORK_GATEWAY $NETWORK_SUBNET)"
+    ensure_imds_forwarder
+    if systemctl --user is-active --quiet "$IMDS_UNIT"; then
+        ok "host: forwarder unit $IMDS_UNIT active"
+    else
+        fail "host: forwarder unit $IMDS_UNIT inactive"
+    fi
+    ensure_hawk_forwarder
+    if ! systemctl --user is-active --quiet "$HAWK_UNIT"; then
+        fail "host: hawk-token forwarder unit $HAWK_UNIT inactive"
+    elif [[ ! -S "$HAWK_SOCK" ]]; then
+        fail "host: hawk-token forwarder unit $HAWK_UNIT active but $HAWK_SOCK missing"
+    else
+        ok "host: hawk-token forwarder unit $HAWK_UNIT active, socket $HAWK_SOCK"
+    fi
+    local embed=0
+    if curl -fsS -m 2 "http://127.0.0.1:${EMBED_PORT}/health" >/dev/null 2>&1; then
+        ok "host: omp-embed healthy"
+        embed=1
+    else
+        echo "note host: omp-embed not answering (box falls back to its own worker)"
+    fi
+    if [[ -S "/run/user/$UID_/secretsd.sock" ]]; then
+        ok "host: secretsd socket"
+    else
+        fail "host: secretsd socket missing"
+    fi
+    local s
+    for s in forward forward-arm.sock forward-browser-grant.sock; do
+        if [[ -e "/run/user/$UID_/$s" ]]; then
+            ok "host: /run/user/$UID_/$s"
+        else
+            fail "host: /run/user/$UID_/$s missing"
+        fi
+    done
+    local p t
+    for p in "${HIDDEN_DIRS[@]}"; do
+        t="$HOME/$p"
+        if [[ ! -e "$t" ]]; then
+            echo "note host: hidden target $p missing (pre-created at launch)"
+        elif [[ "$(stat -c %u "$t")" != "$UID_" ]]; then
+            fail "host: hidden target $p not owned by uid $UID_"
+        fi
+    done
+    # A file is hidden only while the host has one (hide_mounts).
+    for p in "${HIDDEN_FILES[@]}"; do
+        t="$HOME/$p"
+        if [[ ! -e "$t" ]]; then
+            echo "note host: hidden file $p absent (nothing to hide)"
+        elif [[ "$(stat -c %u "$t")" != "$UID_" ]]; then
+            fail "host: hidden target $p not owned by uid $UID_"
+        fi
+    done
+    ok "host: hidden targets pre-creation checked"
+
+    # Box side: a named running box, or a throwaway box from the current image.
+    local out
+    if [[ -n "$named" ]]; then
+        out="$(docker exec --user ubuntu "$named" bash -c "$DOCTOR_BOX_SCRIPT" _ \
+            "${HIDDEN_DIRS[@]}" -- "${HIDDEN_FILES[@]}" "embed=$embed" 2>&1)" || true
+    else
+        build_image "$tag"
+        local box mounts=() env=()
+        box="agentbox-doctor$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-8)"
+        mapfile -t mounts < <(mount_args "$box" "")
+        mapfile -t env < <(session_env "$box" "$(cat /proc/sys/kernel/random/uuid)" "")
+        out="$(docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" \
+            --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
+            --user ubuntu -w "$HOME" "${mounts[@]}" "${env[@]}" "$tag" \
+            bash -c "$DOCTOR_BOX_SCRIPT" _ "${HIDDEN_DIRS[@]}" -- "${HIDDEN_FILES[@]}" "embed=$embed" 2>&1)" || true
+        rm -rf "${RUN_BASE:?}/$box"
+    fi
+    grep -v '^@' <<<"$out"
+    FAILS=$((FAILS + $(grep -c '^FAIL ' <<<"$out" || true)))
+    grep -q '^@fails:' <<<"$out" || fail "box: doctor script did not complete"
+
+    # forward doctor row parity: same row names inside and out. Values differ
+    # legitimately (grants are per-session), names must not.
+    if command -v forward >/dev/null 2>&1; then
+        local host_rows box_rows
+        host_rows="$(forward doctor 2>/dev/null | cut -d: -f1 | sort)"
+        box_rows="$(sed -n 's/^@forward://p' <<<"$out" | sort)"
+        if [[ "$host_rows" == "$box_rows" ]]; then
+            ok "forward doctor row parity with host"
+        else
+            fail "forward doctor rows differ: host [$(tr '\n' ',' <<<"$host_rows")] box [$(tr '\n' ',' <<<"$box_rows")]"
+        fi
+    fi
+
+    if (( FAILS )); then
+        echo "agentbox doctor: $FAILS failing" >&2
+        exit 1
+    fi
+    echo "agentbox doctor: all checks passed"
+}
+
 case "${1:-}" in
-    up)      shift; cmd_up "${1:-}" ;;
-    omp)     shift; cmd_exec omp "$@" ;;
-    sh)      shift; cmd_exec sh "$@" ;;
-    down)    shift; cmd_down "${1:-}" ;;
-    rebuild) cmd_rebuild ;;
+    omp)     shift; cmd_omp "$@" ;;
+    sh)      shift; cmd_sh "$@" ;;
     ls)      cmd_ls ;;
-    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    doctor)  shift; cmd_doctor "${1:-}" ;;
+    gc)      cmd_gc ;;
+    rebuild) cmd_rebuild ;;
+    *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
