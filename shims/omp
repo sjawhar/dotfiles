@@ -107,9 +107,15 @@ fi
 # Anything else already in the environment is left alone, so
 # `secrets ANTHROPIC_API_KEY -- omp --profile theorem` bills the personal
 # Anthropic account for that session.
+# The default profile gets no ANTHROPIC_API_KEY: omp/models.yml routes the
+# anthropic provider through the Hawk model gateway with a per-person token
+# (`!hawk-token`), so no static Anthropic key sits in the process environment
+# — or in the environment of every tool subprocess omp spawns. A named
+# profile keeps its own scoped keys; its models.yml is separate.
 # OMP_PROFILE wins over --profile whenever it is defined, even when empty
 # (empty and "default" both mean the default profile), matching omp itself.
 _keys=(ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY)
+_default_keys=(GEMINI_API_KEY OPENAI_API_KEY)
 if [[ -n "${OMP_PROFILE+x}" ]]; then
     _profile="$OMP_PROFILE"
 else
@@ -125,7 +131,7 @@ fi
 _profile="${_profile//[[:space:]]/}"
 case "$_profile" in
     ""|default)
-        exec secrets "${_keys[@]}" -- "${_cmd[@]}" "$@"
+        exec secrets "${_default_keys[@]}" -- "${_cmd[@]}" "$@"
         ;;
 esac
 
