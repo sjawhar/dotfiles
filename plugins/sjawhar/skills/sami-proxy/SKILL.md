@@ -177,13 +177,19 @@ verdict predicts a judgment; it does not approve an action or authorize sending.
 Every verdict must then land in exactly one of two places:
 
 1. **A dispatched ask** — when the verdict is `Sami's call: yes`, or when it is
-   low-confidence on a consequential action. The caller sends the question,
-   corrected to pass both pre-flight gates, and keeps working on everything not
+   low-confidence on a consequential action. A yes-verdict carries the ask
+   itself: its `Ask to send` line is the corrected question — at most 800
+   characters, at least two genuine options with tradeoffs, exactly one marked
+   recommended (the predicted answer), both pre-flight gates passed — ready for
+   the caller to dispatch verbatim. A yes-verdict that only describes how the
+   caller should fix its draft has not terminated; the 2026-09-16 shadow eval
+   measured 9 of 15 yes-verdicts doing exactly that when the format had no slot
+   for the question. The caller sends it and keeps working on everything not
    blocked by it.
 2. **A recorded decision** — otherwise the caller acts on the verdict and
    records the decision with its reasoning (the verdict's answer and grounds) in
    its own ledger or report, so the user can see what was decided on his behalf
-   and why.
+   and why. No `Ask to send` line appears on a no-verdict.
 
 A `Sami's call: yes` prediction that simply evaporates is a defect, not a
 judgment call: the 2026-09-16 audit found 11 of 22 live yes-verdicts were
