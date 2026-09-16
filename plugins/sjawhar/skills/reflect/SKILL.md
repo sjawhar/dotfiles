@@ -37,8 +37,8 @@ notifications, goal-loop re-prompts, slash-command bodies) in chronological orde
 read them end to end. Never delegate this reading; subagents may pre-filter noise
 mechanically, but a summary of Sami's words is not Sami's words.
 
-The mechanical first step is index -> extract -> read every row, using the two
-helpers next to this skill:
+The mechanical first step is index -> extract -> read every row, using the first two
+of the three helpers next to this skill:
 
 ```bash
 SKILL_DIR=~/.dotfiles/plugins/sjawhar/skills/reflect
@@ -52,6 +52,21 @@ inventories every failed tool call for the Command Repeater / Mistake Finder lan
 Sami's ruling (2026-09-16, verbatim): "Script helpers are good (e.g. extracting user
 messages or tool call errors from transcripts)." They make the full read tractable —
 they never replace it.
+
+Agent-side problem discovery has its own stage-1 helper, `extract-agent-narrative.py`:
+it renders EVERY omp transcript in the window (top-level sessions and every subagent
+sidecar under them, streamed line by line) as a readable agent-only narrative — full
+assistant text, one line per tool call, failed tool results in full, user turns and
+harness notices truncated, subagent spawn/result markers, `-- gap Nm --` for pauses over
+ten minutes — and writes one digest row per file (turns, tool errors and their top
+error lines, retry runs, gaps, step-back language, compactions, subagent failures).
+Population is the population: run it over the whole window, then read narratives
+chosen from the digest, not a sample. Sami (2026-09-16, verbatim): "we didn't do
+nearly enough problem discovery from the transcripts."
+
+```bash
+python3 "$SKILL_DIR/extract-agent-narrative.py" --days <N> --out narratives/   # narratives/<session>[/<sidecar>].md + digest.jsonl
+```
 
 The highest-value learnings are the TURNING POINTS: the small fraction of his messages
 that demonstrably changed an architecture or implementation direction, or unstuck an
