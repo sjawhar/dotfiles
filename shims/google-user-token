@@ -7,7 +7,7 @@
 
 Configuration comes from the production/devbox/machine-identity-google-wif Secrets Manager entry; no human credential is used.
 """
-import argparse, json, sys
+import argparse, json, os, sys
 import urllib.error, urllib.request
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -15,7 +15,10 @@ from google.auth import aws as gauth_aws, exceptions as google_auth_exceptions, 
 from google.auth.transport.requests import Request
 
 SECRET = "production/devbox/machine-identity-google-wif"
-SCOPE_PREFIX, IMDS_BASE = "https://www.googleapis.com/auth/", "http://169.254.169.254/latest"
+SCOPE_PREFIX = "https://www.googleapis.com/auth/"
+# The same override the AWS SDKs honor: an agentbox reaches the metadata service
+# only through the host forwarder that scripts/agentbox names here.
+IMDS_BASE = os.environ.get("AWS_EC2_METADATA_SERVICE_ENDPOINT", "http://169.254.169.254").rstrip("/") + "/latest"
 
 class UserTokenError(Exception): pass
 
@@ -58,8 +61,16 @@ def owner_email() -> str:
     return owner
 
 def mint_token(subject: str, scopes: tuple[str, ...], config: dict) -> str:
+    adc = dict(config["adc"])
+    # The WIF credential_source embeds literal 169.254.169.254 URLs; point them at
+    # the same forwarder the direct IMDS calls above use, or the mint hangs in a box.
+    if (source_cfg := adc.get("credential_source")) and IMDS_BASE != "http://169.254.169.254/latest":
+        adc["credential_source"] = {
+            key: value.replace("http://169.254.169.254", IMDS_BASE.removesuffix("/latest")) if isinstance(value, str) else value
+            for key, value in source_cfg.items()
+        }
     try:
-        source = gauth_aws.Credentials.from_info(config["adc"], scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        source = gauth_aws.Credentials.from_info(adc, scopes=["https://www.googleapis.com/auth/cloud-platform"])
         credentials = impersonated_credentials.Credentials(source_credentials=source, target_principal=config["sa_email"], target_scopes=scopes, subject=subject)
         credentials.refresh(Request())
     except google_auth_exceptions.GoogleAuthError as error: raise UserTokenError(f"WIF/DWD failed: {error}") from error
