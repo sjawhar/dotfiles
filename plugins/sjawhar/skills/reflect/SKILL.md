@@ -37,6 +37,22 @@ notifications, goal-loop re-prompts, slash-command bodies) in chronological orde
 read them end to end. Never delegate this reading; subagents may pre-filter noise
 mechanically, but a summary of Sami's words is not Sami's words.
 
+The mechanical first step is index -> extract -> read every row, using the two
+helpers next to this skill:
+
+```bash
+SKILL_DIR=~/.dotfiles/plugins/sjawhar/skills/reflect
+python3 "$SKILL_DIR/extract-user-messages.py" --days <N> --out prompts.jsonl --text prompts.txt
+python3 "$SKILL_DIR/extract-tool-errors.py" --days <N> --summary   # failed bash/tool calls, top stems
+```
+
+`extract-user-messages.py` pre-filters injected noise and dedupes exact repeats
+(recording the dup count) so what remains is Sami's own words; `extract-tool-errors.py`
+inventories every failed tool call for the Command Repeater / Mistake Finder lanes.
+Sami's ruling (2026-09-16, verbatim): "Script helpers are good (e.g. extracting user
+messages or tool call errors from transcripts)." They make the full read tractable —
+they never replace it.
+
 The highest-value learnings are the TURNING POINTS: the small fraction of his messages
 that demonstrably changed an architecture or implementation direction, or unstuck an
 agent that was spinning. For each one, pull the surrounding session context and answer:
