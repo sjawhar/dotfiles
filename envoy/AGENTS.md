@@ -18,7 +18,7 @@ Pulumi (TypeScript) infrastructure that deploys the on-prem `envoy-listener` con
 
 ## Where the secrets are
 
-- **The Dispatch bearer token is not here.** The `envoy_*`/`dispatch_*` tools read it from `~/.config/opencode/envoy.json`, key `dispatch.token` (beside `dispatch.enabled`, `dispatch.serverUrl` and top-level `natsUrls`). The reader is the pi-envoy extension and the Dispatch server's shared config loader in the legion repo (`packages/envoy/internal/dispatch/config/config.go`), which shallow-merges that user file with `<cwd>/.opencode/envoy.json`, repo overriding. The token is a user credential: never commit it, never copy it into this directory.
+- **The Dispatch bearer token is not here.** The `envoy_*`/`dispatch_*` tools read it from `~/.config/opencode/envoy.json`, key `dispatch.token` (beside `dispatch.enabled`, `dispatch.serverUrl` and top-level `natsUrls`). The reader is the pi-envoy extension and the Dispatch server's shared config loader in the legion repo (`packages/envoy/internal/dispatch/config/config.go`), which shallow-merges that user file with `<cwd>/.opencode/envoy.json`, repo overriding. The token is a secret: never commit it, never copy it into this directory. On the devbox its value is the shared agent token (Secrets Manager `production/dispatch/agent-token`), deployed for agent sessions to use with their own `actor` identity - it is not Sami's personal credential, and reading it from that file is the sanctioned path.
 - **This directory holds the deployment's own secrets only**, encrypted in `Pulumi.prod.yaml`: `envoy:githubWebhookSecret`, `envoy:slackSigningSecret` and the `envoy:ghcrToken` image-pull token.
 
 ## How changes take effect
