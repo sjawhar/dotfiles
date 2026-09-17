@@ -46,6 +46,7 @@ Every worker brief requires all of:
 1. **Shortcut ledger:** log each shortcut immediately in the hardening ledger and return its entries. Group repayment by root cause and file ownership, while preserving the resolution of every entry; the ledger is empty before the coordinator's PR gate.
 2. **Real-surface evidence:** drive the named user/operator path and report what was observed. A pytest fixture qualifies only when it drives the real product path. Green counts, internal shortcuts, substituted implementations, unit-only checks, and code inspection do not qualify.
 3. **Required skills:** the step's entries from the plan's `## Skill catalog`, loaded before work starts.
+4. **The repo's own gate commands:** a check command named in a brief is the CI job's exact recipe (the repo AGENTS.md Commands section or the workflow file), never a subset. Inferred from legion#1186 (2026-09-18): the brief said `biome lint`, CI runs `bun run lint` = `biome check` (lint + format), and the lane went red on formatting the worker had proven "clean".
 
 Track each work item separately as **implemented**, **integrated**, and **acceptance-verified**. Do not report completion from unresolved dependency evidence.
 
