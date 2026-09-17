@@ -33,6 +33,8 @@ Plan the full request. Divide parallel work only into disjoint ownership units a
 
 **Product-shape questions.** When a plan would choose a new page, navigation entry, table key, customer-scoping rule, or persisted sidecar, and Sami has not already settled that product shape, write a one-line Dispatch ask before the first implementation commit. A platform-PO ruling on schema or contract does not settle product shape. This does not apply to a user-specified decision or turn routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
 
+**Migration chain order.** When a coordinated batch of migration pull requests is packet-ready, assign and record their parent order once before individual migrations re-parent and re-gate. A later sibling does not by itself reopen that batch decision. This applies to a defined coordinated migration batch, not routine branch work; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
+
 Every plan includes:
 
 - `## Hardening ledger`, initially empty.
