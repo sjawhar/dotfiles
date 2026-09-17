@@ -60,6 +60,8 @@ The deploy lane is a queue, and waiting in it is normal: one chain runs, one wai
 
 **Deploy queues need complete evidence.** When a deployment queue can coalesce or replace chains, track every chain that can carry the merge, not only the newest one. For a failed workflow, inspect the job `steps[]` through `gh api` when `gh run view` omits continue-on-error detail. This is a verification boundary for queued delivery, not an approval gate; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
 
+**A queue packet needs its source verdicts.** When a packet reports a verdict, include the PR-comment URL for each verdict rather than an Envoy message or lane file. When a merge write reports success, read the API's `merged=true` state; a command exit alone can describe a refused write. Background jobs cannot supply the owning session's credential, so they do not perform the merge. These checks apply to queue mutations and reports, not ordinary PR discussion; inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
+
 ## Red flags — you have left the envelope
 
 - A merge commit appeared on the PR head. (`update-branch`, a local base merge.) Report it as the defect it is; never undo with a force-push.
