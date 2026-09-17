@@ -1,20 +1,9 @@
 providers:
   anthropic:
-    # Route the built-in anthropic catalog through the Hawk model gateway with a
-    # per-person short-lived token instead of a static Anthropic API key. Only
-    # baseUrl/apiKey/headers are overridden; every model id, thinking ladder,
-    # price and the modelRoles/fallbackChains in config.yml stay as they are.
-    #
-    # The gateway authenticates the token in `x-api-key` only. omp sends
-    # `Authorization: Bearer <apiKey>` to a non-Anthropic base and adds
-    # `X-Api-Key` only when it is given explicitly, so the same command backs
-    # both (one cached invocation; both re-run on a 401).
-    # `hawk-token` (scripts/) pairs the Hawk API URL with this gateway: both
-    # name the production stack (armed 2026-09-15); change both together.
-    baseUrl: https://middleman.hawk.internal.trajectorylabs.com/anthropic
-    apiKey: "!hawk-token"
-    headers:
-      X-Api-Key: "!hawk-token"
+    # Universal catalog patches only. Anything that targets one machine's network
+    # or credentials — a gateway baseUrl, an `!command` apiKey — is machine-local
+    # and belongs in omp/models.local.yml (gitignored); installers/omp.sh merges
+    # that file over this one on machines where it exists and links the result.
     modelOverrides:
       # Installed pi-catalog is stale: claude-opus-5 supports xhigh per Anthropic docs
       # (https://platform.claude.com/docs/en/build-with-claude/effort - "Claude Opus 5
