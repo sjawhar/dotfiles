@@ -67,13 +67,12 @@ copy)
 resume)
     id=$(sed -n "${2}p" "$cache")
     [ -n "$id" ] || exit 1
-    # A pane whose leader is `agentbox omp …` runs a box session and resumes
-    # boxed (no directory argument — agentbox defaults to the pane's cwd); any
-    # other pane — including an editor opened on the agentbox script — resumes
-    # on the host.
-    if ps -o args= -p "$(tmux display-message -p ${3:+-t "$3"} '#{pane_pid}')" 2>/dev/null \
-        | grep -qE '(^|[ /])agentbox omp( |$)'; then
-        cmd="agentbox omp --resume $id"
+    # A pane whose leader is `agentbox omp <repo> …` runs a box session and
+    # resumes boxed in the same repo; any other pane — including an editor
+    # opened on the agentbox script — resumes on the host.
+    leader="$(ps -o args= -p "$(tmux display-message -p ${3:+-t "$3"} '#{pane_pid}')" 2>/dev/null || true)"
+    if repo="$(sed -nE 's#.*(^|[ /])agentbox omp ([^ -][^ ]*).*#\2#p' <<<"$leader")" && [ -n "$repo" ]; then
+        cmd="agentbox omp $repo --resume $id"
     else
         cmd="omp --resume $id"
     fi

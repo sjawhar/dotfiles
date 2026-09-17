@@ -36,7 +36,7 @@ usage() {
 usage: ompo                 — list profiles and their scoped keys
        ompo ls              — same
        ompo NAME [args...]  — launch omp under profile NAME on the host; for a
-                              boxed session run `agentbox omp [DIR] --profile NAME`
+                              boxed session run `agentbox omp <repo> --profile NAME`
 USAGE
 }
 
