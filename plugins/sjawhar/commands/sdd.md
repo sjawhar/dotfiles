@@ -60,7 +60,12 @@ When the tester finds a defect, the tester writes the failing red test itself, i
 For every acceptance scenario, record the source, dependency, and image revisions, then mark it:
 
 - `RAN` — real-surface observation;
-- `BLOCKED` — exact blocker.
+- `BLOCKED` — exact blocker, stated as the COMMAND that failed and the AUTHORITATIVE RECORD you
+  checked, never as a person. Four blockers on 2026-09-16 turned out not to bind once checked: a
+  lane "blocked on Ryan's reply" when the Taiga RfC tags and the Lyon PRs already held the answer;
+  a `gcloud auth` ask when we never pull from Taiga's registry; a "cancelled deploy" that was the
+  queue coalescing; an SSO ask another lane inherited after its own profile had expired. A blocker
+  another lane reports is re-verified, not adopted. Sami, 2026-09-17: "nothing here needed Ryan".
 
 There is no waiver state. Verification on a production-like surface is never optional and never
 something to ask Sami to skip (Sami, 2026-09-15: "Is there any part of the sdd process that says
@@ -95,7 +100,12 @@ production afterwards, and that runs alongside the next stacked change, not inst
 
 The coordinator moves the issue's Dispatch status at every transition, the way a human moves a card:
 `in_progress` when implementation starts, `testing` when acceptance begins, `needs_review` when the
-PR is open and its merge packet is sent, `done` once the change is verified in production. An issue
+PR is open and its merge packet is sent, `done` once the change is verified in production AND the
+person who asked for it has seen it on the live surface — a green suite, a harness screenshot, or a
+merge is groundwork, not done. Three things shipped invisibly on 2026-09-16 (the searchable
+multi-select asked for three times while the component existed; the red-teamer viewer live a day
+before the people who asked were told; a P0 close-out whose `done` the PO missed for two hours) and
+each cost more trust than the work took. `done` is a render in front of the requester. An issue
 left at `triage` while work is underway is a defect: the roadmap view is read from these statuses,
 and Sami has no other way to see delivery without interrupting a session. Do this for child issues
 you own as well as the root. Deploy queueing is not a status: a merge that waits for the deploy lane
