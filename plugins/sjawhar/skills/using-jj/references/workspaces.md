@@ -89,8 +89,22 @@ Multiple jj workspaces share **one operation log and one commit store**. Every j
 - Keep operations minimal and deliberate — don't experiment
 - Never chain undos (see "No Undo Loops" above)
 - If your workspace is stale, run `jj workspace update-stale` before doing anything else
-- Rebase onto main with `jj git fetch && jj rebase -o main`
+- Rebase onto main with `jj git fetch && jj rebase -o main`, and only when there is a conflict to resolve (Sami, #2092: "Please don't do unecessary rebases (i.e. unless there are merge conflicts)")
+- Rebase **your own change**, named: `-r @` / `-s <your change>`. A revset like `visible_heads() & ~immutable()` sweeps every other session's unpushed PR bookmark in the store onto the new base — three open-PR bookmarks were moved that way in `~/.dotfiles` on 2026-09-17 (no conflicts, identical patches, so pure churn, and each PR's local bookmark then diverged from its published head)
 - Verify your workspace — confirm you're operating on the right directory
+
+**Advancing a shared checkout that carries someone else's uncommitted edit** (the served `~/.dotfiles` / `~/core-ops` copy after your change landed on main): `jj new main@origin` parks the old `@` — *with the co-tenant's edit* — as an orphan change. Restore from that parked change by its id, and restore **every path it touched**, not the one you remember:
+
+```bash
+OLD=$(jj log -r @ --no-graph -T 'change_id.short()')   # BEFORE jj new
+jj new main@origin
+jj diff --stat -r "$OLD"                                 # the full list of paths to carry
+jj restore --from "$OLD" <every path in that list>
+diff <(jj diff --stat -r "$OLD") <(jj diff --stat -r @)  # identical, or you dropped one
+jj abandon "$OLD"
+```
+
+`--from @-` after `jj new` is main and carries nothing. On 2026-09-17 this session restored `mise.toml` alone from the parked change and abandoned it; the same change also held another session's three `omp/plugins/` lockfile edits, which that session had to recover from the hidden commit twenty minutes later. Inferred from that incident (librarian, 2026-09-17), not a rule Sami stated in these words.
 
 ## Merge Conflict Resolution
 
