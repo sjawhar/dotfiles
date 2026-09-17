@@ -21,7 +21,7 @@ Root inside the box is Sysbox fake-root (a user namespace on the host), so `sudo
 
 knives: claims are keyed by the omp session id, so a boxed `knives start` is released at box exit without `--force`. The registered forks still live at their pre-`~/src` paths (`~/inspect/*`, `~/toon-rust/default`, …), which a box does not mount; `knives start` from a box works once a fork's checkout is moved under `~/src` (knives places workspaces next to the checkout, so they land inside the mount).
 
-Known gap until `sjawhar/forward` §9 lands: human-tier `secrets` from a box is rejected by the broker (`could not communicate with secretsd: Connection reset by peer`), and omp's own secretsd registration shows as deferred; agent-tier keys work. `agentbox doctor` reports the exact symptom as expected.
+Secrets work from a box on both tiers as of `forward` v3.2.2 (sjawhar/forward#40): the daemon runs in the private user namespace its mount protections imply, so a same-uid client in a box arrives at `SO_PEERCRED` as the overflow uid, and the daemon now decides admission on the socket node being owner-only rather than on that uid. omp's own secretsd registration succeeds with it. `agentbox doctor` asserts a broker answer from inside the box; a `Connection reset by peer` there is a regression, not the expectation.
 
 ### How changes take effect
 

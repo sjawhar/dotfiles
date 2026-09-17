@@ -465,7 +465,11 @@ touch "$HOME/.omp/.doctor.$$" 2>/dev/null && { ok "~/.omp writable"; rm -f "$HOM
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1)";; esac
 gh auth status 2>&1 | grep -q "not logged" && ok "gh auth: no user login" || fail "gh auth status shows a login"
 n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && ok "secrets agent-tier" || fail "secrets agent-tier"
-out="$(timeout 20 secrets DD_API_KEY -- true 2>&1)"; case "$out" in *"Connection reset"*|*"foreign uid"*) echo "note box: secrets human-tier rejected by the broker (sjawhar/forward fix pending): ${out##*: }";; "") ok "secrets human-tier reached the broker";; *) echo "note box: secrets human-tier: $(echo "$out" | tail -1)";; esac
+# The broker serves a box as of forward v3.2.2 (a same-uid peer arrives as the
+# overflow uid through the private userns the daemon runs in). A reset here is
+# the regression, not the expectation. No grant is requested: `grants` is an
+# unscoped control op, so it answers without making the human key blink.
+out="$(timeout 20 secrets grants 2>&1)"; case "$out" in *"Connection reset"*|*"foreign uid"*) fail "secrets human-tier: broker refused a box peer: ${out##*: }";; *"no active grants"*|*"KEY"*|*grant*) ok "secrets human-tier: broker answered";; *) fail "secrets human-tier: $(echo "$out" | tail -1)";; esac
 arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
 t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
 timeout 40 google-user-token >/dev/null 2>&1 && ok "google-user-token mints" || fail "google-user-token"
