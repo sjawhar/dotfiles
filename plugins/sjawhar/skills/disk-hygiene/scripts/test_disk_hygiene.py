@@ -750,6 +750,163 @@ class ReaperScenarioTest(unittest.TestCase):
         for bad, result in results.items():
             self.assertIn("refused", result, f"admin id {bad!r} not refused: {result}")
 
+    # ------------------------------------------------------------- scratch (2026-09-18)
+
+    def age(self, path: Path, hours: float) -> None:
+        old = time.time() - hours * 3600
+        os.utime(path, (old, old))
+
+    def test_s21_stale_scratch_directory_is_planned_and_removed(self) -> None:
+        """The pile that filled the box: a plain directory no workspace walk ever saw. 1.3 TB
+        of /tmp was invisible to this inventory until it grew a scratch class."""
+        repo = self.make_jj_repo()
+        scratch = self.base / "forrest"
+        scratch.mkdir()
+        (scratch / "blob").write_text("x" * 4096)
+        self.age(scratch, 48)
+
+        doc, plan_path = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
+        planned = [i for i in doc["plan"] if i["kind"] == "scratch"]
+        self.assertEqual([i["path"] for i in planned], [str(scratch)], f"scratch not planned: {doc['plan']}")
+
+        _, entries = self.apply(plan_path)
+        removed = [e for e in entries if e["op"] == "removed" and e.get("kind") == "scratch"]
+        self.assertEqual([e["path"] for e in removed], [str(scratch)], f"scratch not removed: {entries}")
+        self.assertFalse(scratch.exists(), "scratch directory survived its own removal entry")
+
+    def test_s22_fresh_scratch_directory_survives_plan_and_apply(self) -> None:
+        """Freshness is the whole guard for a plain directory: a dir written to inside the
+        window is someone's live work with no process holding it open right now."""
+        repo = self.make_jj_repo()
+        fresh = self.base / "fresh-scratch"
+        fresh.mkdir()
+        (fresh / "blob").write_text("y")
+        self.age(fresh, 1)
+
+        doc, _ = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
+        self.assertEqual([i for i in doc["plan"] if i["kind"] == "scratch"], [], f"fresh scratch planned: {doc['plan']}")
+        self.assertTrue(fresh.exists())
+
+    def test_s23_scratch_written_to_after_planning_survives_apply(self) -> None:
+        """The plan can be an hour old. A directory touched between plan and apply must
+        survive on the apply-time re-derivation, not on the plan's stale evidence."""
+        repo = self.make_jj_repo()
+        scratch = self.base / "touched-after-plan"
+        scratch.mkdir()
+        (scratch / "blob").write_text("z")
+        self.age(scratch, 48)
+
+        _, plan_path = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
+        os.utime(scratch, None)  # an agent comes back to it
+
+        _, entries = self.apply(plan_path)
+        skips = [e for e in entries if e["op"] == "skip" and e["path"] == str(scratch)]
+        self.assertTrue(skips and "written to" in skips[0]["reason"], f"touched scratch not skipped: {entries}")
+        self.assertTrue(scratch.exists(), "a directory written to after planning was removed")
+
+    def test_s24_scratch_that_became_a_working_copy_survives_apply(self) -> None:
+        """A scratch path that grew a .jj between plan and apply is a workspace now, and the
+        scratch path has none of the divergence checks a workspace removal requires."""
+        repo = self.make_jj_repo()
+        scratch = self.base / "became-workspace"
+        scratch.mkdir()
+        (scratch / "blob").write_text("w")
+        self.age(scratch, 48)
+
+        _, plan_path = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
+        (scratch / ".jj").mkdir()
+        self.age(scratch, 48)  # mkdir bumped the mtime; re-age so ONLY the working-copy guard can save it
+
+        _, entries = self.apply(plan_path)
+        skips = [e for e in entries if e["op"] == "skip" and e["path"] == str(scratch)]
+        self.assertTrue(skips and "working copy" in skips[0]["reason"], f"new working copy not skipped: {entries}")
+        self.assertTrue(scratch.exists(), "a path that became a working copy was removed as scratch")
+
+    def test_s25_live_scratch_directory_is_never_planned(self) -> None:
+        """A process with its cwd inside the directory keeps it, exactly as for a workspace."""
+        repo = self.make_jj_repo()
+        scratch = self.base / "live-scratch"
+        scratch.mkdir()
+        self.age(scratch, 48)
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=scratch)
+        try:
+            doc, _ = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
+            self.assertEqual([i for i in doc["plan"] if i["kind"] == "scratch"], [],
+                             f"live scratch planned: {doc['plan']}")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=30)
+
+    def test_s26_protected_scratch_directory_is_never_planned(self) -> None:
+        repo = self.make_jj_repo()
+        scratch = self.base / "protected-scratch"
+        scratch.mkdir()
+        self.age(scratch, 48)
+        prot = self.base / "protected.json"
+        prot.write_text(json.dumps({"protected": [str(scratch)]}))
+
+        doc, _ = self.plan("--protected", prot, inventory=self.inventory(repo))
+        self.assertEqual([i for i in doc["plan"] if i["kind"] == "scratch"], [],
+                         f"protected scratch planned: {doc['plan']}")
+
+    # --------------------------------------------- driver threshold (2026-09-18)
+
+    def run_driver(self, repo: Path, floor_gb: float | None) -> list[dict[str, Any]]:
+        """One `reaper_plan.py run` against this test's own XDG dirs."""
+        cfg_home, state_home = self.base / "cfg", self.base / "state"
+        (cfg_home / "disk-hygiene").mkdir(parents=True, exist_ok=True)
+        cfg: dict[str, Any] = {"repo": str(repo), "roots": [str(self.base)], "fresh_hours": 24,
+                               "protected": [], "anchors": []}
+        if floor_gb is not None:
+            cfg["apply_below_free_gb"] = floor_gb
+        (cfg_home / "disk-hygiene" / "reaper.json").write_text(json.dumps(cfg))
+        env = dict(os.environ, XDG_CONFIG_HOME=str(cfg_home), XDG_STATE_HOME=str(state_home))
+        sh(sys.executable, SCRIPT.parent / "reaper_plan.py", "run", env=env)
+        ledger = state_home / "disk-hygiene" / "reaper-ledger.jsonl"
+        return [json.loads(line) for line in ledger.read_text().splitlines()]
+
+    def test_s27_driver_stays_plan_only_above_the_floor(self) -> None:
+        """The ruling this preserves: a healthy box deletes nothing. A floor of 1 GB is below
+        any real free space, so the driver must plan and stop."""
+        repo = self.make_jj_repo()
+        scratch = self.base / "above-floor"
+        scratch.mkdir()
+        self.age(scratch, 48)
+
+        entries = self.run_driver(repo, floor_gb=1)
+        ops = [e["op"] for e in entries]
+        self.assertIn("plan-only-run", ops, f"no plan-only line: {entries}")
+        self.assertNotIn("removed", ops, f"something was removed above the floor: {entries}")
+        self.assertTrue(scratch.exists(), "scratch removed while the box was healthy")
+
+    def test_s28_driver_applies_below_the_floor(self) -> None:
+        """Below the floor the plan gets consumed — the change that makes the hourly tick
+        able to save the box instead of describing it."""
+        repo = self.make_jj_repo()
+        scratch = self.base / "below-floor"
+        scratch.mkdir()
+        (scratch / "blob").write_text("q" * 2048)
+        self.age(scratch, 48)
+
+        entries = self.run_driver(repo, floor_gb=10_000_000)  # a floor no box clears
+        ops = [e["op"] for e in entries]
+        self.assertIn("apply-run", ops, f"driver did not switch to apply: {entries}")
+        removed = [e for e in entries if e["op"] == "removed" and e.get("kind") == "scratch"]
+        self.assertEqual([e["path"] for e in removed], [str(scratch)], f"scratch not removed: {entries}")
+        self.assertFalse(scratch.exists())
+        self.assertTrue(any(e["op"] == "apply-finished" for e in entries), f"no apply-finished line: {entries}")
+
+    def test_s29_driver_without_a_floor_never_applies(self) -> None:
+        """An operator who never sets the key keeps today's behaviour exactly."""
+        repo = self.make_jj_repo()
+        scratch = self.base / "no-floor-configured"
+        scratch.mkdir()
+        self.age(scratch, 48)
+
+        entries = self.run_driver(repo, floor_gb=None)
+        self.assertIn("plan-only-run", [e["op"] for e in entries], f"no plan-only line: {entries}")
+        self.assertTrue(scratch.exists(), "scratch removed with no floor configured")
+
 
 if __name__ == "__main__":
     unittest.main()

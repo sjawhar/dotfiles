@@ -1,7 +1,9 @@
 #!/bin/bash
-# Hourly PLAN-ONLY workspace-reaper timer (AGENTC-79 D7). The service runs
-# reaper_plan.py, which has no apply path; enabling the timer schedules
-# evidence-gathering only. Wired from devbox/install.sh (shared agent boxes),
+# Hourly workspace-reaper timer (AGENTC-79 D7, amended 2026-09-18). The service
+# plans every hour and, when free space is below `apply_below_free_gb`, consumes
+# that plan through the same verified apply path a hand-run uses. Above the floor
+# it is still evidence-gathering only. Set the key to 0 for the original
+# plan-only behaviour. Wired from devbox/install.sh (shared agent boxes),
 # not from the main install.sh.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -23,6 +25,7 @@ if [ ! -f "$config" ]; then
  "repo": "${HOME}/agent-c",
  "roots": ["${HOME}/.worktrees", "/tmp"],
  "fresh_hours": 24,
+ "apply_below_free_gb": 600,
  "protected": ["${HOME}/agent-c", "${HOME}/.dotfiles"],
  "anchors": []
 }

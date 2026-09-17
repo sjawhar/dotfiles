@@ -117,6 +117,13 @@ def df_used_gb() -> float:
     return round((st.f_blocks - st.f_bfree) * st.f_frsize / 1e9, 1)
 
 
+def df_free_gb() -> float:
+    """Space available to an unprivileged writer, which is what a reclaim threshold decides
+    on: f_bavail excludes the reserved blocks that f_bfree counts and nobody here can use."""
+    st = os.statvfs("/")
+    return round(st.f_bavail * st.f_frsize / 1e9, 1)
+
+
 def ledger_write(path: Path, entry: dict[str, Any]) -> None:
     entry["t"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     entry["df_used_gb"] = df_used_gb()
@@ -342,6 +349,30 @@ def cmd_inventory(args: argparse.Namespace) -> None:
             cls = "UNPUSHED"
         row["class"] = cls
         rows.append(row)
+    # Plain scratch directories under the roots. Until 2026-09-18 this inventory saw only
+    # jj/git working copies, so /tmp's ordinary agent scratch was invisible BY CONSTRUCTION:
+    # the night the box hit 91% used, /tmp held 1.3 TB of it (one dir, /tmp/forrest, was
+    # 182 GB) while the hourly plan listed 49 workspace items and nothing else. Depth 1 only:
+    # an agent's scratch is a top-level directory, and walking deeper turns one refusal into
+    # thousands of rows.
+    known = set(dirs)
+    for root in roots:
+        for entry in sorted(Path(root).glob("*")):
+            path = str(entry)
+            if not entry.is_dir() or entry.is_symlink() or path in known:
+                continue
+            if any(path == d or path.startswith(d + "/") or d.startswith(path + "/") for d in known):
+                continue  # a workspace lives here (or under here): its own row owns it
+            if (entry / ".jj").exists() or (entry / ".git").exists():
+                continue  # a working copy the walk above did not attribute: never scratch
+            try:
+                idle_h = round((time.time() - entry.stat().st_mtime) / 3600, 1)
+            except OSError:
+                continue  # unreadable: no freshness evidence, so no row (D1)
+            live_procs = sorted({c for c in live if c == path or c.startswith(path + "/")})[:3]
+            rows.append({"path": path, "name": None, "exists": True, "is_git_worktree": False,
+                         "live_procs": live_procs, "jj_idle_hours": idle_h, "registered": False,
+                         "class": "LIVE" if live_procs else "SCRATCH"})
     # registrations with no directory found
     found_names = {r["name"] for r in rows if r["name"]}
     for name in sorted(registered - found_names - {"default"}):
@@ -600,6 +631,14 @@ def cmd_plan(args: argparse.Namespace) -> None:
                 continue
             if idle < args.fresh_hours:
                 continue
+            if cls == "SCRATCH":
+                # A plain directory has no working-copy commit to verify against, so age and
+                # liveness ARE the evidence, re-derived again at apply time. This is the rule
+                # the 2026-09-18 hand sweep used on 270k candidates: 71,256 removed, 3,055
+                # skipped as fresh or live.
+                plan.append({"path": path, "name": None, "kind": "scratch", "class": cls,
+                             "reason": f"plain scratch directory, idle {idle}h (>= {args.fresh_hours}h), no live process"})
+                continue
             if cls == "PUSHED" and args.skip_pushed:
                 continue
             reason = {
@@ -813,12 +852,14 @@ def _apply_released(args: argparse.Namespace, item: dict[str, Any], trunk: str, 
     _retire_after_removal(args.releases, e, ledger, path)
 
 
-def _apply_path_item(args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path) -> None:
+def _apply_path_item(
+    args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path, fresh_hours: float = 24.0
+) -> None:
     path, name, cls = item["path"], item.get("name"), item.get("class")
     repo = item.get("repo")
-    if item["kind"] != "jj":
-        # cmd_plan emits only jj path items; plain git worktrees are reaped solely via an
-        # owner release. Anything else is a hand-authored plan this pipeline cannot verify.
+    if item["kind"] not in ("jj", "scratch"):
+        # cmd_plan emits jj and scratch path items; plain git worktrees are reaped solely via
+        # an owner release. Anything else is a hand-authored plan this pipeline cannot verify.
         ledger_write(ledger, {"op": "error", "path": path, "name": name, "stage": "kind",
                               "out": f"unknown plan kind {item['kind']!r}: refusing removal without a verification pipeline"})
         return
@@ -837,6 +878,30 @@ def _apply_path_item(args: argparse.Namespace, item: dict[str, Any], trunk: str,
     pu = procs_under(path)
     if pu:
         skip(f"live processes {pu[:4]}")
+        return
+    if item["kind"] == "scratch":
+        # A plain directory's evidence is age + liveness + "not a working copy", and all three
+        # are re-derived HERE because the plan can be an hour old: a directory written to since
+        # the plan, or one that has become a workspace, must survive.
+        if (Path(path) / ".jj").exists() or (Path(path) / ".git").exists():
+            skip("re-verification failed: now a jj/git working copy, not scratch")
+            return
+        try:
+            idle_h = (time.time() - os.stat(path).st_mtime) / 3600
+        except OSError as error:
+            skip(f"re-verification failed: freshness unreadable ({error})")
+            return
+        if idle_h < fresh_hours:
+            skip(f"re-verification failed: written to {idle_h:.2f}h ago (< {fresh_hours}h)")
+            return
+        _pace(args.io_limit, ledger, path)
+        r = subprocess.run(RM + [path], capture_output=True, text=True)
+        if r.returncode != 0:
+            ledger_write(ledger, {"op": "error", "path": path, "stage": "rm", "out": r.stderr[-400:]})
+            return
+        ledger_write(ledger, {"op": "removed", "path": path, "name": None, "kind": "scratch",
+                              "idle_hours": round(idle_h, 1), "reason": item.get("reason"),
+                              "recover": "none: a scratch directory has no store copy — recovery is re-running whatever wrote it"})
         return
     # D6: the plan may be stale — re-derive the class evidence immediately before acting
     if repo:
@@ -921,7 +986,7 @@ def cmd_apply(args: argparse.Namespace) -> None:
             elif item["kind"] == "released":
                 _apply_released(args, item, trunk, ledger)
             else:
-                _apply_path_item(args, item, trunk, ledger)
+                _apply_path_item(args, item, trunk, ledger, fresh_hours)
         ledger_write(ledger, {"op": "apply-complete", "items": len(plan)})
     finally:
         lock_fd.close()

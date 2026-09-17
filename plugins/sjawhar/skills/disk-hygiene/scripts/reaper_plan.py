@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Hourly PLAN-ONLY workspace-reaper driver (plan-workspace-reaper.md, D7).
+"""Hourly workspace-reaper driver (plan-workspace-reaper.md, D7; amended 2026-09-18).
 
 Regenerates the protected set (D4), inventories the configured store, produces a
-deletion plan, and ledgers the diff against the previous run's plan. It NEVER
-invokes `apply` — no code path from this driver removes anything. The apply
-schedule arrives only after the plan's scenario 14 (attended first real pass)
-settles; until then the timer gathers evidence.
+deletion plan, and ledgers the diff against the previous run's plan. Then, ONLY
+when free space is below the config's `apply_below_free_gb`, it consumes that plan
+through `disk_hygiene.py apply` — the same path a hand-run uses, with its own
+re-verification of every item. Above the floor, or with the key unset/0, nothing
+is removed and the run is evidence-gathering exactly as before.
+
+Why it changed: on 2026-09-18 the box reached 91% used while this driver had
+planned 49 items an hour for weeks and consumed none, and the pile that filled it
+(1.3 TB of plain /tmp scratch) was not even in the plan — see the SCRATCH class in
+disk_hygiene.cmd_inventory.
 
 Subcommands:
-  run             one plan-only pass (what disk-hygiene-reaper.service executes)
+  run             one pass: plan always, apply below the floor (what
+                  disk-hygiene-reaper.service executes)
   record-failure  append a timer-failure line with the unit's journal tail to the
                   ledger (what disk-hygiene-reaper-failure.service executes via
                   OnFailure=)
@@ -85,15 +92,35 @@ def cmd_run() -> None:
     prev_keys: set[str] | None = None
     if prev_path.is_file():
         prev_keys = {plan_key(i) for i in json.loads(prev_path.read_text())["plan"]}
+    free_gb = dh.df_free_gb()
+    floor_gb = float(cfg.get("apply_below_free_gb", 0) or 0)
+    applying = bool(floor_gb) and free_gb < floor_gb
     dh.ledger_write(ledger, {
-        "op": "plan-only-run",  # D7: the dry run. This driver never invokes apply.
+        "op": "apply-run" if applying else "plan-only-run",
         "items": len(plan_doc["plan"]), "refused": len(plan_doc["refused"]),
         "added": sorted(new_keys - prev_keys) if prev_keys is not None else sorted(new_keys),
         "left_plan": sorted(prev_keys - new_keys) if prev_keys is not None else [],
         "first_run": prev_keys is None,
         "sources": prot["sources"], "plan_file": str(plan_path),
+        "free_gb": free_gb, "apply_below_free_gb": floor_gb or None,
     })
     shutil.copyfile(plan_path, prev_path)  # rotate only after the diff is ledgered
+    if applying:
+        # The plan is what it always was; what changed on 2026-09-18 is that a box below the
+        # floor now consumes it. Every removal still passes apply's own re-verification
+        # (protected re-read, live processes, divergence for a workspace, age for scratch),
+        # and each one is ledgered with its recovery id. Above the floor nothing is deleted:
+        # the steady state stays plan-only, which is the ruling this preserves.
+        apply_argv = [py, str(SCRIPT), "apply", "--plan", str(plan_path),
+                      "--protected", str(STATE / "protected.json"), "--ledger", str(ledger)]
+        if releases.is_file():
+            apply_argv += ["--releases", str(releases)]
+        r = subprocess.run(apply_argv, capture_output=True, text=True)
+        if r.returncode != 0:
+            # Loud: a non-zero exit fails the unit, which fires OnFailure= into the ledger.
+            sys.exit(f"reaper-plan: apply failed rc={r.returncode}: {r.stderr[-400:]}")
+        dh.ledger_write(ledger, {"op": "apply-finished", "free_gb_after": dh.df_free_gb(),
+                                 "free_gb_before": free_gb, "floor_gb": floor_gb})
 
 
 def cmd_record_failure() -> None:
