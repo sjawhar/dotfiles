@@ -12,7 +12,25 @@ mkdir -p "$OMP_AGENT_DIR"
 # Config and agents are canonical in dotfiles (same layout idea as
 # ~/.config/opencode -> dotfiles/opencode).
 ensure_link "${DOTFILES_DIR}/omp/config.yml"  "${OMP_AGENT_DIR}/config.yml"
-ensure_link "${DOTFILES_DIR}/omp/models.yml"  "${OMP_AGENT_DIR}/models.yml"
+# models.yml is universal catalog patches; a machine's own provider routing
+# (gateway baseUrl, `!command` apiKey) goes in the gitignored
+# omp/models.local.yml and is merged over it here. The link target is a built
+# file rather than models.yml itself so the merged view is what omp reads — but
+# it stays a symlink, because scripts/ompo mirrors only symlinks into named
+# profiles and a real file here would drop models config from every profile.
+MODELS_BUILT="${DOTFILES_DIR}/omp/models.generated.yml"
+if [ -f "${DOTFILES_DIR}/omp/models.local.yml" ]; then
+    yq eval-all '. as $item ireduce ({}; . * $item)' \
+        "${DOTFILES_DIR}/omp/models.yml" "${DOTFILES_DIR}/omp/models.local.yml" > "${MODELS_BUILT}.new"
+else
+    cp "${DOTFILES_DIR}/omp/models.yml" "${MODELS_BUILT}.new"
+fi
+if cmp -s "${MODELS_BUILT}.new" "$MODELS_BUILT" 2>/dev/null; then
+    rm -f "${MODELS_BUILT}.new"
+else
+    mv "${MODELS_BUILT}.new" "$MODELS_BUILT"
+fi
+ensure_link "$MODELS_BUILT" "${OMP_AGENT_DIR}/models.yml"
 ensure_link "${DOTFILES_DIR}/omp/mcp.json"    "${OMP_AGENT_DIR}/mcp.json"
 ensure_link "${DOTFILES_DIR}/omp/lsp.json"    "${OMP_AGENT_DIR}/lsp.json"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.md" "${OMP_AGENT_DIR}/WATCHDOG.md"

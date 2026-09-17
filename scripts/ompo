@@ -18,14 +18,17 @@
 #    uses the personal Anthropic account for that session. Credentials pasted
 #    with /login inside the profile work too, and need no secret.
 # 2. Shared config, the way oco mirrors the canonical opencode dir: every
-#    symlink in ~/.omp/agent (agents, prompts, models.yml, mcp.json,
-#    WATCHDOG.md, keybindings.yml, extensions/*) is mirrored into the profile
-#    with the same target, so it follows installers/omp.sh. Real files and dirs
-#    there are runtime state (agent.db, sessions, cache) and stay per-profile.
-#    config.yml is never shared: it carries the model roles, which name the
-#    credentials a session bills, and omp writes /model picks back into it, so
-#    a shared file would let one profile rewrite the other's default. Entries
-#    already present in the profile are left alone.
+#    symlink in ~/.omp/agent (agents, prompts, mcp.json, WATCHDOG.md,
+#    keybindings.yml, extensions/*) is mirrored into the profile with the same
+#    target, so it follows installers/omp.sh. Real files and dirs there are
+#    runtime state (agent.db, sessions, cache) and stay per-profile. Two files
+#    are never shared, because they decide where a session's traffic and bill
+#    go: config.yml carries the model roles, and omp writes /model picks back
+#    into it, so a shared file would let one profile rewrite the other's
+#    default; models.yml carries provider routing — the default profile's
+#    sends the anthropic provider through the Hawk gateway with a per-person
+#    token, and a client profile must reach the provider directly with its own
+#    key. Entries already present in the profile are left alone.
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -83,7 +86,7 @@ mirror_links() { # mirror_links SRC_DIR DST_DIR
     for entry in "$src"/*; do
         [ -e "$entry" ] || [ -L "$entry" ] || continue
         name=$(basename "$entry")
-        [ "$name" = config.yml ] && continue
+        case "$name" in config.yml|models.yml) continue ;; esac
         target="$dst/$name"
         if [ -L "$entry" ]; then
             [ -e "$target" ] || [ -L "$target" ] || ln -s "$(readlink "$entry")" "$target"
