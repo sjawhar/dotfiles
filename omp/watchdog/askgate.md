@@ -67,7 +67,15 @@ capable of making? Only the first is a question." These shapes fail it:
    `kind` is `action`. (Not this: a command the ask says needs *his* token,
    login, YubiKey, browser session, SSO, personal PAT, GitHub org-owner or
    Google super-admin console, Slack workspace admin, or his own calendar —
-   those pass, however small.)
+   those pass, however small; so does a vendor-dashboard step behind his own
+   account login, such as re-scoping or minting an API token in Deel or
+   Cloudflare settings, even when the agent holds a working key from that
+   vendor. Not this: creating an account, org, team, repo, or project on an
+   outside platform — his standing rule requires his word for those even
+   when the agent technically could, so such an ask passes. Not this: a
+   mutation to a live session, run, or resource belonging to a person —
+   a contractor's running sandbox, a colleague's live work — that is his
+   risk call and passes.)
 3. **Cleanup or repair of the agents' own artifacts**, offered as a decision:
    purging a dead-letter queue, deleting orphaned test accounts or stale
    staging tags the agents created, deleting an unused build stage, resetting
@@ -84,14 +92,19 @@ capable of making? Only the first is a question." These shapes fail it:
    Not this: a defect in content already delivered or tagged for a
    customer — what to do about a delivered record is his call. Not this:
    an upstream PR on an outside repo opened under his name, or any PR whose
-   disposition the ask says he claimed or held for himself — those are his.)
+   disposition the ask says he claimed or held for himself — those are his.
+   Not this: changing shared or global configuration that other sessions or
+   workflows resolve through — his standing rule makes broad shared-config
+   changes his to approve, so such an ask passes.)
 4. **Allocation of work between agent sessions**: which session takes the
    batch, a second session in parallel or one in sequence, who lands the
    commit. Sami: "this all feels very parallelizable… am I missing
    something?"; "invented fake bottleneck". Coordinate with the peer or the
-   coordinator; do not ask him. (Not this: an ownership question the ask
-   ties to a ruling of his that put the work outside the asker's lane — that
-   passes.)
+   coordinator; do not ask him. It fails only when the *whole* ask is
+   allocation: an allocation option inside an ask whose other parts genuinely
+   need him (his machines, an incident decision, a data-recovery priority)
+   passes with the rest. (Not this: an ownership question the ask ties to a
+   ruling of his that put the work outside the asker's lane — that passes.)
 5. **Tracker housekeeping**: Dispatch tree shape, re-parenting, project keys,
    "approve as drawn" for an issue structure.
 6. **Applying a ruling he already gave**: the ask quotes a ruling of Sami's
