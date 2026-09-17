@@ -4,8 +4,21 @@
 # omp's models.yml resolves `!hawk-token` for the anthropic provider's apiKey and
 # X-Api-Key header (omp/models.yml), so the model gateway gets a per-person,
 # short-lived credential instead of a static Anthropic key. omp caches the value
-# for the process and re-runs the command on a 401, which is how an expired token
-# gets re-minted mid-session.
+# for the process and re-runs the command on a 401.
+#
+# Every invocation mints a token with a FRESH jti via the OAuth refresh grant
+# (`hawk auth refresh-token` supplies the RT; the Hawk API's /auth/config supplies
+# the Cognito token endpoint and client id). The jti matters: middleman spends a
+# token's jti on the one Anthropic exchange it is allowed, so handing omp's 401
+# retry the SAME cached token (what `hawk auth access-token` does until 5 minutes
+# before expiry) can never heal the cross-workspace `assertion_consumed` challenge
+# — a fresh jti always can. Cost is one refresh grant per helper invocation
+# (process start or 401 retry), never per request. The pool's web client has
+# refresh-token rotation OFF (verified 2026-09-17), so this never invalidates the
+# hawk CLI's stored session; if Cognito ever returns a rotated refresh token the
+# grant response would carry `refresh_token`, and this script warns loudly since
+# dropping it would strand the CLI's stored one. Any failure on the fresh path
+# falls back to `hawk auth access-token` (the pre-2026-09-17 behavior), logged.
 #
 # hawk writes every notice (access-token refresh, CLI version check, login help)
 # to stderr, and omp's `!command` resolver lets the child inherit the TUI's
@@ -57,9 +70,46 @@ else
         exit 1
     fi
     where="$log"
-    if ! token="$("$hawk" auth access-token 2>>"$log")"; then
-        echo "hawk-token: \`hawk auth access-token\` failed for $HAWK_API_URL; see $log (usually: run \`hawk login\` for that API, or unlock the keyring)" >&2
-        exit 1
+    fresh_mint() {
+        local rt config token_endpoint client_id response
+        rt="$("$hawk" auth refresh-token 2>>"$log")" || return 1
+        [[ -n "$rt" ]] || return 1
+        config="$(curl -fsS --max-time 10 "$HAWK_API_URL/auth/config" 2>>"$log")" || return 1
+        read -r token_endpoint client_id < <(python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+print(d["token_endpoint"], d["client_id"])
+' "$config" 2>>"$log") || return 1
+        [[ -n "$token_endpoint" && -n "$client_id" ]] || return 1
+        # Public client: the refresh grant needs no secret. The RT travels in the
+        # POST body over TLS, same as the hawk CLI's own refresh.
+        response="$(curl -fsS --max-time 15 "$token_endpoint" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'grant_type=refresh_token' \
+            --data-urlencode "client_id=$client_id" \
+            --data-urlencode "refresh_token=$rt" 2>>"$log")" || return 1
+        python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+if "refresh_token" in d:
+    print(
+        "hawk-token: Cognito returned a ROTATED refresh token; rotation is expected"
+        " to be off, and dropping it strands the hawk CLI session. Re-run hawk login"
+        " and investigate the pool client config.",
+        file=sys.stderr,
+    )
+token = d.get("access_token", "")
+if not token:
+    raise SystemExit(1)
+print(token)
+' <<<"$response" 2>>"$log"
+    }
+    if ! token="$(fresh_mint)"; then
+        echo "hawk-token: fresh mint via the refresh grant failed; falling back to the cached token (see $log)" >>"$log"
+        if ! token="$("$hawk" auth access-token 2>>"$log")"; then
+            echo "hawk-token: \`hawk auth access-token\` failed for $HAWK_API_URL; see $log (usually: run \`hawk login\` for that API, or unlock the keyring)" >&2
+            exit 1
+        fi
     fi
 fi
 if [[ ! "$token" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
