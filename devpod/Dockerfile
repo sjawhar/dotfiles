@@ -27,22 +27,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ubuntu:24.04 ships uid/gid 1000 = ubuntu with home /home/ubuntu, matching the
 # host user whose directories are mounted in. Passwordless sudo is the whole
 # point of the box: root here is Sysbox fake-root, unprivileged on the host.
-# The marker file is what shims/omp checks to know it is inside a box. The
-# world-writable lock file is the docker wrapper's serialization point for the
-# lazy dockerd start: /run is root-owned and the wrapper runs as ubuntu.
+# The marker file is what shims/omp and scripts/hawk-token check to know they
+# are inside a box. The home skeleton exists so the mounts land in
+# ubuntu-owned parents.
 RUN echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu && chmod 0440 /etc/sudoers.d/ubuntu \
     && usermod -aG docker ubuntu \
     && echo agentbox > /etc/agentbox-identity \
-    && install -d -o ubuntu -g ubuntu /home/ubuntu/.cache /home/ubuntu/.config /home/ubuntu/.local /home/ubuntu/.local/share /home/ubuntu/.ssh \
-    && install -m 0666 /dev/null /run/agentbox-docker.lock
+    && install -d -o ubuntu -g ubuntu /home/ubuntu/.cache /home/ubuntu/.config /home/ubuntu/.local /home/ubuntu/.local/share /home/ubuntu/.ssh
 
-# The docker and jj wrappers shadow the real binaries on the session PATH:
-# docker starts the daemon lazily through the libexec, jj records workspace
-# adds for the launcher's close/resume bookkeeping. The entrypoint only
-# validates the environment and execs the session command.
+# The entrypoint runs as root: it starts the inner dockerd, firewalls the
+# metadata forwarder off the containers the box starts, logs the inner docker
+# into ghcr.io as ubuntu, then drops to ubuntu for the session command.
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY docker /usr/local/bin/docker
-COPY jj /usr/local/bin/jj
-COPY agentbox-dockerd /usr/local/libexec/agentbox-dockerd
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/docker /usr/local/bin/jj /usr/local/libexec/agentbox-dockerd
+RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
