@@ -8,6 +8,12 @@ advisors:
     tools: []
     instructions: "@~/.dotfiles/omp/watchdog/askgate.md"
 
+  - name: ForkGate
+    enabled: false
+    maxNotesPerUpdate: 1
+    tools: []
+    instructions: "@~/.dotfiles/omp/watchdog/forkgate.md"
+
   - name: General
     enabled: false
     instructions: "@~/.dotfiles/omp/watchdog/general.md"
