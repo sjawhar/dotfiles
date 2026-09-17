@@ -175,6 +175,45 @@ class GhAppTokenTests(unittest.TestCase):
         )
         self.assertEqual(self.secrets_calls(), [])
 
+    def test_covered_owner_missing_from_a_later_discovery_refuses_rather_than_falls_back(self):
+        # 2026-09-17: two review verdicts on trajectory-labs-pbc/agent-c posted as
+        # the human. The App covers that owner, yet gh-app-token handed out the
+        # fallback PAT - the only path there is a discovery that omits an owner
+        # it listed before. That is a contradiction, not a routing decision.
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):
+            gh_app_token.discover_installations("3202636", "pk")
+        # Expire the installations cache so the next call rediscovers.
+        cache = gh_app_token.installation_cache_file("3202636")
+        data = json.loads(cache.read_text())
+        data["fetched_at"] = 0
+        cache.write_text(json.dumps(data))
+
+        gone = fake_github(installed={"sjawhar": 111})
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=gone):
+            rc, stdout, stderr = self.run_main(
+                ["agent", "get"], stdin="host=github.com\npath=trajectory-labs-pbc/agent-c.git\n\n"
+            )
+        self.assertEqual((rc, stdout), (1, "quit=1\n"))
+        self.assertIn("trajectory-labs-pbc", stderr)
+        self.assertIn("refusing", stderr)
+        self.assertEqual(self.secrets_calls(), [], "the fallback secret was read for a covered owner")
+
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=gone):
+            rc, stdout, stderr = self.run_main(["agent", "--owner", "trajectory-labs-pbc"])
+        self.assertEqual((rc, stdout), (1, ""))
+        self.assertEqual(self.secrets_calls(), [])
+
+    def test_a_real_fallback_announces_the_identity_it_hands_out(self):
+        # An uncovered owner legitimately gets the personal token, but never
+        # silently: the caller must be able to see, on stderr, that the identity
+        # about to act is the human's and not the App's.
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):
+            rc, stdout, stderr = self.run_main(["agent", "--owner", "METR"])
+        self.assertEqual((rc, stdout), (0, "ghp_stub_upstream_token\n"))
+        self.assertIn("METR", stderr)
+        self.assertIn("GH_PUBLIC_REPO_PAT", stderr)
+        self.assertIn("personal", stderr)
+
     def test_uninstalled_owner_with_unreadable_fallback_secret_quits(self):
         self.git_config["gh-app.agent.fallback-secret"] = "GH_MISSING_TOKEN"
         with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):

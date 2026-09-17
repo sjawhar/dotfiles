@@ -39,6 +39,19 @@ if agent_context; then
     mkdir -p "$_agent_cfg"
     [[ -e "$_agent_cfg/config.yml" ]] || ln -sfn "$_gh_cfg/config.yml" "$_agent_cfg/config.yml"
     export GH_CONFIG_DIR="$_agent_cfg"
+    # An inherited GH_TOKEN wins over everything below: knives skips minting and
+    # gh acts as whoever owns that token, with no trace at the call site. That
+    # is legitimate (the queue's admin PAT via `secrets`), so it is not refused,
+    # but it is never silent: 2026-09-17, two review verdicts went out as the
+    # human and nothing recorded which path produced them.
+    if [[ -n "${GH_TOKEN:-}" ]]; then
+        case "$GH_TOKEN" in
+            ghs_*) _kind="an App installation token" ;;
+            ghp_*|gho_*|github_pat_*) _kind="a PERSONAL token: this call acts as its user, not as an App" ;;
+            *) _kind="a token of unknown kind" ;;
+        esac
+        echo "gh shim: GH_TOKEN inherited from the environment (${GH_TOKEN:0:4}…, $_kind); not routing" >&2
+    fi
     # The config directory hides hosts.yml from API calls, but `gh auth token`
     # and `gh auth git-credential` still read the user's login from the OS
     # keyring (measured: a gho_ token with hosts.yml absent). Every `gh auth`

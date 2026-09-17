@@ -204,8 +204,69 @@ def discover_installations(app_id: str, private_key: str) -> dict[str, int]:
         installation_cache_file(app_id),
         {"fetched_at": time.time(), **installations},
     )
+    remember_covered_owners(app_id, installations)
     return installations
 
+
+def covered_owners_file(app_id: str) -> Path:
+    return CACHE_DIR / f"covered-{cache_component(app_id)}.json"
+
+
+def remember_covered_owners(app_id: str, installations: dict[str, int]) -> None:
+    """Record every owner this App has ever been seen installed on.
+
+    Unlike the installations cache, this is never expired and never shrinks:
+    it is what lets a later discovery that omits a known owner be treated as
+    the contradiction it is, instead of as permission to hand out the personal
+    token.
+    """
+    covered = covered_owners(app_id)
+    covered.update(installations)
+    write_cache_file(covered_owners_file(app_id), covered)
+
+
+def covered_owners(app_id: str) -> dict[str, int]:
+    cache_file = covered_owners_file(app_id)
+    if not cache_file.exists():
+        return {}
+    try:
+        data = json.loads(cache_file.read_text())
+        return {k: v for k, v in data.items() if isinstance(v, int)}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+
+def log_decision(profile: str, owner: str, request: dict[str, str], decision: str, detail: str) -> None:
+    """One line per invocation in the cache dir, so a misattributed action is
+    answerable after the fact: which owner was resolved, from what path, and
+    whether the App, the personal token, or a refusal answered. Never the token
+    itself - four characters of prefix say which kind it was (ghs_ App, ghp_
+    personal). 2026-09-17: two review verdicts went out as the human and nothing
+    recorded which of these paths produced them.
+    """
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (CACHE_DIR / "decisions.log").open("a") as log:
+            log.write(
+                json.dumps(
+                    {
+                        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "profile": profile,
+                        "owner": owner,
+                        "path": request.get("path", ""),
+                        "decision": decision,
+                        "detail": detail,
+                        "pid": os.getpid(),
+                        "ppid": os.getppid(),
+                        "cwd": os.getcwd(),
+                        "session": os.environ.get("OMP_SESSION_ID", ""),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass  # the log is diagnostics; never fail a mint because of it
 
 def resolve_installation(
     app_id: str, private_key: str, owner: str, *, refresh: bool = False
@@ -257,13 +318,31 @@ def fallback_token(profile: str, owner: str) -> str:
     """The profile's personal access token for an owner the App is not installed on.
 
     Read from the secrets broker on every request; the token is static, so no
-    cache file is written for it.
+    cache file is written for it. Never silent: the identity about to act is
+    the human's, and the caller has no other way to tell.
     """
+    app_id = git_config(f"gh-app.{profile}.app-id")
+    known = covered_owners(app_id).get(owner.casefold())
+    if known is not None:
+        # 2026-09-17: two review verdicts on trajectory-labs-pbc/agent-c went
+        # out as the human because a discovery omitted an owner the App covers
+        # and this path handed out the personal token without a word.
+        raise AppTokenError(
+            f"owner {owner} was installed for App {app_id} (installation {known}) and is now "
+            "missing from discovery; refusing to fall back to the personal token. If the App "
+            f"really was uninstalled there, delete {covered_owners_file(app_id)} to re-enable "
+            "the fallback for it"
+        )
     fallback_secret = git_config_optional(f"gh-app.{profile}.fallback-secret")
     if fallback_secret is None:
         raise AppTokenError(
             f"no App installation for owner {owner} and no fallback-secret on profile {profile}"
         )
+    print(
+        f"gh-app-token: no App installation for owner {owner}; using the personal token "
+        f"{fallback_secret} - this call will act as its user, not as the App",
+        file=sys.stderr,
+    )
     return resolve_secret(fallback_secret)
 
 
@@ -344,9 +423,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             token = get_token(args.profile, owner)
+            decision = "app"
         except UninstalledOwnerError:
             token = fallback_token(args.profile, owner)
+            decision = "fallback-personal-token"
     except AppTokenError as error:
+        log_decision(args.profile, owner, request, "refused", str(error))
         print(f"gh-app-token: {error}", file=sys.stderr)
         if credential_mode:
             # Stop git's helper chain: a broken app setup, or an uncovered
@@ -354,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
             # fall back to the user's own credentials.
             print("quit=1")
         return 1
+    log_decision(args.profile, owner, request, decision, f"token={token[:4]}…")
 
     if credential_mode:
         print(f"protocol={request.get('protocol', 'https')}")
