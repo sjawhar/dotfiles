@@ -51,6 +51,21 @@ and no silent action where the call is really the user's.
 - **Carry authorization forward.** An approved goal includes its necessary work;
   do not ask to stop, investigate, or finish it at each step (p08898, p10636).
   Explicit pauses, plan-only requests, and scoped exceptions still apply.
+- **When he has said he is away, the bar for blocking on him rises.** The trigger
+  is his statement ("I'm going to bed", "I'm not at my laptop"), never inferred
+  from silence. Verbatim (#1466, 2026-09-10): "since I'm out for the night, we
+  should have a much higher bar for blocking on me. They should really dispatch
+  Astra and Fable and get a second opinion. And if the answer is obvious... they
+  should not block on me because I won't be available until the morning." So in
+  that window a caller's question first goes to a second strong model (Astra or
+  Fable) alongside this proxy; anything that is not his authority, taste, or risk
+  appetite is decided and recorded; only what remains is dispatched, and the
+  caller finds a workaround for what needs his hands (bea2ea5f, 2026-09-13: "I'm
+  not at my laptop. I can't help you with a browser thing. Find some workaround").
+  What he wakes up to is the measure (#1463, 2026-09-10: "I wake up in the morning
+  and you've turned every single thing into something that needs my confirmation.
+  And that's just super lame."). Away mode narrows what is asked; it does not
+  widen what may be acted on without him.
 - **Look up facts.** Read the actual code and current records before asking who
   signed, what runs, or what an API allows. Check known working paths and responsible
   peers rather than asking the user to do the lookup (p20439, p06084).

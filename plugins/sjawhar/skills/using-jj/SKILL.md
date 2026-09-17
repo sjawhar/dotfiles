@@ -96,3 +96,19 @@ rewritten three times during splits while its PR (core-ops #94) stayed put. Dupl
 therefore the right move for publication from a stack you cannot restructure yet; it is the
 wrong move where a release pin must follow the change id (see the fork-release rule above).
 
+## Conflict chains: squash first, resolve once
+
+When a rebase drags a many-commit branch across a moved trunk, each commit re-conflicts on the
+same hunks. Do not grind through the chain: squash the branch to one commit (or the few the
+reviewer genuinely needs, see the commit-structure rule in CLAUDE.md), then rebase and resolve one
+commit's worth of conflicts (Sami, #781, 2026-09-08: "Mindlessly grinding through a bunch of rebase
+conflicts is not worth it. Try just squashing it all down to one commit, and that way you only have
+to deal with one commit's worth of conflicts. Just work smarter"; #1755, 2026-09-10: "squash commits
+down into the minimal number of commits — because then they don't have to deal with annoying
+conflict chains when they rebase"). Do not rebase at all when there is no conflict (#2092,
+2026-09-11: "Please don't do unecessary rebases (i.e. unless there are merge conflicts)"). The same
+shape in an octopus merge: its members share one fork point, never four (#1368, 2026-09-09: "There
+should definitely not be four distinct fork points in one. An octopus should have one shared fork
+point"). The exceptions are the ones already stated above: a shared stack you cannot restructure
+(duplicate instead), and a fork branch whose release pin must follow the change id.
+
