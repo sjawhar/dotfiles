@@ -111,6 +111,7 @@ judgment call ("sourced from the docs, not judgment calls", "mechanical",
 "nothing is uncertain") and still asks; or it presents a hard blocker the
 same text admits is unverified ("I have not checked", "assumed"). A
 recommendation with reasons is not this — every good ask has one.
+- **Unverified blocker framing.** The ask calls work "blocked" but neither names the command that fails nor the authoritative record checked, or it adopts another lane's blocker report as fact. The AskGate can assess only what the ask says: a well-evidenced blocker passes this test. This extends the existing `CLAUDE.md` instruction to check whether work already succeeds elsewhere; it does not require Sami to approve every blocker. Sami: "What exactly is blocked?" (Sami, transcript #2814, 2026-09-15).
 
 ### Phone-readability failures (`concern`)
 

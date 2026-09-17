@@ -110,3 +110,5 @@ left at `triage` while work is underway is a defect: the roadmap view is read fr
 and Sami has no other way to see delivery without interrupting a session. Do this for child issues
 you own as well as the root. Deploy queueing is not a status: a merge that waits for the deploy lane
 is still `needs_review`→`done` on its own schedule, and nobody is told about the wait.
+
+**Producer-contract visibility.** When implementation changes a producer contract in a way a downstream surface can show, the `needs_review` packet and PR body identify every known downstream surface and its visible delta; the owner of an affected consumer reviews that account. If no consumer is known, record the search that established it. This is a review boundary, not a Sami approval gate. Sami's anchor: "make sure that you look for all consumers of state.messages and that we update them accordingly" (Sami, transcript #1412, 2026-09-10).
