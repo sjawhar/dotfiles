@@ -48,3 +48,4 @@ docs/superpowers/
 .secrets/
 omp/models.local.yml
 omp/models.generated.yml
+omp/env.local

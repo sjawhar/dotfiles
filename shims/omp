@@ -10,7 +10,16 @@ set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 
-# Envoy NATS lives on the tailnet; guarantee it for every omp launch (sessions
+# Machine-local env first: a box that runs its own single-node envoy (its own
+# nats-server, its own listener) sets ENVOY_NATS_URL here rather than reaching
+# the tailnet name below. Gitignored, so nothing machine-specific is committed.
+# Sourced before every default so it can override any of them.
+if [ -r "${DOTFILES_DIR}/omp/env.local" ]; then
+    # shellcheck disable=SC1091  # machine-local, absent in the repo
+    . "${DOTFILES_DIR}/omp/env.local"
+fi
+
+# Envoy NATS defaults to the tailnet; guarantee it for every omp launch (sessions
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 
