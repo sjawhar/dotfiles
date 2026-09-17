@@ -18,6 +18,8 @@ Run `envoy_whoami`. If it returns a session ID, Envoy is available and the rest 
 
 **Stalled subagent? Message it before you kill it.** A subagent that looks stuck may be deep in legitimate work — killing it burns everything it learned. `envoy_send` a status request and give it ~10 minutes to answer (longer if its task involves builds or long test suites); re-dispatch only on silence or a reply confirming it is wedged. Kill-then-redispatch without asking is the last resort, not the reflex.
 
+**A status is not progress evidence.** When work reported as `Running` would change a lane's next decision, check for fresh tool output or an observed state transition; if neither exists, use the direct-message deadline and cancel/re-dispatch path above rather than reporting liveness as progress. This applies only when the distinction affects a decision, not to a known long-running job that continues to show progress; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
+
 **Replies arrive as turns in your session** with a reply-to session ID — respond with `envoy_send(session_id="<their-id>", ...)`.
 
 ## Dispatch prompts

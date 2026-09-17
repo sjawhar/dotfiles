@@ -31,6 +31,8 @@ Before any design that touches Inspect (`inspect_ai`, `inspect_swe`, `inspect_sc
 
 Plan the full request. Divide parallel work only into disjoint ownership units and name every shared contract before dispatch. Finish every cutover: migrate all callers and remove obsolete paths, shims, aliases, compatibility exports, and dead code unless Sami explicitly requires compatibility.
 
+**Product-shape questions.** When a plan would choose a new page, navigation entry, table key, customer-scoping rule, or persisted sidecar, and Sami has not already settled that product shape, write a one-line Dispatch ask before the first implementation commit. A platform-PO ruling on schema or contract does not settle product shape. This does not apply to a user-specified decision or turn routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
+
 Every plan includes:
 
 - `## Hardening ledger`, initially empty.
