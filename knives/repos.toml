@@ -3,6 +3,7 @@ upstream = "https://github.com/UKGovernmentBEIS/inspect_ai"
 origin = "https://github.com/sjawhar/inspect_ai.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_ai.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+workspaces = "~/.worktrees/inspect_ai"
 
 [repos.fleet]
 upstream = "https://github.com/fleetdm/fleet"
@@ -13,6 +14,7 @@ upstream = "https://github.com/METR/hawk"
 origin = "https://github.com/sjawhar/hawk.git"
 release = "https://github.com/trajectory-labs-pbc/hawk"
 consumers = ["trajectory-labs-pbc/agent-c"]
+workspaces = "~/.worktrees/hawk"
 
 [repos.jj]
 upstream = "https://github.com/jj-vcs/jj"
@@ -23,6 +25,7 @@ upstream = "https://github.com/UKGovernmentBEIS/inspect_k8s_sandbox"
 origin = "https://github.com/sjawhar/inspect_k8s_sandbox.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_k8s_sandbox"
 consumers = ["trajectory-labs-pbc/agent-c"]
+workspaces = "~/.worktrees/inspect_k8s_sandbox"
 
 [repos.luthien-proxy]
 upstream = "https://github.com/LuthienResearch/luthien-proxy.git"
@@ -67,18 +70,21 @@ upstream = "https://github.com/meridianlabs-ai/inspect_sandboxes.git"
 origin = "https://github.com/sjawhar/inspect_sandboxes.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_sandboxes.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+workspaces = "~/.worktrees/inspect_sandboxes_fork"
 
 [repos.scout]
 upstream = "https://github.com/meridianlabs-ai/inspect_scout"
 origin = "https://github.com/sjawhar/inspect_scout.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_scout.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+workspaces = "~/.worktrees/inspect_scout"
 
 [repos.swe]
 upstream = "https://github.com/meridianlabs-ai/inspect_swe.git"
 origin = "https://github.com/sjawhar/inspect_swe.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_swe.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+workspaces = "~/.worktrees/inspect_swe"
 
 [repos.toon-rust]
 upstream = "https://github.com/toon-format/toon-rust"
@@ -88,6 +94,7 @@ origin = "https://github.com/sjawhar/toon-rust"
 upstream = "https://github.com/meridianlabs-ai/ts-mono"
 origin = "https://github.com/trajectory-labs-pbc/ts-mono"
 consumers = ["trajectory-labs-pbc/agent-c"]
+workspaces = "~/.worktrees/ts-mono"
 
 [trust]
 owners = ["sjawhar", "trajectory-labs-pbc"]

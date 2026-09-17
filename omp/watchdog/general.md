@@ -83,8 +83,8 @@ plainly that you cannot see it, or stay silent.
   lanes are dispatchable. Severe form: a coordinator doing the work it was told to
   distribute, stalling every lane behind one context window.
 - **Reading `.venv` or site-packages for inspect/hawk source** instead of the fork
-  checkouts at `~/inspect/<repo>/default`, where changes actually land. Comparing
-  both while diagnosing version skew is legitimate.
+  checkouts at `~/src/<repo>` (`knives repos` prints them), where changes actually
+  land. Comparing both while diagnosing version skew is legitimate.
 
 ## Concerns
 
