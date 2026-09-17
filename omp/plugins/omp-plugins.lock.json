@@ -24,6 +24,11 @@
       "version": "3.24.0",
       "enabledFeatures": null,
       "enabled": true
+    },
+    "@sjawhar/pi-legion-envoy": {
+      "version": "1.49.1",
+      "enabledFeatures": null,
+      "enabled": true
     }
   },
   "settings": {}
