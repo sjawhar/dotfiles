@@ -25,6 +25,8 @@ Do not use this for vague claims like "the code is cleaner". Ask for a measurabl
 5. Compare raw artifacts: numbers, screenshots, terminal transcripts, HTTP responses, profiles, heap snapshots, or test output.
 6. Return exactly one verdict: `VERIFIED`, `NOT VERIFIED`, or `INCONCLUSIVE`.
 
+For a Dispatch record, a root-cause verdict carries the reproducing command or test in the same message. Without that evidence, write `hypothesis` rather than a causal conclusion; a diagnosis in progress is still useful when labelled as such. This is the Dispatch-record form of the baseline/treatment comparison, not a requirement to withhold an investigation update. Inferred from the astro lane's 2026-09-16 retro (platform PO, 2026-09-17).
+
 ## Local Surfaces
 
 - Code behavior: focused unit/integration tests or a minimal repro script.
