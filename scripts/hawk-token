@@ -25,9 +25,12 @@
 # stderr, so stderr is captured to a log here. stdout is accepted only when it is
 # exactly one JWT: anything else fails loudly instead of becoming a credential.
 #
-# Runs the hawk synced into the agent-c checkout — uv.lock pins it to the same
-# commit as the infrastructure — never a standalone `uv tool install` copy, which
-# drifts from that pin (using-hawk skill in agent-c).
+# hawk runs through uvx, pinned to one git rev of trajectory-labs-pbc/hawk —
+# the same rev agent-c's uv.lock names, so every machine mints with the CLI the
+# infrastructure was released with, and no machine needs an agent-c checkout to
+# do it. Only the auth surface is used here, so the pin moves only when that
+# lockfile's hawk rev does; bump both together. uvx caches the build, so the
+# steady-state cost is process startup.
 #
 # Inside an agent box (the image's /etc/agentbox-identity marker) the GNOME
 # keyring that holds the Hawk session is deliberately absent, so the token is
@@ -63,16 +66,17 @@ if [[ -e /etc/agentbox-identity ]]; then
         exit 1
     fi
 else
-    agent_c="${AGENT_C_DIR:-$HOME/agent-c}"
-    hawk="$agent_c/.venv/bin/hawk"
-    if [[ ! -x "$hawk" ]]; then
-        echo "hawk-token: no hawk at $hawk; run \`uv sync\` in $agent_c (or set AGENT_C_DIR to the checkout)" >&2
+    # Pin = agent-c/uv.lock's hawk rev (release/2026-09-15.8).
+    HAWK_UVX_SPEC="${HAWK_UVX_SPEC:-hawk[cli] @ git+https://github.com/trajectory-labs-pbc/hawk@339e42a55af88a6361d02844b3000fae6c88b1e1#subdirectory=hawk}"
+    if ! command -v uvx >/dev/null; then
+        echo "hawk-token: uvx not on PATH (uv is pinned in mise.toml; run install.sh)" >&2
         exit 1
     fi
+    hawk() { uvx --from "$HAWK_UVX_SPEC" hawk "$@"; }
     where="$log"
     fresh_mint() {
         local rt config token_endpoint client_id response
-        rt="$("$hawk" auth refresh-token 2>>"$log")" || return 1
+        rt="$(hawk auth refresh-token 2>>"$log")" || return 1
         [[ -n "$rt" ]] || return 1
         config="$(curl -fsS --max-time 10 "$HAWK_API_URL/auth/config" 2>>"$log")" || return 1
         read -r token_endpoint client_id < <(python3 -c '
@@ -106,7 +110,7 @@ print(token)
     }
     if ! token="$(fresh_mint)"; then
         echo "hawk-token: fresh mint via the refresh grant failed; falling back to the cached token (see $log)" >>"$log"
-        if ! token="$("$hawk" auth access-token 2>>"$log")"; then
+        if ! token="$(hawk auth access-token 2>>"$log")"; then
             echo "hawk-token: \`hawk auth access-token\` failed for $HAWK_API_URL; see $log (usually: run \`hawk login\` for that API, or unlock the keyring)" >&2
             exit 1
         fi
