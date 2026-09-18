@@ -72,6 +72,7 @@ For every acceptance scenario, record the source, dependency, and image revision
 Production-like acceptance verification is mandatory. A missing or blocked surface is work, not a question: build or repair the infrastructure, tooling, skill, or driver at the head under test, then rerun each affected acceptance scenario there. `BLOCKED` stops merge readiness, not independent work; the change is not merge-ready until every scenario has run. Asking Sami whether to omit it is itself the failure.
 
 **No-waiver provenance:** Sami, 2026-09-18, `dispatch://OPS-68/ask/6029785b-9ead-4f18-9330-ef9006f149f6`: "Please update the skills to make it clear that skipping e2e testing is never an option, I should not even be being asked this."
+**No-waiver provenance:** Sami, 2026-09-15: "Is there any part of the sdd process that says it's optional or you can ask to skip it?" The answer was no.
 
 Iterate locally. The local stack (real migrations, real fixtures, the real browser and API) is where
 every edit→see→fix loop runs; a dev stack or staging slot is the LAST proof, run once per PR, not a
