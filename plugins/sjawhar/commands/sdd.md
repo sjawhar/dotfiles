@@ -25,13 +25,13 @@ Planning starts with an explicit skill search (Sami, 2026-09-16, verbatim: "an e
 
 ## Plan contract
 
-Plan the full request. Divide parallel work only into disjoint ownership units and name every shared contract before dispatch. Finish every cutover: migrate all callers and remove obsolete paths, shims, aliases, compatibility exports, and dead code unless Sami explicitly requires compatibility.
+Plan the full request. Divide parallel work only into disjoint ownership units and name every shared contract before dispatch.
+
+**Where the work happens.** The coordinator works in the workspace its session started in, and a worker works in the workspace its task block names — normally that same one, since steps run in sequence on one tree. A new workspace exists only for a genuinely disjoint parallel lane, created with `jj workspace add ~/.worktrees/<repo>/<name> --name <name>`; never under `/tmp`, never a clone (Sami, 2026-09-18, verbatim: "the orchestrator seems to think they need to make a new workspace for themselves and it's dumb. New workspaces should be in ~/.worktrees/{repo}, not /tmp/ or some other dumb location"). Finish every cutover: migrate all callers and remove obsolete paths, shims, aliases, compatibility exports, and dead code unless Sami explicitly requires compatibility.
 
 **Major design changes are brainstormed with Sami on Dispatch, not in the session transcript** (Sami, 2026-09-17, verbatim: "they should be doing brainstorming with me through dispatch for major design changes"). For a major design change — a new subsystem, a workflow restructure, anything the brainstorming skill classifies architectural — the design conversation itself runs on Dispatch: the spec document on the issue, each open question an anchored `dispatch_ask` with options and a recommendation, his answers recorded as the decision provenance. A chat message dies when he scrolls past it; the Dispatch thread is durable and reaches him wherever he is. Chat remains right for execution and for bounded designs he is already discussing live.
 
-**Product-shape questions.** When a plan would choose a new page, navigation entry, table key, customer-scoping rule, or persisted sidecar, and Sami has not already settled that product shape, write a one-line Dispatch ask before the first implementation commit. A platform-PO ruling on schema or contract does not settle product shape. This does not apply to a user-specified decision or turn routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
 
-**Migration chain order.** When a coordinated batch of migration pull requests is packet-ready, assign and record their parent order once before individual migrations re-parent and re-gate. A later sibling does not by itself reopen that batch decision. This applies to a defined coordinated migration batch, not routine branch work; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
 
 Every plan includes:
 
@@ -47,6 +47,7 @@ Track each work item separately as **implemented**, **integrated**, and **accept
 
 **Every worker brief is the role's prepared prompt plus the task.** The prompts live in the legion repository and are read from GitHub at dispatch time, never from a local copy:
 
+- shared opening: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/common.md`, fetched for implementer, tester, and reviewer dispatches (the oracle's core stands alone);
 - core: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/<role>.md`, where `<role>` comes from the dispatch's PURPOSE, not its agent tier: an implementation or debug dispatch (`agent: "deep"`) fetches `implementer`; the acceptance dispatch (also `agent: "deep"`) fetches `tester`; a review dispatch (`agent: "reviewer"`) fetches `reviewer`; a research dispatch (`agent: "oracle"`) fetches `oracle`; a delegated planning dispatch does not exist (the coordinator plans), so `planner` is fetched only by Legion;
 - mechanics: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/mechanics/interactive.md`.
 
@@ -62,7 +63,7 @@ fetch_part() {
 }
 ```
 
-The brief is: the core, one blank line, the mechanics fragment, one blank line, then a `# Task` block naming the workspace (absolute path), the step's brief file, the acceptance criteria, the bookmark the worker may move, the report-file path, and this step's `## Skill catalog` entries. Never paraphrase, summarise, or edit the fetched text. A failed fetch stops the dispatch — there is no fallback copy of the prompts anywhere, on purpose. A change to what a worker is told is a reviewed commit in the legion repository, and it reaches every session's next dispatch with no change here.
+The brief is: the shared opening (when fetched), one blank line, the core, one blank line, the mechanics fragment, one blank line, then a `# Task` block naming the workspace (absolute path), the step's brief file, the acceptance criteria, the bookmark the worker may move, the report-file path, and this step's `## Skill catalog` entries. Never paraphrase, summarise, or edit the fetched text. A failed fetch stops the dispatch — there is no fallback copy of the prompts anywhere, on purpose. A change to what a worker is told is a reviewed commit in the legion repository, and it reaches every session's next dispatch with no change here.
 
 The coordinator names a check command in a brief only as the CI job's exact recipe (the repo `AGENTS.md` Commands section or the workflow file), never a subset. Inferred from legion#1186 (2026-09-18): the brief said `biome lint`, CI runs `bun run lint` = `biome check` (lint + format), and the lane went red on formatting the worker had proven "clean".
 
@@ -89,21 +90,13 @@ Production-like acceptance verification is mandatory. A missing or blocked surfa
 **No-waiver provenance:** Sami, 2026-09-18, `dispatch://OPS-68/ask/6029785b-9ead-4f18-9330-ef9006f149f6`: "Please update the skills to make it clear that skipping e2e testing is never an option, I should not even be being asked this."
 **No-waiver provenance:** Sami, 2026-09-15: "Is there any part of the sdd process that says it's optional or you can ask to skip it?" The answer was no.
 
-Iterate locally. The local stack (real migrations, real fixtures, the real browser and API) is where
-every edit→see→fix loop runs; a dev stack or staging slot is the LAST proof, run once per PR, not a
-surface to iterate against. That proof runs against a slot YOU applied at the head under test: a gate
-run against a slot deployed from someone else's branch compares your tree with their build and reds
-on their schema (dev2, 2026-09-15: a 55-field parquet diff that was one column from another lane's
-merge). A dev-stack deploy is never the rate limiter; if it is, the missing piece is a local
-capability, and building it is part of the work. Anything that runs locally in place of a production
-path (a fixture, a stub identity, a local mode) is a drift risk: name it in the plan and state the
-check that keeps it faithful to production.
+Iterate on the fastest loop the repository offers; its slowest surface is the once-per-PR proof, never an edit loop. The repository's testing skill defines the rungs and what counts as production-like there.
 
 After acceptance, a final `reviewer` examines integrated correctness and security, plus dead code, shims, aliases, dual paths, and half-migrations. Resolve grounded findings before PR readiness; a reviewer preference without a grounded finding is not automatically binding. Do not park a real defect as follow-up work.
 
 Review depth scales to the diff, and the `reviewer` decides it inside its own pass. A change to runtime code gets the thermonuclear pair (`thermonuclear-deep-review` + `thermonuclear-code-quality`) once, at the final code head, dispatched by the reviewer as part of its review — never bolted on in parallel by the coordinator, and never a second time on a push that changed only prose or a Minor (Sami, #1004, 2026-09-09: "the reviewer is the one that should be running the Thermo deep in quality review. If everything else passes, it should run that"; #598, 2026-09-08: "I don't care about replying to every tiny little minor after every single push. We have to use some discretion here"). A docs-only or otherwise runtime-free change gets no thermonuclear pair at all (#597, 2026-09-08: "we don't need thermonuclear review on a docs-only PR"). The skip is bound to the paths touched — no runtime code in the diff — not to the change "looking safe"; a one-line behaviour change is still a behaviour change. The 2026-09-16 dispatch audit found 63% of tester/reviewer dispatches carrying review agents this contract never names (claudemd-miner #5); that layer is what this paragraph removes.
 
-The coordinator owns `opening-a-pr`. On every PR open or push, including each stack layer, invoke `landing-a-pr` immediately while independent implementation continues; each stacked PR also receives `opening-a-pr` and a `reviewer` as it lands. Use `gh-stack` autonomously when multiple PRs are needed. Consolidate completed applicable stacks with `squash-stack`; if it changes the delivered diff, refresh affected acceptance and the `opening-a-pr` gate before final readiness. Do not ask whether to stack, state a PR arrangement, or pause mid-stack. Merge only after Sami approves.
+The implementer opens its own pull request under `opening-a-pr` and owns `landing-a-pr` for it, resumed on each event (a check, a review, a conflict) rather than re-dispatched; each stacked PR gets the same, and a `reviewer` as it lands (Sami, 2026-09-18: "it's very strange that the coordinator would own opening-a-pr, I disagree with that"). The coordinator sends the merge packet to the merge queue, and the queue merges (Sami, 2026-09-18, choosing that over merging only on his own approval). Use `gh-stack` autonomously when multiple PRs are needed; consolidate completed applicable stacks with `squash-stack`, and if that changes the delivered diff, refresh affected acceptance and the `opening-a-pr` gate before readiness. Do not ask whether to stack, state a PR arrangement, or pause mid-stack.
 
 A PR waiting in the merge queue or the deploy lane never idles the lane. Unless you are revising that
 PR, the next change stacks on its branch (`gh-stack`) and work continues; a dependency on another
