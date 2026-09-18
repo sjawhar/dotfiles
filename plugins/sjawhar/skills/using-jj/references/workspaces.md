@@ -69,6 +69,8 @@ This user has a custom alias: `jj tug` moves the closest bookmark to `@`. It is 
 
 You may be in a **jj workspace** (not the default workspace). Check with `jj workspace list`.
 
+**The shared store's default checkout is not a place to work.** `/home/ubuntu/agent-c` (and every other canonical checkout other sessions share) is the store's default workspace: a `jj new`, edit, or commit there lands in a working copy every co-tenant resolves through. Make a named workspace and work only there: `jj workspace add /home/ubuntu/.worktrees/<repo>/<name> --name <name>`. Four stray `jj new`s in shared checkouts on 2026-09-17/18 (the platform PO's at 14:37Z, a dispatched subagent's in `/home/ubuntu/legion` ~04:40Z, two on #19336's own lane) each cost another session a repair. Inferred from those incidents (platform PO via the PR queue, 2026-09-18).
+
 This user uses **colocated repositories** (jj + git coexist). A `.git` folder is present and tools like `gh` work fine. However, **always use `jj` commands instead of `git`** — git operations can desync the jj state.
 
 In non-default workspaces:

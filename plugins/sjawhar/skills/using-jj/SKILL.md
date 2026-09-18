@@ -75,7 +75,7 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
 - **CRITICAL — `Commit X is immutable` on a rebase in a fork is a stale pin, not a
   protection:** jj's default `immutable_heads()` includes `untracked_remote_bookmarks()`, so a
   superseded release ref a fetch re-materialized, or another fork's PR head, freezes every
-  commit beneath it — your branch tips included. NEVER `--ignore-immutable` a rebase (it
+  commit beneath it — your branch tips included. NEVER `--ignore-immutable` a rebase or a squash — `jj squash` refusing "would rewrite 188 immutable commits" is the load-bearing guard in a shared store, not an obstacle (astrolabe lane, 2026-09-18) — (it
   rewrites whatever the pin is; last time, the release merges), and NEVER substitute
   `jj duplicate` (new commit ids; the release can no longer match the branch by change id).
   Find the pin: `jj log -r 'immutable_heads() & descendants(<rev>)'`. In a knives-managed
