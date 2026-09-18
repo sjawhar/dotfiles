@@ -100,13 +100,15 @@ Multiple jj workspaces share **one operation log and one commit store**. Every j
 ```bash
 OLD=$(jj log -r @ --no-graph -T 'change_id.short()')   # BEFORE jj new
 jj new main@origin
-jj diff --stat -r "$OLD"                                 # the full list of paths to carry
-jj restore --from "$OLD" <every path in that list>
+# derive the path list — NEVER type it from memory:
+jj restore --from "$OLD" $(jj diff -r "$OLD" --summary | awk '{print $2}')
 diff <(jj diff --stat -r "$OLD") <(jj diff --stat -r @)  # identical, or you dropped one
 jj abandon "$OLD"
 ```
 
 `--from @-` after `jj new` is main and carries nothing. On 2026-09-17 this session restored `mise.toml` alone from the parked change and abandoned it; the same change also held another session's three `omp/plugins/` lockfile edits, which that session had to recover from the hidden commit twenty minutes later. Inferred from that incident (librarian, 2026-09-17), not a rule Sami stated in these words.
+
+A second instance on 2026-09-18: the same session typed four remembered paths into the restore, missed a fifth co-tenant edit (`disk-hygiene/scripts/disk_hygiene.py`), and abandoned the parked change before the diff check — recovered from the hidden commit only because abandoned commits stay reachable by commit id. The `$(jj diff --summary)` derivation above exists so the list cannot be typed from memory.
 
 ## Merge Conflict Resolution
 
