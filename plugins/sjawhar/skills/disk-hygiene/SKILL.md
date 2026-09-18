@@ -126,3 +126,23 @@ Ledger (JSONL, one line per action, with `df` after each) plus a summary: freed,
 | `docker buildx prune --filter until=24h` on 0 B reclaimable | Leaked leases; restart buildkitd first |
 | Diff of a stale checkout read as a revert | A checkout parented on an old main shows every later merge as "changes"; check `jj log -r '::@ ~ ::trunk()'` before alarming anyone |
 | Deleting a live cwd | Its tools fail with "Working directory does not exist"; re-check liveness immediately before `rm`, not at inventory time |
+
+## The shared jj op store (`.jj/repo/op_store`)
+
+Every jj operation stores a full view (all bookmarks + remote bookmarks + tags + per-workspace
+working-copy commits). At agent scale this is the box's fastest-growing pile: agent-c measured
+2026-09-19 at ~180 workspaces / ~7k ops/day / 1-3 MB per view = 10-25 GB/day, 187 GB total; a
+single stray `git fetch '+refs/pull/*/head:refs/remotes/pr/*'` in the shared store tripled every
+view (10,907 `<n>@pr` bookmarks) until `jj git remote remove pr` dropped them. Watch
+`ls .jj/repo/op_store/views | wc -l` and the per-view size before blaming workspaces.
+
+`scripts/jj_opstore_gc.py --repo R --keep-days N [--apply]` compacts it without stranding
+workspaces: abandon older-than-N history, remap every workspace's `checkout` file to the
+reparented operation under jj's own working-copy lock (plain `jj op abandon` gives every other
+workspace "Run `jj workspace update-stale`" + a RECOVERY COMMIT), re-abandon chains that
+concurrent commands re-attach, and sweep unreachable op/view files only after every jj process
+that predates the abandon has exited (`--sweep-only` resumes a deferred sweep). Known hazard,
+reproduced on a scratch repo: a jj command that loads pre-abandon state and commits AFTER the
+remap makes the affected change divergent when a reconcile merges the chains (base = root).
+The tool re-abandons within its poll interval, but a genuinely quiet window is the safe run
+condition — and `jj op abandon` is NOT undoable, so on a shared store it is Sami's call.

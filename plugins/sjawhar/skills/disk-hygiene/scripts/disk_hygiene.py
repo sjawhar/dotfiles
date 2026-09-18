@@ -363,12 +363,12 @@ def cmd_inventory(args: argparse.Namespace) -> None:
                 continue
             if any(path == d or path.startswith(d + "/") or d.startswith(path + "/") for d in known):
                 continue  # a workspace lives here (or under here): its own row owns it
-            if (entry / ".jj").exists() or (entry / ".git").exists():
-                continue  # a working copy the walk above did not attribute: never scratch
             try:
+                if (entry / ".jj").exists() or (entry / ".git").exists():
+                    continue  # a working copy the walk above did not attribute: never scratch
                 idle_h = round((time.time() - entry.stat().st_mtime) / 3600, 1)
             except OSError:
-                continue  # unreadable: no freshness evidence, so no row (D1)
+                continue  # unreadable (another user's dir, EACCES): no evidence, so no row (D1)
             live_procs = sorted({c for c in live if c == path or c.startswith(path + "/")})[:3]
             rows.append({"path": path, "name": None, "exists": True, "is_git_worktree": False,
                          "live_procs": live_procs, "jj_idle_hours": idle_h, "registered": False,
@@ -383,6 +383,8 @@ def cmd_inventory(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------- reaper helpers
+
+UNCOVERED_MARKER: Final = "REAPER_UNCOVERED_GB"
 
 RECOVER_NOTE = (
     "jj op revert {op} — restores the workspace registration only, never files; "
@@ -852,6 +854,78 @@ def _apply_released(args: argparse.Namespace, item: dict[str, Any], trunk: str, 
     _retire_after_removal(args.releases, e, ledger, path)
 
 
+def cmd_coverage(args: argparse.Namespace) -> None:
+    """Name every large directory the reaper's own roots cannot reach.
+
+    Added 2026-09-18 after the reflection this skill's own fix failed: the roots were
+    `~/.worktrees` and `/tmp`, so a correct, tested, shipped reaper could not touch
+    `~/.local/share/opencode` (303 GB), `/var/lib/docker` (275 GB), `~/agent-c/.jj` (187 GB)
+    or `~/.cache` (170 GB) -- about 1.2 TB of a 4.26 TB filesystem. Coverage was a judgement
+    call, made wrongly twice. Now it is a number: `REAPER_UNCOVERED_GB`, printed hourly by the
+    timer and read by the SRE tick sweep, where an empty read is itself a finding.
+
+    Reporting only: this never removes anything, and "uncovered" is not an instruction to
+    widen a root. `/var/lib/docker`'s depth-1 children are docker's own layer stores; adding
+    that path as a root would let an age rule delete them. The number demands a decision per
+    pile -- widen a root, prune with the tool that owns it, or accept it in writing.
+
+    Every directory is sized under its OWN timeout, and a timeout is reported as UNKNOWN
+    rather than failing the command: on a box with saturated IO a single `du` over `/` does
+    not return (measured, 900 s, twice on 2026-09-18), and a coverage check that dies when
+    the box is busiest is a check that never runs when it matters.
+    """
+    protected, anchors = load_protected(args.protected) if args.protected else ([], [])
+    cfg: dict[str, Any] = json.loads(Path(args.config).expanduser().read_text()) if args.config else {}
+    roots = [str(Path(r).expanduser()) for r in cfg.get("roots", [])]
+    covered = [c for c in roots + [str(Path(x).expanduser()) for x in
+                                   protected + (anchors or []) + cfg.get("protected", [])] if c]
+    scan = args.scan or ["/", str(Path.home())]
+    candidates: list[str] = []
+    for base in scan:
+        try:
+            children = sorted(str(c) for c in Path(base).iterdir() if c.is_dir() and not c.is_symlink())
+        except OSError as error:
+            print(f"coverage: cannot list {base}: {error}", file=sys.stderr)
+            continue
+        for path in children:
+            # Covered means INSIDE a root or protected path. A parent that merely CONTAINS one
+            # is not covered -- treating it as covered is what made the first run of this
+            # command report REAPER_UNCOVERED_GB=0 on a box with 1.2 TB out of reach, because
+            # /home contains ~/.worktrees. An ancestor of a scanned base is skipped instead,
+            # since that base's own children are enumerated on their own.
+            if any(path == c or path.startswith(c + "/") for c in covered):
+                continue
+            if any(b != path and b.startswith(path + "/") for b in scan):
+                continue
+            if path not in candidates:
+                candidates.append(path)
+    sized: dict[str, float] = {}
+    unknown: list[str] = []
+    for path in candidates:
+        try:
+            r = subprocess.run(["du", "-xsB1", path], capture_output=True, text=True, timeout=args.dir_timeout)
+        except subprocess.TimeoutExpired:
+            unknown.append(path)
+            continue
+        field = r.stdout.split("\t", 1)[0].strip()
+        if not field.isdigit():
+            unknown.append(path)
+            continue
+        gb = int(field) / 1e9
+        if gb >= args.min_gb:
+            sized[path] = round(gb, 1)
+    ordered = sorted(sized.items(), key=lambda kv: -kv[1])
+    total = round(sum(gb for _, gb in ordered), 1)
+    dirs = ",".join(f"{p}:{gb:.0f}" for p, gb in ordered) or "none"
+    print(f"{UNCOVERED_MARKER}={total} dirs={dirs} unsized={len(unknown)}")
+    if args.out:
+        with open(args.out, "w") as fh:
+            json.dump({"uncovered_gb": total, "dirs": [{"path": p, "gb": gb} for p, gb in ordered],
+                       "unsized": unknown, "roots": roots, "min_gb": args.min_gb}, fh, indent=1)
+    if ordered or unknown:
+        sys.exit(1)
+
+
 def _apply_path_item(
     args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path, fresh_hours: float = 24.0
 ) -> None:
@@ -1159,6 +1233,13 @@ def main() -> None:
     sub.add_parser("containers")
     p = sub.add_parser("images")
     p.add_argument("--older-than-hours", type=float, default=48.0)
+    p = sub.add_parser("coverage")
+    p.add_argument("--config", help="reaper.json whose roots define what IS covered")
+    p.add_argument("--protected")
+    p.add_argument("--scan", action="append", help="directories to enumerate at depth 1 (default: / and $HOME)")
+    p.add_argument("--min-gb", type=float, default=50.0)
+    p.add_argument("--dir-timeout", type=int, default=120)
+    p.add_argument("--out", help="write the JSON report here as well as the marker line")
     args = ap.parse_args()
     if args.cmd == "procs":
         json.dump(sorted(proc_cwds()), sys.stdout, indent=1)
@@ -1182,6 +1263,8 @@ def main() -> None:
         cmd_containers(args)
     elif args.cmd == "images":
         cmd_images(args)
+    elif args.cmd == "coverage":
+        cmd_coverage(args)
 
 
 if __name__ == "__main__":
