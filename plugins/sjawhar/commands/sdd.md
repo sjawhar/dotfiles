@@ -41,24 +41,38 @@ Every plan includes:
 
 Plan verification describes a user-observable outcome. A reviewer rejects missing, proxy-only, or internal-only verification paths.
 
-Every worker brief requires all of:
-
-1. **Shortcut ledger:** log each shortcut immediately in the hardening ledger and return its entries. Group repayment by root cause and file ownership, while preserving the resolution of every entry; the ledger is empty before the coordinator's PR gate.
-2. **Real-surface evidence:** drive the named user/operator path and report what was observed. A pytest fixture qualifies only when it drives the real product path. Green counts, internal shortcuts, substituted implementations, unit-only checks, and code inspection do not qualify.
-3. **Required skills:** the step's entries from the plan's `## Skill catalog`, loaded before work starts.
-4. **The repo's own gate commands:** a check command named in a brief is the CI job's exact recipe (the repo AGENTS.md Commands section or the workflow file), never a subset. Inferred from legion#1186 (2026-09-18): the brief said `biome lint`, CI runs `bun run lint` = `biome check` (lint + format), and the lane went red on formatting the worker had proven "clean".
-
 Track each work item separately as **implemented**, **integrated**, and **acceptance-verified**. Do not report completion from unresolved dependency evidence.
 
 ## Execution and acceptance
+
+**Every worker brief is the role's prepared prompt plus the task.** The prompts live in the legion repository and are read from GitHub at dispatch time, never from a local copy:
+
+- core: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/<role>.md`, where `<role>` comes from the dispatch's PURPOSE, not its agent tier: an implementation or debug dispatch (`agent: "deep"`) fetches `implementer`; the acceptance dispatch (also `agent: "deep"`) fetches `tester`; a review dispatch (`agent: "reviewer"`) fetches `reviewer`; a research dispatch (`agent: "oracle"`) fetches `oracle`; a delegated planning dispatch does not exist (the coordinator plans), so `planner` is fetched only by Legion;
+- mechanics: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/mechanics/interactive.md`.
+
+Fetch each part with the check that catches both failure shapes (a non-200, and an empty 200):
+
+```bash
+fetch_part() {
+  url="$1"; out=$(mktemp)
+  code=$(curl -sS -o "$out" -w '%{http_code}' "$url") || { echo "role prompt unavailable: $url (curl: $code)" >&2; return 1; }
+  [ "$code" = "200" ] || { echo "role prompt unavailable: $url (HTTP $code)" >&2; return 1; }
+  [ -s "$out" ] || { echo "role prompt unavailable: $url (HTTP 200, empty body)" >&2; return 1; }
+  cat "$out"
+}
+```
+
+The brief is: the core, one blank line, the mechanics fragment, one blank line, then a `# Task` block naming the workspace (absolute path), the step's brief file, the acceptance criteria, the bookmark the worker may move, the report-file path, and this step's `## Skill catalog` entries. Never paraphrase, summarise, or edit the fetched text. A failed fetch stops the dispatch — there is no fallback copy of the prompts anywhere, on purpose. A change to what a worker is told is a reviewed commit in the legion repository, and it reaches every session's next dispatch with no change here.
+
+The coordinator names a check command in a brief only as the CI job's exact recipe (the repo `AGENTS.md` Commands section or the workflow file), never a subset. Inferred from legion#1186 (2026-09-18): the brief said `biome lint`, CI runs `bun run lint` = `biome check` (lint + format), and the lane went red on formatting the worker had proven "clean".
 
 Dispatch independent work in parallel. Use native, event-driven subagent results; do not poll. Continue other dispatchable work when a lane blocks. Send one direct clarification to a genuinely blocking, silent worker, then re-dispatch only if needed.
 
 After integration, dispatch `task` with `agent: "deep"` for acceptance through each exact driver named in the plan.
 
-The acceptance dispatch is the tester, and it starts skeptical: the work is broken until the tester proves otherwise on the real surface (Sami, 2026-09-16, verbatim: the tester needs "a strong skeptical assumption that it's broken until proven otherwise"). Acceptance means driving the changed surface end to end, climbing the repo's smoke-testing/verification ladder where one exists — unit tests, type checks, and reading the diff are not acceptance (inferred from the 2026-09-16 tester audit: 79.9% of 4,282 tester-population dispatches never touched a running surface, and 51.7% ran no verification command at all). The tester dispatches no extra review-agent layers nobody mandated — the same audit found an un-mandated thermonuclear-* layer on 63% of those dispatches; review belongs to the `reviewer` gate below (inferred).
+The tester dispatches no extra review-agent layers nobody mandated — the same audit found an un-mandated thermonuclear-* layer on 63% of those dispatches; review belongs to the `reviewer` gate below (inferred).
 
-When the tester finds a defect, the tester writes the failing red test itself, in the repo tree, and hands it to the resumed implementer, who makes it pass and may not change that test (Sami, 2026-09-16, verbatim: the tester "[s]hould write the red test, but then the implementer, when resumed, needs to make a pass. The implementer should be given strong guidance not to change that test that the tester wrote"). Mark tester-authored tests as tester-authored in the handoff; an implementer weakening, rewriting, or deleting one is a ledger entry, never a quiet fix.
+A tester defect returns to the resumed implementer; the tester's red test travels with the resumption.
 
 For every acceptance scenario, record the source, dependency, and image revisions, then mark it:
 
