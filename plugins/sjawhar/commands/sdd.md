@@ -69,11 +69,9 @@ For every acceptance scenario, record the source, dependency, and image revision
   queue coalescing; an SSO ask another lane inherited after its own profile had expired. A blocker
   another lane reports is re-verified, not adopted. Sami, 2026-09-17: "nothing here needed Ryan".
 
-There is no waiver state. Verification on a production-like surface is never optional and never
-something to ask Sami to skip (Sami, 2026-09-15: "Is there any part of the sdd process that says
-it's optional or you can ask to skip it?" — no). `BLOCKED` stops the PR-readiness gate, not
-independent work; its resolution is building the missing surface or driver, never an ask. After any
-fix, rerun each affected acceptance scenario.
+Production-like acceptance verification is mandatory. A missing or blocked surface is work, not a question: build or repair the infrastructure, tooling, skill, or driver at the head under test, then rerun each affected acceptance scenario there. `BLOCKED` stops merge readiness, not independent work; the change is not merge-ready until every scenario has run. Asking Sami whether to omit it is itself the failure.
+
+**No-waiver provenance:** Sami, 2026-09-18, `dispatch://OPS-68/ask/6029785b-9ead-4f18-9330-ef9006f149f6`: "Please update the skills to make it clear that skipping e2e testing is never an option, I should not even be being asked this."
 
 Iterate locally. The local stack (real migrations, real fixtures, the real browser and API) is where
 every edit→see→fix loop runs; a dev stack or staging slot is the LAST proof, run once per PR, not a
