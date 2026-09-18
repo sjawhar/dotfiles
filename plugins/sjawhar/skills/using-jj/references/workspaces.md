@@ -74,10 +74,24 @@ You may be in a **jj workspace** (not the default workspace). Check with `jj wor
 This user uses **colocated repositories** (jj + git coexist). A `.git` folder is present and tools like `gh` work fine. However, **always use `jj` commands instead of `git`** — git operations can desync the jj state.
 
 In non-default workspaces:
-- If the workspace is stale, `jj workspace update-stale` **loses nothing**: it snapshots the on-disk edits into the OLD working-copy commit first, then checks out the fresh one (`cli/src/cli_util.rs`, `recover_stale_working_copy_impl`: "Snapshot the current working copy on top of the last known working-copy operation, then merge the divergent operations"; if the operation itself is gone it writes a recovery commit). What it does not do is carry those edits onto the new `@` — they sit on a sibling. So: `OLD=$(jj log --ignore-working-copy -r @ --no-graph -T 'change_id.short()')` first, then `jj workspace update-stale`, then `jj log -r "change_id($OLD)"` — a nonempty sibling holds your edits; `jj restore --from <it> <paths>` puts them on the new `@`; an empty one is nothing to keep. Sami, 2026-09-18 13:37Z, verbatim: "update-stale doesn't cause losses, do your research" — the 'lossy' claim that circulated that night was wrong; the only way to lose the edits is to abandon the sibling without looking.
+- If the workspace is stale, run `jj workspace update-stale`. It loses nothing — see "How a stale working copy actually works" below for the mechanism and where your edits end up.
 - After updating a stale workspace, check `jj log -r @` to confirm your working copy is where you expect
 
 ### Parallel Workspaces and Shared Operation Log
+
+#### How a stale working copy actually works (from the source, jj 0.45.1)
+
+Every workspace records the operation id it last synchronised at. On each command jj compares that to the repository's current operation (`lib/src/working_copy.rs`, `WorkingCopyFreshness::check_stale`):
+
+- same operation → **fresh**;
+- the workspace's operation is *ahead* of the repo's (this workspace moved and the repo view is older) → **updated**: jj reloads the repo at the workspace's operation, silently;
+- the workspace's operation is an *ancestor* of the repo's — some other workspace's operation landed since, typically one that rewrote, described, rebased or abandoned this workspace's working-copy commit — then if the on-disk tree already equals the working-copy commit's tree → **fresh** (nothing to do; this is the "it recovered by itself" case), else → **stale**;
+- neither is an ancestor of the other (divergent operations) → **sibling operation**, also handled by `update-stale`.
+
+`jj workspace update-stale` (`cli/src/cli_util.rs`, `recover_stale_working_copy_impl`) then does, in order: (1) **snapshot the on-disk working copy on top of the last-known working-copy operation** — every unsnapshotted edit is committed into the *old* working-copy commit, in the old view, before anything else happens ("Snapshot the current working copy on top of the last known working-copy operation, then merge the divergent operations"); (2) merge the operations; (3) if still stale, reset the colocated git HEAD and check out the working-copy commit the current view names — this prints `Updated working copy to fresh commit <id>` and replaces the files on disk with that commit's tree; (4) snapshot again ("there should be no data loss at least"). If the old operation cannot be loaded at all (abandoned, or lost by the storage backend), it writes a **recovery commit** holding the on-disk contents, parented to the current working-copy commit.
+
+So after an update the edits you made before it are in the old working-copy commit — often shown as a *divergent* sibling carrying the same change id (`rsxtlxuq/0`, `rsxtlxuq/1`) — not on the new `@`, and not gone. The recipe: `OLD=$(jj log --ignore-working-copy -r @ --no-graph -T 'change_id.short()')` before updating (`--ignore-working-copy` reads the repo without touching the stale tree), `jj workspace update-stale`, then `jj log -r "change_id($OLD)"`: a nonempty sibling holds your edits — `jj restore --from <it> <paths>` puts them on the new `@`; an empty one is nothing to keep and safe to abandon (check `descendants(<id>) ~ <id>` is empty first). The only way to lose the edits is to abandon that sibling without looking. Sami, 2026-09-18 13:37Z, verbatim: "update-stale doesn't cause losses, do your research" — the "lossy"/"overwrote" claims that circulated that night were misreadings of cross-session rewrites, and the `removed N files` / `modified N files` lines in update-stale's output describe the checkout, not a loss.
+
 
 Multiple jj workspaces share **one operation log and one commit store**. Every jj command you run — including `jj st`, `jj undo`, `jj rebase` — writes to that shared log. Other Claude sessions in other workspaces see your operations and vice versa.
 
