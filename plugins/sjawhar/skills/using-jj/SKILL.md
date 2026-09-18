@@ -23,6 +23,12 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
   (`jj diff -r <that-commit> --stat` vs `jj diff --stat`) before committing — a partial restore
   looks exactly like a complete one until the diff says otherwise. (Extension session,
   2026-09-12, nearly lost real work this way.)
+  The same trap has an after-push half: once `jj git push` succeeds, the working copy IS the
+  published commit — keep editing and the next snapshot silently amends it, the branch moves
+  non-fast-forward with nobody deciding to rewrite history, and a sibling based on the pushed
+  commit is orphaned. `jj new` belongs in the same command as the push, never a later step.
+  Diagnostic once suspected: `git merge-base --is-ancestor <pushed-sha> <new-head>` non-zero
+  proves the amend (dispatched worker, 2026-09-17, twice in one day).
 - **CRITICAL — bare `jj describe` rewrites `@`'s existing message:** it does not "commit your
   work"; it renames whatever `@` already is. Before describing, check
   `jj log -r @ --no-graph -T 'description.first_line()'` — if `@` already carries a message that
