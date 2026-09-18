@@ -72,7 +72,7 @@ You may be in a **jj workspace** (not the default workspace). Check with `jj wor
 This user uses **colocated repositories** (jj + git coexist). A `.git` folder is present and tools like `gh` work fine. However, **always use `jj` commands instead of `git`** — git operations can desync the jj state.
 
 In non-default workspaces:
-- If the workspace is stale, run `jj workspace update-stale`
+- If the workspace is stale, `update-stale` REPLACES the tree on disk; anything jj can save from an unsnapshotted edit lands in a recovery sibling of your old `@`, and only its change id finds it. So: `OLD=$(jj log --ignore-working-copy -r @ --no-graph -T 'change_id.short()')` first, then `jj workspace update-stale`, then `jj log -r "change_id($OLD)"` — a nonempty sibling is your edit (`jj edit` it, or `jj restore --from` it by path); an empty one is reconciliation debris. A clean working copy has nothing to lose, which is the case to be in: run `jj st` (a snapshot) at the end of every edit batch in a shared-store workspace, because only unsnapshotted edits are exposed.
 - After updating a stale workspace, check `jj log -r @` to confirm your working copy is where you expect
 
 ### Parallel Workspaces and Shared Operation Log
@@ -88,7 +88,7 @@ Multiple jj workspaces share **one operation log and one commit store**. Every j
 **Rules for parallel workspaces:**
 - Keep operations minimal and deliberate — don't experiment
 - Never chain undos (see "No Undo Loops" above)
-- If your workspace is stale, run `jj workspace update-stale` before doing anything else
+- If your workspace is stale, follow the update-stale recipe above (record `@` with `--ignore-working-copy`, update, check the recovery sibling) before doing anything else
 - Rebase onto main with `jj git fetch && jj rebase -o main`, and only when there is a conflict to resolve (Sami, #2092: "Please don't do unecessary rebases (i.e. unless there are merge conflicts)")
 - Rebase **your own change**, named: `-r @` / `-s <your change>`. After `jj commit <paths>` in a shared checkout, never `jj rebase -r` that new commit away from under `@`: `-r` moves only the named commit and re-parents `@` back onto the old base, so your files on disk silently revert to the pre-fix versions while the push succeeds — the live gh shim ran un-hardened for 44 minutes this way (2026-09-17 20:41-21:25Z). Use `-s <commit>` (or `-b @`), which carries `@` along. A revset like `visible_heads() & ~immutable()` sweeps every other session's unpushed PR bookmark in the store onto the new base — three open-PR bookmarks were moved that way in `~/.dotfiles` on 2026-09-17 (no conflicts, identical patches, so pure churn, and each PR's local bookmark then diverged from its published head)
 - Verify your workspace — confirm you're operating on the right directory
