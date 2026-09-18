@@ -5,10 +5,29 @@
 //     from the session transcript filename, which is what resume matching
 //     scans. Keys per-session state for tools that track what a session saw.
 //   JJ_CONFIG — user config chain plus a generated per-session overlay that
-//     sets `templates.commit_trailers`, so every jj commit made from an agent
-//     session automatically carries an `Omp-Session: <id>` trailer. Attribution
-//     rides the commit itself: any checkout can map a commit back to the
-//     session that made it, with zero agent compliance required.
+//     (1) sets `templates.commit_trailers`, so every jj commit made from an
+//     agent session automatically carries an `Omp-Session: <id>` trailer —
+//     attribution rides the commit itself: any checkout can map a commit back
+//     to the session that made it, with zero agent compliance required; and
+//     (2) redefines `immutable_heads()` so every OTHER session's non-empty
+//     unpushed commit is immutable to this session (AGENTC-318, approved by
+//     Sami 2026-09-18): `abandon`/`rebase`/`squash` on another lane's commits
+//     fails without `--ignore-immutable`, the same guard that protects main.
+//     The revset guards the frontier — `ancestors(visible_heads(), 4)` minus
+//     trunk ancestors, empty commits, this session's own trailer, and
+//     `present(@)` — and ancestry closure (`::immutable_heads()`) protects
+//     all deeper history for free. Empty commits stay exempt so ended
+//     sessions' working-copy leftovers (the bulk of store clutter) remain
+//     abandonable by anyone. `present(@)` exempts the CALLER's current
+//     working-copy commit: the trailer only lands at describe time, so an
+//     edited-but-undescribed `@` carries no trailer yet and would otherwise
+//     be immutable to its own session (hit live 2026-09-18 14:1xZ) — `@`
+//     resolves per invocation, so each session exempts only its own working
+//     copy while other workspaces' `@`s stay guarded. A human shell without
+//     this overlay keeps stock jj behaviour.
+//     Depth 4 measured on the ~67k-commit agent-c store: ~1s per evaluation
+//     (depth 10 crosses octopus merges and explodes to 40k commits / 26s),
+//     zero foreign non-empty commits escape the closure.
 //
 // Subagents load no extensions but share the parent process, and their
 // session_start events fire process-wide. A session family deliberately
@@ -84,7 +103,10 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await mkdir(OVERLAY_DIR, { recursive: true });
 			const tmp = `${overlay}.${process.pid}.tmp`;
-			await writeFile(tmp, `[templates]\ncommit_trailers = '"Omp-Session: ${id}"'\n`);
+			await writeFile(
+				tmp,
+				`[templates]\ncommit_trailers = '"Omp-Session: ${id}"'\n\n[revset-aliases]\n"immutable_heads()" = 'builtin_immutable_heads() | (ancestors(visible_heads(), 4) ~ ::trunk() ~ description(glob:"*Omp-Session: ${id}*") ~ empty() ~ present(@))'\n`,
+			);
 			await rename(tmp, overlay);
 			process.env.JJ_CONFIG = `${base}:${overlay}`;
 		} catch {
