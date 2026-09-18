@@ -43,6 +43,18 @@ Avoid:
   self-flagellation bullshit. Again. And you keep doing it at the end as well."* And on a channel
   announcement: *"We don't need to start a channel announcement with 'Oh, I'm so sorry, I did
   something wrong, please forgive me.'"*
+
+  Banned outright, in every variation: the fault contrast. "That is our mistake, not yours",
+  "that's on us, not you", "our fault, not anything you did", "nothing you did wrong", "not a
+  second round", and any other sentence whose shape is "the fault is ours and not the
+  reader's". Naming who is not at fault puts the reader's fault on the table in order to take it
+  off again, and no reader asked. Sami, rewriting a candidate correction on 2026-09-18 whose
+  draft was "that invite was sent in error ... that is our mistake, not a second round ...
+  Nothing is outstanding from you": *"Sorry for the mixup, we're rebuilding our hiring platform
+  and that email went out accidentally." that's it. also, please update the relevant skills to
+  ban the "that is our mistake, not yours", "that's on us, not you", and all other stupid
+  variations.* The pattern to reach for instead is his: one "sorry for" clause, the plain cause
+  in a few words, done. No contrast, no reassurance, no second sentence.
 - Over-explaining. A transactional message to a candidate or contractor (an outcome, a payment,
   a schedule) carries only what the reader needs in order to act. Not the causal story of what
   went wrong on our side, not reassurance that their payment "is not affected", not an
