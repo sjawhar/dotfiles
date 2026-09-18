@@ -23,8 +23,14 @@
 //     edited-but-undescribed `@` carries no trailer yet and would otherwise
 //     be immutable to its own session (hit live 2026-09-18 14:1xZ) — `@`
 //     resolves per invocation, so each session exempts only its own working
-//     copy while other workspaces' `@`s stay guarded. A human shell without
-//     this overlay keeps stock jj behaviour.
+//     copy while other workspaces' `@`s stay guarded. Undescribed commits
+//     that are NOBODY's working copy (`description(exact:"") ~
+//     working_copies()`) are also exempt: they are stray snapshots — a
+//     session that `jj new`s away from an edited-but-undescribed `@` orphans
+//     one — and guarding them would make clutter permanently uncleanable
+//     (second live edge, 2026-09-18 14:16Z); live undescribed `@`s of other
+//     sessions remain guarded through the `working_copies()` carve-out.
+//     A human shell without this overlay keeps stock jj behaviour.
 //     Depth 4 measured on the ~67k-commit agent-c store: ~1s per evaluation
 //     (depth 10 crosses octopus merges and explodes to 40k commits / 26s),
 //     zero foreign non-empty commits escape the closure.
@@ -105,7 +111,7 @@ export default function (pi: ExtensionAPI) {
 			const tmp = `${overlay}.${process.pid}.tmp`;
 			await writeFile(
 				tmp,
-				`[templates]\ncommit_trailers = '"Omp-Session: ${id}"'\n\n[revset-aliases]\n"immutable_heads()" = 'builtin_immutable_heads() | (ancestors(visible_heads(), 4) ~ ::trunk() ~ description(glob:"*Omp-Session: ${id}*") ~ empty() ~ present(@))'\n`,
+				`[templates]\ncommit_trailers = '"Omp-Session: ${id}"'\n\n[revset-aliases]\n"immutable_heads()" = 'builtin_immutable_heads() | (ancestors(visible_heads(), 4) ~ ::trunk() ~ description(glob:"*Omp-Session: ${id}*") ~ empty() ~ present(@) ~ (description(exact:"") ~ working_copies()))'\n`,
 			);
 			await rename(tmp, overlay);
 			process.env.JJ_CONFIG = `${base}:${overlay}`;
