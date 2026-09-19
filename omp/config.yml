@@ -60,7 +60,7 @@ mnemopi:
 theme:
   dark: titanium
 symbolPreset: unicode
-hideThinkingBlock: true
+hideThinkingBlock: false
 doubleEscapeAction: tree
 extendedContext: true
 dev:
