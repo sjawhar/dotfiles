@@ -9,6 +9,7 @@ PORTABLE_MONITORS="${FIXTURES}/portable.monitors"
 SINGLE_MONITORS="${FIXTURES}/single.monitors"
 LAPTOP_ONLY_MONITORS="${FIXTURES}/laptop-only.monitors"
 DISABLED_LAPTOP_MONITORS="${FIXTURES}/disabled-laptop.monitors"
+HYBRID_MONITORS="${FIXTURES}/hybrid.monitors"
 mkdir -p /tmp/opencode
 TMPDIR="$(mktemp -d /tmp/opencode/generate-shortcuts-test.XXXXXX)"
 trap 'rm -rf "${TMPDIR}"' EXIT
@@ -168,6 +169,26 @@ grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — MB16AC
     || fail 'workspace 11 must continue the ASUS local index sequence'
 grep -Fq '(modifiers: [Super, Alt], key: "5", description: Some("WS15 — eDP-1 (5)")): WorkspaceOnOutput("eDP-1", 5),' "${portable_output}" \
     || fail 'workspace 15 must finish the laptop local index sequence'
+
+# Hybrid kit with the LG ULTRAWIDE on DP-2: 1-3 claim it, so DP-2? passes 4-6 to the laptop.
+hybrid_output="${TMPDIR}/hybrid-custom"
+"${GENERATOR}" --check --monitors "${HYBRID_MONITORS}" > "${hybrid_output}"
+grep -Fq '(modifiers: [Alt], key: "3", description: Some("WS3 — ULTRAWIDE (3)")): WorkspaceOnOutput("ULTRAWIDE", 3),' "${hybrid_output}" \
+    || fail 'hybrid workspace 3 must stay on the ultrawide'
+grep -Fq '(modifiers: [Alt], key: "4", description: Some("WS4 — eDP-1 (1)")): WorkspaceOnOutput("eDP-1", 1),' "${hybrid_output}" \
+    || fail 'hybrid workspace 4 must fall through to the laptop, not the DP-2 ultrawide'
+grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — InnoView (1)")): WorkspaceOnOutput("InnoView", 1),' "${hybrid_output}" \
+    || fail 'hybrid workspace 7 must resolve to the left InnoView portrait'
+grep -Fq '(modifiers: [Alt], key: "0", description: Some("WS10 — MB16AC (2)")): WorkspaceOnOutput("MB16AC", 2),' "${hybrid_output}" \
+    || fail 'hybrid workspace 10 must resolve to the right ASUS portrait'
+
+# The Dell office ultrawide on DP-2 still takes 4-6, by model, after 1-3.
+dell_monitors="${TMPDIR}/dell.monitors"
+printf '%s\n' 'eDP-1' 'DP-2 DELL P3425WE' > "${dell_monitors}"
+dell_output="${TMPDIR}/dell-custom"
+"${GENERATOR}" --check --monitors "${dell_monitors}" > "${dell_output}"
+grep -Fq '(modifiers: [Alt], key: "4", description: Some("WS4 — P3425WE (4)")): WorkspaceOnOutput("P3425WE", 4),' "${dell_output}" \
+    || fail 'Dell office workspace 4 must stay on the ultrawide as local 4'
 
 disabled_laptop_output="${TMPDIR}/disabled-laptop-custom"
 "${GENERATOR}" --check --monitors "${DISABLED_LAPTOP_MONITORS}" > "${disabled_laptop_output}"

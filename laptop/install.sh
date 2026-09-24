@@ -266,6 +266,9 @@ fi
 
 # Laptop daemon role opens tunneled URLs without colliding with the SSH LocalForward on 12802.
 bash "${DOTFILES_DIR}/installers/forward.sh" daemon
+# The laptop is the one machine holding the paired WhatsApp session; the
+# installer also registers the loopback MCP client for omp on this machine.
+bash "${DOTFILES_DIR}/installers/whatsapp.sh"
 
 # =============================================================================
 # Desktop apps (separate installers)

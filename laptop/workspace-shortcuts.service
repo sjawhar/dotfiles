@@ -20,8 +20,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
-# Let WAYLAND_DISPLAY / DBus env import finish on session start (same guard as
-# tt-watcher); doubles as a debounce for dock-enumeration write bursts.
+# Let WAYLAND_DISPLAY / DBus env import finish on session start; doubles as a
+# debounce for dock-enumeration write bursts.
 ExecStartPre=/bin/sleep 5
 ExecStart=%h/.dotfiles/laptop/generate-shortcuts --apply
 
