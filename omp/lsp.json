@@ -1,0 +1,6 @@
+{
+  "idleTimeoutMs": 1800000,
+  "servers": {
+    "pyright": { "disabled": true }
+  }
+}
