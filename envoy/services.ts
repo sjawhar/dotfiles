@@ -64,6 +64,11 @@ export function createListener(
       image: image.imageId,
       command: ["/usr/local/bin/envoy-listener"],
       restart: "unless-stopped",
+      // A SIGTERM runs the listener's ordered shutdown: up to 10 s for HTTP, then up to 10 s to
+      // drain NATS. Docker's 10 s default would kill it before the drain, both on `docker stop`
+      // (stopTimeout) and when Pulumi replaces the container (destroyGraceSeconds).
+      stopTimeout: 30,
+      destroyGraceSeconds: 30,
       networkMode: "host",
       // Bounded container logs on every host (oryx had this set by hand).
       logOpts: { "max-file": "5", "max-size": "20m" },
