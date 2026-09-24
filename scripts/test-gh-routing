@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Smoke test for GitHub App credential routing.
 #
-# The route is a single catch-all helper chain (gh-app-token, then the user's
-# gh auth fallback), so per-URL owner selection happens inside gh-app-token
-# and is covered by shims/tests/test_gh_app_token.py. This script asserts the
-# git-config layer around it:
+# The route is a single catch-all helper (gh-app-token, nothing behind it), so
+# per-URL owner selection and the upstream-token fallback happen inside
+# gh-app-token and are covered by shims/tests/test_gh_app_token.py. This script
+# asserts the git-config layer around it:
 #   1. with the gh-app-routes.gitconfig include active, github.com credential
-#      requests see the app helper chain;
+#      requests see the app helper alone;
 #   2. without the include (interactive shells), gh-app-token is not wired up.
 #
 # Robust to being run from agent shells: explicitly clears any inherited
@@ -46,7 +46,7 @@ got=$(env "${scrub_args[@]}" \
       GIT_CONFIG_VALUE_0="$ROUTES_FILE" \
       git config --get-regexp '^credential\.https://github\.com/\.helper$' 2>/dev/null \
       | cut -d ' ' -f2- | grep .) || got="<error>"
-report "agent shell (include active)" $'!gh-app-token agent\n!gh auth git-credential' "$got"
+report "agent shell (include active)" '!gh-app-token agent' "$got"
 
 got=$(env "${scrub_args[@]}" \
       git config --get-regexp '^credential\..*\.helper$' 2>/dev/null \

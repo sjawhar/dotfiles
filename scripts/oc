@@ -385,7 +385,8 @@ def launch(args: list[str]) -> NoReturn:
 
     # --- gh-app routing config (per-repo credential routing for git+gh) ---
     # Agents authenticate as the GitHub App installation matching each repo's
-    # owner; owners without an installation fall through to your gh user auth.
+    # owner; owners without an installation get the upstream token from the
+    # secrets store (gh-app.agent.fallback-secret), never your keyring login.
     # See gh-app-routes.gitconfig and shims/gh-app-token.
     index = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
     env[f"GIT_CONFIG_KEY_{index}"] = "include.path"

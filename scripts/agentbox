@@ -1,0 +1,594 @@
+#!/usr/bin/env bash
+# agentbox: one disposable Sysbox container per agent session, working in a
+# jj workspace made for it.
+#
+#   agentbox new <repo> <cmd> [args…]     run a command in a fresh box
+#   agentbox sh <box|session-id> [cmd…] exec into a running session's box
+#   agentbox ls                         running boxes
+#   agentbox doctor                     health checks, host side and box side
+#   agentbox rebuild                    build the image now; list boxes on older tags
+#   agentbox restart <box|session-id>… | --all [--now]
+#                                       relaunch a box's omp in place on the current
+#                                       pin/plugins: asks the agent over Envoy to run
+#                                       `agentbox restart` (in-box form: this session,
+#                                       now) when safe; --now hangs it up at once
+#
+# <repo> is a canonical checkout under ~/src. The box works in a jj workspace
+# of it at ~/boxes/<box>/<repo>; at exit the workspace is snapshotted,
+# forgotten and removed, so work survives only as commits in the canonical
+# repo. omp flags pass straight through.
+#
+# The box mounts an allow-list of $HOME (below). Host services arrive two ways:
+# the session bus, the metadata service and the Envoy API through socat relays
+# (Sysbox maps the box onto a subordinate uid range and dbus-daemon refuses a
+# peer whose uid is not the user's; the relayed bus is what makes the keyring -
+# and every tool that keeps a login in it - work unchanged inside), and the
+# secretsd socket by direct mount. secretsd pins the process that REGISTERs a
+# session and serves only that process's descendants; a forking relay makes
+# every connection a different, short-lived peer, so nothing through a relay is
+# ever a descendant of anything. The daemon (>= 3.2.3) accepts the mapped uid.
+# Image: agentbox/Dockerfile.
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+SRC="${AGENTBOX_SRC:-$HOME/src}"
+BOXES="$HOME/boxes"
+RUNTIME=sysbox-runc
+NETWORK=agentbox
+EMBED_NAME=omp-embed
+EMBED_PORT="${OMP_EMBED_PORT:-8087}"
+IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
+# The Envoy HTTP API listens on the host's loopback (envoy-listener, :9020);
+# a box reaches it through the same kind of forwarder as the metadata service.
+ENVOY_PORT="${AGENTBOX_ENVOY_PORT:-9020}"
+UID_="$(id -u)"
+RUN_BASE="/run/user/$UID_/agentbox"
+# The relayed session bus, in its own dir so a box sees the socket socat
+# recreates after a unit restart.
+BUS_SOCK="$RUN_BASE/bus/bus"
+# systemd's secretsd.socket unit holds this listener, so the node is stable
+# across daemon restarts and a bare-file bind stays live.
+SECRETSD_SOCK="/run/user/$UID_/secretsd.sock"
+
+# What a session relies on, and nothing more: agentbox/mounts, one "<rw|ro>
+# <path>" per line. Read here (host) and by doctor (box); both see the file
+# because the dotfiles are mounted.
+MOUNTS_FILE="$DOTFILES_DIR/agentbox/mounts"
+# The entries of one mode, one path per line.
+mounts_of() { awk -v m="$1" '$1 == m { print $2 }' "$MOUNTS_FILE"; }
+
+die() { echo "agentbox: $*" >&2; exit 1; }
+
+# The canonical checkouts, one name per line.
+repos() { find "$SRC" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -printf '%f\n' 2>/dev/null | sort; }
+
+# Image tag is the content hash of what builds it, so an edit to any image
+# input yields a new tag built on the next launch; running boxes on the old
+# tag are listed by `rebuild` and move when their sessions restart.
+image_tag() {
+    local h
+    h="$(cat "$DOTFILES_DIR/agentbox/Dockerfile" "$DOTFILES_DIR/agentbox/entrypoint.sh" | sha256sum | cut -c1-12)"
+    echo "agentbox:$h"
+}
+
+build_image() {
+    local tag="$1"
+    if [[ -z "$(docker image ls -q "$tag")" ]]; then
+        echo "agentbox: building $tag" >&2
+        # buildx with the default builder: ~/.docker/config.json may alias
+        # `docker build` to depot, which needs a project this image has none of.
+        docker buildx build --builder default --load -t "$tag" "$DOTFILES_DIR/agentbox" >&2
+    fi
+}
+
+ensure_network() {
+    docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK" >/dev/null
+    # omp-embed (installers/omp-embed.sh) serves mnemopi embeddings for every
+    # session on the machine; boxes reach it by name on this network.
+    if docker inspect "$EMBED_NAME" >/dev/null 2>&1 \
+        && ! docker inspect -f '{{json .NetworkSettings.Networks}}' "$EMBED_NAME" | grep -q "\"$NETWORK\""; then
+        docker network connect "$NETWORK" "$EMBED_NAME"
+    fi
+    NETWORK_GATEWAY="$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$NETWORK")"
+    NETWORK_SUBNET="$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$NETWORK")"
+    [[ -n "$NETWORK_GATEWAY" && -n "$NETWORK_SUBNET" ]] || die "network $NETWORK has no IPv4 gateway/subnet"
+}
+
+# Host forwarders as transient user units, restarted if socat dies. TCP ones
+# bind the box network's gateway and admit only that network; unix ones are
+# 0600 sockets under $RUN_BASE.
+start_unit() {
+    local unit="$1"; shift
+    systemctl --user is-active --quiet "$unit" && return 0
+    systemctl --user reset-failed "$unit" 2>/dev/null || true
+    systemd-run --user --unit "$unit" --quiet --collect --property=Restart=always --property=RestartSec=1 "$@"
+}
+
+wait_for() {
+    local _
+    for _ in $(seq 1 20); do
+        "$@" && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
+ensure_tcp_forwarder() {
+    local unit="$1" port="$2" target="$3"
+    start_unit "$unit" socat "TCP4-LISTEN:$port,bind=$NETWORK_GATEWAY,range=$NETWORK_SUBNET,fork,reuseaddr" "TCP4:$target"
+    wait_for bash -c "ss -ltn 'sport = :$port' | grep -q '$NETWORK_GATEWAY:$port'" \
+        || die "forwarder $unit did not bind $NETWORK_GATEWAY:$port (journalctl --user -u $unit)"
+}
+
+ensure_unix_forwarder() {
+    local unit="$1" sock="$2" target="$3"
+    mkdir -p "$(dirname "$sock")"
+    start_unit "$unit" socat "UNIX-LISTEN:$sock,fork,mode=600,unlink-early" "UNIX-CONNECT:$target"
+    wait_for test -S "$sock" || die "forwarder $unit did not open $sock (journalctl --user -u $unit)"
+}
+
+ensure_forwarders() {
+    ensure_tcp_forwarder agentbox-imds "$IMDS_PORT" 169.254.169.254:80
+    ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
+    ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
+}
+
+# The allow-list, as docker -v arguments. rw dirs are created on the host
+# first so docker never creates them root-owned; symlinked entries (the
+# dotfiles' config files) are bound by target so the box sees content, not a
+# link into an unmounted path.
+mount_args() {
+    local box="$1" a=() p src
+    a+=(-v "$SRC:$SRC")
+    # $SRC may hold symlinks to checkouts elsewhere (~/src/dotfiles → ~/.dotfiles);
+    # each target is mounted at its own path so the link resolves inside.
+    for p in "$SRC"/*; do
+        [[ -L "$p" ]] || continue
+        src="$(readlink -f "$p")"
+        a+=(-v "$src:$src")
+    done
+    a+=(-v "$BOXES/$box:$BOXES/$box")
+    [[ "$DOTFILES_DIR" == "$SRC"/* || "$(readlink -f "$DOTFILES_DIR")" == "$(readlink -f "$HOME/.dotfiles")" ]] \
+        || a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
+    a+=(-v "$HOME/.dotfiles:$HOME/.dotfiles")
+    while read -r p; do
+        mkdir -p "$HOME/$p"
+        a+=(-v "$HOME/$p:$HOME/$p")
+    done < <(mounts_of rw)
+    while read -r p; do
+        [[ -e "$HOME/$p" ]] || continue
+        a+=(-v "$(readlink -f "$HOME/$p"):$HOME/$p:ro")
+    done < <(mounts_of ro)
+    # jj creates a per-repo metadata dir under ~/.config/jj/repos/<id> the
+    # first time it touches a repository. The ro bind of .config/jj above
+    # (agentbox/mounts) is deliberate — a box must not rewrite jj metadata the
+    # host and other boxes trust — but it also made that first contact fail
+    # with EROFS for any repository the host had not seen (a fresh clone,
+    # `jj workspace add`). Overlay a box-private writable repos dir on top:
+    # docker nests binds by destination, the parent stays ro, and the dirs are
+    # cheap re-creatable metadata that lives under the box dir and dies with
+    # it. The host-side mkdirs keep docker from creating a mountpoint inside
+    # the ro parent.
+    mkdir -p "$HOME/.config/jj/repos" "$BOXES/$box/jj-user-repos"
+    a+=(-v "$BOXES/$box/jj-user-repos:$HOME/.config/jj/repos")
+    # A per-box runtime dir owned by ubuntu (omp refuses a root-owned one), with
+    # the host sockets bound at their usual paths. Never the host's whole
+    # /run/user/$UID_. secretsd/ is the token dir the omp extension writes to;
+    # created here so it is the user's, 0700, not a root-owned mountpoint.
+    local run_user="$RUN_BASE/$box/run-user"
+    mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd"
+    chmod 700 "$run_user/secretsd"
+    a+=(-v "$run_user:/run/user/$UID_")
+    a+=(-v "$(dirname "$BUS_SOCK"):/run/user/$UID_/bus")
+    [[ -S "$SECRETSD_SOCK" ]] || die "secretsd socket $SECRETSD_SOCK missing (systemctl --user status secretsd.socket)"
+    a+=(-v "$SECRETSD_SOCK:$SECRETSD_SOCK")
+    # forward's sockets (arming, browser grant, pulse) all live in forward/,
+    # mounted as a directory: a restarted `forward serve` rebinds them, which
+    # a directory mount shows at once and a mount of a socket file would not.
+    # Created here so a box started before the serve still sees it later.
+    mkdir -p -m 700 "/run/user/$UID_/forward"
+    a+=(-v "/run/user/$UID_/forward:/run/user/$UID_/forward")
+    # The inner dockerd's image store: anonymous, dies with the box.
+    a+=(-v /var/lib/docker)
+    printf '%s\n' "${a[@]}"
+}
+
+session_env() {
+    local box="$1" e=()
+    e+=(-e "XDG_RUNTIME_DIR=/run/user/$UID_")
+    e+=(-e "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_/bus/bus")
+    e+=(-e "HOME=$HOME" -e USER=ubuntu -e "TERM=${TERM:-xterm-256color}" -e "DOTFILES_DIR=$DOTFILES_DIR")
+    e+=(-e "MISE_DATA_DIR=$HOME/.mise")
+    # $HOME/.dotfiles/bin holds gitignored binaries (mise, a local jj) a
+    # checkout under test does not have.
+    e+=(-e "PATH=$DOTFILES_DIR/shims:$DOTFILES_DIR/bin:$HOME/.dotfiles/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:$HOME/.pulumi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    e+=(-e "JJ_CONFIG=$HOME/.config/jj/config.toml:$DOTFILES_DIR/.jjconfig.toml")
+    e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
+    e+=(-e "ENVOY_URL=http://$NETWORK_GATEWAY:$ENVOY_PORT")
+    # Also the inner dockerd's firewall rule (agentbox/entrypoint.sh).
+    e+=(-e "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://$NETWORK_GATEWAY:$IMDS_PORT")
+    e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
+    e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
+    e+=(-e "AGENTBOX_BOX=$box" -e AGENTBOX_USER=ubuntu)
+    if curl -fsS -m 1 "http://127.0.0.1:${EMBED_PORT}/health" >/dev/null 2>&1; then
+        e+=(-e "MNEMOPI_EMBEDDING_API_URL=http://$EMBED_NAME/v1")
+    fi
+    # The pane's tmux identity, as a host omp in the same pane sees it. TMUX_PANE
+    # is how tmux-resurrect-omp finds the omp inside the box; TMUX is how omp
+    # knows to wrap graphics and notification sequences in tmux's DCS
+    # passthrough - without it the bare kitty APC it emits on every reflow
+    # reaches tmux, which takes any APC string as the pane title
+    # ("Ga=d,d=A,q=2"); TERM_PROGRAM(_VERSION) is what its hyperlink policy
+    # reads. The socket path in TMUX is not mounted; omp never runs tmux.
+    local v
+    for v in TMUX TMUX_PANE TERM_PROGRAM TERM_PROGRAM_VERSION; do
+        [[ -n "${!v:-}" ]] && e+=(-e "$v=${!v}")
+    done
+    printf '%s\n' "${e[@]}"
+}
+
+# The session id of the omp running in a box: the file it holds open,
+# ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl, read from its fd table (omp
+# exports OMP_SESSION_ID to its children, not itself) - or, when none is open
+# (idle after a resume or a full-file rewrite), the newest session file of the
+# box's working directory: omp keys that directory by cwd, relocates a resumed
+# session's file into it, and a box name is never reused. Empty until a
+# session has materialized, and for a --no-session run.
+box_session_id() {
+    local sid
+    sid="$(docker exec "$1" sh -c '
+        for p in $(pgrep -x omp); do
+            for fd in /proc/$p/fd/*; do
+                readlink "$fd" 2>/dev/null
+            done
+        done | sed -n "s#.*/\\.omp/agent/sessions/[^/]*/[0-9T:-]*Z_\\([0-9a-f-]\\{36\\}\\)\\.jsonl\$#\\1#p" | head -1' 2>/dev/null || true)"
+    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
+    # Callers run under set -e: this must succeed, empty, while no file exists.
+    local files
+    files="$(ls -t "$HOME/.omp/agent/sessions/-boxes-$1-"*/*.jsonl 2>/dev/null || true)"
+    sed -n '1s#.*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' <<<"$files"
+}
+
+# Close-phase jj/knives run in their own session (`setsid`): the pane's
+# hangup reaches only the terminal's session, and jj cannot be made to ignore
+# it - it installs its own SIGHUP handler (ctrlc, "termination") that exits 1,
+# replacing whatever disposition it inherited. A snapshot killed that way is a
+# workspace left behind. `-w` returns the child's status.
+detached() { setsid -w "$@"; }
+
+# Release every knives claim the session holds. Claims are keyed by the omp
+# session id (kind harness-session), so acting as that session releases them
+# without --force; knives forgets and removes the workspace itself and keeps
+# the commits. The registry (repos.toml) names each checkout.
+finish_knives_claims() {
+    local sid="$1" state="$HOME/.config/knives/state.json" repo branch path
+    [[ -n "$sid" && -s "$state" ]] || return 0
+    while IFS=$'\t' read -r repo branch; do
+        [[ -n "$repo" && -n "$branch" ]] || continue
+        path="$(detached knives repos --json 2>/dev/null | jq -r --arg r "$repo" '.repos[] | select(.name == $r) | .path')"
+        if [[ -z "$path" || ! -d "$path" ]]; then
+            echo "agentbox: knives claim $repo/$branch: checkout not found; left as is" >&2
+            continue
+        fi
+        if ! (cd "$path" && OMP_SESSION_ID="$sid" detached knives finish "$branch"); then
+            echo "agentbox: knives finish $repo/$branch failed; left as is" >&2
+        fi
+    done < <(jq -r --arg s "$sid" '.. | objects | select(.owner? == $s) | "\(.repo)\t\(.branch)"' "$state")
+}
+
+# Everything the box made goes: the knives claims its session holds, then its
+# own workspace (snapshotted first, so uncommitted edits are a commit in the
+# canonical repo), then the directory. The container must be gone first — it
+# holds the mounts, and docker recreates a removed mountpoint root-owned.
+close_box() {
+    local box="$1" repo="$2" sid="$3" _
+    local ws="$BOXES/$box/$repo"
+    for _ in $(seq 1 60); do
+        docker inspect "$box" >/dev/null 2>&1 || break
+        sleep 1
+    done
+    if docker inspect "$box" >/dev/null 2>&1; then
+        echo "agentbox: $box is still running after 60s; removing it" >&2
+        docker rm -f "$box" >/dev/null 2>&1 || true
+    fi
+    finish_knives_claims "$sid"
+    if [[ -d "$ws/.jj" ]]; then
+        # `jj st` snapshots the working copy into @. On a shared store another
+        # session's operations routinely leave a workspace stale, and `jj st`
+        # refuses a stale one; `update-stale` first recovers it, putting any
+        # unsnapshotted edits in a commit, and is a no-op on a fresh workspace.
+        if detached jj -R "$ws" workspace update-stale >/dev/null 2>&1 \
+            && detached jj -R "$ws" st >/dev/null 2>&1; then
+            detached jj -R "$SRC/$repo" workspace forget "$box" \
+                || echo "agentbox: workspace forget $box failed; $ws left in place" >&2
+        else
+            echo "agentbox: could not snapshot $ws; left in place" >&2
+            return 0
+        fi
+    fi
+    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+}
+
+cmd_new() {
+    local repo="${1:-}"
+    [[ -n "$repo" && "$repo" != -* ]] || die "usage: agentbox new <repo> <cmd> [args…]  (repos: $(repos | tr '\n' ' '))"
+    shift
+    (( $# )) || die "usage: agentbox new <repo> <cmd> [args…]"
+    [[ -d "$SRC/$repo" ]] || die "no checkout $SRC/$repo (repos: $(repos | tr '\n' ' '))"
+    [[ -e "$SRC/$repo/.jj" ]] || die "$SRC/$repo is not a jj repository"
+    local box tag
+    box="agentbox-$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-12)"
+    tag="$(image_tag)"
+    build_image "$tag"
+    ensure_network
+    ensure_forwarders
+
+    local ws="$BOXES/$box/$repo"
+    # From here the box has state on disk: whatever fails before or during the
+    # session, its directory and workspace never outlive the launcher.
+    # Values are expanded now (the trap outlives this function's locals) and
+    # the trap runs only in the launcher itself, never in a $(…) subshell,
+    # which inherits EXIT traps in bash.
+    local launcher_pid=$BASHPID
+    # shellcheck disable=SC2064
+    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '$repo' ''" EXIT
+    # A pane kill or TERM lands here; the trap forwards a hangup into the box
+    # (--init delivers it to the command), --rm fires, close runs. Before the
+    # box exists it is remembered instead and honoured once the workspace add
+    # returns. After a hangup the terminal is gone: a write to it fails with
+    # EIO, and under set -e the first chatty step of close_box (jj's
+    # "concurrent modification" note, an echo) would end the launcher after the
+    # workspace forget and before the rm -rf - which is how ~/boxes/<box> trees
+    # outlived their boxes. Nothing printed from here on has a reader.
+    local interrupted=0
+    trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
+    trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
+    mkdir -p "$BOXES/$box"
+    # Detached so a pane hangup cannot end it half-way (see `detached`): a
+    # registered workspace with a partial tree could not be snapshotted, so
+    # close would have to leave it.
+    detached jj -R "$SRC/$repo" workspace add --name "$box" "$ws" >&2
+    (( interrupted )) && exit 130
+    # The workspace is a git worktree of the shared checkout, and its path
+    # exists only on the host and inside this box. From every other box it
+    # looks missing, so a `git worktree prune` run there - an agent's cleanup
+    # after `git worktree remove`, Legion's provisioning - would drop its
+    # registration and leave git in the box fatal (14 live boxes at once,
+    # 2026-09-21). A locked worktree is what prune skips; jj's forget in
+    # close_box still removes it.
+    git -C "$SRC/$repo" worktree lock \
+        --reason "agentbox $box: path exists only on the host and inside its box" "$ws"
+
+    local mounts=() env=()
+    mapfile -t mounts < <(mount_args "$box")
+    mapfile -t env < <(session_env "$box")
+    # omp runs under the in-box runner so `restart` can relaunch it in the same
+    # container (scripts/agentbox-run.ts); any other command runs bare.
+    local cmd=("$@")
+    if [[ "$1" == omp ]]; then cmd=(bun "$DOTFILES_DIR/scripts/agentbox-run.ts" "$@"); fi
+    local tty=(-i)
+    [[ -t 0 && -t 1 ]] && tty=(-it)
+    # Not exec'd: close_box must run after the container exits, whatever the
+    # exit reason.
+    local rc=0 child sid="" stdin_fd
+    # The explicit stdin dup matters: a job-control-less background child gets
+    # /dev/null for stdin, which -it refuses ("stdin is not a terminal").
+    exec {stdin_fd}<&0
+    # --log-driver none: stdout is the omp TUI's redraw stream, gigabytes a day
+    # per box that nothing reads (the transcript is in ~/.omp; attach is live).
+    docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
+        --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
+        -w "$ws" "${tty[@]}" \
+        "${mounts[@]}" "${env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
+    child=$!
+    # An omp inside reveals its session id once up; close releases that
+    # session's knives claims. Other commands have none.
+    while kill -0 "$child" 2>/dev/null; do
+        sid="$(box_session_id "$box")"
+        [[ -n "$sid" ]] && break
+        sleep 2
+    done
+    # An interrupted wait re-waits: the first return after a signal carries
+    # 128+sig, the child's real status arrives once it is reaped.
+    while :; do
+        if wait "$child"; then rc=0; else rc=$?; fi
+        kill -0 "$child" 2>/dev/null || break
+    done
+    # The pane can go away while close is still running (a pane kill during
+    # the jj snapshot, a server exit). That must not stop the box's removal:
+    # the launcher ignores the hangup from here on (jj and knives run in their
+    # own session, see `detached`), and its output goes through a reader that
+    # writes to the terminal while it exists and drops the rest - a direct
+    # write to a hung-up pty fails with EIO, which set -e would turn into an
+    # exit between the workspace forget and the rm -rf.
+    trap - TERM INT EXIT
+    trap '' HUP
+    exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
+    close_box "$box" "$repo" "$sid"
+    exit "$rc"
+}
+
+# The box a target names: a running box (exact name or unique prefix), or the
+# omp session id (or prefix) of the omp running in one.
+resolve_box() {
+    local target="$1" b matches=()
+    mapfile -t matches < <(docker ps --filter name='^agentbox-' --format '{{.Names}}' | grep -E "^(agentbox-)?${target}" || true)
+    if (( ${#matches[@]} == 1 )); then printf '%s\n' "${matches[0]}"; return 0; fi
+    for b in $(docker ps --filter name='^agentbox-' --format '{{.Names}}'); do
+        if [[ "$(box_session_id "$b")" == "$target"* ]]; then printf '%s\n' "$b"; return 0; fi
+    done
+    return 1
+}
+
+cmd_sh() {
+    local target="${1:-}"
+    [[ -n "$target" ]] || die "box name or session id required"
+    shift
+    local box wdir
+    box="$(resolve_box "$target")" || die "no running box matches $target"
+    wdir="$(docker inspect -f '{{.Config.WorkingDir}}' "$box")"
+    local tty=(-i)
+    [[ -t 0 && -t 1 ]] && tty=(-it)
+    local cmd=("$@")
+    (( ${#cmd[@]} )) || cmd=(bash)
+    # docker exec carries the container's launch env (PATH, routing, sockets);
+    # only the caller's terminal needs passing through.
+    exec docker exec "${tty[@]}" --user ubuntu -e "TERM=${TERM:-xterm-256color}" -w "$wdir" "$box" "${cmd[@]}"
+}
+
+cmd_rebuild() {
+    local tag
+    tag="$(image_tag)"
+    build_image "$tag"
+    local stale
+    stale="$(docker ps --filter name='^agentbox-' --format '{{.Names}} {{.Image}}' | awk -v t="$tag" '$2 != t {print $1}')"
+    if [[ -n "$stale" ]]; then
+        echo "agentbox: boxes on an older image (they move to it in a new box, not via agentbox restart):" >&2
+        echo "$stale" >&2
+    fi
+    echo "agentbox: image $tag"
+}
+
+cmd_ls() { docker ps --filter name='^agentbox-' --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'; }
+
+# The runner's pid in a box (agentbox-run.ts is pid 1's only child), empty for
+# a box running something else - a bare omp would take SIGUSR1 itself.
+box_runner_pid() {
+    docker exec "$1" sh -c 'p=$(pgrep -P 1 | head -1); [ -n "$p" ] && tr "\0" " " </proc/$p/cmdline | grep -q agentbox-run && echo "$p"' 2>/dev/null || true
+}
+
+RESTART_NOTICE='agentbox: a restart of your omp is pending (new omp/plugins on the host). Finish the current step and start no new subagents or long jobs. When `hub jobs` shows nothing running, run `agentbox restart` from your bash tool: omp quits gracefully and relaunches in this same box with --resume of this session; the box, its workspace and /tmp stay, hub-supervised processes only if started with persist. If you are idle, do it now.'
+
+cmd_restart() {
+    # Inside a box this is the agent's own trigger. omp's bash tool has a
+    # builtin kill that refuses the shell's ancestors - the runner is one - so
+    # the signal is sent from here, a real process.
+    if [[ -n "${AGENTBOX_RUNNER_PID:-}" ]]; then
+        (( $# == 0 )) || die "inside a box, agentbox restart takes no arguments: it restarts this session"
+        exec kill -USR1 "$AGENTBOX_RUNNER_PID"
+    fi
+    local now=false all=false t targets=() boxes=() box sid
+    for t in "$@"; do
+        case "$t" in
+            --now) now=true ;;
+            --all) all=true ;;
+            -*) die "unknown option $t" ;;
+            *) targets+=("$t") ;;
+        esac
+    done
+    if $all; then
+        mapfile -t boxes < <(docker ps --filter name='^agentbox-' --format '{{.Names}}')
+    else
+        (( ${#targets[@]} )) || die "usage: agentbox restart <box|session-id>… | --all [--now]"
+        for t in "${targets[@]}"; do
+            box="$(resolve_box "$t")" || die "no running box matches $t"
+            boxes+=("$box")
+        done
+    fi
+    for box in "${boxes[@]}"; do
+        if [[ -z "$(box_runner_pid "$box")" ]]; then
+            echo "agentbox: $box does not run omp under the runner; quit it and relaunch with --resume instead" >&2
+            continue
+        fi
+        if $now; then
+            # pid 1 (docker-init) forwards the signal to the runner.
+            docker kill -s USR1 "$box" >/dev/null
+            echo "agentbox: $box restarting now"
+            continue
+        fi
+        sid="$(box_session_id "$box")"
+        [[ -n "$sid" ]] || { echo "agentbox: $box: omp holds no session file open right now; retry, or use --now" >&2; continue; }
+        envoy send "$sid" "$RESTART_NOTICE" >/dev/null || die "envoy send to $sid failed"
+        echo "agentbox: $box (session $sid) notified; it restarts when it reaches a safe point"
+    done
+}
+
+FAILS=0
+ok() { echo "ok   $*"; }
+fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
+
+# The box side of doctor, run under bash inside a throwaway box. The single
+# quotes are the point: everything expands inside the box.
+# shellcheck disable=SC2016
+DOCTOR_BOX_SCRIPT='
+set -u
+fails=0
+ok() { echo "ok   box: $*"; }
+fail() { echo "FAIL box: $*"; fails=$((fails + 1)); }
+for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets hawk-token; do
+    command -v "$t" >/dev/null 2>&1 && ok "tool $t" || fail "tool $t does not resolve"
+done
+for d in .config/gh .ssh/id_ed25519 .gnupg .config/gcloud; do
+    [ -e "$HOME/$d" ] && fail "$d is present in the box" || ok "$d absent"
+done
+mounted() { awk -v t="$1" "\$5 == t { f = 1 } END { exit !f }" /proc/self/mountinfo; }
+writable() { if [ -d "$1" ]; then touch "$1/.doctor.$$" 2>/dev/null && rm -f "$1/.doctor.$$"; else (: >>"$1") 2>/dev/null; fi; }
+while read -r m p; do
+    case "$m" in
+        rw) mounted "$HOME/$p" && writable "$HOME/$p" && ok "rw $p" || fail "rw $p: not a writable mount";;
+        ro) [ -e "$HOME/$p" ] || { echo "note box: ro $p absent (not on the host)"; continue; }
+            mounted "$HOME/$p" && ! writable "$HOME/$p" && ok "ro $p" || fail "ro $p: not a read-only mount";;
+    esac
+done <"$DOTFILES_DIR/agentbox/mounts"
+r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os.environ[\"DBUS_SESSION_BUS_ADDRESS\"].split(\"=\",1)[1]); s.sendall(b\"\\0AUTH EXTERNAL 31303030\\r\\n\"); print(s.recv(64).split()[0].decode())" 2>&1)"; [ "$r" = OK ] && ok "session bus (keyring) reachable through the relay" || fail "session bus: $r"
+[ "$(ls -A "$HOME/.ssh" | sort | tr "\n" " ")" = "jj-signing jj-signing.pub " ] && ok ".ssh holds exactly the jj-signing pair" || fail ".ssh contents: $(ls -A "$HOME/.ssh" | tr "\n" " ")"
+auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && ok ".docker holds only the box ghcr login" || fail ".docker auths: ${auths:-none}"
+[ "$(stat -c %U /run/user/$(id -u))" = ubuntu ] && ok "runtime dir owned by ubuntu" || fail "runtime dir owner $(stat -c %U /run/user/$(id -u))"
+[ -n "$(jj log -r @ --no-graph -T change_id 2>/dev/null)" ] && ok "cwd is a jj workspace" || fail "cwd is not a jj workspace"
+out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1)";; esac
+gh auth status 2>&1 | grep -q "not logged" && ok "gh auth: no user login" || fail "gh auth status shows a login"
+n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && ok "secrets agent-tier" || fail "secrets agent-tier"
+arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
+t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
+timeout 40 google-user-token >/dev/null 2>&1 && ok "google-user-token mints" || fail "google-user-token"
+timeout 5 bash -c "exec 3<>/dev/tcp/envoy-nats/4222" 2>/dev/null && ok "envoy nats reachable" || fail "envoy nats unreachable"
+c="$(curl -s -m 3 -o /dev/null -w %{http_code} "$ENVOY_URL/" 2>/dev/null)"; [ "$c" != 000 ] && ok "envoy api reachable ($ENVOY_URL → $c)" || fail "envoy api $ENVOY_URL unreachable"
+c="$(curl -s -m 3 -o /dev/null -w %{http_code} "${MNEMOPI_EMBEDDING_API_URL:-http://none}/../health" 2>/dev/null)"; [ "$c" = 200 ] && ok "mnemopi embed" || echo "note box: mnemopi embed $c"
+n="$(timeout 20 forward doctor 2>&1 | grep -cE "accepted|reachable|accepts")"; echo "@forward-ok $n"
+timeout 30 docker info >/dev/null 2>&1 && ok "inner docker answers" || fail "inner docker"
+exit $fails
+'
+
+cmd_doctor() {
+    if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc; then ok "host: sysbox-runc runtime"; else fail "host: sysbox-runc runtime not registered"; fi
+    local tag; tag="$(image_tag)"
+    [[ -n "$(docker image ls -q "$tag")" ]] && ok "host: image $tag built" || echo "note host: image $tag not built (built on next launch)"
+    if [[ -d "$SRC" ]]; then ok "host: $SRC ($(repos | tr '\n' ' '))"; else fail "host: $SRC missing"; fi
+    if [[ -S "/run/user/$UID_/bus" ]]; then ok "host: session bus"; else fail "host: session bus missing"; fi
+    ensure_network && ok "host: network $NETWORK gateway $NETWORK_GATEWAY"
+    ensure_forwarders && ok "host: forwarders (imds, envoy, bus)"
+    local host_forward; host_forward="$(timeout 20 forward doctor 2>&1 | grep -cE 'accepted|reachable|accepts' || true)"
+    build_image "$tag"
+    # A throwaway box on a throwaway workspace of the first repo in $SRC.
+    local repo box ws
+    repo="$(repos | head -1)"
+    [[ -n "$repo" ]] || die "no repo under $SRC to test with"
+    box="agentbox-doctor$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-6)"
+    ws="$BOXES/$box/$repo"
+    mkdir -p "$BOXES/$box"
+    jj -R "$SRC/$repo" workspace add --name "$box" "$ws" >/dev/null 2>&1
+    local mounts=() env=() out
+    mapfile -t mounts < <(mount_args "$box")
+    mapfile -t env < <(session_env "$box")
+    out="$(docker run --rm --init --runtime "$RUNTIME" --name "$box" --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
+        -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+    jj -R "$SRC/$repo" workspace forget "$box" >/dev/null 2>&1 || true
+    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+    grep -vE '^@' <<<"$out"
+    FAILS=$((FAILS + $(grep -c '^FAIL ' <<<"$out" || true)))
+    local box_forward; box_forward="$(sed -n 's/^@forward-ok //p' <<<"$out")"
+    if [[ "$box_forward" == "$host_forward" ]]; then ok "forward: $box_forward channel rows ok in box, same as host"; else fail "forward: $box_forward rows ok in box vs $host_forward on host"; fi
+    (( FAILS == 0 )) && { echo "agentbox doctor: all checks passed"; exit 0; }
+    echo "agentbox doctor: $FAILS check(s) failed" >&2
+    exit 1
+}
+
+case "${1:-}" in
+    new)     shift; cmd_new "$@" ;;
+    sh)      shift; cmd_sh "$@" ;;
+    ls)      cmd_ls ;;
+    doctor)  cmd_doctor ;;
+    rebuild) cmd_rebuild ;;
+    restart) shift; cmd_restart "$@" ;;
+    *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

@@ -1,12 +1,13 @@
 # Dynamic GitHub App credential routing.
-# This file is included into git config only by agent launchers (cld/oc),
+# This file is included into git config only by agent launchers (cld/oc/omp),
 # never by interactive shells. gh-app-token derives the owner from each
-# credential request path (useHttpPath) and mints a token for that owner's
-# app installation. Owners without an installation fall through to the
-# user's `gh auth git-credential`; any other failure emits quit=1 so git
-# stops instead of silently using the user's identity.
+# credential request path (useHttpPath) and answers or quits for every
+# owner-bearing github.com request: an owner with an App installation gets a
+# token minted for that installation; an owner with no App installation gets
+# the profile's fallback secret (the user's personal access token for upstream
+# repositories); any failure emits quit=1 so git stops instead of silently
+# using the user's identity. Nothing is configured behind this helper.
 
 [credential "https://github.com/"]
 	helper =
 	helper = !gh-app-token agent
-	helper = !gh auth git-credential

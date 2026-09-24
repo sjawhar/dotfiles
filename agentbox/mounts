@@ -1,0 +1,73 @@
+# What an agent box sees of $HOME, and nothing more. scripts/agentbox binds
+# each entry at its own path; `agentbox doctor` checks every entry from inside
+# a box. One entry per line: <rw|ro> <path relative to $HOME>. Blank lines and
+# # comments are ignored. A missing path is created (rw) or skipped (ro), so
+# the list is the same on every machine.
+#
+# rw: state the session writes. ro: configuration.
+#
+# The rule for a tool login: a CLI's own login state is fine here when the box
+# needs that CLI (fleetctl, sentry, depot, pup); an identity that can act as
+# the user on GitHub never is - no ~/.config/gh, no ssh keys, no docker login
+# - so a session pushes only as its repo's GitHub App. Tools that keep their
+# login in the keyring (hawk, pup's tokens, gws) need nothing here: the
+# session bus is relayed into the box.
+
+# omp: sessions, memory, settings
+rw .omp
+rw .config/omp
+rw .cache/omp
+
+# the pinned tool store and language caches
+rw .mise
+rw .cache/mise
+rw .config/mise
+rw .bun
+rw .npm
+rw .cache/uv
+rw .local/share/uv
+rw .cargo
+rw .rustup
+rw .cache/ms-playwright
+# hawk-token's private agent-c checkout (scripts/hawk-token): one clone on the host,
+# refreshed by whichever run finds it stale, shared by every box
+rw .cache/hawk-token
+
+# cloud access (AWS by design)
+rw .aws
+rw .kube
+rw .pulumi
+
+# work identities agents use
+rw .config/trajectory-labs
+rw .config/taiga
+rw .config/gws
+rw .config/knives
+rw .cache/knives
+rw .config/opencode
+rw .claude
+rw .codex
+rw .local/bin
+rw .mcp-auth
+rw .pcscd
+
+# tool logins the CLI itself maintains (each rewrites its file: pup its site
+# registry, sentry its sqlite journal, depot its update state, mailbox its
+# thread refs, token cache and compose drafts)
+rw .fleet
+rw .sentry
+rw .config/depot
+rw .config/pup
+rw .cache/mailbox
+
+# configuration
+ro .config/forward
+ro .config/jj
+ro .config/secretsd
+ro .config/sops
+ro .config/ctx
+ro .config/mailbox
+ro .npmrc
+ro .gitconfig
+ro .ssh/jj-signing
+ro .ssh/jj-signing.pub
