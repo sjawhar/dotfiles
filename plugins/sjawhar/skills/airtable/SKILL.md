@@ -35,19 +35,12 @@ secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli <tool> --help
 secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli whoami
 ```
 
-## Pinned base — hiring applicants
+## Hiring applicants base is retired
 
-```
-baseId:   appvSQts63ngMSoCP
-tableId:  tblTAe1moooa5Lsoy
-view:     viwyGwAUe0E5k3FXF
-```
-
-```bash
-# List applicant records (page through with --pageSize / --cursor)
-secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli list-records-for-table \
-  --baseId appvSQts63ngMSoCP --tableId tblTAe1moooa5Lsoy --pageSize 20
-```
+The old Applications base (`appvSQts63ngMSoCP`) is no longer the hiring system of record.
+Candidate pipeline data now lives in Terminal; see the agent-c `hiring` skill and its
+`hire` CLI (`hire show <email>`, `hire stats`, and so on). Do not re-pin this tool to that
+base.
 
 ## Tips
 

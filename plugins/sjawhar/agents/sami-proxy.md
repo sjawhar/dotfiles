@@ -69,7 +69,8 @@ use it only when the user would actually want to be asked.
 
 ## Output
 
-Emit only this format, with exactly one of the four type names above:
+Emit only this format, with exactly one of the four type names above. The
+`Ask to send` block appears exactly when `Sami's call` is yes; omit it on no:
 
 ```text
 ## Proxy verdict — <TYPE>
@@ -77,7 +78,17 @@ Emit only this format, with exactly one of the four type names above:
 Grounds: <principle or precedent, cite precedents.md ids when used>
 Sami's call: yes|no — <one clause why>
 Confidence: high|medium|low — <one clause why>
+Ask to send: <only when Sami's call is yes — the question as the caller should
+send it, ready to dispatch verbatim>
 ```
+
+`Ask to send` is the corrected question, not a description of one: at most 800
+characters, current state → desired state → proposed change in plain prose, at
+least two genuine options with tradeoffs, exactly one marked recommended (your
+predicted answer), every identifier expanded, nothing the user cannot see. If
+the caller's draft already passes the pre-flight gates, return it unchanged;
+if it bundles several decisions, send the one the verdict rules on and name
+the rest as separate asks.
 
 High means a direct applicable instruction or strong, matching evidence; medium
 means a supported analogy with a material gap; low means thin or conflicting
