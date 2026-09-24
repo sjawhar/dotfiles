@@ -32,8 +32,15 @@ minimum_release_age_excludes = [
   "github:sjawhar/time-tracker",
   "forward",
   "tt",
-  "tt-watcher",
 ]
+# The global `rust` pin below makes mise export RUSTUP_TOOLCHAIN, which overrides
+# every repo's own rust-toolchain.toml. oh-my-pi pins nightly-2026-08-12; under
+# the override its natives build dies (E0554 #![feature] on stable) and `bun check`
+# reports rustfmt drift in untouched vendored crates -- five agents hit it on
+# 2026-09-22. Reading rust-toolchain.toml as an idiomatic version file keeps 1.98.0
+# everywhere else and the repo's own pin inside such a repo (verified: rustc
+# 1.99.0-nightly in oh-my-pi, 1.98.0 in agent-c).
+idiomatic_version_file_enable_tools = ["rust"]
 
 [settings.upgrade]
 auto_prune = false
@@ -43,8 +50,8 @@ AGENT_EVAL_VERSION = "0.1.1"
 
 [tools]
 "github:sjawhar/jj" = "0.45.1-sami.20260910-043938"  # upstream main + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10127 + #10129 + #10130 + reset_head writes HEAD after the index reset + forget unlinks only its own worktree + index write waits for index.lock (#7530) + import keeps @ when the recorded HEAD was lost + merge_view treats a lost git_heads entry as no information
-"github:sjawhar/knives" = "2.0.11"
-"github:sjawhar/oh-my-pi" = "18.1.15-sami.20260910-044004"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
+"github:sjawhar/knives" = "2.0.18"
+"github:sjawhar/oh-my-pi" = "18.2.9-sami.20260922-201951"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
@@ -71,6 +78,14 @@ zoxide = "0.10.0"
 "github:sjawhar/opencode" = "latest"
 "npm:@googleworkspace/cli" = "0.22.5"
 "npm:@openai/codex" = "0.153.1"
+# WhatsApp MCP (Baileys fork): the laptop runs it as a daemon
+# (whatsapp/whatsapp-mcp.service) and its omp reaches it with the same
+# binary's `--connect` stdio client (installers/whatsapp.sh). aube gates: the package is
+# my own (unpopular by download count); better-sqlite3 fetches its prebuilt
+# native binding in an install script; and it pins pino@9.14.0, a 9.x backport
+# matteo.collina published by hand two weeks after 10.0.0 without provenance
+# (reviewed 2026-09-13: same integrity on npmjs.org, maintainer publish).
+"npm:@sjawhar/whatsapp-mcp" = { version = "2.4.0", allow_low_downloads = true, allow_builds = ["better-sqlite3"], trust_policy_excludes = ["pino@9.14.0"] }
 
 # Development
 "npm:basedpyright" = "1.39.10"
@@ -79,9 +94,10 @@ zoxide = "0.10.0"
 # Bump this and "github:sjawhar/oh-my-pi" together. Upstream does not publish this
 # package for every tag: if the exact version is missing from npm, pin the nearest
 # published one after confirming packages/mnemopi is unchanged between the two tags.
-"npm:@oh-my-pi/pi-mnemopi" = "18.1.15"
+"npm:@oh-my-pi/pi-mnemopi" = "18.2.9"
 actionlint = "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
+amazon-ecr-credential-helper = "0.12.0"  # ~/.docker/config.json routes every ECR registry to `ecr-login`; installed since 08-10 but unpinned, so inside a box (no ~/.local/state/mise) the shim had no version and every ECR push failed
 cmake = "4.4.2"
 ninja = "1.13.2"  # oh-my-pi's .cargo/config.toml sets CMAKE_GENERATOR=Ninja (audiopus_sys builds Opus via CMake); without a pin the mise shim has no version and `bun check` fails in check:rs
 depot = "2.102.7"
@@ -102,19 +118,16 @@ sops = "3.13.3"
 "github:DataDog/pup" = "1.13.0"
 sentry-cli = "3.6.2"
 k9s = "latest"
+gitleaks = "8.30.1"
 
-# AI-native time tracker — one release publishes two binaries as separate assets:
-#   tt-{arch}-unknown-linux-musl.tar.gz  (CLI, static)
-#   tt-watcher-{arch}-unknown-linux-gnu.tar.gz  (COSMIC daemon, glibc)
-# Use [tool_alias] + per-platform asset_pattern (the documented mise pattern for
-# multiple assets from one release). Distinct aliases give each binary its own
-# install dir; bare "github:sjawhar/time-tracker" entry must NOT coexist or it
-# collides on the install path.
+# Time tracker CLI, kept for reading past data (collection is retired). Its
+# release also publishes a tt-watcher asset, so [tool_alias] + a per-platform
+# asset_pattern pick the CLI tarball; a bare "github:sjawhar/time-tracker"
+# entry must NOT coexist or it collides on the install path.
 # `forward` has one release asset, but its alias supplies the short name used by
 # the installer guard and `mise exec -- forward`.
 [tool_alias]
 tt = "github:sjawhar/time-tracker"
-tt-watcher = "github:sjawhar/time-tracker"
 forward = "github:sjawhar/forward"
 secrets = "github:sjawhar/forward"
 
@@ -122,11 +135,6 @@ secrets = "github:sjawhar/forward"
 version = "latest"
 platforms.linux-x64   = { asset_pattern = "tt-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "tt-aarch64-unknown-linux-musl.tar.gz" }
-
-[tools.tt-watcher]
-version = "latest"
-platforms.linux-x64   = { asset_pattern = "tt-watcher-x86_64-unknown-linux-gnu.tar.gz" }
-platforms.linux-arm64 = { asset_pattern = "tt-watcher-aarch64-unknown-linux-gnu.tar.gz" }
 
 [tools.forward]
 version = "latest"
@@ -141,7 +149,15 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # systemd units, the OpenCode plugin, and the using-secrets skill, which
 # installers/secretsd.sh reads straight out of this install dir.
 [tools.secrets]
-version = "latest"
+# Pinned to the RUNNING daemon's release, not "latest": the client and daemon
+# share a protocol version that moved in 3.3.0, and the daemon is only
+# restarted by hand (installers/secretsd.sh with SECRETSD_RESTART_WITH_GRANTS=1
+# when grants are live; a restart drops every live grant). Bump this and
+# restart in the same command - 2026-09-21 a "latest" client rolled to 3.3.1
+# under a 3.2.3 daemon and every human-tier request from every box failed
+# VersionMismatch. mise needs GITHUB_TOKEN for the release lookup (the
+# unauthenticated API limit is 60/h and this machine exhausts it).
+version = "3.3.1"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
