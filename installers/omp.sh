@@ -9,12 +9,46 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 OMP_AGENT_DIR="${HOME}/.omp/agent"
 mkdir -p "$OMP_AGENT_DIR"
 
-# Config and agents are canonical in dotfiles (same layout idea as
-# ~/.config/opencode -> dotfiles/opencode).
-ensure_link "${DOTFILES_DIR}/omp/config.yml"  "${OMP_AGENT_DIR}/config.yml"
-ensure_link "${DOTFILES_DIR}/omp/models.yml"  "${OMP_AGENT_DIR}/models.yml"
+# Agents and the other config files are canonical in dotfiles and linked (same
+# layout idea as ~/.config/opencode -> dotfiles/opencode). config.yml is not:
+# shims/omp loads the committed file as a read-only PI_CONFIG_FILES overlay,
+# and ~/.omp/agent/config.yml is the machine's own real file, where omp's
+# runtime writes (/model picks, prompt answers) land. Converging the earlier
+# layout (that path a link into the repo) copies the content in place: a
+# running session re-reads this file before every subagent spawn, and one
+# started under the link has no overlay to fall back on, so an empty file
+# would strip its roles mid-session. The overlay wins on the duplicated keys.
+# A fresh machine gets an empty mapping, so omp does not run its
+# settings.json/agent.db migration into the file.
+if [ -L "${OMP_AGENT_DIR}/config.yml" ]; then
+    cp --remove-destination "$(readlink -f "${OMP_AGENT_DIR}/config.yml")" "${OMP_AGENT_DIR}/config.yml"
+fi
+[ -e "${OMP_AGENT_DIR}/config.yml" ] || echo '{}' > "${OMP_AGENT_DIR}/config.yml"
+# models.yml is universal catalog patches; a machine's own provider routing
+# (gateway baseUrl, `!command` apiKey) goes in the gitignored
+# omp/models.local.yml and is merged over it here, straight into the file omp
+# reads. A real file, not a link: no committed file holds the merged content,
+# and scripts/ompo never mirrors models.yml into profiles (a client profile
+# must not inherit the default's gateway routing).
+MODELS_OUT="${OMP_AGENT_DIR}/models.yml"
+# Converge the earlier layout: a link to a built copy inside the repo.
+[ -L "$MODELS_OUT" ] && rm "$MODELS_OUT"
+rm -f "${DOTFILES_DIR}/omp/models.generated.yml"
+if [ -f "${DOTFILES_DIR}/omp/models.local.yml" ]; then
+    yq eval-all '. as $item ireduce ({}; . * $item)' \
+        "${DOTFILES_DIR}/omp/models.yml" "${DOTFILES_DIR}/omp/models.local.yml" > "${MODELS_OUT}.new"
+else
+    cp "${DOTFILES_DIR}/omp/models.yml" "${MODELS_OUT}.new"
+fi
+if cmp -s "${MODELS_OUT}.new" "$MODELS_OUT" 2>/dev/null; then
+    rm -f "${MODELS_OUT}.new"
+else
+    mv "${MODELS_OUT}.new" "$MODELS_OUT"
+fi
 ensure_link "${DOTFILES_DIR}/omp/mcp.json"    "${OMP_AGENT_DIR}/mcp.json"
+ensure_link "${DOTFILES_DIR}/omp/lsp.json"    "${OMP_AGENT_DIR}/lsp.json"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.md" "${OMP_AGENT_DIR}/WATCHDOG.md"
+ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.yml" "${OMP_AGENT_DIR}/WATCHDOG.yml"
 ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
@@ -29,6 +63,7 @@ mkdir -p "${OMP_AGENT_DIR}/extensions"
 rm -f "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/dotfiles-skills.ts" "${OMP_AGENT_DIR}/extensions/dotfiles-skills.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/session-env.ts" "${OMP_AGENT_DIR}/extensions/session-env.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/compaction-reminder.ts" "${OMP_AGENT_DIR}/extensions/compaction-reminder.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 (cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
 # The envoy extension installs from npm (@sjawhar/pi-legion-envoy). The old

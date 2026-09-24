@@ -10,9 +10,27 @@ set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 
-# Envoy NATS lives on the tailnet; guarantee it for every omp launch (sessions
+# Machine-local env first: a box that runs its own single-node envoy (its own
+# nats-server, its own listener) sets ENVOY_NATS_URL here rather than reaching
+# the tailnet name below. Gitignored, so nothing machine-specific is committed.
+# Sourced before every default so it can override any of them.
+if [ -r "${DOTFILES_DIR}/omp/env.local" ]; then
+    # shellcheck disable=SC1091  # machine-local, absent in the repo
+    . "${DOTFILES_DIR}/omp/env.local"
+fi
+
+# Envoy NATS defaults to the tailnet; guarantee it for every omp launch (sessions
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
+
+# --- committed settings as a read-only overlay ---
+# omp/config.yml is the settings of record for every profile, loaded as a
+# PI_CONFIG_FILES overlay that omp never writes. Runtime writes — /model picks,
+# prompt answers, TUI toggles — go to the profile's own ~/.omp/agent/config.yml
+# (a real file, installers/omp.sh) and are overridden by the committed values
+# on the next start. Later entries in the list win, so overlays a caller
+# already set stay on top of this one.
+export PI_CONFIG_FILES="${DOTFILES_DIR}/omp/config.yml${PI_CONFIG_FILES:+:$PI_CONFIG_FILES}"
 
 # --- mnemopi recall ranking ---
 # Mnemopi's veracity defaults read "a tool asserted this" as lower-trust than an
@@ -31,10 +49,25 @@ export MNEMOPI_VEC_WEIGHT="${MNEMOPI_VEC_WEIGHT:-0.6}"
 export MNEMOPI_FTS_WEIGHT="${MNEMOPI_FTS_WEIGHT:-0.2}"
 export MNEMOPI_IMPORTANCE_WEIGHT="${MNEMOPI_IMPORTANCE_WEIGHT:-0.2}"
 
+# --- mnemopi shared embedding server ---
+# installers/omp-embed.sh runs one text-embeddings-inference container per
+# machine and records its URL; pointing mnemopi's OpenAI-compatible embedding
+# endpoint at it means this session spawns no ~1 GB `__omp_worker_mnemopi_embed`
+# of its own. Only when the server answers right now: a dead server would make
+# mnemopi fall back to keyword-only recall for the whole session, while an
+# unset variable keeps omp's in-process worker (memory works, costs the 1 GB).
+_embed_file="${XDG_CONFIG_HOME:-$HOME/.config}/omp-embed/endpoint"
+if [[ -z "${MNEMOPI_EMBEDDING_API_URL:-}" && -r "$_embed_file" ]]; then
+    _embed_url="$(<"$_embed_file")"
+    if curl -fsS -m 1 "${_embed_url%/v1}/health" >/dev/null 2>&1; then
+        export MNEMOPI_EMBEDDING_API_URL="$_embed_url"
+    fi
+fi
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
 # Agents authenticate as the GitHub App installation matching each repo's
-# owner; owners without an installation fall through to your gh user auth.
+# owner; owners without an installation get the upstream token from the
+# secrets store (gh-app.agent.fallback-secret), never your keyring login.
 # Mirrors scripts/oc. See gh-app-routes.gitconfig and shims/gh-app-token.
 _gc_index="${GIT_CONFIG_COUNT:-0}"
 export "GIT_CONFIG_KEY_${_gc_index}=include.path"
@@ -92,9 +125,15 @@ fi
 # Anything else already in the environment is left alone, so
 # `secrets ANTHROPIC_API_KEY -- omp --profile theorem` bills the personal
 # Anthropic account for that session.
+# The default profile gets no ANTHROPIC_API_KEY: omp/models.yml routes the
+# anthropic provider through the Hawk model gateway with a per-person token
+# (`!hawk-token`), so no static Anthropic key sits in the process environment
+# — or in the environment of every tool subprocess omp spawns. A named
+# profile keeps its own scoped keys; its models.yml is separate.
 # OMP_PROFILE wins over --profile whenever it is defined, even when empty
 # (empty and "default" both mean the default profile), matching omp itself.
 _keys=(ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY)
+_default_keys=(GEMINI_API_KEY OPENAI_API_KEY)
 if [[ -n "${OMP_PROFILE+x}" ]]; then
     _profile="$OMP_PROFILE"
 else
@@ -110,7 +149,7 @@ fi
 _profile="${_profile//[[:space:]]/}"
 case "$_profile" in
     ""|default)
-        exec secrets "${_keys[@]}" -- "${_cmd[@]}" "$@"
+        exec secrets "${_default_keys[@]}" -- "${_cmd[@]}" "$@"
         ;;
 esac
 

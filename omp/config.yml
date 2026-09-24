@@ -9,51 +9,77 @@ modelRoles:
   advisor: anthropic/claude-sonnet-5:medium
 retry:
   modelFallback: true
-  # Coding-plan quota preflight: switch to the chain below at <=10% remaining
-  # (subagents automatically; an interactive session gets one confirm and
-  # auto-switches once depleted) instead of waiting for the 429.
   usageAwareFallback: true
   fallbackChains:
     anthropic/claude-fable-5:
+      - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
     anthropic/claude-fable-5-1:
       - anthropic/claude-fable-5
+      - anthropic/claude-opus-5-5
+      - anthropic/claude-opus-5
+      - anthropic/claude-opus-4-8
+    anthropic/claude-opus-5-5:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
     anthropic/claude-opus-5:
       - anthropic/claude-opus-4-8
-    # Subscription quota exhausted -> same model id on API billing, then the
-    # same id via OpenCode Zen. Wildcard entries keep the failing id and swap
-    # provider; thinking level carries over.
+    # Codex (ChatGPT Pro subscription) falls to the Anthropic tier that matches
+    # the failing model; exact keys beat the wildcard. An empty chain means no
+    # fallback at all: the two GPT escape hatches — gpt-6-astra (the astra and
+    # sami-proxy agents) and the API-billed gpt-api agent — fail loudly rather
+    # than answer from another provider; the caller then decides.
+    openai-codex/gpt-6-astra: []
+    openai/gpt-5.6-terra: []
+    openai-codex/gpt-5.5:
+      - anthropic/claude-opus-5-5
+      - anthropic/claude-opus-5
+      - anthropic/claude-opus-4-8
+    openai-codex/gpt-5.6-sol:
+      - anthropic/claude-opus-5-5
+      - anthropic/claude-opus-5
+      - anthropic/claude-opus-4-8
+    openai-codex/gpt-5.6-terra:
+      - anthropic/claude-opus-5-5
+      - anthropic/claude-opus-5
+      - anthropic/claude-sonnet-5
+    openai-codex/gpt-5.6-luna:
+      - anthropic/claude-sonnet-5
     openai-codex/*:
-      - openai/*
-      - opencode-zen/*
+      - anthropic/claude-opus-5-5
+      - anthropic/claude-opus-5
+      - anthropic/claude-opus-4-8
+      # API-billed routes, off for cost; restore by uncommenting.
+      # - openai/*
+      # - opencode-zen/*
     default:
+      - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
     plan:
+      - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
 task:
   maxRecursionDepth: 3
   agentModelOverrides:
     bug-finder: "@review"
-    code-architect: anthropic/claude-opus-5
+    code-architect: anthropic/claude-opus-5-5
     code-reviewer: "@review"
     code-simplifier: anthropic/claude-fable-5-1
     comment-analyzer: "@review"
-    cybersecurity-expert: anthropic/claude-opus-5
+    cybersecurity-expert: anthropic/claude-opus-5-5
     performance-engineer: "@slow"
-    red-teamer: anthropic/claude-opus-5
+    red-teamer: anthropic/claude-opus-5-5
     test-analyzer: "@review"
-    type-checker: anthropic/claude-opus-5
+    type-checker: anthropic/claude-opus-5-5
     ux-designer: "@vision"
   isolation:
     merge: patch
     enabled: true
 advisor:
-  enabled: false
+  enabled: true
 bashInterceptor:
   enabled: true
 memory:
@@ -66,16 +92,17 @@ mnemopi:
 theme:
   dark: titanium
 symbolPreset: unicode
-hideThinkingBlock: false
+hideThinkingBlock: true
 doubleEscapeAction: tree
-# Off (the default since omp 18.0.9) caps every model with a premium long-context
-# price tier at its standard-pricing threshold: GPT-5.6/GPT-6-Astra drop from
-# 1.05M to 272K. On restores the full window; openai/* bills 2x input above 272K,
-# openai-codex/* is subscription-priced and exempt.
 extendedContext: true
 dev:
   autoqaConsent: granted
 setupVersion: 2
+# The update check asks upstream (can1357/oh-my-pi) and `omp update` would
+# `mise upgrade github:can1357/oh-my-pi` - the fork's pin in mise.toml is the
+# only version of record; no banner steering a session toward upstream.
+startup:
+  checkUpdate: false
 display:
   smoothStreaming: false
   hideToolActivity: false
@@ -116,6 +143,11 @@ skills:
 providers:
   anthropic:
     serverSideFallback: true
+    # Sent only when the primary is Fable/Mythos. Every entry must be in that
+    # primary's allowed_fallback_models (GET /v1/models/<id> with the
+    # server-side-fallback-2026-06-01 beta), or the whole request 400s. On
+    # 2026-09-22 both Fable 5 and 5.1 allow only claude-opus-5 and claude-opus-4-8;
+    # claude-opus-5-5 is not a valid target. At most three entries; order = preference.
     serverSideFallbackModels:
       - claude-opus-5
       - claude-opus-4-8
@@ -123,3 +155,5 @@ composer:
   shape: box
 isolation:
   backend: auto
+codexResets:
+  autoRedeem: "yes"
