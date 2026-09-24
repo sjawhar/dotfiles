@@ -16,6 +16,33 @@ Host devbox
   TCPKeepAlive yes
   IPQoS lowdelay throughput
 
+# Theorem GCE devbox (project autoformalization). Same auth as
+# `gcloud compute ssh sami-devbox`: gcloud's key and known_hosts, keyed by
+# instance id rather than address. The VM has no reserved address, so its IP
+# changes across stop/start; the proxy asks gcloud for the current one on each
+# connection (~1.5s, once per ControlPersist window). mosh needs a resolvable
+# HostName, so it works only once the IP is reserved and pinned here instead.
+# A recreated VM gets a new instance id: update HostKeyAlias from
+# `gcloud compute ssh sami-devbox --dry-run`.
+Host sami-devbox theorem
+  User sami
+  ProxyCommand nc "$(CLOUDSDK_ACTIVE_CONFIG_NAME=theorem gcloud compute instances describe sami-devbox --zone us-west1-b --format='value(networkInterfaces[0].accessConfigs[0].natIP)')" %p
+  IdentityFile ~/.ssh/google_compute_engine
+  IdentitiesOnly yes
+  HostKeyAlias compute.5092395176580716040
+  UserKnownHostsFile ~/.ssh/google_compute_known_hosts
+  CheckHostIP no
+  StrictHostKeyChecking yes
+  ForwardAgent yes
+  Compression yes
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/%r@%h-%p
+  ControlPersist 600
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  TCPKeepAlive yes
+  IPQoS lowdelay throughput
+
 Host oryx
   HostName oryx.tailb86685.ts.net
   User agent
