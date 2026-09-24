@@ -11,7 +11,7 @@
       "enabled": true
     },
     "@sjawhar/opencode-knives": {
-      "version": "0.13.3",
+      "version": "2.0.18",
       "enabledFeatures": null,
       "enabled": true
     },
@@ -26,7 +26,7 @@
       "enabled": true
     },
     "@sjawhar/pi-legion-envoy": {
-      "version": "1.53.1",
+      "version": "1.59.1",
       "enabledFeatures": null,
       "enabled": true
     }
