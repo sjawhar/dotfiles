@@ -12,6 +12,16 @@ YubiKey. The `browser` tool does not know this. When the relay is locked it wait
 extension handshake that can never arrive and reports a bare `Browser open timed out after
 30000ms`, which reads exactly like "Chrome is not connected". It is not that.
 
+## Not for our own applications
+
+The relay is for third-party sites only a person is logged into. **Our own deployed apps never
+need it, and asking Sami for a screenshot of one is a red flag that the wrong path was taken.** The Trajectory Labs Platform signs a headless Chromium
+in with a bearer the `tl` CLI mints (`tl platform bearer --as svc-proof --stack production` for a
+surface's shape; the operator's own `tl platform bearer --platform <url>` for gated content),
+added to `platform.trajectorylabs.com/api/*` requests only. The recipe and its failure modes:
+`docs/solutions/2026-09-18-render-production-platform-without-a-human-browser.md` in agent-c.
+Reach for a grant only after that path cannot render the surface, and say why in the ask.
+
 ## The rule
 
 **Never diagnose a relay timeout by retrying it, and never ask Sami to connect his

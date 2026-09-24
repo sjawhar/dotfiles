@@ -35,7 +35,7 @@ Apply the baseline prompt above, plus these explicit review rules:
    - Treat this as a strong code-quality smell by default.
    - Prefer extracting helpers, subcomponents, modules, or local abstractions instead of letting a file sprawl past 1000 lines.
    - If the diff crosses that threshold, explicitly ask whether the code should be decomposed first.
-   - Only waive this if there is a compelling structural reason and the resulting file remains well organized.
+   - Depart from this only if there is a compelling structural reason and the resulting file remains well organized.
 
 2. **Do not allow random spaghetti growth in existing code.**
    - Be highly suspicious of new ad-hoc conditionals, scattered special cases, or one-off branches inserted into unrelated flows.

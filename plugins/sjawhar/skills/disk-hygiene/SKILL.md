@@ -1,13 +1,13 @@
 ---
 name: disk-hygiene
-description: Use when a shared dev box is low on disk or RAM, `df` is far above what known work explains, load spikes with D-state processes, or jj workspaces / git worktrees / docker images / temp dirs have piled up from many agent sessions. Triggers - disk full, ENOSPC, "clean up the workspaces", stale worktrees, docker prune, buildx cache, /tmp full, io pressure, nightly hygiene.
+description: Use when a shared dev box is low on disk or RAM, `df` is far above what known work explains, load spikes with D-state processes, or jj workspaces / git worktrees / docker images / temp dirs have piled up from many agent sessions. Triggers - disk full, ENOSPC, "clean up the workspaces", stale worktrees, docker prune, buildx cache, /tmp full, io pressure.
 ---
 
 # Disk Hygiene on a Shared Agent Box
 
 Reclaim disk from a machine where dozens of agent sessions each left workspaces, containers, caches and scratch behind. The hard part is not deleting; it is knowing what is live. Sessions that are alive but idle look identical to dead ones on disk.
 
-**Safety principle:** nothing is deleted whose directory any live session is standing in, and nothing is deleted whose only copy of versioned work would be lost. Liveness is *asked and measured*, never inferred from age.
+**Safety principle:** nothing is deleted whose directory any live session is standing in, and nothing is deleted that holds content existing only on disk — untracked, gitignored, and modified-tracked files all count, not just versioned work. Liveness is *asked and measured*, never inferred from age.
 
 Tool: `$SKILL/scripts/disk_hygiene.py` where `$SKILL` is the directory this SKILL.md loaded from (stdlib only, `--help` for subcommands). It does the mechanical parts; the judgment steps below are yours.
 
@@ -24,6 +24,17 @@ Tool: `$SKILL/scripts/disk_hygiene.py` where `$SKILL` is the directory this SKIL
 | 7 | Report: freed, kept-and-why, unowned WIP found | Summary next to ledger |
 
 Biggest levers observed, in order: dangling docker images, a buildkit cache whose leases leaked, unused tagged images, orphaned sandboxes, `/tmp` families, then workspaces. Workspaces are smaller than they look: `uv` venvs hardlink into `~/.cache/uv`, so 180 checkouts freed ~1.5 GB each.
+
+## Cleaning up after yourself
+
+A request to clean up after yourself is not a sweep. The whole question is which paths are yours, and a directory's name answers it in neither direction. On 2026-09-24 the platform PO deleted six workspaces, announced that five belonged to other agents, then retracted: "I asserted 'five of them were not mine' and that was an INFERENCE from the directory names, not a measurement." All six sat inside its own box, named for issues rather than sessions: "I read them as other agents' property because I did not recognise them." Sami, the same night: "do not assume that a workspace you do not recognize is unused."
+
+Ownership is measured, like liveness:
+
+- **Where it lives.** An agent box holds one session, so a path inside yours (`~/boxes/<your box>/`, the box's own `/tmp`) was made by you or by a subagent you spawned. A session running directly on the host has no such boundary, so every path takes the next test.
+- **What created it.** For any other path (the shared jj store, a host-mounted home directory, anything a host session made), find the creating command in your own or your subagents' transcripts: a `jj workspace add`, a clone or `mktemp` into it, a write under it. `session-attribution` gives the transcript paths. A path no transcript of yours names is not yours, whatever it is called: say so to whoever asked, and leave it.
+
+The sweep's two gates still hold for your own paths: no live process standing in one (`disk_hygiene.py procs`), and no content that exists only on disk.
 
 ## Pacing (applies to every phase)
 
@@ -47,16 +58,19 @@ Envoy shows your cwd as: <dir>
 "cwd only: <path>" is a complete answer. Silence after 20 min = cwd only.
 ```
 
-Replies land one per turn; drain them with `envoy_inbox`. Record three lists: **live** (protected), **released** (delete even if a heuristic would keep it), **holds** (named by a human, e.g. "Sami said keep"). Two rules resolve conflicts: a live claim beats a release from someone else; an explicit hold beats everything.
+Replies land one per turn; drain them with `envoy_inbox`. Record three lists: **live** (protected), **released** (the owner explicitly gave the slot up — a release is still guarded, not a bypass), **holds** (named by a human, e.g. "Sami said keep"). Two rules resolve conflicts: a live claim beats a release from someone else; an explicit hold beats everything.
 
-Protected set = Envoy cwds ∪ every process cwd ∪ every reported live path ∪ holds. Write it as `{"protected": [...]}`; the script re-reads it before every item, so you can extend it mid-run when a late reply arrives.
+A released path is not a bare string. Capture the slot's identity — HEAD hash + worktree admin id + directory mtime — with `python3 $S release-capture --path P --repo R --kind git|jj [--name N] [--releases releases.json]`; `--releases` appends the entry to the releases file, otherwise paste the printed JSON in yourself. `plan --releases releases.json` reports each entry read-only; `apply --releases` acts on an entry once and retires it in place (one-shot). Apply still refuses when the identity no longer matches (HEAD/admin-id mismatch retires the entry as adoption evidence; an mtime-only change keeps it for the next pass), when unpushed commits are reachable from HEAD, or when any content exists only on disk — `git status --porcelain --ignored` non-empty for worktrees (a gitignored `.env` or `.venv/` blocks deletion), disk-vs-store divergence for jj slots. Every mutation of the releases file (retirement, capture append) holds an exclusive flock on the file itself, so concurrent mutators never lose each other's updates.
+
+Start from the generated set — `python3 $S protected --fixed fixed.json > protected.json` (D4) — then merge in what the check-in surfaced. The generator regenerates liveness evidence per run: fixed entries ∪ container bind-mount sources (`docker inspect`, all containers) ∪ knives checkouts (the parent of a `default/`-layout path, so sibling workspace slots are covered; plus registry `workspaces` dirs) as `"protected"`, and every process cwd as an `"anchor"`. A protected entry guards both directions (under it or containing it); an anchor guards only the tree it stands IN — `/`, `$HOME` and `/tmp` are live cwds on every box, and subtree semantics for them would blanket-protect every slot. A source that cannot be read (docker down, knives missing, output unparseable) kills the run loudly rather than shrinking the set. Residual, stated in the plan: a slot driven only via `jj -R` from elsewhere has no cwd inside it and is protected by the idle threshold alone. Envoy replies, reported live paths and holds go into `"protected"` in the fixed/merged file; the script re-reads the file before every item, so you can extend it mid-run when a late reply arrives.
 
 ## Phase 3: Classify
 
 ```bash
 S=$SKILL/scripts/disk_hygiene.py
+python3 $S protected --fixed fixed.json > protected.json
 python3 $S inventory --repo ~/REPO --root ~/.worktrees --root /tmp > inv.json
-python3 $S plan --inventory inv.json --protected protected.json > plan.json
+python3 $S plan --inventory inv.json --protected protected.json [--releases releases.json] > plan.json
 ```
 
 | Class | Meaning | Action |
@@ -65,30 +79,43 @@ python3 $S plan --inventory inv.json --protected protected.json > plan.json
 | UNPUSHED | non-empty commits not on any remote bookmark | keep; list for owner |
 | PUSHED | every non-empty commit is on a remote bookmark | forget + rm (content is on origin and in the jj store) |
 | MERGED | every non-empty ancestor is in trunk, `@` empty | forget + rm |
-| UNREGISTERED | jj already forgot it; directory is residue | rm |
-| STALE_REGISTRATION | registered, no directory | `jj workspace forget` if merged; else report |
-| GIT_HEAD_PUSHED | plain git worktree, HEAD on a remote | opt-in after `git status --porcelain` (slow) |
+| UNREGISTERED | jj already forgot it; directory is residue | planned, but apply refuses removal: no working-copy commit to verify disk contents against |
+| STALE_REGISTRATION | registered, no directory | `jj workspace forget` when `NAME@` is merged AND the registering op is older than `--fresh-hours`; refused when the op is unfindable. Unnamed git-side admin entries land in `refused` |
+| GIT_HEAD_PUSHED | plain git worktree, HEAD on a remote | keep; reaped only via an owner release (apply then checks `git status --porcelain --ignored` itself) |
 
-`jj workspace list` alone is not a safety signal: "(empty) (no description)" says nothing about the unmerged ancestors under it, and a described workspace may be fully pushed. Directory mtime is not a liveness signal either (a rebase op rewrites every working copy). The script uses `.jj/working_copy/tree_state` mtime only as a freshness tiebreaker (`--fresh-hours`, default 1).
+`jj workspace list` alone is not a safety signal: "(empty) (no description)" says nothing about the unmerged ancestors under it, and a described workspace may be fully pushed. Directory mtime is not a liveness signal either (a rebase op rewrites every working copy). `.jj/working_copy/tree_state` mtime is a hard freshness gate on every reapable class (`--fresh-hours`, default 24): a slot idle less than the threshold is skipped, and a slot whose idle is unmeasurable (no `tree_state` — exactly what a mid-creation slot looks like) is refused outright. Stale-registration forgets threshold the registering op's age the same way. Everything the plan declines to reap for a reason is listed in its `refused` array, never dropped.
 
-Not in scope of the script — leave alone: knives-managed fork checkouts (release via `knives finish`, never rm), Legion daemon state, anything a human named as a hold. Removal mechanics the script uses: `jj --ignore-working-copy --config fsmonitor.backend=none workspace forget NAME`, then `rm`, then `git worktree prune` (workspaces in colocated repos are also git worktrees).
+Not in scope of the script — leave alone: knives-managed fork checkouts (release via `knives finish`, never rm), Legion daemon state, anything a human named as a hold. Removal mechanics the script uses: `jj --ignore-working-copy --config fsmonitor.backend=none workspace forget NAME` (which itself drops the colocated git-worktree linkage), then `rm`. It never runs `git worktree prune`: on a shared store a prune walks every slot and can delete other sessions' admin entries. When a released worktree's `git worktree remove` fails and the `rm` fallback runs, the script removes exactly that slot's `.git/worktrees/<admin-id>` entry and ledgers the result.
+
+**`forget` does not always drop ONLY its own linkage, so check your survivors afterwards.** Observed 2026-09-24 on agent-c's shared store: eight sequential `workspace forget`s, each printing `Missing HEAD at '.git/HEAD'`, left the two workspaces that were NOT forgotten without their `.git/worktrees/<name>` entries either. jj kept working in both (its own store is unaffected — a commit and a push from one succeeded afterwards); what broke was every tool that shells out to plain git from inside them, which is how `gh pr create` died with `fatal: not a git repository: <store>/.git/worktrees/<name>`. Other sessions' slots on the same store were untouched — 70 entries intact, verified by name — so the damage was confined to the forgetting session's own. **Check the slots you KEPT after every batch, unconditionally** -- reproduced 2026-09-24 a second time from a HEALTHY git side, where all five forgets printed the clean `Removed Git worktree for "..."` and the two untouched survivors lost their entries anyway, so `Missing HEAD` is a symptom of the first occurrence rather than the trigger and its absence proves nothing. Check each slot you kept with `git -C <ws> rev-parse --git-dir`, and repair a missing one by recreating `<store>/.git/worktrees/<name>/` with three files — `gitdir` (absolute path to the workspace's own `.git` file), `commondir` (`../..`), and `HEAD` (that slot's current commit, from `jj -R <ws> --ignore-working-copy log -r @- --no-graph -T commit_id`) — then confirm with `git -C <store> worktree list` and a `git -C <ws> rev-parse HEAD`. Recreating your OWN slot's entry is cleaning up after yourself; `git worktree prune` stays banned on a shared store either way.
 
 ## Phase 4: Apply
 
 ```bash
-nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger ledger.jsonl
+nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger ledger.jsonl [--releases releases.json]
 ```
 
 Run it as a supervised background process, not a foreground call: 90 workspaces took ~2 h at idle IO priority. If you chain passes with a shell `while pgrep -f ...` loop, use a pattern that cannot match its own command line (`pgrep -f 'exec3[.]py'`), or the wrapper waits on itself forever.
+
+Apply is single-instance per store: a second apply finds the flock held, writes a `locked` ledger line, and exits. Every item is re-verified immediately before acting — existence, protection, live processes, class evidence, disk-vs-store divergence — so a plan gone stale refuses instead of deleting. A removed jj slot's ledger line carries `forget_op`: `jj op revert <forget_op>` restores the workspace registration only, never files, and reverting a forget whose name was reused since is a silent no-op.
+
+## No recurring pass
+
+There is no timer. An hourly reaper (`disk-hygiene-reaper.timer`, 2026-09-15 to 2026-09-20) planned every hour and applied below a free-space floor; Sami retired it on 2026-09-20 ("I think we can kill the recurring disk cleanup thing. Agentbox is handling it better"). The reason it lost: it fought the symptom. A session's workspace, scratch and sandboxes leak because nothing owns their end; `agentbox` gives them an owner — the box is a jj workspace of a canonical checkout under `~/src/<repo>`, and when omp exits the launcher snapshots, forgets the workspace and removes the directory. What this skill is for now is the attended pass: a box that filled up before agentbox, or a pile agentbox does not own (Docker builders and volumes, `~/.local/share/opencode`, a retired jj store). Run it by hand, with the check-in, and stop when it is done.
 
 ## Phase 5: Docker
 
 1. `docker system df` (no `-v`) failing with `rw layer snapshot not found for container X` is one dead container, not a reason to stop: `docker rm -f X`, rerun. `docker system df -v` walks every layer and stalls for minutes under IO load; use the script's `images`/`containers` instead.
 2. `docker image prune -f` (dangling only). Always safe; was 292 GB.
-3. Buildkit cache: `docker buildx du --builder B`. If Total is large but Reclaimable is 0 B, leases leaked from killed builds. Confirm no build is running (`docker top buildx_buildkit_B0` shows only buildkitd; no host `docker build`/`buildx`/`depot` process), then `docker restart buildx_buildkit_B0` and `docker buildx prune -a -f --builder B`. Was 207 GB. Check which builder is the default (`docker buildx ls`, the `*`) before removing one.
+3. Buildkit cache: `docker buildx du --builder B`. If Total is large but Reclaimable is 0 B, leases leaked from killed builds. Confirm no build is running (`docker top buildx_buildkit_B0` shows only buildkitd; no host `docker build`/`buildx`/`depot` process), then `docker restart buildx_buildkit_B0` and `docker buildx prune -a -f --builder B`. Was 207 GB. Check which builder is the default (`docker buildx ls`, the `*`) before removing one. **Size the volumes before blaming fixtures:** on 2026-09-20 the "fixture leak" that grew Docker by 70 GB overnight was `buildx_buildkit_brave_curie0_state` at 92.6 GB (10.7 GB two days earlier) plus one agentbox volume at 47 GB; every test fixture on the box together was a few GB. `docker buildx prune --builder B --keep-storage 20GB` is the standard, non-breaking cut; a builder that grows 40 GB/day needs a gc policy on the builder, not a sweep.
 4. Unused tagged images: `python3 $S images --older-than-hours 48` lists tags no container references. Remove by explicit `docker rmi REF` (no `-f`; a refusal means a container uses it). Leave anything younger for its owner; locally built images (no registry prefix) belong to whoever built them and may take an hour to rebuild.
-5. Sandboxes: `python3 $S containers`. Reap only eval/task sandboxes (compose projects named for a run), never service containers (postgres, nats, registries, envoy, buildx) — those have no host holder by design. A sandbox is orphaned when no eval process exists and nothing names it, or when its only holder is a dangling `docker exec -it ... bash` shell whose session is gone: kill the shell, then `docker compose -p PROJECT down -v`. When a live session is a plausible owner, ask before killing.
-6. `docker volume prune -f` (anonymous unused only).
+5. Containers: `python3 $S containers` classifies every container into a family with an owner attribution and a liveness verdict, using the fixture owners' own labels and rules (e2e owner, agent-c#19533, 2026-09-20). Labels attribute; they never decide liveness. Reap only what the verdict names and only after re-running the census at rm time:
+   - **platform-e2e** (`trajectory.platform-e2e=1`, `.role` harness-db|test-fixture|cleanup-probe, `.run-id`): Created-never-started >1 h = `leaked` (a killed test skipped its `finally`). Running with a run-id = `live` iff some host process's environment carries `TRAJECTORY_PLATFORM_E2E_RUN_ID=<that id>`, else iff its postgres port has established clients. Running with an **empty** run-id (a developer's local run): the env walk matches *nothing* — another producer's id says nothing about this container — clients alone decide, docker's Created as the age grace. Unlabelled containers of the name shape are pre-#19533 producers: same rules, role `unlabelled`. Why no creating-PID label: a PID only means something inside the namespace that wrote it, and sessions run in agentboxes with their own PID namespaces (some with their own dockerd); a label that lies cross-namespace is worse than none. The client check is namespace-consistent with `docker ps` visibility: whoever sees the container is on the daemon its port binds to.
+   - **local-stack** (`trajectory.local-stack{,.name,.owner}`; names `tl-platform-<name>-<owner>-db`): owner = `sha256("<uid>:<checkout>/platform/tl_platform")[:16]`, resolved to a checkout by hashing every plausible one on the box. `live` iff a process stands under that checkout or its port has clients; `idle` if the checkout exists but nothing runs (leave it — a dev stack is long-lived by design; message the owner); `leaked` if the checkout is gone. Created-never-started = `leaked`.
+   - **ryuk** (`testcontainers-ryuk-<session>`): `stranded` when Created — it never ran, so no client socket ever existed; remove it together with its `org.testcontainers.session-id`-labelled fixtures (`tc-fixture` rows inherit the verdict). A **running** ryuk is never removed by hand: it self-reaps its session ~10 s after its client socket drops, so a live one means a live client — `docker port <ryuk>` then `ss -tnp` gives the client pid; if that is an orphaned pre-relocation pytest, kill the pid and ryuk does the rest. A `tc-fixture` whose named ryuk is **absent** (`orphan-no-ryuk`) is the same leak with a stronger mechanism: ryuk is testcontainers' only lifecycle owner, started before the fixtures and alive exactly as long as a client holds its socket, so no ryuk means no live owner can exist and self-reap never comes — reap it once it is past a 15-minute startup grace with zero clients (e2e owner, 2026-09-20; project-agnostic, it rests on testcontainers' contract). Never extend that to a fixture whose ryuk *exists*: an intact ryuk means an intact lifecycle, and racing it is how a live session's database dies.
+   - **agentbox**: session infrastructure, `never`.
+   - **other**: compose sandboxes and service containers. Reap only eval/task sandboxes (compose projects named for a run), never service containers (postgres, nats, registries, envoy, buildx) — those have no host holder by design. A sandbox is orphaned when no eval process exists and nothing names it, or when its only holder is a dangling `docker exec -it ... bash` shell whose session is gone: kill the shell, then `docker compose -p PROJECT down -v`. When a live session is a plausible owner, ask before killing. Two attribution mistakes in one sweep (Created ryuks read as running; running Playwright harness DBs read as pytest husks) is what earned the labels — name-parsing stays as the fallback for pre-label producers only.
+6. `docker volume prune -f` (dangling only — attached to no container). Always safe; was 26 GB.
 
 ## Phase 6: Caches and temp
 
@@ -113,3 +140,23 @@ Ledger (JSONL, one line per action, with `df` after each) plus a summary: freed,
 | `docker buildx prune --filter until=24h` on 0 B reclaimable | Leaked leases; restart buildkitd first |
 | Diff of a stale checkout read as a revert | A checkout parented on an old main shows every later merge as "changes"; check `jj log -r '::@ ~ ::trunk()'` before alarming anyone |
 | Deleting a live cwd | Its tools fail with "Working directory does not exist"; re-check liveness immediately before `rm`, not at inventory time |
+
+## The shared jj op store (`.jj/repo/op_store`)
+
+Every jj operation stores a full view (all bookmarks + remote bookmarks + tags + per-workspace
+working-copy commits). At agent scale this is the box's fastest-growing pile: agent-c measured
+2026-09-19 at ~180 workspaces / ~7k ops/day / 1-3 MB per view = 10-25 GB/day, 187 GB total; a
+single stray `git fetch '+refs/pull/*/head:refs/remotes/pr/*'` in the shared store tripled every
+view (10,907 `<n>@pr` bookmarks) until `jj git remote remove pr` dropped them. Watch
+`ls .jj/repo/op_store/views | wc -l` and the per-view size before blaming workspaces.
+
+`scripts/jj_opstore_gc.py --repo R --keep-days N [--apply]` compacts it without stranding
+workspaces: abandon older-than-N history, remap every workspace's `checkout` file to the
+reparented operation under jj's own working-copy lock (plain `jj op abandon` gives every other
+workspace "Run `jj workspace update-stale`" + a RECOVERY COMMIT), re-abandon chains that
+concurrent commands re-attach, and sweep unreachable op/view files only after every jj process
+that predates the abandon has exited (`--sweep-only` resumes a deferred sweep). Known hazard,
+reproduced on a scratch repo: a jj command that loads pre-abandon state and commits AFTER the
+remap makes the affected change divergent when a reconcile merges the chains (base = root).
+The tool re-abandons within its poll interval, but a genuinely quiet window is the safe run
+condition — and `jj op abandon` is NOT undoable, so on a shared store it is Sami's call.

@@ -36,6 +36,10 @@ With an id in hand, in order:
 2. **Resume it:** `omp --resume <id-prefix>` on the machine where the session ran.
 3. **Read only:** transcript at `~/.omp/agent/sessions/<project-slug>/<timestamp>_<id>.jsonl`;
    subagent transcripts are `<AgentName>.jsonl` inside the session's same-named directory.
+   A subagent's opening brief is the `task` field of the `session_init` record near the top of its
+   file. A `local://<name>` file the session itself wrote is `local/<name>` inside that same
+   directory, on the host's disk under `~/.omp`; a brief written to `/tmp` or a box workspace
+   instead is gone with the box.
 
 ## Session → artifacts (inventory)
 
@@ -43,7 +47,8 @@ With an id in hand, in order:
 git log --all --format='%h %s %(trailers:key=Omp-Session,valueonly)' | grep <id>
 jj log -r 'all()' --no-graph -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"' \
   -r 'description(glob:"*Omp-Session: <id>*")'
-gh search issues "<id> in:comments" --owner <owner>          # issue/PR comments (search index)
+gh search issues "<id> in:comments" --owner <owner>          # ISSUE comments only - excludes PRs (measured 2026-09-21)
+gh search prs    "<id> in:comments" --owner <owner>          # PR comments; run both, or a PR hit reads as "never reported"
 gh api "repos/<owner>/<repo>/issues/comments" --paginate \
   -q '.[] | select(.body | contains("<id>")) | .html_url'   # deterministic per-repo sweep
 ```
@@ -55,3 +60,16 @@ gh api "repos/<owner>/<repo>/issues/comments" --paginate \
 - Legion phase workers are subagents of the root architect: their commits carry the **root**
   session id. Worker-level provenance lives in the comment footers and `.legion/` handoffs.
 - The trailer names the session, not the machine. Resume works where the transcript lives.
+- **In a shared checkout the trailer names who snapshotted, not who wrote.** jj snapshots every
+  pending edit in the working copy under whichever session runs the next `jj` command there,
+  so one commit can carry four sessions' edits under one trailer. Measured 2026-09-12 in
+  `~/core-ops`: hiring's 09-06 edits landed under the Gray Swan coordinator's trailer because
+  that session ran a jj command in the shared tree. Trailer attribution is reliable in a
+  per-session workspace (`jj workspace add`); in a shared checkout, attribute from content
+  and ask the candidate sessions, and split the commit on file boundaries once owners claim.
+- **A command's text in a transcript is not evidence the session ran the command.** Read the
+  record's role: an invocation is a `message` record whose role is `user` or `fileMention`; the
+  same text inside a `toolResult` or `compaction` record is the session reading the file. The
+  post-compaction reminder tells every long session to reread `commands/sdd.md`, so its text sits
+  in most long transcripts. Measured 2026-09-24 (AGENTC-341): 19 coordinator transcripts carried
+  sdd.md's description line, and 4 of them had an invocation record.

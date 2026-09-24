@@ -16,6 +16,10 @@ Write what is true now. Remove on sight:
 
 If a reader needs to know the old way existed, that's what `jj log` is for.
 
+## A cutover sweeps the whole owning tree
+
+When a change or ruling makes prose false, the sweep that fixes it enumerates every file in the owning tree by tree walk — `jj file list <dir>`, `rg --files <dir>` — never by a hand-written glob: `.claude/skills/*/references/*.md` cannot see `references/phases/`, and what the glob misses keeps teaching the old behavior. The sweep covers every file type, not `.md` alone: scripts and configs in a skill tree are the doc of record for what actually runs. On agent-c #19273 (2026-09-18, 35 files) the skill text said docker/hawk while `run_probe.sh:16` two directories down still hardcoded `--sandbox modal` — "the script is what actually runs, so the doc was lying." Inferred from that owner's sweep; not a sentence Sami wrote.
+
 ## Integrate, don't accrete
 
 Before adding a section, check whether an existing section already covers the topic. If it mostly does, rewrite that section — don't append a near-duplicate beside it. Symptoms you're accreting instead of integrating:

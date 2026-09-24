@@ -28,16 +28,16 @@
       "namespace": "sentry-cli"
     },
     {
-      "root": "../core-ops",
+      "root": "../src/core-ops",
       "namespace": "core-ops",
       "skills": false,
-      "ompSkillsDir": "~/core-ops/skills"
+      "ompSkillsDir": "~/src/core-ops/skills"
     },
     {
-      "root": "../core-context",
+      "root": "../src/core-context",
       "namespace": "core-context",
       "skills": false,
-      "ompSkillsDir": "~/core-context/skills"
+      "ompSkillsDir": "~/src/core-context/skills"
     },
     {
       "root": "vendor/compound-engineering",
