@@ -275,8 +275,27 @@ def cmd_protected(args: argparse.Namespace) -> None:
 
 # ---------------------------------------------------------------- inventory
 
+def observable_root(box_dir: str) -> str | None:
+    """The only tree under which this process can judge a path ABSENT, or None for everywhere.
+
+    Inside an agentbox, other boxes' checkouts, the host's ~/.worktrees and the host's /tmp are
+    invisible, so every one of their registrations looks exactly like a stale one. Measured
+    2026-09-25 09:15Z: a prune from inside a box took 13 registrations of the shared agent-c
+    store, four of them live worktrees in other boxes and on the host. `auto` = the box's own
+    directory (~/boxes/<hostname>) when /etc/agentbox-identity exists, else None (the host sees
+    everything); `none` forces host semantics; any other value is taken as the directory."""
+    if box_dir == "none":
+        return None
+    if box_dir == "auto":
+        if not Path("/etc/agentbox-identity").exists():
+            return None
+        return str(Path.home() / "boxes" / os.uname().nodename)
+    return str(Path(box_dir).resolve())
+
+
 def cmd_inventory(args: argparse.Namespace) -> None:
     repo = str(Path(args.repo).resolve())
+    obs = observable_root(args.box_dir)
     repo_store = str(Path(repo) / ".jj" / "repo")
     roots = args.root or [str(Path.home())]
     rc, out = run(JJ + ["workspace", "list"], cwd=repo)
@@ -338,7 +357,9 @@ def cmd_inventory(args: argparse.Namespace) -> None:
         if row["live_procs"]:
             cls = "LIVE"
         elif not exists:
-            cls = "STALE_REGISTRATION"
+            # Absence is evidence only where this process can see: outside `obs`, a live
+            # workspace and a stale one are indistinguishable from here.
+            cls = "STALE_REGISTRATION" if obs is None or path == obs or path.startswith(obs + "/") else "UNOBSERVABLE"
         elif not row.get("registered"):
             cls = "UNREGISTERED" if not row.get("git_only") else ("GIT_UNPUSHED" if row.get("head_unpushed") else "GIT_HEAD_PUSHED")
         elif row["unmerged"] == 0:
@@ -376,7 +397,10 @@ def cmd_inventory(args: argparse.Namespace) -> None:
     # registrations with no directory found
     found_names = {r["name"] for r in rows if r["name"]}
     for name in sorted(registered - found_names - {"default"}):
-        rows.append({"path": None, "name": name, "exists": False, "registered": True, "class": "STALE_REGISTRATION"})
+        # With no path to test, a registration the walk did not find is judgeable only on the
+        # host; inside a box it is most often another box's live workspace.
+        rows.append({"path": None, "name": name, "exists": False, "registered": True,
+                     "class": "STALE_REGISTRATION" if obs is None else "UNOBSERVABLE"})
     json.dump({"repo": repo, "trunk": trunk, "rows": rows}, sys.stdout, indent=1)
     print(file=sys.stderr)
     print(Counter(str(r["class"]) for r in rows), file=sys.stderr)
@@ -620,7 +644,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
                 plan.append({"kind": "forget", "path": None, "name": name, "repo": repo, "class": cls,
                              "reason": f"registration with no directory; {name}@ merged; registering op {age_h:.1f}h old"})
                 continue
-            if not path or cls in ("LIVE", "UNPUSHED", "GIT_UNPUSHED", "GIT_HEAD_PUSHED"):
+            if not path or cls in ("LIVE", "UNPUSHED", "GIT_UNPUSHED", "GIT_HEAD_PUSHED", "UNOBSERVABLE"):
                 continue  # keep classes; plain git worktrees are reaped only via an owner release
             if is_protected(path, protected, anchors):
                 continue
@@ -1296,6 +1320,9 @@ def main() -> None:
     p.add_argument("--root", action="append")
     p.add_argument("--trunk", default="trunk()")
     p.add_argument("--max-depth", type=int, default=6)
+    p.add_argument("--box-dir", default="auto",
+                   help="where absence can be judged: auto (inside an agentbox, its own ~/boxes/<host> dir; "
+                        "on the host, everywhere), none (host semantics), or a directory")
     p = sub.add_parser("plan")
     p.add_argument("--inventory")
     p.add_argument("--protected")
