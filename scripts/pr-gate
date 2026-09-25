@@ -51,7 +51,8 @@ printf '%s\n%s\n' "$rv" "$cm" | sed '/^$/d'
 echo "verdict-bearing reviews (VERDICT:/Verdict:/APPROVE at/MERGE at), newest first:"
 vr=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq '[.[]|select(.body|test("(?i)verdict:|approve at|merge at|request_changes at|do not merge"))]|reverse|.[0:6][]|"  \(.submitted_at[5:16]) \(.user.login) :: \(.body|gsub("\n";" ")|.[0:110]) :: names=\([.body|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"')
 printf '%s\n' "${vr:-  (none)}"
-last=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq '[.[]|select(.body|test("(?i)verdict:|approve at|merge at"))|.body|scan("[0-9a-f]{40}")]|last // ""')
+# The newest verdict-bearing review names its head FIRST; older shas later in the same body are history, not the verdict.
+last=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq '[.[]|select(.body|test("(?i)verdict:|approve at|approved at|merge at"))]|last|(.body // "")|[scan("[0-9a-f]{40}")]|first // ""')
 if [ -n "$last" ] && [ "$last" != "$head" ]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
   api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | @json)"' | sort > "$w/last.tsv" || true

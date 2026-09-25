@@ -50,6 +50,8 @@ from typing import Any
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 SCRIPT = SCRIPTS_DIR / "disk_hygiene.py"
+sys.path.insert(0, str(SCRIPTS_DIR))
+import disk_hygiene  # noqa: E402 -- needs SCRIPTS_DIR on sys.path first
 GIT_ID = ["-c", "user.email=reaper-test@local", "-c", "user.name=reaper-test"]
 
 
@@ -848,6 +850,40 @@ class ReaperScenarioTest(unittest.TestCase):
         doc, _ = self.plan("--protected", prot, inventory=self.inventory(repo))
         self.assertEqual([i for i in doc["plan"] if i["kind"] == "scratch"], [],
                          f"protected scratch planned: {doc['plan']}")
+
+
+class ContainerCensusOtherFamilyTest(unittest.TestCase):
+    """cmd_containers' box-local-daemon discriminator for family="other" rows (AGENTC-751):
+    four lanes (e2e, env typing, Reaper, agent-c#20033) independently found the same leaked
+    census row a leaked/stranded-only reaper would otherwise never remove."""
+
+    def test_box_local_created_never_started_stale_no_holders_is_leaked(self) -> None:
+        self.assertTrue(disk_hygiene._is_leaked_never_started(
+            True, "created", 0, "0001-01-01T00:00:00Z", 2.0, []))
+
+    def test_shared_daemon_same_container_stays_unknown(self) -> None:
+        self.assertFalse(disk_hygiene._is_leaked_never_started(
+            False, "created", 0, "0001-01-01T00:00:00Z", 2.0, []))
+
+    def test_box_local_too_young_stays_unknown(self) -> None:
+        self.assertFalse(disk_hygiene._is_leaked_never_started(
+            True, "created", 0, "0001-01-01T00:00:00Z", 0.5, []))
+
+    def test_box_local_with_holder_stays_unknown(self) -> None:
+        self.assertFalse(disk_hygiene._is_leaked_never_started(
+            True, "created", 0, "0001-01-01T00:00:00Z", 2.0, [(123, "some-holder-process")]))
+
+    def test_box_local_ran_once_real_started_at_stays_unknown(self) -> None:
+        self.assertFalse(disk_hygiene._is_leaked_never_started(
+            True, "created", 0, "2026-09-24T10:00:00Z", 2.0, []))
+
+    def test_docker_info_failure_treated_as_not_box_local(self) -> None:
+        original = disk_hygiene.run
+        disk_hygiene.run = lambda cmd, cwd=None, timeout=600: (1, "Cannot connect to the Docker daemon")
+        try:
+            self.assertFalse(disk_hygiene._docker_daemon_is_box_local())
+        finally:
+            disk_hygiene.run = original
 
 
 if __name__ == "__main__":
