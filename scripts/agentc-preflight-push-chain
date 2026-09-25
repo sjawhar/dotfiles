@@ -1,21 +1,40 @@
 #!/usr/bin/env bash
 # Pre-push preflight for an agent-c chain branch: refuse to push a head that CI will red on arrival.
-# Usage: agentc-preflight-push-chain <branch>   (run from a plain git clone of agent-c whose origin is GitHub, at the head to push)
+# Usage: agentc-preflight-push-chain <branch> [--base <ref>]
+#   (run from a plain git clone of agent-c whose origin is GitHub, at the head to push)
+#
+# The base is the branch the head will LAND ON: the open pull request's base branch when one
+# exists (a stacked branch lands on its parent, not on main -- checking it against main reports
+# rounds-old conflicts the parent chain has already resolved, measured 2026-09-25 on
+# content-split-a3: six conflicts vs main, zero vs its base), else origin/main. `--base` overrides.
 #
 # Three checks, each one a defect this chain has already paid for:
-#   1. HEAD merges cleanly onto current origin/main (merge-tree, no checkout).
-#   2. The MERGED tree has exactly one alembic head (main's newest migration may have
+#   1. HEAD merges cleanly onto the current base (merge-tree, no checkout).
+#   2. The MERGED tree has exactly one alembic head (the base's newest migration may have
 #      moved under the branch since its last merge round -- the 0150/0157 two-heads red).
 #   3. A migration the branch adds carries a number no open PR or main already claims
 #      (the 0164 collision with #20093).
 set -euo pipefail
 branch="${1:?branch}"
-git fetch -q origin main "$branch"
+base=""
+if [ "${2:-}" = "--base" ]; then
+  base="${3:?--base needs a ref}"
+fi
+if [ -z "$base" ]; then
+  base=$(gh pr view "$branch" -R trajectory-labs-pbc/agent-c --json baseRefName --jq .baseRefName 2>/dev/null || true)
+  if [ -z "$base" ]; then
+    base=main
+    echo "base=origin/main (no open pull request for $branch)"
+  else
+    echo "base=origin/$base (open pull request's base branch)"
+  fi
+fi
+git fetch -q origin main "$base" "$branch"
 head=$(git rev-parse HEAD)
 echo "head=$head"
 
-if ! merged=$(git merge-tree --write-tree origin/main "$head" 2>/dev/null); then
-  echo "PREFLIGHT FAIL: HEAD conflicts with origin/main -- merge main into the branch (never rebase a blessed chain) before pushing"
+if ! merged=$(git merge-tree --write-tree "origin/$base" "$head" 2>/dev/null); then
+  echo "PREFLIGHT FAIL: HEAD conflicts with origin/$base -- merge $base into the branch (never rebase a blessed chain) before pushing"
   exit 1
 fi
 
