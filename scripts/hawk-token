@@ -13,60 +13,130 @@
 # wrapper owns, not from ~/src/agent-c: that is the shared jj store's default
 # workspace and its working copy sits wherever the last session left it. The
 # checkout lives under ~/src (a dot-dir, so `agentbox new <repo>` never sees it)
-# because ~/src is already mounted rw into every box — one clone on the host serves
-# every running session with no restart. It is refreshed at most once per
-# REFRESH_SECONDS and only when the run is not on a client's 401-retry budget (omp
-# kills a `!command` after 10 s); `uv sync --frozen` is a no-op when the lock has not
-# moved, so the steady-state cost is one `uv run` (~1 s warm).
+# because ~/src is already mounted rw into every box: one clone on the host serves
+# every running session with no restart.
+#
+# Minting never runs git. omp kills a `!command` after 10 s, and the host and every
+# box share this checkout. On 2026-09-24 a refresh done in place on the minting path
+# was killed mid-write at 11:42; its leftover index.lock failed every later refresh
+# until 2026-09-25 07:08, and `!hawk-token` came back empty in several sessions. So:
+#   - two slots, $root/agent-c and $root/agent-c.alt; `current` is a symlink to the
+#     live one, and minting always runs from whatever `current` resolves to;
+#   - a stale stamp starts ONE detached background refresh (flock, which the kernel
+#     releases if the holder dies; a mkdir lock where flock is missing) that rebuilds
+#     the IDLE slot, checks it can import the console script's module, and only then
+#     swaps `current` with an atomic rename;
+#   - the live slot is never rewritten, so a refresh killed at any point leaves the
+#     previous checkout intact and minting unaffected.
+# Each slot's venv records absolute paths, so it is built at that slot's path; slots
+# never move, only the symlink does. Refresh output goes to $root/refresh.log.
 set -euo pipefail
 
 : "${HAWK_API_URL:=https://api.hawk.internal.trajectorylabs.com}"
 export HAWK_API_URL
 
 root="${AGENTBOX_SRC:-$HOME/src}/.hawk-token"
-checkout="$root/agent-c"
+current="$root/current"
 stamp="$root/.refreshed"
 REFRESH_SECONDS="${HAWK_TOKEN_REFRESH_SECONDS:-21600}"
+LOCK_STALE_MINUTES=30
+REFRESH_ARG=__hawk_token_background_refresh
 mkdir -p "$root"
 
 log() { echo "hawk-token: $*" >&2; }
 
-if [ ! -f "$stamp" ]; then
-    # First run, or a previous first run died mid-way: build in a scratch dir and
-    # rename into place, so a half-clone never masquerades as a checkout. The stamp
-    # is written last and is the readiness marker every later run keys on. The
-    # scratch dir is per-invocation, so two first runs (host and a box, say) do not
-    # touch each other's; whichever finishes second wins the rename, harmlessly.
-    log "first run: cloning agent-c main into $checkout (about a minute)"
-    scratch="$(mktemp -d "$root/.clone.XXXXXX")"
-    git clone --quiet --depth 1 --branch main --filter=blob:none \
-        https://github.com/trajectory-labs-pbc/agent-c.git "$scratch/agent-c" 1>&2
-    rm -rf "$checkout"
-    mv "$scratch/agent-c" "$checkout"
-    rmdir "$scratch"
-    # The venv records absolute paths, so it is built at the final location.
-    ( cd "$checkout" && uv sync --frozen --no-dev --quiet 1>&2 )
-    touch "$stamp"
-elif [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; then
-    # Stale: advance to main. Never on a hot path — a client retrying a 401 has
-    # already spent seconds; a fetch that fails leaves the previous checkout usable.
-    # A refresh killed mid-operation leaves git lock files behind. From 2026-09-24 11:42 an
-    # index.lock no process held made every refresh fail silently (stderr only) for 19 h,
-    # while minting continued from the previous checkout. It did NOT cause the separate
-    # 2026-09-25 06:45 empty mint, whose cause is unmeasured (a mint worked at 07:05 with the
-    # lock still present). Git holds these locks for seconds in this shallow checkout, so
-    # one older than 10 minutes can only be a leftover. Boxes have no fuser/lsof, hence age.
-    while IFS= read -r lock; do
-        log "removing stale $lock (older than 10 min; a killed refresh left it)"
-        rm -f -- "$lock"
-    done < <(find "$checkout/.git" -maxdepth 3 -name '*.lock' -mmin +10 2>/dev/null)
-    if ( cd "$checkout" && git fetch --quiet --depth 1 origin main 1>&2 \
-        && git reset --quiet --hard origin/main 1>&2 \
-        && uv sync --frozen --no-dev --quiet 1>&2 ); then
-        touch "$stamp"
+# take_lock nonblock|block: hold the refresh lock for the rest of this process.
+take_lock() {
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"$root/.refresh.lock"
+        if [ "$1" = nonblock ]; then flock -n 9; else flock 9; fi
+        return
+    fi
+    local dir="$root/.refresh.lock.d"
+    until mkdir "$dir" 2>/dev/null; do
+        if [ -n "$(find "$dir" -maxdepth 0 -mmin +"$LOCK_STALE_MINUTES" 2>/dev/null)" ]; then
+            rm -rf "$dir"
+        elif [ "$1" = nonblock ]; then
+            return 1
+        else
+            sleep 2
+        fi
+    done
+    trap 'rm -rf "$dir"' EXIT
+}
+
+# release_lock: drop the lock before exec (exec replaces the process without running traps).
+release_lock() {
+    if command -v flock >/dev/null 2>&1; then exec 9>&-; else rm -rf "$root/.refresh.lock.d"; trap - EXIT; fi
+}
+
+# build_slot DIR: make DIR a checkout of agent-c main with a working venv. DIR is never
+# the live slot, and the refresh lock is held, so any git lock file in it is a leftover
+# from a killed run. Every step fails the function explicitly: errexit does not apply
+# inside a function called as an `if` condition.
+build_slot() {
+    local slot=$1 scratch
+    if [ -d "$slot/.git" ]; then
+        find "$slot/.git" -name '*.lock' -type f -delete || return 1
+        ( cd "$slot" && git fetch --quiet --depth 1 origin main && git reset --quiet --hard origin/main ) || return 1
     else
-        log "refresh of $checkout failed; minting from the previous checkout (see stderr above)"
+        scratch="$(mktemp -d "$root/.clone.XXXXXX")" || return 1
+        git clone --quiet --depth 1 --branch main --filter=blob:none \
+            https://github.com/trajectory-labs-pbc/agent-c.git "$scratch/agent-c" || { rm -rf "$scratch"; return 1; }
+        rm -rf "$slot" && mv "$scratch/agent-c" "$slot" && rmdir "$scratch" || return 1
+    fi
+    ( cd "$slot" && uv sync --frozen --no-dev --quiet ) || return 1
+    uv run --frozen --no-dev --project "$slot" python -c 'import trajectory_labs.hawk_token' >/dev/null || return 1
+}
+
+# publish NAME: point `current` at the sibling slot NAME, atomically (rename(2)
+# replaces the symlink itself, never follows it).
+publish() {
+    ln -sfn "$1" "$current.tmp.$$"
+    if mv -Tf "$current.tmp.$$" "$current" 2>/dev/null; then return; fi
+    python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$current.tmp.$$" "$current"
+}
+
+if [ "${1:-}" = "$REFRESH_ARG" ]; then
+    take_lock nonblock || exit 0
+    # A sibling may have finished a refresh while this one was starting.
+    if [ -n "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; then exit 0; fi
+    live="$(basename "$(readlink "$current")")"
+    if [ "$live" = agent-c ]; then idle=agent-c.alt; else idle=agent-c; fi
+    if build_slot "$root/$idle"; then
+        publish "$idle"
+        touch "$stamp"
+        log "$(date -u +%FT%TZ) refreshed: current -> $idle"
+    else
+        log "$(date -u +%FT%TZ) refresh of $root/$idle failed; still minting from $live"
+    fi
+    exit 0
+fi
+
+if [ ! -L "$current" ]; then
+    if [ -f "$stamp" ] && [ -d "$root/agent-c/.git" ]; then
+        # A checkout built by the single-checkout version of this wrapper: adopt it.
+        publish agent-c
+    else
+        # First run: there is nothing to mint from yet, so build in the foreground.
+        take_lock block
+        if [ ! -L "$current" ]; then
+            log "first run: cloning agent-c main into $root/agent-c (about a minute)"
+            build_slot "$root/agent-c" 1>&2 || { log "first-run build failed (see stderr above)"; exit 1; }
+            publish agent-c
+            touch "$stamp"
+        fi
+        release_lock
     fi
 fi
 
-exec uv run --frozen --no-dev --project "$checkout" hawk-token --api-url "$HAWK_API_URL" "$@"
+if [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; then
+    # Detached from this call's session, so omp killing the minting call cannot reach it.
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "${BASH_SOURCE[0]}" "$REFRESH_ARG" </dev/null >>"$root/refresh.log" 2>&1 &
+    else
+        nohup "${BASH_SOURCE[0]}" "$REFRESH_ARG" </dev/null >>"$root/refresh.log" 2>&1 &
+    fi
+fi
+
+exec uv run --frozen --no-dev --project "$(readlink -f "$current")" hawk-token --api-url "$HAWK_API_URL" "$@"
