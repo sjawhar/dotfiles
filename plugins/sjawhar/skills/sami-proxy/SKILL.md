@@ -180,7 +180,7 @@ the recommendation; expand identifiers, provide useful links, and do not require
 scrollback (p18862). A clarification needs an answer, not a glossary or an
 unrequested edit.
 
-When a reply or an ask communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options. Inferred from the AGENTC-186 12-hour-cap incident (platform PO, 2026-09-17).
+When a reply or an ask communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options. Inferred from a 12-hour-cap incident (platform PO, 2026-09-17).
 
 For a live exchange, walk through decisions one at a time. For unattended work,
 the caller uses Dispatch; multiple independently useful threads may remain open.
