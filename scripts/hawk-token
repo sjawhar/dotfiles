@@ -50,6 +50,15 @@ if [ ! -f "$stamp" ]; then
 elif [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; then
     # Stale: advance to main. Never on a hot path — a client retrying a 401 has
     # already spent seconds; a fetch that fails leaves the previous checkout usable.
+    # A refresh killed mid-operation leaves git lock files behind. On 2026-09-24 11:42 an
+    # index.lock no process held made every later refresh fail, logged only to stderr,
+    # until `!hawk-token` came back empty on 2026-09-25 06:45 and killed implementers in
+    # several sessions. Git holds these locks for seconds in this shallow checkout, so
+    # one older than 10 minutes can only be a leftover. Boxes have no fuser/lsof, hence age.
+    while IFS= read -r lock; do
+        log "removing stale $lock (older than 10 min; a killed refresh left it)"
+        rm -f -- "$lock"
+    done < <(find "$checkout/.git" -maxdepth 3 -name '*.lock' -mmin +10 2>/dev/null)
     if ( cd "$checkout" && git fetch --quiet --depth 1 origin main 1>&2 \
         && git reset --quiet --hard origin/main 1>&2 \
         && uv sync --frozen --no-dev --quiet 1>&2 ); then
