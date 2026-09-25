@@ -18,11 +18,12 @@ fi
 ensure_vendor https://github.com/anthropics/skills.git anthropic-skills
 # Our fork of compound-engineering: `sami` branch = the compound-engineering-v*
 # release tag plus fork-local patches (ce-simplify-code reviews on top-tier
-# GPT agents, not the Sonnet class). Pinned to a commit on that branch. Bump:
+# GPT agents, not the Sonnet class; ce-babysit-pr's pr-snapshot reads a PR
+# stack its token cannot see as no stack). Pinned to a commit on that branch. Bump:
 # rebase `sami` onto the new tag in the vendor checkout, push, re-pin here;
 # check every omp/config.yml skills.ignoredSkills name (and the skip list
 # below) still exists upstream, and diff the skill set for new arrivals.
-ensure_vendor https://github.com/sjawhar/compound-engineering-plugin.git compound-engineering 24653aacb5cc881129725106769b9e1385585ec5
+ensure_vendor https://github.com/sjawhar/compound-engineering-plugin.git compound-engineering b4adb2f0312d2e61f9168b3b5bbef8d95c75382a
 if [ -d "${DOTFILES_DIR}/vendor/compound-engineering/.git" ]; then
     git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote get-url upstream &>/dev/null || \
         git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote add upstream https://github.com/EveryInc/compound-engineering-plugin.git
