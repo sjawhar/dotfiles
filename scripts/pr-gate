@@ -46,13 +46,19 @@ rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq ".[]|select(.body|test(\
 cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h8\"))|select(.user.login|test(\"github-actions\")|not)|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
 printf '%s\n%s\n' "$rv" "$cm" | sed '/^$/d'
 [ -z "$rv$cm" ] && { echo "  (none - no verdict at this head)"; fail=1; }
-# Verdict-bearing reviews by identity (newest first), and whether the PR's OWN diff (against its base,
-# per-file patch text) changed since the newest one - a merge from main does not count as a new round.
-echo "verdict-bearing reviews (VERDICT:/Verdict:/APPROVE at/MERGE at), newest first:"
-vr=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq '[.[]|select(.body|test("(?i)verdict:|approve at|merge at|request_changes at|do not merge"))]|reverse|.[0:6][]|"  \(.submitted_at[5:16]) \(.user.login) :: \(.body|gsub("\n";" ")|.[0:110]) :: names=\([.body|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"')
+# Verdict-bearing artifacts by identity (newest first) on BOTH surfaces - review bodies AND issue comments
+# (self-gating lanes post their halves as comments; a reviews-only read took a superseded review for the
+# newest verdict on #19789, 2026-09-25) - and whether the PR's OWN diff (against its base, per-file patch
+# text) changed since the newest one. A merge from main does not count as a new round.
+w0=$(mktemp -d)
+api "repos/$repo/pulls/$n/reviews" --paginate --jq '.[]|{t:.submitted_at,u:.user.login,k:"R",b:(.body//"")}' > "$w0/r.jsonl" || true
+api "repos/$repo/issues/$n/comments" --paginate --jq '.[]|select(.user.login|test("github-actions")|not)|{t:.created_at,u:.user.login,k:"C",b:(.body//"")}' > "$w0/c.jsonl" || true
+echo "verdict-bearing artifacts (VERDICT:/Verdict:/APPROVE at/MERGE at; reviews + comments), newest first:"
+vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s '[.[]|select(.b|test("(?i)verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
 printf '%s\n' "${vr:-  (none)}"
-# The newest verdict-bearing review names its head FIRST; older shas later in the same body are history, not the verdict.
-last=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq '[.[]|select(.body|test("(?i)verdict:|approve at|approved at|merge at"))]|last|(.body // "")|[scan("[0-9a-f]{40}")]|first // ""')
+# The newest verdict-bearing artifact names its head FIRST; older shas later in the same body are history, not the verdict.
+last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r '[.[]|select(.b|test("(?i)verdict:|approve at|approved at|merge at"))]|sort_by(.t)|last|(.b // "")|[scan("[0-9a-f]{40}")]|first // ""')
+rm -rf "$w0"
 if [ -n "$last" ] && [ "$last" != "$head" ]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
   api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | @json)"' | sort > "$w/last.tsv" || true

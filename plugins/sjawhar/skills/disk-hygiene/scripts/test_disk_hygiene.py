@@ -94,8 +94,10 @@ class ReaperScenarioTest(unittest.TestCase):
         sh("jj", "workspace", "add", dest, cwd=repo)
         return dest
 
-    def inventory(self, repo: Path) -> Path:
-        r = script("inventory", "--repo", repo, "--root", self.base, "--trunk", "main")
+    def inventory(self, repo: Path, box_dir: str | Path = "none") -> Path:
+        # Host semantics by default, so these scenarios mean the same thing on the host and in
+        # an agentbox (where `auto` would narrow what counts as observably absent).
+        r = script("inventory", "--repo", repo, "--root", self.base, "--trunk", "main", "--box-dir", box_dir)
         p = self.base / "inventory.json"
         p.write_text(r.stdout)
         return p
@@ -551,6 +553,25 @@ class ReaperScenarioTest(unittest.TestCase):
         forgot = [e for e in ledger if e.get("op") == "forgot" and e.get("name") == "w12"]
         self.assertTrue(forgot, f"ledger: {ledger}")
         self.assertIn("forget_op", forgot[0], "D8 forget must carry the D3 restoration id")
+
+    def test_s12c_unobservable_registration_never_forgotten(self) -> None:
+        """Scenario 12's exact state (no directory, merged, old op) seen from a process that cannot
+        observe the workspace's location -- another box's checkout, from inside a box. Absence is
+        not evidence there: the registration must classify UNOBSERVABLE, stay out of the plan,
+        and survive apply. 2026-09-25 09:15Z: a prune from inside a box broke four live worktrees."""
+        repo = self.make_jj_repo()
+        ws = self.add_ws(repo, "w12c")
+        shutil.rmtree(ws)
+        elsewhere = self.base / "some-other-box"
+        elsewhere.mkdir()
+        inv = self.inventory(repo, box_dir=elsewhere)
+        rows = [r for r in json.loads(inv.read_text())["rows"] if r.get("name") == "w12c"]
+        self.assertTrue(rows and all(r["class"] == "UNOBSERVABLE" for r in rows), f"rows: {rows}")
+        doc, plan_path = self.plan("--fresh-hours", "0", inventory=inv)
+        self.assertFalse(any(i.get("name") == "w12c" for i in doc["plan"]),
+                         f"an unobservable registration was planned: {doc['plan']}")
+        self.apply(plan_path)
+        self.assertIn("w12c", self.registered(repo), "an unobservable registration was forgotten")
 
     def test_s12b_d8_young_registering_op_refused(self) -> None:
         """Scenario 12 twin: registering op younger than the threshold => refused (creation window)."""
