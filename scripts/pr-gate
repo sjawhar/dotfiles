@@ -10,7 +10,8 @@
 #     verdict-bearing reviews by identity, and whether the PR's own diff changed since the newest one
 #   - the Omp-Session trailers on the commits (who owns it)
 # Exit 0 = every hard gate reads green (head matches, aggregate success, 0 non-minor unresolved,
-# MERGEABLE, at least one artifact at head). Exit 1 otherwise. It never approves or merges.
+# MERGEABLE, and a verdict-bearing artifact whose newest instance covers the head). Exit 1 otherwise.
+# It never approves or merges.
 set -euo pipefail
 unset GH_TOKEN GH_CONFIG_DIR GH_REPO 2>/dev/null || true
 repo="${1:?owner/repo}"; n="${2:?PR number}"; want="${3:-}"
@@ -23,9 +24,18 @@ echo "head=$head base=$(jq -r .base <<<"$pr") state=$(jq -r .state <<<"$pr") dra
 fail=0
 if [ -n "$want" ] && [[ "$head" != "$want"* ]]; then echo "!! head does not start with $want (packet stale)"; fail=1; fi
 g=$(api graphql -f query="{repository(owner:\"$owner\",name:\"$name\"){pullRequest(number:$n){mergeable mergeStateStatus reviewThreads(first:100){nodes{isResolved isOutdated path comments(first:1){nodes{author{login} createdAt body}}}}}}}")
-echo "mergeable=$(jq -r .data.repository.pullRequest.mergeable <<<"$g")/$(jq -r .data.repository.pullRequest.mergeStateStatus <<<"$g")"
 mg=$(jq -r .data.repository.pullRequest.mergeable <<<"$g"); ms=$(jq -r .data.repository.pullRequest.mergeStateStatus <<<"$g")
+# GitHub computes mergeability LAZILY: the first read after it goes stale returns UNKNOWN and TRIGGERS the
+# compute; a REST re-poll seconds later returns the real value. Re-poll before concluding, or the gate
+# false-blocks every PR whose base just moved - which is exactly when the queue looks (iac/#20179: GraphQL
+# UNKNOWN ~20min while REST read true). Only a value that STAYS UNKNOWN across polls is a real signal.
+mg0=$mg
+if [ "$mg" = "UNKNOWN" ] || [ "$mg" = "null" ]; then
+  for _ in 1 2 3; do sleep 3; rp=$(api "repos/$repo/pulls/$n" --jq '.mergeable'); case "$rp" in true) mg=MERGEABLE; break;; false) mg=CONFLICTING; break;; esac; done
+fi
+echo "mergeable=$mg/$ms$([ "$mg" != "$mg0" ] && echo " (re-polled from $mg0 via REST; GitHub lazy compute)")"
 if [ "$mg" = "CONFLICTING" ] || [ "$ms" = "DIRTY" ]; then echo "!! DIRTY/CONFLICTING: GitHub runs NO pull_request workflow on a conflicting PR - merge from main or rebase BEFORE any re-trigger"; fail=1; fi
+case "$mg" in MERGEABLE|CONFLICTING) ;; *) echo "!! mergeable stayed $mg across 3 REST re-polls - GitHub cannot compute mergeability yet; re-run the gate shortly (a single stale UNKNOWN is NOT a hard block, #20179)"; fail=1;; esac
 unres=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not)]|length' <<<"$g")
 nonminor=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not)|select(.comments.nodes[0].body|test("Minor")|not)]|length' <<<"$g")
 echo "unresolved threads=$unres (non-minor=$nonminor)   [outdated=true means the line moved, not that the finding was answered]"
@@ -39,7 +49,8 @@ if [ -n "$agg" ]; then
   echo "$agg=$pcr"; [ "$pcr" = "completed/success" ] || fail=1
 else
   cs=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '[.check_runs|group_by(.name)[]|max_by(.started_at)]|"ok=\([.[]|select(.conclusion=="success")]|length) fail=\([.[]|select(.conclusion=="failure")]|length) running=\([.[]|select(.status!="completed")]|length) :: failing=\([.[]|select(.conclusion=="failure")|.name]|join(","))"')
-  echo "checks $cs"; grep -q "fail=0 running=0" <<<"$cs" || fail=1
+  echo "checks $cs"; okn=$(sed -n 's/^ok=\([0-9]*\).*/\1/p' <<<"$cs")
+  { grep -q "fail=0 running=0" <<<"$cs" && [ "${okn:-0}" -gt 0 ]; } || { echo "!! not green: need fail=0 running=0 AND at least one green check (ok=${okn:-0}; zero check-runs is not green, #20160)"; fail=1; }
 fi
 echo "verdict artifacts naming $h8 (review bodies + issue comments):"
 rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq ".[]|select(.body|test(\"$h8\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
@@ -53,11 +64,28 @@ printf '%s\n%s\n' "$rv" "$cm" | sed '/^$/d'
 w0=$(mktemp -d)
 api "repos/$repo/pulls/$n/reviews" --paginate --jq '.[]|{t:.submitted_at,u:.user.login,k:"R",b:(.body//"")}' > "$w0/r.jsonl" || true
 api "repos/$repo/issues/$n/comments" --paginate --jq '.[]|select(.user.login|test("github-actions")|not)|{t:.created_at,u:.user.login,k:"C",b:(.body//"")}' > "$w0/c.jsonl" || true
-echo "verdict-bearing artifacts (VERDICT:/Verdict:/APPROVE at/MERGE at; reviews + comments), newest first:"
-vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s '[.[]|select(.b|test("(?i)verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
+echo "verdict-bearing artifacts (VERDICT:/APPROVE/APPROVED/MERGE at/REQUEST_CHANGES; reviews + comments), newest first:"
+vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s '[.[]|select(.b|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
 printf '%s\n' "${vr:-  (none)}"
+# A verdict-bearing artifact is REQUIRED for green (#20167). Distinguish two empties: nothing names the
+# head at all (truly no verdict) vs an artifact NAMES the head but the grammar missed it (a real verdict
+# the matcher cannot parse, #20076) - the latter must be READ, never silently blocked-as-absent or greened.
+if [ -z "$vr" ]; then
+  if [ -n "$rv$cm" ]; then echo "  !! POSSIBLE GRAMMAR MISS - artifact(s) NAME the head (above) but none matched the verdict grammar; READ them, they may be a real verdict the matcher missed (#20076)"; else echo "  !! NEEDS VERDICT - no verdict-bearing artifact and nothing names the head (#20167)"; fi
+  fail=1
+fi
 # The newest verdict-bearing artifact names its head FIRST; older shas later in the same body are history, not the verdict.
-last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r '[.[]|select(.b|test("(?i)verdict:|approve at|approved at|merge at"))]|sort_by(.t)|last|(.b // "")|[scan("[0-9a-f]{40}")]|first // ""')
+last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r '[.[]|select(.b|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|last|(.b // "")|[scan("[0-9a-f]{40}")]|first // ""')
+# Verdict POLARITY: green only if the LATEST verdict is not a rejection. Match negative verdicts
+# (REQUEST_CHANGES / CHANGES REQUESTED / DO NOT MERGE) and clean positives (APPROVE/MERGE/LGTM with no
+# negative token in the same artifact); block if the latest negative is not superseded by a later positive.
+# The old gate matched CHANGES REQUESTED as verdict-bearing without seeing it was negative (#20188).
+# "does not block" is positive by construction - it is not in the negative set.
+NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *(request[_ ]changes|changes requested|do not merge)'
+POS='(?i)approve|merge +at|lgtm|verdict:? *(approve|merge|ship)'
+negt=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg re "$NEG" '[.[]|select(.b|test($re))]|sort_by(.t)|last|.t // ""')
+post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" '[.[]|select(.b|test($pos))|select(.b|test($neg)|not)]|sort_by(.t)|last|.t // ""')
+if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
 rm -rf "$w0"
 if [ -n "$last" ] && [ "$last" != "$head" ]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
