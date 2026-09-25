@@ -254,16 +254,6 @@ for cosmic_path in "${!COSMIC_SETTINGS[@]}"; do
         ~/.config/cosmic/"${cosmic_path}"
 done
 
-# --- COSMIC pinned workspaces (seed only; cosmic-comp owns this file at runtime) ---
-# Snapshot of the 15-global-workspace pin layout (see laptop/workspaces.conf).
-# Refresh the snapshot after re-pinning:
-#   cp ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces "${LAPTOP_DIR}/cosmic/comp-pinned-workspaces"
-if [ ! -f ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces ]; then
-    echo "Seeding COSMIC pinned workspaces..."
-    mkdir -p ~/.config/cosmic/com.system76.CosmicComp/v1
-    cp "${LAPTOP_DIR}/cosmic/comp-pinned-workspaces" ~/.config/cosmic/com.system76.CosmicComp/v1/pinned_workspaces
-fi
-
 # Laptop daemon role opens tunneled URLs without colliding with the SSH LocalForward on 12802.
 bash "${DOTFILES_DIR}/installers/forward.sh" daemon
 # The laptop is the one machine holding the paired WhatsApp session; the
