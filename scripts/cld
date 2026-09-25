@@ -21,7 +21,13 @@ export "GIT_CONFIG_KEY_${_idx}"=include.path
 export "GIT_CONFIG_VALUE_${_idx}"="${DOTFILES_DIR:-$HOME/.dotfiles}/gh-app-routes.gitconfig"
 unset _idx
 
-# Envoy NATS lives on the tailnet host;
+# Envoy NATS defaults to the tailnet host; a box that runs its own single-node
+# envoy overrides it in the gitignored envoy/env.local (shims/omp sources the
+# same file).
+if [ -r "${DOTFILES_DIR:-$HOME/.dotfiles}/envoy/env.local" ]; then
+    # shellcheck disable=SC1091  # machine-local, absent in the repo
+    . "${DOTFILES_DIR:-$HOME/.dotfiles}/envoy/env.local"
+fi
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 
 # --- dotfiles shims must lead PATH ---
