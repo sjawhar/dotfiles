@@ -577,7 +577,10 @@ cmd_doctor() {
     mapfile -t env < <(session_env "$box")
     out="$(docker run --rm --init --runtime "$RUNTIME" --name "$box" --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
         -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
-    jj -R "$SRC/$repo" workspace forget "$box" >/dev/null 2>&1 || true
+    # A failed forget leaves a registration whose directory the rm below removes: an orphan in the
+    # shared store that every later `jj workspace list` carries. Count it as a doctor failure.
+    jj -R "$SRC/$repo" workspace forget "$box" >/dev/null 2>&1 \
+        || fail "doctor: workspace forget $box failed; its registration is left in $SRC/$repo"
     rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
     grep -vE '^@' <<<"$out"
     FAILS=$((FAILS + $(grep -c '^FAIL ' <<<"$out" || true)))
