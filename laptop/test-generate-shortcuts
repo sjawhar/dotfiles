@@ -10,6 +10,7 @@ SINGLE_MONITORS="${FIXTURES}/single.monitors"
 LAPTOP_ONLY_MONITORS="${FIXTURES}/laptop-only.monitors"
 DISABLED_LAPTOP_MONITORS="${FIXTURES}/disabled-laptop.monitors"
 HYBRID_MONITORS="${FIXTURES}/hybrid.monitors"
+DESK_DELL_LEFT_MONITORS="${FIXTURES}/desk-dell-left.monitors"
 mkdir -p /tmp/opencode
 TMPDIR="$(mktemp -d /tmp/opencode/generate-shortcuts-test.XXXXXX)"
 trap 'rm -rf "${TMPDIR}"' EXIT
@@ -189,6 +190,17 @@ dell_output="${TMPDIR}/dell-custom"
 "${GENERATOR}" --check --monitors "${dell_monitors}" > "${dell_output}"
 grep -Fq '(modifiers: [Alt], key: "4", description: Some("WS4 — P3425WE (4)")): WorkspaceOnOutput("P3425WE", 4),' "${dell_output}" \
     || fail 'Dell office workspace 4 must stay on the ultrawide as local 4'
+
+# LG-ultrawide desk with the Dell as left portrait (HDMI-A-1) and the InnoView in the
+# bottom row: the Dell takes 7-8 and the InnoView falls to 11-13.
+desk_output="${TMPDIR}/desk-dell-left-custom"
+"${GENERATOR}" --check --monitors "${DESK_DELL_LEFT_MONITORS}" > "${desk_output}"
+grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — HDMI-A-1 (1)")): WorkspaceOnOutput("HDMI-A-1", 1),' "${desk_output}" \
+    || fail 'desk workspace 7 must resolve to the left Dell on HDMI-A-1'
+grep -Fq '(modifiers: [Alt], key: "0", description: Some("WS10 — MB16AC (2)")): WorkspaceOnOutput("MB16AC", 2),' "${desk_output}" \
+    || fail 'desk workspace 10 must resolve to the right ASUS portrait'
+grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — DP-1 (1)")): WorkspaceOnOutput("DP-1", 1),' "${desk_output}" \
+    || fail 'desk workspace 11 must resolve to the bottom-row InnoView'
 
 disabled_laptop_output="${TMPDIR}/disabled-laptop-custom"
 "${GENERATOR}" --check --monitors "${DISABLED_LAPTOP_MONITORS}" > "${disabled_laptop_output}"
