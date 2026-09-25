@@ -47,4 +47,4 @@ docs/superpowers/
 # Private secrets repo (its own git repo, never part of dotfiles)
 .secrets/
 omp/models.local.yml
-omp/env.local
+envoy/env.local
