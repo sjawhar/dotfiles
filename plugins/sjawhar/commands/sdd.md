@@ -106,10 +106,10 @@ production afterwards, and that runs alongside the next stacked change, not inst
 
 The coordinator moves the issue's Dispatch status at every transition, the way a human moves a card:
 `in_progress` when implementation starts, `testing` when acceptance begins, `needs_review` when the
-PR is open and its merge packet is sent, `done` once the change is verified in production AND the
-person who asked for it has seen it on the live surface — a green suite, a harness screenshot, or a
-merge is groundwork, not done. `done` is a render in front of the requester: work that shipped
-without one is invisible to the person who asked, and that costs more trust than the work took. An issue
+PR is open and its merge packet is sent, `done` once the change is verified in production by the
+coordinator's own check through its real surface — a green suite, a harness screenshot, or a merge is
+groundwork, not done. That check is the coordinator's work: never ask Sami, or whoever requested the
+change, to look at the result or approve it before moving the issue to `done`. An issue
 left at `triage` while work is underway is a defect: the roadmap view is read from these statuses,
 and Sami has no other way to see delivery without interrupting a session. Do this for child issues
 you own as well as the root. Deploy queueing is not a status: a merge that waits for the deploy lane
