@@ -17,14 +17,19 @@ unset GH_TOKEN GH_CONFIG_DIR GH_REPO 2>/dev/null || true
 # Self-staleness. A lane running a gate out of a checkout that is behind main is how a FIXED gate bug
 # keeps red-ing PRs: on 2026-09-25 the shared ~/.dotfiles sat 30 commits behind on one dirty lockfile,
 # so the digest fix below reached nobody. Compares this file to the LAST-KNOWN main@origin copy and does
-# not fetch, so it costs nothing and a stale local ref can only under-report, never false-alarm.
+# not fetch. It stays silent when the checkout holds commits main@origin lacks (a working copy with
+# edits, or a local ref that is behind), because then a difference is not evidence of a missing fix.
 _self="${BASH_SOURCE[0]}"; _root=$(cd "$(dirname "$_self")/.." && pwd)
 if [ -d "$_root/.jj" ] && command -v jj >/dev/null 2>&1; then
-  _live=$(jj -R "$_root" --ignore-working-copy file show -r 'main@origin' scripts/pr-gate 2>/dev/null | sha256sum | cut -d" " -f1 || true)
-  _mine=$(sha256sum < "$_self" | cut -d" " -f1)
-  if [ -n "${_live:-}" ] && [ "$_live" != "$_mine" ]; then
+  _t=$(mktemp)
+  _ahead=$(jj -R "$_root" --ignore-working-copy log -r 'main@origin..@ ~ empty()' --no-graph -T '"x"' 2>/dev/null || true)
+  # root: makes the path repo-relative; a bare path resolves against the CALLER's cwd and fails from
+  # anywhere outside the checkout, and hashing that empty read is what false-alarmed (2026-09-25).
+  if jj -R "$_root" --ignore-working-copy file show -r 'main@origin' 'root:"scripts/pr-gate"' > "$_t" 2>/dev/null \
+     && [ -s "$_t" ] && [ -z "$_ahead" ] && ! cmp -s "$_t" "$_self"; then
     echo "note: this pr-gate differs from main@origin's copy - a landed fix may be missing here (cd $_root && jj git fetch; advance with 'jj new main@origin' only when @ is empty)"
   fi
+  rm -f "$_t"
 fi
 repo="${1:?owner/repo}"; n="${2:?PR number}"; want="${3:-}"
 owner="${repo%%/*}"; name="${repo##*/}"
@@ -103,9 +108,12 @@ if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "
 rm -rf "$w0"
 if [ -n "$last" ] && [ "$last" != "$head" ]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
-  api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | @json)"' | sort > "$w/last.tsv" || true
-  api "repos/$repo/compare/$base...$head" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | @json)"' | sort > "$w/head.tsv" || true
-  if cmp -s "$w/last.tsv" "$w/head.tsv"; then echo "PR-own diff IDENTICAL between newest verdict sha ${last:0:8} and head - a confirmation, not a round"; else echo "!! PR-own diff CHANGED since newest verdict sha ${last:0:8}: $(cut -f1 "$w/head.tsv" "$w/last.tsv" | sort | uniq -u | tr '\n' ' ' | cut -c1-200) -> that verdict does not cover the head"; fail=1; fi
+  api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/last.tsv" || true
+  api "repos/$repo/compare/$base...$head" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/head.tsv" || true
+  # Per file: the SORTED +/- lines, as running-the-merge-queue's verdict row specifies. Raw patch text
+  # carries @@ offsets and context lines, and git re-aligns a hunk when main moves beside it, so a clean
+  # rebase read CHANGED with no content difference (#20149, 2026-09-25).
+  if cmp -s "$w/last.tsv" "$w/head.tsv"; then echo "PR-own diff IDENTICAL between newest verdict sha ${last:0:8} and head - a confirmation, not a round"; else echo "!! PR-own diff CHANGED since newest verdict sha ${last:0:8}: $(diff "$w/last.tsv" "$w/head.tsv" | awk -F'\t' '/^[<>] /{sub(/^[<>] /,"",$1); print $1}' | sort -u | tr '\n' ' ' | cut -c1-200) -> that verdict does not cover the head"; fail=1; fi
   rm -rf "$w"
 fi
 echo "owner trailers: $(api "repos/$repo/pulls/$n/commits" --paginate --jq '[.[]|.commit.message|capture("Omp-Session: (?<s>[0-9a-f-]+)")|.s]|unique|join(",")')"
