@@ -38,7 +38,7 @@ secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli whoami
 ## Hiring applicants base is retired
 
 The old Applications base (`appvSQts63ngMSoCP`) is no longer the hiring system of record.
-Candidate pipeline data now lives in Terminal; see the agent-c `hiring` skill and its
+Candidate pipeline data now lives in Terminal; see the project's `hiring` skill and its
 `hire` CLI (`hire show <email>`, `hire stats`, and so on). Do not re-pin this tool to that
 base.
 

@@ -250,7 +250,7 @@ The audit that produced this rule (23 of 30 sessions) found substance mostly
 present and structure mostly absent: coordinators implementing themselves, default-tier
 implementers instead of `deep`, self-review instead of `reviewer`. The one coordinator who reviewed
 its own PR that night missed a Critical the bot then caught. Three scope questions went to Sami
-(task-maintenance lanes; oracle vs scout; legion LIVE-DEFERRED acceptance) - read his
+(task-maintenance lanes; oracle vs scout; a project's LIVE-DEFERRED acceptance) - read his
 answers before ruling on any of them yourself.
 
 The controller does not implement either. Authoring a revert PR by hand is a deviation to record, not a mechanic to repeat: dispatch `deep`.

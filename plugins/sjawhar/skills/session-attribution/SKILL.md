@@ -71,5 +71,5 @@ gh api "repos/<owner>/<repo>/issues/comments" --paginate \
   record's role: an invocation is a `message` record whose role is `user` or `fileMention`; the
   same text inside a `toolResult` or `compaction` record is the session reading the file. The
   post-compaction reminder tells every long session to reread `commands/sdd.md`, so its text sits
-  in most long transcripts. Measured 2026-09-24 (AGENTC-341): 19 coordinator transcripts carried
+  in most long transcripts. Measured 2026-09-24: 19 coordinator transcripts carried
   sdd.md's description line, and 4 of them had an invocation record.
