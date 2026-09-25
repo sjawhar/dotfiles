@@ -57,7 +57,7 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
   — after every rebase, edit, or workspace update. Once a rewrite is suspected, a different
   instrument answers a different question: grep the hunk's own identifier in the file at each
   sha along the branch (pre-rebase, the approved tip, the current tip) — absent, absent, present
-  pins WHERE the hunk entered the history (AGENTC-404, 2026-09-21). That is a presence probe; the
+  pins WHERE the hunk entered the history (one lane, 2026-09-21). That is a presence probe; the
   count it returns is occurrences within one file at one sha and says nothing about how many
   commits carry the hunk. And diff from the sha a gate actually cited, never from the branch
   name: "I only appended" can be true of intent and false of history.
@@ -106,7 +106,7 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
   is `jj git push --named <name>=@`, which CREATES and pushes. `--allow-new` does not exist (it
   was a flag in older jj releases, which is why it keeps coming to mind). When you try it, jj
   replies *"tip: a similar argument exists: '--all'"* — **do not take that suggestion.** `--all`
-  pushes every local bookmark in the repo; agent-c currently has 179, mostly other agents' work.
+  pushes every local bookmark in the repo; one repo currently has 179, mostly other agents' work.
   The tool's own error message is steering you into a mass push. Ignore it and use `--named`.
   The second trap is that `--named` and `jj bookmark create` are ALTERNATIVES, not a sequence, and
   there are two distinct ways a "push" publishes nothing (both reproduced on jj 0.45.1-sami,
@@ -192,7 +192,7 @@ file, propagated into your own commits — `--skip-emptied` does nothing for tho
 commit is not empty). The fork is decided per **file**, so a real case is a mix — several empty
 commits and one conflicted one — which reads as a broken rebase rather than a duplicate replay; the
 natural next move, `--skip-emptied`, drops the empties and leaves the conflict, and the natural
-misdiagnosis is that the tool is confused (the AGENTC-404 lane, 2026-09-21: five duplicates, one
+misdiagnosis is that the tool is confused (one lane, 2026-09-21: five duplicates, one
 `.gitignore` collision; `git merge-tree` of the un-rebased head against main already exited 1 on that
 file before any rebase). jj does no patch-id matching. The probe is positive, not a reading of commit
 subjects: `jj log -r '<their-commit> & ::main@origin'` **empty** proves the squash left no ancestry.

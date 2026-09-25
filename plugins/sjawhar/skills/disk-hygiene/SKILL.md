@@ -158,7 +158,7 @@ Ledger (JSONL, one line per action, with `df` after each) plus a summary: freed,
 ## The shared jj op store (`.jj/repo/op_store`)
 
 Every jj operation stores a full view (all bookmarks + remote bookmarks + tags + per-workspace
-working-copy commits). At agent scale this is the box's fastest-growing pile: agent-c measured
+working-copy commits). At agent scale this is the box's fastest-growing pile: one repo measured
 2026-09-19 at ~180 workspaces / ~7k ops/day / 1-3 MB per view = 10-25 GB/day, 187 GB total; a
 single stray `git fetch '+refs/pull/*/head:refs/remotes/pr/*'` in the shared store tripled every
 view (10,907 `<n>@pr` bookmarks) until `jj git remote remove pr` dropped them. Watch
