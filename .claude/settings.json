@@ -20,10 +20,6 @@
       }
     ]
   },
-  "statusLine": {
-    "type": "command",
-    "command": "~/.dotfiles/.claude/hooks/statusline.sh"
-  },
   "enabledPlugins": {
     "ralph-loop@claude-plugins-official": true,
     "rust-analyzer-lsp@claude-plugins-official": true,

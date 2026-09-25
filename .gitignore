@@ -21,7 +21,6 @@ vendor/
 !.claude/project-instructions/
 !.claude/settings.json
 
-/.claude-oauth/
 
 /.opencode-profiles/
 
