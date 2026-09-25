@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pre-push preflight for an agent-c chain branch: refuse to push a head that CI will red on arrival.
-# Usage: agentc-preflight-push <branch>   (run from a plain git clone of agent-c whose origin is GitHub, at the head to push)
+# Usage: agentc-preflight-push-chain <branch>   (run from a plain git clone of agent-c whose origin is GitHub, at the head to push)
 #
 # Three checks, each one a defect this chain has already paid for:
 #   1. HEAD merges cleanly onto current origin/main (merge-tree, no checkout).
