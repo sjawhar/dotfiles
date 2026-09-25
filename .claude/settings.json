@@ -6,7 +6,7 @@
   "permissions": {
     "defaultMode": "auto"
   },
-  "model": "fable[1m]",
+  "model": "opus[1m]",
   "hooks": {
     "PostToolUse": [
       {
@@ -20,6 +20,10 @@
       }
     ]
   },
+  "statusLine": {
+    "type": "command",
+    "command": "$HOME/.dotfiles/scripts/claude-statusline"
+  },
   "enabledPlugins": {
     "ralph-loop@claude-plugins-official": true,
     "rust-analyzer-lsp@claude-plugins-official": true,
@@ -30,7 +34,8 @@
     "skill-creator@claude-plugins-official": true,
     "knives@knives": true,
     "sjawhar@sjawhar": true,
-    "claude-envoy-bridge@legion-plugins": true
+    "claude-envoy-bridge@legion-plugins": true,
+    "slack@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "sjawhar": {
@@ -52,8 +57,17 @@
       }
     }
   },
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "xhigh"
+    },
+    "claude-fable-5-1": {
+      "effortLevel": "xhigh"
+    }
+  },
   "fastMode": true,
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
+  "teammateMode": "tmux",
   "skipAutoPermissionPrompt": true
 }
