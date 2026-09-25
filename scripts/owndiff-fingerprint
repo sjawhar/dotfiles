@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# owndiff-fingerprint.sh <repo> <base> <head>
+# Recipe (stated with every number it produces):
+#   file set : git diff --no-renames --name-only <base> <head>, sorted LC_ALL=C
+#   per file : git -c diff.algorithm=myers -c core.quotepath=false diff --no-ext-diff --no-color
+#              --no-renames -U0 <base> <head> -- <path>
+#   normalise: delete lines matching ^@@ (hunk headers) and ^index  (blob ids); keep diff --git,
+#              ---/+++, mode lines, and every +/- content line
+#   hashes   : full = sha256(normalised); plus = sha256(lines ^+ excluding ^+++);
+#              minus = sha256(lines ^- excluding ^---); aggregate = sha256 of the LC_ALL=C-sorted
+#              "<full-sha> <path>" lines
+set -euo pipefail
+repo=$1 base=$2 head=$3
+cd "$repo"
+export LC_ALL=C
+d() { git -c diff.algorithm=myers -c core.quotepath=false diff --no-ext-diff --no-color --no-renames -U0 "$base" "$head" -- "$1" | grep -v -e '^@@' -e '^index ' || true; }
+git -c core.quotepath=false diff --no-renames --name-only "$base" "$head" | sort | while IFS= read -r f; do
+  n=$(d "$f")
+  full=$(printf '%s\n' "$n" | sha256sum | cut -c1-16)
+  plus=$(printf '%s\n' "$n" | grep '^+' | grep -v '^+++' | sha256sum | cut -c1-16 || true)
+  minus=$(printf '%s\n' "$n" | grep '^-' | grep -v '^---' | sha256sum | cut -c1-16 || true)
+  printf '%s %s %s %s\n' "$full" "$plus" "$minus" "$f"
+done > /tmp/fp.$$
+echo "base=$(git rev-parse "$base") head=$(git rev-parse "$head") files=$(wc -l < /tmp/fp.$$) git=$(git --version | cut -d' ' -f3)"
+echo "aggregate=$(awk '{print $1" "$4}' /tmp/fp.$$ | sort | sha256sum | cut -c1-16)"
+cat /tmp/fp.$$
+rm -f /tmp/fp.$$
