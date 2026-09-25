@@ -203,6 +203,9 @@ session_env() {
     # checkout under test does not have.
     e+=(-e "PATH=$DOTFILES_DIR/shims:$DOTFILES_DIR/bin:$HOME/.dotfiles/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:$HOME/.pulumi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     e+=(-e "JJ_CONFIG=$HOME/.config/jj/config.toml:$DOTFILES_DIR/.jjconfig.toml")
+    # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
+    # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
+    e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
     e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
     e+=(-e "ENVOY_URL=http://$NETWORK_GATEWAY:$ENVOY_PORT")
     # Also the inner dockerd's firewall rule (agentbox/entrypoint.sh).
