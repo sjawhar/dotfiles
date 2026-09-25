@@ -16,7 +16,7 @@
       "enabled": true
     },
     "secretsd": {
-      "version": "3.4.2",
+      "version": "3.5.0",
       "enabledFeatures": null,
       "enabled": true
     },
