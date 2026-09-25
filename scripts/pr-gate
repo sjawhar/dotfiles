@@ -73,7 +73,8 @@ echo "verdict artifacts naming $h8 (review bodies + issue comments):"
 rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq ".[]|select(.body|test(\"$h8\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
 cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h8\"))|select(.user.login|test(\"github-actions\")|not)|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
 printf '%s\n%s\n' "$rv" "$cm" | sed '/^$/d'
-[ -z "$rv$cm" ] && { echo "  (none - no verdict at this head)"; fail=1; }
+nohead=0; carry=0
+[ -z "$rv$cm" ] && { echo "  (none names this head - it needs one, or an IDENTICAL carry below)"; nohead=1; }
 # Verdict-bearing artifacts by identity (newest first) on BOTH surfaces - review bodies AND issue comments
 # (self-gating lanes post their halves as comments; a reviews-only read took a superseded review for the
 # newest verdict on #19789, 2026-09-25) - and whether the PR's OWN diff (against its base, per-file patch
@@ -113,9 +114,13 @@ if [ -n "$last" ] && [ "$last" != "$head" ]; then
   # Per file: the SORTED +/- lines, as running-the-merge-queue's verdict row specifies. Raw patch text
   # carries @@ offsets and context lines, and git re-aligns a hunk when main moves beside it, so a clean
   # rebase read CHANGED with no content difference (#20149, 2026-09-25).
-  if cmp -s "$w/last.tsv" "$w/head.tsv"; then echo "PR-own diff IDENTICAL between newest verdict sha ${last:0:8} and head - a confirmation, not a round"; else echo "!! PR-own diff CHANGED since newest verdict sha ${last:0:8}: $(diff "$w/last.tsv" "$w/head.tsv" | awk -F'\t' '/^[<>] /{sub(/^[<>] /,"",$1); print $1}' | sort -u | tr '\n' ' ' | cut -c1-200) -> that verdict does not cover the head"; fail=1; fi
+  if [ ! -s "$w/last.tsv" ] || [ ! -s "$w/head.tsv" ]; then echo "!! could not read the PR-own diff at ${last:0:8} or at the head (compare API returned nothing) - no carry"; fail=1
+  elif cmp -s "$w/last.tsv" "$w/head.tsv"; then echo "PR-own diff IDENTICAL between newest verdict sha ${last:0:8} and head - a confirmation, not a round"; carry=1; else echo "!! PR-own diff CHANGED since newest verdict sha ${last:0:8}: $(diff "$w/last.tsv" "$w/head.tsv" | awk -F'\t' '/^[<>] /{sub(/^[<>] /,"",$1); print $1}' | sort -u | tr '\n' ' ' | cut -c1-200) -> that verdict does not cover the head"; fail=1; fi
   rm -rf "$w"
 fi
+# A head no artifact names is covered only by an IDENTICAL carry from the newest verdict (the queue's
+# carry ruling, 2026-09-25); requiring both made a valid carry read NOT GREEN and forced a confirmation review.
+if [ "$nohead" = 1 ] && [ "$carry" != 1 ]; then echo "  !! no verdict artifact names $h8 and no IDENTICAL carry covers it"; fail=1; fi
 echo "owner trailers: $(api "repos/$repo/pulls/$n/commits" --paginate --jq '[.[]|.commit.message|capture("Omp-Session: (?<s>[0-9a-f-]+)")|.s]|unique|join(",")')"
 echo "e2e line: (not readable from GitHub - state surface, run/log id, head it ran at, what was observed, negative controls; the queue's oracle red-teams it)"
 if [ $fail -eq 0 ]; then echo "GATE READS GREEN at $h8 - packet on these facts"; else echo "GATE NOT GREEN at $h8 - fix what is marked above before packeting"; fi
