@@ -14,6 +14,18 @@
 # It never approves or merges.
 set -euo pipefail
 unset GH_TOKEN GH_CONFIG_DIR GH_REPO 2>/dev/null || true
+# Self-staleness. A lane running a gate out of a checkout that is behind main is how a FIXED gate bug
+# keeps red-ing PRs: on 2026-09-25 the shared ~/.dotfiles sat 30 commits behind on one dirty lockfile,
+# so the digest fix below reached nobody. Compares this file to the LAST-KNOWN main@origin copy and does
+# not fetch, so it costs nothing and a stale local ref can only under-report, never false-alarm.
+_self="${BASH_SOURCE[0]}"; _root=$(cd "$(dirname "$_self")/.." && pwd)
+if [ -d "$_root/.jj" ] && command -v jj >/dev/null 2>&1; then
+  _live=$(jj -R "$_root" --ignore-working-copy file show -r 'main@origin' scripts/pr-gate 2>/dev/null | sha256sum | cut -d" " -f1 || true)
+  _mine=$(sha256sum < "$_self" | cut -d" " -f1)
+  if [ -n "${_live:-}" ] && [ "$_live" != "$_mine" ]; then
+    echo "note: this pr-gate differs from main@origin's copy - a landed fix may be missing here (cd $_root && jj git fetch; advance with 'jj new main@origin' only when @ is empty)"
+  fi
+fi
 repo="${1:?owner/repo}"; n="${2:?PR number}"; want="${3:-}"
 owner="${repo%%/*}"; name="${repo##*/}"
 api() { timeout 30 gh api "$@"; }
@@ -65,7 +77,7 @@ w0=$(mktemp -d)
 api "repos/$repo/pulls/$n/reviews" --paginate --jq '.[]|{t:.submitted_at,u:.user.login,k:"R",b:(.body//"")}' > "$w0/r.jsonl" || true
 api "repos/$repo/issues/$n/comments" --paginate --jq '.[]|select(.user.login|test("github-actions")|not)|{t:.created_at,u:.user.login,k:"C",b:(.body//"")}' > "$w0/c.jsonl" || true
 echo "verdict-bearing artifacts (VERDICT:/APPROVE/APPROVED/MERGE at/REQUEST_CHANGES; reviews + comments), newest first:"
-vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s '[.[]|select(.b|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
+vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s '[.[]|select(.b|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|gsub("[0-9a-f]{41,}";" ")|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
 printf '%s\n' "${vr:-  (none)}"
 # A verdict-bearing artifact is REQUIRED for green (#20167). Distinguish two empties: nothing names the
 # head at all (truly no verdict) vs an artifact NAMES the head but the grammar missed it (a real verdict
@@ -75,7 +87,9 @@ if [ -z "$vr" ]; then
   fail=1
 fi
 # The newest verdict-bearing artifact names its head FIRST; older shas later in the same body are history, not the verdict.
-last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r '[.[]|select(.b|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|last|(.b // "")|[scan("[0-9a-f]{40}")]|first // ""')
+# Strip hex runs of 41+ first: a 64-hex image digest (sha256:556b68...) otherwise yields its first 40 digits as a
+# bogus "verdict sha", the compare 404s, and a PR whose verdicts all hold reports NOT GREEN (sjawhar/legion#1371).
+last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r '[.[]|select(.b|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|last|(.b // "")|gsub("[0-9a-f]{41,}";" ")|[scan("[0-9a-f]{40}")]|first // ""')
 # Verdict POLARITY: green only if the LATEST verdict is not a rejection. Match negative verdicts
 # (REQUEST_CHANGES / CHANGES REQUESTED / DO NOT MERGE) and clean positives (APPROVE/MERGE/LGTM with no
 # negative token in the same artifact); block if the latest negative is not superseded by a later positive.
