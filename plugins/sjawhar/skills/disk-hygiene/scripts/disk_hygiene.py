@@ -1103,6 +1103,32 @@ def _local_stack_workspaces() -> dict[str, str]:
             out[hashlib.sha256(f"{os.getuid()}:{pkg}".encode()).hexdigest()[:16]] = str(c)
     return out
 
+def _docker_daemon_is_box_local() -> bool:
+    """True iff `docker info` reports a box-local daemon. A box's own daemon names itself
+    `agentbox-<id>`; the shared host daemon reports `sami-agents`. A query that fails (timeout,
+    docker absent, non-zero exit) is conservatively NOT box-local."""
+    try:
+        rc, out = run(["docker", "info", "--format", "{{.Name}}"], timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return rc == 0 and out.strip().startswith("agentbox-")
+
+
+def _is_leaked_never_started(box_local: bool, status: str, pid: int, started_at: str, age_h: float, holders: list[Any]) -> bool:
+    """A `created`, never-started container is safe to call leaked only on a box-local daemon,
+    where no other box's container can exist: Pid 0 and a zero StartedAt confirm it never ran,
+    age past 1h rules out a container still in its creation window, and no holders confirm
+    nothing is about to start it."""
+    return (
+        box_local
+        and status == "created"
+        and pid == 0
+        and started_at.startswith("0001-01-01")
+        and age_h > 1
+        and not holders
+    )
+
+
 
 def cmd_containers(_args: argparse.Namespace) -> None:
     """Every container with its family, owner attribution and a liveness verdict.
@@ -1123,6 +1149,16 @@ def cmd_containers(_args: argparse.Namespace) -> None:
                     org.testcontainers.session-id-labelled fixtures of the same id); running = find the
                     client pid through its published port, never remove by hand - it self-reaps.
       agentbox      session infrastructure; never a reaper target.
+      other         no known label/name shape. On a BOX-LOCAL daemon (`docker info --format
+                    '{{.Name}}'` starts with "agentbox-") no other box's container can ever exist,
+                    so a container that is `created`, has State.Pid 0, State.StartedAt at docker's
+                    zero time, is older than 1h, and has no holders is leaked -- it can only be this
+                    box's own dead fixture. On the shared host daemon ("sami-agents") other boxes'
+                    containers are legitimately present, so this row stays unknown regardless of age
+                    or state. Four independent lanes (e2e, env typing, Reaper, agent-c#20033)
+                    rediscovered this same discriminator on 2026-09-25 while chasing the AGENTC-751
+                    fixture-timeout leak, each blocked by a family=other/verdict=unknown row that a
+                    leaked/stranded-only reaper would never remove.
     Labels attribute; they never decide liveness. Verdicts are a report - removal is the apply step's
     judgment with the owner's rules re-checked at that moment.
     """
@@ -1144,6 +1180,7 @@ def cmd_containers(_args: argparse.Namespace) -> None:
     _, ss_out = run(["sudo", "ss", "-tnpH", "state", "established"])
     cwds = proc_cwds()
     stack_ws = _local_stack_workspaces()
+    box_local = _docker_daemon_is_box_local()
     now = time.time()
     result: list[dict[str, Any]] = []
     for d in data:
@@ -1192,6 +1229,8 @@ def cmd_containers(_args: argparse.Namespace) -> None:
             row.update(family="tc-fixture", session_id=labels["org.testcontainers.session-id"])
         elif name.startswith("agentbox-"):
             row.update(family="agentbox", verdict="never")
+        elif _is_leaked_never_started(box_local, status, d["State"].get("Pid", 0), d["State"].get("StartedAt", ""), age_h, holders):
+            row.update(verdict="leaked", reason="box-local daemon, never started")
         result.append(row)
     # A fixture's lifecycle is its ryuk's (testcontainers' only reaper; started first, lives while a
     # client holds its socket, reaps on disconnect). Stranded ryuk -> its fixtures go with it. Ryuk
