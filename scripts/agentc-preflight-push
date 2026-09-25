@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Pre-push preflight for an agent-c chain branch: refuse to push a head that CI will red on arrival.
+# Usage: agentc-preflight-push <branch>   (run from a plain git clone of agent-c whose origin is GitHub, at the head to push)
+#
+# Three checks, each one a defect this chain has already paid for:
+#   1. HEAD merges cleanly onto current origin/main (merge-tree, no checkout).
+#   2. The MERGED tree has exactly one alembic head (main's newest migration may have
+#      moved under the branch since its last merge round -- the 0150/0157 two-heads red).
+#   3. A migration the branch adds carries a number no open PR or main already claims
+#      (the 0164 collision with #20093).
+set -euo pipefail
+branch="${1:?branch}"
+git fetch -q origin main "$branch"
+head=$(git rev-parse HEAD)
+echo "head=$head"
+
+if ! merged=$(git merge-tree --write-tree origin/main "$head" 2>/dev/null); then
+  echo "PREFLIGHT FAIL: HEAD conflicts with origin/main -- merge main into the branch (never rebase a blessed chain) before pushing"
+  exit 1
+fi
+
+versions=platform/tl_platform/src/tl_platform/db/migrations/versions
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+git archive "$merged" "$versions" | tar -x -C "$tmp"
+python3 - "$tmp/$versions" <<'PY'
+import pathlib, re, sys
+
+revisions: dict[str, str] = {}
+parents: set[str] = set()
+for path in pathlib.Path(sys.argv[1]).glob("*.py"):
+    text = path.read_text(encoding="utf-8")
+    revision = re.search(r'^revision\s*=\s*"([^"]+)"', text, re.M)
+    down = re.search(r'^down_revision\s*=\s*"([^"]+)"', text, re.M)
+    if revision:
+        revisions[revision.group(1)] = path.name
+    if down:
+        parents.add(down.group(1))
+heads = sorted(set(revisions) - parents)
+print("alembic heads in merged tree:", heads)
+if len(heads) != 1:
+    print("PREFLIGHT FAIL: the merged tree has", len(heads), "alembic heads")
+    sys.exit(1)
+PY
+
+if git diff --name-only origin/main "$head" -- "$versions" | grep -q .; then
+  echo "branch adds/changes a migration; the repo's own scanner says the next free number is:"
+  uv run --no-project python .github/scripts/next_migration_number.py --repo trajectory-labs-pbc/agent-c | tail -1
+  echo "(a branch number below that line is claimed by main or an open PR -- renumber before pushing)"
+fi
+echo "PREFLIGHT OK"
