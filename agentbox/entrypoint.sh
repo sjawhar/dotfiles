@@ -41,6 +41,19 @@ if ! setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --r
     echo "agentbox: ghcr.io login failed; private image pulls will fail until it is fixed" >&2
 fi
 
+# Docker Hub and dhi.io authenticate through scripts/docker-credential-secretsd,
+# which reads the org's pull-only token from the secrets store when docker asks,
+# so no token for them sits in the box. Merged into the box's config beside the
+# ghcr login; `agentbox doctor` checks the helper answers, because a config that
+# names a missing helper fails every Docker Hub pull, public images included.
+# shellcheck disable=SC2016  # the inner sh expands $HOME and $HELPERS; this shell must not
+if ! setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --reset-env \
+        env HOME="$HOME" PATH="$PATH" \
+        HELPERS='{"dhi.io": "secretsd", "https://index.docker.io/v1/": "secretsd"}' \
+        sh -c 'c="$HOME/.docker/config.json"; mkdir -p "$HOME/.docker" && { [ -s "$c" ] || echo "{}" > "$c"; } && jq --argjson h "$HELPERS" ".credHelpers = ((.credHelpers // {}) + \$h)" "$c" > "$c.tmp" && mv "$c.tmp" "$c"'; then
+    echo "agentbox: docker credHelpers not written; Docker Hub pulls stay anonymous" >&2
+fi
+
 # The session runs as the mounted directories' owner with the launcher's
 # environment intact (setpriv keeps env unless told otherwise).
 exec setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups "$@"
