@@ -1,0 +1,10 @@
+[Unit]
+Description=Prune anonymous Docker volumes that no container references (shared devbox daemon)
+
+# On 2026-09-25 anonymous volumes left by test harnesses and removed containers had piled
+# up to 308 GB unnoticed and taken the shared disk to 91%. No -a: named volumes, and any
+# volume a container references (running or stopped), are kept. Docker prints the total
+# reclaimed to the journal.
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker volume prune -f

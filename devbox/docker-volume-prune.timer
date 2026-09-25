@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 6 h: prune anonymous Docker volumes that no container references
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
