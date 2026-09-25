@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# pr-gate <owner/repo> <N> [expected-head-prefix]
+# Prints a pull request's merge-gate facts straight from GitHub - the reads a merge controller
+# makes on arrival. Run it BEFORE sending a READY packet; paste its output into the packet.
+# It approves and merges nothing; it shows what a merge controller would bounce on:
+#   - unresolved review threads (with the first line of each and whether it says Minor)
+#   - the aggregate check when the repo publishes one (a check named *-result), else every check
+#   - mergeability, draft state, base, the PR's OWN file counts (not a cited upstream diff)
+#   - every review body and issue comment that names the head (verdict artifacts AT HEAD)
+#   - the Omp-Session trailers on the commits (who owns it)
+# Exit 0 = every hard gate reads green (head matches, aggregate success, 0 non-minor unresolved,
+# MERGEABLE, at least one artifact at head). Exit 1 otherwise. It never approves or merges.
+set -euo pipefail
+unset GH_TOKEN GH_CONFIG_DIR GH_REPO 2>/dev/null || true
+repo="${1:?owner/repo}"; n="${2:?PR number}"; want="${3:-}"
+owner="${repo%%/*}"; name="${repo##*/}"
+api() { timeout 30 gh api "$@"; }
+pr=$(api "repos/$repo/pulls/$n" --jq '{head:.head.sha, base:.base.ref, draft:.draft, state:.state, files:.changed_files, add:.additions, del:.deletions, title:.title}')
+head=$(jq -r .head <<<"$pr"); h8=${head:0:8}
+echo "PR $repo#$n :: $(jq -r .title <<<"$pr" | cut -c1-90)"
+echo "head=$head base=$(jq -r .base <<<"$pr") state=$(jq -r .state <<<"$pr") draft=$(jq -r .draft <<<"$pr") files=$(jq -r .files <<<"$pr") +$(jq -r .add <<<"$pr")/-$(jq -r .del <<<"$pr")"
+fail=0
+if [ -n "$want" ] && [[ "$head" != "$want"* ]]; then echo "!! head does not start with $want (packet stale)"; fail=1; fi
+g=$(api graphql -f query="{repository(owner:\"$owner\",name:\"$name\"){pullRequest(number:$n){mergeable mergeStateStatus reviewThreads(first:100){nodes{isResolved isOutdated path comments(first:1){nodes{author{login} createdAt body}}}}}}}")
+echo "mergeable=$(jq -r .data.repository.pullRequest.mergeable <<<"$g")/$(jq -r .data.repository.pullRequest.mergeStateStatus <<<"$g")"
+[ "$(jq -r .data.repository.pullRequest.mergeable <<<"$g")" = "CONFLICTING" ] && fail=1
+unres=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not)]|length' <<<"$g")
+nonminor=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not)|select(.comments.nodes[0].body|test("Minor")|not)]|length' <<<"$g")
+echo "unresolved threads=$unres (non-minor=$nonminor)"
+jq -r '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not)|"  OPEN \(.path) outdated=\(.isOutdated) \(.comments.nodes[0].author.login) \(.comments.nodes[0].createdAt[5:16]) :: \(.comments.nodes[0].body|gsub("\n";" ")|.[0:140])"' <<<"$g"
+[ "$nonminor" -gt 0 ] && fail=1
+# Aggregate check: a repo that publishes one (a check run whose name ends in "-result") is judged on it;
+# otherwise every check at the head must be green and finished.
+agg=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '[.check_runs[]|select(.name|test("-result$"))|.name]|unique|first // ""')
+if [ -n "$agg" ]; then
+  pcr=$(api "repos/$repo/commits/$head/check-runs?check_name=$agg&per_page=5" --jq '[.check_runs[]|"\(.status)/\(.conclusion//"-")"]|first // "none"')
+  echo "$agg=$pcr"; [ "$pcr" = "completed/success" ] || fail=1
+else
+  cs=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '[.check_runs|group_by(.name)[]|max_by(.started_at)]|"ok=\([.[]|select(.conclusion=="success")]|length) fail=\([.[]|select(.conclusion=="failure")]|length) running=\([.[]|select(.status!="completed")]|length) :: failing=\([.[]|select(.conclusion=="failure")|.name]|join(","))"')
+  echo "checks $cs"; grep -q "fail=0 running=0" <<<"$cs" || fail=1
+fi
+echo "verdict artifacts naming $h8 (review bodies + issue comments):"
+rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq ".[]|select(.body|test(\"$h8\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
+cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h8\"))|select(.user.login|test(\"github-actions\")|not)|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
+printf '%s\n%s\n' "$rv" "$cm" | sed '/^$/d'
+[ -z "$rv$cm" ] && { echo "  (none - no verdict at this head)"; fail=1; }
+echo "owner trailers: $(api "repos/$repo/pulls/$n/commits" --paginate --jq '[.[]|.commit.message|capture("Omp-Session: (?<s>[0-9a-f-]+)")|.s]|unique|join(",")')"
+echo "e2e line: (not readable from GitHub - state surface, run/log id, head it ran at, what was observed, negative controls; the queue's oracle red-teams it)"
+if [ $fail -eq 0 ]; then echo "GATE READS GREEN at $h8 - packet on these facts"; else echo "GATE NOT GREEN at $h8 - fix what is marked above before packeting"; fi
+exit $fail
