@@ -55,6 +55,12 @@ Avoid:
   ban the "that is our mistake, not yours", "that's on us, not you", and all other stupid
   variations.* The pattern to reach for instead is his: one "sorry for" clause, the plain cause
   in a few words, done. No contrast, no reassurance, no second sentence.
+- A change note. A message announcing a changed rule or tool carries the action the reader must
+  take and any consequence they would not guess, and nothing else: no background, no history, no
+  restatement of what changed in the code. Sami, 2026-09-25, on a three-paragraph #dpi-eval
+  rule-change draft: *"Post it as me - Nobody really needs to know this unless they need to pull
+  the latest code. Don't drown them in AI slop."* It went out as four sentences. A periodic digest
+  is a different instrument and can carry context; a rule change is a to-do.
 - Over-explaining. A transactional message to a candidate or contractor (an outcome, a payment,
   a schedule) carries only what the reader needs in order to act. Not the causal story of what
   went wrong on our side, not reassurance that their payment "is not affected", not an
