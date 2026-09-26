@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tmux-resurrect post-save-layout hook: save omp panes as `omp --resume <id>`.
+"""tmux-resurrect post-save-layout hook: save omp panes as resumable commands.
 
 resurrect records each pane's command as the shell's child argv, which for omp
 is the resolved mise binary path plus whatever flags it was started with —
@@ -9,12 +9,23 @@ Restoring that would start a new session, not the one that was running.
 The omp TUI holds its current session file open, so the running session is
 read from the process's fd table: ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl.
 That is true whichever way the session was entered (fresh, --resume, -c, or the
-in-app picker). Each omp pane line is rewritten to `omp --resume <id>`, which
-`@resurrect-processes '"~omp --resume"'` then restores.
+in-app picker). Each omp pane line is rewritten to a command that resumes that
+session where it was running:
 
-Invoked by resurrect with the save file path; panes whose session cannot be
-determined (omp still starting, process gone) are left as written and come back
-as a shell in the same directory.
+- a pane running omp on the host becomes `omp --resume <id>`;
+- a pane running `agentbox new <repo>` (scripts/agentbox) shows the launcher
+  as its command; the omp process lives in the box under another uid, so it is
+  found by asking each box for omp processes whose TMUX_PANE names this pane,
+  and the line becomes `agentbox new <repo> omp --resume <id>`. The repo is read
+  from the session file's own directory bucket (a box works in
+  ~/boxes/<box>/<repo>, so the bucket is `-boxes-<box>-<repo>`); the launcher
+  makes a fresh box and workspace on resume, and omp relocates the session
+  file into its bucket.
+
+`@resurrect-processes` in .tmux.conf lists both shapes. Invoked by resurrect
+with the save file path; panes whose session cannot be determined (omp still
+starting, process gone) are left as written and come back as a shell in the
+same directory.
 """
 
 from __future__ import annotations
@@ -26,26 +37,47 @@ import sys
 from pathlib import Path
 
 SESSION_FILE = re.compile(
-    r"/\.omp/agent/sessions/[^/]+/"
-    r"\d{4}-\d{2}-\d{2}T[0-9-]+Z_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
+    r"/\.omp/agent/sessions/(?P<bucket>[^/]+)/"
+    r"\d{4}-\d{2}-\d{2}T[0-9-]+Z_(?P<sid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
 RESUME_ARG = re.compile(r"(?:^|\s)(?:--resume|-r)[=\s]+([0-9a-f-]{36})(?:\s|$)")
+# A pane whose foreground process is a box session. resurrect records the pane
+# leader's argv: the launcher itself (`bash /…/scripts/agentbox new …`, since
+# it waits on `docker run` to run the close phase rather than exec-ing it), a
+# `agentbox new <repo> omp --resume <id>` line, or the exec client naming the box.
+BOX_PANE = re.compile(r"(?:^|[\s/])agentbox(?:\s+new(?:\s|$)|-[^\s]+)")
 MAX_DEPTH = 4
 MAX_PROCESSES = 32
 FIELD_SEP = "\t"
 
+# Run inside a box: every omp process's pane id and open session files.
+BOX_SESSIONS_SCRIPT = r"""
+for p in $(pgrep -x omp); do
+  pane="$(tr '\0' '\n' < /proc/$p/environ 2>/dev/null | sed -n 's/^TMUX_PANE=//p')"
+  [ -n "$pane" ] || continue
+  for fd in /proc/$p/fd/*; do
+    t="$(readlink "$fd" 2>/dev/null)" || continue
+    case "$t" in
+      */.omp/agent/sessions/*.jsonl)
+        printf '%s\t%s\t%s\n' "$pane" "$(stat -c %Y "$t" 2>/dev/null || echo 0)" "$t" ;;
+    esac
+  done
+done
+"""
 
-def pane_pids() -> dict[tuple[str, str, str], int]:
+
+def panes() -> dict[tuple[str, str, str], tuple[int, str]]:
+    """(session, window, pane_index) -> (pane pid, pane id)."""
     out = subprocess.run(
         ["tmux", "list-panes", "-a", "-F",
-         "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}"],
+         "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_id}"],
         check=True, capture_output=True, text=True,
     ).stdout
-    pids: dict[tuple[str, str, str], int] = {}
+    result: dict[tuple[str, str, str], tuple[int, str]] = {}
     for line in out.splitlines():
-        session, window, pane, pid = line.split(FIELD_SEP)
-        pids[(session, window, pane)] = int(pid)
-    return pids
+        session, window, pane, pid, pane_id = line.split(FIELD_SEP)
+        result[(session, window, pane)] = (int(pid), pane_id)
+    return result
 
 
 def children(pid: int) -> list[int]:
@@ -106,11 +138,11 @@ def open_session(pid: int) -> str | None:
         except OSError:
             mtime = 0.0
         if best is None or mtime > best[0]:
-            best = (mtime, m.group(1))
+            best = (mtime, m.group("sid"))
     return best[1] if best else None
 
 
-def session_for(pane_pid: int, full_command: str) -> str | None:
+def host_session_for(pane_pid: int, full_command: str) -> str | None:
     omp = find_omp(pane_pid)
     if omp is not None:
         sid = open_session(omp)
@@ -120,8 +152,55 @@ def session_for(pane_pid: int, full_command: str) -> str | None:
     return m.group(1) if m else None
 
 
+# The bucket a boxed session lives in: `-boxes-agentbox-<12 hex>-<repo>`.
+BOX_BUCKET = re.compile(r"^-boxes-agentbox-[0-9a-f]{12}-(?P<repo>.+)$")
+
+
+def box_sessions() -> dict[str, tuple[str, str]]:
+    """pane id -> (repo, session id) for every omp running in any agentbox."""
+    boxes = subprocess.run(
+        ["docker", "ps", "--filter", "name=^agentbox-", "--format", "{{.Names}}"],
+        capture_output=True, text=True, timeout=10,
+    ).stdout.split()
+    best: dict[str, tuple[float, str, str]] = {}
+    for box in boxes:
+        # A wedged box must not stall every autosave (resurrect runs this hook inline).
+        try:
+            out = subprocess.run(
+                ["docker", "exec", box, "sh", "-c", BOX_SESSIONS_SCRIPT],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+        except subprocess.TimeoutExpired:
+            print(f"tmux-resurrect-omp: {box} did not answer within 10s; its panes are left as saved",
+                  file=sys.stderr)
+            continue
+        for line in out.splitlines():
+            parts = line.split(FIELD_SEP, 2)
+            if len(parts) != 3:
+                continue
+            pane_id, mtime, target = parts
+            m = SESSION_FILE.search(target)
+            if not m:
+                continue
+            bucket = BOX_BUCKET.match(m.group("bucket"))
+            if not bucket:
+                # A session started outside a box (resumed into one from a
+                # mounted directory): resurrect cannot name its repo.
+                continue
+            current = best.get(pane_id)
+            if current is None or float(mtime) > current[0]:
+                best[pane_id] = (float(mtime), bucket.group("repo"), m.group("sid"))
+    return {pane: (repo, sid) for pane, (_, repo, sid) in best.items()}
+
+
+
+def resume_command(repo: str | None, sid: str) -> str:
+    return f"agentbox new {repo} omp --resume {sid}" if repo else f"omp --resume {sid}"
+
+
 def rewrite(save_file: Path) -> tuple[int, int]:
-    pids = pane_pids()
+    pane_map = panes()
+    boxed: dict[str, tuple[str, str]] | None = None
     lines = save_file.read_text().split("\n")
     rewritten = 0
     omp_panes = 0
@@ -129,16 +208,30 @@ def rewrite(save_file: Path) -> tuple[int, int]:
         # pane \t session \t window \t window_active \t flags \t pane_index
         #      \t title \t dir \t pane_active \t command \t :full_command
         fields = line.split(FIELD_SEP, 10)
-        if len(fields) != 11 or fields[0] != "pane" or fields[9] != "omp":
+        if len(fields) != 11 or fields[0] != "pane":
+            continue
+        command, full_command = fields[9], fields[10][1:]
+        is_box = BOX_PANE.search(full_command) is not None
+        if command != "omp" and not is_box:
             continue
         omp_panes += 1
-        pane_pid = pids.get((fields[1], fields[2], fields[5]))
-        if pane_pid is None:
+        located = pane_map.get((fields[1], fields[2], fields[5]))
+        if located is None:
             continue
-        sid = session_for(pane_pid, fields[10][1:])
-        if sid is None:
-            continue
-        fields[10] = f":omp --resume {sid}"
+        pane_pid, pane_id = located
+        repo: str | None = None
+        if is_box:
+            if boxed is None:
+                boxed = box_sessions()
+            found = boxed.get(pane_id)
+            if found is None:
+                continue
+            repo, sid = found
+        else:
+            sid = host_session_for(pane_pid, full_command)
+            if sid is None:
+                continue
+        fields[10] = ":" + resume_command(repo, sid)
         lines[i] = FIELD_SEP.join(fields)
         rewritten += 1
     tmp = save_file.with_suffix(save_file.suffix + ".tmp")

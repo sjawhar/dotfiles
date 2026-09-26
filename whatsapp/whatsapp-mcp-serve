@@ -1,0 +1,25 @@
+#!/bin/bash
+set -euo pipefail
+
+MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+export MISE_AUTO_INSTALL=0
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+
+# The daemon owns the paired WhatsApp session (state under
+# ~/.local/share/whatsapp-mcp) and serves MCP over HTTP on loopback only:
+# clients on this machine reach it through `whatsapp-mcp --connect`
+# (registered in ~/.omp/agent/.mcp.json by installers/whatsapp.sh), and
+# nothing on the LAN or tailnet can. The bearer key is
+# the sops-managed WHATSAPP_MCP_SECRET, agent-tier, so `secrets` resolves it
+# without a YubiKey touch and this works from a user unit. The binary reads
+# it as MCP_API_KEY.
+#
+# ENVOY_URL is deliberately unset: with it, every incoming message is
+# published onto the Envoy NATS bus, which today has no authentication and
+# is reachable by every tailnet member.
+#
+# Voice notes are transcribed through Groq's Whisper endpoint with the
+# agent-tier GROQ_API_KEY; the binary reads it as WHISPER_API_KEY.
+export WHISPER_API_URL="https://api.groq.com/openai/v1/audio/transcriptions"
+exec "$MISE" exec -- secrets WHATSAPP_MCP_SECRET GROQ_API_KEY -- \
+    bash -c 'MCP_API_KEY="$WHATSAPP_MCP_SECRET" WHISPER_API_KEY="$GROQ_API_KEY" exec whatsapp-mcp --http --host 127.0.0.1 --port 3456'

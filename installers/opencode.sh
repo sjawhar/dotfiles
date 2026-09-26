@@ -18,11 +18,12 @@ fi
 ensure_vendor https://github.com/anthropics/skills.git anthropic-skills
 # Our fork of compound-engineering: `sami` branch = the compound-engineering-v*
 # release tag plus fork-local patches (ce-simplify-code reviews on top-tier
-# GPT agents, not the Sonnet class). Pinned to a commit on that branch. Bump:
+# GPT agents, not the Sonnet class; ce-babysit-pr's pr-snapshot reads a PR
+# stack its token cannot see as no stack). Pinned to a commit on that branch. Bump:
 # rebase `sami` onto the new tag in the vendor checkout, push, re-pin here;
 # check every omp/config.yml skills.ignoredSkills name (and the skip list
 # below) still exists upstream, and diff the skill set for new arrivals.
-ensure_vendor https://github.com/sjawhar/compound-engineering-plugin.git compound-engineering 24653aacb5cc881129725106769b9e1385585ec5
+ensure_vendor https://github.com/sjawhar/compound-engineering-plugin.git compound-engineering b4adb2f0312d2e61f9168b3b5bbef8d95c75382a
 if [ -d "${DOTFILES_DIR}/vendor/compound-engineering/.git" ]; then
     git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote get-url upstream &>/dev/null || \
         git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote add upstream https://github.com/EveryInc/compound-engineering-plugin.git
@@ -57,7 +58,29 @@ ensure_link "${DOTFILES_DIR}/vendor/sentry-for-ai/skills/sentry-python-sdk"     
 for stale in "${HOME}/.claude/skills/sentry-for-ai"/*; do
     [ -L "$stale" ] && [ "$(basename "$stale")" != "sentry-python-sdk" ] && rm "$stale"
 done
-ensure_link "${DOTFILES_DIR}/vendor/ghost-wispr/.opencode/skills"                 "${HOME}/.claude/skills/ghost-wispr"
+# Optional vendor checkout: link only when present, and clear a stale link.
+if [ -d "${DOTFILES_DIR}/vendor/ghost-wispr/.opencode/skills" ]; then
+    ensure_link "${DOTFILES_DIR}/vendor/ghost-wispr/.opencode/skills"             "${HOME}/.claude/skills/ghost-wispr"
+elif [ -L "${HOME}/.claude/skills/ghost-wispr" ]; then
+    rm "${HOME}/.claude/skills/ghost-wispr"
+fi
+
+# agent-c skills required by instructions that apply outside agent-c. Per-skill,
+# never the pool. Two links: ~/.claude/skills for OpenCode (Claude Code reads
+# $CLAUDE_CONFIG_DIR/skills), ~/.omp/skill-farms for OMP, which reads only
+# skills-sources.json paths.
+AGENT_C_GLOBAL_SKILLS="${HOME}/src/agent-c/.claude/skills"
+OMP_AGENT_C_FARM="${HOME}/.omp/skill-farms/agent-c"
+for global_skill in maintaining-inspect; do
+    if [ -d "${AGENT_C_GLOBAL_SKILLS}/${global_skill}" ]; then
+        ensure_link "${AGENT_C_GLOBAL_SKILLS}/${global_skill}"                   "${HOME}/.claude/skills/${global_skill}"
+        mkdir -p "${OMP_AGENT_C_FARM}"
+        ensure_link "${AGENT_C_GLOBAL_SKILLS}/${global_skill}"                   "${OMP_AGENT_C_FARM}/${global_skill}"
+    else
+        [ -L "${HOME}/.claude/skills/${global_skill}" ] && rm "${HOME}/.claude/skills/${global_skill}"
+        [ -L "${OMP_AGENT_C_FARM}/${global_skill}" ] && rm "${OMP_AGENT_C_FARM}/${global_skill}"
+    fi
+done
 
 # Checkout-backed team skill pools for OpenCode only (linked only on machines
 # that have the checkout). OMP gets these via skills-sources.json ompSkillsDir

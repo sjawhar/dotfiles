@@ -1,5 +1,9 @@
 providers:
   anthropic:
+    # Universal catalog patches only. Anything that targets one machine's network
+    # or credentials — a gateway baseUrl, an `!command` apiKey — is machine-local
+    # and belongs in omp/models.local.yml (gitignored); installers/omp.sh merges
+    # that file over this one and writes the result to ~/.omp/agent/models.yml.
     modelOverrides:
       # Installed pi-catalog is stale: claude-opus-5 supports xhigh per Anthropic docs
       # (https://platform.claude.com/docs/en/build-with-claude/effort - "Claude Opus 5
