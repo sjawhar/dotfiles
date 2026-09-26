@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# pr-gate-corpus - standing regression for pr-gate's verdict matcher. Runs offline against synthetic bodies.
+# Extracts the LIVE grammar (GR), polarity sets (POS/NEG), code-span strip (VS) and verdict-sha scan from
+# scripts/pr-gate, so a drift in the script fails here, not on a real PR. Exit 1 on any failing case.
+#
+# Every shape below was a real event on 2026-09-25/26: a false green, a false block, or a restatement round.
+# Add a row when the matcher gets a new form or a new hole; the row IS the fix's acceptance.
+set -uo pipefail
+F="${PR_GATE:-$(dirname "$(readlink -f "$0")")/pr-gate}"
+VS=$(grep -oP "^VS='\K.*(?=')" "$F"); POS=$(grep -oP "^POS='\K.*(?=')" "$F"); NEG=$(grep -oP "^NEG='\K.*(?=')" "$F")
+# The grammar lives inside three identical jq string literals; lift the first and un-escape jq's \\ -> \.
+GR=$(grep -oP 'select\(\.b\|vs\|test\("\K\(\?i:verdict:.*?(?="\)\)\]\|sort_by\(\.t\)\|reverse)' "$F" | head -1 | sed 's/\\\\/\\/g')
+SCAN=$(grep -oP '^last=.*?\[scan\("\K[^"]*(?="\)\]\|first)' "$F" | sed 's/\\\\/\\/g')
+[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$SCAN" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} SCAN=${#SCAN})"; exit 2; }
+fail=0; n=0
+# t <expected> <body>   expected = "g=<grammar> p=<positive> n=<negative> sha=<verdict sha (only when g=true) or ->"
+t() { local exp="$1" body="$2"; n=$((n+1))
+  got=$(jq -n --arg b "$body" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" --arg sc "$SCAN" "$VS"'($b|vs) as $v | "g=\($v|test($gr)) p=\($v|test($pos)) n=\($v|test($neg)) sha=\(if ($v|test($gr)) then (($v|gsub("[0-9a-f]{41,}";" ")|[scan($sc)]|first) // "-") else "-" end)"' -r)
+  if [ "$got" = "$exp" ]; then echo "PASS $got :: ${body:0:72}"; else echo "FAIL got [$got] want [$exp] :: ${body:0:72}"; fail=1; fi; }
+H=486fc48e0629a1b2c3d4e5f60718293a4b5c6d7e
+echo "== positives at head =="
+t "g=true p=true n=false sha=486fc48e"   "VERDICT: APPROVE at 486fc48e ($H)"
+t "g=true p=true n=false sha=486fc48e"   "MERGE 486fc48e — extends my 143425f5 review. The one nit I raised is now taken"
+t "g=true p=true n=false sha=188327f0"   "**ACCEPT at 188327f0.** GraphQL at this head reads threads=3 unresolved=0"
+t "g=true p=true n=false sha=$H"         "Verdict: ACCEPT ($H) - delta read"
+t "g=true p=true n=false sha=-"          "**Verdict: clean — the delta is exactly as described**"
+t "g=true p=true n=false sha=a96869d"    'Reviewed `a96869d` (`a96869d5b02f9a367d1414eb6a3d2e0ba58b1f3e`): **clean, no findings.** [Run](https://x/actions/runs/1)'
+t "g=true p=true n=false sha=$H"         "Merge-decision review. Verdict: MERGE at $H. Everything below was re-derived from a clean extraction"
+echo "== the verdict sha is the FIRST short-or-long sha, not the first 40-hex (hawk pin df0e9892 on #20186) =="
+t "g=true p=true n=false sha=00473e0f"   "Verdict: APPROVE at 00473e0f ## Code review, round 7: #20186 at 00473e0f. Scope: the pin to hawk df0e989212345678901234567890abcdefabcdef"
+t "g=true p=true n=false sha=$H"         "APPROVE at $H (image digest sha256:556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa)"
+echo "== negatives / rejections =="
+t "g=true p=false n=true sha=433fa449"   "VERDICT: CHANGES REQUESTED at 433fa449 - two claims disproved"
+t "g=true p=false n=true sha=188327f0"   "Verdict: REJECT at 188327f0 - the accept criteria are unmet"
+t "g=true p=false n=true sha=9edad355"   "Verdict: HOLD at 9edad355 - alarm text > 1024 chars"
+t "g=true p=false n=true sha=b2183a5f"   "VERDICT: BLOCK at b2183a5f -- NEW-6 from the body claims"
+t "g=true p=false n=true sha=-"          "Verdict: FAIL — the migration guard does not fire"
+echo "== neutral: grammar but no polarity -> pr-gate fails closed (PASS is a tester half, #20200) =="
+t "g=true p=false n=false sha=36ae1e27"  "Verdict: PASS at 36ae1e27 (tester run)"
+echo "== NOT verdicts: requests, replies, prose, quoted grammar =="
+t "g=false p=false n=false sha=-"        "Please accept or reject the round at your convenience - ask the reviewer to accept or reject"
+t "g=false p=false n=false sha=-"        "Accepted: fixed in 188327f0 (thread reply, not a verdict)"
+t "g=false p=false n=false sha=-"        "Reviewer: please restate as \`ACCEPT at 188327f0\` so the gate line goes green"
+t "g=false p=false n=false sha=-"        "Head stable since 09:30Z; ready to merge 486fc48e once pcr settles green"
+t "g=false p=false n=false sha=-"        "please merge 486fc48e when you can - author"
+t "g=false p=false n=false sha=-"        $'Re-cite requested.\n  merge conflict at 486fc48e resolved by rebase'
+t "g=false p=false n=false sha=-"        "Reviewer: post \`MERGE 486fc48e\` as the first line"
+t "g=false p=false n=false sha=-"        "@claude review  Delta since your verdict at 1d64f1ca: one commit, $H"
+echo "== a later-line bare VERB <sha> is NOT a verdict (first-line rule; jq ^ is string start) =="
+t "g=false p=false n=false sha=-"        $'Some preamble line\nMERGE 486fc48e\nmore text'
+echo; echo "$n cases, fail=$fail"; exit $fail

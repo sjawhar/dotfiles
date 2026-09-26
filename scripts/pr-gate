@@ -131,9 +131,12 @@ if [ -z "$vr" ]; then
   fail=1
 fi
 # The newest verdict-bearing artifact names its head FIRST; older shas later in the same body are history, not the verdict.
+# The verdict sha is the FIRST hex run of 7-40 that contains a letter (a short sha in the verdict line counts; pure digits are
+# comment/run ids): #20186's round-7 verdict said "APPROVE at 00473e0f" but its first 40-hex was the HAWK commit being pinned
+# (df0e9892, not in agent-c), so the carry compared against a foreign sha and read a false CHANGED (2026-09-26 13:31Z).
 # Strip hex runs of 41+ first: a 64-hex image digest (sha256:556b68...) otherwise yields its first 40 digits as a
 # bogus "verdict sha", the compare 404s, and a PR whose verdicts all hold reports NOT GREEN (sjawhar/legion#1371).
-last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|last|(.b // "")|vs|gsub("[0-9a-f]{41,}";" ")|[scan("[0-9a-f]{40}")]|first // ""')
+last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|last|(.b // "")|vs|gsub("[0-9a-f]{41,}";" ")|[scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first // ""')
 # Verdict POLARITY: green only if the LATEST verdict is not a rejection. Match negative verdicts
 # (REQUEST_CHANGES / CHANGES REQUESTED / DO NOT MERGE) and clean positives (APPROVE/MERGE/LGTM with no
 # negative token in the same artifact); block if the latest negative is not superseded by a later positive.
@@ -158,7 +161,7 @@ post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$P
 if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
 if [ -n "$vr" ] && [ -z "$negt" ] && [ -z "$post" ]; then echo "  !! verdict grammar found but its polarity is in NEITHER set (not APPROVE/MERGE/LGTM/clean, not a rejection) - READ it; PASS alone is a review half or a tester run, not a merge authorization (#20200, #20291)"; fail=1; fi
 rm -rf "$w0"
-if [ -n "$last" ] && [ "$last" != "$head" ]; then
+if [ -n "$last" ] && [[ "$head" != "$last"* ]]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
   api "repos/$repo/compare/$base...$last" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/last.tsv" || true
   api "repos/$repo/compare/$base...$head" --jq '.files[]|"\(.filename)\t\(.additions)\t\(.deletions)\t\(.patch // "" | split("\n") | map(select(test("^[+-]"))) | sort | join("\n") | @json)"' | sort > "$w/head.tsv" || true
