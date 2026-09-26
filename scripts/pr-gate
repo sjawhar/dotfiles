@@ -36,6 +36,10 @@ owner="${repo%%/*}"; name="${repo##*/}"
 api() { timeout 30 gh api "$@"; }
 pr=$(api "repos/$repo/pulls/$n" --jq '{head:.head.sha, base:.base.ref, draft:.draft, state:.state, files:.changed_files, add:.additions, del:.deletions, title:.title}')
 head=$(jq -r .head <<<"$pr"); h8=${head:0:8}
+# MATCH on 7 chars, DISPLAY 8: git's default abbreviation is 7, and a reviewer who cited the head
+# that way read as "no verdict names the head" - three clean re-cites lost to it (2026-09-26).
+# Any longer citation contains the 7-char prefix, so one needle covers 7, 8, 12 and 40.
+h7=${head:0:7}
 echo "PR $repo#$n :: $(jq -r .title <<<"$pr" | cut -c1-90)"
 echo "head=$head base=$(jq -r .base <<<"$pr") state=$(jq -r .state <<<"$pr") draft=$(jq -r .draft <<<"$pr") files=$(jq -r .files <<<"$pr") +$(jq -r .add <<<"$pr")/-$(jq -r .del <<<"$pr")"
 fail=0
@@ -86,8 +90,8 @@ if [ -n "$prev" ]; then
   fi
 fi
 echo "verdict artifacts naming $h8 (review bodies + issue comments):"
-rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq ".[]|select(.body|test(\"$h8\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
-cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h8\"))|select(.user.login|test(\"github-actions\")|not)|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
+rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq ".[]|select(.body|test(\"$h7\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
+cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h7\"))|select(.user.login|test(\"github-actions\")|not)|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
 printf '%s\n%s\n' "$rv" "$cm" | sed '/^$/d'
 nohead=0; carry=0
 [ -z "$rv$cm" ] && { echo "  (none names this head - it needs one, or an IDENTICAL carry below)"; nohead=1; }
@@ -109,7 +113,7 @@ printf '%s\n' "${vr:-  (none)}"
 # The head-naming list above and the grammar list are separate reads; green needs ONE artifact doing both. A lane's
 # "please re-verdict at <head>" names the head, an older verdict carries the grammar, and together they read GREEN
 # with no verdict at the head (agent-c#20214 and a second lane, 2026-09-26). No such artifact -> needs an IDENTICAL carry.
-vh=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg h "$h8" "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))|select(.b|test($h))]|length')
+vh=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg h "$h7" "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))|select(.b|test($h))]|length')
 if [ -n "$vr" ] && [ "$nohead" = 0 ] && [ "${vh:-0}" = 0 ]; then echo "  (artifacts name $h8 and others carry verdict grammar, but none does both - a request or note naming the head is not a verdict)"; nohead=1; fi
 # A verdict-bearing artifact is REQUIRED for green (#20167). Distinguish two empties: nothing names the
 # head at all (truly no verdict) vs an artifact NAMES the head but the grammar missed it (a real verdict
