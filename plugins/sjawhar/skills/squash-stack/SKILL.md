@@ -19,6 +19,21 @@ No new branch and no new PR: the stack's top PR becomes the consolidated PR.
   the owning branch and `gh stack rebase --upstack` first.
 - The sdd command's smoke-test phase and final review pass are clean.
 
+## Grouping has a CI cost — do not leave a stack grouped while you are still pushing to it
+
+A PR inside a GitHub **native stack** (`gh stack link`) receives NO `github-actions` check suites on
+`synchronize` or `labeled`. Measured twice on 2026-09-26: #20282 (pushes at 08:29Z and 08:59Z, label
+lever at 09:07Z) and #20138 (push at 05:31Z) sat with zero suites while unrelated PRs ran normally,
+and #20282's own pre-grouping push at 05:19Z HAD run. `gh stack unstack <n>` — which removes tracking
+only, touching no branch and no base — brought `PR Checks queued` back within 30 seconds on both heads.
+The mechanism is not known; only the behaviour is measured, so treat this as a reproducible symptom
+rather than a settled cause.
+
+So the bases carry the order, not the grouping: leave the stack UNGROUPED while it is being worked, name
+each PR's base explicitly in its packet, and group only at merge time if your merge tooling needs it.
+If a stack you did not create is missing CI, check for grouping before re-running anything — a re-run
+cannot produce a suite that the event never created.
+
 ## Collapsing the stack
 
 1. **Read the stack's shape** — trunk, the branches in order, the top branch and its PR:

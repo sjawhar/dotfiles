@@ -88,11 +88,11 @@ Fine for short messages with light formatting. For lists, literal `•` / `◦` 
 
 ### Path 3 — `content_type: "text/markdown"` (AVOID for structured messages)
 
-Do not use content_type text/markdown for structured messages — the converter splits every element into separate blocks (80-char wraps, lost formatting); use blocks instead.
+Do not use content_type text/markdown for structured messages — the converter splits every element into separate blocks (80-char wraps, lost formatting); use blocks instead. Paragraph breaks do not survive it either. On 2026-09-25 two lanes posted multi-paragraph messages through `conversations_add_message`, one via `text/markdown`, and read them back through the raw API: every paragraph break had become a single space. A message with more than one paragraph goes as `blocks`, one `rich_text_section` per paragraph.
 
 ## Inspecting message structure
 
-The MCP `conversations_history` response strips Block Kit structure to a flat text representation. To see the actual block JSON (for replicating a hand-edited message), use Slack's API directly — this is debug-only, not the send path:
+The MCP `conversations_history` response strips Block Kit structure to a flat text representation. It also collapses newlines, so it cannot show that a posted message lost its paragraph breaks: both lanes above read theirs back through the MCP and saw nothing wrong. After posting anything multi-paragraph, read it back with the call below using `.messages[0].text` and count the newlines. Fix a damaged message in place with `chat.update`, which keeps its reactions and thread. To see the actual block JSON (for replicating a hand-edited message), use Slack's API directly — this is debug-only, not the send path:
 
 ```bash
 secrets SLACK_MCP_XOXP_TOKEN -- sh -c 'curl -s "https://slack.com/api/conversations.history?channel=$CH&latest=$TS&oldest=$TS&inclusive=true&limit=1" -H "Authorization: Bearer $SLACK_MCP_XOXP_TOKEN"' \
