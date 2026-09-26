@@ -34,6 +34,8 @@ Ownership is measured, like liveness:
 - **Where it lives.** An agent box holds one session, so a path inside yours (`~/boxes/<your box>/`, the box's own `/tmp`) was made by you or by a subagent you spawned. A session running directly on the host has no such boundary, so every path takes the next test.
 - **What created it.** For any other path (the shared jj store, a host-mounted home directory, anything a host session made), find the creating command in your own or your subagents' transcripts: a `jj workspace add`, a clone or `mktemp` into it, a write under it. `session-attribution` gives the transcript paths. A path no transcript of yours names is not yours, whatever it is called: say so to whoever asked, and leave it.
 
+A CORE DUMP IS EVIDENCE BEFORE IT IS SPACE. `core_pattern` is often a bare `core`, so a multi-gigabyte core lands in the crashing process's working directory - a checkout root, where it reads as junk under disk pressure. Identify it before removing it: `file core` names the binary, and `gdb -batch -ex bt core` gives the stack. One lane deleted a 4.2 GiB core it had read as build residue, and only afterwards worked out it was its own harness crashing during a restart - which had also left that session's supervisor socket dead. Inside a box `dmesg` and `journalctl` are unreadable, so the deleted core was the only evidence (2026-09-26). A core whose timestamp matches a restart is not the last tool you happened to run.
+
 The sweep's two gates still hold for your own paths: no live process standing in one (`disk_hygiene.py procs`), and no content that exists only on disk.
 
 ## Pacing (applies to every phase)
