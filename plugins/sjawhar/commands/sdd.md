@@ -36,9 +36,10 @@ Plan the full request. Divide parallel work only into disjoint ownership units a
 Every plan includes:
 
 - `## Hardening ledger`, initially empty.
-- `## End-to-end verification plan`, with one scenario per deliverable: the real user/operator surface; the existing end-to-end driver and its location; a reusable driver task when none exists; and, for a required shared or costly resource, the cheapest genuine substitute (for example staging or a branch run).
+- `## End-to-end verification plan`, with one scenario per deliverable: the real user/operator surface, driven as the identity that holds it in production (a human-facing surface is accepted through a human's own grant path at least once; a run as a test or machine identity alone proves the route, not that anyone can reach it); the existing end-to-end driver and its location; a reusable driver task when none exists; and, for a required shared or costly resource, the cheapest genuine substitute (for example staging or a branch run).
 - `## Skill catalog`, mapping each step to the skills its worker is required to load (see above).
 - `## Contract change census`, for any step that tightens a boundary (a new refusal, a newly required field, a removed or renamed field, or a changed signature at a process or package boundary): the search commands, every hit with its planned disposition, and the rollout line, in the form `opening-a-pr` requires of the PR body.
+- `## Permission source census`, for any step that introduces or widens a permission, role, scope, or capability flag: each one named with its holder in every environment it ships to (the group, machine profile, role binding, or seed that grants it, and the enforcement point that reads it), plus the test that fails when a permission has no holder. "Granted by hand" is not a source, and a permission whose only holder is a test identity is unreachable in production; a plan that says either is not gated (Sami, 2026-09-26, after Release 1 of the hiring lifecycle shipped `hiring.read` and `hiring.manage` with no human holder, so the People page rendered Not found for everyone in production and every acceptance driver had passed as a machine identity).
 
 Plan verification describes a user-observable outcome. A reviewer rejects missing, proxy-only, or internal-only verification paths.
 
