@@ -591,11 +591,27 @@ cmd_doctor() {
     exit 1
 }
 
+# The box-side half, run against THIS box instead of a throwaway one. `agentbox doctor` is a host
+# command: from inside a box it fails the host probes (sysbox runtime, session bus, the IMDS
+# forwarder's bind) that describe the caller's vantage rather than the box, and exits before the
+# block it execs into a box — so the one tool that detects a box's own defects could not be run by
+# the sessions that have them. Four sessions read those FAILs as their own box's health on
+# 2026-09-26 while hunting a docker-credential defect this block reports directly.
+cmd_doctor_here() {
+    [[ -n "${AGENTBOX_BOX:-}" ]] || die "doctor --here runs INSIDE a box; on the host run 'agentbox doctor'"
+    local out fails
+    out="$(bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+    grep -vE '^@' <<<"$out"
+    fails="$(grep -c '^FAIL ' <<<"$out" || true)"
+    (( fails == 0 )) && { echo "agentbox doctor ($AGENTBOX_BOX): all box checks passed"; exit 0; }
+    echo "agentbox doctor ($AGENTBOX_BOX): $fails check(s) failed" >&2
+    exit 1
+}
+
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;
     sh)      shift; cmd_sh "$@" ;;
-    ls)      cmd_ls ;;
-    doctor)  cmd_doctor ;;
+    doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
     *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
