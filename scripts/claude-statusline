@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Claude Code status line: the context the next request carries, e.g. "ctx 184k/1M (18%)".
+# Claude Code status line: a bar of the context the next request carries, e.g.
+# "ctx ██▌░░░░░░░ 25% 250k/1M" (green under 50%, yellow under 80%, red above).
 # Claude Code pipes the session state as JSON on stdin. context_window.current_usage is the
 # last request's input (uncached, cache writes, cache reads) and is null before the first reply.
 set -euo pipefail
@@ -9,11 +10,24 @@ jq -r '
     if . >= 1000000 then "\(. / 100000 | floor / 10)M"
     elif . >= 1000 then "\(. / 1000 | floor)k"
     else tostring end;
+  def cells($n; $s): [range($n)] | map($s) | join("");
+  # A $width-cell bar filled to $frac, in eighths of a cell.
+  def bar($frac; $width):
+    ([([$frac, 0] | max), 1] | min * $width * 8 | floor) as $eighths
+    | ($eighths / 8 | floor) as $full
+    | ($eighths % 8) as $part
+    | (if $part > 0 then ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][$part] else "" end) as $edge
+    | [cells($full; "█") + $edge, cells($width - $full - ($edge | length); "░")];
+  def paint($color; $text): "\u001b[\($color)m\($text)\u001b[0m";
   .context_window as $w
-  | if $w == null then error("status line input has no context_window")
-    elif $w.current_usage == null then "ctx -/\($w.context_window_size | short)"
+  | if $w == null then error("status line input has no context_window") else . end
+  | ($w.context_window_size | short) as $size
+  | if $w.current_usage == null then "ctx \(paint("2"; cells(10; "░"))) -/\($size)"
     else
       ($w.current_usage | .input_tokens + .cache_creation_input_tokens + .cache_read_input_tokens) as $used
-      | "ctx \($used | short)/\($w.context_window_size | short) (\($w.used_percentage)%)"
+      | ($used / $w.context_window_size) as $frac
+      | (if $frac < 0.5 then "32" elif $frac < 0.8 then "33" else "31" end) as $color
+      | bar($frac; 10) as [$filled, $empty]
+      | "ctx \(paint($color; $filled))\(paint("2"; $empty)) \($w.used_percentage)% \($used | short)/\($size)"
     end
 '
