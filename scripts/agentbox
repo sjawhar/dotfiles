@@ -355,7 +355,11 @@ cmd_new() {
     # Detached so a pane hangup cannot end it half-way (see `detached`): a
     # registered workspace with a partial tree could not be snapshotted, so
     # close would have to leave it.
-    detached jj -R "$SRC/$repo" workspace add --name "$box" "$ws" >&2
+    # `-r trunk()` because jj otherwise bases a new workspace on the parent of
+    # the canonical checkout's working-copy commit, and a checkout sitting on
+    # the root commit (~/src/oh-my-pi, ~/src/jj) hands the box an empty tree:
+    # `ls` in the box showed only .git and .jj (2026-09-26, Sami's call).
+    detached jj -R "$SRC/$repo" workspace add --name "$box" -r 'trunk()' "$ws" >&2
     (( interrupted )) && exit 130
     # The workspace is a git worktree of the shared checkout, and its path
     # exists only on the host and inside this box. From every other box it
@@ -593,7 +597,7 @@ cmd_doctor() {
     box="agentbox-doctor$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-6)"
     ws="$BOXES/$box/$repo"
     mkdir -p "$BOXES/$box"
-    jj -R "$SRC/$repo" workspace add --name "$box" "$ws" >/dev/null 2>&1
+    jj -R "$SRC/$repo" workspace add --name "$box" -r 'trunk()' "$ws" >/dev/null 2>&1
     local mounts=() env=() out
     mapfile -t mounts < <(mount_args "$box")
     mapfile -t env < <(session_env "$box")
