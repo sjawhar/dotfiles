@@ -33,6 +33,7 @@ minimum_release_age_excludes = [
   "github:sjawhar/time-tracker",
   "forward",
   "tt",
+  "agent-secrets",
 ]
 # The global `rust` pin below makes mise export RUSTUP_TOOLCHAIN, which overrides
 # every repo's own rust-toolchain.toml. oh-my-pi pins nightly-2026-08-12; under
@@ -129,12 +130,15 @@ gitleaks = "8.30.1"
 # release also publishes a tt-watcher asset, so [tool_alias] + a per-platform
 # asset_pattern pick the CLI tarball; a bare "github:sjawhar/time-tracker"
 # entry must NOT coexist or it collides on the install path.
+# Measured on mise 2026.8.10 (2026-09-30): installed together, the bare entry and the tt alias
+# land in separate install dirs, `mise which` resolves each to its own binary, and both run.
 # `forward` has one release asset, but its alias supplies the short name used by
 # the installer guard and `mise exec -- forward`.
 [tool_alias]
 tt = "github:sjawhar/time-tracker"
 forward = "github:sjawhar/forward"
 secrets = "github:sjawhar/forward"
+agent-secrets = "github:sjawhar/legion"
 
 [tools.tt]
 version = "latest"
@@ -164,6 +168,17 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # unauthenticated API limit is 60/h and this machine exhausts it).
 version = "3.3.1"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
+
+# The agent-secrets client and host helper (AGENTC-393), from sjawhar/legion's legion-envoy-v*
+# release: its agent-secrets tarball ships bin/agent-secrets and bin/agent-secrets-helper, and
+# the alias keeps it apart from the plain "github:sjawhar/legion" CLI entry above (a different
+# tag series and install dir; both measured side by side on mise 2026.8.10). The helper runs
+# this pin from its user unit, and installers/agent-secrets.sh restarts it on a bump only when
+# no host session is registered: a restart re-pins every live session and revokes its grants.
+[tools.agent-secrets]
+version = "legion-envoy-v3.16.0"
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
