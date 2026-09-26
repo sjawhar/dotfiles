@@ -14,6 +14,12 @@
 #      moved under the branch since its last merge round -- the 0150/0157 two-heads red).
 #   3. A migration the branch adds carries a number no open PR or main already claims
 #      (the 0164 collision with #20093).
+# Then, when the head carries agent-c's own `meta/scripts/preflight.sh` (#20130), the CI lanes the
+# change triggers, computed by CI's router (classify_pr.py) rather than by a brief's enumeration --
+# merge round 10 (2026-09-26) ran the five basedpyright lanes its brief named and missed
+# `platform/tests`, its own gated lane, while main had rewritten a helper there by 623 lines; the
+# textually clean semantic conflict reddened that lane for two hours. Informational: the lanes
+# print, nothing here runs them, and their absence is not a PREFLIGHT FAIL.
 set -euo pipefail
 branch="${1:?branch}"
 base=""
@@ -65,5 +71,9 @@ if git diff --name-only origin/main "$head" -- "$versions" | grep -q .; then
   echo "branch adds/changes a migration; the repo's own scanner says the next free number is:"
   uv run --no-project python .github/scripts/next_migration_number.py --repo trajectory-labs-pbc/agent-c | tail -1
   echo "(a branch number below that line is claimed by main or an open PR -- renumber before pushing)"
+fi
+if git cat-file -e "$head:meta/scripts/preflight.sh" 2>/dev/null; then
+  echo "== CI lanes the branch triggers vs origin/main (meta/scripts/preflight.sh --plan; run each lane's recipe before pushing):"
+  bash meta/scripts/preflight.sh --plan || echo "(lane classification unavailable here: $? -- run it from a checkout with the repo's venv)"
 fi
 echo "PREFLIGHT OK"
