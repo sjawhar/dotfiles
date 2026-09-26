@@ -36,8 +36,12 @@ The layout is a fixed placement map. Before adding anything, read the sibling fi
 
 ## Wrapper parity (hard)
 
-Agent-harness launchers (`scripts/oc`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, envoy env. A capability added to one belongs in both — drift means sessions silently act as the user on GitHub or lose messaging.
+Agent-harness launchers (`scripts/oc`, `scripts/agentbox`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, envoy env. A capability added to one belongs in all of them — drift means sessions silently act as the user on GitHub or lose messaging. `agentbox` builds that environment for `docker run` (one box per session, `shims/omp` as the container's main process), so a change to what a session needs goes into `session_env()` there and into the shim.
+
+## Skills here are repo-agnostic (hard)
+
+A skill in this repo (`opening-a-pr`, `landing-a-pr`, `disk-hygiene`, all of `plugins/sjawhar/skills/`) runs in every repo Sami works in, so it names no project: no agent-c paths, lanes, workflow names, or task vocabulary. A project's rule lives in that project's AGENTS.md or its own `.claude/skills/`, and the generic skill points at "the repo's own X" where one exists. A dated incident from one repo may illustrate a generic rule; the rule itself must still read correctly with that repo's name removed.
 
 ## Commit discipline
 
-Consolidate a session's work into 1-2 described commits per topic before pushing — never a trail of per-step fragments. If Sami is actively working in the repo, leave changes in the working copy and say so.
+Consolidate a session's work into 1-2 described commits per topic before pushing — never a trail of per-step fragments. A push here belongs to a task that is about these files (a skill or config change he asked for, or a standing role that owns them, such as the librarian's skill-mechanics lane); a dotfiles edit made on the way to something else stays in the working copy and is named in your report. If Sami is actively working in the repo, leave changes in the working copy and say so.

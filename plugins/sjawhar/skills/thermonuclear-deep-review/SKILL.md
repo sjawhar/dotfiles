@@ -56,6 +56,15 @@ The codebase might gate features behind feature flags or internal-only checks. D
 ## Intended Breakage Guidelines
 If a high-risk effect is an intentional, well-constrained change, do not report it as a defect. Report it when the scope or consequences appear unclear, including when a safeguard or feature gate is removed.
 
+## Claims in the PR body
+
+A safety or correctness claim written in a PR body is a claim like any other, and the only reader who catches a wrong one is the reader told to ATTACK it. Verifying reviewers read the code against the claim and pass; that is what they are for. On 2026-09-25 an approving reviewer and a clearing oracle both read a sentence asserting a residual could not be exploited, and neither challenged it; a pass briefed to attack the property broke it in one construction and reproduced the forbidden result end to end. Attack the body's claims, not only its diff.
+
+Two shapes to attack first:
+
+- **Neutralization ORDER, not coverage.** Any pipeline that sanitizes and then edits can create what it sanitized: a block was neutralized as a whole, then a later bookkeeping strip removed an element from inside it and wrote a newline where it had been, bringing the forbidden string into existence after the neutralizer had already run. The test is not "did it neutralize everything" but "can any later pass CREATE what was being neutralized".
+- **A severity resting on a third party's formatting is a dependency, not a mitigation.** "Low, because the attacker cannot choose the opener" held only while a vendor's harness text stayed plain prose in the bodies captured that day. Rate it as the bet it is, and fix rather than disclose.
+
 ## Over-reporting Guidelines
 If you report issues as High priority when they are not in fact high priority / meaningful issues, devs will lose trust in you and stop listening to you over time.
 Never misreport priority or importance. Trace issues end to end and report only what the evidence supports.
