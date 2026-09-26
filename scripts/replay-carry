@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# replay-carry.sh <repo> <old-base> <old-top> <new-base> <new-top>
+# Replays the approved range old-base..old-top onto new-base, file by file, and compares the result
+# byte for byte with new-top. Recipe:
+#   file set : union of `git diff --no-renames --name-only` over old-base..old-top and
+#              new-base..new-top, sorted LC_ALL=C
+#   per file : cur = new-base:path, base = old-base:path, other = old-top:path (absent -> empty file)
+#              git merge-file -p cur base other  (git's default diff algorithm, default conflict style)
+#   verdict  : EQUAL      replay bytes == new-top bytes, and presence and mode agree
+#              DIFFERS    replay applied cleanly but differs from new-top (the lane changed content)
+#              CONFLICT   the replay itself conflicts (N regions); new-top is the lane's resolution
+#              PRESENCE / MODE  the file's existence or mode differs between replay and new-top
+set -euo pipefail
+repo=$1 ob=$2 ot=$3 nb=$4 nt=$5
+cd "$repo"; export LC_ALL=C
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+exists() { git cat-file -e "$1:$2" 2>/dev/null; }
+blob() { if exists "$1" "$2"; then git show "$1:$2"; fi; }
+mode() { git ls-tree "$1" -- "$2" | cut -d' ' -f1; }
+{ git diff --no-renames --name-only "$ob" "$ot"; git diff --no-renames --name-only "$nb" "$nt"; } | sort -u > "$tmp/files"
+echo "old=$(git rev-parse --short=12 "$ob")..$(git rev-parse --short=12 "$ot") new=$(git rev-parse --short=12 "$nb")..$(git rev-parse --short=12 "$nt") files=$(wc -l < "$tmp/files") git=$(git --version | cut -d' ' -f3)"
+equal=0
+while IFS= read -r f; do
+  blob "$nb" "$f" > "$tmp/cur"; blob "$ob" "$f" > "$tmp/base"; blob "$ot" "$f" > "$tmp/other"; blob "$nt" "$f" > "$tmp/new"
+  set +e; git merge-file -p "$tmp/cur" "$tmp/base" "$tmp/other" > "$tmp/replay" 2>/dev/null; rc=$?; set -e
+  # expected presence: the range's own presence change applied to new-base
+  if exists "$ot" "$f"; then want=1; elif exists "$ob" "$f"; then want=0; elif exists "$nb" "$f"; then want=1; else want=0; fi
+  if exists "$nt" "$f"; then have=1; else have=0; fi
+  if [ "$rc" -gt 0 ]; then echo "CONFLICT($rc) $f"
+  elif [ "$want" != "$have" ]; then echo "PRESENCE(want=$want have=$have) $f"
+  elif ! cmp -s "$tmp/replay" "$tmp/new"; then echo "DIFFERS $f"
+  elif [ "$have" = 1 ] && [ "$(mode "$ot" "$f")" != "" ] && [ "$(mode "$ot" "$f")" != "$(mode "$nt" "$f")" ]; then echo "MODE $f"
+  else echo "EQUAL $f"; equal=$((equal+1)); fi
+done < "$tmp/files"
+echo "equal=$equal of $(wc -l < "$tmp/files")"
