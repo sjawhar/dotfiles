@@ -521,9 +521,26 @@ fail() { echo "FAIL box: $*"; fails=$((fails + 1)); }
 for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets hawk-token; do
     command -v "$t" >/dev/null 2>&1 && ok "tool $t" || fail "tool $t does not resolve"
 done
-for d in .config/gh .ssh/id_ed25519 .gnupg .config/gcloud; do
+for d in .config/gh .ssh/id_ed25519 .gnupg; do
     [ -e "$HOME/$d" ] && fail "$d is present in the box" || ok "$d absent"
 done
+# .config/gcloud is not simply forbidden: deploy.py (_DEVBOX_WIF_ADC, and its refusal at ~1315)
+# REQUIRES ~/.config/gcloud/agent-devbox-wif-adc.json for any devN up/destroy, and
+# verify-machine-identity.sh writes it. That file is keyless - an external_account WIF config bound
+# to the box instance role, no token and no user - so it is a machine credential, not a login.
+# Deleting it to satisfy this check breaks the next slot apply (reported by a lane that had done one).
+if [ -e "$HOME/.config/gcloud" ]; then
+    gc="$HOME/.config/gcloud/agent-devbox-wif-adc.json"
+    if [ "$(ls -A "$HOME/.config/gcloud")" = "agent-devbox-wif-adc.json" ] \
+        && [ "$(jq -r ".type" "$gc" 2>/dev/null)" = external_account ] \
+        && [ "$(jq -r ".service_account_impersonation_url // \"none\"" "$gc" 2>/dev/null)" = none ]; then
+        ok ".config/gcloud holds only the keyless devbox WIF config"
+    else
+        fail ".config/gcloud: $(ls -A "$HOME/.config/gcloud" | tr "\n" " ")"
+    fi
+else
+    ok ".config/gcloud absent"
+fi
 mounted() { awk -v t="$1" "\$5 == t { f = 1 } END { exit !f }" /proc/self/mountinfo; }
 writable() { if [ -d "$1" ]; then touch "$1/.doctor.$$" 2>/dev/null && rm -f "$1/.doctor.$$"; else (: >>"$1") 2>/dev/null; fi; }
 while read -r m p; do
