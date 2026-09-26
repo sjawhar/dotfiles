@@ -69,6 +69,22 @@ else
   echo "checks $cs"; okn=$(sed -n 's/^ok=\([0-9]*\).*/\1/p' <<<"$cs")
   { grep -q "fail=0 running=0" <<<"$cs" && [ "${okn:-0}" -gt 0 ]; } || { echo "!! not green: need fail=0 running=0 AND at least one green check (ok=${okn:-0}; zero check-runs is not green, #20160)"; fail=1; }
 fi
+# A commit status the PR carried on an EARLIER commit must be success at the head too. #20196: the
+# Claude-review status (TRAJECTORY_CLAUDE_REVIEW) posted at the first head only; four pushes later the
+# head carried Vercel alone, and the verdict grammar below still read green (2026-09-25). Contexts are
+# compared as whole lines, so one context name that prefixes another cannot satisfy it.
+prev=$(for s in $(api "repos/$repo/pulls/$n/commits" --paginate --jq '.[].sha' | grep -vx "$head" || true); do
+  api "repos/$repo/commits/$s/status" --jq '.statuses[].context'
+done | sort -u)
+if [ -n "$prev" ]; then
+  ok_now=$(api "repos/$repo/commits/$head/status" --jq '.statuses[]|select(.state=="success")|.context' | sort -u)
+  echo "statuses success at head: $(tr '\n' ' ' <<<"${ok_now:-none}")"
+  missing=$(comm -23 <(printf '%s\n' "$prev") <(printf '%s\n' "$ok_now"))
+  if [ -n "$missing" ]; then
+    echo "!! status(es) posted on an earlier commit but not success at $h8: $(tr '\n' ' ' <<<"$missing")- re-trigger at the head (#20196)"
+    fail=1
+  fi
+fi
 echo "verdict artifacts naming $h8 (review bodies + issue comments):"
 rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq ".[]|select(.body|test(\"$h8\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
 cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h8\"))|select(.user.login|test(\"github-actions\")|not)|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
