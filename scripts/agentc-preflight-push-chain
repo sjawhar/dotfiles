@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Pre-push preflight for an agent-c chain branch: refuse to push a head that CI will red on arrival.
+# Usage: agentc-preflight-push-chain <branch> [--base <ref>]
+#   (run from a plain git clone of agent-c whose origin is GitHub, at the head to push)
+#
+# The base is the branch the head will LAND ON: the open pull request's base branch when one
+# exists (a stacked branch lands on its parent, not on main -- checking it against main reports
+# rounds-old conflicts the parent chain has already resolved, measured 2026-09-25 on
+# content-split-a3: six conflicts vs main, zero vs its base), else origin/main. `--base` overrides.
+#
+# Three checks, each one a defect this chain has already paid for:
+#   1. HEAD merges cleanly onto the current base (merge-tree, no checkout).
+#   2. The MERGED tree has exactly one alembic head (the base's newest migration may have
+#      moved under the branch since its last merge round -- the 0150/0157 two-heads red).
+#   3. A migration the branch adds carries a number no open PR or main already claims
+#      (the 0164 collision with #20093).
+# Then, when the head carries agent-c's own `meta/scripts/preflight.sh` (#20130), the CI lanes the
+# change triggers, computed by CI's router (classify_pr.py) rather than by a brief's enumeration --
+# merge round 10 (2026-09-26) ran the five basedpyright lanes its brief named and missed
+# `platform/tests`, its own gated lane, while main had rewritten a helper there by 623 lines; the
+# textually clean semantic conflict reddened that lane for two hours. Informational: the lanes
+# print, nothing here runs them, and their absence is not a PREFLIGHT FAIL.
+set -euo pipefail
+branch="${1:?branch}"
+base=""
+if [ "${2:-}" = "--base" ]; then
+  base="${3:?--base needs a ref}"
+fi
+if [ -z "$base" ]; then
+  base=$(gh pr view "$branch" -R trajectory-labs-pbc/agent-c --json baseRefName --jq .baseRefName 2>/dev/null || true)
+  if [ -z "$base" ]; then
+    base=main
+    echo "base=origin/main (no open pull request for $branch)"
+  else
+    echo "base=origin/$base (open pull request's base branch)"
+  fi
+fi
+git fetch -q origin main "$base" "$branch"
+head=$(git rev-parse HEAD)
+echo "head=$head"
+
+if ! merged=$(git merge-tree --write-tree "origin/$base" "$head" 2>/dev/null); then
+  echo "PREFLIGHT FAIL: HEAD conflicts with origin/$base -- merge $base into the branch (never rebase a blessed chain) before pushing"
+  exit 1
+fi
+
+versions=platform/tl_platform/src/tl_platform/db/migrations/versions
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+git archive "$merged" "$versions" | tar -x -C "$tmp"
+python3 - "$tmp/$versions" <<'PY'
+import pathlib, re, sys
+
+revisions: dict[str, str] = {}
+parents: set[str] = set()
+for path in pathlib.Path(sys.argv[1]).glob("*.py"):
+    text = path.read_text(encoding="utf-8")
+    revision = re.search(r'^revision\s*=\s*"([^"]+)"', text, re.M)
+    down = re.search(r'^down_revision\s*=\s*"([^"]+)"', text, re.M)
+    if revision:
+        revisions[revision.group(1)] = path.name
+    if down:
+        parents.add(down.group(1))
+heads = sorted(set(revisions) - parents)
+print("alembic heads in merged tree:", heads)
+if len(heads) != 1:
+    print("PREFLIGHT FAIL: the merged tree has", len(heads), "alembic heads")
+    sys.exit(1)
+PY
+
+if git diff --name-only origin/main "$head" -- "$versions" | grep -q .; then
+  echo "branch adds/changes a migration; the repo's own scanner says the next free number is:"
+  uv run --no-project python .github/scripts/next_migration_number.py --repo trajectory-labs-pbc/agent-c | tail -1
+  echo "(a branch number below that line is claimed by main or an open PR -- renumber before pushing)"
+fi
+if git cat-file -e "$head:meta/scripts/preflight.sh" 2>/dev/null; then
+  echo "== CI lanes the branch triggers vs origin/main (meta/scripts/preflight.sh --plan; run each lane's recipe before pushing):"
+  # Paths are passed explicitly, computed from the merge base with origin/main, so the classifier
+  # never runs its own default diff: in a jj workspace whose @ is a parked empty child of the pushed
+  # head, that default (`main@origin..@`) fails with "Cannot diff revsets with gaps in" (measured
+  # 2026-09-26 by the inspect-release lane, the first user of this step).
+  mapfile -t changed < <(git diff --name-only --no-renames "$(git merge-base origin/main "$head")" "$head")
+  if [ ${#changed[@]} -eq 0 ]; then
+    echo "(no paths changed vs origin/main; nothing to classify)"
+  else
+    bash meta/scripts/preflight.sh --plan "${changed[@]}" || echo "(lane classification unavailable here: $? -- run it from a checkout with the repo's venv)"
+  fi
+fi
+echo "PREFLIGHT OK"

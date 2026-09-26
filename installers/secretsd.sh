@@ -195,6 +195,10 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     if cmp -s "${SECRETSD_DROPIN}.new" "$SECRETSD_DROPIN" 2>/dev/null; then
         rm -f "${SECRETSD_DROPIN}.new"
     else
+        # The drop-in's markers are how the next run knows whether the daemon
+        # still needs restarting, so the previous one is kept until the restart
+        # below actually happens; a refused restart puts it back.
+        [ -f "$SECRETSD_DROPIN" ] && cp "$SECRETSD_DROPIN" "${SECRETSD_DROPIN}.prev"
         mv "${SECRETSD_DROPIN}.new" "$SECRETSD_DROPIN"
         secretsd_restart_needed=1
     fi
@@ -218,8 +222,24 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     if [ "$secretsd_restart_needed" -eq 1 ]; then
         # Only when the binary version, the generated environment, or a unit
         # file actually changed -- see the marker comments in the drop-in. A
-        # restart clears memory-only grants, so an unconditional one would cost
-        # a YubiKey touch on every install run.
+        # restart clears memory-only grants (by design: they are never
+        # persisted), so while any session on this box holds one, restarting
+        # kills credentialed work mid-flight in a session that is not this one.
+        # 2026-09-17: two broker upgrades wiped the merge queue's admin-PAT
+        # grant mid-merge, twice. Refuse unless the caller says so; the new
+        # binary is already installed and takes effect at the next restart.
+        # `grants` is an unscoped control op: it never prompts for a touch.
+        active_grants="$(timeout 10 "$SECRETSD_BIN" grants 2>/dev/null | grep -v '^no active grants$' || true)"
+        if [ -n "$active_grants" ] && [ "${SECRETSD_RESTART_WITH_GRANTS:-}" != 1 ]; then
+            # Put the previous drop-in back so the next run sees the pending
+            # change instead of concluding the daemon is current.
+            [ -f "${SECRETSD_DROPIN}.prev" ] && mv "${SECRETSD_DROPIN}.prev" "$SECRETSD_DROPIN" && systemctl --user daemon-reload 2>/dev/null
+            echo "secretsd: NOT restarting -- the new version is installed but the running daemon holds human-tier grants that a restart would wipe:" >&2
+            printf '%s\n' "$active_grants" | while IFS= read -r line; do printf '    %s\n' "$line"; done >&2
+            echo "secretsd: announce the restart to the box (envoy) so grant-holders can finish, then either wait for the grants to lapse or re-run with SECRETSD_RESTART_WITH_GRANTS=1." >&2
+            exit 1
+        fi
+        rm -f "${SECRETSD_DROPIN}.prev"
         systemctl --user try-restart secretsd.service 2>/dev/null || true
     fi
 else

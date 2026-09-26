@@ -34,8 +34,9 @@
 	useHttpPath = true
 
 [gh-app "agent"]
-	app-id = 3202636
+	app-id = 4943528
 	key-secret = GH_AGENT_APP_PRIVATE_KEY_B64
+	fallback-secret = GH_PUBLIC_REPO_PAT
 
 # Commit signing, mirroring the jj setup in .jjconfig.toml: same key path, same
 # allowed-signers file, so a commit verifies the same whether jj or plain git
@@ -59,3 +60,7 @@
 	directory = *
 [protocol "file"]
 	allow = always
+[http]
+	postBuffer = 524288000
+	lowSpeedLimit = 0
+	lowSpeedTime = 999999
