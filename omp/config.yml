@@ -82,11 +82,11 @@ advisor:
   enabled: true
 bashInterceptor:
   enabled: true
-# The status-line git/jj integration (branch, dirty counts, PR) recomputes the
-# working-copy status every 5 s by walking the whole tree in native code; in
-# agent-c one walk takes ~13 s and times out at 5, so every session re-walks
-# the tree forever (224k fs syscalls per 20 s idle) and churns the native
-# allocator. Sami does not read the footer's branch or counts (AGENTC-814).
+# The status-line git integration (branch, dirty counts, PR) re-runs
+# `git status --porcelain --untracked-files=normal` as a child process every
+# 2-3 s per session; in agent-c that is ~150k filesystem calls and 0.45 s per
+# run, and parsing its output churns the native allocator (AGENTC-814). Sami
+# does not read the footer's branch or counts.
 git:
   enabled: false
 memory:
