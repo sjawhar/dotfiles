@@ -1,0 +1,52 @@
+#!/bin/bash
+# jj-lock-shim: every workspace `jj workspace add` creates in a colocated repo gets
+# its git worktree locked. From inside an agent box every other box's workspace
+# path looks missing, and an unlocked registration under <store>/.git/worktrees/
+# can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
+# still removes it. Everything else goes straight to the real jj.
+set -euo pipefail
+
+# The first jj on PATH that is not this shim, judged by content like shims/gh.
+real_jj() {
+    local IFS=':'
+    local dir candidate header
+    for dir in $PATH; do
+        candidate="$dir/jj"
+        [[ -f "$candidate" && -x "$candidate" ]] || continue
+        header=""
+        IFS= read -r -n 512 -d '' header < "$candidate" || true
+        [[ "$header" == *jj-lock-shim* ]] && continue
+        echo "$candidate"
+        return
+    done
+    return 1
+}
+if ! _real="$(real_jj)"; then
+    echo "jj shim: no real jj found on PATH" >&2
+    exit 127
+fi
+
+_add=0 _prev=""
+for _a in "$@"; do
+    if [[ "$_prev" == workspace && "$_a" == add ]]; then _add=1; break; fi
+    _prev="$_a"
+done
+((_add)) || exec "$_real" "$@"
+
+_err="$(mktemp)"
+trap 'rm -f "$_err"' EXIT
+_rc=0
+"$_real" "$@" 2> "$_err" || _rc=$?
+cat "$_err" >&2
+((_rc == 0)) || exit "$_rc"
+
+# jj names the new workspace relative to the current directory.
+_rel="$(sed -n 's/^Created workspace in "\(.*\)"$/\1/p' "$_err" | tail -1)"
+[[ -n "$_rel" ]] || exit 0
+_dest="$(realpath -m -- "$_rel")"
+[[ -f "$_dest/.git" ]] || exit 0
+if ! _out="$(git -C "$_dest" worktree lock --reason "jj shim: locked on add (AGENTC-431)" "$_dest" 2>&1)"; then
+    echo "jj shim: the workspace was created but its git worktree could NOT be locked: $_out" >&2
+    echo "jj shim: lock it by hand: git -C '$_dest' worktree lock '$_dest'" >&2
+fi
+exit 0
