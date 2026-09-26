@@ -6,7 +6,7 @@ description: |
   review of Claude-authored work, or bounded implementation and debugging. Full tool access;
   finishes the task it is handed and reports with evidence.
 model:
-  - "openai/gpt-6-astra:xhigh"
+  - "openai-codex/gpt-6-astra:xhigh"
 color: green
 ---
 

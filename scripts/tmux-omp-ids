@@ -14,7 +14,9 @@
 # Usage:
 #   tmux-omp-ids menu <copy|resume> <pane>  Show a display-menu of UUIDs in <pane>
 #   tmux-omp-ids copy <n>                   Copy UUID number <n> (bare)
-#   tmux-omp-ids resume <n>                 Copy `omp --resume <UUID number n>`
+#   tmux-omp-ids resume <n> [<pane>]        Copy the resume command for UUID number <n>
+#                                           (`agentbox new <repo> omp --resume …` when <pane> runs
+#                                           a box session, else `omp --resume …`)
 set -euo pipefail
 
 cache="${TMUX_TMPDIR:-/tmp}/tmux-omp-ids-$(id -u)"
@@ -49,7 +51,7 @@ menu)
     while IFS= read -r id; do
         i=$((i + 1))
         [ "$i" -le "${#keys[@]}" ] || break
-        args+=("$id" "${keys[$((i - 1))]}" "run-shell '$0 $action $i'")
+        args+=("$id" "${keys[$((i - 1))]}" "run-shell '$0 $action $i $pane'")
     done <"$cache"
 
     title="Copy session ID"
@@ -65,11 +67,20 @@ copy)
 resume)
     id=$(sed -n "${2}p" "$cache")
     [ -n "$id" ] || exit 1
-    printf 'omp --resume %s' "$id" | "$copy_cmd"
-    tmux display-message "Copied: omp --resume $id"
+    # A pane whose leader is `agentbox new <repo> …` runs a box session and
+    # resumes boxed in the same repo; any other pane — including an editor
+    # opened on the agentbox script — resumes on the host.
+    leader="$(ps -o args= -p "$(tmux display-message -p ${3:+-t "$3"} '#{pane_pid}')" 2>/dev/null || true)"
+    if repo="$(sed -nE 's#.*(^|[ /])agentbox new ([^ -][^ ]*).*#\2#p' <<<"$leader")" && [ -n "$repo" ]; then
+        cmd="agentbox new $repo omp --resume $id"
+    else
+        cmd="omp --resume $id"
+    fi
+    printf %s "$cmd" | "$copy_cmd"
+    tmux display-message "Copied: $cmd"
     ;;
 *)
-    echo "usage: tmux-omp-ids [menu <copy|resume> <pane>|copy <n>|resume <n>]" >&2
+    echo "usage: tmux-omp-ids [menu <copy|resume> <pane>|copy <n>|resume <n> [<pane>]]" >&2
     exit 64
     ;;
 esac

@@ -11,17 +11,22 @@
       "enabled": true
     },
     "@sjawhar/opencode-knives": {
-      "version": "0.13.3",
+      "version": "2.0.18",
       "enabledFeatures": null,
       "enabled": true
     },
     "secretsd": {
-      "version": "2.5.2",
+      "version": "3.5.1",
       "enabledFeatures": null,
       "enabled": true
     },
     "compound-engineering": {
       "version": "3.24.0",
+      "enabledFeatures": null,
+      "enabled": true
+    },
+    "@sjawhar/pi-legion-envoy": {
+      "version": "1.59.1",
       "enabledFeatures": null,
       "enabled": true
     }
