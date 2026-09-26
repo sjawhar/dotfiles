@@ -9,7 +9,7 @@ Reclaim disk from a machine where dozens of agent sessions each left workspaces,
 
 **Safety principle:** nothing is deleted whose directory any live session is standing in, and nothing is deleted that holds content existing only on disk — untracked, gitignored, and modified-tracked files all count, not just versioned work. Liveness is *asked and measured*, never inferred from age.
 
-Tool: `$SKILL/scripts/disk_hygiene.py` where `$SKILL` is the directory this SKILL.md loaded from (stdlib only, `--help` for subcommands). It does the mechanical parts; the judgment steps below are yours.
+Tool: `$SKILL/scripts/disk_hygiene.py` where `$SKILL` is the directory this SKILL.md loaded from - on these machines `~/.dotfiles/plugins/sjawhar/skills/disk-hygiene`, because a `skill://` path does not resolve in bash and a `find` for the script is an IO walk that timed out at 180 s under load (2026-09-26) (stdlib only, `--help` for subcommands). It does the mechanical parts; the judgment steps below are yours.
 
 ## Quick Reference
 
