@@ -909,6 +909,60 @@ class ReaperScenarioTest(unittest.TestCase):
         self.assertTrue(skips and "working copy" in skips[0]["reason"], f"container not skipped: {entries}")
         self.assertTrue((scratch / "wt" / ".jj").exists(), "a directory holding a working copy was removed as scratch")
 
+    def _path_holder(self, target: Path) -> subprocess.Popen[bytes]:
+        """A live process whose cwd is ELSEWHERE and which depends on <target> only through PATH,
+        like the orphan test loop whose fake kubectl lived in /tmp/tmp.X/bin (SRE, 2026-09-26)."""
+        env = dict(os.environ, PATH=f"{target}/bin:{os.environ.get('PATH', '')}")
+        return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd="/", env=env)
+
+    def test_s29_scratch_referenced_only_by_a_process_path_is_never_planned(self) -> None:
+        repo = self.make_jj_repo()
+        stubs = self.base / "fake-bin-dir"
+        (stubs / "bin").mkdir(parents=True)
+        self.age(stubs / "bin", 48)
+        self.age(stubs, 48)
+        proc = self._path_holder(stubs)
+        try:
+            doc, _ = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
+            self.assertNotIn(str(stubs), self.plan_paths(doc), f"PATH-referenced dir planned: {doc['plan']}")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=30)
+
+    def test_s30_scratch_that_a_process_references_after_planning_survives_apply(self) -> None:
+        repo = self.make_jj_repo()
+        stubs = self.base / "fake-bin-later"
+        (stubs / "bin").mkdir(parents=True)
+        self.age(stubs / "bin", 48)
+        self.age(stubs, 48)
+        _, plan_path = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
+        proc = self._path_holder(stubs)
+        try:
+            _, entries = self.apply(plan_path)
+            skips = [e for e in entries if e["op"] == "skip" and e["path"] == str(stubs)]
+            self.assertTrue(skips and "live processes" in skips[0]["reason"], f"PATH-referenced dir not skipped: {entries}")
+            self.assertTrue((stubs / "bin").exists(), "a live process's PATH directory was removed")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=30)
+
+    def test_s31_tmp_apply_spares_a_path_referenced_dir_and_removes_the_rest(self) -> None:
+        held, free = self.base / "tfam-held", self.base / "tfam-free"
+        for d in (held, free):
+            (d / "bin").mkdir(parents=True)
+            self.age(d / "bin", 48)
+            self.age(d, 48)
+        ledger = self.base / "tmp-ledger.jsonl"
+        proc = self._path_holder(held)
+        try:
+            script("tmp", "--dir", self.base, "--families", "^tfam-", "--older-than-hours", "1",
+                   "--apply", "--ledger", ledger, "--io-limit", "100")
+            self.assertTrue((held / "bin").exists(), "tmp --apply removed a live process's PATH directory")
+            self.assertFalse(free.exists(), "tmp --apply kept an unreferenced stale directory")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=30)
+
 
 class ContainerCensusOtherFamilyTest(unittest.TestCase):
     """cmd_containers' box-local-daemon discriminator for family="other" rows (AGENTC-751):

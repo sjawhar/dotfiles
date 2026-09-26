@@ -91,17 +91,49 @@ def proc_cwds() -> set[str]:
     return out
 
 
+_REF_SPLIT = re.compile(r"[:=,\s]")
+
+
+def proc_path_refs() -> tuple[list[tuple[int, str]], int]:
+    """((pid, path) for every absolute path a readable process depends on, unreadable count).
+    A process depends on a directory through its cwd, a PATH-style or other env value, or an
+    argument: an orphan test loop whose fake kubectl/tmux lived in /tmp/tmp.X/bin had its cwd
+    elsewhere, a cwd-only check cleared the dir, and its next kubectl resolved to the REAL
+    binary (SRE, 2026-09-26). OLDPWD is a record of where a shell was, not a dependency. A
+    non-root reader gets EPERM for other users' processes and PID 1, so the census is partial
+    and says how partial rather than reporting a clean result."""
+    refs: list[tuple[int, str]] = []
+    unreadable, me = 0, os.getpid()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        n = int(pid)
+        try:
+            refs.append((n, os.readlink(f"/proc/{pid}/cwd").removesuffix(" (deleted)")))
+            env = Path(f"/proc/{pid}/environ").read_bytes()
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            unreadable += 1
+            continue
+        values = [p.split(b"=", 1)[1] for p in env.split(b"\0") if b"=" in p and not p.startswith(b"OLDPWD=")]
+        for raw in values + argv.split(b"\0"):
+            for tok in _REF_SPLIT.split(raw.decode(errors="replace")):
+                if tok.startswith("/") and len(tok) > 1:
+                    refs.append((n, tok.rstrip("/")))
+    return refs, unreadable
+
+
+def refs_under(path: str, refs: list[tuple[int, str]]) -> list[int]:
+    return sorted({pid for pid, r in refs if r == path or r.startswith(path + "/")})
+
+
 def procs_under(path: str) -> list[tuple[int, str]]:
     hits: list[tuple[int, str]] = []
-    for pid in os.listdir("/proc"):
-        if not pid.isdigit():
-            continue
+    for pid in refs_under(path, proc_path_refs()[0]):
         try:
-            cwd = os.readlink(f"/proc/{pid}/cwd")
-            if cwd == path or cwd.startswith(path + "/"):
-                hits.append((int(pid), Path(f"/proc/{pid}/comm").read_text().strip()))
+            hits.append((pid, Path(f"/proc/{pid}/comm").read_text().strip()))
         except OSError:
-            pass
+            hits.append((pid, "?"))
     return hits
 
 
@@ -350,7 +382,9 @@ def cmd_inventory(args: argparse.Namespace) -> None:
         if p != repo and p not in dirs:
             dirs[p] = jj_workspace_name(p) if os.path.isdir(p) else None
 
-    live = proc_cwds()
+    live_refs, unreadable = proc_path_refs()
+    live = {r for _, r in live_refs}
+    print(f"liveness census: {unreadable} processes unreadable (other uid / PID 1) - partial", file=sys.stderr)
     rows: list[dict[str, Any]] = []
     for path, name in sorted(dirs.items()):
         exists = os.path.isdir(path)
@@ -1078,7 +1112,9 @@ def cmd_tmp(args: argparse.Namespace) -> None:
     fam = re.compile(str(args.families))
     tmp_dir = str(args.dir)
     protected, anchors = load_protected(args.protected)
-    live = proc_cwds()
+    live_refs, unreadable = proc_path_refs()
+    live = {r for _, r in live_refs}
+    print(f"liveness census: {unreadable} processes unreadable (other uid / PID 1) - partial", file=sys.stderr)
     now = time.time()
     targets: list[str] = []
     for name in sorted(os.listdir(tmp_dir)):
@@ -1098,7 +1134,7 @@ def cmd_tmp(args: argparse.Namespace) -> None:
     ledger_write(ledger, {"op": "tmp-start", "targets": len(targets), "dir": tmp_dir})
     removed = 0
     for p in targets:
-        if any(c == p or c.startswith(p + "/") for c in proc_cwds()):
+        if refs_under(p, proc_path_refs()[0]):
             ledger_write(ledger, {"op": "skip", "path": p, "reason": "live processes"})
             continue
         while io_full_avg10() > args.io_limit:
