@@ -53,7 +53,7 @@ AGENT_EVAL_VERSION = "0.1.1"
 "github:sjawhar/jj" = "0.45.1-sami.20260910-043938"  # upstream main + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10127 + #10129 + #10130 + reset_head writes HEAD after the index reset + forget unlinks only its own worktree + index write waits for index.lock (#7530) + import keeps @ when the recorded HEAD was lost + merge_view treats a lost git_heads entry as no information
 "github:sjawhar/knives" = "2.0.18"
 "github:sjawhar/legion" = "cli-v2.0.0"  # the `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); replaces a hand-placed 0.3.1 binary in ~/.local/bin that had no `legion threads`
-"github:sjawhar/oh-my-pi" = "18.2.9-sami.20260922-201951"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
+"github:sjawhar/oh-my-pi" = "18.3.2-sami.20260926-111503"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
@@ -96,7 +96,7 @@ zoxide = "0.10.0"
 # Bump this and "github:sjawhar/oh-my-pi" together. Upstream does not publish this
 # package for every tag: if the exact version is missing from npm, pin the nearest
 # published one after confirming packages/mnemopi is unchanged between the two tags.
-"npm:@oh-my-pi/pi-mnemopi" = "18.2.9"
+"npm:@oh-my-pi/pi-mnemopi" = "18.3.2"
 actionlint = "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
 amazon-ecr-credential-helper = "0.12.0"  # ~/.docker/config.json routes every ECR registry to `ecr-login`; installed since 08-10 but unpinned, so inside a box (no ~/.local/state/mise) the shim had no version and every ECR push failed
