@@ -33,6 +33,15 @@
 # every connection a different, short-lived peer, so nothing through a relay is
 # ever a descendant of anything. The daemon (>= 3.2.3) accepts the mapped uid.
 # Image: agentbox/Dockerfile.
+#
+# Secrets (AGENTC-393): each box gets its own broker identity — a P-256 key generated inside
+# it (docker exec … agent-secrets keygen) in its private runtime dir, and one enrollment made
+# from the host with the operator's launcher credential (agent-secrets-login, once per host).
+# The key dir is bind-mounted into that box only; the credential lives under
+# ~/.config/agent-secrets, which agentbox/mounts never lists. close_box revokes the enrollment;
+# a lease the box renews (agentbox-run.ts) lapses within 15 min if the launcher never gets there.
+# A box started while the host's helper holds no live launcher credential gets no identity at
+# all (no key, no enrollment.pending): its agents use secretsd, and `new` says so (broker_ready).
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -54,6 +63,23 @@ BUS_SOCK="$RUN_BASE/bus/bus"
 # systemd's secretsd.socket unit holds this listener, so the node is stable
 # across daemon restarts and a bare-file bind stays live.
 SECRETSD_SOCK="/run/user/$UID_/secretsd.sock"
+# The secrets broker (AGENTC-393). Default is the production broker; AGENT_SECRETS_URL in the
+# environment overrides it. The launcher credential and the operator it was issued to are what
+# scripts/agent-secrets-login writes; `mise install agent-secrets` provides the binary.
+AGENT_SECRETS_URL="${AGENT_SECRETS_URL:-https://secrets.internal.trajectorylabs.com}"
+# mise where fails (nonzero) until agent-secrets is installed; under set -e a bare
+# `$(mise where …)/bin/…` concatenation would kill agentbox at startup for every subcommand
+# (verified: `x="$(false)/bin/y"` exits under set -e even with 2>/dev/null), so the fallback to
+# empty is explicit here, exactly like installers/agent-secrets.sh's HELPER_MISE_DIR. A missing
+# binary then yields "/bin/agent-secrets", which `command -v agent-secrets` (broker_ready) — not
+# this constant — is what actually gates callers on.
+# The host-side agent-secrets binary path: fresh_process needs its directory on PATH, since a
+# systemd --user unit's environment carries none of ours (no mise shims). agent-secrets-login and
+# the tasks 13-15 host-side proof script each declare their own copy for the same reason.
+AGENT_SECRETS_BIN="$(mise where agent-secrets 2>/dev/null || true)/bin/agent-secrets"
+LAUNCHER_DIR="$HOME/.config/agent-secrets"
+# Why broker_ready last said no, with the command that fixes it.
+BROKER_UNREADY=""
 
 # What a session relies on, and nothing more: agentbox/mounts, one "<rw|ro>
 # <path>" per line. Read here (host) and by doctor (box); both see the file
@@ -63,6 +89,116 @@ MOUNTS_FILE="$DOTFILES_DIR/agentbox/mounts"
 mounts_of() { awk -v m="$1" '$1 == m { print $2 }' "$MOUNTS_FILE"; }
 
 die() { echo "agentbox: $*" >&2; exit 1; }
+
+# Whether a new box can get a broker identity: the client installed, an operator recorded, the
+# helper running and holding a live launcher credential. Until then (a host before its one
+# `agent-secrets-login`, a helper restarted since) a box starts without one: no key, no
+# enrollment.pending, so its agents use secretsd. Sets BROKER_UNREADY when it answers no.
+broker_ready() {
+    BROKER_UNREADY=""
+    if ! command -v agent-secrets >/dev/null 2>&1; then
+        BROKER_UNREADY="agent-secrets is not installed (run: mise install agent-secrets)"
+    elif [[ ! -s "$LAUNCHER_DIR/operator" ]]; then
+        BROKER_UNREADY="no operator recorded for this host (run: agent-secrets-login <github-login>)"
+    elif ! systemctl --user is-active --quiet agent-secrets-helper.service; then
+        BROKER_UNREADY="agent-secrets-helper is not running (systemctl --user status agent-secrets-helper)"
+    elif ! agent-secrets launcher login-status >/dev/null 2>&1; then
+        BROKER_UNREADY="the helper holds no live launcher credential (run: agent-secrets-login <github-login>)"
+    fi
+    [[ -z "$BROKER_UNREADY" ]]
+}
+
+# The host side of a box's key dir: bind-mounted at /run/user/$UID_/agent-secrets in that box only.
+box_keydir() { echo "$RUN_BASE/$1/run-user/agent-secrets"; }
+
+# How a box's enrollment ends when it does not end enrolled: the reason in enrollment.error
+# first, then the enrollment.pending marker removed, so a client in the box that stops waiting
+# on the marker finds the reason already there.
+enroll_failed() {
+    local keydir; keydir="$(box_keydir "$1")"
+    printf '%s\n' "$2" >"$keydir/enrollment.error"
+    rm -f "$keydir/enrollment.pending"
+    return 1
+}
+
+# Wait for the container to be Running (docker exec needs that), giving up if the launcher's
+# docker run child is gone.
+wait_for_running() {
+    local box="$1" child="$2" _
+    for _ in $(seq 1 120); do
+        [[ "$(docker inspect -f '{{.State.Running}}' "$box" 2>/dev/null)" == true ]] && return 0
+        kill -0 "$child" 2>/dev/null || return 1
+        sleep 0.5
+    done
+    return 1
+}
+
+# Enroll a running box with the secrets broker. The key is generated INSIDE the box by a
+# process in its namespaces, into its private runtime dir (tmpfs, this box only); only the
+# public thumbprint comes back. The enrollment is made from the host with the launcher
+# credential, which no box can read, and the client writes the enrollment id beside the key.
+# sid is the box's omp session id when known (the broker wakes that session on a decision),
+# else empty. Ten attempts 3 s apart, each attempt's error kept in enrollment.attempt-error;
+# success removes enrollment.pending (cmd_new creates it before docker run) and every error
+# file, and every other end leaves enrollment.error (every agent-secrets call in the box then
+# names it) with the marker gone (enroll_failed); the box runs on either way. Re-running is
+# safe: the broker answers a repeat of the same key with the same enrollment.
+enroll_box() {
+    local box="$1" sid="$2" keydir tp attempt
+    keydir="$(box_keydir "$box")"
+    broker_ready || { enroll_failed "$box" "not enrolled: $BROKER_UNREADY"; return 1; }
+    if ! tp="$(docker exec --user ubuntu "$box" agent-secrets keygen --out "/run/user/$UID_/agent-secrets" 2>"$keydir/enrollment.attempt-error")"; then
+        enroll_failed "$box" "agent-secrets keygen failed in $box: $(<"$keydir/enrollment.attempt-error")"
+        return 1
+    fi
+    tp="${tp//[[:space:]]/}"
+    if [[ ! "$tp" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+        enroll_failed "$box" "agent-secrets keygen printed no thumbprint: '$tp'"
+        return 1
+    fi
+    local args=(enroll --helper --kind box --runtime-id "$box" --thumbprint "$tp")
+    [[ -n "$sid" ]] && args+=(--session-id "$sid")
+    for attempt in $(seq 1 10); do
+        if AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENT_SECRETS_KEY_DIR="$keydir" \
+            agent-secrets "${args[@]}" >/dev/null 2>"$keydir/enrollment.attempt-error"; then
+            [[ -s "$keydir/enrollment" ]] || { enroll_failed "$box" "agent-secrets enroll wrote no $keydir/enrollment"; return 1; }
+            rm -f "$keydir/enrollment.pending" "$keydir/enrollment.attempt-error" "$keydir/enrollment.error"
+            return 0
+        fi
+        (( attempt < 10 )) && sleep 3
+    done
+    enroll_failed "$box" "agent-secrets enroll failed 10 times; last: $(<"$keydir/enrollment.attempt-error")"
+}
+
+# A box not running omp has no runner to renew its lease: one detached renew inside it, dying
+# with the box.
+start_renew() {
+    docker exec -d --user ubuntu "$1" sh -c 'exec agent-secrets renew >>"$AGENT_SECRETS_KEY_DIR/renew.log" 2>&1'
+}
+
+# Revoke a box's enrollment and every grant under it. Idempotent on the broker; a failure is
+# noted, and the lease the box stopped renewing lapses within 15 minutes.
+unenroll_box() {
+    local box="$1" keydir eid
+    keydir="$(box_keydir "$box")"
+    [[ -s "$keydir/enrollment" ]] || return 0
+    eid="$(<"$keydir/enrollment")"
+    AGENT_SECRETS_URL="$AGENT_SECRETS_URL" agent-secrets unenroll --helper --enrollment "$eid" \
+        || echo "agentbox: unenroll $box ($eid) failed; the broker drops it when its lease lapses (15 min)" >&2
+}
+
+# Run a command as a fresh process under the user manager: a child of systemd --user, inside
+# no registered host session. What a check of the helper's refusal, or of a brand-new
+# registration, needs when the caller itself runs inside an agent session. The unit
+# environment carries nothing of ours, so the broker, socket and a PATH holding the real
+# binary (a mise shim cannot run there) are passed explicitly.
+fresh_process() {
+    systemd-run --user --pipe --wait --quiet --collect \
+        --setenv="AGENT_SECRETS_URL=$AGENT_SECRETS_URL" \
+        --setenv="AGENT_SECRETS_HELPER_SOCK=/run/user/$UID_/agent-secrets/helper.sock" \
+        --setenv="PATH=$(dirname "$AGENT_SECRETS_BIN"):/usr/local/bin:/usr/bin:/bin" \
+        -- "$@"
+}
 
 # The canonical checkouts, one name per line.
 repos() { find "$SRC" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -printf '%f\n' 2>/dev/null | sort; }
@@ -180,9 +316,11 @@ mount_args() {
     # the host sockets bound at their usual paths. Never the host's whole
     # /run/user/$UID_. secretsd/ is the token dir the omp extension writes to;
     # created here so it is the user's, 0700, not a root-owned mountpoint.
+    # agent-secrets/ holds the box's broker key (written by keygen inside the box) and its
+    # enrollment id (written by the launcher, enroll_box): tmpfs, this box only, gone with it.
     local run_user="$RUN_BASE/$box/run-user"
-    mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd" "$run_user/envoy"
-    chmod 700 "$run_user/secretsd"
+    mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd" "$run_user/envoy" "$run_user/agent-secrets"
+    chmod 700 "$run_user/secretsd" "$run_user/agent-secrets"
     a+=(-v "$run_user:/run/user/$UID_")
     a+=(-v "$(dirname "$BUS_SOCK"):/run/user/$UID_/bus")
     [[ -S "$SECRETSD_SOCK" ]] || die "secretsd socket $SECRETSD_SOCK missing (systemctl --user status secretsd.socket)"
@@ -237,6 +375,9 @@ session_env() {
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
     e+=(-e "AGENTBOX_BOX=$box" -e AGENTBOX_USER=ubuntu)
+    # The box's broker identity: its key dir (mount_args) and the broker. The launcher enrolls
+    # the key once the box is up (enroll_box). No helper socket: a box is not a host session.
+    e+=(-e "AGENT_SECRETS_URL=$AGENT_SECRETS_URL" -e "AGENT_SECRETS_KEY_DIR=/run/user/$UID_/agent-secrets")
     if curl -fsS -m 1 "http://127.0.0.1:${EMBED_PORT}/health" >/dev/null 2>&1; then
         e+=(-e "MNEMOPI_EMBEDDING_API_URL=http://$EMBED_NAME/v1")
     fi
@@ -320,6 +461,9 @@ close_box() {
         echo "agentbox: $box is still running after 60s; removing it" >&2
         docker rm -f "$box" >/dev/null 2>&1 || true
     fi
+    # The container is gone: nothing inside can use the key any more, and the broker must not
+    # accept it either. Before the rm -rf below, which takes the key dir with it.
+    unenroll_box "$box"
     finish_knives_claims "$sid"
     local snapshotted=() failed=0
     for repo in "$@"; do
@@ -369,8 +513,14 @@ cmd_new() {
     local dup
     dup="$(printf '%s\n' "${box_repos[@]}" | sort | uniq -d)"
     [[ -z "$dup" ]] || die "repo listed twice: $dup"
+    local use_broker=1
+    broker_ready || use_broker=0
     local box tag
     box="agentbox-$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-12)"
+    echo "agentbox: box $box" >&2
+    if (( ! use_broker )); then
+        echo "agentbox: $box starts without a secrets-broker identity, so its agents use secretsd: $BROKER_UNREADY" >&2
+    fi
     tag="$(image_tag)"
     build_image "$tag"
     ensure_network
@@ -425,6 +575,10 @@ cmd_new() {
 
     local mounts=() env=()
     mapfile -t mounts < <(mount_args "$box")
+    # mount_args made the key dir. enrollment.pending tells the box's agent-secrets that an
+    # enrollment is on its way; enroll_box ends it either way. A box with no broker identity
+    # gets no marker and no key.
+    if (( use_broker )); then : >"$(box_keydir "$box")/enrollment.pending"; fi
     mapfile -t env < <(session_env "$box")
     # omp runs under the in-box runner so `restart` can relaunch it in the same
     # container (scripts/agentbox-run.ts); any other command runs bare.
@@ -445,13 +599,29 @@ cmd_new() {
         -w "$BOXES/$box/${box_repos[0]}" "${tty[@]}" \
         "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
     child=$!
-    # An omp inside reveals its session id once up; close releases that
-    # session's knives claims. Other commands have none.
+    # Enrollment (enroll_box) once the box is up: for omp, when its session id is known — omp
+    # opens its session file 4–10 s after start, before any tool can run — so the enrollment
+    # carries the id the broker wakes on a decision; any other command enrolls at once and gets
+    # its own renew. 120 s without a session id (an omp --no-session run) enrolls without one.
+    # A box that never runs, or ends first, gets enrollment.error and loses its marker too.
+    # An omp inside reveals its session id once up; close releases that session's knives claims.
+    local enrolled=$(( ! use_broker )) deadline=$(( SECONDS + 120 ))
+    if ! wait_for_running "$box" "$child"; then
+        (( enrolled )) || enroll_failed "$box" "$box never reached Running; not enrolled" || true
+        enrolled=1
+    fi
     while kill -0 "$child" 2>/dev/null; do
         sid="$(box_session_id "$box")"
+        if (( ! enrolled )) && { [[ -n "$sid" || "$1" != omp ]] || (( SECONDS >= deadline )); }; then
+            enrolled=1
+            if enroll_box "$box" "$sid"; then
+                [[ "$1" == omp ]] || start_renew "$box" || echo "agentbox: renew start for $box failed" >&2
+            fi
+        fi
         [[ -n "$sid" ]] && break
         sleep 2
     done
+    (( enrolled )) || enroll_failed "$box" "$box ended before it was enrolled" || true
     # An interrupted wait re-waits: the first return after a signal carries
     # 128+sig, the child's real status arrives once it is reaped.
     while :; do
@@ -579,10 +749,10 @@ set -u
 fails=0
 ok() { echo "ok   box: $*"; }
 fail() { echo "FAIL box: $*"; fails=$((fails + 1)); }
-for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets hawk-token; do
+for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets hawk-token agent-secrets; do
     command -v "$t" >/dev/null 2>&1 && ok "tool $t" || fail "tool $t does not resolve"
 done
-for d in .config/gh .ssh/id_ed25519 .gnupg; do
+for d in .config/gh .ssh/id_ed25519 .gnupg .config/agent-secrets; do
     [ -e "$HOME/$d" ] && fail "$d is present in the box" || ok "$d absent"
 done
 # .config/gcloud is not simply forbidden: deploy.py (_DEVBOX_WIF_ADC, and its refusal at ~1315)
@@ -621,6 +791,12 @@ gh auth status 2>&1 | grep -q "not logged" && ok "gh auth: no user login" || fai
 n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && ok "secrets agent-tier" || fail "secrets agent-tier"
 jq -e ".credHelpers[\"https://index.docker.io/v1/\"] == \"secretsd\"" "$HOME/.docker/config.json" >/dev/null 2>&1 && ok "docker config names the secretsd helper for Docker Hub" || fail "docker config: no secretsd credHelper for Docker Hub"
 printf "%s" https://index.docker.io/v1/ | timeout 20 docker-credential-secretsd get 2>/dev/null | jq -e ".Secret | length > 0" >/dev/null && ok "docker-credential-secretsd answers for Docker Hub" || fail "docker-credential-secretsd get"
+[ -n "${AGENT_SECRETS_URL:-}" ] && [ "${AGENT_SECRETS_KEY_DIR:-}" = "/run/user/$(id -u)/agent-secrets" ] && ok "agent-secrets env (url, key dir)" || fail "agent-secrets env: URL=${AGENT_SECRETS_URL:-unset} KEY_DIR=${AGENT_SECRETS_KEY_DIR:-unset}"
+[ -z "${AGENT_SECRETS_HELPER_SOCK:-}" ] && [ ! -S "/run/user/$(id -u)/agent-secrets/helper.sock" ] && ok "no helper socket in the box (a box is not a host session)" || fail "helper socket reachable from the box"
+[ "$(stat -c %a "$AGENT_SECRETS_KEY_DIR/key.pem" 2>/dev/null)" = 600 ] && [ "$(stat -c %U "$AGENT_SECRETS_KEY_DIR/key.pem" 2>/dev/null)" = ubuntu ] && ok "box key 0600 ubuntu" || fail "box key: $(ls -l "$AGENT_SECRETS_KEY_DIR" 2>&1 | tr "\n" " ")"
+[ -s "$AGENT_SECRETS_KEY_DIR/enrollment" ] && ok "box enrolled ($(cat "$AGENT_SECRETS_KEY_DIR/enrollment"))" || fail "box not enrolled: $(cat "$AGENT_SECRETS_KEY_DIR/enrollment.error" 2>/dev/null || echo no enrollment.error either)"
+w="$(timeout 20 agent-secrets whoami 2>&1)"; jq -e ".kind == \"box\"" <<<"$w" >/dev/null 2>&1 && ok "broker knows this box as kind box, operator $(jq -r .operator <<<"$w")" || fail "agent-secrets whoami: $(head -1 <<<"$w")"
+n="$(timeout 60 agent-secrets AGENT_SECRETS_PROOF_TOKEN -- sh -c "echo \${#AGENT_SECRETS_PROOF_TOKEN}" 2>&1)"; [ "${n:-0}" -gt 0 ] 2>/dev/null && ok "agent-secrets injects an automatic secret ($n bytes)" || fail "agent-secrets inject: $(head -1 <<<"$n")"
 arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
 t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
 timeout 40 google-user-token >/dev/null 2>&1 && ok "google-user-token mints" || fail "google-user-token"
@@ -642,6 +818,16 @@ cmd_doctor() {
     ensure_network && ok "host: network $NETWORK gateway $NETWORK_GATEWAY"
     ensure_forwarders && ok "host: forwarders (imds, envoy, bus)"
     local host_forward; host_forward="$(timeout 20 forward doctor 2>&1 | grep -cE 'accepted|reachable|accepts' || true)"
+    local out state
+    if command -v agent-secrets >/dev/null 2>&1; then ok "host: agent-secrets on PATH"; else fail "host: agent-secrets not installed (mise install agent-secrets)"; fi
+    if state="$(agent-secrets launcher login-status 2>/dev/null)"; then ok "host: launcher credential issued for $(cat "$LAUNCHER_DIR/operator" 2>/dev/null || echo unknown)"; else fail "host: no live launcher credential (state: ${state:-none}); run: agent-secrets-login <github-login>"; fi
+    if systemctl --user is-active --quiet agent-secrets-helper.service && [[ -S "/run/user/$UID_/agent-secrets/helper.sock" ]]; then ok "host: agent-secrets-helper active ($(agent-secrets-helper sessions 2>/dev/null | wc -l) sessions)"; else fail "host: agent-secrets-helper not active (systemctl --user status agent-secrets-helper)"; fi
+    # Both helper checks run as a child of the user manager: doctor itself may be running inside
+    # an agent session, which would make its own pid a session member.
+    out="$(fresh_process agent-secrets whoami 2>&1 || true)"
+    case "$out" in *NOT_A_SESSION*) ok "host: helper refuses an unregistered process";; *) fail "host: helper answered an unregistered process: $(head -1 <<<"$out")";; esac
+    out="$(fresh_process agent-secrets register --exec --wait 30 -- agent-secrets whoami 2>&1 || true)"
+    if jq -e '.kind == "host"' <<<"$out" >/dev/null 2>&1; then ok "host: helper enrolls and signs for a fresh session (kind host, operator $(jq -r .operator <<<"$out"))"; else fail "host: helper session: $(head -1 <<<"$out")"; fi
     build_image "$tag"
     # A throwaway box on a throwaway workspace of the first repo in $SRC.
     local repo box ws
@@ -654,8 +840,41 @@ cmd_doctor() {
     local mounts=() env=() out
     mapfile -t mounts < <(mount_args "$box")
     mapfile -t env < <(session_env "$box")
-    out="$(docker run --rm --init --runtime "$RUNTIME" --name "$box" --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
-        -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+    # The doctor box runs detached so it can be enrolled like a real box (enroll_box needs the
+    # container up) before the checks run inside it; `sleep` is its session command, and the
+    # entrypoint has finished — inner dockerd up, ghcr login done — once that sleep exists.
+    local started=1 ready=0
+    if ! docker run -d --init --runtime "$RUNTIME" --name "$box" --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
+        -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" sleep 900 >/dev/null; then
+        started=0
+        fail "host: doctor box failed to start"
+    fi
+    if (( started )); then
+        local _
+        for _ in $(seq 1 90); do
+            docker exec "$box" pgrep -x sleep >/dev/null 2>&1 && { ready=1; break; }
+            sleep 1
+        done
+        (( ready )) || fail "host: doctor box did not reach sleep-running state"
+    fi
+    if (( ready )); then
+        # Enrolled like a box from `new`, when the host could enroll one; the host checks above
+        # already reported why not, and the box-side checks show the rest.
+        if broker_ready; then
+            enroll_box "$box" "" || fail "host: enroll $box: $(cat "$(box_keydir "$box")/enrollment.error" 2>/dev/null)"
+        fi
+        out="$(docker exec --user ubuntu -w "$ws" "$box" bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+    else
+        # No box-side output to report: the earlier host-check reuse of $out (fresh_process)
+        # must not leak into the box-output accounting below.
+        out=""
+    fi
+    # Unconditional: docker rm -f on a name docker run never created is a harmless no-op under
+    # || true, and unenroll_box already returns early with nothing to do when its box never wrote
+    # an enrollment file — so both run even when the docker run -d attempt itself failed, in case
+    # it still left a named/stopped/partial container or enrollment behind.
+    docker rm -f "$box" >/dev/null 2>&1 || true
+    unenroll_box "$box"
     # A failed forget leaves a registration whose directory the rm below removes: an orphan in the
     # shared store that every later `jj workspace list` carries. Count it as a doctor failure.
     jj -R "$SRC/$repo" workspace forget "$box" >/dev/null 2>&1 \
@@ -686,6 +905,9 @@ cmd_doctor_here() {
     echo "agentbox doctor ($AGENTBOX_BOX): $fails check(s) failed" >&2
     exit 1
 }
+
+# Sourced (scripts/tests/test_agentbox_enroll.py), it defines its functions and runs nothing.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;

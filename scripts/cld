@@ -54,6 +54,23 @@ done
 export PATH="${DOTFILES_DIR:-$HOME/.dotfiles}/shims:$_newpath"
 unset _newpath _parts _p
 
+# Host session identity for agent secrets: register this pid with the agent-secrets helper and
+# exec claude under it (the same wrapper as shims/omp and scripts/oc). Skipped in a box (key
+# dir) and on a machine without the helper; with the helper but no agent-secrets on PATH claude
+# starts unregistered, saying so. `--wait 10` (enrolled before claude starts its MCP servers)
+# only while the helper holds a launcher credential; without one it waits in vain.
+_wrap=()
+if [[ -z "${AGENT_SECRETS_KEY_DIR:-}" && -e "${HOME}/.config/systemd/user/agent-secrets-helper.service" ]]; then
+    if command -v agent-secrets >/dev/null 2>&1; then
+        export AGENT_SECRETS_HELPER_SOCK="${AGENT_SECRETS_HELPER_SOCK:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/agent-secrets/helper.sock}"
+        export AGENT_SECRETS_URL="${AGENT_SECRETS_URL:-https://secrets.internal.trajectorylabs.com}"
+        _wrap=(agent-secrets register)
+        if agent-secrets launcher login-status >/dev/null 2>&1; then _wrap+=(--wait 10); fi
+        _wrap+=(--exec --)
+    else
+        echo "cld: agent-secrets is not on PATH (mise install agent-secrets); this session has no secrets-broker identity" >&2
+    fi
+fi
 # Opt the session into the Envoy channel plugin (managed settings allowlist the
 # legion-plugins marketplace); channel events reach the model as <channel> messages.
-exec claude --dangerously-skip-permissions --channels plugin:claude-envoy-bridge@legion-plugins "$@"
+exec "${_wrap[@]}" claude --dangerously-skip-permissions --channels plugin:claude-envoy-bridge@legion-plugins "$@"
