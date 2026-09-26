@@ -872,6 +872,43 @@ class ReaperScenarioTest(unittest.TestCase):
         self.assertEqual([i for i in doc["plan"] if i["kind"] == "scratch"], [],
                          f"protected scratch planned: {doc['plan']}")
 
+    def test_s27_directory_holding_a_working_copy_below_depth_one_is_never_planned(self) -> None:
+        """~/.worktrees/<repo>/ holds OTHER repos' worktrees one level down. The depth-1 guard
+        saw no .git/.jj in the container itself and planned eight of them as scratch rm, with
+        a container idle 160-280 h because its own mtime moves only on add/remove (SRE, 2026-09-26)."""
+        repo = self.make_jj_repo()
+        container = self.base / "knives"
+        (container / "some-branch").mkdir(parents=True)
+        (container / "some-branch" / ".git").write_text("gitdir: /nonexistent/.git/worktrees/some-branch\n")
+        (container / "some-branch" / "work.txt").write_text("unsaved")
+        self.age(container / "some-branch", 48)
+        self.age(container, 200)
+
+        inv = self.inventory(repo)
+        doc, _ = self.plan("--protected", self.protected_file(), inventory=inv)
+        self.assertNotIn(str(container), [i["path"] for i in doc["plan"]], f"working-copy container planned: {doc['plan']}")
+        rows = [r for r in json.loads(Path(inv).read_text())["rows"] if r.get("path") == str(container)]
+        self.assertEqual([r["class"] for r in rows], ["HOLDS_WORKING_COPY"], f"container row: {rows}")
+
+    def test_s28_scratch_that_gained_a_nested_working_copy_survives_apply(self) -> None:
+        """The apply-time re-derivation applies the same depth: a worktree created INSIDE a
+        planned scratch directory after planning makes it a container, not scratch."""
+        repo = self.make_jj_repo()
+        scratch = self.base / "became-container"
+        scratch.mkdir()
+        (scratch / "blob").write_text("v")
+        self.age(scratch, 48)
+
+        _, plan_path = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
+        (scratch / "wt").mkdir()
+        (scratch / "wt" / ".jj").mkdir()
+        self.age(scratch, 48)  # mkdir bumped the mtime; re-age so ONLY the working-copy guard can save it
+
+        _, entries = self.apply(plan_path)
+        skips = [e for e in entries if e["op"] == "skip" and e["path"] == str(scratch)]
+        self.assertTrue(skips and "working copy" in skips[0]["reason"], f"container not skipped: {entries}")
+        self.assertTrue((scratch / "wt" / ".jj").exists(), "a directory holding a working copy was removed as scratch")
+
 
 class ContainerCensusOtherFamilyTest(unittest.TestCase):
     """cmd_containers' box-local-daemon discriminator for family="other" rows (AGENTC-751):
