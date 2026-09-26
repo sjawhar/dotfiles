@@ -10,6 +10,7 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not git. **Never us
 ## Non-negotiable traps
 
 - **Auto-snapshot:** there is no staging; every `jj` command snapshots. `@` is the on-disk working-copy change; change IDs stay stable across rewrites, commit IDs do not.
+- **Moving work to another workspace does not save it; a commit does.** A file copied into a fresh `jj workspace add` directory lives only on disk until some jj command there snapshots it, so the workspace can be registered, its `@` empty, and the content nowhere in the store. One lane moved a 220-line extension out of a shared checkout this way; its workspace directory was gone an hour later and the file survived only in the repo's operation log, recoverable with `jj --ignore-working-copy --at-op <op> file show -r <commit> 'root-file:"<path>"'` (2026-09-26). After moving anything out, put it in a described commit before doing anything else, and confirm with `jj log -r @` that `@` is not empty.
 - **CRITICAL — `jj new` comes BEFORE the work, never after:** auto-snapshot puts edits into
   whatever `@` is *now*. If the next piece of work deserves its own commit, run `jj new` first,
   then edit. Running `jj new -m "msg"` after editing creates an **empty** commit with your
