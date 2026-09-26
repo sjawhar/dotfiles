@@ -27,6 +27,7 @@ t "g=true p=true n=false sha=$H"         "Verdict: ACCEPT ($H) - delta read"
 t "g=true p=true n=false sha=-"          "**Verdict: clean — the delta is exactly as described**"
 t "g=true p=true n=false sha=a96869d"    'Reviewed `a96869d` (`a96869d5b02f9a367d1414eb6a3d2e0ba58b1f3e`): **clean, no findings.** [Run](https://x/actions/runs/1)'
 t "g=true p=true n=false sha=$H"         "Merge-decision review. Verdict: MERGE at $H. Everything below was re-derived from a clean extraction"
+t "g=true p=true n=false sha=aadf66d3"   "MERGE-WITH-NITS aadf66d3 — Extends my MERGE 2e1234c2 review; the nits are PR-body wording"
 echo "== the verdict sha is the FIRST short-or-long sha, not the first 40-hex (hawk pin df0e9892 on #20186) =="
 t "g=true p=true n=false sha=00473e0f"   "Verdict: APPROVE at 00473e0f ## Code review, round 7: #20186 at 00473e0f. Scope: the pin to hawk df0e989212345678901234567890abcdefabcdef"
 t "g=true p=true n=false sha=$H"         "APPROVE at $H (image digest sha256:556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa)"
@@ -57,5 +58,6 @@ tp neg  "VERDICT: REQUEST_CHANGES at 2846a746 - the round-3 APPROVE at 11aa22bb 
 tp pos  "**ACCEPT at 188327f0.** Supersedes my BLOCK at b18fa260 (stale cites)."
 tp neg  "Verdict: BLOCK at b2183a5f -- NEW-6 from the body claims; NEW-4/NEW-5 fixed"
 tp none "Verdict: PASS at 36ae1e27 (tester run)"
+tp pos  "MERGE-WITH-NITS 143425f5 - one non-blocking hardening nit; my earlier REQUEST_CHANGES at 0000aaaa is cleared"
 tp pos  'Reviewed `a96869d` (`a96869d5b02f9a367d1414eb6a3d2e0ba58b1f3e`): **clean, no findings.**'
 echo; echo "$n cases, fail=$fail"; exit $fail
