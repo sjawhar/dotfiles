@@ -528,17 +528,17 @@ mounted() { awk -v t="$1" "\$5 == t { f = 1 } END { exit !f }" /proc/self/mounti
 writable() { if [ -d "$1" ]; then touch "$1/.doctor.$$" 2>/dev/null && rm -f "$1/.doctor.$$"; else (: >>"$1") 2>/dev/null; fi; }
 while read -r m p; do
     case "$m" in
-        rw) mounted "$HOME/$p" && writable "$HOME/$p" && ok "rw $p" || fail "rw $p: not a writable mount";;
+        rw) mounted "$HOME/$p" && writable "$HOME/$p" && ok "rw $p" || fail "rw $p: not a writable mount (mounts entry newer than this box: relaunch to pick it up)";;
         ro) [ -e "$HOME/$p" ] || { echo "note box: ro $p absent (not on the host)"; continue; }
-            mounted "$HOME/$p" && ! writable "$HOME/$p" && ok "ro $p" || fail "ro $p: not a read-only mount";;
+            mounted "$HOME/$p" && ! writable "$HOME/$p" && ok "ro $p" || fail "ro $p: not a read-only mount (mounts entry newer than this box: relaunch to pick it up)";;
     esac
 done <"$DOTFILES_DIR/agentbox/mounts"
 r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os.environ[\"DBUS_SESSION_BUS_ADDRESS\"].split(\"=\",1)[1]); s.sendall(b\"\\0AUTH EXTERNAL 31303030\\r\\n\"); print(s.recv(64).split()[0].decode())" 2>&1)"; [ "$r" = OK ] && ok "session bus (keyring) reachable through the relay" || fail "session bus: $r"
 [ "$(ls -A "$HOME/.ssh" | sort | tr "\n" " ")" = "jj-signing jj-signing.pub " ] && ok ".ssh holds exactly the jj-signing pair" || fail ".ssh contents: $(ls -A "$HOME/.ssh" | tr "\n" " ")"
 auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && ok ".docker holds only the box ghcr login" || fail ".docker auths: ${auths:-none}"
 [ "$(stat -c %U /run/user/$(id -u))" = ubuntu ] && ok "runtime dir owned by ubuntu" || fail "runtime dir owner $(stat -c %U /run/user/$(id -u))"
-[ -n "$(jj log -r @ --no-graph -T change_id 2>/dev/null)" ] && ok "cwd is a jj workspace" || fail "cwd is not a jj workspace"
-out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1)";; esac
+[ -n "$(jj log -r @ --no-graph -T change_id 2>/dev/null)" ] && ok "cwd is a jj workspace" || fail "cwd is not a jj workspace (cwd-dependent: run doctor from your workspace, not /tmp)"
+out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
 gh auth status 2>&1 | grep -q "not logged" && ok "gh auth: no user login" || fail "gh auth status shows a login"
 n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && ok "secrets agent-tier" || fail "secrets agent-tier"
 jq -e ".credHelpers[\"https://index.docker.io/v1/\"] == \"secretsd\"" "$HOME/.docker/config.json" >/dev/null 2>&1 && ok "docker config names the secretsd helper for Docker Hub" || fail "docker config: no secretsd credHelper for Docker Hub"
