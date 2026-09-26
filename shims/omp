@@ -131,6 +131,17 @@ else
     _cmd=(mise x "github:sjawhar/oh-my-pi" -- omp)
 fi
 
+# --- host session identity for agent secrets ---
+# On the host a session's secrets-broker proofs come from the agent-secrets helper, which signs
+# only for descendants of a registered process. Register this pid — the execs below keep it, so
+# it is omp's — before omp starts. A box has a key dir instead and skips this; a machine without
+# the helper installed has neither variable and skips it too (agent-secrets/AGENTS.md).
+if [[ -z "${AGENT_SECRETS_KEY_DIR:-}" && -e "${HOME}/.config/systemd/user/agent-secrets-helper.service" ]]; then
+    export AGENT_SECRETS_HELPER_SOCK="${AGENT_SECRETS_HELPER_SOCK:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/agent-secrets/helper.sock}"
+    export AGENT_SECRETS_URL="${AGENT_SECRETS_URL:-https://secrets.internal.trajectorylabs.com}"
+    _cmd=(agent-secrets register --exec -- "${_cmd[@]}")
+fi
+
 # --- provider keys: personal by default, profile-scoped under a profile ---
 # `omp --profile NAME` (or OMP_PROFILE=NAME) isolates auth, sessions, and
 # config; billing follows. Under a named profile the shim injects the secrets

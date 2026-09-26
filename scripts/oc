@@ -405,8 +405,17 @@ def launch(args: list[str]) -> NoReturn:
 
     # OPENCODE_NO_SERVE=1 opts out; an explicit --port wins over our --port 0.
     serve_args = [] if env.get("OPENCODE_NO_SERVE") == "1" or "--port" in args else ["--port", "0"]
+    argv = ["opencode", *serve_args, *args]
+    # Host session identity for agent secrets: register this pid with the agent-secrets helper
+    # and exec opencode under it (the same wrapper shims/omp and scripts/cld use). A box has a
+    # key dir instead; a machine without the helper skips it.
+    if not env.get("AGENT_SECRETS_KEY_DIR") and (HOME / ".config/systemd/user/agent-secrets-helper.service").exists():
+        runtime_dir = env.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        env.setdefault("AGENT_SECRETS_HELPER_SOCK", f"{runtime_dir}/agent-secrets/helper.sock")
+        env.setdefault("AGENT_SECRETS_URL", "https://secrets.internal.trajectorylabs.com")
+        argv = ["agent-secrets", "register", "--exec", "--", *argv]
     try:
-        os.execvp("opencode", ["opencode", *serve_args, *args])
+        os.execvp(argv[0], argv)
     except OSError as exc:
         print(f"oc: cannot exec opencode: {exc}", file=sys.stderr)
         sys.exit(127)
