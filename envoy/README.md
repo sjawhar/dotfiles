@@ -30,6 +30,14 @@ This makes nodes effectively transient: a fresh host that joins the tailnet
 just needs `envoy-listener` running. No NATS cluster to join, no auth key to
 provision, no per-listener identity.
 
+A box that must stay off the tailnet is outside this stack: it runs its own
+single-node `nats-server -js` on `127.0.0.1:4222` (a systemd user unit) and an
+`envoy-listener` pointed at it, so its sessions reach only each other and no
+GitHub/Slack events arrive. The launchers find that NATS through the gitignored
+`envoy/env.local` (`export ENVOY_NATS_URL=nats://127.0.0.1:4222`), which
+`shims/omp` and `scripts/cld` source before falling back to
+`nats://envoy-nats:4222`.
+
 ## Prerequisites
 
 - [Pulumi CLI](https://www.pulumi.com/docs/install/)

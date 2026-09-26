@@ -22,7 +22,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "~/.dotfiles/.claude/hooks/statusline.sh"
+    "command": "$HOME/.dotfiles/scripts/claude-statusline"
   },
   "enabledPlugins": {
     "ralph-loop@claude-plugins-official": true,
@@ -34,7 +34,7 @@
     "skill-creator@claude-plugins-official": true,
     "knives@knives": true,
     "sjawhar@sjawhar": true,
-    "claude-envoy-bridge@legion-plugins": true
+    "claude-envoy@legion-plugins": true
   },
   "extraKnownMarketplaces": {
     "sjawhar": {
