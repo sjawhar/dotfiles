@@ -74,6 +74,15 @@ if git diff --name-only origin/main "$head" -- "$versions" | grep -q .; then
 fi
 if git cat-file -e "$head:meta/scripts/preflight.sh" 2>/dev/null; then
   echo "== CI lanes the branch triggers vs origin/main (meta/scripts/preflight.sh --plan; run each lane's recipe before pushing):"
-  bash meta/scripts/preflight.sh --plan || echo "(lane classification unavailable here: $? -- run it from a checkout with the repo's venv)"
+  # Paths are passed explicitly, computed from the merge base with origin/main, so the classifier
+  # never runs its own default diff: in a jj workspace whose @ is a parked empty child of the pushed
+  # head, that default (`main@origin..@`) fails with "Cannot diff revsets with gaps in" (measured
+  # 2026-09-26 by the inspect-release lane, the first user of this step).
+  mapfile -t changed < <(git diff --name-only --no-renames "$(git merge-base origin/main "$head")" "$head")
+  if [ ${#changed[@]} -eq 0 ]; then
+    echo "(no paths changed vs origin/main; nothing to classify)"
+  else
+    bash meta/scripts/preflight.sh --plan "${changed[@]}" || echo "(lane classification unavailable here: $? -- run it from a checkout with the repo's venv)"
+  fi
 fi
 echo "PREFLIGHT OK"
