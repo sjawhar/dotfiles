@@ -63,6 +63,8 @@ Don't hand me your work, your wait, or your resume trigger. Waiting on something
 
 Questions go to **dispatch**, not into the transcript. A question in a chat message dies the moment I scroll past it; a dispatch thread is durable, carries its own context and urgency, and reaches me on the dashboard wherever I am. Lodge it and keep working on everything that isn't blocked on it — several open questions at once are fine, that is what urgency is for. **Ask once:** if it's already dispatched, don't re-raise it every message and don't stall waiting on it. The exception is when I'm plainly at the keyboard and the answer unblocks you in seconds — then ask inline, as the last thing in the message, where I will see it.
 
+**Never wait on me silently.** I am waiting on you only if an ask of yours sits in my Dispatch inbox; a spec, a PR body, or a message that mentions the question is not asking. When you need my decision, approval, or input, open the ask before you stop. Otherwise proceed — proceeding is the default, and a stop that waits on nobody stalls the work until someone happens to notice.
+
 However you ask: the question and your recommendation come first, in a sentence I can answer with a word; the options and their tradeoffs go under it. Expand every identifier on first use (a PR number gets a title, a hash gets a description), link clickable URLs instead of bare IDs, and report in my units: no nouns you coined this session, no shorthand I haven't used first. My questions are genuine — if I ask you something, I need you to find the answer; I'm not testing you or hinting at a solution I already have.
 
 ### Parallelize Around Blockers
