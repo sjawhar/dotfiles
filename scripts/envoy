@@ -7,6 +7,18 @@
 #   envoy ps --json  — JSON output
 #   envoy ps --local — filter to local machine only
 #   envoy send <t> <msg> — send message (ses_* = direct, else publish to topic)
+#   envoy broadcast <msg> — direct-send <msg> to every live titled session
+#                          `envoy ps` lists for this machine (`--all-machines`
+#                          widens, `--machine <id>` picks one); `--dir <substr>`
+#                          narrows by working directory; `--dry-run` lists
+#                          recipients only. `--untitled` adds untitled rows: an
+#                          OMP session before its first turn, but also — until
+#                          every parent process runs pi-legion-envoy with
+#                          sjawhar/legion#1249 (LEGION-225) — the leftover
+#                          registration of a finished task subagent, whose
+#                          inbox still wakes that parked subagent. Once that
+#                          release is installed everywhere, make untitled rows
+#                          the default and drop the flag.
 #
 # `envoy send` identifies the sender. From an interactive shell the message is
 # stamped source=human. Inside an agent harness (the bash tool of an OMP,
@@ -49,9 +61,12 @@ _envoy_ps() {
         echo "No live sessions"
         return
     fi
+    # `column -t -s` merges adjacent tabs, so an empty TITLE (the Claude Code
+    # bridge registers "", and OMP names a session only after its first turn)
+    # would shift TOPICS/UPDATED left; `//` does not catch "", so test for it.
     {
         printf 'SESSION\tPORT\tMACHINE\tDIR\tTITLE\tTOPICS\tUPDATED\n'
-        echo "$raw" | jq -r '.[] | [.session_id, .port, .machine_id, .dir, (.title // "-"), (.topics | length | tostring), ((.updated_at / 1000) | strftime("%Y-%m-%d %H:%M"))] | @tsv'
+        echo "$raw" | jq -r '.[] | [.session_id, .port, .machine_id, .dir, (if (.title // "") == "" then "-" else .title end), (.topics | length | tostring), ((.updated_at / 1000) | strftime("%Y-%m-%d %H:%M"))] | @tsv'
     } | column -t -s $'\t'
 }
 
@@ -97,9 +112,69 @@ _envoy_send() {
     }
 }
 
+_envoy_broadcast() {
+    local machine="$MACHINE_ID" untitled=false dry_run=false dir_filter=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --all-machines) machine="" ;;
+            --machine) machine="$2"; shift ;;
+            --untitled) untitled=true ;;
+            --dir) dir_filter="$2"; shift ;;
+            --dry-run|-n) dry_run=true ;;
+            --) shift; break ;;
+            -*) echo "Unknown option: $1" >&2; return 1 ;;
+            *) break ;;
+        esac
+        shift
+    done
+    if [ $# -lt 1 ]; then
+        echo "Usage: envoy broadcast [--all-machines|--machine <id>] [--untitled] [--dir <substr>] [--dry-run] <message>" >&2
+        return 1
+    fi
+    local message="$*"
+
+    local rows
+    rows=$(_envoy_ps --json | jq -r \
+        --arg m "$machine" --arg d "$dir_filter" --arg self "${OMP_SESSION_ID:-}" --argjson untitled "$untitled" '
+        .[]
+        | select($m == "" or .machine_id == $m)
+        | select($d == "" or (.dir | contains($d)))
+        | select($untitled or (.title // "") != "")
+        | select(.session_id != $self)
+        | [.session_id, .machine_id, .dir, (if (.title // "") == "" then "-" else .title end)]
+        | @tsv') || return 1
+    if [ -z "$rows" ]; then
+        echo "No matching sessions" >&2
+        return 1
+    fi
+
+    if [ "$dry_run" = true ]; then
+        {
+            printf 'SESSION\tMACHINE\tDIR\tTITLE\n'
+            echo "$rows"
+        } | column -t -s $'\t'
+        echo "(dry run: $(echo "$rows" | wc -l) recipients, nothing sent)" >&2
+        return
+    fi
+
+    local sent=0 failed=0 id machine_id dir title
+    while IFS=$'\t' read -r id machine_id dir title; do
+        if _envoy_send "$id" "$message" >/dev/null; then
+            sent=$((sent + 1))
+            printf 'sent    %s  %s\n' "$id" "$title"
+        else
+            failed=$((failed + 1))
+            printf 'FAILED  %s  %s\n' "$id" "$title" >&2
+        fi
+    done <<<"$rows"
+    echo "$sent sent, $failed failed"
+    [ "$failed" -eq 0 ]
+}
+
 case "${1:-}" in
-    ps)      shift; _envoy_ps "$@"; exit ;;
-    send)    shift; _envoy_send "$@"; exit ;;
-    "")      echo "Usage: envoy <ps|send>" >&2; exit 1 ;;
-    *)       echo "Unknown command: $1" >&2; exit 1 ;;
+    ps)        shift; _envoy_ps "$@"; exit ;;
+    send)      shift; _envoy_send "$@"; exit ;;
+    broadcast) shift; _envoy_broadcast "$@"; exit ;;
+    "")        echo "Usage: envoy <ps|send|broadcast>" >&2; exit 1 ;;
+    *)         echo "Unknown command: $1" >&2; exit 1 ;;
 esac
