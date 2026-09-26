@@ -89,8 +89,16 @@ if [ -n "$prev" ]; then
     fail=1
   fi
 fi
+# A GitHub-native review (state APPROVED / CHANGES_REQUESTED, often an empty body - Sami's own approve on #20200)
+# is bound to its commit_id; fold it in as "<state> at <commit_id>" so it names its head and carries grammar. A bot
+# review names its head in the BODY, which is read first and wins (the queue's body-not-commit_id rule, 2026-09-25).
+# The merge queue's own APPROVE (merge-one.sh / rest-merge.sh) posts under the admin PAT, so it is ALSO login
+# sjawhar with state APPROVED - indistinguishable from a human approve by identity, only by its body (the queue's
+# "Verified ... at head <sha>" format). A failed merge leaves that approve behind; it must never read as a verdict
+# for the next gate run (#20200's 01:51 approve was misread as Sami's, 2026-09-26). Excluded by body on both reads.
+RS='def rs: (.body//"") + (if .state=="APPROVED" then " [review state APPROVED at \(.commit_id)]" elif .state=="CHANGES_REQUESTED" then " [review state REQUEST_CHANGES at \(.commit_id)]" else "" end); def notqueue: ((.user.login=="sjawhar") and ((.body//"")|test("Verified (independently |GREEN )?at head"))) | not;'
 echo "verdict artifacts naming $h8 (review bodies + issue comments):"
-rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq ".[]|select(.body|test(\"$h7\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
+rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq "$RS"".[]|select(notqueue)|select(rs|test(\"$h7\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(rs|gsub(\"\\n\";\" \")|.[0:120])\"")
 cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h7\"))|select(.user.login|test(\"github-actions\")|not)|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
 printf '%s\n%s\n' "$rv" "$cm" | sed '/^$/d'
 nohead=0; carry=0
@@ -105,7 +113,7 @@ w0=$(mktemp -d)
 # and its own request read as the verdict: GATE READS GREEN (agent-c#20214, 2026-09-25). Fails safe - a real
 # verdict written in backticks becomes a grammar miss for a human to read, never a false green.
 VS='def vs: gsub("(?s)```.*?```";" ")|gsub("`(?<c>[^`\n]*)`"; if (.c|test("(?i)verdict|approve|merge at|request.changes|lgtm|do not merge")) then " " else "`\(.c)`" end);'
-api "repos/$repo/pulls/$n/reviews" --paginate --jq '.[]|{t:.submitted_at,u:.user.login,k:"R",b:(.body//"")}' > "$w0/r.jsonl" || true
+api "repos/$repo/pulls/$n/reviews" --paginate --jq "$RS"'.[]|select(notqueue)|{t:.submitted_at,u:.user.login,k:"R",b:rs}' > "$w0/r.jsonl" || true
 api "repos/$repo/issues/$n/comments" --paginate --jq '.[]|select(.user.login|test("github-actions")|not)|{t:.created_at,u:.user.login,k:"C",b:(.body//"")}' > "$w0/c.jsonl" || true
 echo "verdict-bearing artifacts (VERDICT:/APPROVE/APPROVED/MERGE at/REQUEST_CHANGES; reviews + comments), newest first:"
 vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|gsub("[0-9a-f]{41,}";" ")|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
@@ -135,11 +143,15 @@ last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("
 # followed by a later `Verdict: CHANGES` read GREEN (2026-09-26). `\**` admits a bold verdict line. `Verdict: PASS` is
 # deliberately NOT positive here: it is a review half or a tester run, and every lane posts as the same bot, so
 # a tester's PASS must not supersede a reviewer's rejection (the queue's ruling, #20200).
-NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block)'
-POS='(?i)approve|merge +at|lgtm|verdict:? *(approve|merge|ship)'
+# `Verdict: clean` is the repo's claude-pr-review app's positive form (TRAJECTORY_CLAUDE_REVIEW success); it was in
+# neither set and read GREEN as a neutral, for the wrong reason (agent-c#20291, 2026-09-26). A verdict in NEITHER set
+# is now NOT green: read it. `\**` admits a bold verdict line on both sides.
+NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block|hold\b|reject|not ready)'
+POS='(?i)approve|merge +at|lgtm|verdict:? *\**(approve|merge|ship|clean)'
 negt=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg re "$NEG" "$VS"'[.[]|select(.b|vs|test($re))]|sort_by(.t)|last|.t // ""')
 post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS"'[.[]|select(.b|vs|test($pos))|select(.b|vs|test($neg)|not)]|sort_by(.t)|last|.t // ""')
 if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
+if [ -n "$vr" ] && [ -z "$negt" ] && [ -z "$post" ]; then echo "  !! verdict grammar found but its polarity is in NEITHER set (not APPROVE/MERGE/LGTM/clean, not a rejection) - READ it; PASS alone is a review half or a tester run, not a merge authorization (#20200, #20291)"; fail=1; fi
 rm -rf "$w0"
 if [ -n "$last" ] && [ "$last" != "$head" ]; then
   base=$(jq -r .base <<<"$pr"); w=$(mktemp -d)
