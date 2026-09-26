@@ -2,13 +2,14 @@
 set -euo pipefail
 
 # Forked cosmic-comp: adds WorkspaceOnOutput / MoveToWorkspaceOnOutput /
-# SendToWorkspaceOnOutput shortcut actions (AeroSpace-style global workspaces
-# addressed by output name or EDID model), and makes ext-workspace-v1 Activate
-# transfer keyboard focus + pointer cross-output.
+# SendToWorkspaceOnOutput shortcut actions, which address a numbered workspace
+# slot on an output named by connector or EDID model (Alt+3 is slot 3 whether
+# or not slots 1-2 exist), and makes ext-workspace-v1 Activate transfer
+# keyboard focus + pointer cross-output.
 #
-# Forks:       https://github.com/sjawhar/cosmic-comp  (switch-to-output)
+# Forks:       https://github.com/sjawhar/cosmic-comp  (workspace-slots)
 #              https://github.com/sjawhar/cosmic-settings-daemon  (output-addressed-actions)
-# Upstream:    https://github.com/pop-os/cosmic-comp/issues/2120  (PR links TBD)
+# Upstream:    https://github.com/pop-os/cosmic-comp/pull/2625  (issue #2120)
 # Stock binary backed up at /usr/bin/cosmic-comp.stock; rollback from a TTY:
 #   sudo install -m 755 /usr/bin/cosmic-comp.stock /usr/bin/cosmic-comp
 #
@@ -26,7 +27,7 @@ fi
 # build is installed. No mismatch = stock binary = the fork needs (re)installing.
 if ! dpkg -V cosmic-comp 2>/dev/null | grep -q "/usr/bin/cosmic-comp$"; then
     echo "NOTE: /usr/bin/cosmic-comp is the stock build, not the patched fork."
-    echo "  git clone -b switch-to-output https://github.com/sjawhar/cosmic-comp"
+    echo "  git clone -b workspace-slots https://github.com/sjawhar/cosmic-comp"
     echo "  cd cosmic-comp && mise x rust@1.93.0 -- cargo build --release"
     echo "  sudo test -e /usr/bin/cosmic-comp.stock || sudo install -m 755 /usr/bin/cosmic-comp /usr/bin/cosmic-comp.stock"
     echo "  sudo install -m 755 target/release/cosmic-comp /usr/bin/cosmic-comp"
