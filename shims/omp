@@ -24,6 +24,17 @@ fi
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 
+# --- glibc malloc arenas ---
+# omp's native addon (pi_natives, Rust) allocates through glibc malloc from
+# ~140 threads (tokio, rayon, the Bun pool), and glibc gives each allocating
+# thread its own 64 MiB arena whose freed chunks are never returned to the OS.
+# The status-line repository walk churns through those arenas every few
+# seconds, so a long-lived session retains 1-2 GB of freed native memory (cold,
+# pushed to swap). Two arenas shared by every thread keep that under ~30 MB;
+# measured idle in agent-c: 24 MB flat versus 104 MB growing 45 MB/min. Bun and
+# JavaScriptCore use mimalloc, so this touches only the native addon.
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+
 # --- committed settings as a read-only overlay ---
 # omp/config.yml is the settings of record for every profile, loaded as a
 # PI_CONFIG_FILES overlay that omp never writes. Runtime writes — /model picks,
