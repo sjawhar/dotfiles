@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Claude Code status line: the context the next request carries, e.g. "ctx 184k/1M (18%)".
+# Claude Code pipes the session state as JSON on stdin. context_window.current_usage is the
+# last request's input (uncached, cache writes, cache reads) and is null before the first reply.
+set -euo pipefail
+
+jq -r '
+  def short:
+    if . >= 1000000 then "\(. / 100000 | floor / 10)M"
+    elif . >= 1000 then "\(. / 1000 | floor)k"
+    else tostring end;
+  .context_window as $w
+  | if $w == null then error("status line input has no context_window")
+    elif $w.current_usage == null then "ctx -/\($w.context_window_size | short)"
+    else
+      ($w.current_usage | .input_tokens + .cache_creation_input_tokens + .cache_read_input_tokens) as $used
+      | "ctx \($used | short)/\($w.context_window_size | short) (\($w.used_percentage)%)"
+    end
+'
