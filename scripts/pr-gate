@@ -156,8 +156,13 @@ last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("
 # is now NOT green: read it. `\**` admits a bold verdict line on both sides.
 NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block|hold\b|reject|not ready)'
 POS='(?i)approve|accept(ed)? +at +[0-9a-f]|merge +at|lgtm|verdict:? *\**(approve|accept|merge|ship|clean)|^[ \t]*\**(merge|approve|accept(ed)?)\**:? +(at +)?[0-9a-f]{7,40}|^reviewed `?[0-9a-f]{7,40}`? \(`?[0-9a-f]{40}`?\): \**clean, no findings'
-negt=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg re "$NEG" "$VS"'[.[]|select(.b|vs|test($re))]|sort_by(.t)|last|.t // ""')
-post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS"'[.[]|select(.b|vs|test($pos))|select(.b|vs|test($neg)|not)]|sort_by(.t)|last|.t // ""')
+# POLARITY IS DECIDED BY THE FIRST HIT. An APPROVE whose body recounts its own earlier "REQUEST_CHANGES at <sha>" (every
+# multi-round re-cite does) matched the negative set by substring and read as the latest rejection (legion#1430; the
+# queue's own #20293 body, 2026-09-26). Same rule as the sha: the verdict comes first, history later. An artifact is
+# negative if its first NEG hit precedes its first POS hit (or POS is absent), positive the other way round.
+PL='def pol($pos; $neg): (. as $v | ([$v|match($pos; "i")][0].offset // null) as $p | ([$v|match($neg; "i")][0].offset // null) as $n | if $n != null and ($p == null or $n < $p) then "neg" elif $p != null then "pos" else "none" end);'
+negt=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL"'[.[]|select(.b|vs|pol($pos;$neg)=="neg")]|sort_by(.t)|last|.t // ""')
+post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL"'[.[]|select(.b|vs|pol($pos;$neg)=="pos")]|sort_by(.t)|last|.t // ""')
 if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
 if [ -n "$vr" ] && [ -z "$negt" ] && [ -z "$post" ]; then echo "  !! verdict grammar found but its polarity is in NEITHER set (not APPROVE/MERGE/LGTM/clean, not a rejection) - READ it; PASS alone is a review half or a tester run, not a merge authorization (#20200, #20291)"; fail=1; fi
 rm -rf "$w0"

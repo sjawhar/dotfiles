@@ -10,8 +10,9 @@ F="${PR_GATE:-$(dirname "$(readlink -f "$0")")/pr-gate}"
 VS=$(grep -oP "^VS='\K.*(?=')" "$F"); POS=$(grep -oP "^POS='\K.*(?=')" "$F"); NEG=$(grep -oP "^NEG='\K.*(?=')" "$F")
 # The grammar lives inside three identical jq string literals; lift the first and un-escape jq's \\ -> \.
 GR=$(grep -oP 'select\(\.b\|vs\|test\("\K\(\?i:verdict:.*?(?="\)\)\]\|sort_by\(\.t\)\|reverse)' "$F" | head -1 | sed 's/\\\\/\\/g')
+PL=$(grep -oP "^PL='\\K.*(?=')" "$F")
 SCAN=$(grep -oP '^last=.*?\[scan\("\K[^"]*(?="\)\]\|first)' "$F" | sed 's/\\\\/\\/g')
-[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$SCAN" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} SCAN=${#SCAN})"; exit 2; }
+[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$SCAN" ] && [ -n "$PL" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} SCAN=${#SCAN})"; exit 2; }
 fail=0; n=0
 # t <expected> <body>   expected = "g=<grammar> p=<positive> n=<negative> sha=<verdict sha (only when g=true) or ->"
 t() { local exp="$1" body="$2"; n=$((n+1))
@@ -48,4 +49,13 @@ t "g=false p=false n=false sha=-"        "Reviewer: post \`MERGE 486fc48e\` as t
 t "g=false p=false n=false sha=-"        "@claude review  Delta since your verdict at 1d64f1ca: one commit, $H"
 echo "== a later-line bare VERB <sha> is NOT a verdict (first-line rule; jq ^ is string start) =="
 t "g=false p=false n=false sha=-"        $'Some preamble line\nMERGE 486fc48e\nmore text'
+echo "== polarity is decided by the FIRST hit (legion#1430: an APPROVE recounting its earlier REQUEST_CHANGES) =="
+tp() { local exp="$1" body="$2"; n=$((n+1)); got=$(jq -n --arg b "$body" --arg pos "$POS" --arg neg "$NEG" "$VS$PL"'$b|vs|pol($pos;$neg)' -r)
+  if [ "$got" = "$exp" ]; then echo "PASS pol=$got :: ${body:0:72}"; else echo "FAIL pol got [$got] want [$exp] :: ${body:0:72}"; fail=1; fi; }
+tp pos  "Verdict: APPROVE at 2846a746 (round 4). My round-2 REQUEST_CHANGES at 11aa22bb is cleared: both findings fixed."
+tp neg  "VERDICT: REQUEST_CHANGES at 2846a746 - the round-3 APPROVE at 11aa22bb is withdrawn; the guard still fires on the move-back"
+tp pos  "**ACCEPT at 188327f0.** Supersedes my BLOCK at b18fa260 (stale cites)."
+tp neg  "Verdict: BLOCK at b2183a5f -- NEW-6 from the body claims; NEW-4/NEW-5 fixed"
+tp none "Verdict: PASS at 36ae1e27 (tester run)"
+tp pos  'Reviewed `a96869d` (`a96869d5b02f9a367d1414eb6a3d2e0ba58b1f3e`): **clean, no findings.**'
 echo; echo "$n cases, fail=$fail"; exit $fail
