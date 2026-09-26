@@ -1223,6 +1223,17 @@ def _is_leaked_never_started(box_local: bool, status: str, pid: int, started_at:
     )
 
 
+_INSPECT_DRIVER_RE = re.compile(r"\binspect(\s|_ai|-)|\btl (run|cyber)\b|\bpytest\b|\bhawk\b")
+
+
+def _is_leaked_inspect_sandbox(box_local: bool, status: str, age_h: float, drivers: list[Any], holders: list[Any]) -> bool:
+    """An `inspect-*` compose project whose eval is over: on a BOX-LOCAL daemon only this box's
+    processes can have started it, and the box's /proc sees them all, so a running sandbox older
+    than a day with no eval-driver process anywhere in the box (the driver pattern includes
+    pytest, which drives Inspect through its Python API) and no holder has nothing left to serve.
+    On the shared daemon a driver can live in any box, so the row stays unknown."""
+    return box_local and status == "running" and age_h > 24 and not drivers and not holders
+
 
 def cmd_containers(_args: argparse.Namespace) -> None:
     """Every container with its family, owner attribution and a liveness verdict.
@@ -1243,6 +1254,10 @@ def cmd_containers(_args: argparse.Namespace) -> None:
                     org.testcontainers.session-id-labelled fixtures of the same id); running = find the
                     client pid through its published port, never remove by hand - it self-reaps.
       agentbox      session infrastructure; never a reaper target.
+      inspect-sandbox  compose project `inspect-*` (an Inspect eval's sandbox). On a BOX-LOCAL daemon,
+                    running, older than 24h, with no eval-driver process in the box (inspect, tl run,
+                    tl cyber, pytest, hawk) and no holders: leaked. Three lanes found these 9 h to 2
+                    days after their evals ended (2026-09-26). On the shared daemon: unknown.
       other         no known label/name shape. On a BOX-LOCAL daemon (`docker info --format
                     '{{.Name}}'` starts with "agentbox-") no other box's container can ever exist,
                     so a container that is `created`, has State.Pid 0, State.StartedAt at docker's
@@ -1271,6 +1286,7 @@ def cmd_containers(_args: argparse.Namespace) -> None:
             except OSError:
                 pass
     run_ids = _e2e_run_ids_in_env()
+    drivers = [(pid, c[:120]) for pid, c in cmdlines if _INSPECT_DRIVER_RE.search(c) and "disk_hygiene" not in c]
     _, ss_out = run(["sudo", "ss", "-tnpH", "state", "established"])
     cwds = proc_cwds()
     stack_ws = _local_stack_workspaces()
@@ -1323,6 +1339,12 @@ def cmd_containers(_args: argparse.Namespace) -> None:
             row.update(family="tc-fixture", session_id=labels["org.testcontainers.session-id"])
         elif name.startswith("agentbox-"):
             row.update(family="agentbox", verdict="never")
+        elif proj.startswith("inspect-"):
+            row.update(family="inspect-sandbox", drivers=drivers[:5])
+            if _is_leaked_inspect_sandbox(box_local, status, age_h, drivers, holders):
+                row.update(verdict="leaked", reason="box-local daemon, eval sandbox older than 24h, no eval driver in the box")
+            elif _is_leaked_never_started(box_local, status, d["State"].get("Pid", 0), d["State"].get("StartedAt", ""), age_h, holders):
+                row.update(verdict="leaked", reason="box-local daemon, never started")
         elif _is_leaked_never_started(box_local, status, d["State"].get("Pid", 0), d["State"].get("StartedAt", ""), age_h, holders):
             row.update(verdict="leaked", reason="box-local daemon, never started")
         result.append(row)

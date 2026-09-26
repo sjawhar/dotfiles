@@ -998,5 +998,33 @@ class ContainerCensusOtherFamilyTest(unittest.TestCase):
             disk_hygiene.run = original
 
 
+class ContainerCensusInspectSandboxTest(unittest.TestCase):
+    """An `inspect-*` compose project outliving its eval: three lanes found them on their own box
+    daemons 9 h, 16-19 h and 2 days after the run ended, and the SRE removed 18 more (7-10 days
+    old, no driver) from the shared daemon (2026-09-26)."""
+
+    def test_box_local_stale_running_no_driver_no_holder_is_leaked(self) -> None:
+        self.assertTrue(disk_hygiene._is_leaked_inspect_sandbox(True, "running", 30.0, [], []))
+
+    def test_shared_daemon_stays_unknown(self) -> None:
+        self.assertFalse(disk_hygiene._is_leaked_inspect_sandbox(False, "running", 200.0, [], []))
+
+    def test_younger_than_a_day_stays_unknown(self) -> None:
+        self.assertFalse(disk_hygiene._is_leaked_inspect_sandbox(True, "running", 20.0, [], []))
+
+    def test_a_live_driver_anywhere_in_the_box_keeps_it(self) -> None:
+        self.assertFalse(disk_hygiene._is_leaked_inspect_sandbox(True, "running", 30.0, [(9, "uv run pytest tests")], []))
+
+    def test_a_holder_keeps_it(self) -> None:
+        self.assertFalse(disk_hygiene._is_leaked_inspect_sandbox(True, "running", 30.0, [], [(9, "docker compose -p inspect-x exec")]))
+
+    def test_driver_pattern_covers_python_api_evals_and_cli_runs(self) -> None:
+        for c in ("uv run pytest tests -q", "python -m inspect_ai eval x", "inspect eval-set spec.yaml",
+                  "uv run tl run task-1 --epochs 3", "tl cyber verify", "hawk eval-set run spec.yaml"):
+            self.assertTrue(disk_hygiene._INSPECT_DRIVER_RE.search(c), c)
+        for c in ("bash -l", "jj log -r @", "docker ps -a"):
+            self.assertFalse(disk_hygiene._INSPECT_DRIVER_RE.search(c), c)
+
+
 if __name__ == "__main__":
     unittest.main()
