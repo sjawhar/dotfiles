@@ -99,7 +99,7 @@ fi
 RS='def rs: (.body//"") + (if .state=="APPROVED" then " [review state APPROVED at \(.commit_id)]" elif .state=="CHANGES_REQUESTED" then " [review state REQUEST_CHANGES at \(.commit_id)]" else "" end); def notqueue: ((.user.login=="sjawhar") and ((.body//"")|test("Verified (independently |GREEN )?at head"))) | not;'
 echo "verdict artifacts naming $h8 (review bodies + issue comments):"
 rv=$(api "repos/$repo/pulls/$n/reviews" --paginate --jq "$RS"".[]|select(notqueue)|select(rs|test(\"$h7\"))|\"  R \\(.id) \\(.state) \\(.submitted_at[5:16]) \\(.user.login) :: \\(rs|gsub(\"\\n\";\" \")|.[0:120])\"")
-cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h7\"))|select((.user.login|test(\"github-actions\")|not) or (.body|test(\"^Reviewed `?[0-9a-f]{7,40}`? \\\\(`?[0-9a-f]{40}`?\\\\): \\\\**clean, no findings\")))|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
+cm=$(api "repos/$repo/issues/$n/comments" --paginate --jq ".[]|select(.body|test(\"$h7\"))|select((.user.login|test(\"github-actions\")|not) or (.body|test(\"^Reviewed \`?[0-9a-f]{7,40}\`? \\\\(\`?[0-9a-f]{40}\`?\\\\): \\\\**clean, no findings\")))|\"  C \\(.id) \\(.created_at[5:16]) \\(.user.login) :: \\(.body|gsub(\"\\n\";\" \")|.[0:120])\"")
 printf '%s\n%s\n' "$rv" "$cm" | sed '/^$/d'
 nohead=0; carry=0
 [ -z "$rv$cm" ] && { echo "  (none names this head - it needs one, or an IDENTICAL carry below)"; nohead=1; }
