@@ -208,6 +208,11 @@ session_env() {
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
     e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
     e+=(-e "ENVOY_URL=http://$NETWORK_GATEWAY:$ENVOY_PORT")
+    # ECR: the box's instance role is already allowed, but docker only asks for it when the
+    # config names a helper for that registry host — without the entry it sends nothing at all
+    # ("no basic auth credentials", measured 2026-09-26). Pass the host's OWN ecr-login hosts so a
+    # box mirrors the machine and no second list can drift; empty when the host has none.
+    e+=(-e "AGENTBOX_ECR_HELPERS=$(jq -c '(.credHelpers // {}) | with_entries(select(.value == "ecr-login"))' "$HOME/.docker/config.json" 2>/dev/null || echo '{}')")
     # Also the inner dockerd's firewall rule (agentbox/entrypoint.sh).
     e+=(-e "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://$NETWORK_GATEWAY:$IMDS_PORT")
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")

@@ -54,6 +54,25 @@ if ! setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --r
     echo "agentbox: docker credHelpers not written; Docker Hub pulls stay anonymous" >&2
 fi
 
+# ECR needs no token in the box: docker-credential-ecr-login exchanges the box's instance role
+# for a registry token when docker asks. The identity is already allowed — what was missing is
+# that docker only reaches it when the config NAMES the helper for that host. Measured 2026-09-26,
+# same box and role ten seconds apart: without the entry `docker manifest inspect` returns "no
+# basic auth credentials" (docker sent nothing); with it, the call authenticates as the instance
+# role and any refusal after that is an IAM answer. The host list comes from the machine's own
+# config via AGENTBOX_ECR_HELPERS (scripts/agentbox), so a box mirrors the host rather than
+# carrying a second list that can drift. Skipped, with a note, when the helper is not installed:
+# naming a missing helper breaks every pull for that host, which is worse than no entry.
+# shellcheck disable=SC2016  # the inner sh expands $HOME and $ECR_HELPERS; this shell must not
+if [ -n "${AGENTBOX_ECR_HELPERS:-}" ] && [ "$AGENTBOX_ECR_HELPERS" != "{}" ]; then
+    if ! setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --reset-env \
+            env HOME="$HOME" PATH="$PATH" MISE_DATA_DIR="${MISE_DATA_DIR:-}" \
+            ECR_HELPERS="$AGENTBOX_ECR_HELPERS" \
+            sh -c 'command -v docker-credential-ecr-login >/dev/null 2>&1 || exit 7; c="$HOME/.docker/config.json"; mkdir -p "$HOME/.docker" && { [ -s "$c" ] || echo "{}" > "$c"; } && jq --argjson h "$ECR_HELPERS" ".credHelpers = ((.credHelpers // {}) + \$h)" "$c" > "$c.tmp" && mv "$c.tmp" "$c"'; then
+        echo "agentbox: ECR credHelpers not written; ECR pulls will fail with 'no basic auth credentials'" >&2
+    fi
+fi
+
 # The session runs as the mounted directories' owner with the launcher's
 # environment intact (setpriv keeps env unless told otherwise).
 exec setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups "$@"
