@@ -70,6 +70,10 @@ if agent_context; then
         echo "gh shim: 'gh auth ${2:-}' is the user's own login and is refused in an agent session; gh calls are routed to the GitHub App for the repo's owner" >&2
         exit 1
     fi
+    # A standalone docs-only pull request is refused where docs are batched.
+    if [[ "${1:-}" == pr && "${2:-}" == create ]]; then
+        "$_dotfiles/scripts/docs-pr-gate" "${@:3}"
+    fi
 fi
 
 # Content decides what is "real", never the path: any candidate carrying the
