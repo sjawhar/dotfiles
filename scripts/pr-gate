@@ -127,7 +127,11 @@ last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("
 # negative token in the same artifact); block if the latest negative is not superseded by a later positive.
 # The old gate matched CHANGES REQUESTED as verdict-bearing without seeing it was negative (#20188).
 # "does not block" is positive by construction - it is not in the negative set.
-NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *(request[_ ]changes|changes requested|do not merge)'
+# `Verdict: CHANGES|FAIL` (Legion's and the thermonuclear reviewers' negative form) was missing, so an approve
+# followed by a later `Verdict: CHANGES` read GREEN (2026-09-26). `\**` admits a bold verdict line. `Verdict: PASS` is
+# deliberately NOT positive here: it is a review half or a tester run, and every lane posts as the same bot, so
+# a tester's PASS must not supersede a reviewer's rejection (the queue's ruling, #20200).
+NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block)'
 POS='(?i)approve|merge +at|lgtm|verdict:? *(approve|merge|ship)'
 negt=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg re "$NEG" "$VS"'[.[]|select(.b|vs|test($re))]|sort_by(.t)|last|.t // ""')
 post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS"'[.[]|select(.b|vs|test($pos))|select(.b|vs|test($neg)|not)]|sort_by(.t)|last|.t // ""')
