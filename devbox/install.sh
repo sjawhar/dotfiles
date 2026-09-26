@@ -21,4 +21,15 @@ systemctl --user daemon-reload
 # Devbox serve role exposes files through the laptop tunnel without binding the laptop's forwarded port.
 bash "${DOTFILES_DIR}/installers/forward.sh" serve
 
+# One embedding server for every omp session on the box (see installers/omp-embed.sh):
+# without it each session loads its own ~1 GB copy of the mnemopi embedding model.
+bash "${DOTFILES_DIR}/installers/omp-embed.sh"
+
+# Anonymous Docker volumes no container references piled up to 308 GB unnoticed on
+# 2026-09-25 and took the shared disk to 91%; prune them every 6 h (see the unit files).
+ensure_link "${DEVBOX_DIR}/docker-volume-prune.service" ~/.config/systemd/user/docker-volume-prune.service
+ensure_link "${DEVBOX_DIR}/docker-volume-prune.timer"   ~/.config/systemd/user/docker-volume-prune.timer
+systemctl --user daemon-reload
+systemctl --user enable --now docker-volume-prune.timer
+
 echo "--- Devbox setup complete ---"
