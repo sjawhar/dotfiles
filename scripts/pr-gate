@@ -112,16 +112,16 @@ w0=$(mktemp -d)
 # code span is QUOTED, not asserted. A lane asking a reviewer to restate a verdict spelled the form out in backticks,
 # and its own request read as the verdict: GATE READS GREEN (agent-c#20214, 2026-09-25). Fails safe - a real
 # verdict written in backticks becomes a grammar miss for a human to read, never a false green.
-VS='def vs: gsub("(?s)```.*?```";" ")|gsub("`(?<c>[^`\n]*)`"; if (.c|test("(?i)verdict|approve|merge at|request.changes|lgtm|do not merge")) then " " else "`\(.c)`" end);'
+VS='def vs: gsub("(?s)```.*?```";" ")|gsub("`(?<c>[^`\n]*)`"; if (.c|test("(?i)verdict|approve|accept at|merge at|request.changes|lgtm|do not merge")) then " " else "`\(.c)`" end);'
 api "repos/$repo/pulls/$n/reviews" --paginate --jq "$RS"'.[]|select(notqueue)|{t:.submitted_at,u:.user.login,k:"R",b:rs}' > "$w0/r.jsonl" || true
 api "repos/$repo/issues/$n/comments" --paginate --jq '.[]|select(.user.login|test("github-actions")|not)|{t:.created_at,u:.user.login,k:"C",b:(.body//"")}' > "$w0/c.jsonl" || true
 echo "verdict-bearing artifacts (VERDICT:/APPROVE/APPROVED/MERGE at/REQUEST_CHANGES; reviews + comments), newest first:"
-vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|gsub("[0-9a-f]{41,}";" ")|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
+vr=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|reverse|.[0:6][]|"  \(.k) \(.t[5:16]) \(.u) :: \(.b|gsub("\n";" ")|.[0:110]) :: names=\([.b|gsub("[0-9a-f]{41,}";" ")|scan("[0-9a-f]{40}")]|unique|.[0:2]|map(.[0:8])|join(","))"' -r)
 printf '%s\n' "${vr:-  (none)}"
 # The head-naming list above and the grammar list are separate reads; green needs ONE artifact doing both. A lane's
 # "please re-verdict at <head>" names the head, an older verdict carries the grammar, and together they read GREEN
 # with no verdict at the head (agent-c#20214 and a second lane, 2026-09-26). No such artifact -> needs an IDENTICAL carry.
-vh=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg h "$h7" "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))|select(.b|test($h))]|length')
+vh=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg h "$h7" "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))|select(.b|test($h))]|length')
 if [ -n "$vr" ] && [ "$nohead" = 0 ] && [ "${vh:-0}" = 0 ]; then echo "  (artifacts name $h8 and others carry verdict grammar, but none does both - a request or note naming the head is not a verdict)"; nohead=1; fi
 # A verdict-bearing artifact is REQUIRED for green (#20167). Distinguish two empties: nothing names the
 # head at all (truly no verdict) vs an artifact NAMES the head but the grammar missed it (a real verdict
@@ -133,7 +133,7 @@ fi
 # The newest verdict-bearing artifact names its head FIRST; older shas later in the same body are history, not the verdict.
 # Strip hex runs of 41+ first: a 64-hex image digest (sha256:556b68...) otherwise yields its first 40 digits as a
 # bogus "verdict sha", the compare 404s, and a PR whose verdicts all hold reports NOT GREEN (sjawhar/legion#1371).
-last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|last|(.b // "")|vs|gsub("[0-9a-f]{41,}";" ")|[scan("[0-9a-f]{40}")]|first // ""')
+last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b"))]|sort_by(.t)|last|(.b // "")|vs|gsub("[0-9a-f]{41,}";" ")|[scan("[0-9a-f]{40}")]|first // ""')
 # Verdict POLARITY: green only if the LATEST verdict is not a rejection. Match negative verdicts
 # (REQUEST_CHANGES / CHANGES REQUESTED / DO NOT MERGE) and clean positives (APPROVE/MERGE/LGTM with no
 # negative token in the same artifact); block if the latest negative is not superseded by a later positive.
@@ -147,7 +147,7 @@ last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("
 # neither set and read GREEN as a neutral, for the wrong reason (agent-c#20291, 2026-09-26). A verdict in NEITHER set
 # is now NOT green: read it. `\**` admits a bold verdict line on both sides.
 NEG='(?i)(request[_ ]changes|changes requested|do not merge) +at +[0-9a-f]|verdict:? *\**(request[_ ]changes|changes requested|changes\b|do not merge|fail\b|block|hold\b|reject|not ready)'
-POS='(?i)approve|merge +at|lgtm|verdict:? *\**(approve|merge|ship|clean)'
+POS='(?i)approve|accept(ed)? +at +[0-9a-f]|merge +at|lgtm|verdict:? *\**(approve|accept|merge|ship|clean)'
 negt=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg re "$NEG" "$VS"'[.[]|select(.b|vs|test($re))]|sort_by(.t)|last|.t // ""')
 post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS"'[.[]|select(.b|vs|test($pos))|select(.b|vs|test($neg)|not)]|sort_by(.t)|last|.t // ""')
 if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
