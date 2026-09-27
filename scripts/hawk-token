@@ -139,4 +139,27 @@ if [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; t
     fi
 fi
 
-exec uv run --frozen --no-dev --project "$(readlink -f "$current")" hawk-token --api-url "$HAWK_API_URL" "$@"
+# A mint that prints nothing is worse than one that fails: omp stores the empty
+# value as the anthropic apiKey, reports MissingApiKeyError, and makes no request
+# at all, so its own re-mint-on-401 can never fire again this turn. On 2026-09-27
+# a transient failure at 14:07Z did exactly that on two machines seven seconds
+# apart. So try twice, capped so both attempts fit inside omp's 10 s budget for a
+# `!command` (a healthy mint takes about 1.5 s).
+mint() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 4 uv run --frozen --no-dev --project "$(readlink -f "$current")" hawk-token --api-url "$HAWK_API_URL" "$@"
+    else
+        uv run --frozen --no-dev --project "$(readlink -f "$current")" hawk-token --api-url "$HAWK_API_URL" "$@"
+    fi
+}
+
+err="$(mktemp)"
+trap 'rm -f "$err"' EXIT
+for attempt in 1 2; do
+    out="$(mint 2>"$err")" || out=""
+    if [ -n "$out" ]; then printf '%s\n' "$out"; exit 0; fi
+    [ "$attempt" = 1 ] && sleep 0.5
+done
+log "mint produced no token after 2 attempts; last stderr follows"
+cat "$err" >&2
+exit 1

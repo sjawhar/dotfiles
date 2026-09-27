@@ -13,7 +13,7 @@ LOCK_REASON="agent session: locked on add (AGENTC-431)"
 # before the shim's own (`-ef`: its directory however PATH spells it) already had
 # their turn: a wrapper there that hands off positionally (knives gh's jj-bookmark
 # wrapper) would otherwise be chosen again and the two exec each other forever.
-# A PATH that does not carry this shim is scanned whole.
+# A PATH that does not carry this shim is scanned whole, then the system dirs.
 real_git() {
     local IFS=':'
     local dir candidate header seen_self=0 first_above=""
@@ -37,12 +37,24 @@ real_git() {
         echo "$first_above"
         return
     fi
+    # A caller that builds its own PATH may leave the real binary off it.
+    for candidate in /usr/bin/git /usr/local/bin/git /bin/git; do
+        [[ -f "$candidate" && -x "$candidate" ]] || continue
+        header=""
+        IFS= read -r -n 512 -d '' header < "$candidate" || true
+        [[ "$header" == *git-worktree-shim* ]] && continue
+        echo "$candidate"
+        return
+    done
     return 1
 }
 if ! _real="$(real_git)"; then
     echo "git shim: no real git found on PATH" >&2
     exit 127
 fi
+# The shim's own tools (cat, awk, realpath, mktemp) must exist even when the
+# caller's PATH omits the system dirs; appending keeps the caller's dirs first.
+PATH="$PATH:/usr/bin:/bin"
 
 # Same test as shims/gh: an omp session, an agentbox session, or anything
 # launched with the gh-app routing include.

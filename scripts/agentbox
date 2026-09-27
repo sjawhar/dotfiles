@@ -382,8 +382,13 @@ cmd_new() {
     # registration and leave git in the box fatal (14 live boxes at once,
     # 2026-09-21). A locked worktree is what prune skips; jj's forget in
     # close_box still removes it.
-    git -C "$SRC/$repo" worktree lock \
-        --reason "agentbox $box: path exists only on the host and inside its box" "$ws"
+    # The jj shim already locks what `jj workspace add` creates, so an
+    # existing lock is the outcome this step wants, not a failure.
+    local lock_out
+    if ! lock_out=$(git -C "$SRC/$repo" worktree lock \
+        --reason "agentbox $box: path exists only on the host and inside its box" "$ws" 2>&1); then
+        [[ "$lock_out" == *"is already locked"* ]] || { printf '%s\n' "$lock_out" >&2; exit 1; }
+    fi
 
     local mounts=() env=()
     mapfile -t mounts < <(mount_args "$box")

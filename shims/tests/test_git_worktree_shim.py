@@ -83,6 +83,14 @@ class GitWorktreeShimTest(unittest.TestCase):
         self.assertNotEqual(self.git("worktree", "remove", str(path)).returncode, 0)
         self.assertIn(str(path), self.registrations())
 
+    def test_a_caller_path_without_the_system_dirs_still_reaches_real_git(self):
+        env = {**self.agent, "PATH": str(SHIMS)}
+        self.assertEqual(self.git("rev-parse", "HEAD", env=env).returncode, 0)
+        self.missing_worktree("gone")
+        refused = self.git("worktree", "prune", env=env)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("refused", refused.stderr)
+
     def test_other_commands_pass_through_unchanged(self):
         direct = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         self.assertEqual(self.git("rev-parse", "HEAD").stdout, direct)

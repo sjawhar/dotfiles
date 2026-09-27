@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly check for omp usage on per-token API billing
+
+[Timer]
+OnCalendar=hourly
+# A box that was asleep or rebooted still gets the check it missed: the window
+# this detects (a session left on an API-billed model) persists across both.
+Persistent=true
+# The scan reads a multi-GB stats.db; keep it off the top of the hour where it
+# would contend with every other hourly unit.
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target

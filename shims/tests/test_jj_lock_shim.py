@@ -50,6 +50,13 @@ class JjLockShimTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.worktrees()[str(self.tmp / "ws-b")])
 
+    def test_in_an_agent_session_the_git_shims_lock_is_not_reported_as_a_failure(self):
+        self.env["OMP_SESSION_ID"] = "test-session"
+        result = self.jj("workspace", "add", "../ws-agent", "--name", "agent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("could NOT be locked", result.stderr)
+        self.assertTrue(self.worktrees()[str(self.tmp / "ws-agent")])
+
     def test_a_failed_add_keeps_jjs_exit_code_and_message(self):
         (self.tmp / "occupied").mkdir()
         (self.tmp / "occupied" / "file").write_text("x", encoding="utf-8")

@@ -149,6 +149,17 @@ authority and 10.5% on format. Those are the baselines this skill exists to push
 down; re-measure against them when editing it. Apply both tests to any question
 a verdict would let through, phrased as the caller would send it.
 
+- **Prior-answer search, before any other gate.** Search Dispatch for an issue or an answer that
+  already settles the question: `dispatch_search` on the question's nouns, plus the issue tree
+  around the work (titles, statuses, the owning issue's events). The proxy cannot do this
+  for you. Its tools are read, glob and grep, so a ruling that lives only in Dispatch is
+  invisible to it. Run the search yourself and pass the hits in. Measured 2026-09-27: a
+  coordinator asked him how a candidate run should get model access. A P1 issue titled with
+  the answer already existed, with a plan recording the decisive measurement. It was routed
+  to that coordinator's own session and sat in `backlog`, and `dispatch_search` on the
+  question's own nouns returns it first. His words: "I gave the answer last night … and
+  apparently you wasted all night doing something else." Production stayed frozen all night
+  on the issue carrying the symptom while the cause's plan sat untouched.
 - **Authority test.** His gate, verbatim: “am I asking because this needs my
   authority, my taste, or my risk appetite — or because I want you to ratify a
   judgment you are capable of making? Only the first is a question.” 233 of 770
@@ -196,6 +207,16 @@ a verdict would let through, phrased as the caller would send it.
   lane offered a candidate and then withdrew it, because the preview workflow it
   suspected validates its stack input as production|staging and fails closed, so
   that parking on an attended session was correct.
+- **Measured-premise test.** Every factual claim in the ask, its premise and each
+  option's precondition, is measured before it goes out, or the option is marked
+  unavailable and says why. An option resting on an unmeasured precondition is a
+  trap with a recommendation attached. One ask's revert option depended on a
+  static key that a separate retirement might already have deactivated, in which
+  case it restored nothing; a read-only measurement settled that before the option
+  stood (platform PO, 2026-09-27). The same night an ask went out on a premise
+  over an hour stale, "the token refresher is failing", when the refresher had
+  already switched to the new version, so his answer was moot (librarian). Four
+  lines of text do not show which claim was measured, so measure them all.
 
 ## When the question really belongs to the user
 
@@ -227,7 +248,7 @@ Every verdict must then land in exactly one of two places:
    low-confidence on a consequential action. A yes-verdict carries the ask
    itself: its `Ask to send` line is the corrected question — at most 800
    characters, at least two genuine options with tradeoffs, exactly one marked
-   recommended (the predicted answer), both pre-flight gates passed — ready for
+   recommended (the predicted answer), every pre-flight gate passed — ready for
    the caller to dispatch verbatim. A yes-verdict that only describes how the
    caller should fix its draft has not terminated; the 2026-09-16 shadow eval
    measured 9 of 15 yes-verdicts doing exactly that when the format had no slot
