@@ -60,4 +60,14 @@ tp neg  "Verdict: BLOCK at b2183a5f -- NEW-6 from the body claims; NEW-4/NEW-5 f
 tp none "Verdict: PASS at 36ae1e27 (tester run)"
 tp pos  "MERGE-WITH-NITS 143425f5 - one non-blocking hardening nit; my earlier REQUEST_CHANGES at 0000aaaa is cleared"
 tp pos  'Reviewed `a96869d` (`a96869d5b02f9a367d1414eb6a3d2e0ba58b1f3e`): **clean, no findings.**'
+echo "== check-run aggregation reads the WHOLE list, not a page (#20057: 198 runs, one verdict line per page) =="
+CSQ=$(grep -oP "^CSQ='\K.*(?=')" "$F"); [ -n "$CSQ" ] || { echo "could not extract CSQ from $F"; exit 1; }
+# tc <expected> <jq program building the slurped check-run array>
+tc() { local exp="$1" gen="$2"; n=$((n+1)); got=$(jq -nr "$gen | $CSQ")
+  if [ "$got" = "$exp" ]; then echo "PASS $got"; else echo "FAIL got [$got] want [$exp] :: $gen"; fail=1; fi; }
+R='{status:"completed",conclusion:"success",started_at:"1"}'
+tc "ok=150 fail=1 running=0 :: failing=z" "[range(150) as \$i | $R + {name:\"c\(\$i)\"}] + [{name:\"z\",status:\"completed\",conclusion:\"failure\",started_at:\"1\"}]"
+tc "ok=1 fail=0 running=0 :: failing="    "[{name:\"x\",status:\"completed\",conclusion:\"failure\",started_at:\"1\"}, {name:\"x\",status:\"completed\",conclusion:\"success\",started_at:\"2\"}]"
+tc "ok=0 fail=0 running=0 :: failing="    "[]"
+tc "ok=1 fail=0 running=1 :: failing="    "[$R + {name:\"a\"}, {name:\"b\",status:\"in_progress\",conclusion:null,started_at:\"1\"}]"
 echo; echo "$n cases, fail=$fail"; exit $fail
