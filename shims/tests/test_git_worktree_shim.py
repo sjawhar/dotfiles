@@ -87,6 +87,32 @@ class GitWorktreeShimTest(unittest.TestCase):
         direct = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         self.assertEqual(self.git("rev-parse", "HEAD").stdout, direct)
 
+    def test_a_wrapper_above_the_shim_that_hands_off_positionally_is_not_chosen_again(self):
+        # knives gh puts such a wrapper first on PATH inside a jj checkout; a shim that
+        # scans PATH from the top picks it as "the real git" and the two exec each other
+        # forever (four hung `gh pr create`s at ~70% CPU each, 2026-09-27).
+        wrapper = self.tmp / "wrapper"
+        wrapper.mkdir()
+        (wrapper / "git").write_text(
+            "#!/bin/bash\n"
+            '_self="$(cd "$(dirname "$0")" && pwd)"\n'
+            "_after=false\n"
+            "IFS=':' read -ra _dirs <<< \"$PATH\"\n"
+            'for _d in "${_dirs[@]}"; do\n'
+            '    if [[ "$_d" == "$_self" ]]; then _after=true; continue; fi\n'
+            '    [[ "$_after" == true && -x "$_d/git" ]] && exec "$_d/git" "$@"\n'
+            "done\n"
+            "exit 127\n"
+        )
+        (wrapper / "git").chmod(0o755)
+        env = {**self.agent, "PATH": f"{wrapper}{os.pathsep}{self.agent['PATH']}"}
+        direct = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+        try:
+            result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, env=env, capture_output=True, text=True, check=False, timeout=10)
+        except subprocess.TimeoutExpired:
+            self.fail("the shim chose the wrapper above it and the two exec each other forever")
+        self.assertEqual(result.stdout, direct)
+
 
 if __name__ == "__main__":
     unittest.main()

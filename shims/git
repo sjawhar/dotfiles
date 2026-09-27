@@ -9,19 +9,34 @@ set -euo pipefail
 
 LOCK_REASON="agent session: locked on add (AGENTC-431)"
 
-# The first git on PATH that is not this shim, judged by content like shims/gh.
+# The first git on PATH past this shim, judged by content like shims/gh. Entries
+# before the shim's own (`-ef`: its directory however PATH spells it) already had
+# their turn: a wrapper there that hands off positionally (knives gh's jj-bookmark
+# wrapper) would otherwise be chosen again and the two exec each other forever.
+# A PATH that does not carry this shim is scanned whole.
 real_git() {
     local IFS=':'
-    local dir candidate header
+    local dir candidate header seen_self=0 first_above=""
     for dir in $PATH; do
         candidate="$dir/git"
         [[ -f "$candidate" && -x "$candidate" ]] || continue
+        if [[ "$candidate" -ef "$0" ]]; then
+            seen_self=1
+            continue
+        fi
         header=""
         IFS= read -r -n 512 -d '' header < "$candidate" || true
         [[ "$header" == *git-worktree-shim* ]] && continue
-        echo "$candidate"
-        return
+        if [[ "$seen_self" == 1 ]]; then
+            echo "$candidate"
+            return
+        fi
+        [[ -n "$first_above" ]] || first_above="$candidate"
     done
+    if [[ "$seen_self" == 0 && -n "$first_above" ]]; then
+        echo "$first_above"
+        return
+    fi
     return 1
 }
 if ! _real="$(real_git)"; then
