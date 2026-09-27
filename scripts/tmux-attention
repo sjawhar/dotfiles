@@ -219,21 +219,48 @@ age() {
     if [ "$s" -lt 60 ]; then echo "${s}s"; elif [ "$s" -lt 3600 ]; then echo "$(( s / 60 ))m"; else echo "$(( s / 3600 ))h"; fi
 }
 
+# Colours follow .tmux.conf's status theme (24-bit; tmux-256color + RGB override).
+C_BLUE=$'\033[38;2;122;162;247m'
+C_YELLOW=$'\033[38;2;224;175;104m'
+C_GREEN=$'\033[38;2;158;206;106m'
+C_FG=$'\033[38;2;192;202;245m'
+C_DIM=$'\033[38;2;86;95;137m'
+C_BOLD=$'\033[1m'
+C_OFF=$'\033[0m'
+
+# Fit s to width w: pad, or cut with an ellipsis.
+fit() {
+    local s="$1" w="$2"
+    if [ "${#s}" -gt "$w" ]; then printf '%s…' "${s:0:$((w - 1))}"; else printf '%-*s' "$w" "$s"; fi
+}
+
 draw() {
-    local lines n
+    local lines n cols title
     mapfile -t lines < <(locked read_queue)
     n=${#lines[@]}
-    printf '\033[2J\033[H'
+    cols=$(tm display -p -t "$TMUX_PANE" '#{pane_width}' 2>/dev/null || echo 80)
+    printf '\033[2J\033[H\033[?25l'
+    # The pane border shows #{pane_title}, so the border itself reads the count.
     if [ -s "$VISITING" ]; then
-        printf '\033[1m%s\033[0m is at the cockpit · C-b a returns it\n\n' "$(jq -r '.title' "$VISITING")"
+        title=$(jq -r '.title' "$VISITING")
+        printf '\033]2;attention · visiting\033\\'
+        printf '\n  %s%s%s%s\n' "$C_YELLOW" "$C_BOLD" "$(fit "$title" $((cols - 4)))" "$C_OFF"
+        printf '  %sis at the cockpit%s   %sC-b a%s %sreturns it%s\n\n' "$C_FG" "$C_OFF" "$C_GREEN" "$C_OFF" "$C_DIM" "$C_OFF"
     elif [ "$n" -gt 0 ]; then
-        printf '\033[1m%s waiting\033[0m · C-b a brings the next\n\n' "$n"
+        printf '\033]2;attention · %s waiting\033\\' "$n"
+        printf '\n  %s%s⧗ %s waiting%s   %sC-b a%s %sbrings the next%s\n\n' "$C_YELLOW" "$C_BOLD" "$n" "$C_OFF" "$C_GREEN" "$C_OFF" "$C_DIM" "$C_OFF"
     else
-        printf '\033[2mnobody waiting\033[0m\n\n'
+        printf '\033]2;attention\033\\'
+        printf '\n  %snobody waiting%s\n\n' "$C_DIM" "$C_OFF"
     fi
-    local l
+    # Columns: title, repo (the working directory's name), age. Title takes what is left.
+    local l t repo a tw
+    tw=$(( cols - 2 - 18 - 2 - 5 - 2 )); [ "$tw" -lt 12 ] && tw=12
     for l in "${lines[@]}"; do
-        printf '  %s  \033[2m%s · %s\033[0m\n' "$(jq -r '.title' <<<"$l")" "$(jq -r '.pane' <<<"$l")" "$(age "$(jq -r '.at' <<<"$l")")"
+        t=$(jq -r '.title' <<<"$l")
+        repo=$(basename "$(jq -r '.cwd' <<<"$l")")
+        a=$(age "$(jq -r '.at' <<<"$l")")
+        printf '  %s%s%s  %s%s%s  %s%5s%s\n' "$C_FG" "$(fit "$t" "$tw")" "$C_OFF" "$C_BLUE" "$(fit "$repo" 18)" "$C_OFF" "$C_DIM" "$a" "$C_OFF"
     done
     tm refresh-client -S 2>/dev/null || true
 }
@@ -243,6 +270,7 @@ draw() {
 WATCH=
 cockpit_leave() {
     trap - INT TERM HUP EXIT
+    printf '\033[?25h' 2>/dev/null || true
     [ -z "$WATCH" ] || kill "$WATCH" 2>/dev/null || true
     exec 3<&-
     locked cockpit_exit "$TMUX_PANE"
