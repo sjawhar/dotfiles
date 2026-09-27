@@ -27,33 +27,33 @@ Planning starts with an explicit skill search. Enumerate the repo's skill direct
 
 ## Plan contract
 
-Plan the full request. Divide parallel work only into disjoint ownership units and name every shared contract before dispatch.
+Plan the full request, divide parallel work into disjoint ownership units and name shared contracts before dispatch.
 
-**Where the work happens.** The coordinator works in the workspace its session started in, and a worker works in the workspace its task block names — normally that same one, since steps run in sequence on one tree. A new workspace exists only for a genuinely disjoint parallel lane, created with `jj workspace add ~/.worktrees/<repo>/<name> --name <name>` outside an agent box and at `~/boxes/<box>/<name>` inside one, then locked from the box that made it (`using-jj`'s workspaces reference); never under `/tmp`, never a clone. Finish every cutover: migrate all callers and remove obsolete paths, shims, aliases, compatibility exports, and dead code unless Sami explicitly requires compatibility.
+**Where the work happens.** The coordinator uses its starting workspace; each worker uses the workspace named in its task, normally the same tree for sequential steps. Create a workspace only for a disjoint parallel lane: `jj workspace add ~/.worktrees/<repo>/<name> --name <name>` outside a box, or `~/boxes/<box>/<name>` inside one, then lock it from that box using `using-jj`. Never use `/tmp` or a clone. Complete cutovers by migrating every caller and removing obsolete paths, shims, aliases, compatibility exports and dead code unless Sami requires compatibility.
 
-**Major design changes are brainstormed with Sami on Dispatch, not in the session transcript.** For a major design change — a new subsystem, a workflow restructure, anything the brainstorming skill classifies architectural — the design conversation itself runs on Dispatch: the spec document on the issue, each open question an anchored `dispatch_ask` with options and a recommendation, his answers recorded as the decision provenance. A chat message dies when he scrolls past it; the Dispatch thread is durable and reaches him wherever he is. Chat remains right for execution and for bounded designs he is already discussing live.
+**Major design changes are discussed with Sami on Dispatch.** For architectural changes under `brainstorming`, put the spec on the issue, anchor open questions with `dispatch_ask`, give options and a recommendation, and record his answers as decision provenance. Chat is for execution and bounded designs already being discussed live.
 
 Every plan includes:
 
 - `## Hardening ledger`, initially empty.
-- `## End-to-end verification plan`, with one scenario per deliverable: the real user/operator surface, driven as the identity that holds it in production (a human-facing surface is accepted through a human's own grant path at least once; a run as a test or machine identity alone proves the route, not that anyone can reach it); the existing end-to-end driver and its location; a reusable driver task when none exists; and, for a required shared or costly resource, the cheapest genuine substitute (for example staging or a branch run).
-- `## Skill catalog`, mapping each step to the skills its worker is required to load (see above).
-- `## Contract change census`, for any step that tightens a boundary (a new refusal, a newly required field, a removed or renamed field, or a changed signature at a process or package boundary): the search commands, every hit with its planned disposition, and the rollout line, in the form `opening-a-pr` requires of the PR body.
-- `## Permission source census`, for any step that introduces or widens a permission, role, scope, or capability flag: each one named with its holder in every environment it ships to (the group, machine profile, role binding, or seed that grants it, and the enforcement point that reads it), plus the test that fails when a permission has no holder. "Granted by hand" is not a source, and a permission whose only holder is a test identity is unreachable in production; a plan that says either is not gated (Sami, 2026-09-26, after Release 1 of the hiring lifecycle shipped `hiring.read` and `hiring.manage` with no human holder, so the People page rendered Not found for everyone in production and every acceptance driver had passed as a machine identity).
+- `## End-to-end verification plan`: each deliverable's user-visible outcome, actual production transport/environment, production identity and grant path (including a human grant for human-facing work), existing driver location or a task to build one, and the cheapest genuine shared-resource substitute such as staging or a branch run, never a local simulation of the transport.
+- `## Skill catalog`, mapping steps to required worker skills.
+- `## Contract change census`: for boundary tightenings defined by `opening-a-pr`, record search commands, every hit's disposition and rollout line after tracing the data's producers, consumers and shared builders across this repository and siblings, including callers that reconstruct values without spelling fields or endpoints; the brief's caller list is not evidence.
+- `## Permission source census`: name each new or widened permission, role, scope or capability flag, its real holder in every shipped environment, the granting group/profile/binding/seed, the enforcement point and a test that fails for a permission without a holder; manual grants and test-only identities are not production sources.
 
-Plan verification describes a user-observable outcome. A reviewer rejects missing, proxy-only, or internal-only verification paths.
+Every worker brief must carry the full acceptance scenario, including existing data, the real user and transport, required live or write probes, and a pre-merge run; a coordinator cannot narrow, substitute or defer it without Sami's explicit scope change. If a named corpus is absent or a probe reaches no cases, mark the scenario `BLOCKED` and repair the plan against existing data rather than dropping or narrowing it. Plan verification describes a user-observable outcome; a reviewer rejects missing, proxy-only, or internal-only verification paths.
 
-Track each work item separately as **implemented**, **integrated**, and **acceptance-verified**. Do not report completion from unresolved dependency evidence.
+Track **implemented**, **integrated** and **acceptance-verified** separately; unresolved dependencies do not establish completion.
 
 ## Execution and acceptance
 
-**Every worker brief is the role's prepared prompt plus the task.** The prompts live in the legion repository and are read from GitHub at dispatch time, never from a local copy:
+**Every worker brief contains the prepared role prompt and the task.** Fetch these parts from Legion's GitHub `main` at dispatch time, never a local copy:
 
-- shared opening: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/common.md`, fetched for implementer, tester, and reviewer dispatches (the oracle's core stands alone);
-- core: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/<role>.md`, where `<role>` comes from the dispatch's PURPOSE, not its agent tier: an implementation or debug dispatch (`agent: "deep"`) fetches `implementer`; the acceptance dispatch (also `agent: "deep"`) fetches `tester`; a review dispatch (`agent: "reviewer"`) fetches `reviewer`; a research dispatch (`agent: "oracle"`) fetches `oracle`; a delegated planning dispatch does not exist (the coordinator plans), so `planner` is fetched only by Legion;
+- shared opening for implementer, tester and reviewer: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/common.md`;
+- core: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/<role>.md`, selecting by purpose: implementation/debug uses `implementer` (`deep`), acceptance uses `tester` (`deep`), review uses `reviewer` (`reviewer`), research uses `oracle` (`oracle`, without the shared opening); only Legion fetches `planner` because the coordinator plans here;
 - mechanics: `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/mechanics/interactive.md`.
 
-Fetch each part with the check that catches both failure shapes (a non-200, and an empty 200):
+Reject non-200 responses and empty bodies:
 
 ```bash
 fetch_part() {
@@ -65,43 +65,26 @@ fetch_part() {
 }
 ```
 
-The brief is: the shared opening (when fetched), one blank line, the core, one blank line, the mechanics fragment, one blank line, then a `# Task` block naming the workspace (absolute path), the step's brief file, the acceptance criteria, the bookmark the worker may move, the report-file path, and this step's `## Skill catalog` entries. Never paraphrase, summarise, or edit the fetched text. A failed fetch stops the dispatch — there is no fallback copy of the prompts anywhere, on purpose. A change to what a worker is told is a reviewed commit in the legion repository, and it reaches every session's next dispatch with no change here.
+Join the shared opening when applicable, core, mechanics and `# Task` with blank lines. The task names the absolute workspace, step brief, acceptance criteria, allowed bookmark, report path and skill-catalog entries. Preserve fetched text verbatim; a failed fetch blocks dispatch, with no fallback. Changes to prepared prompts are reviewed in Legion. Check commands in briefs use CI's exact recipe from the repo guide or workflow, not a subset.
 
-The coordinator names a check command in a brief only as the CI job's exact recipe (the repo `AGENTS.md` Commands section or the workflow file), never a subset: a brief that says `biome lint` where CI runs `bun run lint` (= `biome check`, lint + format) sends a worker to prove the wrong thing "clean".
+Dispatch independent work concurrently, consume event-driven results without polling and continue unblocked work. Clarify a genuinely blocking silent worker once, then redispatch only if needed.
 
-Dispatch independent work in parallel. Use native, event-driven subagent results; do not poll. Continue other dispatchable work when a lane blocks. Send one direct clarification to a genuinely blocking, silent worker, then re-dispatch only if needed.
+After integration, dispatch `deep` acceptance through every driver in the plan. The tester adds no review layers; defects and their red tests return to the resumed implementer.
 
-After integration, dispatch `task` with `agent: "deep"` for acceptance through each exact driver named in the plan.
+Record source, dependency and image revisions for every scenario, then mark:
 
-The tester dispatches no extra review-agent layers nobody mandated; review belongs to the `reviewer` gate below.
+- `RAN`: observation through the real surface.
+- `BLOCKED`: failed command and authoritative record, not a person's name; verify another lane's reported blocker against that record.
 
-A tester defect returns to the resumed implementer; the tester's red test travels with the resumption.
+For a contract census, exercise every human entry point through the actual client and new check; any unrun entry is `BLOCKED`. Build or repair missing infrastructure, tooling, skills or drivers at the tested head and rerun affected scenarios; `BLOCKED` prevents merge readiness until every acceptance scenario runs, while independent work continues. Do not ask Sami to omit acceptance. Iterate on the repo's fastest loop and use its slowest surface for final proof, not each edit. The repository's testing skill defines the rungs and what counts as production-like there.
 
-For every acceptance scenario, record the source, dependency, and image revisions, then mark it:
+After acceptance, the final `reviewer` checks correctness, security, dead code, shims, aliases, dual paths and half-migrations. Fix grounded findings before readiness; no other approval or follow-up assignment waives them, and ungrounded preferences are not binding.
 
-- `RAN` — real-surface observation;
-- `BLOCKED` — exact blocker, stated as the COMMAND that failed and the AUTHORITATIVE RECORD you
-  checked, never as a person. Most named blockers dissolve against that record: the answer is
-  already in a tag, a PR, or a queue's own behaviour, and the credential nobody needs was never on
-  the path. A blocker another lane reports is re-verified, not adopted.
+Review depth scales to the diff, and the reviewer decides it inside its own pass. For runtime changes, run `ce-simplify-code` once per PR after the last review round, scoped to its diff; any applied change becomes the final head for CI, review and refreshed real-surface proof. The coordinator then dispatches `thermonuclear-deep-review` and `thermonuclear-code-quality` once at that final code head, in sequence with the reviewer, who weighs their findings. The built-in reviewer cannot dispatch the pair. Do not repeat it for prose-only or Minor changes; docs-only/runtime-free diffs get neither simplify nor the pair. Path scope decides the skip, not a claim that changed behavior looks safe; a no-change simplify pass is expected.
 
-A step with a contract change census carries one more required acceptance scenario: **every human entry point in the census exercised through its real surface**, meaning the client that builds the input, run through the new check. An entry point no scenario ran is `BLOCKED`, not done.
+The implementer opens each PR under `opening-a-pr` and owns `landing-a-pr`, resumed for checks, reviews and conflicts; the coordinator sends the packet to the merge queue, which merges. Each stacked PR gets the same, and a reviewer as it lands. Use `gh-stack` for dependent PRs and `squash-stack` for completed applicable stacks, refreshing acceptance and PR gates if consolidation changes the delivered diff. Do not pause to ask about stacking.
 
-Production-like acceptance verification is mandatory. A missing or blocked surface is work, not a question: build or repair the infrastructure, tooling, skill, or driver at the head under test, then rerun each affected acceptance scenario there. `BLOCKED` stops merge readiness, not independent work; the change is not merge-ready until every scenario has run. Asking Sami whether to omit it is itself the failure.
-
-Iterate on the fastest loop the repository offers; its slowest surface is the once-per-PR proof, never an edit loop. The repository's testing skill defines the rungs and what counts as production-like there.
-
-After acceptance, a final `reviewer` examines integrated correctness and security, plus dead code, shims, aliases, dual paths, and half-migrations. Resolve grounded findings before PR readiness; a reviewer preference without a grounded finding is not automatically binding. Do not park a real defect as follow-up work.
-
-Review depth scales to the diff, and the `reviewer` decides it inside its own pass. Before the pair, the implementer runs `ce-simplify-code` once per pull request at the head where the last review round closed, scoped to the pull request's own diff: nothing applied leaves that head final; applied → the applied head is the final head: CI runs on it, the thermonuclear pair runs once on it, and the E2E proof re-runs on it for the surface the simplify diff touched (Sami, 2026-09-13: test on the real surface before merging, no shortcuts — a refactor that "preserves behaviour" is a claim until it is executed). That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly. A change to runtime code gets the thermonuclear pair (`thermonuclear-deep-review` + `thermonuclear-code-quality`) once, at the final code head, and never a second time on a push that changed only prose or a Minor. The built-in `reviewer` agent cannot dispatch it (its frontmatter says `spawns: scout`), so the coordinator dispatches the pair at that head, after the last review round and the simplify pass, and hands its findings to the `reviewer`, whose verdict at that head weighs them. The pair runs in sequence with the review, never in parallel beside it. A docs-only or otherwise runtime-free change gets neither pass: no simplify and no thermonuclear pair. The skip is bound to the paths touched — no runtime code in the diff — not to the change "looking safe"; a one-line behaviour change is still a behaviour change.
-
-The implementer opens its own pull request under `opening-a-pr` and owns `landing-a-pr` for it, resumed on each event (a check, a review, a conflict) rather than re-dispatched; each stacked PR gets the same, and a `reviewer` as it lands. The coordinator sends the merge packet to the merge queue, and the queue merges. Use `gh-stack` autonomously when multiple PRs are needed; consolidate completed applicable stacks with `squash-stack`, and if that changes the delivered diff, refresh affected acceptance and the `opening-a-pr` gate before readiness. Do not ask whether to stack, state a PR arrangement, or pause mid-stack.
-
-A PR waiting in the merge queue or the deploy lane never idles the lane. Unless you are revising that
-PR, the next change stacks on its branch (`gh-stack`) and work continues; a dependency on another
-lane's open PR is handled the same way, based on their branch. Merging and deploying are never a
-reason to wait. The one thing that genuinely waits for the merge is driving the change in
-production afterwards, and that runs alongside the next stacked change, not instead of it.
+If a deep worker's bash tool breaks, provide the kernel-hosted shell described in `using-subagents`; that worker has no eval tool. While a PR waits for merge or deployment, continue from its branch or a dependency's branch unless revising the waiting PR; post-merge production proof runs alongside that next work, not instead of it.
 
 ## Dispatch status
 
