@@ -65,6 +65,7 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/dotfiles-skills.ts" "${OMP_AGENT_DIR
 ensure_link "${DOTFILES_DIR}/omp/extensions/session-env.ts" "${OMP_AGENT_DIR}/extensions/session-env.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/compaction-reminder.ts" "${OMP_AGENT_DIR}/extensions/compaction-reminder.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/fullscreen.ts" "${OMP_AGENT_DIR}/extensions/fullscreen.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/attention-queue.ts" "${OMP_AGENT_DIR}/extensions/attention-queue.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 (cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
 # The envoy extension installs from npm (@sjawhar/pi-legion-envoy). The old

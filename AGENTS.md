@@ -27,7 +27,7 @@ forward/             # Browser-forwarding policy plus devbox serve and laptop da
 whatsapp/            # WhatsApp MCP daemon: wrapper + laptop user unit (holds the paired session)
 bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
 shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, git, jj, omp, tmux, xdg-open, pyright, basedpyright)
-scripts/             # Utility scripts (git-identity, ephemeral-monitor, etc.)
+scripts/             # Utility scripts (git-identity, tmux-attention, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
 agentbox/            # Opt-in agent box: image + home allow-list (scripts/agentbox runs sessions in it)
 devpod/              # Cloud-init for a bare VM (dormant)
@@ -94,6 +94,7 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 - **Showing Sami devbox content:** link files as `http://localhost:12802/<abs-path>` (get one with `forward url <path>`) instead of `file:///` links, which the laptop resolves against the wrong filesystem. A web app or any other TCP port, on the devbox or inside an agent box, reaches his laptop's `localhost:<port>` while `forward port <ports>…` runs; the `using-forward` skill has the supervised invocation and its failure modes.
 - **systemd user lingering must stay enabled** (`loginctl enable-linger ubuntu`): user services die when the last login session ends without it. "Lingering processes" cleanup is unrelated to systemd linger; do not disable it.
 - **YubiKey PC/SC transport:** the devbox reaches the YubiKey through forward's pcsc channel (`forward-serve` ⇄ laptop `forward-daemon`), supervised by systemd on both ends. `forward doctor` shows `pcsc channel` / `pcsc socket` rows. The old SSH-tunnel guidance applies only to oryx: create its tunnel from a local terminal. Ubuntu's verified polkit boundary refuses `access_pcsc` to SSH-session processes on the laptop, but permits systemd --user processes; test it with `systemd-run --user`, never a raw SSH shell.
+- **Attention:** a ready omp session does not ring the bell; it queues for the tmux attention cockpit instead (`scripts/tmux-attention`, run it in a pane; `C-b a` brings the next waiting session's pane into that cell and sends the current visitor back). The queue is `~/.omp/attention/queue.jsonl`.
 
 ## Commit Signing and Identity
 

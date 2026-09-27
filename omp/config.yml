@@ -117,6 +117,16 @@ display:
 tui:
   resizeScrollback: preserve
   rewindScrollback: preserve
+# Ready sessions join the attention queue (omp/extensions/attention-queue.ts,
+# scripts/tmux-attention) instead of ringing the bell: under tmux each of these
+# writes an OSC 9 plus a BEL, Ghostty asks the desktop for attention, and
+# Pop!_OS moves focus to that window.
+completion:
+  notify: "off"
+ask:
+  notify: "off"
+error:
+  notify: "off"
 skills:
   ignoredSkills:
     - ce-commit-push-pr
