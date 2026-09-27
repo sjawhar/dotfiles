@@ -14,19 +14,39 @@
 // hands the transcript back to the normal screen, where the rows that settled
 // meanwhile retire into native scrollback as usual.
 //
-// Two things here are structural, not documented API: the transcript is found
-// among the TUI's children by duck-typing (`renderTail` + `peekReplayBatch`),
-// and the editor is the focusable descendant with `getText`/`handleInput`. If
-// an omp upgrade reshapes the TUI, the mode shows "transcript not found" and
-// closes instead of drawing garbage; the upstream ask then is a documented
-// ctx.ui accessor for the transcript and editor, not the whole mode.
+// Three things here are structural, not documented API: the transcript is
+// found among the TUI's children by duck-typing (`renderTail` +
+// `peekReplayBatch`), the editor is the focusable descendant with
+// `getText`/`handleInput`, and `tui.showOverlay` is wrapped while the mode is
+// open (below). If an omp upgrade reshapes the TUI, the mode shows "transcript
+// not found" and closes instead of drawing garbage; the upstream ask then is a
+// documented ctx.ui accessor for the transcript and editor, not the whole mode.
 //
-// Known limits: while a non-fullscreen dialog (ask, confirm) sits on top, the
-// engine leaves the alternate screen until it closes; mouse reporting is on
-// while the mode is open, so native text selection needs the terminal's
-// bypass modifier (Shift in most terminals, and in tmux with `mouse on`).
+// Dialogs opened over the mode (the alt+p model picker, ask, confirm) stay on
+// the alternate screen, drawn over the viewport. The engine picks the screen
+// from the topmost overlay alone (`fullscreen` decides nothing else: layout
+// comes from anchor, width and height, and the alternate frame composites the
+// whole overlay stack), so each dialog opened while the mode is up is shown
+// with `fullscreen` set and mouse reporting off unless it asked for it;
+// without that the engine drops to the normal screen and repaints the whole
+// page behind the dialog, and again when it closes.
+//
+// The alternate frame keeps the terminal cursor hidden and expects a modal to
+// draw its own, so the editor uses its software cursor while the mode is open
+// and gets the terminal cursor back when it closes.
+//
+// Known limit: mouse reporting is on while the mode is open, so native text
+// selection needs the terminal's bypass modifier (Shift in most terminals, and
+// in tmux with `mouse on`).
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type Component, matchesKey, parseSgrMouse, type TUI, truncateToWidth } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	matchesKey,
+	type OverlayOptions,
+	parseSgrMouse,
+	type TUI,
+	truncateToWidth,
+} from "@oh-my-pi/pi-tui";
 
 const WHEEL_ROWS = 3;
 const TOGGLE_KEY = "ctrl+alt+f";
@@ -38,6 +58,7 @@ interface TranscriptView extends Component {
 interface EditorView extends Component {
 	focused: boolean;
 	handleInput(data: string): void;
+	setUseTerminalCursor?(useTerminalCursor: boolean): void;
 }
 
 function isTranscript(component: Component): component is TranscriptView {
@@ -76,6 +97,8 @@ function open(ctx: ExtensionContext): void {
 			let width = tui.terminal.columns;
 			let height = 1;
 			let total = 0;
+			// The editor whose cursor mode this mode switched, restored on close.
+			let cursorEditor: EditorView | undefined;
 
 			const locate = () => {
 				const index = tui.children.findIndex(isTranscript);
@@ -111,6 +134,10 @@ function open(ctx: ExtensionContext): void {
 						queueMicrotask(() => done());
 						return [theme.fg("warning", "fullscreen: transcript not found in this omp build; closing")];
 					}
+					// The TUI re-applies the terminal-cursor mode on every focus change,
+					// so this is re-asserted per frame; the call is a no-op when unchanged.
+					found.editor?.setUseTerminalCursor?.(false);
+					cursorEditor = found.editor;
 					const chrome = tui.children.slice(found.index + 1).flatMap(child => child.render(renderWidth));
 					height = Math.max(1, rows - chrome.length - 1);
 					let window: readonly string[];
@@ -170,6 +197,30 @@ function open(ctx: ExtensionContext): void {
 					return { consume: true };
 				}),
 			);
+			unsubscribers.push(() => cursorEditor?.setUseTerminalCursor?.(tui.getShowHardwareCursor()));
+
+			// Every dialog opened while the mode is up is shown fullscreen (see the
+			// header); the originals are put back if the mode closes under one.
+			const lifted = new Map<OverlayOptions, OverlayOptions | undefined>();
+			const originalShowOverlay = tui.showOverlay;
+			const showOverlay: TUI["showOverlay"] = (component, options) => {
+				if (options?.fullscreen === true) return originalShowOverlay.call(tui, component, options);
+				const fullscreenOptions: OverlayOptions = {
+					...options,
+					fullscreen: true,
+					mouseTracking: options?.mouseTracking ?? false,
+				};
+				lifted.set(fullscreenOptions, options);
+				return originalShowOverlay.call(tui, component, fullscreenOptions);
+			};
+			tui.showOverlay = showOverlay;
+			unsubscribers.push(() => {
+				if (tui.showOverlay === showOverlay) tui.showOverlay = originalShowOverlay;
+				for (const entry of tui.overlayStack) {
+					if (entry.options && lifted.has(entry.options)) entry.options = lifted.get(entry.options);
+				}
+				tui.requestRender();
+			});
 			focusEditor = () => {
 				const editor = locate()?.editor;
 				if (editor) tui.setFocus(editor);
