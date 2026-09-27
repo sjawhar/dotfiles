@@ -103,4 +103,6 @@ and Sami has no other way to see delivery without interrupting a session. Do thi
 you own as well as the root. Deploy queueing is not a status: a merge that waits for the deploy lane
 is still `needs_review`→`done` on its own schedule, and nobody is told about the wait.
 
+At each of these checkpoints, run the owner audit (`skills/dispatch`) over the project you own.
+
 **Producer-contract visibility.** When a plan, specification, or implementation changes a producer contract in a way a downstream surface can show, the `needs_review` packet and PR body identify every known downstream surface and its visible delta; the owner of an affected consumer reviews that account. If no consumer is known, record the search that established it. This is a review boundary, not a Sami approval gate.
