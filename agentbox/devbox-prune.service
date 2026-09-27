@@ -8,7 +8,9 @@ Description=Prune the always-safe class on the shared devbox: host Docker volume
 # Go build cache (161 GB; Go trims only entries idle for 5 days, with no size cap).
 # No -a anywhere: tagged images, named volumes and anything a container or build references
 # stay. The script logs bytes reclaimed per box and fails the unit, naming the box and the
-# command, if any step fails (scripts/devbox-prune).
+# command, if any step fails (agentbox/devbox-prune).
+# install.sh does not install this unit: a host links and enables it by hand
+# (agentbox/AGENTS.md).
 [Service]
 Type=oneshot
-ExecStart=%h/.dotfiles/scripts/devbox-prune
+ExecStart=%h/.dotfiles/agentbox/devbox-prune

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# devbox-prune: the shared devbox's recurring prune, run every 6 h by
-# devbox/devbox-prune.timer. Only the always-safe class - dangling or unused
+# devbox-prune: prune the shared devbox's always-safe class. Run it by hand;
+# a host that wants it every 6 h links and enables agentbox/devbox-prune.timer
+# by hand (install.sh sets up no timer). Only the always-safe class - dangling or unused
 # Docker objects and Go build cache entries idle for days - and nothing that
 # decides whether a workspace or a tagged image is live (the judgment-based
 # reaper was retired on 2026-09-20; see the disk-hygiene skill).
