@@ -31,6 +31,8 @@ Planning starts with an explicit skill search. Enumerate the repo's skill direct
 
 Plan the full request, divide parallel work into disjoint ownership units and name shared contracts before dispatch.
 
+**Ship in slices.** Group the plan's tasks into slices. Each slice merges as one PR and ends in something the requester can try: a command that runs, a page that renders, a real record that moves. Cut slices as thin end-to-end paths, not layers, and order them so the first is usable quickly. A slice is a merge and acceptance boundary, not a work assignment: its tasks still split into disjoint ownership units that run in parallel, and slices that don't depend on each other run at the same time. A slice's acceptance is its own user-visible outcome, not the whole feature's. Later slices build forward on the contracts the plan names up front, extending earlier ones rather than replacing them; a slice that could only ship with throwaway scaffolding merges into the next one.
+
 **Where the work happens.** The coordinator uses its starting workspace; each worker uses the workspace named in its task, normally the same tree for sequential steps. Create a workspace only for a disjoint parallel lane: `jj workspace add ~/.worktrees/<repo>/<name> --name <name>` outside a box, or `~/boxes/<box>/<name>` inside one, then lock it from that box using `using-jj`. Never use `/tmp` or a clone. Complete cutovers by migrating every caller and removing obsolete paths, shims, aliases, compatibility exports and dead code unless Sami requires compatibility.
 
 **Major design changes are discussed with Sami on Dispatch.** For architectural changes under `brainstorming`, put the spec on the issue, anchor open questions with `dispatch_ask`, give options and a recommendation, and record his answers as decision provenance. Chat is for execution and bounded designs already being discussed live.
@@ -38,12 +40,12 @@ Plan the full request, divide parallel work into disjoint ownership units and na
 Every plan includes:
 
 - `## Hardening ledger`, initially empty.
-- `## End-to-end verification plan`: each deliverable's user-visible outcome, actual production transport/environment, production identity and grant path (including a human grant for human-facing work), existing driver location or a task to build one, and the cheapest genuine shared-resource substitute such as staging or a branch run, never a local simulation of the transport.
+- `## End-to-end verification plan`: each slice's user-visible outcome, actual production transport/environment, production identity and grant path (including a human grant for human-facing work), existing driver location or a task to build one, and the cheapest genuine shared-resource substitute such as staging or a branch run, never a local simulation of the transport.
 - `## Skill catalog`, mapping steps to required worker skills.
 - `## Contract change census`: for boundary tightenings defined by `opening-a-pr`, record search commands, every hit's disposition and rollout line after tracing the data's producers, consumers and shared builders across this repository and siblings, including callers that reconstruct values without spelling fields or endpoints; the brief's caller list is not evidence.
 - `## Permission source census`: name each new or widened permission, role, scope or capability flag, its real holder in every shipped environment, the granting group/profile/binding/seed, the enforcement point and a test that fails for a permission without a holder; manual grants and test-only identities are not production sources.
 
-Every worker brief must carry the full acceptance scenario, including existing data, the real user and transport, required live or write probes, and a pre-merge run; a coordinator cannot narrow, substitute or defer it without Sami's explicit scope change. If a named corpus is absent or a probe reaches no cases, mark the scenario `BLOCKED` and repair the plan against existing data rather than dropping or narrowing it. Plan verification describes a user-observable outcome; a reviewer rejects missing, proxy-only, or internal-only verification paths.
+Every worker brief must carry the full acceptance scenario for the slice its task belongs to, including existing data, the real user and transport, required live or write probes, and a pre-merge run; a coordinator cannot narrow, substitute or defer it without Sami's explicit scope change. If a named corpus is absent or a probe reaches no cases, mark the scenario `BLOCKED` and repair the plan against existing data rather than dropping or narrowing it. Plan verification describes a user-observable outcome; a reviewer rejects missing, proxy-only, or internal-only verification paths.
 
 Track **implemented**, **integrated** and **acceptance-verified** separately; unresolved dependencies do not establish completion.
 
@@ -71,7 +73,7 @@ Join the shared opening when applicable, core, mechanics and `# Task` with blank
 
 Dispatch independent work concurrently, consume event-driven results without polling and continue unblocked work. Clarify a genuinely blocking silent worker once, then redispatch only if needed.
 
-After integration, dispatch `deep` acceptance through every driver in the plan. The tester adds no review layers; defects and their red tests return to the resumed implementer.
+After each slice integrates, dispatch `deep` acceptance for that slice's outcome; the last slice runs every driver in the plan. The tester adds no review layers; defects and their red tests return to the resumed implementer.
 
 Record source, dependency and image revisions for every scenario, then mark:
 
