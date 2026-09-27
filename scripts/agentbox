@@ -2,10 +2,12 @@
 # agentbox: one disposable Sysbox container per agent session, working in a
 # jj workspace made for it.
 #
-#   agentbox new <repo> [-e NAME[=VALUE]]… <cmd> [args…]
-#                                       run a command in a fresh box; each -e sets
-#                                       a variable in the box (docker run -e: a bare
-#                                       NAME passes the caller's value)
+#   agentbox new [-e NAME[=VALUE]]… <repo>… -- <cmd> [args…]
+#                                       run a command in a fresh box holding a jj
+#                                       workspace of each repo, working in the
+#                                       first; each -e sets a variable in the box
+#                                       (docker run -e: a bare NAME passes the
+#                                       caller's value)
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
 #   agentbox ls                         running boxes
 #   agentbox doctor                     health checks, host side and box side
@@ -16,10 +18,10 @@
 #                                       `agentbox restart` (in-box form: this session,
 #                                       now) when safe; --now hangs it up at once
 #
-# <repo> is a canonical checkout under ~/src. The box works in a jj workspace
-# of it at ~/boxes/<box>/<repo>; at exit the workspace is snapshotted,
-# forgotten and removed, so work survives only as commits in the canonical
-# repo. omp flags pass straight through.
+# Each <repo> is a canonical checkout under ~/src. The box holds a jj workspace
+# of each at ~/boxes/<box>/<repo> and works in the first; at exit every
+# workspace is snapshotted, forgotten and removed, so work survives only as
+# commits in the canonical repos. omp flags pass straight through after `--`.
 #
 # The box mounts an allow-list of $HOME (below). Host services arrive two ways:
 # the session bus, the metadata service and the Envoy API through socat relays
@@ -301,13 +303,14 @@ finish_knives_claims() {
     done < <(jq -r --arg s "$sid" '.. | objects | select(.owner? == $s) | "\(.repo)\t\(.branch)"' "$state")
 }
 
-# Everything the box made goes: the knives claims its session holds, then its
-# own workspace (snapshotted first, so uncommitted edits are a commit in the
+# Everything the box made goes: the knives claims its session holds, then each
+# repo's workspace (snapshotted first, so uncommitted edits are a commit in the
 # canonical repo), then the directory. The container must be gone first — it
-# holds the mounts, and docker recreates a removed mountpoint root-owned.
+# holds the mounts, and docker recreates a removed mountpoint root-owned. A
+# workspace that cannot be snapshotted keeps the whole directory in place.
 close_box() {
-    local box="$1" repo="$2" sid="$3" _
-    local ws="$BOXES/$box/$repo"
+    local box="$1" sid="$2" repo ws kept=0 _
+    shift 2
     for _ in $(seq 1 60); do
         docker inspect "$box" >/dev/null 2>&1 || break
         sleep 1
@@ -317,7 +320,9 @@ close_box() {
         docker rm -f "$box" >/dev/null 2>&1 || true
     fi
     finish_knives_claims "$sid"
-    if [[ -d "$ws/.jj" ]]; then
+    for repo in "$@"; do
+        ws="$BOXES/$box/$repo"
+        [[ -d "$ws/.jj" ]] || continue
         # `jj st` snapshots the working copy into @. On a shared store another
         # session's operations routinely leave a workspace stale, and `jj st`
         # refuses a stale one; `update-stale` first recovers it, putting any
@@ -328,28 +333,37 @@ close_box() {
                 || echo "agentbox: workspace forget $box failed; $ws left in place" >&2
         else
             echo "agentbox: could not snapshot $ws; left in place" >&2
-            return 0
+            kept=1
         fi
-    fi
+    done
+    if (( kept )); then return 0; fi
     rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
 }
 
 cmd_new() {
-    local usage="usage: agentbox new <repo> [-e NAME[=VALUE]]… <cmd> [args…]"
-    local repo="${1:-}"
-    [[ -n "$repo" && "$repo" != -* ]] || die "$usage  (repos: $(repos | tr '\n' ' '))"
-    shift
-    # Options sit between <repo> and <cmd>: a command never starts with `-`, and
-    # tmux-omp-ids reads <repo> as the first word after `agentbox new`.
-    local user_env=()
-    while [[ "${1:-}" == -e ]]; do
-        [[ "${2:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*(=.*)?$ ]] || die "-e takes NAME or NAME=VALUE, got '${2:-}'  ($usage)"
-        user_env+=(-e "$2")
-        shift 2
+    local usage="usage: agentbox new [-e NAME[=VALUE]]… <repo>… -- <cmd> [args…]"
+    local user_env=() box_repos=() repo
+    while (( $# )) && [[ "$1" != -- ]]; do
+        case "$1" in
+            -e)
+                [[ "${2:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*(=.*)?$ ]] || die "-e takes NAME or NAME=VALUE, got '${2:-}'  ($usage)"
+                user_env+=(-e "$2")
+                shift 2
+                ;;
+            -*) die "unknown option '$1'  ($usage)" ;;
+            *) box_repos+=("$1"); shift ;;
+        esac
     done
+    [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} )) || die "$usage  (repos: $(repos | tr '\n' ' '))"
+    shift
     (( $# )) || die "$usage"
-    [[ -d "$SRC/$repo" ]] || die "no checkout $SRC/$repo (repos: $(repos | tr '\n' ' '))"
-    [[ -e "$SRC/$repo/.jj" ]] || die "$SRC/$repo is not a jj repository"
+    for repo in "${box_repos[@]}"; do
+        [[ -d "$SRC/$repo" ]] || die "no checkout $SRC/$repo (repos: $(repos | tr '\n' ' '))"
+        [[ -e "$SRC/$repo/.jj" ]] || die "$SRC/$repo is not a jj repository"
+    done
+    local dup
+    dup="$(printf '%s\n' "${box_repos[@]}" | sort | uniq -d)"
+    [[ -z "$dup" ]] || die "repo listed twice: $dup"
     local box tag
     box="agentbox-$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-12)"
     tag="$(image_tag)"
@@ -357,7 +371,6 @@ cmd_new() {
     ensure_network
     ensure_forwarders
 
-    local ws="$BOXES/$box/$repo"
     # From here the box has state on disk: whatever fails before or during the
     # session, its directory and workspace never outlive the launcher.
     # Values are expanded now (the trap outlives this function's locals) and
@@ -365,7 +378,7 @@ cmd_new() {
     # which inherits EXIT traps in bash.
     local launcher_pid=$BASHPID
     # shellcheck disable=SC2064
-    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '$repo' ''" EXIT
+    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '' $(printf '%q ' "${box_repos[@]}")" EXIT
     # A pane kill or TERM lands here; the trap forwards a hangup into the box
     # (--init delivers it to the command), --rm fires, close runs. Before the
     # box exists it is remembered instead and honoured once the workspace add
@@ -385,9 +398,7 @@ cmd_new() {
     # the canonical checkout's working-copy commit, and a checkout sitting on
     # the root commit (~/src/oh-my-pi, ~/src/jj) hands the box an empty tree:
     # `ls` in the box showed only .git and .jj (2026-09-26, Sami's call).
-    detached jj -R "$SRC/$repo" workspace add --name "$box" -r 'trunk()' "$ws" >&2
-    (( interrupted )) && exit 130
-    # The workspace is a git worktree of the shared checkout, and its path
+    # Each workspace is a git worktree of its shared checkout, and its path
     # exists only on the host and inside this box. From every other box it
     # looks missing, so a `git worktree prune` run there - an agent's cleanup
     # after `git worktree remove`, Legion's provisioning - would drop its
@@ -396,11 +407,16 @@ cmd_new() {
     # close_box still removes it.
     # The jj shim already locks what `jj workspace add` creates, so an
     # existing lock is the outcome this step wants, not a failure.
-    local lock_out
-    if ! lock_out=$(git -C "$SRC/$repo" worktree lock \
-        --reason "agentbox $box: path exists only on the host and inside its box" "$ws" 2>&1); then
-        [[ "$lock_out" == *"is already locked"* ]] || { printf '%s\n' "$lock_out" >&2; exit 1; }
-    fi
+    local ws lock_out
+    for repo in "${box_repos[@]}"; do
+        ws="$BOXES/$box/$repo"
+        detached jj -R "$SRC/$repo" workspace add --name "$box" -r 'trunk()' "$ws" >&2
+        (( interrupted )) && exit 130
+        if ! lock_out=$(git -C "$SRC/$repo" worktree lock \
+            --reason "agentbox $box: path exists only on the host and inside its box" "$ws" 2>&1); then
+            [[ "$lock_out" == *"is already locked"* ]] || { printf '%s\n' "$lock_out" >&2; exit 1; }
+        fi
+    done
 
     local mounts=() env=()
     mapfile -t mounts < <(mount_args "$box")
@@ -421,7 +437,7 @@ cmd_new() {
     # per box that nothing reads (the transcript is in ~/.omp; attach is live).
     docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
-        -w "$ws" "${tty[@]}" \
+        -w "$BOXES/$box/${box_repos[0]}" "${tty[@]}" \
         "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
     child=$!
     # An omp inside reveals its session id once up; close releases that
@@ -447,7 +463,7 @@ cmd_new() {
     trap - TERM INT EXIT
     trap '' HUP
     exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
-    close_box "$box" "$repo" "$sid"
+    close_box "$box" "$sid" "${box_repos[@]}"
     exit "$rc"
 }
 
@@ -672,5 +688,5 @@ case "${1:-}" in
     doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
-    *) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
