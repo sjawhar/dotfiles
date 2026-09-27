@@ -122,6 +122,10 @@ display:
 tui:
   resizeScrollback: preserve
   rewindScrollback: preserve
+# No inline word predictions (dim ghost text after the cursor, accepted with
+# Tab). The default, auto, predicts from prompt history on every platform.
+spelling:
+  autocomplete: "off"
 # Ready sessions join the attention queue (omp/extensions/attention-queue.ts,
 # scripts/tmux-attention) instead of ringing the bell: under tmux each of these
 # writes an OSC 9 plus a BEL, Ghostty asks the desktop for attention, and
