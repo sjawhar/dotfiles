@@ -7,6 +7,7 @@ import itertools
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -275,6 +276,10 @@ class PaneSwapping(unittest.TestCase):
         self.assertEqual(self.geometry(), before, "the visitor went home and nobody replaced it")
         self.assertFalse((self.dir / "visiting").exists())
 
+    # The cockpit view watches its directory with inotifywait (inotify-tools),
+    # which installers/tmux.sh puts on the host; the agent-box image has none,
+    # so inside a box these two tests skip rather than time out.
+    @unittest.skipUnless(shutil.which("inotifywait"), "inotifywait (inotify-tools) is not installed; the cockpit view needs it")
     def test_cockpit_exit_sends_visitor_home(self) -> None:
         (self.dir / "cockpit").unlink()
         env = f"OMP_ATTENTION_DIR={shlex.quote(str(self.dir))} TMUX_ATTENTION_TMUX={shlex.quote(' '.join(self.tmux))}"
@@ -317,6 +322,7 @@ class PaneSwapping(unittest.TestCase):
         out = subprocess.run(["pgrep", "-af", "--", f"inotifywait .*{self.dir}"], capture_output=True, text=True, check=False).stdout
         return out.splitlines()
 
+    @unittest.skipUnless(shutil.which("inotifywait"), "inotifywait (inotify-tools) is not installed; the cockpit view needs it")
     def test_directly_launched_cockpit_exits_on_term_and_leaves_no_watcher(self) -> None:
         cockpit, pid = self.start_cockpit_directly()
         self.wait_for(lambda: len(self.watchers()) == 1, "the watcher to start")
