@@ -1,0 +1,94 @@
+#!/bin/bash
+# git-worktree-shim: in an agent session, refuse a bare `git worktree prune`, lock
+# every `git worktree add`, and unlock a lock of ours before `git worktree remove`.
+# From inside an agent box every other box's worktree path looks missing, so a
+# prune there deletes live sessions' registrations in the shared store
+# (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
+# registration survives a prune. Everything else goes straight to the real git.
+set -euo pipefail
+
+LOCK_REASON="agent session: locked on add (AGENTC-431)"
+
+# The first git on PATH that is not this shim, judged by content like shims/gh.
+real_git() {
+    local IFS=':'
+    local dir candidate header
+    for dir in $PATH; do
+        candidate="$dir/git"
+        [[ -f "$candidate" && -x "$candidate" ]] || continue
+        header=""
+        IFS= read -r -n 512 -d '' header < "$candidate" || true
+        [[ "$header" == *git-worktree-shim* ]] && continue
+        echo "$candidate"
+        return
+    done
+    return 1
+}
+if ! _real="$(real_git)"; then
+    echo "git shim: no real git found on PATH" >&2
+    exit 127
+fi
+
+# Same test as shims/gh: an omp session, an agentbox session, or anything
+# launched with the gh-app routing include.
+agent_context() {
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
+    local i v
+    for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
+        v="GIT_CONFIG_VALUE_$i"
+        [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
+    done
+    return 1
+}
+agent_context || exec "$_real" "$@"
+
+# Locate the subcommand past git's global options.
+args=("$@")
+i=0
+while ((i < ${#args[@]})); do
+    case "${args[i]}" in
+        -C | -c | --git-dir | --work-tree | --namespace | --config-env | --exec-path) i=$((i + 2)) ;;
+        -*) i=$((i + 1)) ;;
+        *) break ;;
+    esac
+done
+[[ "${args[i]:-}" == worktree ]] || exec "$_real" "$@"
+verb="${args[i + 1]:-}"
+rest=("${args[@]:i+2}")
+
+case "$verb" in
+    prune)
+        for a in "${rest[@]}"; do
+            [[ "$a" == -n || "$a" == --dry-run ]] && exec "$_real" "$@"
+        done
+        cat >&2 << 'EOF'
+git shim: `git worktree prune` is refused in an agent session (AGENTC-431).
+From inside a box every other box's worktree looks missing, so a prune deletes
+live sessions' registrations in the shared store; it did so 17 times on 2026-09-26.
+Remove your own worktree with `git worktree remove <path>` or `jj workspace forget <name>`;
+`git worktree prune -n` shows what a prune would delete without deleting it.
+EOF
+        exit 1
+        ;;
+    add)
+        for a in "${rest[@]}"; do
+            [[ "$a" == --lock ]] && exec "$_real" "$@"
+        done
+        exec "$_real" "${args[@]:0:i+2}" --lock --reason "$LOCK_REASON" "${rest[@]}"
+        ;;
+    remove)
+        # The worktree is the last non-option argument. Unlock it first only when
+        # the lock is one this shim or shims/jj set; any other lock stands.
+        target=""
+        for a in "${rest[@]}"; do [[ "$a" == -* ]] || target="$a"; done
+        if [[ -n "$target" ]]; then
+            abs="$(realpath -m -- "$target")"
+            lock="$("$_real" "${args[@]:0:i}" worktree list --porcelain | awk -v p="worktree $abs" '$0 == p {f = 1; next} /^worktree / {f = 0} f && /^locked/ {print; exit}')"
+            if [[ "$lock" == *AGENTC-431* ]]; then
+                "$_real" "${args[@]:0:i}" worktree unlock "$abs"
+            fi
+        fi
+        exec "$_real" "$@"
+        ;;
+esac
+exec "$_real" "$@"
