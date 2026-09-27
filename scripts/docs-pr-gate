@@ -47,9 +47,13 @@ if [[ -z "$base" ]]; then
     base="$(gh api "repos/$repo" --jq .default_branch)"
 fi
 
-if ! files="$(gh api "repos/$repo/compare/${base}...${head}" --jq '.files[]?.filename' 2>&1)"; then
+# gh's stderr stays out of the captured list: the shim prints a token-mint line there,
+# which read as a file name would let a docs-only pull request through.
+err="$(mktemp)"
+trap 'rm -f "$err"' EXIT
+if ! files="$(gh api "repos/$repo/compare/${base}...${head}" --jq '.files[]?.filename' 2>"$err")"; then
     echo "docs-pr-gate: could not read the file list of ${base}...${head} in ${repo}:" >&2
-    echo "  $files" >&2
+    sed 's/^/  /' "$err" >&2
     echo "  Push the branch first, then retry; the gate reads the pushed commits, not your working copy." >&2
     exit 1
 fi
@@ -69,7 +73,20 @@ done <<< "$files"
 
 today="$(date -u +%F)"
 if [[ "$branch" =~ $BATCH_RE ]] && [[ "${BASH_REMATCH[1]}" == "$today" ]]; then
-    exit 0
+    # One batch pull request per topic per day: once today's merged, the batch is closed.
+    if ! merged="$(gh api "repos/$repo/pulls?head=${repo%%/*}:${branch}&state=closed" \
+        --jq '.[] | select(.merged_at != null) | "#\(.number) at \(.merged_at)"' 2>"$err")"; then
+        echo "docs-pr-gate: could not check whether ${branch} already merged in ${repo}:" >&2
+        sed 's/^/  /' "$err" >&2
+        exit 1
+    fi
+    [[ -n "$merged" ]] || exit 0
+    cat >&2 << EOF
+docs-pr-gate: refused. Today's batch ${branch} already merged (${merged%%$'\n'*}), and ${repo}
+takes one documentation pull request per topic per day (AGENTC-847). Put this change in the
+pull request that caused it, or in tomorrow's batch for its topic (docs-batch/<topic>/<UTC date>).
+EOF
+    exit 1
 fi
 noun="files"
 ((count == 1)) && noun="file"

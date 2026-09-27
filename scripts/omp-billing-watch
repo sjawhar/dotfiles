@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# omp-billing-watch: which omp sessions spent on per-token API billing, from
+# omp's stats database (~/.omp/stats.db; costs are omp's list-price estimates,
+# not the invoice).
+#
+#   omp-billing-watch [--hours N] [--allow <session-id>|role:<name>]... [--alert]
+#
+# Providers that bill our own accounts per token: openai and opencode-zen.
+# anthropic goes through the Hawk gateway, openai-codex is the ChatGPT
+# subscription, google is the vision role and expected, so those are not
+# reported. Every session's usage is listed and any of it at or above --threshold
+# dollars is a deviation (exit 1; with --alert also sent to the `sre` role through
+# Envoy so the on-call triages it), unless the session is on the allow-list
+# (--allow <session-id> or --allow role:<envoy role>; none by default). Meant for the hourly
+# user timer installers/omp-billing-watch.sh sets up, and for a hand run with a
+# longer window (--hours 168).
+set -euo pipefail
+
+DB="${OMP_STATS_DB:-$HOME/.omp/stats.db}"
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+HOURS=1
+THRESHOLD=1
+ALERT=false
+ALLOW=()
+ALLOW_SET=false
+
+while (($#)); do
+    case "$1" in
+        --hours) HOURS="$2"; shift 2 ;;
+        --threshold) THRESHOLD="$2"; shift 2 ;;
+        --allow) $ALLOW_SET || { ALLOW=(); ALLOW_SET=true; }; ALLOW+=("$2"); shift 2 ;;
+        --alert) ALERT=true; shift ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "omp-billing-watch: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+
+[[ -r "$DB" ]] || { echo "omp-billing-watch: no stats db at $DB" >&2; exit 2; }
+
+# Nothing keeps stats.db current in the background: omp ingests session files
+# only when a stats surface runs (omp stats, /usage, the dashboard, omp gc).
+# Read it unsynced and the report is whatever the last surface left behind --
+# found 25h stale on 2026-09-22 while ~20 sessions wrote, so every hourly run
+# said "none" from a frozen snapshot, and the 09-21 verification run read a db
+# whose newest row was already 18h old.
+#
+# So: sync first (the pinned binary through mise, not shims/omp -- that re-execs
+# under `secrets`, which a tty-less timer cannot satisfy), then assert the db
+# actually covers the window before reporting from it. The assertion, not the
+# sync's exit code, is the gate: a sync that times out or loses the race for
+# omp's lock is fine as long as another one left the db current, and a sync that
+# exits 0 without ingesting the window is not. Ingest high-water mark is the
+# newest file mtime the db has recorded; if that predates the window, usage
+# inside the window cannot be in the db and "none" would be a lie.
+since_ms=$(( ($(date +%s) - HOURS * 3600) * 1000 ))
+timeout "${SYNC_TIMEOUT:-2700}" "$DOTFILES_DIR/bin/mise" x "github:sjawhar/oh-my-pi" -- omp stats --summary >/dev/null 2>&1 || true
+
+# cast: the column holds fs.Stats.mtimeMs, a float, and (( )) rejects a decimal.
+hwm="$(sqlite3 -readonly "$DB" "select cast(coalesce(max(last_modified), 0) as integer) from file_offsets" 2>/dev/null || echo 0)"
+if (( hwm < since_ms )); then
+    msg="omp-billing-watch: stats db covers only up to $(date -u -d "@$((hwm / 1000))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown), before the ${HOURS}h window opened -- refusing to report 'none' from data that cannot contain it. Check 'omp stats --summary' by hand."
+    echo "DEVIATION: $msg" >&2
+    if $ALERT; then
+        "$DOTFILES_DIR/scripts/envoy" send notifications.role.sre "$msg" >/dev/null && echo "  alerted notifications.role.sre" >&2
+    fi
+    exit 2
+fi
+
+# Live sessions, for titles and role holders. Envoy being down only costs
+# the names; usage is still reported.
+live="$(timeout 10 "$DOTFILES_DIR/scripts/envoy" ps --json 2>/dev/null || echo '[]')"
+
+allowed_ids=()
+for a in "${ALLOW[@]}"; do
+    if [[ "$a" == role:* ]]; then
+        mapfile -t holders < <(jq -r --arg t "notifications.role.${a#role:}" '.[] | select(.topics | index($t)) | .session_id' <<<"$live")
+        allowed_ids+=("${holders[@]}")
+    else
+        allowed_ids+=("$a")
+    fi
+done
+
+# One row per session: the uuid sits after "Z_" in every session file path,
+# for the main transcript and for its subagents' files alike.
+rows="$(sqlite3 -readonly -separator $'\t' "$DB" "
+    with m as (
+        select substr(session_file, instr(session_file, 'Z_') + 2, 36) sid,
+               provider, model, agent_type, cost_total
+        from messages
+        where provider in ('openai', 'opencode-zen') and timestamp > $since_ms
+    )
+    select sid,
+           printf('%.2f', sum(cost_total)),
+           count(*),
+           printf('%.2f', sum(case when agent_type = 'subagent' then cost_total else 0 end)),
+           group_concat(distinct provider || '/' || model)
+    from m group by sid order by sum(cost_total) desc")"
+
+printf 'API-billed usage, last %sh (omp list-price estimate)\n' "$HOURS"
+deviations=()
+total=0
+if [[ -z "$rows" ]]; then
+    echo "  none"
+else
+    printf '  %-9s %-10s %-6s %-9s %-4s %-24s %s\n' USD msgs sub\$ session who title models
+    while IFS=$'\t' read -r sid cost n subcost models; do
+        title="$(jq -r --arg s "$sid" '.[] | select(.session_id == $s) | .title // "-"' <<<"$live" | head -1)"
+        who=""
+        for a in "${allowed_ids[@]}"; do [[ "$a" == "$sid" ]] && who="ok"; done
+        if [[ -z "$who" ]] && awk -v c="$cost" -v t="$THRESHOLD" 'BEGIN{exit !(c+0 >= t+0)}'; then
+            who="!!"
+            deviations+=("${title:--} (${sid:0:8}) \$${cost} on ${models}")
+        fi
+        printf '  %-9s %-10s %-6s %-9s %-4s %-24s %s\n' "$cost" "$n" "$subcost" "${sid:0:8}" "${who:--}" "${title:--}" "$models"
+        total="$(awk -v a="$total" -v b="$cost" 'BEGIN{printf "%.2f", a+b}')"
+    done <<<"$rows"
+    printf '  total $%s; allowed: %s\n' "$total" "${ALLOW[*]:-none}"
+fi
+
+(( ${#deviations[@]} )) || exit 0
+msg="omp-billing-watch: API-billed usage outside the allow-list in the last ${HOURS}h — $(IFS='; '; echo "${deviations[*]}"). Nothing should reach openai/* or opencode-zen/* (allowed: ${ALLOW[*]:-none}); a Codex quota wall should fall to Anthropic (omp/config.yml fallbackChains), so check that session's model and the chain."
+echo "DEVIATION: $msg" >&2
+if $ALERT; then
+    "$DOTFILES_DIR/scripts/envoy" send notifications.role.sre "$msg" >/dev/null && echo "  alerted notifications.role.sre" >&2
+fi
+exit 1

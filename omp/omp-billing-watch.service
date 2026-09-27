@@ -1,0 +1,11 @@
+[Unit]
+Description=Report omp sessions spending on per-token API billing (openai, opencode-zen)
+# Exits non-zero on a deviation so the unit goes `failed` and `systemctl --user
+# --failed` shows it; the unit state is a record, not the handler. The handler is
+# --alert, which sends the finding to the `sre` Envoy role. Both are needed: a
+# unit nobody lists is a log line, and an Envoy role nobody holds is a dropped
+# message -- the deviation has to be visible in at least one place a human looks.
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/scripts/omp-billing-watch --hours 1

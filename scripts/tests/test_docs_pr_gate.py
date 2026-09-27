@@ -12,10 +12,15 @@ REPO = "trajectory-labs-pbc/agent-c"
 
 GH_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_LOG"
+# the real shim announces a token mint on stderr; the gate must not read it as data
+echo "gh-app-token: minting token for profile agent (owner=trajectory-labs-pbc)..." >&2
 case "$2" in
   */compare/*)
     if [ -n "$STUB_COMPARE_FAIL" ]; then echo "HTTP 404: Not Found" >&2; exit 1; fi
     printf '%s' "$STUB_FILES" ;;
+  */pulls\?*)
+    if [ -n "$STUB_PULLS_FAIL" ]; then echo '{"message":"Bad credentials","status":"401"}'; exit 1; fi
+    printf '%s' "$STUB_MERGED" ;;
   repos/*) echo main ;;
 esac
 """
@@ -66,6 +71,18 @@ class DocsPrGateTest(unittest.TestCase):
     def test_docs_only_pr_from_todays_batch_branch_passes(self):
         result = self.gate(f"--repo={REPO}", "-H", f"docs-batch/solutions/{today()}", files=["docs/solutions/x.md"])
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_batch_whose_pull_request_already_merged_today_is_refused(self):
+        result = self.gate("--repo", REPO, "--head", f"docs-batch/dpi/{today()}", files=["docs/a.md"],
+                           STUB_MERGED=f"#20344 at {today()}T02:55:00Z")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("already merged (#20344", result.stderr)
+        self.assertIn(f"pulls?head=trajectory-labs-pbc:docs-batch/dpi/{today()}&state=closed", self.log.read_text(encoding="utf-8"))
+
+    def test_an_unreadable_merge_check_refuses_rather_than_waving_through(self):
+        result = self.gate("--repo", REPO, "--head", f"docs-batch/dpi/{today()}", files=["docs/a.md"], STUB_PULLS_FAIL="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not check whether", result.stderr)
 
     def test_a_stale_batch_branch_is_refused(self):
         result = self.gate("-R", REPO, "--head", f"docs-batch/solutions/{today(-1)}", files=["docs/solutions/x.md"])

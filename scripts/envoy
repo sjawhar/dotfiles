@@ -43,8 +43,8 @@ _envoy_ps() {
         esac
     done
     local raw
-    raw=$(curl -fsS "$ENVOY_URL/v1/sessions" 2>/dev/null) || {
-        echo "error: could not reach Envoy at $ENVOY_URL" >&2
+    raw=$(curl -sS --fail-with-body "$ENVOY_URL/v1/sessions" 2>&1) || {
+        echo "error: Envoy at $ENVOY_URL failed GET /v1/sessions: $raw" >&2
         return 1
     }
     if [ "$sub_agents" = false ]; then
@@ -104,12 +104,14 @@ _envoy_send() {
             '{ topic: $t, message: $m, source: $s } + (if $ss == "" then {} else { source_session: $ss } end)')
     fi
 
-    curl -fsS -X POST "$ENVOY_URL$endpoint" \
+    local out
+    out=$(curl -sS --fail-with-body -X POST "$ENVOY_URL$endpoint" \
         -H "Content-Type: application/json" \
-        -d "$payload" 2>/dev/null || {
-        echo "error: could not reach Envoy at $ENVOY_URL" >&2
+        -d "$payload" 2>&1) || {
+        echo "error: Envoy at $ENVOY_URL failed POST $endpoint: $out" >&2
         return 1
     }
+    printf '%s\n' "$out"
 }
 
 _envoy_broadcast() {
