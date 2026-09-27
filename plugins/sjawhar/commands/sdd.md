@@ -93,7 +93,7 @@ The coordinator moves the issue's Dispatch status at every transition, the way a
 PR is open and its merge packet is sent, `done` once the change is verified in production by the
 coordinator's own check through its real surface — a green suite, a harness screenshot, or a merge is
 groundwork, not done. That check is the coordinator's work: never ask Sami, or whoever requested the
-change, to look at the result or approve it before moving the issue to `done`. An issue
+change, to look at the result or approve it before moving the issue to `done`, and close it with a reason (what shipped and the check that proved it live; `dispatch_issue_update` refuses `done` without one). An issue
 left at `triage` while work is underway is a defect: the roadmap view is read from these statuses,
 and Sami has no other way to see delivery without interrupting a session. Do this for child issues
 you own as well as the root. Deploy queueing is not a status: a merge that waits for the deploy lane
