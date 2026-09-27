@@ -36,7 +36,7 @@ The layout is a fixed placement map. Before adding anything, read the sibling fi
 
 ## Wrapper parity (hard)
 
-Agent-harness launchers (`scripts/oc`, `scripts/agentbox`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, envoy env. A capability added to one belongs in all of them — drift means sessions silently act as the user on GitHub or lose messaging. `agentbox` builds that environment for `docker run` (one box per session, `shims/omp` as the container's main process), so a change to what a session needs goes into `session_env()` there and into the shim.
+Agent-harness launchers (`scripts/oc`, `scripts/agentbox`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, envoy env. A capability added to one belongs in all of them — drift means sessions silently act as the user on GitHub, lose messaging, or lose commit attribution. Measured 2026-09-27: four sessions stamped no session trailer on ANY commit, coordinator included, while a fifth started the same day stamped every one, and 202 of 883 merged PRs across a week carried none — invisible to trailer-based attribution. The differing thing was how those sessions were launched. `agentbox` builds that environment for `docker run` (one box per session, `shims/omp` as the container's main process), so a change to what a session needs goes into `session_env()` there and into the shim.
 
 ## Skills here are repo-agnostic (hard)
 
