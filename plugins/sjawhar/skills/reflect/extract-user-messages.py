@@ -9,10 +9,12 @@ index (sessions/turns), fetches each user turn from the source JSONL by line
 number, drops injected noise (envoy/dispatch notification blocks, XML system
 notices, background-job snapshots, history-resume re-prompts, slash-command
 wrappers), redacts secrets, and dedupes exact repeats while recording how many
-duplicates were suppressed.
+duplicates were suppressed and each one's own session and timestamp.
 
-Output: JSONL rows {ts, session, project, turn, chars, dups, text}, plus an
-optional readable transcript (--text) with `--- #N <ts> <project>` headers.
+Output: JSONL rows {ts, session, project, turn, chars, dups, dup_at, text} --
+`dup_at` is `[[session, ts], ...]` for every suppressed repeat, always present
+(`[]` when none) -- plus an optional readable transcript (--text) with
+`--- #N <ts> <project>` headers.
 
 Usage:
     python extract-user-messages.py [--days N | --since ISO] [--db PATH]
@@ -198,6 +200,7 @@ def main():
         key = re.sub(r"\s+", " ", txt)[:400]
         if key in seen:
             seen[key]["dups"] += 1
+            seen[key]["dup_at"].append([sid, ts])
             continue
         rec = {
             "ts": ts,
@@ -206,6 +209,7 @@ def main():
             "turn": turn,
             "chars": len(txt),
             "dups": 0,
+            "dup_at": [],
             "text": txt,
         }
         seen[key] = rec
