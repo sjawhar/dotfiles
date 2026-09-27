@@ -1,0 +1,14 @@
+[Unit]
+Description=Prune the always-safe class on the shared devbox: host Docker volumes, every agent box's dangling images/build cache/volumes, idle Go build cache
+
+# On 2026-09-25 anonymous volumes left by test harnesses and removed containers had piled
+# up to 308 GB on the host daemon and taken the shared disk to 91%. On 2026-09-27 another
+# ~585 GB had regrown in a day, out of this job's original reach: dangling images and build
+# cache inside each agent box's own daemon (a dev-slot apply leaves 25-40 GB) and the host's
+# Go build cache (161 GB; Go trims only entries idle for 5 days, with no size cap).
+# No -a anywhere: tagged images, named volumes and anything a container or build references
+# stay. The script logs bytes reclaimed per box and fails the unit, naming the box and the
+# command, if any step fails (scripts/devbox-prune).
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/scripts/devbox-prune
