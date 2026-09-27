@@ -24,6 +24,19 @@ fi
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 
+# Envoy NATS credential: pi-envoy authenticates as the `omp-session` nkey user
+# when NATS_NKEY_SEED_FILE names its seed. scripts/envoy-nats-seed keeps that
+# seed in a per-boot 0600 file and prints its path, or prints nothing (no secret
+# yet, no AWS) and the session connects without a credential. A seed the caller
+# already gave (a box's session_env, a Legion pane) wins. Mirrors scripts/cld,
+# scripts/oc and scripts/agentbox.
+if [[ -z "${NATS_NKEY_SEED_FILE:-}" && -z "${NATS_NKEY_SEED:-}" ]]; then
+    _seed_file="$("${DOTFILES_DIR}/scripts/envoy-nats-seed")" || _seed_file=""
+    if [[ -n "$_seed_file" ]]; then
+        export NATS_NKEY_SEED_FILE="$_seed_file"
+    fi
+fi
+
 # --- glibc malloc arenas ---
 # omp's native addon (pi_natives) and the C libraries linked into it allocate
 # through glibc malloc from ~140 threads (tokio, rayon, the Bun pool), and glibc

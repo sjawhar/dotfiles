@@ -30,6 +30,17 @@ if [ -r "${DOTFILES_DIR:-$HOME/.dotfiles}/envoy/env.local" ]; then
 fi
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 
+# Envoy NATS credential for the claude-envoy bridge: the `omp-session` nkey
+# seed's per-boot 0600 file, when there is one (scripts/envoy-nats-seed). A seed
+# the caller already gave wins. Mirrors shims/omp.
+if [[ -z "${NATS_NKEY_SEED_FILE:-}" && -z "${NATS_NKEY_SEED:-}" ]]; then
+    _seed_file="$("${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/envoy-nats-seed")" || _seed_file=""
+    if [[ -n "$_seed_file" ]]; then
+        export NATS_NKEY_SEED_FILE="$_seed_file"
+    fi
+    unset _seed_file
+fi
+
 # --- dotfiles shims must lead PATH ---
 # The gh App routing above only works when `gh` resolves to shims/gh. The
 # launching shell's mise hook may have prepended tool install dirs (including
