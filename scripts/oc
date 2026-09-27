@@ -403,6 +403,18 @@ def launch(args: list[str]) -> NoReturn:
     rest = [p for p in env.get("PATH", "").split(":") if p and p != shims]
     env["PATH"] = ":".join([shims, *rest])
 
+    # --- Envoy NATS credential ---
+    # The `omp-session` nkey seed's per-boot 0600 file, when there is one
+    # (scripts/envoy-nats-seed); a seed the caller already gave wins. OpenCode
+    # opens no NATS connection itself; the sessions and tools it starts read it.
+    # Mirrors shims/omp.
+    if not env.get("NATS_NKEY_SEED_FILE") and not env.get("NATS_NKEY_SEED"):
+        seed_file = subprocess.run(
+            [str(dotfiles / "scripts/envoy-nats-seed")], stdout=subprocess.PIPE, text=True, check=False
+        ).stdout.strip()
+        if seed_file:
+            env["NATS_NKEY_SEED_FILE"] = seed_file
+
     # OPENCODE_NO_SERVE=1 opts out; an explicit --port wins over our --port 0.
     serve_args = [] if env.get("OPENCODE_NO_SERVE") == "1" or "--port" in args else ["--port", "0"]
     try:

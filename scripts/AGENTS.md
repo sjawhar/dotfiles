@@ -10,7 +10,7 @@ Executables covering several areas:
 - **tmux** — `tmux-dev-group`, `tmux-restore`, `tmux-snapshot`, `tmux-osc52-copy`, `tmux-urls`, `tmux-resurrect-omp` (tmux-resurrect save hook: records each omp pane as `omp --resume <id>`, or `agentbox omp <repo> --resume <id>` for a pane already running in a box, so a server restart brings the sessions back, not just the layout).
 - **Monitoring / system** — `ephemeral-monitor`, `mem-usage`, `resource-warnings`, `fix-monitors`, `jj-agent-status`, `fix-watchman` (unwatches Watchman roots whose sync is broken, which otherwise adds ~60s to every jj command in that workspace).
 - **Version control** — `git-identity` (sets the git *and* jj commit identity for a repo together, so signing stays intact), `docs-pr-gate` (run by `shims/gh` on `gh pr create` in agent sessions: refuses a pull request to agent-c whose every file is documentation unless its head is today's `docs-batch/<topic>/<UTC date>` branch; documentation rides in the pull request that caused it or in that one batch per topic per day, AGENTC-847).
-- **Misc** — `envoy`, `vendor-update` (rebases `vendor/*` clones), `mdview` / `mdview-server.py`, `joycon`, `brave-hw-encode`, `test-gh-routing`.
+- **Misc** — `envoy`, `envoy-nats-seed` (prints the path of the per-boot 0600 cache of the `omp-session` NATS nkey seed, fetching it from Secrets Manager on the first launch after boot and refreshing it hourly in the background; `shims/omp`, `cld`, `oc` and `agentbox` export it as `NATS_NKEY_SEED_FILE`, and export nothing when it prints nothing; `--refresh` fetches now, after a rotation), `vendor-update` (rebases `vendor/*` clones), `mdview` / `mdview-server.py`, `joycon`, `brave-hw-encode`, `test-gh-routing`.
 
 ## Conventions
 

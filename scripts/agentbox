@@ -176,7 +176,7 @@ mount_args() {
     # /run/user/$UID_. secretsd/ is the token dir the omp extension writes to;
     # created here so it is the user's, 0700, not a root-owned mountpoint.
     local run_user="$RUN_BASE/$box/run-user"
-    mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd"
+    mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd" "$run_user/envoy"
     chmod 700 "$run_user/secretsd"
     a+=(-v "$run_user:/run/user/$UID_")
     a+=(-v "$(dirname "$BUS_SOCK"):/run/user/$UID_/bus")
@@ -188,6 +188,11 @@ mount_args() {
     # Created here so a box started before the serve still sees it later.
     mkdir -p -m 700 "/run/user/$UID_/forward"
     a+=(-v "/run/user/$UID_/forward:/run/user/$UID_/forward")
+    # The host's cached NATS nkey seed (scripts/envoy-nats-seed), as a directory
+    # so the rename a refresh does reaches a running box, and so an in-box
+    # fetch, when the host had none at launch, lands in the host's cache.
+    mkdir -p -m 700 "/run/user/$UID_/envoy"
+    a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
     # The inner dockerd's image store: anonymous, dies with the box.
     a+=(-v /var/lib/docker)
     printf '%s\n' "${a[@]}"
@@ -208,6 +213,15 @@ session_env() {
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
     e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
     e+=(-e "ENVOY_URL=http://$NETWORK_GATEWAY:$ENVOY_PORT")
+    # The omp-session NATS nkey seed, fetched on the host into the directory
+    # mount_args binds at the same path, so a launch never waits on AWS from
+    # inside a box. Nothing when there is none: the box's omp connects without a
+    # credential. Mirrors shims/omp.
+    local seed_file
+    seed_file="$(XDG_RUNTIME_DIR="/run/user/$UID_" "$DOTFILES_DIR/scripts/envoy-nats-seed")" || seed_file=""
+    if [[ -n "$seed_file" ]]; then
+        e+=(-e "NATS_NKEY_SEED_FILE=$seed_file")
+    fi
     # ECR: the box's instance role is already allowed, but docker only asks for it when the
     # config names a helper for that registry host — without the entry it sends nothing at all
     # ("no basic auth credentials", measured 2026-09-26). Pass the host's OWN ecr-login hosts so a
@@ -577,6 +591,7 @@ c="$(curl -s -m 3 -o /dev/null -w %{http_code} "$ENVOY_URL/" 2>/dev/null)"; [ "$
 c="$(curl -s -m 3 -o /dev/null -w %{http_code} "${MNEMOPI_EMBEDDING_API_URL:-http://none}/../health" 2>/dev/null)"; [ "$c" = 200 ] && ok "mnemopi embed" || echo "note box: mnemopi embed $c"
 n="$(timeout 20 forward doctor 2>&1 | grep -cE "accepted|reachable|accepts")"; echo "@forward-ok $n"
 timeout 30 docker info >/dev/null 2>&1 && ok "inner docker answers" || fail "inner docker"
+if [ -n "${NATS_NKEY_SEED_FILE:-}" ]; then [ -r "$NATS_NKEY_SEED_FILE" ] && ok "NATS nkey seed readable" || fail "NATS_NKEY_SEED_FILE $NATS_NKEY_SEED_FILE unreadable: envoy cannot connect"; else echo "note box: no NATS nkey seed (envoy connects without a credential)"; fi
 exit $fails
 '
 
