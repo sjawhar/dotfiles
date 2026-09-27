@@ -306,10 +306,11 @@ finish_knives_claims() {
 # Everything the box made goes: the knives claims its session holds, then each
 # repo's workspace (snapshotted first, so uncommitted edits are a commit in the
 # canonical repo), then the directory. The container must be gone first — it
-# holds the mounts, and docker recreates a removed mountpoint root-owned. A
-# workspace that cannot be snapshotted keeps the whole directory in place.
+# holds the mounts, and docker recreates a removed mountpoint root-owned. Every
+# workspace is snapshotted before any is forgotten: if one cannot be, all of
+# them stay registered and the whole directory stays in place.
 close_box() {
-    local box="$1" sid="$2" repo ws kept=0 _
+    local box="$1" sid="$2" repo ws _
     shift 2
     for _ in $(seq 1 60); do
         docker inspect "$box" >/dev/null 2>&1 || break
@@ -320,6 +321,7 @@ close_box() {
         docker rm -f "$box" >/dev/null 2>&1 || true
     fi
     finish_knives_claims "$sid"
+    local snapshotted=() failed=0
     for repo in "$@"; do
         ws="$BOXES/$box/$repo"
         [[ -d "$ws/.jj" ]] || continue
@@ -329,14 +331,17 @@ close_box() {
         # unsnapshotted edits in a commit, and is a no-op on a fresh workspace.
         if detached jj -R "$ws" workspace update-stale >/dev/null 2>&1 \
             && detached jj -R "$ws" st >/dev/null 2>&1; then
-            detached jj -R "$SRC/$repo" workspace forget "$box" \
-                || echo "agentbox: workspace forget $box failed; $ws left in place" >&2
+            snapshotted+=("$repo")
         else
-            echo "agentbox: could not snapshot $ws; left in place" >&2
-            kept=1
+            echo "agentbox: could not snapshot $ws; $BOXES/$box left in place with every workspace registered" >&2
+            failed=1
         fi
     done
-    if (( kept )); then return 0; fi
+    if (( failed )); then return 0; fi
+    for repo in "${snapshotted[@]}"; do
+        detached jj -R "$SRC/$repo" workspace forget "$box" \
+            || echo "agentbox: workspace forget $box failed in $SRC/$repo" >&2
+    done
     rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
 }
 
@@ -350,7 +355,7 @@ cmd_new() {
                 user_env+=(-e "$2")
                 shift 2
                 ;;
-            -*) die "unknown option '$1'  ($usage)" ;;
+            -*) die "unknown option '$1'; the command goes after \`--\`  ($usage)" ;;
             *) box_repos+=("$1"); shift ;;
         esac
     done

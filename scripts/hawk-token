@@ -12,7 +12,7 @@
 # The console script runs from a private shallow checkout of agent-c main that this
 # wrapper owns, not from ~/src/agent-c: that is the shared jj store's default
 # workspace and its working copy sits wherever the last session left it. The
-# checkout lives under ~/src (a dot-dir, so `agentbox new <repo>` never sees it)
+# checkout lives under ~/src (a dot-dir, so `agentbox new` never offers it as a repo)
 # because ~/src is already mounted rw into every box: one clone on the host serves
 # every running session with no restart.
 #
