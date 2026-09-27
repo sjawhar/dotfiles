@@ -173,6 +173,12 @@ if [ -n "$last" ] && [[ "$head" != "$last"* ]]; then
   # Per file: the SORTED +/- lines, as running-the-merge-queue's verdict row specifies. Raw patch text
   # carries @@ offsets and context lines, and git re-aligns a hunk when main moves beside it, so a clean
   # rebase read CHANGED with no content difference (#20149, 2026-09-25).
+  # The compare API silently caps .files at 300 (the gh pr view --json files 100-cap's bigger sibling,
+  # 2026-09-27: it hid BOTH of #20057's migrations from a census). A capped read here makes two different
+  # diffs read IDENTICAL. Reconcile against the PR's own changed_files count; last.tsv has no stored
+  # count to reconcile, so exactly-300 rows is treated as capped.
+  hrows=$(wc -l < "$w/head.tsv"); lrows=$(wc -l < "$w/last.tsv"); ftot=$(jq -r .files <<<"$pr")
+  if [ "$hrows" -lt "$ftot" ] || [ "$lrows" -eq 300 ]; then echo "  !! file list SHORT READ (head $hrows/$ftot rows, last $lrows; compare API caps at 300) - carry check unreliable, diff the shas with git or per-commit API before packeting"; fail=1; fi
   if [ ! -s "$w/last.tsv" ] || [ ! -s "$w/head.tsv" ]; then echo "!! could not read the PR-own diff at ${last:0:8} or at the head (compare API returned nothing) - no carry"; fail=1
   elif cmp -s "$w/last.tsv" "$w/head.tsv"; then echo "PR-own diff IDENTICAL between newest verdict sha ${last:0:8} and head - a confirmation, not a round"; carry=1; else echo "!! PR-own diff CHANGED since newest verdict sha ${last:0:8}: $(diff "$w/last.tsv" "$w/head.tsv" | awk -F'\t' '/^[<>] /{sub(/^[<>] /,"",$1); print $1}' | sort -u | tr '\n' ' ' | cut -c1-200) -> that verdict does not cover the head"; fail=1; fi
   rm -rf "$w"
