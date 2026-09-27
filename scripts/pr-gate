@@ -64,12 +64,20 @@ jq -r '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not
 [ "$nonminor" -gt 0 ] && fail=1
 # Aggregate check: a repo that publishes one (a check run whose name ends in "-result") is judged on it;
 # otherwise every check at the head must be green and finished.
-agg=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '[.check_runs[]|select(.name|test("-result$"))|.name]|unique|first // ""')
+# The check-run list is read ONCE and WHOLE. `gh --paginate --jq` runs the filter once per PAGE, so an
+# aggregating filter printed one verdict line per page: #20057 (198 runs) read "ok=97 fail=1 running=1" and
+# "ok=83 fail=1 running=0", and the "-result" pick could come back with a leading blank line when the
+# aggregate sat on page 2 (2026-09-27). Slurp every page, reconcile against the total_count carried in the
+# same stream (no second call to race), then aggregate. CSQ is top-level so pr-gate-corpus can test it.
+CSQ='[group_by(.name)[]|max_by(.started_at)]|"ok=\([.[]|select(.conclusion=="success")]|length) fail=\([.[]|select(.conclusion=="failure")]|length) running=\([.[]|select(.status!="completed")]|length) :: failing=\([.[]|select(.conclusion=="failure")|.name]|join(","))"'
+crs=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '.total_count as $t|.check_runs[]|{t:$t,name,status,conclusion,started_at}' | jq -cs .)
+jq -e 'length == (first.t // 0)' <<<"$crs" >/dev/null || { echo "!! check-run list SHORT READ: $(jq length <<<"$crs") of $(jq 'first.t' <<<"$crs")"; fail=1; }
+agg=$(jq -r '[.[].name|select(test("-result$"))]|unique|first // ""' <<<"$crs")
 if [ -n "$agg" ]; then
   pcr=$(api "repos/$repo/commits/$head/check-runs?check_name=$agg&per_page=5" --jq '[.check_runs[]|"\(.status)/\(.conclusion//"-")"]|first // "none"')
   echo "$agg=$pcr"; [ "$pcr" = "completed/success" ] || fail=1
 else
-  cs=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '[.check_runs|group_by(.name)[]|max_by(.started_at)]|"ok=\([.[]|select(.conclusion=="success")]|length) fail=\([.[]|select(.conclusion=="failure")]|length) running=\([.[]|select(.status!="completed")]|length) :: failing=\([.[]|select(.conclusion=="failure")|.name]|join(","))"')
+  cs=$(jq -r "$CSQ" <<<"$crs")
   echo "checks $cs"; okn=$(sed -n 's/^ok=\([0-9]*\).*/\1/p' <<<"$cs")
   { grep -q "fail=0 running=0" <<<"$cs" && [ "${okn:-0}" -gt 0 ]; } || { echo "!! not green: need fail=0 running=0 AND at least one green check (ok=${okn:-0}; zero check-runs is not green, #20160)"; fail=1; }
 fi
