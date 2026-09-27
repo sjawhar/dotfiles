@@ -114,6 +114,11 @@ display:
   smoothStreaming: false
   hideToolActivity: false
   shimmer: disabled
+  # Keep the transcript before each compaction inline, behind a divider. The
+  # default (true) rebuilds the live transcript from only the kept tail and
+  # clears scrollback, so everything before a compaction or handoff vanishes
+  # from both the fullscreen viewport and the normal screen's scrollback.
+  collapseCompacted: false
 tui:
   resizeScrollback: preserve
   rewindScrollback: preserve
