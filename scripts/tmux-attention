@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# tmux-attention: the waiting list of omp sessions that are ready for Sami,
+# and the cockpit pane that brings each one to him.
+#
+#   tmux-attention push <json-line>   add or refresh a session's line (back of the queue)
+#   tmux-attention drop <pane-id>     remove a session's line
+#   tmux-attention list               print the queue in order
+#   tmux-attention next               return the visiting session home, bring the next one in
+#   tmux-attention status             one status-bar segment: "⧗ N" or nothing
+#   tmux-attention recover <pane-id>  become the cockpit in <pane-id>, sending any stale visitor home
+#   tmux-attention                    run the cockpit view in this pane
+#
+# The queue is ~/.omp/attention/queue.jsonl, one JSON object per line
+# ({pane, server, session, title, cwd, at}), first in first out. Every read-
+# modify-write runs under flock(1) on queue.lock so a session on the host and
+# one in an agent box can append in the same instant without losing a line.
+# The omp extension (omp/extensions/attention-queue.ts) only ever calls push
+# and drop.
+#
+# A pane id means something only on the tmux server that issued it, so every
+# record — queue line, `cockpit` ("<server pid> <pane id>"), `visiting` — names
+# its server, and a record from another server (a restart, a reboot) is stale:
+# dropped, never swapped.
+set -euo pipefail
+
+DIR="${OMP_ATTENTION_DIR:-$HOME/.omp/attention}"
+QUEUE="$DIR/queue.jsonl"
+LOCK="$DIR/queue.lock"
+COCKPIT="$DIR/cockpit"
+VISITING="$DIR/visiting"
+
+mkdir -p "$DIR"
+# Create, never re-touch: a write-open of queue.jsonl on every invocation
+# (each status-bar poll) would be a close_write event that redraws the cockpit.
+for f in "$QUEUE" "$LOCK"; do [ -e "$f" ] || touch "$f"; done
+
+# Run "$@" with the queue lock held; the lock is fd 9 for the duration.
+locked() {
+    (
+        flock -w 10 9 || { echo "tmux-attention: could not take $LOCK" >&2; exit 1; }
+        "$@"
+    ) 9>>"$LOCK"
+}
+
+VALID='type == "object" and (.pane | type == "string") and (.server | type == "string") and (.title | type == "string") and (.at | type == "string")'
+
+# Print valid queue lines; drop and report any line that does not satisfy
+# $VALID. Caller holds the lock.
+read_queue() {
+    local raw valid=() dirty=0
+    while IFS= read -r raw; do
+        [ -n "$raw" ] || continue
+        if jq -e "$VALID" <<<"$raw" >/dev/null 2>&1; then
+            valid+=("$raw")
+        else
+            echo "tmux-attention: dropping invalid queue line: $raw" >&2
+            dirty=1
+        fi
+    done <"$QUEUE"
+    if [ "$dirty" = 1 ]; then
+        if [ ${#valid[@]} -eq 0 ]; then
+            : >"$QUEUE.heal.$$"
+        else
+            printf '%s\n' "${valid[@]}" >"$QUEUE.heal.$$"
+        fi
+        mv "$QUEUE.heal.$$" "$QUEUE"
+    fi
+    [ ${#valid[@]} -eq 0 ] || printf '%s\n' "${valid[@]}"
+}
+
+# Replace the queue with the lines on stdin. Caller holds the lock.
+write_queue() {
+    grep -v '^$' >"$QUEUE.tmp.$$" || true
+    mv "$QUEUE.tmp.$$" "$QUEUE"
+}
+
+do_push() {
+    local line="$1" pane
+    jq -e "$VALID" <<<"$line" >/dev/null 2>&1 || { echo "tmux-attention push: bad line: $line" >&2; exit 1; }
+    pane=$(jq -r '.pane' <<<"$line")
+    [[ "$pane" == %* ]] || { echo "tmux-attention push: bad pane in $line" >&2; exit 1; }
+    { read_queue | jq -c --arg p "$pane" 'select(.pane != $p)'; printf '%s\n' "$line"; } | write_queue
+}
+
+do_drop() {
+    read_queue | jq -c --arg p "$1" 'select(.pane != $p)' | write_queue
+}
+
+# tmux is addressed through $TMUX_ATTENTION_TMUX (tests pass "tmux -L <socket>").
+read -r -a TMUX_CMD <<<"${TMUX_ATTENTION_TMUX:-tmux}"
+tm() { "${TMUX_CMD[@]}" "$@"; }
+
+# This server's pid, fetched once per invocation into $SERVER.
+SERVER=
+server_id() { [ -n "$SERVER" ] || SERVER=$(tm display -p '#{pid}'); }
+
+pane_exists() { tm list-panes -a -F '#{pane_id}' | grep -qx -- "$1"; }
+
+# The pane the `cockpit` record names, or nothing when there is no record or
+# it is from another server.
+cockpit_pane() {
+    local server pane
+    { read -r server pane || true; } <"$COCKPIT" 2>/dev/null || return 0
+    server_id
+    [ "$server" != "$SERVER" ] || printf '%s\n' "$pane"
+}
+
+# Trade cells between a session pane and the cockpit; both directions are the
+# same swap. -d keeps the cockpit's cell active so the keyboard lands on the
+# visitor; -Z keeps a zoomed window zoomed.
+swap() { tm swap-pane -d -Z -s "$1" -t "$2"; }
+
+msg() { tm display-message "tmux-attention: $1" 2>/dev/null || echo "tmux-attention: $1" >&2; }
+
+# The pane the `visiting` record names, or nothing when there is no record or
+# it is from another server.
+visitor_pane() {
+    [ -s "$VISITING" ] || return 0
+    server_id
+    jq -r --arg s "$SERVER" 'select(.server == $s) | .pane' "$VISITING"
+}
+
+# Return the visiting session to its home cell, which the given cockpit pane
+# occupies; a visitor recorded on another server just loses its record. Caller
+# holds the lock.
+send_visitor_home() {
+    local cockpit="$1" visitor
+    visitor=$(visitor_pane)
+    if [ -n "$visitor" ] && pane_exists "$visitor" && pane_exists "$cockpit"; then swap "$visitor" "$cockpit"; fi
+    rm -f "$VISITING"
+}
+
+# Pop the first line whose pane is on this server and still exists; print it.
+# Caller holds the lock.
+pop_live() {
+    local lines head pane
+    server_id
+    mapfile -t lines < <(read_queue)
+    while [ "${#lines[@]}" -gt 0 ]; do
+        head="${lines[0]}"; lines=("${lines[@]:1}")
+        pane=$(jq -r --arg s "$SERVER" 'select(.server == $s) | .pane' <<<"$head")
+        if [ -n "$pane" ] && pane_exists "$pane"; then
+            printf '%s\n' "${lines[@]}" | write_queue
+            printf '%s\n' "$head"
+            return 0
+        fi
+    done
+    printf '' | write_queue
+    return 0
+}
+
+# Caller holds the lock: read visiting, pop, write visiting and swap are one
+# critical section, so two `next` invocations at once cannot both bring a pane
+# in and leave one displaced with no record. A cockpit record whose pane is
+# gone is removed before anything is popped, so a dead cockpit never eats a
+# queue line; another server's record is not ours to touch — `bind a` runs on
+# every server that loads .tmux.conf, and that record may be a live cockpit.
+do_next() {
+    local cockpit popped
+    server_id
+    cockpit=$(cockpit_pane)
+    if [ -n "$cockpit" ] && ! pane_exists "$cockpit"; then rm -f "$COCKPIT"; cockpit=; fi
+    [ -n "$cockpit" ] || { msg "no cockpit running — run tmux-attention in a pane"; exit 1; }
+    send_visitor_home "$cockpit"
+    popped=$(pop_live)
+    [ -n "$popped" ] || { msg "nobody waiting"; return 0; }
+    printf '%s\n' "$popped" >"$VISITING"
+    swap "$(jq -r '.pane' <<<"$popped")" "$cockpit"
+}
+
+# The trailing space is the separator before the next status segment, so the
+# status bar has none when nobody is waiting.
+do_status() {
+    local n
+    n=$(locked read_queue | grep -c . || true)
+    [ "$n" -gt 0 ] && printf '⧗ %s ' "$n" || true
+}
+
+# Become the cockpit in pane $1. A recorded cockpit at rest in another live
+# pane is presumed running and refused; one recorded mid-visit is presumed dead
+# and its visitor is sent home. A cockpit record from another server counts as
+# absent, and so does its visitor. With no record at all, a visitor of this
+# server that is still alive is away from home with nothing saying which pane
+# holds its cell: a swap with the new cockpit would land it in the wrong cell
+# and deleting the record would strand it, so this refuses until a human puts
+# it back. Caller holds the lock.
+do_recover() {
+    local pane="$1" other visitor
+    server_id
+    other=$(cockpit_pane)
+    visitor=$(visitor_pane)
+    if [ -n "$other" ] && [ "$other" != "$pane" ] && pane_exists "$other" && [ -z "$visitor" ]; then
+        echo "tmux-attention: a cockpit is already running in pane $other" >&2; exit 1
+    fi
+    if [ -n "$other" ]; then
+        send_visitor_home "$other"
+    elif [ -n "$visitor" ] && pane_exists "$visitor"; then
+        echo "tmux-attention: $visitor is away from its home cell and no cockpit record says which pane holds it; swap it back by hand (tmux swap-pane -d -s $visitor -t <that pane>) or remove $VISITING" >&2; exit 1
+    else
+        rm -f "$VISITING"
+    fi
+    printf '%s %s\n' "$SERVER" "$pane" >"$COCKPIT"
+}
+
+# The cockpit in pane $1 is leaving: send its visitor home while the pane is
+# still there (Ctrl-C, crash), or just clear the record when it is gone (HUP),
+# so the next cockpit never inherits a visitor it would swap into the wrong
+# cell. Only the cockpit the record names may do this: a cockpit that was
+# taken over, or one outliving its server, must not touch its successor's
+# visitor. Caller holds the lock; $SERVER was cached while the server lived.
+cockpit_exit() {
+    [ "$(cat "$COCKPIT" 2>/dev/null)" = "$SERVER $1" ] || return 0
+    send_visitor_home "$1" || true
+    rm -f "$COCKPIT"
+}
+
+age() {
+    local s=$(( $(date +%s) - $(date -d "$1" +%s) ))
+    if [ "$s" -lt 60 ]; then echo "${s}s"; elif [ "$s" -lt 3600 ]; then echo "$(( s / 60 ))m"; else echo "$(( s / 3600 ))h"; fi
+}
+
+draw() {
+    local lines n
+    mapfile -t lines < <(locked read_queue)
+    n=${#lines[@]}
+    printf '\033[2J\033[H'
+    if [ -s "$VISITING" ]; then
+        printf '\033[1m%s\033[0m is at the cockpit · C-b a returns it\n\n' "$(jq -r '.title' "$VISITING")"
+    elif [ "$n" -gt 0 ]; then
+        printf '\033[1m%s waiting\033[0m · C-b a brings the next\n\n' "$n"
+    else
+        printf '\033[2mnobody waiting\033[0m\n\n'
+    fi
+    local l
+    for l in "${lines[@]}"; do
+        printf '  %s  \033[2m%s · %s\033[0m\n' "$(jq -r '.title' <<<"$l")" "$(jq -r '.pane' <<<"$l")" "$(age "$(jq -r '.at' <<<"$l")")"
+    done
+    tm refresh-client -S 2>/dev/null || true
+}
+
+# The cockpit is leaving (signal, or the pane closed): stop the watcher, then
+# hand the visitor back. A second trap must not re-run this.
+WATCH=
+cockpit_leave() {
+    trap - INT TERM HUP EXIT
+    [ -z "$WATCH" ] || kill "$WATCH" 2>/dev/null || true
+    exec 3<&-
+    locked cockpit_exit "$TMUX_PANE"
+    exit 0
+}
+
+# The cockpit view: redraw on every change to the queue directory until the pane closes.
+do_cockpit() {
+    [ -n "${TMUX_PANE:-}" ] || { echo "tmux-attention: run the cockpit inside a tmux pane" >&2; exit 1; }
+    command -v inotifywait >/dev/null || { echo "tmux-attention: inotifywait missing — run installers/tmux.sh" >&2; exit 1; }
+    # Cached here, in the main shell, so the exit path still knows its server
+    # after that server is gone.
+    server_id
+    locked do_recover "$TMUX_PANE"
+    trap cockpit_leave INT TERM HUP EXIT
+    draw
+    # One watch stays open across redraws (-m), so a change that lands while
+    # draw runs queues in the pipe instead of being lost. The wait is the main
+    # shell's own `read` on the watcher's output, not a pipeline: bash runs a
+    # trap the moment a signal interrupts a builtin, while a foreground
+    # pipeline would defer it until inotifywait exited — which, with the pane
+    # gone, is never. read -t 30 returns with no event every 30 s, so ages
+    # tick; the inner read coalesces a burst (tmp write, mv, visiting) into
+    # one redraw. queue.lock is excluded: every locked read closes it, and
+    # that close_write would redraw forever.
+    exec 3< <(inotifywait -q -m --exclude '/queue\.lock$' -e close_write -e moved_to -e delete "$DIR")
+    WATCH=$!
+    while :; do
+        if read -r -t 30 -u 3 _; then
+            while read -r -t 0.1 -u 3 _; do :; done
+        elif [ $? -le 128 ]; then
+            break   # EOF: the watcher died
+        fi
+        draw
+    done
+}
+
+case "${1:-}" in
+push)
+    [ -n "${2:-}" ] || { echo "usage: tmux-attention push <json-line>" >&2; exit 2; }
+    locked do_push "$2"
+    ;;
+drop)
+    [ -n "${2:-}" ] || { echo "usage: tmux-attention drop <pane-id>" >&2; exit 2; }
+    locked do_drop "$2"
+    ;;
+list)
+    locked read_queue
+    ;;
+next)    locked do_next ;;
+status)  do_status ;;
+recover)
+    [ -n "${2:-}" ] || { echo "usage: tmux-attention recover <pane-id>" >&2; exit 2; }
+    locked do_recover "$2"
+    ;;
+"")      do_cockpit ;;
+*)
+    echo "tmux-attention: unknown command ${1:-(none)}" >&2
+    exit 2
+    ;;
+esac
