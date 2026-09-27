@@ -2,7 +2,10 @@
 # agentbox: one disposable Sysbox container per agent session, working in a
 # jj workspace made for it.
 #
-#   agentbox new <repo> <cmd> [args…]     run a command in a fresh box
+#   agentbox new <repo> [-e NAME[=VALUE]]… <cmd> [args…]
+#                                       run a command in a fresh box; each -e sets
+#                                       a variable in the box (docker run -e: a bare
+#                                       NAME passes the caller's value)
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
 #   agentbox ls                         running boxes
 #   agentbox doctor                     health checks, host side and box side
@@ -332,10 +335,19 @@ close_box() {
 }
 
 cmd_new() {
+    local usage="usage: agentbox new <repo> [-e NAME[=VALUE]]… <cmd> [args…]"
     local repo="${1:-}"
-    [[ -n "$repo" && "$repo" != -* ]] || die "usage: agentbox new <repo> <cmd> [args…]  (repos: $(repos | tr '\n' ' '))"
+    [[ -n "$repo" && "$repo" != -* ]] || die "$usage  (repos: $(repos | tr '\n' ' '))"
     shift
-    (( $# )) || die "usage: agentbox new <repo> <cmd> [args…]"
+    # Options sit between <repo> and <cmd>: a command never starts with `-`, and
+    # tmux-omp-ids reads <repo> as the first word after `agentbox new`.
+    local user_env=()
+    while [[ "${1:-}" == -e ]]; do
+        [[ "${2:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*(=.*)?$ ]] || die "-e takes NAME or NAME=VALUE, got '${2:-}'  ($usage)"
+        user_env+=(-e "$2")
+        shift 2
+    done
+    (( $# )) || die "$usage"
     [[ -d "$SRC/$repo" ]] || die "no checkout $SRC/$repo (repos: $(repos | tr '\n' ' '))"
     [[ -e "$SRC/$repo/.jj" ]] || die "$SRC/$repo is not a jj repository"
     local box tag
@@ -410,7 +422,7 @@ cmd_new() {
     docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
         -w "$ws" "${tty[@]}" \
-        "${mounts[@]}" "${env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
+        "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
     child=$!
     # An omp inside reveals its session id once up; close releases that
     # session's knives claims. Other commands have none.
@@ -660,5 +672,5 @@ case "${1:-}" in
     doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
-    *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
