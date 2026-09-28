@@ -89,7 +89,10 @@ build_slot() {
         rm -rf "$slot" && mv "$scratch/agent-c" "$slot" && rmdir "$scratch" || return 1
     fi
     ( cd "$slot" && uv sync --frozen --no-dev --quiet ) || return 1
-    uv run --frozen --no-dev --project "$slot" hawk-token --api-url "$HAWK_API_URL" >/dev/null 2>&1 || return 1
+    # Validate the command minting runs, not `uv run hawk-token`: a slot venv
+    # without the console script would make uv fall back to this wrapper on PATH,
+    # which mints from the live slot and passes the check vacuously.
+    "$slot/.venv/bin/hawk-token" --api-url "$HAWK_API_URL" >/dev/null 2>&1 || return 1
 }
 
 # publish NAME: point `current` at the sibling slot NAME, atomically (rename(2)
@@ -130,6 +133,10 @@ if [ ! -L "$current" ]; then
             touch "$stamp"
         fi
         release_lock
+        # A foreground build that outlived the budget proves the caller is not omp's
+        # 10 s `!command` (a terminal bootstrapping a fresh machine), so give the mint
+        # a fresh budget; a fast build keeps whatever was left.
+        [ $(( ($(date +%s%N) - started_ns) / 1000000 )) -lt "$MINT_BUDGET_MS" ] || started_ns="$(date +%s%N)"
     fi
 fi
 
@@ -157,8 +164,8 @@ fi
 # The slot's console script runs directly. `uv run` re-resolved the project and
 # reinstalled it into the shared slot venv on every mint: about 3 s under load, and
 # a concurrent write into one venv from every session minting at once. The
-# background refresh still checks each new slot through `uv run` before publishing
-# it (build_slot).
+# background refresh validates each new slot by running this same console script
+# before publishing it (build_slot).
 mint_bin="$(readlink -f "$current")/.venv/bin/hawk-token"
 err="$(mktemp)"
 trap 'rm -f "$err"' EXIT
@@ -169,7 +176,8 @@ for attempt in 1 2; do
         # Pause before retrying only when a retry can still fit in the budget.
         [ "$left_ms" -gt 1500 ] || break
         sleep 0.5
-        left_ms=$(( left_ms - 500 ))
+        # Re-read the clock: under the load this budget exists for, sleep overshoots.
+        left_ms=$(( MINT_BUDGET_MS - ($(date +%s%N) - started_ns) / 1000000 ))
     fi
     [ "$left_ms" -gt 500 ] || break
     tries=$attempt
