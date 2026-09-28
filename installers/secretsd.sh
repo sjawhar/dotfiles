@@ -110,6 +110,17 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     # (which fails in a unit's minimal environment), so resolve real absolute paths.
     # mise keeps a `latest` symlink beside each installed version, so these paths
     # follow the pin in mise.toml without naming a version here.
+    # age-plugin-yubikey links against libpcsclite even for pure encryption
+    # (wrapping to an age1yubikey1… recipient needs no card, but the binary
+    # will not load without the library). The shared .sops.yaml catch-all rule
+    # lists the YubiKey recipient, so on a machine without this package every
+    # sops encrypt — including `secrets edit-local` — fails, with an error that
+    # misleadingly points at .sops.yaml ("no matching creation rule").
+    # dpkg, not ldconfig: ldconfig lives in /sbin, which minimal PATHs lack,
+    # and an empty pipeline here would re-run the install on every machine.
+    if command -v dpkg &>/dev/null && ! dpkg -s libpcsclite1 &>/dev/null; then
+        sudo apt-get install -y -qq libpcsclite1 >/dev/null
+    fi
     SOPS_ABS="${MISE_INSTALLS}/sops/latest/sops"
     AGE_DIR="${MISE_INSTALLS}/github-str4d-age-plugin-yubikey/latest"
     [ -x "$SOPS_ABS" ] || SOPS_ABS="$(command -v sops || true)"
