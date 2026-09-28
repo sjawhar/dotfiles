@@ -169,8 +169,17 @@ POS='(?i)approve|accept(ed)? +at +[0-9a-f]|merge +at|lgtm|verdict:? *\**(approve
 # queue's own #20293 body, 2026-09-26). Same rule as the sha: the verdict comes first, history later. An artifact is
 # negative if its first NEG hit precedes its first POS hit (or POS is absent), positive the other way round.
 PL='def pol($pos; $neg): (. as $v | ([$v|match($pos; "i")][0].offset // null) as $p | ([$v|match($neg; "i")][0].offset // null) as $n | if $n != null and ($p == null or $n < $p) then "neg" elif $p != null then "pos" else "none" end);'
-negt=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL"'[.[]|select(.b|vs|pol($pos;$neg)=="neg")]|sort_by(.t)|last|.t // ""')
-post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL"'[.[]|select(.b|vs|pol($pos;$neg)=="pos")]|sort_by(.t)|last|.t // ""')
+# SUPERSESSION BY THE SAME AUTHOR AT THE SAME HEAD (the queue's ruling on agent-c#20410, logged on AGENTC-1070, 2026-09-28).
+# The queue's oracle posts `Verdict: BLOCKS at <sha>` and, after re-judging the SAME head, `Verdict: DOES NOT BLOCK at <sha>`.
+# The second is verdict-bearing (it starts "Verdict:") but was in NEITHER polarity set, so the BLOCKS stood as the latest
+# negative and a PR every other verdict had cleared read NOT GREEN until a human read it. Rule: a later DOES NOT BLOCK
+# RETRACTS the same author's earlier negative at the same sha, and only then counts as a positive; a DOES NOT BLOCK never
+# clears ANOTHER author's rejection (one reviewer cannot clear another's, #20200's shape), and one with nothing of its own
+# to retract is neutral, so it falls through to the NEITHER-set read below. An APPROVE keeps superseding globally as before.
+# Same head = the two artifacts' verdict shas agree on their first seven characters (either may be the short form).
+SU='def vsha: gsub("[0-9a-f]{41,}";" ")|[scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first // ""; def dnbfirst($pos; $neg): (. as $v | ([$v|match("verdict:? *\\**does +not +block"; "i")][0].offset // null) as $d | ([$v|match($neg; "i")][0].offset // null) as $n | ([$v|match($pos; "i")][0].offset // null) as $p | $d != null and ($n == null or $d < $n) and ($p == null or $d < $p)); def samehead($a; $b): ($a != "" and $b != "" and (($a|startswith($b[0:7])) or ($b|startswith($a[0:7])))); def gate($pos; $neg): [.[] | (.b|vs) as $v | {t, u, sha:($v|vsha), pol:(if ($v|dnbfirst($pos;$neg)) then "dnb" else ($v|pol($pos;$neg)) end)}] as $vs | ($vs|map(if .pol=="neg" then . as $a | .retracted = any($vs[]; .pol=="dnb" and .u==$a.u and .t>$a.t and samehead(.sha; $a.sha)) elif .pol=="dnb" then . as $d | .retracts = any($vs[]; .pol=="neg" and .u==$d.u and .t<$d.t and samehead(.sha; $d.sha)) else . end)) as $m | {negt:([$m[]|select(.pol=="neg" and (.retracted|not))]|sort_by(.t)|last|.t // ""), post:([$m[]|select(.pol=="pos" or (.pol=="dnb" and .retracts))]|sort_by(.t)|last|.t // "")};'
+gate=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL$SU"'gate($pos;$neg)|"\(.negt)\t\(.post)"')
+negt=${gate%%$'\t'*}; post=${gate#*$'\t'}
 if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
 if [ -n "$vr" ] && [ -z "$negt" ] && [ -z "$post" ]; then echo "  !! verdict grammar found but its polarity is in NEITHER set (not APPROVE/MERGE/LGTM/clean, not a rejection) - READ it; PASS alone is a review half or a tester run, not a merge authorization (#20200, #20291)"; fail=1; fi
 rm -rf "$w0"
