@@ -3,7 +3,8 @@
 # its git worktree locked. From inside an agent box every other box's workspace
 # path looks missing, and an unlocked registration under <store>/.git/worktrees/
 # can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
-# still removes it. Everything else goes straight to the real jj.
+# still removes it. In an agent session `jj git push --deleted` is also refused
+# (see below). Everything else goes straight to the real jj.
 set -euo pipefail
 
 # The first jj on PATH that is not this shim, judged by content like shims/gh.
@@ -37,6 +38,59 @@ fi
 # The shim's own tools (cat, awk, realpath, mktemp) must exist even when the
 # caller's PATH omits the system dirs; appending keeps the caller's dirs first.
 PATH="$PATH:/usr/bin:/bin"
+
+# Refuse `jj git push --deleted` in an agent session. `--deleted` pushes every
+# deleted bookmark and tag in the repo, not just the caller's — in a checkout
+# shared by many sessions every bookmark whose local copy is absent belongs to
+# someone else, and a deleted branch auto-closes its pull request. It is a
+# plain clap flag with no attached-value or bundled form (`--deleted=…` is a
+# parse error) and is already mutually exclusive with `--bookmark`/`--tag`/
+# `--revision`/`--change` (`jj git push --help`), so only the bare literal
+# token is the real flag; `jj git push` takes no positional arguments, so a
+# token after `--` is never it either. This is a second, independent gate: it
+# runs before the workspace-add lock logic below and does not alter it.
+agent_context() {
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
+    local i v
+    for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
+        v="GIT_CONFIG_VALUE_$i"
+        [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
+    done
+    return 1
+}
+if agent_context; then
+    # Locate the `git push` subcommand past jj's global options, same
+    # approach as shims/git's search for `worktree`.
+    _pargs=("$@")
+    _pi=0
+    while ((_pi < ${#_pargs[@]})); do
+        case "${_pargs[_pi]}" in
+            -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
+            -*) _pi=$((_pi + 1)) ;;
+            *) break ;;
+        esac
+    done
+    if [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
+        for _parg in "${_pargs[@]:_pi+2}"; do
+            [[ "$_parg" == -- ]] && break
+            if [[ "$_parg" == --deleted ]]; then
+                cat >&2 << 'EOF'
+jj shim: `jj git push --deleted` is refused in an agent session.
+--deleted pushes every deleted bookmark and tag in the repo, not just yours —
+there is no per-name form (`jj git push --help`) — so in a checkout shared by
+many sessions it also takes every other session's pending deletion, and a
+deleted branch auto-closes its pull request. It cost a human's PR branch on
+2026-09-15, and three other sessions' bookmarks plus PR #20325 on 2026-09-28.
+Delete and push only your own bookmark:
+  jj bookmark delete <name>
+  jj git push --bookmark <name>
+EOF
+                exit 1
+            fi
+        done
+    fi
+    unset _pargs _pi _parg
+fi
 
 _add=0 _prev=""
 for _a in "$@"; do
