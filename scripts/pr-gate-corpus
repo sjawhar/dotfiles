@@ -11,8 +11,9 @@ VS=$(grep -oP "^VS='\K.*(?=')" "$F"); POS=$(grep -oP "^POS='\K.*(?=')" "$F"); NE
 # The grammar lives inside three identical jq string literals; lift the first and un-escape jq's \\ -> \.
 GR=$(grep -oP 'select\(\.b\|vs\|test\("\K\(\?i:verdict:.*?(?="\)\)\]\|sort_by\(\.t\)\|reverse)' "$F" | head -1 | sed 's/\\\\/\\/g')
 PL=$(grep -oP "^PL='\\K.*(?=')" "$F")
+SU=$(grep -oP "^SU='\\K.*(?=')" "$F")
 SCAN=$(grep -oP '^last=.*?\[scan\("\K[^"]*(?="\)\]\|first)' "$F" | sed 's/\\\\/\\/g')
-[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$SCAN" ] && [ -n "$PL" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} SCAN=${#SCAN})"; exit 2; }
+[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$SCAN" ] && [ -n "$PL" ] && [ -n "$SU" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} SCAN=${#SCAN} PL=${#PL} SU=${#SU})"; exit 2; }
 fail=0; n=0
 # t <expected> <body>   expected = "g=<grammar> p=<positive> n=<negative> sha=<verdict sha (only when g=true) or ->"
 t() { local exp="$1" body="$2"; n=$((n+1))
@@ -60,6 +61,26 @@ tp neg  "Verdict: BLOCK at b2183a5f -- NEW-6 from the body claims; NEW-4/NEW-5 f
 tp none "Verdict: PASS at 36ae1e27 (tester run)"
 tp pos  "MERGE-WITH-NITS 143425f5 - one non-blocking hardening nit; my earlier REQUEST_CHANGES at 0000aaaa is cleared"
 tp pos  'Reviewed `a96869d` (`a96869d5b02f9a367d1414eb6a3d2e0ba58b1f3e`): **clean, no findings.**'
+echo "== the oracle's DOES NOT BLOCK is verdict-bearing, in neither polarity set by itself (agent-c#20410, AGENTC-1070) =="
+t "g=true p=false n=false sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict: DOES NOT BLOCK at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 5, none blocking) Oracle re-judge after the owner's census. This supersedes the BLOCKS verdict in 5861618968."
+t "g=true p=false n=true sha=4f659f925529e430a0497de212dbaec240397ee1" "Verdict: BLOCKS at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 7, 1 blocking: staging only)"
+tp none "Verdict: DOES NOT BLOCK at 4f659f925529e430a0497de212dbaec240397ee1 (UNPROVEN CLAIMS: 5, none blocking). This supersedes the BLOCKS verdict in 5861618968."
+echo "== supersession across artifacts: a later DOES NOT BLOCK retracts the SAME author's BLOCKS at the SAME head, and nothing else =="
+# ts <expected> <json array of {t,u,b}>   expected = green | blocked | neutral, the polarity stage's three outcomes
+ts() { local exp="$1" arts="$2"; n=$((n+1)); got=$(jq -n --argjson a "$arts" --arg pos "$POS" --arg neg "$NEG" "$VS$PL$SU"'$a|gate($pos;$neg)|if .negt!="" and (.post=="" or .negt>.post) then "blocked" elif .negt=="" and .post=="" then "neutral" else "green" end' -r)
+  if [ "$got" = "$exp" ]; then echo "PASS seq=$got :: $(jq -r '[.[]|"\(.u):\(.b[0:28])"]|join(" | ")' <<<"$arts")"; else echo "FAIL seq got [$got] want [$exp] :: $arts"; fail=1; fi; }
+B="Verdict: BLOCKS at $H (UNPROVEN CLAIMS: 7, 1 blocking)"
+D="Verdict: DOES NOT BLOCK at $H (UNPROVEN CLAIMS: 5, none blocking). This supersedes the BLOCKS verdict above."
+A="VERDICT: APPROVE at $H"
+ts green   "[{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"$B\"},{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"oracle\",\"b\":\"$D\"}]"
+ts blocked "[{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"$D\"},{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"oracle\",\"b\":\"$B\"}]"
+ts blocked "[{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"$B\"},{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"other-reviewer\",\"b\":\"$D\"}]"
+ts neutral "[{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"oracle\",\"b\":\"$D\"}]"
+ts blocked "[{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"Verdict: BLOCKS at 1111aaaa (older head)\"},{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"oracle\",\"b\":\"$D\"}]"
+ts green   "[{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"},{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"$B\"},{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"oracle\",\"b\":\"$D\"}]"
+ts blocked "[{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"},{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"$B\"}]"
+ts green   "[{\"t\":\"2026-09-28T00:10:00Z\",\"u\":\"reviewer-a\",\"b\":\"VERDICT: REQUEST_CHANGES at $H - two claims disproved\"},{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"}]"
+ts blocked "[{\"t\":\"2026-09-28T00:10:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"},{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"reviewer-a\",\"b\":\"VERDICT: REQUEST_CHANGES at $H - two claims disproved\"}]"
 echo "== check-run aggregation reads the WHOLE list, not a page (#20057: 198 runs, one verdict line per page) =="
 CSQ=$(grep -oP "^CSQ='\K.*(?=')" "$F"); [ -n "$CSQ" ] || { echo "could not extract CSQ from $F"; exit 1; }
 # tc <expected> <jq program building the slurped check-run array>
