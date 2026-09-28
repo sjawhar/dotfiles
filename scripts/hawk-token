@@ -31,6 +31,9 @@
 # Each slot's venv records absolute paths, so it is built at that slot's path; slots
 # never move, only the symlink does. Refresh output goes to $root/refresh.log.
 set -euo pipefail
+# omp kills a `!command` after 10 s, so the whole run, not only the mint, spends one budget.
+started_ns="$(date +%s%N)"
+MINT_BUDGET_MS=9000
 
 : "${HAWK_API_URL:=https://api.hawk.internal.trajectorylabs.com}"
 export HAWK_API_URL
@@ -143,23 +146,41 @@ fi
 # value as the anthropic apiKey, reports MissingApiKeyError, and makes no request
 # at all, so its own re-mint-on-401 can never fire again this turn. On 2026-09-27
 # a transient failure at 14:07Z did exactly that on two machines seven seconds
-# apart. So try twice, capped so both attempts fit inside omp's 10 s budget for a
-# `!command` (a healthy mint takes about 1.5 s).
-mint() {
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 4 uv run --frozen --no-dev --project "$(readlink -f "$current")" hawk-token --api-url "$HAWK_API_URL" "$@"
-    else
-        uv run --frozen --no-dev --project "$(readlink -f "$current")" hawk-token --api-url "$HAWK_API_URL" "$@"
-    fi
-}
-
+# apart.
+#
+# A mint slows down with the machine: a healthy one takes about 1.5 s, but at load
+# 200 on 32 cores (2026-09-28 19:20Z) the same mint took 7-9 s. The earlier two
+# fixed 4 s attempts then failed for every session that minted, so the first
+# attempt now gets whatever is left of the budget, and a second runs only if time
+# remains, which is what a fast transient failure leaves.
+#
+# The slot's console script runs directly. `uv run` re-resolved the project and
+# reinstalled it into the shared slot venv on every mint: about 3 s under load, and
+# a concurrent write into one venv from every session minting at once. The
+# background refresh still checks each new slot through `uv run` before publishing
+# it (build_slot).
+mint_bin="$(readlink -f "$current")/.venv/bin/hawk-token"
 err="$(mktemp)"
 trap 'rm -f "$err"' EXIT
+tries=0
 for attempt in 1 2; do
-    out="$(mint 2>"$err")" || out=""
+    left_ms=$(( MINT_BUDGET_MS - ($(date +%s%N) - started_ns) / 1000000 ))
+    if [ "$attempt" = 2 ]; then
+        # Pause before retrying only when a retry can still fit in the budget.
+        [ "$left_ms" -gt 1500 ] || break
+        sleep 0.5
+        left_ms=$(( left_ms - 500 ))
+    fi
+    [ "$left_ms" -gt 500 ] || break
+    tries=$attempt
+    if command -v timeout >/dev/null 2>&1; then
+        out="$(timeout "$(( left_ms / 1000 )).$(printf '%03d' $(( left_ms % 1000 )))" \
+            "$mint_bin" --api-url "$HAWK_API_URL" "$@" 2>"$err")" || out=""
+    else
+        out="$("$mint_bin" --api-url "$HAWK_API_URL" "$@" 2>"$err")" || out=""
+    fi
     if [ -n "$out" ]; then printf '%s\n' "$out"; exit 0; fi
-    [ "$attempt" = 1 ] && sleep 0.5
 done
-log "mint produced no token after 2 attempts; last stderr follows"
+log "mint produced no token after $tries attempt(s) in $(( ($(date +%s%N) - started_ns) / 1000000 )) ms of a ${MINT_BUDGET_MS} ms budget; last stderr follows"
 cat "$err" >&2
 exit 1
