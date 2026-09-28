@@ -10,13 +10,17 @@
 //   mouse wheel              scroll three rows
 //
 // At the live tail the mode renders only the rows that fit. Scrolled back, the
-// view is a number of rows above the tail, rendered bottom-up only as deep as
-// it needs plus PREFETCH_ROWS more (omp's `renderTail`), so a scroll step costs
-// time in proportion to how far back it goes, not to the length of the
-// session; only Ctrl+Home renders everything. Frames page through that copy.
-// A scroll step re-renders it once it is over a second old, and if output
-// arrived at the tail meanwhile it finds the rows it was showing in the new
-// copy and keeps them where they were.
+// view is anchored to a transcript block and a row within it
+// (viewport-window.ts), so a frame or a scroll step renders only the blocks on
+// screen and the ones it passes over, however long the session is. New output
+// at the tail does not move a scrolled-back view, and neither do rows below it
+// shrinking: the view then shows the last rows and stays scrolled back until
+// PgDn or Ctrl+End. A transcript rebuilt from new blocks without the view's
+// block (a shake, for example) returns the view to the live tail. Ctrl+Home
+// jumps to the first block without rendering the rest. A transcript that fits
+// on screen has nothing to scroll back to, whether it fit when the key was
+// pressed or came to fit later: PgUp and Ctrl+Home keep the live tail, and a
+// scrolled-back view returns to it.
 //
 // Built entirely on public extension API, so upstream omp needs no change:
 // `ctx.ui.custom(..., { overlay: true, overlayOptions: { fullscreen: true } })`
@@ -25,14 +29,22 @@
 // hands the transcript back to the normal screen, where the rows that settled
 // meanwhile retire into native scrollback as usual.
 //
-// Three things here are structural, not documented API: the transcript is
+// Four things here are structural, not documented API: the transcript is
 // found among the TUI's children by duck-typing (`renderTail` +
-// `peekReplayBatch`), the editor is the focusable descendant with
-// `getText`/`handleInput`, and `tui.showOverlay` and `tui.hasOverlay` are
-// wrapped while the mode is open (below). If an omp upgrade reshapes the TUI,
-// the mode shows "transcript not found" and closes instead of drawing garbage;
-// the upstream ask then is a documented ctx.ui accessor for the transcript and
-// editor, not the whole mode.
+// `peekReplayBatch` + `children`), the editor is the focusable descendant with
+// `getText`/`handleInput`, `tui.showOverlay` and `tui.hasOverlay` are wrapped
+// while the mode is open (below), and the scrolled-back view iterates
+// `transcript.children` itself, calling each block's `setTranscriptAllocation`
+// and `render` and composing the rows as `TranscriptContainer.renderTail` does
+// (a copy in viewport-window.ts). The transcript lookup fails loudly: if an omp
+// upgrade reshapes the TUI, the mode shows "transcript not found" and closes
+// instead of drawing garbage. The block walk drifts silently: a renamed
+// `setTranscriptAllocation` shows the blocks the live frame squeezed as compact
+// summaries when scrolled back, and a change to `renderTail`'s composition makes
+// the scrolled-back view differ from the live one, so either needs the same
+// change here. The upstream ask is a documented ctx.ui accessor for the
+// transcript and editor, and a transcript method that renders rows from a block
+// position so the composition copy can go; not the whole mode.
 //
 // Dialogs opened over the mode (the alt+p model picker, ask, confirm) stay on
 // the alternate screen, drawn over the viewport. The engine picks the screen
@@ -68,28 +80,31 @@ import {
 	type TUI,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
+import {
+	type Blocks,
+	isTop,
+	moveDown,
+	moveUp,
+	type Position,
+	positionFromTail,
+	resolve,
+	scrolledBack,
+	settle,
+	top,
+	trimBlankEdges,
+	windowAt,
+} from "./viewport-window";
 
 const WHEEL_ROWS = 3;
-// Rows rendered above the scrolled-back view, so the next pages come from the same copy.
-const PREFETCH_ROWS = 2000;
-// A scroll step re-renders the copy once it is this old, so new output shows up.
-const COPY_MAX_AGE_MS = 1000;
-// Consecutive rows matched to find the view's place in a re-rendered copy.
-const ANCHOR_ROWS = 4;
 const TOGGLE_KEY = "ctrl+alt+f";
 
-/** The transcript's last rows, rendered bottom-up for the scrolled-back view. */
-interface TailCopy {
-	width: number;
-	rows: readonly string[];
-	/** The render reached the transcript's first row. */
-	complete: boolean;
-	/** When it was rendered (Date.now()). */
-	at: number;
+interface TranscriptView extends Component {
+	children: Component[];
+	renderTail(width: number, maxRows: number): readonly string[];
 }
 
-interface TranscriptView extends Component {
-	renderTail(width: number, maxRows: number): readonly string[];
+interface AllocationTarget {
+	setTranscriptAllocation?(rows: number, frame: { tick: number; now: number }): void;
 }
 
 interface EditorView extends Component {
@@ -99,8 +114,12 @@ interface EditorView extends Component {
 }
 
 function isTranscript(component: Component): component is TranscriptView {
-	const candidate = component as Partial<Record<"renderTail" | "peekReplayBatch", unknown>>;
-	return typeof candidate.renderTail === "function" && typeof candidate.peekReplayBatch === "function";
+	const candidate = component as Partial<Record<"renderTail" | "peekReplayBatch" | "children", unknown>>;
+	return (
+		typeof candidate.renderTail === "function" &&
+		typeof candidate.peekReplayBatch === "function" &&
+		Array.isArray(candidate.children)
+	);
 }
 
 function findEditor(component: Component): EditorView | undefined {
@@ -129,29 +148,38 @@ function open(ctx: ExtensionContext): void {
 		(tui: TUI, theme, _keybindings, done) => {
 			finish = () => done();
 			if (closeRequested) queueMicrotask(finish);
-			// Scrolled back: rows between the view's last row and the transcript's last
-			// row. `undefined` follows the live tail.
-			let back: number | undefined;
+			// Scrolled back: the view's top row. `undefined` follows the live tail.
+			let pos: Position<Component> | undefined;
 			let width = tui.terminal.columns;
 			let height = 1;
-			// The transcript's last rows as rendered for the scrolled-back view.
-			let copy: TailCopy | undefined;
-			const renderCopy = (transcript: TranscriptView, renderWidth: number, depth: number): TailCopy => {
-				const cap = depth + PREFETCH_ROWS;
-				const rows = transcript.renderTail(renderWidth, cap);
-				return { width: renderWidth, rows, complete: rows.length < cap, at: Date.now() };
-			};
-			// Rows that arrived at the tail between two copies: how much further from
-			// the end the view's top rows now sit. 0 when they cannot be found.
-			const growth = (old: TailCopy, oldBack: number, fresh: TailCopy): number => {
-				const fromEnd = Math.min(old.rows.length, oldBack + height);
-				const start = old.rows.length - fromEnd;
-				const anchor = old.rows.slice(start, start + ANCHOR_ROWS);
-				if (anchor.every(row => row === "")) return 0;
-				for (let at = fresh.rows.length - fromEnd; at >= 0; at--) {
-					if (anchor.every((row, i) => fresh.rows[at + i] === row)) return fresh.rows.length - fromEnd - at;
-				}
-				return 0;
+			// The transcript's blocks for one frame or one scroll step. The windowing
+			// asks for a block's rows several times per operation, so they are
+			// memoized for that operation; components cache their own rows across
+			// frames.
+			const blocksOf = (transcript: TranscriptView, renderWidth: number): Blocks<Component> => {
+				const rendered = new Map<Component, readonly string[]>();
+				const frame = { tick: 0, now: Date.now() };
+				return {
+					get length() {
+						return transcript.children.length;
+					},
+					at: index => transcript.children[index]!,
+					rows: block => {
+						let rows = rendered.get(block);
+						if (rows === undefined) {
+							// As TranscriptContainer.renderTail does: a full allocation, so a
+							// block the live frame squeezed renders whole, not compact.
+							(block as Component & AllocationTarget).setTranscriptAllocation?.(Number.MAX_SAFE_INTEGER, frame);
+							rows = trimBlankEdges(block.render(renderWidth));
+							rendered.set(block, rows);
+						}
+						return rows;
+					},
+					// Container.clear() swaps in a new array; removeChild splices in place.
+					get source() {
+						return transcript.children;
+					},
+				};
 			};
 			// The editor whose cursor mode this mode switched, restored on close.
 			let cursorEditor: EditorView | undefined;
@@ -170,31 +198,25 @@ function open(ctx: ExtensionContext): void {
 			const scrollBy = (delta: number) => {
 				const found = locate();
 				if (!found) return;
-				let next = (back ?? 0) - delta;
-				if (next <= 0) {
-					back = undefined;
-					copy = undefined;
-					tui.requestRender();
-					return;
+				const blocks = blocksOf(found.transcript, width);
+				const current = pos === undefined ? undefined : resolve(blocks, pos);
+				if (delta < 0) {
+					const moved = current === undefined ? positionFromTail(blocks, -delta, height) : moveUp(blocks, current, -delta);
+					pos = scrolledBack(blocks, moved, height);
+				} else {
+					pos = current === undefined ? undefined : moveDown(blocks, current, delta, height);
 				}
-				let current = copy;
-				if (
-					current === undefined ||
-					current.width !== width ||
-					Date.now() - current.at > COPY_MAX_AGE_MS ||
-					(!current.complete && next + height > current.rows.length)
-				) {
-					const renewed = renderCopy(found.transcript, width, next + height);
-					if (current !== undefined && back !== undefined && current.width === width) {
-						next += growth(current, back, renewed);
-					}
-					current =
-						!renewed.complete && next + height > renewed.rows.length
-							? renderCopy(found.transcript, width, next + height)
-							: renewed;
-				}
-				copy = current;
-				back = Math.min(next, Math.max(0, current.rows.length - height));
+				tui.requestRender();
+			};
+			const jumpTop = () => {
+				const found = locate();
+				if (!found) return;
+				const blocks = blocksOf(found.transcript, width);
+				pos = scrolledBack(blocks, top(blocks), height);
+				tui.requestRender();
+			};
+			const jumpTail = () => {
+				pos = undefined;
 				tui.requestRender();
 			};
 
@@ -217,27 +239,24 @@ function open(ctx: ExtensionContext): void {
 					cursorEditor = found.editor;
 					const chrome = tui.children.slice(found.index + 1).flatMap(child => child.render(renderWidth));
 					height = Math.max(1, rows - chrome.length - 1);
-					let window: readonly string[];
-					let atTop = false;
-					if (back === undefined) {
-						window = found.transcript.renderTail(renderWidth, height);
-					} else {
-						if (copy === undefined || copy.width !== renderWidth) {
-							copy = renderCopy(found.transcript, renderWidth, back + height);
+					let scrolled: { rows: readonly string[]; where: string } | undefined;
+					if (pos !== undefined) {
+						const blocks = blocksOf(found.transcript, renderWidth);
+						pos = settle(blocks, pos, height);
+						if (pos !== undefined) {
+							scrolled = {
+								rows: windowAt(blocks, pos, height).rows,
+								where: isTop(blocks, pos)
+									? "top of the transcript"
+									: `block ${(pos.index + 1).toLocaleString("en-US")} of ${blocks.length.toLocaleString("en-US")}`,
+							};
 						}
-						back = Math.min(back, Math.max(0, copy.rows.length - height));
-						const end = copy.rows.length - back;
-						window = copy.rows.slice(Math.max(0, end - height), end);
-						atTop = copy.complete && end <= height;
 					}
+					const window = scrolled?.rows ?? found.transcript.renderTail(renderWidth, height);
+					const status = scrolled
+						? theme.fg("accent", `── ↑ ${scrolled.where} · Ctrl+End or PgDn to the live tail`)
+						: theme.fg("dim", "── viewport · PgUp/PgDn scroll · Ctrl+Home top · Ctrl+Alt+F exit");
 					const padding = Array.from({ length: Math.max(0, height - window.length) }, () => "");
-					const status =
-						back === undefined
-							? theme.fg("dim", "── viewport · PgUp/PgDn scroll · Ctrl+Home top · Ctrl+Alt+F exit")
-							: theme.fg(
-									"accent",
-									`── ↑ ${atTop ? "top of the transcript" : `${back} rows above the live tail`} · Ctrl+End or PgDn to the live tail`,
-								);
 					return [...padding, ...window, truncateToWidth(status, renderWidth), ...chrome];
 				},
 				handleInput(data: string): void {
@@ -272,8 +291,8 @@ function open(ctx: ExtensionContext): void {
 					const page = Math.max(1, height - 2);
 					if (matchesKey(data, "pageUp")) scrollBy(-page);
 					else if (matchesKey(data, "pageDown")) scrollBy(page);
-					else if (matchesKey(data, "ctrl+home")) scrollBy(Number.MIN_SAFE_INTEGER);
-					else if (matchesKey(data, "ctrl+end")) scrollBy(Number.MAX_SAFE_INTEGER);
+					else if (matchesKey(data, "ctrl+home")) jumpTop();
+					else if (matchesKey(data, "ctrl+end")) jumpTail();
 					else return undefined;
 					return { consume: true };
 				}),
