@@ -8,4 +8,4 @@ Description=Report omp sessions spending on per-token API billing (openai, openc
 
 [Service]
 Type=oneshot
-ExecStart=%h/.dotfiles/scripts/omp-billing-watch --hours 1
+ExecStart=%h/.dotfiles/scripts/omp-billing-watch --hours 1 --alert
