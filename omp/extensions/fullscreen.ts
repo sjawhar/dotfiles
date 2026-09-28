@@ -7,6 +7,15 @@
 //   Ctrl+Home / Ctrl+End     jump to the top / back to the live tail
 //   mouse wheel              scroll three rows
 //
+// At the live tail the mode renders only the rows that fit. Scrolled back, the
+// view is a number of rows above the tail, rendered bottom-up only as deep as
+// it needs plus PREFETCH_ROWS more (omp's `renderTail`), so a scroll step costs
+// time in proportion to how far back it goes, not to the length of the
+// session; only Ctrl+Home renders everything. Frames page through that copy.
+// A scroll step re-renders it once it is over a second old, and if output
+// arrived at the tail meanwhile it finds the rows it was showing in the new
+// copy and keeps them where they were.
+//
 // Built entirely on public extension API, so upstream omp needs no change:
 // `ctx.ui.custom(..., { overlay: true, overlayOptions: { fullscreen: true } })`
 // borrows the alternate screen and suspends history retirement while it is the
@@ -58,7 +67,23 @@ import {
 } from "@oh-my-pi/pi-tui";
 
 const WHEEL_ROWS = 3;
+// Rows rendered above the scrolled-back view, so the next pages come from the same copy.
+const PREFETCH_ROWS = 2000;
+// A scroll step re-renders the copy once it is this old, so new output shows up.
+const COPY_MAX_AGE_MS = 1000;
+// Consecutive rows matched to find the view's place in a re-rendered copy.
+const ANCHOR_ROWS = 4;
 const TOGGLE_KEY = "ctrl+alt+f";
+
+/** The transcript's last rows, rendered bottom-up for the scrolled-back view. */
+interface TailCopy {
+	width: number;
+	rows: readonly string[];
+	/** The render reached the transcript's first row. */
+	complete: boolean;
+	/** When it was rendered (Date.now()). */
+	at: number;
+}
 
 interface TranscriptView extends Component {
 	renderTail(width: number, maxRows: number): readonly string[];
@@ -101,11 +126,30 @@ function open(ctx: ExtensionContext): void {
 		(tui: TUI, theme, _keybindings, done) => {
 			finish = () => done();
 			if (closeRequested) queueMicrotask(finish);
-			// The window's top row while scrolled back; `undefined` follows the live tail.
-			let top: number | undefined;
+			// Scrolled back: rows between the view's last row and the transcript's last
+			// row. `undefined` follows the live tail.
+			let back: number | undefined;
 			let width = tui.terminal.columns;
 			let height = 1;
-			let total = 0;
+			// The transcript's last rows as rendered for the scrolled-back view.
+			let copy: TailCopy | undefined;
+			const renderCopy = (transcript: TranscriptView, renderWidth: number, depth: number): TailCopy => {
+				const cap = depth + PREFETCH_ROWS;
+				const rows = transcript.renderTail(renderWidth, cap);
+				return { width: renderWidth, rows, complete: rows.length < cap, at: Date.now() };
+			};
+			// Rows that arrived at the tail between two copies: how much further from
+			// the end the view's top rows now sit. 0 when they cannot be found.
+			const growth = (old: TailCopy, oldBack: number, fresh: TailCopy): number => {
+				const fromEnd = Math.min(old.rows.length, oldBack + height);
+				const start = old.rows.length - fromEnd;
+				const anchor = old.rows.slice(start, start + ANCHOR_ROWS);
+				if (anchor.every(row => row === "")) return 0;
+				for (let at = fresh.rows.length - fromEnd; at >= 0; at--) {
+					if (anchor.every((row, i) => fresh.rows[at + i] === row)) return fresh.rows.length - fromEnd - at;
+				}
+				return 0;
+			};
 			// The editor whose cursor mode this mode switched, restored on close.
 			let cursorEditor: EditorView | undefined;
 
@@ -123,10 +167,31 @@ function open(ctx: ExtensionContext): void {
 			const scrollBy = (delta: number) => {
 				const found = locate();
 				if (!found) return;
-				total = found.transcript.render(width).length;
-				const bottom = Math.max(0, total - height);
-				const next = Math.max(0, Math.min(bottom, (top ?? bottom) + delta));
-				top = next >= bottom ? undefined : next;
+				let next = (back ?? 0) - delta;
+				if (next <= 0) {
+					back = undefined;
+					copy = undefined;
+					tui.requestRender();
+					return;
+				}
+				let current = copy;
+				if (
+					current === undefined ||
+					current.width !== width ||
+					Date.now() - current.at > COPY_MAX_AGE_MS ||
+					(!current.complete && next + height > current.rows.length)
+				) {
+					const renewed = renderCopy(found.transcript, width, next + height);
+					if (current !== undefined && back !== undefined && current.width === width) {
+						next += growth(current, back, renewed);
+					}
+					current =
+						!renewed.complete && next + height > renewed.rows.length
+							? renderCopy(found.transcript, width, next + height)
+							: renewed;
+				}
+				copy = current;
+				back = Math.min(next, Math.max(0, current.rows.length - height));
 				tui.requestRender();
 			};
 
@@ -150,21 +215,25 @@ function open(ctx: ExtensionContext): void {
 					const chrome = tui.children.slice(found.index + 1).flatMap(child => child.render(renderWidth));
 					height = Math.max(1, rows - chrome.length - 1);
 					let window: readonly string[];
-					if (top === undefined) {
+					let atTop = false;
+					if (back === undefined) {
 						window = found.transcript.renderTail(renderWidth, height);
 					} else {
-						const all = found.transcript.render(renderWidth);
-						total = all.length;
-						top = Math.min(top, Math.max(0, total - height));
-						window = all.slice(top, top + height);
+						if (copy === undefined || copy.width !== renderWidth) {
+							copy = renderCopy(found.transcript, renderWidth, back + height);
+						}
+						back = Math.min(back, Math.max(0, copy.rows.length - height));
+						const end = copy.rows.length - back;
+						window = copy.rows.slice(Math.max(0, end - height), end);
+						atTop = copy.complete && end <= height;
 					}
 					const padding = Array.from({ length: Math.max(0, height - window.length) }, () => "");
 					const status =
-						top === undefined
+						back === undefined
 							? theme.fg("dim", "── fullscreen · PgUp/PgDn scroll · Ctrl+Home top · Ctrl+Alt+F exit")
 							: theme.fg(
 									"accent",
-									`── ↑ rows ${top + 1}–${Math.min(total, top + height)} of ${total} · Ctrl+End or PgDn to the live tail`,
+									`── ↑ ${atTop ? "top of the transcript" : `${back} rows above the live tail`} · Ctrl+End or PgDn to the live tail`,
 								);
 					return [...padding, ...window, truncateToWidth(status, renderWidth), ...chrome];
 				},
