@@ -80,6 +80,9 @@ zoxide = "0.10.0"
 "github:sjawhar/opencode" = "latest"
 "npm:@googleworkspace/cli" = "0.22.5"
 "npm:@openai/codex" = "0.153.1"
+# Vercel CLI: agent boxes read Lyon's Vercel request logs with the host's own CLI
+# login, mounted by agentbox/mounts (AGENTC-61).
+"npm:vercel" = "59.14.0"
 # WhatsApp MCP (Baileys fork): the laptop runs it as a daemon
 # (whatsapp/whatsapp-mcp.service) and its omp reaches it with the same
 # binary's `--connect` stdio client (installers/whatsapp.sh). aube gates: the package is
