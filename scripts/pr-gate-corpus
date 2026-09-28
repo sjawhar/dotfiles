@@ -12,12 +12,11 @@ VS=$(grep -oP "^VS='\K.*(?=')" "$F"); POS=$(grep -oP "^POS='\K.*(?=')" "$F"); NE
 GR=$(grep -oP 'select\(\.b\|vs\|test\("\K\(\?i:verdict:.*?(?="\)\)\]\|sort_by\(\.t\)\|reverse)' "$F" | head -1 | sed 's/\\\\/\\/g')
 PL=$(grep -oP "^PL='\\K.*(?=')" "$F")
 SU=$(grep -oP "^SU='\\K.*(?=')" "$F")
-SCAN=$(grep -oP '^last=.*?\[scan\("\K[^"]*(?="\)\]\|first)' "$F" | sed 's/\\\\/\\/g')
-[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$SCAN" ] && [ -n "$PL" ] && [ -n "$SU" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} SCAN=${#SCAN} PL=${#PL} SU=${#SU})"; exit 2; }
+[ -n "$GR" ] && [ -n "$POS" ] && [ -n "$NEG" ] && [ -n "$VS" ] && [ -n "$PL" ] && [ -n "$SU" ] || { echo "could not extract matcher pieces from $F (GR=${#GR} POS=${#POS} NEG=${#NEG} VS=${#VS} PL=${#PL} SU=${#SU})"; exit 2; }
 fail=0; n=0
 # t <expected> <body>   expected = "g=<grammar> p=<positive> n=<negative> sha=<verdict sha (only when g=true) or ->"
 t() { local exp="$1" body="$2"; n=$((n+1))
-  got=$(jq -n --arg b "$body" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" --arg sc "$SCAN" "$VS"'($b|vs) as $v | "g=\($v|test($gr)) p=\($v|test($pos)) n=\($v|test($neg)) sha=\(if ($v|test($gr)) then (($v|gsub("[0-9a-f]{41,}";" ")|[scan($sc)]|first) // "-") else "-" end)"' -r)
+  got=$(jq -n --arg b "$body" --arg gr "$GR" --arg pos "$POS" --arg neg "$NEG" "$VS$PL$SU"'($b|vs) as $v | "g=\($v|test($gr)) p=\($v|test($pos)) n=\($v|test($neg)) sha=\(if ($v|test($gr)) then ($v|vsha($pos;$neg)|if . == "" then "-" else . end) else "-" end)"' -r)
   if [ "$got" = "$exp" ]; then echo "PASS $got :: ${body:0:72}"; else echo "FAIL got [$got] want [$exp] :: ${body:0:72}"; fail=1; fi; }
 H=486fc48e0629a1b2c3d4e5f60718293a4b5c6d7e
 echo "== positives at head =="
@@ -31,6 +30,10 @@ t "g=true p=true n=false sha=$H"         "Merge-decision review. Verdict: MERGE 
 t "g=true p=true n=false sha=aadf66d3"   "MERGE-WITH-NITS aadf66d3 — Extends my MERGE 2e1234c2 review; the nits are PR-body wording"
 echo "== the verdict sha is the FIRST short-or-long sha, not the first 40-hex (hawk pin df0e9892 on #20186) =="
 t "g=true p=true n=false sha=00473e0f"   "Verdict: APPROVE at 00473e0f ## Code review, round 7: #20186 at 00473e0f. Scope: the pin to hawk df0e989212345678901234567890abcdefabcdef"
+# A delta review names its BASE first and its verdict on a later line: the verdict sha is the one after "at" on the
+# VERDICT line, not the body's first hex (inspect-release lane, agent-c#20026, 2026-09-28).
+t "g=true p=true n=false sha=f2314fb2"   "delta only: `fda41a10` -> `f2314fb2` (two child commits, 3 files). VERDICT: APPROVE at f2314fb2"
+t "g=true p=true n=false sha=f2314fb2"   "$(printf 'delta only: fda41a10 -> f2314fb2\n\nVERDICT: APPROVE at f2314fb2 -- the two findings are closed')"
 t "g=true p=true n=false sha=$H"         "APPROVE at $H (image digest sha256:556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa)"
 echo "== negatives / rejections =="
 t "g=true p=false n=true sha=433fa449"   "VERDICT: CHANGES REQUESTED at 433fa449 - two claims disproved"
@@ -80,6 +83,9 @@ ts blocked "[{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"Verdict: B
 ts green   "[{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"},{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"$B\"},{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"oracle\",\"b\":\"$D\"}]"
 ts blocked "[{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"},{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"$B\"}]"
 ts green   "[{\"t\":\"2026-09-28T00:10:00Z\",\"u\":\"reviewer-a\",\"b\":\"VERDICT: REQUEST_CHANGES at $H - two claims disproved\"},{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"}]"
+# Same-author supersession reads each artifact's verdict-line sha: a DOES NOT BLOCK written as a delta (base named first)
+# still retracts that author's BLOCKS at the head.
+ts green   "[{\"t\":\"2026-09-28T01:15:00Z\",\"u\":\"oracle\",\"b\":\"Verdict: BLOCKS at f2314fb2 (1 blocking)\"},{\"t\":\"2026-09-28T01:36:00Z\",\"u\":\"oracle\",\"b\":\"delta only: fda41a10 -> f2314fb2. Verdict: DOES NOT BLOCK at f2314fb2\"}]"
 ts blocked "[{\"t\":\"2026-09-28T00:10:00Z\",\"u\":\"coordinator\",\"b\":\"$A\"},{\"t\":\"2026-09-28T00:53:00Z\",\"u\":\"reviewer-a\",\"b\":\"VERDICT: REQUEST_CHANGES at $H - two claims disproved\"}]"
 echo "== check-run aggregation reads the WHOLE list, not a page (#20057: 198 runs, one verdict line per page) =="
 CSQ=$(grep -oP "^CSQ='\K.*(?=')" "$F"); [ -n "$CSQ" ] || { echo "could not extract CSQ from $F"; exit 1; }
