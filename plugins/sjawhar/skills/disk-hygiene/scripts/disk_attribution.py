@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """Time-boxed disk attribution: where did the space go?
 
-Each directory is walked with a deadline, several at a time on threads. A walk
-that finishes gives that directory's exact size and it is done. One that runs
-out of time is large by definition: it reports the bytes it counted as a lower
-bound and is split into its immediate children, which are walked the same way.
-Small directories drop out within seconds, the large ones surface as splits
-straight away, and nothing waits for one walk of everything.
+Sibling directories are sized in batches by one `du -sx` each, several batches
+at a time. du prints each argument's total as soon as it finishes that
+argument, in argument order, so when a batch reaches its deadline every total
+already printed is exact, the directory du was still inside is large by
+definition, and the arguments after it were never started. The large one is
+split into its children, which are batched and sized the same way; the
+unstarted ones are queued again. Small directories are settled within seconds,
+large ones surface as splits straight away, the walking is du's own native
+code, and nothing waits for one walk of everything.
 
-Sizes are allocated blocks (what df counts), and each walk stays on the root's
-filesystem. A file with several hardlinks is counted once: a finished walk
-claims the multiply-linked inodes it saw, and an inode another finished walk
-already claimed is subtracted from it. So the roll-up total is exact, and a
-shared inode is attributed to whichever subtree finished first.
-
-New walks wait while /proc/pressure/io "full avg10" is above --max-io-pressure,
-so the thread pool backs off when the box's IO is saturated.
+Sizes are allocated blocks (what df counts), each du stays on the argument's
+filesystem, and du counts a hardlinked inode once within one invocation. A
+file hardlinked into two different batches is counted in both, so compare the
+roll-up with df for the exact total.
 
 Output lines on stdout, flushed as they happen:
-  SIZE   <bytes>  <path>                          finished, at or above --min-size
-  SPLIT  <path>  at_least=<GB> subdirs=<n>        ran out of time after counting at_least; children queued
-  WAIT   io full avg10=<x>                        new walks paused on IO pressure
---out FILE also records every finished walk and every split, whatever its
-size, as tab-separated `SIZE <bytes> <path>` / `SPLIT <path> <at_least bytes>
-<subdirs>`, so partial per-directory totals can be summed while the run is
-still going. At the end, a roll-up tree of every node at or above --min-size.
+  SIZE   <bytes>  <path>              finished, at or above --min-size
+  SPLIT  <path>  subdirs=<n>          still being walked at the deadline; children queued
+  WAIT   io full avg10=<x>            new batches paused on IO pressure
+--out FILE also records every finished directory and split, whatever its size
+(tab-separated `SIZE <bytes> <path>` / `SPLIT <path> <direct bytes> <subdirs>`),
+flushed at least once a second, so partial totals can be summed mid-run. At the
+end, a roll-up tree of every node at or above --min-size.
 
 Run it as root to read every directory, and under a supervisor (systemd-run)
 when it may outlive a tool call.
@@ -34,7 +33,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import selectors
+import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -46,7 +48,7 @@ from typing import TextIO
 @dataclass
 class Node:
     path: str
-    size: int | None = None  # exact size when the walk finished
+    size: int | None = None  # exact size when du finished it
     files: int = 0  # direct entries (non-directories, subdirectory inodes), when split
     children: list["Node"] = field(default_factory=list)
 
@@ -54,10 +56,6 @@ class Node:
         if self.size is not None:
             return self.size
         return self.files + sum(c.total() for c in self.children)
-
-
-class Timeout(Exception):
-    pass
 
 
 def io_full_avg10() -> float:
@@ -79,7 +77,7 @@ class Output:
             print(*parts, sep="\t", flush=True)
 
     def log(self, *parts: object) -> None:
-        """Record a result; the file is flushed at most once a second, so readers see it within a second."""
+        """Record a result; the file is flushed at least once a second."""
         if self.record is None:
             return
         with self.lock:
@@ -89,107 +87,113 @@ class Output:
                 self.flushed = time.monotonic()
 
 
-class Sizer:
-    def __init__(self, timeout: float, dev: int) -> None:
-        self.timeout = timeout
-        self.dev = dev
-        self.claimed: set[tuple[int, int]] = set()
-        self.lock = threading.Lock()
+def du_batch(paths: list[str], timeout: float) -> tuple[dict[str, int], list[str]]:
+    """Size paths with one du; return (finished sizes, paths not finished, in order)."""
+    proc = subprocess.Popen(
+        ["ionice", "-c2", "-n7", "du", "-sxB1", "--null", "--", *paths],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    assert proc.stdout is not None
+    deadline = time.monotonic() + timeout
+    buf = b""
+    sizes: dict[str, int] = {}
+    with selectors.DefaultSelector() as sel:
+        sel.register(proc.stdout, selectors.EVENT_READ)
+        eof = False
+        while not eof:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            if not sel.select(left):
+                continue
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                eof = True
+            buf += chunk
+            *records, buf = buf.split(b"\0")
+            for rec in records:
+                size, _, path = rec.decode("utf-8", "surrogateescape").partition("\t")
+                sizes[path] = int(size)
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGKILL)
+    proc.wait()
+    proc.stdout.close()
+    return sizes, [p for p in paths if p not in sizes]
 
-    def claim(self, links: dict[tuple[int, int], int]) -> int:
-        """Claim a finished walk's hardlinked inodes; return bytes already claimed elsewhere."""
-        dup = 0
-        with self.lock:
-            for key, blocks in links.items():
-                if key in self.claimed:
-                    dup += blocks
-                else:
-                    self.claimed.add(key)
-        return dup
 
-    def walk(self, path: str) -> tuple[int | None, int]:
-        """(exact size, bytes counted); size is None when the deadline passed first."""
-        deadline = time.monotonic() + self.timeout
-        total = 0
-        links: dict[tuple[int, int], int] = {}
-        stack = [path]
-        try:
-            while stack:
-                if time.monotonic() > deadline:
-                    raise Timeout
-                d = stack.pop()
-                try:
-                    it = os.scandir(d)
-                except (FileNotFoundError, NotADirectoryError):
-                    continue
-                with it:
-                    for entry in it:
-                        try:
-                            st = entry.stat(follow_symlinks=False)
-                        except FileNotFoundError:
-                            continue
-                        if st.st_dev != self.dev:
-                            continue
-                        blocks = st.st_blocks * 512
-                        if stat.S_ISDIR(st.st_mode):
-                            total += blocks
-                            stack.append(entry.path)
-                        elif st.st_nlink > 1:
-                            links[(st.st_dev, st.st_ino)] = blocks
-                        else:
-                            total += blocks
-        except Timeout:
-            return None, total + sum(links.values())
-        return total + sum(links.values()) - self.claim(links), total
+def chunks(items: list[str], n: int) -> list[list[str]]:
+    n = max(1, min(n, len(items)))
+    return [items[i::n] for i in range(n)]
 
-    def split(self, node: Node) -> None:
-        links: dict[tuple[int, int], int] = {}
+
+class Attribution:
+    def __init__(self, args: argparse.Namespace, out: Output) -> None:
+        self.args = args
+        self.out = out
+        self.min_size = parse_size(args.min_size)
+        self.nodes: dict[str, Node] = {}
+
+    def split(self, node: Node) -> list[str]:
+        dev = os.lstat(node.path).st_dev
+        subdirs: list[str] = []
         with os.scandir(node.path) as it:
             for entry in it:
                 try:
                     st = entry.stat(follow_symlinks=False)
                 except FileNotFoundError:
                     continue
-                if st.st_dev != self.dev:
+                if st.st_dev != dev:
                     continue
                 if stat.S_ISDIR(st.st_mode):
-                    node.children.append(Node(entry.path))
-                    node.files += st.st_blocks * 512  # the subdirectory's own inode
-                elif st.st_nlink > 1:
-                    links[(st.st_dev, st.st_ino)] = st.st_blocks * 512
+                    # du counts a directory's own inode inside that directory's total.
+                    child = Node(entry.path)
+                    node.children.append(child)
+                    self.nodes[child.path] = child
+                    subdirs.append(child.path)
                 else:
                     node.files += st.st_blocks * 512
-        node.files += sum(links.values()) - self.claim(links)
+        return sorted(subdirs)
 
-
-def run(roots: list[Node], args: argparse.Namespace, out: Output) -> None:
-    min_size = parse_size(args.min_size)
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        pending: dict[Future[tuple[int | None, int]], tuple[Node, Sizer]] = {}
-
-        def submit(node: Node, sizer: Sizer) -> None:
-            while (pressure := io_full_avg10()) > args.max_io_pressure:
-                out.show("WAIT", f"io full avg10={pressure:.1f}")
-                time.sleep(2)
-            pending[pool.submit(sizer.walk, node.path)] = (node, sizer)
-
+    def run(self, roots: list[Node]) -> None:
         for root in roots:
-            submit(root, Sizer(args.timeout, os.lstat(root.path).st_dev))
-        while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for fut in done:
-                node, sizer = pending.pop(fut)
-                node.size, counted = fut.result()
-                if node.size is not None:
-                    out.log("SIZE", node.size, node.path)
-                    if node.size >= min_size:
-                        out.show("SIZE", node.size, node.path)
-                    continue
-                sizer.split(node)
-                out.log("SPLIT", node.path, counted, len(node.children))
-                out.show("SPLIT", node.path, f"at_least={counted / 1e9:.1f}GB", f"subdirs={len(node.children)}")
-                for child in node.children:
-                    submit(child, sizer)
+            self.nodes[root.path] = root
+        with ThreadPoolExecutor(max_workers=self.args.jobs) as pool:
+            pending: dict[Future[tuple[dict[str, int], list[str]]], list[str]] = {}
+
+            def submit(batch: list[str]) -> None:
+                while (pressure := io_full_avg10()) > self.args.max_io_pressure:
+                    self.out.show("WAIT", f"io full avg10={pressure:.1f}")
+                    time.sleep(2)
+                pending[pool.submit(du_batch, batch, self.args.timeout)] = batch
+
+            for batch in chunks([r.path for r in roots], self.args.jobs):
+                submit(batch)
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    pending.pop(fut)
+                    sizes, unfinished = fut.result()
+                    for path, size in sizes.items():
+                        self.nodes[path].size = size
+                        self.out.log("SIZE", size, path)
+                        if size >= self.min_size:
+                            self.out.show("SIZE", size, path)
+                    if not unfinished:
+                        continue
+                    big, rest = unfinished[0], unfinished[1:]
+                    node = self.nodes[big]
+                    try:
+                        subdirs = self.split(node)
+                    except (FileNotFoundError, NotADirectoryError):
+                        node.size = 0  # removed while it was being sized
+                        subdirs = []
+                    else:
+                        self.out.log("SPLIT", big, node.files, len(subdirs))
+                        self.out.show("SPLIT", big, f"subdirs={len(subdirs)}")
+                    for batch in chunks(subdirs, self.args.jobs):
+                        submit(batch)
+                    if rest:
+                        submit(rest)
 
 
 def print_tree(node: Node, min_size: int, depth: int, max_depth: int) -> None:
@@ -215,20 +219,20 @@ def parse_size(text: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("roots", nargs="+", help="directories to attribute (each stays on its own filesystem)")
-    ap.add_argument("--timeout", type=float, default=5.0, help="seconds per walk before a directory is split (default 5)")
-    ap.add_argument("--jobs", type=int, default=8, help="walks at once (default 8)")
+    ap.add_argument("--timeout", type=float, default=10.0, help="seconds per du batch before its current directory is split (default 10)")
+    ap.add_argument("--jobs", type=int, default=8, help="du batches at once (default 8)")
     ap.add_argument("--max-io-pressure", type=float, default=20.0,
-                    help="pause new walks while /proc/pressure/io full avg10 is above this (default 20)")
+                    help="pause new batches while /proc/pressure/io full avg10 is above this (default 20)")
     ap.add_argument("--min-size", default="1G", help="smallest node shown on stdout and in the roll-up (default 1G)")
     ap.add_argument("--max-depth", type=int, default=6, help="deepest level of the roll-up (default 6)")
-    ap.add_argument("--out", help="also record every finished walk and split, whatever its size, to this TSV file")
+    ap.add_argument("--out", help="also record every finished directory and split, whatever its size, to this TSV file")
     args = ap.parse_args()
 
     started = time.monotonic()
     roots = [Node(os.path.abspath(r)) for r in args.roots]
     record = open(args.out, "a", encoding="utf-8") if args.out else None
     try:
-        run(roots, args, Output(record))
+        Attribution(args, Output(record)).run(roots)
     finally:
         if record is not None:
             record.close()
