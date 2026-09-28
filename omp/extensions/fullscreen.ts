@@ -17,10 +17,11 @@
 // Three things here are structural, not documented API: the transcript is
 // found among the TUI's children by duck-typing (`renderTail` +
 // `peekReplayBatch`), the editor is the focusable descendant with
-// `getText`/`handleInput`, and `tui.showOverlay` is wrapped while the mode is
-// open (below). If an omp upgrade reshapes the TUI, the mode shows "transcript
-// not found" and closes instead of drawing garbage; the upstream ask then is a
-// documented ctx.ui accessor for the transcript and editor, not the whole mode.
+// `getText`/`handleInput`, and `tui.showOverlay` and `tui.hasOverlay` are
+// wrapped while the mode is open (below). If an omp upgrade reshapes the TUI,
+// the mode shows "transcript not found" and closes instead of drawing garbage;
+// the upstream ask then is a documented ctx.ui accessor for the transcript and
+// editor, not the whole mode.
 //
 // Dialogs opened over the mode (the alt+p model picker, ask, confirm) stay on
 // the alternate screen, drawn over the viewport. The engine picks the screen
@@ -30,6 +31,14 @@
 // with `fullscreen` set and mouse reporting off unless it asked for it;
 // without that the engine drops to the normal screen and repaints the whole
 // page behind the dialog, and again when it closes.
+//
+// The editor's app keys (Ctrl+R history search, Ctrl+O, Alt+L and the rest of
+// omp's global editor actions) stand down while `tui.hasOverlay()` reports a
+// dialog holding the keyboard. This mode is an overlay that hands the keyboard
+// back to the editor, so `hasOverlay` leaves it out while it is open; a dialog
+// opened over it still counts. The same check gates omp's inline mouse
+// click-to-focus (`tui.mouse`, off by default), which would then take wheel
+// reports before this mode sees them, so `tui.mouse` stays off.
 //
 // The alternate frame keeps the terminal cursor hidden and expects a modal to
 // draw its own, so the editor uses its software cursor while the mode is open
@@ -187,7 +196,7 @@ function open(ctx: ExtensionContext): void {
 						return { consume: true };
 					}
 					const editor = locate()?.editor;
-					if (editor && !editor.focused) return undefined;
+					if (!editor?.focused) return undefined;
 					const page = Math.max(1, height - 2);
 					if (matchesKey(data, "pageUp")) scrollBy(-page);
 					else if (matchesKey(data, "pageDown")) scrollBy(page);
@@ -220,6 +229,21 @@ function open(ctx: ExtensionContext): void {
 					if (entry.options && lifted.has(entry.options)) entry.options = lifted.get(entry.options);
 				}
 				tui.requestRender();
+			});
+			// App keys aimed at the editor defer only to dialogs, not to this mode
+			// (see the header). Visibility mirrors the TUI's own check: not hidden,
+			// and the overlay's `visible` callback, if any, says so.
+			const originalHasOverlay = tui.hasOverlay;
+			const hasOverlay: TUI["hasOverlay"] = () =>
+				tui.overlayStack.some(
+					entry =>
+						entry.component !== view &&
+						!entry.hidden &&
+						(entry.options?.visible?.(tui.terminal.columns, tui.terminal.rows) ?? true),
+				);
+			tui.hasOverlay = hasOverlay;
+			unsubscribers.push(() => {
+				if (tui.hasOverlay === hasOverlay) tui.hasOverlay = originalHasOverlay;
 			});
 			focusEditor = () => {
 				const editor = locate()?.editor;
