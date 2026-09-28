@@ -1,11 +1,13 @@
 [Unit]
 Description=Report omp sessions spending on per-token API billing (openai, opencode-zen)
-# Exits non-zero on a deviation so the unit goes `failed` and `systemctl --user
-# --failed` shows it; the unit state is a record, not the handler. The handler is
-# --alert, which sends the finding to the `sre` Envoy role. Both are needed: a
-# unit nobody lists is a log line, and an Envoy role nobody holds is a dropped
-# message -- the deviation has to be visible in at least one place a human looks.
+# Reports every hour and does not alert, by Sami's ruling of 2026-09-27
+# (dispatch://AGENTC-27/ask/1295ec24-de6f-4fa9-9ed8-c06baa55f692, "Allow it":
+# agents may use the OpenAI API, and the watch reports spend every hour instead
+# of raising an alarm). A deviation exits non-zero, so the unit goes `failed` and
+# the journal records the finding: that is the report. --alert would also send it
+# to the `sre` Envoy role, and the SRE would then chase spend he has allowed. Do
+# not add --alert back without a new ruling.
 
 [Service]
 Type=oneshot
-ExecStart=%h/.dotfiles/scripts/omp-billing-watch --hours 1 --alert
+ExecStart=%h/.dotfiles/scripts/omp-billing-watch --hours 1
