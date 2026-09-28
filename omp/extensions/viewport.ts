@@ -1,7 +1,9 @@
-// Fullscreen transcript viewport: the session transcript in an app-owned
-// window on the terminal's alternate screen, with the composer (editor, status
-// line, widgets) pinned below it. Toggle with `/fullscreen` or Ctrl+Alt+F;
-// `OMP_FULLSCREEN=1` opens it when an interactive session starts.
+// Transcript viewport: the session transcript in an app-owned window on the
+// terminal's alternate screen, with the composer (editor, status line,
+// widgets) pinned below it. Toggle with `/viewport` or Ctrl+Alt+F;
+// `OMP_VIEWPORT=1` opens it when an interactive session starts, and so does
+// `OMP_FULLSCREEN=1`, which boxes launched under the mode's first name still
+// carry in their container environment across `agentbox restart`.
 //
 //   PageUp / PageDown        scroll a page (while the editor has focus)
 //   Ctrl+Home / Ctrl+End     jump to the top / back to the live tail
@@ -206,7 +208,7 @@ function open(ctx: ExtensionContext): void {
 					const found = locate();
 					if (!found) {
 						queueMicrotask(() => done());
-						return [theme.fg("warning", "fullscreen: transcript not found in this omp build; closing")];
+						return [theme.fg("warning", "viewport: transcript not found in this omp build; closing")];
 					}
 					// The TUI re-applies the terminal-cursor mode on every focus change,
 					// so this is re-asserted per frame; the call is a no-op when unchanged.
@@ -230,7 +232,7 @@ function open(ctx: ExtensionContext): void {
 					const padding = Array.from({ length: Math.max(0, height - window.length) }, () => "");
 					const status =
 						back === undefined
-							? theme.fg("dim", "── fullscreen · PgUp/PgDn scroll · Ctrl+Home top · Ctrl+Alt+F exit")
+							? theme.fg("dim", "── viewport · PgUp/PgDn scroll · Ctrl+Home top · Ctrl+Alt+F exit")
 							: theme.fg(
 									"accent",
 									`── ↑ ${atTop ? "top of the transcript" : `${back} rows above the live tail`} · Ctrl+End or PgDn to the live tail`,
@@ -349,16 +351,16 @@ function toggle(ctx: ExtensionContext): void {
 	else open(ctx);
 }
 
-export default function fullscreen(pi: ExtensionAPI): void {
-	pi.registerCommand("fullscreen", {
-		description: "Toggle the fullscreen transcript viewport (alternate screen, composer pinned)",
+export default function viewport(pi: ExtensionAPI): void {
+	pi.registerCommand("viewport", {
+		description: "Toggle the transcript viewport (alternate screen, composer pinned)",
 		handler: async (_args, ctx) => toggle(ctx),
 	});
 	pi.registerShortcut(TOGGLE_KEY, {
-		description: "Toggle the fullscreen transcript viewport",
+		description: "Toggle the transcript viewport",
 		handler: ctx => toggle(ctx),
 	});
 	pi.on("session_start", async (_event, ctx) => {
-		if (process.env.OMP_FULLSCREEN === "1") open(ctx);
+		if (process.env.OMP_VIEWPORT === "1" || process.env.OMP_FULLSCREEN === "1") open(ctx);
 	});
 }
