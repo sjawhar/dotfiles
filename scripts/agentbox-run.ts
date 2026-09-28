@@ -25,7 +25,28 @@
 // `agentbox restart`, which sends SIGUSR1 to $AGENTBOX_RUNNER_PID - exported
 // to omp and so to its tools. (omp's builtin kill refuses the shell's
 // ancestors, so a bare `kill -USR1` from the bash tool is rejected.)
+//
+// Every restart request, omp exit and relaunch is appended to
+// ~/.cache/omp/agentbox/<box>.log (a mounted path, so it outlives the box).
+// While omp runs it owns the pane, where a stray line would sit on its screen,
+// so only the box's last line also goes to stderr; a box that ended is
+// otherwise silent.
 import * as fs from "node:fs";
+import * as path from "node:path";
+
+const box = process.env.AGENTBOX_BOX ?? "unknown-box";
+const logPath = `${process.env.HOME}/.cache/omp/agentbox/${box}.log`;
+
+function note(message: string, toStderr = false): void {
+	const line = `agentbox-run ${new Date().toISOString()} ${box}: ${message}\n`;
+	if (toStderr) process.stderr.write(line);
+	try {
+		fs.mkdirSync(path.dirname(logPath), { recursive: true });
+		fs.appendFileSync(logPath, line);
+	} catch (error) {
+		process.stderr.write(`agentbox-run: cannot append to ${logPath}: ${error}\n`);
+	}
+}
 
 // Launch flags that pick a session; the relaunch supplies its own --resume.
 // Mirrors SESSION_SOURCE_FLAGS in omp's cli/flag-tables.ts. Value arity is
@@ -99,6 +120,8 @@ if (launchArgv[0] !== "omp") {
 }
 
 let child = spawnOmp(launchArgv);
+let startedAt = Date.now();
+note(`omp started (pid ${child.pid}): ${launchArgv.join(" ")}`);
 let relaunch: string[] | undefined;
 let restarting = false;
 let shuttingDown = false;
@@ -108,16 +131,18 @@ process.on("SIGUSR1", () => {
 	restarting = true;
 	const sid = sessionId(child.pid);
 	if (!sid) {
-		process.stderr.write("agentbox-run: this box has no session yet; omp left running, restart not performed\n");
+		note("restart requested, but this box has no session yet; omp left running, restart not performed");
 		restarting = false;
 		return;
 	}
 	relaunch = relaunchArgv(launchArgv, sid);
+	note(`restart requested: hanging up omp (pid ${child.pid}) to resume session ${sid}`);
 	child.kill("SIGHUP");
 });
 for (const sig of ["SIGHUP", "SIGTERM"] as const) {
 	process.on(sig, () => {
 		shuttingDown = true;
+		note(`${sig} received: shutting omp down, no relaunch`);
 		relaunch = undefined;
 		child.kill(sig);
 	});
@@ -126,14 +151,21 @@ for (const sig of ["SIGHUP", "SIGTERM"] as const) {
 // no relaunch follows.
 process.on("SIGINT", () => {
 	shuttingDown = true;
+	note("SIGINT received: no relaunch will follow");
 	relaunch = undefined;
 });
 
 for (;;) {
 	const code = await child.exited;
-	if (shuttingDown || relaunch === undefined) process.exit(code ?? 1);
+	const ran = `after ${Math.round((Date.now() - startedAt) / 1000)}s (exit code ${code ?? "none"}, signal ${child.signalCode ?? "none"})`;
+	if (shuttingDown || relaunch === undefined) {
+		note(`omp (pid ${child.pid}) exited ${ran}; the box ends`, true);
+		process.exit(code ?? 1);
+	}
 	const argv = relaunch;
 	relaunch = undefined;
 	restarting = false;
 	child = spawnOmp(argv);
+	startedAt = Date.now();
+	note(`omp exited ${ran} for the restart; relaunched (pid ${child.pid}): ${argv.join(" ")}`);
 }
