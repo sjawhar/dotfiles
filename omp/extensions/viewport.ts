@@ -55,9 +55,10 @@
 // draw its own, so the editor uses its software cursor while the mode is open
 // and gets the terminal cursor back when it closes.
 //
-// Known limit: mouse reporting is on while the mode is open, so native text
-// selection needs the terminal's bypass modifier (Shift in most terminals, and
-// in tmux with `mouse on`).
+// Known limit: mouse reporting is on while the mode is open, so a plain drag
+// does not select. In tmux, Alt+drag selects the on-screen text inside the pane
+// (`.tmux.conf`); Shift+drag hands selection to the outer terminal, which
+// selects across tmux panes.
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
 	type Component,
