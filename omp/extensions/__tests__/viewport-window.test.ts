@@ -1,78 +1,32 @@
 import { describe, expect, test } from "bun:test";
 import {
 	type Blocks,
+	comparePositions,
 	isTop,
 	moveDown,
 	moveUp,
 	type Position,
 	positionFromTail,
 	resolve,
+	rowsBetween,
 	scrolledBack,
 	settle,
 	top,
 	trimBlankEdges,
 	windowAt,
+	windowWithPositions,
 } from "../viewport-window";
+import { type Block, blocksOf, compose, originTable, random, rowOf, transcript, unitLengths } from "./transcript-fixtures";
 
-type Block = { id: number; rows: string[] };
+/** Seeded property tests: bun's default 5 s per test is too short for them on a loaded box. */
+const PROPERTY_TIMEOUT_MS = 30_000;
 
-/** Blocks over `list`, read fresh on every call; `source` is the array, as viewport.ts passes `transcript.children`. */
-function blocksOf(list: Block[]): Blocks<Block> {
-	return {
-		get length() {
-			return list.length;
-		},
-		at: i => list[i]!,
-		rows: b => trimBlankEdges(b.rows),
-		source: list,
-	};
-}
-
-/** omp's `TranscriptContainer.renderTail` composition, written forwards. */
-function compose(list: Block[]): string[] {
-	const out: string[] = [];
-	for (const block of list) {
-		const rows = trimBlankEdges(block.rows);
-		if (rows.length === 0) continue;
-		if (out.length > 0) out.push("");
-		out.push(...rows);
-	}
-	return out;
-}
-
-/** Rows in each block's unit: its rows plus one separator when a later block draws something. */
-function unitLengths(list: Block[]): number[] {
-	const lengths = list.map(b => trimBlankEdges(b.rows).length);
-	return lengths.map((n, i) => (n === 0 ? 0 : n + (lengths.slice(i + 1).some(m => m > 0) ? 1 : 0)));
-}
-
-/** A position's absolute row in `compose(list)`, given `units = unitLengths(list)`. */
-function rowOf(units: readonly number[], pos: Position<Block>): number {
-	return units.slice(0, pos.index).reduce((a, b) => a + b, 0) + pos.offset;
-}
-
-/**
- * Deterministic transcripts: 1-5 row blocks with interior blank rows, blank
- * edges, all-blank blocks and empty blocks at `emptyRate`. Park-Miller keeps
- * every step exact (48271 x (2^31 - 1) < 2^53).
- */
-function transcript(count: number, seed: number, emptyRate: number): Block[] {
-	let state = seed;
-	const next = () => ((state = (state * 48271) % 2147483647) / 2147483647);
-	return Array.from({ length: count }, (_, id) => {
-		const kind = next();
-		if (kind < emptyRate) return { id, rows: [] };
-		if (kind < emptyRate + 0.05) return { id, rows: ["   ", "", "\t"] };
-		const body = Array.from({ length: 1 + Math.floor(next() * 5) }, (_, r) => (next() < 0.1 ? "" : `b${id}r${r}`));
-		body[0] ||= `b${id}first`;
-		body[body.length - 1] ||= `b${id}last`;
-		return { id, rows: kind < emptyRate + 0.2 ? ["", ...body, " "] : body };
-	});
-}
+/** Index and offset of each position, for comparison with `originTable`. */
+const origins = (positions: readonly Position<Block>[]) => positions.map(({ index, offset }) => ({ index, offset }));
 
 const CASES: Array<[string, Block[]]> = [];
-// Three seeds keep every test here well inside bun's 5 s per-test limit on a loaded
-// machine while still killing every behavior-changing mutant tried against the module.
+// Three seeds keep every test here fast while still killing every
+// behavior-changing mutant tried against the module.
 for (let seed = 1; seed <= 3; seed++) {
 	for (const count of [0, 1, 2, 3, 5, 12, 40]) {
 		for (const emptyRate of [0, 0.3, 0.7]) CASES.push([`seed ${seed} count ${count} empty ${emptyRate}`, transcript(count, seed * 7919, emptyRate)]);
@@ -114,7 +68,7 @@ describe("viewport-window", () => {
 				}
 			}
 		}
-	});
+	}, PROPERTY_TIMEOUT_MS);
 
 	test("any block and offset, including empty blocks, windows and moves correctly", () => {
 		for (let seed = 1; seed < 40; seed++) {
@@ -144,7 +98,7 @@ describe("viewport-window", () => {
 				}
 			}
 		}
-	});
+	}, PROPERTY_TIMEOUT_MS);
 
 	test("the next frame's resolve shows the same rows as the step that produced the position", () => {
 		const list: Block[] = [
@@ -284,6 +238,62 @@ describe("viewport-window", () => {
 		expect(resolve(blocks, fallback)).toBeUndefined();
 		expect(settle(blocks, fallback, 5)).toBeUndefined();
 	});
+
+	test("windowWithPositions reports each drawn row's position, blank rows and separators included", () => {
+		for (let seed = 1; seed < 20; seed++) {
+			for (const count of [1, 2, 4, 9, 20]) {
+				for (const emptyRate of [0, 0.4, 0.8]) {
+					const list = transcript(count, seed * 104729, emptyRate);
+					const ref = compose(list);
+					const table = originTable(list);
+					expect(table.length).toBe(ref.length);
+					const units = unitLengths(list);
+					const blocks = blocksOf(list);
+					for (let index = 0; index < list.length; index++) {
+						for (let offset = 0; offset < Math.max(1, units[index]!); offset++) {
+							const pos: Position<Block> = { block: list[index]!, index, offset, source: list };
+							const row = rowOf(units, pos);
+							for (const height of [1, 3, 6]) {
+								const view = windowWithPositions(blocks, pos, height);
+								expect(view.rows).toEqual(ref.slice(row, row + height));
+								expect(origins(view.positions)).toEqual(table.slice(row, row + height));
+								expect(view.positions.every(p => p.block === list[p.index] && p.source === list)).toBe(true);
+								expect(view.atEnd).toBe(row + height >= ref.length);
+								expect(windowAt(blocks, pos, height)).toEqual({ rows: view.rows, atEnd: view.atEnd });
+							}
+						}
+					}
+				}
+			}
+		}
+	}, PROPERTY_TIMEOUT_MS);
+
+	test("rowsBetween is the composed rows from one drawn position through another, and comparePositions orders them", () => {
+		const next = random(4099);
+		for (const [name, list] of CASES) {
+			const ref = compose(list);
+			const blocks = blocksOf(list);
+			if (ref.length === 0) continue;
+			const drawn = windowWithPositions(blocks, top(blocks)!, ref.length).positions;
+			expect(origins(drawn), name).toEqual(originTable(list));
+			for (let pair = 0; pair < 40; pair++) {
+				const i = Math.floor(next() * ref.length);
+				const j = pair === 0 ? i : Math.floor(next() * ref.length);
+				const a = drawn[i]!;
+				const b = drawn[j]!;
+				expect(Math.sign(comparePositions(blocks, a, b)), `${name} ${i} vs ${j}`).toBe(Math.sign(i - j));
+				const [low, high, from, to] = i <= j ? [i, j, a, b] : [j, i, b, a];
+				expect(rowsBetween(blocks, from, to), `${name} ${low}..${high}`).toEqual({
+					rows: ref.slice(low, high + 1),
+					positions: drawn.slice(low, high + 1),
+				});
+				if (low < high) expect(() => rowsBetween(blocks, to, from), `${name} ${high}..${low}`).toThrow();
+			}
+			// A position whose block is gone from a replaced list no longer resolves.
+			const gone: Position<Block> = { block: { id: -1, rows: ["gone"] }, index: 0, offset: 0, source: [] };
+			expect(() => comparePositions(blocks, drawn[0]!, gone), name).toThrow();
+		}
+	}, PROPERTY_TIMEOUT_MS);
 
 	test("trimBlankEdges drops only all-blank edge rows", () => {
 		expect(trimBlankEdges([" ", "a", "", "b", "\t"])).toEqual(["a", "", "b"]);
