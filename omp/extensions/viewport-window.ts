@@ -21,7 +21,11 @@ export interface Blocks<B> {
 	readonly source: unknown;
 }
 
-/** The top row of a scrolled-back view. */
+/**
+ * A row of the transcript: a block and a row offset into its unit (its rows,
+ * then the separator at offset === rows.length). It is the top row of a
+ * scrolled-back view, a drawn row, or a selection end.
+ */
 export interface Position<B> {
 	block: B;
 	/** Where `block` sat when this was made; `resolve` re-finds it if the list moved. */
@@ -94,23 +98,71 @@ export function resolve<B>(blocks: Blocks<B>, pos: Position<B>): Position<B> | u
 	return pos.source === blocks.source ? positionAt(blocks, Math.min(pos.index, blocks.length - 1), 0) : undefined;
 }
 
-/** Up to `count` rows from `pos` down. */
-function take<B>(blocks: Blocks<B>, pos: Position<B>, count: number): string[] {
+/** Order two positions by resolved block index, then offset. Both must resolve. */
+export function comparePositions<B>(blocks: Blocks<B>, a: Position<B>, b: Position<B>): number {
+	const first = resolve(blocks, a);
+	const second = resolve(blocks, b);
+	if (first === undefined || second === undefined) throw new Error("comparePositions: a position no longer resolves");
+	return first.index - second.index || first.offset - second.offset;
+}
+
+/**
+ * Rows from `pos` down: up to `count`, and no further than `through` when
+ * given. `positions`, when given, receives each row's position.
+ */
+function take<B>(
+	blocks: Blocks<B>,
+	pos: Position<B>,
+	count: number,
+	positions?: Position<B>[],
+	through?: Position<B>,
+): string[] {
 	const out: string[] = [];
 	let offset = pos.offset;
-	for (let index = pos.index; index < blocks.length && out.length < count; index++) {
+	const lastIndex = through?.index ?? blocks.length - 1;
+	for (let index = pos.index; index <= lastIndex && index < blocks.length && out.length < count; index++) {
 		const rows = blocks.rows(blocks.at(index));
-		const length = unitLength(blocks, index);
-		for (let row = offset; row < length && out.length < count; row++) out.push(row < rows.length ? rows[row]! : "");
+		const length = index === through?.index ? Math.min(unitLength(blocks, index), through.offset + 1) : unitLength(blocks, index);
+		for (let row = offset; row < length && out.length < count; row++) {
+			out.push(row < rows.length ? rows[row]! : "");
+			positions?.push(positionAt(blocks, index, row));
+		}
 		offset = 0;
 	}
 	return out;
+}
+
+/** The rows windowAt draws, each with the position it came from; `atEnd` when they reach the transcript's last row. */
+export function windowWithPositions<B>(
+	blocks: Blocks<B>,
+	pos: Position<B>,
+	height: number,
+): { rows: string[]; positions: Position<B>[]; atEnd: boolean } {
+	const positions: Position<B>[] = [];
+	const rows = take(blocks, pos, height + 1, positions);
+	return { rows: rows.slice(0, height), positions: positions.slice(0, height), atEnd: rows.length <= height };
 }
 
 /** Up to `height` rows from `pos` down; `atEnd` when they reach the transcript's last row. */
 export function windowAt<B>(blocks: Blocks<B>, pos: Position<B>, height: number): { rows: string[]; atEnd: boolean } {
 	const rows = take(blocks, pos, height + 1);
 	return { rows: rows.slice(0, height), atEnd: rows.length <= height };
+}
+
+/**
+ * Composed rows from `from` through `to`, inclusive, with their positions.
+ * Both are resolved first; a `to` in a block that draws nothing ends at the
+ * rows above it. Throws when `from` is after `to`.
+ */
+export function rowsBetween<B>(
+	blocks: Blocks<B>,
+	from: Position<B>,
+	to: Position<B>,
+): { rows: string[]; positions: Position<B>[] } {
+	if (comparePositions(blocks, from, to) > 0) throw new Error("rowsBetween: `from` is after `to`");
+	const positions: Position<B>[] = [];
+	const rows = take(blocks, resolve(blocks, from)!, Number.POSITIVE_INFINITY, positions, resolve(blocks, to)!);
+	return { rows, positions };
 }
 
 /** `pos`, or undefined (the live tail) when a view `height` rows tall from it reaches the last row. */
