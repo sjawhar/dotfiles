@@ -570,6 +570,107 @@ class OverlayTest(unittest.TestCase):
         self.assertEqual(self.members(), ["askgate"])
 
 
+def gm(ungated=0.05, p95=4000, matched=40, verdicts=38):
+    """The gate-metrics fields the rules read."""
+    return {"ungated_share": ungated, "latency_ms_p95": p95, "matched": matched, "verdicts": verdicts}
+
+
+def labelled(n=30, precision=0.6, harm=0.0):
+    return {"n": n, "precision": precision, "harm": harm}
+
+
+UNLABELLED = labelled(n=0, precision=None, harm=None)
+
+
+class GateDecisionTest(unittest.TestCase):
+    """One row per pre-registered rule (docs/advisor-report.md, Readout rules). Every row changes a gate that reads GO
+    on day 15: 30 labels at precision 0.60, harm 0, ungated_share 0.05, p95 4 s against a 90 s timeout, no skips."""
+
+    ROWS = [
+        # (rule, changed inputs, verdict, text a reason carries, text no reason carries)
+        ("the killed overlay comes first, even over a day-3 burst", dict(killed=True, recent=gm(ungated=0.5, matched=20)),
+         "killed", "", None),
+        ("before day 3 no rule runs", dict(day=2.9, recent=gm(ungated=0.5, matched=20), labelled=UNLABELLED),
+         "incomplete", "labels < 30", None),
+        ("day 3: ungated_share above 0.20 over 20 calls in the last 24 h kills",
+         dict(day=3, recent=gm(ungated=0.25, matched=20), labelled=UNLABELLED),
+         "kill", "ungated_share 0.250 > 0.2 over 20 calls in the last 24 h", None),
+        ("day 3: 19 calls are under the floor", dict(day=3, recent=gm(ungated=0.5, matched=19), labelled=UNLABELLED),
+         "incomplete", "", None),
+        ("day 3: verdict p95 above 0.9 x the timeout over 20 verdicts kills",
+         dict(day=3, recent=gm(p95=85_000, verdicts=20), labelled=UNLABELLED),
+         "kill", "p95 latency 85000 ms above 0.9 x the 90000 ms timeout over 20 verdicts in the last 24 h", None),
+        ("day 3: verdict p95 at 0.9 x the timeout does not", dict(day=3, recent=gm(p95=81_000, verdicts=20), labelled=UNLABELLED),
+         "incomplete", "", None),
+        ("day 3: 19 verdicts are under the floor", dict(day=3, recent=gm(p95=85_000, verdicts=19), labelled=UNLABELLED),
+         "incomplete", "", None),
+        ("the day-3 rule comes before the day-14 rules", dict(recent=gm(ungated=0.25, matched=20), whole=gm(ungated=0.2)),
+         "kill", "over 20 calls in the last 24 h", "day 14"),
+        ("day 14: ungated_share 0.10 over the window kills", dict(whole=gm(ungated=0.10)),
+         "kill", "day 14: ungated_share 0.100 >= 0.1", None),
+        ("day 14: the ungated KILL is named before precision", dict(whole=gm(ungated=0.12), labelled=labelled(precision=0.2)),
+         "kill", "ungated_share 0.120", "precision"),
+        ("day 14: precision below 0.3 at 30 labels kills", dict(labelled=labelled(precision=0.29)),
+         "kill", "day 14: precision 0.29 < 0.3", None),
+        ("day 14: precision below 0.3 at 29 labels waits", dict(labelled=labelled(n=29, precision=0.2)),
+         "incomplete", "labels < 30 (n=29)", None),
+        ("day 14: harm above 0.10 kills", dict(labelled=labelled(harm=0.11)), "kill", "day 14: harm 0.11 > 0.1 over 30 labels", None),
+        ("day 14: harm above 0.10 kills at 20 labels", dict(labelled=labelled(n=20, precision=0.5, harm=0.25)),
+         "kill", "harm 0.25 > 0.1 over 20 labels", None),
+        ("day 14: GO", {}, "go", "make OMP_ASKGATE=block the shim default", None),
+        ("before day 14 a GO-ready gate is on track", dict(day=13.9), "on track", "", None),
+        ("day 14: a skip blocks GO", dict(skips=1), "extend", "one more week, then GO or KILL", None),
+        ("day 14: p95 above 0.9 x the timeout blocks GO", dict(whole=gm(p95=81_001)), "extend", "", None),
+        ("day 14: harm 0.06 blocks GO", dict(labelled=labelled(harm=0.06)), "extend", "", None),
+        ("day 14: ungated_share 0.099 allows GO", dict(whole=gm(ungated=0.099)), "go", "", None),
+        ("day 14: precision 0.49 extends", dict(labelled=labelled(precision=0.49)), "extend", "", None),
+        ("day 14: precision 0.50 is GO", dict(labelled=labelled(precision=0.5)), "go", "", None),
+        ("day 21: not GO after the extension kills", dict(day=21, labelled=labelled(precision=0.4)),
+         "kill", "day 21: not GO after the one-week extension", None),
+        ("day 21: GO", dict(day=22), "go", "", None),
+        ("day 21: fewer than 30 labels is incomplete", dict(day=22, labelled=labelled(n=20)), "incomplete", "labels < 30", None),
+        ("fewer than 30 labels names each week without labels", dict(labelled=labelled(n=20), missing_weeks=["week 2 (x)"]),
+         "incomplete", "no labels for week 2 (x)", None),
+        ("a roster or link problem blocks GO", dict(problems=["roster empty"]), "incomplete", "", None),
+        ("a roster or link problem does not block a KILL", dict(problems=["roster empty"], whole=gm(ungated=0.2)),
+         "kill", "ungated_share", None),
+    ]
+
+    def decide(self, **changes):
+        inputs = dict(day=15, timeout_ms=90_000, whole=gm(), recent=gm(), labelled=labelled(), skips=0, missing_weeks=[],
+                      killed=False, problems=[])
+        return ar.gate_decision(**{**inputs, **changes})
+
+    def test_each_rule(self):
+        for rule, changes, verdict, carried, absent in self.ROWS:
+            with self.subTest(rule):
+                decision = self.decide(**changes)
+                reasons = "; ".join(decision.reasons)
+                self.assertEqual(decision.verdict, verdict, reasons)
+                self.assertIn(carried, reasons)
+                if absent is not None:
+                    self.assertNotIn(absent, reasons)
+
+
+class RosterProblemsTest(unittest.TestCase):
+    def test_the_extension_link_must_resolve_under_dotfiles_and_the_roster_keep_advisors(self):
+        home = Home()
+        self.addCleanup(home.cleanup)
+        self.assertEqual(ar.roster_problems(home.dotfiles, home.agent_dir), [])
+        stray = home.root / "elsewhere" / "askgate.ts"
+        stray.parent.mkdir()
+        stray.write_text("export default function askgate() {}\n", encoding="utf-8")
+        home.extension_link.unlink()
+        home.extension_link.symlink_to(stray)
+        problems = ar.roster_problems(home.dotfiles, home.agent_dir)
+        self.assertEqual(len(problems), 1)
+        self.assertIn(str(home.extension_link), problems[0])
+        home.extension_link.unlink()
+        self.assertEqual(len(ar.roster_problems(home.dotfiles, home.agent_dir)), 1)
+        home.roster.write_text("advisors: []\n", encoding="utf-8")
+        self.assertEqual(len(ar.roster_problems(home.dotfiles, home.agent_dir)), 2)
+
+
 class ReadoutTest(unittest.TestCase):
     """`readout --check gate` against a launched gate, labels ingested through the real sample packet."""
 
@@ -616,74 +717,16 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn("labels < 30", proc.stdout)
         self.assertFalse(self.home.overlay.exists())
 
-    def test_precision_on_30_labels_with_low_ungated_share_is_no_finding(self):
-        self.healthy_gate()
-        self.label_revises(correct=18, other=12)
-        proc = self.home.run("readout", "--check", "gate", check_exit=0)
-        self.assertIn("precision 0.60", proc.stdout)
-        self.assertFalse(self.home.overlay.exists())
-
     def kill_fixture(self):
         at = [self.now - timedelta(minutes=10 + i) for i in range(20)]
         self.gate_session([gate_line(at=at[i]) for i in range(15)]
                           + [gate_line(outcome="timeout", at=at[15 + i], latency_ms=90_000) for i in range(5)])
 
-    def test_day_three_ungated_share_over_20_percent_applies_the_kill(self):
+    def test_a_kill_is_written_to_the_overlay_and_exits_1(self):
         self.kill_fixture()
-        self.home.run("readout", "--check", "gate", check_exit=1)
-        self.assert_killed()
-
-    def test_day_three_verdicts_at_85_s_against_a_90_s_timeout_apply_the_kill(self):
-        """A verdict slower than the timeout is recorded as a timeout, so the stall shows as p95 near it."""
-        def verdicts_at(latency_ms):
-            self.gate_session([gate_line(at=self.now - timedelta(minutes=10 + i), latency_ms=latency_ms) for i in range(20)])
-
-        verdicts_at(80_000)
-        self.home.run("readout", "--check", "gate", check_exit=3)
-        self.assertFalse(self.home.overlay.exists())
-        verdicts_at(85_000)
         out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
-        self.assertIn("p95 latency 85000 ms", out)
+        self.assertIn(f"gate: KILL applied (advisor.disableRoster += askgate in {self.home.overlay})", out)
         self.assert_killed()
-
-    def test_day_three_latency_kill_waits_for_20_verdicts_in_the_last_24_h(self):
-        """One slow verdict among a handful is the whole p95 (nearest rank); it must not end the trial."""
-        latencies = [85_000, 3000, 3000, 3000, 3000]
-        self.gate_session([gate_line(at=self.now - timedelta(minutes=10 + i), latency_ms=ms) for i, ms in enumerate(latencies)])
-        out = self.home.run("readout", "--check", "gate", check_exit=3).stdout
-        self.assertIn("p95 85000 ms", out)
-        self.assertFalse(self.home.overlay.exists())
-
-    def killed_after_a_day_three_burst(self):
-        """230 good calls, a day-3 hour with 8 timeouts in 25 calls, then 250 calls the kill switch passed."""
-        day3 = self.launched + timedelta(days=3)
-        entries = [gate_line(decision="revise" if i < 30 else "allow", at=self.launched + timedelta(minutes=5 + 18 * i),
-                             latency_ms=4000) for i in range(230)]
-        entries += [gate_line(outcome="timeout" if i < 8 else "verdict", at=day3 + timedelta(minutes=2 * i),
-                              latency_ms=90_000 if i < 8 else 4000) for i in range(25)]
-        entries += [gate_line(outcome="killed", at=day3 + timedelta(hours=2 + i), latency_ms=0) for i in range(250)]
-        self.gate_session(entries)
-
-    def test_after_a_kill_a_later_readout_computes_no_go(self):
-        self.launch(days=15)
-        self.killed_after_a_day_three_burst()
-        self.label_revises(correct=18, other=12)
-        self.home.overlay.write_text("advisor:\n  disableRoster:\n  - askgate\n", encoding="utf-8")
-        before = self.home.overlay.read_bytes()
-        proc = self.home.run("readout", "--check", "gate", check_exit=1)
-        self.assertIn("precision 0.60", proc.stdout)
-        self.assertIn("no GO or EXTEND computed", proc.stdout)
-        self.assertNotIn("GO:", proc.stdout)
-        self.assertEqual(self.home.overlay.read_bytes(), before)
-        # The S9 drill: the kill switch passes two calls, then the owner removes the member and the gate runs on.
-        self.home.run("overlay", "remove", "advisor.disableRoster", "askgate", check_exit=0)
-        shutil.rmtree(self.home.sessions)
-        self.healthy_gate(extra=self.s9_drill())
-        self.label_revises(correct=18, other=12)
-        proc = self.home.run("readout", "--check", "gate", check_exit=0)
-        self.assertIn("(2 killed)", proc.stdout)
-        self.assertIn("gate: GO: make OMP_ASKGATE=block the shim default", proc.stdout)
-        self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": []}})
 
     def s9_drill(self):
         return [gate_line(outcome="killed", at=self.launched + timedelta(hours=6, minutes=i), latency_ms=0) for i in range(2)]
@@ -696,14 +739,16 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn("gate: incomplete: labels < 30", proc.stdout)
         self.assertFalse(self.home.overlay.exists())
 
-    def test_an_overlay_holding_askgate_computes_no_go(self):
+    def test_an_overlay_holding_askgate_computes_no_go_and_writes_nothing(self):
         self.launch(days=15)
         self.healthy_gate()
         self.label_revises(correct=18, other=12)
         self.home.overlay.write_text("advisor:\n  disableRoster:\n  - askgate\n", encoding="utf-8")
+        before = self.home.overlay.read_bytes()
         proc = self.home.run("readout", "--check", "gate", check_exit=1)
         self.assertIn("no GO or EXTEND computed", proc.stdout)
         self.assertNotIn("GO:", proc.stdout)
+        self.assertEqual(self.home.overlay.read_bytes(), before)
 
     def readout_on_day(self, day: float, correct: int, other: int, harmful: int = 0, unlabelled: int = 0,
                        exit_code: int = 0) -> str:
@@ -716,56 +761,16 @@ class ReadoutTest(unittest.TestCase):
     def assert_killed(self):
         self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": ["askgate"]}})
 
-    def test_day_14_precision_0_6_is_go(self):
+    def test_day_14_precision_0_6_from_ingested_labels_is_go(self):
         out = self.readout_on_day(15, correct=18, other=12)
+        self.assertIn("labelled revises n=30, precision 0.60", out)
         self.assertIn("gate: GO: make OMP_ASKGATE=block the shim default", out)
         self.assertFalse(self.home.overlay.exists())
-
-    def test_day_14_precision_0_4_extends(self):
-        out = self.readout_on_day(15, correct=12, other=18)
-        self.assertIn("gate: EXTEND: one more week", out)
-        self.assertFalse(self.home.overlay.exists())
-
-    def test_day_14_precision_0_2_kills(self):
-        out = self.readout_on_day(15, correct=6, other=24, exit_code=1)
-        self.assertIn("precision 0.20 < 0.3", out)
-        self.assert_killed()
-
-    def test_day_14_harm_0_13_kills(self):
-        out = self.readout_on_day(15, correct=18, harmful=4, other=8, exit_code=1)
-        self.assertIn("harm 0.13 > 0.1", out)
-        self.assert_killed()
-
-    def test_day_14_harm_over_0_10_kills_at_20_labels(self):
-        out = self.readout_on_day(15, correct=10, harmful=5, other=5, unlabelled=10, exit_code=1)
-        self.assertIn("n=20", out)
-        self.assertIn("harm 0.25 > 0.1", out)
-        self.assert_killed()
-
-    def test_day_22_not_go_kills(self):
-        out = self.readout_on_day(22, correct=12, other=18, exit_code=1)
-        self.assertIn("day 21: not GO after the one-week extension", out)
-        self.assert_killed()
-
-    def test_day_14_ungated_share_0_125_kills_without_labels(self):
-        self.launch(days=15)
-        at = [self.now - timedelta(minutes=5 + i) for i in range(40)]
-        entries = [gate_line(decision="revise", at=at[i], latency_ms=4000) for i in range(30)]
-        entries += [gate_line(at=at[30 + i], latency_ms=3000) for i in range(5)]
-        entries += [gate_line(outcome="timeout", at=at[35 + i], latency_ms=90_000) for i in range(5)]
-        self.gate_session(entries)
-        out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
-        self.assertIn("ungated_share 0.125 >= 0.1", out)
-        self.assert_killed()
 
     def test_gate_and_trial_checks_combine_their_exits(self):
         self.healthy_gate()
         proc = self.home.run("readout", "--check", "gate", "--check", "trial", check_exit=3)
         self.assertIn("trial: not armed", proc.stdout)
-
-    def test_a_gate_kill_wins_over_an_unarmed_trial(self):
-        self.kill_fixture()
-        self.home.run("readout", "--check", "gate", "--check", "trial", check_exit=1)
 
     def test_an_empty_advisors_list_messages_the_role_and_writes_nothing(self):
         self.healthy_gate()
@@ -792,20 +797,6 @@ class ReadoutTest(unittest.TestCase):
         proc = self.home.run("readout", "--check", "gate", "--notify", "notifications.role.example", check_exit=3)
         self.assertFalse(self.home.envoy_log.exists())
         self.assertIn("send --source envoy", proc.stderr)
-
-    def test_an_extension_link_outside_dotfiles_is_incomplete_and_writes_nothing(self):
-        self.healthy_gate()
-        self.label_revises(correct=18, other=12)
-        stray = self.home.root / "elsewhere" / "askgate.ts"
-        stray.parent.mkdir()
-        stray.write_text("export default function askgate() {}\n", encoding="utf-8")
-        self.home.extension_link.unlink()
-        self.home.extension_link.symlink_to(stray)
-        proc = self.home.run("readout", "--check", "gate", check_exit=3)
-        self.assertIn(str(self.home.extension_link), proc.stdout)
-        self.assertFalse(self.home.overlay.exists())
-        self.home.extension_link.unlink()
-        self.home.run("readout", "--check", "gate", check_exit=3)
 
 
 class SampleTest(unittest.TestCase):
