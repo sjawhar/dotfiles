@@ -791,12 +791,25 @@ gh auth status 2>&1 | grep -q "not logged" && ok "gh auth: no user login" || fai
 n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && ok "secrets agent-tier" || fail "secrets agent-tier"
 jq -e ".credHelpers[\"https://index.docker.io/v1/\"] == \"secretsd\"" "$HOME/.docker/config.json" >/dev/null 2>&1 && ok "docker config names the secretsd helper for Docker Hub" || fail "docker config: no secretsd credHelper for Docker Hub"
 printf "%s" https://index.docker.io/v1/ | timeout 20 docker-credential-secretsd get 2>/dev/null | jq -e ".Secret | length > 0" >/dev/null && ok "docker-credential-secretsd answers for Docker Hub" || fail "docker-credential-secretsd get"
-[ -n "${AGENT_SECRETS_URL:-}" ] && [ "${AGENT_SECRETS_KEY_DIR:-}" = "/run/user/$(id -u)/agent-secrets" ] && ok "agent-secrets env (url, key dir)" || fail "agent-secrets env: URL=${AGENT_SECRETS_URL:-unset} KEY_DIR=${AGENT_SECRETS_KEY_DIR:-unset}"
 [ -z "${AGENT_SECRETS_HELPER_SOCK:-}" ] && [ ! -S "/run/user/$(id -u)/agent-secrets/helper.sock" ] && ok "no helper socket in the box (a box is not a host session)" || fail "helper socket reachable from the box"
-[ "$(stat -c %a "$AGENT_SECRETS_KEY_DIR/key.pem" 2>/dev/null)" = 600 ] && [ "$(stat -c %U "$AGENT_SECRETS_KEY_DIR/key.pem" 2>/dev/null)" = ubuntu ] && ok "box key 0600 ubuntu" || fail "box key: $(ls -l "$AGENT_SECRETS_KEY_DIR" 2>&1 | tr "\n" " ")"
-[ -s "$AGENT_SECRETS_KEY_DIR/enrollment" ] && ok "box enrolled ($(cat "$AGENT_SECRETS_KEY_DIR/enrollment"))" || fail "box not enrolled: $(cat "$AGENT_SECRETS_KEY_DIR/enrollment.error" 2>/dev/null || echo no enrollment.error either)"
-w="$(timeout 20 agent-secrets whoami 2>&1)"; jq -e ".kind == \"box\"" <<<"$w" >/dev/null 2>&1 && ok "broker knows this box as kind box, operator $(jq -r .operator <<<"$w")" || fail "agent-secrets whoami: $(head -1 <<<"$w")"
-n="$(timeout 60 agent-secrets AGENT_SECRETS_PROOF_TOKEN -- sh -c "echo \${#AGENT_SECRETS_PROOF_TOKEN}" 2>&1)"; [ "${n:-0}" -gt 0 ] 2>/dev/null && ok "agent-secrets injects an automatic secret ($n bytes)" || fail "agent-secrets inject: $(head -1 <<<"$n")"
+# A box with no broker identity is a supported state, not a defect: one started before the key
+# dir existed, or while the host could not enroll boxes (no key, no enrollment.error). Its agents
+# use secretsd.
+kd="${AGENT_SECRETS_KEY_DIR:-}"
+if [ -z "$kd" ]; then
+    echo "note box: no broker identity (no AGENT_SECRETS_KEY_DIR: the box predates it); its agents use secretsd"
+elif [ -z "${AGENT_SECRETS_URL:-}" ] || [ "$kd" != "/run/user/$(id -u)/agent-secrets" ]; then
+    fail "agent-secrets env: URL=${AGENT_SECRETS_URL:-unset} KEY_DIR=$kd"
+elif [ ! -e "$kd/key.pem" ] && [ ! -e "$kd/enrollment.error" ]; then
+    ok "agent-secrets env (url, key dir)"
+    echo "note box: no broker identity (the host could not enroll boxes when this box started); its agents use secretsd"
+else
+    ok "agent-secrets env (url, key dir)"
+    [ "$(stat -c %a "$kd/key.pem" 2>/dev/null)" = 600 ] && [ "$(stat -c %U "$kd/key.pem" 2>/dev/null)" = ubuntu ] && ok "box key 0600 ubuntu" || fail "box key: $(ls -l "$kd" 2>&1 | tr "\n" " ")"
+    [ -s "$kd/enrollment" ] && ok "box enrolled ($(cat "$kd/enrollment"))" || fail "box not enrolled: $(cat "$kd/enrollment.error" 2>/dev/null || echo no enrollment.error either)"
+    w="$(timeout 20 agent-secrets whoami 2>&1)"; jq -e ".kind == \"box\"" <<<"$w" >/dev/null 2>&1 && ok "broker knows this box as kind box, operator $(jq -r .operator <<<"$w")" || fail "agent-secrets whoami: $(head -1 <<<"$w")"
+    n="$(timeout 60 agent-secrets AGENT_SECRETS_PROOF_TOKEN -- sh -c "echo \${#AGENT_SECRETS_PROOF_TOKEN}" 2>&1)"; [ "${n:-0}" -gt 0 ] 2>/dev/null && ok "agent-secrets injects an automatic secret ($n bytes)" || fail "agent-secrets inject: $(head -1 <<<"$n")"
+fi
 arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
 t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
 timeout 40 google-user-token >/dev/null 2>&1 && ok "google-user-token mints" || fail "google-user-token"
@@ -808,6 +821,18 @@ timeout 30 docker info >/dev/null 2>&1 && ok "inner docker answers" || fail "inn
 if [ -n "${NATS_NKEY_SEED_FILE:-}" ]; then [ -r "$NATS_NKEY_SEED_FILE" ] && ok "NATS nkey seed readable" || fail "NATS_NKEY_SEED_FILE $NATS_NKEY_SEED_FILE unreadable: envoy cannot connect"; else echo "note box: no NATS nkey seed (envoy connects without a credential)"; fi
 exit $fails
 '
+
+# The doctor box and everything it made: the container, its enrollment, its workspace and its
+# directories. A failed forget leaves a registration whose directory the rm removes: an orphan in
+# the shared store that every later `jj workspace list` carries, so it counts as a failure.
+remove_doctor_box() {
+    local box="$1" repo="$2"
+    docker rm -f "$box" >/dev/null 2>&1 || true
+    unenroll_box "$box"
+    jj -R "$SRC/$repo" workspace forget "$box" >/dev/null 2>&1 \
+        || fail "doctor: workspace forget $box failed; its registration is left in $SRC/$repo"
+    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+}
 
 cmd_doctor() {
     if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc; then ok "host: sysbox-runc runtime"; else fail "host: sysbox-runc runtime not registered"; fi
@@ -835,6 +860,12 @@ cmd_doctor() {
     [[ -n "$repo" ]] || die "no repo under $SRC to test with"
     box="agentbox-doctor$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-6)"
     ws="$BOXES/$box/$repo"
+    # Whatever ends doctor from here (a failed step under set -e, ^C, a hangup), the box goes with
+    # it. The trap fires only in doctor itself, never in a $(…) subshell (see cmd_new).
+    local doctor_pid=$BASHPID
+    # shellcheck disable=SC2064
+    trap "[[ \$BASHPID == $doctor_pid ]] && remove_doctor_box '$box' '$repo'" EXIT
+    trap 'exit 130' INT TERM HUP
     mkdir -p "$BOXES/$box"
     jj -R "$SRC/$repo" workspace add --name "$box" -r 'trunk()' "$ws" >/dev/null 2>&1
     local mounts=() env=() out
@@ -869,17 +900,8 @@ cmd_doctor() {
         # must not leak into the box-output accounting below.
         out=""
     fi
-    # Unconditional: docker rm -f on a name docker run never created is a harmless no-op under
-    # || true, and unenroll_box already returns early with nothing to do when its box never wrote
-    # an enrollment file — so both run even when the docker run -d attempt itself failed, in case
-    # it still left a named/stopped/partial container or enrollment behind.
-    docker rm -f "$box" >/dev/null 2>&1 || true
-    unenroll_box "$box"
-    # A failed forget leaves a registration whose directory the rm below removes: an orphan in the
-    # shared store that every later `jj workspace list` carries. Count it as a doctor failure.
-    jj -R "$SRC/$repo" workspace forget "$box" >/dev/null 2>&1 \
-        || fail "doctor: workspace forget $box failed; its registration is left in $SRC/$repo"
-    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+    trap - EXIT INT TERM HUP
+    remove_doctor_box "$box" "$repo"
     grep -vE '^@' <<<"$out"
     FAILS=$((FAILS + $(grep -c '^FAIL ' <<<"$out" || true)))
     local box_forward; box_forward="$(sed -n 's/^@forward-ok //p' <<<"$out")"
