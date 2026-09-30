@@ -1,5 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import {
 	ADVISOR_GATE_ENTRY_TYPE,
 	breakerKey,
@@ -438,5 +441,63 @@ describe("parseVerdict (test 14)", () => {
 	test("a revise without a reason and an unknown decision are no verdict", () => {
 		expect(parseVerdict('{"decision":"revise","reason":"  "}')).toBeUndefined();
 		expect(parseVerdict('{"decision":"maybe"}')).toBeUndefined();
+	});
+});
+
+describe("askgate.ts, the entry", () => {
+	// The entry imports @oh-my-pi/pi-ai, which resolves only inside omp; this stub stands in for it and records the
+	// options of every completion the gate makes.
+	const completions: Array<Record<string, unknown>> = [];
+	mock.module("@oh-my-pi/pi-ai", () => ({
+		completeSimple: async (_model: unknown, _context: unknown, options: Record<string, unknown>) => {
+			completions.push(options);
+			return {
+				content: [{ type: "thinking", thinking: "Checking the call." }, { type: "text", text: ALLOW }],
+				usage: { input: 5, output: 7, cacheRead: 0, cacheWrite: 0, totalTokens: 12, cost: { input: 0.05, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.25 } },
+				stopReason: "stop",
+			};
+		},
+		retryTransientCompletion: (run: () => Promise<unknown>) => run(),
+	}));
+	const saved = { ...process.env };
+	const dirs: string[] = [];
+	afterEach(() => {
+		completions.length = 0;
+		for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+		Object.assign(process.env, saved);
+		for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	/** Binds the real entry to a fake `pi` and runs one gated dispatch_comment through it. */
+	async function gateOnce(env: Record<string, string> = {}) {
+		const agentDir = fs.mkdtempSync(path.join(tmpdir(), "askgate-entry-"));
+		dirs.push(agentDir);
+		Object.assign(process.env, { PI_CODING_AGENT_DIR: agentDir }, env);
+		delete process.env.OMP_ASKGATE;
+		// Imported after mock.module so the entry binds the stub; a static import would load it first.
+		const { default: askgate } = await import("../askgate");
+		const handlers = new Map<string, Handler>();
+		const entries: GateEntry[] = [];
+		askgate({ on: (event: string, handler: Handler) => handlers.set(event, handler), appendEntry: (_: string, data: GateEntry) => entries.push(data), logger: { debug: () => {} } } as never);
+		const ctx = {
+			agent: { kind: "main" },
+			hasUI: false,
+			ui: { notify: () => {} },
+			getSystemPrompt: () => ["PRIMARY"],
+			models: { resolve: () => MODEL },
+			modelRegistry: { resolver: () => "resolved-key" },
+			sessionManager: { getBranch: () => [fx.user("Post it.")], getSessionId: () => "sess-e" },
+		};
+		const result = await handlers.get("tool_call")?.({ type: "tool_call", toolName: "dispatch_comment", toolCallId: "t1", input: COMMENT }, ctx);
+		return { result, entries, agentDir };
+	}
+
+	test("the completion runs at high effort with prompt caching off, and its usage is recorded", async () => {
+		const { result, entries } = await gateOnce();
+		expect(result).toBeUndefined();
+		expect(completions).toHaveLength(1);
+		expect(completions[0]).toMatchObject({ reasoning: "high", cacheRetention: "none", maxTokens: 1200, sessionId: "sess-e", apiKey: "resolved-key" });
+		expect(completions[0].signal).toBeInstanceOf(AbortSignal);
+		expect(entries).toMatchObject([{ decision: "allow", outcome: "verdict", usage: { input: 5, output: 7, cacheRead: 0, cacheWrite: 0, cost: 0.25 } }]);
 	});
 });

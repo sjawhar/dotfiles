@@ -22,7 +22,10 @@ async function complete({ ctx, model, system, user, sessionId, signal }: Complet
 			completeSimple(
 				full,
 				{ systemPrompt: [system], messages: [{ role: "user", content: user, timestamp: Date.now() }] },
-				{ apiKey: (ctx as Ctx).modelRegistry.resolver(full, sessionId), sessionId, reasoning: GATE_EFFORT, maxTokens: 1200, temperature: 0, signal },
+				// Caching off: the provider's breakpoints cover the whole prompt, transcript included, so every
+				// call would write it all at the one-hour rate (twice the input price here), and the transcript,
+				// which slides on every call, is never read back.
+				{ apiKey: (ctx as Ctx).modelRegistry.resolver(full, sessionId), sessionId, reasoning: GATE_EFFORT, cacheRetention: "none", maxTokens: 1200, temperature: 0, signal },
 			),
 		{ maxAttempts: 2, provider: full.provider, signal },
 	);
