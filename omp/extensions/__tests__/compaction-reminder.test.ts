@@ -5,19 +5,17 @@ type Pi = Parameters<typeof extension>[0];
 type Sent = { message: { customType: string; content: string; display: boolean }; options: { deliverAs?: string } };
 type Entry = Record<string, unknown> & { type: string };
 
-const SESSION_DIR = "/home/u/.omp/agent/sessions/-src-repo/2026-09-30T01-02-03-456Z_01a0ef85-79c0-7197-9a12-31f588da3406";
-const TOP_LEVEL_FILE = `${SESSION_DIR}.jsonl`;
-const SUBAGENT_FILE = `${SESSION_DIR}/SubagentWorker.jsonl`;
-const ASSIGNMENT = "# Target\n- `omp/config.yml` only\n\nNon-goals: the fork.\n\nReport the commit sha.";
-const FENCED_ASSIGNMENT = `${ASSIGNMENT}\n\n\`\`\`text\n${"keep this exact block ".repeat(120)}\n\`\`\``;
+const ASSIGNMENT = `# Target\n- \`omp/config.yml\` only\n\nNon-goals: the fork.\n\n${"Restate every constraint. ".repeat(80)}\n\nReport the commit sha.`;
 const SHAKEN = "[shaken ~600 tokens — recover: artifact://7 (region 1)]";
 
-const user = (content: unknown): Entry => ({ type: "message", message: { role: "user", content } });
+const user = (text: string): Entry => ({ type: "message", message: { role: "user", content: [{ type: "text", text }] } });
 const assistant = (text: string): Entry => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
+const sessionInit = (task: string): Entry => ({ type: "session_init", systemPrompt: "you are a subagent", task, tools: [] });
 const compaction: Entry = { type: "compaction", summary: "paraphrase" };
 const sddGoal: Entry = { type: "mode_change", mode: "goal", data: { goal: { objective: "[sdd] ship it", status: "active" } } };
-const context = (file: string, branch: Entry[], idle: boolean) => ({
-	sessionManager: { getSessionFile: () => file, getBranch: () => branch },
+const context = (kind: "main" | "sub", branch: Entry[], idle: boolean) => ({
+	agent: { kind, id: kind === "sub" ? "0-Worker" : "Main", name: kind === "sub" ? "task" : "main", depth: 0 },
+	sessionManager: { getBranch: () => branch },
 	isIdle: () => idle,
 });
 
@@ -34,14 +32,13 @@ function bind() {
 	return {
 		sent,
 		turnEnd: (toolResults: number) => emit("turn_end", { toolResults: Array(toolResults).fill({}) }),
-		messageEnd: (message: unknown, branch: Entry[] = []) =>
-			emit("message_end", { message }, context(SUBAGENT_FILE, branch, false)),
-		compact: (file: string, branch: Entry[], idle: boolean) => emit("session_compact", {}, context(file, branch, idle)),
-		shakeEnd: (file: string, branch: Entry[], idle: boolean, outcome: Record<string, unknown>) =>
+		compact: (kind: "main" | "sub", branch: Entry[], idle: boolean) =>
+			emit("session_compact", {}, context(kind, branch, idle)),
+		shakeEnd: (kind: "main" | "sub", branch: Entry[], idle: boolean, outcome: Record<string, unknown>) =>
 			emit(
 				"auto_compaction_end",
 				{ action: "shake", result: undefined, aborted: false, willRetry: false, ...outcome },
-				context(file, branch, idle)
+				context(kind, branch, idle)
 			),
 	};
 }
@@ -49,10 +46,41 @@ function bind() {
 const subagentLead = async () =>
 	(await Bun.file(new URL("../compaction-reminder-subagent.md", import.meta.url)).text()).trim();
 
+/**
+ * Shake's top-level XML grammar, from `packages/agent/src/compaction/shake.ts`
+ * (`OPENING_XML`, `CLOSING_XML`, `scanTextForBlockRanges`) at omp
+ * 18.4.3-sami.20260929-152920. A matching tag on its own line opens a span, and a
+ * span of 400+ tokens in a custom message is one elidable region — which is why the
+ * restated assignment must not sit inside one. Models tags only: a fenced block
+ * inside the assignment is still a region of its own. Re-prove against the fork with
+ * `collectShakeRegions` when omp moves.
+ */
+function xmlSpansOf(text: string): Array<{ start: number; end: number }> {
+	const opening = /^<([a-z_-]+)(?:\s+[^>]*)?>$/;
+	const closing = /^<\/([a-z_-]+)>$/;
+	const spans: Array<{ start: number; end: number }> = [];
+	const stack: string[] = [];
+	let start = -1;
+	text.split("\n").forEach((line, index) => {
+		const open = opening.exec(line);
+		if (open) {
+			if (stack.length === 0) start = index;
+			stack.push(open[1]);
+			return;
+		}
+		const close = closing.exec(line);
+		if (close && stack.length > 0 && stack[stack.length - 1] === close[1]) {
+			stack.pop();
+			if (stack.length === 0) spans.push({ start, end: index });
+		}
+	});
+	return spans;
+}
+
 describe("compaction-reminder", () => {
-	test("a subagent's first compaction restates its assignment verbatim after the reminder text", async () => {
+	test("a subagent's first compaction restates its assignment after the reminder text", async () => {
 		const session = bind();
-		session.compact(SUBAGENT_FILE, [user([{ type: "text", text: ASSIGNMENT }]), assistant("working"), compaction], true);
+		session.compact("sub", [sessionInit(ASSIGNMENT), user(ASSIGNMENT), assistant("working"), compaction], true);
 
 		expect(session.sent).toHaveLength(1);
 		const [{ message }] = session.sent;
@@ -62,34 +90,63 @@ describe("compaction-reminder", () => {
 		expect(message.content).toContain(ASSIGNMENT);
 	});
 
-	test("the assignment is the first user message, joining its text parts", () => {
+	test("the assignment is the branch's latest session_init task, not a user message", () => {
 		const session = bind();
-		const branch = [
-			user([{ type: "text", text: "part one" }, { type: "image", data: "x" }, { type: "text", text: "part two" }]),
-			assistant("working"),
-			user([{ type: "text", text: "a later steer" }]),
-			compaction,
-		];
-		session.compact(SUBAGENT_FILE, branch, true);
+		// A `/tan` clone of a subagent: the fork carries the parent's transcript and
+		// session_init, then the clone appends its own and prompts with its own work.
+		session.compact(
+			"sub",
+			[
+				sessionInit("the parent's assignment"),
+				user("the parent's first prompt"),
+				assistant("parent working"),
+				sessionInit("the clone's own work"),
+				user("the clone's own work"),
+				compaction,
+			],
+			true
+		);
 
 		expect(session.sent).toHaveLength(1);
-		expect(session.sent[0].message.content).toContain("part one\npart two");
-		expect(session.sent[0].message.content).not.toContain("a later steer");
+		expect(session.sent[0].message.content).toContain("the clone's own work");
+		expect(session.sent[0].message.content).not.toContain("the parent's assignment");
+		expect(session.sent[0].message.content).not.toContain("the parent's first prompt");
 	});
 
-	test("a subagent with no user message on its branch gets the reminder text alone", async () => {
+	test("a shaken user message does not reach the restatement", () => {
 		const session = bind();
-		session.compact(SUBAGENT_FILE, [assistant("working"), compaction], true);
+		session.compact("sub", [sessionInit(ASSIGNMENT), user(SHAKEN), compaction], true);
+
+		expect(session.sent[0].message.content).toContain(ASSIGNMENT);
+		expect(session.sent[0].message.content).not.toContain(SHAKEN);
+	});
+
+	test("a subagent whose branch has no session_init gets the reminder text alone", async () => {
+		const session = bind();
+		session.compact("sub", [user(ASSIGNMENT), assistant("working"), compaction], true);
 
 		expect(session.sent).toHaveLength(1);
 		expect(session.sent[0].message.content).toBe(await subagentLead());
 	});
 
+	test("no span shake would elide encloses the restated assignment", async () => {
+		const session = bind();
+		session.compact("sub", [sessionInit(ASSIGNMENT), compaction], true);
+		const { content } = session.sent[0].message;
+
+		const assignmentLine = content.split("\n").indexOf(ASSIGNMENT.split("\n")[0]);
+		expect(assignmentLine).toBeGreaterThan(0);
+		const lead = await subagentLead();
+		expect(xmlSpansOf(content).filter(span => span.end >= assignmentLine)).toEqual([]);
+		// The lead itself is one span, and stays far under shake's 400-token floor.
+		expect(xmlSpansOf(lead)).toHaveLength(1);
+	});
+
 	test("a subagent's later compactions send nothing", () => {
 		const session = bind();
-		const branch = [user(ASSIGNMENT), compaction];
-		session.compact(SUBAGENT_FILE, branch, true);
-		session.compact(SUBAGENT_FILE, [...branch, compaction], true);
+		const branch = [sessionInit(ASSIGNMENT), compaction];
+		session.compact("sub", branch, true);
+		session.compact("sub", [...branch, compaction], true);
 
 		expect(session.sent).toHaveLength(1);
 	});
@@ -97,76 +154,43 @@ describe("compaction-reminder", () => {
 	test("each subagent binding gets its own first-compaction reminder", () => {
 		const first = bind();
 		const second = bind();
-		first.compact(SUBAGENT_FILE, [user(ASSIGNMENT), compaction], true);
-		second.compact(SUBAGENT_FILE, [user(ASSIGNMENT), compaction], true);
+		first.compact("sub", [sessionInit(ASSIGNMENT), compaction], true);
+		second.compact("sub", [sessionInit(ASSIGNMENT), compaction], true);
 
 		expect(first.sent).toHaveLength(1);
 		expect(second.sent).toHaveLength(1);
 	});
 
-	test("the reminder restates the assignment as it arrived, after a shake rewrote it on the branch", () => {
-		const session = bind();
-		session.messageEnd({ role: "user", content: [{ type: "text", text: FENCED_ASSIGNMENT }] });
-		session.messageEnd({ role: "assistant", content: [{ type: "text", text: "working" }] });
-		session.messageEnd({ role: "user", content: [{ type: "text", text: "a later steer" }] });
-		const shakenBranch = [user([{ type: "text", text: `${ASSIGNMENT}\n\n${SHAKEN}` }]), user("a later steer"), compaction];
-		session.compact(SUBAGENT_FILE, shakenBranch, true);
-
-		expect(session.sent).toHaveLength(1);
-		expect(session.sent[0].message.content).toContain(FENCED_ASSIGNMENT);
-		expect(session.sent[0].message.content).not.toContain(SHAKEN);
-		expect(session.sent[0].message.content).not.toContain("a later steer");
-	});
-
-	test("a subagent woken again with a follow-up keeps the assignment already on its branch", () => {
-		const session = bind();
-		const branch = [user(ASSIGNMENT), assistant("done")];
-		session.messageEnd({ role: "user", content: "a follow-up question" }, branch);
-		session.compact(SUBAGENT_FILE, [...branch, user("a follow-up question"), compaction], true);
-
-		expect(session.sent).toHaveLength(1);
-		expect(session.sent[0].message.content).toContain(ASSIGNMENT);
-		expect(session.sent[0].message.content).not.toContain("a follow-up question");
-	});
-
 	test("a shake that dropped content is a subagent's first compaction", () => {
 		const session = bind();
-		session.messageEnd({ role: "user", content: ASSIGNMENT });
 		session.turnEnd(1);
-		session.shakeEnd(SUBAGENT_FILE, [user(SHAKEN)], false, { skipped: false });
+		session.shakeEnd("sub", [sessionInit(ASSIGNMENT), user(SHAKEN)], false, { skipped: false });
 
 		expect(session.sent.map(s => [s.message.customType, s.options.deliverAs])).toEqual([
 			["post-compaction-subagent-reminder", "aside"],
 		]);
 		expect(session.sent[0].message.content).toContain(ASSIGNMENT);
-		session.compact(SUBAGENT_FILE, [user(SHAKEN), compaction], false);
+		session.compact("sub", [sessionInit(ASSIGNMENT), user(SHAKEN), compaction], false);
 		expect(session.sent).toHaveLength(1);
 	});
 
 	test("a shake that drops nothing, falls through or aborts leaves the reminder to the compaction that follows", () => {
 		const session = bind();
-		const branch = [user(ASSIGNMENT)];
+		const branch = [sessionInit(ASSIGNMENT)];
 		const fellThrough = "Auto-shake reclaimed ~9000 tokens but context is still above the threshold; trying the next preferred compaction method.";
-		session.shakeEnd(SUBAGENT_FILE, branch, true, { skipped: true });
-		session.shakeEnd(SUBAGENT_FILE, branch, true, { skipped: false, errorMessage: fellThrough });
-		session.shakeEnd(SUBAGENT_FILE, branch, true, { aborted: true });
+		session.shakeEnd("sub", branch, true, { skipped: true });
+		session.shakeEnd("sub", branch, true, { skipped: false, errorMessage: fellThrough });
+		session.shakeEnd("sub", branch, true, { aborted: true });
 		expect(session.sent).toHaveLength(0);
 
-		session.compact(SUBAGENT_FILE, [...branch, compaction], true);
+		session.compact("sub", [...branch, compaction], true);
 		expect(session.sent).toHaveLength(1);
-	});
-
-	test("a top-level session's shake sends no reminder, sdd goal or not", () => {
-		const session = bind();
-		session.shakeEnd(TOP_LEVEL_FILE, [user(ASSIGNMENT), sddGoal], true, { skipped: false });
-
-		expect(session.sent).toHaveLength(0);
 	});
 
 	test("a subagent compacting mid-run gets the reminder as an aside", () => {
 		const session = bind();
 		session.turnEnd(2);
-		session.compact(SUBAGENT_FILE, [user(ASSIGNMENT), compaction], false);
+		session.compact("sub", [sessionInit(ASSIGNMENT), compaction], false);
 
 		expect(session.sent).toHaveLength(1);
 		expect(session.sent[0].options.deliverAs).toBe("aside");
@@ -175,20 +199,21 @@ describe("compaction-reminder", () => {
 	test("a subagent compacting while idle, or at the end of its run, gets the reminder on the next turn", () => {
 		const idle = bind();
 		idle.turnEnd(2);
-		idle.compact(SUBAGENT_FILE, [user(ASSIGNMENT), compaction], true);
+		idle.compact("sub", [sessionInit(ASSIGNMENT), compaction], true);
 		const runEnd = bind();
 		runEnd.turnEnd(0);
-		runEnd.compact(SUBAGENT_FILE, [user(ASSIGNMENT), compaction], false);
+		runEnd.compact("sub", [sessionInit(ASSIGNMENT), compaction], false);
 
 		expect(idle.sent.map(s => s.options.deliverAs)).toEqual(["nextTurn"]);
 		expect(runEnd.sent.map(s => s.options.deliverAs)).toEqual(["nextTurn"]);
 	});
 
-	test("a top-level session without an active [sdd] goal gets nothing", () => {
+	test("a top-level session gets no subagent reminder, and its shake sends nothing", () => {
 		const session = bind();
-		session.compact(TOP_LEVEL_FILE, [user(ASSIGNMENT), assistant("working"), compaction], true);
+		session.compact("main", [sessionInit(ASSIGNMENT), user(ASSIGNMENT), compaction], true);
 		const paused: Entry = { type: "mode_change", mode: "goal_paused" };
-		session.compact(TOP_LEVEL_FILE, [user(ASSIGNMENT), sddGoal, paused, compaction], true);
+		session.compact("main", [sddGoal, paused, compaction], true);
+		session.shakeEnd("main", [sddGoal], true, { skipped: false });
 
 		expect(session.sent).toHaveLength(0);
 	});
@@ -197,9 +222,9 @@ describe("compaction-reminder", () => {
 		const sddText = (await Bun.file(new URL("../compaction-reminder.md", import.meta.url)).text()).trim();
 		const session = bind();
 		const branch = [user(ASSIGNMENT), sddGoal, compaction];
-		session.compact(TOP_LEVEL_FILE, branch, true);
+		session.compact("main", branch, true);
 		session.turnEnd(1);
-		session.compact(TOP_LEVEL_FILE, [...branch, compaction], false);
+		session.compact("main", [...branch, compaction], false);
 
 		expect(session.sent.map(s => [s.message.customType, s.message.content, s.options.deliverAs])).toEqual([
 			["post-compaction-reminder", sddText, "nextTurn"],

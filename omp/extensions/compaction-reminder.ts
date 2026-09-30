@@ -45,37 +45,43 @@
 // valid signal here.
 //
 // Subagents rebind the parent's extensions to their own runtime, so these
-// handlers also run for their compactions. The transcript name tells the two
-// apart: subagent transcripts live inside the parent's session directory as
-// <AgentName>.jsonl rather than a <timestamp>_<uuid>.jsonl, the grammar
-// session-env.ts uses for the same distinction. Only the top-level session is
-// the coordinator following the sdd process, so the sdd reminder is for it
-// alone, on committed compactions. A subagent instead gets its assignment
-// back: a summary paraphrases the scope limits, forbidden files and required
-// output it was dispatched with, and a shake can swap a large block of the
-// assignment itself for a placeholder. So on its first compaction — a
+// handlers also run for their compactions. `ctx.agent.kind` tells the two
+// apart: `"sub"` for anything spawned — a task subagent, an eval agent, a
+// `/tan` clone — and `"main"` for the top-level session. Only the top-level
+// session is the coordinator following the sdd process, so the sdd reminder is
+// for it alone, on committed compactions. A subagent instead gets its
+// assignment back: a summary paraphrases the scope limits, forbidden files and
+// required output it was dispatched with, and a shake can swap a large block
+// of the assignment itself for a placeholder. So on its first compaction — a
 // committed one, or an automatic shake that dropped content and brought the
 // context back under its threshold — it is told to re-check them and handed
 // the assignment verbatim. A shake that dropped nothing, aborted, or fell
 // through to the next method leaves the reminder to the compaction that
 // follows. Later compactions stay quiet: one restatement per subagent, not one
-// per summary.
+// per summary. State lives in the factory closure, which is per session
+// binding, never at module scope shared across sessions.
 //
-// The assignment is the first user message on the branch, recorded at the
-// binding's first user `message_end`, before any compaction can have touched
-// it: the branch's first user message when the branch already has one (a
-// revived subagent woken with a follow-up keeps what it was dispatched with),
-// else the message just sent. Only when nothing was recorded is the branch
-// read at compaction time; with no user message at all the reminder text goes
-// alone. State lives in the factory closure, which is per session binding,
-// never at module scope shared across sessions.
-import path from "node:path";
+// The assignment is the `task` of the branch's latest `session_init`: the
+// string the runtime recorded before prompting this session with it, whoever
+// spawned it. The latest one is this session's own — a `/tan` clone forks its
+// parent's transcript, so the parent's entry is on the branch too, and the
+// clone's own follows it. Shake scans only `message` and `custom_message`
+// entries, so `session_init` survives every shake and a cold revive; the first
+// user message on the branch survives neither, and in a `/tan` clone is the
+// parent's prompt rather than this session's work. With no `session_init` —
+// nothing spawned through the task executor recorded one — the reminder text
+// goes alone.
+//
+// The restatement is wrapped in `<ORIGINAL_ASSIGNMENT>` rather than a
+// lowercase tag: shake reads a lowercase tag alone on its line as one
+// top-level XML span, and would elide the whole restated assignment as a
+// single 400+ token region the next time it ran. Its opening grammar is
+// lowercase-only, so an uppercase name never matches. A large fenced or
+// lowercase-XML block *inside* the assignment is still a region of its own.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import sddReminder from "./compaction-reminder.md" with { type: "text" };
 import subagentReminder from "./compaction-reminder-subagent.md" with { type: "text" };
 
-const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
-const TOP_LEVEL_TRANSCRIPT = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d-]+Z_${UUID}\\.jsonl$`);
 const SDD_MESSAGE = { customType: "post-compaction-reminder", content: sddReminder.trim(), display: true };
 const SUBAGENT_REMINDER = subagentReminder.trim();
 const SDD_PREFIX = "[sdd]";
@@ -85,11 +91,11 @@ type ModeChangeEntry = {
 	mode: string;
 	data?: { goal?: { objective?: string; status?: string } };
 };
-type UserMessage = { role: string; content: string | Array<{ type: string; text?: string }> };
-type MessageEntry = { type: "message"; message: UserMessage };
+type SessionInitEntry = { type: "session_init"; task?: string };
 type ShakeEndEvent = { action: string; aborted: boolean; skipped?: boolean; errorMessage?: string };
 type CompactCtx = {
-	sessionManager: { getSessionFile: () => string | undefined; getBranch: () => Array<{ type: string }> };
+	agent: { kind: "main" | "sub" };
+	sessionManager: { getBranch: () => Array<{ type: string }> };
 	isIdle: () => boolean;
 };
 
@@ -107,35 +113,17 @@ function sddGoalActive(ctx: CompactCtx): boolean {
 	return false;
 }
 
-/** Text parts of a message, joined. */
-function messageText(message: UserMessage): string {
-	if (typeof message.content === "string") return message.content;
-	return message.content
-		.filter(part => part.type === "text")
-		.map(part => part.text)
-		.join("\n");
-}
-
-/** Text of the branch's first user message: the assignment a subagent was dispatched with. */
-function firstUserText(ctx: CompactCtx): string | undefined {
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "message") continue;
-		const { message } = entry as MessageEntry;
-		if (message.role === "user") return messageText(message);
+/** The assignment: the `task` this session was prompted with, from its own `session_init`. */
+function assignmentTask(ctx: CompactCtx): string | undefined {
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		if (branch[i].type === "session_init") return (branch[i] as SessionInitEntry).task;
 	}
 	return undefined;
 }
 
-/** Whether the session is a subagent; undefined when it has no transcript to tell by. */
-function isSubagent(ctx: CompactCtx): boolean | undefined {
-	const file = ctx.sessionManager.getSessionFile();
-	if (!file) return undefined;
-	return !TOP_LEVEL_TRANSCRIPT.test(path.basename(file));
-}
-
 export default function (pi: ExtensionAPI) {
 	let runContinues = false;
-	let assignment: string | undefined;
 	let subagentReminded = false;
 
 	const deliver = (message: typeof SDD_MESSAGE, ctx: CompactCtx) =>
@@ -143,11 +131,13 @@ export default function (pi: ExtensionAPI) {
 	const remindSubagent = (ctx: CompactCtx) => {
 		if (subagentReminded) return;
 		subagentReminded = true;
-		const text = assignment ?? firstUserText(ctx);
+		const task = assignmentTask(ctx);
 		deliver(
 			{
 				customType: "post-compaction-subagent-reminder",
-				content: text ? `${SUBAGENT_REMINDER}\n\n<assignment>\n${text}\n</assignment>` : SUBAGENT_REMINDER,
+				content: task
+					? `${SUBAGENT_REMINDER}\n\n<ORIGINAL_ASSIGNMENT>\n${task}\n</ORIGINAL_ASSIGNMENT>`
+					: SUBAGENT_REMINDER,
 				display: true,
 			},
 			ctx
@@ -160,18 +150,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", () => {
 		runContinues = false;
 	});
-	pi.on("message_end", (event: { message: UserMessage }, ctx: CompactCtx) => {
-		if (assignment !== undefined || event.message.role !== "user") return;
-		assignment = firstUserText(ctx) ?? messageText(event.message);
-	});
 	pi.on("session_compact", (_event: unknown, ctx: CompactCtx) => {
-		const subagent = isSubagent(ctx);
-		if (subagent) remindSubagent(ctx);
-		else if (subagent === false && sddGoalActive(ctx)) deliver(SDD_MESSAGE, ctx);
+		if (ctx.agent.kind === "sub") remindSubagent(ctx);
+		else if (sddGoalActive(ctx)) deliver(SDD_MESSAGE, ctx);
 	});
 	pi.on("auto_compaction_end", (event: ShakeEndEvent, ctx: CompactCtx) => {
 		// A shake that fell through carries an errorMessage; the method after it commits and reminds.
 		if (event.action !== "shake" || event.aborted || event.skipped || event.errorMessage !== undefined) return;
-		if (isSubagent(ctx)) remindSubagent(ctx);
+		if (ctx.agent.kind === "sub") remindSubagent(ctx);
 	});
 }
