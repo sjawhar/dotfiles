@@ -45,9 +45,10 @@
 // usage, the aborted one included; scripts/advisor-report reads them. Every path fails open: a
 // throw inside the handler is recorded as `error` and the call runs, and the deadline keeps the
 // handler inside the runner's ceiling, whose expiry would refuse the call. When the call's tool
-// ends first anyway (a user abort, or that ceiling), the model call is cancelled and the entry
-// reads `abandoned`. OMP_ASKGATE_DUMP names a file each gate's system and user prompts are
-// appended to, owner-only and never through a symlink.
+// ends first anyway (a user abort, or that ceiling), or the agent's run ends while it waits (the
+// path an eval-bridged write takes), the model call is cancelled and the entry reads `abandoned`,
+// which never counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system and user
+// prompts are appended to, owner-only and never through a symlink.
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
@@ -90,7 +91,7 @@ export interface GateEntry {
 	path: string;
 	toolCallId: string;
 	decision: "allow" | "revise";
-	outcome: "verdict" | "rebuttal" | "breaker" | "timeout" | "error" | "no-verdict" | "unavailable" | "halted" | "killed" | "skipped";
+	outcome: "verdict" | "rebuttal" | "breaker" | "timeout" | "error" | "no-verdict" | "unavailable" | "halted" | "killed" | "skipped" | "abandoned";
 	verdictMode: Exclude<Mode, "off">;
 	reason?: string;
 	rebuttal?: string;
@@ -408,9 +409,14 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		pi.on("session_branch", reset);
 		// A gate still waiting when its tool's execution ends was abandoned: the runner gave up on the
 		// handler (a user abort, or its ceiling) and the call already went its way. Cancel the model call.
+		// An eval-bridged write never shows its own id on a loop tool_execution_end, so every gate still
+		// waiting when the agent's run ends is abandoned too: no run is left to deliver its verdict to.
 		const inflight = new Map<string, () => void>();
 		pi.on("tool_execution_end", (event: { toolCallId: string }) => {
 			inflight.get(event.toolCallId)?.();
+		});
+		pi.on("agent_end", () => {
+			for (const abandon of inflight.values()) abandon();
 		});
 
 		/** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
@@ -473,8 +479,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const answer = await ask(request, event.toolCallId, Math.max(0, deadlineMs - (deps.now() - started)));
 			const usage = answer.usage ? { usage: answer.usage } : {};
 			if (answer.kind === "timeout") return pass("timeout", { ...called, ...usage }, "failure");
-			// Not the gate's failure: the call ended without it (a user abort, or the runner's ceiling).
-			if (answer.kind === "abandoned") return pass("error", { reason: "abandoned: the call ended before a verdict (a user abort or the runner's handler ceiling)", ...called, ...usage });
+			// Not the gate's failure: the call, or the run, ended without it.
+			if (answer.kind === "abandoned") return pass("abandoned", { ...called, ...usage });
 			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...called, ...usage }, "failure");
 			const verdict = parseVerdict(answer.text);
 			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...called, ...usage }, "failure");

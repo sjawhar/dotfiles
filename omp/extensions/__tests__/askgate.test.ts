@@ -434,9 +434,8 @@ describe("deadline and abandonment", () => {
 			expect(await gated).toBeUndefined();
 		}
 		expect(signals.every(s => s.aborted)).toBe(true);
-		expect(g.entries.map(e => e.outcome)).toEqual(["error", "error", "error"]);
-		expect(g.entries[0]).toMatchObject({ usage: PARTIAL });
-		expect(g.entries[0].reason).toMatch(/^abandoned/);
+		expect(g.entries.map(e => e.outcome)).toEqual(["abandoned", "abandoned", "abandoned"]);
+		expect(g.entries[0]).toMatchObject({ decision: "allow", usage: PARTIAL });
 		expect(g.notices).toHaveLength(0);
 		started = Promise.withResolvers<void>();
 		const next = g.device("d", "dispatch_comment", COMMENT);
@@ -444,6 +443,27 @@ describe("deadline and abandonment", () => {
 		g.event("tool_execution_end", { toolCallId: "d", toolName: "write", isError: true });
 		await next;
 		expect(signals).toHaveLength(4);
+	});
+	test("a gate still waiting when the agent's run ends is abandoned, whichever path dispatched its call", async () => {
+		// An eval-bridged write: its id never appears on a loop tool_execution_end, the eval call's own id does.
+		const signals: AbortSignal[] = [];
+		const started = Promise.withResolvers<void>();
+		const g = bind({
+			complete: req => {
+				signals.push(req.signal);
+				started.resolve();
+				return untilAborted(req);
+			},
+		});
+		const gated = g.device("js-write-00000000-0000-4000-8000-000000000000", "dispatch_comment", COMMENT);
+		await started.promise;
+		g.event("tool_execution_end", { toolCallId: "toolu_eval", toolName: "eval", isError: true });
+		expect(signals[0].aborted).toBe(false);
+		g.event("agent_end", { messages: [] });
+		expect(await gated).toBeUndefined();
+		expect(signals[0].aborted).toBe(true);
+		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned", usage: PARTIAL }]);
+		expect(g.notices).toHaveLength(0);
 	});
 	test("replies to different messages are different breaker targets", async () => {
 		const g = bind({ complete: async () => ({ text: REVISE }) });
