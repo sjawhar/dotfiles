@@ -52,7 +52,8 @@ export default createAskGate({
 	home: os.homedir(),
 	now: Date.now,
 	readFile,
-	appendFile: (p, text) => fs.appendFileSync(p, text),
+	// The dump holds the primary system prompt and transcript: owner-only, like the session files (the mode applies on creation).
+	appendFile: (p, text) => fs.appendFileSync(p, text, { mode: 0o600 }),
 	complete,
 	charterPath: path.join(path.dirname(fs.realpathSync(import.meta.path)), "..", "watchdog", "askgate.md"),
 }) as (pi: ExtensionAPI) => void;
