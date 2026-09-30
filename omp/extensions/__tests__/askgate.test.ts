@@ -41,6 +41,8 @@ function bind(opts: {
 	kind?: "main" | "sub";
 	model?: unknown;
 	branch?: () => readonly unknown[];
+	/** Every appendEntry throws: the session file cannot take the record. */
+	recordThrows?: boolean;
 } = {}) {
 	const handlers = new Map<string, Handler>();
 	const entries: GateEntry[] = [];
@@ -49,10 +51,13 @@ function bind(opts: {
 	const dumps: Array<[string, string]> = [];
 	const calls: CompleteRequest[] = [];
 	const files = new Map(Object.entries({ [CHARTER_PATH]: "# AskGate charter\nJudge the call.", ...opts.files }));
+	/** Paths whose read fails as an unreadable file would. */
+	const unreadable = new Set<string>();
 	const pi = {
 		on: (event: string, handler: Handler) => handlers.set(event, handler),
 		appendEntry: (customType: string, data: GateEntry) => {
 			expect(customType).toBe(ADVISOR_GATE_ENTRY_TYPE);
+			if (opts.recordThrows) throw new Error("session file unavailable");
 			entries.push(data);
 		},
 		logger: { debug: (message: string) => debug.push(message), warn: () => {} },
@@ -62,7 +67,10 @@ function bind(opts: {
 		env: opts.env ?? {},
 		home: HOME,
 		now: Date.now,
-		readFile: p => files.get(p),
+		readFile: p => {
+			if (unreadable.has(p)) throw new Error(`EACCES: permission denied, open '${p}'`);
+			return files.get(p);
+		},
 		appendFile: (p, text) => dumps.push([p, text]),
 		complete: req => {
 			calls.push(req);
@@ -91,6 +99,7 @@ function bind(opts: {
 		dumps,
 		calls,
 		files,
+		unreadable,
 		write: (toolCallId: string, path: string, content: string) => emit({ toolName: "write", toolCallId, input: { path, content } }),
 		device: (toolCallId: string, toolName: string, input: Record<string, unknown>) => emit({ toolName, toolCallId, input }),
 	};
@@ -291,6 +300,22 @@ describe("fail-open", () => {
 		expect(await g.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
 		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "error" }]);
 		expect(g.entries[0].reason).toContain("branch unavailable");
+	});
+	test("a call whose record cannot be written still counts once toward the halt", async () => {
+		const g = bind({ recordThrows: true, env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: () => Promise.withResolvers<Completion>().promise });
+		for (const id of ["a", "b", "c", "d"]) expect(await g.device(id, "dispatch_comment", COMMENT)).toBeUndefined();
+		expect(g.calls).toHaveLength(3);
+		expect(g.notices).toHaveLength(1);
+	});
+	test("an unreadable overlay is an error that never counts toward the halt", async () => {
+		const g = bind();
+		g.unreadable.add(OVERLAY);
+		for (const id of ["a", "b", "c"]) expect(await g.device(id, "dispatch_comment", COMMENT)).toBeUndefined();
+		g.unreadable.clear();
+		await g.device("d", "dispatch_comment", COMMENT);
+		expect(g.entries.map(e => e.outcome)).toEqual(["error", "error", "error", "verdict"]);
+		expect(g.entries[0].reason).toContain("EACCES");
+		expect(g.notices).toHaveLength(0);
 	});
 });
 
