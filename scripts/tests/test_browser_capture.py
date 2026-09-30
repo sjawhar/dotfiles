@@ -19,6 +19,10 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent
 CAPTURE = SCRIPTS / "browser-capture"
+# How long each secrets stub stalls. A run still going at BOUND_SECONDS waited on the
+# stall, and the bound stays well clear of interpreter start-up on a loaded machine.
+STALL_SECONDS = 60
+BOUND_SECONDS = STALL_SECONDS // 2
 
 
 def uv(*args: str) -> str:
@@ -59,7 +63,7 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def run_driver(
-        self, body: str, timeout: float = 1
+        self, body: str, timeout: float = BOUND_SECONDS
     ) -> subprocess.CompletedProcess[str]:
         driver = textwrap.dedent(
             f"""
@@ -109,13 +113,13 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
             capture_output=True,
             text=True,
             env=env,
-            timeout=5,
+            timeout=BOUND_SECONDS,
             check=False,
         )
 
     def test_incapable_secrets_stops_before_contacting_the_relay(self) -> None:
         """An editor-only secrets CLI is rejected before browser access begins."""
-        write_stub(self.stub_dir, "secrets", "import time\ntime.sleep(60)")
+        write_stub(self.stub_dir, "secrets", f"import time\ntime.sleep({STALL_SECONDS})")
 
         result = self.run_driver(
             """
@@ -137,7 +141,7 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
         write_stub(
             self.stub_dir,
             "secrets",
-            "import sys, time\nsys.stdin.buffer.read()\ntime.sleep(60)",
+            f"import sys, time\nsys.stdin.buffer.read()\ntime.sleep({STALL_SECONDS})",
         )
 
         result = self.run_driver(
