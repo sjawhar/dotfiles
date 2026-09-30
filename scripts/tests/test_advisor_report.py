@@ -530,7 +530,7 @@ class ReadoutTest(unittest.TestCase):
     def test_day_three_ungated_share_over_20_percent_applies_the_kill(self):
         self.kill_fixture()
         self.home.run("readout", "--check", "gate", check_exit=1)
-        self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": ["askgate"]}})
+        self.assert_killed()
 
     def test_day_three_verdicts_at_85_s_against_a_90_s_timeout_apply_the_kill(self):
         """A verdict slower than the timeout is recorded as a timeout, so the stall shows as p95 near it."""
@@ -543,7 +543,7 @@ class ReadoutTest(unittest.TestCase):
         verdicts_at(85_000)
         out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
         self.assertIn("p95 latency 85000 ms", out)
-        self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": ["askgate"]}})
+        self.assert_killed()
 
     def test_day_three_latency_kill_waits_for_20_verdicts_in_the_last_24_h(self):
         """One slow verdict among a handful is the whole p95 (nearest rank); it must not end the trial."""
