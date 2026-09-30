@@ -40,11 +40,17 @@ AGENT_SECRETS_STUB = r"""
 case "$1" in
     launcher)
         echo login-status >>"$STUB_LOG"
+        # The first call after a pin bump: mise's auto-install progress on stderr, before the state.
+        [[ -n "${STUB_AUTOINSTALL:-}" ]] && echo "mise agent-secrets@legion-envoy-v9.9.9 [1/3] download agent-secrets-amd64.tar.gz" >&2
         case "${STUB_LOGIN_STATE:-none}" in
             issued) echo issued; exit 0 ;;
             unreachable) echo "agent-secrets launcher login-status: dial unix $AGENT_SECRETS_HELPER_SOCK: connect: no such file or directory" >&2; exit 1 ;;
             broken) echo "mise ERROR Tool not installed for shim: agent-secrets" >&2; exit 1 ;;
-            *) echo "$STUB_LOGIN_STATE"; exit 1 ;;
+            # The legion #1589 client prints the state on stdout and what to do about it on stderr
+            # (cmd/agent-secrets/main.go, cmdLauncherLoginStatus, at 3d5f07e5).
+            pending) echo pending; echo "agent-secrets launcher login-status: a machine login is waiting for approval (code ABCD-EFGH)" >&2; exit 1 ;;
+            none) echo none; echo "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login" >&2; exit 1 ;;
+            *) echo "$STUB_LOGIN_STATE"; echo "agent-secrets launcher login-status: the last machine login is $STUB_LOGIN_STATE; run: agent-secrets launcher login" >&2; exit 1 ;;
         esac
         ;;
     register)
@@ -122,16 +128,18 @@ class AgentSecretsSession(unittest.TestCase):
 
     def test_credential_issued_registers_and_waits_keeping_the_pid(self) -> None:
         self.install_helper_unit()
-        result, pid = self.session(STUB_LOGIN_STATE="issued")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            result.stdout.splitlines(),
-            [
-                f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL}",
-                f"AGENT pid={pid} --flag",
-            ],
-        )
-        self.assertEqual(result.stderr, "")
+        for extra in ({}, {"STUB_AUTOINSTALL": "1"}):
+            with self.subTest(**extra):
+                result, pid = self.session(STUB_LOGIN_STATE="issued", **extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.splitlines(),
+                    [
+                        f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL}",
+                        f"AGENT pid={pid} --flag",
+                    ],
+                )
+                self.assertEqual(result.stderr, "")
 
     def test_caller_socket_and_url_are_kept(self) -> None:
         self.install_helper_unit()
@@ -147,18 +155,21 @@ class AgentSecretsSession(unittest.TestCase):
         )
 
     def test_no_credential_registers_without_waiting(self) -> None:
+        """Every state but issued; stderr around the state (auto-install, #1589's remedy) aside."""
         self.install_helper_unit()
-        for state in ("none", "pending"):
-            with self.subTest(state=state):
-                result, pid = self.session(STUB_LOGIN_STATE=state)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(
-                    result.stdout.splitlines(),
-                    [
-                        f"REGISTER --exec SOCK={self.sock} URL={BROKER_URL}",
-                        f"AGENT pid={pid} --flag",
-                    ],
-                )
+        for state in ("none", "pending", "denied", "expired"):
+            for extra in ({}, {"STUB_AUTOINSTALL": "1"}):
+                with self.subTest(state=state, **extra):
+                    result, pid = self.session(STUB_LOGIN_STATE=state, **extra)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        result.stdout.splitlines(),
+                        [
+                            f"REGISTER --exec SOCK={self.sock} URL={BROKER_URL}",
+                            f"AGENT pid={pid} --flag",
+                        ],
+                    )
+                    self.assertEqual(result.stderr, "")
 
     def test_no_state_launches_unregistered_and_says_why(self) -> None:
         """A stopped helper, or a client that cannot run, costs the launch nothing."""

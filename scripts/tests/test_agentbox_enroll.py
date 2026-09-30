@@ -8,8 +8,9 @@ Enrollment must end it every time: enrolled (key.pem and enrollment, no marker, 
 marker stays fresh while the launcher still works; what the host writes into the box-writable key
 dir never follows a link the box planted there; the id the host revokes is the one it recorded.
 
-Technique: source scripts/agentbox (its source guard runs nothing) with `docker`,
-`agent-secrets` and `sleep` stubbed first on PATH, and call its functions on a scratch key dir.
+Technique: source scripts/agentbox (its source guard runs nothing) with `docker`, `git`,
+`agent-secrets` and `sleep` stubbed first on PATH, and call its functions on a scratch key dir;
+cmd_new runs with the steps that need a real host (image, network, mounts) replaced by no-ops.
 """
 
 from __future__ import annotations
@@ -33,27 +34,43 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+# A box's key dir is $STUB_RUN_BASE/<box>/run-user/agent-secrets. `docker exec -d` runs its
+# script here when STUB_RUN_RENEW is set; `docker run` notes whether the marker is there as the
+# box starts, then lives for a second.
 DOCKER_STUB = rf"""
 echo "docker $*" >>"$STUB_CALLS"
+keydir() {{ echo "$STUB_RUN_BASE/$1/run-user/agent-secrets"; }}
 case "$*" in
-    inspect*) echo "${{STUB_RUNNING:-true}}" ;;
+    inspect*) [[ -z "${{STUB_GONE:-}}" ]] || exit 1; echo "${{STUB_RUNNING:-true}}" ;;
+    "run "*)
+        while [[ "$1" != --name ]]; do shift; done
+        if [[ -e "$(keydir "$2")/enrollment.pending" ]]; then m=yes; else m=no; fi
+        echo "run $2 marker=$m" >>"$STUB_CALLS"
+        /bin/sleep 1 ;;
+    "exec -d "*)
+        [[ -z "${{STUB_RUN_RENEW:-}}" ]] || AGENT_SECRETS_KEY_DIR="$(keydir "$5")" sh -c "$8" ;;
     *" keygen "*)
         case "${{STUB_KEYGEN:-ok}}" in
-            ok) : >"$STUB_KEYDIR/key.pem"; echo "{THUMBPRINT}" ;;
+            ok) : >"$(keydir "$4")/key.pem"; echo "{THUMBPRINT}" ;;
             fail) echo "keygen: no /run/user dir" >&2; exit 1 ;;
             empty) ;;
         esac ;;
-    *"pgrep -x omp"*) echo "${{STUB_SID:-}}" ;;
+    *"pgrep -x omp"*)
+        echo "sid-probe marker-mtime=$(stat -c %Y "$(keydir "$2")/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
+        echo "${{STUB_SID:-}}" ;;
 esac
 """
 
 # enroll records the marker's mtime as it saw it, then prints the enrollment id and writes it into
-# the key dir, as the real client does.
+# the key dir, as the real client does. renew fails at once, and ends its loop on the third run.
 AGENT_SECRETS_STUB = r"""
 case "$1" in
     launcher)
         [[ "${STUB_LOGIN_STATUS:-0}" == 0 ]] && { echo issued; exit 0; }
-        echo none; exit 1 ;;
+        # As the legion #1589 client: the state on stdout, then a remedy on stderr.
+        echo none
+        echo "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login" >&2
+        exit 1 ;;
     enroll)
         echo "enroll $* marker-mtime=$(stat -c %Y "$AGENT_SECRETS_KEY_DIR/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
         case "${STUB_ENROLL:-ok}" in
@@ -62,6 +79,11 @@ case "$1" in
             nofile) echo enr-123 ;;
         esac ;;
     unenroll) echo "unenroll $*" >>"$STUB_CALLS" ;;
+    renew)
+        echo "renew" >>"$STUB_CALLS"
+        echo "agent-secrets renew: 401 PROOF_INVALID"
+        (( $(grep -c '^renew$' "$STUB_CALLS") < 3 )) || kill "$PPID"
+        exit 1 ;;
     *) echo "unexpected agent-secrets $*" >&2; exit 99 ;;
 esac
 """
@@ -87,6 +109,7 @@ class EnrollFixture(unittest.TestCase):
         )
         write_stub(self.stub_dir, "docker", DOCKER_STUB)
         write_stub(self.stub_dir, "agent-secrets", AGENT_SECRETS_STUB)
+        write_stub(self.stub_dir, "git", "exit 0")
         self.run_base = self.root / "run"
         self.hostdir = self.run_base / "box1"
         self.keydir = self.hostdir / "run-user" / "agent-secrets"
@@ -106,8 +129,10 @@ class EnrollFixture(unittest.TestCase):
             "HOME": str(self.home),
             "PATH": f"{self.stub_dir}:/usr/bin:/bin",
             "DOTFILES_DIR": str(DOTFILES),
+            "AGENTBOX_SRC": str(self.root / "src"),
             "STUB_CALLS": str(self.calls),
             "STUB_KEYDIR": str(self.keydir),
+            "STUB_RUN_BASE": str(self.run_base),
             **stubs,
         }
         return subprocess.run(
@@ -204,6 +229,20 @@ class AgentboxEnroll(EnrollFixture):
         (call,) = self.calls_matching("unenroll ")
         self.assertIn("--enrollment enr-123", call)
 
+    def test_close_box_revokes_the_enrollment(self) -> None:
+        (self.hostdir / "enrollment-id").write_text("enr-123\n")
+        (self.home / "boxes" / "box1").mkdir(parents=True)
+        self.bash('close_box box1 ""', STUB_GONE="1")
+        (call,) = self.calls_matching("unenroll ")
+        self.assertIn("--enrollment enr-123", call)
+        self.assertFalse(self.hostdir.exists())
+
+    def test_a_renew_that_exits_is_started_again(self) -> None:
+        # The stub ends the loop by killing it on the third renew, so the run ends by signal.
+        self.bash("start_renew box1", STUB_RUN_RENEW="1")
+        self.assertEqual(len(self.calls_matching("renew")), 3)
+        self.assertEqual((self.keydir / "renew.log").read_text().count("401 PROOF_INVALID"), 3)
+
     def test_broker_ready_names_the_fix(self) -> None:
         cases = {
             "client not installed": ({"PATH": "/usr/bin:/bin"}, "mise install agent-secrets"),
@@ -258,6 +297,49 @@ class EnrollWhenUp(EnrollFixture):
         self.assertIn("rc=1", result.stdout, result.stderr)
         self.assert_no_identity()
         self.assertEqual(self.calls_matching("enroll "), [])
+
+    def test_the_marker_stays_fresh_while_it_waits(self) -> None:
+        """Each pass of the wait renews the marker; each sleep ages it past 160 s."""
+        started = time.time()
+        self.when_up("omp", child="/bin/sleep 1 &")
+        probes = self.calls_matching("sid-probe ")
+        self.assertGreater(len(probes), 1)
+        for probe in probes:
+            self.assertGreaterEqual(int(probe.rsplit("=", 1)[1]), int(started) - 1, probe)
+
+
+class CmdNew(EnrollFixture):
+    """cmd_new gives a box a marker and an enrollment only when the host can enroll it."""
+
+    NO_HOST = (
+        "build_image() { :; }; ensure_network() { :; }; ensure_forwarders() { :; }\n"
+        'mount_args() { mkdir -p "$(box_keydir "$1")"; }\n'
+        "session_env() { :; }; detached() { :; }\n"
+        'close_box() { echo "close_box $1" >>"$STUB_CALLS"; }\n'
+        "cmd_new repo1 -- bash -c true"
+    )
+
+    def new_box(self, **stubs: str) -> Path:
+        (self.root / "src" / "repo1" / ".jj").mkdir(parents=True)
+        result = self.bash(self.NO_HOST, **stubs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (box,) = self.run_base.glob("agentbox-*")
+        return box / "run-user" / "agent-secrets"
+
+    def test_a_host_that_can_enroll_marks_and_enrolls_the_box(self) -> None:
+        keydir = self.new_box(STUB_LOGIN_STATUS="0")
+        (started,) = self.calls_matching("run ")
+        self.assertTrue(started.endswith("marker=yes"), started)
+        self.assertEqual({p.name for p in keydir.iterdir()}, {"key.pem", "enrollment"})
+        self.assertEqual(len(self.calls_matching("enroll ")), 1)
+
+    def test_a_host_that_cannot_enroll_leaves_the_box_alone(self) -> None:
+        keydir = self.new_box(STUB_LOGIN_STATUS="1")
+        (started,) = self.calls_matching("run ")
+        self.assertTrue(started.endswith("marker=no"), started)
+        self.assertEqual(list(keydir.iterdir()), [])
+        self.assertEqual(self.calls_matching("enroll "), [])
+        self.assertEqual([c for c in self.calls_matching("docker ") if " keygen " in c], [])
 
 
 if __name__ == "__main__":
