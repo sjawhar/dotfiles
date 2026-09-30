@@ -19,6 +19,8 @@ from an agent reading a `sample` packet with the rubric in docs/advisor-report.m
 
 Pre-registered rules for the AskGate gate (`readout --check gate`, launch =
 `arm gate`); the reasoning lives in docs/advisor-report.md:
+  - any day, first: advisor.disableRoster holds askgate, or a call since launch
+    recorded outcome killed -> killed; no GO or EXTEND is computed, nothing is written.
   - day 3 onward: ungated_share > 0.20 over >= 20 matched calls in the last 24 h,
     or verdict p95 latency above the timeout -> KILL.
   - day 14: GO (set OMP_ASKGATE=block as the shim default) when labelled
@@ -80,6 +82,7 @@ REACHED_MODEL = FAIL_OPEN | {"verdict"}
 # gate failures, so they leave ungated_share's denominator.
 PASSED = frozenset({"rebuttal", "breaker", "killed"})
 
+KILL_KEY, GATE_SLUG = "advisor.disableRoster", "askgate"
 KILL_DAY = 3
 KILL_WINDOW = timedelta(hours=24)
 KILL_MIN_MATCHED = 20
@@ -660,40 +663,58 @@ def require_yaml():
 
 # --- overlay ---------------------------------------------------------------
 
+def overlay_path() -> Path:
+    return agent_dir() / "local-overrides.yml"
+
+
+def read_overlay(target: Path) -> dict:
+    """local-overrides.yml parsed with PyYAML; {} when it is absent or empty."""
+    yaml = require_yaml()
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    doc = yaml.safe_load(text) if text.strip() else {}
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise Failure(f"{target} is not a mapping")
+    return doc
+
+
+def overlay_list(doc: dict, key_path: str, target: Path, create: bool) -> tuple[dict | None, list]:
+    """The mapping that holds the list at `key_path` and the list itself ([] when unset). A mapping missing on the
+    way is created with `create`; without it the answer is (None, [])."""
+    keys = key_path.split(".")
+    node = doc
+    for key in keys[:-1]:
+        child = node.get(key)
+        if child is None:
+            if not create:
+                return None, []
+            child = node[key] = {}
+        if not isinstance(child, dict):
+            raise Failure(f"{target}: {key!r} in {key_path} is not a mapping")
+        node = child
+    members = node.get(keys[-1])
+    if members is None:
+        return node, []
+    if not isinstance(members, list):
+        raise Failure(f"{target}: {key_path} is not a list")
+    return node, members
+
+
 def overlay_update(key_path: str, member: str, add: bool) -> bool:
     """Add or remove one list member at `key_path` in local-overrides.yml under an exclusive lock. True when the file changed."""
     yaml = require_yaml()
-    directory = agent_dir()
-    target = directory / "local-overrides.yml"
+    target = overlay_path()
     keys = key_path.split(".")
     if not all(keys):
         raise UsageError(f"bad key path {key_path!r}")
-    with (directory / "local-overrides.yml.lock").open("a") as lock:
+    with (target.parent / "local-overrides.yml.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            text = target.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            text = ""
-        doc = yaml.safe_load(text) if text.strip() else {}
-        if doc is None:
-            doc = {}
-        if not isinstance(doc, dict):
-            raise Failure(f"{target} is not a mapping")
-        node = doc
-        for key in keys[:-1]:
-            child = node.get(key)
-            if child is None:
-                if not add:
-                    return False
-                child = node[key] = {}
-            if not isinstance(child, dict):
-                raise Failure(f"{target}: {key!r} in {key_path} is not a mapping")
-            node = child
-        members = node.get(keys[-1])
-        if members is None:
-            members = []
-        if not isinstance(members, list):
-            raise Failure(f"{target}: {key_path} is not a list")
+        doc = read_overlay(target)
+        node, members = overlay_list(doc, key_path, target, create=add)
         if (member in members) == add:
             return False
         node[keys[-1]] = [*members, member] if add else [m for m in members if m != member]
@@ -703,7 +724,7 @@ def overlay_update(key_path: str, member: str, add: bool) -> bool:
 
 def cmd_overlay(args) -> int:
     changed = overlay_update(args.key, args.member, add=args.verb == "add")
-    target = agent_dir() / "local-overrides.yml"
+    target = overlay_path()
     state = "added to" if args.verb == "add" else "removed from"
     print(f"{args.member} {state} {args.key} in {target}" if changed else f"{target} unchanged")
     return 0
@@ -1031,7 +1052,8 @@ def gate_check(now: datetime) -> Check:
         raise Failure(f"{report_dir() / 'launch.json'}: the gate record needs `launched` and `timeout_ms`; rerun `arm gate`")
     launched, timeout_ms = parse_iso(record["launched"]), record["timeout_ms"]
     day = (now - launched).total_seconds() / 86400
-    scan = scan_sessions(agent_dir() / "sessions", Window(launched, now), "askgate", re.compile(DEFAULT_SCOPE_REGEX))
+    _node, disabled = overlay_list(read_overlay(overlay_path()), KILL_KEY, overlay_path(), create=False)
+    scan = scan_sessions(agent_dir() / "sessions", Window(launched, now), GATE_SLUG, re.compile(DEFAULT_SCOPE_REGEX))
     entries = scan.gate_entries
     whole = gate_metrics(entries)
     recent = gate_metrics([e for e in entries if entry_time(e) >= now - KILL_WINDOW])
@@ -1044,6 +1066,16 @@ def gate_check(now: datetime) -> Check:
              f"last 24 h {recent['matched']} matched, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
              f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}",
              f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(launched)}"]
+    problems = roster_problems(dotfiles_dir(), agent_dir())
+    lines += [f"gate: {problem}" for problem in problems]
+    # A killed gate records every later call as `killed`, which leaves every denominator, so the rules below would
+    # judge only the calls before the kill; its entries still say so after the owner's cleanup removes the member.
+    killed = [f"{KILL_KEY} holds {GATE_SLUG} in {overlay_path()}"] if GATE_SLUG in disabled else []
+    if whole["killed"]:
+        killed.append(f"{whole['killed']} calls since launch passed by the kill switch")
+    if killed:
+        lines.append(f"gate: killed ({'; '.join(killed)}); no GO or EXTEND computed")
+        return Check(KILLED, lines)
     kill: list[str] = []
     if day >= KILL_DAY:
         if recent["matched"] >= KILL_MIN_MATCHED and (recent["ungated_share"] or 0) > KILL_UNGATED_24H:
@@ -1066,11 +1098,9 @@ def gate_check(now: datetime) -> Check:
                 decision = "EXTEND: one more week, then GO or KILL"
             else:
                 kill.append(f"day {EXTENDED_DAY}: not GO after the one-week extension")
-    problems = roster_problems(dotfiles_dir(), agent_dir())
-    lines += [f"gate: {problem}" for problem in problems]
     if kill:
-        overlay_update("advisor.disableRoster", "askgate", add=True)
-        lines.append(f"gate: KILL applied (advisor.disableRoster += askgate in {agent_dir() / 'local-overrides.yml'}): {'; '.join(kill)}")
+        overlay_update(KILL_KEY, GATE_SLUG, add=True)
+        lines.append(f"gate: KILL applied ({KILL_KEY} += {GATE_SLUG} in {overlay_path()}): {'; '.join(kill)}")
         return Check(KILLED, lines)
     if lab["n"] < MIN_LABELS:
         missing = missing_label_weeks(launched, now, fired, labels)

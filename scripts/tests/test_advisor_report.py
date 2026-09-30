@@ -455,7 +455,11 @@ class ReadoutTest(unittest.TestCase):
     def setUp(self):
         self.home = Home()
         self.now = now_utc()
-        self.home.launch(gate={"launched": iso(self.now - timedelta(days=5)), "timeout_ms": 90_000})
+        self.launch(days=5)
+
+    def launch(self, days: float):
+        self.launched = self.now - timedelta(days=days)
+        self.home.launch(gate={"launched": iso(self.launched), "timeout_ms": 90_000})
 
     def tearDown(self):
         self.home.cleanup()
@@ -471,17 +475,17 @@ class ReadoutTest(unittest.TestCase):
         entries += [gate_entry(outcome="timeout", at=at[38 + i], latency_ms=90_000) for i in range(2)]
         self.gate_session(entries)
 
-    def label_revises(self, correct: int, other: int):
+    def label_revises(self, correct: int, other: int, harmful: int = 0):
         packet = self.home.root / "packet.jsonl"
-        self.home.run("sample", "--since", iso(self.now - timedelta(days=5)), "--until", iso(self.now), "--n", "100",
+        self.home.run("sample", "--since", iso(self.launched), "--until", iso(self.now), "--n", "100",
                       "--out", str(packet), check_exit=0)
         rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()][1:]
         revises = [row["id"] for row in rows if row.get("decision") == "revise"]
-        self.assertEqual(len(revises), correct + other)
+        self.assertEqual(len(revises), correct + harmful + other)
         labels = self.home.root / "labels.jsonl"
         with labels.open("w", encoding="utf-8") as fh:
             for i, row_id in enumerate(revises):
-                label = "acted-correct" if i < correct else "ignored-agent-right"
+                label = "acted-correct" if i < correct else "acted-harmful" if i < correct + harmful else "ignored-agent-right"
                 fh.write(json.dumps({"id": row_id, "label": label, "labeler": "oracle-test", "at": iso(self.now)}) + "\n")
         self.home.run("ingest-labels", str(labels), check_exit=0)
 
@@ -507,6 +511,43 @@ class ReadoutTest(unittest.TestCase):
         self.kill_fixture()
         self.home.run("readout", "--check", "gate", check_exit=1)
         self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": ["askgate"]}})
+
+    def killed_after_a_day_three_burst(self):
+        """230 good calls, a day-3 hour with 8 timeouts in 25 calls, then 250 calls the kill switch passed."""
+        day3 = self.launched + timedelta(days=3)
+        entries = [gate_entry(decision="revise" if i < 30 else "allow", at=self.launched + timedelta(minutes=5 + 18 * i),
+                              latency_ms=4000) for i in range(230)]
+        entries += [gate_entry(outcome="timeout" if i < 8 else "verdict", at=day3 + timedelta(minutes=2 * i),
+                               latency_ms=90_000 if i < 8 else 4000) for i in range(25)]
+        entries += [gate_entry(outcome="killed", at=day3 + timedelta(hours=2 + i), latency_ms=0) for i in range(250)]
+        self.gate_session(entries)
+
+    def test_after_a_kill_a_later_readout_computes_no_go(self):
+        self.launch(days=15)
+        self.killed_after_a_day_three_burst()
+        self.label_revises(correct=18, other=12)
+        self.home.overlay.write_text("advisor:\n  disableRoster:\n  - askgate\n", encoding="utf-8")
+        before = self.home.overlay.read_bytes()
+        proc = self.home.run("readout", "--check", "gate", check_exit=1)
+        self.assertIn("precision 0.60", proc.stdout)
+        self.assertIn("no GO or EXTEND computed", proc.stdout)
+        self.assertNotIn("GO:", proc.stdout)
+        self.assertEqual(self.home.overlay.read_bytes(), before)
+        # The owner's cleanup removes its member; the calls the kill switch passed still show the gate was killed.
+        self.home.run("overlay", "remove", "advisor.disableRoster", "askgate", check_exit=0)
+        proc = self.home.run("readout", "--check", "gate", check_exit=1)
+        self.assertIn("no GO or EXTEND computed", proc.stdout)
+        self.assertNotIn("GO:", proc.stdout)
+        self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": []}})
+
+    def test_an_overlay_holding_askgate_computes_no_go(self):
+        self.launch(days=15)
+        self.healthy_gate()
+        self.label_revises(correct=18, other=12)
+        self.home.overlay.write_text("advisor:\n  disableRoster:\n  - askgate\n", encoding="utf-8")
+        proc = self.home.run("readout", "--check", "gate", check_exit=1)
+        self.assertIn("no GO or EXTEND computed", proc.stdout)
+        self.assertNotIn("GO:", proc.stdout)
 
     def test_gate_and_trial_checks_combine_their_exits(self):
         self.healthy_gate()
