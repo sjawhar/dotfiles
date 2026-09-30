@@ -16,9 +16,10 @@ Executables covering several areas:
 ## Conventions
 
 - Scripts are executable and self-contained; put a `#!` line and `set -euo pipefail` (bash) or the appropriate interpreter at the top.
+- Import-only shared Python modules here are libraries: they may omit the `#!` line and the executable bit; an executable entrypoint keeps both.
 - Match the naming and interpreter style of neighboring scripts.
 - A secret never goes into a command's arguments: every user can read them from `/proc/<pid>/cmdline`, and any `ps` prints them. Pass it through the environment, a file, or stdin — curl's `--config` or `-H @file` on a `<(printf …)` path (`printf` is a builtin), mcp-remote's `${VAR}` header placeholders, `mcp-remote-from-env` for a URL.
 
 ## How changes take effect
 
-This directory is on `PATH` (prepended in `.bashrc`), so scripts run by name in interactive shells. New scripts need the executable bit; no install step or symlink.
+This directory is on `PATH` (prepended in `.bashrc`), so scripts run by name in interactive shells. A new entrypoint needs the executable bit; an import-only library does not. No install step or symlink either way.
