@@ -102,6 +102,11 @@ memory:
   backend: mnemopi
 mnemopi:
   scoping: per-project-tagged
+  # Only deliberate saves are stored: the retain and learn tools, and an explicit
+  # `/memory enqueue`. autoRetain would store a raw transcript slice every 4 user
+  # turns and at session exit; those slices outranked deliberate saves in recall
+  # (AGENTC-1305).
+  autoRetain: false
   polyphonicRecall: true
   enhancedRecall: true
   proactiveLinking: true
