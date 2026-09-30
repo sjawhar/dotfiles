@@ -54,6 +54,8 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
+from collections.abc import Iterable, Iterator
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -267,16 +269,308 @@ def scoped_device(name: str, arguments: dict, scope_re: re.Pattern) -> str | Non
     return device
 
 
+# --- parsed session facts --------------------------------------------------
+
+@dataclass(frozen=True)
+class GateEntry:
+    """One `advisor-gate` entry the AskGate extension appended to a root session."""
+
+    session_id: str
+    id: str | None
+    at: datetime | None
+    data: dict
+
+    @property
+    def row_id(self) -> str:
+        return f"gate:{self.session_id}:{self.id}"
+
+    @property
+    def is_revise(self) -> bool:
+        """A gate decision the agent was told to act on: the labelled population the precision rule reads."""
+        return self.data.get("decision") == "revise" and self.data.get("outcome") == "verdict"
+
+
+@dataclass
+class AdviseCall:
+    """One `advise` call in an advisor transcript, its ack class and the update the advisor was answering."""
+
+    id: str | None
+    note: str
+    severity: str | None
+    at: datetime | None
+    update: str
+    ack: str = "unanswered"
+
+    @property
+    def admitted(self) -> bool:
+        return self.ack in ADMITTED
+
+    def row_id(self, session_id: str) -> str:
+        return f"note:{session_id}:{self.id}"
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    at: datetime | None
+    id: str
+    name: str
+    arguments: dict
+
+
+@dataclass(frozen=True)
+class Card:
+    """An advisor card in a primary session: its index among the entries, its time and the notes it carries."""
+
+    position: int
+    at: datetime | None
+    notes: frozenset
+
+
+@dataclass
+class SessionRecord:
+    """What one root session file and its advisor transcript hold that a metric reads; parsed, not windowed."""
+
+    path: Path
+    session_id: str
+    turn_times: list = field(default_factory=list)
+    tool_calls: list = field(default_factory=list)
+    cards: list = field(default_factory=list)
+    skip_times: list = field(default_factory=list)
+    gate_entries: list = field(default_factory=list)
+    transcript: bool = False
+    advisor_turn_times: list = field(default_factory=list)
+    advise_calls: list = field(default_factory=list)
+    bad_lines: int = 0
+
+
+@dataclass(frozen=True)
+class SubagentScan:
+    files: int
+    calls: int
+    bad_lines: int
+
+
+# --- reading session files -------------------------------------------------
+
+def read_jsonl(path: Path, must_contain: str | None = None) -> tuple[list[dict], int]:
+    """Entries of a jsonl file and its unparsable-line count. `must_contain` skips lines without it unparsed."""
+    entries, bad = [], 0
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if not line.strip() or (must_contain is not None and must_contain not in line):
+                continue
+            try:
+                value = json.loads(line)
+            except ValueError:
+                bad += 1
+                continue
+            if isinstance(value, dict):
+                entries.append(value)
+            else:
+                bad += 1
+    return entries, bad
+
+
+def tool_call_arguments(block: dict) -> dict:
+    arguments = block.get("arguments")
+    return arguments if isinstance(arguments, dict) else {}
+
+
+def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> SessionRecord:
+    """Fill `record` from a primary session's entries: assistant turns, tool calls, advisor cards, skips, and the gate
+    entries of `advisor`."""
+    for position, entry in enumerate(entries):
+        kind, at = entry.get("type"), entry_time(entry)
+        if kind == "message":
+            message = entry.get("message") or {}
+            role = message.get("role")
+            if role == "assistant":
+                record.turn_times.append(at)
+                record.tool_calls += [ToolCall(at, str(block.get("id")), str(block.get("name", "")), tool_call_arguments(block))
+                                      for block in tool_calls_of(message)]
+            elif role == "toolResult" and content_text(message.get("content")).startswith(SKIP_PREFIX):
+                record.skip_times.append(at)
+        elif kind == "custom_message" and entry.get("customType") == "advisor":
+            notes = (entry.get("details") or {}).get("notes") or []
+            record.cards.append(Card(position, at, frozenset(n.get("note") for n in notes if isinstance(n, dict))))
+        elif kind == "custom" and entry.get("customType") == GATE_ENTRY_TYPE:
+            data = entry.get("data") or {}
+            name = data.get("advisor")
+            if advisor != "default" and isinstance(name, str) and slugify(name) == advisor:
+                record.gate_entries.append(GateEntry(record.session_id, entry.get("id"), at, data))
+    return record
+
+
+def parse_advisor(entries: list[dict]) -> tuple[list, list[AdviseCall]]:
+    """An advisor transcript's assistant turn times and its `advise` calls, each with its ack class and the update (the
+    advisor-side user message just before it) it answered."""
+    last_update, by_id, turns, calls = "", {}, [], []
+    for entry in entries:
+        if entry.get("type") != "message":
+            continue
+        message = entry.get("message") or {}
+        role = message.get("role")
+        if role == "user":
+            last_update = content_text(message.get("content"))
+        elif role == "assistant":
+            at = entry_time(entry)
+            turns.append(at)
+            for block in tool_calls_of(message):
+                if block.get("name") == "advise":
+                    arguments = tool_call_arguments(block)
+                    call = AdviseCall(block.get("id"), str(arguments.get("note", "")), arguments.get("severity"), at, last_update)
+                    by_id[call.id] = call
+                    calls.append(call)
+        elif role == "toolResult" and message.get("toolName") == "advise":
+            call = by_id.get(message.get("toolCallId"))
+            if call is not None:
+                call.ack = classify_ack(content_text(message.get("content")))
+    return turns, calls
+
+
+def scan_root(path: Path, session_id: str, advisor: str) -> SessionRecord:
+    """Parse one root session file and its advisor transcript."""
+    entries, bad = read_jsonl(path)
+    record = parse_primary(SessionRecord(path=path, session_id=session_id, bad_lines=bad), entries, advisor)
+    transcript = path.with_suffix("") / transcript_name(advisor)
+    if transcript.is_file():
+        advisor_entries, bad = read_jsonl(transcript)
+        record.transcript, record.bad_lines = True, record.bad_lines + bad
+        record.advisor_turn_times, record.advise_calls = parse_advisor(advisor_entries)
+    return record
+
+
+def session_id_of(root_stem: str) -> str:
+    return root_stem.split("_", 1)[1] if "_" in root_stem else root_stem
+
+
+def root_session_files(root: Path, window: Window, advisor: str) -> Iterator[tuple[Path, str]]:
+    """Each root session file (sessions/<project>/<stem>.jsonl) that it or its advisor transcript was touched since the
+    window opened, with its session id."""
+    opened = window.since.timestamp()
+    for project in sorted(root.iterdir()):
+        if not project.is_dir():
+            continue
+        for path in sorted(project.iterdir()):
+            if path.suffix != ".jsonl" or path.name.startswith(ADVISOR_STEM) or not path.is_file():
+                continue
+            transcript = path.with_suffix("") / transcript_name(advisor)
+            if max(path.stat().st_mtime, transcript.stat().st_mtime if transcript.is_file() else 0) >= opened:
+                yield path, session_id_of(path.stem)
+
+
+def scan_sessions(root: Path, window: Window, advisor: str) -> Iterator[SessionRecord]:
+    """The parsed root sessions below `root` touched since the window opened, one at a time."""
+    if not root.is_dir():
+        raise UsageError(f"no sessions directory at {root}")
+    return (scan_root(path, session_id, advisor) for path, session_id in root_session_files(root, window, advisor))
+
+
+def subagent_scoped_calls(root: Path, window: Window, scope_re: re.Pattern) -> SubagentScan:
+    """Scoped calls in the window in task subagent files: every file below a root session's <stem>/ but an advisor
+    transcript, touched since the window opened."""
+    files = calls = bad_lines = 0
+    opened = window.since.timestamp()
+    for dirpath, _dirnames, filenames in os.walk(root):
+        if len(Path(dirpath).relative_to(root).parts) < 2:
+            continue
+        for name in filenames:
+            path = Path(dirpath) / name
+            if not name.endswith(".jsonl") or name.startswith(ADVISOR_STEM) or path.stat().st_mtime < opened:
+                continue
+            files += 1
+            entries, bad = read_jsonl(path, must_contain="dispatch_")
+            bad_lines += bad
+            for entry in entries:
+                message = entry.get("message") or {}
+                if entry.get("type") != "message" or message.get("role") != "assistant" or not window.contains(entry_time(entry)):
+                    continue
+                calls += sum(1 for block in tool_calls_of(message)
+                             if scoped_device(str(block.get("name", "")), tool_call_arguments(block), scope_re))
+    return SubagentScan(files, calls, bad_lines)
+
+
 # --- metrics over parsed data ----------------------------------------------
 
-def out_of_charter_pct(calls: list[dict], scope_re) -> float | None:
-    pattern = re.compile(scope_re) if isinstance(scope_re, str) else scope_re
-    admitted = [call for call in calls if call["ack"] in ADMITTED]
-    return ratio(sum(1 for call in admitted if not pattern.search(call["update"])), len(admitted))
+def primary_turns(record: SessionRecord, window: Window) -> int:
+    return sum(1 for at in record.turn_times if window.contains(at))
 
 
-def gate_metrics(entries: list[dict]) -> dict:
-    data = [entry.get("data") or {} for entry in entries]
+def advisor_turns(record: SessionRecord, window: Window) -> int:
+    return sum(1 for at in record.advisor_turn_times if window.contains(at))
+
+
+def window_calls(record: SessionRecord, window: Window) -> list[AdviseCall]:
+    return [call for call in record.advise_calls if window.contains(call.at)]
+
+
+def root_scoped_calls(record: SessionRecord, window: Window, scope_re: re.Pattern) -> int:
+    return sum(1 for call in record.tool_calls if window.contains(call.at) and scoped_device(call.name, call.arguments, scope_re))
+
+
+def skips_in(record: SessionRecord, window: Window) -> int:
+    return sum(1 for at in record.skip_times if window.contains(at))
+
+
+def per_100_turns(count: int, turns: int) -> float | None:
+    return None if not turns else count / turns * 100
+
+
+def out_of_charter(admitted: list[AdviseCall], scope_re: re.Pattern) -> int:
+    """Admitted notes whose originating update carries no scoped call."""
+    return sum(1 for call in admitted if not scope_re.search(call.update))
+
+
+def routing_card(call: AdviseCall, cards: list[Card]) -> Card | None:
+    """The card that routed a note: the first timed card at or after the call that carries its exact text."""
+    if call.at is None:
+        return None
+    return next((card for card in cards if card.at is not None and card.at >= call.at and call.note in card.notes), None)
+
+
+@dataclass
+class Held:
+    latencies_ms: list[int]
+    unrouted: int
+    routed: list[tuple[AdviseCall, Card]]
+
+
+def held_notes(admitted: list[AdviseCall], cards: list[Card]) -> Held:
+    """Queued notes: the delay to the card that routed each, and how many no card carried."""
+    held = Held([], 0, [])
+    for call in admitted:
+        if call.ack != "queued" or call.at is None:
+            continue
+        card = routing_card(call, cards)
+        if card is None:
+            held.unrouted += 1
+            continue
+        held.latencies_ms.append(int((card.at - call.at).total_seconds() * 1000))
+        held.routed.append((call, card))
+    return held
+
+
+def moot_count(routed: list[tuple[AdviseCall, Card]], tool_calls: list[ToolCall]) -> int:
+    """Routed notes a primary tool call between the note and its card carries one of the note's ids."""
+    moot = 0
+    for call, card in routed:
+        tokens = note_tokens(call.note)
+        if tokens and any(tool.at is not None and call.at < tool.at <= card.at and carries_token(tool.arguments, tokens)
+                          for tool in tool_calls):
+            moot += 1
+    return moot
+
+
+def chain_pairs(admitted: list[AdviseCall]) -> int:
+    return sum(1 for i, a in enumerate(admitted) for b in admitted[i + 1:] if jaccard(a.note, b.note) >= 0.5)
+
+
+def blockers(admitted: list[AdviseCall]) -> int:
+    return sum(1 for call in admitted if call.severity == "blocker")
+
+
+def gate_metrics(entries: list[GateEntry]) -> dict:
+    data = [entry.data for entry in entries]
     outcomes = Counter(d.get("outcome") for d in data)
     verdict_latencies = [d["latencyMs"] for d in data
                          if d.get("outcome") == "verdict" and isinstance(d.get("latencyMs"), (int, float))]
@@ -293,7 +587,7 @@ def gate_metrics(entries: list[dict]) -> dict:
         "rebuttal_rate": ratio(outcomes["rebuttal"], matched),
         "breaker_trips": outcomes["breaker"],
         "killed": outcomes["killed"],
-        "halted_sessions": len({entry.get("_session") for entry, d in zip(entries, data) if d.get("outcome") == "halted"}),
+        "halted_sessions": len({entry.session_id for entry in entries if entry.data.get("outcome") == "halted"}),
         "usage": gate_usage(data),
     }
 
@@ -322,206 +616,6 @@ def labelled_metrics(labels: dict[str, dict], fired_ids, skips: int) -> dict:
         "precision": ratio(counts["acted-correct"] + counts["ignored-advisor-right"], len(rows)),
         "harm": ratio(counts["acted-harmful"] + skips, len(rows)),
     }
-
-
-def gate_row_id(entry: dict) -> str:
-    return f"gate:{entry['_session']}:{entry.get('id')}"
-
-
-def note_row_id(session_id: str, call: dict) -> str:
-    return f"note:{session_id}:{call['id']}"
-
-
-def is_revise(entry: dict) -> bool:
-    """A gate decision the agent was told to act on: the labelled population the precision rule reads."""
-    data = entry.get("data") or {}
-    return data.get("decision") == "revise" and data.get("outcome") == "verdict"
-
-
-# --- reading session files -------------------------------------------------
-
-@dataclass
-class SessionResult:
-    """What one root session contributes; the parsed entries are not kept."""
-
-    path: Path
-    session_id: str
-    turns: int = 0
-    skips: int = 0
-    transcript: bool = False
-    advisor_turns: int = 0
-    calls: list[dict] = field(default_factory=list)
-    held_latencies: list[int] = field(default_factory=list)
-    held_unrouted: int = 0
-    held_moot: int = 0
-    chain_pairs: int = 0
-    blockers: int = 0
-    gate_entries: list[dict] = field(default_factory=list)
-
-
-@dataclass
-class Scan:
-    window: Window
-    advisor: str
-    sessions: list[SessionResult] = field(default_factory=list)
-    subagent_files: int = 0
-    bad_lines: int = 0
-    scoped: Counter = field(default_factory=Counter)  # scoped calls by file kind: root, subagent
-
-    @property
-    def gate_entries(self) -> list[dict]:
-        return [entry for session in self.sessions for entry in session.gate_entries]
-
-    @property
-    def skips(self) -> int:
-        return sum(session.skips for session in self.sessions)
-
-
-def read_jsonl(path: Path, must_contain: str | None = None) -> tuple[list[dict], int]:
-    """Entries of a jsonl file and its unparsable-line count. `must_contain` skips lines without it unparsed."""
-    entries, bad = [], 0
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if not line.strip() or (must_contain is not None and must_contain not in line):
-                continue
-            try:
-                value = json.loads(line)
-            except ValueError:
-                bad += 1
-                continue
-            if isinstance(value, dict):
-                entries.append(value)
-            else:
-                bad += 1
-    return entries, bad
-
-
-def advise_calls(entries: list[dict], window: Window) -> tuple[list[dict], int]:
-    """`advise` calls in the window with their ack class and originating update, and the advisor turn count."""
-    last_update, by_id, calls, turns = "", {}, [], 0
-    for entry in entries:
-        if entry.get("type") != "message":
-            continue
-        message = entry.get("message") or {}
-        role = message.get("role")
-        if role == "user":
-            last_update = content_text(message.get("content"))
-        elif role == "assistant":
-            at = entry_time(entry)
-            if window.contains(at):
-                turns += 1
-            for block in tool_calls_of(message):
-                if block.get("name") != "advise":
-                    continue
-                arguments = block.get("arguments") or {}
-                call = {"id": block.get("id"), "note": str(arguments.get("note", "")), "severity": arguments.get("severity"),
-                        "at": at, "update": last_update, "ack": "unanswered"}
-                by_id[call["id"]] = call
-                if window.contains(at):
-                    calls.append(call)
-        elif role == "toolResult" and message.get("toolName") == "advise":
-            call = by_id.get(message.get("toolCallId"))
-            if call is not None:
-                call["ack"] = classify_ack(content_text(message.get("content")))
-    for call in calls:
-        if call["ack"] not in ADMITTED:
-            call["update"] = ""
-    return calls, turns
-
-
-def scan_root(path: Path, session_id: str, window: Window, advisor: str, scope_re: re.Pattern, scan: Scan) -> SessionResult:
-    result = SessionResult(path=path, session_id=session_id)
-    entries, bad = read_jsonl(path)
-    scan.bad_lines += bad
-    tool_calls: list[tuple[datetime | None, dict]] = []  # (time, arguments), for the moot test
-    cards: list[tuple[datetime, set[str]]] = []
-    for entry in entries:
-        kind, at = entry.get("type"), entry_time(entry)
-        if kind == "message":
-            message = entry.get("message") or {}
-            role = message.get("role")
-            if role == "assistant":
-                if window.contains(at):
-                    result.turns += 1
-                for block in tool_calls_of(message):
-                    arguments = block.get("arguments") if isinstance(block.get("arguments"), dict) else {}
-                    tool_calls.append((at, arguments))
-                    if window.contains(at) and scoped_device(str(block.get("name", "")), arguments, scope_re):
-                        scan.scoped["root"] += 1
-            elif role == "toolResult" and window.contains(at) and content_text(message.get("content")).startswith(SKIP_PREFIX):
-                result.skips += 1
-        elif kind == "custom_message" and entry.get("customType") == "advisor" and at is not None:
-            notes = (entry.get("details") or {}).get("notes") or []
-            cards.append((at, {n.get("note") for n in notes if isinstance(n, dict)}))
-        elif kind == "custom" and entry.get("customType") == GATE_ENTRY_TYPE and window.contains(at):
-            name = (entry.get("data") or {}).get("advisor")
-            if advisor != "default" and isinstance(name, str) and slugify(name) == advisor:
-                result.gate_entries.append({**entry, "_session": session_id})
-
-    transcript = path.with_suffix("") / transcript_name(advisor)
-    if transcript.is_file():
-        result.transcript = True
-        advisor_entries, bad = read_jsonl(transcript)
-        scan.bad_lines += bad
-        result.calls, result.advisor_turns = advise_calls(advisor_entries, window)
-    admitted = [call for call in result.calls if call["ack"] in ADMITTED]
-    for call in admitted:
-        if call["ack"] != "queued" or call["at"] is None:
-            continue
-        card_at = next((at for at, notes in cards if at >= call["at"] and call["note"] in notes), None)
-        if card_at is None:
-            result.held_unrouted += 1
-            continue
-        result.held_latencies.append(int((card_at - call["at"]).total_seconds() * 1000))
-        tokens = note_tokens(call["note"])
-        if tokens and any(at is not None and call["at"] < at <= card_at and carries_token(args, tokens)
-                          for at, args in tool_calls):
-            result.held_moot += 1
-    result.chain_pairs = sum(1 for i, a in enumerate(admitted) for b in admitted[i + 1:]
-                             if jaccard(a["note"], b["note"]) >= 0.5)
-    result.blockers = sum(1 for call in admitted if call["severity"] == "blocker")
-    return result
-
-
-def session_id_of(root_stem: str) -> str:
-    return root_stem.split("_", 1)[1] if "_" in root_stem else root_stem
-
-
-def scan_sessions(root: Path, window: Window, advisor: str, scope_re: re.Pattern, subagents: bool = True) -> Scan:
-    """Every root session file (sessions/<project>/<stem>.jsonl) and subagent file below it touched since the window opened.
-
-    Subagent files add only scoped calls; `subagents=False` skips them for callers that never read `scan.scoped`."""
-    if not root.is_dir():
-        raise UsageError(f"no sessions directory at {root}")
-    scan = Scan(window=window, advisor=advisor)
-    opened = window.since.timestamp()
-    for dirpath, _dirnames, filenames in os.walk(root):
-        parts = Path(dirpath).relative_to(root).parts
-        for name in filenames:
-            if not name.endswith(".jsonl") or name.startswith(ADVISOR_STEM):
-                continue
-            path = Path(dirpath) / name
-            if len(parts) == 1:
-                transcript = path.with_suffix("") / transcript_name(advisor)
-                touched = max(path.stat().st_mtime, transcript.stat().st_mtime if transcript.is_file() else 0)
-                if touched < opened:
-                    continue
-                scan.sessions.append(scan_root(path, session_id_of(path.stem), window, advisor, scope_re, scan))
-            elif subagents and len(parts) >= 2:
-                if path.stat().st_mtime < opened:
-                    continue
-                scan.subagent_files += 1
-                entries, bad = read_jsonl(path, must_contain="dispatch_")
-                scan.bad_lines += bad
-                for entry in entries:
-                    message = entry.get("message") or {}
-                    if entry.get("type") != "message" or message.get("role") != "assistant" or not window.contains(entry_time(entry)):
-                        continue
-                    for block in tool_calls_of(message):
-                        arguments = block.get("arguments") if isinstance(block.get("arguments"), dict) else {}
-                        if scoped_device(str(block.get("name", "")), arguments, scope_re):
-                            scan.scoped["subagent"] += 1
-    return scan
 
 
 # --- stats.db --------------------------------------------------------------
@@ -566,14 +660,15 @@ def watcher_cost(db: sqlite3.Connection, window: Window, advisor: str) -> float:
     return sum(total for session_file, total in rows if session_file.endswith(name))
 
 
-def corrections(db: sqlite3.Connection, scan: Scan) -> int:
-    root_keys = {key for session in scan.sessions if (key := session_key(str(session.path))) is not None}
+def corrections(db: sqlite3.Connection, session_files: Iterable[Path], window: Window) -> int:
+    """Σ(negation + blame + anguish + yelling + profanity) over these root sessions' user messages in the window."""
+    keys = {key for path in session_files if (key := session_key(str(path))) is not None}
     rows = db.execute(
         "select session_file, coalesce(sum(negation + blame + anguish + yelling + profanity), 0) from user_messages "
         "where timestamp >= ? and timestamp <= ? group by session_file",
-        (int(scan.window.since.timestamp() * 1000), int(scan.window.until.timestamp() * 1000)),
+        (int(window.since.timestamp() * 1000), int(window.until.timestamp() * 1000)),
     ).fetchall()
-    return sum(total for session_file, total in rows if session_key(session_file) in root_keys)
+    return sum(total for session_file, total in rows if session_key(session_file) in keys)
 
 
 # --- labels, launch record -------------------------------------------------
@@ -709,52 +804,59 @@ def window_from(args) -> Window:
     return Window(since, until)
 
 
-def compute_metrics(scan: Scan, scope_re: re.Pattern, stats: sqlite3.Connection, covers_until: datetime, stats_path: Path) -> dict:
-    calls = [call for session in scan.sessions for call in session.calls]
-    admitted = [call for call in calls if call["ack"] in ADMITTED]
-    queued = sum(1 for call in admitted if call["ack"] == "queued")
-    latencies = [ms for session in scan.sessions for ms in session.held_latencies]
-    turns = sum(session.turns for session in scan.sessions)
-    kinds = scan.scoped
-    days = scan.window.days
-    correction_total = corrections(stats, scan)
-    fired = [gate_row_id(e) for e in scan.gate_entries if is_revise(e)]
-    fired += [note_row_id(s.session_id, c) for s in scan.sessions for c in s.calls if c["ack"] in ADMITTED]
-    gate = gate_metrics(scan.gate_entries)
+def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, window: Window, advisor: str,
+                    scope_re: re.Pattern, labels: dict[str, dict], stats: sqlite3.Connection) -> dict:
+    """Every metric over the window, one root session at a time; nothing of a session is kept past its turn."""
+    n = Counter()
+    by_ack, latencies, gate_entries, fired, paths = Counter(), [], [], [], []
+    for record in records:
+        calls = window_calls(record, window)
+        admitted = [call for call in calls if call.admitted]
+        held = held_notes(admitted, record.cards)
+        pairs = chain_pairs(admitted)
+        entries = [entry for entry in record.gate_entries if window.contains(entry.at)]
+        n.update(files=1, bad_lines=record.bad_lines, transcripts=record.transcript, turns=primary_turns(record, window),
+                 advisor_turns=advisor_turns(record, window), scoped=root_scoped_calls(record, window, scope_re),
+                 skips=skips_in(record, window), admitted=len(admitted), queued=sum(1 for call in admitted if call.ack == "queued"),
+                 out_of_charter=out_of_charter(admitted, scope_re), unrouted=held.unrouted,
+                 moot=moot_count(held.routed, record.tool_calls), pairs=pairs, sessions_with_pairs=pairs > 0,
+                 sessions_with_2_blockers=blockers(admitted) >= 2)
+        by_ack.update(call.ack for call in calls)
+        latencies += held.latencies_ms
+        gate_entries += entries
+        fired += [entry.row_id for entry in entries if entry.is_revise] + [call.row_id(record.session_id) for call in admitted]
+        paths.append(record.path)
+    days, turns = window.days, n["turns"]
+    correction_total = corrections(stats, paths, window)
+    gate = gate_metrics(gate_entries)
     return {
-        "window": {"since": iso(scan.window.since), "until": iso(scan.window.until), "days": days},
-        "advisor": scan.advisor,
-        "files": {"root": len(scan.sessions), "subagent": scan.subagent_files, "bad_lines": scan.bad_lines},
+        "window": {"since": iso(window.since), "until": iso(window.until), "days": days},
+        "advisor": advisor,
+        "files": {"root": n["files"], "subagent": subagents.files, "bad_lines": n["bad_lines"] + subagents.bad_lines},
         "primary_turns": turns,
         "watch": {
-            "transcripts": sum(1 for s in scan.sessions if s.transcript),
-            "advisor_turns": sum(s.advisor_turns for s in scan.sessions),
-            "advise_calls": len(calls),
-            "by_ack": dict(sorted(Counter(call["ack"] for call in calls).items())),
-            "admitted": len(admitted),
-            "notes_per_100_turns": None if not turns else len(admitted) / turns * 100,
-            "out_of_charter_pct": out_of_charter_pct(calls, scope_re),
-            "held_pct": ratio(queued, len(admitted)),
+            "transcripts": n["transcripts"],
+            "advisor_turns": n["advisor_turns"],
+            "advise_calls": sum(by_ack.values()),
+            "by_ack": dict(sorted(by_ack.items())),
+            "admitted": n["admitted"],
+            "notes_per_100_turns": per_100_turns(n["admitted"], turns),
+            "out_of_charter_pct": ratio(n["out_of_charter"], n["admitted"]),
+            "held_pct": ratio(n["queued"], n["admitted"]),
             "held_latency_ms": statistics.median(latencies) if latencies else None,
-            "held_unrouted": sum(s.held_unrouted for s in scan.sessions),
-            "moot_pct": ratio(sum(s.held_moot for s in scan.sessions), len(latencies)),
-            "cost_usd_per_day": watcher_cost(stats, scan.window, scan.advisor) / days,
-            "chains": {
-                "pairs": sum(s.chain_pairs for s in scan.sessions),
-                "sessions_with_pairs": sum(1 for s in scan.sessions if s.chain_pairs),
-                "sessions_with_2_blockers": sum(1 for s in scan.sessions if s.blockers >= 2),
-            },
+            "held_unrouted": n["unrouted"],
+            "moot_pct": ratio(n["moot"], len(latencies)),
+            "cost_usd_per_day": watcher_cost(stats, window, advisor) / days,
+            "chains": {"pairs": n["pairs"], "sessions_with_pairs": n["sessions_with_pairs"],
+                       "sessions_with_2_blockers": n["sessions_with_2_blockers"]},
         },
-        "skips": scan.skips,
-        "scoped_calls": {
-            "root": kinds["root"], "subagent": kinds["subagent"],
-            "per_day": {kind: kinds[kind] / days for kind in ("root", "subagent")},
-        },
+        "skips": n["skips"],
+        "scoped_calls": {"root": n["scoped"], "subagent": subagents.calls,
+                         "per_day": {"root": n["scoped"] / days, "subagent": subagents.calls / days}},
         "gate": {**gate, "usage_per_day": {key: value / days for key, value in gate["usage"].items()},
                  "cost_usd_per_day": gate["usage"]["cost"] / days},
-        "corrections": {"sum": correction_total, "per_100_turns": None if not turns else correction_total / turns * 100},
-        "labelled": labelled_metrics(load_labels(), fired, scan.skips),
-        "stats_db": {"path": str(stats_path), "covers_until": iso(covers_until)},
+        "corrections": {"sum": correction_total, "per_100_turns": per_100_turns(correction_total, turns)},
+        "labelled": labelled_metrics(labels, fired, n["skips"]),
     }
 
 
@@ -794,9 +896,11 @@ def cmd_metrics(args) -> int:
         sync_stats()
     stats_path = Path(args.stats_db).expanduser() if args.stats_db else default_stats_db()
     stats, covers_until = open_stats(stats_path, window)
-    root = Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions"
-    scan = scan_sessions(root.absolute(), window, args.advisor, scope_re)
-    metrics = compute_metrics(scan, scope_re, stats, covers_until, stats_path)
+    root = (Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions").absolute()
+    with closing(stats):
+        metrics = compute_metrics(scan_sessions(root, window, args.advisor), subagent_scoped_calls(root, window, scope_re),
+                                  window, args.advisor, scope_re, load_labels(), stats)
+    metrics["stats_db"] = {"path": str(stats_path), "covers_until": iso(covers_until)}
     if args.json:
         json.dump(metrics, sys.stdout, indent=2)
         print()
@@ -829,33 +933,33 @@ def context_around(entries: list[dict], anchor: int) -> list[dict]:
     return [render_message(entries[i]) for i in before + after]
 
 
-def gate_row(entry: dict, entries: list[dict]) -> dict:
-    data = entry.get("data") or {}
-    anchor = next((i for i, e in enumerate(entries) if e.get("type") == "custom" and e.get("id") == entry.get("id")), len(entries))
-    call = None
-    for candidate in entries:
-        for block in tool_calls_of(candidate.get("message") or {}) if candidate.get("type") == "message" else []:
-            if block.get("id") == data.get("toolCallId"):
-                arguments = block.get("arguments") or {}
-                call = {**arguments, "content": parse_json_object(arguments.get("content")) or arguments.get("content")} \
-                    if "content" in arguments else arguments
-    return {"type": "row", "id": gate_row_id(entry), "kind": "gate", "session": entry["_session"],
-            "advisor": data.get("advisor"), "timestamp": entry.get("timestamp"), "decision": data.get("decision"),
-            "outcome": data.get("outcome"), "verdictMode": data.get("verdictMode"), "reason": data.get("reason"),
-            "rebuttal": data.get("rebuttal"), "tool": data.get("tool"), "path": data.get("path"), "call": call,
-            "context": context_around(entries, anchor)}
+def sample_stratum(item: GateEntry | AdviseCall) -> str:
+    """Every gate revise verdict and every admitted blocker note are the priority stratum; the rest is `other`."""
+    urgent = item.is_revise if isinstance(item, GateEntry) else item.severity == "blocker"
+    return "priority" if urgent else "other"
 
 
-def note_row(session: SessionResult, call: dict, entries: list[dict], advisor: str) -> dict:
-    anchor = next((i for i, e in enumerate(entries)
-                   if e.get("type") == "custom_message" and e.get("customType") == "advisor"
-                   and any(isinstance(n, dict) and n.get("note") == call["note"] for n in (e.get("details") or {}).get("notes") or [])
-                   and (entry_time(e) or call["at"]) >= call["at"]), None)
-    if anchor is None:
-        anchor = next((i for i, e in enumerate(entries) if (entry_time(e) or call["at"]) >= call["at"]), len(entries))
-    return {"type": "row", "id": note_row_id(session.session_id, call), "kind": "note", "session": session.session_id,
-            "advisor": advisor, "timestamp": iso(call["at"]), "severity": call["severity"], "ack": call["ack"],
-            "note": call["note"], "update": call["update"][-UPDATE_TEXT_MAX:], "context": context_around(entries, anchor)}
+def gate_row(entry: GateEntry, entries: list[dict], tool_calls: list[ToolCall]) -> dict:
+    data = entry.data
+    anchor = next((i for i, e in enumerate(entries) if e.get("type") == "custom" and e.get("id") == entry.id), len(entries))
+    tool = next((tool for tool in tool_calls if tool.id == data.get("toolCallId")), None)
+    call = None if tool is None else tool.arguments
+    if call is not None and "content" in call:
+        call = {**call, "content": parse_json_object(call["content"]) or call["content"]}
+    return {"type": "row", "id": entry.row_id, "kind": "gate", "session": entry.session_id,
+            "advisor": data.get("advisor"), "timestamp": None if entry.at is None else iso(entry.at),
+            "decision": data.get("decision"), "outcome": data.get("outcome"), "verdictMode": data.get("verdictMode"),
+            "reason": data.get("reason"), "rebuttal": data.get("rebuttal"), "tool": data.get("tool"), "path": data.get("path"),
+            "call": call, "context": context_around(entries, anchor)}
+
+
+def note_row(session_id: str, call: AdviseCall, entries: list[dict], cards: list[Card], advisor: str) -> dict:
+    card = routing_card(call, cards)
+    anchor = card.position if card is not None else \
+        next((i for i, e in enumerate(entries) if (entry_time(e) or call.at) >= call.at), len(entries))
+    return {"type": "row", "id": call.row_id(session_id), "kind": "note", "session": session_id,
+            "advisor": advisor, "timestamp": iso(call.at), "severity": call.severity, "ack": call.ack,
+            "note": call.note, "update": call.update[-UPDATE_TEXT_MAX:], "context": context_around(entries, anchor)}
 
 
 def cmd_sample(args) -> int:
@@ -863,26 +967,25 @@ def cmd_sample(args) -> int:
     if args.n < 1:
         raise UsageError("--n must be positive")
     root = Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions"
-    scan = scan_sessions(root.absolute(), window, args.advisor, re.compile(DEFAULT_SCOPE_REGEX), subagents=False)
-    population = []  # (stratum, session, kind, item)
-    for session in scan.sessions:
-        for entry in session.gate_entries:
-            population.append(("priority" if is_revise(entry) else "other", session, "gate", entry))
-        for call in session.calls:
-            if call["ack"] in ADMITTED:
-                population.append(("priority" if call["severity"] == "blocker" else "other", session, "note", call))
+    population = []  # (stratum, session file, session id, gate entry or admitted note)
+    for record in scan_sessions(root.absolute(), window, args.advisor):
+        items = [entry for entry in record.gate_entries if window.contains(entry.at)]
+        items += [call for call in window_calls(record, window) if call.admitted]
+        population += [(sample_stratum(item), record.path, record.session_id, item) for item in items]
     priority = [p for p in population if p[0] == "priority"]
     other = [p for p in population if p[0] == "other"]
     rng = random.SystemRandom()
     drawn_priority = priority if len(priority) <= args.n // 2 else rng.sample(priority, args.n // 2)
     drawn_other = rng.sample(other, min(args.n - len(drawn_priority), len(other)))
-    parsed: dict[Path, list[dict]] = {}
+    parsed: dict[Path, tuple[list[dict], SessionRecord]] = {}
     rows = []
-    for stratum, session, kind, item in drawn_priority + drawn_other:
-        if session.path not in parsed:
-            parsed[session.path] = read_jsonl(session.path)[0]
-        entries = parsed[session.path]
-        row = gate_row(item, entries) if kind == "gate" else note_row(session, item, entries, args.advisor)
+    for stratum, path, session_id, item in drawn_priority + drawn_other:
+        if path not in parsed:
+            entries = read_jsonl(path)[0]
+            parsed[path] = entries, parse_primary(SessionRecord(path=path, session_id=session_id), entries, args.advisor)
+        entries, record = parsed[path]
+        row = gate_row(item, entries, record.tool_calls) if isinstance(item, GateEntry) else \
+            note_row(session_id, item, entries, record.cards, args.advisor)
         rows.append({**row, "stratum": stratum})
     header = {"type": "header", "since": iso(window.since), "until": iso(window.until), "n": args.n, "advisor": args.advisor,
               "generated_at": iso(datetime.now(timezone.utc)),
@@ -890,8 +993,8 @@ def cmd_sample(args) -> int:
                          "other": {"population": len(other), "drawn": len(drawn_other)}}}
     out = Path(args.out).expanduser()
     with out.open("w", encoding="utf-8") as fh:
-        for record in [header, *rows]:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        for line in [header, *rows]:
+            fh.write(json.dumps(line, ensure_ascii=False) + "\n")
     print(f"{len(rows)} rows to {out}: priority {len(drawn_priority)}/{len(priority)}, other {len(drawn_other)}/{len(other)}")
     return 0
 
@@ -991,14 +1094,13 @@ def roster_problems(dotfiles: Path, agents: Path) -> list[str]:
     return problems
 
 
-def watch_baseline(launched: datetime) -> str:
+def watch_baseline(path: Path, launched: datetime) -> str:
     """The watch-mode AskGate's spend per day over the 14 days before the gate launched, the cost it replaces."""
-    path = default_stats_db()
     if not path.is_file():
         return f"no stats db at {path} for the watch-mode baseline"
-    db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-    before = Window(launched - timedelta(days=DECISION_DAY), launched)
-    return f"watch-mode AskGate ${watcher_cost(db, before, GATE_SLUG) / DECISION_DAY:.2f}/day over the 14 days before launch"
+    with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as db:
+        cost = watcher_cost(db, Window(launched - timedelta(days=DECISION_DAY), launched), GATE_SLUG)
+    return f"watch-mode AskGate ${cost / DECISION_DAY:.2f}/day over the 14 days before launch"
 
 
 def missing_label_weeks(launched: datetime, now: datetime, fired: list[tuple[str, datetime]], labels: dict) -> list[str]:
@@ -1020,21 +1122,23 @@ def gate_check(now: datetime) -> Check:
     day = (now - launched).total_seconds() / 86400
     overlay = overlay_path()
     _node, disabled = overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)
-    scan = scan_sessions(agent_dir() / "sessions", Window(launched, now), GATE_SLUG, re.compile(DEFAULT_SCOPE_REGEX),
-                         subagents=False)
-    entries = scan.gate_entries
+    window = Window(launched, now)
+    entries, skips = [], 0
+    for session in scan_sessions(agent_dir() / "sessions", window, GATE_SLUG):
+        entries += [entry for entry in session.gate_entries if window.contains(entry.at)]
+        skips += skips_in(session, window)
     whole = gate_metrics(entries)
-    latest = [e for e in entries if entry_time(e) >= now - KILL_WINDOW]
+    latest = [entry for entry in entries if entry.at >= now - KILL_WINDOW]
     recent = gate_metrics(latest)
     labels = load_labels()
-    fired = [(gate_row_id(e), entry_time(e)) for e in entries if is_revise(e)]
-    lab = labelled_metrics(labels, [row_id for row_id, _at in fired], scan.skips)
+    fired = [(entry.row_id, entry.at) for entry in entries if entry.is_revise]
+    lab = labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
     p95 = whole["latency_ms_p95"]
     lines = [f"gate: day {day:.1f}; {whole['matched']} matched ({whole['killed']} killed), ungated_share "
-             f"{fmt(whole['ungated_share'])}, p95 {fmt(p95, '.0f')} ms (timeout {timeout_ms}), skips {scan.skips}; "
+             f"{fmt(whole['ungated_share'])}, p95 {fmt(p95, '.0f')} ms (timeout {timeout_ms}), skips {skips}; "
              f"last 24 h {recent['matched']} matched, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
              f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}",
-             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(launched)}"]
+             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(default_stats_db(), launched)}"]
     problems = roster_problems(dotfiles_dir(), agent_dir())
     lines += [f"gate: {problem}" for problem in problems]
     # A killed gate records every later call as `killed`, which leaves every denominator, so the rules below would
@@ -1049,7 +1153,7 @@ def gate_check(now: datetime) -> Check:
             kill.append(f"ungated_share {recent['ungated_share']:.3f} > {KILL_UNGATED_24H} over {recent['matched']} calls in the last 24 h")
         # A verdict slower than the timeout is recorded as a timeout, so verdict p95 never passes the timeout itself.
         # Below 20 verdicts the nearest-rank p95 is the slowest one, so a single slow verdict would decide.
-        verdicts = sum(1 for e in latest if (e.get("data") or {}).get("outcome") == "verdict")
+        verdicts = sum(1 for entry in latest if entry.data.get("outcome") == "verdict")
         if verdicts >= KILL_MIN_MATCHED and recent["latency_ms_p95"] > GO_LATENCY_SHARE * timeout_ms:
             kill.append(f"p95 latency {recent['latency_ms_p95']:.0f} ms above {GO_LATENCY_SHARE} x the {timeout_ms} ms "
                         f"timeout over {verdicts} verdicts in the last 24 h")
@@ -1063,7 +1167,7 @@ def gate_check(now: datetime) -> Check:
             kill.append(f"day {DECISION_DAY}: harm {lab['harm']:.2f} > {KILL_HARM} over {lab['n']} labels")
         elif lab["n"] >= MIN_LABELS:
             if (lab["precision"] >= GO_PRECISION and lab["harm"] <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
-                  and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and scan.skips == 0):
+                  and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and skips == 0):
                 decision = "GO: make OMP_ASKGATE=block the shim default"
             elif day < EXTENDED_DAY:
                 decision = "EXTEND: one more week, then GO or KILL"

@@ -12,6 +12,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -19,13 +20,13 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "advisor-report"
 FIXTURES = Path(__file__).parent / "fixtures" / "advisor-report"
 WATCH_SESSION = "2026-09-20T10-00-00-000Z_01a0f000-0000-7000-8000-00000000f001"
-ASK_ID = "0192f0e1-aaaa-4bbb-8ccc-0123456789ab"
 
 ROSTER_OK = """advisors:
   - name: ForkGate
@@ -63,10 +64,6 @@ def setUpModule():
     ar = load_module()
 
 
-def iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -74,14 +71,15 @@ def now_utc() -> datetime:
 _entry_seq = [0]
 
 
-def gate_entry(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None, session="s1"):
+def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None):
+    """An `advisor-gate` entry as the AskGate extension appends it to a root session file."""
     _entry_seq[0] += 1
     return {
         "type": "custom",
         "customType": "advisor-gate",
         "id": f"g{_entry_seq[0]:05d}",
         "parentId": None,
-        "timestamp": iso(at or now_utc()),
+        "timestamp": ar.iso(at or now_utc()),
         "data": {
             "advisor": advisor,
             "tool": "write",
@@ -94,15 +92,20 @@ def gate_entry(outcome="verdict", decision="allow", latency_ms=1000, advisor="As
             "revisesForKey": 0,
             **({"reason": "failure 7: the text points at a message the reader cannot see"} if decision == "revise" else {}),
         },
-        "_session": session,
     }
+
+
+def gate_entry(session="s1", **fields):
+    """The same entry as the script reads it."""
+    line = gate_line(**fields)
+    return ar.GateEntry(session_id=session, id=line["id"], at=ar.parse_iso(line["timestamp"]), data=line["data"])
 
 
 def write_jsonl(path: Path, entries) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         for entry in entries:
-            fh.write(json.dumps({k: v for k, v in entry.items() if k != "_session"}) + "\n")
+            fh.write(json.dumps(entry) + "\n")
 
 
 def build_stats_db(path: Path, user_messages=(), files=(), messages=(), covers_until_ms=None) -> None:
@@ -168,7 +171,7 @@ class Home:
         started = started or now_utc() - timedelta(days=6)
         stem = started.strftime("%Y-%m-%dT%H-%M-%S-000Z") + f"_{sid}"
         path = self.sessions / project / f"{stem}.jsonl"
-        header = {"type": "session", "version": 3, "id": sid, "timestamp": iso(started), "cwd": "/home/user/gate"}
+        header = {"type": "session", "version": 3, "id": sid, "timestamp": ar.iso(started), "cwd": "/home/user/gate"}
         write_jsonl(path, [header, *entries])
         return path
 
@@ -203,7 +206,9 @@ class WatchFixtureTest(unittest.TestCase):
         root_file = cls.home.sessions / "-home-user-example" / f"{WATCH_SESSION}.jsonl"
         stats = cls.home.root / "stats.db"
         at = int(datetime(2026, 9, 20, 10, 0, 5, tzinfo=timezone.utc).timestamp() * 1000)
-        build_stats_db(stats, user_messages=[(str(root_file), "p0001", at, 1, 1, 0, 0, 0)])
+        transcript = root_file.with_suffix("") / "__advisor.askgate.jsonl"
+        build_stats_db(stats, user_messages=[(str(root_file), "p0001", at, 1, 1, 0, 0, 0)],
+                       messages=[(str(transcript), "advisor", at, 3.0), (str(transcript), "advisor", at, 4.0)])
         proc = cls.home.run(
             "metrics", "--since", "2026-09-20T00:00:00Z", "--until", "2026-09-21T00:00:00Z", "--advisor", "askgate",
             "--stats-db", str(stats), "--no-sync", "--json", check_exit=0,
@@ -222,6 +227,7 @@ class WatchFixtureTest(unittest.TestCase):
     def test_advise_calls_by_ack(self):
         self.assertEqual(self.metrics["watch"]["advise_calls"], 4)
         self.assertEqual(self.metrics["watch"]["by_ack"], {"delivered": 2, "queued": 1, "dropped-duplicate": 1})
+        self.assertEqual(self.metrics["watch"]["advisor_turns"], 4)
 
     def test_out_of_charter_share_over_admitted_notes(self):
         self.assertAlmostEqual(self.metrics["watch"]["out_of_charter_pct"], 2 / 3)
@@ -242,88 +248,220 @@ class WatchFixtureTest(unittest.TestCase):
     def test_corrections_per_100_primary_turns(self):
         self.assertEqual(self.metrics["corrections"]["per_100_turns"], 10.0)
 
+    def test_watch_advisor_cost_per_day(self):
+        self.assertAlmostEqual(self.metrics["watch"]["cost_usd_per_day"], 7.0)
+
+
+T0 = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+ASK = "0192f0e1-aaaa-4bbb-8ccc-0123456789ab"
+
+
+def minutes(n: float | None) -> datetime | None:
+    return None if n is None else T0 + timedelta(minutes=n)
+
+
+def hour() -> "ar.Window":
+    """The window every inline metric test reads: T0 to T0 + 60 minutes."""
+    return ar.Window(minutes(0), minutes(60))
+
+
+def advise(note="note", at=0, ack="queued", severity=None, update=""):
+    return ar.AdviseCall(id=f"call-{note}", note=note, severity=severity, at=minutes(at), update=update, ack=ack)
+
+
+def card(at, *notes, position=0):
+    return ar.Card(position=position, at=minutes(at), notes=frozenset(notes))
+
+
+def tool(at, arguments, name="write"):
+    return ar.ToolCall(at=minutes(at), id=f"t{at}", name=name, arguments=arguments)
+
+
+def record(**fields):
+    return ar.SessionRecord(path=Path("s.jsonl"), session_id="s", **fields)
+
+
+def assistant_call(call_id, name, arguments, at):
+    return {"type": "message", "id": f"m{call_id}", "timestamp": ar.iso(at),
+            "message": {"role": "assistant", "content": [{"type": "toolCall", "id": call_id, "name": name, "arguments": arguments}]}}
+
+
+class WindowedCountsTest(unittest.TestCase):
+    """Each count takes what falls inside [since, until]: a second before `since` or after `until` is out."""
+
+    EDGES = (-1 / 60, 0, 30, 60, 60 + 1 / 60)
+
+    def test_primary_turns(self):
+        self.assertEqual(ar.primary_turns(record(turn_times=[minutes(m) for m in self.EDGES] + [None]), hour()), 3)
+
+    def test_advisor_turns(self):
+        self.assertEqual(ar.advisor_turns(record(advisor_turn_times=[minutes(m) for m in self.EDGES]), hour()), 3)
+
+    def test_advise_calls(self):
+        calls = [advise(str(m), m) for m in self.EDGES] + [advise("untimed", None)]
+        self.assertEqual([call.note for call in ar.window_calls(record(advise_calls=calls), hour())], ["0", "30", "60"])
+
+    def test_root_scoped_calls_count_dispatch_issue_only_with_spec(self):
+        spec = {"path": "xd://dispatch_issue", "content": json.dumps({"title": "x", "spec": "s"})}
+        calls = [
+            tool(-1 / 60, spec), tool(1, spec),
+            tool(2, {"path": "xd://dispatch_issue", "content": json.dumps({"title": "x"})}),
+            tool(3, {"path": "xd://dispatch_search", "content": "{}"}),
+            tool(4, {"issue": "EX-1", "body": "b"}, name="dispatch_comment"),
+            tool(60 + 1 / 60, spec),
+        ]
+        self.assertEqual(ar.root_scoped_calls(record(tool_calls=calls), hour(), re.compile(ar.DEFAULT_SCOPE_REGEX)), 2)
+
+
+class HeldNotesTest(unittest.TestCase):
+    def test_latency_runs_to_the_first_later_card_carrying_the_exact_note(self):
+        note = advise(f"Ask {ASK} names the retired flag", at=0)
+        cards = [card(-1, note.note), card(2, "another note"), card(5, note.note, position=7), card(9, note.note)]
+        held = ar.held_notes([note], cards)
+        self.assertEqual((held.latencies_ms, held.unrouted), ([300_000], 0))
+        self.assertEqual(held.routed, [(note, cards[2])])
+
+    def test_a_queued_note_no_card_carries_is_unrouted(self):
+        held = ar.held_notes([advise("carried"), advise("never carried")], [card(1, "carried")])
+        self.assertEqual((len(held.latencies_ms), held.unrouted), (1, 1))
+
+    def test_only_queued_notes_are_held_and_an_untimed_card_routes_nothing(self):
+        held = ar.held_notes([advise("delivered", ack="delivered"), advise("untimed")], [card(1, "delivered"), card(None, "untimed")])
+        self.assertEqual((held.latencies_ms, held.unrouted, held.routed), ([], 1, []))
+
+
+class MootTest(unittest.TestCase):
+    """A routed note is moot when a primary call between the note and its card carries one of the note's ids."""
+
+    def moot(self, text, *calls):
+        note = advise(text, at=0)
+        return ar.moot_count([(note, card(10, text))], list(calls))
+
+    def test_a_call_before_the_card_carrying_the_notes_id_makes_it_moot(self):
+        self.assertEqual(self.moot(f"Edit ask {ASK}", tool(5, {"path": "xd://dispatch_edit_ask", "content": json.dumps({"ask": ASK})})), 1)
+
+    def test_a_call_without_the_id_does_not(self):
+        self.assertEqual(self.moot(f"Edit ask {ASK}", tool(5, {"command": "ls"}, name="bash")), 0)
+
+    def test_a_call_after_the_card_does_not(self):
+        self.assertEqual(self.moot(f"Edit ask {ASK}", tool(11, {"content": json.dumps({"ask": ASK})})), 0)
+
+    def test_a_note_without_ids_is_never_moot(self):
+        self.assertEqual(self.moot("Run the tests first", tool(5, {"command": "run the tests first"}, name="bash")), 0)
+
+
+class ChainsTest(unittest.TestCase):
+    def test_notes_at_jaccard_one_half_are_a_pair_and_below_it_are_not(self):
+        self.assertEqual(ar.chain_pairs([advise("retire old flag"), advise("retire old switch")]), 1)
+        self.assertEqual(ar.chain_pairs([advise("retire old flag"), advise("retire new switch")]), 0)
+
+    def test_blockers(self):
+        self.assertEqual(ar.blockers([advise(severity="blocker"), advise(severity="blocker"), advise(severity="concern")]), 2)
+
 
 class OutOfCharterTest(unittest.TestCase):
-    def call(self, update):
-        return {"id": "n", "note": "x", "severity": None, "at": now_utc(), "update": update, "ack": "delivered"}
-
     def test_note_whose_update_has_no_scoped_call_is_out_of_charter(self):
-        calls = [self.call("### Session update\n→ read(src/a.ts) ⇒ ok")]
-        self.assertEqual(ar.out_of_charter_pct(calls, ar.DEFAULT_SCOPE_REGEX), 1.0)
+        calls = [advise(update="### Session update\n→ read(src/a.ts) ⇒ ok", ack="delivered")]
+        self.assertEqual(ar.out_of_charter(calls, re.compile(ar.DEFAULT_SCOPE_REGEX)), 1)
 
     def test_note_whose_update_writes_dispatch_ask_is_in_charter(self):
-        calls = [self.call("### Session update\n→ write(xd://dispatch_ask) ⇒ ok · 1 line")]
-        self.assertEqual(ar.out_of_charter_pct(calls, ar.DEFAULT_SCOPE_REGEX), 0.0)
+        calls = [advise(update="### Session update\n→ write(xd://dispatch_ask) ⇒ ok · 1 line", ack="delivered")]
+        self.assertEqual(ar.out_of_charter(calls, re.compile(ar.DEFAULT_SCOPE_REGEX)), 0)
 
 
-class ScopedCallsTest(unittest.TestCase):
-    def setUp(self):
-        self.home = Home()
+class SessionFilesTest(unittest.TestCase):
+    """Root sessions are sessions/<project>/<stem>.jsonl; every other file below <stem>/ but an advisor transcript is a subagent."""
 
-    def tearDown(self):
-        self.home.cleanup()
-
-    def assistant(self, call_id, name, arguments, minute, day=datetime(2026, 9, 20, 12, tzinfo=timezone.utc)):
-        return {
-            "type": "message", "id": f"m{call_id}", "timestamp": iso(day + timedelta(minutes=minute)),
-            "message": {"role": "assistant", "content": [
-                {"type": "toolCall", "id": call_id, "name": name, "arguments": arguments}]},
-        }
-
-    def metrics(self, stats):
-        proc = self.home.run("metrics", "--since", "2026-09-20T00:00:00Z", "--until", "2026-09-21T00:00:00Z",
-                             "--stats-db", str(stats), "--no-sync", "--json", check_exit=0)
-        return json.loads(proc.stdout)
-
-    def test_dispatch_issue_counts_only_with_spec_and_calls_split_by_file_depth(self):
-        day = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
-        root = self.home.session("01a0f000-0000-7000-8000-00000000f002", [
-            self.assistant("t1", "write", {"path": "xd://dispatch_issue", "content": json.dumps({"title": "x"})}, 1),
-            self.assistant("t2", "write", {"path": "xd://dispatch_issue", "content": json.dumps({"title": "x", "spec": "s"})}, 2),
-            self.assistant("t3", "write", {"path": "xd://dispatch_search", "content": "{}"}, 3),
-        ], started=day)
-        sub = root.with_suffix("") / "Worker.jsonl"
-        write_jsonl(sub, [self.assistant("t4", "dispatch_comment", {"issue": "EX-1", "body": "b"}, 4)])
-        stats = self.home.root / "stats.db"
-        build_stats_db(stats)
-        scoped = self.metrics(stats)["scoped_calls"]
-        self.assertEqual((scoped.get("root"), scoped.get("subagent")), (1, 1))
-        self.assertEqual(scoped["per_day"].get("root"), 1.0)
-
-    def test_corrections_recorded_before_the_session_moved_directory_still_join(self):
-        """An agent box relaunch moves the session to a new project dir; stats.db keeps the earlier rows under the old path."""
-        day = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    def test_files_split_by_where_they_sit(self):
+        home = Home()
+        self.addCleanup(home.cleanup)
         comment = {"path": "xd://dispatch_comment", "content": json.dumps({"issue": "EX-1", "body": "b"})}
-        root = self.home.session("01a0f000-0000-7000-8000-00000000f005", [
-            self.assistant("t5", "write", comment, 1), self.assistant("t6", "write", comment, 2),
-        ], project="-boxes-agentbox-new-example", started=day)
-        old_root = self.home.sessions / "-boxes-agentbox-old-example" / root.name
-        stats = self.home.root / "stats.db"
-        at = int(day.timestamp() * 1000)
-        build_stats_db(stats, user_messages=[(str(old_root), "u1", at, 1, 1, 0, 0, 0)], files=[old_root, root])
-        self.assertEqual(self.metrics(stats)["corrections"]["sum"], 2)
-
-    def test_gate_cost_per_day_prints_beside_the_watch_advisors(self):
-        day = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
-        spent = []
-        for cost in (0.5, 1.5):
-            entry = gate_entry(at=day, session="s")
-            entry["data"]["usage"] = {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": cost}
-            spent.append(entry)
-        root = self.home.session("01a0f000-0000-7000-8000-00000000f006", spent, started=day)
-        transcripts = root.with_suffix("")
-        at, outside = int(day.timestamp() * 1000), int((day - timedelta(days=3)).timestamp() * 1000)
-        stats = self.home.root / "stats.db"
-        build_stats_db(stats, messages=[
-            (str(transcripts / "__advisor.askgate.jsonl"), "advisor", at, 3.0),
-            (str(transcripts / "__advisor.askgate.jsonl"), "advisor", at, 4.0),
-            (str(transcripts / "__advisor.askgate.jsonl"), "advisor", outside, 100.0),
-            (str(transcripts / "__advisor.forkgate.jsonl"), "advisor", at, 50.0),
-            (str(root), "main", at, 9.0),
+        sid = "01a0f000-0000-7000-8000-00000000f002"
+        root = home.session(sid, [assistant_call("t1", "write", comment, T0)], started=T0)
+        write_jsonl(root.with_suffix("") / "Worker.jsonl", [
+            assistant_call("t2", "dispatch_comment", {"issue": "EX-1", "body": "b"}, T0),
+            assistant_call("t3", "dispatch_comment", {"issue": "EX-1", "body": "b"}, T0 + timedelta(days=2)),
         ])
-        m = self.metrics(stats)
-        self.assertAlmostEqual(m["gate"]["cost_usd_per_day"], 2.0)
-        self.assertAlmostEqual(m["watch"]["cost_usd_per_day"], 7.0)
+        write_jsonl(root.with_suffix("") / "__advisor.askgate.jsonl", [assistant_call("t4", "write", comment, T0)])
+        window = ar.Window(T0 - timedelta(days=1), T0 + timedelta(days=1))
+        self.assertEqual(list(ar.root_session_files(home.sessions, window, "askgate")), [(root, sid)])
+        subagents = ar.subagent_scoped_calls(home.sessions, window, re.compile(ar.DEFAULT_SCOPE_REGEX))
+        self.assertEqual((subagents.files, subagents.calls), (1, 1))
+
+
+class StatsDbTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "stats.db"
+
+    def ms(self, at: datetime) -> int:
+        return int(at.timestamp() * 1000)
+
+    def test_corrections_sum_the_windows_rows_of_root_sessions_through_a_move(self):
+        stem = f"2026-09-20T11-00-00-000Z_{ASK}.jsonl"
+        root = Path("/s/-boxes-agentbox-new-example") / stem
+        build_stats_db(self.path, user_messages=[
+            (f"/s/-boxes-agentbox-old-example/{stem}", "u1", self.ms(minutes(1)), 1, 1, 0, 0, 0),
+            (str(root), "u2", self.ms(minutes(2)), 0, 0, 1, 0, 0),
+            ("/s/-other/2026-09-20T11-00-00-000Z_other.jsonl", "u3", self.ms(minutes(3)), 5, 0, 0, 0, 0),
+            (str(root), "u4", self.ms(minutes(61)), 7, 0, 0, 0, 0),
+        ])
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(ar.corrections(db, [root], hour()), 3)
+
+    def test_watcher_cost_sums_the_advisors_transcript_rows_in_the_window(self):
+        transcripts = Path("/s/-p/2026-09-20T11-00-00-000Z_x")
+        build_stats_db(self.path, messages=[
+            (str(transcripts / "__advisor.askgate.jsonl"), "advisor", self.ms(minutes(1)), 3.0),
+            (str(transcripts / "__advisor.askgate.jsonl"), "advisor", self.ms(minutes(2)), 4.0),
+            (str(transcripts / "__advisor.askgate.jsonl"), "advisor", self.ms(minutes(-60)), 100.0),
+            (str(transcripts / "__advisor.forkgate.jsonl"), "advisor", self.ms(minutes(1)), 50.0),
+            (f"{transcripts}.jsonl", "main", self.ms(minutes(1)), 9.0),
+        ])
+        with closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(ar.watcher_cost(db, hour(), "askgate"), 7.0)
+
+    def test_watch_baseline_is_the_watch_askgates_spend_per_day_over_the_14_days_before_launch(self):
+        transcript = "/s/-p/2026-09-01T00-00-00-000Z_x/__advisor.askgate.jsonl"
+        build_stats_db(self.path, messages=[
+            (transcript, "advisor", self.ms(T0 - timedelta(days=3)), 14.0),
+            (transcript, "advisor", self.ms(T0 - timedelta(days=20)), 1000.0),
+            (transcript, "advisor", self.ms(T0 + timedelta(hours=1)), 1000.0),
+        ])
+        self.assertEqual(ar.watch_baseline(self.path, T0), "watch-mode AskGate $1.00/day over the 14 days before launch")
+        self.assertEqual(ar.watch_baseline(self.path.with_name("absent.db"), T0),
+                         f"no stats db at {self.path.with_name('absent.db')} for the watch-mode baseline")
+
+
+class SampleUnitTest(unittest.TestCase):
+    def test_revise_verdicts_and_blocker_notes_are_the_priority_stratum(self):
+        self.assertEqual(ar.sample_stratum(gate_entry(decision="revise")), "priority")
+        self.assertEqual(ar.sample_stratum(gate_entry(decision="revise", outcome="timeout")), "other")
+        self.assertEqual(ar.sample_stratum(gate_entry()), "other")
+        self.assertEqual(ar.sample_stratum(advise(severity="blocker", ack="delivered")), "priority")
+        self.assertEqual(ar.sample_stratum(advise(severity="concern", ack="delivered")), "other")
+
+    def test_context_is_five_primary_messages_either_side(self):
+        entries = []
+        for i in range(12):
+            entries.append({"type": "message", "id": f"u{i}", "timestamp": ar.iso(minutes(i)),
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": f"step {i}"}]}})
+            entries.append({"type": "custom", "customType": "tool_execution_start", "id": f"x{i}"})
+        rendered = ar.context_around(entries, entries.index(next(e for e in entries if e["id"] == "u6")))
+        self.assertEqual([row["text"] for row in rendered], [f"step {i}" for i in (1, 2, 3, 4, 5, 7, 8, 9, 10, 11)])
+
+
+class MissingLabelWeeksTest(unittest.TestCase):
+    def test_names_each_completed_week_whose_revises_carry_no_label(self):
+        fired = [("gate:s:a", T0 + timedelta(days=1)), ("gate:s:b", T0 + timedelta(days=8)),
+                 ("gate:s:c", T0 + timedelta(days=14.5))]
+        labels = {"gate:s:a": {"id": "gate:s:a", "label": "moot"}}
+        self.assertEqual(ar.missing_label_weeks(T0, T0 + timedelta(days=15), fired, labels),
+                         ["week 2 (2026-09-27..2026-10-04)"])
+
+
+
 
 
 class GateMetricsTest(unittest.TestCase):
@@ -354,12 +492,16 @@ class GateMetricsTest(unittest.TestCase):
 
     def test_usage_sums_each_entrys_tokens_and_cost_and_extra_fields_are_ignored(self):
         first, second, third = gate_entry(), gate_entry(), gate_entry(outcome="timeout")
-        first["data"].update(usage={"input": 1000, "output": 50, "cacheRead": 400, "cacheWrite": 900, "cost": 0.25},
-                             argsDigest="{}", promptBytes=9000)
-        second["data"].update(usage={"input": 2000, "output": 70, "cacheRead": 0, "cacheWrite": 0, "cost": 0.5})
+        first.data.update(usage={"input": 1000, "output": 50, "cacheRead": 400, "cacheWrite": 900, "cost": 0.25},
+                          argsDigest="{}", promptBytes=9000)
+        second.data.update(usage={"input": 2000, "output": 70, "cacheRead": 0, "cacheWrite": 0, "cost": 0.5})
         metrics = ar.gate_metrics([first, second, third])
         self.assertEqual(metrics["usage"], {"input": 3000, "output": 120, "cacheRead": 400, "cacheWrite": 900, "cost": 0.75})
         self.assertEqual(metrics["matched"], 3)
+
+    def test_revise_rate_is_over_verdicts(self):
+        entries = [gate_entry(decision="revise"), gate_entry(), gate_entry(outcome="timeout"), gate_entry(outcome="rebuttal")]
+        self.assertEqual(ar.gate_metrics(entries)["revise_rate"], 0.5)
 
 
 class OverlayTest(unittest.TestCase):
@@ -438,7 +580,7 @@ class ReadoutTest(unittest.TestCase):
 
     def launch(self, days: float):
         self.launched = self.now - timedelta(days=days)
-        self.home.launch(gate={"launched": iso(self.launched), "timeout_ms": 90_000})
+        self.home.launch(gate={"launched": ar.iso(self.launched), "timeout_ms": 90_000})
 
     def tearDown(self):
         self.home.cleanup()
@@ -449,14 +591,14 @@ class ReadoutTest(unittest.TestCase):
     def healthy_gate(self, extra=()):
         """30 revises, 8 allows, 2 timeouts in the last hours: ungated_share 0.05."""
         at = [self.now - timedelta(minutes=5 + i) for i in range(40)]
-        entries = [gate_entry(decision="revise", at=at[i], latency_ms=4000) for i in range(30)]
-        entries += [gate_entry(at=at[30 + i], latency_ms=3000) for i in range(8)]
-        entries += [gate_entry(outcome="timeout", at=at[38 + i], latency_ms=90_000) for i in range(2)]
+        entries = [gate_line(decision="revise", at=at[i], latency_ms=4000) for i in range(30)]
+        entries += [gate_line(at=at[30 + i], latency_ms=3000) for i in range(8)]
+        entries += [gate_line(outcome="timeout", at=at[38 + i], latency_ms=90_000) for i in range(2)]
         self.gate_session([*extra, *entries])
 
     def label_revises(self, correct: int, other: int, harmful: int = 0, unlabelled: int = 0):
         packet = self.home.root / "packet.jsonl"
-        self.home.run("sample", "--since", iso(self.launched), "--until", iso(self.now), "--n", "100",
+        self.home.run("sample", "--since", ar.iso(self.launched), "--until", ar.iso(self.now), "--n", "100",
                       "--out", str(packet), check_exit=0)
         rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()][1:]
         revises = [row["id"] for row in rows if row.get("decision") == "revise"]
@@ -465,7 +607,7 @@ class ReadoutTest(unittest.TestCase):
         with labels.open("w", encoding="utf-8") as fh:
             for i, row_id in enumerate(revises[:correct + harmful + other]):
                 label = "acted-correct" if i < correct else "acted-harmful" if i < correct + harmful else "ignored-agent-right"
-                fh.write(json.dumps({"id": row_id, "label": label, "labeler": "oracle-test", "at": iso(self.now)}) + "\n")
+                fh.write(json.dumps({"id": row_id, "label": label, "labeler": "oracle-test", "at": ar.iso(self.now)}) + "\n")
         self.home.run("ingest-labels", str(labels), check_exit=0)
 
     def test_fewer_than_30_labels_is_incomplete(self):
@@ -483,8 +625,8 @@ class ReadoutTest(unittest.TestCase):
 
     def kill_fixture(self):
         at = [self.now - timedelta(minutes=10 + i) for i in range(20)]
-        self.gate_session([gate_entry(at=at[i]) for i in range(15)]
-                          + [gate_entry(outcome="timeout", at=at[15 + i], latency_ms=90_000) for i in range(5)])
+        self.gate_session([gate_line(at=at[i]) for i in range(15)]
+                          + [gate_line(outcome="timeout", at=at[15 + i], latency_ms=90_000) for i in range(5)])
 
     def test_day_three_ungated_share_over_20_percent_applies_the_kill(self):
         self.kill_fixture()
@@ -494,7 +636,7 @@ class ReadoutTest(unittest.TestCase):
     def test_day_three_verdicts_at_85_s_against_a_90_s_timeout_apply_the_kill(self):
         """A verdict slower than the timeout is recorded as a timeout, so the stall shows as p95 near it."""
         def verdicts_at(latency_ms):
-            self.gate_session([gate_entry(at=self.now - timedelta(minutes=10 + i), latency_ms=latency_ms) for i in range(20)])
+            self.gate_session([gate_line(at=self.now - timedelta(minutes=10 + i), latency_ms=latency_ms) for i in range(20)])
 
         verdicts_at(80_000)
         self.home.run("readout", "--check", "gate", check_exit=3)
@@ -507,7 +649,7 @@ class ReadoutTest(unittest.TestCase):
     def test_day_three_latency_kill_waits_for_20_verdicts_in_the_last_24_h(self):
         """One slow verdict among a handful is the whole p95 (nearest rank); it must not end the trial."""
         latencies = [85_000, 3000, 3000, 3000, 3000]
-        self.gate_session([gate_entry(at=self.now - timedelta(minutes=10 + i), latency_ms=ms) for i, ms in enumerate(latencies)])
+        self.gate_session([gate_line(at=self.now - timedelta(minutes=10 + i), latency_ms=ms) for i, ms in enumerate(latencies)])
         out = self.home.run("readout", "--check", "gate", check_exit=3).stdout
         self.assertIn("p95 85000 ms", out)
         self.assertFalse(self.home.overlay.exists())
@@ -515,11 +657,11 @@ class ReadoutTest(unittest.TestCase):
     def killed_after_a_day_three_burst(self):
         """230 good calls, a day-3 hour with 8 timeouts in 25 calls, then 250 calls the kill switch passed."""
         day3 = self.launched + timedelta(days=3)
-        entries = [gate_entry(decision="revise" if i < 30 else "allow", at=self.launched + timedelta(minutes=5 + 18 * i),
-                              latency_ms=4000) for i in range(230)]
-        entries += [gate_entry(outcome="timeout" if i < 8 else "verdict", at=day3 + timedelta(minutes=2 * i),
-                               latency_ms=90_000 if i < 8 else 4000) for i in range(25)]
-        entries += [gate_entry(outcome="killed", at=day3 + timedelta(hours=2 + i), latency_ms=0) for i in range(250)]
+        entries = [gate_line(decision="revise" if i < 30 else "allow", at=self.launched + timedelta(minutes=5 + 18 * i),
+                             latency_ms=4000) for i in range(230)]
+        entries += [gate_line(outcome="timeout" if i < 8 else "verdict", at=day3 + timedelta(minutes=2 * i),
+                              latency_ms=90_000 if i < 8 else 4000) for i in range(25)]
+        entries += [gate_line(outcome="killed", at=day3 + timedelta(hours=2 + i), latency_ms=0) for i in range(250)]
         self.gate_session(entries)
 
     def test_after_a_kill_a_later_readout_computes_no_go(self):
@@ -544,7 +686,7 @@ class ReadoutTest(unittest.TestCase):
         self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": []}})
 
     def s9_drill(self):
-        return [gate_entry(outcome="killed", at=self.launched + timedelta(hours=6, minutes=i), latency_ms=0) for i in range(2)]
+        return [gate_line(outcome="killed", at=self.launched + timedelta(hours=6, minutes=i), latency_ms=0) for i in range(2)]
 
     def test_an_s9_drill_on_day_half_is_incomplete_not_killed(self):
         self.launch(days=0.5)
@@ -608,9 +750,9 @@ class ReadoutTest(unittest.TestCase):
     def test_day_14_ungated_share_0_125_kills_without_labels(self):
         self.launch(days=15)
         at = [self.now - timedelta(minutes=5 + i) for i in range(40)]
-        entries = [gate_entry(decision="revise", at=at[i], latency_ms=4000) for i in range(30)]
-        entries += [gate_entry(at=at[30 + i], latency_ms=3000) for i in range(5)]
-        entries += [gate_entry(outcome="timeout", at=at[35 + i], latency_ms=90_000) for i in range(5)]
+        entries = [gate_line(decision="revise", at=at[i], latency_ms=4000) for i in range(30)]
+        entries += [gate_line(at=at[30 + i], latency_ms=3000) for i in range(5)]
+        entries += [gate_line(outcome="timeout", at=at[35 + i], latency_ms=90_000) for i in range(5)]
         self.gate_session(entries)
         out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
         self.assertIn("ungated_share 0.125 >= 0.1", out)
@@ -676,15 +818,15 @@ class SampleTest(unittest.TestCase):
     def test_revises_fill_at_most_half_the_packet_and_the_header_records_the_strata(self):
         now = now_utc()
         context = [
-            {"type": "message", "id": f"u{i}", "timestamp": iso(now - timedelta(hours=3, minutes=i)),
+            {"type": "message", "id": f"u{i}", "timestamp": ar.iso(now - timedelta(hours=3, minutes=i)),
              "message": {"role": "assistant", "content": [{"type": "text", "text": f"step {i}"}]}}
             for i in range(20, 0, -1)
         ]
-        gates = [gate_entry(decision="revise", at=now - timedelta(minutes=100 - i)) for i in range(40)]
-        gates += [gate_entry(at=now - timedelta(minutes=50 - i)) for i in range(20)]
+        gates = [gate_line(decision="revise", at=now - timedelta(minutes=100 - i)) for i in range(40)]
+        gates += [gate_line(at=now - timedelta(minutes=50 - i)) for i in range(20)]
         self.home.session("01a0f000-0000-7000-8000-00000000f004", context + gates)
         packet = self.home.root / "packet.jsonl"
-        self.home.run("sample", "--since", iso(now - timedelta(days=1)), "--until", iso(now), "--n", "20",
+        self.home.run("sample", "--since", ar.iso(now - timedelta(days=1)), "--until", ar.iso(now), "--n", "20",
                       "--out", str(packet), check_exit=0)
         header, *rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(header["strata"], {"priority": {"population": 40, "drawn": 10},
