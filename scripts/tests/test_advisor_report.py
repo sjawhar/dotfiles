@@ -282,7 +282,7 @@ class ScopedCallsTest(unittest.TestCase):
                              "--stats-db", str(stats), "--no-sync", "--json", check_exit=0)
         return json.loads(proc.stdout)
 
-    def test_dispatch_issue_counts_only_with_spec_and_calls_split_by_agent_type(self):
+    def test_dispatch_issue_counts_only_with_spec_and_calls_split_by_file_depth(self):
         day = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
         root = self.home.session("01a0f000-0000-7000-8000-00000000f002", [
             self.assistant("t1", "write", {"path": "xd://dispatch_issue", "content": json.dumps({"title": "x"})}, 1),
@@ -298,8 +298,25 @@ class ScopedCallsTest(unittest.TestCase):
             (str(root), "t3", "write", "main", at), (str(sub), "t4", "dispatch_comment", "subagent", at),
         ])
         scoped = self.metrics(stats)["scoped_calls"]
-        self.assertEqual((scoped["main"], scoped["subagent"], scoped["unjoined"]), (1, 1, 0))
-        self.assertEqual(scoped["per_day"]["main"], 1.0)
+        self.assertEqual((scoped.get("root"), scoped.get("subagent")), (1, 1))
+        self.assertEqual(scoped["per_day"].get("root"), 1.0)
+        self.assertEqual(scoped.get("stats_db_agent_type"), {"root": {"main": 1}, "subagent": {"subagent": 1}})
+
+    def test_calls_stats_db_never_ingested_are_still_split_by_file_depth(self):
+        """stats.db drops rows for some fully ingested files; the file's place decides root or subagent."""
+        day = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+        comment = {"path": "xd://dispatch_comment", "content": json.dumps({"issue": "EX-1", "body": "b"})}
+        root = self.home.session("01a0f000-0000-7000-8000-00000000f007", [
+            self.assistant("t8", "write", comment, 1), self.assistant("t9", "write", comment, 2),
+        ], started=day)
+        sub = root.with_suffix("") / "Worker.jsonl"
+        write_jsonl(sub, [self.assistant("t10", "dispatch_message", {"issue": "EX-1", "body": "b"}, 3)])
+        stats = self.home.root / "stats.db"
+        build_stats_db(stats, tool_calls=[(str(root), "t8", "write", "main", int(day.timestamp() * 1000))], files=[root, sub])
+        scoped = self.metrics(stats)["scoped_calls"]
+        self.assertEqual((scoped.get("root"), scoped.get("subagent")), (2, 1))
+        self.assertEqual(scoped.get("stats_db_agent_type"),
+                         {"root": {"main": 1, "unjoined": 1}, "subagent": {"unjoined": 1}})
 
     def test_rows_recorded_before_the_session_moved_directory_still_join(self):
         """An agent box relaunch moves the session to a new project dir; stats.db keeps the earlier rows under the old path."""
@@ -323,7 +340,8 @@ class ScopedCallsTest(unittest.TestCase):
         )
         m = self.metrics(stats)
         scoped = m["scoped_calls"]
-        self.assertEqual((scoped["main"], scoped["subagent"], scoped["unjoined"]), (2, 1, 0))
+        self.assertEqual((scoped.get("root"), scoped.get("subagent")), (2, 1))
+        self.assertEqual(scoped.get("stats_db_agent_type"), {"root": {"main": 2}, "subagent": {"subagent": 1}})
         self.assertEqual(m["corrections"]["sum"], 2)
 
     def test_gate_cost_per_day_prints_beside_the_watch_advisors(self):

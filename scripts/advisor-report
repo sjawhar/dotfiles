@@ -365,7 +365,7 @@ class Scan:
     sessions: list[SessionResult] = field(default_factory=list)
     subagent_files: int = 0
     bad_lines: int = 0
-    scoped: list[tuple[str, str, str]] = field(default_factory=list)  # (session file, tool call id, device)
+    scoped: list[tuple[str, str, str]] = field(default_factory=list)  # (root|subagent, session file, tool call id)
 
     @property
     def gate_entries(self) -> list[dict]:
@@ -446,7 +446,7 @@ def scan_root(path: Path, session_id: str, window: Window, advisor: str, scope_r
                     arguments = block.get("arguments") if isinstance(block.get("arguments"), dict) else {}
                     tool_calls.append((at, arguments))
                     if window.contains(at) and scoped_device(str(block.get("name", "")), arguments, scope_re):
-                        scan.scoped.append((str(path), str(block.get("id")), str(block.get("name"))))
+                        scan.scoped.append(("root", str(path), str(block.get("id"))))
             elif role == "toolResult" and window.contains(at) and content_text(message.get("content")).startswith(SKIP_PREFIX):
                 result.skips += 1
         elif kind == "custom_message" and entry.get("customType") == "advisor" and at is not None:
@@ -517,7 +517,7 @@ def scan_sessions(root: Path, window: Window, advisor: str, scope_re: re.Pattern
                     for block in tool_calls_of(message):
                         arguments = block.get("arguments") if isinstance(block.get("arguments"), dict) else {}
                         if scoped_device(str(block.get("name", "")), arguments, scope_re):
-                            scan.scoped.append((str(path), str(block.get("id")), str(block.get("name"))))
+                            scan.scoped.append(("subagent", str(path), str(block.get("id"))))
     return scan
 
 
@@ -561,14 +561,16 @@ def ingested_paths(db: sqlite3.Connection) -> dict[tuple[str, ...], list[str]]:
     return paths
 
 
-def agent_types(db: sqlite3.Connection, calls: list[tuple[str, str, str]]) -> Counter:
-    """Each call's `tool_calls.agent_type`, looked up under its file's current path and then under every earlier path."""
-    by_file: dict[str, list[str]] = {}
-    for session_file, call_id, _name in calls:
-        by_file.setdefault(session_file, []).append(call_id)
+def agent_types(db: sqlite3.Connection, calls: list[tuple[str, str, str]]) -> dict[str, Counter]:
+    """stats.db's `tool_calls.agent_type` for the calls of each file kind, a cross-check of the split by file depth: each
+    call is looked up under its file's current path and then under every earlier path; one in no row is `unjoined`."""
+    by_file: dict[tuple[str, str], list[str]] = {}
+    for kind, session_file, call_id in calls:
+        by_file.setdefault((kind, session_file), []).append(call_id)
     aliases = ingested_paths(db) if calls else {}
-    found: Counter = Counter()
-    for session_file, ids in by_file.items():
+    found: dict[str, Counter] = {}
+    for (kind, session_file), ids in by_file.items():
+        counts = found.setdefault(kind, Counter())
         missing = set(ids)
         for candidate in [session_file, *(p for p in aliases.get(session_key(session_file), []) if p != session_file)]:
             wanted = sorted(missing)
@@ -581,10 +583,11 @@ def agent_types(db: sqlite3.Connection, calls: list[tuple[str, str, str]]) -> Co
                 for call_id, agent_type in rows:
                     if call_id in missing:
                         missing.discard(call_id)
-                        found[agent_type] += 1
+                        counts[agent_type] += 1
             if not missing:
                 break
-        found["unjoined"] += len(missing)
+        if missing:
+            counts["unjoined"] += len(missing)
     return found
 
 
@@ -748,6 +751,7 @@ def compute_metrics(scan: Scan, scope_re: re.Pattern, stats: sqlite3.Connection,
     queued = sum(1 for call in admitted if call["ack"] == "queued")
     latencies = [ms for session in scan.sessions for ms in session.held_latencies]
     turns = sum(session.turns for session in scan.sessions)
+    kinds = Counter(kind for kind, _file, _call_id in scan.scoped)
     types = agent_types(stats, scan.scoped)
     days = scan.window.days
     correction_total = corrections(stats, scan)
@@ -780,9 +784,9 @@ def compute_metrics(scan: Scan, scope_re: re.Pattern, stats: sqlite3.Connection,
         },
         "skips": scan.skips,
         "scoped_calls": {
-            "main": types["main"], "subagent": types["subagent"], "unjoined": types["unjoined"],
-            "by_agent_type": dict(sorted(types.items())),
-            "per_day": {kind: types[kind] / days for kind in ("main", "subagent", "unjoined")},
+            "root": kinds["root"], "subagent": kinds["subagent"],
+            "per_day": {kind: kinds[kind] / days for kind in ("root", "subagent")},
+            "stats_db_agent_type": {kind: dict(sorted(types.get(kind, Counter()).items())) for kind in ("root", "subagent")},
         },
         "gate": {**gate, "usage_per_day": {key: value / days for key, value in gate["usage"].items()},
                  "cost_usd_per_day": gate["usage"]["cost"] / days},
@@ -806,8 +810,9 @@ def print_metrics(m: dict) -> None:
           f"held {fmt(w['held_pct'])} (median {fmt(w['held_latency_ms'], '.0f')} ms, {w['held_unrouted']} never routed), moot {fmt(w['moot_pct'])}")
     print(f"    chains: {w['chains']['pairs']} similar pairs in {w['chains']['sessions_with_pairs']} sessions; "
           f"{w['chains']['sessions_with_2_blockers']} sessions with >= 2 blockers")
-    print(f"  scoped calls/day: main {s['per_day']['main']:.2f}, subagent {s['per_day']['subagent']:.2f}, unjoined {s['per_day']['unjoined']:.2f} "
-          f"(totals {s['main']}/{s['subagent']}/{s['unjoined']})")
+    print(f"  scoped calls/day: root {s['per_day']['root']:.2f}, subagent {s['per_day']['subagent']:.2f} "
+          f"(totals {s['root']}/{s['subagent']}); stats.db agent_type: root {s['stats_db_agent_type']['root']}, "
+          f"subagent {s['stats_db_agent_type']['subagent']}")
     print(f"  gate: {g['matched']} matched {g['counts']}; p50 {fmt(g['latency_ms_p50'], '.0f')} ms, p95 {fmt(g['latency_ms_p95'], '.0f')} ms; "
           f"fail-open {fmt(g['fail_open_rate'])}, ungated {fmt(g['ungated_share'])}, revise {fmt(g['revise_rate'])}, "
           f"rebuttal {fmt(g['rebuttal_rate'])}, breaker {g['breaker_trips']}, killed {g['killed']}, "
