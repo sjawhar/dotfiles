@@ -91,6 +91,7 @@ these rules over the window from launch to now; a gate that was never armed is n
 
 | When | Rule | Result |
 |---|---|---|
+| any day, before every rule below | `advisor.disableRoster` in the overlay holds `askgate`, or any call since launch recorded `outcome: killed` | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
 | day 3 onward | `ungated_share` > 0.20 over ≥ 20 matched calls in the last 24 h, or verdict p95 above the timeout in the last 24 h | KILL |
 | day 14 | `ungated_share` ≥ 0.10 over the window | KILL |
 | day 14, ≥ 30 labelled revises | precision < 0.3, or harm > 0.10 | KILL |
@@ -100,7 +101,11 @@ these rules over the window from launch to now; a gate that was never armed is n
 | any day | fewer than 30 labelled revises | incomplete; each completed week with no labels is named |
 | any day | `~/.omp/agent/extensions/askgate.ts` does not resolve to a file under `$DOTFILES_DIR`, or `$DOTFILES_DIR/omp/WATCHDOG.yml` has no `advisors:` entries | incomplete; nothing is written |
 
-The day-3 rule catches a gate that fails open or stalls the agent; the rest is the go decision. Precision is
+The killed rule comes first because a killed gate records every later call as `killed`, which leaves every
+denominator: the rules would judge only the calls before the kill, and a 24-hour burst that tripped the day-3
+rule is small against the whole window, so the day-14 rules could pass and read GO. The `killed` entries keep
+saying so after the owner's cleanup removes `askgate` from the overlay. The day-3 rule catches a gate that
+fails open or stalls the agent; the rest is the go decision. Precision is
 measured against a baseline of 4 in 26 notes (0.15) from the watch-mode AskGate. The link rule catches a
 gate that is no longer loaded. The roster rule writes nothing because no setting reaches an older omp: a
 roster without `advisors:` entries makes an omp that falls back to its every-turn default watcher when the
