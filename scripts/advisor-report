@@ -26,7 +26,8 @@ Pre-registered rules for the AskGate gate (`readout --check gate`, launch =
   - day 14: GO (set OMP_ASKGATE=block as the shim default) when labelled
     precision >= 0.5 over >= 30 labelled revises, harm <= 0.05,
     ungated_share < 0.10, p95 <= 0.9 x timeout and skips = 0; KILL when
-    ungated_share >= 0.10, or, at >= 30 labels, precision < 0.3 or harm > 0.10;
+    ungated_share >= 0.10, precision < 0.3 at >= 30 labels, or harm > 0.10 at
+    any number of labels;
     otherwise EXTEND one week once, and from day 21 anything that is not GO is
     KILL.
   - fewer than 30 labelled revises: incomplete, naming each completed week with
@@ -1091,12 +1092,12 @@ def gate_check(now: datetime) -> Check:
     if day >= DECISION_DAY and not kill:
         if whole["ungated_share"] is not None and whole["ungated_share"] >= MAX_UNGATED:
             kill.append(f"day {DECISION_DAY}: ungated_share {whole['ungated_share']:.3f} >= {MAX_UNGATED}")
+        elif lab["n"] >= MIN_LABELS and lab["precision"] < KILL_PRECISION:
+            kill.append(f"day {DECISION_DAY}: precision {lab['precision']:.2f} < {KILL_PRECISION}")
+        elif lab["harm"] is not None and lab["harm"] > KILL_HARM:
+            kill.append(f"day {DECISION_DAY}: harm {lab['harm']:.2f} > {KILL_HARM} over {lab['n']} labels")
         elif lab["n"] >= MIN_LABELS:
-            if lab["precision"] < KILL_PRECISION:
-                kill.append(f"day {DECISION_DAY}: precision {lab['precision']:.2f} < {KILL_PRECISION}")
-            elif lab["harm"] > KILL_HARM:
-                kill.append(f"day {DECISION_DAY}: harm {lab['harm']:.2f} > {KILL_HARM}")
-            elif (lab["precision"] >= GO_PRECISION and lab["harm"] <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
+            if (lab["precision"] >= GO_PRECISION and lab["harm"] <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
                   and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and scan.skips == 0):
                 decision = "GO: make OMP_ASKGATE=block the shim default"
             elif day < EXTENDED_DAY:
