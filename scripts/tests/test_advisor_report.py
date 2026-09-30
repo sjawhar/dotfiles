@@ -440,7 +440,8 @@ class OverlayTest(unittest.TestCase):
         self.assertEqual(self.members(), ["memory", "drift"])
 
     def test_concurrent_adds_lose_no_update(self):
-        loop = 'for i in $(seq 50); do "$0" overlay add advisor.disableRoster "$1" || exit 1; done'
+        """Each worker adds 50 members of its own, so a write lost to a race stays lost."""
+        loop = 'for i in $(seq 50); do "$0" overlay add advisor.disableRoster "$1$i" || exit 1; done'
         workers = [
             subprocess.Popen(["bash", "-c", loop, str(SCRIPT), member], env=self.home.env,
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -449,7 +450,8 @@ class OverlayTest(unittest.TestCase):
         for worker in workers:
             _, err = worker.communicate(timeout=120)
             self.assertEqual(worker.returncode, 0, err)
-        self.assertEqual(sorted(self.members()), ["a", "b"])
+        expected = [f"{member}{i}" for member in ("a", "b") for i in range(1, 51)]
+        self.assertEqual(sorted(self.members()), sorted(expected))
         self.assertEqual(list(self.home.agent_dir.glob("local-overrides.*.tmp")), [])
 
     def test_an_add_waits_for_the_lock(self):
