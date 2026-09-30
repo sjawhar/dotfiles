@@ -159,11 +159,16 @@ is meant to run daily from a oneshot user timer, where a non-zero exit leaves th
 
 `~/.omp/agent/local-overrides.yml` is a machine-local settings overlay; `overlay add <key.path> <member>
 [--why TEXT]` and `overlay remove <key.path> <member> [--why TEXT]` are its only writers. Each holds
-`flock(LOCK_EX)` on `local-overrides.yml.lock` for the whole read-modify-write, keeps every other key and list
-member, writes a temp file in the same directory, fsyncs it, renames it over the file and fsyncs the directory,
-so a crash or a concurrent writer never leaves a torn or stale file. Adding a present member or removing an
-absent one changes nothing. Owners remove only their own members: the gate's kill is `askgate`; turning every
-advisor off on this machine is `askgate`, `memory` and `drift`.
+`flock(LOCK_EX)` on `local-overrides.yml.lock` for the whole read-modify-write and edits the file's text, not a
+re-serialised document: it replaces only the list's value (written as a one-line flow list), or adds the missing
+keys as the last entry of the deepest mapping on the path, so every other byte stays as written. That matters
+because PyYAML reads YAML 1.1 and omp reads YAML 1.2: a rewrite from the parsed document would turn `mode: on`
+into `mode: true` and `perm: 0755` into `perm: 493`. The edited text is written only when PyYAML reads it back as
+the intended document; anything else (a list reached through an alias, say) is refused, exit 1, and the file is
+left as it was. The write goes to a temp file in the same directory, fsyncs it, renames it over the file and
+fsyncs the directory, so a crash or a concurrent writer never leaves a torn or stale file. Adding a present member
+or removing an absent one changes nothing. Owners remove only their own members: the gate's kill is `askgate`;
+turning every advisor off on this machine is `askgate`, `memory` and `drift`.
 
 Every change also appends one line to `local-overrides.provenance.jsonl` beside the overlay, still under the lock
 and after the overlay is written: `at`, `verb` (`add` or `remove`), `key`, `member`, `user`, `omp_session_id`

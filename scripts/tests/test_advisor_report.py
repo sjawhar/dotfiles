@@ -723,6 +723,40 @@ class OverlayTest(unittest.TestCase):
         self.assertEqual(removed, {"verb": "remove", "key": "advisor.disableRoster", "member": "askgate", "user": "tester",
                                    "omp_session_id": None, "argv": [str(SCRIPT), "overlay", "remove", "advisor.disableRoster", "askgate"]})
 
+    # PyYAML reads `on` as true and `0755` as 493, so a file rewritten from the parsed document changes both; omp reads
+    # YAML 1.2, where they are the string "on" and 755.
+    UNTOUCHED = "# machine-local settings\nmode: on\nperm: 0755\n"
+
+    def test_an_edit_replaces_only_the_lists_value_and_leaves_every_other_byte(self):
+        cases = [
+            ("into a block list", "advisor:\n  disableRoster:\n  - memory\n  other: 'x'  # keep\n", "add",
+             "advisor:\n  disableRoster: [memory, askgate]\n  other: 'x'  # keep\n"),
+            ("out of a flow list", "advisor:\n  disableRoster: [memory, askgate]  # paused\n", "remove",
+             "advisor:\n  disableRoster: [memory]  # paused\n"),
+            ("into a mapping that lacks the key", "advisor:\n  other: 'x'  # keep\ntail: off\n", "add",
+             "advisor:\n  other: 'x'  # keep\n  disableRoster: [askgate]\ntail: off\n"),
+            ("into a file that lacks the mapping", "tail: off", "add", "tail: off\nadvisor:\n  disableRoster: [askgate]\n"),
+            ("in place of an empty value", "advisor:\n  disableRoster:\ntail: off\n", "add",
+             "advisor:\n  disableRoster: [askgate]\ntail: off\n"),
+            ("before the comment that heads the next key", "advisor:\n  other: 'x'\n# tail section\ntail: off\n", "add",
+             "advisor:\n  other: 'x'\n  disableRoster: [askgate]\n# tail section\ntail: off\n"),
+        ]
+        for case, body, verb, edited in cases:
+            with self.subTest(case):
+                self.home.overlay.write_text(self.UNTOUCHED + body, encoding="utf-8")
+                self.home.run("overlay", verb, "advisor.disableRoster", "askgate", check_exit=0)
+                self.assertEqual(self.home.overlay.read_text(encoding="utf-8"), self.UNTOUCHED + edited)
+
+    def test_an_edit_that_would_not_read_back_as_intended_is_refused_and_writes_nothing(self):
+        """An alias's node carries its anchor's position, so the list's value cannot be replaced in place; the check of
+        the edited text against the intended document refuses the write."""
+        text = self.UNTOUCHED + "base: &paused [memory]\nadvisor:\n  disableRoster: *paused\n"
+        self.home.overlay.write_text(text, encoding="utf-8")
+        proc = self.home.run("overlay", "add", "advisor.disableRoster", "askgate", check_exit=1)
+        self.assertIn("nothing written", proc.stderr)
+        self.assertEqual(self.home.overlay.read_text(encoding="utf-8"), text)
+        self.assertEqual(self.home.provenance(), [])
+
     def test_adds_are_member_semantics_in_either_order_and_remove_takes_only_its_member(self):
         self.home.overlay.write_text("compaction:\n  enabled: true\n", encoding="utf-8")
         for member in ("askgate", "memory", "drift"):
