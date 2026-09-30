@@ -277,14 +277,20 @@ def scoped_device(name: str, arguments: dict, scope_re: re.Pattern) -> str | Non
 
 @dataclass(frozen=True)
 class GateEntry:
-    """One `advisor-gate` entry the AskGate extension appended to a root session, and whether a revise it holds reached
-    the agent (warn_delivered says how)."""
+    """One `advisor-gate` entry the AskGate extension appended to a root session, whether a revise it holds reached the
+    agent (warn_delivered says how), and whether its call's tool result was an error (None: the call has no result)."""
 
     session_id: str
     id: str | None
     at: datetime | None
     data: dict
     delivered: bool
+    result_error: bool | None
+
+    @property
+    def let_through(self) -> bool:
+        """The gate passed the call on to Dispatch: every call but a block-mode revise, which the gate refused."""
+        return not (self.data.get("verdictMode") == "block" and self.data.get("decision") == "revise")
 
     @property
     def row_id(self) -> str:
@@ -376,6 +382,7 @@ class SessionRecord:
     session_id: str
     turn_times: list = field(default_factory=list)
     tool_calls: list = field(default_factory=list)
+    tool_errors: dict = field(default_factory=dict)  # tool call id -> whether its result was an error
     cards: list = field(default_factory=list)
     skips: list = field(default_factory=list)
     gate_entries: list = field(default_factory=list)
@@ -386,9 +393,19 @@ class SessionRecord:
 
 
 @dataclass(frozen=True)
+class Attempt:
+    """A scoped Dispatch call: the unit of every gate rate, whatever Dispatch then did with it. `error` is whether its
+    tool result was an error, None when it has none; an attempt is a send when `error` is False."""
+
+    path: Path
+    id: str
+    error: bool | None
+
+
+@dataclass(frozen=True)
 class SubagentScan:
     files: int
-    calls: int
+    attempts: list
     bad_lines: int
 
 
@@ -419,11 +436,13 @@ def tool_call_arguments(block: dict) -> dict:
 
 
 def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> SessionRecord:
-    """Fill `record` from a primary session's entries: assistant turns, tool calls, advisor cards, skips, and the gate
-    entries of `advisor`, each warn-mode revise delivered only when a developer message after it and before the agent's
-    next assistant message carries it (the fork drops a skipped call's context)."""
+    """Fill `record` from a primary session's entries: assistant turns, tool calls and whether each result was an error,
+    advisor cards, skips, and the gate entries of `advisor`, each with its call's result and each warn-mode revise
+    delivered only when a developer message after it and before the agent's next assistant message carries it (the
+    fork drops a skipped call's context)."""
     open_skips: list = []  # skipped results the steer that caused them has not followed yet
     open_warns: list = []  # indices in record.gate_entries of warn-mode revises no developer message has carried yet
+    awaiting: dict = {}  # tool call id -> indices in record.gate_entries of that call's entries, until its result
     for position, entry in enumerate(entries):
         kind, at = entry.get("type"), entry_time(entry)
         if kind == "message":
@@ -435,8 +454,16 @@ def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> S
                 record.turn_times.append(at)
                 record.tool_calls += [ToolCall(at, str(block.get("id")), str(block.get("name", "")), tool_call_arguments(block))
                                       for block in tool_calls_of(message)]
-            elif role == "toolResult" and content_text(message.get("content")).startswith(SKIP_PREFIX):
-                open_skips.append(at)
+            elif role == "toolResult":
+                skipped = content_text(message.get("content")).startswith(SKIP_PREFIX)
+                if skipped:
+                    open_skips.append(at)
+                call_id = message.get("toolCallId")
+                if isinstance(call_id, str):
+                    # A skipped call never ran, so it is no send whatever its flag says.
+                    record.tool_errors[call_id] = error = message.get("isError") is True or skipped
+                    for index in awaiting.pop(call_id, []):
+                        record.gate_entries[index] = replace(record.gate_entries[index], result_error=error)
             elif role == "developer":
                 text = content_text(message.get("content"))
                 for index in open_warns:
@@ -457,11 +484,13 @@ def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> S
             name = data.get("advisor")
             if advisor != "default" and isinstance(name, str) and slugify(name) == advisor:
                 # A block-mode revise is the call's own tool result, so it always reaches the agent.
-                gate = GateEntry(record.session_id, entry.get("id"), at, data, delivered=False)
+                gate = GateEntry(record.session_id, entry.get("id"), at, data, delivered=False, result_error=None)
                 blocked = gate.is_revise and data.get("verdictMode") == "block"
                 record.gate_entries.append(replace(gate, delivered=True) if blocked else gate)
                 if gate.is_revise and not blocked:
                     open_warns.append(len(record.gate_entries) - 1)
+                if isinstance(data.get("toolCallId"), str):
+                    awaiting.setdefault(data["toolCallId"], []).append(len(record.gate_entries) - 1)
     record.skips += [Skip(skip_at, None) for skip_at in open_skips]
     return record
 
@@ -531,10 +560,12 @@ def scan_sessions(root: Path, window: Window, advisor: str) -> Iterator[SessionR
     return (scan_root(path, session_id, advisor) for path, session_id in root_session_files(root, window, advisor))
 
 
-def subagent_scoped_calls(root: Path, window: Window, scope_re: re.Pattern) -> SubagentScan:
-    """Scoped calls in the window in task subagent files: every file below a root session's <stem>/ but an advisor
-    transcript, touched since the window opened."""
-    files = calls = bad_lines = 0
+def subagent_attempts(root: Path, window: Window, scope_re: re.Pattern) -> SubagentScan:
+    """Attempts in the window in task subagent files, with their results: every file below a root session's <stem>/ but
+    an advisor transcript, touched since the window opened. Only lines naming a Dispatch device are parsed; a scoped
+    call's result names its device too (the call's `toolName`, or `details.xdev.tool` for a device write)."""
+    files = bad_lines = 0
+    attempts = []
     opened = window.since.timestamp()
     for dirpath, _dirnames, filenames in os.walk(root):
         if len(Path(dirpath).relative_to(root).parts) < 2:
@@ -546,13 +577,19 @@ def subagent_scoped_calls(root: Path, window: Window, scope_re: re.Pattern) -> S
             files += 1
             entries, bad = read_jsonl(path, must_contain="dispatch_")
             bad_lines += bad
+            calls, errors = [], {}
             for entry in entries:
                 message = entry.get("message") or {}
-                if entry.get("type") != "message" or message.get("role") != "assistant" or not window.contains(entry_time(entry)):
+                if entry.get("type") != "message":
                     continue
-                calls += sum(1 for block in tool_calls_of(message)
-                             if scoped_device(str(block.get("name", "")), tool_call_arguments(block), scope_re))
-    return SubagentScan(files, calls, bad_lines)
+                if message.get("role") == "toolResult" and isinstance(message.get("toolCallId"), str):
+                    errors[message["toolCallId"]] = (message.get("isError") is True
+                                                     or content_text(message.get("content")).startswith(SKIP_PREFIX))
+                elif message.get("role") == "assistant" and window.contains(entry_time(entry)):
+                    calls += [str(block.get("id")) for block in tool_calls_of(message)
+                              if scoped_device(str(block.get("name", "")), tool_call_arguments(block), scope_re)]
+            attempts += [Attempt(path, call_id, errors.get(call_id)) for call_id in calls]
+    return SubagentScan(files, attempts, bad_lines)
 
 
 # --- metrics over parsed data ----------------------------------------------
@@ -569,8 +606,14 @@ def window_calls(record: SessionRecord, window: Window) -> list[AdviseCall]:
     return [call for call in record.advise_calls if window.contains(call.at)]
 
 
-def root_scoped_calls(record: SessionRecord, window: Window, scope_re: re.Pattern) -> int:
-    return sum(1 for call in record.tool_calls if window.contains(call.at) and scoped_device(call.name, call.arguments, scope_re))
+def root_attempts(record: SessionRecord, window: Window, scope_re: re.Pattern) -> list[ToolCall]:
+    """The root session's scoped calls in the window, whatever Dispatch then did with them."""
+    return [call for call in record.tool_calls if window.contains(call.at) and scoped_device(call.name, call.arguments, scope_re)]
+
+
+def sends(attempts: list[ToolCall], errors: dict) -> int:
+    """Attempts whose tool result is not an error; an attempt with no result is no send."""
+    return sum(1 for call in attempts if errors.get(call.id) is False)
 
 
 def skips_in(record: SessionRecord, window: Window) -> int:
@@ -640,7 +683,15 @@ def blockers(admitted: list[AdviseCall]) -> int:
     return sum(1 for call in admitted if call.severity == "blocker")
 
 
+def entry_cost(data: dict) -> float:
+    usage = data.get("usage")
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    return cost if isinstance(cost, (int, float)) else 0
+
+
 def gate_metrics(entries: list[GateEntry]) -> dict:
+    """The gate's metrics over its entries, one per attempt: every rate and cost is per attempt, beside the attempts
+    Dispatch sent (tool result not an error) and those it refused after the gate had let them through."""
     data = [entry.data for entry in entries]
     outcomes = Counter(d.get("outcome") for d in data)
     verdict_latencies = [d["latencyMs"] for d in data
@@ -648,8 +699,12 @@ def gate_metrics(entries: list[GateEntry]) -> dict:
     revises = sum(1 for entry in entries if entry.fired)
     shutdowns = Counter(d.get("verdictMode") for d in data if d.get("outcome") == SHUTDOWN)
     matched = len(data)
+    sent = sum(1 for entry in entries if entry.result_error is False)
+    refused = [entry for entry in entries if entry.let_through and entry.result_error is True]
+    paid = [entry for entry in refused if entry.data.get("outcome") == "verdict"]
+    usage = gate_usage(data)
     return {
-        "matched": matched,
+        "matched_attempts": matched,
         "counts": dict(sorted(Counter(f"{d.get('decision')}/{d.get('outcome')}" for d in data).items())),
         "latency_ms_p50": nearest_rank(verdict_latencies, 0.5),
         "latency_ms_p95": nearest_rank(verdict_latencies, 0.95),
@@ -667,7 +722,12 @@ def gate_metrics(entries: list[GateEntry]) -> dict:
         "shutdown": outcomes[SHUTDOWN],
         "shutdown_by_mode": {"warn": shutdowns["warn"], "block": shutdowns["block"]},
         "halted_sessions": len({entry.session_id for entry in entries if entry.data.get("outcome") == "halted"}),
-        "usage": gate_usage(data),
+        "sent_attempts": sent,
+        "passed_then_refused": len(refused),
+        "paid_on_refused": {"attempts": len(paid), "cost": sum(entry_cost(entry.data) for entry in paid)},
+        "usage": usage,
+        "cost_per_attempt": ratio(usage["cost"], matched),
+        "cost_per_send": ratio(usage["cost"], sent),
     }
 
 
@@ -695,6 +755,35 @@ def labelled_metrics(labels: dict[str, dict], fired_ids, skips: int) -> dict:
         "precision": ratio(counts["acted-correct"] + counts["ignored-advisor-right"], len(rows)),
         "harm": ratio(counts["acted-harmful"] + skips, len(rows)),
     }
+
+
+def attempt_totals(attempts: list[Attempt], days: float) -> dict:
+    sent = sum(1 for attempt in attempts if attempt.error is False)
+    return {"attempts": len(attempts), "sends": sent, "send_share": ratio(sent, len(attempts)),
+            "attempts_per_day": len(attempts) / days, "sends_per_day": sent / days}
+
+
+STATS_CHUNK = 500  # tool call ids per stats.db query, under SQLite's bound-parameter limit
+
+
+def sends_cross_check(db: sqlite3.Connection, attempts: list[Attempt]) -> dict:
+    """Each attempt's result in its transcript against stats.db's tool_calls.is_error, joined on the path below the
+    project directory and the tool call id: how many attempts stats.db lacks, and how many it records otherwise."""
+    ids = sorted({attempt.id for attempt in attempts})
+    known = {}
+    for start in range(0, len(ids), STATS_CHUNK):
+        chunk = ids[start:start + STATS_CHUNK]
+        rows = db.execute(f"select session_file, tool_call_id, is_error from tool_calls where tool_call_id in "
+                          f"({','.join('?' * len(chunk))})", chunk).fetchall()
+        known.update({(session_key(path), call_id): None if error is None else bool(error) for path, call_id, error in rows})
+    missing = disagree = 0
+    for attempt in attempts:
+        key = (session_key(str(attempt.path)), attempt.id)
+        if key not in known:
+            missing += 1
+        elif known[key] != attempt.error:
+            disagree += 1
+    return {"attempts": len(attempts), "missing": missing, "disagree": disagree}
 
 
 # --- stats.db --------------------------------------------------------------
@@ -1015,7 +1104,7 @@ def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, w
                     scope_re: re.Pattern, labels: dict[str, dict], stats: sqlite3.Connection) -> dict:
     """Every metric over the window, one root session at a time; nothing of a session is kept past its turn."""
     n = Counter()
-    by_ack, latencies, gate_entries, fired, paths = Counter(), [], [], [], []
+    by_ack, latencies, gate_entries, fired, paths, attempts = Counter(), [], [], [], [], []
     for record in records:
         calls = window_calls(record, window)
         admitted = [call for call in calls if call.admitted]
@@ -1023,12 +1112,14 @@ def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, w
         pairs = chain_pairs(admitted)
         entries = [entry for entry in record.gate_entries if window.contains(entry.at)]
         n.update(files=1, bad_lines=record.bad_lines, transcripts=record.transcript, turns=primary_turns(record, window),
-                 advisor_turns=advisor_turns(record, window), scoped=root_scoped_calls(record, window, scope_re),
+                 advisor_turns=advisor_turns(record, window),
                  skips=own_skips(record, window, advisor), skips_any_steer=skips_in(record, window), admitted=len(admitted),
                  queued=sum(1 for call in admitted if call.ack == "queued"),
                  out_of_charter=out_of_charter(admitted, scope_re), unrouted=held.unrouted,
                  moot=moot_count(held.routed, record.tool_calls), pairs=pairs, sessions_with_pairs=pairs > 0,
                  sessions_with_2_blockers=blockers(admitted) >= 2)
+        attempts += [Attempt(record.path, call.id, record.tool_errors.get(call.id))
+                     for call in root_attempts(record, window, scope_re)]
         by_ack.update(call.ack for call in calls)
         latencies += held.latencies_ms
         gate_entries += entries
@@ -1060,8 +1151,8 @@ def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, w
         },
         "skips": n["skips"],
         "skips_any_steer": n["skips_any_steer"],
-        "scoped_calls": {"root": n["scoped"], "subagent": subagents.calls,
-                         "per_day": {"root": n["scoped"] / days, "subagent": subagents.calls / days}},
+        "attempts": {"root": attempt_totals(attempts, days), "subagent": attempt_totals(subagents.attempts, days),
+                     "stats_db": sends_cross_check(stats, attempts + subagents.attempts)},
         "gate": {**gate, "usage_per_day": {key: value / days for key, value in gate["usage"].items()},
                  "cost_usd_per_day": gate["usage"]["cost"] / days},
         "corrections": {"sum": correction_total, "per_100_turns": per_100_turns(correction_total, turns)},
@@ -1074,7 +1165,7 @@ def fmt(value, spec: str = ".3f") -> str:
 
 
 def print_metrics(m: dict) -> None:
-    w, g, s = m["watch"], m["gate"], m["scoped_calls"]
+    w, g, a = m["watch"], m["gate"], m["attempts"]
     print(f"advisor {m['advisor']}, {m['window']['since']} .. {m['window']['until']} ({m['window']['days']:.1f} d)")
     print(f"  files: {m['files']['root']} root, {m['files']['subagent']} subagent, {m['files']['bad_lines']} unparsable lines")
     print(f"  primary turns {m['primary_turns']}; skips {m['skips']} ({m['skips_any_steer']} by any steer); "
@@ -1084,13 +1175,19 @@ def print_metrics(m: dict) -> None:
           f"held {fmt(w['held_pct'])} (median {fmt(w['held_latency_ms'], '.0f')} ms, {w['held_unrouted']} never routed), moot {fmt(w['moot_pct'])}")
     print(f"    chains: {w['chains']['pairs']} similar pairs in {w['chains']['sessions_with_pairs']} sessions; "
           f"{w['chains']['sessions_with_2_blockers']} sessions with >= 2 blockers")
-    print(f"  scoped calls/day: root {s['per_day']['root']:.2f}, subagent {s['per_day']['subagent']:.2f} "
-          f"(totals {s['root']}/{s['subagent']})")
-    print(f"  gate: {g['matched']} matched {g['counts']}; p50 {fmt(g['latency_ms_p50'], '.0f')} ms, p95 {fmt(g['latency_ms_p95'], '.0f')} ms; "
-          f"fail-open {fmt(g['fail_open_rate'])}, ungated {fmt(g['ungated_share'])}, revise {fmt(g['revise_rate'])}, "
-          f"rebuttal {fmt(g['rebuttal_rate'])}, breaker {g['breaker_trips']}, killed {g['killed']}, "
-          f"halted sessions {g['halted_sessions']}")
-    print(f"  gate spend/day: ${g['cost_usd_per_day']:.2f} ({g['usage_per_day']['input']:.0f} in, "
+    for side in ("root", "subagent"):
+        print(f"  {side} attempts/day {a[side]['attempts_per_day']:.2f}, sends/day {a[side]['sends_per_day']:.2f}, "
+              f"send_share {fmt(a[side]['send_share'])} (totals {a[side]['attempts']}/{a[side]['sends']})")
+    print(f"    stats.db tool_calls: {a['stats_db']['missing']} of {a['stats_db']['attempts']} attempts missing, "
+          f"{a['stats_db']['disagree']} recorded with another result")
+    print(f"  gate: {g['matched_attempts']} attempts {g['counts']}; p50 {fmt(g['latency_ms_p50'], '.0f')} ms, "
+          f"p95 {fmt(g['latency_ms_p95'], '.0f')} ms over verdict attempts; fail-open {fmt(g['fail_open_rate'])}, "
+          f"ungated {fmt(g['ungated_share'])}, revise {fmt(g['revise_rate'])}, rebuttal {fmt(g['rebuttal_rate'])} of attempts; "
+          f"breaker {g['breaker_trips']}, killed {g['killed']}, halted sessions {g['halted_sessions']}")
+    print(f"    sent {g['sent_attempts']}, passed then refused {g['passed_then_refused']} (paid "
+          f"{g['paid_on_refused']['attempts']}, ${g['paid_on_refused']['cost']:.2f})")
+    print(f"  gate spend/day: ${g['cost_usd_per_day']:.2f}, ${fmt(g['cost_per_attempt'], '.4f')} per attempt, "
+          f"${fmt(g['cost_per_send'], '.4f')} per send ({g['usage_per_day']['input']:.0f} in, "
           f"{g['usage_per_day']['output']:.0f} out, {g['usage_per_day']['cacheRead']:.0f} cache read, "
           f"{g['usage_per_day']['cacheWrite']:.0f} cache write tokens); watch-mode {m['advisor']} spend/day "
           f"${m['watch']['cost_usd_per_day']:.2f} (stats.db)")
@@ -1108,7 +1205,7 @@ def cmd_metrics(args) -> int:
     stats, covers_until = open_stats(stats_path, window)
     root = (Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions").absolute()
     with closing(stats):
-        metrics = compute_metrics(scan_sessions(root, window, args.advisor), subagent_scoped_calls(root, window, scope_re),
+        metrics = compute_metrics(scan_sessions(root, window, args.advisor), subagent_attempts(root, window, scope_re),
                                   window, args.advisor, scope_re, load_labels(), stats)
     metrics["stats_db"] = {"path": str(stats_path), "covers_until": iso(covers_until)}
     if args.json:
@@ -1444,17 +1541,20 @@ def gate_check(now: datetime) -> Check:
     problems = attempt("read the roster", lambda: roster_problems(dotfiles_dir(), agent_dir()), failures)
     fired = [(entry.row_id, entry.at) for entry in entries if entry.fired]
     lab = None if labels is None else labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
-    lines = [f"gate: day {day:.1f}; {whole['matched']} matched ({whole['killed']} killed), ungated_share "
-             f"{fmt(whole['ungated_share'])}, p95 {fmt(whole['latency_ms_p95'], '.0f')} ms (timeout {timeout_ms}), "
-             f"skips {skips} ({any_skips} by any steer); "
-             f"last 24 h {recent['matched']} matched, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
+    lines = [f"gate: day {day:.1f}; {whole['matched_attempts']} attempts ({whole['killed']} killed), ungated_share "
+             f"{fmt(whole['ungated_share'])} of attempts, p95 {fmt(whole['latency_ms_p95'], '.0f')} ms over verdict attempts "
+             f"(timeout {timeout_ms}), skips {skips} ({any_skips} by any steer); "
+             f"last 24 h {recent['matched_attempts']} attempts, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
              + ("unread" if lab is None else f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}"),
              f"gate: {whole['skipped']} skipped: the primary was on another provider, so the gate sent no transcript; "
              "not in ungated_share",
              f"gate: {whole['abandoned']} abandoned: the user stopped the write while the gate waited; not in ungated_share",
              f"gate: {whole['shutdown']} shutdown: {whole['shutdown_by_mode']['warn']} in warn mode, whose write went out "
              f"without a verdict (ungated); {whole['shutdown_by_mode']['block']} in block mode, refused (gated)",
-             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch" + ("" if baseline is None else f"; {baseline}"),
+             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch, ${fmt(whole['cost_per_attempt'], '.4f')} "
+             f"per attempt, ${fmt(whole['cost_per_send'], '.4f')} per send; {whole['sent_attempts']} attempts sent, "
+             f"{whole['passed_then_refused']} passed then refused ({whole['paid_on_refused']['attempts']} paid, "
+             f"${whole['paid_on_refused']['cost']:.2f})" + ("" if baseline is None else f"; {baseline}"),
              *(f"gate: {problem}" for problem in problems or [])]
     # Two readouts at once (the timer and a hand run) must not both apply and announce a KILL, so the overlay is read,
     # the rules decided and the KILL written under the one lock every overlay writer takes. The overlay member is a

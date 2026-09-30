@@ -69,7 +69,8 @@ def now_utc() -> datetime:
 _entry_seq = [0]
 
 
-def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None, reason=None, mode="warn"):
+def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None, reason=None, mode="warn",
+              call_id=None, cost=None):
     """An `advisor-gate` entry as the AskGate extension appends it to a root session file."""
     _entry_seq[0] += 1
     if decision == "revise" and outcome == "verdict":
@@ -84,22 +85,24 @@ def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="Ask
             "advisor": advisor,
             "tool": "write",
             "path": "xd://example_send",
-            "toolCallId": f"call{_entry_seq[0]}",
+            "toolCallId": call_id or f"call{_entry_seq[0]}",
             "decision": decision,
             "outcome": outcome,
             "verdictMode": mode,
             "latencyMs": latency_ms,
             "revisesForKey": 0,
             **({"reason": reason} if reason else {}),
+            **({"usage": {"cost": cost}} if cost is not None else {}),
         },
     }
 
 
-def gate_entry(session="s1", delivered=False, **fields):
-    """The same entry as the script reads it; `delivered` says whether a revise reached the agent."""
+def gate_entry(session="s1", delivered=False, result_error=None, **fields):
+    """The same entry as the script reads it; `delivered` says whether a revise reached the agent, `result_error` whether
+    the call's tool result was an error (None: no result)."""
     line = gate_line(**fields)
     return ar.GateEntry(session_id=session, id=line["id"], at=ar.parse_iso(line["timestamp"]), data=line["data"],
-                        delivered=delivered)
+                        delivered=delivered, result_error=result_error)
 
 
 def escape_xml(text: str) -> str:
@@ -129,7 +132,7 @@ def write_jsonl(path: Path, entries) -> None:
             fh.write(json.dumps(entry) + "\n")
 
 
-def build_stats_db(path: Path, user_messages=(), files=(), messages=(), covers_until_ms=None) -> None:
+def build_stats_db(path: Path, user_messages=(), files=(), messages=(), covers_until_ms=None, tool_calls=()) -> None:
     db = sqlite3.connect(path)
     db.executescript(
         """
@@ -137,10 +140,12 @@ def build_stats_db(path: Path, user_messages=(), files=(), messages=(), covers_u
                                     anguish integer, yelling integer, profanity integer);
         create table file_offsets (session_file text, last_modified real);
         create table messages (session_file text, agent_type text, timestamp integer, cost_total real);
+        create table tool_calls (session_file text, tool_call_id text, agent_type text, is_error integer, timestamp integer);
         """
     )
     db.executemany("insert into user_messages values (?, ?, ?, ?, ?, ?, ?, ?)", user_messages)
     db.executemany("insert into messages values (?, ?, ?, ?)", messages)
+    db.executemany("insert into tool_calls values (?, ?, ?, ?, ?)", tool_calls)
     hwm = covers_until_ms if covers_until_ms is not None else time.time() * 1000
     db.executemany("insert into file_offsets values (?, ?)", [(str(f), hwm) for f in files] or [("x", hwm)])
     db.commit()
@@ -393,9 +398,10 @@ LONG_REASON, LONG_BLOCK = "failure 7: " + "r" * 3000, "failure 7: " + "r" * 2005
 WIDE_REASON, WIDE_BLOCK = "failure 7: <" + "é" * 1100, "failure 7: &lt;" + "é" * 1000 + " … [elided 200 bytes]"
 
 
-def tool_result(call_id, at):
+def tool_result(call_id, at, error=False, text="ok", name="write"):
     return {"type": "message", "id": f"r{call_id}", "timestamp": ar.iso(at),
-            "message": {"role": "toolResult", "toolCallId": call_id, "toolName": "write", "content": [{"type": "text", "text": "ok"}]}}
+            "message": {"role": "toolResult", "toolCallId": call_id, "toolName": name, "isError": error,
+                        "content": [{"type": "text", "text": text}]}}
 
 
 class DeliveryTest(unittest.TestCase):
@@ -453,7 +459,7 @@ class WindowedCountsTest(unittest.TestCase):
         calls = [advise(str(m), m) for m in self.EDGES] + [advise("untimed", None)]
         self.assertEqual([call.note for call in ar.window_calls(record(advise_calls=calls), hour())], ["0", "30", "60"])
 
-    def test_root_scoped_calls_count_dispatch_issue_only_with_spec(self):
+    def test_root_attempts_count_dispatch_issue_only_with_spec(self):
         spec = {"path": "xd://dispatch_issue", "content": json.dumps({"title": "x", "spec": "s"})}
         calls = [
             tool(-1 / 60, spec), tool(1, spec),
@@ -462,7 +468,35 @@ class WindowedCountsTest(unittest.TestCase):
             tool(4, {"issue": "EX-1", "body": "b"}, name="dispatch_comment"),
             tool(60 + 1 / 60, spec),
         ]
-        self.assertEqual(ar.root_scoped_calls(record(tool_calls=calls), hour(), re.compile(ar.DEFAULT_SCOPE_REGEX)), 2)
+        attempts = ar.root_attempts(record(tool_calls=calls), hour(), re.compile(ar.DEFAULT_SCOPE_REGEX))
+        self.assertEqual([call.id for call in attempts], ["t1", "t4"])
+
+
+COMMENT = {"path": "xd://dispatch_comment", "content": json.dumps({"issue": "EX-1", "body": "b"})}
+
+
+class AttemptsTest(unittest.TestCase):
+    """The unit of every gate rate is an attempt: a scoped call, whatever Dispatch then did with it. A send is an attempt
+    whose tool result is not an error; pi-envoy's refusals and the server's are error results."""
+
+    def test_sends_are_attempts_whose_tool_result_is_not_an_error(self):
+        entries = [assistant_call("c1", "write", COMMENT, minutes(1)), tool_result("c1", minutes(1)),
+                   assistant_call("c2", "write", COMMENT, minutes(2)),
+                   tool_result("c2", minutes(2), error=True, text="dispatch_comment was not called: 1 problem"),
+                   assistant_call("c3", "write", COMMENT, minutes(3)), tool_result("c3", minutes(3)),
+                   assistant_call("c4", "write", COMMENT, minutes(4))]  # the session ended before its result
+        parsed = ar.parse_primary(record(), entries, "askgate")
+        attempts = ar.root_attempts(parsed, hour(), re.compile(ar.DEFAULT_SCOPE_REGEX))
+        self.assertEqual((len(attempts), ar.sends(attempts, parsed.tool_errors)), (4, 2))
+
+    def test_a_gate_entry_carries_its_calls_result(self):
+        entries = [assistant_call("c1", "write", COMMENT, minutes(1)), gate_line(call_id="c1", at=minutes(1)),
+                   tool_result("c1", minutes(1), error=True),
+                   assistant_call("c2", "write", COMMENT, minutes(2)), gate_line(call_id="c2", at=minutes(2)),
+                   tool_result("c2", minutes(2)),
+                   assistant_call("c3", "write", COMMENT, minutes(3)), gate_line(call_id="c3", at=minutes(3))]
+        parsed = ar.parse_primary(record(), entries, "askgate")
+        self.assertEqual([entry.result_error for entry in parsed.gate_entries], [True, False, None])
 
 
 class HeldNotesTest(unittest.TestCase):
@@ -537,8 +571,54 @@ class SessionFilesTest(unittest.TestCase):
         write_jsonl(root.with_suffix("") / "__advisor.askgate.jsonl", [assistant_call("t4", "write", comment, T0)])
         window = ar.Window(T0 - timedelta(days=1), T0 + timedelta(days=1))
         self.assertEqual(list(ar.root_session_files(home.sessions, window, "askgate")), [(root, sid)])
-        subagents = ar.subagent_scoped_calls(home.sessions, window, re.compile(ar.DEFAULT_SCOPE_REGEX))
-        self.assertEqual((subagents.files, subagents.calls), (1, 1))
+        subagents = ar.subagent_attempts(home.sessions, window, re.compile(ar.DEFAULT_SCOPE_REGEX))
+        self.assertEqual((subagents.files, len(subagents.attempts)), (1, 1))
+
+
+class MetricsAttemptsTest(unittest.TestCase):
+    """`metrics --json` reports attempts, sends and send_share for root sessions and task subagents, checks each attempt's
+    result against stats.db's tool_calls.is_error, and prices the gate per attempt and per send."""
+
+    def test_attempts_sends_and_the_gate_per_attempt(self):
+        home = Home()
+        self.addCleanup(home.cleanup)
+        sid = "01a0f000-0000-7000-8000-00000000f00a"
+        refusal = "AskGate did not send this call.\nfailure 7: the text points at a message the reader cannot see"
+        root = home.session(sid, [
+            assistant_call("c1", "write", COMMENT, minutes(1)), gate_line(call_id="c1", at=minutes(1), cost=0.5),
+            tool_result("c1", minutes(1)),
+            assistant_call("c2", "write", COMMENT, minutes(2)), gate_line(call_id="c2", at=minutes(2), cost=0.6),
+            tool_result("c2", minutes(2), error=True, text="dispatch_comment was not called: 1 problem"),
+            assistant_call("c3", "write", COMMENT, minutes(3)),
+            gate_line(call_id="c3", at=minutes(3), decision="revise", mode="block", cost=0.4),
+            tool_result("c3", minutes(3), error=True, text=refusal),
+            assistant_call("c4", "write", COMMENT, minutes(4)), gate_line(call_id="c4", at=minutes(4), cost=0.5),
+            tool_result("c4", minutes(4)),
+        ], started=T0)
+        worker = root.with_suffix("") / "Worker.jsonl"
+        write_jsonl(worker, [
+            assistant_call("s1", "dispatch_comment", {"issue": "EX-1", "body": "b"}, minutes(5)),
+            tool_result("s1", minutes(5), name="dispatch_comment"),
+            assistant_call("s2", "dispatch_comment", {"issue": "EX-1", "body": "b"}, minutes(6)),
+            tool_result("s2", minutes(6), error=True, text="target not found", name="dispatch_comment"),
+        ])
+        stats = home.root / "stats.db"
+        ms = int(minutes(1).timestamp() * 1000)
+        build_stats_db(stats, tool_calls=[(str(root), "c1", "main", 0, ms), (str(root), "c2", "main", 0, ms),
+                                          (str(root), "c3", "main", 1, ms), (str(worker), "s1", "subagent", 0, ms)])
+        proc = home.run("metrics", "--since", ar.iso(T0), "--until", ar.iso(T0 + timedelta(days=1)), "--stats-db", str(stats),
+                        "--no-sync", "--json", check_exit=0)
+        metrics = json.loads(proc.stdout)
+        attempts = metrics["attempts"]
+        self.assertEqual({side: (attempts[side]["attempts"], attempts[side]["sends"]) for side in ("root", "subagent")},
+                         {"root": (4, 2), "subagent": (2, 1)})
+        self.assertEqual((attempts["root"]["send_share"], attempts["subagent"]["send_share"]), (0.5, 0.5))
+        self.assertEqual((attempts["root"]["attempts_per_day"], attempts["root"]["sends_per_day"]), (4.0, 2.0))
+        self.assertEqual(attempts["stats_db"], {"attempts": 6, "missing": 2, "disagree": 1})
+        gate = metrics["gate"]
+        self.assertEqual((gate["matched_attempts"], gate["sent_attempts"], gate["passed_then_refused"]), (4, 2, 1))
+        self.assertEqual(gate["paid_on_refused"], {"attempts": 1, "cost": 0.6})
+        self.assertEqual((gate["cost_per_attempt"], gate["cost_per_send"]), (0.5, 1.0))
 
 
 class StatsDbTest(unittest.TestCase):
@@ -652,7 +732,7 @@ class GateMetricsTest(unittest.TestCase):
         entries = [gate_entry(outcome="timeout") for _ in range(3)] + [gate_entry(outcome="halted") for _ in range(50)]
         metrics = ar.gate_metrics(entries)
         self.assertEqual(metrics["ungated_share"], 1.0)
-        self.assertEqual(metrics["matched"], 53)
+        self.assertEqual(metrics["matched_attempts"], 53)
         self.assertEqual(metrics["fail_open_rate"], 1.0)
         self.assertEqual(metrics["halted_sessions"], 1)
 
@@ -670,7 +750,7 @@ class GateMetricsTest(unittest.TestCase):
         second.data.update(usage={"input": 2000, "output": 70, "cacheRead": 0, "cacheWrite": 0, "cost": 0.5})
         metrics = ar.gate_metrics([first, second, third])
         self.assertEqual(metrics["usage"], {"input": 3000, "output": 120, "cacheRead": 400, "cacheWrite": 900, "cost": 0.75})
-        self.assertEqual(metrics["matched"], 3)
+        self.assertEqual(metrics["matched_attempts"], 3)
 
     def test_revise_rate_is_delivered_revises_over_verdicts(self):
         entries = [gate_entry(decision="revise", delivered=True), gate_entry(decision="revise", delivered=False), gate_entry(),
@@ -701,7 +781,26 @@ class GateMetricsTest(unittest.TestCase):
         metrics = ar.gate_metrics(entries)
         self.assertAlmostEqual(metrics["ungated_share"], 3 / 21)
         self.assertAlmostEqual(metrics["fail_open_rate"], 3 / 21)
-        self.assertEqual((metrics["skipped"], metrics["abandoned"], metrics["matched"]), (5, 5, 31))
+        self.assertEqual((metrics["skipped"], metrics["abandoned"], metrics["matched_attempts"]), (5, 5, 31))
+
+    def test_sends_refusals_after_the_gate_and_cost_per_attempt_and_per_send(self):
+        """The gate judges and bills calls pi-envoy or the server then refuse. A call the gate let through is every call
+        but a block-mode revise, whose error result is the gate's own refusal."""
+        entries = [
+            gate_entry(cost=0.6, result_error=True),  # passed, then refused by pi-envoy: paid
+            gate_entry(decision="revise", mode="warn", cost=0.48, result_error=True),  # a warn revise lets its call through
+            gate_entry(decision="revise", mode="block", cost=0.49, result_error=True),  # the gate's own refusal
+            gate_entry(outcome="timeout", result_error=True),  # passed, refused, unpaid
+            gate_entry(cost=0.5, result_error=False),
+            gate_entry(decision="revise", mode="warn", cost=0.5, result_error=False),
+            gate_entry(outcome="rebuttal", result_error=None),  # the session ended before the result
+        ]
+        metrics = ar.gate_metrics(entries)
+        self.assertEqual((metrics["matched_attempts"], metrics["sent_attempts"], metrics["passed_then_refused"]), (7, 2, 3))
+        self.assertEqual(metrics["paid_on_refused"]["attempts"], 2)
+        self.assertAlmostEqual(metrics["paid_on_refused"]["cost"], 1.08)
+        self.assertAlmostEqual(metrics["cost_per_attempt"], 2.57 / 7)
+        self.assertAlmostEqual(metrics["cost_per_send"], 2.57 / 2)
 
     def test_an_error_counts_as_an_error_whatever_its_reason_says(self):
         """Only unreleased builds wrote an abandoned call as `error` with an `abandoned:` reason; released ones write
