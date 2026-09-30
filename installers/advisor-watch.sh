@@ -28,6 +28,12 @@ envoy="$shared/scripts/envoy"
     echo "advisor-watch: $report is missing; advance ~/.dotfiles to a main that has it" >&2
     exit 1
 }
+for unit in advisor-watch.service advisor-watch.timer; do
+    [[ -f "$shared/omp/$unit" ]] || {
+        echo "advisor-watch: $shared/omp/$unit is missing; advance ~/.dotfiles to a main that has it" >&2
+        exit 1
+    }
+done
 unit_env="$(systemctl --user show-environment)"
 unit_path="$(sed -n 's/^PATH=//p' <<<"$unit_env")"
 for tool in python3 curl jq; do

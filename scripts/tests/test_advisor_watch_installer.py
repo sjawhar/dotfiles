@@ -86,12 +86,15 @@ class AdvisorWatchInstaller(unittest.TestCase):
         user_units = self.home / ".config" / "systemd" / "user"
         return {unit: os.readlink(user_units / unit) for unit in UNITS if (user_units / unit).is_symlink()}
 
+    def systemctl_calls(self) -> str:
+        return self.systemctl_log.read_text(encoding="utf-8") if self.systemctl_log.exists() else ""
+
     def test_run_from_another_checkout_links_the_shared_one(self) -> None:
         proc = self.install()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("advisor-watch: armed", proc.stdout)
         self.assertEqual(self.links(), {unit: str(self.shared / "omp" / unit) for unit in UNITS})
-        self.assertIn("--user enable --now advisor-watch.timer", self.systemctl_log.read_text(encoding="utf-8"))
+        self.assertIn("--user enable --now advisor-watch.timer", self.systemctl_calls())
 
     def test_an_envoy_without_source_arms_nothing(self) -> None:
         write_stub(self.shared / "scripts" / "envoy", ENVOY_WITHOUT_SOURCE)
@@ -99,7 +102,17 @@ class AdvisorWatchInstaller(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("has no 'send --source envoy'", proc.stderr)
         self.assertEqual(self.links(), {})
-        self.assertNotIn("enable", self.systemctl_log.read_text(encoding="utf-8"))
+        self.assertNotIn("enable", self.systemctl_calls())
+
+    def test_a_shared_checkout_without_the_units_arms_nothing(self) -> None:
+        # advisor-report and envoy already there, the unit files not yet: linking would leave dangling links.
+        (self.shared / "omp" / "advisor-watch.timer").unlink()
+        proc = self.install()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("advisor-watch.timer is missing; advance ~/.dotfiles", proc.stderr)
+        self.assertEqual(self.links(), {})
+        self.assertNotIn("daemon-reload", self.systemctl_calls())
+        self.assertNotIn("enable", self.systemctl_calls())
 
 
 if __name__ == "__main__":
