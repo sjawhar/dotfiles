@@ -84,6 +84,9 @@ PASSED = frozenset({"rebuttal", "breaker", "killed"})
 UNJUDGED = frozenset({"skipped", "abandoned"})
 # The extension recorded an abandoned call as `error` with this reason prefix before it had the outcome of its own.
 ABANDONED_REASON = "abandoned:"
+# The session shut down while the gate waited (`shutdown`). In warn mode the write went out without a verdict, so it
+# is ungated; in block mode the call was refused, a gated call like any revise. Both stay in ungated_share's denominator.
+SHUTDOWN = "shutdown"
 # Calls whose latency the gate measured: a verdict, or the deadline passing. The day-3 floor counts these alone.
 LATENCY_EVIDENCE = frozenset({"verdict", "timeout"})
 
@@ -653,6 +656,7 @@ def gate_metrics(entries: list[GateEntry]) -> dict:
     verdict_latencies = [d["latencyMs"] for d in data
                          if d.get("outcome") == "verdict" and isinstance(d.get("latencyMs"), (int, float))]
     revises = sum(1 for entry in entries if entry.fired)
+    shutdowns = Counter(d.get("verdictMode") for d in data if gate_outcome(d) == SHUTDOWN)
     matched = len(data)
     return {
         "matched": matched,
@@ -660,7 +664,8 @@ def gate_metrics(entries: list[GateEntry]) -> dict:
         "latency_ms_p50": nearest_rank(verdict_latencies, 0.5),
         "latency_ms_p95": nearest_rank(verdict_latencies, 0.95),
         "fail_open_rate": ratio(sum(outcomes[o] for o in FAIL_OPEN), sum(outcomes[o] for o in REACHED_MODEL)),
-        "ungated_share": ratio(sum(outcomes[o] for o in UNGATED), matched - sum(outcomes[o] for o in PASSED | UNJUDGED)),
+        "ungated_share": ratio(sum(outcomes[o] for o in UNGATED) + shutdowns["warn"],
+                               matched - sum(outcomes[o] for o in PASSED | UNJUDGED)),
         "verdicts": outcomes["verdict"],
         "latency_calls": sum(outcomes[o] for o in LATENCY_EVIDENCE),
         "revise_rate": ratio(revises, outcomes["verdict"]),
@@ -669,6 +674,8 @@ def gate_metrics(entries: list[GateEntry]) -> dict:
         "killed": outcomes["killed"],
         "skipped": outcomes["skipped"],
         "abandoned": outcomes["abandoned"],
+        "shutdown": outcomes[SHUTDOWN],
+        "shutdown_by_mode": {"warn": shutdowns["warn"], "block": shutdowns["block"]},
         "halted_sessions": len({entry.session_id for entry in entries if entry.data.get("outcome") == "halted"}),
         "usage": gate_usage(data),
     }
@@ -1455,6 +1462,8 @@ def gate_check(now: datetime) -> Check:
              f"gate: {whole['skipped']} skipped: the primary was on another provider, so the gate sent no transcript; "
              "not in ungated_share",
              f"gate: {whole['abandoned']} abandoned: the user stopped the write while the gate waited; not in ungated_share",
+             f"gate: {whole['shutdown']} shutdown: {whole['shutdown_by_mode']['warn']} in warn mode, whose write went out "
+             f"without a verdict (ungated); {whole['shutdown_by_mode']['block']} in block mode, refused (gated)",
              f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch" + ("" if baseline is None else f"; {baseline}"),
              *(f"gate: {problem}" for problem in problems or [])]
     # Two readouts at once (the timer and a hand run) must not both apply and announce a KILL, so the overlay is read,
