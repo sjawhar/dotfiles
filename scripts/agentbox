@@ -38,7 +38,7 @@
 # it (docker exec … agent-secrets keygen) in its private runtime dir, and one enrollment made
 # from the host with the operator's launcher credential (agent-secrets-login, once per host).
 # The key dir is bind-mounted into that box only; the credential lives in the host helper's
-# memory. close_box revokes the enrollment; a detached `agent-secrets renew` in the box
+# memory. close_box revokes the enrollment; a detached `agent-secrets renew` loop in the box
 # (start_renew) keeps its lease, which lapses within 15 min if the launcher never gets there.
 # A box started while the host's helper holds no live launcher credential gets no identity at
 # all (no key, no enrollment.pending): its agents use secretsd, and `new` says so (broker_ready).
@@ -106,9 +106,10 @@ box_keydir() { echo "$RUN_BASE/$1/run-user/agent-secrets"; }
 # The box's key dir is the box's to write too (keygen writes key.pem there as the box's user), so
 # the host keeps its own files beside it, in $RUN_BASE/<box>, which no box mounts: each enroll
 # attempt's error (enroll.attempt-error) and the enrollment id close_box revokes (enrollment-id).
-# What the host puts in the key dir itself is written to a temp file in $RUN_BASE/<box> and
+# What agentbox itself puts in the key dir is written to a temp file in $RUN_BASE/<box> and
 # renamed into place, which replaces whatever the box left at that name (a symlink included)
-# instead of following it.
+# instead of following it. The `enrollment` file the host-side `agent-secrets enroll` writes gets
+# the same treatment only from the legion #1589 release on; the pinned client writes it in place.
 put_keyfile() {
     local box="$1" name="$2" content="$3" tmp
     tmp="$(mktemp "$RUN_BASE/$box/.keyfile.XXXXXX")" || return 1
@@ -181,22 +182,26 @@ enroll_box() {
     enroll_failed "$box" "agent-secrets enroll failed 10 times; last: $(<"$errfile")"
 }
 
-# The box's enrollment lease: one detached `agent-secrets renew` inside it, for every box. It
-# retries a transient failure itself, exits on a refusal (the enrollment is gone), survives an
-# omp relaunch (`agentbox restart`, same container) and dies with the box.
+# The box's enrollment lease: `agent-secrets renew` inside it, for every box, restarted 10 s after
+# it exits. renew retries a transient failure itself but exits on any refusal, and something in
+# the box can kill it; without the restart the lease would lapse within 15 min while the box kept
+# its key. After a revocation the loop only meets the same refusal again. It survives an omp
+# relaunch (`agentbox restart`, same container) and dies with the box.
 start_renew() {
-    docker exec -d --user ubuntu "$1" sh -c 'exec agent-secrets renew >>"$AGENT_SECRETS_KEY_DIR/renew.log" 2>&1'
+    docker exec -d --user ubuntu "$1" sh -c 'while :; do agent-secrets renew; sleep 10; done >>"$AGENT_SECRETS_KEY_DIR/renew.log" 2>&1'
 }
 
 # Enroll a box from `new` once it is up, then start its renew: for omp once its session id is
 # known (omp opens its session file 4–10 s after start, before any tool can run), so the
 # enrollment carries the id the broker wakes on a decision; any other command at once; after
-# 120 s without a session id (an omp --no-session run) without one. A box that never runs, or
-# ends first, ends in enroll_failed too.
+# 120 s without a session id (an omp --no-session run) without one. The enrollment.pending marker
+# is renewed on every pass of the wait, so it stays inside the client's 160 s trust window
+# however long the box takes. A box that never runs, or ends first, ends in enroll_failed too.
 enroll_when_up() {
     local box="$1" child="$2" cmd="$3" sid="" deadline=$(( SECONDS + 120 ))
     wait_for_running "$box" "$child" || { enroll_failed "$box" "$box never reached Running; not enrolled"; return 1; }
     while kill -0 "$child" 2>/dev/null; do
+        put_keyfile "$box" enrollment.pending ""
         [[ "$cmd" == omp ]] && sid="$(box_session_id "$box")"
         if [[ "$cmd" != omp || -n "$sid" ]] || (( SECONDS >= deadline )); then
             enroll_box "$box" "$sid" || return 1
