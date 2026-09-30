@@ -16,5 +16,13 @@ while [[ "$dir" != "/" ]]; do
     dir="$(dirname "$dir")"
 done
 
-# Fall back to mise
-exec mise exec basedpyright -- basedpyright "$@"
+# Fall back to mise. mise exec resolves the bare name on PATH, putting first only the tool dirs it
+# adds itself; an install dir already on PATH without mise's record of adding it counts as the
+# caller's, so this shim, ahead of it, would win and mise would exec it again, forever
+# (AGENTS.md, "A shim composes"). mise therefore starts from PATH without its install dirs.
+mise_path=""
+IFS=':' read -ra dirs <<< "$PATH"
+for d in "${dirs[@]}"; do
+    [[ "$d" == "${MISE_DATA_DIR:-$HOME/.mise}"/installs/* ]] || mise_path="${mise_path:+$mise_path:}$d"
+done
+PATH="$mise_path" exec mise exec basedpyright -- basedpyright "$@"
