@@ -567,6 +567,52 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn("no GO or EXTEND computed", proc.stdout)
         self.assertNotIn("GO:", proc.stdout)
 
+    def readout_on_day(self, day: float, correct: int, other: int, harmful: int = 0, exit_code: int = 0) -> str:
+        """The healthy gate (ungated_share 0.05, p95 4 s, no skips) read out `day` days after launch."""
+        self.launch(days=day)
+        self.healthy_gate()
+        self.label_revises(correct=correct, other=other, harmful=harmful)
+        return self.home.run("readout", "--check", "gate", check_exit=exit_code).stdout
+
+    def assert_killed(self):
+        self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": ["askgate"]}})
+
+    def test_day_14_precision_0_6_is_go(self):
+        out = self.readout_on_day(15, correct=18, other=12)
+        self.assertIn("gate: GO: make OMP_ASKGATE=block the shim default", out)
+        self.assertFalse(self.home.overlay.exists())
+
+    def test_day_14_precision_0_4_extends(self):
+        out = self.readout_on_day(15, correct=12, other=18)
+        self.assertIn("gate: EXTEND: one more week", out)
+        self.assertFalse(self.home.overlay.exists())
+
+    def test_day_14_precision_0_2_kills(self):
+        out = self.readout_on_day(15, correct=6, other=24, exit_code=1)
+        self.assertIn("precision 0.20 < 0.3", out)
+        self.assert_killed()
+
+    def test_day_14_harm_0_13_kills(self):
+        out = self.readout_on_day(15, correct=18, harmful=4, other=8, exit_code=1)
+        self.assertIn("harm 0.13 > 0.1", out)
+        self.assert_killed()
+
+    def test_day_22_not_go_kills(self):
+        out = self.readout_on_day(22, correct=12, other=18, exit_code=1)
+        self.assertIn("day 21: not GO after the one-week extension", out)
+        self.assert_killed()
+
+    def test_day_14_ungated_share_0_125_kills_without_labels(self):
+        self.launch(days=15)
+        at = [self.now - timedelta(minutes=5 + i) for i in range(40)]
+        entries = [gate_entry(decision="revise", at=at[i], latency_ms=4000) for i in range(30)]
+        entries += [gate_entry(at=at[30 + i], latency_ms=3000) for i in range(5)]
+        entries += [gate_entry(outcome="timeout", at=at[35 + i], latency_ms=90_000) for i in range(5)]
+        self.gate_session(entries)
+        out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
+        self.assertIn("ungated_share 0.125 >= 0.1", out)
+        self.assert_killed()
+
     def test_gate_and_trial_checks_combine_their_exits(self):
         self.healthy_gate()
         proc = self.home.run("readout", "--check", "gate", "--check", "trial", check_exit=3)
