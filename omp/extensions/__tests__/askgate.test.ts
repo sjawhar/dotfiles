@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import {
 	ADVISOR_GATE_ENTRY_TYPE,
-	breakerKey,
 	type CompleteRequest,
 	createAskGate,
 	type GateEntry,
@@ -199,7 +197,6 @@ describe("verdicts", () => {
 		const [e] = g.entries;
 		expect(e).toMatchObject({ advisor: "AskGate", decision: "allow", outcome: "verdict", verdictMode: "warn", usage: USAGE, model: "anthropic/claude-fable-5-1" });
 		expect(e.latencyMs).toBeGreaterThanOrEqual(0);
-		expect(e.argsDigest).toBe(createHash("sha256").update(JSON.stringify(COMMENT)).digest("hex"));
 		expect(e.promptBytes).toBe(bytes(g.calls[0].system) + bytes(g.calls[0].user));
 		expect(g.calls[0].model).toEqual(MODEL);
 		expect(g.calls[0].system).toContain("# AskGate charter");
@@ -210,6 +207,11 @@ describe("verdicts", () => {
 		expect(g.dumps[0][0]).toBe("/tmp/dump.txt");
 		expect(g.dumps[0][1]).toContain(g.calls[0].system);
 		expect(g.dumps[0][1]).toContain(g.calls[0].user);
+		// The digest names the arguments: the same arguments give the same digest, different ones another.
+		await g.device("t2", "dispatch_comment", { ...COMMENT });
+		await g.device("t3", "dispatch_comment", { ...COMMENT, body: "Something else." });
+		expect(g.entries[1].argsDigest).toBe(e.argsDigest);
+		expect(g.entries[2].argsDigest).not.toBe(e.argsDigest);
 	});
 	test("no dump without OMP_ASKGATE_DUMP", async () => {
 		const g = bind();
@@ -319,9 +321,13 @@ describe("breaker (test 7)", () => {
 		await g.device("d", "dispatch_comment", { issue: "X-1", body: "four" });
 		expect(g.calls).toHaveLength(4);
 	});
-	test("breakerKey names the device and every target field present", () => {
-		expect(breakerKey("dispatch_ask", { issue: "X-1", question: "q" })).toBe("dispatch_ask\u0000issue=X-1");
-		expect(breakerKey("dispatch_doc_edit", { project: "P", artifact: "a.md" })).toBe("dispatch_doc_edit\u0000artifact=a.md\u0000project=P");
+	test("each artifact of one project is its own breaker target", async () => {
+		const g = bind({ complete: async () => ({ text: REVISE }) });
+		await g.device("a", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
+		await g.device("b", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
+		await g.device("c", "dispatch_doc_edit", { project: "P", artifact: "b.md", edits: [] });
+		await g.device("d", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
+		expect(g.entries.map(e => e.outcome)).toEqual(["verdict", "verdict", "verdict", "breaker"]);
 	});
 });
 
