@@ -8,21 +8,10 @@
 # gh-app-token helper via `secrets get`.
 set -euo pipefail
 
-# --- profile: which Claude config dir, so which login bills the session ---
-# CLAUDE_CONFIG_DIR is Claude Code's own profile mechanism: each dir keeps its own login (a
-# claude.ai subscription, or an Anthropic Console account and the API key it mints), history,
-# sessions, and the org's policy files (policy-limits.json, remote-settings.json).
-# `--profile NAME` runs under ${DOTFILES_DIR}/.claude-profiles/NAME, created on first use;
-# `default` (or an empty name) is the canonical ${DOTFILES_DIR}/.claude. Without the flag an
-# inherited CLAUDE_CONFIG_DIR wins, so a claude started from inside a profiled session stays
-# in that profile. A profile shares the canonical user configuration through symlinks: every
-# entry .gitignore tracks under .claude (the `!.claude/...` lines), plus the dirs Claude Code
-# reads from a config dir (skills, output-styles) and the installed plugins; a new tracked
-# entry belongs in _shared too. Only those, so a state file a new Claude Code release adds
-# stays per-profile instead of carrying one account's login or org policy into another.
-# Entries already in the profile are left alone. The environment is not touched: an
-# ANTHROPIC_API_KEY the caller exported outranks the profile's login, and Claude Code asks
-# before using it.
+# --- profile: CLAUDE_CONFIG_DIR is Claude Code's own profile, with its own login ---
+# --profile NAME uses .claude-profiles/NAME and links _shared into it; no flag keeps an inherited
+# CLAUDE_CONFIG_DIR, else .claude. _shared: what .gitignore tracks under .claude, plus skills,
+# output-styles and plugins.
 _canonical="${DOTFILES_DIR:-$HOME/.dotfiles}/.claude"
 _shared=(CLAUDE.md AGENTS.md settings.json mcp.json agents commands hooks project-instructions
     skills output-styles plugins)
