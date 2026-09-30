@@ -393,7 +393,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			return;
 		}
 		const charter = loadCharter(deps.readFile, deps.charterPath, deps.home);
+		// The system role holds only the gate's own text and the charter; the agent's system prompt
+		// and transcript are data about the agent under review, escaped into the user message.
+		const system = `${systemTemplate.trim()}\n\n${charter}`;
 		const dumpPath = deps.env.OMP_ASKGATE_DUMP;
+		const unparsable = (error: unknown) => pi.logger.debug("AskGate: local-overrides.yml does not parse; the gate stays on", { error: String(error) });
 		// The fork binds this factory once per process and keeps the binding across /new, /resume
 		// and a branch switch, so the per-session state below resets on session_switch and
 		// session_branch: a halt, a count, revise reasons or a rebuttal never outlive their session.
@@ -449,7 +453,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		const pass = (outcome: GateEntry["outcome"], fields: Partial<GateEntry> = {}, effect: Decision["effect"] = "none"): Decision => ({ fields: { decision: "allow", outcome, ...fields }, effect });
 
 		const decide = async (event: ToolCallEvent, ctx: GateCtx, started: number, base: Base, key: string, rebuttal: string | undefined): Promise<Decision> => {
-			const unparsable = (error: unknown) => pi.logger.debug("AskGate: local-overrides.yml does not parse; the gate stays on", { error: String(error) });
 			if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) return pass("killed");
 			if (rebuttal !== undefined) {
 				breaker.reset(key);
@@ -466,9 +469,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			// A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
 			if (ctx.model?.provider !== model.provider) return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
 
-			// The system role holds only the gate's own text and the charter. The agent's system prompt
-			// and transcript are data about the agent under review, escaped into the user message.
-			const system = `${systemTemplate.trim()}\n\n${charter}`;
 			const transcript = renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES);
 			const user = renderRequest(ctx.getSystemPrompt().join("\n\n"), transcript, base.path, event.input, breaker.reasons(key));
 			const promptBytes = byteLength(system) + byteLength(user);
@@ -476,23 +476,22 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 
 			// Raced from handler entry, so the render above counts against the runner's ceiling too.
 			const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
-			const called = { promptBytes, model: `${model.provider}/${model.id}`, deadlineMs };
 			const request = { ctx, model, system, user, sessionId: ctx.sessionManager.getSessionId() };
 			const answer = await ask(request, event.toolCallId, Math.max(0, deadlineMs - (deps.now() - started)));
-			const usage = answer.usage ? { usage: answer.usage } : {};
-			if (answer.kind === "timeout") return pass("timeout", { ...called, ...usage }, "failure");
+			const spent = { promptBytes, model: `${model.provider}/${model.id}`, deadlineMs, ...(answer.usage ? { usage: answer.usage } : {}) };
+			if (answer.kind === "timeout") return pass("timeout", spent, "failure");
 			// Not the gate's failure: the call, or the run, ended without it.
-			if (answer.kind === "abandoned") return pass("abandoned", { ...called, ...usage });
-			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...called, ...usage }, "failure");
+			if (answer.kind === "abandoned") return pass("abandoned", spent);
+			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...spent }, "failure");
 			const verdict = parseVerdict(answer.text);
-			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...called, ...usage }, "failure");
+			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...spent }, "failure");
 			if (verdict.decision === "allow" || verdict.reason === undefined) {
 				breaker.reset(key);
-				return pass("verdict", { ...called, ...usage }, "verdict");
+				return pass("verdict", spent, "verdict");
 			}
 			breaker.revised(key, verdict.reason);
 			return {
-				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, revisesForKey: base.revisesForKey + 1, ...called, ...usage },
+				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, revisesForKey: base.revisesForKey + 1, ...spent },
 				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason) } : { additionalContext: renderWarn(verdict.reason) },
 				effect: "verdict",
 			};
