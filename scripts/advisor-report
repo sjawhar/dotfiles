@@ -797,19 +797,25 @@ def overlay_path() -> Path:
     return agent_dir() / "local-overrides.yml"
 
 
-def read_overlay(target: Path) -> dict:
-    """local-overrides.yml parsed with PyYAML; {} when it is absent or empty."""
-    yaml = require_yaml()
+def overlay_text(target: Path) -> str:
     try:
-        text = target.read_text(encoding="utf-8")
+        return target.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return {}
-    doc = yaml.safe_load(text) if text.strip() else {}
+        return ""
+
+
+def parse_overlay(text: str, target: Path) -> dict:
+    """local-overrides.yml's text parsed with PyYAML; {} when it is empty."""
+    doc = require_yaml().safe_load(text) if text.strip() else None
     if doc is None:
         return {}
     if not isinstance(doc, dict):
         raise Failure(f"{target} is not a mapping")
     return doc
+
+
+def read_overlay(target: Path) -> dict:
+    return parse_overlay(overlay_text(target), target)
 
 
 def overlay_list(doc: dict, key_path: str, target: Path, create: bool) -> tuple[dict | None, list]:
@@ -849,18 +855,90 @@ def overlay_locked() -> Iterator[Path]:
         yield target
 
 
+YAML_STR, YAML_NULL = "tag:yaml.org,2002:str", "tag:yaml.org,2002:null"
+
+
+def nest(keys: list[str], value):
+    for key in reversed(keys):
+        value = {key: value}
+    return value
+
+
+def flow_yaml(value) -> str:
+    return require_yaml().safe_dump(value, default_flow_style=True, width=math.inf).strip()
+
+
+def block_yaml(value: dict, indent: int) -> str:
+    text = require_yaml().safe_dump(value, default_flow_style=None, sort_keys=False, width=math.inf)
+    return "".join(" " * indent + line for line in text.splitlines(keepends=True))
+
+
+def content_end(node) -> int:
+    """Where a node's own text ends: a block collection's end mark runs on to the next line, so descend into its last
+    item."""
+    yaml = require_yaml()
+    if isinstance(node, (yaml.MappingNode, yaml.SequenceNode)) and not node.flow_style and node.value:
+        last = node.value[-1]
+        return content_end(last[1] if isinstance(node, yaml.MappingNode) else last)
+    return node.end_mark.index
+
+
+def insert_entry(text: str, mapping, entry: dict) -> str:
+    """`text` with `entry` added as `mapping`'s last entry: before a flow mapping's `}`, or as lines after the line its
+    last block entry ends on, at the mapping's indentation."""
+    if mapping.flow_style:
+        close = mapping.end_mark.index - 1
+        return f"{text[:close]}{', ' if mapping.value else ''}{flow_yaml(entry)[1:-1]}{text[close:]}"
+    newline = text.find("\n", content_end(mapping))
+    at = len(text) if newline < 0 else newline + 1
+    lead = "\n" if at and not text[:at].endswith("\n") else ""
+    return f"{text[:at]}{lead}{block_yaml(entry, mapping.value[0][0].start_mark.column)}{text[at:]}"
+
+
+def edit_overlay_text(text: str, keys: list[str], members: list) -> str:
+    """`text` with the list at `keys` set to `members` and every other byte as written: the value after the last key,
+    or an empty value on the way, replaced where it stands, or the missing keys added to the deepest mapping."""
+    yaml = require_yaml()
+    node = yaml.compose(text) if text.strip() else None
+    if node is None:  # empty, or comments alone
+        lead = "\n" if text and not text.endswith("\n") else ""
+        return text + lead + block_yaml(nest(keys, members), 0)
+    for depth, key in enumerate(keys):
+        pair = next((pair for pair in reversed(node.value)
+                     if isinstance(pair[0], yaml.ScalarNode) and pair[0].tag == YAML_STR and pair[0].value == key), None)
+        if pair is None:
+            return insert_entry(text, node, nest(keys[depth:], members))
+        key_node, value = pair
+        if depth == len(keys) - 1 or (isinstance(value, yaml.ScalarNode) and value.tag == YAML_NULL):
+            start, end = key_node.end_mark.index, content_end(value)
+            return f"{text[:start]}: {flow_yaml(nest(keys[depth + 1:], members))}{text[end:]}"
+        node = value
+
+
 def overlay_change(target: Path, key_path: str, member: str, add: bool) -> bool:
-    """Add or remove one list member at `key_path` in `target`; the caller holds overlay_locked. True when it changed."""
+    """Add or remove one list member at `key_path` in `target`; the caller holds overlay_locked. True when it changed.
+
+    PyYAML reads YAML 1.1 (`on` is true, `0755` is 493) and omp reads YAML 1.2, so a file rewritten from the parsed
+    document would change keys nobody touched. The edit replaces only the list's text instead, and is written only when
+    the edited text reads back as the intended document."""
     yaml = require_yaml()
     keys = key_path.split(".")
     if not all(keys):
         raise UsageError(f"bad key path {key_path!r}")
-    doc = read_overlay(target)
+    text = overlay_text(target)
+    doc = parse_overlay(text, target)
     node, members = overlay_list(doc, key_path, target, create=add)
     if (member in members) == add:
         return False
     node[keys[-1]] = [*members, member] if add else [m for m in members if m != member]
-    write_atomic(target, yaml.safe_dump(doc, default_flow_style=None, sort_keys=False))
+    edited = edit_overlay_text(text, keys, node[keys[-1]])
+    try:
+        faithful = yaml.safe_load(edited) == doc
+    except yaml.YAMLError:
+        faithful = False
+    if not faithful:
+        raise Failure(f"{target}: setting {key_path} in place would not read back as intended; nothing written")
+    write_atomic(target, edited)
     return True
 
 
