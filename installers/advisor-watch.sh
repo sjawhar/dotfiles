@@ -18,10 +18,12 @@ if [[ -f /.dockerenv ]] || [[ "$(systemd-detect-virt 2>/dev/null)" == docker ]];
     exit 1
 fi
 
-# The unit runs the shared checkout's scripts (%h/.dotfiles), whichever checkout this runs from,
-# under the user manager's PATH, not this shell's.
-report="$HOME/.dotfiles/scripts/advisor-report"
-envoy="$HOME/.dotfiles/scripts/envoy"
+# The unit runs the shared checkout (%h/.dotfiles) under the user manager's PATH, not this shell's.
+# Everything below binds to that checkout, the unit links included, whichever checkout this runs
+# from: a link into a workspace dies when the workspace is forgotten, and the timer with it.
+shared="$HOME/.dotfiles"
+report="$shared/scripts/advisor-report"
+envoy="$shared/scripts/envoy"
 [[ -x "$report" ]] || {
     echo "advisor-watch: $report is missing; advance ~/.dotfiles to a main that has it" >&2
     exit 1
@@ -49,8 +51,8 @@ grep -q -- '--source accepts only envoy' <<<"$probe" || {
 }
 
 mkdir -p ~/.config/systemd/user
-ensure_link "${DOTFILES_DIR}/omp/advisor-watch.service" ~/.config/systemd/user/advisor-watch.service
-ensure_link "${DOTFILES_DIR}/omp/advisor-watch.timer" ~/.config/systemd/user/advisor-watch.timer
+ensure_link "$shared/omp/advisor-watch.service" ~/.config/systemd/user/advisor-watch.service
+ensure_link "$shared/omp/advisor-watch.timer" ~/.config/systemd/user/advisor-watch.timer
 
 systemctl --user daemon-reload
 systemctl --user enable --now advisor-watch.timer
