@@ -7,7 +7,21 @@
 #   4 acceptance (tester)  5 simplify record  6 queue's own gate (not ours)
 #
 # A gate counts only when its comment names the current head, because a verdict
-# at an older head says nothing about the code that would merge.
+# at an older head says nothing about the code that would merge. A gate counts
+# GREEN only when that verdict is not a rejection: `Verdict: CHANGES` at the head
+# means the gate has run and REFUSED, which is the opposite of coverage. Until
+# 2026-09-30 this script counted any verdict line as coverage, so a packet was
+# sent to the queue reporting three reviews present when one of them said
+# CHANGES. Red verdicts are now counted and named separately.
+#
+# This answers a different question from ~/.dotfiles/scripts/pr-gate, and the two
+# are complementary rather than duplicates:
+#   * this script: WHICH of the SDD gates have judged the current head.
+#   * pr-gate: is the LATEST verdict green across both surfaces, and are the
+#     review threads resolved. It reads review bodies as well as issue comments,
+#     knows more verdict spellings (bold lines, `Verdict: clean`, BLOCKS / DOES
+#     NOT BLOCK), and lists unresolved threads with their severity.
+# Run both before a packet. This one cannot see review-body verdicts or threads.
 #
 # Usage:
 #   pr-gates.sh                     # every open PR authored by the current user
@@ -69,21 +83,30 @@ for n in "${prs[@]}"; do
         s = substr(s, RSTART + RLENGTH)
       }
     }' <<<"$bodies")
-  verdicts=$(grep -c '^Verdict:' <<<"$at_head" || true)
-  acpt=$(grep -c '^Acceptance:' <<<"$at_head" || true)
-  simp=$(grep -ci '^Simplify' <<<"$at_head" || true)
+  # Polarity matters: a gate that ran and refused is not a gate satisfied. Legion's
+  # and the thermonuclear reviewers' negative form is `Verdict: CHANGES`, a tester's
+  # is `Acceptance: FAIL`, and the queue's oracle posts `Verdict: BLOCKS`. A bold
+  # line (`**Verdict: ...`) is admitted, since reviewers emit both.
+  vgreen=$(grep -cE '^\**Verdict:\**[[:space:]]*(MERGE|APPROVE|clean|DOES NOT BLOCK)' <<<"$at_head" || true)
+  vred=$(grep -cE '^\**Verdict:\**[[:space:]]*(CHANGES|FAIL|BLOCKS|REJECT)' <<<"$at_head" || true)
+  agreen=$(grep -cE '^\**Acceptance:\**[[:space:]]*(PASS)' <<<"$at_head" || true)
+  ared=$(grep -cE '^\**Acceptance:\**[[:space:]]*(FAIL)' <<<"$at_head" || true)
+  simp=$(grep -ci '^\**Simplify' <<<"$at_head" || true)
 
-  # Report the verdict count in the three review columns: three distinct verdict
-  # comments at the head means reviewer + deep + quality have all judged it.
-  rev=$([ "${verdicts:-0}" -ge 1 ] && echo yes || echo NO)
-  deep=$([ "${verdicts:-0}" -ge 2 ] && echo yes || echo NO)
-  qual=$([ "${verdicts:-0}" -ge 3 ] && echo yes || echo NO)
-  a=$([ "${acpt:-0}" -ge 1 ] && echo yes || echo NO)
+  # Report the GREEN verdict count in the three review columns: three green verdict
+  # comments at the head means reviewer + deep + quality have all passed it. A red
+  # verdict is reported in MISSING, never as coverage.
+  rev=$([ "${vgreen:-0}" -ge 1 ] && echo yes || echo NO)
+  deep=$([ "${vgreen:-0}" -ge 2 ] && echo yes || echo NO)
+  qual=$([ "${vgreen:-0}" -ge 3 ] && echo yes || echo NO)
+  a=$([ "${agreen:-0}" -ge 1 ] && echo yes || echo NO)
   s=$([ "${simp:-0}" -ge 1 ] && echo yes || echo NO)
 
   missing=""
-  [ "${verdicts:-0}" -lt 3 ] && missing+="reviews(${verdicts:-0}/3) "
+  [ "${vgreen:-0}" -lt 3 ] && missing+="reviews(${vgreen:-0}/3) "
+  [ "${vred:-0}" -gt 0 ] && missing+="CHANGES(${vred}) "
   [ "$a" = NO ] && missing+="acceptance "
+  [ "${ared:-0}" -gt 0 ] && missing+="acceptFAIL(${ared}) "
   [ "$s" = NO ] && missing+="simplify "
   [ -z "$missing" ] && missing="-"
 
