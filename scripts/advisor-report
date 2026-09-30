@@ -82,8 +82,6 @@ PASSED = frozenset({"rebuttal", "breaker", "killed"})
 # who stops the write while the gate waits ends the call (`abandoned`). Neither is a gate failure, so both leave
 # ungated_share's numerator and denominator.
 UNJUDGED = frozenset({"skipped", "abandoned"})
-# The extension recorded an abandoned call as `error` with this reason prefix before it had the outcome of its own.
-ABANDONED_REASON = "abandoned:"
 # The session shut down while the gate waited (`shutdown`). In warn mode the write went out without a verdict, so it
 # is ungated; in block mode the call was refused, a gated call like any revise. Both stay in ungated_share's denominator.
 SHUTDOWN = "shutdown"
@@ -642,25 +640,17 @@ def blockers(admitted: list[AdviseCall]) -> int:
     return sum(1 for call in admitted if call.severity == "blocker")
 
 
-def gate_outcome(data: dict):
-    """An entry's outcome, an `error` the extension recorded for an abandoned call read as `abandoned`."""
-    outcome, reason = data.get("outcome"), data.get("reason")
-    if outcome == "error" and isinstance(reason, str) and reason.startswith(ABANDONED_REASON):
-        return "abandoned"
-    return outcome
-
-
 def gate_metrics(entries: list[GateEntry]) -> dict:
     data = [entry.data for entry in entries]
-    outcomes = Counter(gate_outcome(d) for d in data)
+    outcomes = Counter(d.get("outcome") for d in data)
     verdict_latencies = [d["latencyMs"] for d in data
                          if d.get("outcome") == "verdict" and isinstance(d.get("latencyMs"), (int, float))]
     revises = sum(1 for entry in entries if entry.fired)
-    shutdowns = Counter(d.get("verdictMode") for d in data if gate_outcome(d) == SHUTDOWN)
+    shutdowns = Counter(d.get("verdictMode") for d in data if d.get("outcome") == SHUTDOWN)
     matched = len(data)
     return {
         "matched": matched,
-        "counts": dict(sorted(Counter(f"{d.get('decision')}/{gate_outcome(d)}" for d in data).items())),
+        "counts": dict(sorted(Counter(f"{d.get('decision')}/{d.get('outcome')}" for d in data).items())),
         "latency_ms_p50": nearest_rank(verdict_latencies, 0.5),
         "latency_ms_p95": nearest_rank(verdict_latencies, 0.95),
         "fail_open_rate": ratio(sum(outcomes[o] for o in FAIL_OPEN), sum(outcomes[o] for o in REACHED_MODEL)),
