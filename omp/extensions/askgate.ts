@@ -12,7 +12,8 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { type Api, type ApiKeyResolver, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { type CompleteRequest, type Completion, createAskGate, GATE_EFFORT } from "./askgate-core";
 
-// ctx.models.resolve hands back a full Model<Api>; the core only passes it through.
+// The core passes the fork's objects through untyped: ctx is the ExtensionContext, whose modelRegistry this
+// reads, and model is the full Model<Api> ctx.models.resolve handed back.
 type Ctx = { modelRegistry: { resolver: (model: Model<Api>, sessionId: string) => ApiKeyResolver } };
 
 async function complete({ ctx, model, system, user, sessionId, signal }: CompleteRequest): Promise<Completion> {
