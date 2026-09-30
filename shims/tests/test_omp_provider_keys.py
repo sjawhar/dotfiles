@@ -238,6 +238,54 @@ class OmpProviderKeys(unittest.TestCase):
                 self.assertIn("GEMINI_API_KEY in", result.stderr)
                 self.assert_no_canary(result)
 
+    def test_a_multi_line_quoted_dotenv_value_stops_the_session(self) -> None:
+        """omp's parser (Bun's node:util parseEnv) loads a value split across lines inside a
+        quote, double or single; the guard's awk scan must not read the opening line's empty
+        remainder as the whole value and let a key written that way through."""
+        for quote, name in (('"', "double"), ("'", "single")):
+            with self.subTest(name):
+                (self.home / ".env").write_text(
+                    f"GEMINI_API_KEY={quote}\n{CANARY}multiline\n{quote}\n", encoding="utf-8"
+                )
+                try:
+                    result = self.run_shim("--version")
+                finally:
+                    (self.home / ".env").unlink()
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("GEMINI_API_KEY in", result.stderr)
+                self.assert_no_canary(result)
+
+    def test_an_unclosed_quote_stops_the_session_and_does_not_hide_later_lines(self) -> None:
+        """omp's parser loads a non-empty value from an opening quote whether its closing quote
+        never comes (the rest of the line) or arrives on a later line (everything between): both
+        are an assignment, so the guard must refuse at once and never let a state opened by one
+        line suppress the plain check of a line after it."""
+        cases = {
+            "unclosed, rest of the line is the value": (
+                f'GEMINI_API_KEY="{CANARY}unclosed\n', ("GEMINI_API_KEY",)
+            ),
+            "unclosed, then a plain key on the next line": (
+                f'GEMINI_API_KEY="{CANARY}unclosed\nOPENAI_API_KEY={CANARY}plain\n',
+                ("GEMINI_API_KEY", "OPENAI_API_KEY"),
+            ),
+            "an opening quote alone at end of file": ('GEMINI_API_KEY="\n', ("GEMINI_API_KEY",)),
+            "an opening quote alone, then a plain key on the next line": (
+                f'GEMINI_API_KEY="\nOPENAI_API_KEY={CANARY}plain\n',
+                ("GEMINI_API_KEY", "OPENAI_API_KEY"),
+            ),
+        }
+        for name, (body, expected_names) in cases.items():
+            with self.subTest(name):
+                (self.home / ".env").write_text(body, encoding="utf-8")
+                try:
+                    result = self.run_shim("--version")
+                finally:
+                    (self.home / ".env").unlink()
+                self.assertEqual(result.returncode, 1, result.stdout)
+                for expected in expected_names:
+                    self.assertIn(f"{expected} in", result.stderr)
+                self.assert_no_canary(result)
+
     def test_a_dotenv_file_that_assigns_no_provider_key_value_lets_the_session_start(self) -> None:
         """The other direction: other names, empty values and comments are not a key."""
         body = (
@@ -390,22 +438,44 @@ class OmpProviderKeys(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "OPENAI_API_KEY=scoped-OPENAI_API_KEY_THEOREM\nOMP shell\n")
 
-    def test_a_profile_the_shim_leaves_unread_is_named_at_launch(self) -> None:
-        """omp runs theorem for these, but the shim cannot be sure, so the session starts with no
-        key: a user who typed it must hear that, and the working form, at the terminal rather
-        than meet a missing-key error from the provider."""
-        for name, args in (
-            ("a message first", ("fix the bug", "--profile", "theorem")),
-            ("an unlisted option first", ("--some-ext-flag", "--profile=theorem")),
-        ):
-            with self.subTest(name):
-                result = self.run_shim(*args, STUB_SECRETS_LIST="OPENAI_API_KEY_THEOREM")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, f"OMP {' '.join(args)}\n")
-                self.assertIn("OMP_PROFILE=NAME omp", result.stderr)
+    def test_an_unlisted_option_or_flag_value_names_the_profile_at_launch(self) -> None:
+        """The shim can tell these are not a subcommand's own flag: an option it has no table
+        entry for may take the profile as its value. There it names the profile it could not
+        certify, and the working form, on stderr."""
+        result = self.run_shim(
+            "--some-ext-flag", "--profile=theorem", STUB_SECRETS_LIST="OPENAI_API_KEY_THEOREM"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "OMP --some-ext-flag --profile=theorem\n")
+        self.assertEqual(
+            result.stderr,
+            "omp: --profile theorem follows an option this shim has no entry for, which may"
+            " take it as its value, so this shim starts the session with no provider key"
+            " (omp may still run profile theorem). Put --profile theorem before it.\n",
+        )
         # An unread `--profile default` asked for what it gets: no notice.
         result = self.run_shim("--some-ext-flag", "--profile", "default", OMP_PROFILE="theorem")
         self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_a_leading_bare_word_fails_closed_silently(self) -> None:
+        """Rule 3 cannot tell a message from a subcommand, and a subcommand may have a
+        `--profile` of its own that is not the global one — bench's workload flag
+        (commands/bench.ts) is omp's own documented example. Naming it would be a wrong
+        reading as often as a right one (following "put --profile first" for
+        `omp bench <models> --profile mix` would launch a profile named `mix`), so the shim
+        says nothing rather than guess; the fail-closed default decision still happens."""
+        for name, args in (
+            ("a message first", ("fix the bug", "--profile", "theorem")),
+            ("omp's own bench example", ("bench", "opus", "sonnet", "--profile", "mix")),
+            ("a subcommand with an unrelated --profile", ("grep", "--profile", "x")),
+        ):
+            with self.subTest(name):
+                result = self.run_shim(
+                    *args, STUB_SECRETS_LIST="OPENAI_API_KEY_THEOREM OPENAI_API_KEY_MIX OPENAI_API_KEY_X"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, f"OMP {' '.join(args)}\n")
+                self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":
