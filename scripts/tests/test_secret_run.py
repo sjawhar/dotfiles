@@ -7,7 +7,8 @@ never tried. Everything else (identity exits non-zero, an old client without `id
 agent-secrets at all) runs `secrets` exactly as before, without touching the broker.
 
 Technique: stub `agent-secrets` and `secrets` first on PATH; each prints the argv it got and,
-for the exec forms, execs the command after `--` with a marker variable set.
+for the exec forms, execs the command after `--` with a marker variable set. The `secrets` stub
+refuses `get` with more than one key, as the real CLI does.
 """
 
 from __future__ import annotations
@@ -20,7 +21,11 @@ from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SECRET_RUN = DOTFILES / "scripts" / "secret-run"
-PLAN_B_URL = "https://secrets.internal.trajectorylabs.com"
+BROKER_URL = next(
+    line.split("=", 1)[1].strip()
+    for line in (DOTFILES / "agent-secrets" / "broker.env").read_text().splitlines()
+    if line.startswith("AGENT_SECRETS_URL=")
+)
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -45,7 +50,15 @@ shift
 VIA=broker exec "$@"
 """
 
+# `secrets get` takes exactly one KEY (forward crates/secrets/tests/client/command_forms.rs);
+# $STUB_GET_FAIL names a key whose get fails.
 SECRETS_STUB = r"""
+if [[ "$1" == get ]]; then
+    (( $# == 2 )) || { echo "error: unexpected argument '$3' found" >&2; exit 2; }
+    echo "SECRETSD get $2"
+    [[ "$2" != "${STUB_GET_FAIL:-}" ]] || exit 1
+    exit 0
+fi
 echo "SECRETSD $*"
 while (( $# )) && [[ "$1" != -- ]]; do shift; done
 (( $# )) || exit 0
@@ -59,7 +72,11 @@ class SecretRun(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.stub_dir = Path(self.temp_dir.name)
         write_stub(self.stub_dir, "secrets", SECRETS_STUB)
-        self.env = {"PATH": f"{self.stub_dir}:/usr/bin:/bin", "HOME": self.temp_dir.name}
+        self.env = {
+            "PATH": f"{self.stub_dir}:/usr/bin:/bin",
+            "HOME": self.temp_dir.name,
+            "DOTFILES_DIR": str(DOTFILES),
+        }
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -89,12 +106,24 @@ class SecretRun(unittest.TestCase):
             [
                 (
                     "BROKER AIRTABLE_TOKEN DD_API_KEY --reason skill: smoke --wait 0 -- "
-                    f'sh -c echo "via=$VIA" URL={PLAN_B_URL}'
+                    f'sh -c echo "via=$VIA" URL={BROKER_URL}'
                 ),
                 "via=broker",
             ],
         )
         self.assertNotIn("identity-stdout", result.stdout)
+
+    def test_equals_forms_and_a_duration_wait_reach_the_broker(self) -> None:
+        self.with_client()
+        result = self.run_secret_run(
+            "--reason=skill: smoke", "--wait=30s", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines()[0],
+            "BROKER AIRTABLE_TOKEN --reason skill: smoke --wait 30s -- "
+            f'sh -c echo "via=$VIA" URL={BROKER_URL}',
+        )
 
     def test_caller_url_is_kept(self) -> None:
         self.with_client()
@@ -117,11 +146,18 @@ class SecretRun(unittest.TestCase):
         self.assertNotIn("BROKER", result.stdout)
         self.assertIn("identity: no key dir", result.stderr)
 
-    def test_old_client_without_identity_runs_secretsd(self) -> None:
+    def test_old_client_without_identity_runs_secretsd_quietly(self) -> None:
+        """A client older than `identity` exits 2 with its usage; that text is not shown."""
         self.with_client()
-        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="2")
+        result = self.run_secret_run(
+            "AIRTABLE_TOKEN",
+            *self.CMD,
+            STUB_IDENTITY="2",
+            STUB_IDENTITY_MSG="usage: agent-secrets …",
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], "via=secretsd")
+        self.assertNotIn("usage: agent-secrets", result.stderr)
 
     def test_no_client_runs_secretsd(self) -> None:
         result = self.run_secret_run(*self.EXEC_ARGS, *self.CMD)
@@ -155,11 +191,11 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(
             result.stdout.splitlines(),
             [
-                f"BROKER request DEEL_API_KEY GH_PUBLIC_REPO_PAT --reason task: start URL={PLAN_B_URL}"
+                f"BROKER request DEEL_API_KEY GH_PUBLIC_REPO_PAT --reason task: start URL={BROKER_URL}"
             ],
         )
 
-    def test_request_on_secretsd_is_a_grant_request(self) -> None:
+    def test_request_on_secretsd_asks_for_each_key(self) -> None:
         self.with_client()
         result = self.run_secret_run(
             "request",
@@ -171,8 +207,21 @@ class SecretRun(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            result.stdout.splitlines(), ["SECRETSD get DEEL_API_KEY GH_PUBLIC_REPO_PAT"]
+            result.stdout.splitlines(),
+            ["SECRETSD get DEEL_API_KEY", "SECRETSD get GH_PUBLIC_REPO_PAT"],
         )
+
+    def test_request_on_secretsd_stops_at_the_first_failure(self) -> None:
+        self.with_client()
+        result = self.run_secret_run(
+            "request",
+            "DEEL_API_KEY",
+            "GH_PUBLIC_REPO_PAT",
+            STUB_IDENTITY="1",
+            STUB_GET_FAIL="DEEL_API_KEY",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.splitlines(), ["SECRETSD get DEEL_API_KEY"])
 
     def test_usage_errors(self) -> None:
         self.with_client()
@@ -181,6 +230,8 @@ class SecretRun(unittest.TestCase):
             "no command": ("AIRTABLE_TOKEN", "--"),
             "no separator": ("AIRTABLE_TOKEN", "true"),
             "request without keys": ("request", "--reason", "x"),
+            "request takes no wait": ("request", "--wait", "0", "AIRTABLE_TOKEN"),
+            "request takes no wait=": ("request", "--wait=0", "AIRTABLE_TOKEN"),
             "unknown option": ("--bogus", "AIRTABLE_TOKEN", "--", "true"),
         }
         for name, args in cases.items():

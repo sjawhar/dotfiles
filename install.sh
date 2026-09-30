@@ -19,7 +19,6 @@ source "${DOTFILES_DIR}/installers/omp.sh"
 source "${DOTFILES_DIR}/installers/knives.sh"
 source "${DOTFILES_DIR}/installers/agent-eval.sh"
 source "${DOTFILES_DIR}/installers/secretsd.sh"
-source "${DOTFILES_DIR}/installers/agent-secrets.sh"
 
 echo "Generating completions..."
 COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"

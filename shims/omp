@@ -146,25 +146,10 @@ fi
 
 # --- host session identity for agent secrets ---
 # On the host a session's secrets-broker proofs come from the agent-secrets helper, which signs
-# only for descendants of a registered process. Register this pid — the execs below keep it, so
-# it is omp's — before omp starts. A box has a key dir instead and skips this; a machine without
-# the helper installed has neither variable and skips it too (agent-secrets/AGENTS.md).
-# `--wait 10` holds the launch until the helper has enrolled the session, so omp's MCP servers
-# start enrolled. It is asked only while the helper holds a launcher credential: without one
-# enrollment cannot succeed, and the wait would cost every launch the full 10 s. With --exec a
-# failed registration still launches omp, and agent-secrets says why. With the helper installed
-# but no agent-secrets on PATH, exec'ing it would kill the launch, so omp starts unregistered.
-if [[ -z "${AGENT_SECRETS_KEY_DIR:-}" && -e "${HOME}/.config/systemd/user/agent-secrets-helper.service" ]]; then
-    if command -v agent-secrets >/dev/null 2>&1; then
-        export AGENT_SECRETS_HELPER_SOCK="${AGENT_SECRETS_HELPER_SOCK:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/agent-secrets/helper.sock}"
-        export AGENT_SECRETS_URL="${AGENT_SECRETS_URL:-https://secrets.internal.trajectorylabs.com}"
-        _wait=()
-        if agent-secrets launcher login-status >/dev/null 2>&1; then _wait=(--wait 10); fi
-        _cmd=(agent-secrets register "${_wait[@]}" --exec -- "${_cmd[@]}")
-    else
-        echo "omp: agent-secrets is not on PATH (mise install agent-secrets); this session has no secrets-broker identity" >&2
-    fi
-fi
+# only for descendants of a registered process. scripts/agent-secrets-session registers this
+# pid (every exec below keeps it, so it is omp's) before omp starts, where that applies; the
+# same wrapper as scripts/cld and scripts/oc.
+_cmd=("${DOTFILES_DIR}/scripts/agent-secrets-session" "${_cmd[@]}")
 
 # --- provider keys: the Hawk gateway by default, profile-scoped under a profile ---
 # `omp --profile NAME` (or OMP_PROFILE=NAME) isolates auth, sessions, and
