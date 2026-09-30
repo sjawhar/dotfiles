@@ -53,7 +53,7 @@ attempt; sends are counted beside attempts from the tool results, never assumed.
 | `attempts` | per side, `root` (`sessions/<project>/<stem>.jsonl`, the root sessions a gate covers) and `subagent` (any file below `<stem>/`, task subagents, which run no advisor): `attempts`, the assistant tool calls that are a `write` whose `path` matches the scope regex (as `write(<path>)`) or a top-level `dispatch_<x>` call that does, `xd://dispatch_issue` only when its JSON arguments carry `spec`; `sends`, the attempts whose tool result is not an error (pi-envoy's refusals and the server's `target not found` are error results; a skipped call and one with no result are no send); `send_share` = sends / attempts; `attempts_per_day`, `sends_per_day`. `stats_db` checks each attempt's result against `stats.db tool_calls.is_error`, joined on the path below the project directory and the tool call id: `missing` (no row) and `disagree` (a row with another result) |
 | `gate` | over `{type: custom, customType: advisor-gate}` entries whose `advisor` slugifies to `--advisor`, one per attempt: `matched_attempts`; `counts` by `decision/outcome`; `latency_ms_p50`/`p95` (nearest rank) over `outcome: verdict` attempts; `fail_open_rate` = (timeout + error + no-verdict) / (verdict + timeout + error + no-verdict); `ungated_share` = (timeout + error + no-verdict + unavailable + halted + warn-mode shutdown) / (matched attempts − rebuttal − breaker − killed − skipped − abandoned), since an override, a breaker pass and the machine kill switch are deliberate passes rather than gate failures, a `skipped` call (the primary on another provider, so no transcript was sent) is out of the gate's scope by design, and an `abandoned` one (in either mode) is the user stopping the write while the gate waited; a `shutdown` (the session shut down while the gate waited) is ungated in `warn` mode (`allow/shutdown`: the write went out without a verdict) and a gated refusal in `block` mode (`revise/shutdown`), counted in the denominator as any revise is; `skipped`, `abandoned` and `shutdown` (with `shutdown_by_mode`) count those calls; `revise_rate` = delivered revises / verdict attempts, where a revise is delivered once the agent received it: a `block`-mode revise when the call's tool result is the refusal (an error beginning `AskGate did not send this call`), a `warn`-mode one when a developer message after the entry, before the agent's next assistant message, holds `<advisor-gate advisor="AskGate"` and the entry's `deliveredReason`, the exact text the extension inserted (an entry from a build before that field: its `reason` raw, XML-escaped, or XML-escaped and clipped to 2 KiB with a ` … [elided N bytes]` marker, a character cut in half dropped); the fork joins a batch's blocks into one message and drops a skipped call's; `rebuttal_rate` over matched attempts; `breaker_trips`; `killed`; `halted_sessions`; `sent_attempts`, the attempts whose tool result is not an error; `passed_then_refused`, the attempts the gate let through (every call but a block-mode revise, which the gate refused itself) whose tool result is an error; `paid_on_refused`, those of them with `outcome: verdict` and their cost, the price of judging before Dispatch can refuse; `usage` (input, output, cache-read and cache-write tokens, and `cost` in dollars) summed from each entry's `usage`, with `usage_per_day` and `cost_usd_per_day` — the entries are the only record of the gate's spend, which `omp stats` cannot see; `cost_per_attempt` = cost / matched attempts and `cost_per_send` = cost / sent attempts, both printed because the gate pays for attempts and a reader counts sends. Other entry fields (`argsDigest`, `promptBytes`) are not read |
 | `corrections` | Σ(negation + blame + anguish + yelling + profanity) over `stats.db user_messages` of the window's root sessions, per 100 primary turns. An agent box relaunch moves a session to a new project directory and `stats.db` keeps the rows it ingested earlier under the old path, so a row joins its session on the path below the project directory (`<stem>.jsonl`) |
-| `labelled` | over the fired rows (delivered gate `revise` verdicts and admitted notes) that carry a label: precision = (acted-correct + ignored-advisor-right) / n; harm = (acted-harmful + `skips`) / n |
+| `labelled.gate` | over labelled fired-revise clusters (each labeller's newest label per cluster; a cluster's axis is its labellers' majority): `precision` = right / n; `harm` = acted-harmful / n; `harmful` (the count); `kappa`, `shared` (Cohen's κ on the verdict axis over the clusters both labellers labelled, and that count); `withheld` — why no precision figure counts yet (kappa below 0.6, fewer than two labellers, or fewer than 30 shared clusters), `null` once it is admitted. `labelled.watch` — over labelled routed notes (any labeller's newest label per note): `precision` = right / n, `moot`, `noise` shares |
 
 ## Sample packets and labels
 
@@ -141,16 +141,18 @@ this order, and the first that matches decides:
 | any day | `advisor.disableRoster` in the overlay holds `askgate`, read as the extension reads it: any string member that trims and lowercases to `askgate` (`AskGate` too) | killed: no GO or EXTEND is computed and nothing is written (exit 1); the line names who added the member from the overlay's provenance log, or says `killed by an unrecorded writer` when no line records adding it or the latest line for it is a remove (still killed) |
 | day 3 onward | `ungated_share` > 0.20 over ≥ 20 calls in the last 24 h that got a verdict or a timeout (a rebuttal, a breaker pass or a killed call never fills that floor), or verdict p95 above 0.9 × the timeout over ≥ 20 verdicts in the last 24 h | KILL |
 | day 14 onward | `ungated_share` ≥ 0.10 over the window | KILL |
-| day 14 onward, ≥ 30 labelled revises | precision < 0.3 | KILL |
-| day 14 onward, any number of labelled revises | harm > 0.10 | KILL |
-| any day | a completed week since launch has delivered revises and not one of them is labelled | incomplete, naming the week |
-| day 21 onward | fewer than 30 labelled revises | KILL: EXTEND once, then GO or KILL, and GO lacks its evidence |
-| before day 21 | fewer than 30 labelled revises | incomplete |
+| day 14 onward, ≥ 30 labelled clusters that kappa admits | precision < 0.3 | KILL |
+| day 14 onward, ≥ 30 labelled clusters that kappa admits | acted-harmful / n > 0.10 | KILL |
+| any day | a completed week since launch has fired clusters and not one of them is labelled | incomplete, naming the week |
+| day 14 onward | precision is withheld: fewer than two labellers, fewer than 30 shared clusters, or κ < 0.6 on the verdict axis over those shared clusters | incomplete: precision withheld (names why); no GO, EXTEND or KILL reads a withheld precision |
+| day 21 onward | fewer than 60 labelled clusters | KILL: EXTEND once, then GO or KILL, and GO lacks its evidence |
+| before day 21 | fewer than 60 labelled clusters | incomplete |
 | day 21 onward | not GO | KILL |
 | any day | `~/.omp/agent/extensions/askgate.ts` does not resolve to a file under `$DOTFILES_DIR`, or `$DOTFILES_DIR/omp/WATCHDOG.yml` has no `advisors:` entries | incomplete; nothing is written |
-| day 14 onward | precision ≥ 0.5, harm ≤ 0.05, `ungated_share` < 0.10, p95 ≤ 0.9 × timeout, `skips` = 0 (skips the gate's own cards caused; harm counts the same ones) | GO: make `OMP_ASKGATE=block` the shim default |
+| day 14 onward | ≥ 60 labelled clusters, precision ≥ 0.5, acted-harmful ≤ 3 of them, `ungated_share` < 0.10, p95 ≤ 0.9 × timeout, `skips` = 0 | GO: make `OMP_ASKGATE=block` the shim default |
 | day 14–20 | otherwise | EXTEND one week |
 | before day 14 | otherwise | on track |
+| any day, incidental (no verdict attached) | a label ingested in the last 24 h makes a cluster acted-harmful | the readout names the cluster and says "read the cluster; one label kills nothing" — a single label never decides GO, EXTEND or KILL by itself |
 
 The killed rule comes first because a killed gate records every later call as `killed`, which leaves every
 denominator: the rules would judge only the calls before the kill, and a 24-hour burst that tripped the day-3
@@ -164,12 +166,23 @@ answering at 85 s against a 90 s deadline stalls every scoped write and must sti
 needs 20 calls of evidence in the 24 hours. The latency rule counts verdicts: below 20 the nearest-rank p95 is the
 slowest verdict, so one slow answer among a handful would end the trial. The ungated rule counts calls that got a
 verdict or a timeout, the calls whose latency the gate measured; rebuttals, breaker passes and killed calls never
-reached the model, so 18 rebuttals beside one verdict and one timeout do not make a KILL. The rest is the go decision. A week's sample
+reached the model, so 18 rebuttals beside one verdict and one timeout do not make a KILL.
+
+A gate label is two axes (verdict, response); a cluster's own axis is the majority of its labellers' newest
+labels. Thirty labels can separate 0.30 from 0.50 but cannot confirm harm at or below 0.05, and a KILL that reads
+harm from any n would let a single mislabel end the trial — so the day-14 precision and harm KILLs both need
+≥ 30 labelled clusters, while GO needs ≥ 60 (acted-harmful ≤ 3 of them, about 0.05). Neither figure counts until
+two labellers agree on the verdict axis past chance: `readout` computes Cohen's κ over the clusters both of them
+labelled and withholds precision (and so every rule that reads it) while κ < 0.6 on fewer than 30 shared
+clusters — a κ that low is a rubric defect, not evidence, and no GO, EXTEND or KILL is read from it. A single
+acted-harmful label, once kappa admits it, is reported the day it is ingested (the readout's incidental line
+above) but decides nothing by itself; only the aggregate at ≥ 30 labelled clusters can KILL. The rest is the go
+decision. A week's sample
 packet is drawn when the week ends and labelled after it, so the first readouts past day 14 (or 21) run before
-the last week's labels exist; one packet alone can hold 30 labels, and GO, EXTEND or the day-21 KILL read from
-the earlier weeks would decide on part of the window. A completed week with revises and no labels therefore
-stops those three (the KILLs above it do not wait), while a week with no revises has nothing to label and is
-not named. Precision is
+the last week's labels exist; one packet alone can hold 60 labelled clusters, and GO, EXTEND or the day-21 KILL
+read from the earlier weeks would decide on part of the window. A completed week with fired clusters and no
+labels therefore stops those three (the KILLs above it do not wait), while a week with nothing fired has nothing
+to label and is not named. Precision is
 measured against a baseline of 4 in 26 notes (0.15) from the watch-mode AskGate. The link rule catches a
 gate that is no longer loaded. The roster rule writes nothing because no setting reaches an older omp: a
 roster without `advisors:` entries makes an omp that falls back to its every-turn default watcher when the
