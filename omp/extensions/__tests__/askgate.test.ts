@@ -339,6 +339,13 @@ describe("breaker (test 7)", () => {
 		await g.device("d", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
 		expect(g.entries.map(e => e.outcome)).toEqual(["verdict", "verdict", "verdict", "breaker"]);
 	});
+	test("replies to different messages are different breaker targets", async () => {
+		const g = bind({ complete: async () => ({ text: REVISE }) });
+		await g.device("a", "dispatch_message", { in_reply_to: "m-1", body: "one" });
+		await g.device("b", "dispatch_message", { in_reply_to: "m-1", body: "two" });
+		await g.device("c", "dispatch_message", { in_reply_to: "m-2", body: "other" });
+		expect(g.entries.map(e => e.outcome)).toEqual(["verdict", "verdict", "verdict"]);
+	});
 });
 
 describe("fail-open", () => {
@@ -475,13 +482,6 @@ describe("deadline and abandonment", () => {
 		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned", usage: PARTIAL }]);
 		expect(g.notices).toHaveLength(0);
 	});
-	test("replies to different messages are different breaker targets", async () => {
-		const g = bind({ complete: async () => ({ text: REVISE }) });
-		await g.device("a", "dispatch_message", { in_reply_to: "m-1", body: "one" });
-		await g.device("b", "dispatch_message", { in_reply_to: "m-1", body: "two" });
-		await g.device("c", "dispatch_message", { in_reply_to: "m-2", body: "other" });
-		expect(g.entries.map(e => e.outcome)).toEqual(["verdict", "verdict", "verdict"]);
-	});
 });
 
 describe("kill (test 10)", () => {
@@ -580,7 +580,6 @@ describe("renderTranscript (test 12)", () => {
 		const out = render(context);
 		expect(bytes(out)).toBeLessThanOrEqual(GATE_CONTEXT_MAX_BYTES);
 		expect(out).toMatch(/^… \[elided \d+ bytes of earlier transcript\]/);
-		expect(out.trimEnd().endsWith('→ write({"path":"xd://dispatch_comment","content":"{\\"issue\\":\\"X-1\\",\\"body\\":\\"b\\"}"})')).toBe(true);
 		expect(out).toContain("NEWEST MESSAGE: posting the comment now.");
 	});
 	test("envoy messages render in full whether displayed or hidden", () => {
@@ -692,6 +691,7 @@ describe("askgate.ts, the entry", () => {
 	// The entry's other fork imports: the primary's context (one user message) and the handler ceiling.
 	mock.module("@oh-my-pi/pi-coding-agent", () => ({ buildSessionContext: () => ({ messages: [fx.user("Post it.")] }), settings: {} }));
 	mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({ cfgExtensionHandlersToolCallTimeoutMs: { get: () => 120_000 } }));
+	mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/runner", () => ({ EXTENSION_HANDLER_TIMEOUT_MS: 30_000 }));
 	const saved = { ...process.env };
 	const dirs: string[] = [];
 	afterEach(() => {

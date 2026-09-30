@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildSessionContext, type ExtensionAPI, type ReadonlySessionManager, settings } from "@oh-my-pi/pi-coding-agent";
+import { EXTENSION_HANDLER_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { cfgExtensionHandlersToolCallTimeoutMs } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { type Api, type ApiKeyResolver, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { type CompleteRequest, type Completion, createAskGate, GATE_EFFORT, type Message, type Usage } from "./askgate-core";
@@ -53,7 +54,7 @@ async function complete({ ctx, model, system, user, sessionId, signal }: Complet
 /** The runner's tool_call handler ceiling, normalised as the runner does (runner.ts normalizeHandlerTimeout). */
 function handlerCeilingMs(): number {
 	const configured = cfgExtensionHandlersToolCallTimeoutMs.get(settings);
-	return Number.isFinite(configured) && configured > 0 ? configured : 30_000;
+	return Number.isFinite(configured) && configured > 0 ? configured : EXTENSION_HANDLER_TIMEOUT_MS;
 }
 
 /** Appends to the dump, owner-only on every open (not only on creation), and never through a symlink. */
