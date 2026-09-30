@@ -1143,11 +1143,13 @@ class ReadoutTest(unittest.TestCase):
         revises = [row["id"] for row in rows]
         self.assertEqual(len(revises), correct + harmful + other + unlabelled)
         labels = self.home.root / "labels.jsonl"
+        axes = {"acted-correct": ("right", "acted"), "acted-harmful": ("wrong", "acted"), "ignored-agent-right": ("wrong", "ignored")}
         with labels.open("w", encoding="utf-8") as fh:
             for i, row_id in enumerate(revises[:correct + harmful + other]):
                 label = "acted-correct" if i < correct else "acted-harmful" if i < correct + harmful else "ignored-agent-right"
-                fh.write(json.dumps({"id": row_id, "label": label, "labeler": "oracle-test", "at": ar.iso(self.now)}) + "\n")
-        self.home.run("ingest-labels", str(labels), check_exit=0)
+                verdict, response = axes[label]
+                fh.write(json.dumps({"id": row_id, "verdict": verdict, "response": response, "at": ar.iso(self.now)}) + "\n")
+        self.home.run("ingest-labels", str(labels), "--labeler", "oracle-test", check_exit=0)
 
     def test_a_week_with_revises_and_no_labels_is_incomplete_whatever_n(self):
         """Day 14.1: week 1's 30 revises are labelled at precision 0.60, week 2's 30 are not labelled yet."""
@@ -1164,19 +1166,22 @@ class ReadoutTest(unittest.TestCase):
         self.assertFalse(self.home.overlay.exists())
 
     def test_a_revise_the_agent_never_received_is_not_in_the_labelled_population(self):
-        """The fork dropped a skipped call's warn block, so the agent never saw that revise: a label on it moves neither
-        n nor harm, and the gate still reads GO."""
+        """The fork dropped a skipped call's warn block, so the agent never saw that revise: no packet carries it, so
+        ingest-labels refuses a label on it, and a label written into labels.jsonl by hand moves neither n nor harm."""
         self.launch(days=15)
         at = self.now - timedelta(hours=2)
         undelivered = gate_line(decision="revise", at=at, latency_ms=4000)
         self.healthy_gate(extra=[assistant_call("w9", "write", {}, at), undelivered, skipped_result("w9", at),
                                  assistant_call("a9", "read", {}, at)])
         self.label_revises(correct=18, other=12)
+        row = {"id": f"gate:01a0f000-0000-7000-8000-00000000f003:{undelivered['id']}", "verdict": "wrong", "response": "acted",
+               "at": ar.iso(self.now)}
         harmful = self.home.root / "harmful.jsonl"
-        harmful.write_text(json.dumps({"id": f"gate:01a0f000-0000-7000-8000-00000000f003:{undelivered['id']}",
-                                       "label": "acted-harmful", "labeler": "oracle-test", "at": ar.iso(self.now)}) + "\n",
-                           encoding="utf-8")
-        self.home.run("ingest-labels", str(harmful), check_exit=0)
+        harmful.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        proc = self.home.run("ingest-labels", str(harmful), "--labeler", "oracle-test", check_exit=2)
+        self.assertIn("no packet carried", proc.stderr)
+        with (self.home.report_dir / "labels.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({**row, "stratum": "gate", "labeler": "oracle-test"}) + "\n")
         out = self.home.run("readout", "--check", "gate", check_exit=0).stdout
         self.assertIn("labelled revises n=30, precision 0.60, harm 0.00", out)
         self.assertIn("gate: GO", out)
@@ -1458,36 +1463,90 @@ class SampleTest(unittest.TestCase):
 
     def test_the_watch_stratum_is_admitted_notes_a_card_carried_with_the_cards_time(self):
         at = now_utc() - timedelta(hours=2)
-        root = self.home.session("01a0f000-0000-7000-8000-00000000f007", [
-            {"type": "custom_message", "customType": "advisor", "content": "<advisory>…</advisory>", "display": True,
-             "details": {"notes": [{"note": "note A", "severity": "concern", "advisor": "AskGate"}]},
-             "timestamp": ar.iso(at + timedelta(minutes=5))},
-        ])
-        advice = []
-        for i, (note, ack) in enumerate((("note A", "Delivered."), ("note B", "Queued for the end of the turn. Do not re-raise."))):
-            advice += [assistant_call(f"n{i}", "advise", {"note": note, "severity": "concern"}, at + timedelta(minutes=4 + 2 * i)),
-                       {"type": "message", "timestamp": ar.iso(at + timedelta(minutes=4 + 2 * i)),
-                        "message": {"role": "toolResult", "toolCallId": f"n{i}", "toolName": "advise", "content": ack}}]
-        write_jsonl(root.with_suffix("") / "__advisor.askgate.jsonl", advice)
+        watch_session(self.home, "01a0f000-0000-7000-8000-00000000f007", at)
         _proc, header, rows = self.sample("--stratum", "watch")
         self.assertEqual([(row["id"], row["card_at"], row["probe"]) for row in rows],
                          [("note:01a0f000-0000-7000-8000-00000000f007:n0", ar.iso(at + timedelta(minutes=5)), False)])
         self.assertEqual((header["stratum"], header["population"]), ("watch", 1))
 
 
+def watch_session(home, sid, at):
+    """A root session whose AskGate watch advisor admitted two notes: `note A`, delivered and carried by a card at five
+    minutes, and `note B`, queued and never carried."""
+    root = home.session(sid, [
+        {"type": "custom_message", "customType": "advisor", "content": "<advisory>…</advisory>", "display": True,
+         "details": {"notes": [{"note": "note A", "severity": "concern", "advisor": "AskGate"}]},
+         "timestamp": ar.iso(at + timedelta(minutes=5))},
+    ])
+    advice = []
+    for i, (note, ack) in enumerate((("note A", "Delivered."), ("note B", "Queued for the end of the turn. Do not re-raise."))):
+        advice += [assistant_call(f"n{i}", "advise", {"note": note, "severity": "concern"}, at + timedelta(minutes=4 + 2 * i)),
+                   {"type": "message", "timestamp": ar.iso(at + timedelta(minutes=4 + 2 * i)),
+                    "message": {"role": "toolResult", "toolCallId": f"n{i}", "toolName": "advise", "content": ack}}]
+    write_jsonl(root.with_suffix("") / "__advisor.askgate.jsonl", advice)
+
+
 class IngestLabelsTest(unittest.TestCase):
-    def test_an_unknown_label_rejects_the_whole_file(self):
-        home = Home()
-        self.addCleanup(home.cleanup)
-        labels = home.root / "labels.jsonl"
-        labels.write_text(
-            json.dumps({"id": "gate:s:g1", "label": "moot", "labeler": "o", "at": "2026-09-30T00:00:00Z"}) + "\n"
-            + json.dumps({"id": "gate:s:g2", "label": "great", "labeler": "o", "at": "2026-09-30T00:00:00Z"}) + "\n",
-            encoding="utf-8",
-        )
-        proc = home.run("ingest-labels", str(labels), check_exit=2)
-        self.assertIn("great", proc.stderr)
-        self.assertFalse((home.report_dir / "labels.jsonl").exists())
+    """A gate label is two axes, `verdict` right|wrong and `response` acted|ignored; a watch label is one of right,
+    wrong, moot, noise. ingest-labels takes a label only for an id a packet carried, never for a probe row, and refuses
+    a file with one bad row whole (exit 2)."""
+
+    AT = "2026-09-30T00:00:00Z"
+
+    def setUp(self):
+        self.home = Home()
+        self.addCleanup(self.home.cleanup)
+        at = now_utc() - timedelta(hours=2)
+        self.home.session("01a0f000-0000-7000-8000-00000000f008",
+                          [*block_revise("w1", at), *block_revise("x1", at + timedelta(minutes=1), issue="EX-2")])
+        self.home.session("01a0f000-0000-7000-8000-00000000f009", block_revise("p1", at), project="-.worktrees-p8-accept-s3")
+        watch_session(self.home, "01a0f000-0000-7000-8000-00000000f00b", at)
+        packet = self.home.root / "packet.jsonl"
+        window = ("--since", ar.iso(at - timedelta(hours=1)), "--until", ar.iso(now_utc()), "--n", "10", "--out", str(packet))
+        self.home.run("sample", *window, "--include-probes", check_exit=0)
+        rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()][1:]
+        self.organic = sorted(row["id"] for row in rows if not row["probe"])
+        [self.probe] = [row["id"] for row in rows if row["probe"]]
+        self.home.run("sample", *window, "--stratum", "watch", check_exit=0)
+        [self.note] = [json.loads(line)["id"] for line in packet.read_text(encoding="utf-8").splitlines()[1:]]
+
+    def ingest(self, *rows, exit_code):
+        path = self.home.root / "labels.jsonl"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        return self.home.run("ingest-labels", str(path), "--labeler", "oracle-a", check_exit=exit_code)
+
+    def gate(self, row_id, verdict="right", response="acted", **extra):
+        return {"id": row_id, "verdict": verdict, "response": response, "at": self.AT, **extra}
+
+    def stored(self):
+        path = self.home.report_dir / "labels.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_a_probe_row_cannot_be_ingested_as_a_label(self):
+        proc = self.ingest(self.gate(self.organic[0]), self.gate(self.probe), exit_code=2)
+        self.assertIn("probe", proc.stderr)
+        self.assertEqual(self.stored(), [])
+
+    def test_an_id_no_packet_carried_is_refused(self):
+        proc = self.ingest(self.gate("gate:01a0f000-0000-7000-8000-00000000f008:g99999"), exit_code=2)
+        self.assertIn("no packet carried", proc.stderr)
+
+    def test_a_label_takes_its_strata_axes_and_values_only(self):
+        bad = [{"id": self.organic[0], "verdict": "right", "at": self.AT}, self.gate(self.organic[0], verdict="great"),
+               self.gate(self.organic[0], response="later"), {"id": self.organic[0], "label": "moot", "at": self.AT},
+               self.gate(self.note), {"id": self.note, "label": "acted-correct", "at": self.AT},
+               self.gate(self.organic[0], labeler="oracle-b")]
+        for row in bad:
+            with self.subTest(row=row):
+                self.ingest(row, exit_code=2)
+        self.assertEqual(self.stored(), [])
+        self.ingest(self.gate(self.organic[0]), self.gate(self.organic[1], "wrong", "ignored"),
+                    {"id": self.note, "label": "moot", "at": self.AT}, exit_code=0)
+        self.assertEqual([(row["id"], row["stratum"], row.get("verdict"), row.get("response"), row.get("label"), row["labeler"])
+                          for row in self.stored()],
+                         [(self.organic[0], "gate", "right", "acted", None, "oracle-a"),
+                          (self.organic[1], "gate", "wrong", "ignored", None, "oracle-a"),
+                          (self.note, "watch", None, None, "moot", "oracle-a")])
 
 
 class ArmTest(unittest.TestCase):
