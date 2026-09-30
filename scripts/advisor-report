@@ -19,8 +19,8 @@ from an agent reading a `sample` packet with the rubric in docs/advisor-report.m
 
 Pre-registered rules for the AskGate gate (`readout --check gate`, launch =
 `arm gate`); the reasoning lives in docs/advisor-report.md:
-  - any day, first: advisor.disableRoster holds askgate, or a call since launch
-    recorded outcome killed -> killed; no GO or EXTEND is computed, nothing is written.
+  - any day, first: advisor.disableRoster holds askgate -> killed; no GO or EXTEND
+    is computed, nothing is written. `killed` gate entries alone (a kill-switch drill) end nothing.
   - day 3 onward: ungated_share > 0.20 over >= 20 matched calls in the last 24 h,
     or verdict p95 latency above 0.9 x the timeout over >= 20 verdicts in the last 24 h -> KILL.
   - day 14: GO (set OMP_ASKGATE=block as the shim default) when labelled
@@ -1075,12 +1075,10 @@ def gate_check(now: datetime) -> Check:
     problems = roster_problems(dotfiles_dir(), agent_dir())
     lines += [f"gate: {problem}" for problem in problems]
     # A killed gate records every later call as `killed`, which leaves every denominator, so the rules below would
-    # judge only the calls before the kill; its entries still say so after the owner's cleanup removes the member.
-    killed = [f"{KILL_KEY} holds {GATE_SLUG} in {overlay_path()}"] if GATE_SLUG in disabled else []
-    if whole["killed"]:
-        killed.append(f"{whole['killed']} calls since launch passed by the kill switch")
-    if killed:
-        lines.append(f"gate: killed ({'; '.join(killed)}); no GO or EXTEND computed")
+    # judge only the calls before the kill. The overlay member is the kill's only record: `killed` entries also come
+    # from a drill of the kill switch that the owner has undone, so they end nothing.
+    if GATE_SLUG in disabled:
+        lines.append(f"gate: killed ({KILL_KEY} holds {GATE_SLUG} in {overlay_path()}); no GO or EXTEND computed")
         return Check(KILLED, lines)
     kill: list[str] = []
     if day >= KILL_DAY:
