@@ -10,17 +10,9 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# Must run on the host, not inside an agentbox: a box's ~/.config/systemd is the container's own,
-# so `systemctl enable` there writes a unit the host manager never loads (omp-billing-watch.sh).
-if [[ -f /.dockerenv ]] || [[ "$(systemd-detect-virt 2>/dev/null)" == docker ]]; then
-    echo "advisor-watch: this is an agentbox; the host systemd cannot see its ~/.config/systemd." >&2
-    echo "  Run installers/advisor-watch.sh from a host shell instead." >&2
-    exit 1
-fi
-
-# The unit runs the shared checkout (%h/.dotfiles) under the user manager's PATH, not this shell's.
-# Everything below binds to that checkout, the unit links included, whichever checkout this runs
-# from: a link into a workspace dies when the workspace is forgotten, and the timer with it.
+# The unit runs the shared checkout (%h/.dotfiles) under the user manager's PATH, not this shell's,
+# so every check binds to that checkout whichever checkout this runs from; arm_user_timer links the
+# units from it too.
 shared="$HOME/.dotfiles"
 report="$shared/scripts/advisor-report"
 envoy="$shared/scripts/envoy"
@@ -28,12 +20,6 @@ envoy="$shared/scripts/envoy"
     echo "advisor-watch: $report is missing; advance ~/.dotfiles to a main that has it" >&2
     exit 1
 }
-for unit in advisor-watch.service advisor-watch.timer; do
-    [[ -f "$shared/omp/$unit" ]] || {
-        echo "advisor-watch: $shared/omp/$unit is missing; advance ~/.dotfiles to a main that has it" >&2
-        exit 1
-    }
-done
 unit_env="$(systemctl --user show-environment)"
 unit_path="$(sed -n 's/^PATH=//p' <<<"$unit_env")"
 for tool in python3 curl jq; do
@@ -56,18 +42,4 @@ grep -q -- '--source accepts only envoy' <<<"$probe" || {
     exit 1
 }
 
-mkdir -p ~/.config/systemd/user
-ensure_link "$shared/omp/advisor-watch.service" ~/.config/systemd/user/advisor-watch.service
-ensure_link "$shared/omp/advisor-watch.timer" ~/.config/systemd/user/advisor-watch.timer
-
-systemctl --user daemon-reload
-systemctl --user enable --now advisor-watch.timer
-
-# Prove the timer is scheduled: `enable --now` on a timer whose unit fails to load exits 0 on some
-# systemd versions. Captured before the grep, for the same SIGPIPE reason as the probe above.
-listed="$(systemctl --user list-timers --all advisor-watch.timer)"
-grep -q advisor-watch <<<"$listed" || {
-    echo "advisor-watch: timer did not register; see systemctl --user status advisor-watch.timer" >&2
-    exit 1
-}
-echo "advisor-watch: armed ($(systemctl --user show -p NextElapseUSecRealtime --value advisor-watch.timer))"
+arm_user_timer omp advisor-watch
