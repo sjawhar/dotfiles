@@ -106,11 +106,42 @@ EOF
     remove)
         # The worktree is the last non-option argument. Unlock it first only when
         # the lock is one this shim or shims/jj set; any other lock stands.
+        #
+        # The awk program reads to EOF on purpose. `exit` on the first match
+        # closes the pipe while git is still writing; git then dies of SIGPIPE
+        # and `set -o pipefail` kills the shim before it unlocks, so
+        # `git worktree remove` of a worktree this shim locked exits 141 and
+        # does nothing, leaving a half-registered worktree its owner cannot
+        # remove without bypassing the shim. That was observed once on the
+        # shared legion store (2026-09-30, by a review lane that bypassed the
+        # shim with /usr/bin/git).
+        #
+        # It fires only when git's output exceeds the pipe's capacity, so it is
+        # load-dependent and I could not reproduce it at a 64 KiB pipe: 121
+        # worktrees give 19 KB of porcelain, which fits, and the lookup
+        # succeeded. This box's pipes drop to 8 KiB once the user is past
+        # pipe-user-pages-soft (measured the same day: F_GETPIPE_SZ read 8192 at
+        # some moments and 65536 at others), and 19 KB does not fit in 8 KiB.
+        # So: mechanism established in principle and by the pipe sizes, not
+        # reproduced end to end here.
+        #
+        # Dropping `exit` costs one full read of a short list and prints the
+        # same line: `f` is cleared at the next `worktree ` header, so a block
+        # holds at most one `locked`.
+        #
+        # The `|| true` is the guard that matters, and it is not belt and
+        # braces for the above: this lookup only DECIDES whether to unlock, so
+        # any failure of it must degrade to "leave the lock alone" and let the
+        # real git run. Without it, errexit turns every way this pipeline can
+        # fail -- SIGPIPE, a git that cannot read the store, a locked
+        # `packed-refs` -- into a shim that exits before `exec`, so the user's
+        # own `git worktree remove` never runs at all. That covers the causes
+        # I did not find as well as the one I did.
         target=""
         for a in "${rest[@]}"; do [[ "$a" == -* ]] || target="$a"; done
         if [[ -n "$target" ]]; then
             abs="$(realpath -m -- "$target")"
-            lock="$("$_real" "${args[@]:0:i}" worktree list --porcelain | awk -v p="worktree $abs" '$0 == p {f = 1; next} /^worktree / {f = 0} f && /^locked/ {print; exit}')"
+            lock="$("$_real" "${args[@]:0:i}" worktree list --porcelain | awk -v p="worktree $abs" '$0 == p {f = 1; next} /^worktree / {f = 0} f && /^locked/ {print}' || true)"
             if [[ "$lock" == *AGENTC-431* ]]; then
                 "$_real" "${args[@]:0:i}" worktree unlock "$abs"
             fi
