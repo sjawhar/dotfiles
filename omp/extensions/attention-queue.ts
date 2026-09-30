@@ -22,7 +22,9 @@
 //
 // Runs unchanged in an agent box: TMUX and TMUX_PANE are passed in and
 // ~/.dotfiles and ~/.omp are mounted. Subagent sessions are skipped — only the
-// top-level session has a pane Sami answers.
+// top-level session has a pane Sami answers. A subagent binds these handlers
+// too and inherits the parent's TMUX_PANE, so each handler checks
+// `ctx.agent.kind`: `"sub"` for anything spawned, `"main"` for the top level.
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -39,7 +41,7 @@ const SERVER = process.env.TMUX?.split(",")[1];
 const TERMINAL_REPLY = /^(?:\x1b\[(?:6;\d+;\d+t|\d+;\d+R|[IO]|<[\d;]*[Mm]))+$/;
 
 type Ctx = {
-	agent: { isSubagent: boolean };
+	agent: { kind: "main" | "sub" };
 	cwd: string;
 	hasPendingMessages: () => boolean;
 	sessionManager: { getSessionId: () => string; getSessionName: () => string | undefined };
@@ -89,7 +91,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const listen = (_event: unknown, ctx: Ctx): void => {
-		if (ctx.agent.isSubagent) return;
+		if (ctx.agent.kind === "sub") return;
 		unsubscribe?.();
 		unsubscribe = ctx.ui.onTerminalInput((data) => {
 			if (queued && !TERMINAL_REPLY.test(data)) void drop(ctx);
@@ -100,24 +102,24 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_switch", listen);
 	pi.on("session_branch", listen);
 	pi.on("agent_end", (event: { messages: Assistant[]; willContinue?: boolean }, ctx: Ctx) => {
-		if (ctx.agent.isSubagent || event.willContinue) return;
+		if (ctx.agent.kind === "sub" || event.willContinue) return;
 		const last = event.messages.findLast((m) => m.role === "assistant");
 		if (last?.stopReason === "aborted") return;
 		if (ctx.hasPendingMessages()) return;
 		push(ctx);
 	});
 	pi.on("tool_execution_start", (event: { toolName: string }, ctx: Ctx) => {
-		if (ctx.agent.isSubagent || event.toolName !== "ask") return;
+		if (ctx.agent.kind === "sub" || event.toolName !== "ask") return;
 		push(ctx);
 	});
 	pi.on("tool_execution_end", (event: { toolName: string }, ctx: Ctx) => {
-		if (ctx.agent.isSubagent || event.toolName !== "ask") return;
+		if (ctx.agent.kind === "sub" || event.toolName !== "ask") return;
 		void drop(ctx);
 	});
 	// Awaited: the line must be gone before the process is, or a later `next`
 	// swaps whatever now runs in this pane into the cockpit.
 	pi.on("session_shutdown", (_event: unknown, ctx: Ctx) => {
-		if (ctx.agent.isSubagent) return;
+		if (ctx.agent.kind === "sub") return;
 		return drop(ctx);
 	});
 }
