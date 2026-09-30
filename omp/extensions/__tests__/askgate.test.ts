@@ -500,4 +500,17 @@ describe("askgate.ts, the entry", () => {
 		expect(completions[0].signal).toBeInstanceOf(AbortSignal);
 		expect(entries).toMatchObject([{ decision: "allow", outcome: "verdict", usage: { input: 5, output: 7, cacheRead: 0, cacheWrite: 0, cost: 0.25 } }]);
 	});
+	test("the prompt dump is created readable by its owner only, whatever the umask", async () => {
+		const dir = fs.mkdtempSync(path.join(tmpdir(), "askgate-dump-"));
+		dirs.push(dir);
+		const dump = path.join(dir, "dump.txt");
+		const umask = process.umask(0o022);
+		try {
+			await gateOnce({ OMP_ASKGATE_DUMP: dump });
+		} finally {
+			process.umask(umask);
+		}
+		expect(fs.readFileSync(dump, "utf8")).toContain("### Gate request");
+		expect(fs.statSync(dump).mode & 0o777).toBe(0o600);
+	});
 });
