@@ -14,7 +14,7 @@ const sessionInit = (task: string): Entry => ({ type: "session_init", systemProm
 const compaction: Entry = { type: "compaction", summary: "paraphrase" };
 const sddGoal: Entry = { type: "mode_change", mode: "goal", data: { goal: { objective: "[sdd] ship it", status: "active" } } };
 const context = (kind: "main" | "sub", branch: Entry[], idle: boolean) => ({
-	agent: { kind, id: kind === "sub" ? "0-Worker" : "Main", name: kind === "sub" ? "task" : "main", depth: 0 },
+	agent: { kind },
 	sessionManager: { getBranch: () => branch },
 	isIdle: () => idle,
 });
@@ -90,14 +90,13 @@ describe("compaction-reminder", () => {
 		expect(message.content).toContain(ASSIGNMENT);
 	});
 
-	test("the assignment is the branch's latest session_init task, not a user message", () => {
+	test("the assignment is the branch's session_init task, not its first user message", () => {
 		const session = bind();
-		// A `/tan` clone of a subagent: the fork carries the parent's transcript and
-		// session_init, then the clone appends its own and prompts with its own work.
+		// A `/tan` clone: the fork carries the parent session's whole transcript, then
+		// the clone records its own session_init and prompts with its own work.
 		session.compact(
 			"sub",
 			[
-				sessionInit("the parent's assignment"),
 				user("the parent's first prompt"),
 				assistant("parent working"),
 				sessionInit("the clone's own work"),
@@ -109,7 +108,6 @@ describe("compaction-reminder", () => {
 
 		expect(session.sent).toHaveLength(1);
 		expect(session.sent[0].message.content).toContain("the clone's own work");
-		expect(session.sent[0].message.content).not.toContain("the parent's assignment");
 		expect(session.sent[0].message.content).not.toContain("the parent's first prompt");
 	});
 

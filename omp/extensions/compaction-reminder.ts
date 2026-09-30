@@ -1,4 +1,4 @@
-// Re-assert what a compaction summary loses, in two cases: the sdd process
+// Re-assert what a compaction loses, in two cases: the sdd process
 // contract for a top-level session while an sdd goal is active, and the
 // original assignment for a subagent on its first compaction.
 //
@@ -61,16 +61,16 @@
 // per summary. State lives in the factory closure, which is per session
 // binding, never at module scope shared across sessions.
 //
-// The assignment is the `task` of the branch's latest `session_init`: the
-// string the runtime recorded before prompting this session with it, whoever
-// spawned it. The latest one is this session's own — a `/tan` clone forks its
-// parent's transcript, so the parent's entry is on the branch too, and the
-// clone's own follows it. Shake scans only `message` and `custom_message`
-// entries, so `session_init` survives every shake and a cold revive; the first
-// user message on the branch survives neither, and in a `/tan` clone is the
-// parent's prompt rather than this session's work. With no `session_init` —
-// nothing spawned through the task executor recorded one — the reminder text
-// goes alone.
+// The assignment is the `task` of the branch's `session_init` (the latest,
+// should there be more than one): the string the runtime recorded before
+// prompting this session with it. A task subagent records it before its first
+// prompt, and a `/tan` clone, which forks its parent's whole transcript,
+// records its own after the fork — so in a clone the first user message on the
+// branch is the parent's prompt, and only `session_init` is this session's
+// work. Shake scans only `message` and `custom_message` entries, so
+// `session_init` also survives every shake and a cold revive. With no
+// `session_init` — nothing spawned through the task executor or `/tan`
+// recorded one — the reminder text goes alone.
 //
 // The restatement is wrapped in `<ORIGINAL_ASSIGNMENT>` rather than a
 // lowercase tag: shake reads a lowercase tag alone on its line as one
@@ -91,7 +91,7 @@ type ModeChangeEntry = {
 	mode: string;
 	data?: { goal?: { objective?: string; status?: string } };
 };
-type SessionInitEntry = { type: "session_init"; task?: string };
+type SessionInitEntry = { type: "session_init"; task: string };
 type ShakeEndEvent = { action: string; aborted: boolean; skipped?: boolean; errorMessage?: string };
 type CompactCtx = {
 	agent: { kind: "main" | "sub" };
