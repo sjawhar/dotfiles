@@ -41,6 +41,7 @@ function bind(opts: {
 	complete?: (req: CompleteRequest) => Promise<Completion>;
 	kind?: "main" | "sub";
 	model?: unknown;
+	primary?: { provider: string; id: string };
 	/** The primary's context, as the entry's buildSessionContext binding returns it. */
 	context?: () => readonly Message[];
 	systemPrompt?: string[];
@@ -88,6 +89,8 @@ function bind(opts: {
 		ui: { notify: (message: string) => notices.push(message) },
 		getSystemPrompt: () => opts.systemPrompt ?? ["PRIMARY SYSTEM RULES", "More rules."],
 		models: { resolve: (spec: string) => (spec === "@askgate" ? ("model" in opts ? opts.model : MODEL) : undefined) },
+		/** The session's primary model: on the gate's provider unless a test says otherwise. */
+		model: "primary" in opts ? opts.primary : MODEL,
 		sessionManager: { getSessionId: () => "sess-1", getSessionFile: () => "/sessions/s.jsonl" },
 	};
 	const handler = handlers.get("tool_call");
@@ -106,6 +109,8 @@ function bind(opts: {
 		unreadable,
 		write: (toolCallId: string, path: string, content: string) => emit({ toolName: "write", toolCallId, input: { path, content } }),
 		device: (toolCallId: string, toolName: string, input: Record<string, unknown>) => emit({ toolName, toolCallId, input }),
+		/** Any other event the extension listens to, such as session_switch. */
+		event: (name: string, payload: Record<string, unknown> = {}) => handlers.get(name)?.({ type: name, ...payload }, ctx),
 	};
 }
 
@@ -425,6 +430,44 @@ describe("population (test 11)", () => {
 	});
 });
 
+describe("sessions", () => {
+	test("a halt in one session does not carry into the next", async () => {
+		const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: () => Promise.withResolvers<Completion>().promise });
+		for (const id of ["a", "b", "c", "d"]) await g.device(id, "dispatch_comment", COMMENT);
+		expect(g.entries.map(e => e.outcome)).toEqual(["timeout", "timeout", "timeout", "halted"]);
+		g.event("session_switch", { reason: "new" });
+		await g.device("e", "dispatch_comment", COMMENT);
+		expect(g.entries.at(-1)?.outcome).toBe("timeout");
+		expect(g.calls).toHaveLength(4);
+	});
+	test("revises and rebuttals from one branch do not carry into another", async () => {
+		const g = bind({ complete: async () => ({ text: REVISE }) });
+		await g.write("r1", "xd://dispatch_comment", '{"issue":"X-2","body":"b","advisor_rebuttal":"a link"}');
+		await g.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
+		await g.device("b", "dispatch_comment", { issue: "X-1", body: "two" });
+		g.event("session_branch");
+		await g.device("c", "dispatch_comment", { issue: "X-1", body: "three" });
+		await g.device("r1", "dispatch_comment", { issue: "X-2", body: "b" });
+		expect(g.entries.map(e => e.outcome)).toEqual(["verdict", "verdict", "verdict", "verdict"]);
+		expect(g.calls[2].user).not.toContain("You answered revise");
+	});
+});
+
+describe("data routing", () => {
+	test("a session whose primary model is on another provider is not sent to the gate", async () => {
+		const g = bind({ primary: { provider: "openai-codex", id: "gpt-5.5" }, context: () => { throw new Error("the context must not be read"); } });
+		expect(await g.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
+		expect(g.calls).toHaveLength(0);
+		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "skipped", reason: "primary on openai-codex" }]);
+	});
+	test("a session with no primary model is not sent either", async () => {
+		const g = bind({ primary: undefined });
+		await g.device("t1", "dispatch_comment", COMMENT);
+		expect(g.calls).toHaveLength(0);
+		expect(g.entries).toMatchObject([{ outcome: "skipped", reason: "primary on no model" }]);
+	});
+});
+
 describe("renderTranscript (test 12)", () => {
 	const render = (messages: readonly Message[], cap = GATE_CONTEXT_MAX_BYTES) => renderTranscript(messages, cap);
 	test("a 1 MiB context renders within the cap, elided at the start and ending with the newest message", () => {
@@ -564,6 +607,7 @@ describe("askgate.ts, the entry", () => {
 			ui: { notify: () => {} },
 			getSystemPrompt: () => ["PRIMARY"],
 			models: { resolve: () => MODEL },
+			model: MODEL,
 			modelRegistry: { resolver: () => "resolved-key" },
 			sessionManager: { getEntries: () => [], getLeafId: () => null, getSessionId: () => "sess-e" },
 		};
