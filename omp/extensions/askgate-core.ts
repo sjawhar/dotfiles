@@ -367,7 +367,9 @@ export function renderTemplate(template: string, values: Record<string, string>)
 function renderRequest(primarySystemPrompt: string, transcript: string, tool: string, input: Input, priorReasons: readonly string[]): string {
 	const prior =
 		priorReasons.length > 0
-			? `You answered revise ${priorReasons.length} time(s) for this target since its last allowed call:\n${priorReasons.map(r => `- ${escapeXml(r)}`).join("\n")}`
+			? // Each reason is model text inside the governing request: escaped, and folded onto its bullet line
+				// so none can start a line of its own, such as a forged `### Gate request`.
+				`You answered revise ${priorReasons.length} time(s) for this target since its last allowed call:\n${priorReasons.map(r => `- ${escapeXml(r.replace(/\s*\n\s*/g, " "))}`).join("\n")}`
 			: "";
 	return renderTemplate(requestTemplate, { primarySystemPrompt: escapeXml(primarySystemPrompt), transcript, tool, args: renderArgs(input), priorReasons: prior });
 }
