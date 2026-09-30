@@ -17,24 +17,9 @@ AskGate extension appends to the primary file, and ~/.omp/stats.db (synced first
 `omp stats --summary` unless --no-sync). No command calls a model: labels come
 from an agent reading a `sample` packet with the rubric in docs/advisor-report.md.
 
-Pre-registered rules for the AskGate gate (`readout --check gate`, launch =
-`arm gate`); the reasoning lives in docs/advisor-report.md:
-  - any day, first: advisor.disableRoster holds askgate -> killed; no GO or EXTEND
-    is computed, nothing is written. `killed` gate entries alone (a kill-switch drill) end nothing.
-  - day 3 onward: ungated_share > 0.20 over >= 20 matched calls in the last 24 h,
-    or verdict p95 latency above 0.9 x the timeout over >= 20 verdicts in the last 24 h -> KILL.
-  - day 14: GO (set OMP_ASKGATE=block as the shim default) when labelled
-    precision >= 0.5 over >= 30 labelled revises, harm <= 0.05,
-    ungated_share < 0.10, p95 <= 0.9 x timeout and skips = 0; KILL when
-    ungated_share >= 0.10, precision < 0.3 at >= 30 labels, or harm > 0.10 at
-    any number of labels;
-    otherwise EXTEND one week once, and from day 21 anything that is not GO is
-    KILL.
-  - fewer than 30 labelled revises: incomplete, naming each completed week with
-    no labels.
-  - ~/.omp/agent/extensions/askgate.ts must resolve to a file under
-    $DOTFILES_DIR, and $DOTFILES_DIR/omp/WATCHDOG.yml must keep a non-empty
-    advisors: list; otherwise incomplete, and nothing is written.
+`readout --check gate` applies the AskGate gate's pre-registered go and kill rules from the launch `arm gate`
+recorded; docs/advisor-report.md ("Readout rules") states them in their order of precedence, and
+gate_decision below is their one implementation.
 Every KILL is applied here, by `overlay add advisor.disableRoster askgate`. `--notify` sends through
 `scripts/envoy send --source envoy` and sends nothing through an envoy without that flag.
 Exit: any KILL applied 1, else any incomplete or unsent notice 3, else 0; usage errors 2.
@@ -1145,10 +1130,12 @@ def watch_baseline(path: Path, launched: datetime) -> str:
 
 
 def missing_label_weeks(launched: datetime, now: datetime, fired: list[tuple[str, datetime]], labels: dict) -> list[str]:
+    """Each completed week since launch that has revises and not one of them labelled."""
     missing = []
     for week in range(1, int((now - launched).days // 7) + 1):
         start, end = launched + timedelta(days=7 * (week - 1)), launched + timedelta(days=7 * week)
-        if not any(start <= at < end and row_id in labels for row_id, at in fired):
+        revises = [row_id for row_id, at in fired if start <= at < end]
+        if revises and not any(row_id in labels for row_id in revises):
             missing.append(f"week {week} ({start:%Y-%m-%d}..{end:%Y-%m-%d})")
     return missing
 
@@ -1167,6 +1154,18 @@ def day3_kill(day: float, timeout_ms: int, recent: dict) -> list[str]:
     return kill
 
 
+def day14_kill(whole: dict, labelled: dict) -> list[str]:
+    """The day-14 KILLs, first match only: a gate that fails open over the window, is wrong, or does harm."""
+    n, precision, harm = labelled["n"], labelled["precision"], labelled["harm"]
+    if whole["ungated_share"] is not None and whole["ungated_share"] >= MAX_UNGATED:
+        return [f"day {DECISION_DAY}: ungated_share {whole['ungated_share']:.3f} >= {MAX_UNGATED}"]
+    if n >= MIN_LABELS and precision < KILL_PRECISION:
+        return [f"day {DECISION_DAY}: precision {precision:.2f} < {KILL_PRECISION}"]
+    if harm is not None and harm > KILL_HARM:
+        return [f"day {DECISION_DAY}: harm {harm:.2f} > {KILL_HARM} over {n} labels"]
+    return []
+
+
 def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labelled: dict, skips: int,
                   missing_weeks: list[str], killed: bool, problems: list[str]) -> Decision:
     """The gate's pre-registered rules (docs/advisor-report.md, Readout rules), in their order of precedence."""
@@ -1174,32 +1173,25 @@ def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labell
     # judge only the calls before the kill.
     if killed:
         return Decision(KILLED)
-    n, precision, harm, p95 = labelled["n"], labelled["precision"], labelled["harm"], whole["latency_ms_p95"]
-    kill = day3_kill(day, timeout_ms, recent)
-    go = extend = False
-    if day >= DECISION_DAY and not kill:
-        if whole["ungated_share"] is not None and whole["ungated_share"] >= MAX_UNGATED:
-            kill.append(f"day {DECISION_DAY}: ungated_share {whole['ungated_share']:.3f} >= {MAX_UNGATED}")
-        elif n >= MIN_LABELS and precision < KILL_PRECISION:
-            kill.append(f"day {DECISION_DAY}: precision {precision:.2f} < {KILL_PRECISION}")
-        elif harm is not None and harm > KILL_HARM:
-            kill.append(f"day {DECISION_DAY}: harm {harm:.2f} > {KILL_HARM} over {n} labels")
-        elif n >= MIN_LABELS:
-            go = (precision >= GO_PRECISION and harm <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
-                  and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and skips == 0)
-            if not go and day >= EXTENDED_DAY:
-                kill.append(f"day {EXTENDED_DAY}: not GO after the one-week extension")
-            extend = not go
+    kill = day3_kill(day, timeout_ms, recent) or (day14_kill(whole, labelled) if day >= DECISION_DAY else [])
     if kill:
         return Decision(KILL, tuple(kill))
+    # A week's packet is drawn when the week ends and labelled after, so until then GO, EXTEND and the day-21 KILL
+    # would read the earlier weeks alone.
+    if missing_weeks:
+        return Decision(INCOMPLETE, (f"no labels for {', '.join(missing_weeks)}",))
+    n, precision, harm, p95 = labelled["n"], labelled["precision"], labelled["harm"], whole["latency_ms_p95"]
     if n < MIN_LABELS:
-        weeks = (f"no labels for {', '.join(missing_weeks)}",) if missing_weeks else ()
-        return Decision(INCOMPLETE, (f"labels < {MIN_LABELS} (n={n})", *weeks))
+        return Decision(INCOMPLETE, (f"labels < {MIN_LABELS} (n={n})",))
+    go = (day >= DECISION_DAY and precision >= GO_PRECISION and harm <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
+          and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and skips == 0)
+    if day >= EXTENDED_DAY and not go:
+        return Decision(KILL, (f"day {EXTENDED_DAY}: not GO after the one-week extension",))
     if problems:
         return Decision(INCOMPLETE)
     if go:
         return Decision(GO, ("make OMP_ASKGATE=block the shim default",))
-    if extend:
+    if day >= DECISION_DAY:
         return Decision(EXTEND, ("one more week, then GO or KILL",))
     return Decision(ON_TRACK)
 

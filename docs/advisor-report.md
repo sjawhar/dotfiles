@@ -87,20 +87,23 @@ human reply that retracts it, refuses its framing, or asks why he is being asked
 
 `arm gate` records the gate's launch time, its timeout and the pinned omp version in
 `~/.omp/advisor-report/launch.json`. `readout --check gate` (both checks when none is named) then applies
-these rules over the window from launch to now; a gate that was never armed is no finding.
+these rules over the window from launch to now; a gate that was never armed is no finding. The rules apply in
+this order, and the first that matches decides:
 
 | When | Rule | Result |
 |---|---|---|
-| any day, before every rule below | `advisor.disableRoster` in the overlay holds `askgate` | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
+| any day | `advisor.disableRoster` in the overlay holds `askgate` | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
 | day 3 onward | `ungated_share` > 0.20 over ≥ 20 matched calls in the last 24 h, or verdict p95 above 0.9 × the timeout over ≥ 20 verdicts in the last 24 h | KILL |
-| day 14 | `ungated_share` ≥ 0.10 over the window | KILL |
-| day 14, ≥ 30 labelled revises | precision < 0.3 | KILL |
-| day 14, any number of labelled revises | harm > 0.10 | KILL |
-| day 14, ≥ 30 labelled revises | precision ≥ 0.5, harm ≤ 0.05, `ungated_share` < 0.10, p95 ≤ 0.9 × timeout, `skips` = 0 (skips the gate's own cards caused; harm counts the same ones) | GO: make `OMP_ASKGATE=block` the shim default |
-| day 14–20 | neither | EXTEND one week |
+| day 14 onward | `ungated_share` ≥ 0.10 over the window | KILL |
+| day 14 onward, ≥ 30 labelled revises | precision < 0.3 | KILL |
+| day 14 onward, any number of labelled revises | harm > 0.10 | KILL |
+| any day | a completed week since launch has revises and not one of them is labelled | incomplete, naming the week |
+| any day | fewer than 30 labelled revises | incomplete |
 | day 21 onward | not GO | KILL |
-| any day | fewer than 30 labelled revises | incomplete; each completed week with no labels is named |
 | any day | `~/.omp/agent/extensions/askgate.ts` does not resolve to a file under `$DOTFILES_DIR`, or `$DOTFILES_DIR/omp/WATCHDOG.yml` has no `advisors:` entries | incomplete; nothing is written |
+| day 14 onward | precision ≥ 0.5, harm ≤ 0.05, `ungated_share` < 0.10, p95 ≤ 0.9 × timeout, `skips` = 0 (skips the gate's own cards caused; harm counts the same ones) | GO: make `OMP_ASKGATE=block` the shim default |
+| day 14–20 | otherwise | EXTEND one week |
+| before day 14 | otherwise | on track |
 
 The killed rule comes first because a killed gate records every later call as `killed`, which leaves every
 denominator: the rules would judge only the calls before the kill, and a 24-hour burst that tripped the day-3
@@ -112,7 +115,12 @@ fails open or stalls the agent. Its latency bound is 0.9 × the timeout, not the
 verdict slower than the timeout is recorded as a `timeout`, so verdict p95 can never pass it: a gate
 answering at 85 s against a 90 s deadline stalls every scoped write and must still trip the rule. It needs 20
 verdicts in the 24 hours, as the ungated rule needs 20 calls: below that the nearest-rank p95 is the slowest
-verdict, so one slow answer among a handful would end the trial. The rest is the go decision. Precision is
+verdict, so one slow answer among a handful would end the trial. The rest is the go decision. A week's sample
+packet is drawn when the week ends and labelled after it, so the first readouts past day 14 (or 21) run before
+the last week's labels exist; one packet alone can hold 30 labels, and GO, EXTEND or the day-21 KILL read from
+the earlier weeks would decide on part of the window. A completed week with revises and no labels therefore
+stops those three (the KILLs above it do not wait), while a week with no revises has nothing to label and is
+not named. Precision is
 measured against a baseline of 4 in 26 notes (0.15) from the watch-mode AskGate. The link rule catches a
 gate that is no longer loaded. The roster rule writes nothing because no setting reaches an older omp: a
 roster without `advisors:` entries makes an omp that falls back to its every-turn default watcher when the
