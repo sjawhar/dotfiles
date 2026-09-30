@@ -7,6 +7,14 @@ modelRoles:
   vision: google/gemini-3.7-flash:medium
   review: openai-codex/gpt-5.5:xhigh
   advisor: anthropic/claude-sonnet-5:medium
+  askgate: anthropic/claude-fable-5-1:high
+extensionHandlers:
+  # AskGate (omp/extensions/askgate.ts) answers a Dispatch write with a model
+  # call bounded at 90 s inside the handler; the runner's own ceiling must sit
+  # above it, because a handler that outruns the ceiling is fail-closed (the
+  # call is refused). Global: any tool_call handler in any extension may now
+  # hold a tool call for up to 120 s before the runner refuses it (was 30 s).
+  toolCallTimeoutMs: 120000
 retry:
   modelFallback: true
   usageAwareFallback: true
