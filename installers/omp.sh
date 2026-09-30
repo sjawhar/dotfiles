@@ -28,7 +28,7 @@ fi
 # (gateway baseUrl, `!command` apiKey) goes in the gitignored
 # omp/models.local.yml and is merged over it here, straight into the file omp
 # reads. A real file, not a link: no committed file holds the merged content,
-# and scripts/ompo never mirrors models.yml into profiles (a client profile
+# and shims/omp never mirrors models.yml into a named profile (a client profile
 # must not inherit the default's gateway routing).
 MODELS_OUT="${OMP_AGENT_DIR}/models.yml"
 # Converge the earlier layout: a link to a built copy inside the repo.
@@ -50,6 +50,8 @@ ensure_link "${DOTFILES_DIR}/omp/lsp.json"    "${OMP_AGENT_DIR}/lsp.json"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.md" "${OMP_AGENT_DIR}/WATCHDOG.md"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.yml" "${OMP_AGENT_DIR}/WATCHDOG.yml"
 ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
+# omp loads <agent dir>/hooks/<pre|post>/*.ts; post/jj-snapshot.ts is the one jj snapshotter.
+ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
 # plugin installed from GitHub. The pins live in the committed

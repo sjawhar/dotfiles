@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Claude Code status line: a bar of the context the next request carries, e.g.
-# "ctx ██▌░░░░░░░ 25% 250k/1M" (green under 50%, yellow under 80%, red above), led by the
-# profile's name in magenta when the session runs under `cld --profile NAME`, so the account
-# it bills is always on screen.
+# "ctx ██▌░░░░░░░ 25% 250k/1M" (green under 50%, yellow under 80%, red above),
+# prefixed with the profile name under `cld --profile NAME`.
 # Claude Code pipes the session state as JSON on stdin. context_window.current_usage is the
 # last request's input (uncached, cache writes, cache reads) and is null before the first reply.
 set -euo pipefail

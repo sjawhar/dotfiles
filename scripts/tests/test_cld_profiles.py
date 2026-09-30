@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/cld --profile: which CLAUDE_CONFIG_DIR claude runs under, and what a profile shares.
-
-A profile is its own CLAUDE_CONFIG_DIR, so its own login and org policy; it links only the
-canonical dir's user configuration. Without the flag an inherited CLAUDE_CONFIG_DIR wins, else
-the canonical dir.
-
-Technique: a scratch DOTFILES_DIR whose scripts/ is the real one (cld execs
-scripts/agent-secrets-session, which runs the agent unregistered on a machine without the
-helper's unit) and whose .claude holds both configuration and per-account state; a `claude`
-stub first on PATH prints the config dir and the arguments it got.
-"""
+"""scripts/cld --profile: the config dir claude runs under, and what a profile links."""
 
 from __future__ import annotations
 
@@ -23,8 +13,7 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 CLD = DOTFILES / "scripts" / "cld"
 
-# Every entry the repo tracks under .claude is configuration every profile shares; the installed
-# plugins too. A trailing "/" marks a directory.
+# What .gitignore tracks under .claude, plus plugins; a trailing "/" marks a directory.
 TRACKED = tuple(
     line.strip()[len("!.claude/"):]
     for line in (DOTFILES / ".gitignore").read_text(encoding="utf-8").splitlines()
