@@ -1,7 +1,7 @@
 # Diffs, ancestry and absence evidence
 
-Read from the matching step of the using-jj skill. Git commands here are read-only
-diagnostics; version-control changes use jj.
+Read from the matching step of the using-jj skill. The examples include read-only diagnostics
+and isolated scratch-repository setup; they do not change the main skill's jj-only rule.
 
 - **Numbers from diffs:** `--stat`'s per-file figure is insertions **plus** deletions (`f | 4 +++-`
   for 3 added, 1 removed), not a split. `jj diff` has **no `--numstat`** (`unexpected argument`);

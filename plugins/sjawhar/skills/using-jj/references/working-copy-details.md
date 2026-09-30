@@ -126,4 +126,4 @@ diagnostics or warnings about what not to run; version-control changes use jj.
   not tell you this; it reports a clean working copy that can be many commits and a refactor away
   from main.
 
-- **`git status` cannot certify a jj workspace clean.** In a colocated workspace jj syncs its working-copy commit into git's HEAD, so `git status --porcelain` reads empty while that HEAD sits on no branch and is pushed nowhere; the content is at risk and git says nothing. Use `jj st` and `jj log -r @` in that workspace.
+- **Git's view cannot establish publication.** An empty working-copy change can have an unpublished parent. Use `jj st` and compare `@`, its parent and the intended remote bookmark with `jj log`; a clean Git status does not show whether that content was pushed.

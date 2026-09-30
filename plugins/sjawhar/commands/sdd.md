@@ -127,10 +127,11 @@ skill), starting from the problem and its evidence, with sections that follow th
 than a fixed template. Put each open question right after the section that discusses it, as a
 decision block (on Dispatch, an ask block) carrying the options, what each costs and your
 recommendation, and record each answer there in his words with its date. His answers settle what
-they answer. Ask for approval only when the spec still proposes something he has not settled, and
-say in the request exactly what that is. Without Dispatch, hold the same conversation on the
-tracker you have, or in the conversation when none is reachable. Outside that design conversation,
-chat is for execution and for bounded designs already being discussed live.
+they answer. Ask for approval only once every decision block is answered and folded into the
+text, and only when the spec still proposes something he has not settled. Say in the request
+exactly what those proposals are, never an open question. Without Dispatch, hold the same
+conversation on the tracker you have, or in the conversation when none is reachable. Outside
+that design conversation, chat is for execution and bounded designs already being discussed live.
 
 Every plan includes:
 
