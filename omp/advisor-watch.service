@@ -4,9 +4,9 @@ Description=Daily AskGate readout: apply the pre-registered kill rules and messa
 # (rules in docs/advisor-report.md) and applies every KILL itself, through its locked
 # `overlay add advisor.disableRoster <member>` write to ~/.omp/agent/local-overrides.yml, which
 # running sessions re-read. --notify sends one summary, prefixed `advisor-report (AGENTC-1323)`,
-# to the Envoy role agentc-1305 with `scripts/envoy send --source envoy`: the readout speaks for
-# the platform, not as a session. A KILL exits 1 and an incomplete check exits 3, so the unit
-# shows `failed` and the journal holds the report.
+# to the Envoy role agentc-1305 with `scripts/envoy notify`: the readout speaks for the platform,
+# not as a session. A KILL exits 1 and an incomplete check, an unsent summary included, exits 3,
+# so the unit shows `failed` and the journal holds the report.
 
 [Service]
 Type=oneshot
