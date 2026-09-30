@@ -1,0 +1,1172 @@
+#!/usr/bin/env python3
+"""advisor-report: measure omp's advisors from the session files on this machine.
+
+  advisor-report metrics [--since ISO] [--until ISO] [--days N] [--advisor SLUG] [--sessions-root PATH]
+                         [--stats-db PATH] [--no-sync] [--scope-regex RE] [--json]
+  advisor-report sample --since ISO --until ISO --n N --out FILE.jsonl [--advisor SLUG] [--sessions-root PATH]
+  advisor-report ingest-labels FILE.jsonl
+  advisor-report arm gate --launched ISO --timeout-ms N
+  advisor-report arm trial --launched ISO [--approved-by ASK_ID]
+  advisor-report readout [--check gate] [--check trial] [--notify TOPIC]
+  advisor-report overlay add|remove <key.path> <member>
+
+Reads the primary session files under ~/.omp/agent/sessions, each advisor's
+transcript beside them (<session>/__advisor.<slug>.jsonl; `--advisor default` is
+the unnamed legacy advisor's __advisor.jsonl), the `advisor-gate` entries the
+AskGate extension appends to the primary file, and ~/.omp/stats.db (synced first with
+`omp stats --summary` unless --no-sync). No command calls a model: labels come
+from an agent reading a `sample` packet with the rubric in docs/advisor-report.md.
+
+Pre-registered rules for the AskGate gate (`readout --check gate`, launch =
+`arm gate`); the reasoning lives in docs/advisor-report.md:
+  - day 3 onward: ungated_share > 0.20 over >= 20 matched calls in the last 24 h,
+    or verdict p95 latency above the timeout -> KILL.
+  - day 14: GO (set OMP_ASKGATE=block as the shim default) when labelled
+    precision >= 0.5 over >= 30 labelled revises, harm <= 0.05,
+    ungated_share < 0.10, p95 <= 0.9 x timeout and skips = 0; KILL when
+    ungated_share >= 0.10, or, at >= 30 labels, precision < 0.3 or harm > 0.10;
+    otherwise EXTEND one week once, and from day 21 anything that is not GO is
+    KILL.
+  - fewer than 30 labelled revises: incomplete, naming each completed week with
+    no labels.
+  - ~/.omp/agent/extensions/askgate.ts must resolve to a file under
+    $DOTFILES_DIR, and $DOTFILES_DIR/omp/WATCHDOG.yml must keep a non-empty
+    advisors: list; otherwise incomplete, and nothing is written.
+Every KILL is applied here, by `overlay add advisor.disableRoster askgate`.
+Exit: any KILL applied 1, else any incomplete 3, else 0; usage errors 2.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import math
+import os
+import random
+import re
+import sqlite3
+import statistics
+import subprocess
+import sys
+import tempfile
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+MESSAGE_PREFIX = "advisor-report (AGENTC-1323)"
+
+ACKS = {
+    "Delivered.": "delivered",
+    "Queued for the end of the turn. Do not re-raise.": "queued",
+    "Dropped: empty note.": "dropped-empty",
+    "Dropped: nothing actionable.": "dropped-noise",
+    "Dropped: already raised.": "dropped-duplicate",
+    "Dropped: this update's advice budget is spent.": "dropped-budget",
+}
+ADMITTED = frozenset({"delivered", "queued"})
+DEFAULT_SCOPE_REGEX = r"write\(xd://dispatch_(ask|message|edit_ask|comment|doc_edit|issue)\)"
+SPEC_DEVICE = "xd://dispatch_issue"
+SKIP_PREFIX = "Skipped due to pending system advisory"
+ADVISOR_STEM = "__advisor"
+GATE_ENTRY_TYPE = "advisor-gate"
+LABELS = frozenset({"acted-correct", "acted-harmful", "ignored-agent-right", "ignored-advisor-right", "moot", "noise"})
+
+FAIL_OPEN = frozenset({"timeout", "error", "no-verdict"})
+UNGATED = FAIL_OPEN | {"unavailable", "halted"}
+REACHED_MODEL = FAIL_OPEN | {"verdict"}
+# Deliberate passes: the agent's override, the per-target breaker and the machine kill switch. They are not
+# gate failures, so they leave ungated_share's denominator.
+PASSED = frozenset({"rebuttal", "breaker", "killed"})
+
+KILL_DAY = 3
+KILL_WINDOW = timedelta(hours=24)
+KILL_MIN_MATCHED = 20
+KILL_UNGATED_24H = 0.20
+DECISION_DAY = 14
+EXTENDED_DAY = 21
+MIN_LABELS = 30
+GO_PRECISION = 0.5
+KILL_PRECISION = 0.3
+GO_HARM = 0.05
+KILL_HARM = 0.10
+MAX_UNGATED = 0.10
+GO_LATENCY_SHARE = 0.9
+
+CONTEXT_MESSAGES = 5
+CONTEXT_TEXT_MAX = 2000
+UPDATE_TEXT_MAX = 4000
+
+UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+HEX_RE = re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{8,}\b", re.I)
+XD_PATH_RE = re.compile(r"xd://[A-Za-z0-9_./-]+")
+WORD_RE = re.compile(r"[a-z0-9]+")
+ROOT_STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_[0-9a-f-]+(\.jsonl)?$")
+
+
+class UsageError(Exception):
+    """Bad input or a refused action: exit 2."""
+
+
+class Failure(Exception):
+    """The command could not do its job: exit 1."""
+
+
+# --- paths -----------------------------------------------------------------
+
+def omp_home() -> Path:
+    return Path.home() / ".omp"
+
+
+def agent_dir() -> Path:
+    return Path(os.environ.get("PI_CODING_AGENT_DIR") or omp_home() / "agent")
+
+
+def report_dir() -> Path:
+    return omp_home() / "advisor-report"
+
+
+def trial_flag() -> Path:
+    return omp_home() / "advisor-trial" / "armed"
+
+
+def dotfiles_dir() -> Path:
+    return Path(os.environ.get("DOTFILES_DIR") or Path.home() / ".dotfiles")
+
+
+def default_stats_db() -> Path:
+    return Path(os.environ.get("OMP_STATS_DB") or omp_home() / "stats.db")
+
+
+# --- time ------------------------------------------------------------------
+
+def parse_iso(text: str) -> datetime:
+    value = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
+
+
+def entry_time(entry: dict) -> datetime | None:
+    stamp = entry.get("timestamp")
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return parse_iso(stamp)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class Window:
+    since: datetime
+    until: datetime
+
+    def contains(self, at: datetime | None) -> bool:
+        return at is not None and self.since <= at <= self.until
+
+    @property
+    def days(self) -> float:
+        return (self.until - self.since).total_seconds() / 86400
+
+
+# --- small pure helpers ----------------------------------------------------
+
+def classify_ack(text: str) -> str:
+    return ACKS.get(text.strip(), "unknown")
+
+
+def slugify(name: str) -> str:
+    """The slug omp derives from a roster name (lowercase, non-alphanumerics to `-`)."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "advisor"
+
+
+def transcript_name(slug: str) -> str:
+    return f"{ADVISOR_STEM}.jsonl" if slug == "default" else f"{ADVISOR_STEM}.{slug}.jsonl"
+
+
+def content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text")
+    return ""
+
+
+def tool_calls_of(message: dict) -> list[dict]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict) and block.get("type") == "toolCall"]
+
+
+def parse_json_object(text) -> dict | None:
+    if not isinstance(text, str):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def ratio(numerator: float, denominator: float) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def nearest_rank(values: list[float], share: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(share * len(ordered)) - 1)]
+
+
+def note_tokens(note: str) -> set[str]:
+    """Ids and device paths a later tool call can carry: UUIDs, 8+-hex ids, xd:// paths."""
+    found = {m.group(0).lower() for m in UUID_RE.finditer(note)}
+    found |= {m.group(0).lower() for m in HEX_RE.finditer(note)}
+    found |= {m.group(0).lower() for m in XD_PATH_RE.finditer(note)}
+    return found
+
+
+def carries_token(arguments: dict, tokens: set[str]) -> bool:
+    text = json.dumps(arguments, ensure_ascii=False).lower()
+    return any(token in text for token in tokens)
+
+
+def jaccard(a: str, b: str) -> float:
+    left, right = set(WORD_RE.findall(a.lower())), set(WORD_RE.findall(b.lower()))
+    return ratio(len(left & right), len(left | right)) or 0.0
+
+
+def scoped_device(name: str, arguments: dict, scope_re: re.Pattern) -> str | None:
+    """The device a scoped Dispatch write targets, or None. `dispatch_issue` counts only with `spec`."""
+    if name == "write":
+        path = arguments.get("path")
+        if not isinstance(path, str):
+            return None
+        device, payload = path.strip(), parse_json_object(arguments.get("content"))
+    elif name.startswith("dispatch_"):
+        device, payload = f"xd://{name}", arguments
+    else:
+        return None
+    if not scope_re.search(f"write({device})"):
+        return None
+    if device == SPEC_DEVICE and not (isinstance(payload, dict) and "spec" in payload):
+        return None
+    return device
+
+
+# --- metrics over parsed data ----------------------------------------------
+
+def out_of_charter_pct(calls: list[dict], scope_re) -> float | None:
+    pattern = re.compile(scope_re) if isinstance(scope_re, str) else scope_re
+    admitted = [call for call in calls if call["ack"] in ADMITTED]
+    return ratio(sum(1 for call in admitted if not pattern.search(call["update"])), len(admitted))
+
+
+def gate_metrics(entries: list[dict]) -> dict:
+    data = [entry.get("data") or {} for entry in entries]
+    outcomes = Counter(d.get("outcome") for d in data)
+    verdict_latencies = [d["latencyMs"] for d in data
+                         if d.get("outcome") == "verdict" and isinstance(d.get("latencyMs"), (int, float))]
+    revises = sum(1 for d in data if d.get("outcome") == "verdict" and d.get("decision") == "revise")
+    matched = len(data)
+    return {
+        "matched": matched,
+        "counts": dict(sorted(Counter(f"{d.get('decision')}/{d.get('outcome')}" for d in data).items())),
+        "latency_ms_p50": nearest_rank(verdict_latencies, 0.5),
+        "latency_ms_p95": nearest_rank(verdict_latencies, 0.95),
+        "fail_open_rate": ratio(sum(outcomes[o] for o in FAIL_OPEN), sum(outcomes[o] for o in REACHED_MODEL)),
+        "ungated_share": ratio(sum(outcomes[o] for o in UNGATED), matched - sum(outcomes[o] for o in PASSED)),
+        "revise_rate": ratio(revises, outcomes["verdict"]),
+        "rebuttal_rate": ratio(outcomes["rebuttal"], matched),
+        "breaker_trips": outcomes["breaker"],
+        "killed": outcomes["killed"],
+        "halted_sessions": len({entry.get("_session") for entry, d in zip(entries, data) if d.get("outcome") == "halted"}),
+        "usage": gate_usage(data),
+    }
+
+
+USAGE_KEYS = ("input", "output", "cacheRead", "cacheWrite", "cost")
+
+
+def gate_usage(data: list[dict]) -> dict:
+    """Tokens and dollars the gate's model calls spent, summed from each entry's `usage` (entries without one spent
+    none). omp's own stats cannot see this spend, so the entries are its only record."""
+    totals = Counter()
+    for d in data:
+        usage = d.get("usage")
+        if isinstance(usage, dict):
+            for key in USAGE_KEYS:
+                if isinstance(usage.get(key), (int, float)):
+                    totals[key] += usage[key]
+    return {key: totals[key] for key in USAGE_KEYS}
+
+
+def labelled_metrics(labels: dict[str, dict], fired_ids, skips: int) -> dict:
+    rows = [labels[row_id] for row_id in fired_ids if row_id in labels]
+    counts = Counter(row["label"] for row in rows)
+    return {
+        "n": len(rows),
+        "precision": ratio(counts["acted-correct"] + counts["ignored-advisor-right"], len(rows)),
+        "harm": ratio(counts["acted-harmful"] + skips, len(rows)),
+    }
+
+
+def gate_row_id(entry: dict) -> str:
+    return f"gate:{entry['_session']}:{entry.get('id')}"
+
+
+def note_row_id(session_id: str, call: dict) -> str:
+    return f"note:{session_id}:{call['id']}"
+
+
+def is_revise(entry: dict) -> bool:
+    """A gate decision the agent was told to act on: the labelled population the precision rule reads."""
+    data = entry.get("data") or {}
+    return data.get("decision") == "revise" and data.get("outcome") == "verdict"
+
+
+# --- reading session files -------------------------------------------------
+
+@dataclass
+class SessionResult:
+    """What one root session contributes; the parsed entries are not kept."""
+
+    path: Path
+    session_id: str
+    turns: int = 0
+    skips: int = 0
+    transcript: bool = False
+    advisor_turns: int = 0
+    calls: list[dict] = field(default_factory=list)
+    held_latencies: list[int] = field(default_factory=list)
+    held_unrouted: int = 0
+    held_moot: int = 0
+    chain_pairs: int = 0
+    blockers: int = 0
+    gate_entries: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class Scan:
+    window: Window
+    advisor: str
+    sessions: list[SessionResult] = field(default_factory=list)
+    subagent_files: int = 0
+    bad_lines: int = 0
+    scoped: list[tuple[str, str, str]] = field(default_factory=list)  # (session file, tool call id, device)
+
+    @property
+    def gate_entries(self) -> list[dict]:
+        return [entry for session in self.sessions for entry in session.gate_entries]
+
+    @property
+    def skips(self) -> int:
+        return sum(session.skips for session in self.sessions)
+
+
+def read_jsonl(path: Path, must_contain: str | None = None) -> tuple[list[dict], int]:
+    """Entries of a jsonl file and its unparsable-line count. `must_contain` skips lines without it unparsed."""
+    entries, bad = [], 0
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if not line.strip() or (must_contain is not None and must_contain not in line):
+                continue
+            try:
+                value = json.loads(line)
+            except ValueError:
+                bad += 1
+                continue
+            if isinstance(value, dict):
+                entries.append(value)
+            else:
+                bad += 1
+    return entries, bad
+
+
+def advise_calls(entries: list[dict], window: Window) -> tuple[list[dict], int]:
+    """`advise` calls in the window with their ack class and originating update, and the advisor turn count."""
+    last_update, by_id, calls, turns = "", {}, [], 0
+    for entry in entries:
+        if entry.get("type") != "message":
+            continue
+        message = entry.get("message") or {}
+        role = message.get("role")
+        if role == "user":
+            last_update = content_text(message.get("content"))
+        elif role == "assistant":
+            at = entry_time(entry)
+            if window.contains(at):
+                turns += 1
+            for block in tool_calls_of(message):
+                if block.get("name") != "advise":
+                    continue
+                arguments = block.get("arguments") or {}
+                call = {"id": block.get("id"), "note": str(arguments.get("note", "")), "severity": arguments.get("severity"),
+                        "at": at, "update": last_update, "ack": "unanswered"}
+                by_id[call["id"]] = call
+                if window.contains(at):
+                    calls.append(call)
+        elif role == "toolResult" and message.get("toolName") == "advise":
+            call = by_id.get(message.get("toolCallId"))
+            if call is not None:
+                call["ack"] = classify_ack(content_text(message.get("content")))
+    for call in calls:
+        if call["ack"] not in ADMITTED:
+            call["update"] = ""
+    return calls, turns
+
+
+def scan_root(path: Path, session_id: str, window: Window, advisor: str, scope_re: re.Pattern, scan: Scan) -> SessionResult:
+    result = SessionResult(path=path, session_id=session_id)
+    entries, bad = read_jsonl(path)
+    scan.bad_lines += bad
+    tool_calls: list[tuple[datetime | None, dict]] = []  # (time, arguments), for the moot test
+    cards: list[tuple[datetime, set[str]]] = []
+    for entry in entries:
+        kind, at = entry.get("type"), entry_time(entry)
+        if kind == "message":
+            message = entry.get("message") or {}
+            role = message.get("role")
+            if role == "assistant":
+                if window.contains(at):
+                    result.turns += 1
+                for block in tool_calls_of(message):
+                    arguments = block.get("arguments") if isinstance(block.get("arguments"), dict) else {}
+                    tool_calls.append((at, arguments))
+                    if window.contains(at) and scoped_device(str(block.get("name", "")), arguments, scope_re):
+                        scan.scoped.append((str(path), str(block.get("id")), str(block.get("name"))))
+            elif role == "toolResult" and window.contains(at) and content_text(message.get("content")).startswith(SKIP_PREFIX):
+                result.skips += 1
+        elif kind == "custom_message" and entry.get("customType") == "advisor" and at is not None:
+            notes = (entry.get("details") or {}).get("notes") or []
+            cards.append((at, {n.get("note") for n in notes if isinstance(n, dict)}))
+        elif kind == "custom" and entry.get("customType") == GATE_ENTRY_TYPE and window.contains(at):
+            name = (entry.get("data") or {}).get("advisor")
+            if advisor != "default" and isinstance(name, str) and slugify(name) == advisor:
+                result.gate_entries.append({**entry, "_session": session_id})
+
+    transcript = path.with_suffix("") / transcript_name(advisor)
+    if transcript.is_file():
+        result.transcript = True
+        advisor_entries, bad = read_jsonl(transcript)
+        scan.bad_lines += bad
+        result.calls, result.advisor_turns = advise_calls(advisor_entries, window)
+    admitted = [call for call in result.calls if call["ack"] in ADMITTED]
+    for call in admitted:
+        if call["ack"] != "queued" or call["at"] is None:
+            continue
+        card_at = next((at for at, notes in cards if at >= call["at"] and call["note"] in notes), None)
+        if card_at is None:
+            result.held_unrouted += 1
+            continue
+        result.held_latencies.append(int((card_at - call["at"]).total_seconds() * 1000))
+        tokens = note_tokens(call["note"])
+        if tokens and any(at is not None and call["at"] < at <= card_at and carries_token(args, tokens)
+                          for at, args in tool_calls):
+            result.held_moot += 1
+    result.chain_pairs = sum(1 for i, a in enumerate(admitted) for b in admitted[i + 1:]
+                             if jaccard(a["note"], b["note"]) >= 0.5)
+    result.blockers = sum(1 for call in admitted if call["severity"] == "blocker")
+    return result
+
+
+def session_id_of(root_stem: str) -> str:
+    return root_stem.split("_", 1)[1] if "_" in root_stem else root_stem
+
+
+def scan_sessions(root: Path, window: Window, advisor: str, scope_re: re.Pattern) -> Scan:
+    """Every root session file (sessions/<project>/<stem>.jsonl) and subagent file below it touched since the window opened."""
+    if not root.is_dir():
+        raise UsageError(f"no sessions directory at {root}")
+    scan = Scan(window=window, advisor=advisor)
+    opened = window.since.timestamp()
+    for dirpath, _dirnames, filenames in os.walk(root):
+        parts = Path(dirpath).relative_to(root).parts
+        for name in filenames:
+            if not name.endswith(".jsonl") or name.startswith(ADVISOR_STEM):
+                continue
+            path = Path(dirpath) / name
+            if len(parts) == 1:
+                transcript = path.with_suffix("") / transcript_name(advisor)
+                touched = max(path.stat().st_mtime, transcript.stat().st_mtime if transcript.is_file() else 0)
+                if touched < opened:
+                    continue
+                scan.sessions.append(scan_root(path, session_id_of(path.stem), window, advisor, scope_re, scan))
+            elif len(parts) >= 2:
+                if path.stat().st_mtime < opened:
+                    continue
+                scan.subagent_files += 1
+                entries, bad = read_jsonl(path, must_contain="dispatch_")
+                scan.bad_lines += bad
+                for entry in entries:
+                    message = entry.get("message") or {}
+                    if entry.get("type") != "message" or message.get("role") != "assistant" or not window.contains(entry_time(entry)):
+                        continue
+                    for block in tool_calls_of(message):
+                        arguments = block.get("arguments") if isinstance(block.get("arguments"), dict) else {}
+                        if scoped_device(str(block.get("name", "")), arguments, scope_re):
+                            scan.scoped.append((str(path), str(block.get("id")), str(block.get("name"))))
+    return scan
+
+
+# --- stats.db --------------------------------------------------------------
+
+def sync_stats() -> None:
+    """Ingest session files into stats.db the way scripts/omp-billing-watch does; the coverage check is the gate."""
+    mise = dotfiles_dir() / "bin" / "mise"
+    subprocess.run(["timeout", "2700", str(mise), "x", "github:sjawhar/oh-my-pi", "--", "omp", "stats", "--summary"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def open_stats(path: Path, window: Window) -> tuple[sqlite3.Connection, datetime]:
+    if not path.is_file():
+        raise UsageError(f"no stats db at {path}")
+    db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    hwm_ms = db.execute("select cast(coalesce(max(last_modified), 0) as integer) from file_offsets").fetchone()[0]
+    covers_until = datetime.fromtimestamp(hwm_ms / 1000, timezone.utc)
+    if covers_until < window.since:
+        raise UsageError(f"stats db {path} covers only up to {iso(covers_until)}, before the window opened at "
+                         f"{iso(window.since)}; run 'omp stats --summary' and retry")
+    return db, covers_until
+
+
+def session_key(session_file: str) -> tuple[str, ...] | None:
+    """A session file's path below its project dir (`<stem>.jsonl`, `<stem>/<sub>.jsonl`), which survives a move.
+
+    An agent box relaunch moves a session to a new project dir; stats.db keeps the rows it ingested before the
+    move under the old path, so a join on the path alone would lose them."""
+    parts = Path(session_file).parts
+    start = next((i for i, part in enumerate(parts) if ROOT_STEM_RE.match(part)), None)
+    return None if start is None else parts[start:]
+
+
+def ingested_paths(db: sqlite3.Connection) -> dict[tuple[str, ...], list[str]]:
+    paths: dict[tuple[str, ...], list[str]] = {}
+    for (session_file,) in db.execute("select session_file from file_offsets"):
+        key = session_key(session_file)
+        if key is not None:
+            paths.setdefault(key, []).append(session_file)
+    return paths
+
+
+def agent_types(db: sqlite3.Connection, calls: list[tuple[str, str, str]]) -> Counter:
+    """Each call's `tool_calls.agent_type`, looked up under its file's current path and then under every earlier path."""
+    by_file: dict[str, list[str]] = {}
+    for session_file, call_id, _name in calls:
+        by_file.setdefault(session_file, []).append(call_id)
+    aliases = ingested_paths(db) if calls else {}
+    found: Counter = Counter()
+    for session_file, ids in by_file.items():
+        missing = set(ids)
+        for candidate in [session_file, *(p for p in aliases.get(session_key(session_file), []) if p != session_file)]:
+            wanted = sorted(missing)
+            for start in range(0, len(wanted), 500):
+                chunk = wanted[start:start + 500]
+                rows = db.execute(
+                    f"select tool_call_id, agent_type from tool_calls where session_file = ? and tool_call_id in ({','.join('?' * len(chunk))})",
+                    [candidate, *chunk],
+                ).fetchall()
+                for call_id, agent_type in rows:
+                    if call_id in missing:
+                        missing.discard(call_id)
+                        found[agent_type] += 1
+            if not missing:
+                break
+        found["unjoined"] += len(missing)
+    return found
+
+
+def watcher_cost(db: sqlite3.Connection, window: Window, advisor: str) -> float:
+    """Dollars the watch-mode advisor's own turns cost in the window: stats.db `messages` of its transcripts."""
+    rows = db.execute(
+        "select session_file, coalesce(sum(cost_total), 0) from messages where timestamp >= ? and timestamp <= ? "
+        "and agent_type = 'advisor' group by session_file",
+        (int(window.since.timestamp() * 1000), int(window.until.timestamp() * 1000)),
+    ).fetchall()
+    name = f"/{transcript_name(advisor)}"
+    return sum(total for session_file, total in rows if session_file.endswith(name))
+
+
+def corrections(db: sqlite3.Connection, scan: Scan) -> int:
+    root_keys = {key for session in scan.sessions if (key := session_key(str(session.path))) is not None}
+    rows = db.execute(
+        "select session_file, coalesce(sum(negation + blame + anguish + yelling + profanity), 0) from user_messages "
+        "where timestamp >= ? and timestamp <= ? group by session_file",
+        (int(scan.window.since.timestamp() * 1000), int(scan.window.until.timestamp() * 1000)),
+    ).fetchall()
+    return sum(total for session_file, total in rows if session_key(session_file) in root_keys)
+
+
+# --- labels, launch record -------------------------------------------------
+
+def load_labels() -> dict[str, dict]:
+    path = report_dir() / "labels.jsonl"
+    if not path.is_file():
+        return {}
+    rows, bad = read_jsonl(path)
+    if bad:
+        raise Failure(f"{path} has {bad} unparsable line(s)")
+    return {row["id"]: row for row in rows}
+
+
+def load_launch() -> dict:
+    path = report_dir() / "launch.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+
+
+def write_atomic(target: Path, text: str) -> None:
+    """Write through a temp file in the same directory, fsync it, rename it over `target`, fsync the directory."""
+    try:
+        mode = target.stat().st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f"{target.stem}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fchmod(fh.fileno(), mode)
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    dir_fd = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def require_yaml():
+    try:
+        import yaml
+    except ImportError as err:
+        raise Failure("PyYAML is required for the overlay and the roster check") from err
+    return yaml
+
+
+# --- overlay ---------------------------------------------------------------
+
+def overlay_update(key_path: str, member: str, add: bool) -> bool:
+    """Add or remove one list member at `key_path` in local-overrides.yml under an exclusive lock. True when the file changed."""
+    yaml = require_yaml()
+    directory = agent_dir()
+    target = directory / "local-overrides.yml"
+    keys = key_path.split(".")
+    if not all(keys):
+        raise UsageError(f"bad key path {key_path!r}")
+    with (directory / "local-overrides.yml.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            text = target.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        doc = yaml.safe_load(text) if text.strip() else {}
+        if doc is None:
+            doc = {}
+        if not isinstance(doc, dict):
+            raise Failure(f"{target} is not a mapping")
+        node = doc
+        for key in keys[:-1]:
+            child = node.get(key)
+            if child is None:
+                if not add:
+                    return False
+                child = node[key] = {}
+            if not isinstance(child, dict):
+                raise Failure(f"{target}: {key!r} in {key_path} is not a mapping")
+            node = child
+        members = node.get(keys[-1])
+        if members is None:
+            members = []
+        if not isinstance(members, list):
+            raise Failure(f"{target}: {key_path} is not a list")
+        if (member in members) == add:
+            return False
+        node[keys[-1]] = [*members, member] if add else [m for m in members if m != member]
+        write_atomic(target, yaml.safe_dump(doc, default_flow_style=None, sort_keys=False))
+        return True
+
+
+def cmd_overlay(args) -> int:
+    changed = overlay_update(args.key, args.member, add=args.verb == "add")
+    target = agent_dir() / "local-overrides.yml"
+    state = "added to" if args.verb == "add" else "removed from"
+    print(f"{args.member} {state} {args.key} in {target}" if changed else f"{target} unchanged")
+    return 0
+
+
+# --- metrics ---------------------------------------------------------------
+
+def window_from(args) -> Window:
+    until = parse_iso(args.until) if args.until else datetime.now(timezone.utc)
+    if args.since and args.days is not None:
+        raise UsageError("give --since or --days, not both")
+    since = parse_iso(args.since) if args.since else until - timedelta(days=args.days if args.days is not None else 1)
+    if since >= until:
+        raise UsageError("the window is empty: --since must be before --until")
+    return Window(since, until)
+
+
+def compute_metrics(scan: Scan, scope_re: re.Pattern, stats: sqlite3.Connection, covers_until: datetime, stats_path: Path) -> dict:
+    calls = [call for session in scan.sessions for call in session.calls]
+    admitted = [call for call in calls if call["ack"] in ADMITTED]
+    queued = sum(1 for call in admitted if call["ack"] == "queued")
+    latencies = [ms for session in scan.sessions for ms in session.held_latencies]
+    turns = sum(session.turns for session in scan.sessions)
+    types = agent_types(stats, scan.scoped)
+    days = scan.window.days
+    correction_total = corrections(stats, scan)
+    fired = [gate_row_id(e) for e in scan.gate_entries if is_revise(e)]
+    fired += [note_row_id(s.session_id, c) for s in scan.sessions for c in s.calls if c["ack"] in ADMITTED]
+    gate = gate_metrics(scan.gate_entries)
+    return {
+        "window": {"since": iso(scan.window.since), "until": iso(scan.window.until), "days": days},
+        "advisor": scan.advisor,
+        "files": {"root": len(scan.sessions), "subagent": scan.subagent_files, "bad_lines": scan.bad_lines},
+        "primary_turns": turns,
+        "watch": {
+            "transcripts": sum(1 for s in scan.sessions if s.transcript),
+            "advisor_turns": sum(s.advisor_turns for s in scan.sessions),
+            "advise_calls": len(calls),
+            "by_ack": dict(sorted(Counter(call["ack"] for call in calls).items())),
+            "admitted": len(admitted),
+            "notes_per_100_turns": None if not turns else len(admitted) / turns * 100,
+            "out_of_charter_pct": out_of_charter_pct(calls, scope_re),
+            "held_pct": ratio(queued, len(admitted)),
+            "held_latency_ms": statistics.median(latencies) if latencies else None,
+            "held_unrouted": sum(s.held_unrouted for s in scan.sessions),
+            "moot_pct": ratio(sum(s.held_moot for s in scan.sessions), len(latencies)),
+            "cost_usd_per_day": watcher_cost(stats, scan.window, scan.advisor) / days,
+            "chains": {
+                "pairs": sum(s.chain_pairs for s in scan.sessions),
+                "sessions_with_pairs": sum(1 for s in scan.sessions if s.chain_pairs),
+                "sessions_with_2_blockers": sum(1 for s in scan.sessions if s.blockers >= 2),
+            },
+        },
+        "skips": scan.skips,
+        "scoped_calls": {
+            "main": types["main"], "subagent": types["subagent"], "unjoined": types["unjoined"],
+            "by_agent_type": dict(sorted(types.items())),
+            "per_day": {kind: types[kind] / days for kind in ("main", "subagent", "unjoined")},
+        },
+        "gate": {**gate, "usage_per_day": {key: value / days for key, value in gate["usage"].items()},
+                 "cost_usd_per_day": gate["usage"]["cost"] / days},
+        "corrections": {"sum": correction_total, "per_100_turns": None if not turns else correction_total / turns * 100},
+        "labelled": labelled_metrics(load_labels(), fired, scan.skips),
+        "stats_db": {"path": str(stats_path), "covers_until": iso(covers_until)},
+    }
+
+
+def fmt(value, spec: str = ".3f") -> str:
+    return "-" if value is None else format(value, spec)
+
+
+def print_metrics(m: dict) -> None:
+    w, g, s = m["watch"], m["gate"], m["scoped_calls"]
+    print(f"advisor {m['advisor']}, {m['window']['since']} .. {m['window']['until']} ({m['window']['days']:.1f} d)")
+    print(f"  files: {m['files']['root']} root, {m['files']['subagent']} subagent, {m['files']['bad_lines']} unparsable lines")
+    print(f"  primary turns {m['primary_turns']}; skips {m['skips']}; corrections/100 turns {fmt(m['corrections']['per_100_turns'], '.2f')}")
+    print(f"  watch: {w['transcripts']} transcripts, {w['advisor_turns']} advisor turns, {w['advise_calls']} advise calls {w['by_ack']}")
+    print(f"    admitted {w['admitted']}, notes/100 turns {fmt(w['notes_per_100_turns'], '.2f')}, out of charter {fmt(w['out_of_charter_pct'])}, "
+          f"held {fmt(w['held_pct'])} (median {fmt(w['held_latency_ms'], '.0f')} ms, {w['held_unrouted']} never routed), moot {fmt(w['moot_pct'])}")
+    print(f"    chains: {w['chains']['pairs']} similar pairs in {w['chains']['sessions_with_pairs']} sessions; "
+          f"{w['chains']['sessions_with_2_blockers']} sessions with >= 2 blockers")
+    print(f"  scoped calls/day: main {s['per_day']['main']:.2f}, subagent {s['per_day']['subagent']:.2f}, unjoined {s['per_day']['unjoined']:.2f} "
+          f"(totals {s['main']}/{s['subagent']}/{s['unjoined']})")
+    print(f"  gate: {g['matched']} matched {g['counts']}; p50 {fmt(g['latency_ms_p50'], '.0f')} ms, p95 {fmt(g['latency_ms_p95'], '.0f')} ms; "
+          f"fail-open {fmt(g['fail_open_rate'])}, ungated {fmt(g['ungated_share'])}, revise {fmt(g['revise_rate'])}, "
+          f"rebuttal {fmt(g['rebuttal_rate'])}, breaker {g['breaker_trips']}, killed {g['killed']}, "
+          f"halted sessions {g['halted_sessions']}")
+    print(f"  gate spend/day: ${g['cost_usd_per_day']:.2f} ({g['usage_per_day']['input']:.0f} in, "
+          f"{g['usage_per_day']['output']:.0f} out, {g['usage_per_day']['cacheRead']:.0f} cache read, "
+          f"{g['usage_per_day']['cacheWrite']:.0f} cache write tokens); watch-mode {m['advisor']} spend/day "
+          f"${m['watch']['cost_usd_per_day']:.2f} (stats.db)")
+    lab = m["labelled"]
+    print(f"  labelled: n {lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}")
+    print(f"  stats db {m['stats_db']['path']} covers until {m['stats_db']['covers_until']}")
+
+
+def cmd_metrics(args) -> int:
+    window = window_from(args)
+    scope_re = re.compile(args.scope_regex)
+    if not args.no_sync:
+        sync_stats()
+    stats_path = Path(args.stats_db).expanduser() if args.stats_db else default_stats_db()
+    stats, covers_until = open_stats(stats_path, window)
+    root = Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions"
+    scan = scan_sessions(root.absolute(), window, args.advisor, scope_re)
+    metrics = compute_metrics(scan, scope_re, stats, covers_until, stats_path)
+    if args.json:
+        json.dump(metrics, sys.stdout, indent=2)
+        print()
+    else:
+        print_metrics(metrics)
+    return 0
+
+
+# --- sample ----------------------------------------------------------------
+
+def render_message(entry: dict) -> dict:
+    if entry.get("type") == "custom_message":
+        text = entry.get("content") if isinstance(entry.get("content"), str) else content_text(entry.get("content"))
+        return {"timestamp": entry.get("timestamp"), "role": f"custom:{entry.get('customType')}", "text": text[:CONTEXT_TEXT_MAX]}
+    message = entry.get("message") or {}
+    rendered = {"timestamp": entry.get("timestamp"), "role": message.get("role"),
+                "text": content_text(message.get("content"))[:CONTEXT_TEXT_MAX]}
+    calls = [{"name": block.get("name"), "arguments": json.dumps(block.get("arguments"), ensure_ascii=False)[:CONTEXT_TEXT_MAX]}
+             for block in tool_calls_of(message)]
+    if calls:
+        rendered["tool_calls"] = calls
+    return rendered
+
+
+def context_around(entries: list[dict], anchor: int) -> list[dict]:
+    """Up to CONTEXT_MESSAGES primary messages before and after position `anchor`."""
+    positions = [i for i, entry in enumerate(entries) if entry.get("type") in ("message", "custom_message")]
+    before = [i for i in positions if i < anchor][-CONTEXT_MESSAGES:]
+    after = [i for i in positions if i > anchor][:CONTEXT_MESSAGES]
+    return [render_message(entries[i]) for i in before + after]
+
+
+def gate_row(entry: dict, entries: list[dict]) -> dict:
+    data = entry.get("data") or {}
+    anchor = next((i for i, e in enumerate(entries) if e.get("type") == "custom" and e.get("id") == entry.get("id")), len(entries))
+    call = None
+    for candidate in entries:
+        for block in tool_calls_of(candidate.get("message") or {}) if candidate.get("type") == "message" else []:
+            if block.get("id") == data.get("toolCallId"):
+                arguments = block.get("arguments") or {}
+                call = {**arguments, "content": parse_json_object(arguments.get("content")) or arguments.get("content")} \
+                    if "content" in arguments else arguments
+    return {"type": "row", "id": gate_row_id(entry), "kind": "gate", "session": entry["_session"],
+            "advisor": data.get("advisor"), "timestamp": entry.get("timestamp"), "decision": data.get("decision"),
+            "outcome": data.get("outcome"), "verdictMode": data.get("verdictMode"), "reason": data.get("reason"),
+            "rebuttal": data.get("rebuttal"), "tool": data.get("tool"), "path": data.get("path"), "call": call,
+            "context": context_around(entries, anchor)}
+
+
+def note_row(session: SessionResult, call: dict, entries: list[dict], advisor: str) -> dict:
+    anchor = next((i for i, e in enumerate(entries)
+                   if e.get("type") == "custom_message" and e.get("customType") == "advisor"
+                   and any(isinstance(n, dict) and n.get("note") == call["note"] for n in (e.get("details") or {}).get("notes") or [])
+                   and (entry_time(e) or call["at"]) >= call["at"]), None)
+    if anchor is None:
+        anchor = next((i for i, e in enumerate(entries) if (entry_time(e) or call["at"]) >= call["at"]), len(entries))
+    return {"type": "row", "id": note_row_id(session.session_id, call), "kind": "note", "session": session.session_id,
+            "advisor": advisor, "timestamp": iso(call["at"]), "severity": call["severity"], "ack": call["ack"],
+            "note": call["note"], "update": call["update"][-UPDATE_TEXT_MAX:], "context": context_around(entries, anchor)}
+
+
+def cmd_sample(args) -> int:
+    window = Window(parse_iso(args.since), parse_iso(args.until))
+    if args.n < 1:
+        raise UsageError("--n must be positive")
+    root = Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions"
+    scan = scan_sessions(root.absolute(), window, args.advisor, re.compile(DEFAULT_SCOPE_REGEX))
+    population = []  # (stratum, session, kind, item)
+    for session in scan.sessions:
+        for entry in session.gate_entries:
+            population.append(("priority" if is_revise(entry) else "other", session, "gate", entry))
+        for call in session.calls:
+            if call["ack"] in ADMITTED:
+                population.append(("priority" if call["severity"] == "blocker" else "other", session, "note", call))
+    priority = [p for p in population if p[0] == "priority"]
+    other = [p for p in population if p[0] == "other"]
+    rng = random.SystemRandom()
+    drawn_priority = priority if len(priority) <= args.n // 2 else rng.sample(priority, args.n // 2)
+    drawn_other = rng.sample(other, min(args.n - len(drawn_priority), len(other)))
+    parsed: dict[Path, list[dict]] = {}
+    rows = []
+    for stratum, session, kind, item in drawn_priority + drawn_other:
+        if session.path not in parsed:
+            parsed[session.path] = read_jsonl(session.path)[0]
+        entries = parsed[session.path]
+        row = gate_row(item, entries) if kind == "gate" else note_row(session, item, entries, args.advisor)
+        rows.append({**row, "stratum": stratum})
+    header = {"type": "header", "since": iso(window.since), "until": iso(window.until), "n": args.n, "advisor": args.advisor,
+              "generated_at": iso(datetime.now(timezone.utc)),
+              "strata": {"priority": {"population": len(priority), "drawn": len(drawn_priority)},
+                         "other": {"population": len(other), "drawn": len(drawn_other)}}}
+    out = Path(args.out).expanduser()
+    with out.open("w", encoding="utf-8") as fh:
+        for record in [header, *rows]:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"{len(rows)} rows to {out}: priority {len(drawn_priority)}/{len(priority)}, other {len(drawn_other)}/{len(other)}")
+    return 0
+
+
+# --- labels ----------------------------------------------------------------
+
+def cmd_ingest_labels(args) -> int:
+    source = Path(args.file).expanduser()
+    rows, problems = [], []
+    for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            problems.append(f"line {number}: not JSON")
+            continue
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row.get(k) for k in ("id", "label", "labeler", "at")):
+            problems.append(f"line {number}: a label row is {{\"id\", \"label\", \"labeler\", \"at\"}}")
+        elif row["label"] not in LABELS:
+            problems.append(f"line {number}: unknown label {row['label']!r} (one of {', '.join(sorted(LABELS))})")
+        else:
+            rows.append({k: row[k] for k in ("id", "label", "labeler", "at")})
+    if problems:
+        raise UsageError(f"{source}: nothing ingested\n  " + "\n  ".join(problems))
+    report_dir().mkdir(parents=True, exist_ok=True)
+    with (report_dir() / "labels.jsonl").open("a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+    print(f"ingested {len(rows)} labels into {report_dir() / 'labels.jsonl'}")
+    return 0
+
+
+# --- arm -------------------------------------------------------------------
+
+def pinned_omp_version() -> str:
+    mise = dotfiles_dir() / "bin" / "mise"
+    proc = subprocess.run([str(mise), "x", "github:sjawhar/oh-my-pi", "--", "omp", "--version"],
+                          capture_output=True, text=True, check=False, timeout=300)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        tail = "\n".join(proc.stderr.strip().splitlines()[-3:]) or "no output"
+        raise Failure(f"could not read the pinned omp version (mise exit {proc.returncode}): {tail}")
+    return proc.stdout.strip()
+
+
+def cmd_arm(args) -> int:
+    launch = load_launch()
+    launched = parse_iso(args.launched)
+    if args.what == "gate":
+        if args.timeout_ms is None:
+            raise UsageError("arm gate needs --timeout-ms (the gate entry's timeoutMs), which the latency rules read")
+        launch["gate"] = {"launched": iso(launched), "timeout_ms": args.timeout_ms, "omp_version": pinned_omp_version(),
+                          "armed_at": iso(datetime.now(timezone.utc))}
+    else:
+        if args.approved_by:
+            launch["trial_approved"] = args.approved_by
+        if not launch.get("trial_approved"):
+            raise UsageError("arm trial needs --approved-by <ask id>: the recorded answer that approves the trial")
+        launch["trial"] = {"launched": iso(launched), "omp_version": pinned_omp_version(),
+                           "armed_at": iso(datetime.now(timezone.utc))}
+    report_dir().mkdir(parents=True, exist_ok=True)
+    write_atomic(report_dir() / "launch.json", json.dumps(launch, indent=2) + "\n")
+    if args.what == "trial":
+        trial_flag().parent.mkdir(parents=True, exist_ok=True)
+        trial_flag().touch()
+    print(f"armed {args.what}: {json.dumps(launch[args.what])}")
+    return 0
+
+
+# --- readout ---------------------------------------------------------------
+
+NONE, OK, INCOMPLETE, KILLED = "none", "ok", "incomplete", "killed"
+
+
+@dataclass
+class Check:
+    status: str
+    lines: list[str]
+
+
+def roster_problems(dotfiles: Path, agents: Path) -> list[str]:
+    """The gate runs only while its extension link resolves into dotfiles; an old omp needs advisors: non-empty."""
+    problems = []
+    link = agents / "extensions" / "askgate.ts"
+    real, root = Path(os.path.realpath(link)), Path(os.path.realpath(dotfiles))
+    if not real.is_file() or root not in real.parents:
+        problems.append(f"{link} does not resolve to a file under {dotfiles}, so no session is gated")
+    roster = dotfiles / "omp" / "WATCHDOG.yml"
+    yaml = require_yaml()
+    try:
+        doc = yaml.safe_load(roster.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        doc = {}
+    if not isinstance(doc, dict) or not doc.get("advisors"):
+        problems.append(f"roster {roster} has no advisors: entries, so an omp that falls back to its every-turn "
+                        "default watcher when the list is empty runs it; restore ForkGate and General")
+    return problems
+
+
+def watch_baseline(launched: datetime) -> str:
+    """The watch-mode AskGate's spend per day over the 14 days before the gate launched, the cost it replaces."""
+    path = default_stats_db()
+    if not path.is_file():
+        return f"no stats db at {path} for the watch-mode baseline"
+    db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    before = Window(launched - timedelta(days=DECISION_DAY), launched)
+    return f"watch-mode AskGate ${watcher_cost(db, before, 'askgate') / DECISION_DAY:.2f}/day over the 14 days before launch"
+
+
+def missing_label_weeks(launched: datetime, now: datetime, fired: list[tuple[str, datetime]], labels: dict) -> list[str]:
+    missing = []
+    for week in range(1, int((now - launched).days // 7) + 1):
+        start, end = launched + timedelta(days=7 * (week - 1)), launched + timedelta(days=7 * week)
+        if not any(start <= at < end and row_id in labels for row_id, at in fired):
+            missing.append(f"week {week} ({start:%Y-%m-%d}..{end:%Y-%m-%d})")
+    return missing
+
+
+def gate_check(now: datetime) -> Check:
+    record = load_launch().get("gate")
+    if not record:
+        return Check(NONE, ["gate: not launched"])
+    if not isinstance(record.get("launched"), str) or not isinstance(record.get("timeout_ms"), int):
+        raise Failure(f"{report_dir() / 'launch.json'}: the gate record needs `launched` and `timeout_ms`; rerun `arm gate`")
+    launched, timeout_ms = parse_iso(record["launched"]), record["timeout_ms"]
+    day = (now - launched).total_seconds() / 86400
+    scan = scan_sessions(agent_dir() / "sessions", Window(launched, now), "askgate", re.compile(DEFAULT_SCOPE_REGEX))
+    entries = scan.gate_entries
+    whole = gate_metrics(entries)
+    recent = gate_metrics([e for e in entries if entry_time(e) >= now - KILL_WINDOW])
+    labels = load_labels()
+    fired = [(gate_row_id(e), entry_time(e)) for e in entries if is_revise(e)]
+    lab = labelled_metrics(labels, [row_id for row_id, _at in fired], scan.skips)
+    p95 = whole["latency_ms_p95"]
+    lines = [f"gate: day {day:.1f}; {whole['matched']} matched ({whole['killed']} killed), ungated_share "
+             f"{fmt(whole['ungated_share'])}, p95 {fmt(p95, '.0f')} ms (timeout {timeout_ms}), skips {scan.skips}; "
+             f"last 24 h {recent['matched']} matched, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
+             f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}",
+             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(launched)}"]
+    kill: list[str] = []
+    if day >= KILL_DAY:
+        if recent["matched"] >= KILL_MIN_MATCHED and (recent["ungated_share"] or 0) > KILL_UNGATED_24H:
+            kill.append(f"ungated_share {recent['ungated_share']:.3f} > {KILL_UNGATED_24H} over {recent['matched']} calls in the last 24 h")
+        if recent["latency_ms_p95"] is not None and recent["latency_ms_p95"] > timeout_ms:
+            kill.append(f"p95 latency {recent['latency_ms_p95']:.0f} ms above the {timeout_ms} ms timeout in the last 24 h")
+    decision = None
+    if day >= DECISION_DAY and not kill:
+        if whole["ungated_share"] is not None and whole["ungated_share"] >= MAX_UNGATED:
+            kill.append(f"day {DECISION_DAY}: ungated_share {whole['ungated_share']:.3f} >= {MAX_UNGATED}")
+        elif lab["n"] >= MIN_LABELS:
+            if lab["precision"] < KILL_PRECISION:
+                kill.append(f"day {DECISION_DAY}: precision {lab['precision']:.2f} < {KILL_PRECISION}")
+            elif lab["harm"] > KILL_HARM:
+                kill.append(f"day {DECISION_DAY}: harm {lab['harm']:.2f} > {KILL_HARM}")
+            elif (lab["precision"] >= GO_PRECISION and lab["harm"] <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
+                  and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and scan.skips == 0):
+                decision = "GO: make OMP_ASKGATE=block the shim default"
+            elif day < EXTENDED_DAY:
+                decision = "EXTEND: one more week, then GO or KILL"
+            else:
+                kill.append(f"day {EXTENDED_DAY}: not GO after the one-week extension")
+    problems = roster_problems(dotfiles_dir(), agent_dir())
+    lines += [f"gate: {problem}" for problem in problems]
+    if kill:
+        overlay_update("advisor.disableRoster", "askgate", add=True)
+        lines.append(f"gate: KILL applied (advisor.disableRoster += askgate in {agent_dir() / 'local-overrides.yml'}): {'; '.join(kill)}")
+        return Check(KILLED, lines)
+    if lab["n"] < MIN_LABELS:
+        missing = missing_label_weeks(launched, now, fired, labels)
+        lines.append(f"gate: incomplete: labels < {MIN_LABELS} (n={lab['n']})" + (f"; no labels for {', '.join(missing)}" if missing else ""))
+        return Check(INCOMPLETE, lines)
+    if problems:
+        return Check(INCOMPLETE, lines)
+    lines.append(f"gate: {decision or 'on track'}")
+    return Check(OK, lines)
+
+
+def trial_check() -> Check:
+    record = load_launch().get("trial")
+    if not record or not trial_flag().exists():
+        return Check(NONE, ["trial: not armed"])
+    return Check(INCOMPLETE, [f"trial: armed since {record['launched']}, but this readout has no trial rules yet"])
+
+
+def cmd_readout(args) -> int:
+    now = datetime.now(timezone.utc)
+    checks = [gate_check(now) if name == "gate" else trial_check() for name in (args.check or ["gate", "trial"])]
+    lines = [line for check in checks for line in check.lines]
+    print("\n".join(lines))
+    statuses = {check.status for check in checks}
+    code = 1 if KILLED in statuses else 3 if INCOMPLETE in statuses else 0
+    if args.notify:
+        envoy = dotfiles_dir() / "scripts" / "envoy"
+        sent = subprocess.run([str(envoy), "send", args.notify, f"{MESSAGE_PREFIX} readout: " + " | ".join(lines)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
+        if sent.returncode != 0:
+            print(f"advisor-report: envoy send to {args.notify} failed: {sent.stderr.strip()}", file=sys.stderr)
+            code = code or 3
+    return code
+
+
+# --- entry point -----------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="advisor-report", description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    metrics = sub.add_parser("metrics", help="advisor and gate metrics over a window")
+    metrics.add_argument("--since")
+    metrics.add_argument("--until")
+    metrics.add_argument("--days", type=float)
+    metrics.add_argument("--advisor", default="askgate", help="roster slug; `default` is the unnamed legacy advisor")
+    metrics.add_argument("--sessions-root")
+    metrics.add_argument("--stats-db")
+    metrics.add_argument("--no-sync", action="store_true")
+    metrics.add_argument("--scope-regex", default=DEFAULT_SCOPE_REGEX)
+    metrics.add_argument("--json", action="store_true")
+    metrics.set_defaults(func=cmd_metrics)
+
+    sample = sub.add_parser("sample", help="a stratified packet of gate decisions and admitted notes to label")
+    sample.add_argument("--since", required=True)
+    sample.add_argument("--until", required=True)
+    sample.add_argument("--n", type=int, required=True)
+    sample.add_argument("--out", required=True)
+    sample.add_argument("--advisor", default="askgate")
+    sample.add_argument("--sessions-root")
+    sample.set_defaults(func=cmd_sample)
+
+    ingest = sub.add_parser("ingest-labels", help="append labelled rows to ~/.omp/advisor-report/labels.jsonl")
+    ingest.add_argument("file")
+    ingest.set_defaults(func=cmd_ingest_labels)
+
+    arm = sub.add_parser("arm", help="record an experiment's launch in ~/.omp/advisor-report/launch.json")
+    arm.add_argument("what", choices=["gate", "trial"])
+    arm.add_argument("--launched", required=True)
+    arm.add_argument("--timeout-ms", type=int)
+    arm.add_argument("--approved-by")
+    arm.set_defaults(func=cmd_arm)
+
+    readout = sub.add_parser("readout", help="apply the pre-registered rules; KILLs are applied through the overlay")
+    readout.add_argument("--check", action="append", choices=["gate", "trial"])
+    readout.add_argument("--notify")
+    readout.set_defaults(func=cmd_readout)
+
+    overlay = sub.add_parser("overlay", help="add or remove one list member in ~/.omp/agent/local-overrides.yml")
+    overlay.add_argument("verb", choices=["add", "remove"])
+    overlay.add_argument("key")
+    overlay.add_argument("member")
+    overlay.set_defaults(func=cmd_overlay)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except UsageError as err:
+        print(f"advisor-report: {err}", file=sys.stderr)
+        return 2
+    except (Failure, OSError, sqlite3.Error, ValueError) as err:
+        print(f"advisor-report: {err}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
