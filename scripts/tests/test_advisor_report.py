@@ -83,8 +83,8 @@ def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="Ask
         "timestamp": ar.iso(at or now_utc()),
         "data": {
             "advisor": advisor,
-            "tool": "write",
-            "path": "xd://example_send",
+            "tool": "dispatch_comment",
+            "path": "xd://dispatch_comment",
             "toolCallId": call_id or f"call{_entry_seq[0]}",
             "decision": decision,
             "outcome": outcome,
@@ -701,15 +701,52 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(home.envoy_log.read_text(encoding="utf-8"), "x github:sjawhar/oh-my-pi -- omp stats --summary\n")
 
 
-class SampleUnitTest(unittest.TestCase):
-    def test_delivered_revise_verdicts_and_blocker_notes_are_the_priority_stratum(self):
-        self.assertEqual(ar.sample_stratum(gate_entry(decision="revise", delivered=True)), "priority")
-        self.assertEqual(ar.sample_stratum(gate_entry(decision="revise", delivered=False)), "other")
-        self.assertEqual(ar.sample_stratum(gate_entry(decision="revise", outcome="timeout")), "other")
-        self.assertEqual(ar.sample_stratum(gate_entry()), "other")
-        self.assertEqual(ar.sample_stratum(advise(severity="blocker", ack="delivered")), "priority")
-        self.assertEqual(ar.sample_stratum(advise(severity="concern", ack="delivered")), "other")
+def comment_call(call_id, at, issue="EX-1", body="see the message above"):
+    return assistant_call(call_id, "write", {"path": "xd://dispatch_comment", "content": json.dumps({"issue": issue, "body": body})}, at)
 
+
+def block_revise(call_id, at, issue="EX-1"):
+    """A block-mode revise: the agent's call, the gate's entry and the refusal the agent got."""
+    return [comment_call(call_id, at, issue), gate_line(decision="revise", mode="block", call_id=call_id, at=at, reason=REASON),
+            tool_result(call_id, at, error=True, text=REFUSAL)]
+
+
+def gated(call_id, at, issue="EX-1", error=False, **fields):
+    """A call the gate did not refuse: the agent's call, the gate's entry and its result."""
+    return [comment_call(call_id, at, issue), gate_line(call_id=call_id, at=at, **fields),
+            tool_result(call_id, at, error=error, text="dispatch_comment was not called: 1 problem" if error else "ok")]
+
+
+class ClusterTest(unittest.TestCase):
+    """The labelled unit is a (session, breaker key) run of fired revises: one pending write, however often it was
+    resent. The breaker key is the device and the target fields askgate-core.ts breakerKey reads."""
+
+    def clusters(self, entries):
+        return ar.fired_clusters(ar.parse_primary(record(), entries, "askgate"))
+
+    def test_two_verdicts_on_one_pending_write_collapse_to_one_cluster(self):
+        entries = [*block_revise("w1", minutes(1)), *block_revise("w2", minutes(2)),
+                   *gated("w3", minutes(3), outcome="breaker", mode="block")]
+        [cluster] = self.clusters(entries)
+        self.assertEqual((cluster.first.data["toolCallId"], [entry.data["toolCallId"] for entry in cluster.later],
+                          cluster.ended_by, cluster.next_entry.data["toolCallId"]), ("w1", ["w2"], "breaker", "w2"))
+
+    def test_any_other_entry_on_the_key_ends_a_run_and_keys_do_not_mix(self):
+        entries = [*block_revise("w1", minutes(1)), *gated("w2", minutes(2), outcome="rebuttal", mode="block"),
+                   *block_revise("w3", minutes(3)), *block_revise("x1", minutes(4), issue="EX-2")]
+        self.assertEqual([(cluster.first.data["toolCallId"], cluster.ended_by) for cluster in self.clusters(entries)],
+                         [("w1", "rebuttal"), ("w3", "session end"), ("x1", "session end")])
+
+    def test_a_revise_the_agent_never_saw_neither_joins_nor_ends_a_run(self):
+        unseen = [comment_call("u1", minutes(2)), gate_line(decision="revise", call_id="u1", at=minutes(2)),
+                  tool_result("u1", minutes(2), error=True, text="dispatch_comment was not called: 1 problem")]
+        entries = [*block_revise("w1", minutes(1)), *unseen, *block_revise("w2", minutes(3))]
+        [cluster] = self.clusters(entries)
+        self.assertEqual([entry.data["toolCallId"] for entry in (cluster.first, *cluster.later)], ["w1", "w2"])
+        self.assertEqual(cluster.next_entry.data["toolCallId"], "u1")
+
+
+class SampleUnitTest(unittest.TestCase):
     def test_context_is_five_primary_messages_either_side(self):
         entries = []
         for i in range(12):
@@ -1103,7 +1140,7 @@ class ReadoutTest(unittest.TestCase):
         self.home.run("sample", "--since", ar.iso(self.launched), "--until", ar.iso(until or self.now), "--n", "100",
                       "--out", str(packet), check_exit=0)
         rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()][1:]
-        revises = [row["id"] for row in rows if row.get("decision") == "revise" and row.get("delivered")]
+        revises = [row["id"] for row in rows]
         self.assertEqual(len(revises), correct + harmful + other + unlabelled)
         labels = self.home.root / "labels.jsonl"
         with labels.open("w", encoding="utf-8") as fh:
@@ -1364,44 +1401,78 @@ class SampleTest(unittest.TestCase):
     def tearDown(self):
         self.home.cleanup()
 
-    def test_revises_fill_at_most_half_the_packet_and_the_header_records_the_strata(self):
+    def sample(self, *args, since=None, until=None, n=10):
         now = now_utc()
-        context = [
-            {"type": "message", "id": f"u{i}", "timestamp": ar.iso(now - timedelta(hours=3, minutes=i)),
-             "message": {"role": "assistant", "content": [{"type": "text", "text": f"step {i}"}]}}
-            for i in range(20, 0, -1)
-        ]
-        gates = [entry for i in range(40) for entry in delivered_revise(at=now - timedelta(minutes=100 - i))]
-        gates += [gate_line(at=now - timedelta(minutes=50 - i)) for i in range(20)]
-        self.home.session("01a0f000-0000-7000-8000-00000000f004", context + gates)
         packet = self.home.root / "packet.jsonl"
-        self.home.run("sample", "--since", ar.iso(now - timedelta(days=1)), "--until", ar.iso(now), "--n", "20",
-                      "--out", str(packet), check_exit=0)
+        proc = self.home.run("sample", "--since", ar.iso(since or now - timedelta(days=1)), "--until", ar.iso(until or now),
+                             "--n", str(n), "--out", str(packet), *args, check_exit=0)
         header, *rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(header["strata"], {"priority": {"population": 40, "drawn": 10},
-                                            "other": {"population": 20, "drawn": 10}})
-        self.assertEqual(sum(row["decision"] == "revise" for row in rows), 10)
-        self.assertEqual(len({row["id"] for row in rows}), 20)
+        return proc, header, rows
+
+    def test_the_packet_holds_one_row_per_fired_cluster_and_no_probe_session(self):
+        """A timeout, a rebuttal and an allow fired nothing; two block revises on one pending write are one cluster;
+        of two warn revises only the one whose block reached the agent fired; a probe session is left out."""
+        at = [now_utc() - timedelta(hours=2, minutes=-i) for i in range(12)]
+        warned = [comment_call("d1", at[5], issue="EX-6"), gate_line(decision="revise", call_id="d1", at=at[5], reason=REASON),
+                  tool_result("d1", at[5]), warn_message(REASON, at=at[5])]
+        unseen = [comment_call("u1", at[7], issue="EX-7"), gate_line(decision="revise", call_id="u1", at=at[7]),
+                  tool_result("u1", at[7], error=True, text="dispatch_comment was not called: 1 problem")]
+        organic = self.home.session("01a0f000-0000-7000-8000-00000000f004", [
+            *gated("t1", at[0], issue="EX-3", outcome="timeout"), *gated("t2", at[1], issue="EX-4", outcome="rebuttal"),
+            *gated("t3", at[2], issue="EX-5"), *block_revise("b1", at[3]), *block_revise("b2", at[4]), *warned,
+            *gated("r2", at[6], issue="EX-6", outcome="rebuttal"), *unseen,
+        ])
+        with organic.open("r", encoding="utf-8") as fh:
+            lines = [json.loads(line) for line in fh]
+        rebuttal_entry = next(line for line in lines if line.get("customType") == "advisor-gate" and line["data"]["toolCallId"] == "r2")
+        rebuttal_entry["data"]["rebuttal"] = "the body names the thread"
+        write_jsonl(organic, lines)
+        probe = [*block_revise("p1", at[8]), *block_revise("p2", at[9])]
+        self.home.session("01a0f000-0000-7000-8000-00000000f005", probe, project="-.worktrees-p8-accept-s5")
+        proc, header, rows = self.sample()
+        entry_id = {line["data"]["toolCallId"]: line["id"] for line in lines if line.get("customType") == "advisor-gate"}
+        by_call = {row["id"].rsplit(":", 1)[1]: row for row in rows}
+        self.assertEqual(set(by_call), {entry_id["b1"], entry_id["d1"]})
+        block, warn = by_call[entry_id["b1"]], by_call[entry_id["d1"]]
+        self.assertEqual(([later["id"] for later in block["later_verdicts"]], block["ended_by"]),
+                         ([f"gate:01a0f000-0000-7000-8000-00000000f004:{entry_id['b2']}"], "session end"))
+        self.assertEqual((block["reason"], block["received"], block["probe"]), (REASON, REFUSAL, False))
+        self.assertEqual((block["next_call"]["outcome"], block["next_call"]["rebuttal_stripped"]), ("verdict", False))
+        self.assertEqual((warn["next_call"]["outcome"], warn["next_call"]["rebuttal_stripped"], warn["next_call"]["rebuttal"]),
+                         ("rebuttal", True, "the body names the thread"))
+        self.assertEqual((header["population"], header["drawn"], header["excluded"]["sessions"], header["excluded"]["units"]),
+                         (2, 2, 1, 1))
+        self.assertIn("-.worktrees-p8-accept-*", proc.stdout)
+
+        _proc, header, rows = self.sample("--include-probes")
+        probes = [row for row in rows if row["probe"]]
+        self.assertEqual((len(rows), [row["id"] for row in probes]), (3, [f"gate:01a0f000-0000-7000-8000-00000000f005:{probe[1]['id']}"]))
+
+    def test_more_clusters_than_n_draw_a_uniform_n(self):
+        at = now_utc() - timedelta(hours=2)
+        self.home.session("01a0f000-0000-7000-8000-00000000f006",
+                          [entry for i in range(25) for entry in block_revise(f"w{i}", at + timedelta(minutes=i), issue=f"EX-{i}")])
+        _proc, header, rows = self.sample(n=10)
+        self.assertEqual((header["population"], header["drawn"], len({row["id"] for row in rows})), (25, 10, 10))
         self.assertTrue(all(1 <= len(row["context"]) <= 10 for row in rows))
 
-    def test_rows_say_whether_a_revise_reached_the_agent_and_only_delivered_ones_are_priority(self):
-        now = now_utc()
-        at = [now - timedelta(minutes=30 - i) for i in range(4)]
-        first, second = delivered_revise(at=at[0]), delivered_revise(at=at[1])
-        undelivered, allow = gate_line(decision="revise", at=at[2]), gate_line(at=at[3])
-        self.home.session("01a0f000-0000-7000-8000-00000000f005", [
-            assistant_call("w1", "write", {}, at[0]), *first, assistant_call("w2", "write", {}, at[1]), *second,
-            assistant_call("w3", "write", {}, at[2]), undelivered, skipped_result("w3", at[2]),
-            assistant_call("w4", "write", {}, at[3]), allow, assistant_call("a5", "read", {}, at[3]),
+    def test_the_watch_stratum_is_admitted_notes_a_card_carried_with_the_cards_time(self):
+        at = now_utc() - timedelta(hours=2)
+        root = self.home.session("01a0f000-0000-7000-8000-00000000f007", [
+            {"type": "custom_message", "customType": "advisor", "content": "<advisory>…</advisory>", "display": True,
+             "details": {"notes": [{"note": "note A", "severity": "concern", "advisor": "AskGate"}]},
+             "timestamp": ar.iso(at + timedelta(minutes=5))},
         ])
-        packet = self.home.root / "packet.jsonl"
-        self.home.run("sample", "--since", ar.iso(now - timedelta(days=1)), "--until", ar.iso(now), "--n", "10",
-                      "--out", str(packet), check_exit=0)
-        header, *rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(header["strata"], {"priority": {"population": 2, "drawn": 2}, "other": {"population": 2, "drawn": 2}})
-        by_id = {row["id"].rsplit(":", 1)[1]: (row["stratum"], row["delivered"]) for row in rows}
-        self.assertEqual(by_id, {first[0]["id"]: ("priority", True), second[0]["id"]: ("priority", True),
-                                 undelivered["id"]: ("other", False), allow["id"]: ("other", None)})
+        advice = []
+        for i, (note, ack) in enumerate((("note A", "Delivered."), ("note B", "Queued for the end of the turn. Do not re-raise."))):
+            advice += [assistant_call(f"n{i}", "advise", {"note": note, "severity": "concern"}, at + timedelta(minutes=4 + 2 * i)),
+                       {"type": "message", "timestamp": ar.iso(at + timedelta(minutes=4 + 2 * i)),
+                        "message": {"role": "toolResult", "toolCallId": f"n{i}", "toolName": "advise", "content": ack}}]
+        write_jsonl(root.with_suffix("") / "__advisor.askgate.jsonl", advice)
+        _proc, header, rows = self.sample("--stratum", "watch")
+        self.assertEqual([(row["id"], row["card_at"], row["probe"]) for row in rows],
+                         [("note:01a0f000-0000-7000-8000-00000000f007:n0", ar.iso(at + timedelta(minutes=5)), False)])
+        self.assertEqual((header["stratum"], header["population"]), ("watch", 1))
 
 
 class IngestLabelsTest(unittest.TestCase):

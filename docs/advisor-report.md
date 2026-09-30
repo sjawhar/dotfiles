@@ -57,18 +57,33 @@ attempt; sends are counted beside attempts from the tool results, never assumed.
 
 ## Sample packets and labels
 
-`sample` draws from the window's gate decisions and admitted notes. The priority stratum is every delivered gate
-`revise` verdict and every admitted `blocker` note: all of it when it fits in half the packet, otherwise a
-uniform half-packet of it; the rest of the packet is drawn uniformly from everything else. The first line of
-the packet is a header recording each stratum's population and draw; every other line is one row:
+`sample` draws labelling units, never anything that fired nothing. The `gate` stratum (the default) is the window's
+**fired revise clusters**: a cluster is one (session, breaker key) run of fired revises — the key being the device and
+the target fields AskGate's breaker reads (`issue`, `ask`, `artifact`, `project`, `in_reply_to`) — so one pending write
+is one unit however often it was resent; any other entry on the key (an allow, a rebuttal, a breaker pass, a timeout)
+ends the run, and a revise the agent never received neither joins nor ends one. The `watch` stratum (`--stratum
+watch`) is admitted notes a card carried. **Probe sessions are left out**: every session whose project directory
+matches `-.worktrees-p8-accept-*`, `-tmp-askgate-smoke-*` or a pattern in `launch.json`'s `excluded_dirs` — acceptance
+and smoke runs, whose defects are planted and whose responses are scripted, so they measure detection, not precision.
+`--include-probes` adds them for a pipeline walk-through, each row marked `probe: true`, and no label on one is ever
+taken. When a stratum holds n units or fewer all are drawn, otherwise a uniform n. The first line of the packet is a
+header recording the stratum, the population, the draw and the exclusions applied (the patterns, and how many
+sessions and units they removed), which `sample` also prints; every other line is one row, and every row's id goes
+to `~/.omp/advisor-report/sampled.jsonl` with its stratum and probe flag:
 
-- `id` — `gate:<session id>:<entry id>` or `note:<session id>:<advise call id>`; labels join on it
-- `kind`, `stratum`, `session`, `advisor`, `timestamp`
-- a gate row: `decision`, `outcome`, `verdictMode`, `reason`, `delivered` (whether a revise reached the agent,
-  as `revise_rate` counts it; `null` for any other decision), `rebuttal`, `tool`, `path`, and `call` (the
-  tool call's arguments, a device `content` parsed as JSON)
-- a note row: `severity`, `ack`, `note`, and `update` (the tail of what the advisor was shown)
-- `context` — up to five primary messages either side of the decision (the card, for a routed note)
+- `id` — `gate:<session id>:<first revise's entry id>` or `note:<session id>:<advise call id>`; labels join on it
+- `kind`, `stratum`, `session`, `advisor`, `timestamp`, `probe`
+- a gate row, the cluster's first revise: `decision`, `outcome`, `verdictMode`, the **raw** `reason`, `latencyMs`,
+  `usage`, `tool`, `path`; `call` — the pending call as the agent recorded it (`arguments`, a device `content` parsed
+  as JSON) with `rebuttal_stripped` and `rebuttal`; `received` — the text the agent got (the refusal, or the
+  developer message); `later_verdicts` — the run's later revises; `ended_by` — what ended the run (`allow`,
+  `rebuttal`, `breaker`, another outcome, or `session end`); `next_call` — the agent's next call on the key after
+  the first revise, its verdict and its call, where `rebuttal_stripped: true` means the gate removed the call's
+  `advisor_rebuttal` before it went out, so the recorded call lacks it and `rebuttal` holds it (`null` when there is
+  no next call)
+- a note row: `severity`, `ack`, `note`, `update` (the tail of what the advisor was shown) and `card_at`, when the
+  card carrying the note reached the agent
+- `context` — up to five primary messages either side of the decision (the card, for a note)
 
 A labeller writes one line per row, `{"id", "label", "labeler", "at"}`, and `ingest-labels` appends the file
 to `~/.omp/advisor-report/labels.jsonl` only when every row is well-formed (an unknown label rejects the
