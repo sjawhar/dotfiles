@@ -389,6 +389,10 @@ class SkipAttributionTest(unittest.TestCase):
 
 REASON = "failure 7: the ask quotes <draft> & its link"
 OTHER_REASON = "failure 3: the ask repeats one already open"
+# Reasons over the extension's 2 KiB cap, and the block text it hands the agent for each: escaped, cut to 2016 bytes
+# (a cut inside `é` dropped) and marked. Computed by askgate-core.ts's own clipBytes and escapeXml under bun.
+LONG_REASON, LONG_BLOCK = "failure 7: " + "r" * 3000, "failure 7: " + "r" * 2005 + " … [elided 995 bytes]"
+WIDE_REASON, WIDE_BLOCK = "failure 7: <" + "é" * 1100, "failure 7: &lt;" + "é" * 1000 + " … [elided 200 bytes]"
 
 
 def tool_result(call_id, at):
@@ -422,6 +426,13 @@ class DeliveryTest(unittest.TestCase):
             ("two revises with one reason, which the fork joins once", [call, revise(), revise(), result, warn_message(REASON)],
              [True, True]),
             ("only a revise verdict is delivered", [call, gate_line(at=minutes(1)), result, warn_message(REASON)], [False]),
+            ("a reason over 2 KiB, clipped as the extension clips it", [call, revise(LONG_REASON), result,
+                                                                        warn_message(LONG_BLOCK, escape=False)], [True]),
+            ("a clipped reason whose cut fell inside a character", [call, revise(WIDE_REASON), result,
+                                                                    warn_message(WIDE_BLOCK, escape=False)], [True]),
+            ("the clip of a longer reason with the same head", [call, revise(LONG_REASON), result,
+                                                                warn_message("failure 7: " + "r" * 2005 + " … [elided 1095 bytes]",
+                                                                             escape=False)], [False]),
         ]
         for case, entries, delivered in rows:
             with self.subTest(case):

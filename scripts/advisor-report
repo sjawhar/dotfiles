@@ -67,6 +67,9 @@ GATE_ENTRY_TYPE = "advisor-gate"
 # How a warn-mode revise reaches the agent: the extension's block (askgate-core.ts renderWarn), which the fork carries in
 # the developer message it writes after the tool batch.
 WARN_MARKER = '<advisor-gate advisor="AskGate"'
+# The block carries the reason escaped, then cut to 2 KiB with room for a ` … [elided N bytes]` marker (askgate-core.ts
+# GATE_REASON_MAX_BYTES, CLIP_MARKER_BYTES).
+REASON_MAX_BYTES, CLIP_MARKER_BYTES = 2048, 32
 LABELS = frozenset({"acted-correct", "acted-harmful", "ignored-agent-right", "ignored-advisor-right", "moot", "noise"})
 
 FAIL_OPEN = frozenset({"timeout", "error", "no-verdict"})
@@ -296,12 +299,25 @@ class GateEntry:
         return self.is_revise and self.delivered
 
 
+def clip_bytes(text: str, limit: int) -> str:
+    """askgate-core.ts clipBytes: `text` cut to at most `limit` UTF-8 bytes, marker included. A cut inside a character
+    decodes to one U+FFFD, which is dropped."""
+    data = text.encode("utf-8")
+    if len(data) <= limit:
+        return text
+    head = data[:max(0, limit - CLIP_MARKER_BYTES)].decode("utf-8", errors="replace").removesuffix("\ufffd")
+    return f"{head} … [elided {len(data) - len(head.encode('utf-8'))} bytes]"
+
+
 def warn_delivered(text: str, reason) -> bool:
     """Whether a developer message hands the agent a warn-mode revise: it holds AskGate's block and the entry's reason,
-    escaped as the extension escapes it (`&`, `<`, `>`) or raw. The fork joins a batch's blocks into one message and
-    writes a repeated one once, so each revise it carried is found in that message."""
-    return (WARN_MARKER in text and isinstance(reason, str) and bool(reason)
-            and (reason in text or html.escape(reason, quote=False) in text))
+    raw, escaped as the extension escapes it (`&`, `<`, `>`), or escaped and clipped to the block's 2 KiB. The fork joins
+    a batch's blocks into one message and writes a repeated one once, so each revise it carried is found in that
+    message."""
+    if WARN_MARKER not in text or not isinstance(reason, str) or not reason:
+        return False
+    escaped = html.escape(reason, quote=False)
+    return any(form in text for form in (reason, escaped, clip_bytes(escaped, REASON_MAX_BYTES)))
 
 
 @dataclass
