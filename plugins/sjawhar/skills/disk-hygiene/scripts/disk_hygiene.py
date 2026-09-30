@@ -293,32 +293,6 @@ def observable_root(box_dir: str) -> str | None:
     return str(Path(box_dir).resolve())
 
 
-def holds_working_copy(path: Path, depth: int = 3, dir_cap: int = 5000) -> bool | None:
-    """Does a `.jj` or `.git` exist at or below <path>, down to <depth> levels? None when the
-    scan could not finish (over <dir_cap> directories, or an unreadable one): unverifiable, so
-    never scratch. A depth-1 check planned ~/.worktrees/<repo>/ containers of other repos'
-    worktrees as scratch rm (8 of them, SRE, 2026-09-26). Raises OSError only for <path> itself."""
-    frontier, seen = [(path, 0)], 0
-    while frontier:
-        d, level = frontier.pop()
-        seen += 1
-        if seen > dir_cap:
-            return None
-        try:
-            with os.scandir(d) as it:
-                entries = list(it)
-        except OSError:
-            if d == path:
-                raise
-            return None
-        for e in entries:
-            if e.name in (".jj", ".git"):
-                return True
-            if level < depth and e.is_dir(follow_symlinks=False):
-                frontier.append((Path(e.path), level + 1))
-    return False
-
-
 def cmd_inventory(args: argparse.Namespace) -> None:
     repo = str(Path(args.repo).resolve())
     obs = observable_root(args.box_dir)
@@ -411,16 +385,15 @@ def cmd_inventory(args: argparse.Namespace) -> None:
             if any(path == d or path.startswith(d + "/") or d.startswith(path + "/") for d in known):
                 continue  # a workspace lives here (or under here): its own row owns it
             try:
-                held = holds_working_copy(entry)
+                if (entry / ".jj").exists() or (entry / ".git").exists():
+                    continue  # a working copy the walk above did not attribute: never scratch
                 idle_h = round((time.time() - entry.stat().st_mtime) / 3600, 1)
             except OSError:
                 continue  # unreadable (another user's dir, EACCES): no evidence, so no row (D1)
             live_procs = sorted({c for c in live if c == path or c.startswith(path + "/")})[:3]
-            cls = ("LIVE" if live_procs else "HOLDS_WORKING_COPY" if held
-                   else "SCRATCH_UNVERIFIED" if held is None else "SCRATCH")
             rows.append({"path": path, "name": None, "exists": True, "is_git_worktree": False,
                          "live_procs": live_procs, "jj_idle_hours": idle_h, "registered": False,
-                         "class": cls})
+                         "class": "LIVE" if live_procs else "SCRATCH"})
     # registrations with no directory found
     found_names = {r["name"] for r in rows if r["name"]}
     for name in sorted(registered - found_names - {"default"}):
@@ -671,8 +644,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
                 plan.append({"kind": "forget", "path": None, "name": name, "repo": repo, "class": cls,
                              "reason": f"registration with no directory; {name}@ merged; registering op {age_h:.1f}h old"})
                 continue
-            if not path or cls in ("LIVE", "UNPUSHED", "GIT_UNPUSHED", "GIT_HEAD_PUSHED", "UNOBSERVABLE",
-                                   "HOLDS_WORKING_COPY", "SCRATCH_UNVERIFIED"):
+            if not path or cls in ("LIVE", "UNPUSHED", "GIT_UNPUSHED", "GIT_HEAD_PUSHED", "UNOBSERVABLE"):
                 continue  # keep classes; plain git worktrees are reaped only via an owner release
             if is_protected(path, protected, anchors):
                 continue
@@ -935,14 +907,8 @@ def _apply_path_item(
         # A plain directory's evidence is age + liveness + "not a working copy", and all three
         # are re-derived HERE because the plan can be an hour old: a directory written to since
         # the plan, or one that has become a workspace, must survive.
-        try:
-            held = holds_working_copy(Path(path))
-        except OSError as error:
-            skip(f"re-verification failed: contents unreadable ({error})")
-            return
-        if held is not False:
-            skip("re-verification failed: " + ("holds a jj/git working copy, not scratch" if held
-                                                else "working copy scan could not finish: unverifiable"))
+        if (Path(path) / ".jj").exists() or (Path(path) / ".git").exists():
+            skip("re-verification failed: now a jj/git working copy, not scratch")
             return
         try:
             idle_h = (time.time() - os.stat(path).st_mtime) / 3600
