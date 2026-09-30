@@ -105,19 +105,16 @@ def write_jsonl(path: Path, entries) -> None:
             fh.write(json.dumps({k: v for k, v in entry.items() if k != "_session"}) + "\n")
 
 
-def build_stats_db(path: Path, tool_calls=(), user_messages=(), files=(), messages=(), covers_until_ms=None) -> None:
+def build_stats_db(path: Path, user_messages=(), files=(), messages=(), covers_until_ms=None) -> None:
     db = sqlite3.connect(path)
     db.executescript(
         """
-        create table tool_calls (session_file text, tool_call_id text, tool_name text, agent_type text, timestamp integer,
-                                 unique(session_file, tool_call_id));
         create table user_messages (session_file text, entry_id text, timestamp integer, negation integer, blame integer,
                                     anguish integer, yelling integer, profanity integer);
         create table file_offsets (session_file text, last_modified real);
         create table messages (session_file text, agent_type text, timestamp integer, cost_total real);
         """
     )
-    db.executemany("insert into tool_calls values (?, ?, ?, ?, ?)", tool_calls)
     db.executemany("insert into user_messages values (?, ?, ?, ?, ?, ?, ?, ?)", user_messages)
     db.executemany("insert into messages values (?, ?, ?, ?)", messages)
     hwm = covers_until_ms if covers_until_ms is not None else time.time() * 1000
@@ -206,11 +203,7 @@ class WatchFixtureTest(unittest.TestCase):
         root_file = cls.home.sessions / "-home-user-example" / f"{WATCH_SESSION}.jsonl"
         stats = cls.home.root / "stats.db"
         at = int(datetime(2026, 9, 20, 10, 0, 5, tzinfo=timezone.utc).timestamp() * 1000)
-        build_stats_db(
-            stats,
-            tool_calls=[(str(root_file), "c01", "write", "main", at), (str(root_file), "c06", "write", "main", at)],
-            user_messages=[(str(root_file), "p0001", at, 1, 1, 0, 0, 0)],
-        )
+        build_stats_db(stats, user_messages=[(str(root_file), "p0001", at, 1, 1, 0, 0, 0)])
         proc = cls.home.run(
             "metrics", "--since", "2026-09-20T00:00:00Z", "--until", "2026-09-21T00:00:00Z", "--advisor", "askgate",
             "--stats-db", str(stats), "--no-sync", "--json", check_exit=0,
@@ -292,57 +285,23 @@ class ScopedCallsTest(unittest.TestCase):
         sub = root.with_suffix("") / "Worker.jsonl"
         write_jsonl(sub, [self.assistant("t4", "dispatch_comment", {"issue": "EX-1", "body": "b"}, 4)])
         stats = self.home.root / "stats.db"
-        at = int(day.timestamp() * 1000)
-        build_stats_db(stats, tool_calls=[
-            (str(root), "t1", "write", "main", at), (str(root), "t2", "write", "main", at),
-            (str(root), "t3", "write", "main", at), (str(sub), "t4", "dispatch_comment", "subagent", at),
-        ])
+        build_stats_db(stats)
         scoped = self.metrics(stats)["scoped_calls"]
         self.assertEqual((scoped.get("root"), scoped.get("subagent")), (1, 1))
         self.assertEqual(scoped["per_day"].get("root"), 1.0)
-        self.assertEqual(scoped.get("stats_db_agent_type"), {"root": {"main": 1}, "subagent": {"subagent": 1}})
 
-    def test_calls_stats_db_never_ingested_are_still_split_by_file_depth(self):
-        """stats.db drops rows for some fully ingested files; the file's place decides root or subagent."""
-        day = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
-        comment = {"path": "xd://dispatch_comment", "content": json.dumps({"issue": "EX-1", "body": "b"})}
-        root = self.home.session("01a0f000-0000-7000-8000-00000000f007", [
-            self.assistant("t8", "write", comment, 1), self.assistant("t9", "write", comment, 2),
-        ], started=day)
-        sub = root.with_suffix("") / "Worker.jsonl"
-        write_jsonl(sub, [self.assistant("t10", "dispatch_message", {"issue": "EX-1", "body": "b"}, 3)])
-        stats = self.home.root / "stats.db"
-        build_stats_db(stats, tool_calls=[(str(root), "t8", "write", "main", int(day.timestamp() * 1000))], files=[root, sub])
-        scoped = self.metrics(stats)["scoped_calls"]
-        self.assertEqual((scoped.get("root"), scoped.get("subagent")), (2, 1))
-        self.assertEqual(scoped.get("stats_db_agent_type"),
-                         {"root": {"main": 1, "unjoined": 1}, "subagent": {"unjoined": 1}})
-
-    def test_rows_recorded_before_the_session_moved_directory_still_join(self):
+    def test_corrections_recorded_before_the_session_moved_directory_still_join(self):
         """An agent box relaunch moves the session to a new project dir; stats.db keeps the earlier rows under the old path."""
         day = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
         comment = {"path": "xd://dispatch_comment", "content": json.dumps({"issue": "EX-1", "body": "b"})}
         root = self.home.session("01a0f000-0000-7000-8000-00000000f005", [
             self.assistant("t5", "write", comment, 1), self.assistant("t6", "write", comment, 2),
         ], project="-boxes-agentbox-new-example", started=day)
-        sub = root.with_suffix("") / "Worker.jsonl"
-        write_jsonl(sub, [self.assistant("t7", "dispatch_comment", {"issue": "EX-1", "body": "b"}, 3)])
         old_root = self.home.sessions / "-boxes-agentbox-old-example" / root.name
-        old_sub = old_root.with_suffix("") / "Worker.jsonl"
         stats = self.home.root / "stats.db"
         at = int(day.timestamp() * 1000)
-        build_stats_db(
-            stats,
-            tool_calls=[(str(old_root), "t5", "write", "main", at), (str(root), "t6", "write", "main", at),
-                        (str(old_sub), "t7", "dispatch_comment", "subagent", at)],
-            user_messages=[(str(old_root), "u1", at, 1, 1, 0, 0, 0)],
-            files=[old_root, old_sub, root, sub],
-        )
-        m = self.metrics(stats)
-        scoped = m["scoped_calls"]
-        self.assertEqual((scoped.get("root"), scoped.get("subagent")), (2, 1))
-        self.assertEqual(scoped.get("stats_db_agent_type"), {"root": {"main": 2}, "subagent": {"subagent": 1}})
-        self.assertEqual(m["corrections"]["sum"], 2)
+        build_stats_db(stats, user_messages=[(str(old_root), "u1", at, 1, 1, 0, 0, 0)], files=[old_root, root])
+        self.assertEqual(self.metrics(stats)["corrections"]["sum"], 2)
 
     def test_gate_cost_per_day_prints_beside_the_watch_advisors(self):
         day = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
