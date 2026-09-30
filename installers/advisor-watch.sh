@@ -2,7 +2,9 @@
 # Arm the daily AskGate readout: omp/advisor-watch.{service,timer} run
 # `scripts/advisor-report readout --check gate --check trial --notify notifications.role.agentc-1305`
 # at 06:00 UTC. The readout applies every KILL it computes itself and messages the Envoy role
-# agentc-1305; docs/advisor-report.md has the rules.
+# agentc-1305 with `scripts/envoy notify`; docs/advisor-report.md has the rules. An envoy from
+# before `notify` answers it as an unknown command and sends nothing, so that run fails loudly
+# and this installer needs no probe for it.
 #
 # Standalone installer (like omp-billing-watch.sh) -- not sourced by install.sh. Run it on the
 # host whose ~/.omp holds the sessions and stats.db the readout reads. Until
@@ -15,7 +17,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # units from it too.
 shared="$HOME/.dotfiles"
 report="$shared/scripts/advisor-report"
-envoy="$shared/scripts/envoy"
 [[ -x "$report" ]] || {
     echo "advisor-watch: $report is missing; advance ~/.dotfiles to a main that has it" >&2
     exit 1
@@ -30,15 +31,6 @@ for tool in python3 curl jq; do
 done
 PATH="$unit_path" python3 -c 'import yaml' || {
     echo "advisor-watch: the user manager's python3 has no PyYAML; scripts/advisor-report needs it" >&2
-    exit 1
-}
-# The readout publishes with `envoy send --source envoy`. An envoy from before `--source` would
-# publish that to the topic "--source"; asked `send --source` alone, one that has the flag refuses
-# it by name and one that does not prints its usage, and neither sends. Captured before the grep:
-# under pipefail, `grep -q` quitting early can SIGPIPE the writer and fail a probe that passed.
-probe="$("$envoy" send --source 2>&1)" || true
-grep -q -- '--source accepts only envoy' <<<"$probe" || {
-    echo "advisor-watch: $envoy has no 'send --source envoy' (it answered: $probe); advance ~/.dotfiles" >&2
     exit 1
 }
 

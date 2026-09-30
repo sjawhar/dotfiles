@@ -4,12 +4,13 @@
 What this installer adds before handing off to arm_user_timer (installers/lib.sh, whose own tests
 cover the agentbox refusal, the unit-file check, the links into $HOME/.dotfiles and the timer
 check): it binds its checks to the shared checkout (`%h/.dotfiles`) the unit runs, whichever
-checkout the installer runs from, and refuses to arm when that checkout's envoy predates
-`send --source`, which would publish the readout to the topic "--source".
+checkout the installer runs from. It probes no envoy: the readout publishes with `scripts/envoy
+notify`, which an envoy from before it refuses as an unknown command, sending nothing
+(scripts/advisor-report's own tests cover that run).
 
-Technique: a temporary HOME whose .dotfiles holds the unit files, a stub advisor-report and an
-envoy stub; stubs first on PATH for systemctl (records its argv, answers show-environment,
-list-timers and show) and for the tools the unit needs. The installer runs from this checkout.
+Technique: a temporary HOME whose .dotfiles holds the unit files and a stub advisor-report; stubs
+first on PATH for systemctl (records its argv, answers show-environment, list-timers and show) and
+for the tools the unit needs. The installer runs from this checkout.
 """
 
 from __future__ import annotations
@@ -33,15 +34,6 @@ case "$*" in
     "--user show -p NextElapseUSecRealtime --value advisor-watch.timer") echo "Thu 2026-10-01 06:00:00 UTC" ;;
 esac
 """
-# scripts/envoy as it is: `send --source` alone is refused naming the flag.
-ENVOY_STUB = r"""
-if [ "$*" = "send --source" ]; then echo "--source accepts only envoy" >&2; exit 2; fi
-"""
-# scripts/envoy before `--source` existed: `send --source` alone is a usage error.
-ENVOY_WITHOUT_SOURCE = r"""
-echo "Usage: envoy send <target> <message>" >&2
-exit 1
-"""
 
 
 def write_stub(path: Path, body: str) -> None:
@@ -60,7 +52,6 @@ class AdvisorWatchInstaller(unittest.TestCase):
         for unit in UNITS:
             (self.shared / "omp" / unit).write_text((DOTFILES / "omp" / unit).read_text(encoding="utf-8"), encoding="utf-8")
         write_stub(self.shared / "scripts" / "advisor-report", "exit 0")
-        write_stub(self.shared / "scripts" / "envoy", ENVOY_STUB)
         stub_bin = self.home / "bin"
         stub_bin.mkdir()
         write_stub(stub_bin / "systemctl", SYSTEMCTL_STUB)
@@ -94,14 +85,6 @@ class AdvisorWatchInstaller(unittest.TestCase):
         self.assertIn("advisor-watch: armed", proc.stdout)
         self.assertEqual(self.links(), {unit: str(self.shared / "omp" / unit) for unit in UNITS})
         self.assertIn("--user enable --now advisor-watch.timer", self.systemctl_calls())
-
-    def test_an_envoy_without_source_arms_nothing(self) -> None:
-        write_stub(self.shared / "scripts" / "envoy", ENVOY_WITHOUT_SOURCE)
-        proc = self.install()
-        self.assertEqual(proc.returncode, 1)
-        self.assertIn("has no 'send --source envoy'", proc.stderr)
-        self.assertEqual(self.links(), {})
-        self.assertNotIn("enable", self.systemctl_calls())
 
 
 if __name__ == "__main__":
