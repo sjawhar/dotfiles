@@ -91,7 +91,7 @@ these rules over the window from launch to now; a gate that was never armed is n
 
 | When | Rule | Result |
 |---|---|---|
-| any day, before every rule below | `advisor.disableRoster` in the overlay holds `askgate`, or any call since launch recorded `outcome: killed` | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
+| any day, before every rule below | `advisor.disableRoster` in the overlay holds `askgate` | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
 | day 3 onward | `ungated_share` > 0.20 over ≥ 20 matched calls in the last 24 h, or verdict p95 above 0.9 × the timeout over ≥ 20 verdicts in the last 24 h | KILL |
 | day 14 | `ungated_share` ≥ 0.10 over the window | KILL |
 | day 14, ≥ 30 labelled revises | precision < 0.3 | KILL |
@@ -104,8 +104,10 @@ these rules over the window from launch to now; a gate that was never armed is n
 
 The killed rule comes first because a killed gate records every later call as `killed`, which leaves every
 denominator: the rules would judge only the calls before the kill, and a 24-hour burst that tripped the day-3
-rule is small against the whole window, so the day-14 rules could pass and read GO. The `killed` entries keep
-saying so after the owner's cleanup removes `askgate` from the overlay. The day-3 rule catches a gate that
+rule is small against the whole window, so the day-14 rules could pass and read GO. The overlay member is the
+only record of a kill: `outcome: killed` entries also come from a drill of the kill switch that the owner has
+already undone, so they end nothing, and removing `askgate` from the overlay turns the gate's rules back on. The
+day-3 rule catches a gate that
 fails open or stalls the agent. Its latency bound is 0.9 × the timeout, not the timeout itself, because a
 verdict slower than the timeout is recorded as a `timeout`, so verdict p95 can never pass it: a gate
 answering at 85 s against a 90 s deadline stalls every scoped write and must still trip the rule. It needs 20

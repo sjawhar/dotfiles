@@ -487,13 +487,13 @@ class ReadoutTest(unittest.TestCase):
     def gate_session(self, entries):
         return self.home.session("01a0f000-0000-7000-8000-00000000f003", entries)
 
-    def healthy_gate(self):
+    def healthy_gate(self, extra=()):
         """30 revises, 8 allows, 2 timeouts in the last hours: ungated_share 0.05."""
         at = [self.now - timedelta(minutes=5 + i) for i in range(40)]
         entries = [gate_entry(decision="revise", at=at[i], latency_ms=4000) for i in range(30)]
         entries += [gate_entry(at=at[30 + i], latency_ms=3000) for i in range(8)]
         entries += [gate_entry(outcome="timeout", at=at[38 + i], latency_ms=90_000) for i in range(2)]
-        self.gate_session(entries)
+        self.gate_session([*extra, *entries])
 
     def label_revises(self, correct: int, other: int, harmful: int = 0, unlabelled: int = 0):
         packet = self.home.root / "packet.jsonl"
@@ -574,12 +574,26 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn("no GO or EXTEND computed", proc.stdout)
         self.assertNotIn("GO:", proc.stdout)
         self.assertEqual(self.home.overlay.read_bytes(), before)
-        # The owner's cleanup removes its member; the calls the kill switch passed still show the gate was killed.
+        # The S9 drill: the kill switch passes two calls, then the owner removes the member and the gate runs on.
         self.home.run("overlay", "remove", "advisor.disableRoster", "askgate", check_exit=0)
-        proc = self.home.run("readout", "--check", "gate", check_exit=1)
-        self.assertIn("no GO or EXTEND computed", proc.stdout)
-        self.assertNotIn("GO:", proc.stdout)
+        shutil.rmtree(self.home.sessions)
+        self.healthy_gate(extra=self.s9_drill())
+        self.label_revises(correct=18, other=12)
+        proc = self.home.run("readout", "--check", "gate", check_exit=0)
+        self.assertIn("(2 killed)", proc.stdout)
+        self.assertIn("gate: GO: make OMP_ASKGATE=block the shim default", proc.stdout)
         self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": []}})
+
+    def s9_drill(self):
+        return [gate_entry(outcome="killed", at=self.launched + timedelta(hours=6, minutes=i), latency_ms=0) for i in range(2)]
+
+    def test_an_s9_drill_on_day_half_is_incomplete_not_killed(self):
+        self.launch(days=0.5)
+        self.healthy_gate(extra=self.s9_drill())
+        proc = self.home.run("readout", "--check", "gate", check_exit=3)
+        self.assertIn("(2 killed)", proc.stdout)
+        self.assertIn("gate: incomplete: labels < 30", proc.stdout)
+        self.assertFalse(self.home.overlay.exists())
 
     def test_an_overlay_holding_askgate_computes_no_go(self):
         self.launch(days=15)
