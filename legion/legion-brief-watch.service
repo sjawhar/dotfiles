@@ -10,6 +10,9 @@ Description=Count Legion READY packets carrying the human brief, for its warn-fi
 
 [Service]
 Type=oneshot
+# A listener that takes the connection and never answers would otherwise hold the run open, and
+# every later elapse would merge into it.
+TimeoutStartSec=5min
 WorkingDirectory=%h
 # curl, jq and bash are system binaries, and the script calls scripts/envoy by path; no mise shim
 # is on this PATH, so none needs MISE_DATA_DIR.

@@ -15,9 +15,11 @@ listener would, so each test reads back the URL and the JSON body the script pos
 from __future__ import annotations
 
 import json
+import socket
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -121,6 +123,42 @@ class EnvoySend(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn("Usage: envoy notify <topic> <message>", result.stderr)
                 self.assertFalse(self.curl_log.exists(), "nothing may be posted")
+
+
+class EnvoyStall(unittest.TestCase):
+    """A listener that takes the connection and never answers, against the real curl."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        # The kernel completes the handshake from the backlog; nothing ever reads or replies.
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen()
+        self.env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": self.temp_dir.name,
+            "HOSTNAME": "example-host-test",
+            "ENVOY_URL": f"http://127.0.0.1:{self.listener.getsockname()[1]}",
+            "ENVOY_MAX_TIME": "2",
+        }
+
+    def tearDown(self) -> None:
+        self.listener.close()
+        self.temp_dir.cleanup()
+
+    def test_a_send_to_a_listener_that_never_answers_fails_instead_of_hanging(self) -> None:
+        for args in (("send", TOPIC, "hello"), ("notify", TOPIC, "daily notice")):
+            with self.subTest(args=args):
+                started = time.monotonic()
+                try:
+                    result = subprocess.run(
+                        [str(ENVOY), *args], capture_output=True, text=True, env=self.env, check=False, timeout=20
+                    )
+                except subprocess.TimeoutExpired:
+                    self.fail("the send was still waiting on the listener after 20 s")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("failed POST /v1/messages/publish", result.stderr)
+                self.assertLess(time.monotonic() - started, 20)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,11 @@
 set -euo pipefail
 
 ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
+# Seconds any call to the listener may take before it fails. The listener's own
+# HTTP server times a request out after 10 s, so 30 s only ever cuts off one that
+# accepts the connection and never answers, which would otherwise hang the
+# caller (a timer's run, a session's tool call) for good.
+ENVOY_MAX_TIME="${ENVOY_MAX_TIME:-30}"
 HOSTNAME="${HOSTNAME:-$(hostname)}"
 # --local matches the listener's configured machine_id, which may differ from
 # hostname (it comes from Pulumi's ENVOY_MACHINE_ID). Override when they diverge.
@@ -51,7 +56,7 @@ _envoy_ps() {
         esac
     done
     local raw
-    raw=$(curl -sS --fail-with-body "$ENVOY_URL/v1/sessions" 2>&1) || {
+    raw=$(curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" "$ENVOY_URL/v1/sessions" 2>&1) || {
         echo "error: Envoy at $ENVOY_URL failed GET /v1/sessions: $raw" >&2
         return 1
     }
@@ -123,7 +128,7 @@ _envoy_send() {
     fi
 
     local out
-    out=$(curl -sS --fail-with-body -X POST "$ENVOY_URL$endpoint" \
+    out=$(curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" -X POST "$ENVOY_URL$endpoint" \
         -H "Content-Type: application/json" \
         -d "$payload" 2>&1) || {
         echo "error: Envoy at $ENVOY_URL failed POST $endpoint: $out" >&2
