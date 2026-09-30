@@ -144,23 +144,26 @@ else
     _cmd=(mise x "github:sjawhar/oh-my-pi" -- omp)
 fi
 
-# --- provider keys: personal by default, profile-scoped under a profile ---
+# --- provider keys: the Hawk gateway by default, profile-scoped under a profile ---
 # `omp --profile NAME` (or OMP_PROFILE=NAME) isolates auth, sessions, and
 # config; billing follows. Under a named profile the shim injects the secrets
 # called <KEY>_<NAME> (suffix = profile name uppercased, `-`/`.` as `_`:
-# theorem → OPENAI_API_KEY_THEOREM) as <KEY>, instead of the personal keys.
+# theorem → OPENAI_API_KEY_THEOREM) as <KEY>.
 # Anything else already in the environment is left alone, so
 # `secrets ANTHROPIC_API_KEY -- omp --profile theorem` bills the personal
 # Anthropic account for that session.
-# The default profile gets no ANTHROPIC_API_KEY: omp/models.yml routes the
-# anthropic provider through the Hawk model gateway with a per-person token
-# (`!hawk-token`), so no static Anthropic key sits in the process environment
-# — or in the environment of every tool subprocess omp spawns. A named
-# profile keeps its own scoped keys; its models.yml is separate.
+# The default profile gets no provider key at all. The machine-local
+# omp/models.local.yml routes the anthropic, openai and google providers through
+# the Hawk model gateway with a per-person token (`!hawk-token`), so no static
+# key sits in the process environment, or in the environment of every tool
+# subprocess omp spawns (AGENTC-1085: a key there reaches every transcript that
+# prints the environment). It must not be exported: omp prefers a provider's
+# environment variable over models.yml's apiKey, so an exported key silently
+# bypasses the gateway. A named profile keeps its own scoped keys; its
+# models.yml is separate.
 # OMP_PROFILE wins over --profile whenever it is defined, even when empty
 # (empty and "default" both mean the default profile), matching omp itself.
 _keys=(ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY)
-_default_keys=(GEMINI_API_KEY OPENAI_API_KEY)
 if [[ -n "${OMP_PROFILE+x}" ]]; then
     _profile="$OMP_PROFILE"
 else
@@ -176,7 +179,7 @@ fi
 _profile="${_profile//[[:space:]]/}"
 case "$_profile" in
     ""|default)
-        exec secrets "${_default_keys[@]}" -- "${_cmd[@]}" "$@"
+        exec "${_cmd[@]}" "$@"
         ;;
 esac
 
