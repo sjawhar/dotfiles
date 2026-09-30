@@ -99,20 +99,30 @@ SHUTDOWN = "shutdown"
 LATENCY_EVIDENCE = frozenset({"verdict", "timeout"})
 
 KILL_KEY, GATE_SLUG = "advisor.disableRoster", "askgate"
-DAY3 = 3
-DAY3_WINDOW = timedelta(hours=24)
-DAY3_MIN_CALLS = 20  # below this the 24-hour sample is too small for either day-3 rule
-DAY3_UNGATED = 0.20
-DAY3_LATENCY_SHARE = 0.9  # of the timeout; a verdict slower than the timeout is recorded as a timeout
-DECISION_DAY = 14
-EXTENDED_DAY = 21
-MIN_LABELS = 30
-GO_PRECISION = 0.5
-KILL_PRECISION = 0.3
-GO_HARM = 0.05
-KILL_HARM = 0.10
-MAX_UNGATED = 0.10
-GO_LATENCY_SHARE = 0.9
+DAY3 = 3  # plan.md:782 col 4 (Enforcement): "Timer, day 3 onward"
+DAY3_WINDOW = timedelta(hours=24)  # plan.md:782: "in the last 24 h"
+DAY3_MIN_CALLS = 20  # plan.md:782: "≥ 20 matched root-session attempts"; below this the 24-hour sample is too
+# small for either day-3 rule (nearest-rank p95 below 20 calls is the slowest single call)
+DAY3_UNGATED = 0.20  # plan.md:782: "if `ungated_share` > 0.20"
+# plan.md:782 states the day-3 latency rule informally as "p95 latency > timeout"; taken literally that can never
+# fire, since an outcome of "verdict" is by construction the race the 90 s AbortController did not win (a call that
+# ran past the deadline is recorded "timeout", not "verdict"). Operationalized at the same ratio the day-14/GO rule
+# uses explicitly (plan.md:782: "p95 ... ≤ 81 s (0.9 × timeout)", mirrored below as GO_LATENCY_SHARE) so the day-3
+# early warning is not a dead rule. Flagged to the coordinator as a literal-vs-operational reading, not invented.
+DAY3_LATENCY_SHARE = 0.9
+DECISION_DAY = 14  # plan.md:782: "Day 14: GO ..."
+EXTENDED_DAY = 21  # plan.md:782: "EXTEND one week once ... then GO/KILL by the same rule" (14 + 7)
+MIN_LABELS = 30  # plan.md:24 (R4) / :782: KILL needs "≥ 30" labelled clusters
+GO_LABELS = 60  # plan.md:24 (R4) / :782: GO needs "≥ 60" labelled clusters
+GO_PRECISION = 0.5  # plan.md:24, :782: GO "precision ≥ 0.5"
+KILL_PRECISION = 0.3  # plan.md:24, :782: KILL "precision < 0.3"
+GO_MAX_HARMFUL = 3  # plan.md:24, :782: GO "`acted-harmful` ≤ 3 of those 60 (≤ 0.05)"
+KILL_HARM = 0.10  # plan.md:24, :782: KILL "`acted-harmful` > 0.10" of the labelled clusters
+# No precision figure counts until two labellers agree on the verdict axis past chance over enough shared clusters.
+KAPPA_FLOOR, KAPPA_MIN_SHARED = 0.6, 30  # plan.md:341 (A1 step 5) and :782 (population clause): "κ ≥ 0.6 on ≥ 30
+# shared clusters before any figure counts"
+MAX_UNGATED = 0.10  # plan.md:782: GO "`ungated_share` < 0.10"; KILL "at any time when ... ≥ 0.10"
+GO_LATENCY_SHARE = 0.9  # plan.md:782: "p95 `latency_ms` ≤ 81 s (0.9 × timeout)"
 
 CONTEXT_MESSAGES = 5
 CONTEXT_TEXT_MAX = 2000
@@ -768,13 +778,83 @@ def gate_usage(data: list[dict]) -> dict:
     return {key: totals[key] for key in USAGE_KEYS}
 
 
-def labelled_metrics(labels: dict[str, dict], fired_ids, skips: int) -> dict:
-    """Over the fired units a gate label covers: precision = right / labelled, whatever the agent did; harm counts the
-    wrong verdicts the agent acted on."""
-    rows = [labels[row_id] for row_id in fired_ids if labels.get(row_id, {}).get("stratum") == "gate"]
-    right = sum(1 for row in rows if row["verdict"] == "right")
-    harmful = sum(1 for row in rows if row["verdict"] == "wrong" and row["response"] == "acted")
-    return {"n": len(rows), "precision": ratio(right, len(rows)), "harm": ratio(harmful + skips, len(rows))}
+def newest_labels(rows: list[dict], stratum: str, ids) -> dict[str, dict[str, dict]]:
+    """Each labeller's newest label of the stratum per id among `ids`: {labeller: {id: row}}."""
+    wanted, by_labeller = set(ids), {}
+    for row in rows:
+        if row.get("stratum") == stratum and row["id"] in wanted:
+            by_labeller.setdefault(row["labeler"], {})[row["id"]] = row
+    return by_labeller
+
+
+def majority(values: list[str], tie: str) -> str:
+    counts = Counter(values).most_common()
+    return tie if len(counts) > 1 and counts[0][1] == counts[1][1] else counts[0][0]
+
+
+def cohen_kappa(pairs: list[tuple[str, str]]) -> float:
+    """Cohen's kappa of two labellers' verdicts over the clusters both labelled; 1.0 when both gave one verdict to all."""
+    n = len(pairs)
+    observed = sum(1 for a, b in pairs if a == b) / n
+    expected = sum((sum(1 for a, _ in pairs if a == value) / n) * (sum(1 for _, b in pairs if b == value) / n)
+                   for value in GATE_VERDICTS)
+    return 1.0 if expected == 1 else (observed - expected) / (1 - expected)
+
+
+def gate_labels(rows: list[dict], cluster_ids) -> dict:
+    """The gate's labelled figures over fired clusters: each labeller's newest label per cluster; a cluster's axis is
+    its labellers' majority, a split read against the gate (verdict `wrong`, response `acted`). precision = right /
+    labelled, whatever the agent did; harm = (wrong and acted) / labelled. `withheld` says why no precision figure
+    counts yet: it takes Cohen's kappa >= 0.6 on the verdict over >= 30 clusters both of two labellers labelled."""
+    by_labeller = newest_labels(rows, "gate", cluster_ids)
+    ids = sorted({row_id for labels in by_labeller.values() for row_id in labels})
+    verdict, response = {}, {}
+    for row_id in ids:
+        own = [labels[row_id] for labels in by_labeller.values() if row_id in labels]
+        verdict[row_id] = majority([row["verdict"] for row in own], tie="wrong")
+        response[row_id] = majority([row["response"] for row in own], tie="acted")
+    harmful = [row_id for row_id in ids if verdict[row_id] == "wrong" and response[row_id] == "acted"]
+    labellers = sorted(by_labeller)
+    kappa, shared, withheld = None, 0, None
+    if len(labellers) != 2:
+        withheld = f"kappa needs two labellers, the labels have {len(labellers)}"
+    else:
+        first, second = (by_labeller[labeller] for labeller in labellers)
+        pairs = [(first[row_id]["verdict"], second[row_id]["verdict"]) for row_id in ids if row_id in first and row_id in second]
+        shared = len(pairs)
+        if shared < KAPPA_MIN_SHARED:
+            withheld = f"kappa needs {KAPPA_MIN_SHARED} clusters both labellers labelled, has {shared}"
+        else:
+            kappa = cohen_kappa(pairs)
+            if kappa < KAPPA_FLOOR:
+                withheld = f"kappa {kappa:.2f} < {KAPPA_FLOOR}"
+    return {"n": len(ids), "precision": ratio(sum(1 for value in verdict.values() if value == "right"), len(ids)),
+            "harm": ratio(len(harmful), len(ids)), "harmful": len(harmful), "harmful_ids": harmful,
+            "kappa": kappa, "shared": shared, "labellers": labellers, "withheld": withheld}
+
+
+def watch_labels(rows: list[dict], note_ids) -> dict:
+    """The watch stratum's labelled figures over routed notes, each note's newest label from any labeller."""
+    newest = {}
+    for labels in newest_labels(rows, "watch", note_ids).values():
+        for row_id, row in labels.items():
+            if row_id not in newest or row["ingested"] > newest[row_id]["ingested"]:
+                newest[row_id] = row
+    counts, n = Counter(row["label"] for row in newest.values()), len(newest)
+    return {"n": n, "precision": ratio(counts["right"], n), "moot": ratio(counts["moot"], n), "noise": ratio(counts["noise"], n)}
+
+
+FAILURE_RE = re.compile(r"\bfailures?\s*(\d+)", re.I)
+
+
+def fired_failures(clusters: list[Cluster]) -> dict:
+    """Which charter failures fire live: the failure numbers the clusters' first reasons cite (`none` for a reason that
+    cites none; a reason citing two counts for both)."""
+    counts = Counter()
+    for cluster in clusters:
+        numbers = set(FAILURE_RE.findall(cluster.first.data.get("reason") or ""))
+        counts.update(numbers or {"none"})
+    return dict(sorted(counts.items()))
 
 
 def attempt_totals(attempts: list[Attempt], days: float) -> dict:
@@ -863,14 +943,15 @@ def corrections(db: sqlite3.Connection, session_files: Iterable[Path], window: W
 
 # --- labels, launch record -------------------------------------------------
 
-def load_labels() -> dict[str, dict]:
+def load_labels() -> list[dict]:
+    """Every label row in ingestion order; each labeller's newest label for an id is the one that counts."""
     path = report_dir() / "labels.jsonl"
     if not path.is_file():
-        return {}
+        return []
     rows, bad = read_jsonl(path)
     if bad:
         raise Failure(f"{path} has {bad} unparsable line(s)")
-    return {row["id"]: row for row in rows}
+    return rows
 
 
 def load_launch() -> dict:
@@ -1121,10 +1202,10 @@ def window_from(args) -> Window:
 
 
 def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, window: Window, advisor: str,
-                    scope_re: re.Pattern, labels: dict[str, dict], stats: sqlite3.Connection) -> dict:
+                    scope_re: re.Pattern, labels: list[dict], stats: sqlite3.Connection, probes: list[str]) -> dict:
     """Every metric over the window, one root session at a time; nothing of a session is kept past its turn."""
     n = Counter()
-    by_ack, latencies, gate_entries, fired, paths, attempts = Counter(), [], [], [], [], []
+    by_ack, latencies, gate_entries, clusters, notes, paths, attempts = Counter(), [], [], [], [], [], []
     for record in records:
         calls = window_calls(record, window)
         admitted = [call for call in calls if call.admitted]
@@ -1143,7 +1224,9 @@ def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, w
         by_ack.update(call.ack for call in calls)
         latencies += held.latencies_ms
         gate_entries += entries
-        fired += [entry.row_id for entry in entries if entry.fired] + [call.row_id(record.session_id) for call in admitted]
+        if not is_probe(record.path, probes):
+            clusters += sample_units(record, window, "gate")
+        notes += [call.row_id(record.session_id) for call, _card in sample_units(record, window, "watch")]
         paths.append(record.path)
     days, turns = window.days, n["turns"]
     correction_total = corrections(stats, paths, window)
@@ -1176,12 +1259,22 @@ def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, w
         "gate": {**gate, "usage_per_day": {key: value / days for key, value in gate["usage"].items()},
                  "cost_usd_per_day": gate["usage"]["cost"] / days},
         "corrections": {"sum": correction_total, "per_100_turns": per_100_turns(correction_total, turns)},
-        "labelled": labelled_metrics(labels, fired, n["skips"]),
+        "labelled": {"gate": {**gate_labels(labels, [cluster.first.row_id for cluster in clusters]),
+                              "fired_clusters": len(clusters), "fired_failures": fired_failures(clusters)},
+                     "watch": watch_labels(labels, notes)},
     }
 
 
 def fmt(value, spec: str = ".3f") -> str:
     return "-" if value is None else format(value, spec)
+
+
+def labelled_line(lab: dict) -> str:
+    """The gate's labelled figures, with no precision figure at all while kappa withholds it."""
+    if lab["withheld"]:
+        return f"labelled clusters n={lab['n']}, precision: withheld ({lab['withheld']})"
+    return (f"labelled clusters n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')} "
+            f"({lab['harmful']} acted-harmful), kappa {lab['kappa']:.2f} over {lab['shared']} shared")
 
 
 def print_metrics(m: dict) -> None:
@@ -1211,8 +1304,10 @@ def print_metrics(m: dict) -> None:
           f"{g['usage_per_day']['output']:.0f} out, {g['usage_per_day']['cacheRead']:.0f} cache read, "
           f"{g['usage_per_day']['cacheWrite']:.0f} cache write tokens); watch-mode {m['advisor']} spend/day "
           f"${m['watch']['cost_usd_per_day']:.2f} (stats.db)")
-    lab = m["labelled"]
-    print(f"  labelled: n {lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}")
+    lab, watch = m["labelled"]["gate"], m["labelled"]["watch"]
+    print(f"  {labelled_line(lab)}; {lab['fired_clusters']} fired clusters, failures cited {lab['fired_failures']}")
+    print(f"  watch labels: n {watch['n']}, precision {fmt(watch['precision'], '.2f')}, moot {fmt(watch['moot'], '.2f')}, "
+          f"noise {fmt(watch['noise'], '.2f')}")
     print(f"  stats db {m['stats_db']['path']} covers until {m['stats_db']['covers_until']}")
 
 
@@ -1226,7 +1321,7 @@ def cmd_metrics(args) -> int:
     root = (Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions").absolute()
     with closing(stats):
         metrics = compute_metrics(scan_sessions(root, window, args.advisor), subagent_attempts(root, window, scope_re),
-                                  window, args.advisor, scope_re, load_labels(), stats)
+                                  window, args.advisor, scope_re, load_labels(), stats, probe_patterns())
     metrics["stats_db"] = {"path": str(stats_path), "covers_until": iso(covers_until)}
     if args.json:
         json.dump(metrics, sys.stdout, indent=2)
@@ -1563,13 +1658,13 @@ def watch_baseline(path: Path, launched: datetime) -> str:
     return f"watch-mode AskGate ${cost / DECISION_DAY:.2f}/day over the 14 days before launch"
 
 
-def missing_label_weeks(launched: datetime, now: datetime, fired: list[tuple[str, datetime]], labels: dict) -> list[str]:
-    """Each completed week since launch that has delivered revises and not one of them labelled."""
+def missing_label_weeks(launched: datetime, now: datetime, fired: list[tuple[str, datetime]], labelled: set) -> list[str]:
+    """Each completed week since launch that has fired clusters and not one of them labelled."""
     missing = []
     for week in range(1, int((now - launched).days // 7) + 1):
         start, end = launched + timedelta(days=7 * (week - 1)), launched + timedelta(days=7 * week)
-        revises = [row_id for row_id, at in fired if start <= at < end]
-        if revises and not any(row_id in labels for row_id in revises):
+        clusters = [row_id for row_id, at in fired if start <= at < end]
+        if clusters and not any(row_id in labelled for row_id in clusters):
             missing.append(f"week {week} ({start:%Y-%m-%d}..{end:%Y-%m-%d})")
     return missing
 
@@ -1590,14 +1685,17 @@ def day3_kill(day: float, timeout_ms: int, recent: dict) -> list[str]:
 
 
 def day14_kill(whole: dict, labelled: dict) -> list[str]:
-    """The day-14 KILLs, first match only: a gate that fails open over the window, is wrong, or does harm."""
-    n, precision, harm = labelled["n"], labelled["precision"], labelled["harm"]
+    """The day-14 KILLs, first match only: a gate that fails open over the window, or, over >= 30 labelled clusters
+    that kappa admits, is wrong or does harm."""
     if whole["ungated_share"] is not None and whole["ungated_share"] >= MAX_UNGATED:
         return [f"day {DECISION_DAY}: ungated_share {whole['ungated_share']:.3f} >= {MAX_UNGATED}"]
-    if n >= MIN_LABELS and precision < KILL_PRECISION:
-        return [f"day {DECISION_DAY}: precision {precision:.2f} < {KILL_PRECISION}"]
-    if harm is not None and harm > KILL_HARM:
-        return [f"day {DECISION_DAY}: harm {harm:.2f} > {KILL_HARM} over {n} labels"]
+    n = labelled["n"]
+    if labelled["withheld"] is None and n >= MIN_LABELS:
+        if labelled["precision"] < KILL_PRECISION:
+            return [f"day {DECISION_DAY}: precision {labelled['precision']:.2f} < {KILL_PRECISION} over {n} labelled clusters"]
+        if labelled["harm"] > KILL_HARM:
+            return [f"day {DECISION_DAY}: acted-harmful {labelled['harmful']} of {n} labelled clusters "
+                    f"({labelled['harm']:.2f}) > {KILL_HARM}"]
     return []
 
 
@@ -1615,15 +1713,19 @@ def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labell
     # would read the earlier weeks alone.
     if missing_weeks:
         return Decision(INCOMPLETE, (f"no labels for {', '.join(missing_weeks)}",))
-    n, precision, harm, p95 = labelled["n"], labelled["precision"], labelled["harm"], whole["latency_ms_p95"]
-    # EXTEND once, then GO or KILL: from day 21 a gate without 30 labels lacks GO's evidence, and a KILL restores the
-    # status quo.
-    if n < MIN_LABELS:
+    # A precision two labellers do not agree on past chance is a rubric defect, not a figure: no GO, EXTEND or KILL
+    # reads it.
+    if labelled["withheld"]:
+        return Decision(INCOMPLETE, (f"precision: withheld ({labelled['withheld']})",))
+    n, precision, p95 = labelled["n"], labelled["precision"], whole["latency_ms_p95"]
+    # EXTEND once, then GO or KILL: from day 21 a gate without 60 labelled clusters lacks GO's evidence, and a KILL
+    # restores the status quo.
+    if n < GO_LABELS:
         if day >= EXTENDED_DAY:
-            return Decision(KILL, (f"day {EXTENDED_DAY}: {n} labelled revises, fewer than {MIN_LABELS}, after the one-week extension",))
-        return Decision(INCOMPLETE, (f"labels < {MIN_LABELS} (n={n})",))
-    go = (day >= DECISION_DAY and precision >= GO_PRECISION and harm <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
-          and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and skips == 0)
+            return Decision(KILL, (f"day {EXTENDED_DAY}: {n} labelled clusters, fewer than {GO_LABELS}, after the one-week extension",))
+        return Decision(INCOMPLETE, (f"labelled clusters < {GO_LABELS} (n={n})",))
+    go = (day >= DECISION_DAY and precision >= GO_PRECISION and labelled["harmful"] <= GO_MAX_HARMFUL
+          and (whole["ungated_share"] or 0) < MAX_UNGATED and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and skips == 0)
     if day >= EXTENDED_DAY and not go:
         return Decision(KILL, (f"day {EXTENDED_DAY}: not GO after the one-week extension",))
     if problems:
@@ -1633,6 +1735,20 @@ def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labell
     if day >= DECISION_DAY:
         return Decision(EXTEND, ("one more week, then GO or KILL",))
     return Decision(ON_TRACK)
+
+
+def harmful_notices(labels: list[dict], harmful_ids: list[str], now: datetime) -> list[str]:
+    """A line for each acted-harmful cluster a label ingested in the last 24 hours made so: the role reads each the day
+    it arrives, and a single one kills nothing."""
+    lines = []
+    for row_id in harmful_ids:
+        newest = {labeller: rows[row_id] for labeller, rows in newest_labels(labels, "gate", [row_id]).items()}
+        harmful = {labeller: row for labeller, row in newest.items() if row["verdict"] == "wrong" and row["response"] == "acted"}
+        fresh = [row["ingested"] for row in harmful.values() if row.get("ingested") and parse_iso(row["ingested"]) >= now - DAY3_WINDOW]
+        if fresh:
+            lines.append(f"gate: acted-harmful label on {row_id} ({', '.join(sorted(harmful))}), ingested {max(fresh)}: "
+                         "read the cluster; one label kills nothing")
+    return lines
 
 
 def attempt(action: str, run, failures: list[str]):
@@ -1672,24 +1788,28 @@ def gate_check(now: datetime) -> Check:
     launched, timeout_ms = parse_iso(record["launched"]), record["timeout_ms"]
     day = (now - launched).total_seconds() / 86400
     window = Window(launched, now)
-    entries, skips, any_skips = [], 0, 0
+    entries, clusters, skips, any_skips = [], [], 0, 0
+    failures: list[str] = []
+    probes = attempt("read the probe patterns", probe_patterns, failures) or list(PROBE_DIRS)
     for session in scan_sessions(agent_dir() / "sessions", window, GATE_SLUG):
         entries += [entry for entry in session.gate_entries if window.contains(entry.at)]
         skips += own_skips(session, window, GATE_SLUG)
         any_skips += skips_in(session, window)
+        if not is_probe(session.path, probes):
+            clusters += sample_units(session, window, "gate")
     whole = gate_metrics(entries)
     recent = gate_metrics([entry for entry in entries if entry.at >= now - DAY3_WINDOW])
-    failures: list[str] = []
     labels = attempt("read the labels", load_labels, failures)
     baseline = attempt("read the watch-mode baseline", lambda: watch_baseline(default_stats_db(), launched), failures)
     problems = attempt("read the roster", lambda: roster_problems(dotfiles_dir(), agent_dir()), failures)
-    fired = [(entry.row_id, entry.at) for entry in entries if entry.fired]
-    lab = None if labels is None else labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
+    fired = [(cluster.first.row_id, cluster.first.at) for cluster in clusters]
+    lab = None if labels is None else gate_labels(labels, [row_id for row_id, _at in fired])
     lines = [f"gate: day {day:.1f}; {whole['matched_attempts']} attempts ({whole['killed']} killed), ungated_share "
              f"{fmt(whole['ungated_share'])} of attempts, p95 {fmt(whole['latency_ms_p95'], '.0f')} ms over verdict attempts "
              f"(timeout {timeout_ms}), skips {skips} ({any_skips} by any steer); "
-             f"last 24 h {recent['matched_attempts']} attempts, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
-             + ("unread" if lab is None else f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}"),
+             f"last 24 h {recent['matched_attempts']} attempts, ungated_share {fmt(recent['ungated_share'])}; {len(clusters)} fired "
+             f"clusters, " + ("labelled clusters unread" if lab is None else labelled_line(lab)),
+             *([] if lab is None else harmful_notices(labels, lab["harmful_ids"], now)),
              f"gate: {whole['skipped']} skipped: the primary was on another provider, so the gate sent no transcript; "
              "not in ungated_share",
              f"gate: {whole['abandoned']} abandoned: the user stopped the write while the gate waited; not in ungated_share",
@@ -1713,7 +1833,8 @@ def gate_check(now: datetime) -> Check:
         elif failures:
             decision = Decision(KILL, tuple(day3)) if (day3 := day3_kill(day, timeout_ms, recent)) else None
         else:
-            decision = gate_decision(day, timeout_ms, whole, recent, lab, skips, missing_label_weeks(launched, now, fired, labels),
+            labelled = {row_id for rows in newest_labels(labels, "gate", [row_id for row_id, _at in fired]).values() for row_id in rows}
+            decision = gate_decision(day, timeout_ms, whole, recent, lab, skips, missing_label_weeks(launched, now, fired, labelled),
                                      False, problems)
         applied = unwritten = False
         if decision is not None and decision.verdict == KILL:
