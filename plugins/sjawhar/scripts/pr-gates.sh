@@ -46,7 +46,29 @@ for n in "${prs[@]}"; do
   # simplify "Simplify record at <sha>". Reviewer, deep and quality all emit
   # "Verdict:", so they cannot be told apart from the first line alone — the count
   # of distinct verdict lines at this head is reported instead.
-  at_head=$(grep -F "$head" <<<"$bodies" || true)
+  #
+  # The head is matched by PREFIX, not by its full 40 characters. Verdict lines in
+  # practice name the short head ("Verdict: MERGE at b9891193"), so a `grep -F` of
+  # the full sha finds nothing and the script reports a fully gated PR as 0/3. That
+  # is what it did on 2026-09-30 for legion#1612, which had three MERGE verdicts and
+  # an acceptance PASS at its head. An instrument whose blind spot is undocumented is
+  # worse than no instrument: this one said "missing" about work that was done.
+  #
+  # Any hex run of 7+ characters on the line counts when the head starts with it, so
+  # both "b9891193" and the full sha match. Two limits remain, deliberately:
+  #   * it cannot tell three reviewers apart from one reviewer posting three verdict
+  #     comments at the same head (the coordinator posts on behalf of read-only lanes,
+  #     so author identity does not separate them either);
+  #   * a verdict naming an ANCESTOR of the head reads as absent, which is correct.
+  at_head=$(awk -v head="$head" '
+    {
+      s = $0
+      while (match(s, /[0-9a-f]{7,40}/)) {
+        tok = substr(s, RSTART, RLENGTH)
+        if (index(head, tok) == 1) { print; next }
+        s = substr(s, RSTART + RLENGTH)
+      }
+    }' <<<"$bodies")
   verdicts=$(grep -c '^Verdict:' <<<"$at_head" || true)
   acpt=$(grep -c '^Acceptance:' <<<"$at_head" || true)
   simp=$(grep -ci '^Simplify' <<<"$at_head" || true)
