@@ -47,8 +47,11 @@ for watch in omp-billing-watch omp-cache-watch; do
 
     # Prove the timer is actually scheduled. `enable --now` on a timer whose unit
     # fails to load still exits 0 on some systemd versions, which would leave this
-    # installer claiming an armed detector that never runs.
-    systemctl --user list-timers --all ${watch}.timer | grep -q ${watch} || {
+    # installer claiming an armed detector that never runs. Captured before the
+    # grep: under pipefail, `grep -q` quitting at the row can SIGPIPE systemctl's
+    # footer write and fail a timer that did register (seen 2026-09-30).
+    listed="$(systemctl --user list-timers --all ${watch}.timer)"
+    grep -q ${watch} <<<"$listed" || {
         echo "${watch}: timer did not register; see systemctl --user status ${watch}.timer" >&2
         exit 1
     }
