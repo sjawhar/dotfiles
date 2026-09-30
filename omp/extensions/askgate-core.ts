@@ -22,9 +22,12 @@
 //     stripped on the outer `write` event (before the device validates its arguments) and the
 //     call runs unasked. At most 64 unspent rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, error, no
-//     parsable answer) stop the gate for the session, with one UI notice.
+//     parsable answer) stop the gate for the session, with one UI notice. The halt, the
+//     count, the breaker and the rebuttals reset on session_switch and session_branch.
 //   - breaker: two revises on one target (the device plus its issue/ask/artifact/project
 //     values) send the third attempt unasked; an allow, a rebuttal or a trip resets the target.
+//   - unavailable / skipped: no model for `@askgate`, or a session whose primary model is on
+//     another provider than the gate's: nothing is rendered or sent, and the call runs.
 //   - verdict: `@askgate` (modelRoles.askgate) is asked once, raced against the deadline. Its
 //     system prompt is askgate-system.md and the charter, nothing else. The user message
 //     (askgate-request.md) carries the agent under review as data: its system prompt and the
@@ -73,7 +76,7 @@ export interface GateEntry {
 	path: string;
 	toolCallId: string;
 	decision: "allow" | "revise";
-	outcome: "verdict" | "rebuttal" | "breaker" | "timeout" | "error" | "no-verdict" | "unavailable" | "halted" | "killed";
+	outcome: "verdict" | "rebuttal" | "breaker" | "timeout" | "error" | "no-verdict" | "unavailable" | "halted" | "killed" | "skipped";
 	verdictMode: Exclude<Mode, "off">;
 	reason?: string;
 	rebuttal?: string;
@@ -117,6 +120,8 @@ type GateCtx = {
 	ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
 	getSystemPrompt(): string[];
 	models: { resolve(spec: string): { provider: string; id: string } | undefined };
+	/** The session's primary model. */
+	model?: { provider: string; id: string };
 	sessionManager: { getSessionId(): string };
 };
 /** One AgentMessage of that context, read by `role` (user, assistant, toolResult, custom, compactionSummary, …). */
@@ -322,6 +327,9 @@ export class Breaker {
 	reset(key: string): void {
 		this.#reasons.delete(key);
 	}
+	clear(): void {
+		this.#reasons.clear();
+	}
 	reasons(key: string): readonly string[] {
 		return this.#reasons.get(key) ?? [];
 	}
@@ -358,11 +366,21 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		const timeoutMs = parseTimeout(deps.env.OMP_ASKGATE_TIMEOUT_MS);
 		const charter = loadCharter(deps.readFile, deps.charterPath, deps.home);
 		const dumpPath = deps.env.OMP_ASKGATE_DUMP;
-		// State lives in this binding: the fork rebinds the factory per session.
+		// The fork binds this factory once per process and keeps the binding across /new, /resume
+		// and a branch switch, so the per-session state below resets on session_switch and
+		// session_branch: a halt, a count, revise reasons or a rebuttal never outlive their session.
 		const rebuttals = new Map<string, string>();
 		const breaker = new Breaker();
 		let failures = 0;
 		let halted = false;
+		const reset = () => {
+			rebuttals.clear();
+			breaker.clear();
+			failures = 0;
+			halted = false;
+		};
+		pi.on("session_switch", reset);
+		pi.on("session_branch", reset);
 
 		/** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
 		const settle = (effect: Decision["effect"], ctx: GateCtx) => {
@@ -404,6 +422,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				return pass("breaker");
 			}
 
+			const model = ctx.models.resolve(MODEL_ROLE);
+			if (!model) return pass("unavailable", {}, "failure");
+			// A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
+			if (ctx.model?.provider !== model.provider) return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
+
 			// The system role holds only the gate's own text and the charter. The agent's system prompt
 			// and transcript are data about the agent under review, escaped into the user message.
 			const system = `${systemTemplate.trim()}\n\n${charter}`;
@@ -412,8 +435,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const promptBytes = byteLength(system) + byteLength(user);
 			if (dumpPath) deps.appendFile(dumpPath, `===== AskGate ${event.toolCallId} system =====\n${system}\n===== AskGate ${event.toolCallId} user =====\n${user}\n\n`);
 
-			const model = ctx.models.resolve(MODEL_ROLE);
-			if (!model) return pass("unavailable", {}, "failure");
 			const called = { promptBytes, model: `${model.provider}/${model.id}` };
 			const answer = await ask({ ctx, model, system, user, sessionId: ctx.sessionManager.getSessionId() });
 			const usage = answer.usage ? { usage: answer.usage } : {};
