@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily count of Legion READY packets for the brief's warn-first flip
+
+[Timer]
+OnCalendar=daily
+# A box that was asleep or rebooted still gets the count it missed.
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
