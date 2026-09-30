@@ -4,6 +4,12 @@
 
 `jj rebase` moves revisions to different parents while preserving their diffs. The behavior varies significantly depending on which source flag you use.
 
+The examples describe graph transformations, not permission to rewrite every
+revision they can reach. In a shared store, inspect ownership and descendants
+first for every form, including `-r`. Do not rebase a published/shared chain
+without its required coordination and proof, and do not rebase just because a
+fetch advanced main when no conflict requires it.
+
 ### Source flags: -r vs -s vs -b
 
 **`-r` (revisions only) -- extracts and re-parents children**
@@ -23,7 +29,7 @@ M             K'
 J             J
 ```
 
-Use `-r` when you want to move a commit without bringing its descendants. Common for rewriting octopus merge parents.
+Use `-r` to move the selected revisions without carrying their descendants, only after confirming that re-parenting those descendants is permitted.
 
 **`-s` (source + descendants) -- moves subtree intact**
 
@@ -71,7 +77,7 @@ O             N'
 J             J
 ```
 
-Use `-b` when rebasing after a fetch -- it moves your whole branch onto the updated trunk. **This is the default** when no flag is specified (`jj rebase -o dest` implies `-b @`).
+`-b` moves the selected branch and its descendants onto the destination. It is the default when no source flag is specified (`jj rebase -o dest` implies `-b @`), so a bare rebase is not inherently scoped to your work.
 
 ### Destination flags: -o vs -A vs -B
 
@@ -95,16 +101,16 @@ jj rebase -r @ -o A -o B -o C   # Reset @'s parents to A, B, C (octopus merge)
 ### Common patterns
 
 ```bash
-# Rebase current branch onto updated trunk (most common)
+# Rebase an owned, unpublished branch after checking every affected descendant
 jj rebase -o 'trunk()'
 
-# Rebase all local branches onto trunk
+# Rebase roots in the current branch's range, including their descendants
 jj rebase -s 'roots(trunk()..@)' -o 'trunk()'
 
 # Reset a merge commit's parents (e.g., drop branches from octopus)
 jj rebase -r <merge> -o <parent1> -o <parent2> -o <parent3>
 
-# Extract a commit from middle of chain (descendants stay)
+# Extract a commit; its descendants are re-parented onto its old parents
 jj rebase -r <middle> -o <new-parent>
 
 # Move whole feature branch onto new base

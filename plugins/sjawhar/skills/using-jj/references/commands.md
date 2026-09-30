@@ -9,9 +9,9 @@ This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Ne
 - **No staging area.** Every `jj` command auto-snapshots the working copy. There is no `git add`.
 - **Changes vs Commits.** Change IDs (letters k-z, e.g. `qzmzpxyl`) are *stable* across rewrites. Commit IDs (hex) change when the commit is modified. Prefer change IDs to refer to things.
 - **`@` = working copy change.** Not like git HEAD — it represents what's on disk right now, including uncommitted work. `@-` is its parent.
-- **Rebases always succeed.** Conflicts are recorded in the commit, not blocking. Descendants auto-rebase when parents change.
-- **Commands operate on the repo, not the working copy** — rebase doesn't touch your files or move `@` unless asked.
-- **Nothing is ever lost.** Every operation is logged in `jj op log`. You can inspect any previous state with `--at-op` and restore with `jj op restore`. Run `jj st > /dev/null` frequently to create snapshot recovery points.
+- **A successful rebase can record conflicts.** A refusal is not success; read the result. Descendants can rebase automatically when a parent changes.
+- **Repo operations can move working copies indirectly.** Rewriting an ancestor can rewrite its working-copy descendants. Rebasing a different branch does not select it for your next edit; inspect `@` afterward.
+- **Snapshots are recoverable; unsnapshotted files are not yet stored.** Inspect saved operations with `jj op log` and `--at-op`, then recover the identified paths with a forward `jj restore --from <commit> <paths>` in your own workspace. Never use `jj op restore`, `jj op revert` or `jj undo` in a shared repository.
 - **Divergent commits are routine bookkeeping, not damage.** Two commits sharing one change ID (the `/0`, `/4` suffixes) is simply what jj records when a change is rewritten while something still references the old commit — a bookmark, another workspace, or an octopus merge that pins it. It is not corruption and not a reason to stop working. Do not leave it lying around either; see [Resolving divergence](divergence.md).
 
 ## CRITICAL: Scope Destructive Commands
@@ -21,62 +21,48 @@ Before any jj command that reverts, discards, or rewrites, ask its blast radius 
 - **`jj restore` without a path reverts the WHOLE working copy.** Always name a path: `jj restore --from <rev> <path>`. If you mean one file, name that file.
 - **`jj abandon`** discards a whole change.
 - **`jj undo` / `jj op restore`** are repo-wide time travel: they also undo unrelated work since that operation, including other agents' work in other workspaces.
-- Newly created, untracked-but-snapshotted files are most vulnerable: they exist only in the working copy.
+- New files are not recoverable until snapshotted. Once saved, inspect their commit rather than assuming they exist only in the current directory.
 
 **Recover an accidental restore:** run `jj op log` to find the offending operation, then use a **path-scoped** `jj restore --from <commit-before-it> <path>`. Before restoring, `jj op log --limit N` plus `jj --at-op=<op> file list` lets you inspect what existed at a past operation.
 
-## Edit in place, not via throwaway commits
+## Edit an unpublished, unshared change in place
 
-**It is correct and safe for `@` to sit on the commit (or bookmark) you intend to edit.** Auto-snapshot putting your working-copy edits into that commit IS the editing mechanism — there is no staging area, no detached-HEAD danger, and nothing to "protect" the target from. Every state is in the op log, so nothing is lost.
+For your own unpublished change with no other owner's descendants, `jj edit <change>`
+and ordinary file edits are the intended mechanism. A bookmark alone does not change
+that. Do not create temporary children just to squash them back into such a private change.
 
-**Git-brain antipattern to avoid:** creating a throwaway child commit on top of the thing you actually mean to edit (`jj new <target>` → edit → `jj squash` back down), or avoiding editing `@` because it "has a bookmark" or "is a merge." It is pure ceremony that produces churn and cascading rebases. Editing `@` while it points at a bookmark just updates that bookmark's commit — which is what you want.
+A published or reviewed head is different: run `jj new <head>` before the first edit,
+then publish the appended change. Editing the old head amends it and automatically
+rebases any descendants. A bookmark does not make a published or shared commit safe
+to amend.
 
-- Edit an existing commit/bookmark: `jj edit <change>`, then edit the files. Done.
-- Edit a merge/octopus commit: `jj new <parents...>` creates it; then edit `@` directly (resolve conflicts, tweak content). `@` **is** the merge — you are not sitting "on top of" it.
-- A working copy showing uncommitted files on a bookmarked commit is not a hazard; letting a normal `jj` command snapshot them into that commit is the intended behavior, not something to warn about.
-- `--ignore-working-copy` is only for read-only inspection when you deliberately don't want to snapshot. It is not a safety ritual for normal editing.
+For a merge, resolve it in its own working-copy commit, but do not path-extract its
+resolution with split or squash. `--ignore-working-copy` is for inspection that must
+not snapshot somebody else's workspace, never for proving your own on-disk changes.
 
-## CRITICAL: No Undo Loops
+## Recover with one inspected forward change
 
-**If a jj command doesn't do what you expected, STOP. Do not chain `jj undo` → retry → `jj undo` → retry.**
+Read the complete failure and inspect `@`, bookmarks, ownership and descendants before
+repairing anything. Never use repository-global undo, restore-operation or revert-operation
+commands in a shared store, even once and even with your own operation ID.
 
-Every jj operation (including undo) writes to a shared operation log. Undo loops create operation churn that causes divergent commits across all workspaces. One agent running 10 undo/redo cycles in 5 minutes can corrupt the history for every other workspace.
+Use `jj-agent-status` when available, or ordinary `jj status`, `jj log` and
+`jj workspace list`. Divergence is bookkeeping, not proof of damage. Investigate an
+unexpected state from the saved commits rather than guessing or looping on undo.
 
-**When something goes wrong:**
-1. Run `jj-agent-status` to understand your current state
-2. If you understand the state, make ONE deliberate fix
-3. If you don't understand the state, **ask the user** — don't guess
+## Before and after publication
 
-**Red flags — STOP and ask the user:**
-- You're about to run `jj undo` for the second time
-- You cannot explain where a divergence came from (investigate its provenance before rewriting anything — divergence itself is fine, *unexplained* divergence is what warrants a look)
-- `jj log` shows something unexpected and you're not sure why
-- You're tempted to `jj op restore` to an earlier state
+1. Accumulate related edits in your own unpublished, unshared change.
+2. Keep its description meaningful. Describe with `-m` when needed; `describe` is a
+   rewrite, not a staging operation.
+3. Publish only its named bookmark, after inspecting the dry run and recording the
+   intended commit ID. Verify that exact remote bookmark afterward.
+4. Run `jj new` after the successful push. Any later review fix starts on that child,
+   never by editing and re-pushing the published commit itself.
 
-## Squash Workflow (How This User Works)
-
-All changes accumulate in the working copy change (`@`). Don't create new commits for fixes — just make changes and push again.
-
-1. Work directly in `@` — all file changes are auto-captured
-2. When done, push with `jj git push` (see Pushing Changes)
-3. For fixes after pushing: just edit files and push again — don't create new commits or re-describe
-
-### Modifying Existing Changes
-
-To modify a change that already has a description, **do NOT make changes in `@`, describe `@`, then squash.** This opens an interactive editor that fails in agent contexts.
-
-**Option 1: Edit the target directly** (preferred)
-```bash
-jj edit <change_id>    # Move @ to the change you want to modify
-# Make your changes directly
-jj new                 # Create new empty change when done
-```
-
-**Option 2: Squash without describing**
-```bash
-# Make changes in @ — do NOT run jj describe
-jj squash              # Content moves to @-, parent keeps its description
-```
+When combining private changes, name the revisions and paths, check descendants first,
+and give split/squash an explicit non-interactive description policy (`-m` or squash `-u`).
+Do not use a squash into a published head as a workaround for the append-only rule.
 
 ## Commands (use these instead of git)
 
@@ -96,13 +82,11 @@ jj squash              # Content moves to @-, parent keeps its description
 | Insert change before current | `jj new -B @` |
 | Edit an existing change | `jj edit <rev>` |
 | Move to next/prev change | `jj next --edit` / `jj prev --edit` |
-| Squash `@` into parent | `jj squash` |
+| Squash a private `@` into its private parent | `jj squash -u` (check ownership and descendants first) |
 | Collapse a stack into one commit | `jj squash --from 'aaa::eee' --into zzz -m "msg"` (`-m` required) |
 | Squash interactively (TUI) | `jj squash -i` |
 | Redistribute edits to ancestors | `jj absorb` (see Gotchas) |
 | Abandon a change | `jj abandon <rev>` |
-| Undo last operation | `jj undo` |
-| Redo undone operation | `jj redo` |
 | Rebase (default: branch) | `jj rebase -o <dest>` (defaults to `-b @`) |
 | Rebase revisions only | `jj rebase -r <rev> -o <dest>` |
 | Rebase revision + descendants | `jj rebase -s <rev> -o <dest>` |
@@ -112,7 +96,7 @@ jj squash              # Content moves to @-, parent keeps its description
 | Create merge commit | `jj rebase -s <rev> -o <parent1> -o <parent2>` |
 | List bookmarks | `jj bookmark list` |
 | Create/move bookmark to `@` | `jj bookmark set <name>` |
-| Push | `jj git push` |
+| Push a named bookmark | `jj git push --bookmark <name>` |
 | Fetch | `jj git fetch` |
 | Update stale workspace | `jj workspace update-stale` |
 
@@ -131,10 +115,12 @@ To resolve: edit the file to remove all markers, keeping the correct content. Re
 
 | Action | Command |
 |--------|---------|
-| Push tracked bookmarks that are ahead of the selected remote | `jj git push` |
-| Push all tracked bookmarks | `jj git push --tracked` |
+| Check the intended named push without publishing | `jj git push --bookmark <name> --dry-run` |
 | Push a specific local bookmark, including its first remote publication | `jj git push --bookmark <name>` |
 | Create and publish a named remote bookmark | `jj git push --named <name>=@` |
+
+Use only a named push in a shared store. Bare push and `--tracked` can select other
+work, and `--all` / `--deleted` are repository-wide, not substitutes for a failed flag.
 
 - A plain `jj git push` refuses a local bookmark the remote has never seen. With a local `feature` bookmark and an `origin` remote, stock jj says:
   ```text
@@ -168,6 +154,10 @@ JJ_USER="Your Name" JJ_EMAIL="you@example.com" jj new -m "message"
 ```
 
 `--repo` and user settings affect future commits; set them before the first commit. Redirecting `XDG_CONFIG_HOME` does **not** disable the legacy `~/.jjconfig.toml`, which jj loads before the XDG config. For a hermetic invocation, use `JJ_CONFIG= jj ...`.
+
+Changing shared user-level identity requires the user's authorization. Prefer the
+already configured identity; a missing identity is not permission to invent one or
+silently change other sessions' configuration.
 
 **Common mistake**: Labels ending with `@` in `jj log` output (e.g. `default@`, `my-workspace@`) are **workspace markers**, NOT bookmarks. Only names in the bookmark position (without trailing `@`) are actual bookmarks. **Always verify with `jj bookmark list`.**
 
@@ -203,8 +193,8 @@ jj squash --from 'aaa::eee' --into zzz -m "combined description"
 is a fail-safe only: **always pass `-m` or `-u` yourself.** Never pipe a rewriting `jj` command;
 check `jj log` afterward to confirm the operation actually occurred.
 
-Prefer not splitting at all — one commit per PR is the default — but when independent changes
-must separate, the forms above are the only agent-safe split commands.
+Choose logical commits for reviewability. Published review fixes are appended commits;
+consolidation of private work must not rewrite a published head or another owner's work.
 
 ### `jj diff` in non-TTY / agent contexts
 
