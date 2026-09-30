@@ -155,7 +155,11 @@ describe("rebuttal (test 3)", () => {
 	test("the write event loses the key and its device event is recorded as a rebuttal without a model call", async () => {
 		const g = bind();
 		expect(await g.write("t1", "xd://dispatch_comment", withRebuttal)).toEqual({ input: { path: "xd://dispatch_comment", content: '{"issue":"X-1","body":"b"}' } });
-		expect(await g.device("t1", "dispatch_comment", { issue: "X-1", body: "b" })).toBeUndefined();
+		const ack = (await g.device("t1", "dispatch_comment", { issue: "X-1", body: "b" }))?.additionalContext ?? "";
+		// The agent's record of its call no longer shows the field; the acknowledgement says why.
+		expect(ack).toContain('outcome="rebuttal"');
+		expect(ack).toContain('"a link"');
+		expect(ack).toContain("removed before sending");
 		expect(g.calls).toHaveLength(0);
 		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "rebuttal", rebuttal: "a link", tool: "dispatch_comment", path: "xd://dispatch_comment", toolCallId: "t1" }]);
 	});
@@ -231,6 +235,7 @@ describe("verdicts", () => {
 		const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
 		const result = await g.device("t1", "dispatch_comment", COMMENT);
 		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("removed before sending");
 		expect(result?.reason).toContain("see the message above");
 		expect(result?.reason).toContain("advisor_rebuttal");
 		expect(g.entries).toMatchObject([{ decision: "revise", verdictMode: "block" }]);
@@ -314,12 +319,26 @@ describe("breaker (test 7)", () => {
 		await g.device("b", "dispatch_comment", { issue: "X-1", body: "two" });
 		await g.device("c", "dispatch_comment", { issue: "X-2", body: "other" });
 		expect(g.calls).toHaveLength(3);
-		expect(await g.device("d", "dispatch_comment", { issue: "X-1", body: "three" })).toBeUndefined();
+		const pass = (await g.device("d", "dispatch_comment", { issue: "X-1", body: "three" }))?.additionalContext ?? "";
+		expect(pass).toContain('outcome="breaker"');
+		expect(pass).toContain("sent without review");
 		expect(g.calls).toHaveLength(3);
 		await g.device("e", "dispatch_comment", { issue: "X-1", body: "four" });
 		expect(g.calls).toHaveLength(4);
 		expect(g.entries.map(e => `${e.decision}/${e.outcome}`)).toEqual(["revise/verdict", "revise/verdict", "revise/verdict", "allow/breaker", "revise/verdict"]);
 		expect(g.entries[3].revisesForKey).toBe(2);
+	});
+	test("the second revise on a target says the third unchanged resend goes out unreviewed, in both modes", async () => {
+		const SECOND = "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
+		const block = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
+		const first = (await block.device("a", "dispatch_comment", { issue: "X-1", body: "one" }))?.reason ?? "";
+		const second = (await block.device("b", "dispatch_comment", { issue: "X-1", body: "two" }))?.reason ?? "";
+		expect(first).not.toContain("third");
+		expect(second.trimEnd().endsWith(SECOND)).toBe(true);
+		const warn = bind({ complete: async () => ({ text: REVISE }) });
+		await warn.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
+		const context = (await warn.device("b", "dispatch_comment", { issue: "X-1", body: "two" }))?.additionalContext ?? "";
+		expect(context).toMatch(new RegExp(`${SECOND.replace(/[.:]/g, "\\$&")}\\n</advisor-gate>$`));
 	});
 	test("the request carries the reasons already given for the target", async () => {
 		const g = bind({ complete: async () => ({ text: REVISE }) });

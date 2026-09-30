@@ -25,12 +25,14 @@
 //     sessions; an unparsable file is not a kill.
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON. The key is
 //     stripped on the outer `write` event (before the device validates its arguments) and the
-//     call runs unasked. At most 64 unspent rebuttals are remembered.
+//     call runs unasked; the agent is told its rebuttal was recorded and the field removed
+//     before sending. At most 64 unspent rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, error, no
 //     parsable answer) stop the gate for the session, with one UI notice. The halt, the
 //     count, the breaker and the rebuttals reset on session_switch and session_branch.
 //   - breaker: two revises on one target (the device plus its issue/ask/artifact/project
-//     values) send the third attempt unasked; an allow, a rebuttal or a trip resets the target.
+//     values) send the third attempt unasked, and say so; the second revise already warns that
+//     it will. An allow, a rebuttal or a trip resets the target.
 //   - unavailable / skipped: no model for `@askgate`, or a session whose primary model is on
 //     another provider than the gate's: nothing is rendered or sent, and the call runs.
 //   - verdict: `@askgate` (modelRoles.askgate) is asked once, raced against the deadline. Its
@@ -389,15 +391,22 @@ function renderRequest(primarySystemPrompt: string, transcript: string, tool: st
 
 /** A model's reason, escaped and capped before it reaches the agent: it cannot close its frame or open a tag. */
 const quotedReason = (reason: string) => escaped(reason, GATE_REASON_MAX_BYTES);
-const renderRevise = (reason: string) =>
-	`AskGate did not send this call.\n${quotedReason(reason)}\nSend the corrected call, or resend this one unchanged with "${REBUTTAL_KEY}": "<one line>" added to the JSON to override; an override is always sent and recorded.`;
+// What the agent reads after each gated call: silence only for an allow or a fail-open, since a
+// pass it cannot see is indistinguishable from a gate that broke.
+const SECOND_REVISE = "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
+const renderRevise = (reason: string, second: boolean) =>
+	`AskGate did not send this call.\n${quotedReason(reason)}\nSend the corrected call, or resend this one unchanged with "${REBUTTAL_KEY}": "<one line>" added to the JSON to override; an override is always sent and recorded, and the field is removed before sending.${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
 	abandoned: "AskGate did not send this call: it was stopped before a verdict came back. Send it again if it is still wanted.",
 	shutdown: "AskGate did not send this call: the session shut down before a verdict came back. Send it again from a live session if it is still wanted.",
 };
-const renderWarn = (reason: string) =>
-	`<advisor-gate advisor="AskGate" verdict="revise">\n${quotedReason(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.\n</advisor-gate>`;
+const renderWarn = (reason: string, second: boolean) =>
+	`<advisor-gate advisor="AskGate" verdict="revise">\n${quotedReason(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.${second ? `\n${SECOND_REVISE}` : ""}\n</advisor-gate>`;
+const renderRebuttalAck = (rebuttal: string) =>
+	`<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${REBUTTAL_KEY} "${quotedReason(rebuttal)}" was received and recorded; the call was sent without review, with that field removed before sending.\n</advisor-gate>`;
+const renderBreakerAck = () =>
+	`<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
 	return function askGate(pi: Pi): void {
@@ -509,12 +518,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) return pass("killed");
 			if (rebuttal !== undefined) {
 				breaker.reset(key);
-				return pass("rebuttal", { rebuttal });
+				return { fields: { decision: "allow", outcome: "rebuttal", rebuttal }, result: { additionalContext: renderRebuttalAck(rebuttal) }, effect: "none" };
 			}
 			if (halted) return pass("halted");
 			if (breaker.tripped(key)) {
 				breaker.reset(key);
-				return pass("breaker");
+				return { fields: { decision: "allow", outcome: "breaker" }, result: { additionalContext: renderBreakerAck() }, effect: "none" };
 			}
 
 			if (closing) return givenUp("shutdown");
@@ -543,9 +552,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				return pass("verdict", called, "verdict");
 			}
 			breaker.revised(key, verdict.reason);
+			const second = breaker.reasons(key).length === GATE_BREAKER_REVISES;
 			return {
 				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, revisesForKey: base.revisesForKey + 1, ...called },
-				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason) } : { additionalContext: renderWarn(verdict.reason) },
+				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason, second) } : { additionalContext: renderWarn(verdict.reason, second) },
 				effect: "verdict",
 			};
 		};
