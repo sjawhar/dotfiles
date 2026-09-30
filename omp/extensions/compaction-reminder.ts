@@ -19,11 +19,13 @@
 //
 // `session_compact` fires after every committed compaction — auto, /compact,
 // remote, snapcompact, handoff, soft — once the summary has replaced the
-// history. Shake never reaches it: it elides old tool output in place and
-// commits no compaction entry, and since it paraphrases nothing there is
-// nothing to restate. Each reminder is a persisted, displayed custom message
-// either way; only the queue differs, because omp has no single delivery that
-// fits every moment a compaction can land:
+// history. Shake never reaches it: it replaces old tool output, and fenced or
+// XML blocks of 400+ tokens in any message, with recovery placeholders in
+// place and commits no compaction entry, so an automatic shake reports only
+// through `auto_compaction_end` with action `shake`. Each reminder is a
+// persisted, displayed custom message either way; only the queue differs,
+// because omp has no single delivery that fits every moment a compaction can
+// land:
 //
 //   idle (/compact, idle compaction): `nextTurn` appends to context at once.
 //   mid-run (compaction at a tool-loop boundary and the turn just ended with
@@ -37,24 +39,36 @@
 //     by the loop's stop-boundary poll and force an extra model turn whose only
 //     input is this reminder.
 //
-// `turn_end` reliably precedes `session_compact` at the same boundary (it is
-// pushed before the loop's onTurnEnd hook that hosts mid-turn maintenance),
-// which is what makes the last turn's tool-call count a valid signal here.
+// `turn_end` reliably precedes `session_compact` and `auto_compaction_end` at
+// the same boundary (it is pushed before the loop's onTurnEnd hook that hosts
+// mid-turn maintenance), which is what makes the last turn's tool-call count a
+// valid signal here.
 //
-// Subagents rebind the parent's extensions to their own runtime, so this
-// handler also runs for their compactions. The transcript name tells the two
+// Subagents rebind the parent's extensions to their own runtime, so these
+// handlers also run for their compactions. The transcript name tells the two
 // apart: subagent transcripts live inside the parent's session directory as
 // <AgentName>.jsonl rather than a <timestamp>_<uuid>.jsonl, the grammar
 // session-env.ts uses for the same distinction. Only the top-level session is
 // the coordinator following the sdd process, so the sdd reminder is for it
-// alone. A subagent instead gets its assignment back: the summary paraphrases
-// the scope limits, forbidden files and required output it was dispatched
-// with, so on its first compaction it is told to re-check them and handed the
-// first user message on its branch (the assignment) verbatim, or the reminder
-// text alone when the branch has none. Later compactions stay quiet: one
-// restatement per subagent, not one per summary. State lives in the factory
-// closure, which is per session binding, never at module scope shared across
-// sessions.
+// alone, on committed compactions. A subagent instead gets its assignment
+// back: a summary paraphrases the scope limits, forbidden files and required
+// output it was dispatched with, and a shake can swap a large block of the
+// assignment itself for a placeholder. So on its first compaction — a
+// committed one, or an automatic shake that dropped content and brought the
+// context back under its threshold — it is told to re-check them and handed
+// the assignment verbatim. A shake that dropped nothing, aborted, or fell
+// through to the next method leaves the reminder to the compaction that
+// follows. Later compactions stay quiet: one restatement per subagent, not one
+// per summary.
+//
+// The assignment is the first user message on the branch, recorded at the
+// binding's first user `message_end`, before any compaction can have touched
+// it: the branch's first user message when the branch already has one (a
+// revived subagent woken with a follow-up keeps what it was dispatched with),
+// else the message just sent. Only when nothing was recorded is the branch
+// read at compaction time; with no user message at all the reminder text goes
+// alone. State lives in the factory closure, which is per session binding,
+// never at module scope shared across sessions.
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import sddReminder from "./compaction-reminder.md" with { type: "text" };
@@ -71,10 +85,9 @@ type ModeChangeEntry = {
 	mode: string;
 	data?: { goal?: { objective?: string; status?: string } };
 };
-type MessageEntry = {
-	type: "message";
-	message: { role: string; content: string | Array<{ type: string; text?: string }> };
-};
+type UserMessage = { role: string; content: string | Array<{ type: string; text?: string }> };
+type MessageEntry = { type: "message"; message: UserMessage };
+type ShakeEndEvent = { action: string; aborted: boolean; skipped?: boolean; errorMessage?: string };
 type CompactCtx = {
 	sessionManager: { getSessionFile: () => string | undefined; getBranch: () => Array<{ type: string }> };
 	isIdle: () => boolean;
@@ -94,24 +107,52 @@ function sddGoalActive(ctx: CompactCtx): boolean {
 	return false;
 }
 
+/** Text parts of a message, joined. */
+function messageText(message: UserMessage): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content
+		.filter(part => part.type === "text")
+		.map(part => part.text)
+		.join("\n");
+}
+
 /** Text of the branch's first user message: the assignment a subagent was dispatched with. */
 function firstUserText(ctx: CompactCtx): string | undefined {
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type !== "message") continue;
 		const { message } = entry as MessageEntry;
-		if (message.role !== "user") continue;
-		if (typeof message.content === "string") return message.content;
-		return message.content
-			.filter(part => part.type === "text")
-			.map(part => part.text)
-			.join("\n");
+		if (message.role === "user") return messageText(message);
 	}
 	return undefined;
 }
 
+/** Whether the session is a subagent; undefined when it has no transcript to tell by. */
+function isSubagent(ctx: CompactCtx): boolean | undefined {
+	const file = ctx.sessionManager.getSessionFile();
+	if (!file) return undefined;
+	return !TOP_LEVEL_TRANSCRIPT.test(path.basename(file));
+}
+
 export default function (pi: ExtensionAPI) {
 	let runContinues = false;
+	let assignment: string | undefined;
 	let subagentReminded = false;
+
+	const deliver = (message: typeof SDD_MESSAGE, ctx: CompactCtx) =>
+		pi.sendMessage(message, { deliverAs: !ctx.isIdle() && runContinues ? "aside" : "nextTurn" });
+	const remindSubagent = (ctx: CompactCtx) => {
+		if (subagentReminded) return;
+		subagentReminded = true;
+		const text = assignment ?? firstUserText(ctx);
+		deliver(
+			{
+				customType: "post-compaction-subagent-reminder",
+				content: text ? `${SUBAGENT_REMINDER}\n\n<assignment>\n${text}\n</assignment>` : SUBAGENT_REMINDER,
+				display: true,
+			},
+			ctx
+		);
+	};
 
 	pi.on("turn_end", (event: { toolResults: unknown[] }) => {
 		runContinues = event.toolResults.length > 0;
@@ -119,22 +160,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", () => {
 		runContinues = false;
 	});
+	pi.on("message_end", (event: { message: UserMessage }, ctx: CompactCtx) => {
+		if (assignment !== undefined || event.message.role !== "user") return;
+		assignment = firstUserText(ctx) ?? messageText(event.message);
+	});
 	pi.on("session_compact", (_event: unknown, ctx: CompactCtx) => {
-		const file = ctx.sessionManager.getSessionFile();
-		if (!file) return;
-		let message = SDD_MESSAGE;
-		if (TOP_LEVEL_TRANSCRIPT.test(path.basename(file))) {
-			if (!sddGoalActive(ctx)) return;
-		} else {
-			if (subagentReminded) return;
-			subagentReminded = true;
-			const assignment = firstUserText(ctx);
-			message = {
-				customType: "post-compaction-subagent-reminder",
-				content: assignment ? `${SUBAGENT_REMINDER}\n\n<assignment>\n${assignment}\n</assignment>` : SUBAGENT_REMINDER,
-				display: true,
-			};
-		}
-		pi.sendMessage(message, { deliverAs: !ctx.isIdle() && runContinues ? "aside" : "nextTurn" });
+		const subagent = isSubagent(ctx);
+		if (subagent) remindSubagent(ctx);
+		else if (subagent === false && sddGoalActive(ctx)) deliver(SDD_MESSAGE, ctx);
+	});
+	pi.on("auto_compaction_end", (event: ShakeEndEvent, ctx: CompactCtx) => {
+		// A shake that fell through carries an errorMessage; the method after it commits and reminds.
+		if (event.action !== "shake" || event.aborted || event.skipped || event.errorMessage !== undefined) return;
+		if (isSubagent(ctx)) remindSubagent(ctx);
 	});
 }
