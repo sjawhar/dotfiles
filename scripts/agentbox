@@ -182,13 +182,28 @@ enroll_box() {
     enroll_failed "$box" "agent-secrets enroll failed 10 times; last: $(<"$errfile")"
 }
 
-# The box's enrollment lease: `agent-secrets renew` inside it, for every box, restarted 10 s after
-# it exits. renew retries a transient failure itself but exits on any refusal, and something in
-# the box can kill it; without the restart the lease would lapse within 15 min while the box kept
-# its key. After a revocation the loop only meets the same refusal again. It survives an omp
-# relaunch (`agentbox restart`, same container) and dies with the box.
+# The box's enrollment lease: `agent-secrets renew` inside it, for every box, restarted after it
+# exits. renew retries a transient failure itself but exits on any refusal, and something in the
+# box can kill it; without the restart the lease would lapse within 15 min while the box kept its
+# key. The restart waits 10 s, doubling after each renew that exits quickly, up to 10 min, and
+# back to 10 s after one that ran over a minute: a revoked or lapsed enrollment, which only meets
+# the same refusal again, then costs the broker one call per 10 min. Each exit and the next delay
+# go to renew.log beside renew's own output. The loop survives an omp relaunch
+# (`agentbox restart`, same container) and dies with the box.
+# shellcheck disable=SC2016  # expands in the box's sh
+RENEW_LOOP='d=10
+while :; do
+    s=$(date +%s)
+    agent-secrets renew
+    rc=$?
+    [ $(($(date +%s) - s)) -gt 60 ] && d=10
+    echo "agentbox: agent-secrets renew exited $rc; restarting in ${d}s"
+    sleep "$d"
+    d=$((d * 2))
+    [ "$d" -gt 600 ] && d=600
+done >>"$AGENT_SECRETS_KEY_DIR/renew.log" 2>&1'
 start_renew() {
-    docker exec -d --user ubuntu "$1" sh -c 'while :; do agent-secrets renew; sleep 10; done >>"$AGENT_SECRETS_KEY_DIR/renew.log" 2>&1'
+    docker exec -d --user ubuntu "$1" sh -c "$RENEW_LOOP"
 }
 
 # Enroll a box from `new` once it is up, then start its renew: for omp once its session id is
