@@ -3,7 +3,7 @@
   "private": true,
   "dependencies": {
     "@bopstack/pi-codegraph": "^0.1.1",
-    "@sjawhar/opencode-knives": "github:sjawhar/knives#v2.0.21",
+    "@sjawhar/opencode-knives": "github:sjawhar/knives#v2.0.22",
     "@sjawhar/pi-legion-envoy": "^5.21.0",
     "secretsd": "github:sjawhar/forward#v3.5.3",
     "superpowers": "github:obra/superpowers#v6.3.0"
