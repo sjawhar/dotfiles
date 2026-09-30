@@ -22,7 +22,7 @@ Pre-registered rules for the AskGate gate (`readout --check gate`, launch =
   - any day, first: advisor.disableRoster holds askgate, or a call since launch
     recorded outcome killed -> killed; no GO or EXTEND is computed, nothing is written.
   - day 3 onward: ungated_share > 0.20 over >= 20 matched calls in the last 24 h,
-    or verdict p95 latency above the timeout -> KILL.
+    or verdict p95 latency above 0.9 x the timeout in the last 24 h -> KILL.
   - day 14: GO (set OMP_ASKGATE=block as the shim default) when labelled
     precision >= 0.5 over >= 30 labelled revises, harm <= 0.05,
     ungated_share < 0.10, p95 <= 0.9 x timeout and skips = 0; KILL when
@@ -1086,8 +1086,10 @@ def gate_check(now: datetime) -> Check:
     if day >= KILL_DAY:
         if recent["matched"] >= KILL_MIN_MATCHED and (recent["ungated_share"] or 0) > KILL_UNGATED_24H:
             kill.append(f"ungated_share {recent['ungated_share']:.3f} > {KILL_UNGATED_24H} over {recent['matched']} calls in the last 24 h")
-        if recent["latency_ms_p95"] is not None and recent["latency_ms_p95"] > timeout_ms:
-            kill.append(f"p95 latency {recent['latency_ms_p95']:.0f} ms above the {timeout_ms} ms timeout in the last 24 h")
+        # A verdict slower than the timeout is recorded as a timeout, so verdict p95 never passes the timeout itself.
+        if recent["latency_ms_p95"] is not None and recent["latency_ms_p95"] > GO_LATENCY_SHARE * timeout_ms:
+            kill.append(f"p95 latency {recent['latency_ms_p95']:.0f} ms above {GO_LATENCY_SHARE} x the {timeout_ms} ms "
+                        "timeout in the last 24 h")
     decision = None
     if day >= DECISION_DAY and not kill:
         if whole["ungated_share"] is not None and whole["ungated_share"] >= MAX_UNGATED:

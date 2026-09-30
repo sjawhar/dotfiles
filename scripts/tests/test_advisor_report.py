@@ -532,6 +532,19 @@ class ReadoutTest(unittest.TestCase):
         self.home.run("readout", "--check", "gate", check_exit=1)
         self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": ["askgate"]}})
 
+    def test_day_three_verdicts_at_85_s_against_a_90_s_timeout_apply_the_kill(self):
+        """A verdict slower than the timeout is recorded as a timeout, so the stall shows as p95 near it."""
+        def verdicts_at(latency_ms):
+            self.gate_session([gate_entry(at=self.now - timedelta(minutes=10 + i), latency_ms=latency_ms) for i in range(20)])
+
+        verdicts_at(80_000)
+        self.home.run("readout", "--check", "gate", check_exit=3)
+        self.assertFalse(self.home.overlay.exists())
+        verdicts_at(85_000)
+        out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
+        self.assertIn("p95 latency 85000 ms", out)
+        self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": ["askgate"]}})
+
     def killed_after_a_day_three_burst(self):
         """230 good calls, a day-3 hour with 8 timeouts in 25 calls, then 250 calls the kill switch passed."""
         day3 = self.launched + timedelta(days=3)
