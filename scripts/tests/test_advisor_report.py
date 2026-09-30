@@ -565,6 +565,10 @@ class GateMetricsTest(unittest.TestCase):
         entries = [gate_entry(decision="revise"), gate_entry(), gate_entry(outcome="timeout"), gate_entry(outcome="rebuttal")]
         self.assertEqual(ar.gate_metrics(entries)["revise_rate"], 0.5)
 
+    def test_latency_calls_are_the_verdicts_and_timeouts(self):
+        outcomes = ("verdict", "timeout", "error", "no-verdict", "unavailable", "halted", "rebuttal", "breaker", "killed")
+        self.assertEqual(ar.gate_metrics([gate_entry(outcome=outcome) for outcome in outcomes])["latency_calls"], 2)
+
 
 class OverlayTest(unittest.TestCase):
     def setUp(self):
@@ -632,9 +636,9 @@ class OverlayTest(unittest.TestCase):
         self.assertEqual(self.members(), ["askgate"])
 
 
-def gm(ungated=0.05, p95=4000, matched=40, verdicts=38):
+def gm(ungated=0.05, p95=4000, matched=40, latency_calls=40, verdicts=38):
     """The gate-metrics fields the rules read."""
-    return {"ungated_share": ungated, "latency_ms_p95": p95, "matched": matched, "verdicts": verdicts}
+    return {"ungated_share": ungated, "latency_ms_p95": p95, "matched": matched, "latency_calls": latency_calls, "verdicts": verdicts}
 
 
 def labelled(n=30, precision=0.6, harm=0.0):
@@ -650,15 +654,17 @@ class GateDecisionTest(unittest.TestCase):
 
     ROWS = [
         # (rule, changed inputs, verdict, text a reason carries, text no reason carries)
-        ("the killed overlay comes first, even over a day-3 burst", dict(killed=True, recent=gm(ungated=0.5, matched=20)),
-         "killed", "", None),
-        ("before day 3 no rule runs", dict(day=2.9, recent=gm(ungated=0.5, matched=20), labelled=UNLABELLED),
+        ("the killed overlay comes first, even over a day-3 burst",
+         dict(killed=True, recent=gm(ungated=0.5, matched=20, latency_calls=20)), "killed", "", None),
+        ("before day 3 no rule runs", dict(day=2.9, recent=gm(ungated=0.5, matched=20, latency_calls=20), labelled=UNLABELLED),
          "incomplete", "labels < 30", None),
-        ("day 3: ungated_share above 0.20 over 20 calls in the last 24 h kills",
-         dict(day=3, recent=gm(ungated=0.25, matched=20), labelled=UNLABELLED),
-         "kill", "ungated_share 0.250 > 0.2 over 20 calls in the last 24 h", None),
-        ("day 3: 19 calls are under the floor", dict(day=3, recent=gm(ungated=0.5, matched=19), labelled=UNLABELLED),
-         "incomplete", "", None),
+        ("day 3: ungated_share above 0.20 over 20 verdicts and timeouts in the last 24 h kills",
+         dict(day=3, recent=gm(ungated=0.25, matched=20, latency_calls=20), labelled=UNLABELLED),
+         "kill", "ungated_share 0.250 > 0.2 over 20 calls with a verdict or a timeout in the last 24 h", None),
+        ("day 3: 19 verdicts and timeouts are under the floor",
+         dict(day=3, recent=gm(ungated=0.5, matched=40, latency_calls=19), labelled=UNLABELLED), "incomplete", "", None),
+        ("day 3: rebuttals, breaker passes and killed calls do not fill the floor",
+         dict(day=3, recent=gm(ungated=0.5, matched=20, latency_calls=2), labelled=UNLABELLED), "incomplete", "", None),
         ("day 3: verdict p95 above 0.9 x the timeout over 20 verdicts kills",
          dict(day=3, recent=gm(p95=85_000, verdicts=20), labelled=UNLABELLED),
          "kill", "p95 latency 85000 ms above 0.9 x the 90000 ms timeout over 20 verdicts in the last 24 h", None),
@@ -666,8 +672,8 @@ class GateDecisionTest(unittest.TestCase):
          "incomplete", "", None),
         ("day 3: 19 verdicts are under the floor", dict(day=3, recent=gm(p95=85_000, verdicts=19), labelled=UNLABELLED),
          "incomplete", "", None),
-        ("the day-3 rule comes before the day-14 rules", dict(recent=gm(ungated=0.25, matched=20), whole=gm(ungated=0.2)),
-         "kill", "over 20 calls in the last 24 h", "day 14"),
+        ("the day-3 rule comes before the day-14 rules",
+         dict(recent=gm(ungated=0.25, matched=20, latency_calls=20), whole=gm(ungated=0.2)), "kill", "in the last 24 h", "day 14"),
         ("day 14: ungated_share 0.10 over the window kills", dict(whole=gm(ungated=0.10)),
          "kill", "day 14: ungated_share 0.100 >= 0.1", None),
         ("day 14: the ungated KILL is named before precision", dict(whole=gm(ungated=0.12), labelled=labelled(precision=0.2)),
