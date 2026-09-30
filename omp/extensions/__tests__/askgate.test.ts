@@ -512,6 +512,31 @@ describe("deadline and abandonment", () => {
 		await gated;
 		expect(g.entries.map(e => e.outcome)).toEqual(["timeout"]);
 	});
+	test("shutting the session down abandons every waiting gate and records it before the session is sealed", async () => {
+		// A gate left running past a normal end: the runner awaits session_shutdown, then seals the session manager.
+		const { g, gated, signals } = await bridgedGate();
+		await g.event("session_shutdown");
+		expect(signals[0].aborted).toBe(true);
+		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned", usage: PARTIAL }]);
+		await gated;
+		expect(g.entries).toHaveLength(1);
+	});
+	test("shutdown stays inside the runner's 2 s cap even when the aborted call never settles", async () => {
+		const started = Promise.withResolvers<void>();
+		const g = bind({
+			complete: () => {
+				started.resolve();
+				return Promise.withResolvers<Completion>().promise;
+			},
+		});
+		const gated = g.device("js-write-00000000-0000-4000-8000-000000000001", "dispatch_comment", COMMENT);
+		await started.promise;
+		const began = Date.now();
+		await g.event("session_shutdown");
+		expect(Date.now() - began).toBeLessThan(1_500);
+		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned" }]);
+		await gated;
+	});
 });
 
 describe("kill (test 10)", () => {

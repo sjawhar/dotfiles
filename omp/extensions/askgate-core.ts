@@ -45,9 +45,10 @@
 // usage, the aborted one included; scripts/advisor-report reads them. Every path fails open: a
 // throw inside the handler is recorded as `error` and the call runs, and the deadline keeps the
 // handler inside the runner's ceiling, whose expiry would refuse the call. When the call's tool
-// ends first anyway (a user abort, or that ceiling), or the user stops the run while it waits (the
-// path an eval-bridged write takes), the model call is cancelled and the entry reads `abandoned`,
-// which never counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system and user
+// ends first anyway (a user abort, or that ceiling), the user stops the run while it waits (the
+// path an eval-bridged write takes), or the session shuts down, the model call is cancelled and
+// the entry reads `abandoned`, which never counts toward the halt; at shutdown it is written
+// before the session is sealed. OMP_ASKGATE_DUMP names a file each gate's system and user
 // prompts are appended to, owner-only and never through a symlink.
 import { createHash } from "node:crypto";
 import * as path from "node:path";
@@ -65,6 +66,11 @@ const GATE_TIMEOUT_MS = 90_000;
 const CEILING_MARGIN_MS = 5_000;
 const ABORT_GRACE_MS = 2_000;
 const MIN_DEADLINE_MS = 10_000;
+// The runner gives a session_shutdown handler 2 s (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS) and then seals
+// the session, dropping any later entry: gates abandoned there get a shorter grace, and the handler
+// waits at most SHUTDOWN_WAIT_MS for their records.
+const SHUTDOWN_GRACE_MS = 1_000;
+const SHUTDOWN_WAIT_MS = 1_500;
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
 const GATE_REASON_MAX_BYTES = 2 * 1024;
@@ -419,8 +425,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		// An eval-bridged write never shows its own id on a loop tool_execution_end, so a run the user
 		// stopped (its last assistant message aborted) abandons every gate still waiting. Any other end
 		// leaves them be: the session may continue (willContinue), or a backgrounded eval cell may keep
-		// running past the run, and abandoning its gate would let its write out unchecked.
-		const inflight = new Map<string, () => void>();
+		// running past the run, and abandoning its gate would let its write out unchecked. The one path
+		// none of this reaches: a write an eval cell starts from its own timer or thread after the cell
+		// returned carries a signal nothing aborts, so a user abort does not cancel that gate.
+		const inflight = new Map<string, (graceMs?: number) => void>();
 		pi.on("tool_execution_end", (event: { toolCallId: string }) => {
 			inflight.get(event.toolCallId)?.();
 		});
@@ -428,6 +436,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			if (event.willContinue) return;
 			if (event.messages?.findLast(m => m.role === "assistant")?.stopReason !== "aborted") return;
 			for (const abandon of inflight.values()) abandon();
+		});
+		// A gate still waiting at shutdown (left running past a normal end) would bill to its deadline and
+		// record into a sealed session. Abandon it, and hold shutdown until its entry is written.
+		const handling = new Set<Promise<ToolCallResult>>();
+		pi.on("session_shutdown", async () => {
+			for (const abandon of inflight.values()) abandon(SHUTDOWN_GRACE_MS);
+			const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
+			const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
+			await Promise.race([Promise.allSettled([...handling]), waited]);
+			clearTimeout(timer);
 		});
 
 		/** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
@@ -508,7 +526,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const controller = new AbortController();
 			const { promise: stopped, resolve: stop } = Promise.withResolvers<"timeout" | "abandoned">();
 			const timer = setTimeout(() => stop("timeout"), remainingMs);
-			inflight.set(toolCallId, () => stop("abandoned"));
+			let graceMs = ABORT_GRACE_MS;
+			inflight.set(toolCallId, (grace = ABORT_GRACE_MS) => {
+				graceMs = grace;
+				stop("abandoned");
+			});
 			try {
 				const call = deps.complete({ ...req, signal: controller.signal });
 				// Promise.race subscribes to the completion, so a late rejection is handled.
@@ -519,7 +541,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				controller.abort();
 				// The aborted request was billed for what it sent; give it a moment to report that.
 				const { promise: grace, resolve: graceOver } = Promise.withResolvers<undefined>();
-				const graceTimer = setTimeout(graceOver, ABORT_GRACE_MS);
+				const graceTimer = setTimeout(graceOver, graceMs);
 				const settled = await Promise.race([call.catch(() => undefined), grace]);
 				clearTimeout(graceTimer);
 				return { kind: first, usage: settled?.usage };
@@ -542,7 +564,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			argsDigest: "",
 		});
 
-		pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
+		const handleCall = async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
 			const started = deps.now();
 			let base: Base | undefined;
 			let decision: Decision;
@@ -578,6 +600,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				// The entry is best effort; the call still runs.
 			}
 			return decision.result;
+		};
+
+		pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
+			const done = handleCall(event, ctx);
+			handling.add(done);
+			try {
+				return await done;
+			} finally {
+				handling.delete(done);
+			}
 		});
 	};
 }
