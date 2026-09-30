@@ -10,12 +10,17 @@ set -euo pipefail
 
 # --- never re-enter ---
 # Every hop from here to omp is an exec (agent-secrets-session, `agent-secrets register --exec`,
-# `mise x`), so the pid never changes on the way. Finding our own pid in the marker set below
-# means the omp resolved last time led back into an omp wrapper, and going on would repeat that
-# forever. A process omp starts has a pid of its own, so a session can still launch omp.
-_marker="${DOTFILES_OMP_SHIM:-}"
-if [[ "${_marker%% *}" == "$$" ]]; then
-    echo "omp: ${BASH_SOURCE[0]} ran twice in pid $$: the omp it resolved (${_marker#* }) led back to an omp wrapper; refusing to loop (see \`type -a omp\` and \`mise which omp\`)" >&2
+# `mise x`), so the pid never changes on the way. Finding our own pid in the marker set below,
+# written under 10 s ago, means the omp resolved last time led back into an omp wrapper, and
+# going on would repeat that forever; a loop comes back within a fraction of a second. The time
+# bound lets the slow same-pid entries through: omp's /restart, which execs `omp` in place when
+# its own binary is gone, and a later launch that inherited the marker from a long-lived process
+# (a tmux server, a persist job) and happens to get its pid. A process omp starts has its own pid.
+_marker_pid="" _marker_at="" _marker_target=""
+read -r _marker_pid _marker_at _marker_target <<< "${DOTFILES_OMP_SHIM:-}"
+_now="${EPOCHSECONDS:-$(date +%s)}"
+if [[ "$_marker_pid" == "$$" && "$_marker_at" =~ ^[0-9]+$ ]] && (( _now - 10#$_marker_at < 10 )); then
+    echo "omp: ${BASH_SOURCE[0]} ran twice in pid $$ within $(( _now - 10#$_marker_at ))s: the omp it resolved (${_marker_target}) led back to an omp wrapper; refusing to loop (see \`type -a omp\` and \`mise which omp\`)" >&2
     exit 1
 fi
 
@@ -170,7 +175,7 @@ else
     done
     _cmd=(env PATH="${_shims}:${_mise_path}" mise x "github:sjawhar/oh-my-pi" -- omp)
 fi
-export DOTFILES_OMP_SHIM="$$ ${_omp:-mise x github:sjawhar/oh-my-pi -- omp}"
+export DOTFILES_OMP_SHIM="$$ ${EPOCHSECONDS:-$(date +%s)} ${_omp:-mise x github:sjawhar/oh-my-pi -- omp}"
 
 # --- host session identity for agent secrets ---
 # On the host a session's secrets-broker proofs come from the agent-secrets helper, which signs
