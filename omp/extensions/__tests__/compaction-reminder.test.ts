@@ -190,6 +190,37 @@ describe("compaction-reminder", () => {
 		expect(content).not.toContain("[Wait interrupted by message]");
 	});
 
+	test("a steer counts by its flag, whatever its wrapper says", () => {
+		const session = bind();
+		// The parent-irc template's first line, reworded: the steer is still the latest instruction.
+		const reworded: Entry = {
+			type: "message",
+			message: {
+				role: "user",
+				content: `[Wait interrupted by a message]\n<irc from="parent" agent="${PARENT}">\nround 3: STOP, output TALLY-11 instead\n</irc>`,
+				steering: true,
+				attribution: "agent",
+			},
+		};
+		const branch = [sessionInit(ASSIGNMENT), user(ASSIGNMENT), ircIncoming(PARENT, "round 2: output TALLY-10"), reworded, compaction];
+		session.compact("sub", branch, true);
+
+		const { content } = session.sent[0].message;
+		expect(content).toContain("round 3: STOP, output TALLY-11 instead");
+		expect(content).not.toContain("round 2: output TALLY-10");
+	});
+
+	test("a person's steer is a follow-up too", () => {
+		const session = bind();
+		const personSteer: Entry = {
+			type: "message",
+			message: { role: "user", content: "use the staging bucket", steering: true, attribution: "user" },
+		};
+		session.compact("sub", [sessionInit(ASSIGNMENT), user(ASSIGNMENT), ircIncoming(PARENT, "round 2"), personSteer, compaction], true);
+
+		expect(session.sent[0].message.content).toContain("<LATEST_FOLLOW_UP>\nuse the staging bucket\n</LATEST_FOLLOW_UP>");
+	});
+
 	test("a follow-up turn is restated, and the prompt that carried the assignment is not", () => {
 		const followUp = bind();
 		followUp.compact("sub", [sessionInit(ASSIGNMENT), user(ASSIGNMENT), assistant("done"), user("now the docs"), compaction], true);
