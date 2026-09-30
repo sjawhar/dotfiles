@@ -86,10 +86,11 @@ REACHED_MODEL = FAIL_OPEN | {"verdict"}
 PASSED = frozenset({"rebuttal", "breaker", "killed"})
 
 KILL_KEY, GATE_SLUG = "advisor.disableRoster", "askgate"
-KILL_DAY = 3
-KILL_WINDOW = timedelta(hours=24)
-KILL_MIN_MATCHED = 20
-KILL_UNGATED_24H = 0.20
+DAY3 = 3
+DAY3_WINDOW = timedelta(hours=24)
+DAY3_MIN_CALLS = 20  # below this the 24-hour sample is too small for either day-3 rule
+DAY3_UNGATED = 0.20
+DAY3_LATENCY_SHARE = 0.9  # of the timeout; a verdict slower than the timeout is recorded as a timeout
 DECISION_DAY = 14
 EXTENDED_DAY = 21
 MIN_LABELS = 30
@@ -583,6 +584,7 @@ def gate_metrics(entries: list[GateEntry]) -> dict:
         "latency_ms_p95": nearest_rank(verdict_latencies, 0.95),
         "fail_open_rate": ratio(sum(outcomes[o] for o in FAIL_OPEN), sum(outcomes[o] for o in REACHED_MODEL)),
         "ungated_share": ratio(sum(outcomes[o] for o in UNGATED), matched - sum(outcomes[o] for o in PASSED)),
+        "verdicts": outcomes["verdict"],
         "revise_rate": ratio(revises, outcomes["verdict"]),
         "rebuttal_rate": ratio(outcomes["rebuttal"], matched),
         "breaker_trips": outcomes["breaker"],
@@ -1066,13 +1068,23 @@ def cmd_arm(args) -> int:
 
 # --- readout ---------------------------------------------------------------
 
-NONE, OK, INCOMPLETE, KILLED = "none", "ok", "incomplete", "killed"
+NONE, OK, INCOMPLETE, KILLED = "none", "ok", "incomplete", "killed"  # a check's status
+KILL, GO, EXTEND, ON_TRACK = "kill", "go", "extend", "on track"  # the other verdicts of a gate decision
+
+
+@dataclass(frozen=True)
+class Decision:
+    verdict: str
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass
 class Check:
+    name: str
     status: str
     lines: list[str]
+    kill: tuple[str, ...] = ()  # the reasons of a KILL cmd_readout applies by adding `member` to the overlay
+    member: str | None = None
 
 
 def roster_problems(dotfiles: Path, agents: Path) -> list[str]:
@@ -1112,10 +1124,62 @@ def missing_label_weeks(launched: datetime, now: datetime, fired: list[tuple[str
     return missing
 
 
+def day3_kill(day: float, timeout_ms: int, recent: dict) -> list[str]:
+    """The day-3 rules over the last 24 hours' gate metrics: a gate that fails open or stalls the agent."""
+    if day < DAY3:
+        return []
+    kill = []
+    if recent["matched"] >= DAY3_MIN_CALLS and (recent["ungated_share"] or 0) > DAY3_UNGATED:
+        kill.append(f"ungated_share {recent['ungated_share']:.3f} > {DAY3_UNGATED} over {recent['matched']} calls in the last 24 h")
+    # Below 20 verdicts the nearest-rank p95 is the slowest one, so a single slow verdict would decide.
+    if recent["verdicts"] >= DAY3_MIN_CALLS and recent["latency_ms_p95"] > DAY3_LATENCY_SHARE * timeout_ms:
+        kill.append(f"p95 latency {recent['latency_ms_p95']:.0f} ms above {DAY3_LATENCY_SHARE} x the {timeout_ms} ms "
+                    f"timeout over {recent['verdicts']} verdicts in the last 24 h")
+    return kill
+
+
+def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labelled: dict, skips: int,
+                  missing_weeks: list[str], killed: bool, problems: list[str]) -> Decision:
+    """The gate's pre-registered rules (docs/advisor-report.md, Readout rules), in their order of precedence."""
+    # A killed gate records every later call as `killed`, which leaves every denominator, so the rules below would
+    # judge only the calls before the kill.
+    if killed:
+        return Decision(KILLED)
+    n, precision, harm, p95 = labelled["n"], labelled["precision"], labelled["harm"], whole["latency_ms_p95"]
+    kill = day3_kill(day, timeout_ms, recent)
+    go = extend = False
+    if day >= DECISION_DAY and not kill:
+        if whole["ungated_share"] is not None and whole["ungated_share"] >= MAX_UNGATED:
+            kill.append(f"day {DECISION_DAY}: ungated_share {whole['ungated_share']:.3f} >= {MAX_UNGATED}")
+        elif n >= MIN_LABELS and precision < KILL_PRECISION:
+            kill.append(f"day {DECISION_DAY}: precision {precision:.2f} < {KILL_PRECISION}")
+        elif harm is not None and harm > KILL_HARM:
+            kill.append(f"day {DECISION_DAY}: harm {harm:.2f} > {KILL_HARM} over {n} labels")
+        elif n >= MIN_LABELS:
+            go = (precision >= GO_PRECISION and harm <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
+                  and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and skips == 0)
+            if not go and day >= EXTENDED_DAY:
+                kill.append(f"day {EXTENDED_DAY}: not GO after the one-week extension")
+            extend = not go
+    if kill:
+        return Decision(KILL, tuple(kill))
+    if n < MIN_LABELS:
+        weeks = (f"no labels for {', '.join(missing_weeks)}",) if missing_weeks else ()
+        return Decision(INCOMPLETE, (f"labels < {MIN_LABELS} (n={n})", *weeks))
+    if problems:
+        return Decision(INCOMPLETE)
+    if go:
+        return Decision(GO, ("make OMP_ASKGATE=block the shim default",))
+    if extend:
+        return Decision(EXTEND, ("one more week, then GO or KILL",))
+    return Decision(ON_TRACK)
+
+
 def gate_check(now: datetime) -> Check:
+    """Gather the gate's inputs, decide, and say so; a KILL is left for cmd_readout to apply."""
     record = load_launch().get("gate")
     if not record:
-        return Check(NONE, ["gate: not launched"])
+        return Check("gate", NONE, ["gate: not launched"])
     if not isinstance(record.get("launched"), str) or not isinstance(record.get("timeout_ms"), int):
         raise Failure(f"{report_dir() / 'launch.json'}: the gate record needs `launched` and `timeout_ms`; rerun `arm gate`")
     launched, timeout_ms = parse_iso(record["launched"]), record["timeout_ms"]
@@ -1128,75 +1192,49 @@ def gate_check(now: datetime) -> Check:
         entries += [entry for entry in session.gate_entries if window.contains(entry.at)]
         skips += skips_in(session, window)
     whole = gate_metrics(entries)
-    latest = [entry for entry in entries if entry.at >= now - KILL_WINDOW]
-    recent = gate_metrics(latest)
+    recent = gate_metrics([entry for entry in entries if entry.at >= now - DAY3_WINDOW])
     labels = load_labels()
     fired = [(entry.row_id, entry.at) for entry in entries if entry.is_revise]
     lab = labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
-    p95 = whole["latency_ms_p95"]
+    problems = roster_problems(dotfiles_dir(), agent_dir())
     lines = [f"gate: day {day:.1f}; {whole['matched']} matched ({whole['killed']} killed), ungated_share "
-             f"{fmt(whole['ungated_share'])}, p95 {fmt(p95, '.0f')} ms (timeout {timeout_ms}), skips {skips}; "
+             f"{fmt(whole['ungated_share'])}, p95 {fmt(whole['latency_ms_p95'], '.0f')} ms (timeout {timeout_ms}), skips {skips}; "
              f"last 24 h {recent['matched']} matched, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
              f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}",
-             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(default_stats_db(), launched)}"]
-    problems = roster_problems(dotfiles_dir(), agent_dir())
-    lines += [f"gate: {problem}" for problem in problems]
-    # A killed gate records every later call as `killed`, which leaves every denominator, so the rules below would
-    # judge only the calls before the kill. The overlay member is the kill's only record: `killed` entries also come
-    # from a drill of the kill switch that the owner has undone, so they end nothing.
-    if GATE_SLUG in disabled:
+             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(default_stats_db(), launched)}",
+             *(f"gate: {problem}" for problem in problems)]
+    # The overlay member is a kill's only record: `killed` entries also come from a drill of the kill switch that the
+    # owner has undone, so they end nothing.
+    decision = gate_decision(day, timeout_ms, whole, recent, lab, skips, missing_label_weeks(launched, now, fired, labels),
+                             GATE_SLUG in disabled, problems)
+    if decision.verdict == KILLED:
         lines.append(f"gate: killed ({KILL_KEY} holds {GATE_SLUG} in {overlay}); no GO or EXTEND computed")
-        return Check(KILLED, lines)
-    kill: list[str] = []
-    if day >= KILL_DAY:
-        if recent["matched"] >= KILL_MIN_MATCHED and (recent["ungated_share"] or 0) > KILL_UNGATED_24H:
-            kill.append(f"ungated_share {recent['ungated_share']:.3f} > {KILL_UNGATED_24H} over {recent['matched']} calls in the last 24 h")
-        # A verdict slower than the timeout is recorded as a timeout, so verdict p95 never passes the timeout itself.
-        # Below 20 verdicts the nearest-rank p95 is the slowest one, so a single slow verdict would decide.
-        verdicts = sum(1 for entry in latest if entry.data.get("outcome") == "verdict")
-        if verdicts >= KILL_MIN_MATCHED and recent["latency_ms_p95"] > GO_LATENCY_SHARE * timeout_ms:
-            kill.append(f"p95 latency {recent['latency_ms_p95']:.0f} ms above {GO_LATENCY_SHARE} x the {timeout_ms} ms "
-                        f"timeout over {verdicts} verdicts in the last 24 h")
-    decision = None
-    if day >= DECISION_DAY and not kill:
-        if whole["ungated_share"] is not None and whole["ungated_share"] >= MAX_UNGATED:
-            kill.append(f"day {DECISION_DAY}: ungated_share {whole['ungated_share']:.3f} >= {MAX_UNGATED}")
-        elif lab["n"] >= MIN_LABELS and lab["precision"] < KILL_PRECISION:
-            kill.append(f"day {DECISION_DAY}: precision {lab['precision']:.2f} < {KILL_PRECISION}")
-        elif lab["harm"] is not None and lab["harm"] > KILL_HARM:
-            kill.append(f"day {DECISION_DAY}: harm {lab['harm']:.2f} > {KILL_HARM} over {lab['n']} labels")
-        elif lab["n"] >= MIN_LABELS:
-            if (lab["precision"] >= GO_PRECISION and lab["harm"] <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
-                  and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and skips == 0):
-                decision = "GO: make OMP_ASKGATE=block the shim default"
-            elif day < EXTENDED_DAY:
-                decision = "EXTEND: one more week, then GO or KILL"
-            else:
-                kill.append(f"day {EXTENDED_DAY}: not GO after the one-week extension")
-    if kill:
-        overlay_update(KILL_KEY, GATE_SLUG, add=True)
-        lines.append(f"gate: KILL applied ({KILL_KEY} += {GATE_SLUG} in {overlay}): {'; '.join(kill)}")
-        return Check(KILLED, lines)
-    if lab["n"] < MIN_LABELS:
-        missing = missing_label_weeks(launched, now, fired, labels)
-        lines.append(f"gate: incomplete: labels < {MIN_LABELS} (n={lab['n']})" + (f"; no labels for {', '.join(missing)}" if missing else ""))
-        return Check(INCOMPLETE, lines)
-    if problems:
-        return Check(INCOMPLETE, lines)
-    lines.append(f"gate: {decision or 'on track'}")
-    return Check(OK, lines)
+        return Check("gate", KILLED, lines)
+    if decision.verdict == KILL:
+        return Check("gate", KILLED, lines, kill=decision.reasons, member=GATE_SLUG)
+    if decision.verdict == INCOMPLETE:
+        lines += [f"gate: incomplete: {'; '.join(decision.reasons)}"] if decision.reasons else []
+        return Check("gate", INCOMPLETE, lines)
+    heading = {GO: "GO", EXTEND: "EXTEND", ON_TRACK: "on track"}[decision.verdict]
+    lines.append(f"gate: {heading}" + (f": {'; '.join(decision.reasons)}" if decision.reasons else ""))
+    return Check("gate", OK, lines)
 
 
 def trial_check() -> Check:
     record = load_launch().get("trial")
     if not record or not trial_flag().exists():
-        return Check(NONE, ["trial: not armed"])
-    return Check(INCOMPLETE, [f"trial: armed since {record['launched']}, but this readout has no trial rules yet"])
+        return Check("trial", NONE, ["trial: not armed"])
+    return Check("trial", INCOMPLETE, [f"trial: armed since {record['launched']}, but this readout has no trial rules yet"])
 
 
 def cmd_readout(args) -> int:
     now = datetime.now(timezone.utc)
     checks = [gate_check(now) if name == "gate" else trial_check() for name in (args.check or ["gate", "trial"])]
+    for check in checks:
+        if check.kill:
+            overlay_update(KILL_KEY, check.member, add=True)
+            check.lines.append(f"{check.name}: KILL applied ({KILL_KEY} += {check.member} in {overlay_path()}): "
+                               f"{'; '.join(check.kill)}")
     lines = [line for check in checks for line in check.lines]
     print("\n".join(lines))
     statuses = {check.status for check in checks}
