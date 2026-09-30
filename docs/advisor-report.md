@@ -136,7 +136,10 @@ until its own rules are added here.
 The readout applies every KILL itself, by `overlay add advisor.disableRoster askgate`. It reads the overlay,
 decides and writes the KILL while holding the overlay's lock, so of two readouts at once (the timer and a hand
 run) only the one whose write added the member says `KILL applied`; the other reads the gate as killed. The exit
-code is 1 when any check applied a KILL or found the gate killed, else 3 when any check is incomplete, else 0.
+code is 1 when any check applied a KILL or found the gate killed, else 2 when a check could not run or could not
+read one of its inputs (the overlay, the labels, the `stats.db` baseline or the roster; the failure is printed and
+sent, and the day-3 rules, which need only the gate entries, still run and still apply a KILL), else 3 when any
+check is incomplete, else 0.
 With `--notify TOPIC` it sends
 one Envoy message covering every check, beginning `advisor-report (AGENTC-1323)` so the role holder can tell
 it apart from other watchers on the same role, through `scripts/envoy send --source envoy`, so the message

@@ -22,7 +22,8 @@ recorded; docs/advisor-report.md ("Readout rules") states them in their order of
 gate_decision below is their one implementation.
 Every KILL is applied here, by `overlay add advisor.disableRoster askgate`. `--notify` sends through
 `scripts/envoy send --source envoy` and sends nothing through an envoy without that flag.
-Exit: any KILL applied 1, else any incomplete or unsent notice 3, else 0; usage errors 2.
+Exit: a KILL applied or the gate found killed 1, else a check that could not run or read an input 2, else any
+incomplete or unsent notice 3, else 0; usage errors also 2.
 """
 from __future__ import annotations
 
@@ -1103,7 +1104,7 @@ def cmd_arm(args) -> int:
 
 # --- readout ---------------------------------------------------------------
 
-NONE, OK, INCOMPLETE, KILLED = "none", "ok", "incomplete", "killed"  # a check's status
+NONE, OK, INCOMPLETE, KILLED, FAILED = "none", "ok", "incomplete", "killed", "failed"  # a check's status
 KILL, GO, EXTEND, ON_TRACK = "kill", "go", "extend", "on track"  # the other verdicts of a gate decision
 
 
@@ -1220,8 +1221,18 @@ def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labell
     return Decision(ON_TRACK)
 
 
+def attempt(what: str, read, failures: list[str]):
+    """One of the gate's incidental reads, or None with its failure recorded: none of them may stop the day-3 rules."""
+    try:
+        return read()
+    except Exception as err:  # every failure is reported, and the day-3 rules still run
+        failures.append(f"failed to read {what}: {type(err).__name__}: {err}")
+        return None
+
+
 def gate_check(now: datetime) -> Check:
-    """Gather the gate's inputs, then decide and apply any KILL under the overlay lock, and say what happened."""
+    """Gather the gate's inputs, then decide and apply any KILL under the overlay lock, and say what happened. The
+    day-3 rules need only the gate entries, so a failed read of anything else is reported and still leaves them to run."""
     record = load_launch().get("gate")
     if not record:
         return Check("gate", NONE, ["gate: not launched"])
@@ -1237,31 +1248,48 @@ def gate_check(now: datetime) -> Check:
         any_skips += skips_in(session, window)
     whole = gate_metrics(entries)
     recent = gate_metrics([entry for entry in entries if entry.at >= now - DAY3_WINDOW])
-    labels = load_labels()
+    failures: list[str] = []
+    labels = attempt("the labels", load_labels, failures)
+    baseline = attempt("the watch-mode baseline", lambda: watch_baseline(default_stats_db(), launched), failures)
+    problems = attempt("the roster", lambda: roster_problems(dotfiles_dir(), agent_dir()), failures)
     fired = [(entry.row_id, entry.at) for entry in entries if entry.is_revise]
-    lab = labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
-    problems = roster_problems(dotfiles_dir(), agent_dir())
+    lab = None if labels is None else labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
     lines = [f"gate: day {day:.1f}; {whole['matched']} matched ({whole['killed']} killed), ungated_share "
              f"{fmt(whole['ungated_share'])}, p95 {fmt(whole['latency_ms_p95'], '.0f')} ms (timeout {timeout_ms}), "
              f"skips {skips} ({any_skips} by any steer); "
              f"last 24 h {recent['matched']} matched, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
-             f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}",
-             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(default_stats_db(), launched)}",
-             *(f"gate: {problem}" for problem in problems)]
-    missing = missing_label_weeks(launched, now, fired, labels)
+             + ("unread" if lab is None else f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}"),
+             f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch" + ("" if baseline is None else f"; {baseline}"),
+             *(f"gate: {problem}" for problem in problems or [])]
     # Two readouts at once (the timer and a hand run) must not both apply and announce a KILL, so the overlay is read,
     # the rules decided and the KILL written under the one lock every overlay writer takes. The overlay member is a
     # kill's only record: `killed` entries also come from a drill of the kill switch the owner has undone.
     with overlay_locked() as overlay:
-        _node, members = overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)
-        decision = gate_decision(day, timeout_ms, whole, recent, lab, skips, missing, is_killed(members, GATE_SLUG), problems)
-        applied = decision.verdict == KILL and overlay_change(overlay, KILL_KEY, GATE_SLUG, add=True)
+        members = attempt("the overlay", lambda: overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)[1], failures)
+        if members is not None and is_killed(members, GATE_SLUG):
+            decision = Decision(KILLED)
+        elif failures:
+            decision = Decision(KILL, tuple(day3)) if (day3 := day3_kill(day, timeout_ms, recent)) else None
+        else:
+            decision = gate_decision(day, timeout_ms, whole, recent, lab, skips, missing_label_weeks(launched, now, fired, labels),
+                                     False, problems)
+        applied = unwritten = False
+        if decision is not None and decision.verdict == KILL:
+            try:
+                applied = overlay_change(overlay, KILL_KEY, GATE_SLUG, add=True)
+            except Exception as err:  # reported: a KILL that could not be written must never read as one that was
+                unwritten = True
+                failures.append(f"KILL not applied ({KILL_KEY} += {GATE_SLUG} in {overlay}): {'; '.join(decision.reasons)}; "
+                                f"{type(err).__name__}: {err}")
+    failed = [f"gate: {failure}" for failure in failures]
     if applied:
         lines.append(f"gate: KILL applied ({KILL_KEY} += {GATE_SLUG} in {overlay}): {'; '.join(decision.reasons)}")
-        return Check("gate", KILLED, lines)
-    if decision.verdict in (KILLED, KILL):
+        return Check("gate", KILLED, lines + failed)
+    if decision is not None and decision.verdict in (KILLED, KILL) and not unwritten:
         lines.append(f"gate: killed ({KILL_KEY} holds {GATE_SLUG} in {overlay}); no GO or EXTEND computed")
-        return Check("gate", KILLED, lines)
+        return Check("gate", KILLED, lines + failed)
+    if failures:
+        return Check("gate", FAILED, lines + failed + ([] if unwritten else ["gate: only the day-3 rules ran; they found no KILL"]))
     if decision.verdict == INCOMPLETE:
         lines += [f"gate: incomplete: {'; '.join(decision.reasons)}"] if decision.reasons else []
         return Check("gate", INCOMPLETE, lines)
@@ -1277,13 +1305,20 @@ def trial_check() -> Check:
     return Check("trial", INCOMPLETE, [f"trial: armed since {record['launched']}, but this readout has no trial rules yet"])
 
 
+def run_check(name: str, now: datetime) -> Check:
+    try:
+        return gate_check(now) if name == "gate" else trial_check()
+    except Exception as err:  # a check that cannot run is reported and exits 2, never 1, the KILL code
+        return Check(name, FAILED, [f"{name}: failed: {type(err).__name__}: {err}"])
+
+
 def cmd_readout(args) -> int:
     now = datetime.now(timezone.utc)
-    checks = [gate_check(now) if name == "gate" else trial_check() for name in (args.check or ["gate", "trial"])]
+    checks = [run_check(name, now) for name in (args.check or ["gate", "trial"])]
     lines = [line for check in checks for line in check.lines]
     print("\n".join(lines))
     statuses = {check.status for check in checks}
-    code = 1 if KILLED in statuses else 3 if INCOMPLETE in statuses else 0
+    code = 1 if KILLED in statuses else 2 if FAILED in statuses else 3 if INCOMPLETE in statuses else 0
     if args.notify:
         envoy = dotfiles_dir() / "scripts" / "envoy"
         # The readout speaks for the platform (source=envoy), not as whichever session or shell ran it. An envoy
