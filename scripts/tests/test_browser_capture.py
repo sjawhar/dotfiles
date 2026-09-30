@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Regression coverage for browser-capture's non-interactive secretsd contract."""
+"""Regression coverage for browser-capture's non-interactive secretsd contract.
+
+browser-capture runs under `uv run --script`, in the environment its own `# /// script`
+header declares (websockets). The tests run it, or import it, with that environment's
+interpreter, which uv builds from the same header, never with the interpreter running
+the tests.
+"""
 
 from __future__ import annotations
 
 import os
 import stat
 import subprocess
-import sys
 import tempfile
 import textwrap
 import unittest
@@ -16,6 +21,24 @@ SCRIPTS = Path(__file__).resolve().parent.parent
 CAPTURE = SCRIPTS / "browser-capture"
 
 
+def uv(*args: str) -> str:
+    result = subprocess.run(
+        ["uv", *args], capture_output=True, text=True, timeout=300, check=False
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"uv {' '.join(args)} exited {result.returncode}: {result.stderr}"
+        )
+    return result.stdout
+
+
+def script_python(script: Path) -> str:
+    """The interpreter uv builds for `script` from its `# /// script` header."""
+    # `find` only locates the environment; with none built it names a bare interpreter.
+    uv("sync", "--quiet", "--script", str(script))
+    return uv("python", "find", "--script", str(script)).strip()
+
+
 def write_stub(directory: Path, name: str, body: str) -> None:
     path = directory / name
     path.write_text(f"#!/usr/bin/env python3\n{body}\n", encoding="utf-8")
@@ -23,6 +46,10 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 
 
 class BrowserCaptureSecretsContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.python = script_python(CAPTURE)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.stub_dir = Path(self.temp_dir.name)
@@ -51,7 +78,7 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
         )
         try:
             return subprocess.run(
-                [sys.executable, "-c", driver],
+                [self.python, "-c", driver],
                 capture_output=True,
                 text=True,
                 env=self.env,
@@ -69,7 +96,7 @@ class BrowserCaptureSecretsContract(unittest.TestCase):
         env.update(extra_env or {})
         return subprocess.run(
             [
-                sys.executable,
+                self.python,
                 str(CAPTURE),
                 "--domain",
                 "example.test",
