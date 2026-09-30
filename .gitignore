@@ -23,6 +23,7 @@ vendor/
 
 
 /.opencode-profiles/
+/.claude-profiles/
 
 .sisyphus/
 .omo/

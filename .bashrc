@@ -88,7 +88,7 @@ export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 export BROWSER="${DOTFILES_DIR}/shims/xdg-open"
 
 
-# Claude Code — state lives in ${DOTFILES_DIR}/.claude/.
+# Claude Code — state lives in ${DOTFILES_DIR}/.claude/; `cld --profile NAME` uses ${DOTFILES_DIR}/.claude-profiles/NAME.
 export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export ANTHROPIC_1M_CONTEXT=true
