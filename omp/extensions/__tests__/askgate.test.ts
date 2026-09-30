@@ -461,11 +461,12 @@ describe("deadline and abandonment", () => {
 		await next;
 		expect(signals).toHaveLength(4);
 	});
-	test("a gate still waiting when the agent's run ends is abandoned, whichever path dispatched its call", async () => {
-		// An eval-bridged write: its id never appears on a loop tool_execution_end, the eval call's own id does.
+	/** An eval-bridged gate waiting on its model: its id never appears on a loop tool_execution_end, the eval call's own id does. */
+	async function bridgedGate(env: Record<string, string> = {}) {
 		const signals: AbortSignal[] = [];
 		const started = Promise.withResolvers<void>();
 		const g = bind({
+			env,
 			complete: req => {
 				signals.push(req.signal);
 				started.resolve();
@@ -476,11 +477,32 @@ describe("deadline and abandonment", () => {
 		await started.promise;
 		g.event("tool_execution_end", { toolCallId: "toolu_eval", toolName: "eval", isError: true });
 		expect(signals[0].aborted).toBe(false);
-		g.event("agent_end", { messages: [] });
+		return { g, gated, signals };
+	}
+	const lastAssistant = (stopReason: string) => ({ ...fx.assistant({ type: "text", text: "Stopping." }), stopReason });
+
+	test("a run the user stopped abandons every gate still waiting, whichever path dispatched its call", async () => {
+		const { g, gated, signals } = await bridgedGate();
+		g.event("agent_end", { messages: [fx.user("Post it."), lastAssistant("aborted")] });
 		expect(await gated).toBeUndefined();
 		expect(signals[0].aborted).toBe(true);
 		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned", usage: PARTIAL }]);
 		expect(g.notices).toHaveLength(0);
+	});
+	test("an end the session will continue past leaves the gate waiting", async () => {
+		const { g, gated, signals } = await bridgedGate({ OMP_ASKGATE_TIMEOUT_MS: "50" });
+		g.event("agent_end", { messages: [lastAssistant("aborted")], willContinue: true });
+		expect(signals[0].aborted).toBe(false);
+		await gated;
+		expect(g.entries.map(e => e.outcome)).toEqual(["timeout"]);
+	});
+	test("a run that ends any other way leaves the gate to its verdict or its deadline", async () => {
+		// A backgrounded eval cell keeps running past the run's end; abandoning its gate would let its write out unchecked.
+		const { g, gated, signals } = await bridgedGate({ OMP_ASKGATE_TIMEOUT_MS: "50" });
+		g.event("agent_end", { messages: [fx.user("Post it."), lastAssistant("stop")] });
+		expect(signals[0].aborted).toBe(false);
+		await gated;
+		expect(g.entries.map(e => e.outcome)).toEqual(["timeout"]);
 	});
 });
 
