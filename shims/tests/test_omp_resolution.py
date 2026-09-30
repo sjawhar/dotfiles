@@ -23,15 +23,21 @@ DOTFILES = Path(__file__).resolve().parents[2]
 SHIM = DOTFILES / "shims" / "omp"
 LOOP_TIMEOUT = 10
 
+# `mise x`, as mise 2026.8.10 runs it: the command is resolved with the tool dir it adds ahead
+# of the PATH it was given (a tool dir already there keeps its place). What the CHILD's PATH
+# holds depends on whether the PATH mise was handed carries mise's own shims dir: with it (every
+# PATH .bashrc builds, the normal case, modelled here) the caller entries ahead of that dir stay
+# first, so anything the child looks up by name finds the shims dir's omp; without it the tool
+# dirs come first. Measured.
 MISE_X = r"""
 [[ "$1" == x && "$3" == -- ]] || { echo "unexpected mise $*" >&2; exit 99; }
 tool="$MISE_DATA_DIR/installs/github-sjawhar-oh-my-pi/1.0.0/bin"
 case ":$PATH:" in
-    *":$tool:"*) lookup="$PATH" ;;
-    *) lookup="$tool:$PATH" ;;
+    *":$tool:"*) lookup="$PATH" child="$PATH" ;;
+    *) lookup="$tool:$PATH" child="$PATH:$tool" ;;
 esac
 program="$(PATH="$lookup" command -v "$4")"
-PATH="$lookup" exec "$program" "${@:5}"
+PATH="$child" exec "$program" "${@:5}"
 """
 
 # The release omp; with --nested it launches omp again as a child, as a session's tool call can.
