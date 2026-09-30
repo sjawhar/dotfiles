@@ -29,9 +29,13 @@
       "args": [
         "HA_MCP_URL",
         "--",
-        "bash",
-        "-c",
-        "exec npx -y mcp-remote \"$HA_MCP_URL\" --allow-http"
+        "npx",
+        "-y",
+        "-p",
+        "mcp-remote@0.14.3",
+        "mcp-remote-from-env",
+        "HA_MCP_URL",
+        "--allow-http"
       ]
     },
     "deel": {
@@ -40,9 +44,12 @@
       "args": [
         "DEEL_API_KEY",
         "--",
-        "bash",
-        "-c",
-        "exec npx -y mcp-remote https://api.letsdeel.com/mcp --header \"Authorization: Bearer $DEEL_API_KEY\""
+        "npx",
+        "-y",
+        "mcp-remote@0.14.3",
+        "https://api.letsdeel.com/mcp",
+        "--header",
+        "Authorization: Bearer ${DEEL_API_KEY}"
       ],
       "enabled": true
     }

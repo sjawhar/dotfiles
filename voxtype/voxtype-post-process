@@ -70,8 +70,10 @@ if [ -n "${VOXTYPE_WHISPER_API_KEY:-}" ] && [ -n "$raw" ]; then
             max_completion_tokens: 4096
         }')
 
+    # The key reaches curl as a header file on a /dev/fd path (printf is a builtin), never as an
+    # argument: every user can read /proc/<pid>/cmdline.
     response=$(curl -sS --max-time 8 \
-        -H "Authorization: Bearer $VOXTYPE_WHISPER_API_KEY" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$VOXTYPE_WHISPER_API_KEY") \
         -H "Content-Type: application/json" \
         -d "$payload" \
         "$GROQ_API" 2>/dev/null) || true

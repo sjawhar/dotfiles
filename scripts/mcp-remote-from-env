@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+// mcp-remote-from-env: run mcp-remote with its server URL taken from an environment variable, so
+// a URL that is itself a credential (a webhook id, a token in the query) never sits on a command
+// line, where `/proc/<pid>/cmdline` shows it to every user and `ps`/`pgrep -af` prints it.
+// mcp-remote reads its URL only from argv (`process.argv.slice(2)` in dist/proxy.js, 0.14.3).
+//
+//   mcp-remote-from-env <ENV_NAME> [mcp-remote args...]
+//
+// Run it through npx, which puts the pinned mcp-remote's bin on PATH:
+//
+//   secrets HA_MCP_URL -- npx -y -p mcp-remote@0.14.3 mcp-remote-from-env HA_MCP_URL --allow-http
+//
+// It takes the URL from ENV_NAME and deletes the variable, so nothing mcp-remote spawns inherits
+// it; resolves the `mcp-remote` bin on PATH to its dist/proxy.js; sets process.argv to what
+// `mcp-remote <url> args...` would get; and imports proxy.js in this process. The URL lives only
+// in this process's memory: the kernel's command line stays `node mcp-remote-from-env ENV_NAME ...`.
+"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+const { pathToFileURL } = require("node:url");
+
+function die(code, message) {
+    process.stderr.write(`mcp-remote-from-env: ${message}\n`);
+    process.exit(code);
+}
+
+const [name, ...rest] = process.argv.slice(2);
+if (!name) die(2, "usage: mcp-remote-from-env <ENV_NAME> [mcp-remote args...]");
+const url = process.env[name];
+if (!url) die(2, `${name} is unset or empty`);
+delete process.env[name];
+
+function findProxy() {
+    for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+        if (!dir) continue;
+        const bin = path.join(dir, "mcp-remote");
+        try {
+            fs.accessSync(bin, fs.constants.X_OK);
+        } catch {
+            continue;
+        }
+        const target = fs.realpathSync(bin);
+        if (!target.endsWith(`${path.sep}dist${path.sep}proxy.js`)) {
+            die(1, `${bin} resolves to ${target}, not mcp-remote's dist/proxy.js`);
+        }
+        return target;
+    }
+    return die(1, "no mcp-remote on PATH; run this through `npx -y -p mcp-remote@<version>`");
+}
+
+const proxy = findProxy();
+process.argv = [process.argv[0], proxy, url, ...rest];
+import(pathToFileURL(proxy).href);

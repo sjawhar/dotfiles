@@ -39,8 +39,10 @@ last=""
 while true; do
     if camera_in_use; then cur=on; else cur=off; fi
     if [[ "$cur" != "$last" ]]; then
+        # The URL is the secret: curl reads it from a config file on a /dev/fd path (printf is a
+        # builtin), never from its arguments, which every user can read from /proc/<pid>/cmdline.
         if curl -sS -m 10 -o /dev/null -X POST -H 'Content-Type: application/json' \
-            -d "{\"state\":\"$cur\"}" "$URL"; then
+            -d "{\"state\":\"$cur\"}" --config <(printf 'url = "%s"\n' "$URL"); then
             last="$cur"
         fi
     fi
