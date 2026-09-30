@@ -521,8 +521,9 @@ class MissingLabelWeeksTest(unittest.TestCase):
         self.assertEqual(ar.missing_label_weeks(T0, T0 + timedelta(days=15), fired, labels),
                          ["week 2 (2026-09-27..2026-10-04)"])
 
-
-
+    def test_a_week_without_revises_is_not_named(self):
+        fired = [("gate:s:a", T0 + timedelta(days=8))]
+        self.assertEqual(ar.missing_label_weeks(T0, T0 + timedelta(days=22), fired, {}), ["week 2 (2026-09-27..2026-10-04)"])
 
 
 class GateMetricsTest(unittest.TestCase):
@@ -690,8 +691,10 @@ class GateDecisionTest(unittest.TestCase):
          "kill", "day 21: not GO after the one-week extension", None),
         ("day 21: GO", dict(day=22), "go", "", None),
         ("day 21: fewer than 30 labels is incomplete", dict(day=22, labelled=labelled(n=20)), "incomplete", "labels < 30", None),
-        ("fewer than 30 labels names each week without labels", dict(labelled=labelled(n=20), missing_weeks=["week 2 (x)"]),
+        ("a completed week with revises and no labels is incomplete, whatever n", dict(day=14.1, missing_weeks=["week 2 (x)"]),
          "incomplete", "no labels for week 2 (x)", None),
+        ("a week without labels holds back no KILL", dict(missing_weeks=["week 2 (x)"], labelled=labelled(harm=0.2)),
+         "kill", "harm 0.20", None),
         ("a roster or link problem blocks GO", dict(problems=["roster empty"]), "incomplete", "", None),
         ("a roster or link problem does not block a KILL", dict(problems=["roster empty"], whole=gm(ungated=0.2)),
          "kill", "ungated_share", None),
@@ -758,9 +761,9 @@ class ReadoutTest(unittest.TestCase):
         entries += [gate_line(outcome="timeout", at=at[38 + i], latency_ms=90_000) for i in range(2)]
         self.gate_session([*extra, *entries])
 
-    def label_revises(self, correct: int, other: int, harmful: int = 0, unlabelled: int = 0):
+    def label_revises(self, correct: int, other: int, harmful: int = 0, unlabelled: int = 0, until: datetime | None = None):
         packet = self.home.root / "packet.jsonl"
-        self.home.run("sample", "--since", ar.iso(self.launched), "--until", ar.iso(self.now), "--n", "100",
+        self.home.run("sample", "--since", ar.iso(self.launched), "--until", ar.iso(until or self.now), "--n", "100",
                       "--out", str(packet), check_exit=0)
         rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()][1:]
         revises = [row["id"] for row in rows if row.get("decision") == "revise"]
@@ -772,10 +775,19 @@ class ReadoutTest(unittest.TestCase):
                 fh.write(json.dumps({"id": row_id, "label": label, "labeler": "oracle-test", "at": ar.iso(self.now)}) + "\n")
         self.home.run("ingest-labels", str(labels), check_exit=0)
 
-    def test_fewer_than_30_labels_is_incomplete(self):
-        self.healthy_gate()
-        proc = self.home.run("readout", "--check", "gate", check_exit=3)
-        self.assertIn("labels < 30", proc.stdout)
+    def test_a_week_with_revises_and_no_labels_is_incomplete_whatever_n(self):
+        """Day 14.1: week 1's 30 revises are labelled at precision 0.60, week 2's 30 are not labelled yet."""
+        self.launch(days=14.1)
+        week = timedelta(days=7)
+        entries = [gate_line(decision="revise", at=self.launched + timedelta(days=1, minutes=i), latency_ms=4000) for i in range(30)]
+        entries += [gate_line(decision="revise", at=self.launched + week + timedelta(days=1, minutes=i), latency_ms=4000)
+                    for i in range(30)]
+        self.gate_session(entries + [gate_line(at=self.now - timedelta(minutes=5 + i), latency_ms=3000) for i in range(8)])
+        self.label_revises(correct=18, other=12, until=self.launched + week)
+        out = self.home.run("readout", "--check", "gate", check_exit=3).stdout
+        self.assertIn("labelled revises n=30, precision 0.60", out)
+        self.assertIn(f"gate: incomplete: no labels for week 2 ({self.launched + week:%Y-%m-%d}..", out)
+        self.assertNotIn("gate: GO", out)
         self.assertFalse(self.home.overlay.exists())
 
     def kill_fixture(self):
