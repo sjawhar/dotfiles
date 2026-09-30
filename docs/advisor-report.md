@@ -92,7 +92,7 @@ this order, and the first that matches decides:
 
 | When | Rule | Result |
 |---|---|---|
-| any day | `advisor.disableRoster` in the overlay holds `askgate` | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
+| any day | `advisor.disableRoster` in the overlay holds `askgate`, read as the extension reads it: any string member that trims and lowercases to `askgate` (`AskGate` too) | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
 | day 3 onward | `ungated_share` > 0.20 over ≥ 20 calls in the last 24 h that got a verdict or a timeout (a rebuttal, a breaker pass or a killed call never fills that floor), or verdict p95 above 0.9 × the timeout over ≥ 20 verdicts in the last 24 h | KILL |
 | day 14 onward | `ungated_share` ≥ 0.10 over the window | KILL |
 | day 14 onward, ≥ 30 labelled revises | precision < 0.3 | KILL |

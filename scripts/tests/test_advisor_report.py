@@ -726,6 +726,14 @@ class GateDecisionTest(unittest.TestCase):
                     self.assertNotIn(absent, reasons)
 
 
+class KillMemberTest(unittest.TestCase):
+    def test_a_member_kills_the_gate_as_the_extension_reads_it(self):
+        for members, killed in ((["AskGate"], True), ([" askgate "], True), (["memory", "askgate"], True),
+                                (["memory"], False), ([1, None], False), ([], False)):
+            with self.subTest(members=members):
+                self.assertEqual(ar.is_killed(members, "askgate"), killed)
+
+
 class RosterProblemsTest(unittest.TestCase):
     def test_the_extension_link_must_resolve_under_dotfiles_and_the_roster_keep_advisors(self):
         home = Home()
@@ -822,11 +830,12 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn("gate: incomplete: labels < 30", proc.stdout)
         self.assertFalse(self.home.overlay.exists())
 
-    def test_an_overlay_holding_askgate_computes_no_go_and_writes_nothing(self):
+    def test_an_overlay_holding_the_gate_in_any_spelling_computes_no_go_and_writes_nothing(self):
+        """The extension reads `AskGate` as a kill (askgate-core.ts isKilled: trimmed, lowercased); so must the readout."""
         self.launch(days=15)
         self.healthy_gate()
         self.label_revises(correct=18, other=12)
-        self.home.overlay.write_text("advisor:\n  disableRoster:\n  - askgate\n", encoding="utf-8")
+        self.home.overlay.write_text("advisor:\n  disableRoster:\n  - AskGate\n", encoding="utf-8")
         before = self.home.overlay.read_bytes()
         proc = self.home.run("readout", "--check", "gate", check_exit=1)
         self.assertIn("no GO or EXTEND computed", proc.stdout)

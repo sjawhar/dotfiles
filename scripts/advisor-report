@@ -782,6 +782,12 @@ def overlay_list(doc: dict, key_path: str, target: Path, create: bool) -> tuple[
     return node, members
 
 
+def is_killed(members: list, slug: str) -> bool:
+    """Whether a disableRoster list pauses `slug`, read as the AskGate extension reads it (askgate-core.ts isKilled):
+    any string member that trims and lowercases to the slug."""
+    return any(isinstance(member, str) and member.strip().lower() == slug for member in members)
+
+
 def overlay_update(key_path: str, member: str, add: bool) -> bool:
     """Add or remove one list member at `key_path` in local-overrides.yml under an exclusive lock. True when the file changed."""
     yaml = require_yaml()
@@ -1237,7 +1243,7 @@ def gate_check(now: datetime) -> Check:
     # The overlay member is a kill's only record: `killed` entries also come from a drill of the kill switch that the
     # owner has undone, so they end nothing.
     decision = gate_decision(day, timeout_ms, whole, recent, lab, skips, missing_label_weeks(launched, now, fired, labels),
-                             GATE_SLUG in disabled, problems)
+                             is_killed(disabled, GATE_SLUG), problems)
     if decision.verdict == KILLED:
         lines.append(f"gate: killed ({KILL_KEY} holds {GATE_SLUG} in {overlay}); no GO or EXTEND computed")
         return Check("gate", KILLED, lines)
