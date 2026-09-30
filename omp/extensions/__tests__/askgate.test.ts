@@ -29,6 +29,13 @@ const USAGE = { input: 1200, output: 40, cacheRead: 300, cacheWrite: 900, cost: 
 const ALLOW = '{"decision":"allow"}';
 const REVISE = '{"decision":"revise","reason":"failure 7 (content gate): \\"see the message above\\" points at nothing; send the text itself"}';
 const bytes = (s: string) => Buffer.byteLength(s, "utf8");
+const PARTIAL = { input: 40000, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.4 };
+/** A model call that runs until aborted, then settles as a real aborted request does: an error, with the input it was billed for. */
+const untilAborted = (req: CompleteRequest): Promise<Completion> => {
+	const { promise, resolve } = Promise.withResolvers<Completion>();
+	req.signal.addEventListener("abort", () => resolve({ text: "", error: "aborted", usage: PARTIAL }), { once: true });
+	return promise;
+};
 
 type Completion = { text: string; error?: string; usage?: GateEntry["usage"] };
 type Result = { block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string } | undefined;
@@ -47,10 +54,13 @@ function bind(opts: {
 	systemPrompt?: string[];
 	/** Every appendEntry throws: the session file cannot take the record. */
 	recordThrows?: boolean;
+	/** extensionHandlers.toolCallTimeoutMs as the entry reads it; 120 000 ms unless a test says otherwise. */
+	ceiling?: number;
 } = {}) {
 	const handlers = new Map<string, Handler>();
 	const entries: GateEntry[] = [];
 	const debug: string[] = [];
+	const warnings: string[] = [];
 	const notices: string[] = [];
 	const dumps: Array<[string, string]> = [];
 	const calls: CompleteRequest[] = [];
@@ -64,7 +74,7 @@ function bind(opts: {
 			if (opts.recordThrows) throw new Error("session file unavailable");
 			entries.push(data);
 		},
-		logger: { debug: (message: string) => debug.push(message), warn: () => {} },
+		logger: { debug: (message: string) => debug.push(message), warn: (message: string) => warnings.push(message) },
 	};
 	const complete = opts.complete ?? (async () => ({ text: ALLOW, usage: USAGE }));
 	createAskGate({
@@ -82,6 +92,7 @@ function bind(opts: {
 		},
 		charterPath: CHARTER_PATH,
 		contextMessages: () => (opts.context ?? (() => [fx.user("Post the comment.")]))(),
+		handlerCeilingMs: () => opts.ceiling ?? 120_000,
 	})(pi as never);
 	const ctx = {
 		agent: { kind: opts.kind ?? "main", id: "Main", name: "main", depth: 0 },
@@ -102,6 +113,7 @@ function bind(opts: {
 		handlers,
 		entries,
 		debug,
+		warnings,
 		notices,
 		dumps,
 		calls,
@@ -314,17 +326,17 @@ describe("breaker (test 7)", () => {
 });
 
 describe("fail-open", () => {
-	test("timeout (test 8): the call runs within the deadline and the model call is aborted", async () => {
+	test("timeout (test 8): the call runs within the deadline, the model call is aborted, and what it billed is recorded", async () => {
 		const signals: AbortSignal[] = [];
-		const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "50" }, complete: req => { signals.push(req.signal); return Promise.withResolvers<Completion>().promise; } });
+		const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "50" }, complete: req => { signals.push(req.signal); return untilAborted(req); } });
 		const started = Date.now();
 		expect(await g.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
 		expect(Date.now() - started).toBeLessThan(1000);
 		expect(signals[0].aborted).toBe(true);
-		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "timeout" }]);
+		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "timeout", usage: PARTIAL }]);
 	});
 	test("three consecutive failures halt the gate for the session with one notice", async () => {
-		const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: () => Promise.withResolvers<Completion>().promise });
+		const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: untilAborted });
 		for (const id of ["a", "b", "c", "d", "e"]) await g.device(id, "dispatch_comment", COMMENT);
 		expect(g.entries.map(e => e.outcome)).toEqual(["timeout", "timeout", "timeout", "halted", "halted"]);
 		expect(g.calls).toHaveLength(3);
@@ -363,7 +375,7 @@ describe("fail-open", () => {
 		expect(g.entries[0].reason).toContain("context unavailable");
 	});
 	test("a call whose record cannot be written still counts once toward the halt", async () => {
-		const g = bind({ recordThrows: true, env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: () => Promise.withResolvers<Completion>().promise });
+		const g = bind({ recordThrows: true, env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: untilAborted });
 		for (const id of ["a", "b", "c", "d"]) expect(await g.device(id, "dispatch_comment", COMMENT)).toBeUndefined();
 		expect(g.calls).toHaveLength(3);
 		expect(g.notices).toHaveLength(1);
@@ -377,6 +389,62 @@ describe("fail-open", () => {
 		expect(g.entries.map(e => e.outcome)).toEqual(["error", "error", "error", "verdict"]);
 		expect(g.entries[0].reason).toContain("EACCES");
 		expect(g.notices).toHaveLength(0);
+	});
+});
+
+describe("deadline and abandonment", () => {
+	test("the deadline sits under the runner's handler ceiling, and each entry records it", async () => {
+		const defaults = bind({ ceiling: 30_000 });
+		await defaults.device("t1", "dispatch_comment", COMMENT);
+		expect(defaults.entries[0].deadlineMs).toBe(25_000);
+		const raised = bind({ ceiling: 120_000 });
+		await raised.device("t1", "dispatch_comment", COMMENT);
+		expect(raised.entries[0].deadlineMs).toBe(90_000);
+		const short = bind({ ceiling: 120_000, env: { OMP_ASKGATE_TIMEOUT_MS: "50" } });
+		await short.device("t1", "dispatch_comment", COMMENT);
+		expect(short.entries[0].deadlineMs).toBe(50);
+	});
+	test("a ceiling that leaves no room for a verdict binds nothing, and says why", () => {
+		const g = bind({ ceiling: 8_000 });
+		expect(g.handlers.size).toBe(0);
+		expect(g.warnings).toHaveLength(1);
+		expect(g.warnings[0]).toContain("8000");
+	});
+	test("a call abandoned by its tool (a user abort, or the runner's ceiling) cancels the model call and never counts toward the halt", async () => {
+		const signals: AbortSignal[] = [];
+		let started = Promise.withResolvers<void>();
+		const g = bind({
+			complete: req => {
+				signals.push(req.signal);
+				started.resolve();
+				return untilAborted(req);
+			},
+		});
+		for (const id of ["a", "b", "c"]) {
+			started = Promise.withResolvers<void>();
+			const gated = g.device(id, "dispatch_comment", COMMENT);
+			await started.promise;
+			g.event("tool_execution_end", { toolCallId: id, toolName: "write", isError: true });
+			expect(await gated).toBeUndefined();
+		}
+		expect(signals.every(s => s.aborted)).toBe(true);
+		expect(g.entries.map(e => e.outcome)).toEqual(["error", "error", "error"]);
+		expect(g.entries[0]).toMatchObject({ usage: PARTIAL });
+		expect(g.entries[0].reason).toMatch(/^abandoned/);
+		expect(g.notices).toHaveLength(0);
+		started = Promise.withResolvers<void>();
+		const next = g.device("d", "dispatch_comment", COMMENT);
+		await started.promise;
+		g.event("tool_execution_end", { toolCallId: "d", toolName: "write", isError: true });
+		await next;
+		expect(signals).toHaveLength(4);
+	});
+	test("replies to different messages are different breaker targets", async () => {
+		const g = bind({ complete: async () => ({ text: REVISE }) });
+		await g.device("a", "dispatch_message", { in_reply_to: "m-1", body: "one" });
+		await g.device("b", "dispatch_message", { in_reply_to: "m-1", body: "two" });
+		await g.device("c", "dispatch_message", { in_reply_to: "m-2", body: "other" });
+		expect(g.entries.map(e => e.outcome)).toEqual(["verdict", "verdict", "verdict"]);
 	});
 });
 
@@ -432,7 +500,7 @@ describe("population (test 11)", () => {
 
 describe("sessions", () => {
 	test("a halt in one session does not carry into the next", async () => {
-		const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: () => Promise.withResolvers<Completion>().promise });
+		const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: untilAborted });
 		for (const id of ["a", "b", "c", "d"]) await g.device(id, "dispatch_comment", COMMENT);
 		expect(g.entries.map(e => e.outcome)).toEqual(["timeout", "timeout", "timeout", "halted"]);
 		g.event("session_switch", { reason: "new" });
@@ -565,42 +633,55 @@ describe("parseVerdict (test 14)", () => {
 });
 
 describe("askgate.ts, the entry", () => {
-	// The entry imports @oh-my-pi/pi-ai, which resolves only inside omp; this stub stands in for it and records the
-	// options of every completion the gate makes.
+	type Attempt = { content: Array<{ type: string; thinking?: string; text?: string }>; usage: Record<string, unknown>; stopReason: string };
+	const answer = (text: string, input: number, output: number, cost: number): Attempt => ({
+		content: [{ type: "thinking", thinking: "Checking the call." }, { type: "text", text }],
+		usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost } },
+		stopReason: "stop",
+	});
+	// The entry imports @oh-my-pi/pi-ai, which resolves only inside omp; this stub stands in for it, records the
+	// options of every completion, reports each attempt through onAttempt as the fork does, and returns the last.
 	const completions: Array<Record<string, unknown>> = [];
+	let attempts: Attempt[] = [];
+	let throwAfterAttempts = false;
 	mock.module("@oh-my-pi/pi-ai", () => ({
-		completeSimple: async (_model: unknown, _context: unknown, options: Record<string, unknown>) => {
+		completeSimple: async (_model: unknown, _context: unknown, options: Record<string, unknown> & { onAttempt?: (m: unknown) => void }) => {
 			completions.push(options);
-			return {
-				content: [{ type: "thinking", thinking: "Checking the call." }, { type: "text", text: ALLOW }],
-				usage: { input: 5, output: 7, cacheRead: 0, cacheWrite: 0, totalTokens: 12, cost: { input: 0.05, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.25 } },
-				stopReason: "stop",
-			};
+			for (const attempt of attempts) options.onAttempt?.(attempt);
+			if (throwAfterAttempts) throw new Error("provider went away");
+			return attempts.at(-1);
 		},
 		retryTransientCompletion: (run: () => Promise<unknown>) => run(),
 	}));
-	// The entry's other fork import: the primary's context, here one user message.
-	mock.module("@oh-my-pi/pi-coding-agent", () => ({ buildSessionContext: () => ({ messages: [fx.user("Post it.")] }) }));
+	// The entry's other fork imports: the primary's context (one user message) and the handler ceiling.
+	mock.module("@oh-my-pi/pi-coding-agent", () => ({ buildSessionContext: () => ({ messages: [fx.user("Post it.")] }), settings: {} }));
+	mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({ cfgExtensionHandlersToolCallTimeoutMs: { get: () => 120_000 } }));
 	const saved = { ...process.env };
 	const dirs: string[] = [];
 	afterEach(() => {
 		completions.length = 0;
+		attempts = [answer(ALLOW, 5, 7, 0.25)];
+		throwAfterAttempts = false;
 		for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
 		Object.assign(process.env, saved);
 		for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});
+	attempts = [answer(ALLOW, 5, 7, 0.25)];
+	const scratch = (prefix: string) => {
+		const dir = fs.mkdtempSync(path.join(tmpdir(), prefix));
+		dirs.push(dir);
+		return dir;
+	};
 
 	/** Binds the real entry to a fake `pi` and runs one gated dispatch_comment through it. */
 	async function gateOnce(env: Record<string, string> = {}) {
-		const agentDir = fs.mkdtempSync(path.join(tmpdir(), "askgate-entry-"));
-		dirs.push(agentDir);
-		Object.assign(process.env, { PI_CODING_AGENT_DIR: agentDir }, env);
+		Object.assign(process.env, { PI_CODING_AGENT_DIR: scratch("askgate-entry-") }, env);
 		delete process.env.OMP_ASKGATE;
-		// Imported after mock.module so the entry binds the stub; a static import would load it first.
+		// Imported after mock.module so the entry binds the stubs; a static import would load it first.
 		const { default: askgate } = await import("../askgate");
 		const handlers = new Map<string, Handler>();
 		const entries: GateEntry[] = [];
-		askgate({ on: (event: string, handler: Handler) => handlers.set(event, handler), appendEntry: (_: string, data: GateEntry) => entries.push(data), logger: { debug: () => {} } } as never);
+		askgate({ on: (event: string, handler: Handler) => handlers.set(event, handler), appendEntry: (_: string, data: GateEntry) => entries.push(data), logger: { debug: () => {}, warn: () => {} } } as never);
 		const ctx = {
 			agent: { kind: "main" },
 			hasUI: false,
@@ -612,7 +693,7 @@ describe("askgate.ts, the entry", () => {
 			sessionManager: { getEntries: () => [], getLeafId: () => null, getSessionId: () => "sess-e" },
 		};
 		const result = await handlers.get("tool_call")?.({ type: "tool_call", toolName: "dispatch_comment", toolCallId: "t1", input: COMMENT }, ctx);
-		return { result, entries, agentDir };
+		return { result, entries };
 	}
 
 	test("the completion runs at high effort with prompt caching off, and its usage is recorded", async () => {
@@ -623,10 +704,20 @@ describe("askgate.ts, the entry", () => {
 		expect(completions[0].signal).toBeInstanceOf(AbortSignal);
 		expect(entries).toMatchObject([{ decision: "allow", outcome: "verdict", usage: { input: 5, output: 7, cacheRead: 0, cacheWrite: 0, cost: 0.25 } }]);
 	});
+	test("usage sums every attempt, a resampled thinking loop included", async () => {
+		attempts = [answer("looping", 40_000, 3000, 0.55), answer(ALLOW, 40_000, 500, 0.43)];
+		const { entries } = await gateOnce();
+		expect(entries).toMatchObject([{ outcome: "verdict", usage: { input: 80_000, output: 3500, cacheRead: 0, cacheWrite: 0, cost: 0.98 } }]);
+	});
+	test("a completion that throws still records what its attempts spent", async () => {
+		attempts = [answer("partial", 40_000, 100, 0.41)];
+		throwAfterAttempts = true;
+		const { result, entries } = await gateOnce();
+		expect(result).toBeUndefined();
+		expect(entries).toMatchObject([{ outcome: "error", reason: "provider went away", usage: { input: 40_000, output: 100, cost: 0.41 } }]);
+	});
 	test("the prompt dump is created readable by its owner only, whatever the umask", async () => {
-		const dir = fs.mkdtempSync(path.join(tmpdir(), "askgate-dump-"));
-		dirs.push(dir);
-		const dump = path.join(dir, "dump.txt");
+		const dump = path.join(scratch("askgate-dump-"), "dump.txt");
 		const umask = process.umask(0o022);
 		try {
 			await gateOnce({ OMP_ASKGATE_DUMP: dump });
@@ -635,5 +726,26 @@ describe("askgate.ts, the entry", () => {
 		}
 		expect(fs.readFileSync(dump, "utf8")).toContain("### Gate request");
 		expect(fs.statSync(dump).mode & 0o777).toBe(0o600);
+	});
+	test("an existing dump is made owner-only on every open", async () => {
+		const dump = path.join(scratch("askgate-dump-"), "dump.txt");
+		fs.writeFileSync(dump, "earlier\n");
+		// Set explicitly: a restrictive umask would otherwise create it 0600 already.
+		fs.chmodSync(dump, 0o644);
+		await gateOnce({ OMP_ASKGATE_DUMP: dump });
+		expect(fs.statSync(dump).mode & 0o777).toBe(0o600);
+		expect(fs.readFileSync(dump, "utf8")).toStartWith("earlier\n");
+	});
+	test("a dump path that is a symlink is not followed", async () => {
+		const dir = scratch("askgate-dump-");
+		const target = path.join(dir, "elsewhere.txt");
+		fs.writeFileSync(target, "untouched\n", { mode: 0o644 });
+		const dump = path.join(dir, "dump.txt");
+		fs.symlinkSync(target, dump);
+		const { result, entries } = await gateOnce({ OMP_ASKGATE_DUMP: dump });
+		expect(result).toBeUndefined();
+		expect(fs.readFileSync(target, "utf8")).toBe("untouched\n");
+		expect(entries).toMatchObject([{ decision: "allow", outcome: "error" }]);
+		expect(entries[0].reason).toContain("ELOOP");
 	});
 });
