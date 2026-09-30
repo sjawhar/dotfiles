@@ -9,8 +9,8 @@
 # ~/.omp/profiles/NAME/agent. This adds two things:
 #
 # 1. Billing, via shims/omp: under a profile the secrets named <KEY>_<NAME> are
-#    injected in place of the personal keys (OPENAI_API_KEY_THEOREM becomes
-#    OPENAI_API_KEY). Add a profile's keys with
+#    injected as the provider keys (OPENAI_API_KEY_THEOREM becomes
+#    OPENAI_API_KEY); the default profile gets no key. Add a profile's keys with
 #    `secrets edit-local --source dotfiles` (this machine) or
 #    `secrets edit --source dotfiles` (every machine); the name is the provider
 #    variable, then the profile uppercased with `-`/`.` as `_`. Anything else
@@ -26,8 +26,9 @@
 #    profile as the read-only PI_CONFIG_FILES overlay shims/omp sets, and the
 #    profile's own copy is where omp writes its /model picks; and models.yml,
 #    because it carries provider routing — the default profile's sends the
-#    anthropic provider through the Hawk gateway with a per-person token, and a
-#    client profile must reach the provider directly with its own key.
+#    anthropic, openai and google providers through the Hawk gateway with a
+#    per-person token, and a client profile must reach the provider directly with
+#    its own key.
 #    Entries already present in the profile are left alone.
 set -euo pipefail
 
