@@ -1,28 +1,69 @@
-#!/usr/bin/env -S uv run --quiet --script
-# /// script
-# requires-python = ">=3.11"
-# dependencies = ["google-auth>=2.38", "requests>=2.32", "boto3>=1.34"]
-# ///
+#!/usr/bin/env python3
+"""google-user-token: scope expansion, config loading, and the WIF/DWD delegation.
+
+The shim imports google-auth and boto3, which only its own `# /// script` header declares. Like
+the browser-capture tests, these run with the interpreter of the environment uv builds from that
+header: discovered or run directly, this file is one test that runs itself there, where it
+tests the shim in-process.
+"""
 import importlib.machinery
 import importlib.util
 import io
 import json
-import sys
+import os
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
 
-try:
-    from botocore.exceptions import ClientError
-except ImportError:  # laptops have no AWS tooling; the broker is devbox-only
-    raise unittest.SkipTest("botocore unavailable (google-user-token runs only on the devbox)")
-
 SHIM = Path(__file__).resolve().parent.parent / "google-user-token"
-spec = importlib.util.spec_from_loader(
-    "google_user_token", importlib.machinery.SourceFileLoader("google_user_token", str(SHIM))
-)
-gut = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(gut)
+# Set for the run in the shim's environment, so that run tests the shim instead of delegating.
+IN_SHIM_ENVIRONMENT = "GOOGLE_USER_TOKEN_TESTS_IN_SHIM_ENV"
+
+if os.environ.get(IN_SHIM_ENVIRONMENT):
+    from botocore.exceptions import ClientError
+
+    spec = importlib.util.spec_from_loader(
+        "google_user_token", importlib.machinery.SourceFileLoader("google_user_token", str(SHIM))
+    )
+    gut = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gut)
+
+
+def uv(*args: str) -> str:
+    result = subprocess.run(["uv", *args], capture_output=True, text=True, timeout=300, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"uv {' '.join(args)} exited {result.returncode}: {result.stderr}")
+    return result.stdout
+
+
+def script_python(script: Path) -> str:
+    """The interpreter uv builds for `script` from its `# /// script` header."""
+    # `find` only locates the environment; with none built it names a bare interpreter.
+    uv("sync", "--quiet", "--script", str(script))
+    return uv("python", "find", "--script", str(script)).strip()
+
+
+def run_in_shim_environment() -> None:
+    result = subprocess.run(
+        [script_python(SHIM), __file__, "-v"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+        env={**os.environ, IN_SHIM_ENVIRONMENT: "1"},
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"exited {result.returncode} in the shim's environment:\n{result.stderr}{result.stdout}")
+
+
+def load_tests(loader, tests, pattern):
+    if os.environ.get(IN_SHIM_ENVIRONMENT):
+        return tests
+    return unittest.TestSuite(
+        [unittest.FunctionTestCase(run_in_shim_environment, description="google-user-token tests, in the shim's uv environment")]
+    )
+
 
 CONFIG = {
     "sa_email": "workspace-broker@example.test",
