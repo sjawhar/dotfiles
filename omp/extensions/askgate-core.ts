@@ -40,8 +40,9 @@
 //     (askgate-request.md) carries the agent under review as data: its system prompt and the
 //     newest 256 KiB of its context (the fork's buildSessionContext), every piece XML-escaped
 //     inside its own block, then the call. The last line of the answer must be
-//     {"decision":"allow"} or {"decision":"revise","reason":"…"}; the reason handed back to the
-//     agent is escaped and capped at 2 KiB.
+//     {"decision":"allow"} or {"decision":"revise","reason":"…"}. The reason reaches the agent
+//     verbatim but for a tag-opening `<` (see `agentFacing`), capped at 2 KiB, and is recorded
+//     as `deliveredReason`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
 // usage, the aborted one included; scripts/advisor-report reads them. Every path fails open but
@@ -109,6 +110,8 @@ export interface GateEntry {
 	verdictMode: Exclude<Mode, "off">;
 	reason?: string;
 	rebuttal?: string;
+	/** On a revise: the reason exactly as the agent received it (the one agent-facing transform's output). */
+	deliveredReason?: string;
 	/** The answer's tail when it held no verdict. */
 	raw?: string;
 	latencyMs: number;
@@ -389,22 +392,31 @@ function renderRequest(primarySystemPrompt: string, transcript: string, tool: st
 	return renderTemplate(requestTemplate, { primarySystemPrompt: escapeXml(primarySystemPrompt), transcript, tool, args: renderArgs(input), priorReasons: prior });
 }
 
-/** A model's reason, escaped and capped before it reaches the agent: it cannot close its frame or open a tag. */
-const quotedReason = (reason: string) => escaped(reason, GATE_REASON_MAX_BYTES);
+/**
+ * The one transform for text handed to the agent (a model's reason, the agent's own rebuttal): verbatim,
+ * except that a `<` which could start a tag (before a letter, `/`, `!` or `?`) becomes `&lt;`, then capped
+ * at 2 KiB. The two defects are disjoint. A frame closed or a harness tag opened needs a tag-opening `<`,
+ * and this rule stops it. Full escaping also turned `&&`, `->` and a `> ` quote line into entities, so a fix
+ * sent back verbatim posted `&gt;` and a check for the quote failed; those now pass through unchanged. Text
+ * rendered into the gate's own prompt is escaped in full instead (`escaped`). Nothing between here and
+ * delivery decodes entities: warn joins the text into a developer message as-is, block's Error message
+ * becomes the tool result as-is.
+ */
+const agentFacing = (text: string) => clipBytes(text.replace(/<(?=[A-Za-z/!?])/g, "&lt;"), GATE_REASON_MAX_BYTES);
 // What the agent reads after each gated call: silence only for an allow or a fail-open, since a
 // pass it cannot see is indistinguishable from a gate that broke.
 const SECOND_REVISE = "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
 const renderRevise = (reason: string, second: boolean) =>
-	`AskGate did not send this call.\n${quotedReason(reason)}\nSend the corrected call, or resend this one unchanged with "${REBUTTAL_KEY}": "<one line>" added to the JSON to override; an override is always sent and recorded, and the field is removed before sending.${second ? `\n${SECOND_REVISE}` : ""}`;
+	`AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with "${REBUTTAL_KEY}": "<one line>" added to the JSON to override; an override is always sent and recorded, and the field is removed before sending.${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
 	abandoned: "AskGate did not send this call: it was stopped before a verdict came back. Send it again if it is still wanted.",
 	shutdown: "AskGate did not send this call: the session shut down before a verdict came back. Send it again from a live session if it is still wanted.",
 };
 const renderWarn = (reason: string, second: boolean) =>
-	`<advisor-gate advisor="AskGate" verdict="revise">\n${quotedReason(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.${second ? `\n${SECOND_REVISE}` : ""}\n</advisor-gate>`;
+	`<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.${second ? `\n${SECOND_REVISE}` : ""}\n</advisor-gate>`;
 const renderRebuttalAck = (rebuttal: string) =>
-	`<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${REBUTTAL_KEY} "${quotedReason(rebuttal)}" was received and recorded; the call was sent without review, with that field removed before sending.\n</advisor-gate>`;
+	`<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${REBUTTAL_KEY} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that field removed before sending.\n</advisor-gate>`;
 const renderBreakerAck = () =>
 	`<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
 
@@ -554,7 +566,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			breaker.revised(key, verdict.reason);
 			const second = breaker.reasons(key).length === GATE_BREAKER_REVISES;
 			return {
-				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, revisesForKey: base.revisesForKey + 1, ...called },
+				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, deliveredReason: agentFacing(verdict.reason), revisesForKey: base.revisesForKey + 1, ...called },
 				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason, second) } : { additionalContext: renderWarn(verdict.reason, second) },
 				effect: "verdict",
 			};
