@@ -126,6 +126,7 @@ export type Entry =
 /** The module's one object guard: transcript and overlay data are untyped JSON/YAML. */
 export const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 export function parseMode(raw: string | undefined): Mode {
 	const value = (raw ?? "warn").trim();
@@ -385,7 +386,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		let failures = 0;
 		let halted = false;
 
-		const failed = (ctx: GateCtx) => {
+		/** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
+		const settle = (effect: Decision["effect"], ctx: GateCtx) => {
+			if (effect === "verdict") failures = 0;
+			if (effect !== "failure") return;
 			failures++;
 			if (failures < GATE_HALT_AFTER_FAILURES || halted) return;
 			halted = true;
@@ -405,27 +409,21 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		};
 
 		type Base = Omit<GateEntry, "decision" | "outcome" | "latencyMs">;
-		const gate = async (event: ToolCallEvent, ctx: GateCtx, started: number, base: Base, key: string, rebuttal: string | undefined): Promise<ToolCallResult> => {
-			const record = (fields: Pick<GateEntry, "decision" | "outcome"> & Partial<GateEntry>) =>
-				pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, { ...base, ...fields, latencyMs: deps.now() - started } satisfies GateEntry);
+		/** What one gated call records, returns, and does to the halt count. */
+		type Decision = { fields: Pick<GateEntry, "decision" | "outcome"> & Partial<GateEntry>; result?: ToolCallResult; effect: "failure" | "verdict" | "none" };
+		const pass = (outcome: GateEntry["outcome"], fields: Partial<GateEntry> = {}, effect: Decision["effect"] = "none"): Decision => ({ fields: { decision: "allow", outcome, ...fields }, effect });
+
+		const decide = async (event: ToolCallEvent, ctx: GateCtx, base: Base, key: string, rebuttal: string | undefined): Promise<Decision> => {
 			const unparsable = (error: unknown) => pi.logger.debug("AskGate: local-overrides.yml does not parse; the gate stays on", { error: String(error) });
-			if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) {
-				record({ decision: "allow", outcome: "killed" });
-				return undefined;
-			}
+			if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) return pass("killed");
 			if (rebuttal !== undefined) {
 				breaker.reset(key);
-				record({ decision: "allow", outcome: "rebuttal", rebuttal });
-				return undefined;
+				return pass("rebuttal", { rebuttal });
 			}
-			if (halted) {
-				record({ decision: "allow", outcome: "halted" });
-				return undefined;
-			}
+			if (halted) return pass("halted");
 			if (breaker.tripped(key)) {
 				breaker.reset(key);
-				record({ decision: "allow", outcome: "breaker" });
-				return undefined;
+				return pass("breaker");
 			}
 
 			const system = `<primary-system-prompt>\n${ctx.getSystemPrompt().join("\n\n")}\n</primary-system-prompt>\n\n${charter}`;
@@ -436,55 +434,46 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			if (dumpPath) deps.appendFile(dumpPath, `===== AskGate ${event.toolCallId} system =====\n${system}\n===== AskGate ${event.toolCallId} user =====\n${user}\n\n`);
 
 			const model = ctx.models.resolve(MODEL_ROLE);
-			if (!model) {
-				failed(ctx);
-				record({ decision: "allow", outcome: "unavailable" });
-				return undefined;
-			}
+			if (!model) return pass("unavailable", {}, "failure");
 			const called = { promptBytes, model: `${model.provider}/${model.id}` };
+			const answer = await ask({ ctx, model, system, user, sessionId: ctx.sessionManager.getSessionId() });
+			const usage = answer.usage ? { usage: answer.usage } : {};
+			if (answer.kind === "timeout") return pass("timeout", { ...called, ...usage }, "failure");
+			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...called, ...usage }, "failure");
+			const verdict = parseVerdict(answer.text);
+			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...called, ...usage }, "failure");
+			if (verdict.decision === "allow" || verdict.reason === undefined) {
+				breaker.reset(key);
+				return pass("verdict", { ...called, ...usage }, "verdict");
+			}
+			breaker.revised(key, verdict.reason);
+			return {
+				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, revisesForKey: base.revisesForKey + 1, ...called, ...usage },
+				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason) } : { additionalContext: renderWarn(verdict.reason) },
+				effect: "verdict",
+			};
+		};
+
+		/** The model call raced against the deadline: an answer, an error, or the deadline. */
+		type Answer = { kind: "answer"; text: string; usage?: Usage } | { kind: "error"; reason: string; usage?: Usage } | { kind: "timeout"; usage?: Usage };
+		const ask = async (req: Omit<CompleteRequest, "signal">): Promise<Answer> => {
 			const controller = new AbortController();
 			const { promise: expired, resolve: expire } = Promise.withResolvers<"timeout">();
 			const timer = setTimeout(() => {
 				controller.abort();
 				expire("timeout");
 			}, timeoutMs);
-			let result: Completion | "timeout";
 			try {
 				// Promise.race subscribes to the completion, so a late rejection after the deadline is handled.
-				result = await Promise.race([deps.complete({ ctx, model, system, user, sessionId: ctx.sessionManager.getSessionId(), signal: controller.signal }), expired]);
+				const result = await Promise.race([deps.complete({ ...req, signal: controller.signal }), expired]);
+				if (result === "timeout") return { kind: "timeout" };
+				if (result.error !== undefined) return { kind: "error", reason: result.error, usage: result.usage };
+				return { kind: "answer", text: result.text, usage: result.usage };
 			} catch (error) {
-				failed(ctx);
-				record({ decision: "allow", outcome: "error", reason: error instanceof Error ? error.message : String(error), ...called });
-				return undefined;
+				return { kind: "error", reason: messageOf(error) };
 			} finally {
 				clearTimeout(timer);
 			}
-			if (result === "timeout") {
-				failed(ctx);
-				record({ decision: "allow", outcome: "timeout", ...called });
-				return undefined;
-			}
-			const usage = result.usage ? { usage: result.usage } : {};
-			if (result.error !== undefined) {
-				failed(ctx);
-				record({ decision: "allow", outcome: "error", reason: result.error, ...called, ...usage });
-				return undefined;
-			}
-			const verdict = parseVerdict(result.text);
-			if (!verdict) {
-				failed(ctx);
-				record({ decision: "allow", outcome: "no-verdict", raw: result.text.slice(-2000), ...called, ...usage });
-				return undefined;
-			}
-			failures = 0;
-			if (verdict.decision === "allow" || verdict.reason === undefined) {
-				breaker.reset(key);
-				record({ decision: "allow", outcome: "verdict", ...called, ...usage });
-				return undefined;
-			}
-			breaker.revised(key, verdict.reason);
-			record({ decision: "revise", outcome: "verdict", reason: verdict.reason, revisesForKey: base.revisesForKey + 1, ...called, ...usage });
-			return mode === "block" ? { block: true, reason: renderRevise(verdict.reason) } : { additionalContext: renderWarn(verdict.reason) };
 		};
 
 		/** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
@@ -501,6 +490,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
 			const started = deps.now();
 			let base: Base | undefined;
+			let decision: Decision;
 			try {
 				if (ctx.agent.kind !== "main") return undefined;
 				if (event.toolName === "write") return stripRebuttal(event);
@@ -514,23 +504,25 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 					revisesForKey: breaker.reasons(key).length,
 					argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
 				};
-				return await gate(event, ctx, started, base, key, rebuttal);
+				decision = await decide(event, ctx, base, key, rebuttal);
 			} catch (error) {
-				// Fail open: the runner turns a thrown handler into a refusal.
-				try {
-					failed(ctx);
-					pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
-						...(base ?? identity(event)),
-						decision: "allow",
-						outcome: "error",
-						reason: error instanceof Error ? error.message : String(error),
-						latencyMs: deps.now() - started,
-					} satisfies GateEntry);
-				} catch {
-					// The entry is best effort; the call still runs.
-				}
-				return undefined;
+				// Fail open: the runner turns a thrown handler into a refusal. A throw here is the
+				// gate's own (the overlay, the dump, the render), not a missing verdict, so it does not
+				// count toward the halt.
+				decision = pass("error", { reason: messageOf(error) });
 			}
+			// Settled once and recorded once, each on its own, so neither failing can repeat the other.
+			try {
+				settle(decision.effect, ctx);
+			} catch {
+				// The halt notice is best effort.
+			}
+			try {
+				pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, { ...(base ?? identity(event)), ...decision.fields, latencyMs: deps.now() - started } satisfies GateEntry);
+			} catch {
+				// The entry is best effort; the call still runs.
+			}
+			return decision.result;
 		});
 	};
 }
