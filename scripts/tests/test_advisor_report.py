@@ -933,6 +933,47 @@ class ReadoutTest(unittest.TestCase):
         self.assertFalse(self.home.envoy_log.exists())
         self.assertIn("send --source envoy", proc.stderr)
 
+    BROKEN_READS = {
+        # stats.db schema drift: the watch-mode baseline is the only reader of `messages`
+        "the watch-mode baseline": lambda home: sqlite3.connect(home.root / ".omp" / "stats.db").executescript(
+            "create table file_offsets (session_file text, last_modified real);").close(),
+        # an interrupted ingest-labels append leaves a torn last line
+        "the labels": lambda home: (home.report_dir / "labels.jsonl").write_text(
+            '{"id": "gate:s:g1", "label": "moot", "labeler": "o", "at": "2026-10-01T00:00:00Z"}\n{"id": "gate:s:g2", "lab',
+            encoding="utf-8"),
+        "the roster": lambda home: home.roster.write_text("advisors: [ForkGate\n", encoding="utf-8"),
+    }
+
+    def readouts_with_a_broken_read(self, gate, exit_code):
+        """Run the readout once per broken incidental read, each in a fresh HOME holding `gate`'s sessions."""
+        for what, break_it in self.BROKEN_READS.items():
+            with self.subTest(what):
+                self.home.cleanup()
+                self.home = Home()
+                self.launch(days=5)
+                gate()
+                break_it(self.home)
+                proc = self.home.run("readout", "--check", "gate", "--notify", "notifications.role.example", check_exit=exit_code)
+                self.assertIn(f"gate: failed to read {what}: ", proc.stdout)
+                self.assertIn(f"failed to read {what}: ", self.home.envoy_log.read_text(encoding="utf-8"))
+                yield proc.stdout
+
+    def test_a_failed_read_is_reported_sent_and_exits_2_not_the_kill_code(self):
+        for _out in self.readouts_with_a_broken_read(self.healthy_gate, exit_code=2):
+            self.assertFalse(self.home.overlay.exists())
+
+    def test_a_failed_read_does_not_hold_back_a_day_three_kill(self):
+        for out in self.readouts_with_a_broken_read(self.kill_fixture, exit_code=1):
+            self.assertIn("gate: KILL applied", out)
+            self.assert_killed()
+
+    def test_an_unreadable_launch_record_is_reported_and_exits_2(self):
+        self.healthy_gate()
+        (self.home.report_dir / "launch.json").write_text('{"gate": {"launched": ', encoding="utf-8")
+        proc = self.home.run("readout", "--check", "gate", "--notify", "notifications.role.example", check_exit=2)
+        self.assertIn("gate: failed: ", proc.stdout)
+        self.assertIn("gate: failed: ", self.home.envoy_log.read_text(encoding="utf-8"))
+
 
 class SampleTest(unittest.TestCase):
     def setUp(self):
