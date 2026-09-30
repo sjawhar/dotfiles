@@ -8,7 +8,7 @@
   advisor-report arm gate --launched ISO --timeout-ms N
   advisor-report arm trial --launched ISO [--approved-by ASK_ID]
   advisor-report readout [--check gate] [--check trial] [--notify TOPIC]
-  advisor-report overlay add|remove <key.path> <member>
+  advisor-report overlay add|remove <key.path> <member> [--why TEXT]
 
 Reads the primary session files under ~/.omp/agent/sessions, each advisor's
 transcript beside them (<session>/__advisor.<slug>.jsonl; `--advisor default` is
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import getpass
 import html
 import json
 import math
@@ -861,14 +862,44 @@ def overlay_change(target: Path, key_path: str, member: str, add: bool) -> bool:
     return True
 
 
-def overlay_update(key_path: str, member: str, add: bool) -> bool:
-    """Add or remove one list member at `key_path` in local-overrides.yml under the lock. True when the file changed."""
+def provenance_path(target: Path) -> Path:
+    return target.with_name("local-overrides.provenance.jsonl")
+
+
+def record_overlay_change(target: Path, verb: str, key_path: str, member: str, why: str | None) -> None:
+    """Append who made one change to the log beside `target`; the caller holds overlay_locked and has written it."""
+    row = {"at": iso(datetime.now(timezone.utc)), "verb": verb, "key": key_path, "member": member, "user": getpass.getuser(),
+           "omp_session_id": os.environ.get("OMP_SESSION_ID"), "argv": sys.argv, **({"why": why} if why else {})}
+    with provenance_path(target).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def member_provenance(target: Path, key_path: str, slug: str) -> list[dict]:
+    """The log's rows for `slug` at `key_path`, oldest first, a member matched as is_killed matches it."""
+    path = provenance_path(target)
+    try:
+        rows, bad = read_jsonl(path)
+    except FileNotFoundError:
+        return []
+    if bad:
+        raise Failure(f"{path} has {bad} unparsable line(s)")
+    return [row for row in rows if row.get("key") == key_path and is_killed([row.get("member")], slug)]
+
+
+def overlay_update(key_path: str, member: str, add: bool, why: str | None) -> bool:
+    """Add or remove one list member at `key_path` in local-overrides.yml and log who did, under the lock. True when the
+    file changed; an unchanged file logs nothing."""
     with overlay_locked() as target:
-        return overlay_change(target, key_path, member, add)
+        changed = overlay_change(target, key_path, member, add)
+        if changed:
+            record_overlay_change(target, "add" if add else "remove", key_path, member, why)
+        return changed
 
 
 def cmd_overlay(args) -> int:
-    changed = overlay_update(args.key, args.member, add=args.verb == "add")
+    changed = overlay_update(args.key, args.member, add=args.verb == "add", why=args.why)
     target = overlay_path()
     state = "added to" if args.verb == "add" else "removed from"
     print(f"{args.member} {state} {args.key} in {target}" if changed else f"{target} unchanged")
@@ -1270,13 +1301,30 @@ def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labell
     return Decision(ON_TRACK)
 
 
-def attempt(what: str, read, failures: list[str]):
-    """One of the gate's incidental reads, or None with its failure recorded: none of them may stop the day-3 rules."""
+def attempt(action: str, run, failures: list[str]):
+    """One of the gate's incidental reads or records, or None with its failure recorded: none of them may stop the
+    day-3 rules."""
     try:
-        return read()
+        return run()
     except Exception as err:  # every failure is reported, and the day-3 rules still run
-        failures.append(f"failed to read {what}: {type(err).__name__}: {err}")
+        failures.append(f"failed to {action}: {type(err).__name__}: {err}")
         return None
+
+
+def killed_line(overlay: Path, rows: list[dict] | None) -> str:
+    """A killed gate, and who added its overlay member: the latest provenance row for it, when that row is an add.
+    Otherwise a writer that bypassed `overlay add` made it, which the readout names and still honours."""
+    held = f"{KILL_KEY} holds {GATE_SLUG} in {overlay}"
+    if rows is None:  # unread: the failure is reported beside this line
+        return f"gate: killed ({held}); no GO or EXTEND computed"
+    latest = rows[-1] if rows else None
+    if latest is None or latest.get("verb") != "add":
+        gap = (f"no line in {provenance_path(overlay)} names it" if latest is None else
+               f"the latest line for it in {provenance_path(overlay)} is a {latest.get('verb')} at {latest.get('at')}")
+        return f"gate: killed by an unrecorded writer ({held}; {gap}); no GO or EXTEND computed"
+    session = f"session {latest['omp_session_id']}" if latest.get("omp_session_id") else "no omp session"
+    why = f": {latest['why']}" if latest.get("why") else ""
+    return f"gate: killed ({held}; added by {latest.get('user')}, {session}, at {latest.get('at')}{why}); no GO or EXTEND computed"
 
 
 def gate_check(now: datetime) -> Check:
@@ -1298,9 +1346,9 @@ def gate_check(now: datetime) -> Check:
     whole = gate_metrics(entries)
     recent = gate_metrics([entry for entry in entries if entry.at >= now - DAY3_WINDOW])
     failures: list[str] = []
-    labels = attempt("the labels", load_labels, failures)
-    baseline = attempt("the watch-mode baseline", lambda: watch_baseline(default_stats_db(), launched), failures)
-    problems = attempt("the roster", lambda: roster_problems(dotfiles_dir(), agent_dir()), failures)
+    labels = attempt("read the labels", load_labels, failures)
+    baseline = attempt("read the watch-mode baseline", lambda: watch_baseline(default_stats_db(), launched), failures)
+    problems = attempt("read the roster", lambda: roster_problems(dotfiles_dir(), agent_dir()), failures)
     fired = [(entry.row_id, entry.at) for entry in entries if entry.fired]
     lab = None if labels is None else labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
     lines = [f"gate: day {day:.1f}; {whole['matched']} matched ({whole['killed']} killed), ungated_share "
@@ -1316,10 +1364,13 @@ def gate_check(now: datetime) -> Check:
     # Two readouts at once (the timer and a hand run) must not both apply and announce a KILL, so the overlay is read,
     # the rules decided and the KILL written under the one lock every overlay writer takes. The overlay member is a
     # kill's only record: `killed` entries also come from a drill of the kill switch the owner has undone.
+    provenance = None
     with overlay_locked() as overlay:
-        members = attempt("the overlay", lambda: overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)[1], failures)
+        members = attempt("read the overlay", lambda: overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)[1],
+                          failures)
         if members is not None and is_killed(members, GATE_SLUG):
             decision = Decision(KILLED)
+            provenance = attempt("read the kill provenance", lambda: member_provenance(overlay, KILL_KEY, GATE_SLUG), failures)
         elif failures:
             decision = Decision(KILL, tuple(day3)) if (day3 := day3_kill(day, timeout_ms, recent)) else None
         else:
@@ -1333,12 +1384,15 @@ def gate_check(now: datetime) -> Check:
                 unwritten = True
                 failures.append(f"KILL not applied ({KILL_KEY} += {GATE_SLUG} in {overlay}): {'; '.join(decision.reasons)}; "
                                 f"{type(err).__name__}: {err}")
+            if applied:
+                attempt("record the KILL in the provenance log",
+                        lambda: record_overlay_change(overlay, "add", KILL_KEY, GATE_SLUG, "; ".join(decision.reasons)), failures)
     failed = [f"gate: {failure}" for failure in failures]
     if applied:
         lines.append(f"gate: KILL applied ({KILL_KEY} += {GATE_SLUG} in {overlay}): {'; '.join(decision.reasons)}")
         return Check("gate", KILLED, lines + failed)
     if decision is not None and decision.verdict in (KILLED, KILL) and not unwritten:
-        lines.append(f"gate: killed ({KILL_KEY} holds {GATE_SLUG} in {overlay}); no GO or EXTEND computed")
+        lines.append(killed_line(overlay, provenance))
         return Check("gate", KILLED, lines + failed)
     if failures:
         return Check("gate", FAILED, lines + failed + ([] if unwritten else ["gate: only the day-3 rules ran; they found no KILL"]))
@@ -1438,6 +1492,7 @@ def build_parser() -> argparse.ArgumentParser:
     overlay.add_argument("verb", choices=["add", "remove"])
     overlay.add_argument("key")
     overlay.add_argument("member")
+    overlay.add_argument("--why", help="recorded with the change in local-overrides.provenance.jsonl")
     overlay.set_defaults(func=cmd_overlay)
     return parser
 

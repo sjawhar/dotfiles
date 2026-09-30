@@ -219,6 +219,11 @@ class Home:
 
         return yaml.safe_load(self.overlay.read_text(encoding="utf-8"))
 
+    def provenance(self) -> list[dict]:
+        """The overlay writers' log beside local-overrides.yml, one row per change; [] before the first."""
+        path = self.agent_dir / "local-overrides.provenance.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
 
 class AckTest(unittest.TestCase):
     def test_six_exact_ack_strings(self):
@@ -682,6 +687,22 @@ class OverlayTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self.home.overlay.read_bytes(), before)
         self.assertEqual(list(self.home.agent_dir.glob("local-overrides.*.tmp")), [])
+        self.assertEqual([row["member"] for row in self.home.provenance()], ["askgate"], "a failed write records nothing")
+
+    def test_each_change_appends_one_provenance_line_naming_its_writer(self):
+        self.home.env.update(USER="tester", OMP_SESSION_ID="01a0f000-0000-7000-8000-00000000abcd")
+        self.home.run("overlay", "add", "advisor.disableRoster", "askgate", "--why", "owner drill", check_exit=0)
+        self.home.run("overlay", "add", "advisor.disableRoster", "askgate", check_exit=0)
+        del self.home.env["OMP_SESSION_ID"]
+        self.home.run("overlay", "remove", "advisor.disableRoster", "askgate", check_exit=0)
+        added, removed = self.home.provenance()
+        self.assertLessEqual(abs(ar.parse_iso(added.pop("at")) - now_utc()), timedelta(minutes=5))
+        self.assertEqual(added, {"verb": "add", "key": "advisor.disableRoster", "member": "askgate", "user": "tester",
+                                 "omp_session_id": "01a0f000-0000-7000-8000-00000000abcd", "why": "owner drill",
+                                 "argv": [str(SCRIPT), "overlay", "add", "advisor.disableRoster", "askgate", "--why", "owner drill"]})
+        removed.pop("at")
+        self.assertEqual(removed, {"verb": "remove", "key": "advisor.disableRoster", "member": "askgate", "user": "tester",
+                                   "omp_session_id": None, "argv": [str(SCRIPT), "overlay", "remove", "advisor.disableRoster", "askgate"]})
 
     def test_adds_are_member_semantics_in_either_order_and_remove_takes_only_its_member(self):
         self.home.overlay.write_text("compaction:\n  enabled: true\n", encoding="utf-8")
@@ -939,6 +960,10 @@ class ReadoutTest(unittest.TestCase):
         out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
         self.assertIn(f"gate: KILL applied (advisor.disableRoster += askgate in {self.home.overlay})", out)
         self.assert_killed()
+        [row] = self.home.provenance()
+        self.assertEqual((row["verb"], row["key"], row["member"], row["argv"][1:]),
+                         ("add", "advisor.disableRoster", "askgate", ["readout", "--check", "gate"]))
+        self.assertIn("ungated_share", row["why"])
 
     def test_of_two_readouts_at_once_only_the_one_that_added_the_member_says_kill_applied(self):
         """The timer and a hand-run readout on the same burst, both started while another process holds the lock."""
@@ -954,6 +979,7 @@ class ReadoutTest(unittest.TestCase):
         self.assertEqual([readout.returncode for readout in readouts], [1, 1], outs)
         self.assertEqual(sum("gate: KILL applied" in out for out in outs), 1, outs)
         self.assertEqual(sum("gate: killed (advisor.disableRoster holds askgate" in out for out in outs), 1, outs)
+        self.assertFalse(any("unrecorded" in out for out in outs), outs)
         self.assert_killed()
 
     def s9_drill(self):
@@ -978,6 +1004,29 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn("no GO or EXTEND computed", proc.stdout)
         self.assertNotIn("GO:", proc.stdout)
         self.assertEqual(self.home.overlay.read_bytes(), before)
+
+    RAW_KILL = "advisor:\n  disableRoster:\n  - askgate\n"
+
+    def test_a_kill_no_writer_recorded_is_still_killed_and_named_in_the_notice(self):
+        self.healthy_gate()
+        self.home.overlay.write_text(self.RAW_KILL, encoding="utf-8")
+        proc = self.home.run("readout", "--check", "gate", "--notify", "notifications.role.example", check_exit=1)
+        self.assertIn(f"gate: killed by an unrecorded writer (advisor.disableRoster holds askgate in {self.home.overlay}", proc.stdout)
+        self.assertIn("no GO or EXTEND computed", proc.stdout)
+        self.assertIn("killed by an unrecorded writer", self.home.envoy_log.read_text(encoding="utf-8"))
+
+    def test_a_kill_the_cli_wrote_names_its_writer_until_a_remove_follows_it(self):
+        self.healthy_gate()
+        self.home.env["USER"] = "tester"
+        self.home.run("overlay", "add", "advisor.disableRoster", "AskGate", "--why", "owner drill", check_exit=0)
+        out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
+        self.assertNotIn("unrecorded", out)
+        self.assertIn("added by tester", out)
+        self.assertIn("owner drill", out)
+        self.home.run("overlay", "remove", "advisor.disableRoster", "AskGate", check_exit=0)
+        self.home.overlay.write_text(self.RAW_KILL, encoding="utf-8")
+        out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
+        self.assertIn("gate: killed by an unrecorded writer", out)
 
     def readout_on_day(self, day: float, correct: int, other: int, harmful: int = 0, unlabelled: int = 0,
                        exit_code: int = 0) -> str:
