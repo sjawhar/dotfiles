@@ -24,6 +24,7 @@ if [ -L "${OMP_AGENT_DIR}/config.yml" ]; then
     cp --remove-destination "$(readlink -f "${OMP_AGENT_DIR}/config.yml")" "${OMP_AGENT_DIR}/config.yml"
 fi
 [ -e "${OMP_AGENT_DIR}/config.yml" ] || echo '{}' > "${OMP_AGENT_DIR}/config.yml"
+[ -e "${OMP_AGENT_DIR}/local-overrides.yml" ] || echo '{}' > "${OMP_AGENT_DIR}/local-overrides.yml"
 # models.yml is universal catalog patches; a machine's own provider routing
 # (gateway baseUrl, `!command` apiKey) goes in the gitignored
 # omp/models.local.yml and is merged over it here, straight into the file omp
@@ -70,6 +71,7 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/viewport.ts" "${OMP_AGENT_DIR}/exten
 # Machines set up before the rename hold a now-dangling link under the old name.
 rm -f "${OMP_AGENT_DIR}/extensions/fullscreen.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/attention-queue.ts" "${OMP_AGENT_DIR}/extensions/attention-queue.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/askgate.ts" "${OMP_AGENT_DIR}/extensions/askgate.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 (cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
 # The envoy extension installs from npm (@sjawhar/pi-legion-envoy). The old

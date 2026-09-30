@@ -80,6 +80,12 @@ export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 # already set stay on top of this one.
 export PI_CONFIG_FILES="${DOTFILES_DIR}/omp/config.yml${PI_CONFIG_FILES:+:$PI_CONFIG_FILES}"
 
+# --- AskGate (omp/extensions/askgate.ts) ---
+# off | warn (a revise runs the call and hands the agent the reason) | block
+# (a revise refuses the call). The go decision recorded in
+# docs/advisor-report.md flips warn to block.
+export OMP_ASKGATE="${OMP_ASKGATE:-warn}"
+
 # --- mnemopi recall ranking ---
 # Mnemopi's veracity defaults read "a tool asserted this" as lower-trust than an
 # unlabelled statement (tool 0.5, unknown 0.8). OMP inverts that meaning: `tool`

@@ -42,6 +42,7 @@ class OmpRelayConfig(unittest.TestCase):
             "XDG_CONFIG_HOME": str(self.config_home),
         }
         self.env.pop("PI_CONFIG_FILES", None)
+        self.env.pop("OMP_ASKGATE", None)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
