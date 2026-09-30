@@ -93,7 +93,7 @@ this order, and the first that matches decides:
 | When | Rule | Result |
 |---|---|---|
 | any day | `advisor.disableRoster` in the overlay holds `askgate` | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
-| day 3 onward | `ungated_share` > 0.20 over ≥ 20 matched calls in the last 24 h, or verdict p95 above 0.9 × the timeout over ≥ 20 verdicts in the last 24 h | KILL |
+| day 3 onward | `ungated_share` > 0.20 over ≥ 20 calls in the last 24 h that got a verdict or a timeout (a rebuttal, a breaker pass or a killed call never fills that floor), or verdict p95 above 0.9 × the timeout over ≥ 20 verdicts in the last 24 h | KILL |
 | day 14 onward | `ungated_share` ≥ 0.10 over the window | KILL |
 | day 14 onward, ≥ 30 labelled revises | precision < 0.3 | KILL |
 | day 14 onward, any number of labelled revises | harm > 0.10 | KILL |
@@ -114,9 +114,11 @@ already undone, so they end nothing, and removing `askgate` from the overlay tur
 day-3 rule catches a gate that
 fails open or stalls the agent. Its latency bound is 0.9 × the timeout, not the timeout itself, because a
 verdict slower than the timeout is recorded as a `timeout`, so verdict p95 can never pass it: a gate
-answering at 85 s against a 90 s deadline stalls every scoped write and must still trip the rule. It needs 20
-verdicts in the 24 hours, as the ungated rule needs 20 calls: below that the nearest-rank p95 is the slowest
-verdict, so one slow answer among a handful would end the trial. The rest is the go decision. A week's sample
+answering at 85 s against a 90 s deadline stalls every scoped write and must still trip the rule. Each day-3 rule
+needs 20 calls of evidence in the 24 hours. The latency rule counts verdicts: below 20 the nearest-rank p95 is the
+slowest verdict, so one slow answer among a handful would end the trial. The ungated rule counts calls that got a
+verdict or a timeout, the calls whose latency the gate measured; rebuttals, breaker passes and killed calls never
+reached the model, so 18 rebuttals beside one verdict and one timeout do not make a KILL. The rest is the go decision. A week's sample
 packet is drawn when the week ends and labelled after it, so the first readouts past day 14 (or 21) run before
 the last week's labels exist; one packet alone can hold 30 labels, and GO, EXTEND or the day-21 KILL read from
 the earlier weeks would decide on part of the window. A completed week with revises and no labels therefore

@@ -69,6 +69,8 @@ REACHED_MODEL = FAIL_OPEN | {"verdict"}
 # Deliberate passes: the agent's override, the per-target breaker and the machine kill switch. They are not
 # gate failures, so they leave ungated_share's denominator.
 PASSED = frozenset({"rebuttal", "breaker", "killed"})
+# Calls whose latency the gate measured: a verdict, or the deadline passing. The day-3 floor counts these alone.
+LATENCY_EVIDENCE = frozenset({"verdict", "timeout"})
 
 KILL_KEY, GATE_SLUG = "advisor.disableRoster", "askgate"
 DAY3 = 3
@@ -596,6 +598,7 @@ def gate_metrics(entries: list[GateEntry]) -> dict:
         "fail_open_rate": ratio(sum(outcomes[o] for o in FAIL_OPEN), sum(outcomes[o] for o in REACHED_MODEL)),
         "ungated_share": ratio(sum(outcomes[o] for o in UNGATED), matched - sum(outcomes[o] for o in PASSED)),
         "verdicts": outcomes["verdict"],
+        "latency_calls": sum(outcomes[o] for o in LATENCY_EVIDENCE),
         "revise_rate": ratio(revises, outcomes["verdict"]),
         "rebuttal_rate": ratio(outcomes["rebuttal"], matched),
         "breaker_trips": outcomes["breaker"],
@@ -1145,8 +1148,9 @@ def day3_kill(day: float, timeout_ms: int, recent: dict) -> list[str]:
     if day < DAY3:
         return []
     kill = []
-    if recent["matched"] >= DAY3_MIN_CALLS and (recent["ungated_share"] or 0) > DAY3_UNGATED:
-        kill.append(f"ungated_share {recent['ungated_share']:.3f} > {DAY3_UNGATED} over {recent['matched']} calls in the last 24 h")
+    if recent["latency_calls"] >= DAY3_MIN_CALLS and (recent["ungated_share"] or 0) > DAY3_UNGATED:
+        kill.append(f"ungated_share {recent['ungated_share']:.3f} > {DAY3_UNGATED} over {recent['latency_calls']} calls "
+                    "with a verdict or a timeout in the last 24 h")
     # Below 20 verdicts the nearest-rank p95 is the slowest one, so a single slow verdict would decide.
     if recent["verdicts"] >= DAY3_MIN_CALLS and recent["latency_ms_p95"] > DAY3_LATENCY_SHARE * timeout_ms:
         kill.append(f"p95 latency {recent['latency_ms_p95']:.0f} ms above {DAY3_LATENCY_SHARE} x the {timeout_ms} ms "
