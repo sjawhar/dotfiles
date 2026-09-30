@@ -11,11 +11,12 @@ minimum_release_age = "14d"
 # My own repos are exempt from the release-age filter. That delay exists so a
 # third-party compromise has time to surface before I install it, which buys
 # nothing for code my own attested CI just built. mise verifies GitHub build
-# provenance on install for every release that carries an attestation; a
-# release with none installs unverified, which is why [tools.agent-secrets]
-# below pins its assets' digests. Third-party tools keep the filter. secretsd
-# matters most here: its daemon and OpenCode plugin ship together, so a fix
-# cannot reach a machine at all until the release is installable.
+# provenance on install for every release that carries an attestation (the
+# agent-secrets releases from legion-envoy-v3.17.1 on); [tools.agent-secrets]
+# below also pins its assets' digests, because its release is mutable.
+# Third-party tools keep the filter. secretsd matters most here: its daemon and
+# OpenCode plugin ship together, so a fix cannot reach a machine at all until
+# the release is installable.
 # mise matches these entries EXACTLY -- a "github:sjawhar/*" glob is accepted
 # and then silently ignored -- so a new repo of mine has to be added by hand.
 # Alias short names sit beside their backend ids because either form can be
@@ -174,13 +175,16 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # this pin from its user unit (only where installers/agent-secrets.sh set it up: devbox/install.sh),
 # and installers/agent-secrets.sh restarts it on a bump only when no host session is registered:
 # a restart re-pins every live session and revokes its grants.
-# The release is mutable and carries no build attestation, so each asset's sha256 is pinned: a
-# replaced asset fails to install. The digests are the ones GitHub recorded at upload; bump them
-# with the version (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
+# The release is mutable, so each asset's sha256 is pinned: a replaced asset fails to install.
+# From legion-envoy-v3.17.1 on the release also carries a build attestation (release-envoy-listener.yaml
+# on main), which mise verifies on install; check it by hand with
+# `gh attestation verify agent-secrets-amd64.tar.gz --repo sjawhar/legion`. The digests are the ones
+# GitHub recorded at upload; bump them with the version
+# (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v3.16.0"
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:ac6f2ad028c4cbaa92bd87bab2cf7c9e265af9fa3802882f52e00eb88467de5b" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:1aca02e614ed28ff9d56b1bf3d96c88cbc695e3724030eff57d7f057208b59a9" }
+version = "legion-envoy-v3.17.1"
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:1fdaa6cfcb2d32fd46bf581c993224159734a50f5fa7ccd1215625eaf84bbdfb" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:3ed7c21b531a814e1797f5669160654b3441416bc0a94838c0048b2e113ac310" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
