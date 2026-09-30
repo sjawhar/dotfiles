@@ -244,6 +244,19 @@ class AgentboxEnroll(EnrollFixture):
         self.assertIn("--enrollment enr-123", call)
         self.assertFalse(self.hostdir.exists())
 
+    def test_close_box_drops_the_launchers_pane_from_the_attention_queue(self) -> None:
+        # The box's own shutdown drop dies with its container; the launcher runs in the same
+        # host pane, so it drops that pane once the container is gone.
+        attention = self.root / "attention"
+        line = '{"pane":"%7","server":"4242","session":"s","title":"t","cwd":"/w","at":"2026-01-01T00:00:00Z"}'
+        env = {"OMP_ATTENTION_DIR": str(attention), "TMUX": "/tmp/tmux-test/default,4242,0", "PATH": "/usr/bin:/bin"}
+        subprocess.run(
+            [str(DOTFILES / "scripts" / "tmux-attention"), "push", line, "1000"], env=env, check=True, capture_output=True
+        )
+        (self.home / "boxes" / "box1").mkdir(parents=True)
+        self.bash('close_box box1 ""', STUB_GONE="1", TMUX_PANE="%7", TMUX=env["TMUX"], OMP_ATTENTION_DIR=env["OMP_ATTENTION_DIR"])
+        self.assertEqual((attention / "queue.jsonl").read_text(), "")
+
     def test_a_renew_that_exits_is_started_again(self) -> None:
         # The stub ends the loop by killing it on the third renew, so the run ends by signal.
         self.bash("start_renew box1", STUB_RUN_RENEW="1")
