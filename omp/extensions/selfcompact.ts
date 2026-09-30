@@ -42,9 +42,8 @@
 // session. Every probe (`selfcompact-probe`), fire (`selfcompact-fire`) and
 // handler failure outside a probe (`selfcompact-error`) is recorded as a custom
 // session entry and, when OMP_SELFCOMPACT_LOG names a file, as one JSON line
-// there — the harness runs omp with --no-session, so the file is the only
-// record a benchmark trial keeps. Each ok fire's record carries the compaction
-// summary, which the pilot replays for constraint recall.
+// there — under --no-session the file is the only record. Each ok fire's record
+// carries the compaction summary.
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import rubric from "./selfcompact.md" with { type: "text" };
@@ -214,8 +213,8 @@ export default function (pi: ExtensionAPI) {
 				capped,
 				stopReason: reply?.stopReason,
 				usage: u && { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite },
-				// The host types cost as required; if a provider ever omits it, the record carries none and the
-				// pilot prices the probe at its measured c_probe. A fire never depends on cost bookkeeping.
+				// The host types cost as required; if a provider ever omits it, the record carries none.
+				// A fire never depends on cost bookkeeping.
 				cost: u?.cost?.total,
 				model: reply?.provider && reply?.model ? `${reply.provider}/${reply.model}` : undefined,
 			});
