@@ -1,7 +1,7 @@
 // AskGate: before a root session's scoped Dispatch write executes, one model call judges it
 // against the AskGate charter and answers `allow` or `revise`. `askgate.ts` is the entry that
-// binds the fork's completion call; everything else lives here so the tests drive it through a
-// fake `pi`, a fake `ctx` and a stub completion.
+// binds the fork's completion call and buildSessionContext; everything else lives here so the
+// tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
 // Scope: `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper
 // emits with `toolName = <device>` and the validated arguments, for dispatch_ask,
@@ -25,10 +25,13 @@
 //     parsable answer) stop the gate for the session, with one UI notice.
 //   - breaker: two revises on one target (the device plus its issue/ask/artifact/project
 //     values) send the third attempt unasked; an allow, a rebuttal or a trip resets the target.
-//   - verdict: `@askgate` (modelRoles.askgate) is asked once, raced against the deadline, with
-//     the charter after the primary's system prompt as system text, and the newest 256 KiB of
-//     the transcript plus askgate-request.md as the user message. The last line of the answer
-//     must be {"decision":"allow"} or {"decision":"revise","reason":"…"}.
+//   - verdict: `@askgate` (modelRoles.askgate) is asked once, raced against the deadline. Its
+//     system prompt is askgate-system.md and the charter, nothing else. The user message
+//     (askgate-request.md) carries the agent under review as data: its system prompt and the
+//     newest 256 KiB of its context (the fork's buildSessionContext), every piece XML-escaped
+//     inside its own block, then the call. The last line of the answer must be
+//     {"decision":"allow"} or {"decision":"revise","reason":"…"}; the reason handed back to the
+//     agent is escaped and capped at 2 KiB.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model), which scripts/advisor-report reads. Every path
 // fails open: a throw inside the handler is recorded as `error` and the call runs, so the
@@ -37,6 +40,7 @@
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
+import systemTemplate from "./askgate-system.md" with { type: "text" };
 
 export const SCOPED_DEVICES = ["dispatch_ask", "dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit", "dispatch_issue"] as const;
 export const SPEC_ONLY_DEVICE = "dispatch_issue";
@@ -45,6 +49,7 @@ export const REBUTTAL_KEY = "advisor_rebuttal";
 export const GATE_TIMEOUT_MS = 90_000;
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 export const GATE_ARGS_MAX_BYTES = 64 * 1024;
+const GATE_REASON_MAX_BYTES = 2 * 1024;
 export const GATE_BREAKER_REVISES = 2;
 export const GATE_HALT_AFTER_FAILURES = 3;
 export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
@@ -94,6 +99,8 @@ export interface Deps {
 	appendFile: (p: string, text: string) => void;
 	complete: (req: CompleteRequest) => Promise<Completion>;
 	charterPath: string;
+	/** The primary's context as its model sees it: the fork's buildSessionContext over this session's branch. */
+	contextMessages: (ctx: GateCtx) => readonly Message[];
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -110,18 +117,10 @@ type GateCtx = {
 	ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
 	getSystemPrompt(): string[];
 	models: { resolve(spec: string): { provider: string; id: string } | undefined };
-	sessionManager: { getBranch(): readonly Entry[]; getSessionId(): string };
+	sessionManager: { getSessionId(): string };
 };
-
-// The session entry shapes (fork session-entries.ts); getBranch() returns every type raw.
-export type Entry =
-	| { type: "message"; id: string; timestamp: string; message: { role: string; content?: unknown; toolName?: string; isError?: boolean; command?: string; code?: string; output?: string; excludeFromContext?: boolean } }
-	| { type: "custom_message"; id: string; timestamp: string; customType: string; content: string | Array<{ type: string; text?: string }>; display: boolean }
-	| { type: "custom"; id: string; timestamp: string; customType: string; data?: unknown }
-	| { type: "compaction"; id: string; timestamp: string; summary: string; firstKeptEntryId: string }
-	| { type: "branch_summary"; id: string; timestamp: string; summary: string }
-	| { type: "reset_boundary"; id: string; timestamp: string }
-	| { type: string; id?: string; timestamp?: string };
+/** One AgentMessage of that context, read by `role` (user, assistant, toolResult, custom, compactionSummary, …). */
+export type Message = { role: string } & Record<string, unknown>;
 
 /** The module's one object guard: transcript and overlay data are untyped JSON/YAML. */
 export const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -208,87 +207,57 @@ function textOf(content: unknown): string {
 }
 
 const escapeXml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/** Untrusted text escaped, then cut to `max` bytes: no transcript text can close or open a tag. */
+const escaped = (text: string, max = Number.POSITIVE_INFINITY) => clipBytes(escapeXml(text), max);
 
 function renderAssistant(content: unknown): string {
 	const parts: string[] = [];
 	for (const block of Array.isArray(content) ? content : []) {
 		if (!isRecord(block)) continue;
-		if (block.type === "text" && typeof block.text === "string" && block.text.trim()) parts.push(block.text);
-		else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) parts.push(`(thinking) ${clipBytes(block.thinking, 1024)}`);
+		if (block.type === "text" && typeof block.text === "string" && block.text.trim()) parts.push(escaped(block.text));
+		else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) parts.push(`(thinking) ${escaped(block.thinking, 1024)}`);
 		else if (block.type === "toolCall") {
 			const args = typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments ?? {});
-			parts.push(`→ ${String(block.name)}(${clipBytes(args, 2048)})`);
+			parts.push(`→ ${escaped(String(block.name))}(${escaped(args, 2048)})`);
 		}
 	}
 	return parts.length > 0 ? `**agent**: ${parts.join("\n")}` : "";
 }
 
-function renderMessage(message: Record<string, unknown>): string {
+function renderMessage(message: Message): string {
 	switch (message.role) {
 		case "user":
-			return `**user**: ${textOf(message.content)}`;
+			return `**user**: ${escaped(textOf(message.content))}`;
 		case "assistant":
 			return renderAssistant(message.content);
 		case "toolResult":
-			return `⇒ ${String(message.toolName)}${message.isError ? " (error)" : ""}: ${clipBytes(textOf(message.content), 8 * 1024)}`;
+			return `⇒ ${escaped(String(message.toolName))}${message.isError ? " (error)" : ""}: ${escaped(textOf(message.content), 8 * 1024)}`;
 		case "bashExecution":
-			return message.excludeFromContext ? "" : `→ user-bash ${String(message.command)} ⇒ ${clipBytes(String(message.output ?? ""), 8 * 1024)}`;
+			return message.excludeFromContext ? "" : `→ user-bash ${escaped(String(message.command))} ⇒ ${escaped(String(message.output ?? ""), 8 * 1024)}`;
 		case "pythonExecution":
-			return message.excludeFromContext ? "" : `→ user-python ${String(message.code)} ⇒ ${clipBytes(String(message.output ?? ""), 8 * 1024)}`;
+			return message.excludeFromContext ? "" : `→ user-python ${escaped(String(message.code))} ⇒ ${escaped(String(message.output ?? ""), 8 * 1024)}`;
 		case "developer":
-			return `**system**: ${clipBytes(textOf(message.content), 2 * 1024)}`;
+			return `**system**: ${escaped(textOf(message.content), 2 * 1024)}`;
+		case "custom":
+		case "hookMessage": {
+			const text = textOf(message.content);
+			// A Dispatch answer from a human arrives this way: in full, even when hidden.
+			if (message.customType === "envoy-message") return `<primary-message kind="envoy-message">\n${escaped(text)}\n</primary-message>`;
+			if (message.display === false && message.customType !== "advisor") return "";
+			return `[${escaped(String(message.customType))}] ${escaped(text.replace(/\s+/g, " ").trim().slice(0, 120))}`;
+		}
+		case "compactionSummary":
+			return `[compaction] ${escaped(String(message.summary ?? ""), 8 * 1024)}`;
+		case "branchSummary":
+			return `[branch] ${escaped(String(message.summary ?? ""), 2 * 1024)}`;
 		default:
 			return "";
 	}
 }
 
-function renderEntry(entry: Record<string, unknown>): string {
-	switch (entry.type) {
-		case "message":
-			return isRecord(entry.message) ? renderMessage(entry.message) : "";
-		case "custom_message": {
-			const text = textOf(entry.content);
-			if (entry.customType === "envoy-message") return `<primary-message kind="envoy-message">\n${escapeXml(text)}\n</primary-message>`;
-			if (entry.display === false && entry.customType !== "advisor") return "";
-			return `[${String(entry.customType)}] ${text.replace(/\s+/g, " ").trim().slice(0, 120)}`;
-		}
-		case "compaction":
-			return `[compaction] ${clipBytes(String(entry.summary ?? ""), 8 * 1024)}`;
-		case "branch_summary":
-			return `[branch] ${clipBytes(String(entry.summary ?? ""), 2 * 1024)}`;
-		default:
-			return "";
-	}
-}
-
-/** The entries the primary's context still holds: after the last `/clear`, and from the newest compaction's first kept entry, its summary in their place. */
-function contextEntries(entries: readonly Entry[]): Entry[] {
-	let start = 0;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		if (entries[i].type === "reset_boundary") {
-			start = i + 1;
-			break;
-		}
-	}
-	const scoped = entries.slice(start);
-	let at = -1;
-	for (let i = scoped.length - 1; i >= 0; i--) {
-		if (scoped[i].type === "compaction") {
-			at = i;
-			break;
-		}
-	}
-	if (at < 0) return scoped;
-	const compaction = scoped[at] as Record<string, unknown>;
-	const kept = scoped.findIndex(e => e.id === compaction.firstKeptEntryId);
-	return [scoped[at], ...scoped.slice(kept < 0 ? at + 1 : kept).filter(e => e.type !== "compaction")];
-}
-
-/** The newest whole entries of the primary's context that fit in `capBytes`, oldest first, behind an elision line when older ones were dropped. */
-export function renderTranscript(entries: readonly Entry[], capBytes: number): string {
-	const rendered = contextEntries(entries)
-		.map(e => (isRecord(e) ? renderEntry(e) : ""))
-		.filter(text => text !== "");
+/** The newest whole messages of the primary's context that fit in `capBytes`, oldest first, behind an elision line when older ones were dropped. */
+export function renderTranscript(messages: readonly Message[], capBytes: number): string {
+	const rendered = messages.map(renderMessage).filter(text => text !== "");
 	const sizes = rendered.map(byteLength);
 	// Bytes of rendered[from..to) joined by SEPARATOR.
 	const span = (from: number, to: number) => sizes.slice(from, to).reduce((sum, size) => sum + size, 0) + SEPARATOR.length * Math.max(0, to - from - 1);
@@ -301,7 +270,7 @@ export function renderTranscript(entries: readonly Entry[], capBytes: number): s
 		used = next;
 	}
 	if (first === rendered.length) {
-		// The newest entry alone overflows the window: keep its head.
+		// The newest message alone overflows the window: keep its head.
 		rendered[rendered.length - 1] = clipBytes(rendered[rendered.length - 1], budget);
 		first = rendered.length - 1;
 	}
@@ -358,20 +327,29 @@ export class Breaker {
 	}
 }
 
-function renderRequest(tool: string, input: Input, priorReasons: readonly string[]): string {
-	const prior =
-		priorReasons.length > 0
-			? `You answered revise ${priorReasons.length} time(s) for this target since its last allowed call:\n${priorReasons.map(r => `- ${r}`).join("\n")}`
-			: "";
-	const values: Record<string, string> = { tool, args: renderArgs(input), priorReasons: prior };
-	// One pass with a function replacer: argument text is never re-scanned or read as `$` patterns.
-	return requestTemplate.replace(/\{\{(tool|args|priorReasons)\}\}/g, (_, name: string) => values[name]);
+/** `{{name}}` placeholders replaced in one pass, values pasted verbatim (never re-scanned, never read as `$` patterns); a placeholder with no value throws. */
+export function renderTemplate(template: string, values: Record<string, string>): string {
+	return template.replace(/\{\{(\w+)\}\}/g, (_, name: string) => {
+		if (!Object.hasOwn(values, name)) throw new Error(`AskGate prompt template names {{${name}}}, which has no value`);
+		return values[name];
+	});
 }
 
-export const renderRevise = (reason: string) =>
-	`AskGate did not send this call.\n${reason}\nSend the corrected call, or resend this one unchanged with "${REBUTTAL_KEY}": "<one line>" added to the JSON to override; an override is always sent and recorded.`;
-export const renderWarn = (reason: string) =>
-	`<advisor-gate advisor="AskGate" verdict="revise">\n${reason}\nThe call ran. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.\n</advisor-gate>`;
+/** The gate's user message: the agent's system prompt and transcript as escaped data, then the call. */
+function renderRequest(primarySystemPrompt: string, transcript: string, tool: string, input: Input, priorReasons: readonly string[]): string {
+	const prior =
+		priorReasons.length > 0
+			? `You answered revise ${priorReasons.length} time(s) for this target since its last allowed call:\n${priorReasons.map(r => `- ${escapeXml(r)}`).join("\n")}`
+			: "";
+	return renderTemplate(requestTemplate, { primarySystemPrompt: escapeXml(primarySystemPrompt), transcript, tool, args: renderArgs(input), priorReasons: prior });
+}
+
+/** A model's reason, escaped and capped before it reaches the agent: it cannot close its frame or open a tag. */
+const quotedReason = (reason: string) => escaped(reason, GATE_REASON_MAX_BYTES);
+const renderRevise = (reason: string) =>
+	`AskGate did not send this call.\n${quotedReason(reason)}\nSend the corrected call, or resend this one unchanged with "${REBUTTAL_KEY}": "<one line>" added to the JSON to override; an override is always sent and recorded.`;
+const renderWarn = (reason: string) =>
+	`<advisor-gate advisor="AskGate" verdict="revise">\n${quotedReason(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.\n</advisor-gate>`;
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
 	return function askGate(pi: Pi): void {
@@ -426,10 +404,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				return pass("breaker");
 			}
 
-			const system = `<primary-system-prompt>\n${ctx.getSystemPrompt().join("\n\n")}\n</primary-system-prompt>\n\n${charter}`;
-			const transcript = renderTranscript(ctx.sessionManager.getBranch(), GATE_CONTEXT_MAX_BYTES);
-			const request = renderRequest(base.path, event.input, breaker.reasons(key));
-			const user = transcript ? `${transcript}\n\n${request}` : request;
+			// The system role holds only the gate's own text and the charter. The agent's system prompt
+			// and transcript are data about the agent under review, escaped into the user message.
+			const system = `${systemTemplate.trim()}\n\n${charter}`;
+			const transcript = renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES);
+			const user = renderRequest(ctx.getSystemPrompt().join("\n\n"), transcript, base.path, event.input, breaker.reasons(key));
 			const promptBytes = byteLength(system) + byteLength(user);
 			if (dumpPath) deps.appendFile(dumpPath, `===== AskGate ${event.toolCallId} system =====\n${system}\n===== AskGate ${event.toolCallId} user =====\n${user}\n\n`);
 
