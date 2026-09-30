@@ -78,6 +78,11 @@ task:
   isolation:
     merge: patch
     enabled: true
+# Shake (mechanical elision of old tool output, no model call) runs first, so a
+# paid model-written summary runs only when shake cannot free enough; the
+# shipped default tries shake after handoff. AGENTC-1288, Sami, 2026-09-30.
+compaction:
+  methodOrder: [shake, remote, snapcompact, handoff, soft]
 advisor:
   enabled: true
 bashInterceptor:
