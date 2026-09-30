@@ -31,10 +31,6 @@
 // While omp runs it owns the pane, where a stray line would sit on its screen,
 // so only the box's last line also goes to stderr; a box that ended is
 // otherwise silent.
-//
-// It also supervises `agent-secrets renew` (the box's broker lease; scripts/agentbox enrolls
-// the box and agentbox/AGENTS.md explains the identity): started once the enrollment id
-// exists, kept across a restart, respawned if it dies, logged to $AGENT_SECRETS_KEY_DIR/renew.log.
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -130,48 +126,6 @@ let relaunch: string[] | undefined;
 let restarting = false;
 let shuttingDown = false;
 
-// agent-secrets: the box's enrollment lease is renewed by a supervised `agent-secrets renew`
-// beside omp for as long as the box lives. It starts once the launcher has written the
-// enrollment id (a few seconds after start: scripts/agentbox enroll_box), keeps running across
-// a SIGUSR1 relaunch (same container, same key, same enrollment), is respawned 10 s after it
-// dies, and is stopped only when the box shuts down. Its output goes to renew.log in the key
-// dir: this process's stderr is the pane omp draws in.
-const keyDir = process.env.AGENT_SECRETS_KEY_DIR;
-let renew: Bun.Subprocess | undefined;
-
-function renewLog(line: string): void {
-	if (keyDir) fs.appendFileSync(`${keyDir}/renew.log`, `${new Date().toISOString()} agentbox-run: ${line}\n`);
-}
-
-function spawnRenew(): void {
-	if (!keyDir || shuttingDown) return;
-	const log = fs.openSync(`${keyDir}/renew.log`, "a");
-	const child = Bun.spawn(["agent-secrets", "renew"], { stdio: ["ignore", log, log], env: process.env });
-	renew = child;
-	child.exited.then((code) => {
-		fs.closeSync(log);
-		if (shuttingDown || renew !== child) return;
-		renewLog(`agent-secrets renew exited ${code}; respawning in 10 s`);
-		setTimeout(spawnRenew, 10_000);
-	});
-}
-
-// Poll for the enrollment file every 2 s, for 10 minutes at most: a box whose enrollment
-// failed has enrollment.error instead (scripts/agentbox), and nothing to renew.
-function startRenewWhenEnrolled(deadlineMs: number): void {
-	if (!keyDir) return;
-	if (fs.existsSync(`${keyDir}/enrollment`)) {
-		spawnRenew();
-		return;
-	}
-	if (Date.now() >= deadlineMs) {
-		renewLog("no enrollment after 10 min; renew not started");
-		return;
-	}
-	setTimeout(() => startRenewWhenEnrolled(deadlineMs), 2_000);
-}
-startRenewWhenEnrolled(Date.now() + 600_000);
-
 process.on("SIGUSR1", () => {
 	if (shuttingDown || restarting) return;
 	restarting = true;
@@ -189,7 +143,6 @@ for (const sig of ["SIGHUP", "SIGTERM"] as const) {
 	process.on(sig, () => {
 		shuttingDown = true;
 		note(`${sig} received: shutting omp down, no relaunch`);
-		renew?.kill("SIGTERM");
 		relaunch = undefined;
 		child.kill(sig);
 	});
@@ -199,7 +152,6 @@ for (const sig of ["SIGHUP", "SIGTERM"] as const) {
 process.on("SIGINT", () => {
 	shuttingDown = true;
 	note("SIGINT received: no relaunch will follow");
-	renew?.kill("SIGTERM");
 	relaunch = undefined;
 });
 
@@ -207,7 +159,6 @@ for (;;) {
 	const code = await child.exited;
 	const ran = `after ${Math.round((Date.now() - startedAt) / 1000)}s (exit code ${code ?? "none"}, signal ${child.signalCode ?? "none"})`;
 	if (shuttingDown || relaunch === undefined) {
-		renew?.kill("SIGTERM");
 		note(`omp (pid ${child.pid}) exited ${ran}; the box ends`, true);
 		process.exit(code ?? 1);
 	}

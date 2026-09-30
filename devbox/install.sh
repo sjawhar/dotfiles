@@ -25,4 +25,8 @@ bash "${DOTFILES_DIR}/installers/forward.sh" serve
 # without it each session loads its own ~1 GB copy of the mnemopi embedding model.
 bash "${DOTFILES_DIR}/installers/omp-embed.sh"
 
+# The secrets broker's host helper (AGENTC-393): agent sessions run here, so this machine
+# registers them and enrolls their boxes (see installers/agent-secrets.sh).
+bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
+
 echo "--- Devbox setup complete ---"

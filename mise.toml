@@ -10,11 +10,12 @@
 minimum_release_age = "14d"
 # My own repos are exempt from the release-age filter. That delay exists so a
 # third-party compromise has time to surface before I install it, which buys
-# nothing for code my own attested CI just built -- and mise still verifies
-# GitHub build provenance on every install either way. Third-party tools keep
-# the filter. secretsd matters most here: it is the secrets broker, and its
-# daemon and OpenCode plugin ship together, so a fix cannot reach a machine at
-# all until the release is installable.
+# nothing for code my own attested CI just built. mise verifies GitHub build
+# provenance on install for every release that carries an attestation; a
+# release with none installs unverified, which is why [tools.agent-secrets]
+# below pins its assets' digests. Third-party tools keep the filter. secretsd
+# matters most here: its daemon and OpenCode plugin ship together, so a fix
+# cannot reach a machine at all until the release is installable.
 # mise matches these entries EXACTLY -- a "github:sjawhar/*" glob is accepted
 # and then silently ignored -- so a new repo of mine has to be added by hand.
 # Alias short names sit beside their backend ids because either form can be
@@ -128,10 +129,7 @@ gitleaks = "8.30.1"
 
 # Time tracker CLI, kept for reading past data (collection is retired). Its
 # release also publishes a tt-watcher asset, so [tool_alias] + a per-platform
-# asset_pattern pick the CLI tarball; a bare "github:sjawhar/time-tracker"
-# entry must NOT coexist or it collides on the install path.
-# Measured on mise 2026.8.10 (2026-09-30): installed together, the bare entry and the tt alias
-# land in separate install dirs, `mise which` resolves each to its own binary, and both run.
+# asset_pattern pick the CLI tarball.
 # `forward` has one release asset, but its alias supplies the short name used by
 # the installer guard and `mise exec -- forward`.
 [tool_alias]
@@ -151,7 +149,7 @@ version = "latest"
 platforms.linux-x64   = { asset_pattern = "forward-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.tar.gz" }
 
-# The secrets broker from the same forward release (consolidation: one repo,
+# secretsd from the same forward release (consolidation: one repo,
 # one tag, three artefacts). Native glibc, x86_64 only, deliberately: it
 # depends on mlockall and pidfd behaviour a static musl build would change,
 # and it only ever runs on the devbox. Its archive ships bin/secrets plus the
@@ -173,12 +171,16 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # release: its agent-secrets tarball ships bin/agent-secrets and bin/agent-secrets-helper, and
 # the alias keeps it apart from the plain "github:sjawhar/legion" CLI entry above (a different
 # tag series and install dir; both measured side by side on mise 2026.8.10). The helper runs
-# this pin from its user unit, and installers/agent-secrets.sh restarts it on a bump only when
-# no host session is registered: a restart re-pins every live session and revokes its grants.
+# this pin from its user unit (only where installers/agent-secrets.sh set it up: devbox/install.sh),
+# and installers/agent-secrets.sh restarts it on a bump only when no host session is registered:
+# a restart re-pins every live session and revokes its grants.
+# The release is mutable and carries no build attestation, so each asset's sha256 is pinned: a
+# replaced asset fails to install. The digests are the ones GitHub recorded at upload; bump them
+# with the version (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
 version = "legion-envoy-v3.16.0"
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz" }
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:ac6f2ad028c4cbaa92bd87bab2cf7c9e265af9fa3802882f52e00eb88467de5b" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:1aca02e614ed28ff9d56b1bf3d96c88cbc695e3724030eff57d7f057208b59a9" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]

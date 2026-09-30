@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""The agent launchers (shims/omp, scripts/cld, scripts/oc) and agent-secrets registration.
+"""scripts/agent-secrets-session, and the agent launchers that exec their agent through it.
 
-On a host with the agent-secrets helper installed, each launcher execs its agent under
-`agent-secrets register --exec --`, and adds `--wait 10` only while `agent-secrets launcher
-login-status` exits 0: without a launcher credential the helper cannot enroll the session, so
-the wait would hold every launch for the full 10 s. A box (AGENT_SECRETS_KEY_DIR) and a machine
-without the helper never register.
+On a host with the agent-secrets helper's unit installed, the session execs the agent under
+`agent-secrets register --exec --`, keeping the pid, and adds `--wait 10` only while `agent-secrets
+launcher login-status` prints `issued`. It registers nothing when `login-status` prints no state
+(the helper does not answer, or the client cannot run), when agent-secrets is missing, in a box
+(AGENT_SECRETS_KEY_DIR) or on a machine without the helper; the agent starts either way.
 
-Technique: stub `agent-secrets` (login-status exits as the case needs; `register` prints the
-flags it got and execs the command after `--`) and the agent binary itself, first on PATH.
+Technique: stub `agent-secrets` (login-status answers as the case needs; `register` prints the
+flags and environment it got, then execs the command after `--`) and the agents themselves,
+first on PATH.
 """
 
 from __future__ import annotations
@@ -21,6 +22,12 @@ import unittest
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
+SESSION = DOTFILES / "scripts" / "agent-secrets-session"
+BROKER_URL = next(
+    line.split("=", 1)[1].strip()
+    for line in (DOTFILES / "agent-secrets" / "broker.env").read_text().splitlines()
+    if line.startswith("AGENT_SECRETS_URL=")
+)
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -33,14 +40,19 @@ AGENT_SECRETS_STUB = r"""
 case "$1" in
     launcher)
         echo login-status >>"$STUB_LOG"
-        exit "${STUB_LOGIN_STATUS:-1}"
+        case "${STUB_LOGIN_STATE:-none}" in
+            issued) echo issued; exit 0 ;;
+            unreachable) echo "agent-secrets launcher login-status: dial unix $AGENT_SECRETS_HELPER_SOCK: connect: no such file or directory" >&2; exit 1 ;;
+            broken) echo "mise ERROR Tool not installed for shim: agent-secrets" >&2; exit 1 ;;
+            *) echo "$STUB_LOGIN_STATE"; exit 1 ;;
+        esac
         ;;
     register)
         shift
         flags=()
         while [[ "$1" != -- ]]; do flags+=("$1"); shift; done
         shift
-        echo "REGISTER ${flags[*]} SOCK=${AGENT_SECRETS_HELPER_SOCK:-unset}"
+        echo "REGISTER ${flags[*]} SOCK=${AGENT_SECRETS_HELPER_SOCK:-unset} URL=${AGENT_SECRETS_URL:-unset}"
         exec "$@"
         ;;
 esac
@@ -57,7 +69,7 @@ LAUNCHERS: dict[str, tuple[list[str], str]] = {
 }
 
 
-class LauncherRegistration(unittest.TestCase):
+class AgentSecretsSession(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
@@ -66,7 +78,10 @@ class LauncherRegistration(unittest.TestCase):
         self.stub_dir = self.root / "bin"
         self.stub_dir.mkdir()
         self.log = self.root / "agent-secrets.log"
+        self.sock = self.root / "run" / "agent-secrets" / "helper.sock"
         write_stub(self.stub_dir, "agent-secrets", AGENT_SECRETS_STUB)
+        # The agent reports its pid: registration must keep the session's.
+        write_stub(self.stub_dir, "agent", 'echo "AGENT pid=$$ $*"')
         # shims/omp reaches omp through `mise x github:sjawhar/oh-my-pi -- omp` when no local
         # build is on PATH; cld and oc exec their agents by name.
         write_stub(self.stub_dir, "mise", 'shift 3; echo "AGENT $*"')
@@ -91,69 +106,120 @@ class LauncherRegistration(unittest.TestCase):
         unit.parent.mkdir(parents=True)
         unit.write_text("", encoding="utf-8")
 
-    def launch(self, name: str, **extra: str) -> subprocess.CompletedProcess[str]:
-        argv, _ = LAUNCHERS[name]
-        return subprocess.run(
-            argv, capture_output=True, text=True, env={**self.env, **extra}, check=False, timeout=60
+    def session(self, **extra: str) -> tuple[subprocess.CompletedProcess[str], int]:
+        proc = subprocess.Popen(
+            [str(SESSION), "agent", "--flag"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**self.env, **extra},
         )
+        out, err = proc.communicate(timeout=60)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err), proc.pid
 
     def status_calls(self) -> int:
         return len(self.log.read_text().splitlines()) if self.log.exists() else 0
 
-    def test_credential_issued_waits_for_enrollment(self) -> None:
+    def test_credential_issued_registers_and_waits_keeping_the_pid(self) -> None:
         self.install_helper_unit()
-        for name, (_, agent_line) in LAUNCHERS.items():
-            with self.subTest(launcher=name):
-                result = self.launch(name, STUB_LOGIN_STATUS="0")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                lines = result.stdout.splitlines()
-                sock = self.root / "run" / "agent-secrets" / "helper.sock"
-                self.assertEqual(lines[0], f"REGISTER --wait 10 --exec SOCK={sock}")
-                self.assertTrue(lines[1].startswith(agent_line), result.stdout)
+        result, pid = self.session(STUB_LOGIN_STATE="issued")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL}",
+                f"AGENT pid={pid} --flag",
+            ],
+        )
+        self.assertEqual(result.stderr, "")
+
+    def test_caller_socket_and_url_are_kept(self) -> None:
+        self.install_helper_unit()
+        result, _ = self.session(
+            STUB_LOGIN_STATE="issued",
+            AGENT_SECRETS_HELPER_SOCK="/elsewhere/helper.sock",
+            AGENT_SECRETS_URL="https://b.example",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines()[0],
+            "REGISTER --wait 10 --exec SOCK=/elsewhere/helper.sock URL=https://b.example",
+        )
 
     def test_no_credential_registers_without_waiting(self) -> None:
         self.install_helper_unit()
-        for name, (_, agent_line) in LAUNCHERS.items():
-            with self.subTest(launcher=name):
-                before = self.status_calls()
-                result = self.launch(name, STUB_LOGIN_STATUS="1")
+        for state in ("none", "pending"):
+            with self.subTest(state=state):
+                result, pid = self.session(STUB_LOGIN_STATE=state)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                lines = result.stdout.splitlines()
-                self.assertTrue(lines[0].startswith("REGISTER --exec SOCK="), result.stdout)
-                self.assertTrue(lines[1].startswith(agent_line), result.stdout)
-                self.assertEqual(self.status_calls(), before + 1)
-
-    def test_no_helper_installed_never_registers(self) -> None:
-        for name, (_, agent_line) in LAUNCHERS.items():
-            with self.subTest(launcher=name):
-                result = self.launch(name, STUB_LOGIN_STATUS="0")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(result.stdout.startswith(agent_line), result.stdout)
-                self.assertNotIn("REGISTER", result.stdout)
-        self.assertEqual(self.status_calls(), 0)
-
-    def test_box_never_registers(self) -> None:
-        self.install_helper_unit()
-        for name, (_, agent_line) in LAUNCHERS.items():
-            with self.subTest(launcher=name):
-                result = self.launch(
-                    name, STUB_LOGIN_STATUS="0", AGENT_SECRETS_KEY_DIR=str(self.root / "keys")
+                self.assertEqual(
+                    result.stdout.splitlines(),
+                    [
+                        f"REGISTER --exec SOCK={self.sock} URL={BROKER_URL}",
+                        f"AGENT pid={pid} --flag",
+                    ],
                 )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(result.stdout.startswith(agent_line), result.stdout)
-                self.assertNotIn("REGISTER", result.stdout)
-        self.assertEqual(self.status_calls(), 0)
 
-    def test_helper_without_client_still_launches(self) -> None:
-        """A helper unit with no agent-secrets on PATH must not turn into a failed launch."""
+    def test_no_state_launches_unregistered_and_says_why(self) -> None:
+        """A stopped helper, or a client that cannot run, costs the launch nothing."""
+        self.install_helper_unit()
+        for state, cause in (
+            ("unreachable", "connect: no such file or directory"),
+            ("broken", "Tool not installed for shim: agent-secrets"),
+        ):
+            with self.subTest(state=state):
+                result, pid = self.session(STUB_LOGIN_STATE=state)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [f"AGENT pid={pid} --flag"])
+                self.assertIn(cause, result.stderr)
+
+    def test_missing_client_launches_unregistered(self) -> None:
         self.install_helper_unit()
         (self.stub_dir / "agent-secrets").unlink()
-        for name, (_, agent_line) in LAUNCHERS.items():
-            with self.subTest(launcher=name):
-                result = self.launch(name)
+        result, pid = self.session()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [f"AGENT pid={pid} --flag"])
+        self.assertIn("agent-secrets is not on PATH", result.stderr)
+
+    def test_box_or_machine_without_the_helper_never_asks(self) -> None:
+        cases = {
+            "no helper unit": {},
+            "box": {"AGENT_SECRETS_KEY_DIR": str(self.root / "keys")},
+        }
+        for name, extra in cases.items():
+            with self.subTest(case=name):
+                if name == "box":
+                    self.install_helper_unit()
+                result, pid = self.session(STUB_LOGIN_STATE="issued", **extra)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(result.stdout.startswith(agent_line), result.stdout)
-                self.assertIn("agent-secrets is not on PATH", result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [f"AGENT pid={pid} --flag"])
+                self.assertEqual(result.stderr, "")
+        self.assertEqual(self.status_calls(), 0)
+
+    def test_usage(self) -> None:
+        result = subprocess.run(
+            [str(SESSION)], capture_output=True, text=True, env=self.env, check=False, timeout=30
+        )
+        self.assertEqual(result.returncode, 2)
+
+    def test_each_launcher_registers_its_agent(self) -> None:
+        self.install_helper_unit()
+        for name, (argv, agent_line) in LAUNCHERS.items():
+            with self.subTest(launcher=name):
+                result = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    env={**self.env, "STUB_LOGIN_STATE": "issued"},
+                    check=False,
+                    timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lines = result.stdout.splitlines()
+                self.assertEqual(
+                    lines[0], f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL}"
+                )
+                self.assertTrue(lines[1].startswith(agent_line), result.stdout)
 
 
 if __name__ == "__main__":
