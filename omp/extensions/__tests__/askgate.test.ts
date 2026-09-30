@@ -517,9 +517,24 @@ describe("deadline and abandonment", () => {
 		const { g, gated, signals } = await bridgedGate();
 		await g.event("session_shutdown");
 		expect(signals[0].aborted).toBe(true);
-		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned", usage: PARTIAL }]);
+		expect(g.entries).toMatchObject([{ outcome: "shutdown", usage: PARTIAL }]);
 		await gated;
 		expect(g.entries).toHaveLength(1);
+	});
+	test("in block mode a call the shutdown caught without a verdict is refused, not let through", async () => {
+		// The runner awaiting it may still be live (a backgrounded cell, a mid-turn dispose): no verdict is not permission.
+		const { g, gated } = await bridgedGate({ OMP_ASKGATE: "block" });
+		await g.event("session_shutdown");
+		const result = await gated;
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("shut down");
+		expect(g.entries).toMatchObject([{ decision: "revise", outcome: "shutdown", verdictMode: "block" }]);
+	});
+	test("in warn mode it goes out, recorded as shutdown so it counts as ungated, not as the user's stop", async () => {
+		const { g, gated } = await bridgedGate();
+		await g.event("session_shutdown");
+		expect(await gated).toBeUndefined();
+		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "shutdown", verdictMode: "warn" }]);
 	});
 	test("shutdown stays inside the runner's 2 s cap even when the aborted call never settles", async () => {
 		const started = Promise.withResolvers<void>();
@@ -534,7 +549,7 @@ describe("deadline and abandonment", () => {
 		const began = Date.now();
 		await g.event("session_shutdown");
 		expect(Date.now() - began).toBeLessThan(1_500);
-		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned" }]);
+		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "shutdown" }]);
 		await gated;
 	});
 });
