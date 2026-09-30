@@ -53,11 +53,11 @@ import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 
-export const SCOPED_DEVICES = ["dispatch_ask", "dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit", "dispatch_issue"] as const;
-export const SPEC_ONLY_DEVICE = "dispatch_issue";
-export const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
-export const REBUTTAL_KEY = "advisor_rebuttal";
-export const GATE_TIMEOUT_MS = 90_000;
+const SCOPED_DEVICES = ["dispatch_ask", "dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit", "dispatch_issue"] as const;
+const SPEC_ONLY_DEVICE = "dispatch_issue";
+const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
+const REBUTTAL_KEY = "advisor_rebuttal";
+const GATE_TIMEOUT_MS = 90_000;
 // The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
 // gate's deadline stays this far under it: room for the aborted call to report its usage
 // (ABORT_GRACE_MS) and for the record. Below MIN_DEADLINE_MS a verdict is hopeless and the gate does not bind.
@@ -65,12 +65,12 @@ const CEILING_MARGIN_MS = 5_000;
 const ABORT_GRACE_MS = 2_000;
 const MIN_DEADLINE_MS = 10_000;
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
-export const GATE_ARGS_MAX_BYTES = 64 * 1024;
+const GATE_ARGS_MAX_BYTES = 64 * 1024;
 const GATE_REASON_MAX_BYTES = 2 * 1024;
-export const GATE_BREAKER_REVISES = 2;
-export const GATE_HALT_AFTER_FAILURES = 3;
+const GATE_BREAKER_REVISES = 2;
+const GATE_HALT_AFTER_FAILURES = 3;
 export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
-export const MODEL_ROLE = "@askgate";
+const MODEL_ROLE = "@askgate";
 export const GATE_EFFORT = "high";
 const SLUG = "askgate";
 const REBUTTAL_CAP = 64;
@@ -81,7 +81,7 @@ const CLIP_MARKER_BYTES = 32;
 const WINDOW_MARKER_BYTES = 64;
 const SEPARATOR = "\n\n";
 
-export type Mode = (typeof MODES)[number];
+type Mode = (typeof MODES)[number];
 type Input = Record<string, unknown>;
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 export interface GateEntry {
@@ -109,7 +109,7 @@ export interface GateEntry {
 }
 export interface CompleteRequest { ctx: unknown; model: unknown; system: string; user: string; sessionId: string; signal: AbortSignal }
 export type Completion = { text: string; error?: string; usage?: Usage };
-export interface Deps {
+interface Deps {
 	env: Record<string, string | undefined>;
 	home: string;
 	now: () => number;
@@ -126,7 +126,7 @@ export interface Deps {
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
-export interface Pi {
+interface Pi {
 	on(event: string, handler: (event: never, ctx: never) => unknown): void;
 	appendEntry(customType: string, data?: unknown): void;
 	logger: { debug(message: string, context?: Record<string, unknown>): void; warn(message: string, context?: Record<string, unknown>): void };
@@ -147,7 +147,7 @@ type GateCtx = {
 export type Message = { role: string } & Record<string, unknown>;
 
 /** The module's one object guard: transcript and overlay data are untyped JSON/YAML. */
-export const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -168,7 +168,7 @@ export function overlayPath(env: Record<string, string | undefined>, home: strin
 }
 
 /** Whether the overlay lists `slug` under `advisor.disableRoster`. A missing file is no kill; an unparsable one is no kill, reported to `onUnparsable`. */
-export function isKilled(overlayText: string | undefined, slug: string, onUnparsable?: (error: unknown) => void): boolean {
+function isKilled(overlayText: string | undefined, slug: string, onUnparsable?: (error: unknown) => void): boolean {
 	if (overlayText === undefined) return false;
 	let doc: unknown;
 	try {
@@ -185,14 +185,14 @@ export function scopedDevice(toolName: string, input: Input): boolean {
 	return (SCOPED_DEVICES as readonly string[]).includes(toolName) && (toolName !== SPEC_ONLY_DEVICE || input.spec !== undefined);
 }
 
-export function breakerKey(toolName: string, input: Input): string {
+function breakerKey(toolName: string, input: Input): string {
 	let key = toolName;
 	for (const k of BREAKER_KEYS) if (input[k] !== undefined) key += `\u0000${k}=${String(input[k])}`;
 	return key;
 }
 
 /** Splits a top-level REBUTTAL_KEY off a device's JSON arguments; anything else comes back unchanged. */
-export function extractRebuttal(content: string): { rebuttal?: string; content: string } {
+function extractRebuttal(content: string): { rebuttal?: string; content: string } {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(content);
@@ -214,7 +214,7 @@ function clipBytes(text: string, max: number): string {
 	return `${head} … [elided ${size - byteLength(head)} bytes]`;
 }
 
-export function renderArgs(input: Input): string {
+function renderArgs(input: Input): string {
 	return clipBytes(JSON.stringify(input, null, 2), GATE_ARGS_MAX_BYTES);
 }
 
@@ -333,7 +333,7 @@ export function parseVerdict(text: string): { decision: "allow" | "revise"; reas
 }
 
 /** Revise reasons per target since its last allowed call. */
-export class Breaker {
+class Breaker {
 	readonly #reasons = new Map<string, string[]>();
 	revised(key: string, reason: string): void {
 		const reasons = this.#reasons.get(key) ?? [];

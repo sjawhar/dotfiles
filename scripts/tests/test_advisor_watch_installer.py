@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """installers/advisor-watch.sh: arming the daily AskGate readout.
 
-The unit runs the shared checkout (`%h/.dotfiles`), so the installer checks that checkout and links
-the unit files from it too, whichever checkout the installer itself runs from: a link into a
-workspace dies when the workspace is forgotten, and the timer, the readout and every kill it would
-apply die with it. It refuses to arm when that checkout's envoy predates `send --source`, which
-would publish the readout to the topic "--source".
+What this installer adds before handing off to arm_user_timer (installers/lib.sh, whose own tests
+cover the agentbox refusal, the unit-file check, the links into $HOME/.dotfiles and the timer
+check): it binds its checks to the shared checkout (`%h/.dotfiles`) the unit runs, whichever
+checkout the installer runs from, and refuses to arm when that checkout's envoy predates
+`send --source`, which would publish the readout to the topic "--source".
 
 Technique: a temporary HOME whose .dotfiles holds the unit files, a stub advisor-report and an
 envoy stub; stubs first on PATH for systemctl (records its argv, answers show-environment,
-list-timers and show) and for the tools the unit needs. The installer runs from this checkout,
-standing in for a scratch workspace.
+list-timers and show) and for the tools the unit needs. The installer runs from this checkout.
 """
 
 from __future__ import annotations
@@ -89,7 +88,7 @@ class AdvisorWatchInstaller(unittest.TestCase):
     def systemctl_calls(self) -> str:
         return self.systemctl_log.read_text(encoding="utf-8") if self.systemctl_log.exists() else ""
 
-    def test_run_from_another_checkout_links_the_shared_one(self) -> None:
+    def test_the_installer_arms_advisor_watch_through_arm_user_timer(self) -> None:
         proc = self.install()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("advisor-watch: armed", proc.stdout)
@@ -102,16 +101,6 @@ class AdvisorWatchInstaller(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("has no 'send --source envoy'", proc.stderr)
         self.assertEqual(self.links(), {})
-        self.assertNotIn("enable", self.systemctl_calls())
-
-    def test_a_shared_checkout_without_the_units_arms_nothing(self) -> None:
-        # advisor-report and envoy already there, the unit files not yet: linking would leave dangling links.
-        (self.shared / "omp" / "advisor-watch.timer").unlink()
-        proc = self.install()
-        self.assertEqual(proc.returncode, 1)
-        self.assertIn("advisor-watch.timer is missing; advance ~/.dotfiles", proc.stderr)
-        self.assertEqual(self.links(), {})
-        self.assertNotIn("daemon-reload", self.systemctl_calls())
         self.assertNotIn("enable", self.systemctl_calls())
 
 
