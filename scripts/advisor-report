@@ -74,6 +74,12 @@ REACHED_MODEL = FAIL_OPEN | {"verdict"}
 # Deliberate passes: the agent's override, the per-target breaker and the machine kill switch. They are not
 # gate failures, so they leave ungated_share's denominator.
 PASSED = frozenset({"rebuttal", "breaker", "killed"})
+# Calls the gate never judged, by design: a primary on another provider sends it no transcript (`skipped`), and a user
+# who stops the write while the gate waits ends the call (`abandoned`). Neither is a gate failure, so both leave
+# ungated_share's numerator and denominator.
+UNJUDGED = frozenset({"skipped", "abandoned"})
+# The extension recorded an abandoned call as `error` with this reason prefix before it had the outcome of its own.
+ABANDONED_REASON = "abandoned:"
 # Calls whose latency the gate measured: a verdict, or the deadline passing. The day-3 floor counts these alone.
 LATENCY_EVIDENCE = frozenset({"verdict", "timeout"})
 
@@ -616,26 +622,36 @@ def blockers(admitted: list[AdviseCall]) -> int:
     return sum(1 for call in admitted if call.severity == "blocker")
 
 
+def gate_outcome(data: dict):
+    """An entry's outcome, an `error` the extension recorded for an abandoned call read as `abandoned`."""
+    outcome, reason = data.get("outcome"), data.get("reason")
+    if outcome == "error" and isinstance(reason, str) and reason.startswith(ABANDONED_REASON):
+        return "abandoned"
+    return outcome
+
+
 def gate_metrics(entries: list[GateEntry]) -> dict:
     data = [entry.data for entry in entries]
-    outcomes = Counter(d.get("outcome") for d in data)
+    outcomes = Counter(gate_outcome(d) for d in data)
     verdict_latencies = [d["latencyMs"] for d in data
                          if d.get("outcome") == "verdict" and isinstance(d.get("latencyMs"), (int, float))]
     revises = sum(1 for entry in entries if entry.fired)
     matched = len(data)
     return {
         "matched": matched,
-        "counts": dict(sorted(Counter(f"{d.get('decision')}/{d.get('outcome')}" for d in data).items())),
+        "counts": dict(sorted(Counter(f"{d.get('decision')}/{gate_outcome(d)}" for d in data).items())),
         "latency_ms_p50": nearest_rank(verdict_latencies, 0.5),
         "latency_ms_p95": nearest_rank(verdict_latencies, 0.95),
         "fail_open_rate": ratio(sum(outcomes[o] for o in FAIL_OPEN), sum(outcomes[o] for o in REACHED_MODEL)),
-        "ungated_share": ratio(sum(outcomes[o] for o in UNGATED), matched - sum(outcomes[o] for o in PASSED)),
+        "ungated_share": ratio(sum(outcomes[o] for o in UNGATED), matched - sum(outcomes[o] for o in PASSED | UNJUDGED)),
         "verdicts": outcomes["verdict"],
         "latency_calls": sum(outcomes[o] for o in LATENCY_EVIDENCE),
         "revise_rate": ratio(revises, outcomes["verdict"]),
         "rebuttal_rate": ratio(outcomes["rebuttal"], matched),
         "breaker_trips": outcomes["breaker"],
         "killed": outcomes["killed"],
+        "skipped": outcomes["skipped"],
+        "abandoned": outcomes["abandoned"],
         "halted_sessions": len({entry.session_id for entry in entries if entry.data.get("outcome") == "halted"}),
         "usage": gate_usage(data),
     }
@@ -1292,6 +1308,9 @@ def gate_check(now: datetime) -> Check:
              f"skips {skips} ({any_skips} by any steer); "
              f"last 24 h {recent['matched']} matched, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
              + ("unread" if lab is None else f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}"),
+             f"gate: {whole['skipped']} skipped: the primary was on another provider, so the gate sent no transcript; "
+             "not in ungated_share",
+             f"gate: {whole['abandoned']} abandoned: the user stopped the write while the gate waited; not in ungated_share",
              f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch" + ("" if baseline is None else f"; {baseline}"),
              *(f"gate: {problem}" for problem in problems or [])]
     # Two readouts at once (the timer and a hand run) must not both apply and announce a KILL, so the overlay is read,

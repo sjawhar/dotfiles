@@ -74,6 +74,8 @@ _entry_seq = [0]
 def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None, reason=None, mode="warn"):
     """An `advisor-gate` entry as the AskGate extension appends it to a root session file."""
     _entry_seq[0] += 1
+    if decision == "revise":
+        reason = reason or "failure 7: the text points at a message the reader cannot see"
     return {
         "type": "custom",
         "customType": "advisor-gate",
@@ -90,7 +92,7 @@ def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="Ask
             "verdictMode": mode,
             "latencyMs": latency_ms,
             "revisesForKey": 0,
-            **({"reason": reason or "failure 7: the text points at a message the reader cannot see"} if decision == "revise" else {}),
+            **({"reason": reason} if reason else {}),
         },
     }
 
@@ -646,6 +648,19 @@ class GateMetricsTest(unittest.TestCase):
         outcomes = ("verdict", "timeout", "error", "no-verdict", "unavailable", "halted", "rebuttal", "breaker", "killed")
         self.assertEqual(ar.gate_metrics([gate_entry(outcome=outcome) for outcome in outcomes])["latency_calls"], 2)
 
+    def test_skipped_and_abandoned_calls_leave_ungated_share_and_fail_open_rate(self):
+        """A primary on another provider sends the gate nothing (`skipped`), and a user who stopped the write ended the
+        call (`abandoned`, recorded as `error` with an `abandoned:` reason until the extension has its own outcome)."""
+        entries = [gate_entry(latency_ms=3000) for _ in range(18)] + [gate_entry(outcome="timeout") for _ in range(2)]
+        entries += [gate_entry(outcome="error", reason="model overloaded")]
+        entries += [gate_entry(outcome="skipped", reason="primary on example-provider") for _ in range(5)]
+        entries += [gate_entry(outcome="error", reason="abandoned: the call ended before a verdict") for _ in range(2)]
+        entries += [gate_entry(outcome="abandoned") for _ in range(3)]
+        metrics = ar.gate_metrics(entries)
+        self.assertAlmostEqual(metrics["ungated_share"], 3 / 21)
+        self.assertAlmostEqual(metrics["fail_open_rate"], 3 / 21)
+        self.assertEqual((metrics["skipped"], metrics["abandoned"], metrics["matched"]), (5, 5, 31))
+
 
 class OverlayTest(unittest.TestCase):
     def setUp(self):
@@ -725,6 +740,16 @@ def labelled(n=30, precision=0.6, harm=0.0):
 UNLABELLED = labelled(n=0, precision=None, harm=None)
 
 
+def skipped_and_abandoned():
+    """The gate metrics of 100 calls: 70 clean verdicts, 10 skipped, 10 abandoned as the extension records them now
+    (`error`, reason `abandoned: …`) and 10 under their own outcome."""
+    entries = [gate_entry(latency_ms=3000) for _ in range(70)]
+    entries += [gate_entry(outcome="skipped", reason="primary on example-provider") for _ in range(10)]
+    entries += [gate_entry(outcome="error", reason="abandoned: the call ended before a verdict") for _ in range(10)]
+    entries += [gate_entry(outcome="abandoned") for _ in range(10)]
+    return ar.gate_metrics(entries)
+
+
 class GateDecisionTest(unittest.TestCase):
     """One row per pre-registered rule (docs/advisor-report.md, Readout rules). Every row changes a gate that reads GO
     on day 15: 30 labels at precision 0.60, harm 0, ungated_share 0.05, p95 4 s against a 90 s timeout, no skips."""
@@ -785,12 +810,14 @@ class GateDecisionTest(unittest.TestCase):
         ("a roster or link problem blocks GO", dict(problems=["roster empty"]), "incomplete", "", None),
         ("a roster or link problem does not block a KILL", dict(problems=["roster empty"], whole=gm(ungated=0.2)),
          "kill", "ungated_share", None),
+        ("30% of calls skipped or abandoned and the rest clean is GO, not a KILL",
+         dict(whole=skipped_and_abandoned, recent=skipped_and_abandoned), "go", "make OMP_ASKGATE=block the shim default", None),
     ]
 
     def decide(self, **changes):
         inputs = dict(day=15, timeout_ms=90_000, whole=gm(), recent=gm(), labelled=labelled(), skips=0, missing_weeks=[],
                       killed=False, problems=[])
-        return ar.gate_decision(**{**inputs, **changes})
+        return ar.gate_decision(**{**inputs, **{key: value() if callable(value) else value for key, value in changes.items()}})
 
     def test_each_rule(self):
         for rule, changes, verdict, carried, absent in self.ROWS:
@@ -988,6 +1015,17 @@ class ReadoutTest(unittest.TestCase):
         self.healthy_gate()
         proc = self.home.run("readout", "--check", "gate", "--check", "trial", check_exit=3)
         self.assertIn("trial: not armed", proc.stdout)
+
+    def test_skipped_and_abandoned_calls_are_counted_on_their_own_lines_and_leave_ungated_share(self):
+        at = self.now - timedelta(hours=1)
+        self.healthy_gate(extra=[gate_line(outcome="skipped", reason="primary on example-provider", at=at) for _ in range(4)]
+                          + [gate_line(outcome="error", reason="abandoned: the call ended before a verdict", at=at) for _ in range(2)]
+                          + [gate_line(outcome="abandoned", at=at)])
+        out = self.home.run("readout", "--check", "gate", check_exit=3).stdout
+        self.assertIn("ungated_share 0.050", out)
+        lines = out.splitlines()
+        self.assertIn("gate: 4 skipped: the primary was on another provider, so the gate sent no transcript; not in ungated_share", lines)
+        self.assertIn("gate: 3 abandoned: the user stopped the write while the gate waited; not in ungated_share", lines)
 
     def test_an_empty_advisors_list_messages_the_role_and_writes_nothing(self):
         self.healthy_gate()
