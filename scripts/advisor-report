@@ -78,7 +78,9 @@ BREAKER_KEYS = ("issue", "ask", "artifact", "project", "in_reply_to")
 # Probe sessions: acceptance and smoke runs, whose defects are planted and whose responses are scripted, so they measure
 # detection, not precision. `sample` leaves them out unless --include-probes and marks their rows; no label counts one.
 PROBE_DIRS = ("-.worktrees-p8-accept-*", "-tmp-askgate-smoke-*")
-LABELS = frozenset({"acted-correct", "acted-harmful", "ignored-agent-right", "ignored-advisor-right", "moot", "noise"})
+# A gate label is two axes, each decided by one observable (docs/advisor-report.md, Rubric); a watch label is one of four.
+GATE_VERDICTS, GATE_RESPONSES = ("right", "wrong"), ("acted", "ignored")
+WATCH_LABELS = frozenset({"right", "wrong", "moot", "noise"})
 
 FAIL_OPEN = frozenset({"timeout", "error", "no-verdict"})
 UNGATED = FAIL_OPEN | {"unavailable", "halted"}
@@ -767,13 +769,12 @@ def gate_usage(data: list[dict]) -> dict:
 
 
 def labelled_metrics(labels: dict[str, dict], fired_ids, skips: int) -> dict:
-    rows = [labels[row_id] for row_id in fired_ids if row_id in labels]
-    counts = Counter(row["label"] for row in rows)
-    return {
-        "n": len(rows),
-        "precision": ratio(counts["acted-correct"] + counts["ignored-advisor-right"], len(rows)),
-        "harm": ratio(counts["acted-harmful"] + skips, len(rows)),
-    }
+    """Over the fired units a gate label covers: precision = right / labelled, whatever the agent did; harm counts the
+    wrong verdicts the agent acted on."""
+    rows = [labels[row_id] for row_id in fired_ids if labels.get(row_id, {}).get("stratum") == "gate"]
+    right = sum(1 for row in rows if row["verdict"] == "right")
+    harmful = sum(1 for row in rows if row["verdict"] == "wrong" and row["response"] == "acted")
+    return {"n": len(rows), "precision": ratio(right, len(rows)), "harm": ratio(harmful + skips, len(rows))}
 
 
 def attempt_totals(attempts: list[Attempt], days: float) -> dict:
@@ -1418,8 +1419,40 @@ def cmd_sample(args) -> int:
 
 # --- labels ----------------------------------------------------------------
 
+def load_sampled() -> dict[str, dict]:
+    """Every id a packet carried, with its stratum and probe flag: the only ids a label may name."""
+    path = report_dir() / "sampled.jsonl"
+    if not path.is_file():
+        return {}
+    rows, bad = read_jsonl(path)
+    if bad:
+        raise Failure(f"{path} has {bad} unparsable line(s)")
+    return {row["id"]: row for row in rows}
+
+
+def label_problem(row, sampled: dict[str, dict], labeler: str) -> str | None:
+    """Why a label row cannot be taken, or None. A gate label is the two axes, a watch label one of four."""
+    if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not isinstance(row.get("at"), str):
+        return 'a label row has a string "id" and "at"'
+    if "labeler" in row and row["labeler"] != labeler:
+        return f"{row['id']}: labeler {row['labeler']!r} is not --labeler {labeler!r}"
+    unit = sampled.get(row["id"])
+    if unit is None:
+        return f"{row['id']}: no packet carried this id"
+    if unit["probe"]:
+        return f"{row['id']}: a probe row, which no label may count"
+    if unit["stratum"] == "gate":
+        if row.get("verdict") not in GATE_VERDICTS or row.get("response") not in GATE_RESPONSES or "label" in row:
+            return f"{row['id']}: a gate label is \"verdict\": right|wrong and \"response\": acted|ignored"
+    elif row.get("label") not in WATCH_LABELS or "verdict" in row or "response" in row:
+        return f"{row['id']}: a watch label is \"label\": {'|'.join(sorted(WATCH_LABELS))}"
+    return None
+
+
 def cmd_ingest_labels(args) -> int:
     source = Path(args.file).expanduser()
+    sampled = load_sampled()
+    ingested = iso(datetime.now(timezone.utc))
     rows, problems = [], []
     for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
@@ -1429,19 +1462,21 @@ def cmd_ingest_labels(args) -> int:
         except ValueError:
             problems.append(f"line {number}: not JSON")
             continue
-        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row.get(k) for k in ("id", "label", "labeler", "at")):
-            problems.append(f"line {number}: a label row is {{\"id\", \"label\", \"labeler\", \"at\"}}")
-        elif row["label"] not in LABELS:
-            problems.append(f"line {number}: unknown label {row['label']!r} (one of {', '.join(sorted(LABELS))})")
-        else:
-            rows.append({k: row[k] for k in ("id", "label", "labeler", "at")})
+        problem = label_problem(row, sampled, args.labeler)
+        if problem is not None:
+            problems.append(f"line {number}: {problem}")
+            continue
+        stratum = sampled[row["id"]]["stratum"]
+        axes = ("verdict", "response") if stratum == "gate" else ("label",)
+        rows.append({"id": row["id"], "stratum": stratum, **{axis: row[axis] for axis in axes}, "labeler": args.labeler,
+                     "at": row["at"], "ingested": ingested})
     if problems:
         raise UsageError(f"{source}: nothing ingested\n  " + "\n  ".join(problems))
     report_dir().mkdir(parents=True, exist_ok=True)
     with (report_dir() / "labels.jsonl").open("a", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row) + "\n")
-    print(f"ingested {len(rows)} labels into {report_dir() / 'labels.jsonl'}")
+    print(f"ingested {len(rows)} labels by {args.labeler} into {report_dir() / 'labels.jsonl'}")
     return 0
 
 
@@ -1774,6 +1809,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest = sub.add_parser("ingest-labels", help="append labelled rows to ~/.omp/advisor-report/labels.jsonl")
     ingest.add_argument("file")
+    ingest.add_argument("--labeler", required=True, help="who labelled the rows; two labellers may label the same id")
     ingest.set_defaults(func=cmd_ingest_labels)
 
     arm = sub.add_parser("arm", help="record an experiment's launch in ~/.omp/advisor-report/launch.json")

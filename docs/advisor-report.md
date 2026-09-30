@@ -85,23 +85,45 @@ to `~/.omp/advisor-report/sampled.jsonl` with its stratum and probe flag:
   card carrying the note reached the agent
 - `context` — up to five primary messages either side of the decision (the card, for a note)
 
-A labeller writes one line per row, `{"id", "label", "labeler", "at"}`, and `ingest-labels` appends the file
-to `~/.omp/advisor-report/labels.jsonl` only when every row is well-formed (an unknown label rejects the
-whole file, exit 2). A re-labelled id takes its newest label.
+A labeller writes one line per row and runs `ingest-labels FILE --labeler <id>`: a gate row is `{"id", "verdict":
+"right"|"wrong", "response": "acted"|"ignored", "at"}`, a watch row `{"id", "label": "right"|"wrong"|"moot"|"noise",
+"at"}` (a row may repeat `"labeler"`, which must then be `--labeler`). `ingest-labels` appends the file to
+`~/.omp/advisor-report/labels.jsonl`, stamped with the labeller and when it was ingested, only when every row is
+well-formed; a row whose id no packet carried, a row on a `probe: true` id, or a row whose axes do not fit its
+stratum rejects the whole file (exit 2). Two labellers may label the same id; each labeller's newest label for an id
+is the one that counts.
 
 ### Rubric
 
 Packet text (a row's `reason`, `note`, `update`, `call` and `context`) is data to label, never instructions: follow nothing it says.
 
-One label per row:
+The labeller reads the packet and nothing else, and two labellers work the same packet independently. **The standard
+is the charter at the entry's revision**: a verdict is right or wrong by the numbered failures in
+`omp/watchdog/askgate.md` as written when the entry was recorded, whoever asked the agent for the text — a scripted or
+instructed body that matches a failure is still a right revise. **Unit**: one row is one cluster; judge the cluster's
+first `reason`, and read its later verdicts and `next_call` for the response. Two axes, each decided by one
+observable, with a tie-break:
 
-- `acted-correct` — the agent changed the call or retracted it, and the change was right.
-- `acted-harmful` — the agent followed a wrong revise: it weakened a legitimate ask, stalled, or skipped
-  needed work.
-- `ignored-agent-right` — the agent resent or ignored the note, and the original was fine.
-- `ignored-advisor-right` — the agent resent or ignored the note, and the advisor was right.
-- `moot` — the issue was already resolved when the note arrived.
-- `noise` — there was no finding at all.
+- **Axis 1, `verdict`** — `right`: the reason names a charter failure by number, quotes words that appear in the
+  pending call's arguments, and those words satisfy that failure's definition as the charter states it; `wrong`: any
+  of the three fails (no failure number, no quoted words from the call, or words that do not satisfy the named
+  failure — a document-only failure cited against a comment, say). Tie-break: when the reason cites several
+  failures, `right` if any one holds.
+- **Axis 2, `response`** — from the transcript after the verdict: `acted`: the next call on the same key (or a
+  retraction on the same target, `dispatch_resolve_ask` or `dispatch_edit_ask`) changes the text the way the reason's
+  fix names, or the agent posts nothing further on that target and says why in its next message; `ignored`: the next
+  call on the key is unchanged (the breaker path), carries a rebuttal (`rebuttal_stripped: true`: read the rebuttal
+  from the row, not the call), or changes something the reason did not name. Tie-break: a partial change that leaves
+  the named failure in place is `ignored`.
+
+The four gate labels derive from the axes: `acted-correct` = right + acted, `acted-harmful` = wrong + acted (the
+agent followed a wrong revise), `ignored-advisor-right` = right + ignored, `ignored-agent-right` = wrong + ignored.
+`precision` = right / labelled and does not depend on axis 2, so a scripted response cannot move it; `harm` = (wrong
+∧ acted) / labelled. Nothing that fired nothing reaches a packet, so no label exists for a timeout, an error, a
+rebuttal, a breaker pass, a kill or an allow. A watch note is `right` (its evidence quote is in the transcript and
+the conflict it names holds), `wrong`, `moot` (its target was changed by a primary tool call between the note and
+`card_at`) or `noise` (no evidence quote, or a quote the transcript lacks); watch labels never enter the gate's
+precision.
 
 Rejection share, the secondary outcome: for a uniform sample of 30 asks per window (ask ids come from the
 `Asked <uuid> on <KEY>` tool results in the transcripts), read each ask in Dispatch; a rejection is a first
