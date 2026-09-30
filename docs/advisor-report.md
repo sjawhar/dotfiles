@@ -43,11 +43,11 @@ Shares are fractions from 0 to 1. `-` / `null` means the denominator was empty.
 | `watch.moot_pct` | held notes with a card where a primary tool call between the call and the card carries one of the note's ids (a UUID, an 8+-character hex id with a letter and a digit, an `xd://` path) |
 | `watch.chains` | per root session, pairs of admitted notes whose word sets have Jaccard ≥ 0.5; sessions with ≥ 2 admitted `blocker`s |
 | `watch.cost_usd_per_day` | dollars per day the watch-mode advisor's own turns cost: `stats.db messages.cost_total` for `agent_type = advisor` rows of its transcripts in the window |
-| `skips` | primary tool results beginning `Skipped due to pending system advisory` |
+| `skips`, `skips_any_steer` | primary tool results beginning `Skipped due to pending system advisory`. The fork writes that text for every non-user steer that arrives while a tool runs, so each skip is attributed to the steer that caused it: the first custom message after the skipped result, before the agent's next assistant message. `skips` counts only the skips whose steer is an `advisor` card carrying a note from `--advisor` (a note that names no advisor is the unnamed legacy advisor, `--advisor default`); `skips_any_steer` counts all of them (in the 14 days to 2026-09-30, 99.4% were caused by envoy messages). The AskGate gate emits no card, so its own skips are 0 by construction |
 | `scoped_calls` | assistant tool calls in any session file that are a `write` whose `path` matches the scope regex (as `write(<path>)`) or a top-level `dispatch_<x>` call that does; `xd://dispatch_issue` counts only when its JSON arguments carry `spec`. Split by where the file sits: `root` (`sessions/<project>/<stem>.jsonl`, the root sessions a gate covers) and `subagent` (any file below `<stem>/`, task subagents, which run no advisor); `per_day` divides by the window length |
 | `gate` | over `{type: custom, customType: advisor-gate}` entries whose `advisor` slugifies to `--advisor`: `counts` by `decision/outcome`; `latency_ms_p50`/`p95` (nearest rank) over `outcome: verdict`; `fail_open_rate` = (timeout + error + no-verdict) / (verdict + timeout + error + no-verdict); `ungated_share` = (timeout + error + no-verdict + unavailable + halted) / (matched − rebuttal − breaker − killed), since an override, a breaker pass and the machine kill switch are deliberate passes rather than gate failures; `revise_rate` over verdicts; `rebuttal_rate` over matched; `breaker_trips`; `killed`; `halted_sessions`; `usage` (input, output, cache-read and cache-write tokens, and `cost` in dollars) summed from each entry's `usage`, with `usage_per_day` and `cost_usd_per_day` — the entries are the only record of the gate's spend, which `omp stats` cannot see. Other entry fields (`argsDigest`, `promptBytes`) are not read |
 | `corrections` | Σ(negation + blame + anguish + yelling + profanity) over `stats.db user_messages` of the window's root sessions, per 100 primary turns. An agent box relaunch moves a session to a new project directory and `stats.db` keeps the rows it ingested earlier under the old path, so a row joins its session on the path below the project directory (`<stem>.jsonl`) |
-| `labelled` | over the fired rows (gate `revise` verdicts and admitted notes) that carry a label: precision = (acted-correct + ignored-advisor-right) / n; harm = (acted-harmful + skips) / n |
+| `labelled` | over the fired rows (gate `revise` verdicts and admitted notes) that carry a label: precision = (acted-correct + ignored-advisor-right) / n; harm = (acted-harmful + `skips`) / n |
 
 ## Sample packets and labels
 
@@ -96,7 +96,7 @@ these rules over the window from launch to now; a gate that was never armed is n
 | day 14 | `ungated_share` ≥ 0.10 over the window | KILL |
 | day 14, ≥ 30 labelled revises | precision < 0.3 | KILL |
 | day 14, any number of labelled revises | harm > 0.10 | KILL |
-| day 14, ≥ 30 labelled revises | precision ≥ 0.5, harm ≤ 0.05, `ungated_share` < 0.10, p95 ≤ 0.9 × timeout, skips = 0 | GO: make `OMP_ASKGATE=block` the shim default |
+| day 14, ≥ 30 labelled revises | precision ≥ 0.5, harm ≤ 0.05, `ungated_share` < 0.10, p95 ≤ 0.9 × timeout, `skips` = 0 (skips the gate's own cards caused; harm counts the same ones) | GO: make `OMP_ASKGATE=block` the shim default |
 | day 14–20 | neither | EXTEND one week |
 | day 21 onward | not GO | KILL |
 | any day | fewer than 30 labelled revises | incomplete; each completed week with no labels is named |

@@ -239,8 +239,9 @@ class WatchFixtureTest(unittest.TestCase):
     def test_moot_when_a_later_call_carries_the_notes_ask_id_before_the_card(self):
         self.assertEqual(self.metrics["watch"]["moot_pct"], 1.0)
 
-    def test_skips_counted_from_primary_tool_results(self):
-        self.assertEqual(self.metrics["skips"], 1)
+    def test_a_skip_counts_for_an_advisor_only_when_its_own_card_caused_it(self):
+        # The fixture's one skip follows the AskGate card; the card came first, so it did not cause the skip.
+        self.assertEqual((self.metrics["skips"], self.metrics["skips_any_steer"]), (0, 1))
 
     def test_unparsable_lines_are_counted_not_fatal(self):
         self.assertEqual(self.metrics["files"]["bad_lines"], 1)
@@ -284,6 +285,66 @@ def record(**fields):
 def assistant_call(call_id, name, arguments, at):
     return {"type": "message", "id": f"m{call_id}", "timestamp": ar.iso(at),
             "message": {"role": "assistant", "content": [{"type": "toolCall", "id": call_id, "name": name, "arguments": arguments}]}}
+
+
+def skipped_result(call_id, at):
+    """A tool result the fork skipped because a steer was pending."""
+    return {"type": "message", "id": f"r{call_id}", "timestamp": ar.iso(at),
+            "message": {"role": "toolResult", "toolCallId": call_id, "toolName": "wait",
+                        "content": [{"type": "text", "text": "Skipped due to pending system advisory: a steer arrived."}]}}
+
+
+def envoy_steer(at):
+    return {"type": "custom_message", "customType": "envoy-message", "content": "envoy:\n  from: a peer", "display": True,
+            "timestamp": ar.iso(at)}
+
+
+def card_steer(at, *advisors):
+    """An advisor card with one note from each advisor; None is the unnamed legacy advisor, which names none."""
+    notes = [{"note": f"note {i}", "severity": "concern", **({} if name is None else {"advisor": name})} for i, name in enumerate(advisors)]
+    return {"type": "custom_message", "customType": "advisor", "content": "<advisory>…</advisory>", "display": True,
+            "details": {"notes": notes}, "timestamp": ar.iso(at)}
+
+
+def skipped_by(steer, at, call_id):
+    """The agent calls a tool, the fork skips it for a pending steer, and the steer follows the skipped result."""
+    return [assistant_call(call_id, "wait", {}, at), skipped_result(call_id, at + timedelta(seconds=1)), steer]
+
+
+class SkipAttributionTest(unittest.TestCase):
+    """The fork writes the same skip text for every non-user steer; the steer that caused a skip is the first custom
+    message after the skipped result, before the agent's next assistant message."""
+
+    def skips(self, entries):
+        return ar.parse_primary(record(), entries, "askgate").skips
+
+    def test_each_skip_takes_the_steer_that_follows_it(self):
+        skips = self.skips([
+            *skipped_by(envoy_steer(minutes(1)), minutes(1), "w1"),
+            *skipped_by(card_steer(minutes(2), "AskGate"), minutes(2), "w2"),
+            *skipped_by(card_steer(minutes(3), None), minutes(3), "w3"),
+        ])
+        self.assertEqual([(skip.steer, skip.advisors) for skip in skips],
+                         [("envoy-message", frozenset()), ("advisor", frozenset({"askgate"})), ("advisor", frozenset({"default"}))])
+
+    def test_a_card_before_the_skip_or_after_the_next_turn_did_not_cause_it(self):
+        skips = self.skips([
+            card_steer(minutes(1), "AskGate"), assistant_call("w1", "wait", {}, minutes(1)), skipped_result("w1", minutes(1)),
+            assistant_call("a2", "read", {}, minutes(2)), card_steer(minutes(2), "AskGate"),
+        ])
+        self.assertEqual([skip.steer for skip in skips], [None])
+
+    def test_parallel_skips_share_the_one_steer(self):
+        skips = self.skips([assistant_call("w1", "wait", {}, minutes(1)), skipped_result("w1", minutes(1)),
+                            skipped_result("w2", minutes(1)), card_steer(minutes(1), "Memory", "AskGate")])
+        self.assertEqual([skip.advisors for skip in skips], [frozenset({"memory", "askgate"})] * 2)
+
+    def test_only_the_advisors_own_cards_count(self):
+        skips = [ar.Skip(minutes(5), "envoy-message"), ar.Skip(minutes(6), "advisor", frozenset({"askgate"})),
+                 ar.Skip(minutes(7), "advisor", frozenset({"memory"})), ar.Skip(minutes(61), "advisor", frozenset({"askgate"})),
+                 ar.Skip(minutes(8), None)]
+        self.assertEqual(ar.own_skips(record(skips=skips), hour(), "askgate"), 1)
+        self.assertEqual(ar.skips_in(record(skips=skips), hour()), 4)
 
 
 class WindowedCountsTest(unittest.TestCase):
@@ -765,6 +826,21 @@ class ReadoutTest(unittest.TestCase):
         out = self.readout_on_day(15, correct=18, other=12)
         self.assertIn("labelled revises n=30, precision 0.60", out)
         self.assertIn("gate: GO: make OMP_ASKGATE=block the shim default", out)
+        self.assertFalse(self.home.overlay.exists())
+
+    def test_envoy_skips_count_for_nothing_and_a_gate_card_skip_still_counts(self):
+        """Four envoy messages and one AskGate card each skipped a tool result in a GO-ready gate: the card's skip
+        enters harm and blocks GO, the envoy ones do neither, so no KILL."""
+        self.launch(days=15)
+        at = self.now - timedelta(hours=2)
+        steers = [envoy_steer(at) for _ in range(4)] + [card_steer(at, "AskGate")]
+        extra = [entry for i, steer in enumerate(steers) for entry in skipped_by(steer, at + timedelta(minutes=i), f"w{i}")]
+        self.healthy_gate(extra=extra)
+        self.label_revises(correct=18, other=12)
+        out = self.home.run("readout", "--check", "gate", check_exit=0).stdout
+        self.assertIn("skips 1 ", out)
+        self.assertIn("harm 0.03", out)
+        self.assertIn("gate: EXTEND", out)
         self.assertFalse(self.home.overlay.exists())
 
     def test_gate_and_trial_checks_combine_their_exits(self):
