@@ -45,7 +45,7 @@
 // usage, the aborted one included; scripts/advisor-report reads them. Every path fails open: a
 // throw inside the handler is recorded as `error` and the call runs, and the deadline keeps the
 // handler inside the runner's ceiling, whose expiry would refuse the call. When the call's tool
-// ends first anyway (a user abort, or that ceiling), or the agent's run ends while it waits (the
+// ends first anyway (a user abort, or that ceiling), or the user stops the run while it waits (the
 // path an eval-bridged write takes), the model call is cancelled and the entry reads `abandoned`,
 // which never counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system and user
 // prompts are appended to, owner-only and never through a symlink.
@@ -415,13 +415,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		pi.on("session_branch", reset);
 		// A gate still waiting when its tool's execution ends was abandoned: the runner gave up on the
 		// handler (a user abort, or its ceiling) and the call already went its way. Cancel the model call.
-		// An eval-bridged write never shows its own id on a loop tool_execution_end, so every gate still
-		// waiting when the agent's run ends is abandoned too: no run is left to deliver its verdict to.
+		// An eval-bridged write never shows its own id on a loop tool_execution_end, so a run the user
+		// stopped (its last assistant message aborted) abandons every gate still waiting. Any other end
+		// leaves them be: the session may continue (willContinue), or a backgrounded eval cell may keep
+		// running past the run, and abandoning its gate would let its write out unchecked.
 		const inflight = new Map<string, () => void>();
 		pi.on("tool_execution_end", (event: { toolCallId: string }) => {
 			inflight.get(event.toolCallId)?.();
 		});
-		pi.on("agent_end", () => {
+		pi.on("agent_end", (event: { messages?: readonly Message[]; willContinue?: boolean }) => {
+			if (event.willContinue) return;
+			if (event.messages?.findLast(m => m.role === "assistant")?.stopReason !== "aborted") return;
 			for (const abandon of inflight.values()) abandon();
 		});
 
