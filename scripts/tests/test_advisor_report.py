@@ -32,7 +32,16 @@ ROSTER_OK = """advisors:
   - name: General
 """
 
+# scripts/envoy as it is: `send --source` alone is refused naming the flag; everything else is logged.
 ENVOY_STUB = """#!/bin/sh
+if [ "$*" = "send --source" ]; then echo "--source accepts only envoy" >&2; exit 2; fi
+printf '%s\\n' "$*" >> "$STUB_LOG"
+"""
+
+# scripts/envoy before `--source` existed: `send --source envoy <topic> <msg>` publishes to the
+# topic "--source", and `send --source` alone is a usage error.
+ENVOY_WITHOUT_SOURCE = """#!/bin/sh
+if [ $# -lt 3 ]; then echo "Usage: envoy send <target> <message>" >&2; exit 1; fi
 printf '%s\\n' "$*" >> "$STUB_LOG"
 """
 
@@ -515,8 +524,24 @@ class ReadoutTest(unittest.TestCase):
         self.home.run("readout", "--check", "gate", "--notify", "notifications.role.example", check_exit=3)
         self.assertFalse(self.home.overlay.exists())
         sent = self.home.envoy_log.read_text(encoding="utf-8")
-        self.assertTrue(sent.startswith("send notifications.role.example advisor-report (AGENTC-1323)"), sent)
+        self.assertTrue(sent.startswith("send --source envoy notifications.role.example advisor-report (AGENTC-1323)"), sent)
         self.assertIn(str(self.home.roster), sent)
+
+    def test_the_readout_speaks_as_envoy(self):
+        self.healthy_gate()
+        self.label_revises(correct=18, other=12)
+        self.home.run("readout", "--check", "gate", "--notify", "notifications.role.example", check_exit=0)
+        sent = self.home.envoy_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(sent), 1, sent)
+        self.assertTrue(sent[0].startswith("send --source envoy notifications.role.example advisor-report (AGENTC-1323) readout: "), sent)
+
+    def test_an_envoy_without_source_sends_nothing_and_is_incomplete(self):
+        self.healthy_gate()
+        self.label_revises(correct=18, other=12)
+        (self.home.dotfiles / "scripts" / "envoy").write_text(ENVOY_WITHOUT_SOURCE, encoding="utf-8")
+        proc = self.home.run("readout", "--check", "gate", "--notify", "notifications.role.example", check_exit=3)
+        self.assertFalse(self.home.envoy_log.exists())
+        self.assertIn("send --source envoy", proc.stderr)
 
     def test_an_extension_link_outside_dotfiles_is_incomplete_and_writes_nothing(self):
         self.healthy_gate()

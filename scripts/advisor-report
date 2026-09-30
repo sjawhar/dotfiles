@@ -32,8 +32,9 @@ Pre-registered rules for the AskGate gate (`readout --check gate`, launch =
   - ~/.omp/agent/extensions/askgate.ts must resolve to a file under
     $DOTFILES_DIR, and $DOTFILES_DIR/omp/WATCHDOG.yml must keep a non-empty
     advisors: list; otherwise incomplete, and nothing is written.
-Every KILL is applied here, by `overlay add advisor.disableRoster askgate`.
-Exit: any KILL applied 1, else any incomplete 3, else 0; usage errors 2.
+Every KILL is applied here, by `overlay add advisor.disableRoster askgate`. `--notify` sends through
+`scripts/envoy send --source envoy` and sends nothing through an envoy without that flag.
+Exit: any KILL applied 1, else any incomplete or unsent notice 3, else 0; usage errors 2.
 """
 from __future__ import annotations
 
@@ -1097,7 +1098,17 @@ def cmd_readout(args) -> int:
     code = 1 if KILLED in statuses else 3 if INCOMPLETE in statuses else 0
     if args.notify:
         envoy = dotfiles_dir() / "scripts" / "envoy"
-        sent = subprocess.run([str(envoy), "send", args.notify, f"{MESSAGE_PREFIX} readout: " + " | ".join(lines)],
+        # The readout speaks for the platform (source=envoy), not as whichever session or shell ran it. An envoy
+        # from before `send --source` would publish to the topic "--source"; `send --source` alone is a refusal
+        # naming the flag from one that has it and a usage error from one that does not, and neither sends.
+        probe = subprocess.run([str(envoy), "send", "--source"], capture_output=True, text=True, check=False)
+        answer = (probe.stdout + probe.stderr).strip()
+        if "--source accepts only envoy" not in answer:
+            print(f"advisor-report: {envoy} has no 'send --source envoy' (it answered: {answer}); "
+                  f"the readout was not sent to {args.notify}", file=sys.stderr)
+            return code or 3
+        sent = subprocess.run([str(envoy), "send", "--source", "envoy", args.notify,
+                               f"{MESSAGE_PREFIX} readout: " + " | ".join(lines)],
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
         if sent.returncode != 0:
             print(f"advisor-report: envoy send to {args.notify} failed: {sent.stderr.strip()}", file=sys.stderr)
