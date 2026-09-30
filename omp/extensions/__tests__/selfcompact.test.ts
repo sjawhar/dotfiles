@@ -272,7 +272,7 @@ describe("firing", () => {
 });
 
 describe("records", () => {
-	test("each probe and fire is appended to the session and to OMP_SELFCOMPACT_LOG with the fields the report reads", async () => {
+	test("each probe and fire is appended to the session and to OMP_SELFCOMPACT_LOG with the v1 record shape; scripts/selfcompact-sessions reads v, verdict, answers, error, capped and stopReason from a probe and ok from a fire", async () => {
 		const b = bind();
 		await b.request(3);
 		const probe = b.entries.find(([t]) => t === "selfcompact-probe")?.[1];

@@ -43,7 +43,7 @@
 // handler failure outside a probe (`selfcompact-error`) is recorded as a custom
 // session entry and, when OMP_SELFCOMPACT_LOG names a file, as one JSON line
 // there — under --no-session the file is the only record. Each ok fire's record
-// carries the compaction summary.
+// carries the compaction summary. scripts/selfcompact-sessions reads these records from real sessions.
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import rubric from "./selfcompact.md" with { type: "text" };
