@@ -5,13 +5,16 @@ The URL is the credential (its webhook id is the whole secret), and every user c
 `/proc/<pid>/cmdline`, so any `ps` or `pgrep -af` prints what a launch puts in an argv. The launch,
 as omp/mcp.json and the skill's `mcp:` frontmatter define it, hands mcp-remote the URL through
 scripts/mcp-remote-from-env: mcp-remote still receives it in `process.argv`, the kernel's command
-line of every process in the launch never holds it, and the variable is gone from the environment
-mcp-remote and its children see. The wrapper refuses an unset or empty variable (exit 2) by name.
+line of every process in the launch never holds it, the variable is gone from the environment
+mcp-remote and its children see, and what mcp-remote logs to stderr (it logs the URL) reaches the
+launcher with the URL and the bare webhook id replaced by `<HA_MCP_URL>`. The wrapper refuses an
+unset or empty variable (exit 2) by name.
 
 Technique: stub `secrets` (injects each named key from STUB_SECRET_<KEY>) and `npx` (puts a fake
 mcp-remote package's bin dir first on PATH and runs the command as its child, as `npm exec` does)
 first on PATH. The fake package's dist/proxy.js records its argv, `/proc/self/cmdline` and the
-cmdline of each ancestor up to the test, its environment and a child's.
+cmdline of each ancestor up to the test, its environment and a child's, then writes the URL and the
+bare id to stderr through console.error and process.stderr.write, as a string and as a Buffer.
 """
 
 from __future__ import annotations
@@ -76,6 +79,10 @@ const childEnv = JSON.parse(
     execFileSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(process.env))"], { encoding: "utf8" })
 );
 writeFileSync(process.env.STUB_OUT, JSON.stringify({ argv: process.argv, cmdlines, env: process.env, childEnv }));
+const url = process.argv[2];
+console.error(`[${process.pid}] Connecting to remote server: ${url}`);
+process.stderr.write(`webhook id ${url.split("/").pop()}\n`);
+process.stderr.write(Buffer.from(`buffered ${url}\n`));
 """
 
 
@@ -135,7 +142,7 @@ class HomeAssistantLaunch(unittest.TestCase):
     def run_launch(self, argv: list[str], **env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(argv, capture_output=True, text=True, env={**self.env, **env}, timeout=30)
 
-    def test_the_url_reaches_mcp_remote_and_no_command_line(self) -> None:
+    def test_the_url_reaches_mcp_remote_and_nowhere_else(self) -> None:
         for source, argv in (("omp/mcp.json", mcp_json_launch()), ("SKILL.md frontmatter", skill_launch())):
             with self.subTest(source=source):
                 self.out.unlink(missing_ok=True)
@@ -148,6 +155,9 @@ class HomeAssistantLaunch(unittest.TestCase):
                 for seen in ("env", "childEnv"):
                     self.assertNotIn("HA_MCP_URL", record[seen])
                     self.assertFalse([k for k, v in record[seen].items() if self.fake_id in v], seen)
+                # The three stderr lines arrive, each with the URL or the bare id redacted.
+                self.assertNotIn(self.fake_id, result.stderr)
+                self.assertEqual(result.stderr.count("<HA_MCP_URL>"), 3, result.stderr)
 
     def test_an_unset_or_empty_variable_is_refused_by_name(self) -> None:
         path = f"{self.npx_bin}:{self.env['PATH']}"
