@@ -487,8 +487,10 @@ def session_id_of(root_stem: str) -> str:
     return root_stem.split("_", 1)[1] if "_" in root_stem else root_stem
 
 
-def scan_sessions(root: Path, window: Window, advisor: str, scope_re: re.Pattern) -> Scan:
-    """Every root session file (sessions/<project>/<stem>.jsonl) and subagent file below it touched since the window opened."""
+def scan_sessions(root: Path, window: Window, advisor: str, scope_re: re.Pattern, subagents: bool = True) -> Scan:
+    """Every root session file (sessions/<project>/<stem>.jsonl) and subagent file below it touched since the window opened.
+
+    Subagent files add only scoped calls; `subagents=False` skips them for callers that never read `scan.scoped`."""
     if not root.is_dir():
         raise UsageError(f"no sessions directory at {root}")
     scan = Scan(window=window, advisor=advisor)
@@ -505,7 +507,7 @@ def scan_sessions(root: Path, window: Window, advisor: str, scope_re: re.Pattern
                 if touched < opened:
                     continue
                 scan.sessions.append(scan_root(path, session_id_of(path.stem), window, advisor, scope_re, scan))
-            elif len(parts) >= 2:
+            elif subagents and len(parts) >= 2:
                 if path.stat().st_mtime < opened:
                     continue
                 scan.subagent_files += 1
@@ -903,7 +905,7 @@ def cmd_sample(args) -> int:
     if args.n < 1:
         raise UsageError("--n must be positive")
     root = Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions"
-    scan = scan_sessions(root.absolute(), window, args.advisor, re.compile(DEFAULT_SCOPE_REGEX))
+    scan = scan_sessions(root.absolute(), window, args.advisor, re.compile(DEFAULT_SCOPE_REGEX), subagents=False)
     population = []  # (stratum, session, kind, item)
     for session in scan.sessions:
         for entry in session.gate_entries:
@@ -1038,7 +1040,7 @@ def watch_baseline(launched: datetime) -> str:
         return f"no stats db at {path} for the watch-mode baseline"
     db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     before = Window(launched - timedelta(days=DECISION_DAY), launched)
-    return f"watch-mode AskGate ${watcher_cost(db, before, 'askgate') / DECISION_DAY:.2f}/day over the 14 days before launch"
+    return f"watch-mode AskGate ${watcher_cost(db, before, GATE_SLUG) / DECISION_DAY:.2f}/day over the 14 days before launch"
 
 
 def missing_label_weeks(launched: datetime, now: datetime, fired: list[tuple[str, datetime]], labels: dict) -> list[str]:
@@ -1058,11 +1060,14 @@ def gate_check(now: datetime) -> Check:
         raise Failure(f"{report_dir() / 'launch.json'}: the gate record needs `launched` and `timeout_ms`; rerun `arm gate`")
     launched, timeout_ms = parse_iso(record["launched"]), record["timeout_ms"]
     day = (now - launched).total_seconds() / 86400
-    _node, disabled = overlay_list(read_overlay(overlay_path()), KILL_KEY, overlay_path(), create=False)
-    scan = scan_sessions(agent_dir() / "sessions", Window(launched, now), GATE_SLUG, re.compile(DEFAULT_SCOPE_REGEX))
+    overlay = overlay_path()
+    _node, disabled = overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)
+    scan = scan_sessions(agent_dir() / "sessions", Window(launched, now), GATE_SLUG, re.compile(DEFAULT_SCOPE_REGEX),
+                         subagents=False)
     entries = scan.gate_entries
     whole = gate_metrics(entries)
-    recent = gate_metrics([e for e in entries if entry_time(e) >= now - KILL_WINDOW])
+    latest = [e for e in entries if entry_time(e) >= now - KILL_WINDOW]
+    recent = gate_metrics(latest)
     labels = load_labels()
     fired = [(gate_row_id(e), entry_time(e)) for e in entries if is_revise(e)]
     lab = labelled_metrics(labels, [row_id for row_id, _at in fired], scan.skips)
@@ -1078,7 +1083,7 @@ def gate_check(now: datetime) -> Check:
     # judge only the calls before the kill. The overlay member is the kill's only record: `killed` entries also come
     # from a drill of the kill switch that the owner has undone, so they end nothing.
     if GATE_SLUG in disabled:
-        lines.append(f"gate: killed ({KILL_KEY} holds {GATE_SLUG} in {overlay_path()}); no GO or EXTEND computed")
+        lines.append(f"gate: killed ({KILL_KEY} holds {GATE_SLUG} in {overlay}); no GO or EXTEND computed")
         return Check(KILLED, lines)
     kill: list[str] = []
     if day >= KILL_DAY:
@@ -1086,7 +1091,7 @@ def gate_check(now: datetime) -> Check:
             kill.append(f"ungated_share {recent['ungated_share']:.3f} > {KILL_UNGATED_24H} over {recent['matched']} calls in the last 24 h")
         # A verdict slower than the timeout is recorded as a timeout, so verdict p95 never passes the timeout itself.
         # Below 20 verdicts the nearest-rank p95 is the slowest one, so a single slow verdict would decide.
-        verdicts = sum(n for key, n in recent["counts"].items() if key.endswith("/verdict"))
+        verdicts = sum(1 for e in latest if (e.get("data") or {}).get("outcome") == "verdict")
         if verdicts >= KILL_MIN_MATCHED and recent["latency_ms_p95"] > GO_LATENCY_SHARE * timeout_ms:
             kill.append(f"p95 latency {recent['latency_ms_p95']:.0f} ms above {GO_LATENCY_SHARE} x the {timeout_ms} ms "
                         f"timeout over {verdicts} verdicts in the last 24 h")
@@ -1108,7 +1113,7 @@ def gate_check(now: datetime) -> Check:
                 kill.append(f"day {EXTENDED_DAY}: not GO after the one-week extension")
     if kill:
         overlay_update(KILL_KEY, GATE_SLUG, add=True)
-        lines.append(f"gate: KILL applied ({KILL_KEY} += {GATE_SLUG} in {overlay_path()}): {'; '.join(kill)}")
+        lines.append(f"gate: KILL applied ({KILL_KEY} += {GATE_SLUG} in {overlay}): {'; '.join(kill)}")
         return Check(KILLED, lines)
     if lab["n"] < MIN_LABELS:
         missing = missing_label_weeks(launched, now, fired, labels)
