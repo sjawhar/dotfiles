@@ -126,6 +126,18 @@ def build_stats_db(path: Path, user_messages=(), files=(), messages=(), covers_u
     db.close()
 
 
+def wait_for_lock_waiters(path: Path, count: int) -> None:
+    """Wait until `count` processes are blocked in flock on `path`, from the kernel's lock table."""
+    inode = f":{path.stat().st_ino} "
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        with open("/proc/locks", encoding="utf-8") as fh:
+            if sum(1 for line in fh if "->" in line and inode in line) >= count:
+                return
+        time.sleep(0.05)
+    raise AssertionError(f"{count} processes never waited on {path}")
+
+
 class Home:
     """A temporary HOME with ~/.omp, a dotfiles dir holding the roster, the AskGate extension link and an envoy stub."""
 
@@ -817,6 +829,22 @@ class ReadoutTest(unittest.TestCase):
         self.kill_fixture()
         out = self.home.run("readout", "--check", "gate", check_exit=1).stdout
         self.assertIn(f"gate: KILL applied (advisor.disableRoster += askgate in {self.home.overlay})", out)
+        self.assert_killed()
+
+    def test_of_two_readouts_at_once_only_the_one_that_added_the_member_says_kill_applied(self):
+        """The timer and a hand-run readout on the same burst, both started while another process holds the lock."""
+        self.kill_fixture()
+        lock_path = self.home.agent_dir / "local-overrides.yml.lock"
+        with lock_path.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            readouts = [subprocess.Popen([str(SCRIPT), "readout", "--check", "gate"], env=self.home.env,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+            wait_for_lock_waiters(lock_path, 2)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        outs = [readout.communicate(timeout=120)[0] for readout in readouts]
+        self.assertEqual([readout.returncode for readout in readouts], [1, 1], outs)
+        self.assertEqual(sum("gate: KILL applied" in out for out in outs), 1, outs)
+        self.assertEqual(sum("gate: killed (advisor.disableRoster holds askgate" in out for out in outs), 1, outs)
         self.assert_killed()
 
     def s9_drill(self):

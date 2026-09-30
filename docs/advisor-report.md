@@ -133,8 +133,11 @@ over the 14 days before launch (from `stats.db`). The trial check reports `trial
 (`arm trial` refuses without `--approved-by <ask id>`, the recorded approval); an armed trial is incomplete
 until its own rules are added here.
 
-The readout applies every KILL itself, by `overlay add advisor.disableRoster askgate`. The exit code is 1
-when any check applied a KILL, else 3 when any check is incomplete, else 0. With `--notify TOPIC` it sends
+The readout applies every KILL itself, by `overlay add advisor.disableRoster askgate`. It reads the overlay,
+decides and writes the KILL while holding the overlay's lock, so of two readouts at once (the timer and a hand
+run) only the one whose write added the member says `KILL applied`; the other reads the gate as killed. The exit
+code is 1 when any check applied a KILL or found the gate killed, else 3 when any check is incomplete, else 0.
+With `--notify TOPIC` it sends
 one Envoy message covering every check, beginning `advisor-report (AGENTC-1323)` so the role holder can tell
 it apart from other watchers on the same role, through `scripts/envoy send --source envoy`, so the message
 comes from envoy rather than from a person or whichever session ran it. It first runs `scripts/envoy send

@@ -40,7 +40,7 @@ import sys
 import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -788,22 +788,34 @@ def is_killed(members: list, slug: str) -> bool:
     return any(isinstance(member, str) and member.strip().lower() == slug for member in members)
 
 
-def overlay_update(key_path: str, member: str, add: bool) -> bool:
-    """Add or remove one list member at `key_path` in local-overrides.yml under an exclusive lock. True when the file changed."""
-    yaml = require_yaml()
+@contextmanager
+def overlay_locked() -> Iterator[Path]:
+    """Hold the exclusive lock every writer of local-overrides.yml takes, for a whole read-decide-write."""
     target = overlay_path()
+    with (target.parent / "local-overrides.yml.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield target
+
+
+def overlay_change(target: Path, key_path: str, member: str, add: bool) -> bool:
+    """Add or remove one list member at `key_path` in `target`; the caller holds overlay_locked. True when it changed."""
+    yaml = require_yaml()
     keys = key_path.split(".")
     if not all(keys):
         raise UsageError(f"bad key path {key_path!r}")
-    with (target.parent / "local-overrides.yml.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        doc = read_overlay(target)
-        node, members = overlay_list(doc, key_path, target, create=add)
-        if (member in members) == add:
-            return False
-        node[keys[-1]] = [*members, member] if add else [m for m in members if m != member]
-        write_atomic(target, yaml.safe_dump(doc, default_flow_style=None, sort_keys=False))
-        return True
+    doc = read_overlay(target)
+    node, members = overlay_list(doc, key_path, target, create=add)
+    if (member in members) == add:
+        return False
+    node[keys[-1]] = [*members, member] if add else [m for m in members if m != member]
+    write_atomic(target, yaml.safe_dump(doc, default_flow_style=None, sort_keys=False))
+    return True
+
+
+def overlay_update(key_path: str, member: str, add: bool) -> bool:
+    """Add or remove one list member at `key_path` in local-overrides.yml under the lock. True when the file changed."""
+    with overlay_locked() as target:
+        return overlay_change(target, key_path, member, add)
 
 
 def cmd_overlay(args) -> int:
@@ -1106,8 +1118,6 @@ class Check:
     name: str
     status: str
     lines: list[str]
-    kill: tuple[str, ...] = ()  # the reasons of a KILL cmd_readout applies by adding `member` to the overlay
-    member: str | None = None
 
 
 def roster_problems(dotfiles: Path, agents: Path) -> list[str]:
@@ -1211,7 +1221,7 @@ def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labell
 
 
 def gate_check(now: datetime) -> Check:
-    """Gather the gate's inputs, decide, and say so; a KILL is left for cmd_readout to apply."""
+    """Gather the gate's inputs, then decide and apply any KILL under the overlay lock, and say what happened."""
     record = load_launch().get("gate")
     if not record:
         return Check("gate", NONE, ["gate: not launched"])
@@ -1219,8 +1229,6 @@ def gate_check(now: datetime) -> Check:
         raise Failure(f"{report_dir() / 'launch.json'}: the gate record needs `launched` and `timeout_ms`; rerun `arm gate`")
     launched, timeout_ms = parse_iso(record["launched"]), record["timeout_ms"]
     day = (now - launched).total_seconds() / 86400
-    overlay = overlay_path()
-    _node, disabled = overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)
     window = Window(launched, now)
     entries, skips, any_skips = [], 0, 0
     for session in scan_sessions(agent_dir() / "sessions", window, GATE_SLUG):
@@ -1240,15 +1248,20 @@ def gate_check(now: datetime) -> Check:
              f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}",
              f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(default_stats_db(), launched)}",
              *(f"gate: {problem}" for problem in problems)]
-    # The overlay member is a kill's only record: `killed` entries also come from a drill of the kill switch that the
-    # owner has undone, so they end nothing.
-    decision = gate_decision(day, timeout_ms, whole, recent, lab, skips, missing_label_weeks(launched, now, fired, labels),
-                             is_killed(disabled, GATE_SLUG), problems)
-    if decision.verdict == KILLED:
+    missing = missing_label_weeks(launched, now, fired, labels)
+    # Two readouts at once (the timer and a hand run) must not both apply and announce a KILL, so the overlay is read,
+    # the rules decided and the KILL written under the one lock every overlay writer takes. The overlay member is a
+    # kill's only record: `killed` entries also come from a drill of the kill switch the owner has undone.
+    with overlay_locked() as overlay:
+        _node, members = overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)
+        decision = gate_decision(day, timeout_ms, whole, recent, lab, skips, missing, is_killed(members, GATE_SLUG), problems)
+        applied = decision.verdict == KILL and overlay_change(overlay, KILL_KEY, GATE_SLUG, add=True)
+    if applied:
+        lines.append(f"gate: KILL applied ({KILL_KEY} += {GATE_SLUG} in {overlay}): {'; '.join(decision.reasons)}")
+        return Check("gate", KILLED, lines)
+    if decision.verdict in (KILLED, KILL):
         lines.append(f"gate: killed ({KILL_KEY} holds {GATE_SLUG} in {overlay}); no GO or EXTEND computed")
         return Check("gate", KILLED, lines)
-    if decision.verdict == KILL:
-        return Check("gate", KILLED, lines, kill=decision.reasons, member=GATE_SLUG)
     if decision.verdict == INCOMPLETE:
         lines += [f"gate: incomplete: {'; '.join(decision.reasons)}"] if decision.reasons else []
         return Check("gate", INCOMPLETE, lines)
@@ -1267,11 +1280,6 @@ def trial_check() -> Check:
 def cmd_readout(args) -> int:
     now = datetime.now(timezone.utc)
     checks = [gate_check(now) if name == "gate" else trial_check() for name in (args.check or ["gate", "trial"])]
-    for check in checks:
-        if check.kill:
-            overlay_update(KILL_KEY, check.member, add=True)
-            check.lines.append(f"{check.name}: KILL applied ({KILL_KEY} += {check.member} in {overlay_path()}): "
-                               f"{'; '.join(check.kill)}")
     lines = [line for check in checks for line in check.lines]
     print("\n".join(lines))
     statuses = {check.status for check in checks}
