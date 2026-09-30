@@ -10,9 +10,14 @@
 // factory is rebound in every subagent, which this check keeps out.
 //
 // OMP_ASKGATE, read when the extension binds to a session: `off` registers nothing; `warn`
-// (unset) runs a revised call and hands the agent the reason as context after the call's
-// result; `block` refuses a revised call with the reason as the `write`'s error result. Any
-// other value throws at bind. OMP_ASKGATE_TIMEOUT_MS replaces the 90 s deadline.
+// (unset) runs a revised call and returns the reason as additional context, which the fork
+// delivers only when the call succeeds and ran through the agent loop (a failing call, or a
+// write made from eval, drops it); `block` refuses a revised call with the reason as the
+// `write`'s error result. Any other value throws at bind.
+//
+// Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
+// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) and raced from
+// handler entry. A ceiling that leaves under 10 s binds nothing and logs why.
 //
 // Per gated call, in order:
 //   - killed: `advisor.disableRoster` in local-overrides.yml (under PI_CODING_AGENT_DIR, else
@@ -36,10 +41,13 @@
 //     {"decision":"allow"} or {"decision":"revise","reason":"…"}; the reason handed back to the
 //     agent is escaped and capped at 2 KiB.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
-// (pi.appendEntry, never sent to the model), which scripts/advisor-report reads. Every path
-// fails open: a throw inside the handler is recorded as `error` and the call runs, so the
-// runner's fail-closed conversion is never reached. OMP_ASKGATE_DUMP names a file each gate's
-// system and user prompts are appended to.
+// (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
+// usage, the aborted one included; scripts/advisor-report reads them. Every path fails open: a
+// throw inside the handler is recorded as `error` and the call runs, and the deadline keeps the
+// handler inside the runner's ceiling, whose expiry would refuse the call. When the call's tool
+// ends first anyway (a user abort, or that ceiling), the model call is cancelled and the entry
+// reads `abandoned`. OMP_ASKGATE_DUMP names a file each gate's system and user prompts are
+// appended to, owner-only and never through a symlink.
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
@@ -47,9 +55,15 @@ import systemTemplate from "./askgate-system.md" with { type: "text" };
 
 export const SCOPED_DEVICES = ["dispatch_ask", "dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit", "dispatch_issue"] as const;
 export const SPEC_ONLY_DEVICE = "dispatch_issue";
-export const BREAKER_KEYS = ["issue", "ask", "artifact", "project"] as const;
+export const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
 export const REBUTTAL_KEY = "advisor_rebuttal";
 export const GATE_TIMEOUT_MS = 90_000;
+// The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
+// gate's deadline stays this far under it: room for the aborted call to report its usage
+// (ABORT_GRACE_MS) and for the record. Below MIN_DEADLINE_MS a verdict is hopeless and the gate does not bind.
+const CEILING_MARGIN_MS = 5_000;
+const ABORT_GRACE_MS = 2_000;
+const MIN_DEADLINE_MS = 10_000;
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 export const GATE_ARGS_MAX_BYTES = 64 * 1024;
 const GATE_REASON_MAX_BYTES = 2 * 1024;
@@ -88,6 +102,9 @@ export interface GateEntry {
 	promptBytes?: number;
 	/** `provider/id` that `@askgate` resolved to, on every entry that reached the model call. */
 	model?: string;
+	/** The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's handler ceiling. */
+	deadlineMs?: number;
+	/** Every attempt's spend, the aborted one included. */
 	usage?: Usage;
 }
 export interface CompleteRequest { ctx: unknown; model: unknown; system: string; user: string; sessionId: string; signal: AbortSignal }
@@ -104,13 +121,15 @@ export interface Deps {
 	charterPath: string;
 	/** The primary's context as its model sees it: the fork's buildSessionContext over this session's branch. */
 	contextMessages: (ctx: GateCtx) => readonly Message[];
+	/** The runner's ceiling for a tool_call handler: extensionHandlers.toolCallTimeoutMs, read when asked. */
+	handlerCeilingMs: () => number;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
 export interface Pi {
 	on(event: string, handler: (event: never, ctx: never) => unknown): void;
 	appendEntry(customType: string, data?: unknown): void;
-	logger: { debug(message: string, context?: Record<string, unknown>): void };
+	logger: { debug(message: string, context?: Record<string, unknown>): void; warn(message: string, context?: Record<string, unknown>): void };
 }
 type ToolCallEvent = { toolName: string; toolCallId: string; input: Input };
 type ToolCallResult = { block?: boolean; reason?: string; input?: Input; additionalContext?: string } | undefined;
@@ -364,6 +383,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		const mode = parseMode(deps.env.OMP_ASKGATE);
 		if (mode === "off") return;
 		const timeoutMs = parseTimeout(deps.env.OMP_ASKGATE_TIMEOUT_MS);
+		const ceiling = deps.handlerCeilingMs();
+		if (ceiling - CEILING_MARGIN_MS < MIN_DEADLINE_MS) {
+			// A deadline this short would time out nearly every verdict; the runner would refuse a longer one.
+			pi.logger.warn(`AskGate not bound: extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, which leaves no room for a verdict (it needs at least ${MIN_DEADLINE_MS + CEILING_MARGIN_MS} ms)`);
+			return;
+		}
 		const charter = loadCharter(deps.readFile, deps.charterPath, deps.home);
 		const dumpPath = deps.env.OMP_ASKGATE_DUMP;
 		// The fork binds this factory once per process and keeps the binding across /new, /resume
@@ -381,6 +406,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		};
 		pi.on("session_switch", reset);
 		pi.on("session_branch", reset);
+		// A gate still waiting when its tool's execution ends was abandoned: the runner gave up on the
+		// handler (a user abort, or its ceiling) and the call already went its way. Cancel the model call.
+		const inflight = new Map<string, () => void>();
+		pi.on("tool_execution_end", (event: { toolCallId: string }) => {
+			inflight.get(event.toolCallId)?.();
+		});
 
 		/** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
 		const settle = (effect: Decision["effect"], ctx: GateCtx) => {
@@ -409,7 +440,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		type Decision = { fields: Pick<GateEntry, "decision" | "outcome"> & Partial<GateEntry>; result?: ToolCallResult; effect: "failure" | "verdict" | "none" };
 		const pass = (outcome: GateEntry["outcome"], fields: Partial<GateEntry> = {}, effect: Decision["effect"] = "none"): Decision => ({ fields: { decision: "allow", outcome, ...fields }, effect });
 
-		const decide = async (event: ToolCallEvent, ctx: GateCtx, base: Base, key: string, rebuttal: string | undefined): Promise<Decision> => {
+		const decide = async (event: ToolCallEvent, ctx: GateCtx, started: number, base: Base, key: string, rebuttal: string | undefined): Promise<Decision> => {
 			const unparsable = (error: unknown) => pi.logger.debug("AskGate: local-overrides.yml does not parse; the gate stays on", { error: String(error) });
 			if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) return pass("killed");
 			if (rebuttal !== undefined) {
@@ -435,10 +466,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const promptBytes = byteLength(system) + byteLength(user);
 			if (dumpPath) deps.appendFile(dumpPath, `===== AskGate ${event.toolCallId} system =====\n${system}\n===== AskGate ${event.toolCallId} user =====\n${user}\n\n`);
 
-			const called = { promptBytes, model: `${model.provider}/${model.id}` };
-			const answer = await ask({ ctx, model, system, user, sessionId: ctx.sessionManager.getSessionId() });
+			// Raced from handler entry, so the render above counts against the runner's ceiling too.
+			const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
+			const called = { promptBytes, model: `${model.provider}/${model.id}`, deadlineMs };
+			const request = { ctx, model, system, user, sessionId: ctx.sessionManager.getSessionId() };
+			const answer = await ask(request, event.toolCallId, Math.max(0, deadlineMs - (deps.now() - started)));
 			const usage = answer.usage ? { usage: answer.usage } : {};
 			if (answer.kind === "timeout") return pass("timeout", { ...called, ...usage }, "failure");
+			// Not the gate's failure: the call ended without it (a user abort, or the runner's ceiling).
+			if (answer.kind === "abandoned") return pass("error", { reason: "abandoned: the call ended before a verdict (a user abort or the runner's handler ceiling)", ...called, ...usage });
 			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...called, ...usage }, "failure");
 			const verdict = parseVerdict(answer.text);
 			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...called, ...usage }, "failure");
@@ -454,25 +490,32 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			};
 		};
 
-		/** The model call raced against the deadline: an answer, an error, or the deadline. */
-		type Answer = { kind: "answer"; text: string; usage?: Usage } | { kind: "error"; reason: string; usage?: Usage } | { kind: "timeout"; usage?: Usage };
-		const ask = async (req: Omit<CompleteRequest, "signal">): Promise<Answer> => {
+		/** The model call raced against the deadline and against its tool ending without it. */
+		type Answer = { kind: "answer"; text: string; usage?: Usage } | { kind: "error"; reason: string; usage?: Usage } | { kind: "timeout" | "abandoned"; usage?: Usage };
+		const ask = async (req: Omit<CompleteRequest, "signal">, toolCallId: string, remainingMs: number): Promise<Answer> => {
 			const controller = new AbortController();
-			const { promise: expired, resolve: expire } = Promise.withResolvers<"timeout">();
-			const timer = setTimeout(() => {
-				controller.abort();
-				expire("timeout");
-			}, timeoutMs);
+			const { promise: stopped, resolve: stop } = Promise.withResolvers<"timeout" | "abandoned">();
+			const timer = setTimeout(() => stop("timeout"), remainingMs);
+			inflight.set(toolCallId, () => stop("abandoned"));
 			try {
-				// Promise.race subscribes to the completion, so a late rejection after the deadline is handled.
-				const result = await Promise.race([deps.complete({ ...req, signal: controller.signal }), expired]);
-				if (result === "timeout") return { kind: "timeout" };
-				if (result.error !== undefined) return { kind: "error", reason: result.error, usage: result.usage };
-				return { kind: "answer", text: result.text, usage: result.usage };
+				const call = deps.complete({ ...req, signal: controller.signal });
+				// Promise.race subscribes to the completion, so a late rejection is handled.
+				const first = await Promise.race([call, stopped]);
+				if (first !== "timeout" && first !== "abandoned") {
+					return first.error !== undefined ? { kind: "error", reason: first.error, usage: first.usage } : { kind: "answer", text: first.text, usage: first.usage };
+				}
+				controller.abort();
+				// The aborted request was billed for what it sent; give it a moment to report that.
+				const { promise: grace, resolve: graceOver } = Promise.withResolvers<undefined>();
+				const graceTimer = setTimeout(graceOver, ABORT_GRACE_MS);
+				const settled = await Promise.race([call.catch(() => undefined), grace]);
+				clearTimeout(graceTimer);
+				return { kind: first, usage: settled?.usage };
 			} catch (error) {
 				return { kind: "error", reason: messageOf(error) };
 			} finally {
 				clearTimeout(timer);
+				inflight.delete(toolCallId);
 			}
 		};
 
@@ -504,7 +547,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 					revisesForKey: breaker.reasons(key).length,
 					argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
 				};
-				decision = await decide(event, ctx, base, key, rebuttal);
+				decision = await decide(event, ctx, started, base, key, rebuttal);
 			} catch (error) {
 				// Fail open: the runner turns a thrown handler into a refusal. A throw here is the
 				// gate's own (the overlay, the dump, the render), not a missing verdict, so it does not
