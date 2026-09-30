@@ -221,6 +221,30 @@ describe("compaction-reminder", () => {
 		expect(session.sent[0].message.content).toContain("<LATEST_FOLLOW_UP>\nuse the staging bucket\n</LATEST_FOLLOW_UP>");
 	});
 
+	test("the executor's budget notice is not a follow-up, so the parent's steer before it stays the latest", () => {
+		const session = bind();
+		// `buildBudgetNotice` in the fork's task/executor.ts, sent as a steer with the parent's own fields.
+		const budgetNotice: Entry = {
+			type: "message",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "[budget notice] You have used 200 requests in this run (soft budget: 200). Wrap up now." }],
+				steering: true,
+				attribution: "agent",
+			},
+		};
+		const branch = [sessionInit(ASSIGNMENT), user(ASSIGNMENT), parentSteer("also fix the second finding; report both shas"), budgetNotice, compaction];
+		session.compact("sub", branch, true);
+		const noticeOnly = bind();
+		noticeOnly.compact("sub", [sessionInit(ASSIGNMENT), user(ASSIGNMENT), budgetNotice, compaction], true);
+
+		expect(session.sent[0].message.content).toContain(
+			"<LATEST_FOLLOW_UP>\nalso fix the second finding; report both shas\n</LATEST_FOLLOW_UP>"
+		);
+		expect(session.sent[0].message.content).not.toContain("[budget notice]");
+		expect(noticeOnly.sent[0].message.content).not.toContain("LATEST_FOLLOW_UP>");
+	});
+
 	test("a follow-up turn is restated, and the prompt that carried the assignment is not", () => {
 		const followUp = bind();
 		followUp.compact("sub", [sessionInit(ASSIGNMENT), user(ASSIGNMENT), assistant("done"), user("now the docs"), compaction], true);

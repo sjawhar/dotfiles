@@ -1,7 +1,7 @@
 // Re-assert what a compaction loses, in two cases: the sdd process contract for
 // a top-level session while an sdd goal is active, and what a subagent was told
 // to do, on its first compaction. Every successful automatic shake also leaves
-// a `compaction-marker` entry, the evidence AGENTC-1288's acceptance check reads.
+// a `compaction-marker` entry recording the context size before and after it.
 //
 // A compaction summary paraphrases the conversation; a workflow contract the
 // session was following (the sdd command's agent mapping and gates) rarely
@@ -29,9 +29,10 @@
 // after it. Both reminders fire on both events: a shake can drop the
 // coordinator's re-read of sdd.md, a plain file read, as readily as a summary
 // can. A successful shake also appends a `compaction-marker` custom entry,
-// never sent to the model, with the context size before and after it, which
-// `compaction-event-audit.py` on AGENTC-1288 counts beside the committed
-// compaction entries: it is the only record of the size a shake leaves. The fork
+// never sent to the model, with the context size before and after it, in every
+// session: it is the only record of the size a shake leaves, for any audit of
+// what compaction costs (`compaction-event-audit.py` on AGENTC-1288 is one
+// reader, counting markers beside committed compaction entries). The fork
 // logs the trigger size it decided on at debug level ("Mid-run compaction ran
 // between provider calls", "Pre-prompt context maintenance triggered …"), but
 // does not pass it to extensions — `auto_compaction_start` carries only
@@ -93,13 +94,22 @@
 // and a follow-up never writes a `session_init`. The follow-up restated is the
 // latest, after that `session_init`, of: an `irc:incoming` custom message from
 // `ctx.agent.parentId` (the parent's message to an idle agent; its raw body is
-// `details.message`); any user message flagged `steering` (a message to a
-// running agent: the parent's IRC message, or a person's); and a user message
+// `details.message`); any user message flagged `steering`, which is a message
+// to a running agent (the parent's IRC message, a person's, or any other
+// queued steer, such as an extension's `sendUserMessage` with `deliverAs:
+// "steer"`), except the executor's soft-request-budget notice; and a user message
 // that is neither synthetic, a steer, nor the prompt that carried the
 // assignment (a follow-up turn). A steer counts by its flag; the fork's
 // parent-irc template only shapes its text, so when the text still carries that
 // wrapper it is unwrapped, and otherwise — a reworded template, or an `<irc>`
 // block a shake already swapped for a placeholder — it is restated as it stands.
+// The budget notice is a runtime warning, not a ruling on the task, and the
+// executor enforces the budget itself; persisted, it carries the same role,
+// `steering` flag and attribution as a parent's IRC steer, so it is told apart
+// by the fork's `[budget notice] ` prefix. A reworded notice would only be
+// restated again, never drop an instruction. The root fix is in the fork: send
+// the notice as a hidden custom message, as the goal runtime sends its
+// `goal-budget-limit`, and this skip goes.
 // The lead says a later instruction wins where the two conflict. Only the latest
 // one is restated: earlier follow-ups survive through the summary, so an
 // intermediate ruling that changed a spawn constraint is recalled only as well
@@ -127,6 +137,8 @@ const SDD_PREFIX = "[sdd]";
 /** The fork's `prompts/steering/parent-irc.md` wrapper, stripped from a steer when present. */
 const PARENT_STEER_PREFIX = "[Wait interrupted by message]\n";
 const PARENT_STEER_BODY = /^<irc from="parent" agent="[^"]*">\n([\s\S]*)\n<\/irc>$/;
+/** The fork's `buildBudgetNotice` (task/executor.ts): a runtime steer, not an instruction. */
+const BUDGET_NOTICE_PREFIX = "[budget notice] ";
 
 type BranchEntry = { type: string };
 type ModeChangeEntry = {
@@ -193,6 +205,8 @@ function latestFollowUp(entries: BranchEntry[], parentId: string | undefined): s
 			continue;
 		}
 		const text = messageText(message);
+		// A reworded notice only gets restated, as before; no instruction is ever dropped.
+		if (message.steering && text.startsWith(BUDGET_NOTICE_PREFIX)) continue;
 		const rest = text.startsWith(PARENT_STEER_PREFIX) ? text.slice(PARENT_STEER_PREFIX.length) : text;
 		latest = PARENT_STEER_BODY.exec(rest)?.[1] ?? rest;
 	}
