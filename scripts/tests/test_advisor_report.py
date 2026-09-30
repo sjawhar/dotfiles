@@ -545,6 +545,14 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn("p95 latency 85000 ms", out)
         self.assertEqual(self.home.overlay_doc(), {"advisor": {"disableRoster": ["askgate"]}})
 
+    def test_day_three_latency_kill_waits_for_20_verdicts_in_the_last_24_h(self):
+        """One slow verdict among a handful is the whole p95 (nearest rank); it must not end the trial."""
+        latencies = [85_000, 3000, 3000, 3000, 3000]
+        self.gate_session([gate_entry(at=self.now - timedelta(minutes=10 + i), latency_ms=ms) for i, ms in enumerate(latencies)])
+        out = self.home.run("readout", "--check", "gate", check_exit=3).stdout
+        self.assertIn("p95 85000 ms", out)
+        self.assertFalse(self.home.overlay.exists())
+
     def killed_after_a_day_three_burst(self):
         """230 good calls, a day-3 hour with 8 timeouts in 25 calls, then 250 calls the kill switch passed."""
         day3 = self.launched + timedelta(days=3)
