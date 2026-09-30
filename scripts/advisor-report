@@ -21,7 +21,7 @@ from an agent reading a `sample` packet with the rubric in docs/advisor-report.m
 recorded; docs/advisor-report.md ("Readout rules") states them in their order of precedence, and
 gate_decision below is their one implementation.
 Every KILL is applied here, by `overlay add advisor.disableRoster askgate`. `--notify` sends through
-`scripts/envoy send --source envoy` and sends nothing through an envoy without that flag.
+`scripts/envoy notify`, which an envoy from before it refuses without sending anything.
 Exit: a KILL applied or the gate found killed 1, else a check that could not run or read an input 2, else any
 incomplete or unsent notice 3, else 0; usage errors also 2.
 """
@@ -1523,20 +1523,13 @@ def cmd_readout(args) -> int:
     code = 1 if KILLED in statuses else 2 if FAILED in statuses else 3 if INCOMPLETE in statuses else 0
     if args.notify:
         envoy = dotfiles_dir() / "scripts" / "envoy"
-        # The readout speaks for the platform (source=envoy), not as whichever session or shell ran it. An envoy
-        # from before `send --source` would publish to the topic "--source"; `send --source` alone is a refusal
-        # naming the flag from one that has it and a usage error from one that does not, and neither sends.
-        probe = subprocess.run([str(envoy), "send", "--source"], capture_output=True, text=True, check=False)
-        answer = (probe.stdout + probe.stderr).strip()
-        if "--source accepts only envoy" not in answer:
-            print(f"advisor-report: {envoy} has no 'send --source envoy' (it answered: {answer}); "
-                  f"the readout was not sent to {args.notify}", file=sys.stderr)
-            return code or 3
-        sent = subprocess.run([str(envoy), "send", "--source", "envoy", args.notify,
-                               f"{MESSAGE_PREFIX} readout: " + " | ".join(lines)],
+        # The readout speaks for the platform, not as whichever session or shell ran it: `envoy notify` is
+        # `send --source envoy`. An envoy from before `notify` answers it as an unknown command, exits 1 and
+        # sends nothing, so the failure below is the whole check.
+        sent = subprocess.run([str(envoy), "notify", args.notify, f"{MESSAGE_PREFIX} readout: " + " | ".join(lines)],
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
         if sent.returncode != 0:
-            print(f"advisor-report: envoy send to {args.notify} failed: {sent.stderr.strip()}", file=sys.stderr)
+            print(f"advisor-report: envoy notify to {args.notify} failed: {sent.stderr.strip()}", file=sys.stderr)
             code = code or 3
     return code
 
