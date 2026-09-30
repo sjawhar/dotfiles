@@ -4,7 +4,7 @@
 The watch reads production Dispatch alone: a READY packet counts when it was posted after
 --release-time. When the newest LEGION_BRIEF_WATCH_MIN (5) counted packets each carry an
 `Outcome:` line right after the READY header, no `Warning: brief-missing` and not the no-brief
-placeholder, it sends one notice with `scripts/envoy send --source envoy`, records it in the state
+placeholder, it sends one notice with `scripts/envoy notify`, records it in the state
 file, and exits 1. The installer refuses a unit still carrying its release-time marker.
 
 Technique: tests/fixtures/dispatch_stub.py serves each test's canned issues and event logs on a
@@ -33,24 +33,20 @@ RELEASE = "2026-09-10T00:00:00Z"
 TOKEN = "fixture-token-5f2c9a"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
-# scripts/envoy as the watch calls it. `send --source` alone is the watch's capability probe, which
-# the real script answers with a refusal and sends nothing; every other call is a send.
+# scripts/envoy as the watch calls it: every call is a `notify`, logged as a send.
 ENVOY_STUB = """#!/bin/sh
-if [ "$*" = "send --source" ]; then echo "--source accepts only envoy" >&2; exit 2; fi
 printf '%s\\n' "$*" >> "$STUB_LOG"
 echo '{"id":"notice-1","holder":"01a0ef85-0000-7000-8000-000000000000"}'
 """
 
-# scripts/envoy before `--source` existed: `send --source envoy <topic> <msg>` publishes to the
-# topic "--source", and `send --source` alone is a usage error.
-ENVOY_WITHOUT_SOURCE = """#!/bin/sh
-if [ $# -lt 3 ]; then echo "Usage: envoy send <target> <message>" >&2; exit 1; fi
+# scripts/envoy before `notify` existed, as it answers one: an unknown command, exit 1, nothing sent.
+ENVOY_WITHOUT_NOTIFY = """#!/bin/sh
+if [ "$1" = notify ]; then echo "Unknown command: notify" >&2; exit 1; fi
 printf '%s\\n' "$*" >> "$STUB_LOG"
 echo '{"id":"notice-1"}'
 """
 
 ENVOY_REFUSING = """#!/bin/sh
-if [ "$*" = "send --source" ]; then echo "--source accepts only envoy" >&2; exit 2; fi
 echo "error: Envoy at http://127.0.0.1:9020 failed POST /v1/messages/publish: {\\"error\\":\\"no holder\\"}" >&2
 exit 1
 """
@@ -191,7 +187,7 @@ class LegionBriefWatch(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         sends = self.sends()
         self.assertEqual(len(sends), 1, sends)
-        prefix = "send --source envoy notifications.role.agentc-1305 "
+        prefix = "notify notifications.role.agentc-1305 "
         self.assertTrue(sends[0].startswith(prefix), sends[0])
         self.assertIn("newest 5 READY", sends[0])
         return sends[0][len(prefix):]
@@ -307,14 +303,14 @@ class LegionBriefWatch(unittest.TestCase):
                                 env=env, capture_output=True, text=True, check=False, timeout=60)
         self.assert_notice_sent(result)
 
-    def test_an_envoy_without_source_is_refused_before_anything_is_sent(self) -> None:
-        self.envoy(ENVOY_WITHOUT_SOURCE)
+    def test_an_envoy_without_notify_sends_nothing_and_records_nothing(self) -> None:
+        self.envoy(ENVOY_WITHOUT_NOTIFY)
         self.serve(*five_clean())
         result = self.watch()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("--source", result.stderr)
-        self.assertEqual(self.sends(), [], "an envoy without --source would publish to the topic --source")
-        self.assertFalse(self.state.exists())
+        self.assertIn("Unknown command: notify", result.stderr)
+        self.assertEqual(self.sends(), [])
+        self.assertFalse(self.state.exists(), "an unsent notice must not be recorded")
 
     def test_a_notice_envoy_refuses_is_not_recorded_so_the_next_run_sends_it(self) -> None:
         self.envoy(ENVOY_REFUSING)

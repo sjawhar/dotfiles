@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""scripts/envoy send: who the message says it is from.
+"""scripts/envoy send and notify: who the message says it is from.
 
 With no flag the sender is derived from the environment: an agent harness's session marker
 stamps source=agent and that session's id as source_session. A leading `--source envoy` stamps
 source=envoy and never a source_session, whatever the environment holds, so an automated notice
 does not show as the session that happened to run it (the inbox renders the sender as
-`source_session ?? source`). envoy is the only value a caller may assert.
+`source_session ?? source`). envoy is the only value a caller may assert. `notify` is that send,
+for the timers that post such notices.
 
 Technique: stub `curl` first on PATH; it records its argv NUL-separated and answers as the
 listener would, so each test reads back the URL and the JSON body the script posted.
@@ -58,8 +59,11 @@ class EnvoySend(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def send(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        return self.envoy("send", *args, **extra)
+
+    def envoy(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(ENVOY), "send", *args],
+            [str(ENVOY), *args],
             capture_output=True,
             text=True,
             env={**self.env, **extra},
@@ -102,6 +106,21 @@ class EnvoySend(unittest.TestCase):
         self.assertEqual(url, f"{ENVOY_URL}/v1/messages/publish")
         self.assertEqual(body["source"], "agent")
         self.assertEqual(body["source_session"], "x")
+
+    def test_notify_publishes_as_envoy_whatever_session_runs_it(self) -> None:
+        result = self.envoy("notify", TOPIC, "daily notice", OMP_SESSION_ID="x")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        url, body = self.posted()
+        self.assertEqual(url, f"{ENVOY_URL}/v1/messages/publish")
+        self.assertEqual(body, {"topic": TOPIC, "message": "daily notice", "source": "envoy"})
+
+    def test_notify_needs_a_topic_and_a_message(self) -> None:
+        for args in ((TOPIC,), (TOPIC, "a", "b")):
+            with self.subTest(args=args):
+                result = self.envoy("notify", *args)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("Usage: envoy notify <topic> <message>", result.stderr)
+                self.assertFalse(self.curl_log.exists(), "nothing may be posted")
 
 
 if __name__ == "__main__":

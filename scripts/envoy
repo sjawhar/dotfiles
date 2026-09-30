@@ -7,6 +7,7 @@
 #   envoy ps --json  — JSON output
 #   envoy ps --local — filter to local machine only
 #   envoy send [--source envoy] <t> <msg> — send message (ses_* = direct, else publish to topic)
+#   envoy notify <topic> <msg> — publish as envoy: `send --source envoy <topic> <msg>`
 #   envoy broadcast <msg> — direct-send <msg> to every live titled session
 #                          `envoy ps` lists for this machine (`--all-machines`
 #                          widens, `--machine <id>` picks one); `--dir <substr>`
@@ -29,6 +30,9 @@
 # the environment holds: an automated notice (a timer, a service) speaks for the
 # platform, not as whichever session ran it, and the inbox shows the sender as
 # source_session ?? source. envoy is the only source a caller may assert.
+# `envoy notify` is that send, for the timers that post such notices: an envoy
+# from before it answers `notify` as an unknown command, exits 1 and sends
+# nothing, so a caller needs no probe for it.
 set -euo pipefail
 
 ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
@@ -187,10 +191,19 @@ _envoy_broadcast() {
     [ "$failed" -eq 0 ]
 }
 
+_envoy_notify() {
+    if [ $# -ne 2 ]; then
+        echo "Usage: envoy notify <topic> <message>" >&2
+        return 1
+    fi
+    _envoy_send --source envoy "$1" "$2"
+}
+
 case "${1:-}" in
     ps)        shift; _envoy_ps "$@"; exit ;;
     send)      shift; _envoy_send "$@"; exit ;;
+    notify)    shift; _envoy_notify "$@"; exit ;;
     broadcast) shift; _envoy_broadcast "$@"; exit ;;
-    "")        echo "Usage: envoy <ps|send|broadcast>" >&2; exit 1 ;;
+    "")        echo "Usage: envoy <ps|send|notify|broadcast>" >&2; exit 1 ;;
     *)         echo "Unknown command: $1" >&2; exit 1 ;;
 esac

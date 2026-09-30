@@ -11,10 +11,10 @@
 # carries no brief)` (either alone is enough), or when the line right after its READY header is not
 # an `Outcome:` line, the mark of a merger that never saw the brief.
 # When the newest LEGION_BRIEF_WATCH_MIN (5) counted packets are none of them warned, it sends one
-# notice to Envoy role LEGION_BRIEF_WATCH_ROLE (agentc-1305) with `scripts/envoy send --source
-# envoy`, records it in LEGION_BRIEF_WATCH_STATE (~/.omp/agent/legion-brief-watch.json) so it goes
-# out once, and exits 1, so the daily user timer installers/legion-brief-watch.sh arms shows
-# `failed` and its journal holds the notice. Otherwise it prints one line and exits 0. --dry-run
+# notice to Envoy role LEGION_BRIEF_WATCH_ROLE (agentc-1305) with `scripts/envoy notify`, records
+# it in LEGION_BRIEF_WATCH_STATE (~/.omp/agent/legion-brief-watch.json) so it goes out once, and
+# exits 1, so the daily user timer installers/legion-brief-watch.sh arms shows `failed` and its
+# journal holds the notice. Otherwise it prints one line and exits 0. --dry-run
 # prints the notice instead of sending it. Exit 2: a bad argument, no Dispatch URL or token, a
 # failed Dispatch read, or a notice Envoy did not take. --whoami prints who Dispatch takes the
 # resolved token for, and exits 0.
@@ -180,19 +180,12 @@ if $DRY_RUN; then
     exit 1
 fi
 
-# DOTFILES_DIR set by hand to another checkout, such as the shared ~/.dotfiles, which can sit behind
-# main while its working copy is dirty, can hold an envoy from before `send --source`, which would
-# publish to the topic "--source". `send --source` alone is a refusal from one that has it and a
-# usage error from one that does not; neither sends.
-probe=$("$DOTFILES_DIR/scripts/envoy" send --source 2>&1) || true
-grep -q -- '--source accepts only envoy' <<<"$probe" \
-    || fail "$DOTFILES_DIR/scripts/envoy has no 'send --source envoy' (it answered: $probe); the notice is not sent"
 # The record is written before the send, so a notice that went out cannot fail to be recorded;
 # only the rename, within one directory, follows it.
 mkdir -p "$(dirname "$STATE")" || fail "cannot create $(dirname "$STATE") to record the go-notice; it is not sent"
 jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{goNoticeSentAt: $at}' >"$STATE.tmp" \
     || fail "cannot write $STATE.tmp to record the go-notice; it is not sent"
-"$DOTFILES_DIR/scripts/envoy" send --source envoy "notifications.role.$ROLE" "$msg" \
+"$DOTFILES_DIR/scripts/envoy" notify "notifications.role.$ROLE" "$msg" \
     || { rm -f "$STATE.tmp"; fail "Envoy did not take the go-notice; it is not recorded, so the next run sends it again"; }
 mv "$STATE.tmp" "$STATE"
 exit 1
