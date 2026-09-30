@@ -27,7 +27,8 @@ class QueueFile(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name) / "attention"
-        self.env = {**os.environ, "OMP_ATTENTION_DIR": str(self.dir)}
+        # A drop names no server; the script takes it from TMUX, as inside a session's pane.
+        self.env = {**os.environ, "OMP_ATTENTION_DIR": str(self.dir), "TMUX": "/tmp/tmux-test/default,1,0"}
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -71,6 +72,101 @@ class QueueFile(unittest.TestCase):
             self.assertEqual(p.wait(), 0)
         self.assertEqual(sorted(q["pane"] for q in self.queue()), sorted(f"%{i}" for i in range(12)))
 
+    def test_a_call_without_a_stamp_is_stamped_when_it_starts(self) -> None:
+        # omp sessions still on an extension that sends no stamp depend on this.
+        before = int(time.time() * 1000)
+        self.run_cmd("drop", "%1")
+        after = int(time.time() * 1000)
+        self.run_cmd("push", line("%1", "earlier"), str(before - 1))
+        self.assertEqual(self.queue(), [])
+        self.run_cmd("push", line("%1", "later"), str(after + 1))
+        self.assertEqual([q["title"] for q in self.queue()], ["later"])
+
+    # omp stamps each push and drop with its event's time; the script orders them by
+    # the stamp, whichever process takes the lock first.
+    def test_a_push_stamped_at_or_before_its_panes_latest_stamp_is_ignored(self) -> None:
+        self.run_cmd("drop", "%1", "2000")
+        self.run_cmd("push", line("%1"), "1999")
+        self.run_cmd("push", line("%1"), "2000")
+        self.assertEqual(self.queue(), [])
+        self.run_cmd("push", line("%1"), "2001")
+        self.assertEqual([q["pane"] for q in self.queue()], ["%1"])
+
+    def test_a_drop_not_newer_than_the_queued_line_leaves_it(self) -> None:
+        # That drop answered an earlier push; the line came from a later one.
+        self.run_cmd("push", line("%1"), "2000")
+        self.run_cmd("drop", "%1", "1999")
+        self.run_cmd("drop", "%1", "2000")
+        self.assertEqual([q["pane"] for q in self.queue()], ["%1"])
+        self.run_cmd("drop", "%1", "2001")
+        self.assertEqual(self.queue(), [])
+
+    def test_every_arrival_order_ends_with_the_latest_event(self) -> None:
+        # An ask opens (push@100), closes (drop@150), and the turn ends (push@200).
+        events = {
+            "push@100": ("push", line("%1", "ask"), "100"),
+            "drop@150": ("drop", "%1", "150"),
+            "push@200": ("push", line("%1", "turn"), "200"),
+        }
+        for order in itertools.permutations(events):
+            with self.subTest(order=order):
+                shutil.rmtree(self.dir, ignore_errors=True)
+                for name in order:
+                    self.run_cmd(*events[name])
+                self.assertEqual([(q["pane"], q["title"]) for q in self.queue()], [("%1", "turn")])
+
+    def test_an_earlier_drop_does_not_lower_the_panes_latest_stamp(self) -> None:
+        # A keystroke drop and the shutdown drop can reach the lock in either order.
+        self.run_cmd("drop", "%1", "3000")
+        self.run_cmd("drop", "%1", "1000")
+        self.run_cmd("push", line("%1"), "2000")
+        self.assertEqual(self.queue(), [])
+
+    def test_stamps_are_kept_per_server(self) -> None:
+        # The same pane id on two tmux servers is two sessions.
+        self.run_cmd("push", line("%1", server="1"), "1000")
+        self.run_cmd("push", line("%1", server="2"), "1000")
+        self.run_cmd("drop", "%1", "2000", "2")
+        self.run_cmd("push", line("%1", "later", server="1"), "1500")
+        self.assertEqual([(q["server"], q["title"]) for q in self.queue()], [("1", "later")])
+
+    def test_stamps_older_than_ten_minutes_are_forgotten(self) -> None:
+        now = int(time.time() * 1000)
+        old, recent = now - 11 * 60_000, now - 60_000
+        self.run_cmd("drop", "%8", str(old))
+        self.run_cmd("drop", "%9", str(recent))
+        self.run_cmd("drop", "%1", str(now))
+        self.run_cmd("push", line("%8"), str(old - 1))
+        self.run_cmd("push", line("%9"), str(recent - 1))
+        self.assertEqual([q["pane"] for q in self.queue()], ["%8"])
+
+    def test_a_stamp_that_is_not_a_number_is_refused(self) -> None:
+        # A leading zero would make bash read the stamp as octal.
+        for args in (("push", line("%1"), "soon"), ("drop", "%1", "-5"), ("push", line("%1"), "08"), ("drop", "%1", "08")):
+            with self.subTest(args=args):
+                result = subprocess.run([str(SCRIPT), *args], env=self.env, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(self.queue(), [])
+
+    def test_push_and_drop_refuse_what_is_not_a_pane_id_or_server_pid(self) -> None:
+        # tmux issues %<number> and a server pid; anything else would split a stamps record.
+        self.run_cmd("drop", "%1", "2000")
+        stamps = (self.dir / "stamps").read_text()
+        refused = [
+            ("push", line("%9 x"), "3000"),
+            ("push", line("9"), "3000"),
+            ("push", line("%9", server="1 2"), "3000"),
+            ("drop", "%9 x", "3000"),
+            ("drop", "9", "3000"),
+            ("drop", "%9", "3000", "x"),
+        ]
+        for args in refused:
+            with self.subTest(args=args):
+                result = subprocess.run([str(SCRIPT), *args], env=self.env, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual((self.dir / "stamps").read_text(), stamps)
+        self.assertEqual(self.queue(), [])
+
     def test_invalid_line_is_removed_and_reported(self) -> None:
         self.dir.mkdir(parents=True)
         (self.dir / "queue.jsonl").write_text(line("%1") + "\nnot json\n" + line("%2") + "\n")
@@ -84,6 +180,45 @@ class QueueFile(unittest.TestCase):
         self.run_cmd("push", line("%3"))
         self.run_cmd("drop", "%1")
         self.assertEqual([q["pane"] for q in self.queue()], ["%2", "%3"])
+
+    def test_a_drop_whose_stderr_is_gone_leaves_the_other_lines(self) -> None:
+        # A shutdown drop outlives omp, so nothing reads its stderr when it reports an invalid line.
+        for sigpipe in (signal.SIG_DFL, signal.SIG_IGN):
+            with self.subTest(sigpipe=sigpipe):
+                shutil.rmtree(self.dir, ignore_errors=True)
+                self.dir.mkdir(parents=True)
+                (self.dir / "queue.jsonl").write_text("\n".join([line("%1"), "not json", line("%2"), line("%3")]) + "\n")
+                read_end, write_end = os.pipe()
+                os.close(read_end)
+                subprocess.run(
+                    [str(SCRIPT), "drop", "%1", "2000"],
+                    env=self.env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=write_end,
+                    preexec_fn=lambda sigpipe=sigpipe: signal.signal(signal.SIGPIPE, sigpipe),
+                    check=False,
+                )
+                os.close(write_end)
+                self.assertEqual([q["pane"] for q in self.queue()], ["%2", "%3"])
+
+    def test_a_drop_whose_read_fails_leaves_the_queue_as_it_was(self) -> None:
+        self.run_cmd("push", line("%1"), "1000")
+        self.run_cmd("push", line("%2"), "1000")
+        before = (self.dir / "queue.jsonl").read_text()
+        broken = Path(self.tmp.name) / "broken-jq"
+        broken.mkdir()
+        (broken / "jq").write_text("#!/bin/sh\nexit 3\n")
+        (broken / "jq").chmod(0o755)
+        result = subprocess.run(
+            [str(SCRIPT), "drop", "%1", "2000"],
+            env={**self.env, "PATH": f"{broken}:{self.env['PATH']}"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.dir / "queue.jsonl").read_text(), before)
 
     def test_list_on_empty_queue_prints_nothing(self) -> None:
         self.assertEqual(self.run_cmd("list").stdout, "")
@@ -252,7 +387,9 @@ class PaneSwapping(unittest.TestCase):
         self.assertNotEqual(self.run_cmd("recover", other).returncode, 0)
         self.assertEqual((self.dir / "cockpit").read_text().strip(), f"{self.server} {self.cockpit}")
 
-    def wait_for(self, condition, what: str, timeout: float = 5.0) -> None:
+    # The bound only keeps a hang from stalling the suite: a passing test returns as
+    # soon as its condition holds, and a loaded machine can take several seconds.
+    def wait_for(self, condition, what: str, timeout: float = 30.0) -> None:
         deadline = time.monotonic() + timeout
         while not condition():
             if time.monotonic() > deadline:

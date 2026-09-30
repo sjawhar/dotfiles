@@ -21,10 +21,12 @@
 // different-sized cell never counts as typing.
 //
 // Runs unchanged in an agent box: TMUX and TMUX_PANE are passed in and
-// ~/.dotfiles and ~/.omp are mounted. Subagent sessions are skipped — only the
-// top-level session has a pane Sami answers. A subagent binds these handlers
-// too and inherits the parent's TMUX_PANE, so each handler checks
-// `ctx.agent.kind`: `"sub"` for anything spawned, `"main"` for the top level.
+// ~/.dotfiles and ~/.omp are mounted. Only a top-level session in omp's
+// terminal UI has a pane Sami answers, so every handler checks `answerable`:
+// a subagent binds these handlers too and inherits the parent's TMUX_PANE
+// (`ctx.agent.kind` is `"sub"` for anything spawned), and `omp -p` or
+// `omp --mode rpc` started from a pane has that pane without answering in it
+// (the host reports `ctx.mode` "print" or "rpc"; a terminal session is "tui").
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -42,12 +44,16 @@ const TERMINAL_REPLY = /^(?:\x1b\[(?:6;\d+;\d+t|\d+;\d+R|[IO]|<[\d;]*[Mm]))+$/;
 
 type Ctx = {
 	agent: { kind: "main" | "sub" };
+	mode: string;
+	hasUI: boolean;
 	cwd: string;
 	hasPendingMessages: () => boolean;
 	sessionManager: { getSessionId: () => string; getSessionName: () => string | undefined };
 	ui: { notify: (message: string, type?: "info" | "warning" | "error") => void; onTerminalInput: (handler: (data: string) => undefined) => () => void };
 };
 type Assistant = { role: string; stopReason?: string };
+
+const answerable = (ctx: Ctx): boolean => ctx.agent.kind === "main" && ctx.mode === "tui" && ctx.hasUI;
 
 export default function (pi: ExtensionAPI) {
 	if (!PANE || !SERVER || !/^\d+$/.test(SERVER)) return;
@@ -57,13 +63,23 @@ export default function (pi: ExtensionAPI) {
 	// the line; the extra drop that follows is a no-op.
 	let queued = false;
 	let unsubscribe: (() => void) | undefined;
+	// Each push and drop carries the time its event happened, and the script
+	// orders them by it (scripts/tmux-attention's header), so every call starts
+	// at once. Stamps only increase, so two events in one millisecond keep their
+	// order.
+	let lastStamp = 0;
+	const stamp = (): string => {
+		lastStamp = Math.max(Date.now(), lastStamp + 1);
+		return String(lastStamp);
+	};
 
 	// Every handler but session_shutdown fires and forgets: the tool loop never
 	// waits on tmux. A failing push or drop is reported in the TUI, never on
 	// stderr, which the TUI owns. exec resolves on non-zero exit rather than
-	// rejecting.
+	// rejecting. Every call runs under `setsid -w`, in a session of its own, so
+	// it survives omp's process group (below); exec still resolves when it exits.
 	const run = (ctx: Ctx, args: string[]): Promise<void> =>
-		pi.exec(SCRIPT, args).then(
+		pi.exec("setsid", ["-w", SCRIPT, ...args]).then(
 			(result) => {
 				if (result.code !== 0) {
 					ctx.ui.notify(`attention-queue: tmux-attention ${args[0]} failed (${result.code}): ${result.stderr.trim()}`, "error");
@@ -83,15 +99,15 @@ export default function (pi: ExtensionAPI) {
 			at: new Date().toISOString(),
 		};
 		queued = true;
-		void run(ctx, ["push", JSON.stringify(line)]);
+		void run(ctx, ["push", JSON.stringify(line), stamp()]);
 	};
 	const drop = (ctx: Ctx): Promise<void> => {
 		queued = false;
-		return run(ctx, ["drop", PANE]);
+		return run(ctx, ["drop", PANE, stamp(), SERVER]);
 	};
 
 	const listen = (_event: unknown, ctx: Ctx): void => {
-		if (ctx.agent.kind === "sub") return;
+		if (!answerable(ctx)) return;
 		unsubscribe?.();
 		unsubscribe = ctx.ui.onTerminalInput((data) => {
 			if (queued && !TERMINAL_REPLY.test(data)) void drop(ctx);
@@ -102,24 +118,29 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_switch", listen);
 	pi.on("session_branch", listen);
 	pi.on("agent_end", (event: { messages: Assistant[]; willContinue?: boolean }, ctx: Ctx) => {
-		if (ctx.agent.kind === "sub" || event.willContinue) return;
+		if (!answerable(ctx) || event.willContinue) return;
 		const last = event.messages.findLast((m) => m.role === "assistant");
 		if (last?.stopReason === "aborted") return;
 		if (ctx.hasPendingMessages()) return;
 		push(ctx);
 	});
 	pi.on("tool_execution_start", (event: { toolName: string }, ctx: Ctx) => {
-		if (ctx.agent.kind === "sub" || event.toolName !== "ask") return;
+		if (!answerable(ctx) || event.toolName !== "ask") return;
 		push(ctx);
 	});
 	pi.on("tool_execution_end", (event: { toolName: string }, ctx: Ctx) => {
-		if (ctx.agent.kind === "sub" || event.toolName !== "ask") return;
+		if (!answerable(ctx) || event.toolName !== "ask") return;
 		void drop(ctx);
 	});
-	// Awaited: the line must be gone before the process is, or a later `next`
-	// swaps whatever now runs in this pane into the cockpit.
+	// The line must go when the process does, or a later `next` swaps whatever
+	// now runs in this pane into the cockpit. omp awaits this handler for at most
+	// 2 s and then exits, and when omp is the pane's own command the pane's
+	// hangup ends omp's whole process group; the drop, in a session of its own,
+	// finishes whenever it gets the queue lock. In an agent box it dies with the
+	// container all the same; scripts/agentbox drops the pane from the host once
+	// the box is gone.
 	pi.on("session_shutdown", (_event: unknown, ctx: Ctx) => {
-		if (ctx.agent.kind === "sub") return;
+		if (!answerable(ctx)) return;
 		return drop(ctx);
 	});
 }

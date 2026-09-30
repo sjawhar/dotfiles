@@ -515,6 +515,12 @@ close_box() {
         echo "agentbox: $box is still running after 60s; removing it" >&2
         docker rm -f "$box" >/dev/null 2>&1 || true
     fi
+    # An omp in the box may have queued this pane for the attention cockpit, and
+    # its own shutdown drop died with the container. The launcher runs in the same
+    # host pane, so it drops that pane here, stamped after everything the box sent.
+    if [[ -n "${TMUX_PANE:-}" ]]; then
+        "$DOTFILES_DIR/scripts/tmux-attention" drop "$TMUX_PANE" >/dev/null || true
+    fi
     # The container is gone: nothing inside can use the key any more, and the broker must not
     # accept it either. Before the rm -rf below, which takes the key dir with it.
     unenroll_box "$box"
