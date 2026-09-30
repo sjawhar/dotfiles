@@ -93,7 +93,7 @@ this order, and the first that matches decides:
 
 | When | Rule | Result |
 |---|---|---|
-| any day | `advisor.disableRoster` in the overlay holds `askgate`, read as the extension reads it: any string member that trims and lowercases to `askgate` (`AskGate` too) | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
+| any day | `advisor.disableRoster` in the overlay holds `askgate`, read as the extension reads it: any string member that trims and lowercases to `askgate` (`AskGate` too) | killed: no GO or EXTEND is computed and nothing is written (exit 1); the line names who added the member from the overlay's provenance log, or says `killed by an unrecorded writer` when no line records adding it or the latest line for it is a remove (still killed) |
 | day 3 onward | `ungated_share` > 0.20 over ≥ 20 calls in the last 24 h that got a verdict or a timeout (a rebuttal, a breaker pass or a killed call never fills that floor), or verdict p95 above 0.9 × the timeout over ≥ 20 verdicts in the last 24 h | KILL |
 | day 14 onward | `ungated_share` ≥ 0.10 over the window | KILL |
 | day 14 onward, ≥ 30 labelled revises | precision < 0.3 | KILL |
@@ -141,9 +141,10 @@ The readout applies every KILL itself, by `overlay add advisor.disableRoster ask
 decides and writes the KILL while holding the overlay's lock, so of two readouts at once (the timer and a hand
 run) only the one whose write added the member says `KILL applied`; the other reads the gate as killed. The exit
 code is 1 when any check applied a KILL or found the gate killed, else 2 when a check could not run or could not
-read one of its inputs (the overlay, the labels, the `stats.db` baseline or the roster; the failure is printed and
-sent, and the day-3 rules, which need only the gate entries, still run and still apply a KILL), else 3 when any
-check is incomplete, else 0.
+read one of its inputs (the overlay, the labels, the `stats.db` baseline, the roster or the overlay's provenance
+log; the failure is printed and sent, and the day-3 rules, which need only the gate entries, still run and still
+apply a KILL), else 3 when any check is incomplete, else 0. A KILL it wrote but could not record in the provenance
+log is still applied (exit 1), with that failure printed and sent.
 With `--notify TOPIC` it sends
 one Envoy message covering every check, beginning `advisor-report (AGENTC-1323)` so the role holder can tell
 it apart from other watchers on the same role, through `scripts/envoy send --source envoy`, so the message
@@ -155,10 +156,17 @@ is meant to run daily from a oneshot user timer, where a non-zero exit leaves th
 
 ## The overlay
 
-`~/.omp/agent/local-overrides.yml` is a machine-local settings overlay; `overlay add <key.path> <member>` and
-`overlay remove <key.path> <member>` are its only writers. Each holds `flock(LOCK_EX)` on
-`local-overrides.yml.lock` for the whole read-modify-write, keeps every other key and list member, writes a
-temp file in the same directory, fsyncs it, renames it over the file and fsyncs the directory, so a crash or
-a concurrent writer never leaves a torn or stale file. Adding a present member or removing an absent one
-changes nothing. Owners remove only their own members: the gate's kill is `askgate`; turning every advisor
-off on this machine is `askgate`, `memory` and `drift`.
+`~/.omp/agent/local-overrides.yml` is a machine-local settings overlay; `overlay add <key.path> <member>
+[--why TEXT]` and `overlay remove <key.path> <member> [--why TEXT]` are its only writers. Each holds
+`flock(LOCK_EX)` on `local-overrides.yml.lock` for the whole read-modify-write, keeps every other key and list
+member, writes a temp file in the same directory, fsyncs it, renames it over the file and fsyncs the directory,
+so a crash or a concurrent writer never leaves a torn or stale file. Adding a present member or removing an
+absent one changes nothing. Owners remove only their own members: the gate's kill is `askgate`; turning every
+advisor off on this machine is `askgate`, `memory` and `drift`.
+
+Every change also appends one line to `local-overrides.provenance.jsonl` beside the overlay, still under the lock
+and after the overlay is written: `at`, `verb` (`add` or `remove`), `key`, `member`, `user`, `omp_session_id`
+(`OMP_SESSION_ID`, `null` outside a session), `argv`, and `why` when `--why` was given; the readout's own KILL
+records its reasons as `why`. An unchanged file logs nothing. The readout looks up the latest line whose `key` is
+`advisor.disableRoster` and whose `member` trims and lowercases to `askgate`, so an overlay edited by hand, or by
+anything but these commands, reads `killed by an unrecorded writer`: the kill still holds and the notice names it.
