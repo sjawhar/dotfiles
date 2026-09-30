@@ -94,7 +94,8 @@ these rules over the window from launch to now; a gate that was never armed is n
 | any day, before every rule below | `advisor.disableRoster` in the overlay holds `askgate`, or any call since launch recorded `outcome: killed` | killed: no GO or EXTEND is computed and nothing is written (exit 1) |
 | day 3 onward | `ungated_share` > 0.20 over ≥ 20 matched calls in the last 24 h, or verdict p95 above the timeout in the last 24 h | KILL |
 | day 14 | `ungated_share` ≥ 0.10 over the window | KILL |
-| day 14, ≥ 30 labelled revises | precision < 0.3, or harm > 0.10 | KILL |
+| day 14, ≥ 30 labelled revises | precision < 0.3 | KILL |
+| day 14, any number of labelled revises | harm > 0.10 | KILL |
 | day 14, ≥ 30 labelled revises | precision ≥ 0.5, harm ≤ 0.05, `ungated_share` < 0.10, p95 ≤ 0.9 × timeout, skips = 0 | GO: make `OMP_ASKGATE=block` the shim default |
 | day 14–20 | neither | EXTEND one week |
 | day 21 onward | not GO | KILL |

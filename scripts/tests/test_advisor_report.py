@@ -495,16 +495,16 @@ class ReadoutTest(unittest.TestCase):
         entries += [gate_entry(outcome="timeout", at=at[38 + i], latency_ms=90_000) for i in range(2)]
         self.gate_session(entries)
 
-    def label_revises(self, correct: int, other: int, harmful: int = 0):
+    def label_revises(self, correct: int, other: int, harmful: int = 0, unlabelled: int = 0):
         packet = self.home.root / "packet.jsonl"
         self.home.run("sample", "--since", iso(self.launched), "--until", iso(self.now), "--n", "100",
                       "--out", str(packet), check_exit=0)
         rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()][1:]
         revises = [row["id"] for row in rows if row.get("decision") == "revise"]
-        self.assertEqual(len(revises), correct + harmful + other)
+        self.assertEqual(len(revises), correct + harmful + other + unlabelled)
         labels = self.home.root / "labels.jsonl"
         with labels.open("w", encoding="utf-8") as fh:
-            for i, row_id in enumerate(revises):
+            for i, row_id in enumerate(revises[:correct + harmful + other]):
                 label = "acted-correct" if i < correct else "acted-harmful" if i < correct + harmful else "ignored-agent-right"
                 fh.write(json.dumps({"id": row_id, "label": label, "labeler": "oracle-test", "at": iso(self.now)}) + "\n")
         self.home.run("ingest-labels", str(labels), check_exit=0)
@@ -569,11 +569,12 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn("no GO or EXTEND computed", proc.stdout)
         self.assertNotIn("GO:", proc.stdout)
 
-    def readout_on_day(self, day: float, correct: int, other: int, harmful: int = 0, exit_code: int = 0) -> str:
-        """The healthy gate (ungated_share 0.05, p95 4 s, no skips) read out `day` days after launch."""
+    def readout_on_day(self, day: float, correct: int, other: int, harmful: int = 0, unlabelled: int = 0,
+                       exit_code: int = 0) -> str:
+        """The healthy gate (30 revises, ungated_share 0.05, p95 4 s, no skips) read out `day` days after launch."""
         self.launch(days=day)
         self.healthy_gate()
-        self.label_revises(correct=correct, other=other, harmful=harmful)
+        self.label_revises(correct=correct, other=other, harmful=harmful, unlabelled=unlabelled)
         return self.home.run("readout", "--check", "gate", check_exit=exit_code).stdout
 
     def assert_killed(self):
@@ -597,6 +598,12 @@ class ReadoutTest(unittest.TestCase):
     def test_day_14_harm_0_13_kills(self):
         out = self.readout_on_day(15, correct=18, harmful=4, other=8, exit_code=1)
         self.assertIn("harm 0.13 > 0.1", out)
+        self.assert_killed()
+
+    def test_day_14_harm_over_0_10_kills_at_20_labels(self):
+        out = self.readout_on_day(15, correct=10, harmful=5, other=5, unlabelled=10, exit_code=1)
+        self.assertIn("n=20", out)
+        self.assertIn("harm 0.25 > 0.1", out)
         self.assert_killed()
 
     def test_day_22_not_go_kills(self):
