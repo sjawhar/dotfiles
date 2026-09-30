@@ -90,9 +90,13 @@ class AgentSecretsSession(unittest.TestCase):
         write_stub(self.stub_dir, "agent-secrets", AGENT_SECRETS_STUB)
         # The agent reports its pid: registration must keep the session's.
         write_stub(self.stub_dir, "agent", 'echo "AGENT pid=$$ $*"')
-        # shims/omp reaches omp through `mise x github:sjawhar/oh-my-pi -- omp` when no local
-        # build is on PATH; cld and oc exec their agents by name.
-        write_stub(self.stub_dir, "mise", 'shift 3; echo "AGENT $*"')
+        # shims/omp reaches omp through `mise x github:sjawhar/oh-my-pi -- …omp` when no local
+        # build is on PATH, which runs the command with the release's install dir on PATH;
+        # cld and oc exec their agents by name.
+        tool_dir = self.home / ".mise" / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin"
+        tool_dir.mkdir(parents=True)
+        write_stub(tool_dir, "omp", 'echo "AGENT omp $*"')
+        write_stub(self.stub_dir, "mise", f'shift 3; PATH="{tool_dir}:$PATH" exec "$@"')
         write_stub(self.stub_dir, "claude", 'echo "AGENT claude"')
         write_stub(self.stub_dir, "opencode", 'echo "AGENT opencode"')
         self.env = {
