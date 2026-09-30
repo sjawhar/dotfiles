@@ -466,7 +466,7 @@ describe("failure containment", () => {
 		const usageThrows = bind({ usageThrows: true });
 		await usageThrows.request(3);
 		expect(usageThrows.probeCalls).toHaveLength(0);
-		// Not a probe: no side turn ran, so the pilot's probe counts must not see it.
+		// Not a probe: no side turn ran, so it must not be recorded as one.
 		expect(usageThrows.entries).toEqual([["selfcompact-error", expect.objectContaining({ v: 1, request: 1, error: "usage unavailable" })]]);
 	});
 	test("a compaction that rejects after onError is recorded once as a failed fire, leaves the cap unconsumed, and two failures close the window", async () => {
