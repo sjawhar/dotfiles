@@ -98,7 +98,8 @@ this order, and the first that matches decides:
 | day 14 onward, ≥ 30 labelled revises | precision < 0.3 | KILL |
 | day 14 onward, any number of labelled revises | harm > 0.10 | KILL |
 | any day | a completed week since launch has revises and not one of them is labelled | incomplete, naming the week |
-| any day | fewer than 30 labelled revises | incomplete |
+| day 21 onward | fewer than 30 labelled revises | KILL: EXTEND once, then GO or KILL, and GO lacks its evidence |
+| before day 21 | fewer than 30 labelled revises | incomplete |
 | day 21 onward | not GO | KILL |
 | any day | `~/.omp/agent/extensions/askgate.ts` does not resolve to a file under `$DOTFILES_DIR`, or `$DOTFILES_DIR/omp/WATCHDOG.yml` has no `advisors:` entries | incomplete; nothing is written |
 | day 14 onward | precision ≥ 0.5, harm ≤ 0.05, `ungated_share` < 0.10, p95 ≤ 0.9 × timeout, `skips` = 0 (skips the gate's own cards caused; harm counts the same ones) | GO: make `OMP_ASKGATE=block` the shim default |

@@ -1181,7 +1181,11 @@ def gate_decision(day: float, timeout_ms: int, whole: dict, recent: dict, labell
     if missing_weeks:
         return Decision(INCOMPLETE, (f"no labels for {', '.join(missing_weeks)}",))
     n, precision, harm, p95 = labelled["n"], labelled["precision"], labelled["harm"], whole["latency_ms_p95"]
+    # EXTEND once, then GO or KILL: from day 21 a gate without 30 labels lacks GO's evidence, and a KILL restores the
+    # status quo.
     if n < MIN_LABELS:
+        if day >= EXTENDED_DAY:
+            return Decision(KILL, (f"day {EXTENDED_DAY}: {n} labelled revises, fewer than {MIN_LABELS}, after the one-week extension",))
         return Decision(INCOMPLETE, (f"labels < {MIN_LABELS} (n={n})",))
     go = (day >= DECISION_DAY and precision >= GO_PRECISION and harm <= GO_HARM and (whole["ungated_share"] or 0) < MAX_UNGATED
           and (p95 is None or p95 <= GO_LATENCY_SHARE * timeout_ms) and skips == 0)
