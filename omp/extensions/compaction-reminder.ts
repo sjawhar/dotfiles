@@ -1,7 +1,7 @@
 // Re-assert what a compaction loses, in two cases: the sdd process contract for
 // a top-level session while an sdd goal is active, and what a subagent was told
 // to do, on its first compaction. Every successful automatic shake also leaves
-// a `compaction-marker` entry, the only durable record a shake has.
+// a `compaction-marker` entry, the evidence AGENTC-1288's acceptance check reads.
 //
 // A compaction summary paraphrases the conversation; a workflow contract the
 // session was following (the sdd command's agent mapping and gates) rarely
@@ -28,12 +28,22 @@
 // errorMessage); a shake that fell through leaves it to the method that commits
 // after it. Both reminders fire on both events: a shake can drop the
 // coordinator's re-read of sdd.md, a plain file read, as readily as a summary
-// can. A successful shake also appends a `compaction-marker` custom entry, never
-// sent to the model, holding the context size `ctx.getContextUsage()` reported
-// at `auto_compaction_start` and after the shake: no compaction entry, log line
-// or stats row records one otherwise. Each reminder is a persisted, displayed
-// custom message; only the queue differs, because omp has no single delivery
-// that fits every moment a compaction can land:
+// can. A successful shake also appends a `compaction-marker` custom entry,
+// never sent to the model, with the context size before and after it, which
+// `compaction-event-audit.py` on AGENTC-1288 counts beside the committed
+// compaction entries: it is the only record of the size a shake leaves. The fork
+// logs the trigger size it decided on at debug level ("Mid-run compaction ran
+// between provider calls", "Pre-prompt context maintenance triggered …"), but
+// does not pass it to extensions — `auto_compaction_start` carries only
+// `reason` and `action` — so both marker figures are `ctx.getContextUsage()`,
+// the session's anchored estimate (the last provider-reported prompt size plus
+// a local count of what came after it): `tokensBefore` read at
+// `auto_compaction_start`, `tokensAfter` after the shake, which folds its own
+// savings into that estimate. The fork's trigger figure is computed differently
+// (from the last response's billed usage and a stored-context estimate), so
+// `tokensBefore` need not equal the logged number. Each reminder is a
+// persisted, displayed custom message; only the queue differs, because omp has
+// no single delivery that fits every moment a compaction can land:
 //
 //   idle (/compact, idle compaction): `nextTurn` appends to context at once.
 //   mid-run (compaction at a tool-loop boundary and the turn just ended with
@@ -61,7 +71,7 @@
 // paraphrases the scope limits, forbidden files and required output, and a
 // shake can swap a large block of them for a placeholder. So on its first
 // compaction it is told to re-check them, and handed, verbatim, the assignment
-// it was spawned with and the latest follow-up its dispatcher sent after it.
+// it was spawned with and the latest instruction it received after it.
 // Later compactions stay quiet: one restatement per session binding. A cold
 // revive rebinds fresh extension instances, so a revived subagent gets one
 // more, which then carries the follow-up that woke it. State lives in the
@@ -83,11 +93,17 @@
 // and a follow-up never writes a `session_init`. The follow-up restated is the
 // latest, after that `session_init`, of: an `irc:incoming` custom message from
 // `ctx.agent.parentId` (the parent's message to an idle agent; its raw body is
-// `details.message`); a user steer rendered from the fork's parent-irc template
-// (the parent's message to a running agent; the body is what sits between its
-// `<irc from="parent" …>` lines); and a user message that is neither
-// synthetic, a steer, nor the prompt that carried the assignment (a follow-up
-// turn). The lead says a later instruction wins where the two conflict.
+// `details.message`); any user message flagged `steering` (a message to a
+// running agent: the parent's IRC message, or a person's); and a user message
+// that is neither synthetic, a steer, nor the prompt that carried the
+// assignment (a follow-up turn). A steer counts by its flag; the fork's
+// parent-irc template only shapes its text, so when the text still carries that
+// wrapper it is unwrapped, and otherwise — a reworded template, or an `<irc>`
+// block a shake already swapped for a placeholder — it is restated as it stands.
+// The lead says a later instruction wins where the two conflict. Only the latest
+// one is restated: earlier follow-ups survive through the summary, so an
+// intermediate ruling that changed a spawn constraint is recalled only as well
+// as the summary keeps it, though the lead still ranks it above the original.
 //
 // A `/tan` clone's committed compaction is restated here and, when the summary
 // dropped the request, by the fork's own `/tan` restore as well. The lead's
@@ -108,7 +124,7 @@ import subagentReminder from "./compaction-reminder-subagent.md" with { type: "t
 const SDD_REMINDER = sddReminder.trim();
 const SUBAGENT_REMINDER = subagentReminder.trim();
 const SDD_PREFIX = "[sdd]";
-/** The fork's `prompts/steering/parent-irc.md`, as rendered into a parent's steer to a running agent. */
+/** The fork's `prompts/steering/parent-irc.md` wrapper, stripped from a steer when present. */
 const PARENT_STEER_PREFIX = "[Wait interrupted by message]\n";
 const PARENT_STEER_BODY = /^<irc from="parent" agent="[^"]*">\n([\s\S]*)\n<\/irc>$/;
 
@@ -119,13 +135,13 @@ type ModeChangeEntry = {
 	data?: { goal?: { objective?: string; status?: string } };
 };
 type InitEntry = { type: "session_init"; task: string };
-type UserMessage = {
+type BranchMessage = {
 	role: string;
 	content: string | Array<{ type: string; text?: string }>;
 	steering?: boolean;
 	synthetic?: boolean;
 };
-type MessageEntry = { type: "message"; message: UserMessage };
+type MessageEntry = { type: "message"; message: BranchMessage };
 type IrcEntry = { type: "custom_message"; customType: string; details?: { from?: string; message?: string } };
 type ShakeEndEvent = { action: string; aborted: boolean; skipped?: boolean; errorMessage?: string };
 type CompactCtx = {
@@ -150,7 +166,7 @@ function sddGoalActive(ctx: CompactCtx): boolean {
 }
 
 /** Text parts of a message, joined. */
-function messageText(message: UserMessage): string {
+function messageText(message: BranchMessage): string {
 	if (typeof message.content === "string") return message.content;
 	return message.content
 		.filter(part => part.type === "text")
@@ -158,7 +174,7 @@ function messageText(message: UserMessage): string {
 		.join("\n");
 }
 
-/** The latest instruction the dispatcher sent after the assignment, as the branch now holds it. */
+/** The latest instruction received after the assignment, as the branch now holds it. */
 function latestFollowUp(entries: BranchEntry[], parentId: string | undefined): string | undefined {
 	let latest: string | undefined;
 	let assignmentPrompt = true;
@@ -171,18 +187,14 @@ function latestFollowUp(entries: BranchEntry[], parentId: string | undefined): s
 		if (entry.type !== "message") continue;
 		const { message } = entry as MessageEntry;
 		if (message.role !== "user" || message.synthetic) continue;
-		const text = messageText(message);
-		if (message.steering) {
-			if (!text.startsWith(PARENT_STEER_PREFIX)) continue;
-			// A shake may have swapped the steer's <irc> block for a placeholder; restate what is left.
-			const rest = text.slice(PARENT_STEER_PREFIX.length);
-			latest = PARENT_STEER_BODY.exec(rest)?.[1] ?? rest;
-		} else if (assignmentPrompt) {
+		if (assignmentPrompt && !message.steering) {
 			// The first plain user message after `session_init` is the prompt that carried the assignment.
 			assignmentPrompt = false;
-		} else {
-			latest = text;
+			continue;
 		}
+		const text = messageText(message);
+		const rest = text.startsWith(PARENT_STEER_PREFIX) ? text.slice(PARENT_STEER_PREFIX.length) : text;
+		latest = PARENT_STEER_BODY.exec(rest)?.[1] ?? rest;
 	}
 	return latest;
 }
