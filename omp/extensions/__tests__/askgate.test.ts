@@ -497,6 +497,15 @@ describe("deadline and abandonment", () => {
 		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "abandoned", usage: PARTIAL }]);
 		expect(g.notices).toHaveLength(0);
 	});
+	test("in block mode a call the user's stop left without a verdict is refused, not let through", async () => {
+		// A write an eval cell starts from its own timer: its runner is still live when the stop abandons its gate.
+		const { g, gated } = await bridgedGate({ OMP_ASKGATE: "block" });
+		g.event("agent_end", { messages: [fx.user("Post it."), lastAssistant("aborted")] });
+		const result = await gated;
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("before a verdict");
+		expect(g.entries).toMatchObject([{ decision: "revise", outcome: "abandoned", verdictMode: "block" }]);
+	});
 	test("an end the session will continue past leaves the gate waiting", async () => {
 		const { g, gated, signals } = await bridgedGate({ OMP_ASKGATE_TIMEOUT_MS: "50" });
 		g.event("agent_end", { messages: [lastAssistant("aborted")], willContinue: true });
@@ -534,6 +543,23 @@ describe("deadline and abandonment", () => {
 		const { g, gated } = await bridgedGate();
 		await g.event("session_shutdown");
 		expect(await gated).toBeUndefined();
+		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "shutdown", verdictMode: "warn" }]);
+	});
+	test("a gated call that arrives after shutdown began asks no model: refused in block mode, recorded as shutdown", async () => {
+		// A mid-turn dispose keeps the loop live until its own abort, so a scoped write can still reach tool_call.
+		const g = bind({ env: { OMP_ASKGATE: "block" } });
+		await g.event("session_shutdown");
+		const result = await g.device("late", "dispatch_comment", COMMENT);
+		expect(g.calls).toHaveLength(0);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("shut down");
+		expect(g.entries).toMatchObject([{ decision: "revise", outcome: "shutdown", verdictMode: "block" }]);
+	});
+	test("in warn mode such a call goes out unasked, recorded as shutdown, not as the user's stop", async () => {
+		const g = bind();
+		await g.event("session_shutdown");
+		expect(await g.device("late", "dispatch_comment", COMMENT)).toBeUndefined();
+		expect(g.calls).toHaveLength(0);
 		expect(g.entries).toMatchObject([{ decision: "allow", outcome: "shutdown", verdictMode: "warn" }]);
 	});
 	test("shutdown stays inside the runner's 2 s cap even when the aborted call never settles", async () => {
