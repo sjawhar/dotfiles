@@ -483,20 +483,20 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
 			const request = { ctx, model, system, user, sessionId: ctx.sessionManager.getSessionId() };
 			const answer = await ask(request, event.toolCallId, Math.max(0, deadlineMs - (deps.now() - started)));
-			const spent = { promptBytes, model: `${model.provider}/${model.id}`, deadlineMs, ...(answer.usage ? { usage: answer.usage } : {}) };
-			if (answer.kind === "timeout") return pass("timeout", spent, "failure");
+			const called = { promptBytes, model: `${model.provider}/${model.id}`, deadlineMs, ...(answer.usage ? { usage: answer.usage } : {}) };
+			if (answer.kind === "timeout") return pass("timeout", called, "failure");
 			// Not the gate's failure: the call, or the run, ended without it.
-			if (answer.kind === "abandoned") return pass("abandoned", spent);
-			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...spent }, "failure");
+			if (answer.kind === "abandoned") return pass("abandoned", called);
+			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...called }, "failure");
 			const verdict = parseVerdict(answer.text);
-			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...spent }, "failure");
+			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...called }, "failure");
 			if (verdict.decision === "allow" || verdict.reason === undefined) {
 				breaker.reset(key);
-				return pass("verdict", spent, "verdict");
+				return pass("verdict", called, "verdict");
 			}
 			breaker.revised(key, verdict.reason);
 			return {
-				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, revisesForKey: base.revisesForKey + 1, ...spent },
+				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, revisesForKey: base.revisesForKey + 1, ...called },
 				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason) } : { additionalContext: renderWarn(verdict.reason) },
 				effect: "verdict",
 			};
