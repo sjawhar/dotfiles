@@ -113,8 +113,12 @@ until its own rules are added here.
 The readout applies every KILL itself, by `overlay add advisor.disableRoster askgate`. The exit code is 1
 when any check applied a KILL, else 3 when any check is incomplete, else 0. With `--notify TOPIC` it sends
 one Envoy message covering every check, beginning `advisor-report (AGENTC-1323)` so the role holder can tell
-it apart from other watchers on the same role. It is meant to run daily from a oneshot user timer, where a
-non-zero exit leaves the unit failed.
+it apart from other watchers on the same role, through `scripts/envoy send --source envoy`, so the message
+comes from envoy rather than from a person or whichever session ran it. It first runs `scripts/envoy send
+--source` alone, which an envoy with the flag refuses with `--source accepts only envoy`; any other answer
+means the flag is missing, and an envoy without it would publish to a topic named `--source`, so nothing is
+sent. A missing flag and a failed send each raise the exit code to at least 3, after any KILL is written. It
+is meant to run daily from a oneshot user timer, where a non-zero exit leaves the unit failed.
 
 ## The overlay
 
