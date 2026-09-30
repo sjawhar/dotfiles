@@ -72,7 +72,7 @@ _entry_seq = [0]
 def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None, reason=None, mode="warn"):
     """An `advisor-gate` entry as the AskGate extension appends it to a root session file."""
     _entry_seq[0] += 1
-    if decision == "revise":
+    if decision == "revise" and outcome == "verdict":
         reason = reason or "failure 7: the text points at a message the reader cannot see"
     return {
         "type": "custom",
@@ -681,6 +681,15 @@ class GateMetricsTest(unittest.TestCase):
         outcomes = ("verdict", "timeout", "error", "no-verdict", "unavailable", "halted", "rebuttal", "breaker", "killed")
         self.assertEqual(ar.gate_metrics([gate_entry(outcome=outcome) for outcome in outcomes])["latency_calls"], 2)
 
+    def test_a_shutdown_is_ungated_in_warn_mode_and_a_gated_refusal_in_block_mode(self):
+        """The session shut down while the gate waited: in warn mode the write went out without a verdict
+        (`allow/shutdown`), in block mode the call was refused (`revise/shutdown`), as an ordinary revise would be."""
+        judged = [gate_entry(latency_ms=3000) for _ in range(17)] + [gate_entry(outcome="timeout")]
+        warn = ar.gate_metrics(judged + [gate_entry(outcome="shutdown", mode="warn") for _ in range(2)])
+        block = ar.gate_metrics(judged + [gate_entry(decision="revise", outcome="shutdown", mode="block") for _ in range(2)])
+        self.assertEqual((warn["ungated_share"], warn["shutdown"]), (3 / 20, 2))
+        self.assertEqual((block["ungated_share"], block["shutdown"]), (1 / 20, 2))
+
     def test_skipped_and_abandoned_calls_leave_ungated_share_and_fail_open_rate(self):
         """A primary on another provider sends the gate nothing (`skipped`), and a user who stopped the write ended the
         call (`abandoned`, recorded as `error` with an `abandoned:` reason until the extension has its own outcome)."""
@@ -1137,6 +1146,15 @@ class ReadoutTest(unittest.TestCase):
         lines = out.splitlines()
         self.assertIn("gate: 4 skipped: the primary was on another provider, so the gate sent no transcript; not in ungated_share", lines)
         self.assertIn("gate: 3 abandoned: the user stopped the write while the gate waited; not in ungated_share", lines)
+
+    def test_shutdowns_are_counted_on_their_own_line_by_mode(self):
+        at = self.now - timedelta(hours=1)
+        self.healthy_gate(extra=[gate_line(outcome="shutdown", mode="warn", at=at)]
+                          + [gate_line(decision="revise", outcome="shutdown", mode="block", at=at) for _ in range(2)])
+        out = self.home.run("readout", "--check", "gate", check_exit=3).stdout
+        self.assertIn("ungated_share 0.070", out)
+        self.assertIn("gate: 3 shutdown: 1 in warn mode, whose write went out without a verdict (ungated); 2 in block mode, "
+                      "refused (gated)", out.splitlines())
 
     def test_an_empty_advisors_list_messages_the_role_and_writes_nothing(self):
         self.healthy_gate()
