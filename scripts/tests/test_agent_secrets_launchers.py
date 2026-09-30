@@ -46,6 +46,8 @@ case "$1" in
             issued) echo issued; exit 0 ;;
             unreachable) echo "agent-secrets launcher login-status: dial unix $AGENT_SECRETS_HELPER_SOCK: connect: no such file or directory" >&2; exit 1 ;;
             broken) echo "mise ERROR Tool not installed for shim: agent-secrets" >&2; exit 1 ;;
+            # A failed auto-install: progress first, the cause last, nothing on stdout.
+            installfail) echo "mise agent-secrets@legion-envoy-v9.9.9 [1/3] download agent-secrets-amd64.tar.gz" >&2; echo "mise ERROR Failed to install github:sjawhar/legion@legion-envoy-v9.9.9: checksum mismatch" >&2; exit 1 ;;
             # The legion #1589 client prints the state on stdout and what to do about it on stderr
             # (cmd/agent-secrets/main.go, cmdLauncherLoginStatus, at 3d5f07e5).
             pending) echo pending; echo "agent-secrets launcher login-status: a machine login is waiting for approval (code ABCD-EFGH)" >&2; exit 1 ;;
@@ -177,12 +179,14 @@ class AgentSecretsSession(unittest.TestCase):
         for state, cause in (
             ("unreachable", "connect: no such file or directory"),
             ("broken", "Tool not installed for shim: agent-secrets"),
+            ("installfail", "Failed to install github:sjawhar/legion@legion-envoy-v9.9.9"),
         ):
             with self.subTest(state=state):
                 result, pid = self.session(STUB_LOGIN_STATE=state)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.splitlines(), [f"AGENT pid={pid} --flag"])
                 self.assertIn(cause, result.stderr)
+                self.assertNotIn("[1/3] download", result.stderr)
 
     def test_missing_client_launches_unregistered(self) -> None:
         self.install_helper_unit()

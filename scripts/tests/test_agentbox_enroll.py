@@ -80,9 +80,13 @@ case "$1" in
         esac ;;
     unenroll) echo "unenroll $*" >>"$STUB_CALLS" ;;
     renew)
+        # Fails at once; ends its loop on run $STUB_RENEW_RUNS (3). Run $STUB_LONG_RUN instead
+        # moves the fake clock ($STUB_CLOCK, read by the date stub) on by two minutes.
         echo "renew" >>"$STUB_CALLS"
         echo "agent-secrets renew: 401 PROOF_INVALID"
-        (( $(grep -c '^renew$' "$STUB_CALLS") < 3 )) || kill "$PPID"
+        n=$(grep -c '^renew$' "$STUB_CALLS")
+        [[ "$n" != "${STUB_LONG_RUN:-}" ]] || echo $(( $(<"$STUB_CLOCK") + 120 )) >"$STUB_CLOCK"
+        (( n < ${STUB_RENEW_RUNS:-3} )) || kill "$PPID"
         exit 1 ;;
     *) echo "unexpected agent-secrets $*" >&2; exit 99 ;;
 esac
@@ -103,13 +107,16 @@ class EnrollFixture(unittest.TestCase):
         write_stub(
             self.stub_dir,
             "sleep",
-            'echo sleep >>"$STUB_CALLS"\n'
+            'echo "sleep $*" >>"$STUB_CALLS"\n'
             '[[ -e "$STUB_KEYDIR/enrollment.pending" ]] && touch -h -d "-1000 seconds" "$STUB_KEYDIR/enrollment.pending"\n'
             "exit 0",
         )
         write_stub(self.stub_dir, "docker", DOCKER_STUB)
         write_stub(self.stub_dir, "agent-secrets", AGENT_SECRETS_STUB)
         write_stub(self.stub_dir, "git", "exit 0")
+        write_stub(
+            self.stub_dir, "date", '[[ -z "${STUB_CLOCK:-}" ]] || exec cat "$STUB_CLOCK"\nexec /bin/date "$@"'
+        )
         self.run_base = self.root / "run"
         self.hostdir = self.run_base / "box1"
         self.keydir = self.hostdir / "run-user" / "agent-secrets"
@@ -243,6 +250,20 @@ class AgentboxEnroll(EnrollFixture):
         self.assertEqual(len(self.calls_matching("renew")), 3)
         self.assertEqual((self.keydir / "renew.log").read_text().count("401 PROOF_INVALID"), 3)
 
+    def renew_delays(self, **stubs: str) -> list[int]:
+        clock = self.root / "clock"
+        clock.write_text("1000\n")
+        self.bash("start_renew box1", STUB_RUN_RENEW="1", STUB_CLOCK=str(clock), **stubs)
+        return [int(c.split()[1]) for c in self.calls_matching("sleep ")]
+
+    def test_a_renew_that_keeps_failing_is_restarted_with_growing_delays(self) -> None:
+        self.assertEqual(
+            self.renew_delays(STUB_RENEW_RUNS="9"), [10, 20, 40, 80, 160, 320, 600, 600]
+        )
+
+    def test_a_renew_that_ran_a_while_restarts_the_delays(self) -> None:
+        self.assertEqual(self.renew_delays(STUB_RENEW_RUNS="5", STUB_LONG_RUN="3"), [10, 20, 10, 20])
+
     def test_broker_ready_names_the_fix(self) -> None:
         cases = {
             "client not installed": ({"PATH": "/usr/bin:/bin"}, "mise install agent-secrets"),
@@ -277,8 +298,8 @@ class EnrollWhenUp(EnrollFixture):
         self.assertEqual(self.files(), {"key.pem", "enrollment"})
         (enroll,) = self.calls_matching("enroll ")
         self.assertNotIn("--session-id", enroll)
-        renews = [c for c in self.calls_matching("docker exec -d ") if "renew" in c]
-        self.assertEqual(len(renews), 1)
+        # One detached exec, the renew loop (its multi-line script follows on the logged line).
+        self.assertEqual(len(self.calls_matching("docker exec -d ")), 1)
 
     def test_omp_enrolls_with_its_session_id(self) -> None:
         result = self.when_up("omp", STUB_SID="0192f3a4-5b6c-7d8e-9f01-23456789abcd")
