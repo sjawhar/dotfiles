@@ -78,12 +78,13 @@ task:
   isolation:
     merge: patch
     enabled: true
-# Shake (mechanical elision of old tool output, no model call) runs first, so a
-# paid model-written summary runs only when shake cannot free enough; the
-# shipped default tries shake after handoff. A local method first also turns off
-# speculative background compaction, which only ever speculates on remote,
-# handoff or soft, so a remote summary shake cannot avoid now runs at the
-# threshold instead of being ready by then. AGENTC-1288, Sami, 2026-09-30.
+# Shake runs first. With no model call, it swaps old tool output, and fenced or
+# XML blocks of 400+ tokens in any message, for recovery placeholders, so a paid
+# model-written summary runs only when shake cannot free enough (the shipped
+# default tries shake after handoff). A local method first also turns off
+# speculative background compaction, which speculates only on remote, handoff or
+# soft, so when shake cannot free enough a remote summary runs synchronously at
+# the threshold. AGENTC-1288, Sami, 2026-09-30.
 compaction:
   methodOrder: [shake, remote, snapcompact, handoff, soft]
 advisor:
