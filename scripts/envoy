@@ -173,8 +173,8 @@ _envoy_broadcast() {
         return
     fi
 
-    local sent=0 failed=0 id machine_id dir title
-    while IFS=$'\t' read -r id machine_id dir title; do
+    local sent=0 failed=0 id title
+    while IFS=$'\t' read -r id _ _ title; do
         if _envoy_send "$id" "$message" >/dev/null; then
             sent=$((sent + 1))
             printf 'sent    %s  %s\n' "$id" "$title"
