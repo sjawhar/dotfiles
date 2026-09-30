@@ -31,7 +31,24 @@ export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 # (a real file, installers/omp.sh) and are overridden by the committed values
 # on the next start. Later entries in the list win, so overlays a caller
 # already set stay on top of this one.
-export PI_CONFIG_FILES="${DOTFILES_DIR}/omp/config.yml${PI_CONFIG_FILES:+:$PI_CONFIG_FILES}"
+# Prepend our overlay, then collapse PI_CONFIG_FILES to unique entries. Nested omp
+# invocations (an agent's task subagents) each re-enter this shim; without the collapse the
+# list stacks a duplicate every level until the single env var passes Linux MAX_ARG_STRLEN
+# (128 KiB) and every child exec (tr, secrets, omp) fails E2BIG. Pure builtins only — an
+# external command here would itself hit E2BIG on an already-bloated env — and the collapse
+# also repairs a bloated value inherited from a pre-fix parent process. First occurrence
+# wins, so our overlay stays the base layer and a caller's later overlays keep priority.
+_pcf_seen=":"; _pcf_out=""
+IFS=':' read -ra _pcf_list <<< "${DOTFILES_DIR}/omp/config.yml${PI_CONFIG_FILES:+:$PI_CONFIG_FILES}"
+for _pcf_e in "${_pcf_list[@]}"; do
+    [ -z "$_pcf_e" ] && continue
+    case "$_pcf_seen" in
+        *":$_pcf_e:"*) ;;
+        *) _pcf_out="${_pcf_out:+$_pcf_out:}$_pcf_e"; _pcf_seen="$_pcf_seen$_pcf_e:" ;;
+    esac
+done
+export PI_CONFIG_FILES="$_pcf_out"
+unset _pcf_seen _pcf_out _pcf_list _pcf_e
 
 # --- mnemopi recall ranking ---
 # Mnemopi's veracity defaults read "a tool asserted this" as lower-trust than an
