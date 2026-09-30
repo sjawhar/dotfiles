@@ -64,11 +64,13 @@ SPEC_DEVICE = "xd://dispatch_issue"
 SKIP_PREFIX = "Skipped due to pending system advisory"
 ADVISOR_STEM = "__advisor"
 GATE_ENTRY_TYPE = "advisor-gate"
-# How a warn-mode revise reaches the agent: the extension's block (askgate-core.ts renderWarn), which the fork carries in
-# the developer message it writes after the tool batch.
+# How a revise reaches the agent. Block mode: the call's tool result is the refusal (askgate-core.ts renderRevise).
+# Warn mode: the extension's block (renderWarn), which the fork carries in the developer message it writes after the
+# tool batch; an entry records the exact reason text it inserted as `deliveredReason`. An entry from a build before
+# that field carries the reason raw, escaped, or escaped and cut to 2 KiB with room for a ` … [elided N bytes]` marker
+# (askgate-core.ts GATE_REASON_MAX_BYTES, CLIP_MARKER_BYTES then).
+REFUSAL_PREFIX = "AskGate did not send this call"
 WARN_MARKER = '<advisor-gate advisor="AskGate"'
-# The block carries the reason escaped, then cut to 2 KiB with room for a ` … [elided N bytes]` marker (askgate-core.ts
-# GATE_REASON_MAX_BYTES, CLIP_MARKER_BYTES).
 REASON_MAX_BYTES, CLIP_MARKER_BYTES = 2048, 32
 LABELS = frozenset({"acted-correct", "acted-harmful", "ignored-agent-right", "ignored-advisor-right", "moot", "noise"})
 
@@ -277,15 +279,19 @@ def scoped_device(name: str, arguments: dict, scope_re: re.Pattern) -> str | Non
 
 @dataclass(frozen=True)
 class GateEntry:
-    """One `advisor-gate` entry the AskGate extension appended to a root session, whether a revise it holds reached the
-    agent (warn_delivered says how), and whether its call's tool result was an error (None: the call has no result)."""
+    """One `advisor-gate` entry the AskGate extension appended to a root session, the text a revise it holds reached the
+    agent in (None when it never did), and whether its call's tool result was an error (None: the call has no result)."""
 
     session_id: str
     id: str | None
     at: datetime | None
     data: dict
-    delivered: bool
+    received: str | None
     result_error: bool | None
+
+    @property
+    def delivered(self) -> bool:
+        return self.received is not None
 
     @property
     def let_through(self) -> bool:
@@ -316,12 +322,17 @@ def clip_bytes(text: str, limit: int) -> str:
     return f"{head} … [elided {len(data) - len(head.encode('utf-8'))} bytes]"
 
 
-def warn_delivered(text: str, reason) -> bool:
-    """Whether a developer message hands the agent a warn-mode revise: it holds AskGate's block and the entry's reason,
-    raw, escaped as the extension escapes it (`&`, `<`, `>`), or escaped and clipped to the block's 2 KiB. The fork joins
-    a batch's blocks into one message and writes a repeated one once, so each revise it carried is found in that
-    message."""
-    if WARN_MARKER not in text or not isinstance(reason, str) or not reason:
+def warn_delivered(text: str, data: dict) -> bool:
+    """Whether a developer message hands the agent an entry's warn-mode revise: it holds AskGate's block and the entry's
+    `deliveredReason`, or, from a build before that field, its reason raw, escaped (`&`, `<`, `>`), or escaped and
+    clipped to the block's 2 KiB. The fork joins a batch's blocks into one message and writes a repeated one once, so
+    each revise it carried is found in that message."""
+    if WARN_MARKER not in text:
+        return False
+    if "deliveredReason" in data:
+        return isinstance(data["deliveredReason"], str) and bool(data["deliveredReason"]) and data["deliveredReason"] in text
+    reason = data.get("reason")
+    if not isinstance(reason, str) or not reason:
         return False
     escaped = html.escape(reason, quote=False)
     return any(form in text for form in (reason, escaped, clip_bytes(escaped, REASON_MAX_BYTES)))
@@ -437,9 +448,10 @@ def tool_call_arguments(block: dict) -> dict:
 
 def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> SessionRecord:
     """Fill `record` from a primary session's entries: assistant turns, tool calls and whether each result was an error,
-    advisor cards, skips, and the gate entries of `advisor`, each with its call's result and each warn-mode revise
-    delivered only when a developer message after it and before the agent's next assistant message carries it (the
-    fork drops a skipped call's context)."""
+    advisor cards, skips, and the gate entries of `advisor`, each with its call's result and the text its revise reached
+    the agent in: a block-mode revise's refusal (the call's error result, `AskGate did not send this call…`), a
+    warn-mode revise's developer message after it and before the agent's next assistant message (the fork drops a
+    skipped call's context)."""
     open_skips: list = []  # skipped results the steer that caused them has not followed yet
     open_warns: list = []  # indices in record.gate_entries of warn-mode revises no developer message has carried yet
     awaiting: dict = {}  # tool call id -> indices in record.gate_entries of that call's entries, until its result
@@ -455,7 +467,8 @@ def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> S
                 record.tool_calls += [ToolCall(at, str(block.get("id")), str(block.get("name", "")), tool_call_arguments(block))
                                       for block in tool_calls_of(message)]
             elif role == "toolResult":
-                skipped = content_text(message.get("content")).startswith(SKIP_PREFIX)
+                text = content_text(message.get("content"))
+                skipped = text.startswith(SKIP_PREFIX)
                 if skipped:
                     open_skips.append(at)
                 call_id = message.get("toolCallId")
@@ -463,13 +476,15 @@ def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> S
                     # A skipped call never ran, so it is no send whatever its flag says.
                     record.tool_errors[call_id] = error = message.get("isError") is True or skipped
                     for index in awaiting.pop(call_id, []):
-                        record.gate_entries[index] = replace(record.gate_entries[index], result_error=error)
+                        gate = record.gate_entries[index]
+                        refusal = gate.is_revise and not gate.let_through and error and text.startswith(REFUSAL_PREFIX)
+                        record.gate_entries[index] = replace(gate, result_error=error, received=text if refusal else gate.received)
             elif role == "developer":
                 text = content_text(message.get("content"))
                 for index in open_warns:
                     gate = record.gate_entries[index]
-                    if warn_delivered(text, gate.data.get("reason")):
-                        record.gate_entries[index] = replace(gate, delivered=True)
+                    if warn_delivered(text, gate.data):
+                        record.gate_entries[index] = replace(gate, received=text)
                 open_warns = [index for index in open_warns if not record.gate_entries[index].delivered]
         elif kind == "custom_message":
             is_card = entry.get("customType") == "advisor"
@@ -483,11 +498,9 @@ def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> S
             data = entry.get("data") or {}
             name = data.get("advisor")
             if advisor != "default" and isinstance(name, str) and slugify(name) == advisor:
-                # A block-mode revise is the call's own tool result, so it always reaches the agent.
-                gate = GateEntry(record.session_id, entry.get("id"), at, data, delivered=False, result_error=None)
-                blocked = gate.is_revise and data.get("verdictMode") == "block"
-                record.gate_entries.append(replace(gate, delivered=True) if blocked else gate)
-                if gate.is_revise and not blocked:
+                gate = GateEntry(record.session_id, entry.get("id"), at, data, received=None, result_error=None)
+                record.gate_entries.append(gate)
+                if gate.is_revise and gate.let_through:
                     open_warns.append(len(record.gate_entries) - 1)
                 if isinstance(data.get("toolCallId"), str):
                     awaiting.setdefault(data["toolCallId"], []).append(len(record.gate_entries) - 1)

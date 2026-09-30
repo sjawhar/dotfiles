@@ -70,7 +70,7 @@ _entry_seq = [0]
 
 
 def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None, reason=None, mode="warn",
-              call_id=None, cost=None):
+              call_id=None, cost=None, delivered_reason=None):
     """An `advisor-gate` entry as the AskGate extension appends it to a root session file."""
     _entry_seq[0] += 1
     if decision == "revise" and outcome == "verdict":
@@ -93,6 +93,7 @@ def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="Ask
             "revisesForKey": 0,
             **({"reason": reason} if reason else {}),
             **({"usage": {"cost": cost}} if cost is not None else {}),
+            **({"deliveredReason": delivered_reason} if delivered_reason is not None else {}),
         },
     }
 
@@ -102,7 +103,7 @@ def gate_entry(session="s1", delivered=False, result_error=None, **fields):
     the call's tool result was an error (None: no result)."""
     line = gate_line(**fields)
     return ar.GateEntry(session_id=session, id=line["id"], at=ar.parse_iso(line["timestamp"]), data=line["data"],
-                        delivered=delivered, result_error=result_error)
+                        received="the text the agent received" if delivered else None, result_error=result_error)
 
 
 def escape_xml(text: str) -> str:
@@ -404,17 +405,26 @@ def tool_result(call_id, at, error=False, text="ok", name="write"):
                         "content": [{"type": "text", "text": text}]}}
 
 
+# A revise whose reason needs the extension's one agent-facing transform (a `<` before a letter becomes `&lt;`), and the
+# `deliveredReason` it records: the exact text inserted into the agent's message (askgate ff6425cb's test vector).
+TAGGED_REASON = "Failure 7: the ruling says <b>use option B</b> && keep > 2 lines"
+TAGGED_DELIVERED = "Failure 7: the ruling says &lt;b>use option B&lt;/b> && keep > 2 lines"
+REFUSAL = "AskGate did not send this call.\n" + REASON
+
+
 class DeliveryTest(unittest.TestCase):
     """A warn-mode revise reaches the agent only in the developer message the fork writes after the tool batch, before
-    the agent's next assistant message; the fork drops a skipped call's context. A block-mode revise is the call's own
-    result, so it always arrives."""
+    the agent's next assistant message; the fork drops a skipped call's context. A block-mode revise reaches it as the
+    call's own tool result, the refusal."""
 
     def test_each_case(self):
         call, result, skipped = assistant_call("w1", "write", {}, minutes(1)), tool_result("w1", minutes(1)), skipped_result("w1", minutes(1))
+        refusal = tool_result("w1", minutes(1), error=True, text=REFUSAL)
         turn = assistant_call("a2", "read", {}, minutes(2))
 
-        def revise(reason=REASON, mode="warn"):
-            return gate_line(decision="revise", reason=reason, mode=mode, at=minutes(1))
+        def revise(reason=REASON, mode="warn", delivered_reason=None):
+            return gate_line(decision="revise", reason=reason, mode=mode, at=minutes(1), call_id="w1",
+                             delivered_reason=delivered_reason)
 
         rows = [
             ("the escaped reason in an AskGate block", [call, revise(), result, warn_message(REASON), turn], [True]),
@@ -424,7 +434,9 @@ class DeliveryTest(unittest.TestCase):
             ("a block after the next assistant message", [call, revise(), result, turn, warn_message(REASON)], [False]),
             ("a block carrying another entry's reason", [call, revise(), result, warn_message(OTHER_REASON)], [False]),
             ("the reason in another advisor's block", [call, revise(), result, warn_message(REASON, advisor="Memory")], [False]),
-            ("a block-mode revise needs no message", [call, revise(mode="block"), result, turn], [True]),
+            ("a block-mode revise arrives as its refusal", [call, revise(mode="block"), refusal, turn], [True]),
+            ("a block-mode revise whose call has no refusal result", [call, revise(mode="block"), turn], [False]),
+            ("a block-mode revise whose result is not the refusal", [call, revise(mode="block"), result, turn], [False]),
             ("a batch's two revises in one joined message", [call, revise(), revise(OTHER_REASON), result,
                                                              warn_message(REASON, OTHER_REASON)], [True, True]),
             ("two revises with one reason, which the fork joins once", [call, revise(), revise(), result, warn_message(REASON)],
@@ -437,6 +449,10 @@ class DeliveryTest(unittest.TestCase):
             ("the clip of a longer reason with the same head", [call, revise(LONG_REASON), result,
                                                                 warn_message("failure 7: " + "r" * 2005 + " … [elided 1095 bytes]",
                                                                              escape=False)], [False]),
+            ("an entry's deliveredReason in an AskGate block", [call, revise(TAGGED_REASON, delivered_reason=TAGGED_DELIVERED),
+                                                                result, warn_message(TAGGED_DELIVERED, escape=False)], [True]),
+            ("an entry with a deliveredReason matches nothing else", [call, revise(TAGGED_REASON, delivered_reason=TAGGED_DELIVERED),
+                                                                      result, warn_message(TAGGED_REASON)], [False]),
         ]
         for case, entries, delivered in rows:
             with self.subTest(case):
