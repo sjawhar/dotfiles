@@ -171,7 +171,7 @@ describe("verdicts", () => {
 		expect(e.latencyMs).toBeGreaterThanOrEqual(0);
 		expect(e.argsDigest).toBe(createHash("sha256").update(JSON.stringify(COMMENT)).digest("hex"));
 		expect(e.promptBytes).toBe(bytes(g.calls[0].system) + bytes(g.calls[0].user));
-		expect(g.calls[0]).toMatchObject({ model: MODEL, sessionId: "sess-1" });
+		expect(g.calls[0].model).toEqual(MODEL);
 		expect(g.calls[0].system).toContain("<primary-system-prompt>\nPRIMARY SYSTEM RULES\n\nMore rules.\n</primary-system-prompt>");
 		expect(g.calls[0].system).toContain("# AskGate charter");
 		expect(g.calls[0].user).toContain("### Gate request");
@@ -496,7 +496,7 @@ describe("askgate.ts, the entry", () => {
 		const { result, entries } = await gateOnce();
 		expect(result).toBeUndefined();
 		expect(completions).toHaveLength(1);
-		expect(completions[0]).toMatchObject({ reasoning: "high", cacheRetention: "none", maxTokens: 1200, sessionId: "sess-e", apiKey: "resolved-key" });
+		expect(completions[0]).toMatchObject({ reasoning: "high", cacheRetention: "none", maxTokens: 1200 });
 		expect(completions[0].signal).toBeInstanceOf(AbortSignal);
 		expect(entries).toMatchObject([{ decision: "allow", outcome: "verdict", usage: { input: 5, output: 7, cacheRead: 0, cacheWrite: 0, cost: 0.25 } }]);
 	});

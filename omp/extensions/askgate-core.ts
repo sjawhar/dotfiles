@@ -69,7 +69,7 @@ export interface GateEntry {
 	toolCallId: string;
 	decision: "allow" | "revise";
 	outcome: "verdict" | "rebuttal" | "breaker" | "timeout" | "error" | "no-verdict" | "unavailable" | "halted" | "killed";
-	verdictMode: "warn" | "block";
+	verdictMode: Exclude<Mode, "off">;
 	reason?: string;
 	rebuttal?: string;
 	/** The answer's tail when it held no verdict. */
@@ -487,6 +487,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			return mode === "block" ? { block: true, reason: renderRevise(verdict.reason) } : { additionalContext: renderWarn(verdict.reason) };
 		};
 
+		/** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
+		const identity = (event: ToolCallEvent): Base => ({
+			advisor: "AskGate",
+			tool: event.toolName,
+			path: `xd://${event.toolName}`,
+			toolCallId: event.toolCallId,
+			verdictMode: mode,
+			revisesForKey: 0,
+			argsDigest: "",
+		});
+
 		pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
 			const started = deps.now();
 			let base: Base | undefined;
@@ -499,11 +510,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				if (!scopedDevice(event.toolName, event.input)) return undefined;
 				const key = breakerKey(event.toolName, event.input);
 				base = {
-					advisor: "AskGate",
-					tool: event.toolName,
-					path: `xd://${event.toolName}`,
-					toolCallId: event.toolCallId,
-					verdictMode: mode,
+					...identity(event),
 					revisesForKey: breaker.reasons(key).length,
 					argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
 				};
@@ -513,14 +520,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				try {
 					failed(ctx);
 					pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
-						advisor: "AskGate",
-						tool: event.toolName,
-						path: `xd://${event.toolName}`,
-						toolCallId: event.toolCallId,
-						verdictMode: mode,
-						revisesForKey: 0,
-						argsDigest: "",
-						...base,
+						...(base ?? identity(event)),
 						decision: "allow",
 						outcome: "error",
 						reason: error instanceof Error ? error.message : String(error),
