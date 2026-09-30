@@ -692,16 +692,25 @@ class GateMetricsTest(unittest.TestCase):
 
     def test_skipped_and_abandoned_calls_leave_ungated_share_and_fail_open_rate(self):
         """A primary on another provider sends the gate nothing (`skipped`), and a user who stopped the write ended the
-        call (`abandoned`, recorded as `error` with an `abandoned:` reason until the extension has its own outcome)."""
+        call (`abandoned`); both leave ungated_share in either mode, a block-mode abandoned call (refused) included."""
         entries = [gate_entry(latency_ms=3000) for _ in range(18)] + [gate_entry(outcome="timeout") for _ in range(2)]
         entries += [gate_entry(outcome="error", reason="model overloaded")]
         entries += [gate_entry(outcome="skipped", reason="primary on example-provider") for _ in range(5)]
-        entries += [gate_entry(outcome="error", reason="abandoned: the call ended before a verdict") for _ in range(2)]
-        entries += [gate_entry(outcome="abandoned") for _ in range(3)]
+        entries += [gate_entry(outcome="abandoned", mode="warn") for _ in range(3)]
+        entries += [gate_entry(decision="revise", outcome="abandoned", mode="block") for _ in range(2)]
         metrics = ar.gate_metrics(entries)
         self.assertAlmostEqual(metrics["ungated_share"], 3 / 21)
         self.assertAlmostEqual(metrics["fail_open_rate"], 3 / 21)
         self.assertEqual((metrics["skipped"], metrics["abandoned"], metrics["matched"]), (5, 5, 31))
+
+    def test_an_error_counts_as_an_error_whatever_its_reason_says(self):
+        """Only unreleased builds wrote an abandoned call as `error` with an `abandoned:` reason; released ones write
+        outcome `abandoned`, so an `error` is a gate failure."""
+        entries = [gate_entry(latency_ms=3000) for _ in range(19)]
+        entries += [gate_entry(outcome="error", reason="abandoned: the call ended before a verdict")]
+        metrics = ar.gate_metrics(entries)
+        self.assertEqual((metrics["ungated_share"], metrics["fail_open_rate"], metrics["abandoned"]), (1 / 20, 1 / 20, 0))
+        self.assertEqual(metrics["counts"], {"allow/error": 1, "allow/verdict": 19})
 
 
 class OverlayTest(unittest.TestCase):
@@ -833,12 +842,11 @@ UNLABELLED = labelled(n=0, precision=None, harm=None)
 
 
 def skipped_and_abandoned():
-    """The gate metrics of 100 calls: 70 clean verdicts, 10 skipped, 10 abandoned as the extension records them now
-    (`error`, reason `abandoned: …`) and 10 under their own outcome."""
+    """The gate metrics of 100 calls: 70 clean verdicts, 10 skipped, and 20 abandoned, half in each mode."""
     entries = [gate_entry(latency_ms=3000) for _ in range(70)]
     entries += [gate_entry(outcome="skipped", reason="primary on example-provider") for _ in range(10)]
-    entries += [gate_entry(outcome="error", reason="abandoned: the call ended before a verdict") for _ in range(10)]
-    entries += [gate_entry(outcome="abandoned") for _ in range(10)]
+    entries += [gate_entry(outcome="abandoned", mode="warn") for _ in range(10)]
+    entries += [gate_entry(decision="revise", outcome="abandoned", mode="block") for _ in range(10)]
     return ar.gate_metrics(entries)
 
 
@@ -1139,8 +1147,8 @@ class ReadoutTest(unittest.TestCase):
     def test_skipped_and_abandoned_calls_are_counted_on_their_own_lines_and_leave_ungated_share(self):
         at = self.now - timedelta(hours=1)
         self.healthy_gate(extra=[gate_line(outcome="skipped", reason="primary on example-provider", at=at) for _ in range(4)]
-                          + [gate_line(outcome="error", reason="abandoned: the call ended before a verdict", at=at) for _ in range(2)]
-                          + [gate_line(outcome="abandoned", at=at)])
+                          + [gate_line(outcome="abandoned", mode="warn", at=at)]
+                          + [gate_line(decision="revise", outcome="abandoned", mode="block", at=at) for _ in range(2)])
         out = self.home.run("readout", "--check", "gate", check_exit=3).stdout
         self.assertIn("ungated_share 0.050", out)
         lines = out.splitlines()
