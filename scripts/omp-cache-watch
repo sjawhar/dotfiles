@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# omp-cache-watch: whether Anthropic prompt caching is holding, from omp's stats
+# database (~/.omp/stats.db; costs are omp's list-price estimates, not the bill).
+#
+#   omp-cache-watch [--hours N] [--until TIME] [--threshold PCT] [--min-cost USD]
+#
+# For each kind of session omp records (main = top-level, subagent, advisor) it
+# reports what share of the window's estimated anthropic cost was uncached input.
+# A kind at or above --threshold percent (default 10) of at least --min-cost
+# dollars (default 5) is a deviation: exit 1, listing the sessions that carried
+# the most uncached input. The window is the --hours (default 1) ending at
+# --until (any `date -d` time; default now). Report-only: nothing is sent
+# anywhere. Meant for the hourly user timer installers/omp-billing-watch.sh sets
+# up, and for a hand run over a longer or past window.
+set -euo pipefail
+
+DB="${OMP_STATS_DB:-$HOME/.omp/stats.db}"
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+HOURS=1
+UNTIL=""
+THRESHOLD=10
+MIN_COST=5
+
+while (($#)); do
+    case "$1" in
+        --hours) HOURS="$2"; shift 2 ;;
+        --until) UNTIL="$2"; shift 2 ;;
+        --threshold) THRESHOLD="$2"; shift 2 ;;
+        --min-cost) MIN_COST="$2"; shift 2 ;;
+        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "omp-cache-watch: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+
+[[ -r "$DB" ]] || { echo "omp-cache-watch: no stats db at $DB" >&2; exit 2; }
+
+# Why anthropic alone: Anthropic bills a cold prefix as a cache write, so with
+# breakpoints in place uncached input is only the few tokens after the last one.
+# Measured over 2026-08-20..09-15, hours with at least $5 of anthropic spend:
+# uncached input peaked at 0.62% of top-level cost, 3.44% of subagent cost and
+# 0.02% of advisor cost. Under the 2026-09-16..28 regression (omp placed no
+# message breakpoint behind a context hook's inserted message, so every turn
+# re-sent the conversation uncached) it ran 18-92% per day. OpenAI-family
+# providers (openai-codex, openai, opencode-zen) bill every cold request as
+# uncached input with no write line, 7-25% of their subagent cost over that
+# same quiet stretch, so counting them would bury the signal.
+until_s="$(date -u -d "${UNTIL:-now}" +%s)" || { echo "omp-cache-watch: bad --until $UNTIL" >&2; exit 2; }
+since_ms=$(( (until_s - HOURS * 3600) * 1000 ))
+until_ms=$(( until_s * 1000 ))
+window="${HOURS}h to $(date -u -d "@$until_s" '+%Y-%m-%dT%H:%MZ')"
+
+# Sync and coverage gate as in omp-billing-watch (its comment has the why):
+# nothing ingests session files in the background, so a window ending now
+# syncs first, and no window is reported from a db whose newest ingested file
+# predates it. A past window is already on disk and skips the 2-3 minute sync.
+if [[ -z "$UNTIL" ]]; then
+    timeout "${SYNC_TIMEOUT:-2700}" "$DOTFILES_DIR/bin/mise" x "github:sjawhar/oh-my-pi" -- omp stats --summary >/dev/null 2>&1 || true
+fi
+hwm="$(sqlite3 -readonly "$DB" "select cast(coalesce(max(last_modified), 0) as integer) from file_offsets" 2>/dev/null || echo 0)"
+if (( hwm < since_ms )); then
+    echo "DEVIATION: omp-cache-watch: stats db covers only up to $(date -u -d "@$((hwm / 1000))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown), before the $window window opened -- refusing to report from data that cannot contain it. Check 'omp stats --summary' by hand." >&2
+    exit 2
+fi
+
+in_window="provider = 'anthropic' and timestamp > $since_ms and timestamp <= $until_ms"
+rows="$(sqlite3 -readonly -separator $'\t' "$DB" "
+    select agent_type, count(*), printf('%.2f', sum(cost_total)), printf('%.2f', sum(cost_input)),
+           printf('%.1f', 100.0 * sum(cost_input) / max(sum(cost_total), 1e-9))
+    from messages where $in_window group by agent_type order by agent_type")"
+
+printf 'Anthropic uncached input, %s (omp list-price estimate; deviation at >=%s%% of >=$%s)\n' "$window" "$THRESHOLD" "$MIN_COST"
+flagged=()
+deviations=()
+if [[ -z "$rows" ]]; then
+    echo "  no anthropic turns"
+else
+    printf '  %-9s %8s %11s %11s %7s\n' kind turns cost\$ uncached\$ share
+    while IFS=$'\t' read -r kind turns cost uncached share; do
+        mark=""
+        if awk -v s="$share" -v t="$THRESHOLD" -v c="$cost" -v m="$MIN_COST" 'BEGIN{exit !(s+0 >= t+0 && c+0 >= m+0)}'; then
+            mark="!!"
+            flagged+=("$kind")
+            deviations+=("${kind} ${share}% (\$${uncached} of \$${cost})")
+        fi
+        printf '  %-9s %8s %11s %11s %6s%% %s\n' "$kind" "$turns" "$cost" "$uncached" "$share" "$mark"
+    done <<<"$rows"
+fi
+
+(( ${#flagged[@]} )) || exit 0
+
+sessions_dir="$HOME/.omp/agent/sessions/"
+for kind in "${flagged[@]}"; do
+    echo "  most uncached input among $kind sessions:"
+    sqlite3 -readonly -separator $'\t' "$DB" "
+        select printf('%.2f', sum(cost_input)), printf('%.0f', 100.0 * sum(cost_input) / max(sum(cost_total), 1e-9)),
+               count(*), group_concat(distinct model), replace(session_file, '$sessions_dir', '')
+        from messages where $in_window and agent_type = '$kind'
+        group by session_file order by sum(cost_input) desc limit 5" |
+        while IFS=$'\t' read -r uncached share turns models file; do
+            printf '    $%-9s %3s%% of %5s turns  %-18s %s\n' "$uncached" "$share" "$turns" "$models" "$file"
+        done
+done
+joined="$(printf '%s; ' "${deviations[@]}")"
+echo "DEVIATION: omp-cache-watch: uncached input at or over ${THRESHOLD}% of anthropic cost in the $window — ${joined%; }. Message cache breakpoints are missing or not honoured: in a listed session, cacheRead pinned at the system+tools size with cacheWrite 0 while input grows is the 2026-09-16 shape (omp 18.2.1-18.2.5); check which omp release that session's process runs (sessions keep the binary they started on) and the request's cache_control placement." >&2
+exit 1
