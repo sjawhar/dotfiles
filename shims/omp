@@ -8,6 +8,17 @@
 # scripts/ompo.
 set -euo pipefail
 
+# --- never re-enter ---
+# Every hop from here to omp is an exec (agent-secrets-session, `agent-secrets register --exec`,
+# `mise x`), so the pid never changes on the way. Finding our own pid in the marker set below
+# means the omp resolved last time led back into an omp wrapper, and going on would repeat that
+# forever. A process omp starts has a pid of its own, so a session can still launch omp.
+_marker="${DOTFILES_OMP_SHIM:-}"
+if [[ "${_marker%% *}" == "$$" ]]; then
+    echo "omp: ${BASH_SOURCE[0]} ran twice in pid $$: the omp it resolved (${_marker#* }) led back to an omp wrapper; refusing to loop (see \`type -a omp\` and \`mise which omp\`)" >&2
+    exit 1
+fi
+
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 
 # Machine-local env first: a box that runs its own single-node envoy (its own
@@ -114,12 +125,10 @@ for _p in "${_dirs[@]}"; do
 done
 export PATH="${_shims}:${_path}"
 
-# --- resolve the real omp: first one on PATH ahead of mise's own copies ---
+# --- resolve the real omp: a local build on PATH, else the pinned release ---
 # PATH order decides, so a local build in `bin/` is picked up with no mise
-# involvement and no edit here. `_path` is PATH with this shims dir removed, so
-# the search can never re-enter this wrapper. `mise x` was doing this job
-# before, but it resolves the command from its own tool dir and ignores PATH
-# entirely, which made a local build unreachable however early it sat.
+# involvement and no edit here; `mise x` alone would miss it, since it looks the
+# command up in the tool dirs it adds before the PATH it was given.
 #
 # mise-managed dirs are skipped rather than matched: a session inherits its PATH
 # forever, so a shell started before a version bump still names the *old*
@@ -127,22 +136,41 @@ export PATH="${_shims}:${_path}"
 # (measured: a PATH holding 18.0.4's install dir resolved 18.0.4 while the pin
 # was 18.0.10). Deferring to `mise x` for mise's copies keeps the pin
 # authoritative, and only non-mise PATH entries — a local build — can win.
+#
+# An omp whose real path is in a `shims/` dir is a wrapper, not a build: this
+# file under another name (a symlink, another spelling of this dir), another
+# checkout's copy of it (a dotfiles workspace's shims while DOTFILES_DIR names
+# ~/.dotfiles, or the reverse), or a version manager's shim. Taking one would
+# run this search again, forever.
 _omp=""
 _mise_root="${MISE_DATA_DIR:-$HOME/.mise}"
 IFS=':' read -ra _cands <<< "$_path"
 for _p in "${_cands[@]}"; do
-    [[ "$_p" == "$_mise_root"/* ]] && continue
-    if [[ -x "${_p}/omp" ]]; then
-        _omp="${_p}/omp"
-        break
-    fi
+    [[ "$_p" == "$_mise_root"/* || ! -x "${_p}/omp" ]] && continue
+    _real="$(realpath "${_p}/omp")"
+    [[ "${_real%/*}" == */shims ]] && continue
+    _omp="${_p}/omp"
+    break
 done
 
 if [[ -n "$_omp" ]]; then
     _cmd=("$_omp")
 else
-    _cmd=(mise x "github:sjawhar/oh-my-pi" -- omp)
+    # mise x resolves the bare `omp` on PATH, with the tool dirs it adds ahead of
+    # the rest. An install dir already on PATH without mise's record of adding
+    # it (__MISE_DIFF: a tmux window opened from a shell outside tmux gets that
+    # shell's PATH and none of its __MISE_* variables) counts as the caller's,
+    # so this shims dir ahead of it wins and mise execs this wrapper again. mise
+    # x therefore starts from PATH without mise's install dirs, adds the pinned
+    # ones itself, and finds omp in them.
+    _mise_path=""
+    for _p in "${_cands[@]}"; do
+        [[ "$_p" == "$_mise_root"/installs/* ]] && continue
+        _mise_path="${_mise_path:+$_mise_path:}$_p"
+    done
+    _cmd=(env PATH="${_shims}:${_mise_path}" mise x "github:sjawhar/oh-my-pi" -- omp)
 fi
+export DOTFILES_OMP_SHIM="$$ ${_omp:-mise x github:sjawhar/oh-my-pi -- omp}"
 
 # --- host session identity for agent secrets ---
 # On the host a session's secrets-broker proofs come from the agent-secrets helper, which signs
@@ -200,6 +228,7 @@ if [[ ${#_scoped[@]} -eq 0 ]]; then
     exec "${_cmd[@]}" "$@"
 fi
 # secrets exposes the scoped names; rename them to the provider names omp reads.
+# shellcheck disable=SC2016  # the body is for the child bash to expand
 exec secrets "${_scoped[@]}" -- bash -c '
     suffix="$1"; shift
     for k in ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY; do

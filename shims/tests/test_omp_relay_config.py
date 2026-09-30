@@ -34,8 +34,6 @@ class OmpRelayConfig(unittest.TestCase):
             'while [[ "${1:-}" != "--" ]]; do shift; done\nshift\nexec "$@"',
         )
         write_stub(self.stub_dir, "mise", 'printf "%s\\n" "${PI_CONFIG_FILES-<unset>}"')
-        # PATH holds no other omp or shims dir: the shim takes the first `omp` on PATH as a local
-        # build, so the caller's ~/.dotfiles/shims there would make it exec itself forever.
         self.env = {
             **os.environ,
             "DOTFILES_DIR": str(DOTFILES),
