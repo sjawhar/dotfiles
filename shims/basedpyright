@@ -25,4 +25,4 @@ IFS=':' read -ra dirs <<< "$PATH"
 for d in "${dirs[@]}"; do
     [[ "$d" == "${MISE_DATA_DIR:-$HOME/.mise}"/installs/* ]] || mise_path="${mise_path:+$mise_path:}$d"
 done
-PATH="$mise_path" exec mise exec basedpyright -- basedpyright "$@"
+PATH="$mise_path" exec mise exec npm:basedpyright -- basedpyright "$@"

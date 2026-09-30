@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -76,15 +77,19 @@ class OmpResolution(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def run_shim(
-        self, *path_dirs: Path, args: tuple[str, ...] = ("--version",)
+        self,
+        *path_dirs: Path,
+        args: tuple[str, ...] = ("--version",),
+        command: Path = SHIM,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         path = ":".join([str(self.stub_dir), *map(str, path_dirs), "/usr/bin", "/bin"])
         try:
             return subprocess.run(
-                [str(SHIM), *args],
+                [str(command), *args],
                 capture_output=True,
                 text=True,
-                env={**self.env, "PATH": path},
+                env={**self.env, "PATH": path, **(extra_env or {})},
                 check=False,
                 timeout=LOOP_TIMEOUT,
             )
@@ -129,6 +134,30 @@ class OmpResolution(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("refusing to loop", result.stderr)
         self.assertIn("mise x github:sjawhar/oh-my-pi -- omp", result.stderr)
+
+    def test_a_same_pid_relaunch_is_refused_only_inside_the_loop_window(self) -> None:
+        """omp's /restart can exec the shim in its own pid; only a fast re-entry is a loop."""
+        # The session's omp, exec'ing `omp` in place with the marker it inherited.
+        restart = write_stub(
+            self.root / "session",
+            "omp",
+            'export DOTFILES_OMP_SHIM="$$ $STUB_MARKER_TAIL"\nexec "$STUB_SHIM" "$@"',
+        )
+        now = int(time.time())
+        target = "mise x github:sjawhar/oh-my-pi -- omp"
+        for name, tail, expected_rc in (
+            ("marker written just now", f"{now} {target}", 1),
+            ("marker written a minute ago", f"{now - 60} {target}", 0),
+            ("marker with no time (7bd6eb92's format)", target, 0),
+        ):
+            with self.subTest(marker=name):
+                result = self.run_shim(command=restart, extra_env={"STUB_MARKER_TAIL": tail})
+                self.assertEqual(result.returncode, expected_rc, result.stderr)
+                if expected_rc:
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("refusing to loop", result.stderr)
+                else:
+                    self.assertEqual(result.stdout, "RELEASE omp --version\n")
 
     def test_omp_launched_from_inside_a_session_starts(self) -> None:
         """The re-entry guard is per process: a child of omp launching omp is a new session."""
