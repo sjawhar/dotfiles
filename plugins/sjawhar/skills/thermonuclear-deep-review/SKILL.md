@@ -58,12 +58,27 @@ If a high-risk effect is an intentional, well-constrained change, do not report 
 
 ## Claims in the PR body
 
-A safety or correctness claim written in a PR body is a claim like any other, and the only reader who catches a wrong one is the reader told to ATTACK it. Verifying reviewers read the code against the claim and pass; that is what they are for. On 2026-09-25 an approving reviewer and a clearing oracle both read a sentence asserting a residual could not be exploited, and neither challenged it; a pass briefed to attack the property broke it in one construction and reproduced the forbidden result end to end. Attack the body's claims, not only its diff.
+A safety or correctness claim written in a PR body is a claim like any other, and the only reader who catches a wrong one is the reader told to ATTACK it. Verifying reviewers read the code against the claim and pass; that is what they are for. Attack the body's claims, not only its diff.
 
 Two shapes to attack first:
 
-- **Neutralization ORDER, not coverage.** Any pipeline that sanitizes and then edits can create what it sanitized: a block was neutralized as a whole, then a later bookkeeping strip removed an element from inside it and wrote a newline where it had been, bringing the forbidden string into existence after the neutralizer had already run. The test is not "did it neutralize everything" but "can any later pass CREATE what was being neutralized".
-- **A severity resting on a third party's formatting is a dependency, not a mitigation.** "Low, because the attacker cannot choose the opener" held only while a vendor's harness text stayed plain prose in the bodies captured that day. Rate it as the bet it is, and fix rather than disclose.
+- **Neutralization ORDER, not coverage.** Any pipeline that sanitizes and then edits can create what it sanitized. The test is not "did it neutralize everything" but "can any later pass CREATE what was being neutralized".
+- **A severity resting on a third party's formatting is a dependency, not a mitigation.** Rate it as the bet it is, and fix rather than disclose.
+
+## Security Guidelines
+
+For each row whose surface the diff touches, answer with a file:line citation. End your report with one `Security:` line: each touched row's tag and its answer with file:line, or `Security: no sensitive surface in this diff.` when the diff touches none.
+
+| Tag | If the diff touches… | Answer, with file:line |
+| --- | --- | --- |
+| `authz` | an authorization or refusal check, or a new route, command, or tool | who may call it, who may not, where the diff enforces that, and what the unauthorized caller gets |
+| `secret` | a token, grant, secret file, credential helper, or its lifetime | what widened: who can read it, for how long, in which process |
+| `untrusted-input` | a subprocess, argv, path, template, or query built from text an outside party controls (an issue body, a PR comment, a webhook payload, model output) | the boundary that neutralizes it, and whether any later pass can re-create what was neutralized (order, not coverage) |
+| `prompt` | a prompt that embeds untrusted text into an agent's instructions | what delimits the untrusted region, and what the agent may do if it obeys that text (OWASP LLM01 prompt injection, LLM06 excessive agency) |
+| `supply-chain` | a dependency, lockfile, base image, or GitHub Action | the version, the pin (a digest or a SHA checked against its tag), and the permissions the workflow runs with |
+| `sandbox` | a sandbox or pod manifest, a capability, or a network policy | which isolation property changed, and against whom |
+
+Cite an OWASP ASVS v5.0.0 identifier where one applies (`v5.0.0-1.2.5` style). A finding with no stated exploit path is not a finding: call it hardening and rank it Minor. A security finding that states an exploit path is always its own finding at its real priority, never folded into hardening. Report at most two hardening items, ranked, and fold the rest into one hardening paragraph. Start each security finding with its row's tag, `Security[<tag>]:`, so it can be told from the others and counted by row.
 
 ## Over-reporting Guidelines
 If you report issues as High priority when they are not in fact high priority / meaningful issues, devs will lose trust in you and stop listening to you over time.
