@@ -45,20 +45,21 @@ Shares are fractions from 0 to 1. `-` / `null` means the denominator was empty.
 | `watch.cost_usd_per_day` | dollars per day the watch-mode advisor's own turns cost: `stats.db messages.cost_total` for `agent_type = advisor` rows of its transcripts in the window |
 | `skips`, `skips_any_steer` | primary tool results beginning `Skipped due to pending system advisory`. The fork writes that text for every non-user steer that arrives while a tool runs, so each skip is attributed to the steer that caused it: the first custom message after the skipped result, before the agent's next assistant message. `skips` counts only the skips whose steer is an `advisor` card carrying a note from `--advisor` (a note that names no advisor is the unnamed legacy advisor, `--advisor default`); `skips_any_steer` counts all of them (in the 14 days to 2026-09-30, 99.4% were caused by envoy messages). The AskGate gate emits no card, so its own skips are 0 by construction |
 | `scoped_calls` | assistant tool calls in any session file that are a `write` whose `path` matches the scope regex (as `write(<path>)`) or a top-level `dispatch_<x>` call that does; `xd://dispatch_issue` counts only when its JSON arguments carry `spec`. Split by where the file sits: `root` (`sessions/<project>/<stem>.jsonl`, the root sessions a gate covers) and `subagent` (any file below `<stem>/`, task subagents, which run no advisor); `per_day` divides by the window length |
-| `gate` | over `{type: custom, customType: advisor-gate}` entries whose `advisor` slugifies to `--advisor`: `counts` by `decision/outcome`; `latency_ms_p50`/`p95` (nearest rank) over `outcome: verdict`; `fail_open_rate` = (timeout + error + no-verdict) / (verdict + timeout + error + no-verdict); `ungated_share` = (timeout + error + no-verdict + unavailable + halted) / (matched − rebuttal − breaker − killed), since an override, a breaker pass and the machine kill switch are deliberate passes rather than gate failures; `revise_rate` over verdicts; `rebuttal_rate` over matched; `breaker_trips`; `killed`; `halted_sessions`; `usage` (input, output, cache-read and cache-write tokens, and `cost` in dollars) summed from each entry's `usage`, with `usage_per_day` and `cost_usd_per_day` — the entries are the only record of the gate's spend, which `omp stats` cannot see. Other entry fields (`argsDigest`, `promptBytes`) are not read |
+| `gate` | over `{type: custom, customType: advisor-gate}` entries whose `advisor` slugifies to `--advisor`: `counts` by `decision/outcome`; `latency_ms_p50`/`p95` (nearest rank) over `outcome: verdict`; `fail_open_rate` = (timeout + error + no-verdict) / (verdict + timeout + error + no-verdict); `ungated_share` = (timeout + error + no-verdict + unavailable + halted) / (matched − rebuttal − breaker − killed), since an override, a breaker pass and the machine kill switch are deliberate passes rather than gate failures; `revise_rate` = delivered revises / verdicts, where a revise is delivered once the agent received it: a `block`-mode revise is the call's own tool result, and a `warn`-mode one counts only when a developer message after the entry, before the agent's next assistant message, holds `<advisor-gate advisor="AskGate"` and the entry's `reason`, raw or XML-escaped (the fork joins a batch's blocks into one message and drops a skipped call's); `rebuttal_rate` over matched; `breaker_trips`; `killed`; `halted_sessions`; `usage` (input, output, cache-read and cache-write tokens, and `cost` in dollars) summed from each entry's `usage`, with `usage_per_day` and `cost_usd_per_day` — the entries are the only record of the gate's spend, which `omp stats` cannot see. Other entry fields (`argsDigest`, `promptBytes`) are not read |
 | `corrections` | Σ(negation + blame + anguish + yelling + profanity) over `stats.db user_messages` of the window's root sessions, per 100 primary turns. An agent box relaunch moves a session to a new project directory and `stats.db` keeps the rows it ingested earlier under the old path, so a row joins its session on the path below the project directory (`<stem>.jsonl`) |
-| `labelled` | over the fired rows (gate `revise` verdicts and admitted notes) that carry a label: precision = (acted-correct + ignored-advisor-right) / n; harm = (acted-harmful + `skips`) / n |
+| `labelled` | over the fired rows (delivered gate `revise` verdicts and admitted notes) that carry a label: precision = (acted-correct + ignored-advisor-right) / n; harm = (acted-harmful + `skips`) / n |
 
 ## Sample packets and labels
 
-`sample` draws from the window's gate decisions and admitted notes. The priority stratum is every gate
+`sample` draws from the window's gate decisions and admitted notes. The priority stratum is every delivered gate
 `revise` verdict and every admitted `blocker` note: all of it when it fits in half the packet, otherwise a
 uniform half-packet of it; the rest of the packet is drawn uniformly from everything else. The first line of
 the packet is a header recording each stratum's population and draw; every other line is one row:
 
 - `id` — `gate:<session id>:<entry id>` or `note:<session id>:<advise call id>`; labels join on it
 - `kind`, `stratum`, `session`, `advisor`, `timestamp`
-- a gate row: `decision`, `outcome`, `verdictMode`, `reason`, `rebuttal`, `tool`, `path`, and `call` (the
+- a gate row: `decision`, `outcome`, `verdictMode`, `reason`, `delivered` (whether a revise reached the agent,
+  as `revise_rate` counts it; `null` for any other decision), `rebuttal`, `tool`, `path`, and `call` (the
   tool call's arguments, a device `content` parsed as JSON)
 - a note row: `severity`, `ack`, `note`, and `update` (the tail of what the advisor was shown)
 - `context` — up to five primary messages either side of the decision (the card, for a routed note)
@@ -97,7 +98,7 @@ this order, and the first that matches decides:
 | day 14 onward | `ungated_share` ≥ 0.10 over the window | KILL |
 | day 14 onward, ≥ 30 labelled revises | precision < 0.3 | KILL |
 | day 14 onward, any number of labelled revises | harm > 0.10 | KILL |
-| any day | a completed week since launch has revises and not one of them is labelled | incomplete, naming the week |
+| any day | a completed week since launch has delivered revises and not one of them is labelled | incomplete, naming the week |
 | day 21 onward | fewer than 30 labelled revises | KILL: EXTEND once, then GO or KILL, and GO lacks its evidence |
 | before day 21 | fewer than 30 labelled revises | incomplete |
 | day 21 onward | not GO | KILL |

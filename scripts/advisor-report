@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import html
 import json
 import math
 import os
@@ -42,7 +43,7 @@ import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -62,6 +63,9 @@ SPEC_DEVICE = "xd://dispatch_issue"
 SKIP_PREFIX = "Skipped due to pending system advisory"
 ADVISOR_STEM = "__advisor"
 GATE_ENTRY_TYPE = "advisor-gate"
+# How a warn-mode revise reaches the agent: the extension's block (askgate-core.ts renderWarn), which the fork carries in
+# the developer message it writes after the tool batch.
+WARN_MARKER = '<advisor-gate advisor="AskGate"'
 LABELS = frozenset({"acted-correct", "acted-harmful", "ignored-agent-right", "ignored-advisor-right", "moot", "noise"})
 
 FAIL_OPEN = frozenset({"timeout", "error", "no-verdict"})
@@ -262,12 +266,14 @@ def scoped_device(name: str, arguments: dict, scope_re: re.Pattern) -> str | Non
 
 @dataclass(frozen=True)
 class GateEntry:
-    """One `advisor-gate` entry the AskGate extension appended to a root session."""
+    """One `advisor-gate` entry the AskGate extension appended to a root session, and whether a revise it holds reached
+    the agent (warn_delivered says how)."""
 
     session_id: str
     id: str | None
     at: datetime | None
     data: dict
+    delivered: bool
 
     @property
     def row_id(self) -> str:
@@ -275,8 +281,20 @@ class GateEntry:
 
     @property
     def is_revise(self) -> bool:
-        """A gate decision the agent was told to act on: the labelled population the precision rule reads."""
         return self.data.get("decision") == "revise" and self.data.get("outcome") == "verdict"
+
+    @property
+    def fired(self) -> bool:
+        """A revise the agent received and was told to act on: the labelled population the precision rule reads."""
+        return self.is_revise and self.delivered
+
+
+def warn_delivered(text: str, reason) -> bool:
+    """Whether a developer message hands the agent a warn-mode revise: it holds AskGate's block and the entry's reason,
+    escaped as the extension escapes it (`&`, `<`, `>`) or raw. The fork joins a batch's blocks into one message and
+    writes a repeated one once, so each revise it carried is found in that message."""
+    return (WARN_MARKER in text and isinstance(reason, str) and bool(reason)
+            and (reason in text or html.escape(reason, quote=False) in text))
 
 
 @dataclass
@@ -378,8 +396,10 @@ def tool_call_arguments(block: dict) -> dict:
 
 def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> SessionRecord:
     """Fill `record` from a primary session's entries: assistant turns, tool calls, advisor cards, skips, and the gate
-    entries of `advisor`."""
+    entries of `advisor`, each warn-mode revise delivered only when a developer message after it and before the agent's
+    next assistant message carries it (the fork drops a skipped call's context)."""
     open_skips: list = []  # skipped results the steer that caused them has not followed yet
+    open_warns: list = []  # indices in record.gate_entries of warn-mode revises no developer message has carried yet
     for position, entry in enumerate(entries):
         kind, at = entry.get("type"), entry_time(entry)
         if kind == "message":
@@ -387,12 +407,19 @@ def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> S
             role = message.get("role")
             if role == "assistant":
                 record.skips += [Skip(skip_at, None) for skip_at in open_skips]
-                open_skips = []
+                open_skips, open_warns = [], []
                 record.turn_times.append(at)
                 record.tool_calls += [ToolCall(at, str(block.get("id")), str(block.get("name", "")), tool_call_arguments(block))
                                       for block in tool_calls_of(message)]
             elif role == "toolResult" and content_text(message.get("content")).startswith(SKIP_PREFIX):
                 open_skips.append(at)
+            elif role == "developer":
+                text = content_text(message.get("content"))
+                for index in open_warns:
+                    gate = record.gate_entries[index]
+                    if warn_delivered(text, gate.data.get("reason")):
+                        record.gate_entries[index] = replace(gate, delivered=True)
+                open_warns = [index for index in open_warns if not record.gate_entries[index].delivered]
         elif kind == "custom_message":
             is_card = entry.get("customType") == "advisor"
             notes = [n for n in (entry.get("details") or {}).get("notes") or [] if isinstance(n, dict)] if is_card else []
@@ -405,7 +432,12 @@ def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> S
             data = entry.get("data") or {}
             name = data.get("advisor")
             if advisor != "default" and isinstance(name, str) and slugify(name) == advisor:
-                record.gate_entries.append(GateEntry(record.session_id, entry.get("id"), at, data))
+                # A block-mode revise is the call's own tool result, so it always reaches the agent.
+                gate = GateEntry(record.session_id, entry.get("id"), at, data, delivered=False)
+                blocked = gate.is_revise and data.get("verdictMode") == "block"
+                record.gate_entries.append(replace(gate, delivered=True) if blocked else gate)
+                if gate.is_revise and not blocked:
+                    open_warns.append(len(record.gate_entries) - 1)
     record.skips += [Skip(skip_at, None) for skip_at in open_skips]
     return record
 
@@ -589,7 +621,7 @@ def gate_metrics(entries: list[GateEntry]) -> dict:
     outcomes = Counter(d.get("outcome") for d in data)
     verdict_latencies = [d["latencyMs"] for d in data
                          if d.get("outcome") == "verdict" and isinstance(d.get("latencyMs"), (int, float))]
-    revises = sum(1 for d in data if d.get("outcome") == "verdict" and d.get("decision") == "revise")
+    revises = sum(1 for entry in entries if entry.fired)
     matched = len(data)
     return {
         "matched": matched,
@@ -860,7 +892,7 @@ def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, w
         by_ack.update(call.ack for call in calls)
         latencies += held.latencies_ms
         gate_entries += entries
-        fired += [entry.row_id for entry in entries if entry.is_revise] + [call.row_id(record.session_id) for call in admitted]
+        fired += [entry.row_id for entry in entries if entry.fired] + [call.row_id(record.session_id) for call in admitted]
         paths.append(record.path)
     days, turns = window.days, n["turns"]
     correction_total = corrections(stats, paths, window)
@@ -972,8 +1004,8 @@ def context_around(entries: list[dict], anchor: int) -> list[dict]:
 
 
 def sample_stratum(item: GateEntry | AdviseCall) -> str:
-    """Every gate revise verdict and every admitted blocker note are the priority stratum; the rest is `other`."""
-    urgent = item.is_revise if isinstance(item, GateEntry) else item.severity == "blocker"
+    """Every delivered gate revise and every admitted blocker note are the priority stratum; the rest is `other`."""
+    urgent = item.fired if isinstance(item, GateEntry) else item.severity == "blocker"
     return "priority" if urgent else "other"
 
 
@@ -987,7 +1019,8 @@ def gate_row(entry: GateEntry, entries: list[dict], tool_calls: list[ToolCall]) 
     return {"type": "row", "id": entry.row_id, "kind": "gate", "session": entry.session_id,
             "advisor": data.get("advisor"), "timestamp": None if entry.at is None else iso(entry.at),
             "decision": data.get("decision"), "outcome": data.get("outcome"), "verdictMode": data.get("verdictMode"),
-            "reason": data.get("reason"), "rebuttal": data.get("rebuttal"), "tool": data.get("tool"), "path": data.get("path"),
+            "reason": data.get("reason"), "delivered": entry.delivered if entry.is_revise else None,
+            "rebuttal": data.get("rebuttal"), "tool": data.get("tool"), "path": data.get("path"),
             "call": call, "context": context_around(entries, anchor)}
 
 
@@ -1150,7 +1183,7 @@ def watch_baseline(path: Path, launched: datetime) -> str:
 
 
 def missing_label_weeks(launched: datetime, now: datetime, fired: list[tuple[str, datetime]], labels: dict) -> list[str]:
-    """Each completed week since launch that has revises and not one of them labelled."""
+    """Each completed week since launch that has delivered revises and not one of them labelled."""
     missing = []
     for week in range(1, int((now - launched).days // 7) + 1):
         start, end = launched + timedelta(days=7 * (week - 1)), launched + timedelta(days=7 * week)
@@ -1252,7 +1285,7 @@ def gate_check(now: datetime) -> Check:
     labels = attempt("the labels", load_labels, failures)
     baseline = attempt("the watch-mode baseline", lambda: watch_baseline(default_stats_db(), launched), failures)
     problems = attempt("the roster", lambda: roster_problems(dotfiles_dir(), agent_dir()), failures)
-    fired = [(entry.row_id, entry.at) for entry in entries if entry.is_revise]
+    fired = [(entry.row_id, entry.at) for entry in entries if entry.fired]
     lab = None if labels is None else labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
     lines = [f"gate: day {day:.1f}; {whole['matched']} matched ({whole['killed']} killed), ungated_share "
              f"{fmt(whole['ungated_share'])}, p95 {fmt(whole['latency_ms_p95'], '.0f')} ms (timeout {timeout_ms}), "

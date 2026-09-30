@@ -71,7 +71,7 @@ def now_utc() -> datetime:
 _entry_seq = [0]
 
 
-def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None):
+def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="AskGate", at=None, reason=None, mode="warn"):
     """An `advisor-gate` entry as the AskGate extension appends it to a root session file."""
     _entry_seq[0] += 1
     return {
@@ -87,18 +87,39 @@ def gate_line(outcome="verdict", decision="allow", latency_ms=1000, advisor="Ask
             "toolCallId": f"call{_entry_seq[0]}",
             "decision": decision,
             "outcome": outcome,
-            "verdictMode": "warn",
+            "verdictMode": mode,
             "latencyMs": latency_ms,
             "revisesForKey": 0,
-            **({"reason": "failure 7: the text points at a message the reader cannot see"} if decision == "revise" else {}),
+            **({"reason": reason or "failure 7: the text points at a message the reader cannot see"} if decision == "revise" else {}),
         },
     }
 
 
-def gate_entry(session="s1", **fields):
-    """The same entry as the script reads it."""
+def gate_entry(session="s1", delivered=False, **fields):
+    """The same entry as the script reads it; `delivered` says whether a revise reached the agent."""
     line = gate_line(**fields)
-    return ar.GateEntry(session_id=session, id=line["id"], at=ar.parse_iso(line["timestamp"]), data=line["data"])
+    return ar.GateEntry(session_id=session, id=line["id"], at=ar.parse_iso(line["timestamp"]), data=line["data"],
+                        delivered=delivered)
+
+
+def escape_xml(text: str) -> str:
+    """askgate-core.ts escapeXml: `&`, `<` and `>` only."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def warn_message(*reasons, escape=True, at=None, advisor="AskGate"):
+    """The developer message the fork writes after a tool batch: each warn-mode revise's block, joined as the fork joins
+    additional context (askgate-core.ts renderWarn; tool-context.ts joinAdditionalContext)."""
+    blocks = [f'<advisor-gate advisor="{advisor}" verdict="revise">\n{escape_xml(reason) if escape else reason}\n'
+              "The call ran. This note concerns only that Dispatch call.\n</advisor-gate>" for reason in reasons]
+    return {"type": "message", "id": f"d{len(reasons)}", "timestamp": ar.iso(at or now_utc()),
+            "message": {"role": "developer", "content": [{"type": "text", "text": "\n\n".join(blocks)}], "attribution": "agent"}}
+
+
+def delivered_revise(at=None, latency_ms=4000):
+    """A warn-mode revise and the developer message that handed its reason to the agent."""
+    line = gate_line(decision="revise", at=at, latency_ms=latency_ms)
+    return [line, warn_message(line["data"]["reason"], at=at)]
 
 
 def write_jsonl(path: Path, entries) -> None:
@@ -359,6 +380,48 @@ class SkipAttributionTest(unittest.TestCase):
         self.assertEqual(ar.skips_in(record(skips=skips), hour()), 4)
 
 
+REASON = "failure 7: the ask quotes <draft> & its link"
+OTHER_REASON = "failure 3: the ask repeats one already open"
+
+
+def tool_result(call_id, at):
+    return {"type": "message", "id": f"r{call_id}", "timestamp": ar.iso(at),
+            "message": {"role": "toolResult", "toolCallId": call_id, "toolName": "write", "content": [{"type": "text", "text": "ok"}]}}
+
+
+class DeliveryTest(unittest.TestCase):
+    """A warn-mode revise reaches the agent only in the developer message the fork writes after the tool batch, before
+    the agent's next assistant message; the fork drops a skipped call's context. A block-mode revise is the call's own
+    result, so it always arrives."""
+
+    def test_each_case(self):
+        call, result, skipped = assistant_call("w1", "write", {}, minutes(1)), tool_result("w1", minutes(1)), skipped_result("w1", minutes(1))
+        turn = assistant_call("a2", "read", {}, minutes(2))
+
+        def revise(reason=REASON, mode="warn"):
+            return gate_line(decision="revise", reason=reason, mode=mode, at=minutes(1))
+
+        rows = [
+            ("the escaped reason in an AskGate block", [call, revise(), result, warn_message(REASON), turn], [True]),
+            ("the raw reason in an AskGate block", [call, revise(), result, warn_message(REASON, escape=False)], [True]),
+            ("a skipped call gets no developer message", [call, revise(), skipped, turn], [False]),
+            ("the file ends before any developer message", [call, revise(), result], [False]),
+            ("a block after the next assistant message", [call, revise(), result, turn, warn_message(REASON)], [False]),
+            ("a block carrying another entry's reason", [call, revise(), result, warn_message(OTHER_REASON)], [False]),
+            ("the reason in another advisor's block", [call, revise(), result, warn_message(REASON, advisor="Memory")], [False]),
+            ("a block-mode revise needs no message", [call, revise(mode="block"), result, turn], [True]),
+            ("a batch's two revises in one joined message", [call, revise(), revise(OTHER_REASON), result,
+                                                             warn_message(REASON, OTHER_REASON)], [True, True]),
+            ("two revises with one reason, which the fork joins once", [call, revise(), revise(), result, warn_message(REASON)],
+             [True, True]),
+            ("only a revise verdict is delivered", [call, gate_line(at=minutes(1)), result, warn_message(REASON)], [False]),
+        ]
+        for case, entries, delivered in rows:
+            with self.subTest(case):
+                parsed = ar.parse_primary(record(), entries, "askgate").gate_entries
+                self.assertEqual([entry.delivered for entry in parsed], delivered)
+
+
 class WindowedCountsTest(unittest.TestCase):
     """Each count takes what falls inside [since, until]: a second before `since` or after `until` is out."""
 
@@ -508,8 +571,9 @@ class StatsDbTest(unittest.TestCase):
 
 
 class SampleUnitTest(unittest.TestCase):
-    def test_revise_verdicts_and_blocker_notes_are_the_priority_stratum(self):
-        self.assertEqual(ar.sample_stratum(gate_entry(decision="revise")), "priority")
+    def test_delivered_revise_verdicts_and_blocker_notes_are_the_priority_stratum(self):
+        self.assertEqual(ar.sample_stratum(gate_entry(decision="revise", delivered=True)), "priority")
+        self.assertEqual(ar.sample_stratum(gate_entry(decision="revise", delivered=False)), "other")
         self.assertEqual(ar.sample_stratum(gate_entry(decision="revise", outcome="timeout")), "other")
         self.assertEqual(ar.sample_stratum(gate_entry()), "other")
         self.assertEqual(ar.sample_stratum(advise(severity="blocker", ack="delivered")), "priority")
@@ -573,9 +637,10 @@ class GateMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["usage"], {"input": 3000, "output": 120, "cacheRead": 400, "cacheWrite": 900, "cost": 0.75})
         self.assertEqual(metrics["matched"], 3)
 
-    def test_revise_rate_is_over_verdicts(self):
-        entries = [gate_entry(decision="revise"), gate_entry(), gate_entry(outcome="timeout"), gate_entry(outcome="rebuttal")]
-        self.assertEqual(ar.gate_metrics(entries)["revise_rate"], 0.5)
+    def test_revise_rate_is_delivered_revises_over_verdicts(self):
+        entries = [gate_entry(decision="revise", delivered=True), gate_entry(decision="revise", delivered=False), gate_entry(),
+                   gate_entry(outcome="timeout"), gate_entry(outcome="rebuttal")]
+        self.assertEqual(ar.gate_metrics(entries)["revise_rate"], 1 / 3)
 
     def test_latency_calls_are_the_verdicts_and_timeouts(self):
         outcomes = ("verdict", "timeout", "error", "no-verdict", "unavailable", "halted", "rebuttal", "breaker", "killed")
@@ -784,9 +849,9 @@ class ReadoutTest(unittest.TestCase):
         return self.home.session("01a0f000-0000-7000-8000-00000000f003", entries)
 
     def healthy_gate(self, extra=()):
-        """30 revises, 8 allows, 2 timeouts in the last hours: ungated_share 0.05."""
+        """30 delivered revises, 8 allows, 2 timeouts in the last hours: ungated_share 0.05."""
         at = [self.now - timedelta(minutes=5 + i) for i in range(40)]
-        entries = [gate_line(decision="revise", at=at[i], latency_ms=4000) for i in range(30)]
+        entries = [entry for i in range(30) for entry in delivered_revise(at=at[i])]
         entries += [gate_line(at=at[30 + i], latency_ms=3000) for i in range(8)]
         entries += [gate_line(outcome="timeout", at=at[38 + i], latency_ms=90_000) for i in range(2)]
         self.gate_session([*extra, *entries])
@@ -796,7 +861,7 @@ class ReadoutTest(unittest.TestCase):
         self.home.run("sample", "--since", ar.iso(self.launched), "--until", ar.iso(until or self.now), "--n", "100",
                       "--out", str(packet), check_exit=0)
         rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()][1:]
-        revises = [row["id"] for row in rows if row.get("decision") == "revise"]
+        revises = [row["id"] for row in rows if row.get("decision") == "revise" and row.get("delivered")]
         self.assertEqual(len(revises), correct + harmful + other + unlabelled)
         labels = self.home.root / "labels.jsonl"
         with labels.open("w", encoding="utf-8") as fh:
@@ -809,9 +874,8 @@ class ReadoutTest(unittest.TestCase):
         """Day 14.1: week 1's 30 revises are labelled at precision 0.60, week 2's 30 are not labelled yet."""
         self.launch(days=14.1)
         week = timedelta(days=7)
-        entries = [gate_line(decision="revise", at=self.launched + timedelta(days=1, minutes=i), latency_ms=4000) for i in range(30)]
-        entries += [gate_line(decision="revise", at=self.launched + week + timedelta(days=1, minutes=i), latency_ms=4000)
-                    for i in range(30)]
+        entries = [entry for i in range(30) for entry in delivered_revise(at=self.launched + timedelta(days=1, minutes=i))]
+        entries += [entry for i in range(30) for entry in delivered_revise(at=self.launched + week + timedelta(days=1, minutes=i))]
         self.gate_session(entries + [gate_line(at=self.now - timedelta(minutes=5 + i), latency_ms=3000) for i in range(8)])
         self.label_revises(correct=18, other=12, until=self.launched + week)
         out = self.home.run("readout", "--check", "gate", check_exit=3).stdout
@@ -819,6 +883,24 @@ class ReadoutTest(unittest.TestCase):
         self.assertIn(f"gate: incomplete: no labels for week 2 ({self.launched + week:%Y-%m-%d}..", out)
         self.assertNotIn("gate: GO", out)
         self.assertFalse(self.home.overlay.exists())
+
+    def test_a_revise_the_agent_never_received_is_not_in_the_labelled_population(self):
+        """The fork dropped a skipped call's warn block, so the agent never saw that revise: a label on it moves neither
+        n nor harm, and the gate still reads GO."""
+        self.launch(days=15)
+        at = self.now - timedelta(hours=2)
+        undelivered = gate_line(decision="revise", at=at, latency_ms=4000)
+        self.healthy_gate(extra=[assistant_call("w9", "write", {}, at), undelivered, skipped_result("w9", at),
+                                 assistant_call("a9", "read", {}, at)])
+        self.label_revises(correct=18, other=12)
+        harmful = self.home.root / "harmful.jsonl"
+        harmful.write_text(json.dumps({"id": f"gate:01a0f000-0000-7000-8000-00000000f003:{undelivered['id']}",
+                                       "label": "acted-harmful", "labeler": "oracle-test", "at": ar.iso(self.now)}) + "\n",
+                           encoding="utf-8")
+        self.home.run("ingest-labels", str(harmful), check_exit=0)
+        out = self.home.run("readout", "--check", "gate", check_exit=0).stdout
+        self.assertIn("labelled revises n=30, precision 0.60, harm 0.00", out)
+        self.assertIn("gate: GO", out)
 
     def kill_fixture(self):
         at = [self.now - timedelta(minutes=10 + i) for i in range(20)]
@@ -989,7 +1071,7 @@ class SampleTest(unittest.TestCase):
              "message": {"role": "assistant", "content": [{"type": "text", "text": f"step {i}"}]}}
             for i in range(20, 0, -1)
         ]
-        gates = [gate_line(decision="revise", at=now - timedelta(minutes=100 - i)) for i in range(40)]
+        gates = [entry for i in range(40) for entry in delivered_revise(at=now - timedelta(minutes=100 - i))]
         gates += [gate_line(at=now - timedelta(minutes=50 - i)) for i in range(20)]
         self.home.session("01a0f000-0000-7000-8000-00000000f004", context + gates)
         packet = self.home.root / "packet.jsonl"
@@ -1001,6 +1083,25 @@ class SampleTest(unittest.TestCase):
         self.assertEqual(sum(row["decision"] == "revise" for row in rows), 10)
         self.assertEqual(len({row["id"] for row in rows}), 20)
         self.assertTrue(all(1 <= len(row["context"]) <= 10 for row in rows))
+
+    def test_rows_say_whether_a_revise_reached_the_agent_and_only_delivered_ones_are_priority(self):
+        now = now_utc()
+        at = [now - timedelta(minutes=30 - i) for i in range(4)]
+        first, second = delivered_revise(at=at[0]), delivered_revise(at=at[1])
+        undelivered, allow = gate_line(decision="revise", at=at[2]), gate_line(at=at[3])
+        self.home.session("01a0f000-0000-7000-8000-00000000f005", [
+            assistant_call("w1", "write", {}, at[0]), *first, assistant_call("w2", "write", {}, at[1]), *second,
+            assistant_call("w3", "write", {}, at[2]), undelivered, skipped_result("w3", at[2]),
+            assistant_call("w4", "write", {}, at[3]), allow, assistant_call("a5", "read", {}, at[3]),
+        ])
+        packet = self.home.root / "packet.jsonl"
+        self.home.run("sample", "--since", ar.iso(now - timedelta(days=1)), "--until", ar.iso(now), "--n", "10",
+                      "--out", str(packet), check_exit=0)
+        header, *rows = [json.loads(line) for line in packet.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(header["strata"], {"priority": {"population": 2, "drawn": 2}, "other": {"population": 2, "drawn": 2}})
+        by_id = {row["id"].rsplit(":", 1)[1]: (row["stratum"], row["delivered"]) for row in rows}
+        self.assertEqual(by_id, {first[0]["id"]: ("priority", True), second[0]["id"]: ("priority", True),
+                                 undelivered["id"]: ("other", False), allow["id"]: ("other", None)})
 
 
 class IngestLabelsTest(unittest.TestCase):
