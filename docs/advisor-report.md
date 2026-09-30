@@ -23,7 +23,8 @@ opened — root sessions are `sessions/<project>/<stem>.jsonl`, task subagents a
 `<stem>/` — each root session's advisor transcript `<stem>/__advisor.<slug>.jsonl` (`--advisor default` is
 the unnamed legacy advisor's `__advisor.jsonl`), the `advisor-gate` entries the AskGate extension
 (`omp/extensions/askgate.ts`) appends to the root session, and `~/.omp/stats.db` (`--stats-db`, `OMP_STATS_DB`). `metrics` first syncs `stats.db` with the
-pinned `omp stats --summary`, as `scripts/omp-billing-watch` does, unless `--no-sync`, and refuses (exit 2)
+pinned `omp stats --summary`, as `scripts/omp-billing-watch` does, unless `--no-sync`, for at most `SYNC_TIMEOUT`
+seconds (2700 when unset), and refuses (exit 2)
 when the database's newest ingested file predates the window. Unparsable lines are skipped and counted
 (`files.bad_lines`). `PI_CODING_AGENT_DIR` moves the agent directory and `DOTFILES_DIR` the dotfiles
 checkout, as in `shims/omp`. Windows are `--since`/`--until` (ISO) or `--days N` back from `--until`

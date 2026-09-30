@@ -577,6 +577,25 @@ class StatsDbTest(unittest.TestCase):
                          f"no stats db at {self.path.with_name('absent.db')} for the watch-mode baseline")
 
 
+class SyncTest(unittest.TestCase):
+    def test_sync_timeout_bounds_the_stats_sync_as_omp_billing_watch_does(self):
+        """A `metrics` run syncs stats.db through the pinned omp first; SYNC_TIMEOUT caps that sync, and the coverage
+        check, not the sync, decides whether the run may go on."""
+        home = Home()
+        self.addCleanup(home.cleanup)
+        mise = home.dotfiles / "bin" / "mise"
+        mise.parent.mkdir()
+        mise.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$STUB_LOG"\nexec sleep 30\n', encoding="utf-8")
+        mise.chmod(0o755)
+        stats = home.root / "stats.db"
+        build_stats_db(stats)
+        home.env["SYNC_TIMEOUT"] = "1"
+        started = time.monotonic()
+        home.run("metrics", "--days", "1", "--stats-db", str(stats), "--json", check_exit=0)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(home.envoy_log.read_text(encoding="utf-8"), "x github:sjawhar/oh-my-pi -- omp stats --summary\n")
+
+
 class SampleUnitTest(unittest.TestCase):
     def test_delivered_revise_verdicts_and_blocker_notes_are_the_priority_stratum(self):
         self.assertEqual(ar.sample_stratum(gate_entry(decision="revise", delivered=True)), "priority")

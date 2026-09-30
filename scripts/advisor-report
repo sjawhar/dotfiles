@@ -687,9 +687,11 @@ def labelled_metrics(labels: dict[str, dict], fired_ids, skips: int) -> dict:
 # --- stats.db --------------------------------------------------------------
 
 def sync_stats() -> None:
-    """Ingest session files into stats.db the way scripts/omp-billing-watch does; the coverage check is the gate."""
+    """Ingest session files into stats.db the way scripts/omp-billing-watch does, capped at SYNC_TIMEOUT seconds (2700
+    when unset or empty); the coverage check is the gate."""
     mise = dotfiles_dir() / "bin" / "mise"
-    subprocess.run(["timeout", "2700", str(mise), "x", "github:sjawhar/oh-my-pi", "--", "omp", "stats", "--summary"],
+    limit = os.environ.get("SYNC_TIMEOUT") or "2700"
+    subprocess.run(["timeout", limit, str(mise), "x", "github:sjawhar/oh-my-pi", "--", "omp", "stats", "--summary"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
