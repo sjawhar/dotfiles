@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import fnmatch
 import getpass
 import html
 import json
@@ -72,6 +73,11 @@ GATE_ENTRY_TYPE = "advisor-gate"
 REFUSAL_PREFIX = "AskGate did not send this call"
 WARN_MARKER = '<advisor-gate advisor="AskGate"'
 REASON_MAX_BYTES, CLIP_MARKER_BYTES = 2048, 32
+# The fields askgate-core.ts breakerKey reads from a call's device arguments; with the device they name one pending write.
+BREAKER_KEYS = ("issue", "ask", "artifact", "project", "in_reply_to")
+# Probe sessions: acceptance and smoke runs, whose defects are planted and whose responses are scripted, so they measure
+# detection, not precision. `sample` leaves them out unless --include-probes and marks their rows; no label counts one.
+PROBE_DIRS = ("-.worktrees-p8-accept-*", "-tmp-askgate-smoke-*")
 LABELS = frozenset({"acted-correct", "acted-harmful", "ignored-agent-right", "ignored-advisor-right", "moot", "noise"})
 
 FAIL_OPEN = frozenset({"timeout", "error", "no-verdict"})
@@ -1253,34 +1259,115 @@ def context_around(entries: list[dict], anchor: int) -> list[dict]:
     return [render_message(entries[i]) for i in before + after]
 
 
-def sample_stratum(item: GateEntry | AdviseCall) -> str:
-    """Every delivered gate revise and every admitted blocker note are the priority stratum; the rest is `other`."""
-    urgent = item.fired if isinstance(item, GateEntry) else item.severity == "blocker"
-    return "priority" if urgent else "other"
+def device_input(call: ToolCall) -> dict:
+    """A call's device arguments as the gate saw them: a device write's JSON `content`, or a top-level call's arguments."""
+    return (parse_json_object(call.arguments.get("content")) or {}) if call.name == "write" else call.arguments
 
 
-def gate_row(entry: GateEntry, entries: list[dict], tool_calls: list[ToolCall]) -> dict:
-    data = entry.data
-    anchor = next((i for i, e in enumerate(entries) if e.get("type") == "custom" and e.get("id") == entry.id), len(entries))
-    tool = next((tool for tool in tool_calls if tool.id == data.get("toolCallId")), None)
-    call = None if tool is None else tool.arguments
-    if call is not None and "content" in call:
-        call = {**call, "content": parse_json_object(call["content"]) or call["content"]}
-    return {"type": "row", "id": entry.row_id, "kind": "gate", "session": entry.session_id,
-            "advisor": data.get("advisor"), "timestamp": None if entry.at is None else iso(entry.at),
+def breaker_key(entry: GateEntry, calls: dict) -> tuple:
+    """askgate-core.ts breakerKey: the device and the target fields of its call's arguments. An entry whose call is not
+    in the transcript is a key of its own."""
+    call = calls.get(entry.data.get("toolCallId"))
+    if call is None:
+        return (entry.data.get("tool"), ("toolCallId", entry.data.get("toolCallId")))
+    arguments = device_input(call)
+    return (entry.data.get("tool"), *((key, arguments[key] if isinstance(arguments[key], str) else json.dumps(arguments[key]))
+                                      for key in BREAKER_KEYS if key in arguments))
+
+
+@dataclass(frozen=True)
+class Cluster:
+    """A (session, breaker key) run of fired revises, the unit a gate label judges: one pending write, however often it
+    was resent. `ended_by` is the outcome of the entry that ended the run (`allow` for an allow verdict) or `session
+    end`; `next_entry` is the entry of the agent's next call on the key after the first revise."""
+
+    first: GateEntry
+    later: tuple
+    ended_by: str
+    next_entry: GateEntry | None
+
+
+def fired_clusters(record: SessionRecord) -> list[Cluster]:
+    """The session's fired revises in runs per breaker key, in the order each run began. Any other entry on the key ends
+    a run; a revise the agent never received neither joins nor ends one."""
+    calls = {call.id: call for call in record.tool_calls}
+    by_key: dict = {}
+    for index, entry in enumerate(record.gate_entries):
+        by_key.setdefault(breaker_key(entry, calls), []).append((index, entry))
+    clusters = []
+    for entries in by_key.values():
+        run = []
+        for position, (index, entry) in enumerate(entries):
+            if entry.fired:
+                run.append((position, index, entry))
+            elif not entry.is_revise and run:
+                outcome = entry.data.get("outcome")
+                clusters.append((run, entries, entry.data.get("decision") if outcome == "verdict" else outcome))
+                run = []
+        if run:
+            clusters.append((run, entries, "session end"))
+    clusters.sort(key=lambda cluster: cluster[0][0][1])
+    return [Cluster(first=run[0][2], later=tuple(entry for _, _, entry in run[1:]), ended_by=ended_by,
+                    next_entry=entries[run[0][0] + 1][1] if run[0][0] + 1 < len(entries) else None)
+            for run, entries, ended_by in clusters]
+
+
+def probe_patterns() -> list[str]:
+    """The project directory patterns of probe sessions: PROBE_DIRS and every pattern launch.json's `excluded_dirs`
+    lists."""
+    extra = load_launch().get("excluded_dirs", [])
+    if not isinstance(extra, list) or not all(isinstance(pattern, str) for pattern in extra):
+        raise Failure(f"{report_dir() / 'launch.json'}: excluded_dirs is not a list of patterns")
+    return [*PROBE_DIRS, *extra]
+
+
+def is_probe(path: Path, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatchcase(path.parent.name, pattern) for pattern in patterns)
+
+
+def displayed_call(entry: GateEntry, calls: dict) -> dict:
+    """An entry's call as the agent recorded it, a device `content` parsed as JSON. `rebuttal_stripped` says the gate
+    removed the agent's `advisor_rebuttal` before the call went out, so the recorded call lacks it; `rebuttal` holds it."""
+    tool = calls.get(entry.data.get("toolCallId"))
+    arguments = None if tool is None else tool.arguments
+    if arguments is not None and "content" in arguments:
+        arguments = {**arguments, "content": parse_json_object(arguments["content"]) or arguments["content"]}
+    stripped = entry.data.get("outcome") == "rebuttal"
+    return {"arguments": arguments, "rebuttal_stripped": stripped, "rebuttal": entry.data.get("rebuttal") if stripped else None}
+
+
+def verdict_summary(entry: GateEntry) -> dict:
+    return {"id": entry.row_id, "timestamp": None if entry.at is None else iso(entry.at), "decision": entry.data.get("decision"),
+            "outcome": entry.data.get("outcome"), "reason": entry.data.get("reason")}
+
+
+def gate_row(cluster: Cluster, entries: list[dict], calls: dict) -> dict:
+    first, data = cluster.first, cluster.first.data
+    anchor = next((i for i, e in enumerate(entries) if e.get("type") == "custom" and e.get("id") == first.id), len(entries))
+    next_entry = cluster.next_entry
+    return {"type": "row", "id": first.row_id, "kind": "gate", "stratum": "gate", "session": first.session_id,
+            "advisor": data.get("advisor"), "timestamp": None if first.at is None else iso(first.at),
             "decision": data.get("decision"), "outcome": data.get("outcome"), "verdictMode": data.get("verdictMode"),
-            "reason": data.get("reason"), "delivered": entry.delivered if entry.is_revise else None,
-            "rebuttal": data.get("rebuttal"), "tool": data.get("tool"), "path": data.get("path"),
-            "call": call, "context": context_around(entries, anchor)}
+            "reason": data.get("reason"), "latencyMs": data.get("latencyMs"), "usage": data.get("usage"),
+            "tool": data.get("tool"), "path": data.get("path"), "call": displayed_call(first, calls), "received": first.received,
+            "later_verdicts": [verdict_summary(entry) for entry in cluster.later], "ended_by": cluster.ended_by,
+            "next_call": None if next_entry is None else {**verdict_summary(next_entry), **displayed_call(next_entry, calls)},
+            "context": context_around(entries, anchor)}
 
 
-def note_row(session_id: str, call: AdviseCall, entries: list[dict], cards: list[Card], advisor: str) -> dict:
-    card = routing_card(call, cards)
-    anchor = card.position if card is not None else \
-        next((i for i, e in enumerate(entries) if (entry_time(e) or call.at) >= call.at), len(entries))
-    return {"type": "row", "id": call.row_id(session_id), "kind": "note", "session": session_id,
-            "advisor": advisor, "timestamp": iso(call.at), "severity": call.severity, "ack": call.ack,
-            "note": call.note, "update": call.update[-UPDATE_TEXT_MAX:], "context": context_around(entries, anchor)}
+def note_row(session_id: str, call: AdviseCall, card: Card, entries: list[dict], advisor: str) -> dict:
+    return {"type": "row", "id": call.row_id(session_id), "kind": "note", "stratum": "watch", "session": session_id,
+            "advisor": advisor, "timestamp": iso(call.at), "card_at": iso(card.at), "severity": call.severity, "ack": call.ack,
+            "note": call.note, "update": call.update[-UPDATE_TEXT_MAX:], "context": context_around(entries, card.position)}
+
+
+def sample_units(record: SessionRecord, window: Window, stratum: str) -> list:
+    """The session's labelling units in the window: fired revise clusters (`gate`), or admitted notes a card carried,
+    each with its card (`watch`)."""
+    if stratum == "gate":
+        return [cluster for cluster in fired_clusters(record) if window.contains(cluster.first.at)]
+    return [(call, card) for call in window_calls(record, window)
+            if call.admitted and (card := routing_card(call, record.cards)) is not None]
 
 
 def cmd_sample(args) -> int:
@@ -1288,35 +1375,44 @@ def cmd_sample(args) -> int:
     if args.n < 1:
         raise UsageError("--n must be positive")
     root = Path(args.sessions_root).expanduser() if args.sessions_root else agent_dir() / "sessions"
-    population = []  # (stratum, session file, session id, gate entry or admitted note)
+    patterns = probe_patterns()
+    population, excluded_sessions, excluded_units = [], 0, 0  # population: (session record, unit, probe)
     for record in scan_sessions(root.absolute(), window, args.advisor):
-        items = [entry for entry in record.gate_entries if window.contains(entry.at)]
-        items += [call for call in window_calls(record, window) if call.admitted]
-        population += [(sample_stratum(item), record.path, record.session_id, item) for item in items]
-    priority = [p for p in population if p[0] == "priority"]
-    other = [p for p in population if p[0] == "other"]
-    rng = random.SystemRandom()
-    drawn_priority = priority if len(priority) <= args.n // 2 else rng.sample(priority, args.n // 2)
-    drawn_other = rng.sample(other, min(args.n - len(drawn_priority), len(other)))
-    parsed: dict[Path, tuple[list[dict], SessionRecord]] = {}
+        units = sample_units(record, window, args.stratum)
+        probe = is_probe(record.path, patterns)
+        if probe and not args.include_probes:
+            excluded_sessions += bool(units)
+            excluded_units += len(units)
+            continue
+        population += [(record, unit, probe) for unit in units]
+    drawn = population if len(population) <= args.n else random.SystemRandom().sample(population, args.n)
+    entries_of: dict[Path, list[dict]] = {}
     rows = []
-    for stratum, path, session_id, item in drawn_priority + drawn_other:
-        if path not in parsed:
-            entries = read_jsonl(path)[0]
-            parsed[path] = entries, parse_primary(SessionRecord(path=path, session_id=session_id), entries, args.advisor)
-        entries, record = parsed[path]
-        row = gate_row(item, entries, record.tool_calls) if isinstance(item, GateEntry) else \
-            note_row(session_id, item, entries, record.cards, args.advisor)
-        rows.append({**row, "stratum": stratum})
-    header = {"type": "header", "since": iso(window.since), "until": iso(window.until), "n": args.n, "advisor": args.advisor,
-              "generated_at": iso(datetime.now(timezone.utc)),
-              "strata": {"priority": {"population": len(priority), "drawn": len(drawn_priority)},
-                         "other": {"population": len(other), "drawn": len(drawn_other)}}}
+    for record, unit, probe in drawn:
+        if record.path not in entries_of:
+            entries_of[record.path] = read_jsonl(record.path)[0]
+        entries = entries_of[record.path]
+        row = gate_row(unit, entries, {call.id: call for call in record.tool_calls}) if args.stratum == "gate" else \
+            note_row(record.session_id, *unit, entries, args.advisor)
+        rows.append({**row, "probe": probe})
+    header = {"type": "header", "stratum": args.stratum, "since": iso(window.since), "until": iso(window.until), "n": args.n,
+              "advisor": args.advisor, "generated_at": iso(datetime.now(timezone.utc)), "include_probes": args.include_probes,
+              "population": len(population), "drawn": len(rows),
+              "excluded": {"patterns": [] if args.include_probes else patterns, "sessions": excluded_sessions,
+                           "units": excluded_units}}
     out = Path(args.out).expanduser()
     with out.open("w", encoding="utf-8") as fh:
         for line in [header, *rows]:
             fh.write(json.dumps(line, ensure_ascii=False) + "\n")
-    print(f"{len(rows)} rows to {out}: priority {len(drawn_priority)}/{len(priority)}, other {len(drawn_other)}/{len(other)}")
+    # ingest-labels takes a label only for an id a packet carried, and refuses one on a probe row.
+    report_dir().mkdir(parents=True, exist_ok=True)
+    with (report_dir() / "sampled.jsonl").open("a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps({"id": row["id"], "stratum": args.stratum, "probe": row["probe"], "packet": str(out),
+                                 "at": header["generated_at"]}) + "\n")
+    exclusions = ("probe sessions included (--include-probes)" if args.include_probes else
+                  f"excluded {excluded_units} in {excluded_sessions} probe sessions ({', '.join(patterns)})")
+    print(f"{len(rows)} {args.stratum} rows to {out}: {len(population)} in the window, {len(rows)} drawn; {exclusions}")
     return 0
 
 
@@ -1664,13 +1760,16 @@ def build_parser() -> argparse.ArgumentParser:
     metrics.add_argument("--json", action="store_true")
     metrics.set_defaults(func=cmd_metrics)
 
-    sample = sub.add_parser("sample", help="a stratified packet of gate decisions and admitted notes to label")
+    sample = sub.add_parser("sample", help="a packet of labelling units: fired gate revise clusters, or watch notes")
     sample.add_argument("--since", required=True)
     sample.add_argument("--until", required=True)
     sample.add_argument("--n", type=int, required=True)
     sample.add_argument("--out", required=True)
     sample.add_argument("--advisor", default="askgate")
     sample.add_argument("--sessions-root")
+    sample.add_argument("--stratum", choices=["gate", "watch"], default="gate")
+    sample.add_argument("--include-probes", action="store_true",
+                        help="add probe sessions' units, marked probe: true, for a pipeline walk-through; never labelled")
     sample.set_defaults(func=cmd_sample)
 
     ingest = sub.add_parser("ingest-labels", help="append labelled rows to ~/.omp/advisor-report/labels.jsonl")
