@@ -23,8 +23,15 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 CLD = DOTFILES / "scripts" / "cld"
 
-SHARED = ("CLAUDE.md", "settings.json", "agents", "plugins")
-PER_ACCOUNT = (".claude.json", ".credentials.json", "policy-limits.json", "remote-settings.json", "projects")
+# Every entry the repo tracks under .claude is configuration every profile shares; the installed
+# plugins too. A trailing "/" marks a directory.
+TRACKED = tuple(
+    line.strip()[len("!.claude/"):]
+    for line in (DOTFILES / ".gitignore").read_text(encoding="utf-8").splitlines()
+    if line.strip().startswith("!.claude/")
+)
+SHARED = (*TRACKED, "plugins/")
+PER_ACCOUNT = (".claude.json", ".credentials.json", "policy-limits.json", "remote-settings.json", "projects/")
 
 
 class CldProfiles(unittest.TestCase):
@@ -32,12 +39,12 @@ class CldProfiles(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.dotfiles = root / "dotfiles"
-        (self.dotfiles).mkdir()
+        self.dotfiles.mkdir()
         (self.dotfiles / "scripts").symlink_to(DOTFILES / "scripts")
         self.canonical = self.dotfiles / ".claude"
         self.canonical.mkdir()
         for name in SHARED + PER_ACCOUNT:
-            if name in ("agents", "plugins", "projects"):
+            if name.endswith("/"):
                 (self.canonical / name).mkdir()
             else:
                 (self.canonical / name).write_text("{}", encoding="utf-8")
