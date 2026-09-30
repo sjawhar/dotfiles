@@ -44,14 +44,14 @@
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
 // usage, the aborted one included; scripts/advisor-report reads them. Every path fails open but
 // one: a throw inside the handler is recorded as `error` and the call runs, and the deadline keeps
-// the handler inside the runner's ceiling, whose expiry would refuse the call. When the call's
-// tool ends first anyway (a user abort, or that ceiling), or the user stops the run while it waits
-// (the path an eval-bridged write takes), the model call is cancelled and the entry reads
-// `abandoned`. When the session shuts down while it waits, the model call is cancelled and the
-// entry reads `shutdown`, written before the session is sealed; the runner awaiting that call may
-// still be live, so in block mode it is refused (the one fail-closed path) and in warn mode it goes
-// out ungated. Neither counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system and
-// user prompts are appended to, owner-only and never through a symlink.
+// the handler inside the runner's ceiling, whose expiry would refuse the call. The exception is a
+// call given up without a verdict. When the call's tool ends first anyway (a user abort, or that
+// ceiling), or the user stops the run while it waits (the path an eval-bridged write takes), the
+// model call is cancelled and the entry reads `abandoned`. When the session shuts down while it
+// waits, or a gated call arrives once shutdown has begun, the entry reads `shutdown`, written
+// before the session is sealed. No verdict is not permission: block mode refuses either, warn mode
+// lets it go, and neither counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system
+// and user prompts are appended to, owner-only and never through a symlink.
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
@@ -98,7 +98,10 @@ export interface GateEntry {
 	tool: string;
 	path: string;
 	toolCallId: string;
-	/** What happened to the call: `allow` it went out; `revise` it was refused (a block-mode revise or shutdown). */
+	/**
+	 * `revise`: the gate did not pass the call as sent (a revise verdict, or in block mode a call given up
+	 * without a verdict). A call was refused exactly when `verdictMode` is `block` and this is `revise`.
+	 */
 	decision: "allow" | "revise";
 	outcome: "verdict" | "rebuttal" | "breaker" | "timeout" | "error" | "no-verdict" | "unavailable" | "halted" | "killed" | "skipped" | "abandoned" | "shutdown";
 	verdictMode: Exclude<Mode, "off">;
@@ -388,7 +391,11 @@ function renderRequest(primarySystemPrompt: string, transcript: string, tool: st
 const quotedReason = (reason: string) => escaped(reason, GATE_REASON_MAX_BYTES);
 const renderRevise = (reason: string) =>
 	`AskGate did not send this call.\n${quotedReason(reason)}\nSend the corrected call, or resend this one unchanged with "${REBUTTAL_KEY}": "<one line>" added to the JSON to override; an override is always sent and recorded.`;
-const SHUTDOWN_REFUSAL = "AskGate did not send this call: the session shut down before a verdict came back. Send it again from a live session if it is still wanted.";
+/** The refusal block mode returns for a call given up without a verdict, by cause. */
+const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
+	abandoned: "AskGate did not send this call: it was stopped before a verdict came back. Send it again if it is still wanted.",
+	shutdown: "AskGate did not send this call: the session shut down before a verdict came back. Send it again from a live session if it is still wanted.",
+};
 const renderWarn = (reason: string) =>
 	`<advisor-gate advisor="AskGate" verdict="revise">\n${quotedReason(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.\n</advisor-gate>`;
 
@@ -416,6 +423,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		const breaker = new Breaker();
 		let failures = 0;
 		let halted = false;
+		// Set once the session starts shutting down (only dispose emits session_shutdown): a scoped call
+		// that reaches the gate after that asks no model and takes the shutdown branch at once.
+		let closing = false;
 		const reset = () => {
 			rebuttals.clear();
 			breaker.clear();
@@ -429,10 +439,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		// An eval-bridged write never shows its own id on a loop tool_execution_end, so a run the user
 		// stopped (its last assistant message aborted) abandons every gate still waiting. Any other end
 		// leaves them be: the session may continue (willContinue), or a backgrounded eval cell may keep
-		// running past the run, and abandoning its gate would let its write out unchecked. The known
-		// exception: a write an eval cell starts from its own timer or thread after the cell returned
-		// carries a signal nothing aborts, so when the user stops the run its gate is abandoned with
-		// the rest and the still-live runner lets that write out unchecked, in block mode too.
+		// running past the run, and abandoning its gate would let its write out unchecked. A call a cell
+		// makes after it finished, from its own timer or thread, never reaches a gate: both eval bridges
+		// refuse a call from a finished cell ("Run no longer active", "No active Python tool bridge
+		// session").
 		/** Why a waiting gate was given up: the user or the runner ended its call or run, or the session shut down. */
 		type Abandon = (cause: "abandoned" | "shutdown", graceMs?: number) => void;
 		const inflight = new Map<string, Abandon>();
@@ -445,12 +455,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			for (const abandon of inflight.values()) abandon("abandoned");
 		});
 		// A gate still waiting at shutdown (left running past a normal end) would bill to its deadline and
-		// record into a sealed session. Abandon it, and hold shutdown until its entry is written. The
-		// shutdown runs before the session aborts its loop and cancels its jobs, so the runner awaiting that
-		// gate may still be live: in block mode the call is refused (no verdict is not permission); in
-		// warn mode it goes out, recorded as `shutdown`, an ungated call, not the user's `abandoned`.
+		// record into a sealed session. Abandon it, and hold shutdown until its entry is written; a gated
+		// call that starts after this point asks no model (`closing`). Either way the entry reads
+		// `shutdown`, and block mode refuses the call as it refuses any call given up without a verdict.
 		const handling = new Set<Promise<ToolCallResult>>();
 		pi.on("session_shutdown", async () => {
+			closing = true;
 			for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
 			const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
 			const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
@@ -484,6 +494,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		/** What one gated call records, returns, and does to the halt count. */
 		type Decision = { fields: Pick<GateEntry, "decision" | "outcome"> & Partial<GateEntry>; result?: ToolCallResult; effect: "failure" | "verdict" | "none" };
 		const pass = (outcome: GateEntry["outcome"], fields: Partial<GateEntry> = {}, effect: Decision["effect"] = "none"): Decision => ({ fields: { decision: "allow", outcome, ...fields }, effect });
+		/**
+		 * A call given up without a verdict: its call, its run or the session ended first. Not the gate's
+		 * failure, so it never counts toward the halt. No verdict is not permission: block mode refuses it
+		 * (defence in depth: the runner awaiting it has usually refused the call already), warn mode lets it
+		 * go. The cause stays recorded.
+		 */
+		const givenUp = (cause: "abandoned" | "shutdown", fields: Partial<GateEntry> = {}): Decision =>
+			mode === "block"
+				? { fields: { decision: "revise", outcome: cause, ...fields }, result: { block: true, reason: NO_VERDICT_REFUSAL[cause] }, effect: "none" }
+				: pass(cause, fields);
 
 		const decide = async (event: ToolCallEvent, ctx: GateCtx, started: number, base: Base, key: string, rebuttal: string | undefined): Promise<Decision> => {
 			if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) return pass("killed");
@@ -497,6 +517,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				return pass("breaker");
 			}
 
+			if (closing) return givenUp("shutdown");
 			const model = ctx.models.resolve(MODEL_ROLE);
 			if (!model) return pass("unavailable", {}, "failure");
 			// A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
@@ -513,13 +534,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const answer = await ask(request, event.toolCallId, Math.max(0, deadlineMs - (deps.now() - started)));
 			const called = { promptBytes, model: `${model.provider}/${model.id}`, deadlineMs, ...(answer.usage ? { usage: answer.usage } : {}) };
 			if (answer.kind === "timeout") return pass("timeout", called, "failure");
-			// Not the gate's failure: the call, or the run, ended without it.
-			if (answer.kind === "abandoned") return pass("abandoned", called);
-			if (answer.kind === "shutdown") {
-				return mode === "block"
-					? { fields: { decision: "revise", outcome: "shutdown", ...called }, result: { block: true, reason: SHUTDOWN_REFUSAL }, effect: "none" }
-					: pass("shutdown", called);
-			}
+			if (answer.kind === "abandoned" || answer.kind === "shutdown") return givenUp(answer.kind, called);
 			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...called }, "failure");
 			const verdict = parseVerdict(answer.text);
 			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...called }, "failure");
