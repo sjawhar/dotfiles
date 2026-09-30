@@ -327,6 +327,17 @@ class Card:
     notes: frozenset
 
 
+@dataclass(frozen=True)
+class Skip:
+    """A primary tool result the fork skipped because a steer was pending, and the steer that caused it: the first
+    custom message after the result, before the agent's next assistant message (None when there is none). The fork
+    writes the same text for every non-user steer (envoy messages, advisor cards, harness notices)."""
+
+    at: datetime | None
+    steer: str | None  # the steer's customType
+    advisors: frozenset = frozenset()  # an advisor card's: the slug of each note's advisor, `default` when it names none
+
+
 @dataclass
 class SessionRecord:
     """What one root session file and its advisor transcript hold that a metric reads; parsed, not windowed."""
@@ -336,7 +347,7 @@ class SessionRecord:
     turn_times: list = field(default_factory=list)
     tool_calls: list = field(default_factory=list)
     cards: list = field(default_factory=list)
-    skip_times: list = field(default_factory=list)
+    skips: list = field(default_factory=list)
     gate_entries: list = field(default_factory=list)
     transcript: bool = False
     advisor_turn_times: list = field(default_factory=list)
@@ -380,25 +391,34 @@ def tool_call_arguments(block: dict) -> dict:
 def parse_primary(record: SessionRecord, entries: list[dict], advisor: str) -> SessionRecord:
     """Fill `record` from a primary session's entries: assistant turns, tool calls, advisor cards, skips, and the gate
     entries of `advisor`."""
+    open_skips: list = []  # skipped results the steer that caused them has not followed yet
     for position, entry in enumerate(entries):
         kind, at = entry.get("type"), entry_time(entry)
         if kind == "message":
             message = entry.get("message") or {}
             role = message.get("role")
             if role == "assistant":
+                record.skips += [Skip(skip_at, None) for skip_at in open_skips]
+                open_skips = []
                 record.turn_times.append(at)
                 record.tool_calls += [ToolCall(at, str(block.get("id")), str(block.get("name", "")), tool_call_arguments(block))
                                       for block in tool_calls_of(message)]
             elif role == "toolResult" and content_text(message.get("content")).startswith(SKIP_PREFIX):
-                record.skip_times.append(at)
-        elif kind == "custom_message" and entry.get("customType") == "advisor":
-            notes = (entry.get("details") or {}).get("notes") or []
-            record.cards.append(Card(position, at, frozenset(n.get("note") for n in notes if isinstance(n, dict))))
+                open_skips.append(at)
+        elif kind == "custom_message":
+            is_card = entry.get("customType") == "advisor"
+            notes = [n for n in (entry.get("details") or {}).get("notes") or [] if isinstance(n, dict)] if is_card else []
+            if is_card:
+                record.cards.append(Card(position, at, frozenset(n.get("note") for n in notes)))
+            advisors = frozenset(slugify(n["advisor"]) if isinstance(n.get("advisor"), str) else "default" for n in notes)
+            record.skips += [Skip(skip_at, entry.get("customType"), advisors) for skip_at in open_skips]
+            open_skips = []
         elif kind == "custom" and entry.get("customType") == GATE_ENTRY_TYPE:
             data = entry.get("data") or {}
             name = data.get("advisor")
             if advisor != "default" and isinstance(name, str) and slugify(name) == advisor:
                 record.gate_entries.append(GateEntry(record.session_id, entry.get("id"), at, data))
+    record.skips += [Skip(skip_at, None) for skip_at in open_skips]
     return record
 
 
@@ -510,7 +530,13 @@ def root_scoped_calls(record: SessionRecord, window: Window, scope_re: re.Patter
 
 
 def skips_in(record: SessionRecord, window: Window) -> int:
-    return sum(1 for at in record.skip_times if window.contains(at))
+    """Skipped tool results in the window, whatever steer caused them."""
+    return sum(1 for skip in record.skips if window.contains(skip.at))
+
+
+def own_skips(record: SessionRecord, window: Window, advisor: str) -> int:
+    """Skipped tool results in the window that `advisor`'s own card caused: the only skips its metrics count."""
+    return sum(1 for skip in record.skips if window.contains(skip.at) and skip.steer == "advisor" and advisor in skip.advisors)
 
 
 def per_100_turns(count: int, turns: int) -> float | None:
@@ -819,7 +845,8 @@ def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, w
         entries = [entry for entry in record.gate_entries if window.contains(entry.at)]
         n.update(files=1, bad_lines=record.bad_lines, transcripts=record.transcript, turns=primary_turns(record, window),
                  advisor_turns=advisor_turns(record, window), scoped=root_scoped_calls(record, window, scope_re),
-                 skips=skips_in(record, window), admitted=len(admitted), queued=sum(1 for call in admitted if call.ack == "queued"),
+                 skips=own_skips(record, window, advisor), skips_any_steer=skips_in(record, window), admitted=len(admitted),
+                 queued=sum(1 for call in admitted if call.ack == "queued"),
                  out_of_charter=out_of_charter(admitted, scope_re), unrouted=held.unrouted,
                  moot=moot_count(held.routed, record.tool_calls), pairs=pairs, sessions_with_pairs=pairs > 0,
                  sessions_with_2_blockers=blockers(admitted) >= 2)
@@ -853,6 +880,7 @@ def compute_metrics(records: Iterable[SessionRecord], subagents: SubagentScan, w
                        "sessions_with_2_blockers": n["sessions_with_2_blockers"]},
         },
         "skips": n["skips"],
+        "skips_any_steer": n["skips_any_steer"],
         "scoped_calls": {"root": n["scoped"], "subagent": subagents.calls,
                          "per_day": {"root": n["scoped"] / days, "subagent": subagents.calls / days}},
         "gate": {**gate, "usage_per_day": {key: value / days for key, value in gate["usage"].items()},
@@ -870,7 +898,8 @@ def print_metrics(m: dict) -> None:
     w, g, s = m["watch"], m["gate"], m["scoped_calls"]
     print(f"advisor {m['advisor']}, {m['window']['since']} .. {m['window']['until']} ({m['window']['days']:.1f} d)")
     print(f"  files: {m['files']['root']} root, {m['files']['subagent']} subagent, {m['files']['bad_lines']} unparsable lines")
-    print(f"  primary turns {m['primary_turns']}; skips {m['skips']}; corrections/100 turns {fmt(m['corrections']['per_100_turns'], '.2f')}")
+    print(f"  primary turns {m['primary_turns']}; skips {m['skips']} ({m['skips_any_steer']} by any steer); "
+          f"corrections/100 turns {fmt(m['corrections']['per_100_turns'], '.2f')}")
     print(f"  watch: {w['transcripts']} transcripts, {w['advisor_turns']} advisor turns, {w['advise_calls']} advise calls {w['by_ack']}")
     print(f"    admitted {w['admitted']}, notes/100 turns {fmt(w['notes_per_100_turns'], '.2f')}, out of charter {fmt(w['out_of_charter_pct'])}, "
           f"held {fmt(w['held_pct'])} (median {fmt(w['held_latency_ms'], '.0f')} ms, {w['held_unrouted']} never routed), moot {fmt(w['moot_pct'])}")
@@ -1187,10 +1216,11 @@ def gate_check(now: datetime) -> Check:
     overlay = overlay_path()
     _node, disabled = overlay_list(read_overlay(overlay), KILL_KEY, overlay, create=False)
     window = Window(launched, now)
-    entries, skips = [], 0
+    entries, skips, any_skips = [], 0, 0
     for session in scan_sessions(agent_dir() / "sessions", window, GATE_SLUG):
         entries += [entry for entry in session.gate_entries if window.contains(entry.at)]
-        skips += skips_in(session, window)
+        skips += own_skips(session, window, GATE_SLUG)
+        any_skips += skips_in(session, window)
     whole = gate_metrics(entries)
     recent = gate_metrics([entry for entry in entries if entry.at >= now - DAY3_WINDOW])
     labels = load_labels()
@@ -1198,7 +1228,8 @@ def gate_check(now: datetime) -> Check:
     lab = labelled_metrics(labels, [row_id for row_id, _at in fired], skips)
     problems = roster_problems(dotfiles_dir(), agent_dir())
     lines = [f"gate: day {day:.1f}; {whole['matched']} matched ({whole['killed']} killed), ungated_share "
-             f"{fmt(whole['ungated_share'])}, p95 {fmt(whole['latency_ms_p95'], '.0f')} ms (timeout {timeout_ms}), skips {skips}; "
+             f"{fmt(whole['ungated_share'])}, p95 {fmt(whole['latency_ms_p95'], '.0f')} ms (timeout {timeout_ms}), "
+             f"skips {skips} ({any_skips} by any steer); "
              f"last 24 h {recent['matched']} matched, ungated_share {fmt(recent['ungated_share'])}; labelled revises "
              f"n={lab['n']}, precision {fmt(lab['precision'], '.2f')}, harm {fmt(lab['harm'], '.2f')}",
              f"gate: spend ${whole['usage']['cost'] / max(day, 1):.2f}/day since launch; {watch_baseline(default_stats_db(), launched)}",
