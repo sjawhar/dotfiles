@@ -11,12 +11,12 @@
       "enabled": true
     },
     "@sjawhar/opencode-knives": {
-      "version": "2.0.21",
+      "version": "2.0.22",
       "enabledFeatures": null,
       "enabled": true
     },
     "secretsd": {
-      "version": "3.5.1",
+      "version": "3.5.3",
       "enabledFeatures": null,
       "enabled": true
     },
