@@ -16,10 +16,14 @@ before you consume.
   `flock /tmp/dispatch-playwright.lock -c '<your command>'`. Two concurrent suites on this box
   produce `exit 139` segfaults in WebKit and Chromium, and the crash looks like a product defect.
   `pgrep` finding no other run is not a substitute: it cannot stop one from starting during yours.
-- **Read the load before a build, a suite or a container, and say what you read.** `cut -d' ' -f1-3
-  /proc/loadavg` and `free -g`. Above a load of about 120 on this box, do reads and defer runs; say
-  in your report that you deferred and why. A report that claims a number without naming where it
-  came from is an unverified claim.
+- **Read the load and memory before a build, a suite or a container, and say what you read.**
+  `cut -d' ' -f1-3 /proc/loadavg` and `free -g`. The load measures the whole box, mostly other
+  sessions, so it is not a reason to defer the one browser suite your gate needs: the lock above is
+  what keeps suites from colliding. Defer optional runs (a whole-package suite where one file would
+  do, a second confirmation) while the load is above about 120; run the gate's suite under the lock
+  when you hold it. Under that load a run can fail on a timeout: re-run it once before calling it
+  red, and report both. A report that claims a number without naming where it came from is an
+  unverified claim.
 - **Reuse a running Postgres or harness rather than starting another.** A per-lane container costs
   far more than the database it holds, and several lanes already have one running.
 - **Nothing outside your own lane.** Do not kill another lane's processes, drop another lane's
