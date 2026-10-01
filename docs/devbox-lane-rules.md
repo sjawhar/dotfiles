@@ -42,6 +42,12 @@ before you consume.
   `canonical-untouched ~/src/<repo>`;** it must print nothing and exit 0. A file it lists that you
   wrote is yours to put back, and say so; one you did not write belongs to someone else, so leave it
   and report it.
+- **Run a `git --git-dir=<repo>/.git` command from a scratch directory** (`cd "$(mktemp -d)"`),
+  never from inside a checkout and never from a shared directory such as `/tmp`. Without
+  `--work-tree`, git takes the current directory as the work tree, and agent-c's relative
+  `core.hooksPath` (`.husky/_`) lets git-lfs write its four hook stubs there: they were found in
+  `~/src/legion/.husky/_` and in `/tmp/.husky/_` on 2026-10-01, and a snapshot had already
+  recorded the legion copy into that checkout's `@`.
 - **Never edit a file under `node_modules` in place.** Bun hardlinks each installed file from the
   shared cache (`~/.bun/install/cache/`), so an edit in your workspace changes that file in every
   workspace on the box. On 2026-10-01 one lane's experiment put `excludes: ''` into
