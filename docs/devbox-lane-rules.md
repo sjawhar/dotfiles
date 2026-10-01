@@ -54,6 +54,12 @@ before you consume.
   shared directory: `rm -rf /tmp/tmp.*` on 2026-10-01 took every lane's default `mktemp -d`
   directory on the box, including another lane's jj workspace with its browser run in flight. Put
   jj workspaces under `/home/ubuntu/.worktrees/`, never in `/tmp`.
+- **Give every background job its own `cd` and absolute paths.** In `cd X && A & B & wait`, the
+  `&` ends the first list, so the `cd` runs only in `A`'s subshell, and `B` runs in the shell's
+  own working directory, which for most lanes is the canonical checkout. On 2026-10-01 a line of
+  that shape wrote three `runs-*.out` files into `~/src/legion`, and the runs never ran. Write
+  `(cd X && A) & (cd X && B) & wait`, or `cd X` on its own line first, and give every script and
+  every output an absolute path.
 - **Never edit a file under `node_modules` in place.** Bun hardlinks each installed file from the
   shared cache (`~/.bun/install/cache/`), so an edit in your workspace changes that file in every
   workspace on the box. On 2026-10-01 one lane's experiment put `excludes: ''` into
