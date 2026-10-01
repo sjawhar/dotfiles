@@ -12,10 +12,18 @@ description: >-
 
 # Landing a PR
 
-The owner gets the PR genuinely merge-ready. **The owner does not merge it or arm
-`gh pr merge --auto`.** Where a merge queue runs, its organizer merges; elsewhere
-Sami does. No admin merge or bypass of branch protection. After someone else
-merges, the owner still verifies delivery and the changed production path.
+The owner gets the PR genuinely merge-ready. **Who merges depends on the repo.**
+In `trajectory-labs-pbc/agent-c` the owner merges: once `pr-checks-result` and the
+required `review` check (workflow "Claude PR Review", run from main's copy) both
+pass at the head, run `gh pr merge <N> --squash` (or arm `--auto --squash`). No
+approval is needed; the org ruleset enforces both checks. Three agent-c cases still
+go to the merge-queue organizer as a READY packet: a PR that adds or re-parents a
+migration under `platform/tl_platform/src/tl_platform/db/migrations/versions/`, a
+PR that edits `.github/workflows/claude-pr-review.yml`, and a Legion-produced PR.
+Everywhere else the owner does not merge or arm `gh pr merge --auto`: where a merge
+queue runs, its organizer merges; elsewhere Sami does. No admin merge or bypass of
+branch protection. After any merge, the owner still verifies delivery and the
+changed production path.
 
 `ce-babysit-pr` owns the watch loop: remote snapshots, claim/act/confirm dedup,
 trajectory tracking, review-still-expected guard, settle window and background
@@ -195,8 +203,9 @@ The packet contains:
 An unread item, unresolved finding, pending expected review or unwaived required
 scenario means **not merge-ready**. Report the exact blocker, command and
 supporting record, keep the detector active where it can make progress, and
-finish reachable work. Once genuinely ready, send the packet to the organizer
-(or Sami where there is no queue) and stop mutating the head. Do not merge it.
+finish reachable work. Once genuinely ready, merge it yourself where the top of
+this skill says the owner merges; otherwise send the packet to the organizer (or
+Sami where there is no queue) and stop mutating the head.
 
 ## 6. After someone else merges
 

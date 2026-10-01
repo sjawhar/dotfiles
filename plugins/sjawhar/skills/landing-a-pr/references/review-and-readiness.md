@@ -167,8 +167,11 @@ Repair what is reachable. Name the exact blocker and command honestly; do not
 rename it “remaining work” under a ready report. With a scoped waiver, keep the
 item unverified and link the decision; it does not excuse other acceptance rows.
 
-After READY, stop changing the head. The organizer merges where a queue exists;
-elsewhere Sami does. The owner neither merges nor arms auto-merge.
+After READY, stop changing the head. In agent-c the owner merges once
+`pr-checks-result` and the required `review` check pass, except migration PRs,
+`claude-pr-review.yml` edits and Legion-produced PRs, which go to the organizer.
+Elsewhere the organizer merges where a queue exists, otherwise Sami does, and the
+owner neither merges nor arms auto-merge.
 
 ## Public text and citations
 
