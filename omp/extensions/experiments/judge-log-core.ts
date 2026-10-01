@@ -1,5 +1,5 @@
-// The judge-difficulty log: every subagent dispatch is rated by the `@judge` model role
-// (`modelRoles.judge` in config.yml) with the rubric in judge-rating.md, and each rating is appended
+// The judge-difficulty log: every subagent dispatch is rated by the `@judgeLog` model role
+// (`modelRoles.judgeLog` in config.yml) with the rubric in judge-rating.md, and each rating is appended
 // as one JSON line to ~/.omp/judge/ratings.jsonl. Nothing routes on the rating. It runs in
 // top-level sessions and subagents alike, while the experiments extension's `judge_log` gate is on
 // (index.ts); judge-log.ts binds the fork's completion and the log file into it, so this file runs
@@ -12,12 +12,12 @@
 //
 // The rating is made off the dispatch path: the `tool_execution_start` handler starts it detached and
 // returns at once, so neither the tool nor the session's event delivery waits on the judge. A judge
-// failure (no `@judge` role, a provider error, the 20 s timeout, an answer that is not a rating, a
+// failure (no `@judgeLog` role, a provider error, the 20 s timeout, an answer that is not a rating, a
 // failed write) is logged through omp's logger and writes nothing. A rating still in flight when the
 // process exits is lost.
 import ratingTemplate from "./judge-rating.md" with { type: "text" };
 
-export const JUDGE_ROLE = "@judge";
+export const JUDGE_ROLE = "@judgeLog";
 export const RATING_SYSTEM = "You rate a work assignment that is about to be given to an autonomous coding agent. You never do the work and you never ask questions. Output one JSON object, nothing else.";
 const ASSIGNMENT_CAP = 12_000;
 const LOGGED_CHARS = 500;

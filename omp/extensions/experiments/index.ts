@@ -8,7 +8,7 @@
 //   context_line      appends "[Token usage: used/window]" to every request (context-line.ts)
 //   skill_gate        refuses `gh pr create` until skill://opening-a-pr is read, and `jj git push`
 //                     until skill://using-jj is read (skill-gate.ts)
-//   judge_log         rates every subagent dispatch with the `@judge` model role and appends the
+//   judge_log         rates every subagent dispatch with the `@judgeLog` model role and appends the
 //                     rating to ~/.omp/judge/ratings.jsonl, routing on nothing (judge-log-core.ts)
 //
 // A bad gate throws here, so omp loads none of it and says why. Each feature registers its
