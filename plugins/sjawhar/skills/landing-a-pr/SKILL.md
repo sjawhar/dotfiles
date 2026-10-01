@@ -20,7 +20,14 @@ approval is needed; the org ruleset enforces both checks. The required `review` 
 starts only on `opened`, `synchronize` or `reopened` of a non-draft PR: a draft never
 gets it, and marking ready alone starts nothing (measured on #20742 and #20703,
 2026-10-01). So mark the PR ready, then push or close and reopen it, but only when no
-PR Checks run is in flight, because either event cancels it. Three agent-c cases still
+PR Checks run is in flight, because either event cancels it. A push starts a fresh
+run at the new head. When a required run FAILED and you only answered and resolved
+threads (no new commit), re-run that run instead: `gh api -X POST
+repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs` (`gh run rerun` 404s on
+these), which reviews the same head and leaves PR Checks alone. The run that counts
+is a `review` check-run on the PR's HEAD sha; a `@claude review` comment runs at
+main's head, never satisfies it, and cancels an in-flight required run. The verdict
+counts every open thread on the PR, old ones included. Three agent-c cases still
 go to the merge-queue organizer as a READY packet: a PR that adds or re-parents a
 migration under `platform/tl_platform/src/tl_platform/db/migrations/versions/`, a
 PR that edits `.github/workflows/claude-pr-review.yml`, and a Legion-produced PR.
