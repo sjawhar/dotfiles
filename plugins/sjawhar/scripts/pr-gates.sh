@@ -14,6 +14,18 @@
 # sent to the queue reporting three reviews present when one of them said
 # CHANGES. Red verdicts are now counted and named separately.
 #
+# `CHANGES(n)` IS A PROMPT TO ATTRIBUTE, NOT A VERDICT. This script reads only the
+# FIRST LINE of each comment, and reviewer, deep and quality all emit `Verdict:`,
+# so it cannot tell which gate posted which line. A gate that posts CHANGES and
+# then MERGE at the SAME head — which happens on every PR whose rounds are
+# body-only, since the head never moves — leaves a red line that is already
+# superseded. legion#1610 printed `yes yes yes yes yes  CHANGES(4)` with all three
+# reviewers green: two reds were quality's, superseded by its MERGE 95 minutes
+# later, and two were the reviewer's, superseded by its own. So `CHANGES(n)`
+# means LOOK, and the script prints the command that settles it. Do not read it
+# as "do not packet", and do not read its absence as "no open rejection" either:
+# a rejection in a review BODY is invisible here (use ~/.dotfiles/scripts/pr-gate).
+#
 # This answers a different question from ~/.dotfiles/scripts/pr-gate, and the two
 # are complementary rather than duplicates:
 #   * this script: WHICH of the SDD gates have judged the current head.
@@ -43,6 +55,9 @@ fi
 
 printf '%-7s %-9s %-14s %-4s %-4s %-4s %-4s %-4s  %s\n' \
   PR HEAD MERGEABLE REV DEEP QUAL ACPT SIMP MISSING
+
+# PRs whose red verdicts need attributing; the tail prints their command.
+attribute=""
 
 for n in "${prs[@]}"; do
   meta=$(gh pr view "$n" -R "$repo" --json headRefOid,mergeable,mergeStateStatus 2>/dev/null) || {
@@ -104,7 +119,9 @@ for n in "${prs[@]}"; do
 
   missing=""
   [ "${vgreen:-0}" -lt 3 ] && missing+="reviews(${vgreen:-0}/3) "
-  [ "${vred:-0}" -gt 0 ] && missing+="CHANGES(${vred}) "
+  # Named `CHANGES?(n)` with the question mark because the script cannot tell a
+  # live rejection from one the same gate has already superseded at this head.
+  [ "${vred:-0}" -gt 0 ] && { missing+="CHANGES?(${vred}) "; attribute+=" $n"; }
   [ "$a" = NO ] && missing+="acceptance "
   [ "${ared:-0}" -gt 0 ] && missing+="acceptFAIL(${ared}) "
   [ "$s" = NO ] && missing+="simplify "
@@ -113,3 +130,20 @@ for n in "${prs[@]}"; do
   printf '%-7s %-9s %-14s %-4s %-4s %-4s %-4s %-4s  %s\n' \
     "#$n" "$short" "$mergeable" "$rev" "$deep" "$qual" "$a" "$s" "$missing"
 done
+
+# A red at the head may already be superseded by a later verdict from the SAME
+# gate, which the first-line read cannot see. Print the one command that settles
+# it rather than leaving the reader to invent it: every verdict at the head in
+# time order, so a CHANGES followed by that gate's own MERGE is visible as such.
+# Attribution still needs the bodies, since all three reviewers say "Verdict:":
+#   gh api repos/<repo>/issues/comments/<id> --jq .body | grep -oiE 'maintainability|code-quality|deep.review|this reviewer'
+if [ -n "${attribute:-}" ]; then
+  echo
+  echo "CHANGES? means attribute before deciding. For each PR above:"
+  for n in $attribute; do
+    head=$(gh pr view "$n" -R "$repo" --json headRefOid --jq .headRefOid 2>/dev/null || true)
+    [ -n "$head" ] || continue
+    printf '  gh api repos/%s/issues/%s/comments --paginate --jq %s | sort\n' \
+      "$repo" "$n" "'.[] | select(.body | test(\"${head:0:8}\")) | \"\\(.created_at) \\(.id) \\((.body | split(\"\\n\"))[0][0:90])\"'"
+  done
+fi
