@@ -16,7 +16,11 @@ The owner gets the PR genuinely merge-ready. **Who merges depends on the repo.**
 In `trajectory-labs-pbc/agent-c` the owner merges: once `pr-checks-result` and the
 required `review` check (workflow "Claude PR Review", run from main's copy) both
 pass at the head, run `gh pr merge <N> --squash` (or arm `--auto --squash`). No
-approval is needed; the org ruleset enforces both checks. Three agent-c cases still
+approval is needed; the org ruleset enforces both checks. The required `review` run
+starts only on `opened`, `synchronize` or `reopened` of a non-draft PR: a draft never
+gets it, and marking ready alone starts nothing (measured on #20742 and #20703,
+2026-10-01). So mark the PR ready, then push or close and reopen it, but only when no
+PR Checks run is in flight, because either event cancels it. Three agent-c cases still
 go to the merge-queue organizer as a READY packet: a PR that adds or re-parents a
 migration under `platform/tl_platform/src/tl_platform/db/migrations/versions/`, a
 PR that edits `.github/workflows/claude-pr-review.yml`, and a Legion-produced PR.
