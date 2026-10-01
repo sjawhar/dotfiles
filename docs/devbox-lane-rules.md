@@ -42,6 +42,12 @@ before you consume.
   `canonical-untouched ~/src/<repo>`;** it must print nothing and exit 0. A file it lists that you
   wrote is yours to put back, and say so; one you did not write belongs to someone else, so leave it
   and report it.
+- **Never edit a file under `node_modules` in place.** Bun hardlinks each installed file from the
+  shared cache (`~/.bun/install/cache/`), so an edit in your workspace changes that file in every
+  workspace on the box. On 2026-10-01 one lane's experiment put `excludes: ''` into
+  `proof-sdk-upstream`'s `proof-marks.ts` (81 hardlinks), and for 21 minutes every lane's editor
+  tests and SPA builds ran on a schema nobody had shipped. To try a change to a dependency, copy it
+  to a private directory (`cp -r`) and point the build at the copy.
 
 ## Version control
 
