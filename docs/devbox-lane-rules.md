@@ -42,12 +42,18 @@ before you consume.
   `canonical-untouched ~/src/<repo>`;** it must print nothing and exit 0. A file it lists that you
   wrote is yours to put back, and say so; one you did not write belongs to someone else, so leave it
   and report it.
-- **Run a `git --git-dir=<repo>/.git` command from a scratch directory** (`cd "$(mktemp -d)"`),
-  never from inside a checkout and never from a shared directory such as `/tmp`. Without
+- **Run a `git --git-dir=<repo>/.git` command from a scratch directory of your own**
+  (`cd "$(mktemp -d /tmp/<your-label>.XXXX)"`), never from inside a checkout and never from a
+  shared directory such as `/tmp` itself. Without
   `--work-tree`, git takes the current directory as the work tree, and agent-c's relative
   `core.hooksPath` (`.husky/_`) lets git-lfs write its four hook stubs there: they were found in
   `~/src/legion/.husky/_` and in `/tmp/.husky/_` on 2026-10-01, and a snapshot had already
   recorded the legion copy into that checkout's `@`.
+- **Name every scratch directory after yourself, and delete only what you created, by exact
+  path.** `mktemp -d /tmp/<your-label>.XXXX`, never a bare `mktemp -d`, and never a glob over a
+  shared directory: `rm -rf /tmp/tmp.*` on 2026-10-01 took every lane's default `mktemp -d`
+  directory on the box, including another lane's jj workspace with its browser run in flight. Put
+  jj workspaces under `/home/ubuntu/.worktrees/`, never in `/tmp`.
 - **Never edit a file under `node_modules` in place.** Bun hardlinks each installed file from the
   shared cache (`~/.bun/install/cache/`), so an edit in your workspace changes that file in every
   workspace on the box. On 2026-10-01 one lane's experiment put `excludes: ''` into
