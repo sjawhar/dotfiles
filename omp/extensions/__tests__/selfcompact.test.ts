@@ -1,8 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import extension, { parseRubric } from "../selfcompact";
+import { afterEach, describe, expect, test, vi } from "bun:test";
+import extension, { parseRubric } from "../experiments/selfcompact";
 
 type Pi = Parameters<typeof extension>[0];
 type Handler = (event: unknown, ctx: unknown) => void | Promise<void>;
@@ -29,18 +26,6 @@ const history = (turns: number) => {
 	for (let i = 0; i < turns; i++) messages.push({ role: "assistant" }, { role: "toolResult" });
 	return messages;
 };
-
-let tmp: string;
-beforeEach(() => {
-	tmp = mkdtempSync(path.join(tmpdir(), "selfcompact-"));
-	process.env.OMP_SELFCOMPACT = "1";
-	process.env.OMP_SELFCOMPACT_LOG = path.join(tmp, "probes.jsonl");
-});
-afterEach(() => {
-	delete process.env.OMP_SELFCOMPACT;
-	delete process.env.OMP_SELFCOMPACT_LOG;
-	rmSync(tmp, { recursive: true, force: true });
-});
 
 type CompactCall = { onComplete?: (r: unknown) => void; onError?: (e: Error) => void };
 /** One session binding of the extension, driven through a fake `pi` and a scripted `ctx`. */
@@ -128,11 +113,7 @@ async function drain() {
 	await promise;
 }
 
-describe("arming", () => {
-	test("without OMP_SELFCOMPACT=1 the factory registers no handler, so a session pays nothing", () => {
-		delete process.env.OMP_SELFCOMPACT;
-		expect(bind().handlers.size).toBe(0);
-	});
+describe("scope", () => {
 	test("a subagent is never probed", async () => {
 		const b = bind({ kind: "sub" });
 		await requests(b, 6);
@@ -272,7 +253,7 @@ describe("firing", () => {
 });
 
 describe("records", () => {
-	test("each probe and fire is appended to the session and to OMP_SELFCOMPACT_LOG with the v1 record shape; scripts/selfcompact-sessions reads v, verdict, answers, error, capped and stopReason from a probe and ok from a fire", async () => {
+	test("each probe and fire is appended to the session with the v1 record shape; scripts/selfcompact-sessions reads v, verdict, answers, error, capped and stopReason from a probe and ok from a fire", async () => {
 		const b = bind();
 		await b.request(3);
 		const probe = b.entries.find(([t]) => t === "selfcompact-probe")?.[1];
@@ -292,9 +273,6 @@ describe("records", () => {
 		expect(typeof probe?.probeMs).toBe("number");
 		const fire = b.entries.find(([t]) => t === "selfcompact-fire")?.[1];
 		expect(fire).toMatchObject({ v: 1, turn: 3, ok: true, tokensBefore: 60_000, firstKeptEntryId: "e9", summary: "s" });
-		const lines = readFileSync(process.env.OMP_SELFCOMPACT_LOG as string, "utf8").trim().split("\n").map(l => JSON.parse(l));
-		expect(lines.map(l => l.type)).toEqual(["selfcompact-probe", "selfcompact-fire"]);
-		expect(lines[0]).toMatchObject({ verdict: "compress", tokens: 60_000, cost: 0.0189 });
 	});
 	test("a reply whose usage has no cost still fires, and its probe record carries no cost", async () => {
 		const b = bind({
