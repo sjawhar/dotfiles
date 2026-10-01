@@ -802,8 +802,10 @@ for d in .config/gh .ssh/id_ed25519 .gnupg .config/agent-secrets; do
     [ -e "$HOME/$d" ] && fail "$d is present in the box" || ok "$d absent"
 done
 # .config/gcloud is not simply forbidden: deploy.py (_DEVBOX_WIF_ADC, and its refusal at ~1315)
-# REQUIRES ~/.config/gcloud/agent-devbox-wif-adc.json for any devN up/destroy, and
-# verify-machine-identity.sh writes it. That file is keyless - an external_account WIF config bound
+# REQUIRES ~/.config/gcloud/agent-devbox-wif-adc.json for any devN up/destroy, and the writer is
+# agent-c meta/infra/pulumi/scripts/provision_devbox_wif_adc.py. An earlier version of this comment
+# credited verify-machine-identity.sh, which only verifies identity and writes no ADC file.
+# That file is keyless - an external_account WIF config bound
 # to the box instance role, no token and no user - so it is a machine credential, not a login.
 # Deleting it to satisfy this check breaks the next slot apply (reported by a lane that had done one).
 if [ -e "$HOME/.config/gcloud" ]; then
