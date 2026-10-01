@@ -88,7 +88,13 @@ class Output:
 
 
 def du_batch(paths: list[str], timeout: float) -> tuple[dict[str, int], list[str]]:
-    """Size paths with one du; return (finished sizes, paths not finished, in order)."""
+    """Size paths with one du; return (finished sizes, paths not finished, in order).
+
+    paths must be non-empty: du given no path argument sizes the current directory and
+    prints `.`, which is not a node of this walk (KeyError('.') mid-run, 2026-10-01).
+    """
+    if not paths:
+        raise ValueError("du_batch needs at least one path; an empty batch would size the current directory")
     proc = subprocess.Popen(
         ["ionice", "-c2", "-n7", "du", "-sxB1", "--null", "--", *paths],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -122,6 +128,8 @@ def du_batch(paths: list[str], timeout: float) -> tuple[dict[str, int], list[str
 
 
 def chunks(items: list[str], n: int) -> list[list[str]]:
+    if not items:
+        return []  # a directory with no subdirectories splits into no batches
     n = max(1, min(n, len(items)))
     return [items[i::n] for i in range(n)]
 
