@@ -1,4 +1,4 @@
-// The experiments extension: one extension holding four experimental session features, each
+// The experiments extension: one extension holding five experimental session features, each
 // behind its own gate (gates.ts says how a gate is read and drawn).
 //
 //   selfcompact       compacts early at a task boundary when the model says its history can be
@@ -8,6 +8,8 @@
 //   context_line      appends "[Token usage: used/window]" to every request (context-line.ts)
 //   skill_gate        refuses `gh pr create` until skill://opening-a-pr is read, and `jj git push`
 //                     until skill://using-jj is read (skill-gate.ts)
+//   judge_log         rates every subagent dispatch with the `@judge` model role and appends the
+//                     rating to ~/.omp/judge/ratings.jsonl, routing on nothing (judge-log-core.ts)
 //
 // A bad gate throws here, so omp loads none of it and says why. Each feature registers its
 // handlers once, through a view of `pi` whose `on` runs a handler only while that feature is on
@@ -21,6 +23,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import contextLine from "./context-line";
 import gateFile from "./gates.json" with { type: "json" };
 import { ENTRY_TYPE, type ExperimentRecord, type Feature, resolve, resolveGates, rootSessionId } from "./gates";
+import judgeLog from "./judge-log";
 import proactiveMemory from "./proactive-memory";
 import selfcompact from "./selfcompact";
 import skillGate from "./skill-gate";
@@ -31,6 +34,7 @@ const REGISTRATIONS: ReadonlyArray<[Feature, (pi: ExtensionAPI) => void]> = [
 	["proactive_memory", proactiveMemory],
 	["context_line", contextLine],
 	["skill_gate", skillGate],
+	["judge_log", judgeLog],
 ];
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
