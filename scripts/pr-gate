@@ -85,9 +85,11 @@ fi
 # Claude-review status (TRAJECTORY_CLAUDE_REVIEW) posted at the first head only; four pushes later the
 # head carried Vercel alone, and the verdict grammar below still read green (2026-09-25). Contexts are
 # compared as whole lines, so one context name that prefixes another cannot satisfy it.
+# TRAJECTORY_CLAUDE_REVIEW is retired (agent-c#20720, 2026-10-01: the reviewer approves instead of posting
+# a status), so a PR that carried it on a commit before that merge must not read NOT GREEN for lacking it now.
 prev=$(for s in $(api "repos/$repo/pulls/$n/commits" --paginate --jq '.[].sha' | grep -vx "$head" || true); do
   api "repos/$repo/commits/$s/status" --jq '.statuses[].context'
-done | sort -u)
+done | grep -vx 'TRAJECTORY_CLAUDE_REVIEW' | sort -u || true)
 if [ -n "$prev" ]; then
   ok_now=$(api "repos/$repo/commits/$head/status" --jq '.statuses[]|select(.state=="success")|.context' | sort -u)
   echo "statuses success at head: $(tr '\n' ' ' <<<"${ok_now:-none}")"
