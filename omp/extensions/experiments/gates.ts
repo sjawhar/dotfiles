@@ -13,7 +13,7 @@
 // name. A session with no file (--no-session) draws from its own id.
 import { createHash } from "node:crypto";
 
-export const FEATURES = ["selfcompact", "proactive_memory", "context_line", "skill_gate"] as const;
+export const FEATURES = ["selfcompact", "proactive_memory", "context_line", "skill_gate", "judge_log"] as const;
 export type Feature = (typeof FEATURES)[number];
 export const GATES = ["on", "off", "random"] as const;
 export type Gate = (typeof GATES)[number];
