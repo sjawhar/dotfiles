@@ -17,7 +17,7 @@ function harness(complete: (req: CompleteRequest) => Promise<Completion>, append
 	};
 	createJudgeLog({ complete, append: append ?? (async line => void written.push(line)), now: () => NOW })(pi);
 	const ctx = {
-		models: { resolve: (spec: string): { provider: string; id: string } | undefined => (spec === "@judge" ? { provider: "anthropic", id: "claude-sonnet-5" } : undefined) },
+		models: { resolve: (spec: string): { provider: string; id: string } | undefined => (spec === "@judgeLog" ? { provider: "anthropic", id: "claude-sonnet-5" } : undefined) },
 		sessionManager: { getSessionFile: (): string | undefined => SESSION, getSessionId: () => "sid" },
 	};
 	const start = (toolCallId: string, args: unknown, toolName = "task") => handler({ toolCallId, toolName, args }, ctx);
@@ -123,7 +123,7 @@ describe("judge-log", () => {
 	});
 
 	test.each([
-		["no @judge role", null, /role @judge resolves to no model/],
+		["no @judgeLog role", null, /role @judgeLog resolves to no model/],
 		["a provider error", async (): Promise<Completion> => ({ text: "", error: "overloaded" }), /overloaded/],
 		[
 			"a thrown completion",
