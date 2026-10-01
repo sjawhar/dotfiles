@@ -37,14 +37,13 @@
 // 30 s handler budget. A fire that settles without `onComplete` is recorded as
 // failed, whether its promise rejects (print and RPC rethrow; a detached
 // rejection is fatal to the session) or resolves with neither callback run (the
-// TUI swallows the error the manual path throws before `onError`). Armed only
-// when the environment has OMP_SELFCOMPACT=1, and only for the top-level
-// session. Every probe (`selfcompact-probe`), fire (`selfcompact-fire`) and
-// handler failure outside a probe (`selfcompact-error`) is recorded as a custom
-// session entry and, when OMP_SELFCOMPACT_LOG names a file, as one JSON line
-// there — under --no-session the file is the only record. Each ok fire's record
-// carries the compaction summary. scripts/selfcompact-sessions reads these records from real sessions.
-import { appendFileSync } from "node:fs";
+// TUI swallows the error the manual path throws before `onError`). It runs
+// only in the top-level session, and only while the experiments extension's
+// `selfcompact` gate is on for it (index.ts). Every probe (`selfcompact-probe`),
+// fire (`selfcompact-fire`) and handler failure outside a probe
+// (`selfcompact-error`) is recorded as a custom session entry. Each ok fire's
+// record carries the compaction summary. scripts/selfcompact-sessions reads
+// these records from real sessions.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import rubric from "./selfcompact.md" with { type: "text" };
 
@@ -102,10 +101,7 @@ function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-export default function (pi: ExtensionAPI) {
-	if (process.env.OMP_SELFCOMPACT !== "1") return;
-	const logPath = process.env.OMP_SELFCOMPACT_LOG;
-
+export default function selfcompact(pi: ExtensionAPI): void {
 	let requests = 0;
 	let lastProbeRequest = -Infinity;
 	let fires = 0;
@@ -116,15 +112,7 @@ export default function (pi: ExtensionAPI) {
 	let phase: "idle" | "probing" | "firing" = "idle";
 
 	const record = (type: "selfcompact-probe" | "selfcompact-fire" | "selfcompact-error", data: Record<string, unknown>) => {
-		const entry = { v: 1, ...data };
-		pi.appendEntry(type, entry);
-		if (!logPath) return;
-		try {
-			appendFileSync(logPath, `${JSON.stringify({ type, ts: Date.now(), ...entry })}\n`);
-		} catch (error) {
-			// The session entry is the record of record; a missing log directory must not reach the handler.
-			pi.logger.warn("selfcompact: could not append to OMP_SELFCOMPACT_LOG", { logPath, error: message(error) });
-		}
+		pi.appendEntry(type, { v: 1, ...data });
 	};
 	const resetWindow = () => {
 		fires = 0;

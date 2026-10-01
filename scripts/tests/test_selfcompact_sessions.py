@@ -106,7 +106,7 @@ class Sessions(unittest.TestCase):
     def test_a_record_omp_copied_into_a_fork_branch_or_tan_clone_counts_once(self) -> None:
         # /fork, /branch, --fork and /tan copy a session's entries, same id and timestamp, into a new file under a new
         # session header; /tan writes <parent>/Tan-<id>.jsonl and runs as a subagent, so it never records anything of
-        # its own (selfcompact.ts:182) -- its clone holds copies only; /fork copies the parent's artifact directory with it
+        # its own (experiments/selfcompact.ts:170) -- its clone holds copies only; /fork copies the parent's artifact directory with it
         written = [{"id": "a1b2c3d4", "timestamp": stamp(4), **probe("compress")}, {"id": "a1b2c3d5", "timestamp": stamp(4), **fire(ok=True)}]
         parent = session_file(self.root / "-src-x", "01a0ffff-0000-7000-8000-000000000006", written, header_stamp=stamp(5))
         tan = session_file(parent.with_suffix(""), "01a0ffff-0000-7000-8000-00000000000a", written,

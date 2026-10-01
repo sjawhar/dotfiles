@@ -3,15 +3,16 @@
 
   selfcompact-sessions --days N [--sessions-root DIR]
 
-The extension (omp/extensions/selfcompact.ts), armed by OMP_SELFCOMPACT=1, appends each probe,
-fire and hook failure to its session as a v1 `custom` entry: selfcompact-probe, selfcompact-fire
-or selfcompact-error. This reads three places omp keeps sessions: ~/.omp/agent/sessions, each
+The experiments extension's selfcompact feature (omp/extensions/experiments/selfcompact.ts), in a
+session whose selfcompact gate is on, appends each probe, fire and hook failure to its session as a
+v1 `custom` entry: selfcompact-probe, selfcompact-fire or selfcompact-error. This reads three places
+omp keeps sessions: ~/.omp/agent/sessions, each
 profile's ~/.omp/profiles/NAME/agent/sessions, and every --session or --session-dir transcript
 registered in ~/.omp/agent/custom-session-files, which also holds test and smoke runs under /tmp.
 --sessions-root DIR reads only the files under DIR. For each file holding such entries timestamped
 in the last N days, it prints one row of those entries, in the order of the files' names, naming
 the file relative to ~/.omp (or DIR), or by its absolute path outside it. A resumed session's older
-entries stay out of the window. No row usually means that no session was armed.
+entries stay out of the window. No row usually means that no session had the feature on.
 
 Each record counts at most once, so rows can be summed:
   - /fork, /branch, --fork and /tan copy entries, ids and timestamps kept, under a new session

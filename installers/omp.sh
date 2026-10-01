@@ -72,6 +72,9 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/viewport.ts" "${OMP_AGENT_DIR}/exten
 rm -f "${OMP_AGENT_DIR}/extensions/fullscreen.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/attention-queue.ts" "${OMP_AGENT_DIR}/extensions/attention-queue.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/askgate.ts" "${OMP_AGENT_DIR}/extensions/askgate.ts"
+# The experiments extension: four session features, each behind its own gate (omp/AGENTS.md).
+# Only the entry is linked; its sibling modules resolve from the link's real path.
+ensure_link "${DOTFILES_DIR}/omp/extensions/experiments/index.ts" "${OMP_AGENT_DIR}/extensions/experiments.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 (cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
 # The envoy extension installs from npm (@sjawhar/pi-legion-envoy). The old
