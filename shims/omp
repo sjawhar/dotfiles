@@ -82,8 +82,7 @@ export PI_CONFIG_FILES="${DOTFILES_DIR}/omp/config.yml${PI_CONFIG_FILES:+:$PI_CO
 
 # --- AskGate (omp/extensions/askgate.ts) ---
 # off | warn (a revise runs the call and hands the agent the reason) | block
-# (a revise refuses the call). The go decision recorded in
-# docs/advisor-report.md flips warn to block.
+# (a revise refuses the call).
 export OMP_ASKGATE="${OMP_ASKGATE:-warn}"
 
 # --- mnemopi recall ranking ---

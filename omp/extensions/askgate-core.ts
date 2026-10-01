@@ -45,7 +45,7 @@
 //     as `deliveredReason`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
-// usage, the aborted one included; scripts/advisor-report reads them. Every path fails open but
+// usage, the aborted one included. Every path fails open but
 // one: a throw inside the handler is recorded as `error` and the call runs, and the deadline keeps
 // the handler inside the runner's ceiling, whose expiry would refuse the call. The exception is a
 // call given up without a verdict. When the call's tool ends first anyway (a user abort, or that
