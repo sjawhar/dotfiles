@@ -58,8 +58,6 @@ async function stepOnce(messages: Msg[]) {
 	const branch: BranchEntry[] = [];
 	const ctx = {
 		agent: { kind: "main" },
-		hasUI: false,
-		ui: { setStatus: () => {} },
 		sessionManager: { getBranch: () => branch, getSessionId: () => "sess-e" },
 		models: { resolve: () => MODEL },
 		modelRegistry: { resolver: () => "resolved-key" },

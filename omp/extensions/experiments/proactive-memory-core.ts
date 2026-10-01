@@ -761,26 +761,6 @@ export interface DeliveryRecord {
 	attempts: number;
 }
 
-function statusLine(record: StepRecord): string {
-	const parts = [`memory: step ${record.turn}`, `${record.bankAfter.knowledge}K ${record.bankAfter.procedural}P`];
-	// A provider failure surfaced through phase1/phase2's own `error` field is "failed" —
-	// distinguishable from `no model`/`legion` (each has its own word), from `deadline`
-	// and `superseded` (both routine — a timer or a newer request aborted the step's own signal,
-	// which makes the aborted phase call ALSO carry `error: "aborted"`, so those two must be
-	// checked, and win, before `failed` is ever considered — R2-2: the prior ordering let a
-	// superseded step's aborted Phase 1 call read as `failed`, double-counting it). Folding a
-	// 401/429/gateway-down into "silent" would hide the likeliest failure mode.
-	const failed = record.phase1?.error !== undefined || record.phase2?.error !== undefined;
-	if (record.skipped) parts.push(record.skipped === "no-model" ? "no model" : record.skipped);
-	else if (record.deadline) parts.push("deadline");
-	else if (record.error === "superseded") parts.push("superseded");
-	else if (failed) parts.push("failed");
-	else if (record.error) parts.push("error");
-	else if (record.phase2?.intervention) parts.push("reminded");
-	else parts.push("silent");
-	return parts.join(" | ");
-}
-
 /** Minimal structural subset of the fork's ExtensionAPI the core needs; the entry binds the real one. */
 export interface Pi {
 	on: (event: string, handler: (event: never, ctx: never) => unknown) => void;
@@ -830,8 +810,6 @@ export default function createProactiveMemory(deps: Deps) {
 					agent: { kind: string };
 					sessionManager: { getBranch: () => readonly BranchEntry[]; getSessionId: () => string };
 					models: { resolve: (role: string) => { provider: string; id: string } | undefined };
-					hasUI: boolean;
-					ui: { setStatus: (key: string, text: string) => void };
 				},
 			) => {
 				try {
@@ -963,7 +941,6 @@ export default function createProactiveMemory(deps: Deps) {
 									record.bankAfter = counts(state.bank);
 									record.latencyMs = deps.now() - started;
 									pi.appendEntry(STEP_ENTRY_TYPE, record);
-									if (ctx.hasUI) ctx.ui.setStatus("proactive-memory", statusLine(record));
 								} else pi.logger.debug("proactive-memory: step orphaned by a session change; nothing written", { turn });
 							} catch (error) {
 								pi.logger.warn("proactive-memory: record failed", { error: message(error) });
