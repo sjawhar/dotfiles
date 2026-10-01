@@ -36,8 +36,12 @@ before you consume.
 - **Say when you are finished with it**, so the coordinator can forget it. Do not forget or delete a
   workspace you did not create.
 - **Never write into a canonical checkout** (`~/src/<repo>`). Use absolute paths in every file
-  operation: a relative path from the wrong working directory lands in the canonical checkout
-  silently, and it has happened more than once.
+  operation: the edit and write tools resolve a relative path against the session's working
+  directory, which for a coordinator's lanes is the canonical checkout, whatever you `cd` to. Three
+  lanes wrote there that way on 2026-10-01 alone. **Before you yield, run
+  `canonical-untouched ~/src/<repo>`;** it must print nothing and exit 0. A file it lists that you
+  wrote is yours to put back, and say so; one you did not write belongs to someone else, so leave it
+  and report it.
 
 ## Version control
 
