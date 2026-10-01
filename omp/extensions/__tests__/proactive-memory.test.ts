@@ -648,8 +648,6 @@ type Ctx = {
 	agent: { kind: string };
 	sessionManager: { getBranch: () => BranchEntry[]; getSessionId: () => string };
 	models: { resolve: (role: string) => { provider: string; id: string } | undefined };
-	hasUI: boolean;
-	ui: { setStatus: (key: string, text: string) => void };
 };
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -658,7 +656,6 @@ interface Binding {
 	entries: Array<{ type: string; data: unknown }>;
 	warnings: string[];
 	debugs: unknown[];
-	statusLines: string[];
 	branch: BranchEntry[];
 	context: (messages: Msg[]) => Promise<{ messages: Msg[] } | undefined>;
 	beforeProviderRequest: (payload: unknown) => void;
@@ -672,7 +669,6 @@ function bind(
 		env?: Record<string, string | undefined>;
 		model?: { provider: string; id: string } | undefined;
 		kind?: string;
-		hasUI?: boolean;
 		complete?: (call: { system: string; user: string; tools?: unknown }, index: number) => Promise<{
 			text: string;
 			toolCalls: { name: string; arguments: Record<string, unknown> }[];
@@ -687,7 +683,6 @@ function bind(
 	const entries: Array<{ type: string; data: unknown }> = [];
 	const warnings: string[] = [];
 	const debugs: unknown[] = [];
-	const statusLines: string[] = [];
 	const branch: BranchEntry[] = [];
 	const completeCalls: Array<{ system: string; user: string; tools?: unknown }> = [];
 	let idIdx = 0;
@@ -707,8 +702,6 @@ function bind(
 		agent: { kind: opts.kind ?? "main" },
 		sessionManager: { getBranch: () => branch, getSessionId: () => "session-1" },
 		models: { resolve: () => opts.model },
-		hasUI: opts.hasUI ?? true,
-		ui: { setStatus: (_key: string, text: string) => statusLines.push(text) },
 	};
 
 	const factory = createProactiveMemory({
@@ -738,7 +731,6 @@ function bind(
 		entries,
 		warnings,
 		debugs,
-		statusLines,
 		branch,
 		// The fork hands the hook a fresh structuredClone of the messages on every call
 		// (runner.ts:1906-1914 @ec43b526), never the caller's own array — cloning here is what
@@ -1315,7 +1307,7 @@ describe("factory, superseded", () => {
 });
 
 describe("factory, orphaned", () => {
-	test("session_switch while a step's complete is pending: on resolve, no appendEntry, no setStatus, one logger.debug", async () => {
+	test("session_switch while a step's complete is pending: on resolve, no appendEntry, one logger.debug", async () => {
 		let resolvePhase1: (() => void) | undefined;
 		const b = bind({
 			model: { provider: "anthropic", id: "claude-sonnet-5" },
@@ -1330,7 +1322,6 @@ describe("factory, orphaned", () => {
 		resolvePhase1?.();
 		await pending;
 		expect(b.entries).toHaveLength(0);
-		expect(b.statusLines).toHaveLength(0);
 		expect(b.debugs).toHaveLength(1);
 	});
 });
@@ -1430,103 +1421,16 @@ describe("factory, task description", () => {
 	});
 });
 
-describe("factory, status bar", () => {
-	test("hasUI calls ui.setStatus with counts and one of reminded/silent/off/no model/deadline", async () => {
-		const b = bind({ model: { provider: "anthropic", id: "claude-sonnet-5" }, hasUI: true });
-		await b.context([user("task")]);
-		expect(b.statusLines).toHaveLength(1);
-		expect(b.statusLines[0]).toContain("0K 0P");
-		expect(b.statusLines[0]).toContain("silent");
-	});
-
-	test("no-model status reads no model", async () => {
-		const b = bind({ model: undefined, hasUI: true });
-		await b.context([user("task")]);
-		expect(b.statusLines[0]).toContain("no model");
-	});
-
-	test("legion status reads legion", async () => {
-		const b = bind({ env: { LEGION_TREE: "1" }, model: { provider: "anthropic", id: "claude-sonnet-5" }, hasUI: true });
-		await b.context([user("task")]);
-		expect(b.statusLines[0]).toContain("legion");
-	});
-
-	test("reminded status reads reminded when Phase 2 returns an intervention", async () => {
+describe("factory, step errors", () => {
+	test("both phases returning a provider error are recorded on the step", async () => {
 		const b = bind({
 			model: { provider: "anthropic", id: "claude-sonnet-5" },
-			hasUI: true,
-			complete: async (_call, index) => (index === 1 ? { text: "<context_for_action>watch it</context_for_action>", toolCalls: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } : { text: "", toolCalls: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }),
-		});
-		await b.context([user("task")]);
-		expect(b.statusLines[0]).toContain("reminded");
-	});
-
-	test("deadline status reads deadline", async () => {
-		vi.useFakeTimers();
-		let resolvePhase1: ((value: { text: string; toolCalls: never[]; usage: { input: number; output: number; cacheRead: number; cacheWrite: number } }) => void) | undefined;
-		const b = bind({
-			model: { provider: "anthropic", id: "claude-sonnet-5" },
-			hasUI: true,
-			now: () => Date.now(),
-			complete: (_call, index) => {
-				if (index === 0)
-					return new Promise(resolve => {
-						resolvePhase1 = resolve;
-					});
-				throw new Error("Phase 2 should not run past the deadline");
-			},
-		});
-		const pending = b.context([user("do the task")]);
-		await drain();
-		vi.advanceTimersByTime(STEP_DEADLINE_MS - 1_000);
-		resolvePhase1?.({ text: "", toolCalls: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
-		await drain();
-		vi.useRealTimers();
-		await pending;
-		expect(b.statusLines[0]).toContain("deadline");
-	});
-
-	// Finding 6 (P1): a failed step (a provider error surfaced through phase1/phase2.error, e.g. an
-	// expired token or a 429) must be distinguishable from a normal silent step in the footer, not
-	// folded into "silent".
-	test("both phases returning a provider error reads failed, not silent (finding 6)", async () => {
-		const b = bind({
-			model: { provider: "anthropic", id: "claude-sonnet-5" },
-			hasUI: true,
 			complete: async () => ({ text: "", toolCalls: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, error: "401 unauthorized" }),
 		});
 		await b.context([user("task")]);
-		expect(b.statusLines[0]).toContain("failed");
-		expect(b.statusLines[0]).not.toContain("silent");
 		const step = lastStep(b);
 		expect(step.phase1?.error).toBe("401 unauthorized");
 		expect(step.phase2?.error).toBe("401 unauthorized");
-	});
-
-	test("a superseded step is reported as its own word, never as failed (R2-2)", async () => {
-		let resolveFirst: (() => void) | undefined;
-		const b = bind({
-			model: { provider: "anthropic", id: "claude-sonnet-5" },
-			hasUI: true,
-			complete: async (_call, index) => {
-				if (index === 0)
-					await new Promise<void>(resolve => {
-						resolveFirst = resolve;
-					});
-				return { text: "<no_intervention/>", toolCalls: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
-			},
-		});
-		const first = b.context([user("first", { timestamp: 1 })]);
-		await drain();
-		const second = b.context([user("first", { timestamp: 1 }), user("second", { timestamp: 2 })]);
-		resolveFirst?.();
-		await Promise.all([first, second]);
-		const steps = b.entries.filter(e => e.type === STEP_ENTRY_TYPE).map(e => e.data as StepRecord);
-		const supersededStep = steps.find(s => s.error === "superseded");
-		expect(supersededStep).toBeDefined();
-		// A routine Esc-and-retype must not read as a failure: its own word, never "failed".
-		expect(b.statusLines.some(line => line.includes("superseded"))).toBe(true);
-		expect(b.statusLines.some(line => line.includes("failed"))).toBe(false);
 	});
 });
 
