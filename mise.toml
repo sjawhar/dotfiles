@@ -182,9 +182,9 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v3.18.1"
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:d055f62b30c2d6ba45a24bd54682fc9a586fc1e27eabe106840f6b0678e475b3" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:63cc2afa20d292db1c7f93e7296665917f9ae637c89e8e4ee99a5b88fae159da" }
+version = "legion-envoy-v3.19.6"
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:0a3747ae1a28088f8e714ca7efacc4ab1a8e35d211e08080b47cd84ea63233f7" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:6c856181608118f11cd7890dbe2cd0829e28ba4c5e4735cfd8f50970309d7b2b" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
