@@ -91,10 +91,10 @@ tests it before production, and in production after the merge; merge-then-test-f
 method. Whatever blocks that is the work — infrastructure, tooling, or the skill itself. Production-like means a dev
 stack, staging, or a local stack with real migrations — a surface that has the resource the change touches. Merge-ready
 therefore requires a **link in the PR** to that pre-merge proof (a run, a screenshot, an e2e on the dev stack) — a green
-unit suite is not it — and the merge queue does not approve without one. A code path that only executes after merge (a
-deploy workflow's inline step, a post-merge helper, a production-only resource) is untested until you have executed it
-against a dev stack yourself; if no surface can reach it, that missing surface is the blocker to name, and building it
-is in scope.
+unit suite is not it — and auto-merge, which `landing-a-pr` arms once the PR is ready, is not armed without one. A code
+path that only executes after merge (a deploy workflow's inline step, a post-merge helper, a production-only resource)
+is untested until you have executed it against a dev stack yourself; if no surface can reach it, that missing surface is
+the blocker to name, and building it is in scope.
 
 **A proof that performs by hand a step the product owns hides a missing feature.** It passes because a person or
 harness did the product's job, and the gap stays invisible for as long as the proof keeps doing it. A proof may not
@@ -238,11 +238,12 @@ record. Never ask to omit acceptance. A named blocker that survives that work go
     where it has one (`pr-screenshots`) so the images survive.
 
 Merging does not end your responsibility for the change: after it lands, **you** — the agent that developed it, not the
-reviewer, the SRE, or the queue — verify it in production and record what you observed (see `landing-a-pr` §6 and the
+reviewer, the SRE, or auto-merge — verify it in production and record what you observed (see `landing-a-pr` §6 and the
 `post-merge` skill).
 
-Then hand off to the `landing-a-pr` skill immediately — automated reviewers post within minutes of open, and its watch
-(`ce-babysit-pr` under that skill's envelope) snapshots the full review surface at every touchpoint: after every push,
+Then hand off to the `landing-a-pr` skill immediately; under it you arm auto-merge at the head once the PR is ready (a
+migration PR is merged by hand instead). Automated reviewers post within minutes of open, and that skill's watch
+(`ce-babysit-pr` under its envelope) snapshots the full review surface at every touchpoint: after every push,
 after every check completion, and always before the words "merge-ready". Do not run one manual `gh pr view` and leave;
 the first snapshot is the babysitter's.
 

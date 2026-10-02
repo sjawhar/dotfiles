@@ -112,8 +112,8 @@ A positive control proves a remote read worked, not that absence of a temporary
 ref answers whether the content merged.
 
 Read the actual merge state and merged message from GitHub, not merely a merge
-command's exit. The owner still does not perform the merge; these are read-back
-checks after the organizer's action.
+command's exit or an armed auto-merge; these are read-back checks after GitHub
+merges.
 
 ```sh
 gh api repos/<owner>/<repo>/pulls/<N> --jq '{merged, merge_commit_sha}'
