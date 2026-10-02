@@ -50,6 +50,9 @@ set -euo pipefail
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 SRC="${AGENTBOX_SRC:-$HOME/src}"
 BOXES="$HOME/boxes"
+# One template clone per repo that every box's clone of that repo is copied from (clone_checkout),
+# outside every box mount so no box can change it.
+CLONE_TEMPLATES="${XDG_CACHE_HOME:-$HOME/.cache}/agentbox-clones"
 # Every repo is a git clone of the box's own (AGENTC-1420, Sami, 2026-10-02: "Let's just switch to
 # Git everywhere"). On the shared jj store of agent-c, 298 workspaces and 135,748 refs/jj/keep refs,
 # every jj command took about 11 s against 0.1 s for git. A repo listed here also gets a sparse
@@ -511,24 +514,56 @@ finish_knives_claims() {
     done < <(jq -r --arg s "$sid" '.. | objects | select(.owner? == $s) | "\(.repo)\t\(.branch)"' "$state")
 }
 
-# The box's git clone of one repo at $ws, from the canonical checkout's origin: without old file
-# contents (git fetches a file's contents from GitHub the first time something reads them), with the
-# repo's sparse patterns (CLONE_SPARSE) set before the first checkout so the files it keeps arrive in
-# one fetch, on the remote's default branch. Automatic maintenance is off: with it on, every on-demand
-# fetch starts a background repack, and adding 1,040 small files to a test clone took over 900 s, a
-# repack notice after each file's fetch; with it off, adding a 94-file task took 1.4 s. Every step
-# checks its own status: callers run this under `||`, where set -e does not apply.
-clone_checkout() {
-    local repo="$1" ws="$2" url branch pats=()
-    url="$(git -C "$SRC/$repo" remote get-url origin)" || return 1
-    detached "${APP_GIT[@]}" clone --quiet --filter=blob:none --no-checkout "$url" "$ws" >&2 || return 1
-    git -C "$ws" config gc.auto 0 && git -C "$ws" config maintenance.auto false || return 1
-    if [[ -n "${CLONE_SPARSE[$repo]:-}" ]]; then
-        read -ra pats <<<"${CLONE_SPARSE[$repo]}"
-        "${APP_GIT[@]}" -C "$ws" sparse-checkout set --no-cone "${pats[@]}" || return 1
+# The template of one repo, at the remote's current default branch: made on first use as a clone
+# without old file contents (git fetches a file's contents from GitHub the first time something
+# reads them), with the repo's sparse patterns (CLONE_SPARSE) set before the first checkout so the
+# files it keeps arrive in one fetch, then brought up to date by a fetch on every launch. Automatic
+# maintenance is off: with it on, every on-demand fetch starts a background repack, and adding 1,040
+# small files to a test clone took over 900 s, a repack notice after each file's fetch; with it off,
+# adding a 94-file task took 1.4 s. Callers hold the repo's template lock and run this under `||`,
+# where set -e does not apply, so every step checks its own status.
+refresh_template() {
+    local repo="$1" tpl="$CLONE_TEMPLATES/$1" url upstream pats=()
+    if [[ ! -d "$tpl/.git" ]]; then
+        url="$(git -C "$SRC/$repo" remote get-url origin)" || return 1
+        rm -rf "$tpl.partial"
+        detached "${APP_GIT[@]}" clone --quiet --filter=blob:none --no-checkout "$url" "$tpl.partial" >&2 || return 1
+        git -C "$tpl.partial" config gc.auto 0 && git -C "$tpl.partial" config maintenance.auto false || return 1
+        if [[ -n "${CLONE_SPARSE[$repo]:-}" ]]; then
+            read -ra pats <<<"${CLONE_SPARSE[$repo]}"
+            "${APP_GIT[@]}" -C "$tpl.partial" sparse-checkout set --no-cone "${pats[@]}" || return 1
+        fi
+        mv "$tpl.partial" "$tpl" || return 1
     fi
-    branch="$(git -C "$ws" symbolic-ref --short HEAD)" || return 1
-    detached "${APP_GIT[@]}" -C "$ws" checkout --quiet "$branch" >&2
+    detached "${APP_GIT[@]}" -C "$tpl" fetch --quiet --prune origin >&2 || return 1
+    upstream="$(git -C "$tpl" symbolic-ref --short refs/remotes/origin/HEAD)" || return 1
+    detached "${APP_GIT[@]}" -C "$tpl" checkout --quiet -f -B "${upstream#origin/}" "$upstream" >&2
+}
+
+# The box's git clone of one repo at $ws: a copy of the repo's template, refreshed first. Its .git is
+# copied, all but the objects and the index; the objects are hard-linked, which is what a local
+# `git clone` does, and safe because git never changes an object file in place. A checkout from those
+# local objects then writes the working tree and a fresh index, needing no network. Each box's clone
+# is its own repository - refs, config and index - and stays whole if the template is rebuilt or
+# deleted. A fresh clone of agent-c took 64-78 s at load 200 (2026-10-02), almost all of it the
+# checkout fetching the kept files' contents; the copy took 1.4 s and its checkout 17.6 s. (A local
+# `git clone` of a clone without old file contents fails: `pack has 1 unresolved delta`.) The lock
+# keeps a launch from copying a template another launch is refreshing.
+clone_checkout() {
+    local repo="$1" ws="$2" tpl
+    tpl="$CLONE_TEMPLATES/$repo"
+    mkdir -p "$CLONE_TEMPLATES" || return 1
+    if ! {
+        flock 9 \
+            && refresh_template "$repo" \
+            && mkdir -p "$ws/.git" \
+            && tar -C "$tpl/.git" --exclude=./objects --exclude=./index -cf - . | tar -C "$ws/.git" -xf - \
+            && cp -al "$tpl/.git/objects" "$ws/.git/objects"
+    } 9>"$CLONE_TEMPLATES/$repo.lock"; then
+        echo "agentbox: could not copy $repo from its template $tpl; remove that directory to have the next launch rebuild it" >&2
+        return 1
+    fi
+    detached git -C "$ws" checkout --quiet -f HEAD >&2
 }
 
 # What a box's clone holds that its remote does not, as one line, empty when nothing: uncommitted
@@ -649,11 +684,25 @@ cmd_new() {
     trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
     trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
     mkdir -p "$BOXES/$box"
-    # Detached so a pane hangup cannot end a clone half-way (see `detached`).
+    # Every repo is cloned at once, each in a subshell that ignores the hangup and TERM/INT: the
+    # launcher acts on those itself, once every clone has returned, and the clones' git runs detached
+    # (see `detached`). A trapped signal ends `wait` early with 128+n while the clone still runs, so a
+    # clone that is still alive is waited for again.
+    local pids=() pid rc failed=0
     for repo in "${box_repos[@]}"; do
-        clone_checkout "$repo" "$BOXES/$box/$repo" || exit 1
-        (( interrupted )) && exit 130
+        ( trap '' HUP TERM INT; clone_checkout "$repo" "$BOXES/$box/$repo" ) &
+        pids+=("$!")
     done
+    for pid in "${pids[@]}"; do
+        while :; do
+            rc=0; wait "$pid" || rc=$?
+            (( rc > 128 )) && kill -0 "$pid" 2>/dev/null && continue
+            break
+        done
+        (( rc == 0 )) || failed=1
+    done
+    (( failed )) && exit 1
+    (( interrupted )) && exit 130
 
     local mounts=() env=()
     mapfile -t mounts < <(mount_args "$box")
