@@ -53,6 +53,12 @@ run `gh pr merge <N> --disable-auto` before pushing to an armed PR. Other repos:
 own required checks and reviews. After any merge, the owner still verifies delivery
 and the changed production path.
 
+Once a PR's required checks and review pass, merging it is usually the right call:
+every extra push restarts all the checks. So before another round, ask whether what
+you'd fix would hurt someone once it's merged: wrong behaviour, a security hole, bad
+data. If it would, fix it first. If it wouldn't, merge, and put the fix in a follow-up
+PR.
+
 `ce-babysit-pr` owns the watch loop: remote snapshots, claim/act/confirm dedup,
 trajectory tracking, review-still-expected guard, settle window and background
 detector. This skill is its standing envelope and takes precedence where they

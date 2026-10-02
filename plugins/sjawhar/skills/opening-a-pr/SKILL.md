@@ -191,7 +191,9 @@ record. Never ask to omit acceptance. A named blocker that survives that work go
 11. **Open or update the PR — and default to NOT opening a new one.** One line of work gets one PR. Before creating,
     inspect this session's existing PRs in the repo (`git branch -vv`, `gh pr view 2>/dev/null`, `gh pr list --author
     @me`): fold same-line work into the existing PR (`git push`, then `gh pr edit`), and use `gh-stack` only for
-    genuinely dependent work that lands as one reviewed unit. Sibling one-off PRs violate the minimal-PR rule. If none
+    genuinely dependent work that lands as one reviewed unit. Building on an unmerged branch is fine when the work needs
+    that code. The cost is that nothing above it ships until the base merges, so keep the base small, get it merged
+    fast, and split off whatever doesn't need it. Sibling one-off PRs violate the minimal-PR rule. If none
     exists, create a branch named for the change (`git checkout -b <name>` and `git push -u origin <name>`) and `gh pr
     create --head <name>` with closing keywords for the issues it resolves. Pass `--head` always, and read the URL from
     `gh pr list --head <name>`, never from the tail of the create output. Before posting, complete step 8's cold-reader check and
