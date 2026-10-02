@@ -14,7 +14,10 @@
 //     Sami 2026-09-18): `abandon`/`rebase`/`squash` on another lane's commits
 //     fails without `--ignore-immutable`, the same guard that protects main.
 //     The revset guards the frontier — `ancestors(visible_heads(), 4)` minus
-//     trunk ancestors, empty commits, this session's own trailer, and
+//     everything already behind `builtin_immutable_heads()` (trunk, tags,
+//     untracked remote bookmarks: immutable either way, so dropping them
+//     leaves `::immutable_heads()` unchanged and spares `empty()`, the
+//     costly filter, from testing them), empty commits, this session's own trailer, and
 //     `present(@)` — and ancestry closure (`::immutable_heads()`) protects
 //     all deeper history for free. Empty commits stay exempt so ended
 //     sessions' working-copy leftovers (the bulk of store clutter) remain
@@ -111,7 +114,7 @@ export default function (pi: ExtensionAPI) {
 			const tmp = `${overlay}.${process.pid}.tmp`;
 			await writeFile(
 				tmp,
-				`[templates]\ncommit_trailers = '"Omp-Session: ${id}"'\n\n[revset-aliases]\n"immutable_heads()" = 'builtin_immutable_heads() | (ancestors(visible_heads(), 4) ~ ::trunk() ~ description(glob:"*Omp-Session: ${id}*") ~ empty() ~ present(@) ~ (description(exact:"") ~ working_copies()))'\n`,
+				`[templates]\ncommit_trailers = '"Omp-Session: ${id}"'\n\n[revset-aliases]\n"immutable_heads()" = 'builtin_immutable_heads() | (ancestors(visible_heads(), 4) ~ ::builtin_immutable_heads() ~ description(glob:"*Omp-Session: ${id}*") ~ empty() ~ present(@) ~ (description(exact:"") ~ working_copies()))'\n`,
 			);
 			await rename(tmp, overlay);
 			process.env.JJ_CONFIG = `${base}:${overlay}`;
