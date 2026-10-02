@@ -37,11 +37,9 @@ retry:
       - anthropic/claude-opus-4-8
     # Codex (ChatGPT Pro subscription) falls to the Anthropic tier that matches
     # the failing model; exact keys beat the wildcard. An empty chain means no
-    # fallback at all: the two GPT escape hatches — gpt-6-astra (the astra and
-    # sami-proxy agents) and the API-billed gpt-api agent — fail loudly rather
-    # than answer from another provider; the caller then decides.
+    # fallback at all: gpt-6-astra (the astra and sami-proxy agents) fails loudly
+    # rather than answer from another provider; the caller then decides.
     openai-codex/gpt-6-astra: []
-    openai/gpt-5.6-terra: []
     openai-codex/gpt-5.5:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
@@ -73,6 +71,15 @@ retry:
       - anthropic/claude-opus-4-8
 task:
   maxRecursionDepth: 3
+  # No session dispatches onto OpenAI API billing (Sami, 2026-10-02, on
+  # dispatch://AGENTC-203/ask/5f198a8e: "Make sure that agents on this box and
+  # legion are not using openai API"). On the devbox the `openai` provider goes
+  # through the Hawk gateway, so these two agents spent the same prepaid OpenAI
+  # balance the deploy gate runs on, and it ran dry twice that day. With
+  # disabledProviders below, nothing can reach `openai/*` by another selector.
+  disabledAgents:
+    - gpt-api
+    - astra-api
   agentModelOverrides:
     bug-finder: "@review"
     code-architect: anthropic/claude-opus-5-5
@@ -190,6 +197,11 @@ skills:
     - sentry-setup-ai-monitoring
     - sentry-svelte-sdk
     - sentry-workflow
+# The OpenAI API provider is off for every session; the ChatGPT Pro
+# subscription (`openai-codex`) is a separate provider and stays on. Reason: the
+# task.disabledAgents comment above.
+disabledProviders:
+  - openai
 providers:
   anthropic:
     serverSideFallback: true
