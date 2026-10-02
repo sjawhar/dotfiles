@@ -18,14 +18,12 @@
 #                                       `agentbox restart` (in-box form: this session,
 #                                       now) when safe; --now hangs it up at once
 #
-# Each <repo> is a canonical checkout under ~/src. The box holds a checkout of
-# each at ~/boxes/<box>/<repo> and works in the first: a git clone of its own
-# for a repo in OWN_CLONE_SPARSE (below), a jj workspace of the canonical
-# checkout for every other. At exit nothing the box did is lost: each jj
-# workspace is snapshotted, forgotten and removed, so its work survives as
-# commits in the canonical repo, and each clone's work the remote does not
-# have is saved to a bundle before the clone is removed. omp flags pass
-# straight through after `--`.
+# Each <repo> is a canonical checkout under ~/src. The box holds a git clone of
+# its own of each, from the canonical checkout's origin, at
+# ~/boxes/<box>/<repo>, and works in the first. At exit a clone holding nothing
+# its remote lacks is removed with the box; a clone with uncommitted changes or
+# commits no remote has keeps ~/boxes/<box> in place, named on the pane, for its
+# owner to push or remove. omp flags pass straight through after `--`.
 #
 # The box mounts an allow-list of $HOME (below). Host services arrive two ways:
 # the session bus, the metadata service and the Envoy API through socat relays
@@ -52,16 +50,14 @@ set -euo pipefail
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 SRC="${AGENTBOX_SRC:-$HOME/src}"
 BOXES="$HOME/boxes"
-# Repos a box gets as a git clone of its own instead of a jj workspace of the canonical checkout's
-# shared store, each with the sparse patterns its first checkout uses. agent-c (AGENTC-1420, Sami,
-# 2026-10-02): on the shared store, 298 workspaces and 135,748 refs/jj/keep refs, every jj command
-# took about 11 s against 0.1 s for git, and a full clone takes 194 s; a clone without old file
-# contents and without tasks/ (3.8 GB of the 4.2 GB tree) takes about 30 s. Every tasks/*/basic_info.json
+# Every repo is a git clone of the box's own (AGENTC-1420, Sami, 2026-10-02: "Let's just switch to
+# Git everywhere"). On the shared jj store of agent-c, 298 workspaces and 135,748 refs/jj/keep refs,
+# every jj command took about 11 s against 0.1 s for git. A repo listed here also gets a sparse
+# checkout with these patterns, set before the first checkout. agent-c leaves out tasks/ (3.8 GB of
+# its 4.2 GB tree): a full clone takes 194 s and this one about 30 s. Every tasks/*/basic_info.json
 # stays, because tl validate's deployment-catalog check reads all of them; an agent adds the task it
-# works on with `git sparse-checkout add /tasks/<id>/`. jj cannot run on such a clone (it reads file
-# contents the clone fetches only on demand), so the box's checkout of these repos is plain git.
-declare -A OWN_CLONE_SPARSE=([agent-c]='/* !/tasks/ /tasks/*/basic_info.json')
-is_own_clone() { [[ -n "${OWN_CLONE_SPARSE[$1]+x}" ]]; }
+# works on with `git sparse-checkout add /tasks/<id>/`.
+declare -A CLONE_SPARSE=([agent-c]='/* !/tasks/ /tasks/*/basic_info.json')
 # git with the same GitHub App credential routing a box's own git has (session_env), so a clone made
 # here acts as the repo owner's App whoever runs the launcher.
 APP_GIT=(env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig" git)
@@ -488,11 +484,11 @@ box_session_id() {
     sed -n '1s#.*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' <<<"$files"
 }
 
-# Close-phase jj/knives run in their own session (`setsid`): the pane's
-# hangup reaches only the terminal's session, and jj cannot be made to ignore
-# it - it installs its own SIGHUP handler (ctrlc, "termination") that exits 1,
-# replacing whatever disposition it inherited. A snapshot killed that way is a
-# workspace left behind. `-w` returns the child's status.
+# A clone and the close-phase knives run in their own session (`setsid`): the
+# pane's hangup reaches only the terminal's session, and jj, which knives runs,
+# cannot be made to ignore it - it installs its own SIGHUP handler (ctrlc,
+# "termination") that exits 1, replacing whatever disposition it inherited.
+# `-w` returns the child's status.
 detached() { setsid -w "$@"; }
 
 # Release every knives claim the session holds. Claims are keyed by the omp
@@ -515,95 +511,56 @@ finish_knives_claims() {
     done < <(jq -r --arg s "$sid" '.. | objects | select(.owner? == $s) | "\(.repo)\t\(.branch)"' "$state")
 }
 
-# A clone of its own for the box (OWN_CLONE_SPARSE): without old file contents (git fetches a file's
-# contents from GitHub the first time something reads them), the repo's sparse patterns set before
-# the first checkout so the files it keeps arrive in one fetch, on the remote's default branch.
-# Detached like the jj workspace add (see `detached`). Automatic maintenance is off: with it on, every
-# on-demand fetch starts a background repack, and adding 1,040 small files to a test clone took over
-# 900 s, a repack notice after each file's fetch; with it off, adding a 94-file task took 1.4 s.
-# Every step checks its own status: callers run this under `||`, where set -e does not apply.
-clone_own() {
+# The box's git clone of one repo at $ws, from the canonical checkout's origin: without old file
+# contents (git fetches a file's contents from GitHub the first time something reads them), with the
+# repo's sparse patterns (CLONE_SPARSE) set before the first checkout so the files it keeps arrive in
+# one fetch, on the remote's default branch. Automatic maintenance is off: with it on, every on-demand
+# fetch starts a background repack, and adding 1,040 small files to a test clone took over 900 s, a
+# repack notice after each file's fetch; with it off, adding a 94-file task took 1.4 s. Every step
+# checks its own status: callers run this under `||`, where set -e does not apply.
+clone_checkout() {
     local repo="$1" ws="$2" url branch pats=()
     url="$(git -C "$SRC/$repo" remote get-url origin)" || return 1
-    read -ra pats <<<"${OWN_CLONE_SPARSE[$repo]}"
     detached "${APP_GIT[@]}" clone --quiet --filter=blob:none --no-checkout "$url" "$ws" >&2 || return 1
     git -C "$ws" config gc.auto 0 && git -C "$ws" config maintenance.auto false || return 1
-    "${APP_GIT[@]}" -C "$ws" sparse-checkout set --no-cone "${pats[@]}" || return 1
+    if [[ -n "${CLONE_SPARSE[$repo]:-}" ]]; then
+        read -ra pats <<<"${CLONE_SPARSE[$repo]}"
+        "${APP_GIT[@]}" -C "$ws" sparse-checkout set --no-cone "${pats[@]}" || return 1
+    fi
     branch="$(git -C "$ws" symbolic-ref --short HEAD)" || return 1
     detached "${APP_GIT[@]}" -C "$ws" checkout --quiet "$branch" >&2
 }
 
-# The box's checkout of one repo at $ws: a clone of its own (clone_own), or a jj workspace of the
-# canonical checkout. `-r trunk()` because jj otherwise bases a new workspace on the parent of the
-# canonical checkout's working-copy commit, and a checkout sitting on the root commit
-# (~/src/oh-my-pi, ~/src/jj) hands the box an empty tree: `ls` in the box showed only .git and .jj
-# (2026-09-26, Sami's call). Each workspace is a git worktree of its shared checkout, and its path
-# exists only on the host and inside this box. From every other box it looks missing, so a
-# `git worktree prune` run there - an agent's cleanup after `git worktree remove`, Legion's
-# provisioning - would drop its registration and leave git in the box fatal (14 live boxes at once,
-# 2026-09-21). A locked worktree is what prune skips; jj's forget in close_box still removes it. The
-# jj shim already locks what `jj workspace add` creates, so an existing lock is the outcome this
-# step wants, not a failure.
-add_checkout() {
-    local box="$1" repo="$2" ws="$3" lock_out
-    if is_own_clone "$repo"; then
-        clone_own "$repo" "$ws"
-        return
-    fi
-    detached jj -R "$SRC/$repo" workspace add --name "$box" -r 'trunk()' "$ws" >&2 || return 1
-    if ! lock_out=$(git -C "$SRC/$repo" worktree lock \
-        --reason "agentbox $box: path exists only on the host and inside its box" "$ws" 2>&1); then
-        [[ "$lock_out" == *"is already locked"* ]] || { printf '%s\n' "$lock_out" >&2; return 1; }
-    fi
-}
-
-# Everything a box's clone holds that its remote does not, saved where the host and every box can
-# fetch it: a bundle at ~/.cache/omp/agentbox/<box>-<repo>.bundle, a mounted path beside the box's
-# log. It holds each branch, stash and detached HEAD with commits no remote-tracking ref reaches, and
-# the working tree's uncommitted changes, tracked and untracked, as one more commit on HEAD
-# (refs/agentbox/uncommitted), made with a scratch index so nothing in the clone moves. `--sparse`
-# takes in files the agent created outside the sparse patterns (a new task directory) and records no
-# deletion of the files those patterns leave out. A clone with nothing of the kind writes nothing.
-# `git fetch <bundle> 'refs/*:refs/saved/*'` brings it into any clone of the repo. Returns non-zero
-# when the save could not be made, and close_box then keeps the clone.
-save_unpushed() {
-    local box="$1" repo="$2"
-    local ws="$BOXES/$box/$repo" bundle idx tree wip ref refs=()
-    # A clone the launcher never finished checking out holds no work.
+# What a box's clone holds that its remote does not, as one line, empty when nothing: uncommitted
+# changes, tracked or untracked, and each branch, stash or detached HEAD with commits no
+# remote-tracking ref reaches. A clone the launcher never finished checking out holds nothing; one git
+# cannot read says so, and close_box keeps it like any other.
+unpushed_work() {
+    local ws="$1" status ref found=()
     git -C "$ws" rev-parse --verify --quiet HEAD >/dev/null || return 0
-    idx="$(mktemp)" || return 1
-    if ! { cp "$ws/.git/index" "$idx" && GIT_INDEX_FILE="$idx" git -C "$ws" add --all --sparse; }; then
-        rm -f "$idx"
-        return 1
+    if ! status="$(git -C "$ws" status --porcelain 2>&1)"; then
+        echo "a checkout git cannot read: ${status%%$'\n'*}"
+        return 0
     fi
-    if ! GIT_INDEX_FILE="$idx" git -C "$ws" diff --cached --quiet HEAD; then
-        if ! { tree="$(GIT_INDEX_FILE="$idx" git -C "$ws" write-tree)" \
-            && wip="$(git -C "$ws" -c commit.gpgsign=false commit-tree "$tree" -p HEAD -m "agentbox $box: uncommitted changes at close")" \
-            && git -C "$ws" update-ref refs/agentbox/uncommitted "$wip"; }; then
-            rm -f "$idx"
-            return 1
-        fi
+    if [[ -n "$status" ]]; then found+=("$(wc -l <<<"$status") uncommitted paths"); fi
+    if ! git -C "$ws" symbolic-ref --quiet HEAD >/dev/null && [[ -n "$(git -C "$ws" rev-list -1 HEAD --not --remotes)" ]]; then
+        found+=("a detached HEAD")
     fi
-    rm -f "$idx"
-    git -C "$ws" symbolic-ref --quiet HEAD >/dev/null || git -C "$ws" update-ref refs/agentbox/detached-head HEAD || return 1
     while read -r ref; do
-        if [[ -n "$(git -C "$ws" rev-list -1 "$ref" --not --remotes)" ]]; then refs+=("$ref"); fi
-    done < <(git -C "$ws" for-each-ref --format='%(refname)' refs/heads refs/agentbox refs/stash)
-    (( ${#refs[@]} )) || return 0
-    bundle="$HOME/.cache/omp/agentbox/$box-$repo.bundle"
-    mkdir -p "${bundle%/*}" || return 1
-    git -C "$ws" bundle create "$bundle" "${refs[@]}" --not --remotes >/dev/null 2>&1 || return 1
-    echo "agentbox: $box's $repo held work its remote does not (${refs[*]}); saved to $bundle, fetch it with: git fetch $bundle 'refs/*:refs/saved/*'" >&2
+        if [[ -n "$(git -C "$ws" rev-list -1 "$ref" --not --remotes)" ]]; then found+=("${ref#refs/heads/}"); fi
+    done < <(git -C "$ws" for-each-ref --format='%(refname)' refs/heads refs/stash)
+    if (( ${#found[@]} )); then echo "${found[*]}"; fi
+    return 0
 }
 
-# Everything the box made goes: the knives claims its session holds, then each repo's checkout,
-# then the directory. A jj workspace is snapshotted first, so uncommitted edits are a commit in the
-# canonical repo; a clone's work its remote does not have is saved first (save_unpushed). The
+# Everything the box made goes: the knives claims its session holds, then the directory. The
 # container must be gone first — it holds the mounts, and docker recreates a removed mountpoint
-# root-owned. Every checkout is saved before any workspace is forgotten: if one cannot be, all of
-# them stay registered and the whole directory stays in place.
+# root-owned. The work in a clone is its agent's to push or remove (Sami, AGENTC-1420, 2026-10-02:
+# "Just tell the agents to migrate off of the JJ workspaces, and then they can handle it"), and
+# nothing is saved for it; a clone holding work its remote does not have keeps the whole box
+# directory in place, named on the pane, so nothing is discarded unseen.
 close_box() {
-    local box="$1" sid="$2" repo ws _
+    local box="$1" sid="$2" repo ws work kept=0 _
     shift 2
     for _ in $(seq 1 60); do
         docker inspect "$box" >/dev/null 2>&1 || break
@@ -623,35 +580,17 @@ close_box() {
     # accept it either. Before the rm -rf below, which takes the key dir with it.
     unenroll_box "$box"
     finish_knives_claims "$sid"
-    local snapshotted=() failed=0
     for repo in "$@"; do
         ws="$BOXES/$box/$repo"
-        if is_own_clone "$repo"; then
-            [[ -d "$ws/.git" ]] || continue
-            save_unpushed "$box" "$repo" && continue
-            echo "agentbox: could not save the work in $ws its remote does not have; $BOXES/$box left in place with every workspace registered" >&2
-            failed=1
-            continue
-        fi
-        [[ -d "$ws/.jj" ]] || continue
-        # `jj st` snapshots the working copy into @. On a shared store another
-        # session's operations routinely leave a workspace stale, and `jj st`
-        # refuses a stale one; `update-stale` first recovers it, putting any
-        # unsnapshotted edits in a commit, and is a no-op on a fresh workspace.
-        if detached jj -R "$ws" workspace update-stale >/dev/null 2>&1 \
-            && detached jj -R "$ws" st >/dev/null 2>&1; then
-            snapshotted+=("$repo")
-        else
-            echo "agentbox: could not snapshot $ws; $BOXES/$box left in place with every workspace registered" >&2
-            failed=1
+        [[ -d "$ws/.git" ]] || continue
+        work="$(unpushed_work "$ws")"
+        if [[ -n "$work" ]]; then
+            echo "agentbox: $ws holds work its remote does not have ($work); $BOXES/$box is left in place for its owner to push or remove" >&2
+            kept=1
         fi
     done
-    if (( failed )); then return 0; fi
-    for repo in "${snapshotted[@]}"; do
-        detached jj -R "$SRC/$repo" workspace forget "$box" \
-            || echo "agentbox: workspace forget $box failed in $SRC/$repo" >&2
-    done
-    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+    rm -rf "${RUN_BASE:?}/$box"
+    if (( ! kept )); then rm -rf "${BOXES:?}/$box"; fi
 }
 
 cmd_new() {
@@ -673,11 +612,7 @@ cmd_new() {
     (( $# )) || die "$usage"
     for repo in "${box_repos[@]}"; do
         [[ -d "$SRC/$repo" ]] || die "no checkout $SRC/$repo (repos: $(repos | tr '\n' ' '))"
-        if is_own_clone "$repo"; then
-            git -C "$SRC/$repo" remote get-url origin >/dev/null 2>&1 || die "$SRC/$repo has no origin remote to clone from"
-        else
-            [[ -e "$SRC/$repo/.jj" ]] || die "$SRC/$repo is not a jj repository"
-        fi
+        git -C "$SRC/$repo" remote get-url origin >/dev/null 2>&1 || die "$SRC/$repo has no origin remote to clone from"
     done
     local dup
     dup="$(printf '%s\n' "${box_repos[@]}" | sort | uniq -d)"
@@ -696,7 +631,7 @@ cmd_new() {
     ensure_forwarders
 
     # From here the box has state on disk: whatever fails before or during the
-    # session, its directory and workspace never outlive the launcher.
+    # session, its directory never outlives the launcher (close_box).
     # Values are expanded now (the trap outlives this function's locals) and
     # the trap runs only in the launcher itself, never in a $(…) subshell,
     # which inherits EXIT traps in bash.
@@ -705,21 +640,18 @@ cmd_new() {
     trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '' $(printf '%q ' "${box_repos[@]}")" EXIT
     # A pane kill or TERM lands here; the trap forwards a hangup into the box
     # (--init delivers it to the command), --rm fires, close runs. Before the
-    # box exists it is remembered instead and honoured once the workspace add
-    # returns. After a hangup the terminal is gone: a write to it fails with
-    # EIO, and under set -e the first chatty step of close_box (jj's
-    # "concurrent modification" note, an echo) would end the launcher after the
-    # workspace forget and before the rm -rf - which is how ~/boxes/<box> trees
-    # outlived their boxes. Nothing printed from here on has a reader.
+    # box exists it is remembered instead and honoured once the clone returns.
+    # After a hangup the terminal is gone: a write to it fails with EIO, and
+    # under set -e the first chatty step of close_box (an echo) would end the
+    # launcher before the rm -rf - which is how ~/boxes/<box> trees outlived
+    # their boxes. Nothing printed from here on has a reader.
     local interrupted=0
     trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
     trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
     mkdir -p "$BOXES/$box"
-    # Detached so a pane hangup cannot end it half-way (see `detached`): a
-    # registered workspace with a partial tree could not be snapshotted, so
-    # close would have to leave it.
+    # Detached so a pane hangup cannot end a clone half-way (see `detached`).
     for repo in "${box_repos[@]}"; do
-        add_checkout "$box" "$repo" "$BOXES/$box/$repo" || exit 1
+        clone_checkout "$repo" "$BOXES/$box/$repo" || exit 1
         (( interrupted )) && exit 130
     done
 
@@ -764,13 +696,12 @@ cmd_new() {
         if wait "$child"; then rc=0; else rc=$?; fi
         kill -0 "$child" 2>/dev/null || break
     done
-    # The pane can go away while close is still running (a pane kill during
-    # the jj snapshot, a server exit). That must not stop the box's removal:
-    # the launcher ignores the hangup from here on (jj and knives run in their
-    # own session, see `detached`), and its output goes through a reader that
-    # writes to the terminal while it exists and drops the rest - a direct
-    # write to a hung-up pty fails with EIO, which set -e would turn into an
-    # exit between the workspace forget and the rm -rf.
+    # The pane can go away while close is still running (a pane kill, a server
+    # exit). That must not stop the box's removal: the launcher ignores the
+    # hangup from here on (knives runs in its own session, see `detached`), and
+    # its output goes through a reader that writes to the terminal while it
+    # exists and drops the rest - a direct write to a hung-up pty fails with
+    # EIO, which set -e would turn into an exit before the rm -rf.
     trap - TERM INT EXIT
     trap '' HUP
     exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
@@ -923,7 +854,7 @@ r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os
 [ "$(ls -A "$HOME/.ssh" | sort | tr "\n" " ")" = "jj-signing jj-signing.pub " ] && ok ".ssh holds exactly the jj-signing pair" || fail ".ssh contents: $(ls -A "$HOME/.ssh" | tr "\n" " ")"
 auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && ok ".docker holds only the box ghcr login" || fail ".docker auths: ${auths:-none}"
 [ "$(stat -c %U /run/user/$(id -u))" = ubuntu ] && ok "runtime dir owned by ubuntu" || fail "runtime dir owner $(stat -c %U /run/user/$(id -u))"
-if [ -n "$(jj log -r @ --no-graph -T change_id 2>/dev/null)" ]; then ok "cwd is a jj workspace"; elif top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git checkout (a clone of its own)"; else fail "cwd is neither a jj workspace nor a git checkout (cwd-dependent: run doctor from your workspace, not /tmp)"; fi
+if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git clone of its own"; else fail "cwd is not a git clone of its own (cwd-dependent: run doctor from your checkout, not /tmp)"; fi
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
 gh auth status 2>&1 | grep -q "not logged" && ok "gh auth: no user login" || fail "gh auth status shows a login"
 n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && ok "secrets agent-tier" || fail "secrets agent-tier"
@@ -960,17 +891,11 @@ if [ -n "${NATS_NKEY_SEED_FILE:-}" ]; then [ -r "$NATS_NKEY_SEED_FILE" ] && ok "
 exit $fails
 '
 
-# The doctor box and everything it made: the container, its enrollment, its workspace and its
-# directories. A failed forget leaves a registration whose directory the rm removes: an orphan in
-# the shared store that every later `jj workspace list` carries, so it counts as a failure.
+# The doctor box and everything it made: the container, its enrollment and its directories.
 remove_doctor_box() {
-    local box="$1" repo="$2"
+    local box="$1"
     docker rm -f "$box" >/dev/null 2>&1 || true
     unenroll_box "$box"
-    if ! is_own_clone "$repo"; then
-        jj -R "$SRC/$repo" workspace forget "$box" >/dev/null 2>&1 \
-            || fail "doctor: workspace forget $box failed; its registration is left in $SRC/$repo"
-    fi
     rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
 }
 
@@ -1006,7 +931,7 @@ cmd_doctor() {
         fi
     fi
     build_image "$tag"
-    # A throwaway box on a throwaway workspace of the first repo in $SRC.
+    # A throwaway box on a throwaway clone of the first repo in $SRC.
     local repo box ws
     repo="$(repos | head -1)"
     [[ -n "$repo" ]] || die "no repo under $SRC to test with"
@@ -1016,10 +941,10 @@ cmd_doctor() {
     # it. The trap fires only in doctor itself, never in a $(…) subshell (see cmd_new).
     local doctor_pid=$BASHPID
     # shellcheck disable=SC2064
-    trap "[[ \$BASHPID == $doctor_pid ]] && remove_doctor_box '$box' '$repo'" EXIT
+    trap "[[ \$BASHPID == $doctor_pid ]] && remove_doctor_box '$box'" EXIT
     trap 'exit 130' INT TERM HUP
     mkdir -p "$BOXES/$box"
-    add_checkout "$box" "$repo" "$ws" >/dev/null 2>&1 || die "doctor: could not make $box's checkout of $repo"
+    clone_checkout "$repo" "$ws" >/dev/null 2>&1 || die "doctor: could not clone $repo into $box"
     local mounts=() env=() box_out="" tries=90
     mapfile -t mounts < <(mount_args "$box")
     mapfile -t env < <(session_env "$box")
@@ -1043,7 +968,7 @@ cmd_doctor() {
         fail "host: doctor box failed to start"
     fi
     trap - EXIT INT TERM HUP
-    remove_doctor_box "$box" "$repo"
+    remove_doctor_box "$box"
     grep -vE '^@' <<<"$box_out"
     FAILS=$((FAILS + $(grep -c '^FAIL ' <<<"$box_out" || true)))
     local box_forward; box_forward="$(sed -n 's/^@forward-ok //p' <<<"$box_out")"
