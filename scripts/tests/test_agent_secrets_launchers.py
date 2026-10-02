@@ -7,9 +7,12 @@ launcher login-status` prints `issued`. It registers nothing when `login-status`
 (the helper does not answer, or the client cannot run), when agent-secrets is missing, in a box
 (AGENT_SECRETS_KEY_DIR) or on a machine without the helper; the agent starts either way.
 
+scripts/agent-secrets-login names the operator by the email they sign in to Dispatch with: a GitHub
+login is refused (exit 2) before the operator file is written.
+
 Technique: stub `agent-secrets` (login-status answers as the case needs; `register` prints the
-flags and environment it got, then execs the command after `--`) and the agents themselves,
-first on PATH.
+flags and environment it got, then execs the command after `--`), the agents themselves and, for
+the login, `systemctl`, first on PATH.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SESSION = DOTFILES / "scripts" / "agent-secrets-session"
+LOGIN = DOTFILES / "scripts" / "agent-secrets-login"
 BROKER_URL = next(
     line.split("=", 1)[1].strip()
     for line in (DOTFILES / "agent-secrets" / "broker.env").read_text().splitlines()
@@ -220,6 +224,22 @@ class AgentSecretsSession(unittest.TestCase):
             [str(SESSION)], capture_output=True, text=True, env=self.env, check=False, timeout=30
         )
         self.assertEqual(result.returncode, 2)
+
+    def test_login_refuses_a_github_login_before_writing_the_operator(self) -> None:
+        """With the client and the helper's unit both answering, only the email check stands
+        between a GitHub login and the operator file."""
+        write_stub(self.stub_dir, "systemctl", "exit 0")
+        result = subprocess.run(
+            [str(LOGIN), "sjawhar"],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("'sjawhar' is not an email", result.stderr)
+        self.assertFalse((self.home / ".config" / "agent-secrets" / "operator").exists())
 
     def test_each_launcher_registers_its_agent(self) -> None:
         self.install_helper_unit()
