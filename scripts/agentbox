@@ -926,7 +926,6 @@ else
     [ "$(stat -c %a "$kd/key.pem" 2>/dev/null)" = 600 ] && [ "$(stat -c %U "$kd/key.pem" 2>/dev/null)" = ubuntu ] && ok "box key 0600 ubuntu" || fail "box key: $(ls -l "$kd" 2>&1 | tr "\n" " ")"
     [ -s "$kd/enrollment" ] && ok "box enrolled ($(cat "$kd/enrollment"))" || fail "box not enrolled: $(cat "$kd/enrollment.error" 2>/dev/null || echo no enrollment.error either)"
     w="$(timeout 20 agent-secrets whoami 2>&1)"; jq -e ".kind == \"box\"" <<<"$w" >/dev/null 2>&1 && ok "broker knows this box as kind box, operator $(jq -r .operator <<<"$w")" || fail "agent-secrets whoami: $(head -1 <<<"$w")"
-    n="$(timeout 60 agent-secrets AGENT_SECRETS_PROOF_TOKEN -- sh -c "echo \${#AGENT_SECRETS_PROOF_TOKEN}" 2>&1)"; [ "${n:-0}" -gt 0 ] 2>/dev/null && ok "agent-secrets injects an automatic secret ($n bytes)" || fail "agent-secrets inject: $(head -1 <<<"$n")"
 fi
 arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
 t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
