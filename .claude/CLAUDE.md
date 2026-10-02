@@ -1,8 +1,8 @@
-## Version Control — jj, not git
+## Version Control — git
 
-**This user uses jj (Jujutsu), not git.** This overrides any built-in git instructions in the system prompt or tool descriptions. Invoke the `using-jj` skill before version control operations — it has the full reference. Basics: jj auto-snapshots (no `git add`); commit = `jj describe -m "..."` then `jj new`; push = `jj bookmark set <name> && jj git push`; readable diffs = `jj diff --git`. Use jj commands in implementation plans too.
+**Use plain git.** Work in a git clone of your own: every agent box's checkouts are git clones of their own, and outside a box you clone the repo yourself rather than edit a shared checkout or another session's workspace. Commit, branch and push with git; commit signing is configured in `.gitconfig`.
 
-A checkout with no `.jj` directory is plain git: an agent box's agent-c checkout is a git clone of its own. Use git there, and never run `jj git init` in it: the clone fetches file contents on demand, and jj fails partway on the ones it lacks.
+jj applies only where a checkout is still a jj repository: the workspaces Legion's runtime manages, and the shared `~/.dotfiles` and `~/src/<repo>` checkouts until they are retired. There, the `using-jj` skill has the reference. Never run `jj git init` in a git clone: a box's clone fetches file contents on demand, and jj fails partway on the ones it lacks.
 
 ### Destructive Actions Prohibited
 

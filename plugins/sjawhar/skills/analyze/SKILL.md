@@ -6,8 +6,8 @@ description: "Run code quality agents on recent changes"
 Analyze the code in my current working copy changes.
 
 **1. Identify what to analyze:**
-- Run `jj diff` to see modified files
-- Run `jj diff --name-only` to get the list of changed files
+- Run `git diff` to see modified files
+- Run `git diff --name-only` to get the list of changed files
 - If there are no changes, report that and ask what to analyze
 
 **2. Run agents in parallel (READ-WRITE mode):**

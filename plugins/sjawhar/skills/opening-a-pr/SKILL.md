@@ -22,8 +22,8 @@ working from memory of it.
 
 1. **Empty the hardening ledger.** Every shortcut logged during implementation is now either done or explicitly blocked
    with the blocker named (missing access, or a decision only Sami can make). "I'll follow up" is not a legal state, and
-   neither is a GitHub issue. Then reconcile scope: diff the change against the authorized plan or issue (`jj diff
-   --git` against the target branch) and finish anything promised but absent. **If there is no ledger because the work
+   neither is a GitHub issue. Then reconcile scope: diff the change against the authorized plan or issue (`git diff`
+   against the target branch) and finish anything promised but absent. **If there is no ledger because the work
    started as an interactive request rather than through `sdd`, write one now** from the session: what Sami asked for,
    which decisions got settled along the way, every shortcut you took, and every part of the request you are unsure you
    covered. An absent ledger means nothing was written down; it never means there was nothing to audit.
@@ -173,11 +173,11 @@ record. Never ask to omit acceptance. A named blocker that survives that work go
    the body's claims explicitly, not only the diff.
 9. **Preserve the final tree across history-only rewrites.** Before reordering, splitting, or squashing commits, record
    the PR head and base refs with `gh pr view <PR> --json title,headRefName,baseRefName,state,commits`, then record a
-   content fingerprint: `before_tree=$(jj diff --from 'root()' --to @ --git | sha256sum)`. After the rewrite, run
-   `after_tree=$(jj diff --from 'root()' --to @ --git | sha256sum)` and compare them. A different fingerprint is allowed
-   only for an intentional, separately explained content change. Use `jj diff --summary <before-change> @` to inspect
-   it. Do not push if the tree changed unintentionally. This is the jj equivalent of preserving Git's final tree while
-   making history easier to review.
+   content fingerprint: `before_tree=$(git diff $(git merge-base origin/<base> HEAD) HEAD | sha256sum)`. After the
+   rewrite, run `after_tree=$(git diff $(git merge-base origin/<base> HEAD) HEAD | sha256sum)` and compare them. A
+   different fingerprint is allowed only for an intentional, separately explained content change. Use `git diff --stat
+   <before-sha> HEAD` to inspect it. Do not push if the tree changed unintentionally. This preserves the final tree
+   while making history easier to review.
 10. **Resolve the PR target — never our own fork; upstream only when the change belongs there.** If the repository is a
     knives-managed fork (`knives repos` lists it), our org forks hold branches and releases and never receive PRs; a
     PR, when one is warranted, targets the **upstream** repository. Do not open an upstream PR without loading the
@@ -189,12 +189,12 @@ record. Never ask to omit acceptance. A named blocker that survives that work go
     `maintaining-fork-pr`. Before shipping a fork member or opening an upstream PR, read
     [references/fork-and-upstream.md](references/fork-and-upstream.md) for the placement test and the release mechanics.
 11. **Open or update the PR — and default to NOT opening a new one.** One line of work gets one PR. Before creating,
-    inspect this session's existing PRs in the repo (`jj bookmark list`, `gh pr view 2>/dev/null`, `gh pr list --author
-    @me`): fold same-line work into the existing PR (`jj git push`, then `gh pr edit`), and use `gh-stack` only for
+    inspect this session's existing PRs in the repo (`git branch -vv`, `gh pr view 2>/dev/null`, `gh pr list --author
+    @me`): fold same-line work into the existing PR (`git push`, then `gh pr edit`), and use `gh-stack` only for
     genuinely dependent work that lands as one reviewed unit. Sibling one-off PRs violate the minimal-PR rule. If none
-    exists, set the bookmark from the change description (`jj git push --named=<name>=@`) and `gh pr create --head
-    <name>` with closing keywords for the issues it resolves. Pass `--head` always, and read the URL from `gh pr list
-    --head <name>`, never from the tail of the create output. Before posting, complete step 8's cold-reader check and
+    exists, create a branch named for the change (`git checkout -b <name>` and `git push -u origin <name>`) and `gh pr
+    create --head <name>` with closing keywords for the issues it resolves. Pass `--head` always, and read the URL from
+    `gh pr list --head <name>`, never from the tail of the create output. Before posting, complete step 8's cold-reader check and
     retain every repository-required field exactly once. A PR without current, observed end-to-end `## Verification`
     evidence is not merge-ready; test-suite and static-checker output — `pytest`, `basedpyright`, lint, a CI link — are
     supporting evidence, not verification.
@@ -277,6 +277,6 @@ Each excuse below is a reason given for shipping something that was never run.
 
 Catch yourself writing any excuse above → go run step 4.
 
-> **jj workspace note:** a colocated workspace has Git metadata; a non-colocated one does not, and branch detection varies.
-> Pass the repository explicitly: `gh -R <owner>/<repo> ...`. Never export `GIT_DIR` or `GIT_WORK_TREE` for this:
-> they redirect unrelated Git subprocesses, including test fixtures, into the shared repository.
+> **Repository note:** when acting inside a box or worktree other than the current shell's own, pass the repository
+> explicitly: `gh -R <owner>/<repo> ...`. Never export `GIT_DIR` or `GIT_WORK_TREE` for this: they redirect unrelated
+> Git subprocesses, including test fixtures, into the shared repository.

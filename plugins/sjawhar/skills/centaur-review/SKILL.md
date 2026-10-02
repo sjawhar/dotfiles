@@ -10,10 +10,13 @@ Sami leads the review by narrating as he reads. Track his observations, find the
 exact diff locations, challenge weak suggestions after he finishes, and compose a
 friendly review together. Do not replace his judgment with unsolicited analysis.
 
-> **jj workspace note:** a colocated workspace has Git metadata; a non-colocated one
-> does not, and branch detection varies. Pass the repository explicitly:
-> `gh -R <owner>/<repo> ...`. Never export `GIT_DIR` or `GIT_WORK_TREE`; they redirect
-> unrelated Git subprocesses, including test fixtures, into the shared repository.
+> **jj workspace note** (applies only when the PR's checkout is one of the
+> remaining jj repositories — a Legion-managed workspace, or the shared
+> `~/.dotfiles`/`~/src` stores): a colocated workspace has Git metadata; a
+> non-colocated one does not, and branch detection varies. Pass the repository
+> explicitly: `gh -R <owner>/<repo> ...`. Never export `GIT_DIR` or
+> `GIT_WORK_TREE`; they redirect unrelated Git subprocesses, including test
+> fixtures, into the shared repository.
 
 ## Set up the review
 

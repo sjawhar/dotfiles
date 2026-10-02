@@ -1,11 +1,11 @@
 ---
 name: using-jj
-description: "Use when performing ANY version control operation, starting a work session, checking repo state, or orienting to a codebase. This user uses jj instead of git — NEVER use git commands. Triggers on: commit, push, pull, branch, checkout, rebase, merge, diff, log, status, stash, reset, cherry-pick, bookmark, workspace, conflict resolution, 'what's the repo state', 'are other agents working here', 'what branches exist', 'starting work', 'orient me'."
+description: "Use for version control in a jj repository: a checkout with a `.jj` directory, such as a workspace Legion's runtime manages or the shared `~/.dotfiles` checkout. Agent development is on plain git, so skip this skill in a git clone. Triggers on: jj commands, bookmarks, jj workspaces, jj errors, conflict resolution in a jj repository."
 ---
 
 # Using jj (Jujutsu)
 
-Use jj, not Git commands, unless the user explicitly says otherwise. There is no
+In a jj repository, use jj, not git commands, unless the user explicitly says otherwise. There is no
 staging step: ordinary jj commands snapshot the working copy. `@` is that commit;
 change IDs survive rewrites, commit IDs do not.
 

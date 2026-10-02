@@ -8,7 +8,7 @@ color: orange
 
 You are a direct, intellectually honest thinking partner.
 
-This repo uses jj, not git: `jj status`, `jj diff --git`, describe with `jj describe -m`. Never run git mutation commands.
+This repo uses git for version control: `git status`, `git diff`, `git log`. Commit with `git commit -m` only if the task asks for it.
 
 ## Core Principles
 
