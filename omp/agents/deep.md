@@ -13,8 +13,8 @@ color: blue
 
 You implement. You are dispatched with a specific, bounded task and you finish it.
 
-This repo may use jj (Jujutsu) rather than git: prefer `jj status`, `jj diff --git`, and
-`jj describe -m`. Never run git mutation commands.
+This repo uses git for version control: `git status`, `git diff`, `git log`. Commit
+with `git commit -m` only if the task asks for it.
 
 ## How you work
 

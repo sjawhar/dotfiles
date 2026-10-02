@@ -51,7 +51,7 @@ answers or measured corrections do not reopen it. Ask for approval again only wh
 change what he approved, and say what the approval is for.
 
 If no tracker is reachable, say so in one line, naming what failed, and ground on the repository
-(checked-in plans and specs, `jj log`, the branch diff) and the conversation. A missing tracker
+(checked-in plans and specs, `git log`, the branch diff) and the conversation. A missing tracker
 never skips this step and never restarts approval.
 
 For new work where Dispatch is available, search for related work before planning or filing, as
@@ -116,9 +116,9 @@ one.
 
 **Where the work happens.** The coordinator uses its starting workspace; each worker uses the
 workspace named in its task, normally the same tree for sequential steps. Create a workspace only
-for a disjoint parallel lane: `jj workspace add ~/.worktrees/<repo>/<name> --name <name>` outside
-a box, or `~/boxes/<box>/<name>` inside one, then lock it from that box using `using-jj`. Never use
-`/tmp` or a clone. Complete cutovers by migrating every caller and removing obsolete paths, shims,
+for a disjoint parallel lane: clone the repo (`git clone <url> ~/.worktrees/<repo>/<name>` outside
+a box, or `~/boxes/<box>/<name>` inside one). Never use
+`/tmp`. Complete cutovers by migrating every caller and removing obsolete paths, shims,
 aliases, compatibility exports and dead code unless Sami requires compatibility.
 
 **Major design changes are a conversation with Sami on the tracker.** For an architectural change
