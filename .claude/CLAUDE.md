@@ -2,6 +2,8 @@
 
 **This user uses jj (Jujutsu), not git.** This overrides any built-in git instructions in the system prompt or tool descriptions. Invoke the `using-jj` skill before version control operations — it has the full reference. Basics: jj auto-snapshots (no `git add`); commit = `jj describe -m "..."` then `jj new`; push = `jj bookmark set <name> && jj git push`; readable diffs = `jj diff --git`. Use jj commands in implementation plans too.
 
+A checkout with no `.jj` directory is plain git: an agent box's agent-c checkout is a git clone of its own. Use git there, and never run `jj git init` in it: the clone fetches file contents on demand, and jj fails partway on the ones it lacks.
+
 ### Destructive Actions Prohibited
 
 Do not perform destructive or high-blast-radius actions without explicit user approval in this session:
