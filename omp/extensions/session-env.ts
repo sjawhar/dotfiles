@@ -3,7 +3,8 @@
 //
 //   OMP_SESSION_ID — the resumable session id (`omp --resume <id>`), derived
 //     from the session transcript filename, which is what resume matching
-//     scans. Keys per-session state for tools that track what a session saw.
+//     scans. Keys per-session state for tools that track what a session saw,
+//     and `shims/git` adds it to every `git commit` as the `Omp-Session` trailer.
 //   JJ_CONFIG — user config chain plus a generated per-session overlay that
 //     (1) sets `templates.commit_trailers`, so every jj commit made from an
 //     agent session automatically carries an `Omp-Session: <id>` trailer —

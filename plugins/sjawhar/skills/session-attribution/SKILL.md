@@ -5,13 +5,14 @@ description: "Use when tracing an artifact back to the agent session that produc
 
 # Session Attribution
 
-Every commit made from an OMP agent session in a jj repository (a Legion-managed
-workspace, or the shared `~/.dotfiles`/`~/src` jj stores) carries an
-`Omp-Session: <session-id>` trailer (injected automatically via a JJ_CONFIG
-overlay — `omp/extensions/session-env.ts` for interactive sessions, the Legion
-extension for Legion roots). The id is the resumable session id: `omp --resume
-<id>` accepts it, prefix included. A plain git checkout (every agent's own
-clone) has no automatic trailer today; attribute those commits by author,
+Every commit an OMP agent session makes carries an `Omp-Session: <session-id>`
+trailer, added without the agent doing anything: `shims/git` adds it to each
+`git commit`, and in a jj repository (a Legion-managed workspace, or the shared
+`~/.dotfiles`/`~/src` jj stores) a JJ_CONFIG overlay does
+(`omp/extensions/session-env.ts` for interactive sessions, the Legion extension
+for Legion roots). The id is the resumable session id: `omp --resume <id>`
+accepts it, prefix included. A git commit made through an alias, a merge, a
+cherry-pick or `git commit-tree` carries no trailer; attribute those by author,
 timestamp and transcript correlation instead. Legion GitHub comments and
 reviews carry an HTML footer with the same kind of id.
 
