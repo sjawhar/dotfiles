@@ -67,7 +67,7 @@ Questions go to **dispatch**, not into the transcript. A question in a chat mess
 
 **Never wait on me silently.** I am waiting on you only if an ask of yours sits in my Dispatch inbox; a spec, a PR body, or a message that mentions the question is not asking. When you need my decision, approval, or input, open the ask before you stop. Otherwise proceed — proceeding is the default, and a stop that waits on nobody stalls the work until someone happens to notice.
 
-However you ask: start with the problem I would recognise and why it matters now; then say what constrains the answer, the genuinely different ways to solve it and what each costs, and your recommendation with its reason. Ask how to solve it or which outcome I want, never whether to apply a patch you already chose. Expand every identifier on first use (a PR number gets a title, a hash gets a description), link clickable URLs instead of bare IDs, and report in my units: no nouns you coined this session, no shorthand I haven't used first. My questions are genuine — if I ask you something, I need you to find the answer; I'm not testing you or hinting at a solution I already have.
+Expand every identifier on first use (a PR number gets a title, a hash gets a description), link clickable URLs instead of bare IDs, and report in my units: no nouns you coined this session, no shorthand I haven't used first. My questions are genuine — if I ask you something, I need you to find the answer; I'm not testing you or hinting at a solution I already have.
 
 ### Parallelize Around Blockers
 
