@@ -15,9 +15,11 @@ description: >-
 The owner gets the PR genuinely merge-ready, then auto-merge lands it. Once the PR is
 ready (required proof at the head, every finding dispositioned, its checks and review
 expected to pass), arm auto-merge: `gh pr merge <N> --auto --squash
---match-head-commit <head sha>`. After every push, re-arm with the new head sha: an
-armed auto-merge survives a push, and `--match-head-commit` refuses a stale sha
-(agent-c#20935). No admin merge or bypass of branch protection. One exception until
+--match-head-commit <head sha>`. The arm stays on across a push (agent-c#20935), so
+push only ready work to an armed PR, or disarm it first with `gh pr merge <N>
+--disable-auto`. After every push, re-arm with the new head sha: `--match-head-commit`
+refuses a sha that is not the current head, so a refused re-arm means a second writer
+pushed. No admin merge or bypass of branch protection. One exception until
 the repo has a merge-time migration check: a PR that adds or changes a database
 migration is merged by hand (`gh pr merge <N> --squash --match-head-commit <head
 sha>`) immediately after confirming main's migration head is still the one the PR's
