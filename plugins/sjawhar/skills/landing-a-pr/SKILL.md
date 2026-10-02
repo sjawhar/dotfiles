@@ -37,8 +37,8 @@ threads (no new commit), re-run that run instead: `gh api -X POST
 repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs` (`gh run rerun` 404s on
 these), which reviews the same head and leaves PR Checks alone. The run that counts
 is a `review` check-run on the PR's HEAD sha, and the merge rule reads the newest run
-of the workflow at that head; a `@claude review` comment runs at main's head, never
-satisfies it, and waits behind an in-flight required run rather than cancelling it.
+of the workflow at that head. A `@claude review` comment starts nothing: the review has
+no comment trigger (agent-c#20924, 2026-10-02).
 Any other PR event, `gh stack link` included, starts a `follow` run that copies the
 newest review run's verdict at that head (agent-c#20827, 2026-10-02). After re-running
 a review at a head that has a newer `follow` run, re-run that `follow` run too:
