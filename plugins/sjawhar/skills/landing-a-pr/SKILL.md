@@ -25,8 +25,14 @@ run at the new head. When a required run FAILED and you only answered and resolv
 threads (no new commit), re-run that run instead: `gh api -X POST
 repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs` (`gh run rerun` 404s on
 these), which reviews the same head and leaves PR Checks alone. The run that counts
-is a `review` check-run on the PR's HEAD sha; a `@claude review` comment runs at
-main's head, never satisfies it, and cancels an in-flight required run. The verdict
+is a `review` check-run on the PR's HEAD sha, and the merge rule reads the newest run
+of the workflow at that head; a `@claude review` comment runs at main's head, never
+satisfies it, and waits behind an in-flight required run rather than cancelling it.
+Any other PR event, `gh stack link` included, starts a `follow` run that copies the
+newest review run's verdict at that head (agent-c#20827, 2026-10-02). After re-running
+a review at a head that has a newer `follow` run, re-run that `follow` run too:
+`rerun-failed-jobs` for a failed one, `.../actions/runs/<id>/rerun` for a passed one,
+or its stale verdict keeps deciding. The verdict
 counts every open thread on the PR, old ones included. The owner merges every agent-c
 PR, migration PRs included (Sami retired the merge queue, AGENTC-1089, 2026-10-02): a
 migration PR re-parents onto main's current alembic head right before merging, and
