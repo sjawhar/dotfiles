@@ -1,6 +1,7 @@
 #!/bin/bash
 # git-worktree-shim: in an agent session, refuse a bare `git worktree prune`, lock
-# every `git worktree add`, and unlock a lock of ours before `git worktree remove`.
+# every `git worktree add`, unlock a lock of ours before `git worktree remove`, and
+# give every `git commit` from an omp session its Omp-Session trailer.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -79,6 +80,18 @@ while ((i < ${#args[@]})); do
         *) break ;;
     esac
 done
+
+# A commit made from an omp session carries `Omp-Session: <id>`, the trailer
+# session attribution reads; omp/extensions/session-env.ts exports the id, and
+# jj commits get the same trailer from its JJ_CONFIG overlay. git's own
+# --trailer adds it, so the repository's hooks and commit signing run exactly as
+# they would without it, and `ifexists=addIfDifferent` keeps an amend from
+# repeating it. A missing or malformed id adds nothing: attribution may be
+# absent, never wrong. Only `git commit` itself is seen: a commit made through an
+# alias, a merge, a cherry-pick or `git commit-tree` carries no trailer.
+if [[ "${args[i]:-}" == commit && "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
+fi
 [[ "${args[i]:-}" == worktree ]] || exec "$_real" "$@"
 verb="${args[i + 1]:-}"
 rest=("${args[@]:i+2}")
