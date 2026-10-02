@@ -167,11 +167,11 @@ Repair what is reachable. Name the exact blocker and command honestly; do not
 rename it “remaining work” under a ready report. With a scoped waiver, keep the
 item unverified and link the decision; it does not excuse other acceptance rows.
 
-After READY, stop changing the head. In agent-c the owner merges once
-`pr-checks-result` and the required `review` check pass, except migration PRs,
-`claude-pr-review.yml` edits and Legion-produced PRs, which go to the organizer.
-Elsewhere the organizer merges where a queue exists, otherwise Sami does, and the
-owner neither merges nor arms auto-merge.
+Once ready, the owner merges and then stops changing the head. In agent-c that is
+once `pr-checks-result` and the required `review` check pass, migration PRs included
+(re-parent onto main's current alembic head first); in `sjawhar/legion` after the
+Legion PO's reviewer App approves the exact head. There is no merge-queue organizer
+(retired 2026-10-02, AGENTC-1089).
 
 ## Public text and citations
 
