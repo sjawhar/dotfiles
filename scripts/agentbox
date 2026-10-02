@@ -112,7 +112,7 @@ broker_ready() {
         return 1
     fi
     status="$(agent-secrets launcher login-status 2>&1)" && return 0
-    BROKER_UNREADY="the helper holds no live launcher credential (login-status: ${status%%$'\n'*}; run: agent-secrets-login <github-login>)"
+    BROKER_UNREADY="the helper holds no live launcher credential (login-status: ${status%%$'\n'*}; run: agent-secrets-login <email>)"
     return 1
 }
 
