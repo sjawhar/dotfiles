@@ -27,13 +27,14 @@ repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs` (`gh run rerun` 404s o
 these), which reviews the same head and leaves PR Checks alone. The run that counts
 is a `review` check-run on the PR's HEAD sha; a `@claude review` comment runs at
 main's head, never satisfies it, and cancels an in-flight required run. The verdict
-counts every open thread on the PR, old ones included. Three agent-c cases still
-go to the merge-queue organizer as a READY packet: a PR that adds or re-parents a
-migration under `platform/tl_platform/src/tl_platform/db/migrations/versions/`, a
-PR that edits `.github/workflows/claude-pr-review.yml`, and a Legion-produced PR.
-Everywhere else the owner does not merge or arm `gh pr merge --auto`: where a merge
-queue runs, its organizer merges; elsewhere Sami does. No admin merge or bypass of
-branch protection. After any merge, the owner still verifies delivery and the
+counts every open thread on the PR, old ones included. The owner merges every agent-c
+PR, migration PRs included (Sami retired the merge queue, AGENTC-1089, 2026-10-02): a
+migration PR re-parents onto main's current alembic head right before merging, and
+two heads that still land are caught on main and fixed forward. A Legion-produced PR is
+merged by the lane that commissioned it. In `sjawhar/legion` the Legion PO's reviewer
+App approves the exact head, then the owner merges with `--match-head-commit`. Other
+repos: the owner merges once their own required checks pass. No admin merge or bypass
+of branch protection. After any merge, the owner still verifies delivery and the
 changed production path.
 
 `ce-babysit-pr` owns the watch loop: remote snapshots, claim/act/confirm dedup,
@@ -214,9 +215,8 @@ The packet contains:
 An unread item, unresolved finding, pending expected review or unwaived required
 scenario means **not merge-ready**. Report the exact blocker, command and
 supporting record, keep the detector active where it can make progress, and
-finish reachable work. Once genuinely ready, merge it yourself where the top of
-this skill says the owner merges; otherwise send the packet to the organizer (or
-Sami where there is no queue) and stop mutating the head.
+finish reachable work. Once genuinely ready, merge it yourself as the top of this
+skill describes, then stop mutating the head.
 
 ## 6. After someone else merges
 
