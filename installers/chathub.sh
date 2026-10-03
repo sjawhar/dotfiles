@@ -64,7 +64,8 @@ render_bridge() {
             | .database.type = \"sqlite3-fk-wal\"
             | .database.uri = \"$db\"
             | .encryption.allow = false
-            | .provisioning.shared_secret = \"disable\"
+            | .provisioning.shared_secret = \"generate\"
+            | .provisioning.allow_matrix_auth = true
             | .backfill.enabled = true
             | .backfill.max_initial_messages = 50" "$cfg"
     else
