@@ -99,7 +99,8 @@ if [ "$new_registration" = true ]; then
 fi
 for bridge in "${BRIDGES[@]}"; do
     name="${bridge%% *}"
-    systemctl --user enable --now "mautrix@$name" 2>/dev/null \
+    # reenable, not enable: it moves an instance's wants-link when [Install] changes.
+    { systemctl --user reenable "mautrix@$name" && systemctl --user start "mautrix@$name"; } 2>/dev/null \
         || echo "NOTE: could not enable mautrix@$name (no user systemd session here?) — enable it on the hub machine."
 done
 
