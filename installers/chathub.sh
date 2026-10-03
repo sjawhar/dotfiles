@@ -38,7 +38,15 @@ render_bridge() {
     local dir="$STATE/$name" cfg="$STATE/$name/config.yaml" reg="$STATE/registrations/$name.yaml"
     local db="file:$dir/$name.db?_txlock=immediate"
     install -d -m 0700 "$dir"
-    [ -f "$cfg" ] || "$MISE" exec -- "mautrix-$name" -e -c "$cfg" >/dev/null
+    if [ ! -f "$cfg" ] && [ "$layout" = bridgev2 ]; then
+        "$MISE" exec -- "mautrix-$name" -e -c "$cfg" >/dev/null
+    elif [ ! -f "$cfg" ]; then
+        # Legacy bridges have no -e; their example config ships in the repo at the
+        # release tag the binary was pinned from.
+        local version
+        version="$("$MISE" current "github:mautrix/$name")"
+        curl -fsSL "https://raw.githubusercontent.com/mautrix/$name/v$version/example-config.yaml" -o "$cfg"
+    fi
 
     local common=".homeserver.address = \"http://127.0.0.1:8008\"
         | .homeserver.domain = \"chathub\"
