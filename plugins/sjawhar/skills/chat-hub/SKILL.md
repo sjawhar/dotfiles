@@ -23,7 +23,8 @@ Each bridged person is a user whose ID names the network:
 | Instagram | `@instagram_…:chathub` | `@instagrambot:chathub` |
 | Discord | `@discord_…:chathub` | `@discordbot:chathub` |
 
-Room names are the contact or group name the network reported.
+Room names are the contact or group name the network reported. The DM with each
+bridge bot is that network's control room.
 
 ## Reading
 
@@ -41,22 +42,25 @@ Room names are the contact or group name the network reported.
 - In an existing conversation, follow what Sami asked for that conversation.
 - `matrix_send_message` (room, body) for a new message, `matrix_reply` to answer a
   specific one.
-- To start a conversation that has no room yet, ask that network's bridge bot; its
-  `help` lists the command (for most bridges, `start-chat <phone number or ID>`).
+- To start a conversation that has no room yet, send `start-chat <phone number or ID>`
+  to that network's bridge bot. `help` in the bot's DM lists every command; Discord's
+  bot has its own set.
 
 ## Logins
 
 Each network was logged in once through its bridge bot. When a bot posts that the login
-expired or was logged out, tell Sami which network, then log back in through the bot
-(`login`). QR codes come back as images: download with `matrix_download_media`, then
-`forward open` the file so it appears on Sami's laptop for him to scan. Messenger and
-Instagram log in with browser cookies Sami copies from a private window.
+expired or was logged out, tell Sami which network, then log back in through the bot:
+`login` (Discord: `login-qr`). QR codes come back as images: download with
+`matrix_download_media`, then `forward open` the file so it appears on Sami's laptop for
+him to scan. Messenger and Instagram log in with browser cookies Sami copies from a
+private window.
 
 ## Running the hub (on oryx)
 
 - Services: `systemctl --user status tuwunel 'mautrix@*'`; logs with
   `journalctl --user -u mautrix@<network>`, where `<network>` is gmessages, whatsapp,
-  signal, meta (Messenger), instagram or discord.
+  signal, meta (Messenger), instagram or discord. Restarting `tuwunel` restarts every
+  bridge with it.
 - State lives in `~/.local/share/chathub/`. Re-running `installers/chathub.sh`
   restores every bridge's config to what the hub needs and keeps the bridges' tokens.
 - Design: `docs/plans/2026-10-03-chat-hub-design.md` in the dotfiles repo.
