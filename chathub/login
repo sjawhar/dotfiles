@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Drive a chat hub bridge login (or any bot command) from a terminal or an agent.
+
+Usage: secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- chathub/login <network> [command... | -]
+
+Sends `command` (default: `login`) to the network's bridge bot in its DM, prints every
+bot reply, and opens any image the bot sends (QR codes) on Sami's laptop with
+`forward open`. Exits 0 when the bot reports a successful login, 1 on failure, and 2
+when the bot asks for input or goes quiet, so the caller can answer with another run,
+e.g. `chathub/login whatsapp login qr`. A command of `-` is read from stdin and never
+printed: use it for cookies or tokens, which must not appear on a command line.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+BOTS = {
+    "gmessages": "gmessagesbot", "whatsapp": "whatsappbot", "signal": "signalbot",
+    "meta": "metabot", "instagram": "instagrambot", "discord": "discordbot",
+}
+SUCCESS = re.compile(r"successfully logged in|logged in as|login successful", re.I)
+FAILURE = re.compile(r"login failed|failed to log in|timed out|cancell?ed|error", re.I)
+QUIET_SECS = 120
+
+HS = os.environ["MATRIX_HUB_URL"].rstrip("/")
+TOKEN = os.environ["MATRIX_HUB_TOKEN"]
+ME = "@sami:chathub"
+
+
+def call(method, path, body=None, raw=False):
+    req = urllib.request.Request(
+        HS + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        data = r.read()
+    return data if raw else json.loads(data or b"{}")
+
+
+def bot_room(bot):
+    direct_path = f"/_matrix/client/v3/user/{urllib.parse.quote(ME)}/account_data/m.direct"
+    try:
+        direct = call("GET", direct_path)
+    except urllib.error.HTTPError:
+        direct = {}
+    if direct.get(bot):
+        return direct[bot][0]
+    room = call("POST", "/_matrix/client/v3/createRoom",
+                {"invite": [bot], "is_direct": True, "preset": "trusted_private_chat"})["room_id"]
+    direct[bot] = [room]
+    call("PUT", direct_path, direct)
+    return room
+
+
+def open_on_laptop(mxc, network):
+    server, media_id = mxc.removeprefix("mxc://").split("/", 1)
+    data = call("GET", f"/_matrix/client/v1/media/download/{server}/{media_id}", raw=True)
+    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"chathub-{network}-{media_id}.png")
+    with open(path, "wb") as f:
+        f.write(data)
+    os.chmod(path, 0o600)
+    opened = subprocess.run(["forward", "open", path], capture_output=True, text=True)
+    print(f"[image] {path} ({'opened on laptop' if opened.returncode == 0 else 'forward open failed: ' + opened.stderr.strip()})")
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in BOTS:
+        sys.exit(f"usage: login <{'|'.join(BOTS)}> [command...]")
+    network = sys.argv[1]
+    secret = sys.argv[2:] == ["-"]
+    command = sys.stdin.read().strip() if secret else (" ".join(sys.argv[2:]) or "login")
+    bot = f"@{BOTS[network]}:chathub"
+    room = urllib.parse.quote(bot_room(bot))
+
+    sent = call("PUT", f"/_matrix/client/v3/rooms/{room}/send/m.room.message/login{time.time_ns()}",
+                {"msgtype": "m.text", "body": command})["event_id"]
+    print(f"> {bot}: {'<stdin, not shown>' if secret else command}")
+
+    # Bot replies are the bot's events after ours, read newest-first each round; a
+    # forward page from the room's "now" token returns nothing on Tuwunel.
+    seen = {sent}
+    sent_ts = None
+    last_reply = time.time()
+    while time.time() - last_reply < QUIET_SECS:
+        chunk = call("GET", f"/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=50").get("chunk", [])
+        if sent_ts is None:
+            sent_ts = next((ev["origin_server_ts"] for ev in chunk if ev.get("event_id") == sent), None)
+        fresh = sorted((ev for ev in chunk
+                        if ev.get("event_id") not in seen and ev.get("sender") == bot
+                        and ev.get("type") == "m.room.message"
+                        and sent_ts is not None and ev.get("origin_server_ts", 0) >= sent_ts),
+                       key=lambda ev: ev["origin_server_ts"])
+        for ev in fresh:
+            seen.add(ev["event_id"])
+            last_reply = time.time()
+            content = ev.get("content", {})
+            if content.get("msgtype") == "m.image" and content.get("url"):
+                open_on_laptop(content["url"], network)
+                continue
+            body = content.get("body", "")
+            print(f"< {body}")
+            if SUCCESS.search(body):
+                sys.exit(0)
+            if FAILURE.search(body):
+                sys.exit(1)
+        time.sleep(2)
+    print(f"(no bot reply for {QUIET_SECS}s; it may be waiting for input)")
+    sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
