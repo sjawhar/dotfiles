@@ -29,6 +29,7 @@ install -d -m 0700 "$STATE"
 install -d -m 0700 "$STATE/registrations"
 
 new_registration=false
+changed=()
 
 # Render one bridge's config from its own example, then pin every value the hub
 # depends on. Assignments, not a merge: a merge would keep the example's
@@ -38,6 +39,8 @@ render_bridge() {
     local dir="$STATE/$name" cfg="$STATE/$name/config.yaml" reg="$STATE/registrations/$name.yaml"
     local db="file:$dir/$name.db?_txlock=immediate"
     install -d -m 0700 "$dir"
+    local before=""
+    [ -f "$cfg" ] && before="$(sha256sum "$cfg")"
     if [ ! -f "$cfg" ] && [ "$layout" = bridgev2 ]; then
         "$MISE" exec -- "mautrix-$name" -e -c "$cfg" >/dev/null
     elif [ ! -f "$cfg" ]; then
@@ -71,6 +74,10 @@ render_bridge() {
             | .bridge.encryption.allow = false" "$cfg"
     fi
     chmod 600 "$cfg"
+    # A running bridge read its config at startup; one this run corrected needs a restart.
+    if [ -n "$before" ] && [ "$before" != "$(sha256sum "$cfg")" ]; then
+        changed+=("$name")
+    fi
 
     if [ ! -f "$reg" ]; then
         "$MISE" exec -- "mautrix-$name" -g -c "$cfg" -r "$reg" >/dev/null
@@ -102,6 +109,10 @@ for bridge in "${BRIDGES[@]}"; do
     # reenable, not enable: it moves an instance's wants-link when [Install] changes.
     { systemctl --user reenable "mautrix@$name" && systemctl --user start "mautrix@$name"; } 2>/dev/null \
         || echo "NOTE: could not enable mautrix@$name (no user systemd session here?) — enable it on the hub machine."
+done
+for name in "${changed[@]}"; do
+    systemctl --user try-restart "mautrix@$name" 2>/dev/null \
+        || echo "NOTE: could not restart mautrix@$name after its config changed — restart it on the hub machine."
 done
 
 echo "Chat hub installed. First run only: ${DOTFILES_DIR}/chathub/bootstrap-user creates @sami:chathub and the agent token."
