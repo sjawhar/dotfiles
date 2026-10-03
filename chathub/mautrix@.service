@@ -1,0 +1,12 @@
+[Unit]
+Description=Chat hub bridge mautrix-%i
+After=tuwunel.service
+Requires=tuwunel.service
+
+[Service]
+ExecStart=%h/.dotfiles/chathub/bridge-serve %i
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

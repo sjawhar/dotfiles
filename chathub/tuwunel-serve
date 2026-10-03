@@ -1,0 +1,20 @@
+#!/bin/bash
+# Run the chat hub homeserver. Extra arguments pass through to tuwunel
+# (chathub/bootstrap-user adds an admin_execute override).
+set -euo pipefail
+
+DOTFILES="${DOTFILES_DIR:-$HOME/.dotfiles}"
+MISE="$DOTFILES/bin/mise"
+export MISE_AUTO_INSTALL=0
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+STATE="${XDG_DATA_HOME:-$HOME/.local/share}/chathub"
+
+# Bridges reach the hub on loopback; agents on other tailnet machines reach it on
+# this machine's tailnet address with a Matrix access token.
+TAILNET_V4="$(tailscale ip -4)"
+
+exec "$MISE" exec -- tuwunel -c "$DOTFILES/chathub/tuwunel.toml" \
+    -O "database_path=\"$STATE/tuwunel\"" \
+    -O "appservice_dir=\"$STATE/registrations\"" \
+    -O "address=[\"127.0.0.1\", \"$TAILNET_V4\"]" \
+    "$@"
