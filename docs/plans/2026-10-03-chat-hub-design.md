@@ -28,8 +28,8 @@ MCP for agents.
 | mautrix-whatsapp | WhatsApp linked device | loopback |
 | mautrix-signal | Signal linked device | loopback |
 | mautrix-discord | Discord user login | loopback |
-| mautrix-meta (instagram) | Instagram DMs; mautrix-meta runs one mode per instance | loopback |
-| mautrix-meta (messenger) | Messenger, second instance | loopback |
+| mautrix-instagram | Instagram DMs; a separate binary from the same mautrix/meta release since 26.08 | loopback |
+| mautrix-meta | Messenger | loopback |
 | matrix-mcp | Agent tools: list chats, read, read thread, send text/file, members, user search | stdio, spawned per agent session |
 
 All binaries are pinned in `mise.toml` (Tuwunel and the bridges ship linux amd64 release
