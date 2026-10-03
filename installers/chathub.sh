@@ -20,9 +20,15 @@ BRIDGES=(
 )
 
 for tool in github:matrix-construct/tuwunel github:mautrix/gmessages github:mautrix/whatsapp \
-    github:mautrix/signal github:mautrix/discord github:mautrix/meta mautrix-instagram; do
+    github:mautrix/signal github:mautrix/discord github:mautrix/meta mautrix-instagram \
+    github:mautrix/manager; do
     "$MISE" install "$tool" >/dev/null
 done
+# chathub/login-screen shows mautrix-manager through VNC and noVNC (Xvfb ships with
+# the desktop).
+if ! dpkg -s x11vnc novnc >/dev/null 2>&1; then
+    sudo apt-get install -y -qq x11vnc novnc >/dev/null
+fi
 YQ="$("$MISE" which yq)"
 
 install -d -m 0700 "$STATE"

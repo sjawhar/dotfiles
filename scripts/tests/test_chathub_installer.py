@@ -148,6 +148,7 @@ class ChathubInstaller(unittest.TestCase):
         write_executable(self.dotfiles / "bin" / "mise", MISE_STUB)
         write_executable(stubs / "systemctl", 'echo "$*" >> "$SYSTEMCTL_LOG"')
         write_executable(stubs / "curl", CURL_STUB)
+        write_executable(stubs / "dpkg", "exit 0")  # login-screen packages count as installed
         self.generate_log = self.root / "generate.log"
         self.env = {
             **os.environ,
