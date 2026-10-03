@@ -16,10 +16,14 @@ fi
 password="$(openssl rand -hex 24)"
 
 systemctl --user stop tuwunel
-# Tuwunel logs the password of a user it creates, so this one-shot run's output is
-# discarded instead of reaching the journal.
+# create-user fails harmlessly if a previous run already created @sami (errors are
+# ignored); reset-password then sets the password this run knows either way. Tuwunel
+# logs passwords it sets, so this one-shot run's output is discarded instead of
+# reaching the journal.
 "$DOTFILES/chathub/tuwunel-serve" \
-    -O "admin_execute=[\"users create-user sami $password\", \"server shutdown\"]" >/dev/null 2>&1
+    -O "admin_execute_errors_ignore=true" \
+    -O "admin_execute=[\"users create-user sami $password\", \"users reset-password sami $password\", \"server shutdown\"]" \
+    >/dev/null 2>&1
 systemctl --user start tuwunel
 
 for _ in $(seq 1 30); do
@@ -48,7 +52,7 @@ printf '%s\n' \
     'MATRIX_HUB_PASSWORD=$password' >> "\$1"
 EOF
 chmod 700 "$editor"
-EDITOR="$editor" secrets edit
+EDITOR="$editor" secrets edit --source dotfiles
 
 echo "Stored MATRIX_HUB_URL, MATRIX_HUB_TOKEN and MATRIX_HUB_PASSWORD in $DOTFILES/secrets.env."
 echo "Commit and push it so agents on other machines can read them."
