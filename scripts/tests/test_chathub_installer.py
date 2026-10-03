@@ -189,7 +189,9 @@ class ChathubInstaller(unittest.TestCase):
         self.assertEqual(c["database"]["uri"], f"file:{self.state}/whatsapp/whatsapp.db?_txlock=immediate")
         self.assertEqual(c["bridge"]["permissions"], {"@sami:chathub": "admin"})
         self.assertFalse(c["encryption"]["allow"])
-        self.assertEqual(c["provisioning"]["shared_secret"], "disable")
+        # mautrix-manager logs in through the provisioning API with the hub token.
+        self.assertEqual(c["provisioning"]["shared_secret"], "generate")
+        self.assertTrue(c["provisioning"]["allow_matrix_auth"])
         self.assertTrue((self.state / "registrations" / "whatsapp.yaml").is_file())
 
     def test_legacy_discord_config_uses_its_own_layout(self) -> None:
