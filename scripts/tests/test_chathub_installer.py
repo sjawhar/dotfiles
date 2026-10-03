@@ -221,14 +221,20 @@ class ChathubInstaller(unittest.TestCase):
         generated = self.generate_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(generated.count("mautrix-signal"), 1)
 
-    def test_rerun_restores_values_that_drifted(self) -> None:
+    def test_rerun_restores_drift_and_restarts_only_that_bridge(self) -> None:
+        """A bridge reads its config at startup, so a corrected config needs a restart;
+        bridges whose config did not change must keep running."""
         self.install()
         cfg = self.state / "gmessages" / "config.yaml"
         subprocess.run([REAL_YQ, "-i", '.homeserver.domain = "elsewhere"', str(cfg)], check=True)
+        log = self.root / "systemctl.log"
+        log.write_text("", encoding="utf-8")
 
         self.install()
 
         self.assertEqual(self.config("gmessages")["homeserver"]["domain"], "chathub")
+        restarts = [l for l in log.read_text(encoding="utf-8").splitlines() if "try-restart mautrix@" in l]
+        self.assertEqual(restarts, ["--user try-restart mautrix@gmessages"])
 
     def test_state_is_private(self) -> None:
         self.install()
