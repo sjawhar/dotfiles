@@ -94,6 +94,19 @@ zoxide = "0.10.0"
 # matteo.collina published by hand two weeks after 10.0.0 without provenance
 # (reviewed 2026-09-13: same integrity on npmjs.org, maintainer publish).
 "npm:@sjawhar/whatsapp-mcp" = { version = "2.4.0", allow_low_downloads = true, allow_builds = ["better-sqlite3"], trust_policy_excludes = ["pino@9.14.0"] }
+# Chat hub (docs/plans/2026-10-03-chat-hub-design.md): Tuwunel and the mautrix
+# bridges run on oryx only (installers/chathub.sh); matrix-mcp is the agents'
+# client on every machine (scripts/chathub-mcp).
+"github:matrix-construct/tuwunel" = { version = "1.9.3", asset_pattern = "*-x86_64-v2-linux-gnu-tuwunel.zst", bin = "tuwunel" }
+"github:mautrix/gmessages" = { version = "0.2609.0", asset_pattern = "mautrix-gmessages-amd64", bin = "mautrix-gmessages" }
+"github:mautrix/whatsapp" = { version = "0.2609.0", asset_pattern = "mautrix-whatsapp-amd64", bin = "mautrix-whatsapp" }
+"github:mautrix/signal" = { version = "0.2609.0", asset_pattern = "mautrix-signal-amd64", bin = "mautrix-signal" }
+"github:mautrix/discord" = { version = "0.7.7", asset_pattern = "mautrix-discord-amd64", bin = "mautrix-discord" }
+# mautrix/meta publishes Messenger and Instagram as two binaries of one release;
+# the mautrix-instagram alias in [tool_alias] gives the second its own install.
+"github:mautrix/meta" = { version = "0.2609.0", asset_pattern = "mautrix-meta-amd64", bin = "mautrix-meta" }
+mautrix-instagram = { version = "0.2609.0", asset_pattern = "mautrix-instagram-amd64", bin = "mautrix-instagram" }
+"pipx:matrix-mcp" = "0.8.1"
 
 # Development
 "npm:basedpyright" = "1.39.10"
@@ -138,6 +151,7 @@ tt = "github:sjawhar/time-tracker"
 forward = "github:sjawhar/forward"
 secrets = "github:sjawhar/forward"
 agent-secrets = "github:sjawhar/legion"
+mautrix-instagram = "github:mautrix/meta"
 
 [tools.tt]
 version = "latest"
