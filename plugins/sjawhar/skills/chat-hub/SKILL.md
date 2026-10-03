@@ -49,11 +49,16 @@ bridge bot is that network's control room.
 ## Logins
 
 Each network was logged in once through its bridge bot. When a bot posts that the login
-expired or was logged out, tell Sami which network, then log back in through the bot:
-`login` (Discord: `login-qr`). QR codes come back as images: download with
-`matrix_download_media`, then `forward open` the file so it appears on Sami's laptop for
-him to scan. Messenger and Instagram log in with browser cookies Sami copies from a
-private window.
+expired or was logged out, tell Sami which network, then run on oryx:
+
+    secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/chathub/login <network> login <flow>
+
+It sends the command to the bot, opens any QR code on Sami's laptop for him to scan,
+and prints the bot's replies (exit 0 means logged in). Flows: whatsapp `qr`, signal
+`qr`, discord `login-qr` (as the whole command), gmessages `google`, meta `messenger`,
+instagram `instagram`. The cookie flows need Sami: he signs in to the site in a
+Firefox private window, copies the request the bot names as cURL, and you pipe it in
+with `-` (read from stdin, never on a command line).
 
 ## Running the hub (on oryx)
 
