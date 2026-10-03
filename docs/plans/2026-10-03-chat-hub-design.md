@@ -76,6 +76,10 @@ For each of the six networks: a message Sami sends to his own account from anoth
 device shows up through the MCP, and a message an agent sends through the MCP arrives in
 the native app. Then the old Baileys WhatsApp MCP daemon is retired.
 
+Accepted by Sami on 2026-10-03 with both directions checked on WhatsApp, Signal and SMS,
+and inbound only on Messenger and Instagram: those have no chat with oneself to test
+sending in.
+
 ## Out of scope for v1
 
 Push of inbound messages to envoy, end-to-end encryption inside the hub, a human Matrix
