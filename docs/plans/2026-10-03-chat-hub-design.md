@@ -74,8 +74,7 @@ noVNC and `forward port`. Google Messages finishes with an emoji tap on his phon
 
 For each of the six networks: a message Sami sends to his own account from another
 device shows up through the MCP, and a message an agent sends through the MCP arrives in
-the native app. Then the laptop WhatsApp MCP (`installers/whatsapp.sh`,
-`whatsapp/`) is retired.
+the native app. Then the old Baileys WhatsApp MCP daemon is retired.
 
 ## Out of scope for v1
 

@@ -86,14 +86,6 @@ zoxide = "0.10.0"
 # Vercel CLI: agent boxes read Lyon's Vercel request logs with the host's own CLI
 # login, mounted by agentbox/mounts (AGENTC-61).
 "npm:vercel" = "59.14.0"
-# WhatsApp MCP (Baileys fork): the laptop runs it as a daemon
-# (whatsapp/whatsapp-mcp.service) and its omp reaches it with the same
-# binary's `--connect` stdio client (installers/whatsapp.sh). aube gates: the package is
-# my own (unpopular by download count); better-sqlite3 fetches its prebuilt
-# native binding in an install script; and it pins pino@9.14.0, a 9.x backport
-# matteo.collina published by hand two weeks after 10.0.0 without provenance
-# (reviewed 2026-09-13: same integrity on npmjs.org, maintainer publish).
-"npm:@sjawhar/whatsapp-mcp" = { version = "2.4.0", allow_low_downloads = true, allow_builds = ["better-sqlite3"], trust_policy_excludes = ["pino@9.14.0"] }
 # Chat hub (docs/plans/2026-10-03-chat-hub-design.md): Tuwunel and the mautrix
 # bridges run on oryx only (installers/chathub.sh); matrix-mcp is the agents'
 # client on every machine (scripts/chathub-mcp).
