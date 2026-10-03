@@ -75,10 +75,12 @@ bridge:
 
 # Stands in for `mise`: `which yq` finds the real yq, `exec -- mautrix-X -e -c F`
 # writes the bridge's example config, and `-g -c F -r R` writes a registration and
-# fresh tokens the way the bridges do, counting each generation.
+# fresh tokens the way the bridges do, counting each generation. mautrix-discord
+# predates `-e` and rejects it, like the real 0.7.7 binary; `current` reports the pin.
 MISE_STUB = r"""
 case "${1:-}" in
     which) if [ "${2:-}" = yq ]; then echo "$REAL_YQ"; fi; exit 0 ;;
+    current) echo "0.7.7"; exit 0 ;;
     install) exit 0 ;;
     exec) shift; [ "${1:-}" = "--" ] && shift ;;
     *) exit 0 ;;
@@ -95,12 +97,31 @@ while [ $# -gt 0 ]; do
     shift
 done
 if [ "$mode" = example ]; then
-    if [ "$bin" = mautrix-discord ]; then cp "$LEGACY_EXAMPLE" "$cfg"; else cp "$BRIDGEV2_EXAMPLE" "$cfg"; fi
+    if [ "$bin" = mautrix-discord ]; then echo "Unknown flag: e" >&2; exit 1; fi
+    cp "$BRIDGEV2_EXAMPLE" "$cfg"
 elif [ "$mode" = generate ]; then
     echo "$bin" >> "$GENERATE_LOG"
     token="AS-$RANDOM-$RANDOM"
     "$REAL_YQ" -i ".appservice.as_token = \"$token\"" "$cfg"
     printf 'id: %s\nas_token: %s\n' "${bin#mautrix-}" "$token" > "$reg"
+fi
+"""
+
+# Stands in for `curl -fsSL URL -o FILE`: serves the legacy example config only at
+# the pinned tag's URL, and fails like curl -f does for anything else.
+CURL_STUB = r"""
+url=""; out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift ;;
+        http*) url="$1" ;;
+    esac
+    shift
+done
+if [ "$url" = "https://raw.githubusercontent.com/mautrix/discord/v0.7.7/example-config.yaml" ]; then
+    cp "$LEGACY_EXAMPLE" "$out"
+else
+    echo "curl: (22) The requested URL returned error: 404" >&2; exit 22
 fi
 """
 
@@ -126,6 +147,7 @@ class ChathubInstaller(unittest.TestCase):
         (self.root / "legacy.yaml").write_text(LEGACY_EXAMPLE, encoding="utf-8")
         write_executable(self.dotfiles / "bin" / "mise", MISE_STUB)
         write_executable(stubs / "systemctl", 'echo "$*" >> "$SYSTEMCTL_LOG"')
+        write_executable(stubs / "curl", CURL_STUB)
         self.generate_log = self.root / "generate.log"
         self.env = {
             **os.environ,
