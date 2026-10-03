@@ -57,15 +57,33 @@ def bot_room(bot):
     return room
 
 
-def open_on_laptop(mxc, network):
+QR_PAGE = """<!doctype html><meta charset=utf-8><title>Scan to link {network}</title>
+<style>body{{font:16px sans-serif;text-align:center;margin-top:40px}}img{{width:360px;image-rendering:pixelated}}</style>
+<h2>Scan with {network} to link it to the chat hub</h2><img id=q src=qr.png>
+<p>The code rotates; this page follows it.</p>
+<script>setInterval(() => {{ document.getElementById('q').src = 'qr.png?t=' + Date.now(); }}, 2000);</script>
+"""
+
+
+def show_on_laptop(mxc, network, state):
+    """Write the newest bot image to one page that follows it; open that page once."""
     server, media_id = mxc.removeprefix("mxc://").split("/", 1)
     data = call("GET", f"/_matrix/client/v1/media/download/{server}/{media_id}", raw=True)
-    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"chathub-{network}-{media_id}.png")
-    with open(path, "wb") as f:
+    page_dir = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"chathub-login-{network}")
+    os.makedirs(page_dir, mode=0o700, exist_ok=True)
+    tmp = os.path.join(page_dir, "qr.png.tmp")
+    with open(tmp, "wb") as f:
         f.write(data)
-    os.chmod(path, 0o600)
-    opened = subprocess.run(["forward", "open", path], capture_output=True, text=True)
-    print(f"[image] {path} ({'opened on laptop' if opened.returncode == 0 else 'forward open failed: ' + opened.stderr.strip()})")
+    os.replace(tmp, os.path.join(page_dir, "qr.png"))
+    if state.get("opened"):
+        print("[image] newer code shown on the open page")
+        return
+    page = os.path.join(page_dir, "index.html")
+    with open(page, "w") as f:
+        f.write(QR_PAGE.format(network=network))
+    opened = subprocess.run(["forward", "open", page], capture_output=True, text=True)
+    state["opened"] = opened.returncode == 0
+    print(f"[image] {'opened on laptop' if state['opened'] else 'forward open failed: ' + opened.stderr.strip()}: {page}")
 
 
 def main():
@@ -84,6 +102,7 @@ def main():
     # Bot replies are the bot's events after ours, read newest-first each round; a
     # forward page from the room's "now" token returns nothing on Tuwunel.
     seen = {sent}
+    page_state = {}
     sent_ts = None
     last_reply = time.time()
     while time.time() - last_reply < QUIET_SECS:
@@ -99,8 +118,9 @@ def main():
             seen.add(ev["event_id"])
             last_reply = time.time()
             content = ev.get("content", {})
+            content = content.get("m.new_content", content)  # QR rotations arrive as edits
             if content.get("msgtype") == "m.image" and content.get("url"):
-                open_on_laptop(content["url"], network)
+                show_on_laptop(content["url"], network, page_state)
                 continue
             body = content.get("body", "")
             print(f"< {body}")
