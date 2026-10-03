@@ -37,6 +37,12 @@ binaries; matrix-mcp from PyPI). Each server is its own user systemd unit with
 `Restart=on-failure`. Bridges use SQLite. Encryption is off inside the hub: every portal
 room is unencrypted, so messages are stored in plaintext on oryx's disk.
 
+Bridges double-puppet `@sami` through one URL-less `doublepuppet` registration: they
+join every chat room as him, so no invites wait to be accepted, and what he sends from
+his phone appears as sent by him. Sami is the only user, so WhatsApp and Signal name
+people from his phone's contacts first. The bridges leave that off by default so that
+one user's contacts don't leak to the others on a shared bridge.
+
 ## State and secrets
 
 - Committed in dotfiles (`chathub/`): config templates, units, the MCP launcher,
@@ -58,9 +64,11 @@ room is unencrypted, so messages are stored in plaintext on oryx's disk.
 
 ## Logins (once per network, by Sami)
 
-Each bridge is logged in through its bot. QR codes (Google Messages, WhatsApp, Signal,
-Discord) are rendered on oryx and opened on Sami's laptop with `forward open`. Meta
-(Instagram, Messenger) needs cookies copied from a private browser window.
+Each bridge is logged in through its bot. WhatsApp, Signal and Discord show a QR code,
+which `chathub/login` opens on Sami's laptop with `forward open`. Google Messages,
+Messenger and Instagram need a website sign-in: `chathub/login-screen` runs
+mautrix-manager on a virtual display on oryx and shows it in Sami's browser through
+noVNC and `forward port`. Google Messages finishes with an emoji tap on his phone.
 
 ## Done means
 
