@@ -104,6 +104,8 @@ render_bridge() {
             | .appservice.database.type = \"sqlite3-fk-wal\"
             | .appservice.database.uri = \"$db\"
             | .bridge.login_shared_secret_map = {\"chathub\": \"$dp_secret\"}
+            | .bridge.backfill.forward_limits.initial.dm = 50
+            | .bridge.backfill.forward_limits.missed.dm = -1
             | .bridge.encryption.allow = false" "$cfg"
     fi
     # One user, so name people the way Sami's phone does. The bridges leave contact-list

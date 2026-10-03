@@ -205,6 +205,10 @@ class ChathubInstaller(unittest.TestCase):
         self.assertEqual(c["appservice"]["database"]["uri"], f"file:{self.state}/discord/discord.db?_txlock=immediate")
         self.assertEqual(c["bridge"]["permissions"], {"@sami:chathub": "admin"})
         self.assertFalse(c["bridge"]["encryption"]["allow"])
+        # DMs carry history like the other bridges, and messages sent while the bridge was
+        # down are fetched when it starts again.
+        self.assertEqual(c["bridge"]["backfill"]["forward_limits"]["initial"]["dm"], 50)
+        self.assertEqual(c["bridge"]["backfill"]["forward_limits"]["missed"]["dm"], -1)
         self.assertNotIn("database", c)
 
     def test_every_bridge_double_puppets_through_one_hub_registration(self) -> None:
