@@ -1,0 +1,14 @@
+#!/bin/bash
+# Agents' MCP client for the chat hub (docs/plans/2026-10-03-chat-hub-design.md).
+# omp runs it as `secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- chathub-mcp`. matrix-mcp
+# reads its login from a config file, so each session writes one into a private
+# directory on the per-user tmpfs and removes it when the server exits.
+set -euo pipefail
+
+cfg="$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" chathub-mcp.XXXXXX)"
+trap 'rm -rf "$cfg"' EXIT
+export XDG_CONFIG_HOME="$cfg"
+
+matrix-mcp auth token "${MATRIX_HUB_URL:?}" "@sami:chathub" "${MATRIX_HUB_TOKEN:?}" --device-id AGENTS >/dev/null
+# Not exec: the trap must remove the token copy when the server exits.
+matrix-mcp serve
