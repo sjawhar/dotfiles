@@ -1,6 +1,7 @@
-# Shared jj config (symlinked to ~/.jjconfig.toml)
-# User-specific settings (name, email) go in ~/.config/jj/config.toml
-# which has higher priority and overrides settings here.
+# Shared jj config. Shells (.bashrc) and agent boxes load it through JJ_CONFIG
+# after ~/.config/jj/config.toml, the per-machine file holding user.name and
+# user.email, so a value here wins over that file. jj run without JJ_CONFIG
+# reads this file through the ~/.jjconfig.toml symlink first, and that file wins.
 
 [revset-aliases]
 'closest_bookmark(to)' = 'heads(::to & bookmarks())'
@@ -67,3 +68,19 @@ key = "~/.ssh/jj-signing.pub"
 
 [signing.backends.ssh]
 allowed-signers = "~/.dotfiles/jj-allowed-signers"
+
+# sjawhar/legion is public and commits as sami@thecybermonk.com. jj has no
+# remote condition, so this matches Legion's jj checkout by path. Every
+# workspace of a repository has its main checkout's repository path, so the one
+# entry covers every workspace of ~/src/legion wherever it lives. The Legion
+# daemon's own workspaces commit as their role's GitHub App through
+# JJ_USER/JJ_EMAIL, which outrank any config. git's half of the rule is the
+# remote-URL include in .gitconfig, and the two must agree: with behavior =
+# "own", jj drops the signature of a commit whose author email is not its
+# user.email when it rewrites it, so a commit git made as cybermonk would lose
+# its signature the first time jj rewrote it as trajectorylabs.
+[[--scope]]
+--when.repositories = ["~/src/legion"]
+[--scope.user]
+name = "Sami Jawhar"
+email = "sami@thecybermonk.com"
