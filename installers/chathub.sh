@@ -106,6 +106,16 @@ render_bridge() {
             | .bridge.login_shared_secret_map = {\"chathub\": \"$dp_secret\"}
             | .bridge.encryption.allow = false" "$cfg"
     fi
+    # One user, so name people the way Sami's phone does. The bridges leave contact-list
+    # names out by default only so they don't leak between users of a shared bridge.
+    local template=""
+    case $name in
+        whatsapp) template='{{or .FullName .BusinessName .PushName .Phone .RedactedPhone "Unknown user"}} (WA)' ;;
+        signal) template='{{or .Nickname .ContactName .ProfileName .PhoneNumber "Unknown user"}}' ;;
+    esac
+    if [ -n "$template" ]; then
+        TEMPLATE="$template" "$YQ" -i '.network.displayname_template = strenv(TEMPLATE)' "$cfg"
+    fi
     chmod 600 "$cfg"
     # A running bridge read its config at startup; one this run corrected needs a restart.
     if [ -n "$before" ] && [ "$before" != "$(sha256sum "$cfg")" ]; then

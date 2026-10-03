@@ -222,6 +222,16 @@ class ChathubInstaller(unittest.TestCase):
             self.assertEqual(self.config(bridge)["double_puppet"]["secrets"], secret, bridge)
         self.assertEqual(self.config("discord")["bridge"]["login_shared_secret_map"], secret)
 
+    def test_people_are_named_as_in_samis_contacts(self) -> None:
+        """One user, so the names from Sami's contacts come first; the bridges leave them
+        out by default only so they don't leak between users of a shared bridge."""
+        self.install()
+
+        whatsapp = self.config("whatsapp")["network"]["displayname_template"]
+        self.assertTrue(whatsapp.startswith("{{or .FullName .BusinessName .PushName .Phone"), whatsapp)
+        signal = self.config("signal")["network"]["displayname_template"]
+        self.assertTrue(signal.startswith("{{or .Nickname .ContactName .ProfileName .PhoneNumber"), signal)
+
     def test_every_bridge_listens_on_its_own_port(self) -> None:
         self.install()
 
