@@ -171,10 +171,10 @@ class ChathubInstaller(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def config(self, bridge: str) -> dict:
-        out = subprocess.run(
-            [REAL_YQ, "-o=json", ".", str(self.state / bridge / "config.yaml")],
-            capture_output=True, text=True, check=True,
-        ).stdout
+        return self.yaml(self.state / bridge / "config.yaml")
+
+    def yaml(self, path: Path) -> dict:
+        out = subprocess.run([REAL_YQ, "-o=json", ".", str(path)], capture_output=True, text=True, check=True).stdout
         return json.loads(out)
 
     def test_bridgev2_config_points_at_the_hub_and_only_sami_may_use_it(self) -> None:
@@ -207,6 +207,21 @@ class ChathubInstaller(unittest.TestCase):
         self.assertFalse(c["bridge"]["encryption"]["allow"])
         self.assertNotIn("database", c)
 
+    def test_every_bridge_double_puppets_through_one_hub_registration(self) -> None:
+        """Bridges act as @sami through the doublepuppet registration, so they join new
+        chat rooms for him instead of leaving invites that nobody accepts."""
+        self.install()
+
+        path = self.state / "registrations" / "doublepuppet.yaml"
+        reg = self.yaml(path)
+        self.assertIsNone(reg["url"])  # Tuwunel sends no events to a registration without a url
+        self.assertEqual(reg["namespaces"]["users"], [{"regex": "@.*:chathub", "exclusive": False}])
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        secret = {"chathub": f"as_token:{reg['as_token']}"}
+        for bridge in ("gmessages", "whatsapp", "signal", "meta", "instagram"):
+            self.assertEqual(self.config(bridge)["double_puppet"]["secrets"], secret, bridge)
+        self.assertEqual(self.config("discord")["bridge"]["login_shared_secret_map"], secret)
+
     def test_every_bridge_listens_on_its_own_port(self) -> None:
         self.install()
 
@@ -217,12 +232,18 @@ class ChathubInstaller(unittest.TestCase):
     def test_rerun_keeps_tokens_and_does_not_regenerate_registrations(self) -> None:
         self.install()
         token = self.config("signal")["appservice"]["as_token"]
+        double_puppet = self.yaml(self.state / "registrations" / "doublepuppet.yaml")["as_token"]
+        log = self.root / "systemctl.log"
+        log.write_text("", encoding="utf-8")
 
         self.install()
 
         self.assertEqual(self.config("signal")["appservice"]["as_token"], token)
+        self.assertEqual(self.yaml(self.state / "registrations" / "doublepuppet.yaml")["as_token"], double_puppet)
         generated = self.generate_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(generated.count("mautrix-signal"), 1)
+        # Restarting Tuwunel restarts every bridge; a rerun with no new registration must not.
+        self.assertNotIn("--user restart tuwunel", log.read_text(encoding="utf-8").splitlines())
 
     def test_rerun_restores_drift_and_restarts_only_that_bridge(self) -> None:
         """A bridge reads its config at startup, so a corrected config needs a restart;
