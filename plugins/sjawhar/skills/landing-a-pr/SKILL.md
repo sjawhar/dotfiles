@@ -23,9 +23,13 @@ second `--auto` on an armed PR exits 0 without changing anything (measured on
 agent-c#20873). `--match-head-commit` refuses a sha that is not the current head, so a
 refused re-arm means a second writer pushed. No admin merge or bypass of branch protection. One exception until
 the repo has a merge-time migration check: a PR that adds or changes a database
-migration is merged by hand (`gh pr merge <N> --squash --match-head-commit <head
-sha>`) immediately after confirming main's migration head is still the one the PR's
-migration builds on; if it moved, re-parent onto it and push first. **The merge rule
+migration is merged by hand, not by auto-merge (`gh pr merge <N> --squash
+--match-head-commit <head sha>`), immediately after confirming main still has one
+migration head and it is the one the PR's migration builds on. Auto-merge fires on a
+check run that may have tested an older main, so two PRs adding migrations on the same
+parent can each go green and leave main with two heads. If main's
+head moved, merge main and join the two heads with `alembic merge heads` (agent-c's rule:
+never re-parent or renumber an existing migration), push, and merge by hand when green. **The merge rule
 depends on the repo.** In `trajectory-labs-pbc/agent-c` it is `pr-checks-result` and
 the required `review` check (workflow "Claude PR Review", run from main's copy), both
 passing at the head. No approval is needed; the org ruleset enforces both checks.
