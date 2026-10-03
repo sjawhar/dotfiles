@@ -57,33 +57,27 @@ def bot_room(bot):
     return room
 
 
-QR_PAGE = """<!doctype html><meta charset=utf-8><title>Scan to link {network}</title>
-<style>body{{font:16px sans-serif;text-align:center;margin-top:40px}}img{{width:360px;image-rendering:pixelated}}</style>
-<h2>Scan with {network} to link it to the chat hub</h2><img id=q src=qr.png>
-<p>The code rotates; this page follows it.</p>
-<script>setInterval(() => {{ document.getElementById('q').src = 'qr.png?t=' + Date.now(); }}, 2000);</script>
-"""
-
-
 def show_on_laptop(mxc, network, state):
-    """Write the newest bot image to one page that follows it; open that page once."""
+    """Write the newest bot image to one fixed file and open it on Sami's machine once.
+
+    The image itself is opened, not an HTML page around it: forward's preview server
+    sends pages with a sandbox CSP that blocks scripts and same-origin images. A
+    rotated code overwrites the same file, so refreshing the tab shows the newest one.
+    """
     server, media_id = mxc.removeprefix("mxc://").split("/", 1)
     data = call("GET", f"/_matrix/client/v1/media/download/{server}/{media_id}", raw=True)
     page_dir = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"chathub-login-{network}")
     os.makedirs(page_dir, mode=0o700, exist_ok=True)
-    tmp = os.path.join(page_dir, "qr.png.tmp")
-    with open(tmp, "wb") as f:
+    path = os.path.join(page_dir, "qr.png")
+    with open(path + ".tmp", "wb") as f:
         f.write(data)
-    os.replace(tmp, os.path.join(page_dir, "qr.png"))
+    os.replace(path + ".tmp", path)
     if state.get("opened"):
-        print("[image] newer code shown on the open page")
+        print("[image] new code written; refresh the open tab to see it")
         return
-    page = os.path.join(page_dir, "index.html")
-    with open(page, "w") as f:
-        f.write(QR_PAGE.format(network=network))
-    opened = subprocess.run(["forward", "open", page], capture_output=True, text=True)
+    opened = subprocess.run(["forward", "open", path], capture_output=True, text=True)
     state["opened"] = opened.returncode == 0
-    print(f"[image] {'opened on laptop' if state['opened'] else 'forward open failed: ' + opened.stderr.strip()}: {page}")
+    print(f"[image] {'opened on laptop' if state['opened'] else 'forward open failed: ' + opened.stderr.strip()}: {path}")
 
 
 def main():
