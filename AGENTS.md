@@ -113,7 +113,7 @@ Git needs configuring even though day-to-day work is all jj: agent worktrees und
 
 ### Two identities
 
-`sami@trajectorylabs.net` is the default for both tools. `sami@thecybermonk.com` is opt-in per repo. `jj-allowed-signers` lists both as principals on every key, so a commit verifies under either one.
+`sami@trajectorylabs.net` is the default for both tools. `sami@thecybermonk.com` is opt-in per repo, except sjawhar/legion, which uses it by rule: `.gitconfig` includes `cybermonk-identity.gitconfig` for every clone whose remote is sjawhar/legion, and `.jjconfig.toml` scopes it to Legion's jj checkouts by path, since jj has no remote condition. `jj-allowed-signers` lists both as principals on every key, so a commit verifies under either one.
 
 Within a repo the two tools must **agree**. jj's `behavior = "own"` signs a commit only when its author email matches jj's configured `user.email`, and on mismatch it *drops* the signature when rewriting rather than preserving it. That is why the defaults are aligned rather than left to differ per tool: a git-authored commit under one identity would lose its signature the first time jj rewrote it under the other — which is what happens when an agent's commit gets rebased into a jj repo.
 

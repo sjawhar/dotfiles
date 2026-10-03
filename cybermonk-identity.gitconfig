@@ -1,0 +1,6 @@
+# The sami@thecybermonk.com identity, included by .gitconfig for every clone of
+# a repository that commits as cybermonk by rule (sjawhar/legion). jj's half of
+# the rule is the repository scope in .jjconfig.toml.
+[user]
+	email = sami@thecybermonk.com
+	name = Sami Jawhar
