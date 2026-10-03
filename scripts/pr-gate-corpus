@@ -32,7 +32,7 @@ echo "== the verdict sha is the FIRST short-or-long sha, not the first 40-hex (h
 t "g=true p=true n=false sha=00473e0f"   "Verdict: APPROVE at 00473e0f ## Code review, round 7: #20186 at 00473e0f. Scope: the pin to hawk df0e989212345678901234567890abcdefabcdef"
 # A delta review names its BASE first and its verdict on a later line: the verdict sha is the one after "at" on the
 # VERDICT line, not the body's first hex (inspect-release lane, agent-c#20026, 2026-09-28).
-t "g=true p=true n=false sha=f2314fb2"   "delta only: `fda41a10` -> `f2314fb2` (two child commits, 3 files). VERDICT: APPROVE at f2314fb2"
+t "g=true p=true n=false sha=f2314fb2"   'delta only: `fda41a10` -> `f2314fb2` (two child commits, 3 files). VERDICT: APPROVE at f2314fb2'
 t "g=true p=true n=false sha=f2314fb2"   "$(printf 'delta only: fda41a10 -> f2314fb2\n\nVERDICT: APPROVE at f2314fb2 -- the two findings are closed')"
 t "g=true p=true n=false sha=$H"         "APPROVE at $H (image digest sha256:556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa556b68aa)"
 echo "== negatives / rejections =="
@@ -97,4 +97,13 @@ tc "ok=150 fail=1 running=0 :: failing=z" "[range(150) as \$i | $R + {name:\"c\(
 tc "ok=1 fail=0 running=0 :: failing="    "[{name:\"x\",status:\"completed\",conclusion:\"failure\",started_at:\"1\"}, {name:\"x\",status:\"completed\",conclusion:\"success\",started_at:\"2\"}]"
 tc "ok=0 fail=0 running=0 :: failing="    "[]"
 tc "ok=1 fail=0 running=1 :: failing="    "[$R + {name:\"a\"}, {name:\"b\",status:\"in_progress\",conclusion:null,started_at:\"1\"}]"
+echo "== Legion handoffs: a .legion/ path the PR does not delete blocks; deleting them stays green (sjawhar/legion#1678) =="
+LG=$(grep -oP "^LG='\K.*(?=')" "$F"); [ -n "$LG" ] || { echo "could not extract LG from $F"; exit 1; }
+# tl <expected blocking files, space-separated, empty = the check stays silent> <json array of {filename,status}>
+tl() { local exp="$1" files="$2"; n=$((n+1)); got=$(jq -nr --argjson f "$files" "\$f|$LG")
+  if [ "$got" = "$exp" ]; then echo "PASS legion=[$got]"; else echo "FAIL legion got [$got] want [$exp] :: $files"; fail=1; fi; }
+tl ".legion/review.json" '[{"filename":"src/a.ts","status":"modified"},{"filename":".legion/review.json","status":"added"}]'
+tl ""                    '[{"filename":".legion/implement.json","status":"removed"},{"filename":".legion/plan.json","status":"removed"},{"filename":".legion/review.json","status":"removed"},{"filename":".legion/test.json","status":"removed"}]'
+tl ""                    '[{"filename":"src/a.ts","status":"modified"},{"filename":"packages/daemon-go/cmd/legion/main.go","status":"added"}]'
+tl ".legion/plan.json"   '[{"filename":".legion/plan.json","status":"modified"},{"filename":".legion/test.json","status":"removed"}]'
 echo; echo "$n cases, fail=$fail"; exit $fail
