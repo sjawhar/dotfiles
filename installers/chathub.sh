@@ -37,6 +37,30 @@ install -d -m 0700 "$STATE/registrations"
 new_registration=false
 changed=()
 
+# Double puppeting: one registration whose user namespace covers the hub, so every
+# bridge can act as @sami, joining new chat rooms for him and posting what he sends
+# from his phone as him. It has no url, so Tuwunel sends it no events.
+dp_reg="$STATE/registrations/doublepuppet.yaml"
+if [ ! -f "$dp_reg" ]; then
+    (
+        umask 077
+        cat >"$dp_reg" <<EOF
+id: doublepuppet
+url: null
+as_token: $(openssl rand -hex 32)
+hs_token: $(openssl rand -hex 32)
+sender_localpart: $(openssl rand -hex 16)
+rate_limited: false
+namespaces:
+  users:
+    - regex: '@.*:chathub'
+      exclusive: false
+EOF
+    )
+    new_registration=true
+fi
+dp_secret="as_token:$("$YQ" '.as_token' "$dp_reg")"
+
 # Render one bridge's config from its own example, then pin every value the hub
 # depends on. Assignments, not a merge: a merge would keep the example's
 # `"*": relay` permission. Tokens come from the registration step and survive reruns.
@@ -69,6 +93,7 @@ render_bridge() {
         "$YQ" -i "$common
             | .database.type = \"sqlite3-fk-wal\"
             | .database.uri = \"$db\"
+            | .double_puppet.secrets = {\"chathub\": \"$dp_secret\"}
             | .encryption.allow = false
             | .provisioning.shared_secret = \"generate\"
             | .provisioning.allow_matrix_auth = true
@@ -78,6 +103,7 @@ render_bridge() {
         "$YQ" -i "$common
             | .appservice.database.type = \"sqlite3-fk-wal\"
             | .appservice.database.uri = \"$db\"
+            | .bridge.login_shared_secret_map = {\"chathub\": \"$dp_secret\"}
             | .bridge.encryption.allow = false" "$cfg"
     fi
     chmod 600 "$cfg"
