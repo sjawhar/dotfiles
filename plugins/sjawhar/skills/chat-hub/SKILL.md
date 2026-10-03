@@ -48,17 +48,21 @@ bridge bot is that network's control room.
 
 ## Logins
 
-Each network was logged in once through its bridge bot. When a bot posts that the login
-expired or was logged out, tell Sami which network, then run on oryx:
+When a bot posts that a login expired or was logged out, tell Sami which network and
+re-link it. Everything runs on oryx; nothing is installed or changed on Sami's machine.
 
-    secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/chathub/login <network> login <flow>
+- **WhatsApp, Signal, Discord** link by QR code:
 
-It sends the command to the bot, opens any QR code on Sami's laptop for him to scan,
-and prints the bot's replies (exit 0 means logged in). Flows: whatsapp `qr`, signal
-`qr`, discord `login-qr` (as the whole command), gmessages `google`, meta `messenger`,
-instagram `instagram`. The cookie flows need Sami: he signs in to the site in a
-Firefox private window, copies the request the bot names as cURL, and you pipe it in
-with `-` (read from stdin, never on a command line).
+      secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/chathub/login whatsapp login qr
+
+  (signal: `login qr`; discord: `login-qr` as the whole command). It opens the QR image
+  in Sami's browser through `forward open`; a rotated code overwrites the same file, so
+  refreshing that tab shows the newest. Exit 0 means linked.
+- **Google Messages, Messenger, Instagram** link by signing in to the website. Run
+  `~/.dotfiles/chathub/login-screen` (keep it running) and send Sami
+  `http://localhost:6080/vnc.html?autoconnect=1&resize=scale`: it shows mautrix-manager,
+  already signed in to the hub, where he picks the network and signs in. Google
+  Messages finishes with an emoji tap on his phone. Stop the script when he's done.
 
 ## Running the hub (on oryx)
 
