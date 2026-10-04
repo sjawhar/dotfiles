@@ -217,11 +217,46 @@ if [ ! -L "$current" ]; then
 fi
 
 if [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; then
-    # Detached from this call's session, so omp killing the minting call cannot reach it.
+    # Detached from this call's session, so omp killing the minting call cannot
+    # reach it -- and detached from its ENVIRONMENT too. Whichever session's
+    # staleness check happens to fire this (any live session, Legion panes
+    # included) must not leak its own git-credential routing into a refresh
+    # every other session on the box shares: a Legion pane's `gh` is a
+    # `legion gh` wrapper scoped to its own pane and grant, and inherited into
+    # this detached child that outlives the pane, it failed outright --
+    # devbox-agents-2, 2026-10-05: "LEGION_GH_PATH is not an absolute path" and
+    # a refused askpass, every few minutes for hours, because nothing here
+    # touches $stamp on failure so every later call re-triggers it. Re-derive
+    # the same gh-app routing `shims/omp` sets up for a normal session
+    # (GIT_CONFIG_* -> gh-app-routes.gitconfig) from scratch in a wiped
+    # environment, so the refresh authenticates the same way no matter who
+    # triggered it, and never inherits a credential scoped to somebody else's
+    # session. The validation mint (build_slot's own hawk-token call) reads the
+    # hawk login from the user's keyring over the D-Bus Secret Service, which
+    # needs XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS -- NOT copied from
+    # whichever session's environment triggered this (same risk as the git
+    # routing above), but derived the one way they can be for this user: by
+    # uid, which is identical for every session on this host (agentbox's own
+    # relay depends on the same bus staying reachable this way, per
+    # agentbox/AGENTS.md).
+    dotfiles_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    xdg_runtime_dir="/run/user/$(id -u)"
+    refresh_env=(
+        "HOME=$HOME"
+        "USER=${USER:-$(id -un)}"
+        "PATH=$dotfiles_dir/shims:$dotfiles_dir/bin:$dotfiles_dir/scripts:$HOME/.local/bin:$HOME/.mise/shims:/usr/local/bin:/usr/bin:/bin"
+        "HAWK_API_URL=$HAWK_API_URL"
+        "GIT_CONFIG_COUNT=1"
+        "GIT_CONFIG_KEY_0=include.path"
+        "GIT_CONFIG_VALUE_0=$dotfiles_dir/gh-app-routes.gitconfig"
+        "XDG_RUNTIME_DIR=$xdg_runtime_dir"
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=$xdg_runtime_dir/bus"
+    )
+    [ -n "${AGENTBOX_SRC:-}" ] && refresh_env+=("AGENTBOX_SRC=$AGENTBOX_SRC")
     if command -v setsid >/dev/null 2>&1; then
-        setsid "${BASH_SOURCE[0]}" "$REFRESH_ARG" </dev/null >>"$root/refresh.log" 2>&1 &
+        setsid env -i "${refresh_env[@]}" "${BASH_SOURCE[0]}" "$REFRESH_ARG" </dev/null >>"$root/refresh.log" 2>&1 &
     else
-        nohup "${BASH_SOURCE[0]}" "$REFRESH_ARG" </dev/null >>"$root/refresh.log" 2>&1 &
+        nohup env -i "${refresh_env[@]}" "${BASH_SOURCE[0]}" "$REFRESH_ARG" </dev/null >>"$root/refresh.log" 2>&1 &
     fi
 fi
 
