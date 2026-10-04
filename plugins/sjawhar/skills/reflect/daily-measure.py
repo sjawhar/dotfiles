@@ -323,6 +323,14 @@ def run_turns_phase(conn, host: str, db_path: Path, home: Path, scratch: Path) -
         store.set_state(conn, state_key, minus(watermark_source, OVERLAP_HOURS), now_iso())
         conn.commit()
 
+    return {
+        "turns_fetched": sum(len(candidate_ids(r)) for r in rows),
+        "texts_pending": len(pending_texts),
+        "texts_labeled": labeled_texts,
+        "jev": len(jev_labels),
+        "strong": len(strong_labels),
+    }
+
 
 # --- CLI -----------------------------------------------------------------------------
 
