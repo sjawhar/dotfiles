@@ -5,7 +5,7 @@ file to every brief, so a lane reads it at boot rather than learning it from a b
 broadcast reaches only the lanes that happen to be alive; this file reaches every lane that starts.
 
 These are host and coordination rules. They are not a review rubric, and they do not replace the
-role prompts in `sjawhar/legion`'s `packages/pi-envoy/roles/`.
+role prompts in `sjawhar/legion`'s `packages/daemon/internal/prompts/roles/`.
 
 ## The shared host
 
