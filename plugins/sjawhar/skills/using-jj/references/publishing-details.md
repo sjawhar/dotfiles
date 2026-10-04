@@ -16,6 +16,18 @@ Read from the matching step of the using-jj skill. Version-control changes use j
   head. Fetching a newer base does not itself require a rebase; follow the repository's
   branch-currency policy and preserve reviewed ancestry.
 
+- **Proving a rebase of published work.** An appended commit's push says `move forward`; a
+  rebase legitimately says `move sideways`, so its proof is payload equality, not the direction
+  word: `git range-diff` plus identical per-commit patch-ids. A rebase that conflicted cannot have
+  that equality; its proof is an empty diff outside the resolved files, plus one line per resolved
+  file saying what each side contributed and what was kept. State both endpoints of both ranges
+  (old base and old tip, new base and new tip; the old tip is the one people get wrong) and
+  publish the commit list or a taxonomy (n rebased, m new, k from the base branch), never a bare
+  count. Push the old tip to a throwaway ref first so others can reach it, or say which mappings
+  rest on your own run. Read the direction word from `jj git push --dry-run`, before the real
+  push. On a published branch `jj new` comes before any edit, and `jj restore --from <sha>`
+  restores content, not identity: it builds a sibling, and the next push goes sideways again.
+
 - **Edit a private change in place.** For your own unpublished, unshared change, use `jj edit <change>` rather than temporary children to squash back. A published or reviewed head gets a new child before editing.
 
 - **Non-TTY — `-m`/`-u` is mandatory:** NEVER invoke `jj split` or `jj squash` bare in an
