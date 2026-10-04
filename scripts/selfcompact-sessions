@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""selfcompact-sessions: what the SelfCompact extension recorded in real omp sessions.
+
+  selfcompact-sessions --days N [--sessions-root DIR]
+
+The experiments extension's selfcompact feature (omp/extensions/experiments/selfcompact.ts), in a
+session whose selfcompact gate is on, appends each probe, fire and hook failure to its session as a
+v1 `custom` entry: selfcompact-probe, selfcompact-fire or selfcompact-error. This reads three places
+omp keeps sessions: ~/.omp/agent/sessions, each
+profile's ~/.omp/profiles/NAME/agent/sessions, and every --session or --session-dir transcript
+registered in ~/.omp/agent/custom-session-files, which also holds test and smoke runs under /tmp.
+--sessions-root DIR reads only the files under DIR. For each file holding such entries timestamped
+in the last N days, it prints one row of those entries, in the order of the files' names, naming
+the file relative to ~/.omp (or DIR), or by its absolute path outside it. A resumed session's older
+entries stay out of the window. No row usually means that no session had the feature on.
+
+Each record counts at most once, so rows can be summed:
+  - /fork, /branch, --fork and /tan copy entries, ids and timestamps kept, under a new session
+    header whose timestamp is the copy's. The extension timestamps a record when it writes it, so
+    one older than its file's header is a copy, and counts only in the file that wrote it.
+  - A file reached twice, registered and also found under a root, is read once.
+  - A byte copy keeps its header, so the rule above cannot see it: a harness's copy of a
+    transcript, or /fork's copy of an artifact directory. A record two files hold alike counts
+    once, in the first by name, then path, which can be the copy.
+A file left with no record of its own prints no row. Records the first and third rules leave out
+are counted on stderr after the rows.
+
+Each column is a count, except share_length:
+  probes          probe side turns; each is exactly one of the next four
+  compress        the rubric said compress. Every compress starts a fire, so compress minus
+                  fires is the number of fires that recorded no outcome
+  continue        the rubric said continue
+  unparsed        [harm] the reply was not the rubric's four lines, so the probe could not fire
+  failed_probes   [harm] the side turn failed or missed its deadline
+  fires           compactions that settled, with a recorded outcome (ok or not)
+  failed_fires    [harm] of those, the ones that did not compact
+  handler_errors  [harm] failures of the extension's context hook outside a probe
+  share_length    of the capped replies that arrived in time, the share cut off at the cap
+                  (PROBE_MAX_TOKENS). Above 0.2, the cap is cutting replies; raise
+                  PROBE_MAX_TOKENS. "-" when no capped probe replied in time
+Higher is worse for the [harm] columns and for share_length. failed_probes and failed_fires are
+named after the extension's own per-window counters (failedProbes, failedFires), but are
+cumulative counts over the window this run reads, not those counters themselves.
+
+The columns read the extension's version-1 records. A record of any other version stops the
+reader (exit 2), naming its file: the extension changed its records, and this reader must change
+with them. A complete line naming selfcompact that does not parse is not counted; after the rows,
+its file and line go to stderr and the run exits 1. Only an unterminated last line, which omp may
+still be writing, is skipped quietly. This counts what the extension did and how often it failed;
+nothing here says whether a compaction helped the task. It only reads; nothing is written or sent.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+from typing import NoReturn
+
+TYPES = ("selfcompact-probe", "selfcompact-fire", "selfcompact-error")
+OUTCOMES = ("compress", "continue", "unparsed", "failed_probes")
+
+
+def entries(path: Path, since: float) -> tuple:
+    """The extension's own entries in one session file, as ((customType, entry id, timestamp), {type,
+    **data}); the numbers of the complete lines naming selfcompact that did not parse; and the count of
+    in-window selfcompact records dropped because they predate the file's own session header (the module
+    docstring: they were copied there from another file, and count only in the file that wrote them).
+    omp opens a file with a title slot and its session header. An unterminated last line is skipped
+    quietly, since omp may still be writing it. A record of any version but 1 stops the reader, since its
+    fields would count as zeros."""
+    out, unread, created, copied = [], [], None, 0
+    with path.open(errors="replace") as fh:
+        for n, line in enumerate(fh):
+            if n < 2 and created is None:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(e, dict) and e.get("type") == "session":
+                    created = seconds(e["timestamp"])
+                continue
+            if "selfcompact-" not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                if line.endswith("\n"):
+                    unread.append(n + 1)
+                continue
+            if isinstance(e, dict) and e.get("type") == "custom" and e.get("customType") in TYPES:
+                if created is None:
+                    die(f"{path}: selfcompact entries, but no session header in its first two lines")
+                data = e.get("data") or {}
+                if data.get("v") != 1:
+                    die(f"{path}: a {e['customType']} record of version {data.get('v')!r}; this reader knows version 1")
+                ts = seconds(e["timestamp"])
+                if ts >= created:
+                    out.append(((e["customType"], e["id"], e["timestamp"]), {"type": e["customType"], **data}))
+                elif ts >= since:
+                    copied += 1
+    return out, unread, copied
+
+
+def die(message: str) -> NoReturn:
+    print(f"selfcompact-sessions: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def seconds(timestamp: str) -> float:
+    """An omp entry timestamp (JavaScript toISOString) as epoch seconds; fromisoformat takes a Z only from 3.11."""
+    return datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+
+
+def outcome(probe: dict) -> str:
+    """Exactly one of OUTCOMES: a failed side turn, a reply that did not parse, or the rubric's verdict.
+    A failed probe records an `error`, whose message can be empty; every other probe's reply is parsed
+    (records `answers`) or is not (records `reason` instead)."""
+    if "error" in probe:
+        return "failed_probes"
+    if "answers" not in probe:
+        return "unparsed"
+    return probe["verdict"]
+
+
+def row(name: str, es: list) -> str:
+    probes = [e for e in es if e["type"] == "selfcompact-probe"]
+    fires = [e for e in es if e["type"] == "selfcompact-fire"]
+    outcomes = Counter(map(outcome, probes))
+    capped = [p for p in probes if p["capped"] and outcome(p) != "failed_probes"]
+    counts = {"probes": len(probes), **{o: outcomes[o] for o in OUTCOMES}, "fires": len(fires),
+              "failed_fires": sum(1 for f in fires if not f["ok"]),
+              "handler_errors": sum(1 for e in es if e["type"] == "selfcompact-error")}
+    length = f"{sum(1 for p in capped if p.get('stopReason') == 'length') / len(capped):.2f}" if capped else "-"
+    return f"{name}  " + " ".join(f"{k}={v}" for k, v in counts.items()) + f" share_length={length}"
+
+
+def registered(registry: Path) -> list:
+    """The --session and --session-dir transcripts omp registers, one marker per file holding its absolute
+    path; a marker whose transcript is gone is skipped, as omp's own reader skips it (cli/gc-cli.ts)."""
+    if not registry.is_dir():
+        return []
+    recorded = (m.read_text(errors="replace").strip() for m in sorted(registry.iterdir()) if m.is_file())
+    return [Path(r) for r in recorded if r and Path(r).is_file()]
+
+
+def main(argv: list) -> int:
+    p = argparse.ArgumentParser(prog="selfcompact-sessions", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--days", type=float, required=True)
+    p.add_argument("--sessions-root", metavar="DIR", help="read only the session files under DIR")
+    a = p.parse_args(argv)
+    if a.sessions_root:
+        base = Path(a.sessions_root)
+        roots, listed, where = [base], [], str(base)
+    else:
+        base = Path.home() / ".omp"
+        roots = [base / "agent" / "sessions", *sorted(base.glob("profiles/*/agent/sessions"))]
+        listed = registered(base / "agent" / "custom-session-files")
+        where = f"{base}: agent/sessions, {len(roots) - 1} profile(s) and {len(listed)} registered transcript(s)"
+    since = time.time() - a.days * 86_400
+    walked = [Path(d) / n for root in roots for d, _, names in os.walk(root) for n in names if n.endswith(".jsonl")]
+    ordered = sorted(walked + listed, key=lambda f: (f.name, str(f)))
+    by_real = {}
+    for path in ordered:
+        by_real.setdefault(os.path.realpath(path), path)  # the same file reached twice (registered, under a root) reads once
+    rows, seen, unread, left_out, left_out_files = [], set(), [], 0, 0
+    for real, path in by_real.items():
+        try:
+            real_path = Path(real)
+            if real_path.stat().st_mtime < since:  # an append bumps the mtime, so a skipped file holds no newer entry
+                continue
+            found, bad, copied = entries(real_path, since)
+        except FileNotFoundError:  # the kept alias, or the file itself, can vanish mid-run; skip it, as a dead marker already is
+            continue
+        name = str(path.relative_to(base)) if path.is_relative_to(base) else str(path)
+        unread += [f"{name}:{n}" for n in bad]
+        es = [(key, record) for key, record in found if seconds(key[2]) >= since]
+        own = [record for key, record in es if key not in seen]
+        dup = len(es) - len(own)  # a byte copy that kept its header (a harness's, /fork's artifact directory)
+        seen.update(key for key, _ in es)
+        if copied + dup:
+            left_out += copied + dup
+            left_out_files += 1
+        if own:
+            rows.append(row(name, own))
+    print("\n".join(rows) if rows else f"no selfcompact records of their own timestamped in the last {a.days:g} day(s) under {where}")
+    if left_out:
+        print(f"selfcompact-sessions: left out {left_out} record(s) copied between session files "
+              f"({left_out_files} file{'s' if left_out_files != 1 else ''}); each counts at most once",
+              file=sys.stderr)
+    if unread:
+        print(f"selfcompact-sessions: {len(unread)} line(s) naming selfcompact did not parse and are not counted: "
+              f"{', '.join(unread)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

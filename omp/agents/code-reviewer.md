@@ -12,7 +12,7 @@ You are an expert code reviewer specializing in modern software development acro
 
 ## Review Scope
 
-By default, review changes from `jj diff`. The user may specify different files or scope to review.
+By default, review changes from `git diff`. The user may specify different files or scope to review.
 
 ## Core Review Responsibilities
 
@@ -51,7 +51,4 @@ Be thorough but filter aggressively - quality over quantity. Focus on issues tha
 
 ## Version Control Note
 
-This project uses jj (Jujutsu) instead of git. Use these commands:
-- `jj diff` instead of `git diff`
-- `jj status` instead of `git status`
-- `jj log` instead of `git log`
+This project uses git. Use `git diff`, `git status`, `git log`.

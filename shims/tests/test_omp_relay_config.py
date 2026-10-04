@@ -38,10 +38,11 @@ class OmpRelayConfig(unittest.TestCase):
             **os.environ,
             "DOTFILES_DIR": str(DOTFILES),
             "HOME": str(self.root),
-            "PATH": f"{self.stub_dir}:{os.environ['PATH']}",
+            "PATH": f"{self.stub_dir}:/usr/bin:/bin",
             "XDG_CONFIG_HOME": str(self.config_home),
         }
         self.env.pop("PI_CONFIG_FILES", None)
+        self.env.pop("OMP_ASKGATE", None)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -56,11 +57,11 @@ class OmpRelayConfig(unittest.TestCase):
         )
 
     def test_omits_relay_url_without_the_devbox_overlay(self) -> None:
-        """Machines without the role-installed overlay do not receive a relay endpoint."""
+        """Machines without the role-installed overlay get the committed settings and no relay."""
         result = self.run_shim()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "<unset>\n")
+        self.assertEqual(result.stdout, f"{DOTFILES}/omp/config.yml\n")
 
     def test_ignores_a_stray_relay_overlay(self) -> None:
         """The overlay contract is retired; a leftover file must not re-enter config."""
@@ -72,7 +73,7 @@ class OmpRelayConfig(unittest.TestCase):
         result = self.run_shim({"PI_CONFIG_FILES": "/tmp/caller.yml"})
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "/tmp/caller.yml\n")
+        self.assertEqual(result.stdout, f"{DOTFILES}/omp/config.yml:/tmp/caller.yml\n")
 
 
 if __name__ == "__main__":

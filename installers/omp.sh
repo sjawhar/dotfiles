@@ -24,11 +24,12 @@ if [ -L "${OMP_AGENT_DIR}/config.yml" ]; then
     cp --remove-destination "$(readlink -f "${OMP_AGENT_DIR}/config.yml")" "${OMP_AGENT_DIR}/config.yml"
 fi
 [ -e "${OMP_AGENT_DIR}/config.yml" ] || echo '{}' > "${OMP_AGENT_DIR}/config.yml"
+[ -e "${OMP_AGENT_DIR}/local-overrides.yml" ] || echo '{}' > "${OMP_AGENT_DIR}/local-overrides.yml"
 # models.yml is universal catalog patches; a machine's own provider routing
 # (gateway baseUrl, `!command` apiKey) goes in the gitignored
 # omp/models.local.yml and is merged over it here, straight into the file omp
 # reads. A real file, not a link: no committed file holds the merged content,
-# and scripts/ompo never mirrors models.yml into profiles (a client profile
+# and shims/omp never mirrors models.yml into a named profile (a client profile
 # must not inherit the default's gateway routing).
 MODELS_OUT="${OMP_AGENT_DIR}/models.yml"
 # Converge the earlier layout: a link to a built copy inside the repo.
@@ -50,6 +51,9 @@ ensure_link "${DOTFILES_DIR}/omp/lsp.json"    "${OMP_AGENT_DIR}/lsp.json"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.md" "${OMP_AGENT_DIR}/WATCHDOG.md"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.yml" "${OMP_AGENT_DIR}/WATCHDOG.yml"
 ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
+ensure_link "${DOTFILES_DIR}/omp/keybindings.yml" "${OMP_AGENT_DIR}/keybindings.yml"
+# omp loads <agent dir>/hooks/<pre|post>/*.ts; post/jj-snapshot.ts is the one jj snapshotter.
+ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
 # plugin installed from GitHub. The pins live in the committed
@@ -64,7 +68,14 @@ rm -f "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/dotfiles-skills.ts" "${OMP_AGENT_DIR}/extensions/dotfiles-skills.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/session-env.ts" "${OMP_AGENT_DIR}/extensions/session-env.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/compaction-reminder.ts" "${OMP_AGENT_DIR}/extensions/compaction-reminder.ts"
-ensure_link "${DOTFILES_DIR}/omp/extensions/fullscreen.ts" "${OMP_AGENT_DIR}/extensions/fullscreen.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/viewport.ts" "${OMP_AGENT_DIR}/extensions/viewport.ts"
+# Machines set up before the rename hold a now-dangling link under the old name.
+rm -f "${OMP_AGENT_DIR}/extensions/fullscreen.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/attention-queue.ts" "${OMP_AGENT_DIR}/extensions/attention-queue.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/askgate.ts" "${OMP_AGENT_DIR}/extensions/askgate.ts"
+# The experiments extension: four session features, each behind its own gate (omp/AGENTS.md).
+# Only the entry is linked; its sibling modules resolve from the link's real path.
+ensure_link "${DOTFILES_DIR}/omp/extensions/experiments/index.ts" "${OMP_AGENT_DIR}/extensions/experiments.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 (cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
 # The envoy extension installs from npm (@sjawhar/pi-legion-envoy). The old

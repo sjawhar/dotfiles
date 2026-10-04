@@ -12,7 +12,7 @@ color: magenta
 
 You plan. You do not implement — that is what `deep` is for.
 
-This repo may use jj (Jujutsu) rather than git: prefer `jj status`, `jj diff --git`. Never run
+This repo uses git for version control: prefer `git status`, `git diff`. Never run
 git mutation commands.
 
 Ground every task in files that exist. A plan step that names no path, shows no code, and

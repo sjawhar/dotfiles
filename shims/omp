@@ -1,12 +1,33 @@
 #!/usr/bin/env bash
-# omp wrapper: inject provider API keys from secretsd, then exec the real omp
-# (the fork release binary, mise-managed: "github:sjawhar/oh-my-pi" in mise.toml).
-# Keys never touch disk or global env; they exist only in the child process.
+# omp wrapper: set up the session environment, then exec the real omp (the fork
+# release binary, mise-managed: "github:sjawhar/oh-my-pi" in mise.toml).
 # Anthropic auth is deliberately API-key (no Claude Pro/Max OAuth emulation).
-# Under `--profile NAME` / OMP_PROFILE the profile's own <KEY>_<NAME> secrets
-# are injected instead of the personal keys — see "provider keys" below and
-# scripts/ompo.
+# Every session gets the environment set up below, including: envoy, the gh-app routing
+# gitconfig, the committed config overlay, shims-first PATH, the secrets-broker
+# identity. Provider keys: a default-profile session holds none of the variables
+# in _keys, even when the caller's environment has them, and reaches its providers
+# through the model gateway (omp/models.local.yml); a named profile gets its own
+# <KEY>_<NAME> secrets from secretsd as the provider keys, and any other provider
+# key the caller exported stays. A named profile also gets the shared setup
+# mirrored into ~/.omp/profiles/NAME ("a named profile gets the shared setup").
 set -euo pipefail
+
+# --- never re-enter ---
+# Every hop from here to omp is an exec (agent-secrets-session, `agent-secrets register --exec`,
+# `mise x`, and for a default-profile session scripts/omp-no-provider-keys), so the pid never
+# changes on the way. Finding our own pid in the marker set below,
+# written under 10 s ago, means the omp resolved last time led back into an omp wrapper, and
+# going on would repeat that forever; a loop comes back within a fraction of a second. The time
+# bound lets the slow same-pid entries through: omp's /restart, which execs `omp` in place when
+# its own binary is gone, and a later launch that inherited the marker from a long-lived process
+# (a tmux server, a persist job) and happens to get its pid. A process omp starts has its own pid.
+_marker_pid="" _marker_at="" _marker_target=""
+read -r _marker_pid _marker_at _marker_target <<< "${DOTFILES_OMP_SHIM:-}"
+_now="${EPOCHSECONDS:-$(date +%s)}"
+if [[ "$_marker_pid" == "$$" && "$_marker_at" =~ ^[0-9]+$ ]] && (( _now - 10#$_marker_at < 10 )); then
+    echo "omp: ${BASH_SOURCE[0]} ran twice in pid $$ within $(( _now - 10#$_marker_at ))s: the omp it resolved (${_marker_target}) led back to an omp wrapper; refusing to loop (see \`type -a omp\` and \`mise which omp\`)" >&2
+    exit 1
+fi
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 
@@ -23,6 +44,19 @@ fi
 # Envoy NATS defaults to the tailnet; guarantee it for every omp launch (sessions
 # spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
+
+# Envoy NATS credential: pi-envoy authenticates as the `omp-session` nkey user
+# when NATS_NKEY_SEED_FILE names its seed. scripts/envoy-nats-seed keeps that
+# seed in a per-boot 0600 file and prints its path, or prints nothing (no secret
+# yet, no AWS) and the session connects without a credential. A seed the caller
+# already gave (a box's session_env, a Legion pane) wins. Mirrors scripts/cld,
+# scripts/oc and scripts/agentbox.
+if [[ -z "${NATS_NKEY_SEED_FILE:-}" && -z "${NATS_NKEY_SEED:-}" ]]; then
+    _seed_file="$("${DOTFILES_DIR}/scripts/envoy-nats-seed")" || _seed_file=""
+    if [[ -n "$_seed_file" ]]; then
+        export NATS_NKEY_SEED_FILE="$_seed_file"
+    fi
+fi
 
 # --- glibc malloc arenas ---
 # omp's native addon (pi_natives) and the C libraries linked into it allocate
@@ -45,6 +79,11 @@ export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 # on the next start. Later entries in the list win, so overlays a caller
 # already set stay on top of this one.
 export PI_CONFIG_FILES="${DOTFILES_DIR}/omp/config.yml${PI_CONFIG_FILES:+:$PI_CONFIG_FILES}"
+
+# --- AskGate (omp/extensions/askgate.ts) ---
+# off | warn (a revise runs the call and hands the agent the reason) | block
+# (a revise refuses the call).
+export OMP_ASKGATE="${OMP_ASKGATE:-warn}"
 
 # --- mnemopi recall ranking ---
 # Mnemopi's veracity defaults read "a tool asserted this" as lower-trust than an
@@ -101,12 +140,10 @@ for _p in "${_dirs[@]}"; do
 done
 export PATH="${_shims}:${_path}"
 
-# --- resolve the real omp: first one on PATH ahead of mise's own copies ---
+# --- resolve the real omp: a local build on PATH, else the pinned release ---
 # PATH order decides, so a local build in `bin/` is picked up with no mise
-# involvement and no edit here. `_path` is PATH with this shims dir removed, so
-# the search can never re-enter this wrapper. `mise x` was doing this job
-# before, but it resolves the command from its own tool dir and ignores PATH
-# entirely, which made a local build unreachable however early it sat.
+# involvement and no edit here; `mise x` alone would miss it, since it looks the
+# command up in the tool dirs it adds before the PATH it was given.
 #
 # mise-managed dirs are skipped rather than matched: a session inherits its PATH
 # forever, so a shell started before a version bump still names the *old*
@@ -114,58 +151,261 @@ export PATH="${_shims}:${_path}"
 # (measured: a PATH holding 18.0.4's install dir resolved 18.0.4 while the pin
 # was 18.0.10). Deferring to `mise x` for mise's copies keeps the pin
 # authoritative, and only non-mise PATH entries — a local build — can win.
+#
+# An omp whose real path is in a `shims/` dir is a wrapper, not a build: this
+# file under another name (a symlink, another spelling of this dir), another
+# checkout's copy of it (a dotfiles workspace's shims while DOTFILES_DIR names
+# ~/.dotfiles, or the reverse), or a version manager's shim. Taking one would
+# run this search again, forever.
 _omp=""
 _mise_root="${MISE_DATA_DIR:-$HOME/.mise}"
 IFS=':' read -ra _cands <<< "$_path"
 for _p in "${_cands[@]}"; do
-    [[ "$_p" == "$_mise_root"/* ]] && continue
-    if [[ -x "${_p}/omp" ]]; then
-        _omp="${_p}/omp"
-        break
-    fi
+    [[ "$_p" == "$_mise_root"/* || ! -x "${_p}/omp" ]] && continue
+    _real="$(realpath "${_p}/omp")"
+    [[ "${_real%/*}" == */shims ]] && continue
+    _omp="${_p}/omp"
+    break
 done
 
+# _via is the chain omp runs under (every hop an exec); _prog is the program itself, an absolute
+# path for a local build and the bare name `mise x` resolves in its tool dirs otherwise.
 if [[ -n "$_omp" ]]; then
-    _cmd=("$_omp")
+    _via=()
 else
-    _cmd=(mise x "github:sjawhar/oh-my-pi" -- omp)
+    # `mise x` resolves its own command with the tool dirs it adds ahead of the
+    # PATH it was given — but only a dir that is not already on it: an install
+    # dir that arrived without mise's record of adding it (__MISE_DIFF: a tmux
+    # window opened from a shell outside tmux gets that shell's PATH and none of
+    # its __MISE_* variables) counts as the caller's, this shims dir ahead of it
+    # wins the lookup, and mise execs this wrapper again. Hence a PATH without
+    # mise's install dirs here, so mise adds the pinned one itself. What its
+    # CHILD's PATH holds is separate (measured, mise 2026.8.10): when the PATH it
+    # is handed carries mise's own shims dir (~/.mise/shims — every PATH .bashrc
+    # builds does, and _mise_path keeps it), the entries ahead of that dir, this
+    # shims dir among them, stay ahead of the tool dirs, so `omp` by name in the
+    # child is this wrapper; without it the tool dirs come first. That is why
+    # scripts/omp-no-provider-keys resolves a bare name in the install dirs on
+    # PATH instead of looking it up.
+    _mise_path=""
+    for _p in "${_cands[@]}"; do
+        [[ "$_p" == "$_mise_root"/installs/* ]] && continue
+        _mise_path="${_mise_path:+$_mise_path:}$_p"
+    done
+    _via=(env PATH="${_shims}:${_mise_path}" mise x "github:sjawhar/oh-my-pi" --)
 fi
+export DOTFILES_OMP_SHIM="$$ ${EPOCHSECONDS:-$(date +%s)} ${_omp:-mise x github:sjawhar/oh-my-pi -- omp}"
+_prog="${_omp:-omp}"
 
-# --- provider keys: personal by default, profile-scoped under a profile ---
+# --- host session identity for agent secrets ---
+# On the host a session's secrets-broker proofs come from the agent-secrets helper, which signs
+# only for descendants of a registered process. scripts/agent-secrets-session registers this
+# pid (every exec below keeps it, so it is omp's) before omp starts, where that applies; the
+# same wrapper as scripts/cld and scripts/oc.
+_via=("${DOTFILES_DIR}/scripts/agent-secrets-session" ${_via[@]+"${_via[@]}"})
+
+# --- provider keys: the Hawk gateway by default, profile-scoped under a profile ---
 # `omp --profile NAME` (or OMP_PROFILE=NAME) isolates auth, sessions, and
 # config; billing follows. Under a named profile the shim injects the secrets
 # called <KEY>_<NAME> (suffix = profile name uppercased, `-`/`.` as `_`:
-# theorem → OPENAI_API_KEY_THEOREM) as <KEY>, instead of the personal keys.
+# theorem → OPENAI_API_KEY_THEOREM) as <KEY>; add them with `secrets edit --source dotfiles`.
 # Anything else already in the environment is left alone, so
 # `secrets ANTHROPIC_API_KEY -- omp --profile theorem` bills the personal
 # Anthropic account for that session.
-# The default profile gets no ANTHROPIC_API_KEY: omp/models.yml routes the
-# anthropic provider through the Hawk model gateway with a per-person token
-# (`!hawk-token`), so no static Anthropic key sits in the process environment
-# — or in the environment of every tool subprocess omp spawns. A named
-# profile keeps its own scoped keys; its models.yml is separate.
-# OMP_PROFILE wins over --profile whenever it is defined, even when empty
-# (empty and "default" both mean the default profile), matching omp itself.
-_keys=(ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY)
-_default_keys=(GEMINI_API_KEY OPENAI_API_KEY)
-if [[ -n "${OMP_PROFILE+x}" ]]; then
-    _profile="$OMP_PROFILE"
-else
-    _profile=""
-    _args=("$@")
-    for ((_i = 0; _i < ${#_args[@]}; _i++)); do
-        case "${_args[_i]}" in
-            --profile=*) _profile="${_args[_i]#--profile=}" ;;
-            --profile) _profile="${_args[_i + 1]:-}" ;;
-        esac
+# The default profile gets no provider key at all: omp/models.local.yml routes
+# each provider whose key is in _keys through the Hawk model gateway with a
+# per-person token (`!hawk-token`), configured as that provider's models.yml
+# `apiKey` — the config override omp's auth cascade takes before any
+# environment variable (packages/ai/src/auth/cascade.ts: the config override
+# returns before the env lookup runs at all). Read in the code (cascade.ts)
+# for the API-key variables: an inherited one does not take a provider off
+# the gateway or bill the personal account (ANTHROPIC_OAUTH_TOKEN follows the
+# same config-override-first order in the cascade, but its effect on the
+# route is not checked here). What an inherited key does do is sit in the
+# process environment and so in the environment of every tool subprocess omp
+# spawns (AGENTC-1085: a key there reaches every transcript that prints the
+# environment) — that is the exposure this strip closes. A key the caller's
+# environment carries is therefore removed, with a line on stderr: a process
+# that holds one hands it to every shell, tmux server and omp it starts, so
+# without this one session holding a key leaks it into every session
+# launched from it. And omp starts through scripts/omp-no-provider-keys, the
+# chain's last hop, which refuses to start the session when a hop after this
+# point (agent-secrets register, mise x) has put one back, or when a dotenv
+# file omp loads for ITSELF after that hop assigns one: `~/.env`,
+# `~/.omp/.env` and the agent dir's `.env` each reach omp's own environment
+# and its tool shells (measured on 18.4.3; the guard lists them).
+# The one path deliberately left unchecked: a `.env` in the working directory
+# reaches omp's own environment but omp filters it out of tool shells, so it
+# cannot write a key into a transcript — the guard checks only the files
+# that can.
+# A named profile keeps its own scoped keys; its models.yml is separate.
+# Which profile a launch runs, read the way omp 18.4.3 reads it
+# (cli/profile-bootstrap.ts `extractProfileFlags`, `runCli`, and
+# `resolveProfileEnv` in utils/dirs.ts):
+#   - omp takes the last `--profile`/`--profile=` it extracts; with none,
+#     OMP_PROFILE whenever it is defined (even empty), else PI_PROFILE; empty
+#     and "default" both name the default profile;
+#   - it extracts none after an end-of-options `--`, none after the first token
+#     it does not strip when that token is a subcommand (`omp shell --profile
+#     x`, `omp grep --profile x`, `omp bench opus --profile mix` — bench has a
+#     --profile of its own), and none that a string flag took as its value
+#     (`omp --system-prompt --profile theorem hi`); a string flag takes even `--`.
+# The shim reads a `--profile` only where omp certainly extracts it, by four
+# rules (verified with omp's own extractProfileFlags from the release tag over
+# a fuzzed argv/env corpus: no shape where omp runs the default profile gets a
+# named decision):
+#   1. the token before it is certified not to take it: empty, a bare word, a
+#      `--name=value` (omp's tables match no `=` token), or a flag in _no_value
+#      (VALUELESS_FLAGS and the optional-value flags of cli/flag-tables.ts, plus
+#      -p/-c/-r);
+#   2. any `--profile` it leaves unread settles the launch as the DEFAULT
+#      profile — not the environment's: every tool shell of a named-profile
+#      session carries OMP_PROFILE, and omp may well have read that flag, so a
+#      fallback would hand a default-profile session the named profile's key. A
+#      later `--profile` the shim does read overrides it, as omp's last-wins does;
+#   3. no `--profile` is read after a leading bare word other than
+#      `launch`/`acp` (a subcommand or a message — the shim cannot tell which),
+#      where "leading" is the first token that is not a `--profile`/`--alias`
+#      pair omp strips;
+#   4. a `--` ends the scan only when the token before it is certified as in 1;
+#      otherwise it may be a string flag's value, so it is an ordinary token and
+#      a `--profile` after it is unread.
+# LIMIT: this is not omp's whole grammar (no subcommand table, string-flag
+# table or extension flags), and _no_value is a hand copy each omp release can
+# outgrow. An unread `--profile` therefore only ever costs a named session its
+# scoped key and its shared-setup mirroring (the default branch execs first);
+# it never gives a default-profile session a key. The shapes that pay it:
+#   - a message word or subcommand before `--profile NAME` (rule 3): silent,
+#     since a subcommand may own a `--profile` (bench's workload,
+#     commands/bench.ts) and naming it would advise creating that profile.
+#     Fix: `--profile NAME` first, or `OMP_PROFILE=NAME omp …` without it;
+#   - an unlisted option, or a string flag that takes `--profile` as its
+#     value (rule 1): named on stderr unless it names default. Fix:
+#     `--profile NAME` first;
+#   - bench under a named profile with a non-default workload: no spelling
+#     works, since bench's own `--profile` is always unread; use its default
+#     `chat` workload.
+# Deliberately NOT closed by exporting OMP_PROFILE="$_profile": that would make
+# omp obey the shim's reading instead of its own, so a shape the shim misreads
+# would silently change which profile omp runs rather than being decided safely.
+# _keys is every variable omp reads for a provider omp/models.local.yml routes
+# through the gateway: each provider's `env` in omp's catalog, plus any `env
+# hook` in its auth rule (anthropic reads ANTHROPIC_OAUTH_TOKEN before
+# ANTHROPIC_API_KEY that way — registry/hooks/env.ts via auth/anthropic.kdl's
+# hook, not providers/anthropic.kdl's own `env` — openai OPENAI_API_KEY,
+# google GEMINI_API_KEY), so a default-profile session holds none of them. A
+# provider routed there needs every variable omp reads for it here, from
+# either source (omp/AGENTS.md).
+_keys=(ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN GEMINI_API_KEY OPENAI_API_KEY)
+_no_value=(--help --version --allow-home --continue --from-claude --from-codex --no-session
+    --no-tools --no-lsp --no-pty --hide-thinking --advisor --external-thinking --prewalk
+    --no-prewalk --plan-yolo --print --print-thoughts --no-extensions --no-skills --no-rules
+    --no-title --no-ui --auto-approve --yolo --resume --session --plan -p -c -r)
+_reads_profile() {
+    local _prev="$1" _f
+    [[ -z "$_prev" || "$_prev" != -* || "$_prev" == --*=* ]] && return 0
+    for _f in "${_no_value[@]}"; do
+        [[ "$_prev" == "$_f" ]] && return 0
     done
+    return 1
+}
+_profile="" _flag="" _unread="" _unread_named="" _word="" _lead=1 _prev=""
+_args=("$@")
+for ((_i = 0; _i < ${#_args[@]}; _i++)); do
+    _a="${_args[_i]}"
+    if [[ "$_a" == "--" ]] && _reads_profile "$_prev"; then break; fi
+    case "$_a" in
+        --profile | --profile=* | --alias | --alias=*)
+            if [[ -n "$_word" ]]; then
+                # Rule 3: after a leading bare word this may be a subcommand's own --profile
+                # (bench's workload), so it decides default and is not named (LIMIT).
+                [[ "$_a" == --alias* ]] || _unread=1
+            elif ! _reads_profile "$_prev"; then
+                # Rule 1: the option before it may take it as its value; named on stderr.
+                if [[ "$_a" != --alias* ]]; then
+                    _unread=1 _asked="${_a#--profile=}"
+                    [[ "$_a" != --profile ]] || _asked="${_args[_i + 1]:-}"
+                    _asked="${_asked//[[:space:]]/}"
+                    [[ -z "$_asked" || "$_asked" == default ]] || _unread_named="$_asked"
+                fi
+            else
+                case "$_a" in
+                    --profile) _profile="${_args[_i + 1]:-}" _flag=1 _unread="" _unread_named="" _i=$((_i + 1)) ;;
+                    --profile=*) _profile="${_a#--profile=}" _flag=1 _unread="" _unread_named="" ;;
+                    --alias) _i=$((_i + 1)) ;;
+                esac
+                # omp strips the pair: the next token is still leading, and fresh.
+                _prev=""
+                continue
+            fi
+            ;;
+        *)
+            if [[ -n "$_lead" && "$_a" != -* ]]; then
+                case "$_a" in launch | acp) ;; *) _word=1 ;; esac
+            fi
+            ;;
+    esac
+    _lead="" _prev="$_a"
+done
+if [[ -n "$_unread" ]]; then
+    _profile=default
+    if [[ -n "$_unread_named" ]]; then
+        echo "omp: --profile $_unread_named follows an option this shim has no entry for, which may take it as its value, so this shim starts the session with no provider key (omp may still run profile $_unread_named). Put --profile $_unread_named before it." >&2
+    fi
+elif [[ -z "$_flag" ]]; then
+    if [[ -n "${OMP_PROFILE+x}" ]]; then
+        _profile="$OMP_PROFILE"
+    else
+        _profile="${PI_PROFILE:-}"
+    fi
 fi
 _profile="${_profile//[[:space:]]/}"
 case "$_profile" in
     ""|default)
-        exec secrets "${_default_keys[@]}" -- "${_cmd[@]}" "$@"
+        _dropped=()
+        for _k in "${_keys[@]}"; do
+            [[ -n "${!_k+x}" ]] && _dropped+=("$_k")
+            unset "$_k"
+        done
+        if (( ${#_dropped[@]} )); then
+            echo "omp: not passing ${_dropped[*]} from this environment to a default-profile session: its providers go through the model gateway, and a key in omp's environment reaches every tool subprocess (AGENTC-1085). A session that needs its own key runs under a named profile (omp --profile NAME)." >&2
+        fi
+        exec "${_via[@]}" "${DOTFILES_DIR}/scripts/omp-no-provider-keys" "${_keys[@]}" -- "$_prog" "$@"
         ;;
 esac
+
+# --- a named profile gets the shared setup ---
+# Its symlinks track installers/omp.sh's (created, re-pointed, retired); its real files are its
+# own. config.yml comes from the overlay above; models.yml (gateway routing) stays per-profile.
+if ! [[ "$_profile" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+    echo "omp: invalid profile name: $_profile (letters, digits, '.', '-', '_'; not starting with '.')" >&2
+    exit 2
+fi
+_mirror_links() { # _mirror_links SRC DST
+    local src="$1" dst="$2" entry name
+    mkdir -p "$dst"
+    for entry in "$dst"/*; do
+        [[ -L "$entry" ]] || continue
+        name="${entry##*/}"
+        case "$name" in config.yml|models.yml) rm -f "$entry"; continue ;; esac
+        [[ -L "$src/$name" ]] || rm -f "$entry"
+    done
+    for entry in "$src"/*; do
+        name="${entry##*/}"
+        case "$name" in config.yml|models.yml) continue ;; esac
+        if [[ -L "$entry" ]]; then
+            if [[ -L "$dst/$name" || ! -e "$dst/$name" ]] \
+                && [[ "$(readlink "$dst/$name" 2>/dev/null)" != "$(readlink "$entry")" ]]; then
+                ln -sfn "$(readlink "$entry")" "$dst/$name"
+            fi
+        elif [[ "$name" == extensions && -d "$entry" ]]; then
+            _mirror_links "$entry" "$dst/$name"
+        fi
+    done
+}
+_mirror_links "$HOME/.omp" "$HOME/.omp/profiles/$_profile"
+_mirror_links "$HOME/.omp/agent" "$HOME/.omp/profiles/$_profile/agent"
+unset -f _mirror_links
 
 _suffix="_$(tr 'a-z.-' 'A-Z__' <<< "$_profile")"
 _available="$(secrets list | awk '{print $1}')"
@@ -174,16 +414,20 @@ for _k in "${_keys[@]}"; do
     grep -qx "${_k}${_suffix}" <<< "$_available" && _scoped+=("${_k}${_suffix}")
 done
 if [[ ${#_scoped[@]} -eq 0 ]]; then
-    exec "${_cmd[@]}" "$@"
+    exec "${_via[@]}" "$_prog" "$@"
 fi
-# secrets exposes the scoped names; rename them to the provider names omp reads.
+# secrets exposes the scoped names; rename them to the provider names omp reads. The key list is
+# passed in, so _keys stays the only copy. `set +x` first: an inherited SHELLOPTS=xtrace would
+# otherwise trace each `export` with the key's value.
+# shellcheck disable=SC2016  # the body is for the child bash to expand
 exec secrets "${_scoped[@]}" -- bash -c '
-    suffix="$1"; shift
-    for k in ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY; do
+    set +x
+    suffix="$1" keys="$2"; shift 2
+    for k in $keys; do
         scoped="${k}${suffix}"
         [[ -n "${!scoped+x}" ]] || continue
         export "$k=${!scoped}"
         unset "$scoped"
     done
     exec "$@"
-' _ "$_suffix" "${_cmd[@]}" "$@"
+' _ "$_suffix" "${_keys[*]}" "${_via[@]}" "$_prog" "$@"

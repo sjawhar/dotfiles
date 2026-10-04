@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# omp-no-provider-keys: the last hop before a default-profile omp. It execs the command only when
+# none of the named variables will be in the session's environment — neither in the environment
+# omp is about to start with, nor in a dotenv file omp loads into it — and otherwise exits 1
+# naming each variable and where it came from, never its value, so the session does not start.
+#
+#   omp-no-provider-keys <NAME…> -- <omp path, or bare omp under mise x> [args…]
+#
+# It is a separate program rather than a check inside shims/omp because the check has to be what
+# `agent-secrets register --exec` and `mise x` actually exec — the shim cannot re-enter itself
+# there (its loop guard would refuse a second entry in the same pid), and a `bash -c` body would
+# be unlinted quoted shell. Why the default profile must hold no provider key, and what puts one
+# there, is in shims/omp under "provider keys".
+#
+# The dotenv files are the ones omp 18.4.3 LOADS for itself after this exec (utils/src/env.ts),
+# each measured with a canary: `~/.env`, the config root's `.env` (`~/.omp/.env`; also measured
+# as `~/$PI_CONFIG_DIR/.env`) and the default agent dir's (`<config root>/agent/.env`). Each
+# reaches omp's own environment AND its tool shells, the full transcript path, and none shows in
+# this process's environment, so the files are read here. omp can read the agent dir's `.env`
+# from PI_CODING_AGENT_DIR instead, when that is not a named profile's own dir (utils/src/dirs.ts,
+# not measured); when it is set, both agent dirs are checked, since which one omp reads depends
+# on profile rules this script does not replicate.
+# Not checked, by measurement: a `.env` in the working directory reaches omp's own environment
+# but omp filters it out of tool shells, so it cannot write a key into a transcript (the gateway
+# precedence that also bears on it is in shims/omp under "provider keys"); `.env.local` reaches
+# neither (the release binary is built with autoloadDotenv: false). This list mirrors omp's
+# behaviour, not a choice: when an omp release changes which dotenv files it reads, re-measure it.
+#
+# Checked downstream of this exec on 2026-09-30 against 18.4.3, and found to add no provider key
+# (AGENTC-1085 review): mise applies a project's [env] only to the tool a mise shim launches, and no
+# mise config here names one; omp's own code writes credentials to its environment only in this
+# dotenv loader and an unconfigured EXA_API_KEY; `bash.direnv` is its only setting that injects
+# environment into tool shells, and direnv is not installed; the shell snapshot's rc files name no
+# provider key. `agent-secrets register --exec` is upstream of this hop, not downstream.
+set -euo pipefail
+
+names=()
+while (( $# )) && [[ "$1" != -- ]]; do names+=("$1"); shift; done
+(( $# > 1 )) || { echo "usage: omp-no-provider-keys <NAME…> -- <omp argv…>" >&2; exit 2; }
+shift
+
+held=()
+for name in "${names[@]}"; do
+    [[ -n "${!name:+x}" ]] && held+=("$name")
+done
+if (( ${#held[@]} )); then
+    echo "omp: refusing to start: ${held[*]} reached this default-profile session's environment after shims/omp removed provider keys, so a hop between the shim and omp added it — a mise.toml [env] (this directory, any parent, or mise's own global config) or a wrapper in the launch chain. Remove it there; a session that needs its own key runs under a named profile (omp --profile NAME)." >&2
+    exit 1
+fi
+
+root="$HOME/${PI_CONFIG_DIR:-.omp}"
+dotenvs=("$HOME/.env" "$root/.env" "$root/agent/.env")
+if [[ -n "${PI_CODING_AGENT_DIR:-}" && "${PI_CODING_AGENT_DIR%/}" != "$root/agent" ]]; then
+    dotenvs+=("${PI_CODING_AGENT_DIR%/}/.env")
+fi
+from_files=()
+for file in "${dotenvs[@]}"; do
+    [[ -r "$file" ]] || continue
+    # Prints each listed name the file assigns a non-empty value, over-reading omp's parser (Bun's
+    # node:util parseEnv): an `export` prefix, `=` or `:`, a "…", '…' or `…` value, a trailing
+    # `# comment`. Values stay inside awk, so no value reaches this shell, its xtrace, or the
+    # output.
+    while IFS= read -r name; do
+        [[ -n "$name" ]] && from_files+=("$name in $file")
+    done < <(awk -v names="${names[*]}" -v q="'" -v bt='`' '
+        BEGIN { n = split(names, want, " ") }
+        {
+            for (i = 1; i <= n; i++) {
+                if (!match($0, "^[[:space:]]*(export[[:space:]]+)?" want[i] "[[:space:]]*[=:]")) continue
+                v = substr($0, RLENGTH + 1)
+                sub(/^[[:space:]]+/, "", v)
+                c = substr(v, 1, 1)
+                if (c == "\"" || c == q || c == bt) {
+                    v = substr(v, 2)
+                    e = index(v, c)
+                    if (e) {
+                        v = substr(v, 1, e - 1)
+                    } else {
+                        # No closing quote on this line: parseEnv loads a non-empty value either
+                        # way (the rest of this line when no quote ever closes it, else
+                        # everything up to the one that does), so refuse here. Keep this pass
+                        # stateless: cross-line state could only serve to skip a continuation
+                        # line, and that lets a plain key below an unclosed quote through. The
+                        # price is a false refusal when the quoted value of another variable
+                        # spans a line shaped like NAME=value. Accept it.
+                        v = "x"
+                    }
+                } else {
+                    sub(/(^|[[:space:]]+)#.*$/, "", v)
+                    sub(/[[:space:]]+$/, "", v)
+                }
+                if (v != "" && !(want[i] in seen)) { seen[want[i]] = 1; print want[i] }
+            }
+        }' "$file")
+done
+if (( ${#from_files[@]} )); then
+    printf -v listed '%s; ' "${from_files[@]}"
+    echo "omp: refusing to start: ${listed%; }. omp loads that file into its own environment and every tool shell, so the key would reach this default-profile session's transcripts (AGENTC-1085). Remove it from the file; a session that needs its own key runs under a named profile (omp --profile NAME)." >&2
+    exit 1
+fi
+
+# A bare name comes only from inside `mise x`, which resolved its own command in the tool dirs it
+# added. Its child's PATH keeps the caller's entries ahead of those dirs whenever the PATH mise was
+# handed carries mise's own shims dir (~/.mise/shims, as every PATH .bashrc builds does), so a
+# plain lookup here would find shims/omp again. shims/omp hands mise a PATH with no install dir of
+# its own, so every install dir on this PATH is one mise added, the pinned release's first: the
+# command is the first match in one of them.
+prog="$1"
+shift
+if [[ "$prog" != */* ]]; then
+    installs="${MISE_DATA_DIR:-$HOME/.mise}/installs"
+    IFS=':' read -ra dirs <<< "$PATH"
+    for dir in "${dirs[@]}"; do
+        if [[ "$dir" == "$installs"/* && -x "$dir/$prog" ]]; then
+            exec "$dir/$prog" "$@"
+        fi
+    done
+    echo "omp-no-provider-keys: no $prog in a mise install dir ($installs/…) on PATH; a bare name is resolved only as \`mise x\` resolves it" >&2
+    exit 1
+fi
+exec "$prog" "$@"

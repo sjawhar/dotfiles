@@ -7,6 +7,16 @@ modelRoles:
   vision: google/gemini-3.7-flash:medium
   review: openai-codex/gpt-5.5:xhigh
   advisor: anthropic/claude-sonnet-5:medium
+  askgate: anthropic/claude-fable-5-1:high
+  proactiveMemory: anthropic/claude-sonnet-5
+  judgeLog: anthropic/claude-sonnet-5
+extensionHandlers:
+  # AskGate (omp/extensions/askgate.ts) answers a Dispatch write with a model
+  # call bounded at 90 s inside the handler; the runner's own ceiling must sit
+  # above it, because a handler that outruns the ceiling is fail-closed (the
+  # call is refused). Global: any tool_call handler in any extension may now
+  # hold a tool call for up to 120 s before the runner refuses it (was 30 s).
+  toolCallTimeoutMs: 120000
 retry:
   modelFallback: true
   usageAwareFallback: true
@@ -27,11 +37,9 @@ retry:
       - anthropic/claude-opus-4-8
     # Codex (ChatGPT Pro subscription) falls to the Anthropic tier that matches
     # the failing model; exact keys beat the wildcard. An empty chain means no
-    # fallback at all: the two GPT escape hatches — gpt-6-astra (the astra and
-    # sami-proxy agents) and the API-billed gpt-api agent — fail loudly rather
-    # than answer from another provider; the caller then decides.
+    # fallback at all: gpt-6-astra (the astra and sami-proxy agents) fails loudly
+    # rather than answer from another provider; the caller then decides.
     openai-codex/gpt-6-astra: []
-    openai/gpt-5.6-terra: []
     openai-codex/gpt-5.5:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
@@ -63,6 +71,15 @@ retry:
       - anthropic/claude-opus-4-8
 task:
   maxRecursionDepth: 3
+  # No session dispatches onto OpenAI API billing (Sami, 2026-10-02, on
+  # dispatch://AGENTC-203/ask/5f198a8e: "Make sure that agents on this box and
+  # legion are not using openai API"). On the devbox the `openai` provider goes
+  # through the Hawk gateway, so these two agents spent the same prepaid OpenAI
+  # balance the deploy gate runs on, and it ran dry twice that day. With
+  # disabledProviders below, nothing can reach `openai/*` by another selector.
+  disabledAgents:
+    - gpt-api
+    - astra-api
   agentModelOverrides:
     bug-finder: "@review"
     code-architect: anthropic/claude-opus-5-5
@@ -78,6 +95,15 @@ task:
   isolation:
     merge: patch
     enabled: true
+# Shake runs first. With no model call, it swaps old tool output, and fenced or
+# XML blocks of 400+ tokens in any message, for recovery placeholders, so a paid
+# model-written summary runs only when shake cannot free enough (the shipped
+# default tries shake after handoff). A local method first also turns off
+# speculative background compaction, which speculates only on remote, handoff or
+# soft, so when shake cannot free enough a remote summary runs synchronously at
+# the threshold. AGENTC-1288, Sami, 2026-09-30.
+compaction:
+  methodOrder: [shake, remote, snapcompact, handoff, soft]
 advisor:
   enabled: true
 bashInterceptor:
@@ -93,6 +119,11 @@ memory:
   backend: mnemopi
 mnemopi:
   scoping: per-project-tagged
+  # Only deliberate saves are stored: the retain and learn tools, and an explicit
+  # `/memory enqueue`. autoRetain would store a raw transcript slice every 4 user
+  # turns and at session exit; those slices outranked deliberate saves in recall
+  # (AGENTC-1305).
+  autoRetain: false
   polyphonicRecall: true
   enhancedRecall: true
   proactiveLinking: true
@@ -114,9 +145,28 @@ display:
   smoothStreaming: false
   hideToolActivity: false
   shimmer: disabled
+  # Keep the transcript before each compaction inline, behind a divider. The
+  # default (true) rebuilds the live transcript from only the kept tail and
+  # clears scrollback, so everything before a compaction or handoff vanishes
+  # from both the fullscreen viewport and the normal screen's scrollback.
+  collapseCompacted: false
 tui:
   resizeScrollback: preserve
   rewindScrollback: preserve
+# No inline word predictions (dim ghost text after the cursor, accepted with
+# Tab). The default, auto, predicts from prompt history on every platform.
+spelling:
+  autocomplete: "off"
+# Ready sessions join the attention queue (omp/extensions/attention-queue.ts,
+# scripts/tmux-attention) instead of ringing the bell: under tmux each of these
+# writes an OSC 9 plus a BEL, Ghostty asks the desktop for attention, and
+# Pop!_OS moves focus to that window.
+completion:
+  notify: "off"
+ask:
+  notify: "off"
+error:
+  notify: "off"
 skills:
   ignoredSkills:
     - ce-commit-push-pr
@@ -147,6 +197,11 @@ skills:
     - sentry-setup-ai-monitoring
     - sentry-svelte-sdk
     - sentry-workflow
+# The OpenAI API provider is off for every session; the ChatGPT Pro
+# subscription (`openai-codex`) is a separate provider and stays on. Reason: the
+# task.disabledAgents comment above.
+disabledProviders:
+  - openai
 providers:
   anthropic:
     serverSideFallback: true

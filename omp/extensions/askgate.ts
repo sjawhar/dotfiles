@@ -1,0 +1,94 @@
+// Entry of the AskGate pre-send gate; the behaviour is described and implemented in
+// askgate-core.ts. This file binds the fork's objects the core needs — the completion, and
+// buildSessionContext for the primary's context — so the core imports nothing from the fork and
+// runs under `bun test` with fakes. (Omp's loader would resolve the fork's packages from any
+// module the entry imports; keeping them here is for the tests, not for the loader.) A transient
+// provider failure gets one retry inside the gate's own deadline, and a failure never falls back to
+// another model. The installer links only this file; askgate-core.ts, the prompt files and
+// ../watchdog/askgate.md resolve from its real path.
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { buildSessionContext, type ExtensionAPI, type ReadonlySessionManager, settings } from "@oh-my-pi/pi-coding-agent";
+import { EXTENSION_HANDLER_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { cfgExtensionHandlersToolCallTimeoutMs } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+import { type Api, type ApiKeyResolver, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { type CompleteRequest, type Completion, createAskGate, GATE_EFFORT, type Message, type Usage } from "./askgate-core";
+
+// The core passes the fork's objects through untyped: ctx is the ExtensionContext, whose modelRegistry and
+// sessionManager this reads, and model is the full Model<Api> ctx.models.resolve handed back.
+type Ctx = { modelRegistry: { resolver: (model: Model<Api>, sessionId: string) => ApiKeyResolver }; sessionManager: ReadonlySessionManager };
+
+async function complete({ ctx, model, system, user, sessionId, signal }: CompleteRequest): Promise<Completion> {
+	const full = model as Model<Api>;
+	// Every attempt bills: a transient retry, a resampled thinking loop, the aborted last one. onAttempt sees each.
+	const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const onAttempt = (attempt: AssistantMessage) => {
+		usage.input += attempt.usage.input;
+		usage.output += attempt.usage.output;
+		usage.cacheRead += attempt.usage.cacheRead;
+		usage.cacheWrite += attempt.usage.cacheWrite;
+		usage.cost += attempt.usage.cost.total;
+	};
+	try {
+		const message = await retryTransientCompletion(
+			() =>
+				completeSimple(
+					full,
+					{ systemPrompt: [system], messages: [{ role: "user", content: user, timestamp: Date.now() }] },
+					// Caching off: the provider's breakpoints cover the whole prompt, transcript included, so every
+					// call would write it all at the one-hour rate (twice the input price here), and the transcript,
+					// which slides on every call, is never read back.
+					{ apiKey: (ctx as Ctx).modelRegistry.resolver(full, sessionId), sessionId, reasoning: GATE_EFFORT, cacheRetention: "none", maxTokens: 1200, temperature: 0, signal, onAttempt },
+				),
+			{ maxAttempts: 2, provider: full.provider, signal },
+		);
+		const text = message.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map(b => b.text).join("\n");
+		return { text, error: message.stopReason === "error" ? (message.errorMessage ?? "error") : message.stopReason === "aborted" ? "aborted" : undefined, usage };
+	} catch (error) {
+		// An abort during a retry's backoff, or a thrown provider error: what the attempts spent is still owed.
+		return { text: "", error: error instanceof Error ? error.message : String(error), usage };
+	}
+}
+
+/** The runner's tool_call handler ceiling, normalised as the runner does (runner.ts normalizeHandlerTimeout). */
+function handlerCeilingMs(): number {
+	const configured = cfgExtensionHandlersToolCallTimeoutMs.get(settings);
+	return Number.isFinite(configured) && configured > 0 ? configured : EXTENSION_HANDLER_TIMEOUT_MS;
+}
+
+/** Appends to the dump, owner-only on every open (not only on creation), and never through a symlink. */
+function appendDump(p: string, text: string): void {
+	const fd = fs.openSync(p, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
+	try {
+		fs.fchmodSync(fd, 0o600);
+		fs.writeSync(fd, text);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+function readFile(p: string): string | undefined {
+	try {
+		return fs.readFileSync(p, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+export default createAskGate({
+	env: process.env,
+	home: os.homedir(),
+	now: Date.now,
+	readFile,
+	// The dump holds the primary system prompt and transcript: owner-only, like the session files.
+	appendFile: appendDump,
+	complete,
+	charterPath: path.join(path.dirname(fs.realpathSync(import.meta.path)), "..", "watchdog", "askgate.md"),
+	handlerCeilingMs,
+	contextMessages: ctx => {
+		const { sessionManager } = ctx as unknown as Ctx;
+		return buildSessionContext(sessionManager.getEntries(), sessionManager.getLeafId()).messages as unknown as readonly Message[];
+	},
+}) as (pi: ExtensionAPI) => void;
