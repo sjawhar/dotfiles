@@ -21,8 +21,10 @@ this record at each wake and before merging.
 - Preserve standing approvals through handoffs until superseded. Do not ask again.
 - Keep active holds, release conditions, priorities and approved windows in that
   current record. Never restore a lifted hold or infer a quiet window from history.
-- Use ordinary protected squash merges. No admin bypass, reused historical token,
-  or permission exception inferred from earlier use.
+- Use ordinary protected squash merges. No admin bypass and no permission
+  inferred from earlier use. A grant given to this queue session stays live for
+  it: keep merging under it and ask once, for the window the queue needs. What is
+  banned is carrying a token in from an earlier task or session.
 - Verify author, session-bound write identity, required reviews and CODEOWNERS
   requirements at registration. A self-approval restriction is an unmet gate.
 - With no explicit priority, sequence by user value and dependencies, not READY
