@@ -13,13 +13,16 @@ in-app picker). Each omp pane line is rewritten to a command that resumes that
 session where it was running:
 
 - a pane running omp on the host becomes `omp --resume <id>`;
-- a pane running `agentbox new <repo>` (scripts/agentbox) shows the launcher
+- a pane running `agentbox new … -- …` (scripts/agentbox) shows the launcher
   as its command; the omp process lives in the box under another uid, so it is
   found by asking each box for omp processes whose TMUX_PANE names this pane,
-  and the line becomes `agentbox new <repo> omp --resume <id>`. The repo is read
-  from the session file's own directory bucket (a box works in
+  and the line becomes `agentbox new <spec> -- omp --resume <id>`, where
+  <spec> is everything the launcher was given before `--` (its repos and -e
+  variables). A pane whose command carries no such launcher line (the exec
+  client naming the box, or a box launched before the `--` form) falls back to
+  the repo in the session file's own directory bucket (a box works in
   ~/boxes/<box>/<repo>, so the bucket is `-boxes-<box>-<repo>`); the launcher
-  makes a fresh box and workspace on resume, and omp relocates the session
+  makes a fresh box and workspaces on resume, and omp relocates the session
   file into its bucket.
 
 `@resurrect-processes` in .tmux.conf lists both shapes. Invoked by resurrect
@@ -44,8 +47,10 @@ RESUME_ARG = re.compile(r"(?:^|\s)(?:--resume|-r)[=\s]+([0-9a-f-]{36})(?:\s|$)")
 # A pane whose foreground process is a box session. resurrect records the pane
 # leader's argv: the launcher itself (`bash /…/scripts/agentbox new …`, since
 # it waits on `docker run` to run the close phase rather than exec-ing it), a
-# `agentbox new <repo> omp --resume <id>` line, or the exec client naming the box.
+# `agentbox new <spec> -- omp --resume <id>` line, or the exec client naming the box.
 BOX_PANE = re.compile(r"(?:^|[\s/])agentbox(?:\s+new(?:\s|$)|-[^\s]+)")
+# What a launcher line was given before its `--`: repos and -e variables.
+LAUNCH_SPEC = re.compile(r"(?:^|[\s/])agentbox\s+new\s+(?P<spec>.+?)\s+--(?:\s|$)")
 MAX_DEPTH = 4
 MAX_PROCESSES = 32
 FIELD_SEP = "\t"
@@ -194,8 +199,8 @@ def box_sessions() -> dict[str, tuple[str, str]]:
 
 
 
-def resume_command(repo: str | None, sid: str) -> str:
-    return f"agentbox new {repo} omp --resume {sid}" if repo else f"omp --resume {sid}"
+def resume_command(spec: str | None, sid: str) -> str:
+    return f"agentbox new {spec} -- omp --resume {sid}" if spec else f"omp --resume {sid}"
 
 
 def rewrite(save_file: Path) -> tuple[int, int]:
@@ -219,7 +224,7 @@ def rewrite(save_file: Path) -> tuple[int, int]:
         if located is None:
             continue
         pane_pid, pane_id = located
-        repo: str | None = None
+        spec: str | None = None
         if is_box:
             if boxed is None:
                 boxed = box_sessions()
@@ -227,11 +232,13 @@ def rewrite(save_file: Path) -> tuple[int, int]:
             if found is None:
                 continue
             repo, sid = found
+            launch = LAUNCH_SPEC.search(full_command)
+            spec = launch.group("spec") if launch else repo
         else:
             sid = host_session_for(pane_pid, full_command)
             if sid is None:
                 continue
-        fields[10] = ":" + resume_command(repo, sid)
+        fields[10] = ":" + resume_command(spec, sid)
         lines[i] = FIELD_SEP.join(fields)
         rewritten += 1
     tmp = save_file.with_suffix(save_file.suffix + ".tmp")
