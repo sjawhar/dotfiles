@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Claude Code status line: a bar of the context the next request carries, e.g.
-# "ctx ██▌░░░░░░░ 25% 250k/1M" (green under 50%, yellow under 80%, red above).
+# "ctx ██▌░░░░░░░ 25% 250k/1M" (green under 50%, yellow under 80%, red above),
+# prefixed with the profile name under `cld --profile NAME`.
 # Claude Code pipes the session state as JSON on stdin. context_window.current_usage is the
 # last request's input (uncached, cache writes, cache reads) and is null before the first reply.
 set -euo pipefail
 
-jq -r '
+profile=""
+case "${CLAUDE_CONFIG_DIR:-}" in */.claude-profiles/*) profile="${CLAUDE_CONFIG_DIR##*/}" ;; esac
+
+jq -r --arg profile "$profile" '
   def short:
     if . >= 1000000 then "\(. / 100000 | floor / 10)M"
     elif . >= 1000 then "\(. / 1000 | floor)k"
@@ -22,12 +26,13 @@ jq -r '
   .context_window as $w
   | if $w == null then error("status line input has no context_window") else . end
   | ($w.context_window_size | short) as $size
-  | if $w.current_usage == null then "ctx \(paint("2"; cells(10; "░"))) -/\($size)"
+  | (if $profile == "" then "" else "\(paint("35"; $profile)) " end)
+  + (if $w.current_usage == null then "ctx \(paint("2"; cells(10; "░"))) -/\($size)"
     else
       ($w.current_usage | .input_tokens + .cache_creation_input_tokens + .cache_read_input_tokens) as $used
       | ($used / $w.context_window_size) as $frac
       | (if $frac < 0.5 then "32" elif $frac < 0.8 then "33" else "31" end) as $color
       | bar($frac; 10) as [$filled, $empty]
       | "ctx \(paint($color; $filled))\(paint("2"; $empty)) \($w.used_percentage)% \($used | short)/\($size)"
-    end
+    end)
 '

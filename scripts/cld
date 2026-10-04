@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code launcher.
+# Claude Code launcher: `cld [--profile NAME] [claude args...]`.
 #
 # Loads gh-app-routes.gitconfig for the agent session so git push and gh CLI
 # authenticate as the GitHub App installation for the target repo's owner;
@@ -7,6 +7,50 @@
 # Mirrors the env setup in scripts/oc. Private key is fetched lazily by the
 # gh-app-token helper via `secrets get`.
 set -euo pipefail
+
+# --- profile: CLAUDE_CONFIG_DIR is Claude Code's own profile, with its own login ---
+# --profile NAME uses .claude-profiles/NAME and links _shared into it; no flag keeps an inherited
+# CLAUDE_CONFIG_DIR, else .claude. _shared: what .gitignore tracks under .claude, plus skills,
+# output-styles and plugins.
+_canonical="${DOTFILES_DIR:-$HOME/.dotfiles}/.claude"
+_shared=(CLAUDE.md AGENTS.md settings.json mcp.json agents commands hooks project-instructions
+    skills output-styles plugins)
+_args=()
+_profile=""
+_profile_given=""
+while (($#)); do
+    case "$1" in
+        --profile=*) _profile="${1#--profile=}" _profile_given=1; shift ;;
+        --profile)
+            if (($# < 2)); then
+                echo "cld: --profile needs a name" >&2
+                exit 2
+            fi
+            _profile="$2" _profile_given=1
+            shift 2
+            ;;
+        *) _args+=("$1"); shift ;;
+    esac
+done
+if [[ -z "$_profile_given" ]]; then
+    export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$_canonical}"
+elif [[ -z "$_profile" || "$_profile" == default ]]; then
+    export CLAUDE_CONFIG_DIR="$_canonical"
+else
+    if ! [[ "$_profile" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+        echo "cld: invalid profile name: $_profile (letters, digits, '.', '-', '_'; not starting with '.')" >&2
+        exit 2
+    fi
+    export CLAUDE_CONFIG_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}/.claude-profiles/$_profile"
+    (umask 077 && mkdir -p "$CLAUDE_CONFIG_DIR")
+    for _n in "${_shared[@]}"; do
+        [[ -e "$_canonical/$_n" ]] || continue
+        [[ -e "$CLAUDE_CONFIG_DIR/$_n" || -L "$CLAUDE_CONFIG_DIR/$_n" ]] \
+            || ln -s "$_canonical/$_n" "$CLAUDE_CONFIG_DIR/$_n"
+    done
+    unset _n
+fi
+unset _canonical _shared _profile _profile_given
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
 # Agents authenticate as the GitHub App installation matching each repo's
@@ -30,6 +74,17 @@ if [ -r "${DOTFILES_DIR:-$HOME/.dotfiles}/envoy/env.local" ]; then
 fi
 export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 
+# Envoy NATS credential for the claude-envoy bridge: the `omp-session` nkey
+# seed's per-boot 0600 file, when there is one (scripts/envoy-nats-seed). A seed
+# the caller already gave wins. Mirrors shims/omp.
+if [[ -z "${NATS_NKEY_SEED_FILE:-}" && -z "${NATS_NKEY_SEED:-}" ]]; then
+    _seed_file="$("${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/envoy-nats-seed")" || _seed_file=""
+    if [[ -n "$_seed_file" ]]; then
+        export NATS_NKEY_SEED_FILE="$_seed_file"
+    fi
+    unset _seed_file
+fi
+
 # --- dotfiles shims must lead PATH ---
 # The gh App routing above only works when `gh` resolves to shims/gh. The
 # launching shell's mise hook may have prepended tool install dirs (including
@@ -43,6 +98,10 @@ done
 export PATH="${DOTFILES_DIR:-$HOME/.dotfiles}/shims:$_newpath"
 unset _newpath _parts _p
 
+# Host session identity for agent secrets: claude runs as a registered session of the
+# agent-secrets helper where that applies (scripts/agent-secrets-session, the same wrapper as
+# shims/omp and scripts/oc).
 # Opt the session into the Envoy channel plugin (managed settings allowlist the
 # legion-plugins marketplace); channel events reach the model as <channel> messages.
-exec claude --dangerously-skip-permissions --channels plugin:claude-envoy-bridge@legion-plugins "$@"
+exec "${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/agent-secrets-session" \
+    claude --dangerously-skip-permissions --channels plugin:claude-envoy-bridge@legion-plugins "${_args[@]}"

@@ -6,7 +6,7 @@
   "permissions": {
     "defaultMode": "auto"
   },
-  "model": "fable[1m]",
+  "model": "opus[1m]",
   "hooks": {
     "PostToolUse": [
       {
@@ -34,7 +34,8 @@
     "skill-creator@claude-plugins-official": true,
     "knives@knives": true,
     "sjawhar@sjawhar": true,
-    "claude-envoy@legion-plugins": true
+    "claude-envoy@legion-plugins": true,
+    "slack@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "sjawhar": {

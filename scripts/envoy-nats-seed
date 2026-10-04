@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# envoy-nats-seed: the path of this machine's cached `omp-session` NATS nkey
+# seed, which the session launchers (shims/omp, scripts/cld, scripts/oc,
+# scripts/agentbox) export as NATS_NKEY_SEED_FILE. pi-envoy and the
+# claude-envoy bridge read that file to authenticate to production NATS.
+#
+#   envoy-nats-seed            print the seed file's path, or nothing when there is none
+#   envoy-nats-seed --refresh  fetch the seed from AWS now, whatever the cache holds
+#
+# The seed lives in AWS Secrets Manager ($SECRET_ID) and on a machine only in
+# one 0600 file under $XDG_RUNTIME_DIR/envoy, a tmpfs cleared at boot. It never
+# enters an argv or an environment: aws writes it straight into a temp file,
+# which replaces the cache by rename once it holds a user nkey seed.
+#
+# The first launch after boot fetches while the session waits (one AWS call,
+# bounded by FETCH_TIMEOUT_S; a lock makes parallel launches share it). Every
+# later launch only stats the file. Once the file, or the last failed attempt,
+# is older than REFRESH_S, a launch starts one detached background refresh and
+# carries on with what it has. A rotated seed therefore reaches sessions started
+# within an hour of the rotation's first launch, or at once after --refresh; a
+# running session keeps the seed it connected with until it restarts.
+#
+# No secret, no AWS credentials, no aws CLI: nothing is printed, so the session
+# connects to NATS without a credential, and the one attempt that failed says
+# why on one stderr line; its retries are silent and in the background, at most
+# one per REFRESH_S. A failed refresh keeps the cached seed. Launcher mode always
+# exits 0: a missing credential never stops a session from starting.
+#
+# Every process a session starts inherits the pointer, and nats.go refuses an
+# nkey seed from a server that sends no nonce ("nkeys not supported by the
+# server"): a local rig against a throwaway no-auth NATS runs with
+# `env -u NATS_NKEY_SEED_FILE` unless its harness strips the variable itself.
+set -uo pipefail
+
+SECRET_ID="production/envoy/nats-nkey-seed-omp-session"
+REGION="us-west-2"
+REFRESH_S=3600
+FETCH_TIMEOUT_S=5
+
+dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/envoy"
+seed="$dir/nats-nkey-seed-omp-session"
+# The last failed attempt: its mtime says when, its content why.
+miss="$seed.miss"
+lock="$seed.lock"
+
+say() { echo "envoy-nats-seed: $*" >&2; }
+usable() { [[ -s "$seed" && -O "$seed" ]]; }
+older_than_refresh() { (( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || echo 0) >= REFRESH_S )); }
+recent_miss() { [[ -e "$miss" ]] && ! older_than_refresh "$miss"; }
+# The lock on fd 9, flock's own arguments passed through; quiet when it cannot be had.
+take_lock() { exec 9>>"$lock" && flock "$@" 9; } 2>/dev/null
+# The first of the tools the locked paths need that this machine lacks.
+missing_tool() {
+    local t
+    for t in flock timeout setsid; do
+        command -v "$t" >/dev/null 2>&1 || { echo "$t"; return 0; }
+    done
+    return 1
+}
+
+# Records a failed attempt in the miss marker; `loud` also says why.
+record_miss() {
+    local loud="$1" reason="$2"
+    { printf '%s\n' "$reason" >"$miss"; } 2>/dev/null
+    [[ "$loud" == loud ]] || return 0
+    if usable; then
+        say "could not refresh the NATS credential ($reason); keeping the cached one"
+    else
+        say "no NATS credential ($reason); sessions connect without one, retried hourly in the background"
+    fi
+}
+
+# One attempt. On failure the cache is left as it was and the miss marker
+# records the reason.
+fetch() {
+    local loud="$1" tmp err reason
+    if ! tmp="$(mktemp "$seed.XXXXXX" 2>/dev/null)"; then
+        record_miss "$loud" "cannot create a file in $dir"
+        return 1
+    fi
+    if ! command -v aws >/dev/null 2>&1; then
+        reason="the aws CLI is not installed"
+    # The default credential chain (a devbox's instance role), never a profile
+    # the launching shell selected: one shell's staging profile would otherwise
+    # record a miss for every launcher on the machine. -k: an aws that ignores
+    # TERM still cannot hold the first launch past the timeout.
+    elif err="$(env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE timeout -k 2 "$FETCH_TIMEOUT_S" \
+        aws secretsmanager get-secret-value --region "$REGION" \
+        --secret-id "$SECRET_ID" --query SecretString --output text 2>&1 >"$tmp")"; then
+        # The readers trim the file (legion #1471), so a stored value with
+        # surrounding whitespace is accepted and cached trimmed.
+        if [[ "$(grep -cv '^[[:space:]]*$' "$tmp")" -eq 1 ]] \
+            && grep -xE '[[:space:]]*SU[A-Z2-7]{56}[[:space:]]*' "$tmp" | tr -d '[:space:]' >"$tmp.v" \
+            && [[ -s "$tmp.v" ]]; then
+            mv -f "$tmp.v" "$seed"
+            rm -f "$tmp" "$miss"
+            return 0
+        fi
+        reason="$SECRET_ID does not hold a user nkey seed"
+    else
+        case $? in
+            124|137) reason="AWS did not answer within ${FETCH_TIMEOUT_S}s" ;;
+            *) reason="$(grep -v '^[[:space:]]*$' <<<"$err" | tail -1 | cut -c1-240)" ;;
+        esac
+    fi
+    rm -f "$tmp" "$tmp.v"
+    record_miss "$loud" "$reason"
+    return 1
+}
+
+refresh_in_background() {
+    setsid "${BASH_SOURCE[0]}" --background </dev/null >/dev/null 2>&1 &
+}
+
+umask 077
+# No usable per-boot directory (none on this machine, or not ours): no cache,
+# no miss marker to rate-limit a message with, so say nothing.
+if ! mkdir -p "$dir" 2>/dev/null || ! [[ -O "$dir" && -w "$dir" ]]; then
+    [[ "${1:-}" == --refresh ]] && { say "cannot use $dir"; exit 1; }
+    exit 0
+fi
+
+case "${1:-}" in
+    "") ;;
+    --refresh)
+        if t="$(missing_tool)"; then say "$t is not installed"; exit 1; fi
+        take_lock -w $((FETCH_TIMEOUT_S + 5)) || { say "cannot take $lock"; exit 1; }
+        fetch loud || exit 1
+        echo "$seed"
+        exit 0
+        ;;
+    --background)
+        if t="$(missing_tool)"; then record_miss quiet "$t is not installed"; exit 0; fi
+        take_lock -n || exit 0
+        # Another refresh may have finished while this one was starting.
+        if usable && ! older_than_refresh "$seed"; then exit 0; fi
+        recent_miss && exit 0
+        fetch quiet
+        exit 0
+        ;;
+    *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac
+
+if usable; then
+    echo "$seed"
+    if older_than_refresh "$seed" && ! recent_miss; then refresh_in_background; fi
+    exit 0
+fi
+if [[ -e "$miss" ]]; then
+    # An attempt already failed this boot; the session starts without waiting.
+    recent_miss || refresh_in_background
+    exit 0
+fi
+# The first launch this boot: fetch now, so this session starts with the seed.
+if t="$(missing_tool)"; then record_miss loud "$t is not installed"; exit 0; fi
+take_lock -w $((FETCH_TIMEOUT_S + 5)) || exit 0
+# A parallel launch may have fetched, or failed, while this one waited.
+if usable; then echo "$seed"; exit 0; fi
+[[ -e "$miss" ]] && exit 0
+fetch loud && echo "$seed"
+exit 0
