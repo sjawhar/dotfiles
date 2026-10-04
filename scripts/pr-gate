@@ -6,11 +6,12 @@
 #   - unresolved review threads (with the first line of each and whether it says Minor)
 #   - the aggregate check when the repo publishes one (a check named *-result), else every check
 #   - mergeability, draft state, base, the PR's OWN file counts (not a cited upstream diff)
+#   - Legion handoff files: any path under .legion/ the PR adds, modifies or keeps (deleting them is fine)
 #   - every review body and issue comment that names the head (verdict artifacts AT HEAD), the
 #     verdict-bearing reviews by identity, and whether the PR's own diff changed since the newest one
 #   - the Omp-Session trailers on the commits (who owns it)
-# Exit 0 = every hard gate reads green (head matches, aggregate success, 0 non-minor unresolved,
-# MERGEABLE, and a verdict-bearing artifact whose newest instance covers the head). Exit 1 otherwise.
+# Exit 0 = every hard gate reads green (head matches, no .legion/ file left, aggregate success, 0 non-minor
+# unresolved, MERGEABLE, and a verdict-bearing artifact whose newest instance covers the head). Exit 1 otherwise.
 # It never approves or merges.
 set -euo pipefail
 unset GH_TOKEN GH_CONFIG_DIR GH_REPO 2>/dev/null || true
@@ -44,6 +45,16 @@ echo "PR $repo#$n :: $(jq -r .title <<<"$pr" | cut -c1-90)"
 echo "head=$head base=$(jq -r .base <<<"$pr") state=$(jq -r .state <<<"$pr") draft=$(jq -r .draft <<<"$pr") files=$(jq -r .files <<<"$pr") +$(jq -r .add <<<"$pr")/-$(jq -r .del <<<"$pr")"
 fail=0
 if [ -n "$want" ] && [[ "$head" != "$want"* ]]; then echo "!! head does not start with $want (packet stale)"; fail=1; fi
+# Legion's phase workers commit their handoffs under .legion/ on the issue branch, and the branch must drop them
+# before it merges (sjawhar/legion#1128, #1187 and #1678 carried them onto main). Every .legion/ path whose status is
+# not "removed" blocks; a PR that only deletes them is the cleanup and stays green. LG is top-level so pr-gate-corpus
+# can test it. The files API stops at 3000 entries, so a list shorter than changed_files fails closed.
+LG='[.[]|select((.filename|startswith(".legion/")) and .status != "removed")|.filename]|join(" ")'
+pf=$(api "repos/$repo/pulls/$n/files?per_page=100" --paginate --jq '.[]|{filename,status}' | jq -cs .)
+pfn=$(jq length <<<"$pf"); pft=$(jq -r .files <<<"$pr")
+[ "$pfn" -lt "$pft" ] && { echo "!! PR file list SHORT READ: $pfn of $pft (the files API stops at 3000) - the .legion/ check saw only part of the PR"; fail=1; }
+lg=$(jq -r "$LG" <<<"$pf")
+[ -n "$lg" ] && { echo "!! Legion handoff files must be removed before merge: $lg"; fail=1; }
 g=$(api graphql -f query="{repository(owner:\"$owner\",name:\"$name\"){pullRequest(number:$n){mergeable mergeStateStatus reviewThreads(first:100){nodes{isResolved isOutdated path comments(first:1){nodes{author{login} createdAt body}}}}}}}")
 mg=$(jq -r .data.repository.pullRequest.mergeable <<<"$g"); ms=$(jq -r .data.repository.pullRequest.mergeStateStatus <<<"$g")
 # GitHub computes mergeability LAZILY: the first read after it goes stale returns UNKNOWN and TRIGGERS the
@@ -64,12 +75,20 @@ jq -r '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not
 [ "$nonminor" -gt 0 ] && fail=1
 # Aggregate check: a repo that publishes one (a check run whose name ends in "-result") is judged on it;
 # otherwise every check at the head must be green and finished.
-agg=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '[.check_runs[]|select(.name|test("-result$"))|.name]|unique|first // ""')
+# The check-run list is read ONCE and WHOLE. `gh --paginate --jq` runs the filter once per PAGE, so an
+# aggregating filter printed one verdict line per page: #20057 (198 runs) read "ok=97 fail=1 running=1" and
+# "ok=83 fail=1 running=0", and the "-result" pick could come back with a leading blank line when the
+# aggregate sat on page 2 (2026-09-27). Slurp every page, reconcile against the total_count carried in the
+# same stream (no second call to race), then aggregate. CSQ is top-level so pr-gate-corpus can test it.
+CSQ='[group_by(.name)[]|max_by(.started_at)]|"ok=\([.[]|select(.conclusion=="success")]|length) fail=\([.[]|select(.conclusion=="failure")]|length) running=\([.[]|select(.status!="completed")]|length) :: failing=\([.[]|select(.conclusion=="failure")|.name]|join(","))"'
+crs=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '.total_count as $t|.check_runs[]|{t:$t,name,status,conclusion,started_at}' | jq -cs .)
+jq -e 'length == (first.t // 0)' <<<"$crs" >/dev/null || { echo "!! check-run list SHORT READ: $(jq length <<<"$crs") of $(jq 'first.t' <<<"$crs")"; fail=1; }
+agg=$(jq -r '[.[].name|select(test("-result$"))]|unique|first // ""' <<<"$crs")
 if [ -n "$agg" ]; then
   pcr=$(api "repos/$repo/commits/$head/check-runs?check_name=$agg&per_page=5" --jq '[.check_runs[]|"\(.status)/\(.conclusion//"-")"]|first // "none"')
   echo "$agg=$pcr"; [ "$pcr" = "completed/success" ] || fail=1
 else
-  cs=$(api "repos/$repo/commits/$head/check-runs?per_page=100" --paginate --jq '[.check_runs|group_by(.name)[]|max_by(.started_at)]|"ok=\([.[]|select(.conclusion=="success")]|length) fail=\([.[]|select(.conclusion=="failure")]|length) running=\([.[]|select(.status!="completed")]|length) :: failing=\([.[]|select(.conclusion=="failure")|.name]|join(","))"')
+  cs=$(jq -r "$CSQ" <<<"$crs")
   echo "checks $cs"; okn=$(sed -n 's/^ok=\([0-9]*\).*/\1/p' <<<"$cs")
   { grep -q "fail=0 running=0" <<<"$cs" && [ "${okn:-0}" -gt 0 ]; } || { echo "!! not green: need fail=0 running=0 AND at least one green check (ok=${okn:-0}; zero check-runs is not green, #20160)"; fail=1; }
 fi
@@ -77,9 +96,11 @@ fi
 # Claude-review status (TRAJECTORY_CLAUDE_REVIEW) posted at the first head only; four pushes later the
 # head carried Vercel alone, and the verdict grammar below still read green (2026-09-25). Contexts are
 # compared as whole lines, so one context name that prefixes another cannot satisfy it.
+# TRAJECTORY_CLAUDE_REVIEW is retired (agent-c#20720, 2026-10-01: the reviewer approves instead of posting
+# a status), so a PR that carried it on a commit before that merge must not read NOT GREEN for lacking it now.
 prev=$(for s in $(api "repos/$repo/pulls/$n/commits" --paginate --jq '.[].sha' | grep -vx "$head" || true); do
   api "repos/$repo/commits/$s/status" --jq '.statuses[].context'
-done | sort -u)
+done | grep -vx 'TRAJECTORY_CLAUDE_REVIEW' | sort -u || true)
 if [ -n "$prev" ]; then
   ok_now=$(api "repos/$repo/commits/$head/status" --jq '.statuses[]|select(.state=="success")|.context' | sort -u)
   echo "statuses success at head: $(tr '\n' ' ' <<<"${ok_now:-none}")"
@@ -130,13 +151,6 @@ if [ -z "$vr" ]; then
   if [ -n "$rv$cm" ]; then echo "  !! POSSIBLE GRAMMAR MISS - artifact(s) NAME the head (above) but none matched the verdict grammar; READ them, they may be a real verdict the matcher missed (#20076)"; else echo "  !! NEEDS VERDICT - no verdict-bearing artifact and nothing names the head (#20167)"; fi
   fail=1
 fi
-# The newest verdict-bearing artifact names its head FIRST; older shas later in the same body are history, not the verdict.
-# The verdict sha is the FIRST hex run of 7-40 that contains a letter (a short sha in the verdict line counts; pure digits are
-# comment/run ids): #20186's round-7 verdict said "APPROVE at 00473e0f" but its first 40-hex was the HAWK commit being pinned
-# (df0e9892, not in agent-c), so the carry compared against a foreign sha and read a false CHANGED (2026-09-26 13:31Z).
-# Strip hex runs of 41+ first: a 64-hex image digest (sha256:556b68...) otherwise yields its first 40 digits as a
-# bogus "verdict sha", the compare 404s, and a PR whose verdicts all hold reports NOT GREEN (sjawhar/legion#1371).
-last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r "$VS"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|last|(.b // "")|vs|gsub("[0-9a-f]{41,}";" ")|[scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first // ""')
 # Verdict POLARITY: green only if the LATEST verdict is not a rejection. Match negative verdicts
 # (REQUEST_CHANGES / CHANGES REQUESTED / DO NOT MERGE) and clean positives (APPROVE/MERGE/LGTM with no
 # negative token in the same artifact); block if the latest negative is not superseded by a later positive.
@@ -161,8 +175,28 @@ POS='(?i)approve|accept(ed)? +at +[0-9a-f]|merge +at|lgtm|verdict:? *\**(approve
 # queue's own #20293 body, 2026-09-26). Same rule as the sha: the verdict comes first, history later. An artifact is
 # negative if its first NEG hit precedes its first POS hit (or POS is absent), positive the other way round.
 PL='def pol($pos; $neg): (. as $v | ([$v|match($pos; "i")][0].offset // null) as $p | ([$v|match($neg; "i")][0].offset // null) as $n | if $n != null and ($p == null or $n < $p) then "neg" elif $p != null then "pos" else "none" end);'
-negt=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL"'[.[]|select(.b|vs|pol($pos;$neg)=="neg")]|sort_by(.t)|last|.t // ""')
-post=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL"'[.[]|select(.b|vs|pol($pos;$neg)=="pos")]|sort_by(.t)|last|.t // ""')
+# SUPERSESSION BY THE SAME AUTHOR AT THE SAME HEAD (the queue's ruling on agent-c#20410, logged on AGENTC-1070, 2026-09-28).
+# The queue's oracle posts `Verdict: BLOCKS at <sha>` and, after re-judging the SAME head, `Verdict: DOES NOT BLOCK at <sha>`.
+# The second is verdict-bearing (it starts "Verdict:") but was in NEITHER polarity set, so the BLOCKS stood as the latest
+# negative and a PR every other verdict had cleared read NOT GREEN until a human read it. Rule: a later DOES NOT BLOCK
+# RETRACTS the same author's earlier negative at the same sha, and only then counts as a positive; a DOES NOT BLOCK never
+# clears ANOTHER author's rejection (one reviewer cannot clear another's, #20200's shape), and one with nothing of its own
+# to retract is neutral, so it falls through to the NEITHER-set read below. An APPROVE keeps superseding globally as before.
+# Same head = the two artifacts' verdict shas agree on their first seven characters (either may be the short form).
+SU='def vsha($pos; $neg): gsub("[0-9a-f]{41,}";" ") | . as $b | ([split("\n")[] | select(test($pos; "i") or test($neg; "i") or test("(?i)verdict:"))] | first) as $line | (if $line != null then (([$line|scan("(?i)\\bat +\\**`?((?=[0-9a-f]*[a-f])[0-9a-f]{7,40})\\b")]|first|.[0]?) // ([$line|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first)) else null end) // ([$b|scan("\\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b")]|first) // ""; def dnbfirst($pos; $neg): (. as $v | ([$v|match("verdict:? *\\**does +not +block"; "i")][0].offset // null) as $d | ([$v|match($neg; "i")][0].offset // null) as $n | ([$v|match($pos; "i")][0].offset // null) as $p | $d != null and ($n == null or $d < $n) and ($p == null or $d < $p)); def samehead($a; $b): ($a != "" and $b != "" and (($a|startswith($b[0:7])) or ($b|startswith($a[0:7])))); def gate($pos; $neg): [.[] | (.b|vs) as $v | {t, u, sha:($v|vsha($pos;$neg)), pol:(if ($v|dnbfirst($pos;$neg)) then "dnb" else ($v|pol($pos;$neg)) end)}] as $vs | ($vs|map(if .pol=="neg" then . as $a | .retracted = any($vs[]; .pol=="dnb" and .u==$a.u and .t>$a.t and samehead(.sha; $a.sha)) elif .pol=="dnb" then . as $d | .retracts = any($vs[]; .pol=="neg" and .u==$d.u and .t<$d.t and samehead(.sha; $d.sha)) else . end)) as $m | {negt:([$m[]|select(.pol=="neg" and (.retracted|not))]|sort_by(.t)|last|.t // ""), post:([$m[]|select(.pol=="pos" or (.pol=="dnb" and .retracts))]|sort_by(.t)|last|.t // "")};'
+# The newest verdict-bearing artifact's VERDICT SHA is read from its VERDICT LINE: the first line hitting the positive or
+# negative set or `verdict:`, taking the hex after 'at' on it, else that line's first letter-bearing hex of 7-40, else the
+# body's first. The same `vsha` feeds the carry check below and the same-head supersession above (one definition). A delta
+# review opening 'delta only: `fda41a10` -> `f2314fb2`' and ending 'VERDICT: APPROVE at f2314fb2' read as a verdict at its
+# BASE, and the gate printed 'PR-own diff CHANGED' at a covered head (the inspect-release lane on agent-c#20026, 2026-09-28).
+# The verdict sha is the FIRST hex run of 7-40 that contains a letter (a short sha in the verdict line counts; pure digits are
+# comment/run ids): #20186's round-7 verdict said "APPROVE at 00473e0f" but its first 40-hex was the HAWK commit being pinned
+# (df0e9892, not in agent-c), so the carry compared against a foreign sha and read a false CHANGED (2026-09-26 13:31Z).
+# Strip hex runs of 41+ first: a 64-hex image digest (sha256:556b68...) otherwise yields its first 40 digits as a
+# bogus "verdict sha", the compare 404s, and a PR whose verdicts all hold reports NOT GREEN (sjawhar/legion#1371).
+last=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL$SU"'[.[]|select(.b|vs|test("(?i:verdict:|approve at|approved at|accept at|accepted at|merge at|request_changes at|request changes at|do not merge)|APPROVE\\b|APPROVED\\b|REQUEST_CHANGES\\b|REQUEST CHANGES\\b|LGTM\\b|(?i)^[ \\t]*\\**(merge|approve|accept(ed)?)(-with-nits)?\\**:? +(at +)?[0-9a-f]{7,40}|^Reviewed `?[0-9a-f]{7,40}`? \\(`?[0-9a-f]{40}`?\\): \\**clean, no findings"))]|sort_by(.t)|last|(.b // "")|vs|vsha($pos;$neg)')
+gate=$(cat "$w0/r.jsonl" "$w0/c.jsonl" | jq -s -r --arg neg "$NEG" --arg pos "$POS" "$VS$PL$SU"'gate($pos;$neg)|"\(.negt)\t\(.post)"')
+negt=${gate%%$'\t'*}; post=${gate#*$'\t'}
 if [ -n "$negt" ] && { [ -z "$post" ] || [[ "$negt" > "$post" ]]; }; then echo "  !! LATEST verdict is a CHANGE REQUEST / REJECTION (${negt:0:16}), not superseded by a later clean APPROVE - needs a superseding APPROVE/MERGE at the head, or an explicit documented override (#20188)"; fail=1; fi
 if [ -n "$vr" ] && [ -z "$negt" ] && [ -z "$post" ]; then echo "  !! verdict grammar found but its polarity is in NEITHER set (not APPROVE/MERGE/LGTM/clean, not a rejection) - READ it; PASS alone is a review half or a tester run, not a merge authorization (#20200, #20291)"; fail=1; fi
 rm -rf "$w0"
@@ -173,6 +207,12 @@ if [ -n "$last" ] && [[ "$head" != "$last"* ]]; then
   # Per file: the SORTED +/- lines, as running-the-merge-queue's verdict row specifies. Raw patch text
   # carries @@ offsets and context lines, and git re-aligns a hunk when main moves beside it, so a clean
   # rebase read CHANGED with no content difference (#20149, 2026-09-25).
+  # The compare API silently caps .files at 300 (the gh pr view --json files 100-cap's bigger sibling,
+  # 2026-09-27: it hid BOTH of #20057's migrations from a census). A capped read here makes two different
+  # diffs read IDENTICAL. Reconcile against the PR's own changed_files count; last.tsv has no stored
+  # count to reconcile, so exactly-300 rows is treated as capped.
+  hrows=$(wc -l < "$w/head.tsv"); lrows=$(wc -l < "$w/last.tsv"); ftot=$(jq -r .files <<<"$pr")
+  if [ "$hrows" -lt "$ftot" ] || [ "$lrows" -eq 300 ]; then echo "  !! file list SHORT READ (head $hrows/$ftot rows, last $lrows; compare API caps at 300) - carry check unreliable, diff the shas with git or per-commit API before packeting"; fail=1; fi
   if [ ! -s "$w/last.tsv" ] || [ ! -s "$w/head.tsv" ]; then echo "!! could not read the PR-own diff at ${last:0:8} or at the head (compare API returned nothing) - no carry"; fail=1
   elif cmp -s "$w/last.tsv" "$w/head.tsv"; then echo "PR-own diff IDENTICAL between newest verdict sha ${last:0:8} and head - a confirmation, not a round"; carry=1; else echo "!! PR-own diff CHANGED since newest verdict sha ${last:0:8}: $(diff "$w/last.tsv" "$w/head.tsv" | awk -F'\t' '/^[<>] /{sub(/^[<>] /,"",$1); print $1}' | sort -u | tr '\n' ' ' | cut -c1-200) -> that verdict does not cover the head"; fail=1; fi
   rm -rf "$w"

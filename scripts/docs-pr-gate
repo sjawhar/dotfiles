@@ -1,0 +1,110 @@
+#!/bin/bash
+# docs-pr-gate: refuse a standalone docs-only pull request in a repo that batches
+# its documentation. shims/gh runs it for `gh pr create` in agent sessions and
+# passes the arguments that follow `pr create`. Exit 0 lets gh proceed; exit 1
+# refuses and says where the change goes instead.
+#
+# The rule (Sami, AGENTC-847): documentation rides in the pull request that
+# caused it, or in one batched pull request per topic per day. The batch is a
+# branch named docs-batch/<topic>/<UTC date>; GitHub allows one open pull
+# request per head branch, so the name is the per-topic, per-day limit.
+set -euo pipefail
+
+ENFORCED_REPOS=" trajectory-labs-pbc/agent-c "
+BATCH_RE='^docs-batch/[a-z0-9][a-z0-9-]*/([0-9]{4}-[0-9]{2}-[0-9]{2})$'
+
+repo="" head="" base=""
+while (($#)); do
+    case "$1" in
+        -R | --repo) repo="${2:-}"; shift; (($#)) && shift ;;
+        --repo=*) repo="${1#*=}"; shift ;;
+        -H | --head) head="${2:-}"; shift; (($#)) && shift ;;
+        --head=*) head="${1#*=}"; shift ;;
+        -B | --base) base="${2:-}"; shift; (($#)) && shift ;;
+        --base=*) base="${1#*=}"; shift ;;
+        *) shift ;;
+    esac
+done
+
+# Without --repo, gh targets the checkout's origin; read it the same way.
+if [[ -z "$repo" ]]; then
+    repo="$(git remote get-url origin 2>/dev/null || true)"
+fi
+repo="${repo%.git}"
+repo="${repo##*github.com[:/]}"
+repo="$(awk -F/ '{ if (NF >= 2) print $(NF-1) "/" $NF }' <<< "$repo")"
+[[ "$ENFORCED_REPOS" == *" $repo "* ]] || exit 0
+
+# Without --head, gh uses the checked-out branch; a detached HEAD makes gh
+# itself refuse, so there is nothing for this gate to judge.
+if [[ -z "$head" ]]; then
+    head="$(git symbolic-ref --short -q HEAD || true)"
+    [[ -n "$head" ]] || exit 0
+fi
+branch="${head#*:}"
+
+if [[ -z "$base" ]]; then
+    base="$(gh api "repos/$repo" --jq .default_branch)"
+fi
+
+# gh's stderr stays out of the captured list: the shim prints a token-mint line there,
+# which read as a file name would let a docs-only pull request through.
+err="$(mktemp)"
+trap 'rm -f "$err"' EXIT
+if ! files="$(gh api "repos/$repo/compare/${base}...${head}" --jq '.files[]?.filename' 2>"$err")"; then
+    echo "docs-pr-gate: could not read the file list of ${base}...${head} in ${repo}:" >&2
+    sed 's/^/  /' "$err" >&2
+    echo "  Push the branch first, then retry; the gate reads the pushed commits, not your working copy." >&2
+    exit 1
+fi
+
+count=0
+while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    count=$((count + 1))
+    case "$f" in
+        docs/* | *.md | *.mdx | *.rst | *.txt) ;;
+        *) exit 0 ;;
+    esac
+done <<< "$files"
+# An empty diff is gh's to refuse. The compare API lists at most 300 files, so a
+# listing that long is not a small documentation change.
+((count > 0 && count < 300)) || exit 0
+
+today="$(date -u +%F)"
+if [[ "$branch" =~ $BATCH_RE ]] && [[ "${BASH_REMATCH[1]}" == "$today" ]]; then
+    # One batch pull request per topic per day: once today's merged, the batch is closed.
+    if ! merged="$(gh api "repos/$repo/pulls?head=${repo%%/*}:${branch}&state=closed" \
+        --jq '.[] | select(.merged_at != null) | "#\(.number) at \(.merged_at)"' 2>"$err")"; then
+        echo "docs-pr-gate: could not check whether ${branch} already merged in ${repo}:" >&2
+        sed 's/^/  /' "$err" >&2
+        exit 1
+    fi
+    [[ -n "$merged" ]] || exit 0
+    cat >&2 << EOF
+docs-pr-gate: refused. Today's batch ${branch} already merged (${merged%%$'\n'*}), and ${repo}
+takes one documentation pull request per topic per day (AGENTC-847). Put this change in the
+pull request that caused it, or in tomorrow's batch for its topic (docs-batch/<topic>/<UTC date>).
+EOF
+    exit 1
+fi
+noun="files"
+((count == 1)) && noun="file"
+cat >&2 << EOF
+docs-pr-gate: refused. Every file in ${base}...${head} is documentation (${count} ${noun}), and
+${repo} takes documentation only inside the pull request that caused it, or in one batched
+pull request per topic per day (AGENTC-847).
+
+  1. If an open pull request caused this change, push it to that pull request's branch
+     (gh pr list --repo ${repo} --author @me).
+  2. Otherwise use today's batch for its topic: docs-batch/<topic>/${today}  (UTC date),
+     e.g. docs-batch/solutions/${today} for a postmortem write-up.
+     - If that branch already exists on origin, it has an open pull request: put your commit
+       on top of it and push; do not open another.
+         jj git fetch && jj rebase -r <your-commit> -d docs-batch/<topic>/${today}@origin
+         jj bookmark set docs-batch/<topic>/${today} -r <your-commit> && jj git push -b docs-batch/<topic>/${today}
+     - If it does not exist yet, create it and open the day's pull request from it:
+         jj git push --named docs-batch/<topic>/${today}=<your-commit>
+         gh pr create --head docs-batch/<topic>/${today} ...
+EOF
+exit 1
