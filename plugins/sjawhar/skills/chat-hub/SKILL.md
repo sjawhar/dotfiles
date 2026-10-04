@@ -45,6 +45,12 @@ bridge bot is that network's control room.
 - To start a conversation that has no room yet, send `start-chat <phone number or ID>`
   to that network's bridge bot. `help` in the bot's DM lists every command; Discord's
   bot has its own set.
+- Discord servers are not bridged by default, so a server channel has no room. To post
+  in one, find the channel id in the bridge database on oryx (`portal` table in
+  `~/.local/share/chathub/discord/discord.db`, rows with that server's `dc_guild_id`), then
+  send the Discord bot `guilds bridging-mode <server id> if-portal-exists` and
+  `create-portal <channel id>`. That bridges only that channel; the rest of the server
+  stays out of the hub. Send with `matrix_send_message` in the new room.
 
 ## Logins
 
