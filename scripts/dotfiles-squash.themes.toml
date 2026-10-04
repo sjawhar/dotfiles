@@ -1,0 +1,75 @@
+# Topics for `scripts/dotfiles-squash`, in commit order. A changed path goes to the topic
+# whose longest prefix matches it ("dir/" matches everything under dir; anything else
+# matches that exact path). Every changed path must match; add a prefix when `plan` says one
+# doesn't.
+
+[[theme]]
+name = "tools"
+paths = [
+  ".bashrc", ".tmux.conf", ".gitconfig", ".gitignore", ".jjconfig.toml",
+  "cybermonk-identity.gitconfig", "mise.toml", "knives/", "ghostty/", "voxtype/",
+  "install.sh", "installers/", "scripts/", "shims/pyright", "shims/basedpyright",
+  "shims/tests/test_pyright_shims.py",
+]
+
+[[theme]]
+name = "agentbox-credentials"
+paths = [
+  "agentbox/", "devbox/", "agent-secrets/", "secrets.env", "secrets.human.d/", ".sops.yaml",
+  "installers/agent-secrets.sh", "installers/secretsd.sh",
+  "scripts/agentbox", "scripts/agentbox-run.ts", "scripts/agentbox-run.test.ts",
+  "scripts/agent-secrets-login", "scripts/agent-secrets-session", "scripts/secret-run",
+  "scripts/hawk-token", "scripts/agent-access", "scripts/browser-slot",
+  "scripts/tests/test_agent_secrets_launchers.py", "scripts/tests/test_agentbox_enroll.py",
+  "scripts/tests/test_secret_run.py", "scripts/tests/test_browser_capture.py",
+  "scripts/tests/test_agent_access.py",
+  "shims/", "docs/devbox-lane-rules.md",
+]
+
+[[theme]]
+name = "omp"
+paths = [
+  "omp/", "shims/omp", "whatsapp/", "installers/omp.sh", "installers/omp-billing-watch.sh",
+  "installers/whatsapp.sh", "scripts/ompo", "scripts/omp-billing-watch",
+  "scripts/omp-no-provider-keys", "scripts/selfcompact-sessions", "scripts/tmux-omp-ids",
+  "scripts/tmux-resurrect-omp", "scripts/tests/test_omp_profile_links.py",
+  "scripts/tests/test_selfcompact_sessions.py", "shims/tests/test_omp_provider_keys.py",
+  "shims/tests/test_omp_relay_config.py", "shims/tests/test_omp_resolution.py",
+]
+
+[[theme]]
+name = "chat-hub"
+paths = [
+  "chathub/", "installers/chathub.sh", "scripts/chathub-mcp",
+  "scripts/tests/test_chathub_installer.py", "docs/plans/2026-10-03-chat-hub-design.md",
+  "docs/plans/2026-10-03-chat-hub-plan.md",
+]
+
+[[theme]]
+name = "claude-envoy"
+paths = [
+  ".claude/settings.json", "envoy/", "scripts/envoy", "scripts/envoy-nats-seed", "scripts/cld",
+  "scripts/oc", "scripts/claude-statusline", "scripts/tests/test_cld_profiles.py",
+  "scripts/tests/test_envoy_send.py",
+]
+
+[[theme]]
+name = "forward-laptop"
+paths = [
+  "forward/", "laptop/", "installers/forward.sh", "scripts/devbox-paste-image",
+  "scripts/tests/test_forward_environment.py",
+]
+
+[[theme]]
+name = "pr-gate"
+paths = [
+  "scripts/pr-gate", "scripts/pr-gate-corpus", "scripts/docs-pr-gate",
+  "scripts/tests/test_docs_pr_gate.py", "plugins/sjawhar/scripts/pr-gates.sh",
+]
+
+[[theme]]
+name = "skills"
+paths = [
+  "plugins/", ".claude/CLAUDE.md", "AGENTS.md", "docs/", "skills-sources.json", "vendor/",
+  "scripts/tests/test_ha_mcp_call.py",
+]
