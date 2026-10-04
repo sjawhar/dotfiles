@@ -5,9 +5,12 @@ and records the draw as a `customType: "experiments"` entry in the session file.
 each root session's draw to three outcomes, counted from that session's first experiments
 entry onward:
 
-- corrections: share of Sami's turns in the session that correct the agent (each turn
-  labelled by a strong model through the omp eval kernel's `completion()`; labels are cached
-  in `turn_labels_path`, so a rerun pays only for new turns);
+- corrections: share of Sami's turns in the session that correct the agent. Each turn is
+  labelled by Jev (TypeSafe's System One model) first; only turns Jev answers below
+  confidence 0.5 (measured 8.4%) escalate to the strong model through the omp eval
+  kernel's `completion()` -- an explicit routing step, never a silent fallback. See
+  `jev-turn-label.py` for the measured agreement and the threshold's provenance. Labels
+  are cached in `turn_labels_path`, so a rerun pays only for new turns;
 - rework: share of the session's merged PRs the delivery dashboard marks as rework;
 - cost per PR: the session's model spend (root and every subagent transcript) divided by its
   merged PRs.
@@ -17,13 +20,21 @@ long-lived session with hundreds of PRs counts once. Each feature is compared ma
 draws are independent), as the mean over sessions on minus the mean over sessions off, with a
 95% interval from resampling sessions within each arm.
 
-Load it in an eval Python cell and await `main`:
+Load it in an eval Python cell, run the Jev pre-pass between two cells (see
+`jev-turn-label.py`'s module docstring for the exact commands), then await `main`:
 
     %load ~/.dotfiles/plugins/sjawhar/skills/reflect/experiments-readout.py
+    dump_turns_for_jev(
+        session_dirs=["~/.omp/agent/sessions", "<scratch>/.omp/agent/sessions"],
+        prompts=["prompts.jsonl", "<other-box>-prompts.jsonl"],
+        out_path="turns-for-jev.jsonl",
+    )
+    # run jev-turn-label.py here, then:
     await main(
         session_dirs=["~/.omp/agent/sessions", "<scratch>/.omp/agent/sessions"],
         prompts=["prompts.jsonl", "<other-box>-prompts.jsonl"],
         turn_labels_path="turn-labels.jsonl",
+        jev_labels_path="jev-labels.jsonl",
         out_path="experiments-readout.md",
     )
 
@@ -167,14 +178,42 @@ def load_turns(prompt_paths, sessions):
     return list({t["id"]: t for t in turns}.values())
 
 
-async def label_turns(turns, cache_path, model="default", batch=20, concurrency=8):
+def dump_turns_for_jev(session_dirs, prompts, out_path, exclude=EXCLUDE_DEFAULT):
+    """Write every turn `label_turns` would otherwise send to the strong model as
+    {"id", "text"} lines, for jev-turn-label.py's external pre-pass to classify. Run
+    this, then jev-turn-label.py, before calling `main(..., jev_labels_path=...)` --
+    see this module's docstring for the exact commands."""
+    sessions = load_sessions(session_dirs, exclude)
+    turns = load_turns(prompts, sessions)
+    with Path(out_path).expanduser().open("w") as f:
+        for t in turns:
+            f.write(json.dumps({"id": t["id"], "text": t["text"]}) + "\n")
+    return len(turns)
+
+
+
+async def label_turns(turns, cache_path, jev_labels_path=None, model="default", batch=20,
+                       concurrency=8):
+    """Jev-first, strong-model-escalated: jev_labels_path (jev-turn-label.py's --out,
+    confidence>=0.5 only -- see its module docstring for the measured agreement) supplies
+    a label directly; every other turn still goes to completion() exactly as before. This
+    is the confidence-routing step documented in reflect's SKILL.md step 4 -- never a
+    silent fallback, since completion() runs on precisely the turns Jev left out."""
+    jev_labels = {}
+    if jev_labels_path is not None:
+        jev_path = Path(jev_labels_path).expanduser()
+        if jev_path.exists():
+            for line in jev_path.open():
+                r = json.loads(line)
+                jev_labels[r["id"]] = r["label"]
+
     cache_path = Path(cache_path).expanduser()
     labels = {}
     if cache_path.exists():
         for line in cache_path.open():
             r = json.loads(line)
             labels[r["id"]] = r["label"]
-    todo = [t for t in turns if t["id"] not in labels]
+    todo = [t for t in turns if t["id"] not in labels and t["id"] not in jev_labels]
     sem = asyncio.Semaphore(concurrency)
 
     async def run(chunk):
@@ -199,7 +238,9 @@ async def label_turns(turns, cache_path, model="default", batch=20, concurrency=
     with cache_path.open("w") as fh:
         for k, v in labels.items():
             fh.write(json.dumps({"id": k, "label": v}) + "\n")
-    return labels
+    print(f"{len(jev_labels)} turns labelled by Jev, {len(labels)} by the strong model "
+          f"({len(todo)} freshly this run)")
+    return {**jev_labels, **labels}
 
 
 def outcomes(sessions, dataset, turns, labels):
@@ -289,11 +330,12 @@ def render(rows, unlabelled, dataset_at, n_turns):
 
 async def main(session_dirs, prompts, turn_labels_path, out_path,
                dataset="http://127.0.0.1:4317/api/dataset", exclude=EXCLUDE_DEFAULT,
-               model="default"):
+               model="default", jev_labels_path=None):
     sessions = load_sessions(session_dirs, exclude)
     data = load_dataset(dataset)
     turns = load_turns(prompts, sessions)
-    labels = await label_turns(turns, turn_labels_path, model=model)
+    labels = await label_turns(turns, turn_labels_path, jev_labels_path=jev_labels_path,
+                                model=model)
     rows, unlabelled = outcomes(sessions, data, turns, labels)
     text = render(rows, unlabelled, data.get("generated_at"), len(turns))
     Path(out_path).expanduser().write_text(text)

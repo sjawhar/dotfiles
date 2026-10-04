@@ -37,6 +37,11 @@ find "${DOTFILES_DIR}/vendor/pup/skills" -mindepth 1 -maxdepth 1 -type d -name '
 # packages/); consumers below and in skills-sources.json expect this layout.
 ensure_vendor https://github.com/getsentry/sentry-for-ai.git sentry-for-ai 2c34b9a2ecff03005d381e60013d7d5849801a62
 ensure_vendor https://github.com/getsentry/cli.git sentry-cli 33028c2ac93e027ce3faa9045efc91d895deae1a
+# typesafe-ai/skills is a 2-commit, single-skill repo (skills/typesafe-ai/SKILL.md);
+# pinned so reflect's jev-turn-label.py (plugins/sjawhar/skills/reflect/) keeps the
+# API reference its design decisions cite, not whatever the docs say later. Bump:
+# re-pin here and re-check jev-turn-label.py's criteria against the live docs.
+ensure_vendor https://github.com/typesafe-ai/skills.git typesafe-ai 65a39f393687675ce170e6094757de20370365b9
 ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
 
 # Native skill discovery: both OpenCode and Claude Code read skills from ~/.claude/skills/<name>/SKILL.md.
