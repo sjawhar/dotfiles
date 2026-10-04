@@ -13,7 +13,13 @@ MISE="${DOTFILES_DIR}/bin/mise"
 case "${1:-}" in
     serve)
         units=(forward-serve.service)
+        # A devbox with its own pairing ships forward/config-serve-<host>.toml
+        # (oryx does); every other devbox is the default pair.
         config_source=config-serve.toml
+        host="$(hostname -s)"
+        if [ -f "${DOTFILES_DIR}/forward/config-serve-${host}.toml" ]; then
+            config_source="config-serve-${host}.toml"
+        fi
         ;;
     daemon)
         units=(forward-daemon.service omp-browser-relay.service)
@@ -43,12 +49,39 @@ for unit in "${units[@]}"; do
     ln -sfn "${DOTFILES_DIR}/forward/${unit}" "${HOME}/.config/systemd/user/${unit}"
 done
 
-service="${units[0]%.service}"
-systemctl --user daemon-reload 2>/dev/null \
-    || echo "NOTE: could not reload ${service} (no user systemd session here?) — reload it on the target machine."
-
+services=()
 for unit in "${units[@]}"; do
-    service="${unit%.service}"
+    services+=("${unit%.service}")
+done
+# forward trusts one peer per daemon, so the laptop runs one more daemon for each
+# extra devbox: forward/config-daemon-<pair>.toml is linked to
+# ~/.config/forward/config-<pair>.toml and read by forward-daemon@<pair>.
+if [ "${1:-}" = daemon ]; then
+    for pair_config in "${DOTFILES_DIR}"/forward/config-daemon-*.toml; do
+        [ -e "$pair_config" ] || continue
+        pair="${pair_config##*/config-daemon-}"
+        pair="${pair%.toml}"
+        ln -sfn "$pair_config" "${HOME}/.config/forward/config-${pair}.toml"
+        # A pair sharing an address with another moves its URL channel with a
+        # drop-in, since that port is a flag, not a config key.
+        if [ -d "${DOTFILES_DIR}/forward/forward-daemon@${pair}.service.d" ]; then
+            ln -sfn "${DOTFILES_DIR}/forward/forward-daemon@${pair}.service.d" \
+                "${HOME}/.config/systemd/user/forward-daemon@${pair}.service.d"
+        fi
+        services+=("forward-daemon@${pair}")
+    done
+    ln -sfn "${DOTFILES_DIR}/forward/forward-daemon@.service" "${HOME}/.config/systemd/user/forward-daemon@.service"
+fi
+# The devbox side of such a pair still dials the laptop's default URL channel
+# port; its host redirects that to the pair's port (a system unit: iptables).
+if [ "${1:-}" = serve ] && [ -f "${DOTFILES_DIR}/forward/channel-nat-${host}.service" ]; then
+    sudo systemctl enable --now "${DOTFILES_DIR}/forward/channel-nat-${host}.service"
+fi
+
+systemctl --user daemon-reload 2>/dev/null \
+    || echo "NOTE: could not reload ${services[0]} (no user systemd session here?) — reload it on the target machine."
+
+for service in "${services[@]}"; do
     systemctl --user enable --now "$service" 2>/dev/null \
         || echo "NOTE: could not enable ${service} (no user systemd session here?) — enable it on the target machine."
     systemctl --user try-restart "$service" 2>/dev/null \

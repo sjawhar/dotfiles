@@ -1,0 +1,12 @@
+# Devbox role on oryx, chosen by installers/forward.sh because this host has its
+# own file. Fields mean what config-serve.toml says. oryx pairs with the laptop's
+# forward-daemon@oryx (config-daemon-oryx.toml) over tailnet IPv6, because the
+# laptop's IPv4 address and default ports belong to the default pair.
+listen = "fd7a:115c:a1e0::2133:f724"
+peer = "fd7a:115c:a1e0::e03b:5c61"
+
+bridge_port = 12801
+forward_ttl_secs = 300
+
+# The SSH tunnel from scripts/devbox owns ~/.pcscd/pcscd.comm on oryx.
+pcsc_port = 0

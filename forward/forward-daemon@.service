@@ -1,0 +1,15 @@
+[Unit]
+Description=forward opener daemon for the %i devbox (receives URLs from %i)
+# One daemon per devbox: forward trusts a single peer per daemon. The instance
+# name selects ~/.config/forward/config-%i.toml, linked by installers/forward.sh
+# from forward/config-daemon-%i.toml. Ordering as forward-daemon.service.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.dotfiles/forward/forward-daemon --config %h/.config/forward/config-%i.toml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

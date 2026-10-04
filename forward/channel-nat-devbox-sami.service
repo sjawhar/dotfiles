@@ -1,0 +1,17 @@
+[Unit]
+Description=Redirect forward's URL channel (laptop :12800) to the devbox-sami pair's daemon on :12810
+# forward has no config key for the URL channel port: `forward open`, `forward
+# port` and `forward doctor` dial the laptop's 12800, which belongs to the
+# default pair's daemon. OUTPUT covers this host's processes, PREROUTING its
+# agent boxes. A system unit, installed by installers/forward.sh serve.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for chain in OUTPUT PREROUTING; do iptables -t nat -C "$chain" -d 100.100.92.97/32 -p tcp --dport 12800 -j DNAT --to-destination 100.100.92.97:12810 2>/dev/null || iptables -t nat -A "$chain" -d 100.100.92.97/32 -p tcp --dport 12800 -j DNAT --to-destination 100.100.92.97:12810; done'
+ExecStop=/bin/sh -c 'for chain in OUTPUT PREROUTING; do iptables -t nat -D "$chain" -d 100.100.92.97/32 -p tcp --dport 12800 -j DNAT --to-destination 100.100.92.97:12810; done'
+
+[Install]
+WantedBy=multi-user.target

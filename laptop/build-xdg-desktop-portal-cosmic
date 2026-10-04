@@ -1,0 +1,88 @@
+#!/bin/bash
+# build-xdg-desktop-portal-cosmic — rebuild the installed xdg-desktop-portal-cosmic
+# with sjawhar/iced's clipboard fix and install it to ~/.local/libexec, where
+# laptop/xdg-desktop-portal-cosmic-fork.sh points the portal's systemd unit.
+#
+# Builds the exact revision the installed package was built from, against the
+# libcosmic revision its Cargo.lock pins, with the fix commits cherry-picked onto
+# the iced that libcosmic pins. Checkouts live in ~/Code/xdg-desktop-portal-cosmic
+# and ~/Code/libcosmic (cloned when missing) and are moved to those revisions.
+# Records the package version beside the binary, so the fork installer can tell
+# when Pop has shipped a newer portal than the build.
+#
+# Does not restart the portal; the new build runs after
+#   systemctl --user restart org.freedesktop.impl.portal.desktop.cosmic.service
+set -euo pipefail
+
+FIX_REMOTE=https://github.com/sjawhar/iced.git
+FIX_BRANCH=clipboard-survives-window-close
+PORTAL=$HOME/Code/xdg-desktop-portal-cosmic
+LIBCOSMIC=$HOME/Code/libcosmic
+BIN=$HOME/.local/libexec/xdg-desktop-portal-cosmic
+
+error() {
+    printf 'build-xdg-desktop-portal-cosmic: %s\n' "$*" >&2
+    exit 1
+}
+
+pkg-config --exists libpipewire-0.3 || error "libpipewire-0.3-dev is missing (laptop/install.sh installs it)"
+pkgver=$(dpkg-query -W -f='${Version}' xdg-desktop-portal-cosmic)
+portal_rev=${pkgver##*~}
+
+# --- portal at the packaged revision ---
+[[ -d $PORTAL ]] || git clone -q https://github.com/pop-os/xdg-desktop-portal-cosmic "$PORTAL"
+git -C "$PORTAL" fetch -q origin
+git -C "$PORTAL" checkout -q -- Cargo.lock  # rewritten by the previous build's [patch]
+git -C "$PORTAL" checkout -q --detach "$portal_rev"
+
+lc_rev=$(sed -n 's|^source = "git+https://github.com/pop-os/libcosmic#\([0-9a-f]*\)"$|\1|p' "$PORTAL/Cargo.lock" | sort -u)
+[[ -n $lc_rev && $lc_rev != *$'\n'* ]] || error "expected one libcosmic revision in Cargo.lock, found: ${lc_rev:-none}"
+
+# --- libcosmic at the pinned revision, its iced with the fix on top ---
+[[ -d $LIBCOSMIC ]] || git clone -q https://github.com/pop-os/libcosmic "$LIBCOSMIC"
+git -C "$LIBCOSMIC" fetch -q origin
+git -C "$LIBCOSMIC" checkout -q --detach "$lc_rev"
+git -C "$LIBCOSMIC" submodule update -q --init iced
+iced=$LIBCOSMIC/iced
+git -C "$iced" remote get-url sjawhar >/dev/null 2>&1 || git -C "$iced" remote add sjawhar "$FIX_REMOTE"
+git -C "$iced" fetch -q origin master
+git -C "$iced" fetch -q sjawhar "$FIX_BRANCH"
+fix=$(git -C "$iced" rev-parse FETCH_HEAD)
+git -C "$iced" -c commit.gpgsign=false cherry-pick "$(git -C "$iced" merge-base "$fix" origin/master)..$fix" >/dev/null \
+    || error "the fix does not apply to iced $(git -C "$iced" rev-parse --short HEAD); rebase $FIX_BRANCH onto it"
+
+# --- build the portal against the local libcosmic ---
+python3 - "$PORTAL" "$LIBCOSMIC" <<'EOF'
+import pathlib, sys, tomllib
+
+portal, libcosmic = map(pathlib.Path, sys.argv[1:])
+source = "git+https://github.com/pop-os/libcosmic"
+lock = tomllib.loads((portal / "Cargo.lock").read_text())
+wanted = {p["name"] for p in lock["package"] if p.get("source", "").startswith(source)}
+paths = {}
+for manifest in libcosmic.rglob("Cargo.toml"):
+    if "target" in manifest.parts:
+        continue
+    try:
+        name = tomllib.loads(manifest.read_text()).get("package", {}).get("name")
+    except tomllib.TOMLDecodeError:
+        continue
+    if name in wanted:
+        paths.setdefault(name, []).append(manifest.parent)
+unresolved = sorted(n for n in wanted if len(paths.get(n, [])) != 1)
+if unresolved:
+    sys.exit(f"build-xdg-desktop-portal-cosmic: no single libcosmic path for {unresolved}")
+config = portal / ".cargo/config.toml"
+config.parent.mkdir(exist_ok=True)
+config.write_text(
+    "# Written by build-xdg-desktop-portal-cosmic: build against the local libcosmic.\n"
+    f'[patch."{source.removeprefix("git+")}"]\n'
+    + "".join(f'{n} = {{ path = "{paths[n][0]}" }}\n' for n in sorted(wanted))
+)
+EOF
+grep -qx '/.cargo/' "$PORTAL/.git/info/exclude" || echo '/.cargo/' >>"$PORTAL/.git/info/exclude"
+
+(cd "$PORTAL" && nice -n 19 cargo build --release --bin xdg-desktop-portal-cosmic)
+install -D -m 755 "$PORTAL/target/release/xdg-desktop-portal-cosmic" "$BIN"
+printf '%s\n' "$pkgver" >"$BIN.pkgver"
+echo "Installed $BIN for xdg-desktop-portal-cosmic $pkgver"
