@@ -171,7 +171,8 @@ class CommittedForwardPairs(unittest.TestCase):
                 serve, daemon = load(serve_name), load(daemon_name)
                 self.assertEqual(serve["peer"], daemon["listen"])
                 self.assertEqual(serve["listen"], daemon["peer"])
-                self.assertEqual(serve.get("pcsc_port"), daemon.get("pcsc_port"))
+                for port in ("pcsc_port", "relay_port", "pulse_port"):
+                    self.assertEqual(serve.get(port), daemon.get(port), port)
 
     def test_laptop_daemons_share_one_url_policy(self) -> None:
         """Extra pairs copy config.toml's policy; only their own preview host differs."""
