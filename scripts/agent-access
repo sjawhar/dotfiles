@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# agent-access: print which logins and credentials THIS session already holds,
+# so an agent checks here before asking Sami for access it already has
+# (CLAUDE.md "Don't Outsource to the User").
+#
+# Every check below runs in parallel with its own timeout, never prompts for
+# input, and never prints a secret or token value - only the identity, expiry
+# and status a non-interactive status command exposes. `--json` emits the same
+# rows as a JSON array for scripts. The whole run finishes in ~10s because the
+# slowest single check (hawk-token's own mint budget) is ~9s and every check
+# runs concurrently, not in sequence.
+#
+# A check that errors prints that error as its detail; it never falls back to
+# a different, silently-chosen command.
+set -uo pipefail
+
+json=0
+case "${1:-}" in
+    --json) json=1 ;;
+    "") ;;
+    *)
+        echo "usage: agent-access [--json]" >&2
+        exit 2
+        ;;
+esac
+
+TIMEOUT_S=6
+HAWK_TIMEOUT_S=9
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# row NAME STATUS IDENTITY EXPIRY COMMAND [DETAIL]: write one tab-separated
+# result row. Fields must not contain tabs or newlines; callers collapse them.
+row() {
+    local name=$1 status=$2 identity=$3 expiry=$4 command=$5 detail=${6:-}
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$status" "${identity//$'\t'/ }" "${expiry//$'\t'/ }" \
+        "${command//$'\t'/ }" "${detail//$'\n'/ }" >"$tmp/$name"
+}
+
+first_line() { head -n1 <<<"$1" | tr -d '\r'; }
+
+# jwt_field FIELD: print FIELD from the JWT payload in $JWT_FIELD_TOKEN, or
+# nothing (rc 1). The token goes through the environment, never argv
+# (scripts/AGENTS.md: a secret in argv is readable from /proc/<pid>/cmdline)
+# and never via stdin, which `python3 -c` needs for its own script source.
+jwt_field() {
+    python3 -c '
+import base64, json, os, sys
+
+field = sys.argv[1]
+token = os.environ.get("JWT_FIELD_TOKEN", "")
+parts = token.split(".")
+if len(parts) < 2:
+    sys.exit(1)
+pad = lambda s: s + "=" * (-len(s) % 4)
+try:
+    payload = json.loads(base64.urlsafe_b64decode(pad(parts[1])))
+except Exception:
+    sys.exit(1)
+value = payload.get(field)
+if value is None:
+    sys.exit(1)
+print(value)
+' "$1"
+}
+
+iso() { python3 -c "import datetime,sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1" 2>/dev/null; }
+
+check_aws() {
+    local out rc arn
+    out="$(timeout "$TIMEOUT_S" aws sts get-caller-identity --output json 2>&1)"
+    rc=$?
+    if ((rc == 0)); then
+        arn="$(jq -r '.Arn // empty' <<<"$out" 2>/dev/null)"
+        row aws live "${arn:-unknown}" "n/a (instance-role session, no fixed expiry)" "aws sts get-caller-identity"
+    else
+        row aws missing - - "aws sts get-caller-identity" "$(first_line "$out")"
+    fi
+}
+
+# GitHub is never a personal login in an agent session (shims/gh refuses
+# `gh auth login/logout/switch`; pushes go through the GitHub App per repo
+# owner). Read gh-app-token's own installation cache instead of minting a
+# fresh token just to report status.
+check_github_app() {
+    local f owners
+    f="$(find "$HOME/.cache/gh-app-token" -maxdepth 1 -name 'covered-*.json' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n1 | cut -d' ' -f2-)"
+    if [[ -z "$f" ]]; then
+        row github_app unknown - - "ls ~/.cache/gh-app-token/covered-*.json" \
+            "no installation discovered yet this host; shims/gh mints on first push/API call. Personal gh login is refused by design."
+        return
+    fi
+    owners="$(jq -r 'keys | join(", ")' "$f" 2>/dev/null)"
+    row github_app live "App covers: ${owners:-unknown}; other owners -> GH_PUBLIC_REPO_PAT fallback" \
+        "n/a (installation tokens auto-mint, ~1h)" "cat ~/.cache/gh-app-token/covered-*.json" \
+        "personal gh login is refused by design (shims/gh)"
+}
+
+check_hawk() {
+    local errfile token rc email exp now ttl status
+    errfile="$tmp/.hawk.err"
+    token="$(timeout "$HAWK_TIMEOUT_S" hawk-token 2>"$errfile")"
+    rc=$?
+    if [[ -z "$token" ]]; then
+        row hawk missing - - "hawk-token" "$(first_line "$(<"$errfile")")"
+        return
+    fi
+    email="$(JWT_FIELD_TOKEN="$token" jwt_field email)"
+    exp="$(JWT_FIELD_TOKEN="$token" jwt_field exp)"
+    if [[ -n "$exp" ]]; then
+        now=$(date +%s)
+        ttl=$((exp - now))
+        if ((ttl > 0)); then status=live; else status=expired; fi
+        row hawk "$status" "${email:-unknown}" "$(iso "$exp")" "hawk-token"
+    else
+        row hawk unknown "${email:-unknown}" - "hawk-token" "minted but exp claim unreadable"
+    fi
+    ((rc == 0)) || true # the mint may have served a cached token past attempt 1; still a real token
+}
+
+check_ant() {
+    local out rc email exp status
+    out="$(timeout "$TIMEOUT_S" ant auth status 2>&1)"
+    rc=$?
+    if ((rc != 0)); then
+        row anthropic_ant missing - - "ant auth status" "$(first_line "$out")"
+        return
+    fi
+    email="$(grep -oP 'Logged in to .* as \K\S+' <<<"$out" || true)"
+    exp="$(grep -oP 'expires:\s+\K\S+' <<<"$out" || true)"
+    if grep -qi 'expired' <<<"$out"; then status=expired; else status=live; fi
+    row anthropic_ant "$status" "${email:-unknown}" "${exp:-unknown}" "ant auth status"
+}
+
+# Taiga has no CLI (agent-c's `tl` is not installed here); its OAuth tokens
+# live in trajectory-labs.json. Decode the id_token's own exp - never print it
+# - and note the refresh_token lets the client refresh past that.
+check_taiga() {
+    local f tok exp now ttl status
+    f="$HOME/.config/trajectory-labs/taiga.json"
+    if [[ ! -f "$f" ]]; then
+        row taiga missing - - "$f" "no config file"
+        return
+    fi
+    tok="$(jq -r '.id_token // empty' "$f" 2>/dev/null)"
+    if [[ -z "$tok" ]]; then
+        row taiga unknown - - "$f" "config present, no id_token field"
+        return
+    fi
+    exp="$(JWT_FIELD_TOKEN="$tok" jwt_field exp)"
+    if [[ -z "$exp" ]]; then
+        row taiga unknown - - "$f" "id_token present, exp claim unreadable"
+        return
+    fi
+    now=$(date +%s)
+    ttl=$((exp - now))
+    if ((ttl > 0)); then status=live; else status=expired; fi
+    row taiga "$status" "trajectory-labs taiga client (no CLI; config only)" "$(iso "$exp")" "$f" \
+        "id_token only; refresh_token is also present and the taiga client refreshes on use"
+}
+
+check_vercel() {
+    local out rc user
+    out="$(timeout "$TIMEOUT_S" vercel whoami 2>&1)"
+    rc=$?
+    if ((rc == 0)); then
+        user="$(tail -n1 <<<"$out" | tr -d '\r')"
+        row vercel live "$user" "n/a" "vercel whoami"
+    else
+        row vercel missing - - "vercel whoami" "$(tail -n1 <<<"$out" | tr -d '\r')"
+    fi
+}
+
+check_datadog() {
+    local out rc site exp
+    out="$(timeout "$TIMEOUT_S" pup auth status 2>&1)"
+    rc=$?
+    if ((rc == 0)) && grep -qi 'Authenticated' <<<"$out"; then
+        site="$(grep -oP 'site:\s*\K\S+' <<<"$out" || true)"
+        exp="$(grep -oP 'expires in:\s*\K\S+' <<<"$out" || true)"
+        row datadog_pup live "${site:-unknown}" "${exp:-unknown} from now" "pup auth status"
+    else
+        row datadog_pup missing - - "pup auth status" "$(first_line "$out")"
+    fi
+}
+
+check_gcloud() {
+    local out rc active
+    out="$(timeout "$TIMEOUT_S" gcloud auth list --format=json 2>&1)"
+    rc=$?
+    if ((rc == 0)); then
+        active="$(jq -r '[.[] | select(.status=="ACTIVE")][0].account // empty' <<<"$out" 2>/dev/null)"
+        if [[ -n "$active" ]]; then
+            row gcloud live "$active" "n/a" "gcloud auth list"
+        else
+            row gcloud missing - - "gcloud auth list" "no ACTIVE account"
+        fi
+    else
+        row gcloud missing - - "gcloud auth list" "$(first_line "$out")"
+    fi
+}
+
+check_gws() {
+    local out rc email
+    out="$(timeout "$TIMEOUT_S" gws drive about get --params '{"fields":"user"}' 2>&1)"
+    rc=$?
+    if ((rc == 0)); then
+        email="$(jq -r '.user.emailAddress // empty' <<<"$out" 2>/dev/null)"
+        row google_workspace live "${email:-unknown}" "n/a" "gws drive about get" \
+            "default account only; secrets grants list shows which GWS_*_OAUTH scopes are held"
+    else
+        row google_workspace missing - - "gws drive about get" "$(first_line "$out")"
+    fi
+}
+
+check_fleetctl() {
+    local out rc email
+    out="$(timeout "$TIMEOUT_S" fleetctl get config --json 2>&1)"
+    rc=$?
+    email="$(awk -F': *' '/^ *email:/{print $2; exit}' "$HOME/.fleet/config" 2>/dev/null | tr -d '\r')"
+    if ((rc == 0)); then
+        row fleetctl live "${email:-unknown}" "n/a" "fleetctl get config"
+    else
+        row fleetctl missing - - "fleetctl get config" "$(tail -n1 <<<"$out")"
+    fi
+}
+
+check_sentry() {
+    local out rc user
+    out="$(timeout "$TIMEOUT_S" sentry-cli info 2>&1)"
+    rc=$?
+    user="$(grep -oP '^\s*User:\s*\K\S+' <<<"$out" || true)"
+    if ((rc == 0)) && [[ -n "$user" ]]; then
+        row sentry live "$user" "n/a (auth token)" "sentry-cli info"
+    else
+        row sentry missing - - "sentry-cli info" "$(first_line "$out")"
+    fi
+}
+
+check_kubectl() {
+    local ctx rc out username
+    ctx="$(timeout "$TIMEOUT_S" kubectl config current-context 2>&1)"
+    rc=$?
+    if ((rc != 0)); then
+        row kubectl missing - - "kubectl config current-context" "$(first_line "$ctx")"
+        return
+    fi
+    out="$(timeout "$TIMEOUT_S" kubectl auth whoami 2>&1)"
+    rc=$?
+    if ((rc == 0)); then
+        username="$(grep -oP '^Username\s+\K\S+' <<<"$out" || true)"
+        row kubectl live "${username:-unknown} (context: $ctx)" "n/a (assumed-role session)" "kubectl auth whoami"
+    else
+        row kubectl missing - - "kubectl auth whoami" "context: $ctx; $(first_line "$out")"
+    fi
+}
+
+# Session-scope secrets this process already holds via secretsd (names only,
+# never values - `secrets grants` reports keys and ages, not secret contents).
+check_secretsd() {
+    local out rc keys
+    out="$(timeout "$TIMEOUT_S" secrets grants 2>&1)"
+    rc=$?
+    if ((rc == 0)); then
+        keys="$(tail -n +2 <<<"$out" | awk '{print $1}' | paste -sd, -)"
+        row secretsd_grants live "${keys:-none}" "see \`secrets grants\` for per-key age" "secrets grants" "key names only, never values"
+    else
+        row secretsd_grants missing - - "secrets grants" "$(first_line "$out")"
+    fi
+}
+
+check_agent_secrets_broker() {
+    local out rc
+    out="$(timeout "$TIMEOUT_S" agent-secrets identity 2>&1)"
+    rc=$?
+    if ((rc == 0)); then
+        row agent_secrets_broker live "this process is a registered broker session" "n/a" "agent-secrets identity" \
+            "secret-run uses the broker instead of secretsd for this session"
+    else
+        row agent_secrets_broker missing - - "agent-secrets identity" "${out:-no broker identity; secret-run falls back to secretsd}"
+    fi
+}
+
+check_modal() {
+    if command -v modal >/dev/null 2>&1; then
+        row modal unknown - - "command -v modal" "modal is on PATH but agent-access has no verified non-interactive status command for it"
+    else
+        row modal missing - - "command -v modal" "modal CLI not installed on this machine"
+    fi
+}
+
+# Dispatch has no CLI: the session's identity (xd://dispatch_whoami) is an MCP
+# tool call, not a shell command, so there is nothing for this script to run.
+check_dispatch() {
+    row dispatch unknown - - "xd://dispatch_whoami (MCP tool, not a shell command)" \
+        "no CLI or on-disk token to check from a script; call the dispatch_whoami tool"
+}
+
+for fn in check_aws check_github_app check_hawk check_ant check_taiga check_vercel \
+    check_datadog check_gcloud check_gws check_fleetctl check_sentry check_kubectl \
+    check_secretsd check_agent_secrets_broker check_modal check_dispatch; do
+    "$fn" &
+done
+wait
+
+order=(aws github_app anthropic_ant hawk taiga google_workspace gcloud vercel datadog_pup \
+    fleetctl sentry kubectl secretsd_grants agent_secrets_broker modal dispatch)
+
+if ((json)); then
+    for name in "${order[@]}"; do
+        [[ -f "$tmp/$name" ]] || continue
+        IFS=$'\t' read -r n status identity expiry command detail <"$tmp/$name"
+        jq -c -n --arg name "$n" --arg status "$status" --arg identity "$identity" \
+            --arg expiry "$expiry" --arg command "$command" --arg detail "$detail" \
+            '{name:$name,status:$status,identity:$identity,expiry:$expiry,command:$command,detail:$detail}'
+    done | jq -s '.'
+else
+    # No dependency on `column`: it is not on PATH inside an agent box image.
+    {
+        printf 'NAME\tSTATUS\tIDENTITY\tEXPIRY\tCOMMAND\tDETAIL\n'
+        for name in "${order[@]}"; do
+            [[ -f "$tmp/$name" ]] || continue
+            cat "$tmp/$name"
+        done
+    } | awk -F'\t' '
+        { for (i = 1; i <= NF; i++) if (length($i) > w[i]) w[i] = length($i); n = NF; lines[NR] = $0 }
+        END {
+            for (r = 1; r <= NR; r++) {
+                m = split(lines[r], f, "\t")
+                line = ""
+                for (i = 1; i <= m; i++) {
+                    line = line f[i]
+                    if (i < m) { for (j = length(f[i]); j < w[i] + 2; j++) line = line " " }
+                }
+                print line
+            }
+        }'
+fi

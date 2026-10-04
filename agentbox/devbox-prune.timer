@@ -1,5 +1,5 @@
 [Unit]
-Description=Every 6 h: prune anonymous Docker volumes that no container references
+Description=Every 6 h: prune the always-safe class on the shared devbox (devbox-prune.service)
 
 [Timer]
 OnCalendar=*-*-* 00/6:00:00

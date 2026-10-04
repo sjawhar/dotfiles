@@ -1,0 +1,120 @@
+#!/bin/bash
+# jj-lock-shim: every workspace `jj workspace add` creates in a colocated repo gets
+# its git worktree locked. From inside an agent box every other box's workspace
+# path looks missing, and an unlocked registration under <store>/.git/worktrees/
+# can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
+# still removes it. In an agent session `jj git push --deleted` is also refused
+# (see below). Everything else goes straight to the real jj.
+set -euo pipefail
+
+# The first jj on PATH that is not this shim, judged by content like shims/gh.
+real_jj() {
+    local IFS=':'
+    local dir candidate header
+    for dir in $PATH; do
+        candidate="$dir/jj"
+        [[ -f "$candidate" && -x "$candidate" ]] || continue
+        header=""
+        IFS= read -r -n 512 -d '' header < "$candidate" || true
+        [[ "$header" == *jj-lock-shim* ]] && continue
+        echo "$candidate"
+        return
+    done
+    # A caller that builds its own PATH may leave the real binary off it.
+    for candidate in "${DOTFILES_DIR:-$HOME/.dotfiles}/bin/jj" "$HOME/.mise/shims/jj"; do
+        [[ -f "$candidate" && -x "$candidate" ]] || continue
+        header=""
+        IFS= read -r -n 512 -d '' header < "$candidate" || true
+        [[ "$header" == *jj-lock-shim* ]] && continue
+        echo "$candidate"
+        return
+    done
+    return 1
+}
+if ! _real="$(real_jj)"; then
+    echo "jj shim: no real jj found on PATH" >&2
+    exit 127
+fi
+# The shim's own tools (cat, awk, realpath, mktemp) must exist even when the
+# caller's PATH omits the system dirs; appending keeps the caller's dirs first.
+PATH="$PATH:/usr/bin:/bin"
+
+# Refuse `jj git push --deleted` in an agent session. `--deleted` pushes every
+# deleted bookmark and tag in the repo, not just the caller's — in a checkout
+# shared by many sessions every bookmark whose local copy is absent belongs to
+# someone else, and a deleted branch auto-closes its pull request. It is a
+# plain clap flag with no attached-value or bundled form (`--deleted=…` is a
+# parse error) and is already mutually exclusive with `--bookmark`/`--tag`/
+# `--revision`/`--change` (`jj git push --help`), so only the bare literal
+# token is the real flag; `jj git push` takes no positional arguments, so a
+# token after `--` is never it either. This is a second, independent gate: it
+# runs before the workspace-add lock logic below and does not alter it.
+agent_context() {
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
+    local i v
+    for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
+        v="GIT_CONFIG_VALUE_$i"
+        [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
+    done
+    return 1
+}
+if agent_context; then
+    # Locate the `git push` subcommand past jj's global options, same
+    # approach as shims/git's search for `worktree`.
+    _pargs=("$@")
+    _pi=0
+    while ((_pi < ${#_pargs[@]})); do
+        case "${_pargs[_pi]}" in
+            -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
+            -*) _pi=$((_pi + 1)) ;;
+            *) break ;;
+        esac
+    done
+    if [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
+        for _parg in "${_pargs[@]:_pi+2}"; do
+            [[ "$_parg" == -- ]] && break
+            if [[ "$_parg" == --deleted ]]; then
+                cat >&2 << 'EOF'
+jj shim: `jj git push --deleted` is refused in an agent session.
+--deleted pushes every deleted bookmark and tag in the repo, not just yours —
+there is no per-name form (`jj git push --help`) — so in a checkout shared by
+many sessions it also takes every other session's pending deletion, and a
+deleted branch auto-closes its pull request. It cost a human's PR branch on
+2026-09-15, and three other sessions' bookmarks plus PR #20325 on 2026-09-28.
+Delete and push only your own bookmark:
+  jj bookmark delete <name>
+  jj git push --bookmark <name>
+EOF
+                exit 1
+            fi
+        done
+    fi
+    unset _pargs _pi _parg
+fi
+
+_add=0 _prev=""
+for _a in "$@"; do
+    if [[ "$_prev" == workspace && "$_a" == add ]]; then _add=1; break; fi
+    _prev="$_a"
+done
+((_add)) || exec "$_real" "$@"
+
+_err="$(mktemp)"
+trap 'rm -f "$_err"' EXIT
+_rc=0
+"$_real" "$@" 2> "$_err" || _rc=$?
+cat "$_err" >&2
+((_rc == 0)) || exit "$_rc"
+
+# jj names the new workspace relative to the current directory.
+_rel="$(sed -n 's/^Created workspace in "\(.*\)"$/\1/p' "$_err" | tail -1)"
+[[ -n "$_rel" ]] || exit 0
+_dest="$(realpath -m -- "$_rel")"
+[[ -f "$_dest/.git" ]] || exit 0
+if ! _out="$(git -C "$_dest" worktree lock --reason "jj shim: locked on add (AGENTC-431)" "$_dest" 2>&1)"; then
+    # In an agent session shims/git already locked it on jj's `git worktree add`.
+    [[ "$_out" == *"is already locked"* ]] && exit 0
+    echo "jj shim: the workspace was created but its git worktree could NOT be locked: $_out" >&2
+    echo "jj shim: lock it by hand: git -C '$_dest' worktree lock '$_dest'" >&2
+fi
+exit 0

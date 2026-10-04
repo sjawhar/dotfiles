@@ -7,7 +7,7 @@
 # rw: state the session writes. ro: configuration.
 #
 # The rule for a tool login: a CLI's own login state is fine here when the box
-# needs that CLI (fleetctl, sentry, depot, pup); an identity that can act as
+# needs that CLI (fleetctl, sentry, depot, pup, ant, vercel); an identity that can act as
 # the user on GitHub never is - no ~/.config/gh, no ssh keys, no docker login
 # - so a session pushes only as its repo's GitHub App. Tools that keep their
 # login in the keyring (hawk, pup's tokens, gws) need nothing here: the
@@ -53,12 +53,15 @@ rw .pcscd
 
 # tool logins the CLI itself maintains (each rewrites its file: pup its site
 # registry, sentry its sqlite journal, depot its update state, mailbox its
-# thread refs, token cache and compose drafts)
+# thread refs, token cache and compose drafts, ant its profiles and credentials,
+# vercel its auth, config and telemetry files)
 rw .fleet
 rw .sentry
 rw .config/depot
 rw .config/pup
+rw .config/anthropic
 rw .cache/mailbox
+rw .local/share/com.vercel.cli
 
 # configuration
 ro .config/forward

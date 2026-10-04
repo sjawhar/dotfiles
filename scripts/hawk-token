@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
-# hawk-token: print one fresh Hawk (Cognito) access token on stdout and nothing else.
+# hawk-token: print one Hawk (Cognito) access token on stdout and nothing else: a
+# freshly minted one, or, when no mint can finish in time, the last good one.
 #
-# A thin wrapper over agent-c's `hawk-token` console script (agent-c #19673,
-# meta/trajectory_labs/src/trajectory_labs/hawk_token.py), which performs one OAuth
-# refresh grant per run through hawk's own refresh path so every run yields a jti
-# middleman has never seen. omp's models.local.yml resolves `!hawk-token` for the
-# anthropic provider's apiKey and X-Api-Key header; omp caches the value for the
-# process and re-runs this on a 401. The script name is stable so live omp sessions
-# and `agentbox doctor` need no change.
+# A thin wrapper over agent-c's `hawk-token` console script (agent-c #19673, now
+# meta/tl_hawk_token), which performs one OAuth refresh grant per run through hawk's
+# own refresh path, so every fresh mint yields a jti middleman has never seen. omp's
+# models.local.yml resolves `!hawk-token` for the anthropic provider's apiKey and
+# X-Api-Key header; omp caches the value for the process and re-runs this on a 401.
+# The script name is stable so live omp sessions and `agentbox doctor` need no change.
+#
+# A never-seen jti is a property of minting fresh, not a requirement of the gateway:
+# a token may be reused across processes until it expires. Proven 2026-09-30 against
+# middleman's /openai/v1/models: one token (a single jti) presented from three separate
+# processes got 200, 200, 200, and the same token with its last character altered got
+# 401 in the same run, so the endpoint is auth-gated and the 200s are not an open door.
+# That is what $root/last-good-token rests on: every successful mint rewrites it (0600,
+# the token alone, renamed into place), and it is read ONLY when no mint could finish
+# inside the budget, and served only while its `exp` is at least 5 minutes away. It is
+# a fallback for budget exhaustion on a loaded host, not the normal path.
 #
 # The console script runs from a private shallow checkout of agent-c main that this
 # wrapper owns, not from ~/src/agent-c: that is the shared jj store's default
 # workspace and its working copy sits wherever the last session left it. The
-# checkout lives under ~/src (a dot-dir, so `agentbox new <repo>` never sees it)
+# checkout lives under ~/src (a dot-dir, so `agentbox new` never offers it as a repo)
 # because ~/src is already mounted rw into every box: one clone on the host serves
 # every running session with no restart.
 #
@@ -31,6 +41,9 @@
 # Each slot's venv records absolute paths, so it is built at that slot's path; slots
 # never move, only the symlink does. Refresh output goes to $root/refresh.log.
 set -euo pipefail
+# omp kills a `!command` after 10 s, so the whole run, not only the mint, spends one budget.
+started_ns="$(date +%s%N)"
+MINT_BUDGET_MS=9000
 
 : "${HAWK_API_URL:=https://api.hawk.internal.trajectorylabs.com}"
 export HAWK_API_URL
@@ -38,6 +51,8 @@ export HAWK_API_URL
 root="${AGENTBOX_SRC:-$HOME/src}/.hawk-token"
 current="$root/current"
 stamp="$root/.refreshed"
+cache="$root/last-good-token"
+CACHE_MIN_TTL_SECONDS=300
 REFRESH_SECONDS="${HAWK_TOKEN_REFRESH_SECONDS:-21600}"
 LOCK_STALE_MINUTES=30
 REFRESH_ARG=__hawk_token_background_refresh
@@ -86,7 +101,10 @@ build_slot() {
         rm -rf "$slot" && mv "$scratch/agent-c" "$slot" && rmdir "$scratch" || return 1
     fi
     ( cd "$slot" && uv sync --frozen --no-dev --quiet ) || return 1
-    uv run --frozen --no-dev --project "$slot" hawk-token --api-url "$HAWK_API_URL" >/dev/null 2>&1 || return 1
+    # Validate the command minting runs, not `uv run hawk-token`: a slot venv
+    # without the console script would make uv fall back to this wrapper on PATH,
+    # which mints from the live slot and passes the check vacuously.
+    "$slot/.venv/bin/hawk-token" --api-url "$HAWK_API_URL" >/dev/null 2>&1 || return 1
 }
 
 # publish NAME: point `current` at the sibling slot NAME, atomically (rename(2)
@@ -95,6 +113,70 @@ publish() {
     ln -sfn "$1" "$current.tmp.$$"
     if mv -Tf "$current.tmp.$$" "$current" 2>/dev/null; then return; fi
     python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$current.tmp.$$" "$current"
+}
+
+# save_token TOKEN: rewrite the last-good-token cache after a successful mint. Every
+# host session and every box shares $root and mints without a lock, so the token goes
+# to a temp file private to this process (the host name tells the boxes' pid
+# namespaces apart) and is renamed over the cache: a reader sees the old token or the
+# new one, never part of one. umask 077 makes it 0600 from creation; this is the
+# process's last step, so the umask reaches nothing else.
+save_token() {
+    local tmp="$cache.tmp.$HOSTNAME.$$"
+    umask 077
+    printf '%s\n' "$1" >"$tmp" && mv -f "$tmp" "$cache" && return
+    rm -f "$tmp"
+    return 1
+}
+
+# b64url_decode STR VAR: set VAR to the bytes unpadded base64url STR (RFC 7515)
+# encodes, in bash alone. STR must hold only base64url characters (the caller's JWT
+# match guarantees it); a NUL ends the result, and JSON holds none. Every local is
+# prefixed, because `printf -v "$2"` assigns to a local of this function instead of
+# the caller's variable when the two share a name, and loses the result with no error.
+b64url_decode() {
+    local LC_ALL=C _b64_in=$1 _b64_i _b64_word _b64_esc _b64_out=''
+    local _b64_alphabet=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_
+    local -A _b64_val=()
+    for (( _b64_i = 0; _b64_i < 64; _b64_i++ )); do _b64_val[${_b64_alphabet:_b64_i:1}]=$_b64_i; done
+    # Whole 4-character groups: the value-0 padding decodes to trailing NULs, where %b stops.
+    case $(( ${#_b64_in} % 4 )) in 2) _b64_in+=AA ;; 3) _b64_in+=A ;; esac
+    for (( _b64_i = 0; _b64_i < ${#_b64_in}; _b64_i += 4 )); do
+        _b64_word=$(( _b64_val[${_b64_in:_b64_i:1}] << 18 | _b64_val[${_b64_in:_b64_i+1:1}] << 12 \
+            | _b64_val[${_b64_in:_b64_i+2:1}] << 6 | _b64_val[${_b64_in:_b64_i+3:1}] ))
+        printf -v _b64_esc '\\x%02x\\x%02x\\x%02x' \
+            $(( _b64_word >> 16 )) $(( _b64_word >> 8 & 255 )) $(( _b64_word & 255 ))
+        _b64_out+=$_b64_esc
+    done
+    printf -v "$2" '%b' "$_b64_out"
+}
+
+# cached_token: set `cached` to the cached token and `ttl` to its seconds left when its
+# `exp` is at least CACHE_MIN_TTL_SECONDS away; otherwise say why not and return 1.
+# Nothing here forks: it runs after the mint has spent the budget, on a host too loaded
+# to finish that mint, in the second omp's kill leaves.
+cached_token() {
+    local line='' json now
+    local jwt_re='^[A-Za-z0-9_-]+\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+$'
+    local exp_re='[{,][[:space:]]*"exp"[[:space:]]*:[[:space:]]*([0-9]{1,15})[[:space:]]*[,}]'
+    if [ ! -e "$cache" ]; then log "no cached token at $cache"; return 1; fi
+    if ! { read -r line <"$cache" || [ -n "$line" ]; }; then
+        # read returns 1 at EOF having still assigned a last line with no newline, so
+        # a cache written without one is valid; only nothing at all is not.
+        log "cached token $cache is unreadable or empty"
+        return 1
+    fi
+    if [[ ! $line =~ $jwt_re ]]; then log "cached token $cache is not one JWT; refusing it"; return 1; fi
+    b64url_decode "${BASH_REMATCH[1]}" json
+    if [[ ! $json =~ $exp_re ]]; then log "cached token $cache has no readable exp claim; refusing it"; return 1; fi
+    printf -v now '%(%s)T' -1
+    ttl=$(( 10#${BASH_REMATCH[1]} - now ))
+    if (( ttl < 0 )); then log "cached token expired $(( -ttl )) s ago; refusing it"; return 1; fi
+    if (( ttl < CACHE_MIN_TTL_SECONDS )); then
+        log "cached token has $ttl s left, under the $CACHE_MIN_TTL_SECONDS s floor; refusing it"
+        return 1
+    fi
+    cached=$line
 }
 
 if [ "${1:-}" = "$REFRESH_ARG" ]; then
@@ -127,6 +209,10 @@ if [ ! -L "$current" ]; then
             touch "$stamp"
         fi
         release_lock
+        # A foreground build that outlived the budget proves the caller is not omp's
+        # 10 s `!command` (a terminal bootstrapping a fresh machine), so give the mint
+        # a fresh budget; a fast build keeps whatever was left.
+        [ $(( ($(date +%s%N) - started_ns) / 1000000 )) -lt "$MINT_BUDGET_MS" ] || started_ns="$(date +%s%N)"
     fi
 fi
 
@@ -139,4 +225,67 @@ if [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; t
     fi
 fi
 
-exec uv run --frozen --no-dev --project "$(readlink -f "$current")" hawk-token --api-url "$HAWK_API_URL" "$@"
+# A mint that prints nothing is worse than one that fails: omp stores the empty
+# value as the anthropic apiKey, reports MissingApiKeyError, and makes no request
+# at all, so its own re-mint-on-401 can never fire again this turn. On 2026-09-27
+# a transient failure at 14:07Z did exactly that on two machines seven seconds
+# apart.
+#
+# A mint slows down with the machine: a healthy one takes about 1.5 s, but at load
+# 200 on 32 cores (2026-09-28 19:20Z) the same mint took 7-9 s. The earlier two
+# fixed 4 s attempts then failed for every session that minted, so the first
+# attempt now gets whatever is left of the budget, and a second runs only if time
+# remains, which is what a fast transient failure leaves.
+#
+# The slot's console script runs directly. `uv run` re-resolved the project and
+# reinstalled it into the shared slot venv on every mint: about 3 s under load, and
+# a concurrent write into one venv from every session minting at once. The
+# background refresh validates each new slot by running this same console script
+# before publishing it (build_slot).
+mint_bin="$(readlink -f "$current")/.venv/bin/hawk-token"
+err="$(mktemp)"
+trap 'rm -f "$err"' EXIT
+tries=0
+for attempt in 1 2; do
+    left_ms=$(( MINT_BUDGET_MS - ($(date +%s%N) - started_ns) / 1000000 ))
+    if [ "$attempt" = 2 ]; then
+        # Pause before retrying only when a retry can still fit in the budget.
+        [ "$left_ms" -gt 1500 ] || break
+        sleep 0.5
+        # Re-read the clock: under the load this budget exists for, sleep overshoots.
+        left_ms=$(( MINT_BUDGET_MS - ($(date +%s%N) - started_ns) / 1000000 ))
+    fi
+    [ "$left_ms" -gt 500 ] || break
+    tries=$attempt
+    if command -v timeout >/dev/null 2>&1; then
+        out="$(timeout "$(( left_ms / 1000 )).$(printf '%03d' $(( left_ms % 1000 )))" \
+            "$mint_bin" --api-url "$HAWK_API_URL" "$@" 2>"$err")" || out=""
+    else
+        out="$("$mint_bin" --api-url "$HAWK_API_URL" "$@" 2>"$err")" || out=""
+    fi
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        # The caller now has its token; the cache only serves the NEXT call. A failure
+        # here must not fail this run: exiting non-zero with a good token in hand would
+        # produce the very empty-apiKey symptom the cache exists to prevent. So it is
+        # loud, and `cached_token` names the absence again at the moment it bites.
+        if [ "$#" -eq 0 ] && ! save_token "$out"; then
+            log "could not rewrite $cache; a later mint that runs out of budget will have no fallback"
+        fi
+        exit 0
+    fi
+done
+
+# Every attempt is spent, which on a loaded host is a timeout rather than a refusal.
+# A token minted earlier is a better answer than nothing -- see the reuse proof at the
+# top of this file -- so serve it while it still has real life left. Only for the
+# no-argument form, which is what omp calls: any argument reaches the mint and can ask
+# for a different token than the one cached here.
+if [ "$#" -eq 0 ] && cached_token; then
+    log "no mint finished inside the ${MINT_BUDGET_MS} ms budget; served the cached token ($ttl s left)"
+    printf '%s\n' "$cached"
+    exit 0
+fi
+log "mint produced no token after $tries attempt(s) in $(( ($(date +%s%N) - started_ns) / 1000000 )) ms of a ${MINT_BUDGET_MS} ms budget; last stderr follows"
+cat "$err" >&2
+exit 1
