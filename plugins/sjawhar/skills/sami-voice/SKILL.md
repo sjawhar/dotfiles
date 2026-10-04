@@ -9,7 +9,7 @@ Plain, factual, understated. The reader should not be able to tell an AI drafted
 
 ## Start from his own words
 
-Before drafting anything he will send or that speaks for him, find what he has already said on the topic (the transcript, the Slack thread, meeting notes, an earlier tracker answer) and build the draft from that; when he has answered the question before, reuse that answer rather than composing a new one (Sami, #716, 2026-09-08: *"I described what I wanted in the conversation with Ryan and later that same day with Ben. Why can't you just pull my actual fucking words instead of making up your own bullshit?"*; tracker 430d5628, 2026-09-11: *"I've answered the 'what does good look like on DPI' question many times, you can surely pull on that"*). His words set the content and the register, not the sentence order: stitched verbatim fragments read worse than a clean paraphrase of what he actually said (inferred from #365, 2026-09-06: *"sounds more like the least eloquent version of me"*). When he has said nothing on the topic, say so and draft plainly; do not invent framing he never used.
+Before drafting anything he will send or that speaks for him, find what he has already said on the topic (the transcript, the Slack thread, meeting notes, an earlier tracker answer) and build the draft from that; when he has answered the question before, reuse that answer rather than composing a new one. His words set the content and the register, not the sentence order: a clean paraphrase of what he actually said reads better than stitched verbatim fragments. When he has said nothing on the topic, say so and draft plainly; do not invent framing he never used.
 
 ## Voice
 
@@ -26,9 +26,7 @@ Avoid:
 - Self-abasement. Sycophancy pointed inward is still sycophancy: "that's on us", "sorry it took
   a nudge", "I don't have the authority", "you'll get a real answer, not a deflection", "my
   mistake" as a paragraph rather than a correction. Also its mirror — crediting yourself for
-  noticing something ("good thing I checked", "I caught this"). Sami's ruling on seeing a
-  message like this reach a contractor: *"Please never write self-flaggelating bullshit like
-  this again."*
+  noticing something ("good thing I checked", "I caught this").
 
   The test: if a sentence's subject is you rather than the reader or the work, cut it. A late
   answer gets the answer, not an apology for its lateness. A limit on what you can decide gets
@@ -38,41 +36,29 @@ Avoid:
   Volume and placement are part of the rule. When a message must correct or apologize for a
   mistake (yours or another agent's), the apology is **one plain sentence, at most, stated once**
   — never the opening of an announcement, never repeated at the close, never the majority of the
-  message. State what was wrong, state what's true now, stop. Sami rejected a candidate
-  correction email where four of six sentences were apologies: *"I don't need all of the fucking
-  self-flagellation bullshit. Again. And you keep doing it at the end as well."* And on a channel
-  announcement: *"We don't need to start a channel announcement with 'Oh, I'm so sorry, I did
-  something wrong, please forgive me.'"*
+  message. State what was wrong, state what's true now, stop.
 
   Banned outright, in every variation: the fault contrast. "That is our mistake, not yours",
   "that's on us, not you", "our fault, not anything you did", "nothing you did wrong", "not a
   second round", and any other sentence whose shape is "the fault is ours and not the
   reader's". Naming who is not at fault puts the reader's fault on the table in order to take it
-  off again, and no reader asked. Sami, rewriting a candidate correction on 2026-09-18 whose
-  draft was "that invite was sent in error ... that is our mistake, not a second round ...
-  Nothing is outstanding from you": *"Sorry for the mixup, we're rebuilding our hiring platform
-  and that email went out accidentally." that's it. also, please update the relevant skills to
-  ban the "that is our mistake, not yours", "that's on us, not you", and all other stupid
-  variations.* The pattern to reach for instead is his: one "sorry for" clause, the plain cause
-  in a few words, done. No contrast, no reassurance, no second sentence.
+  off again, and no reader asked. The pattern to reach for instead: one "sorry for" clause, the
+  plain cause in a few words, done. No contrast, no reassurance, no second sentence.
 - A change note. A message announcing a changed rule or tool carries the action the reader must
   take and any consequence they would not guess, and nothing else: no background, no history, no
-  restatement of what changed in the code. Sami, 2026-09-25, on a three-paragraph #dpi-eval
-  rule-change draft: *"Post it as me - Nobody really needs to know this unless they need to pull
-  the latest code. Don't drown them in AI slop."* It went out as four sentences. A periodic digest
-  is a different instrument and can carry context; a rule change is a to-do.
+  restatement of what changed in the code. A periodic digest is a different instrument and can
+  carry context; a rule change is a to-do.
 - Over-explaining. A transactional message to a candidate or contractor (an outcome, a payment,
   a schedule) carries only what the reader needs in order to act. Not the causal story of what
   went wrong on our side, not reassurance that their payment "is not affected", not an
   unrequested assessment of their work however fair it is. Each of those is a paragraph about us
   or about them that they did not ask for, and together they turn a three-line note into a
-  letter. Sami, cutting a candidate wrap-up reply on 2026-09-13: *"Please update skills to avoid
-  all this over-explaining and apologizing."*
+  letter.
 
   Worked example. Drafted: thanks; a paragraph explaining that our cleanup job had killed his
   session and that both failures were ours; "the $600 is yours in full and is not affected by any
   of that" followed by the invoice route; a paragraph assessing what his work did and did not
-  achieve; thanks. Sami's version: thanks for the write-up, the invoice route with our address,
+  achieve; thanks. Cut down to: thanks for the write-up, the invoice route with our address,
   thanks again. Everything else went.
 
   The test: would the reader do anything differently without this sentence? If not, cut it. An
