@@ -1,0 +1,66 @@
+#!/bin/bash
+# canonical-untouched <checkout>...: exit 0 when every file on disk in each jj checkout equals that
+# checkout's working-copy commit and that commit carries no change of its own, else list each
+# difference and exit 1.
+#
+# Why it exists: a lane's edit and write tools resolve a relative path against the session's
+# working directory, which for a coordinator's subagents is the canonical checkout (~/src/<repo>),
+# whatever the lane `cd`s to. Three lanes wrote into ~/src/legion that way on 2026-10-01 alone,
+# each under a brief that said "absolute paths only". This is the check that does not depend on
+# anyone remembering the rule: a lane runs it before it yields, the coordinator after.
+#
+# It writes nothing. `jj --ignore-working-copy` reads the working-copy commit without snapshotting
+# (a snapshot would record the stray edits into the canonical @), and `git --no-optional-locks`
+# skips the index refresh `git diff`/`ls-files` would otherwise write. The checkout must be
+# colocated (git and jj share the store), which every ~/src checkout is.
+#
+# Disk against @ is not enough on its own. Sessions run `jj util snapshot` in a canonical checkout
+# every few minutes, and a snapshot records a stray write into @: from then on disk equals @, and
+# jj marks a new file intent-to-add in git's index, so `ls-files --others` no longer lists it.
+# Measured 2026-10-01 on ~/src/legion: four git-lfs hook stubs written at 15:01 were in @ by
+# 16:36, and every disk check in between passed. So a canonical @ that is not empty is reported too.
+#
+# A difference it reports is not necessarily yours: another session may be working there, and a
+# non-empty @ may be the owner's own work in progress. Restore only what you wrote, and say so.
+set -euo pipefail
+
+if [[ $# -eq 0 ]]; then
+  echo "usage: canonical-untouched <checkout>..." >&2
+  exit 2
+fi
+
+status=0
+for checkout in "$@"; do
+  checkout=$(cd "$checkout" && pwd)
+  if [[ ! -d "$checkout/.git" ]]; then
+    echo "$checkout: not a colocated checkout (no .git directory)" >&2
+    exit 2
+  fi
+  at=$(jj --ignore-working-copy --repository "$checkout" log -r @ --no-graph -T commit_id)
+  git_in() { git --no-optional-locks --git-dir="$checkout/.git" --work-tree="$checkout" "$@"; }
+  # Tracked paths whose content on disk differs from the working-copy commit, or that are gone.
+  changed=$(git_in diff --name-status "$at" --)
+  # New files nothing tracks and .gitignore does not exclude.
+  untracked=$(git_in ls-files --others --exclude-standard)
+  # Changes a snapshot already recorded into the working-copy commit itself.
+  absorbed=""
+  if [[ $(jj --ignore-working-copy --repository "$checkout" log -r @ --no-graph -T 'if(empty, "", "x")') == x ]]; then
+    absorbed=$(cd "$checkout" && jj --ignore-working-copy diff -r @ --summary)
+  fi
+  if [[ -n "$changed" || -n "$untracked" ]]; then
+    status=1
+    echo "$checkout differs from its working-copy commit ${at:0:12}:"
+    if [[ -n "$changed" ]]; then
+      while IFS= read -r line; do printf '  %s\n' "$line"; done <<<"$changed"
+    fi
+    if [[ -n "$untracked" ]]; then
+      while IFS= read -r line; do printf '  ?\t%s\n' "$line"; done <<<"$untracked"
+    fi
+  fi
+  if [[ -n "$absorbed" ]]; then
+    status=1
+    echo "$checkout's working-copy commit ${at:0:12} is not empty (a snapshot recorded these, or the owner is working there):"
+    while IFS= read -r line; do printf '  %s\n' "$line"; done <<<"$absorbed"
+  fi
+done
+exit "$status"

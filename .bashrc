@@ -88,7 +88,7 @@ export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 export BROWSER="${DOTFILES_DIR}/shims/xdg-open"
 
 
-# Claude Code — state lives in ${DOTFILES_DIR}/.claude/.
+# Claude Code — state lives in ${DOTFILES_DIR}/.claude/; `cld --profile NAME` uses ${DOTFILES_DIR}/.claude-profiles/NAME.
 export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export ANTHROPIC_1M_CONTEXT=true
@@ -110,6 +110,17 @@ fi
 # than "no audio system", which is the more honest error.
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${HOME}/.config/systemd/user/forward-serve.service" ]; then
     export PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/forward/pulse.sock"
+fi
+
+# Agent secrets (AGENTC-393): a host session gets its broker proofs from the agent-secrets
+# helper over this socket (installers/agent-secrets.sh; the agent launchers register each session
+# through scripts/agent-secrets-session). Agent boxes have a key dir instead: scripts/agentbox
+# sets AGENT_SECRETS_KEY_DIR and never mounts this socket. Present only where the helper is
+# installed, like PULSE_SERVER above; a value the caller already has wins.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${HOME}/.config/systemd/user/agent-secrets-helper.service" ]; then
+    export AGENT_SECRETS_HELPER_SOCK="${AGENT_SECRETS_HELPER_SOCK:-${XDG_RUNTIME_DIR}/agent-secrets/helper.sock}"
+    [ -n "${AGENT_SECRETS_URL:-}" ] || . "${DOTFILES_DIR}/agent-secrets/broker.env"
+    export AGENT_SECRETS_URL
 fi
 
 
