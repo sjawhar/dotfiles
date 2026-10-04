@@ -92,17 +92,17 @@ Do not use content_type text/markdown for structured messages — the converter 
 
 ## Inspecting message structure
 
-The MCP `conversations_history` response strips Block Kit structure to a flat text representation. It also collapses newlines, so it cannot show that a posted message lost its paragraph breaks: both lanes above read theirs back through the MCP and saw nothing wrong. After posting anything multi-paragraph, read it back with the call below using `.messages[0].text` and count the newlines. Fix a damaged message in place with `chat.update`, which keeps its reactions and thread. To see the actual block JSON (for replicating a hand-edited message), use Slack's API directly — this is debug-only, not the send path:
+The MCP `conversations_history` response strips Block Kit structure to a flat text representation. It also collapses newlines, so it cannot show that a posted message lost its paragraph breaks: both lanes above read theirs back through the MCP and saw nothing wrong. After posting anything multi-paragraph, read it back with the call below using `.messages[0].text` and count the newlines. Fix a damaged message in place with `chat.update`, which keeps its reactions and thread. To see the actual block JSON (for replicating a hand-edited message), use Slack's API directly — this is debug-only, not the send path. The token reaches curl on stdin (`-H @-`; `printf` is a shell builtin), never as an argument, because every user can read a process's arguments from `/proc/<pid>/cmdline` and any `ps` prints them:
 
 ```bash
-secrets SLACK_MCP_XOXP_TOKEN -- sh -c 'curl -s "https://slack.com/api/conversations.history?channel=$CH&latest=$TS&oldest=$TS&inclusive=true&limit=1" -H "Authorization: Bearer $SLACK_MCP_XOXP_TOKEN"' \
+secrets SLACK_MCP_XOXP_TOKEN -- sh -c 'printf "Authorization: Bearer %s\n" "$SLACK_MCP_XOXP_TOKEN" | curl -s -H @- "https://slack.com/api/conversations.history?channel=$CH&latest=$TS&oldest=$TS&inclusive=true&limit=1"' \
   | jq '.messages[0].blocks'
 ```
 
 To delete a message:
 ```bash
-secrets SLACK_MCP_XOXP_TOKEN -- sh -c 'curl -s -X POST "https://slack.com/api/chat.delete" \
-  -H "Authorization: Bearer $SLACK_MCP_XOXP_TOKEN" \
+secrets SLACK_MCP_XOXP_TOKEN -- sh -c 'printf "Authorization: Bearer %s\n" "$SLACK_MCP_XOXP_TOKEN" | curl -s -X POST "https://slack.com/api/chat.delete" \
+  -H @- \
   -H "Content-Type: application/json" \
   -d "{\"channel\": \"C1234567890\", \"ts\": \"1234567890.123456\"}"'
 ```

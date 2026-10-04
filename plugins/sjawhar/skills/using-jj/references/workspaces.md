@@ -69,14 +69,29 @@ This user has a custom alias: `jj tug` moves the closest bookmark to `@`. It is 
 
 You may be in a **jj workspace** (not the default workspace). Check with `jj workspace list`.
 
-**Canonical checkouts live at `~/src/<repo>` and are not a place to work.** `/home/ubuntu/src/agent-c` (and every other canonical checkout other sessions share) is the store's default workspace: a `jj new`, edit, or commit there lands in a working copy every co-tenant resolves through. Make a named workspace and work only there. Outside an agent box that is `jj -R /home/ubuntu/src/<repo> workspace add /home/ubuntu/.worktrees/<repo>/<name> --name <name>`. **Inside a box it is `/home/ubuntu/boxes/<box>/<name>`**, because a box's home is overlay and `~/.worktrees` is not in `agentbox/mounts`: a workspace there is deleted with the box and takes any unpushed work with it. Host-backed is better, not safe: other boxes still cannot see `~/boxes/<box>/`, so in both cases lock the new entry right after the add, from the box that created it (`git -C /home/ubuntu/src/<repo> worktree lock <path> --reason '<why>'`; lock resolves by path, so from another box it answers `not a working tree`). If it answers `not a working tree` right after a successful add in the same box, read the workspace's own `.git`: a `gitdir:` line naming a missing directory means the entry was created and already deleted (twice on 2026-09-25, within a minute of creation), so rebuild it by `disk-hygiene`'s recipe and lock it; no `.git` at all means the workspace is not colocated, and git will not work there. Push early: a pushed bookmark survives the box, the overlay, a prune and a forget. Clean up with `jj workspace forget` (on a fixed build: stock jj 0.45.1's forget is itself a repo-wide prune; see SKILL.md) or `git worktree remove`, never `git worktree prune`. Those paths are the only places a new workspace goes — never `/tmp`, never a clone — and a new one is made only for a genuinely disjoint parallel lane, not because a session "wants its own". Four stray `jj new`s in shared checkouts on 2026-09-17/18 (the platform PO's at 14:37Z, a dispatched subagent's in `/home/ubuntu/legion` ~04:40Z, two on #19336's own lane) each cost another session a repair. Inferred from those incidents (platform PO via the PR queue, 2026-09-18); the box split, the lock and push-early are the platform PO's 2026-09-25 amendment, after that ruling's path turned out to be overlay inside a box.
+**Work in a named workspace, not a shared canonical checkout.** The canonical store is normally
+`~/src/<repo>`. Outside a box, the workspace belongs under `~/.worktrees/<repo>/<name>`;
+inside a box, use its host-backed `~/boxes/<box>/<name>` area. Read the box's mount contract:
+an arbitrary home-directory path can be writable yet disappear with the box.
 
-**`/home/ubuntu/agent-c` is the retired store.** Its operation log had grown to 189 GB and every command there costs ~4 s. Do not add workspaces to it. **The trap:** `jj workspace add` without `-R` uses the repo of your current directory, so run from inside any old workspace it silently creates the new one on the retired store. Always pass `-R /home/ubuntu/src/agent-c`, and check with `cat <new-dir>/.jj/repo` (it must resolve under `src/agent-c`). A session still working in one of the old store's workspaces moves its lane with `~/.local/state/disk-hygiene/run-2026-09-18/migrate-lane.sh <old-workspace-dir> <new-name>` (pushes your described commit into the new store by sha, adds a workspace at `~/.worktrees/agent-c/<new-name>`), then `cd`s there. Nothing else is carried: bookmarks nobody pushed, old working copies and the old operation log are deleted with the store once its last session ends.
+Pass the canonical store explicitly when adding; without `-R`, the add selects whatever store
+the current directory resolves to, which can be a retired one:
+`jj -R "$HOME/src/<repo>" workspace add "$HOME/.worktrees/<repo>/<name>" --name <name>`
+(substitute the box-backed destination inside a box). Confirm that files were populated and
+inspect the new workspace's `.jj/repo` and `.git` pointers. The installed jj wrapper locks
+the new worktree entry; verify that protection rather than running a repo-wide prune.
+If a `gitdir:` target is missing, use the disk-hygiene recovery procedure. No `.git` means a
+non-colocated workspace, not proof its jj state is lost.
+
+Snapshot and push early: a named directory is not stored content and a box-local copy dies
+with its box. Retire only your own superseded workspace through the supported
+`jj workspace forget` path, never a repository-wide prune. Do not create a workspace merely
+for a read-only review or use the shared checkout to park another session's changes.
 
 This user uses **colocated repositories** (jj + git coexist). A `.git` folder is present and tools like `gh` work fine. However, **always use `jj` commands instead of `git`** — git operations can desync the jj state.
 
 In non-default workspaces:
-- Plain `jj workspace add` colocates (`git.colocate` defaults true — the new workspace gets a git worktree; jj prints `Created Git worktree for the new workspace.`). A `--no-colocate` workspace has no `.git`, and on fleet boxes the dotfiles `.jjconfig.toml` enables the LFS filter with `required = true`, so the add aborts partway on LFS-tracked files and subprocess `git` exits 128 there. The AGENTC-144 unblock (`--config git.filter.drivers.lfs.required=false --config fsmonitor.backend=none`, absolute paths) completes the add but leaves LFS files as pointer text — prefer the colocated add.
+- Plain `jj workspace add` colocates (`git.colocate` defaults true — the new workspace gets a git worktree; jj prints `Created Git worktree for the new workspace.`). A `--no-colocate` workspace has no `.git`, and on fleet boxes the dotfiles `.jjconfig.toml` enables the LFS filter with `required = true`, so the add aborts partway on LFS-tracked files and subprocess `git` exits 128 there. The unblock (`--config git.filter.drivers.lfs.required=false --config fsmonitor.backend=none`, absolute paths) completes the add but leaves LFS files as pointer text — prefer the colocated add. See [shared-store details](shared-store-details.md).
 - If the workspace is stale, run `jj workspace update-stale`. It loses nothing — see "How a stale working copy actually works" below for the mechanism and where your edits end up.
 - After updating a stale workspace, check `jj log -r @` to confirm your working copy is where you expect
 
@@ -84,98 +99,90 @@ In non-default workspaces:
 
 #### How a stale working copy actually works (from the source, jj 0.45.1)
 
-Every workspace records the operation id it last synchronised at. On each command jj compares that to the repository's current operation (`lib/src/working_copy.rs`, `WorkingCopyFreshness::check_stale`):
+Each workspace records its last synchronized operation. `WorkingCopyFreshness::check_stale`
+compares that operation with the repository's current one:
 
-- same operation → **fresh**;
-- the workspace's operation is *ahead* of the repo's (this workspace moved and the repo view is older) → **updated**: jj reloads the repo at the workspace's operation, silently;
-- the workspace's operation is an *ancestor* of the repo's — some other workspace's operation landed since, typically one that rewrote, described, rebased or abandoned this workspace's working-copy commit — then if the on-disk tree already equals the working-copy commit's tree → **fresh** (nothing to do; this is the "it recovered by itself" case), else → **stale**;
-- neither is an ancestor of the other (divergent operations) → **sibling operation**, also handled by `update-stale`.
+- Same operation: fresh.
+- Workspace operation ahead of the repository view: reload at the workspace operation.
+- Workspace operation is an ancestor: fresh if the on-disk and recorded trees agree,
+  otherwise stale.
+- Divergent operations: a sibling operation, also handled by `update-stale`.
 
-`jj workspace update-stale` (`cli/src/cli_util.rs`, `recover_stale_working_copy_impl`) then does, in order: (1) **snapshot the on-disk working copy on top of the last-known working-copy operation** — every unsnapshotted edit is committed into the *old* working-copy commit, in the old view, before anything else happens ("Snapshot the current working copy on top of the last known working-copy operation, then merge the divergent operations"); (2) merge the operations; (3) if still stale, reset the colocated git HEAD and check out the working-copy commit the current view names — this prints `Updated working copy to fresh commit <id>` and replaces the files on disk with that commit's tree; (4) snapshot again ("there should be no data loss at least"). If the old operation cannot be loaded at all (abandoned, or lost by the storage backend), it writes a **recovery commit** holding the on-disk contents, parented to the current working-copy commit.
+`recover_stale_working_copy_impl` snapshots on-disk edits into the old working-copy commit
+before merging operations. If still stale, it checks out the working-copy commit selected
+by the current repository view, then snapshots again. If the old operation is unavailable,
+it creates a recovery commit holding the on-disk contents.
 
-So after an update the edited file is **gone from disk** — that is step 3 replacing the tree, and it is the moment the update reads as "it discarded my edit" (platform PO, 2026-09-21); it did not. Do not re-apply from a copy you kept; the edits you made before the update are in the old working-copy commit — often shown as a *divergent* sibling carrying the same change id (`rsxtlxuq/0`, `rsxtlxuq/1`) — not on the new `@`, and not gone. The recipe: `OLD=$(jj log --ignore-working-copy -r @ --no-graph -T 'change_id.short()')` before updating (`--ignore-working-copy` reads the repo without touching the stale tree), `jj workspace update-stale`, then `jj log -r "change_id($OLD)" -p`: the change id is now divergent, so address the siblings by COMMIT id — the nonempty one holds your edits, and `jj restore --from <its commit id> <paths>` puts them on the new `@` (`--from <change id>` fails with "Change ID is divergent"; reproduced 2026-09-18); an empty one is nothing to keep and safe to abandon (check `descendants(<id>) ~ <id>` is empty first). The only way to lose the edits is to abandon that sibling without looking. Update-stale does not cause losses: the "lossy"/"overwrote" claims are misreadings of cross-session rewrites, and the `removed N files` / `modified N files` lines in update-stale's output describe the checkout, not a loss.
+The checkout can therefore remove an edited file from the visible directory without
+discarding its saved contents. Before updating, record the working-copy change ID with
+`jj --ignore-working-copy log -r @ --no-graph -T change_id`. After
+`jj workspace update-stale`, inspect `jj log -r 'change_id(<saved-id>)' -p` and the operation
+history. A nonempty divergent sibling may hold the edits. Address it by commit ID and
+recover the intended paths with `jj restore --from <saved-commit> <paths>` in your own
+workspace. Check the complete saved path set, not just a remembered file.
+
+`removed N files` describes a checkout, not proven data loss. Conversely, never assume an
+empty sibling is disposable until ownership, bookmarks and descendants have been checked.
 
 ### The cross-session immutability guard
 
-Since 2026-09-18 (AGENTC-318, approved by Sami), every omp agent session's jj config — the harness-injected `~/.cache/omp/jj/omp-attribution-<session-id>.toml` overlay in `JJ_CONFIG` — redefines `immutable_heads()` so that **other sessions' non-empty unpushed commits are immutable to you**. `jj abandon`, `rebase`, `squash`, or `describe` touching another lane's commit fails with `Error: Commit <id> is immutable` — the same guard that protects main.
+The session overlay in `JJ_CONFIG` adds protection for other sessions' work. A refusal can
+also come from ordinary trunk, tag or remote-reference protection. Identify the actual pin
+before diagnosing it; ownership alone does not decide mutability.
 
-What that error means and what to do:
-- **It is not a bug.** You tried to rewrite a commit that carries another session's `Omp-Session:` trailer (or a human's trailer-less commit). Leave it alone; coordinate with the owning session over hub/envoy instead.
-- **Your own commits stay mutable** — commits carrying YOUR session's trailer. Exception: your commit under another session's commit is immutable as their ancestor (rewriting a parent rewrites the descendant — correct).
-- **Empty commits are exempt** everywhere: ended sessions' working-copy leftovers stay abandonable by anyone.
-- **Your own working copy is exempt** (`present(@)`): the trailer only lands at describe time, so an edited-but-undescribed `@` carries no trailer yet — without this exemption a session could not describe its own fresh snapshot (hit live 2026-09-18 14:1xZ). `@` resolves per invocation, so each session exempts only its own working copy; other workspaces' LIVE `@`s stay guarded against you, described or not.
-- **Stray snapshots are exempt** (`description(exact:"") ~ working_copies()`): an undescribed commit that is nobody's working copy — the orphan left when a session `jj new`s away from an edited-but-undescribed `@` — is cleanable by anyone, or clutter would accrete forever (second live edge, 14:16Z). CAUTION: a recovery sibling from `update-stale` has exactly this shape and may hold someone's edits — `jj show` a stray before abandoning it; the guard no longer stops you.
-- **`--ignore-immutable` overrides deliberately.** Legitimate only for commits your lane owns (e.g. a successor session amending its predecessor's PR commits). NEVER for another live lane's work — the override existing is what turns an accident into a choice.
-- A human shell without the overlay (Sami's terminal) keeps stock jj behaviour: only main-ancestry is immutable.
+The recorded guard has two operands: `builtin_immutable_heads()` and a session-ownership
+filter. Exemptions for your trailer, `present(@)`, empty commits and undescribed orphaned
+snapshots subtract only from the second operand. They do not remove protection supplied
+by the first. Inspect the current configuration rather than assuming a historical revset:
+`jj config get 'revset-aliases."builtin_immutable_heads()"'`.
 
-Mechanics: the overlay's revset is `builtin_immutable_heads() | (ancestors(visible_heads(), 4) ~ ::trunk() ~ description(glob:"*Omp-Session: <your-id>*") ~ empty() ~ present(@) ~ (description(exact:"") ~ working_copies()))` — it guards the 4-generation frontier below every visible head, and ancestry closure (`::immutable_heads()`) protects all deeper history automatically (measured on the ~67k-commit agent-c store: zero foreign non-empty commits escape; warm per-command cost is noise-level). Generated by `~/.dotfiles/omp/extensions/session-env.ts`.
+- An empty or undescribed commit can contain recovery work or support another workspace.
+  A guard exemption is not cleanup authorization.
+- Your own commit beneath another owner's commit is protected through ancestry.
+- An untracked remote bookmark can freeze an otherwise mutable head or its ancestor,
+  even if you did not push it. Pushed and immutable are independent properties.
+- A human shell without the session overlay still has its configured builtin protections.
+- Do not override a real pin or another owner's protection. Append a fix on a fresh child
+  of a published or reviewed head. Managed fork movement belongs to the fork workflow.
 
-**Every exemption in that revset subtracts from the SECOND operand only.** `~ ::trunk()`,
-`~ description(glob:"*Omp-Session: …*")`, `~ empty()`, `~ present(@)` and
-`~ (description(exact:"") ~ working_copies())` all sit inside the parentheses and narrow
-`ancestors(visible_heads(), 4)`. **Nothing subtracts from `builtin_immutable_heads()`**, which on
-jj 0.45.1-sami is `trunk() | tags() | untracked_remote_bookmarks() | untracked_remote_tags()`
-(`jj config get 'revset-aliases."builtin_immutable_heads()"'`). So "it is my own commit", "it is
-empty", "it is my working copy" all answer the wrong operand whenever the pin is a builtin one.
+A refused mutation exits 1 with empty stdout and its explanation on stderr. Suppressing that
+error makes later checks inspect an unchanged tree, so keep stderr and verify the changed
+artifact before interpreting a probe.
 
-**`untracked_remote_bookmarks()` is how a commit becomes immutable without you having pushed it
-and without anyone touching it.** In agent-c those refs are PR-tracking ones on a remote named
-`pr` — `19842@pr`, `19842b@pr` — and they land on a head AFTER the PR exists, so a commit you were
-mutating an hour ago refuses today. **Pushed and immutable are independent in both directions:**
-pushing does not by itself freeze a commit, and a commit carrying no ref of its own freezes anyway
-once one lands on a descendant (ancestry closure). Measured in agent-c 2026-09-23: `45280428` has
-no bookmark and is not in `::trunk()`, yet is immutable, because `5e56c648` (`19842@pr`,
-`19842c@pr`) and `ea5ce39e` (`19842b@pr`) sit above it — the same commit a lane had restored from
-cleanly earlier, frozen since by a ref that arrived over it. Reproduced from scratch (throwaway
-repo, jj 0.45.1-sami, 2026-09-23): a commit carrying this session's own `Omp-Session:` trailer —
-exempt under operand 2, verified mutable — became immutable the instant a pushed-then-untracked
-bookmark pointed at it, with the commit itself never rewritten.
+All workspaces share one commit store and operation log. State-changing operations,
+including snapshots taken by otherwise read-like commands, affect that shared history.
+Use `--ignore-working-copy` when inspecting another session's store.
 
-Remedy: **`jj new`, then mutate the fresh child.** Never `--ignore-immutable` for this one: what you
-would be overriding is not a guess about ownership, it is a real ref, and the override rewrites
-whatever that ref is pinning.
+**Before a rewrite:** inspect every descendant and bookmark of the exact revisions you
+intend to change. This applies to describe, amend, squash, abandon, absorb and every
+rebase form, not only `-s` or `-b`. `-r` can reparent descendants onto the old parents,
+removing your contribution from their trees. A release merge is a descendant too:
+coordinate with its owner and let the release workflow advance it.
 
-**A refusal inside a script with stderr suppressed is silent, and the run then reports on an
-unmutated tree.** `jj restore --into <pinned commit> …` exits **1** with **empty stdout** and the
-whole `Error: Commit <id> is immutable` block on **stderr**; under `2>/dev/null`, or any caller that
-ignores `$?`, the script continues and every downstream result is a false negative — a
-mutation-testing battery scores the unmutated code, a fix loop measures the unfixed tree. Prove the
-mutation landed before trusting any result: `jj file show -r <rev> <path>` piped to a `grep` for a
-marker only the mutated version carries, never the command having returned.
+Use only named revisions you own. Do not mutate broad selections such as
+`visible_heads() & ~immutable()`. A private stack whose base was squash-merged must
+select only its own unmerged commits; [rebase mechanics](rebase.md) and
+[stack details](stack-and-conflict-details.md) explain the boundary. A moved base alone
+is not a reason to rewrite a reviewed branch.
 
+An operation's description does not bound its descendants: a broad rebase, or a single-revision
+rebase beneath a many-parent release merge or a live wrapper's working copy, can move far more
+than it names. Reconstruct a recovery with forward changes, never a repository-wide undo,
+operation restore or operation revert.
 
-Multiple jj workspaces share **one operation log and one commit store**. Every jj command you run — including `jj st`, `jj undo`, `jj rebase` — writes to that shared log. Other Claude sessions in other workspaces see your operations and vice versa.
+**Advance a served checkout only when its working-copy change is empty.** Fetch first
+and inspect its actual working-copy state. Leave another session's edits in place and
+coordinate; do not park them with `jj new`. If an earlier operation already parked them,
+inspect the old working-copy commit and recover its complete path set with its owner.
+After `jj new`, `@-` names the new parent, not the parked edits.
 
-**Consequences:**
-- Concurrent operations from two sessions create **divergent operations** that jj must reconcile
-- Each reconciliation can create divergent commit IDs (the `/0`, `/4` suffixes)
-- A rebase that rewrites another workspace's `@` (or its ancestors) makes that workspace stale — this only matters when workspaces share lineage, not when they're on independent branches
-- **This is why undo loops are so destructive** — each undo is another shared operation that may trigger reconciliation
+Do not split human-readable diff output on spaces to recover paths: renames and spaced
+filenames need structured handling. Recover the complete saved path set, including lockfiles
+and generated files, not only the paths you remember editing.
 
-**Rules for parallel workspaces:**
-- Keep operations minimal and deliberate — don't experiment
-- Never chain undos (see "No Undo Loops" above)
-- If your workspace is stale, follow the update-stale recipe above (record `@`, update, restore from the sibling) before doing anything else — it is safe; nothing is lost by running it
-- Rebase onto main with `jj git fetch && jj rebase -o main`, and only when there is a conflict to resolve
-- Rebase **your own change**, named: `-r @` / `-s <your change>`. `-s`/`-b` rewrite every DESCENDANT of the named root, and in a shared store those descendants are other sessions' commits: `jj rebase -s <root> -d main@origin` on 2026-09-18 08:55Z rewrote 1,081 commits across every lane (op `ca97c0f7af50`; left in place because undoing it would be a second repo-wide rewrite). Before any `-s`/`-b`, `jj log -r "descendants(<root>) ~ (<your change ids>)"` must be empty. `-r` is no exception when the commit has descendants: it re-parents each of them onto the commit's OLD parents (`rebase.md`), so a live release merge that descends from it silently loses your commit and gains its predecessor. On 2026-09-25 one lane's `jj rebase -r` of a hawk member re-parented the inspect release owner's 50-parent release merge, swapped an older commit in for the member, and introduced two conflicts; it was restored by commit id. Run the same descendants check before `-r`. If a release merge is among the descendants, hand the new tip to the release owner and let its `advance` move it. The one routine case that needs `-s` is a stacked branch whose base PR was squash-merged: `jj rebase -s <first own commit> -d main@origin` replays only your commits, where `-b` replays the base's too and every one of them conflicts (reproduced 2026-09-18; agent-c `docs/solutions/2026-09-18-rebasing-a-stacked-pr-after-its-base-was-squash-merged.md`) — the descendants check still comes first. After a store-wide rewrite your local branch head is likely a rebased TWIN of your pushed PR head — same content, new commit id — so before citing or pushing a head compare content, not ids: `git diff <merge-base> <head> | git patch-id --stable` against the pushed head; pushing the twin moves the PR head and re-runs CI, and verdicts then carry on patch-id identity, stated in the packet. After `jj commit <paths>` in a shared checkout, never `jj rebase -r` that new commit away from under `@`: `-r` moves only the named commit and re-parents `@` back onto the old base, so your files on disk silently revert to the pre-fix versions while the push succeeds — the live gh shim ran un-hardened for 44 minutes this way (2026-09-17 20:41-21:25Z). Use `-s <commit>` (or `-b @`), which carries `@` along. A revset like `visible_heads() & ~immutable()` sweeps every other session's unpushed PR bookmark in the store onto the new base — three open-PR bookmarks were moved that way in `~/.dotfiles` on 2026-09-17 (no conflicts, identical patches, so pure churn, and each PR's local bookmark then diverged from its published head)
-- Verify your workspace — confirm you're operating on the right directory
-
-**Cloning away from the shared store:** `git clone --local /path/to/shared/checkout` keeps the shared checkout as `origin`, so the clone's first push lands stray refs back in the store every session works in. The FIRST command executed with cwd inside a new clone is `git remote set-url origin <github-url>`, verified with `git remote -v` from that same cwd — a set-url issued from the wrong directory changes nothing and fails silently. Stray-ref detection in the store: `git for-each-ref --format='%(refname)' | grep refs/heads/<branch>`; remove with `jj bookmark forget` once the content is confirmed reachable on GitHub (dispatched worker, 2026-09-17).
-
-**Advancing a shared checkout that carries someone else's uncommitted edit** (the served `~/.dotfiles` / `~/core-ops` copy after your change landed on main): `jj new main@origin` parks the old `@` — *with the co-tenant's edit* — as an orphan change. Restore from that parked change by its id, and restore **every path it touched**, not the one you remember:
-
-```bash
-OLD=$(jj log -r @ --no-graph -T 'change_id.short()')   # BEFORE jj new
-jj new main@origin
-# derive the path list — NEVER type it from memory:
-jj restore --from "$OLD" $(jj diff -r "$OLD" --summary | awk '{print $2}')
-diff <(jj diff --stat -r "$OLD") <(jj diff --stat -r @)  # identical, or you dropped one
-jj abandon "$OLD"
-```
-
-`--from @-` after `jj new` is main and carries nothing. On 2026-09-17 this session restored `mise.toml` alone from the parked change and abandoned it; the same change also held another session's three `omp/plugins/` lockfile edits, which that session had to recover from the hidden commit twenty minutes later. Inferred from that incident (librarian, 2026-09-17), not a rule Sami stated in these words.
-
-A second instance on 2026-09-18: the same session typed four remembered paths into the restore, missed a fifth co-tenant edit (`disk-hygiene/scripts/disk_hygiene.py`), and abandoned the parked change before the diff check — recovered from the hidden commit only because abandoned commits stay reachable by commit id. The `$(jj diff --summary)` derivation above exists so the list cannot be typed from memory.
+Use named jj workspaces rather than cloning a shared checkout. A local clone can retain
+the shared store as its remote and push stray refs into it; changing a remote from the
+wrong directory is not a repair of that clone.
 
 ## Merge Conflict Resolution
 

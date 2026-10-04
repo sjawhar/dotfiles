@@ -10,10 +10,13 @@ Sami leads the review by narrating as he reads. Track his observations, find the
 exact diff locations, challenge weak suggestions after he finishes, and compose a
 friendly review together. Do not replace his judgment with unsolicited analysis.
 
-> **jj workspace note:** a non-default jj workspace has no `.git`, so `gh` cannot infer
-> the repo. Pass it explicitly: `gh -R <owner>/<repo> ...`. Never set `GIT_DIR` or
-> `GIT_WORK_TREE` — an exported `GIT_DIR` redirects every git subprocess in that shell
-> (test fixtures' `git init && git commit` included) into the shared repo.
+> **jj workspace note** (applies only when the PR's checkout is one of the
+> remaining jj repositories — a Legion-managed workspace, or the shared
+> `~/.dotfiles`/`~/src` stores): a colocated workspace has Git metadata; a
+> non-colocated one does not, and branch detection varies. Pass the repository
+> explicitly: `gh -R <owner>/<repo> ...`. Never export `GIT_DIR` or
+> `GIT_WORK_TREE`; they redirect unrelated Git subprocesses, including test
+> fixtures, into the shared repository.
 
 ## Set up the review
 

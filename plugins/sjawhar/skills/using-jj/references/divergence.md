@@ -1,17 +1,39 @@
-# Covers identifying and resolving divergent jj commits without damaging remote history.
+# Resolve divergent changes without moving someone else's work
 
-## Resolving divergence
+A change ID can name several commit IDs after a rewrite. That is bookkeeping,
+not proof of corruption or a reason to delete remote history.
 
-Divergence means one change ID has two or more commits. It shows up whenever you rewrite a change (`describe`, `rebase`, `abandon` of an ancestor) while another reference still points at the old commit. Finish the cleanup — but treat it as bookkeeping, not a hazard.
+## Inspect before cleanup
 
-**A local abandon cannot harm the remote.** `jj abandon` edits your local view only: it pushes nothing, origin's refs keep pointing exactly where they did, and a later `jj git fetch` re-materializes whatever you dropped. A lockfile pinning a branch + SHA resolves against origin, so it is unaffected. The `immutable` marker is a guardrail against rewriting *your local copy* of published history — it is not protection for the remote.
+1. List the siblings with `jj log -r 'change_id(<id>)'` and inspect each by its
+   unambiguous commit ID. Record their contents, bookmarks and workspace owners.
+2. Identify the version the current work actually uses. An operation-log snapshot
+   can predate later edits; a recovery sibling may contain unsaved-looking work.
+3. Inspect `descendants(<commit>) ~ <commit>` before any rewrite or abandon.
+   Both `-r` and `-s` rebases can move other owners' descendants, by different rules.
+4. Check the actual remote head before changing a published bookmark. Local state
+   does not prove what a reviewer or another workspace has fetched.
 
-Resolution, in order:
+## Select the narrow remedy
 
-1. **Forget the reference you no longer need, then abandon the copy you don't want:** `jj bookmark forget <name>`, then `jj abandon <commit-id>`. Address commits by **commit ID, not change ID** — a divergent change ID is ambiguous; use `jj log -r 'change_id(abc)'` to list every copy.
-2. **If jj refuses the abandon because the commit is immutable,** the pin is usually an untracked remote ref (`jj log -r 'immutable_heads() & descendants(<commit-id>)'` names it). For a superseded copy you have confirmed is carried elsewhere, `--ignore-immutable` on the **abandon** is the direct tool. Never carry that flag over to a rebase: a rebase under `--ignore-immutable` rewrites the pinning commits themselves — in a fork, the release merges. In a knives-managed fork the repo's rule is trunk, tags, and the trunk on every knives remote (set by `knives start`), so this refusal there means a trunk or a tag, and the answer is to stop.
-3. **If an empty, bookmark-less commit reappears every time you abandon it,** it is another workspace's working copy, not cruft. Check `jj workspace list`. Retire it with `jj workspace forget <name>`; stock jj only stops tracking the workspace and leaves its directory alone. Abandoning its `@` only makes jj recreate one.
-4. **Before abandoning anything non-empty, check it is not unsalvaged work.** Read its diff and confirm the content exists elsewhere (a current branch, or a branch on origin). Empty commits and empty octopus merges for superseded releases are always safe.
-5. **Verify you destroyed nothing:** capture `git ls-remote --heads origin` before and after, diff the two, and confirm every open PR head commit still resolves.
+- An ambiguous change ID needs an explicit commit ID for a one-revision command.
+  After a rewrite, find the surviving commit again; the old ID still names the old snapshot.
+- An owned conflicted bookmark can be pointed at the verified surviving commit.
+  Do not delete the remote branch to tidy the local view.
+- Abandon a superseded copy only when it is yours, its contents remain reachable,
+  no bookmark depends on it and it has no descendants. Empty is not an ownership test.
+- A repeatedly recreated empty commit may be another workspace's current `@`.
+  Identify it by workspace name; do not abandon or forget another live workspace.
+- An immutable refusal requires finding the pin, for example
+  `jj log -r 'immutable_heads() & descendants(<commit>)'`. Do not override it to
+  clean up a published or shared revision. For a managed fork, its release workflow
+  owns the pin and stable change IDs; use `fork-work` and `using-knives`.
 
-Rewriting a commit that an octopus merge or a published release pins is fine. The merge is rewritten locally and its bookmark moves off the remote's commit; forget the superseded bookmark and abandon the leftover. Never "fix" local divergence by deleting branches from the remote — that destroys published history to tidy a local view.
+An abandon pushes nothing by itself, but it can delete local bookmarks and rebase
+other work, and a later named push can then delete the remote branch. Empty
+leftovers are not automatically safe to abandon. Inspect the dry-run direction
+before every publication and verify the remote bookmark still names the intended
+commit afterward.
+
+No repository-global `jj undo`, `jj op restore` or `jj op revert` is a safe repair
+in a shared store. Recover with a narrowly scoped forward change instead.

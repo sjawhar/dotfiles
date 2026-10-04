@@ -5,19 +5,24 @@ description: "Use when tracing an artifact back to the agent session that produc
 
 # Session Attribution
 
-Every jj commit made from an OMP agent session carries an `Omp-Session: <session-id>` trailer
-(injected automatically via a `JJ_CONFIG` overlay — `omp/extensions/session-env.ts` for
-interactive sessions, the Legion extension for Legion roots). The id is the resumable session
-id: `omp --resume <id>` accepts it, prefix included. Legion GitHub comments and reviews carry
-an HTML footer with the same kind of id.
+Every commit an OMP agent session makes carries an `Omp-Session: <session-id>`
+trailer, added without the agent doing anything: `shims/git` adds it to each
+`git commit`, and in a jj repository (a Legion-managed workspace, or the shared
+`~/.dotfiles`/`~/src` jj stores) a JJ_CONFIG overlay does
+(`omp/extensions/session-env.ts` for interactive sessions, the Legion extension
+for Legion roots). The id is the resumable session id: `omp --resume <id>`
+accepts it, prefix included. A git commit made through an alias, a merge, a
+cherry-pick or `git commit-tree` carries no trailer; attribute those by author,
+timestamp and transcript correlation instead. Legion GitHub comments and
+reviews carry an HTML footer with the same kind of id.
 
 ## Artifact → session
 
-**Commit** (jj or git checkout, any machine):
+**Commit:**
 
 ```bash
-jj log -r <rev> --no-graph -T description | grep Omp-Session
-git log -1 --format=%b <sha> | grep Omp-Session          # git-only checkout
+git log -1 --format=%b <sha> | grep Omp-Session         # plain git checkout
+jj log -r <rev> --no-graph -T description | grep Omp-Session   # jj repos only: Legion workspaces, shared ~/.dotfiles/~/src stores
 ```
 
 **GitHub issue/PR comment or review** (Legion-posted):
@@ -46,7 +51,7 @@ With an id in hand, in order:
 ```bash
 git log --all --format='%h %s %(trailers:key=Omp-Session,valueonly)' | grep <id>
 jj log -r 'all()' --no-graph -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"' \
-  -r 'description(glob:"*Omp-Session: <id>*")'
+  -r 'description(glob:"*Omp-Session: <id>*")'   # jj repos only: Legion workspaces, shared ~/.dotfiles/~/src stores
 gh search issues "<id> in:comments" --owner <owner>          # ISSUE comments only - excludes PRs (measured 2026-09-21)
 gh search prs    "<id> in:comments" --owner <owner>          # PR comments; run both, or a PR hit reads as "never reported"
 gh api "repos/<owner>/<repo>/issues/comments" --paginate \
@@ -60,7 +65,8 @@ gh api "repos/<owner>/<repo>/issues/comments" --paginate \
 - Legion phase workers are subagents of the root architect: their commits carry the **root**
   session id. Worker-level provenance lives in the comment footers and `.legion/` handoffs.
 - The trailer names the session, not the machine. Resume works where the transcript lives.
-- **In a shared checkout the trailer names who snapshotted, not who wrote.** jj snapshots every
+- **In one of the remaining shared jj stores (the shared `~/.dotfiles`/`~/src` checkouts) the
+  trailer names who snapshotted, not who wrote.** jj snapshots every
   pending edit in the working copy under whichever session runs the next `jj` command there,
   so one commit can carry four sessions' edits under one trailer. Measured 2026-09-12 in
   `~/core-ops`: hiring's 09-06 edits landed under the Gray Swan coordinator's trailer because
