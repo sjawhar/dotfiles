@@ -11,7 +11,7 @@ Report n and the interval, not only the delta.
 
 | Change | Route | Evidence |
 |---|---|---|
-| Harness behavior that can be switched per session (an extension feature, a context line, an advisor) | A gate in the omp experiments extension (`omp/extensions/experiments/gates.json`, set to `random`) | Outcome rates per arm, joined from each session's recorded draw: correction rate, PR rework rate, cost per PR. The session is the unit; a week of fleet traffic detects only large effects. |
+| Harness behavior that can be switched per session (an extension feature, a context line, an advisor) | A gate in the omp experiments extension (`omp/extensions/experiments/gates.json`, set to `random`) | The weekly `reflect` run's `experiments-readout.py`: per session, the share of Sami's turns that correct the agent, the share of merged PRs marked rework and spend per merged PR, feature on versus off with a 95% interval. A week of fleet traffic detects only large effects. |
 | Skill or instruction text | A real-omp scenario run in the repo that owns the text, or a live behavior count | A real `omp` session given the text acts correctly on a fixed scenario, beside a control run with the text removed; or the target failure class's rate in the `reflect` skill's step-2 labels before and after the text landed. |
 | Agreement with Sami's own labels (an ask gate, a proxy, a classifier) | Re-run the stored population in the private `sjawhar/agent-eval-data` repository (`experiments/askgate`, `experiments/forkgate`, `experiments/sami-proxy`, each with its `score.py`) | Agreement with his labels, with an interval, from a score that does not depend on an LLM judge. |
 

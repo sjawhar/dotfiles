@@ -95,11 +95,19 @@ justification, no absolute always/never that agents will apply pedantically. Tig
 existing text rather than adding a paragraph.
 
 A change to harness behavior ships behind a gate in the omp experiments extension
-(`omp/extensions/experiments/gates.json`), so its effect is randomized per session and
-read from outcomes. A text change lands for everyone and is read from the step-2 rates in
-later runs; changes that land within a day of each other cannot be told apart, so say so
-instead of attributing. Every report ends with a table of what landed in this run (commit
-or PR, timestamp, the failure class it targets): the next run's before/after.
+(`omp/extensions/experiments/gates.json`), so its effect is randomized per session. Every run
+reads the gates with `experiments-readout.py`: each randomized feature on versus off, per
+session, on the share of Sami's turns that correct the agent, the share of merged PRs marked
+rework, and model spend per merged PR, each with a 95% interval. Load it in an eval cell like
+the classifier, pass both boxes' session directories and step 1's prompt files, and keep its
+turn-label cache in the scratch directory. Report every feature's three intervals; there is no
+stop rule. A week of traffic detects only large effects, so a feature whose interval includes
+0 stays random rather than being called a wash.
+
+A text change lands for everyone and is read from the step-2 rates in later runs; changes
+that land within a day of each other cannot be told apart, so say so instead of attributing.
+Every report ends with a table of what landed in this run (commit or PR, timestamp, the
+failure class it targets): the next run's before/after.
 
 ## Lanes and synthesis
 
