@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# dotfiles-sync [--old SHA] [HOST...]: put each machine's ~/.dotfiles working copy on origin's
+# main. HOST is an ssh destination, or `local` for this machine; with none, every machine in
+# MACHINES below. --old is the tip main had before a history rewrite (scripts/dotfiles-squash
+# prints it and tags it pre-squash-<date>); commits from that old history are dropped, while
+# anything a machine holds that is neither on main nor in the old history is kept and named.
+#
+# A jj checkout keeps its working-copy change: it is rebased onto main, and the run fails on a
+# conflict instead of resolving it. Before fetching, the working copy's parent is pinned with
+# a bookmark, so the fetch cannot abandon it and roll the files on disk back to an older
+# ancestor while live sessions run them. A plain git checkout moves only when it is clean.
+set -euo pipefail
+
+MACHINES=(local devbox-agents-2 sami@sami agent@oryx)
+
+sync_here() {
+  local old="$1"
+  set +eu
+  # shellcheck disable=SC1090
+  source ~/.dotfiles/.bashrc >/dev/null 2>&1
+  set -eu
+  cd ~/.dotfiles
+  if [ -n "$old" ] && ! git cat-file -e "$old^{commit}" 2>/dev/null; then
+    git fetch -q origin "$old"
+  fi
+  if [ -d .jj ] && jj --version >/dev/null 2>&1; then
+    local anchor=dotfiles-sync-anchor wc before after local_only=""
+    jj bookmark create "$anchor" -r @- >/dev/null 2>&1 || jj bookmark set "$anchor" -r @- --allow-backwards >/dev/null
+    # Commits under the working copy that the old main never had are this machine's own.
+    [ -z "$old" ] || local_only=$(git log --oneline "$(jj log -r @- --no-graph -T 'commit_id')" ^"$old")
+    wc=$(jj log -r @ --no-graph -T 'change_id')
+    before=$(jj diff -r @ --git | { grep -v '^index ' || true; } | sha256sum)
+    jj git fetch --quiet
+    if [ "$(jj log -r @ --no-graph -T 'empty')" = true ]; then
+      jj new --quiet main@origin
+    else
+      jj rebase --quiet -r "$wc" -d main@origin
+      if [ "$(jj log -r "$wc" --no-graph -T 'conflict')" = true ]; then
+        echo "CONFLICT: the working-copy change $wc conflicts with main; resolve it here" >&2
+        return 1
+      fi
+      after=$(jj diff -r "$wc" --git | { grep -v '^index ' || true; } | sha256sum)
+      if [ "$(jj log -r "$wc" --no-graph -T 'empty')" = true ]; then
+        jj new --quiet main@origin
+        # Moving off an empty, undescribed change abandons it; a described one stays.
+        if jj log -r "$wc" --no-graph -T 'change_id' >/dev/null 2>&1; then
+          jj abandon --quiet "$wc"
+        fi
+        echo "working-copy change already on main; dropped"
+      elif [ "$before" != "$after" ]; then
+        echo "kept working-copy change (diff text changed by the rebase, review it):"; jj diff -r "$wc" --stat
+      else
+        echo "kept working-copy change unchanged:"; jj diff -r "$wc" --stat
+      fi
+    fi
+    if [ -n "$local_only" ]; then
+      printf 'local commits that were never on main, left in place under bookmark %s:\n%s\n' "$anchor-kept" "$local_only"
+      jj bookmark set "$anchor-kept" -r "$anchor" --allow-backwards >/dev/null
+    elif [ -n "$old" ]; then
+      # The old week's commits, except any another workspace's working copy still sits on.
+      jj abandon --quiet --ignore-immutable "::$anchor ~ ::main@origin ~ ::working_copies()"
+    fi
+    jj bookmark delete "$anchor" >/dev/null
+    printf '%s on %s\n' "$(hostname)" "$(jj log -r @- --no-graph -T 'commit_id.short()')"
+  else
+    git fetch -q origin
+    if [ -n "$(git status --porcelain)" ]; then
+      echo "DIRTY: $(hostname) has uncommitted changes; not moved" >&2
+      git status --short >&2
+      return 1
+    fi
+    if [ -n "$old" ] && [ -n "$(git rev-list HEAD ^"$old" ^origin/main)" ]; then
+      echo "LOCAL COMMITS on $(hostname); not moved:" >&2
+      git log --oneline HEAD ^"$old" ^origin/main >&2
+      return 1
+    fi
+    git checkout -q --detach origin/main
+    printf '%s on %s\n' "$(hostname)" "$(git rev-parse --short HEAD)"
+  fi
+}
+
+if [ "${1:-}" = --here ]; then
+  sync_here "${2:-}"
+  exit
+fi
+
+old=""
+if [ "${1:-}" = --old ]; then
+  old="$2"; shift 2
+  # A tag name is resolved here, so no machine imports the tag (jj would keep the old history visible).
+  [[ "$old" =~ ^[0-9a-f]{7,40}$ ]] || old=$(git -C ~/.dotfiles ls-remote origin "refs/tags/$old" | cut -f1)
+  [ -n "$old" ] || { echo "--old: no such commit or tag on origin" >&2; exit 2; }
+fi
+hosts=("$@")
+[ ${#hosts[@]} -gt 0 ] || hosts=("${MACHINES[@]}")
+
+status=0
+for h in "${hosts[@]}"; do
+  echo "== $h"
+  if [ "$h" = local ]; then
+    "$0" --here "$old" || status=1
+  else
+    timeout 180 ssh -o BatchMode=yes -o ConnectTimeout=10 "$h" bash -s -- --here "$old" < "$0" || status=1
+  fi
+done
+exit $status

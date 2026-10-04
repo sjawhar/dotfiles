@@ -11,3 +11,6 @@ ensure_link "${DOTFILES_DIR}/.tmux.conf" ~/.tmux.conf
 if command -v tmux &>/dev/null; then
     ensure_clone https://github.com/tmux-plugins/tpm "${HOME}/.tmux/plugins/tpm"
 fi
+
+# The attention cockpit (scripts/tmux-attention) watches its queue directory.
+ensure_command inotifywait "sudo apt-get install -y -qq inotify-tools >/dev/null"
