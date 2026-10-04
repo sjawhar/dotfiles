@@ -1,0 +1,20 @@
+[Unit]
+Description=Mint a fresh hawk-token credential off any agent turn's budget (scripts/AGENTS.md's `hawk-token` entry)
+# Runs the ordinary `hawk-token` mint (its own cache-fallback and slot-refresh
+# machinery are unchanged) with no 9/10 s budget of its own: a systemd oneshot has
+# nothing racing it, so a slow mint under load just takes longer, it does not fail.
+# Its ONLY effect that matters here is the atomic rewrite of
+# $root/last-good-token (hawk-token's own `save_token()`), which
+# `scripts/hawk-token-fast` -- what omp's `!command` actually calls now -- reads
+# with no network or OAuth exchange at all. Keeping the cache's floor
+# (CACHE_MIN_TTL_SECONDS=300) 300s/3600s away from the token's 1-hour lifetime, a
+# 3-minute refresh cadence leaves about 55 minutes of slack even if every refresh
+# in a row fails.
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/scripts/hawk-token
+# Same PATH gap as ctx-ingest.service: systemd user units default to
+# /usr/bin:/bin, which resolves neither the dotfiles git shim nor mise's uv shim
+# that hawk-token's `uv sync`/mint step needs.
+Environment=PATH=/home/ubuntu/.dotfiles/shims:/home/ubuntu/.dotfiles/bin:/home/ubuntu/.dotfiles/scripts:/home/ubuntu/.local/bin:/home/ubuntu/.mise/shims:/usr/local/bin:/usr/bin:/bin

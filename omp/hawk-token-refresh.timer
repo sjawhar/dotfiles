@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 3 minutes: keep hawk-token-fast's cache inside its 300s floor
+
+[Timer]
+OnCalendar=*:0/3
+Persistent=true
+RandomizedDelaySec=20
+
+[Install]
+WantedBy=timers.target
