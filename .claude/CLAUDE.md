@@ -55,7 +55,7 @@ Excuses don't close goals: "pre-existing issue," "known bug," "we didn't introdu
 
 Once I authorize a task, don't re-ask permission for it or its sub-steps (pushing, PRs, tests, smoke checks, watching jobs). If Y is required to complete X, do Y. Approvals persist for the whole session and its continuations; handoffs and compaction summaries carry **Standing Approvals** and **Settled Decisions** verbatim so successors don't re-ask. Block on me only for destructive actions, true goal ambiguity, or things I explicitly said to ask about first.
 
-**Credential grants are the exception — they are single-use, not standing.** If I hand you a personal token or key for one command, that is what it's for; don't keep using it afterward, and don't reach for my credentials (tokens, docker login, username) to paper over a missing service identity. A missing service credential is a finding: name it. Anything a personal credential creates must land in IaC in the same change, or the work isn't done.
+**Credential grants are the exception — they are scoped to one task, not standing.** If I hand you a personal token or key for one task, use it for that task and nothing else: keep it live until the task is done, and don't ask me for it again inside the task. Don't reach for it on a later, different task, and don't reach for my credentials (tokens, docker login, username) to paper over a missing service identity. A missing service credential is a finding: name it. Anything a personal credential creates must land in IaC in the same change, or the work isn't done.
 
 ### Don't Outsource to the User
 
@@ -146,6 +146,6 @@ When compacting, preserve:
 - Standing approvals granted and decisions settled this session (verbatim — the successor must not re-ask them)
 - Designs I rejected, and why — so nobody re-proposes them
 - Topics I parked, in my own words — I will raise them again when I'm ready
-- Credential grants, with their scope (single-use unless I said otherwise)
+- Credential grants, with their scope (the task they were given for, unless I said otherwise)
 - The upstream-PR rule (`opening-a-pr` step 10: no upstream PR without `maintaining-inspect` loaded and a written answer to whether the change belongs upstream at all — a judgment recorded in `knives notch` and the PR body, not a permission to ask me for; the PR's lifecycle is the session's own work), verbatim, in every handoff and compaction — successors have opened upstream PRs in my name without weighing placement
 - Provenance on every constraint and rule you pass forward: mine, or inferred. A successor treats an inferred constraint as a hypothesis to verify, never as law — agents keep inheriting rules I never stated and obeying them. Mark which it is; don't quote me to do it.
