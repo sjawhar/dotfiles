@@ -54,6 +54,10 @@
       "commands": false
     },
     {
+      "root": "vendor/typesafe-ai",
+      "namespace": "typesafe-ai"
+    },
+    {
       "root": "vendor/time-tracker/.opencode",
       "namespace": "time-tracker",
       "skills": false,

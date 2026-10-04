@@ -98,11 +98,17 @@ A change to harness behavior ships behind a gate in the omp experiments extensio
 (`omp/extensions/experiments/gates.json`), so its effect is randomized per session. Every run
 reads the gates with `experiments-readout.py`: each randomized feature on versus off, per
 session, on the share of Sami's turns that correct the agent, the share of merged PRs marked
-rework, and model spend per merged PR, each with a 95% interval. Load it in an eval cell like
-the classifier, pass both boxes' session directories and step 1's prompt files, and keep its
-turn-label cache in the scratch directory. Report every feature's three intervals; there is no
-stop rule. A week of traffic detects only large effects, so a feature whose interval includes
-0 stays random rather than being called a wash.
+rework, and model spend per merged PR, each with a 95% interval. Turn labelling is Jev-first,
+strong-model-escalated: dump the turns with `dump_turns_for_jev`, run `jev-turn-label.py`
+(confidence >= 0.5; measured 91.2% agreement with the strong model on the 91.6% of turns it
+answers that confidently, escalation is explicit, never silent -- `jev-turn-label.py`'s
+docstring has the exact commands and the full measurement is in
+`.claude/session-analysis/2026-10-04-work/jev-evaluation.md`), then load
+`experiments-readout.py` in an eval cell like the classifier, pass both boxes' session
+directories and step 1's prompt files, the Jev output as `jev_labels_path`, and keep the
+strong-model turn-label cache in the scratch directory. Report every feature's three
+intervals; there is no stop rule. A week of traffic detects only large effects, so a feature
+whose interval includes 0 stays random rather than being called a wash.
 
 A text change lands for everyone and is read from the step-2 rates in later runs; changes
 that land within a day of each other cannot be told apart, so say so instead of attributing.
