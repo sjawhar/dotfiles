@@ -6,11 +6,12 @@
 #   - unresolved review threads (with the first line of each and whether it says Minor)
 #   - the aggregate check when the repo publishes one (a check named *-result), else every check
 #   - mergeability, draft state, base, the PR's OWN file counts (not a cited upstream diff)
+#   - Legion handoff files: any path under .legion/ the PR adds, modifies or keeps (deleting them is fine)
 #   - every review body and issue comment that names the head (verdict artifacts AT HEAD), the
 #     verdict-bearing reviews by identity, and whether the PR's own diff changed since the newest one
 #   - the Omp-Session trailers on the commits (who owns it)
-# Exit 0 = every hard gate reads green (head matches, aggregate success, 0 non-minor unresolved,
-# MERGEABLE, and a verdict-bearing artifact whose newest instance covers the head). Exit 1 otherwise.
+# Exit 0 = every hard gate reads green (head matches, no .legion/ file left, aggregate success, 0 non-minor
+# unresolved, MERGEABLE, and a verdict-bearing artifact whose newest instance covers the head). Exit 1 otherwise.
 # It never approves or merges.
 set -euo pipefail
 unset GH_TOKEN GH_CONFIG_DIR GH_REPO 2>/dev/null || true
@@ -44,6 +45,16 @@ echo "PR $repo#$n :: $(jq -r .title <<<"$pr" | cut -c1-90)"
 echo "head=$head base=$(jq -r .base <<<"$pr") state=$(jq -r .state <<<"$pr") draft=$(jq -r .draft <<<"$pr") files=$(jq -r .files <<<"$pr") +$(jq -r .add <<<"$pr")/-$(jq -r .del <<<"$pr")"
 fail=0
 if [ -n "$want" ] && [[ "$head" != "$want"* ]]; then echo "!! head does not start with $want (packet stale)"; fail=1; fi
+# Legion's phase workers commit their handoffs under .legion/ on the issue branch, and the branch must drop them
+# before it merges (sjawhar/legion#1128, #1187 and #1678 carried them onto main). Every .legion/ path whose status is
+# not "removed" blocks; a PR that only deletes them is the cleanup and stays green. LG is top-level so pr-gate-corpus
+# can test it. The files API stops at 3000 entries, so a list shorter than changed_files fails closed.
+LG='[.[]|select((.filename|startswith(".legion/")) and .status != "removed")|.filename]|join(" ")'
+pf=$(api "repos/$repo/pulls/$n/files?per_page=100" --paginate --jq '.[]|{filename,status}' | jq -cs .)
+pfn=$(jq length <<<"$pf"); pft=$(jq -r .files <<<"$pr")
+[ "$pfn" -lt "$pft" ] && { echo "!! PR file list SHORT READ: $pfn of $pft (the files API stops at 3000) - the .legion/ check saw only part of the PR"; fail=1; }
+lg=$(jq -r "$LG" <<<"$pf")
+[ -n "$lg" ] && { echo "!! Legion handoff files must be removed before merge: $lg"; fail=1; }
 g=$(api graphql -f query="{repository(owner:\"$owner\",name:\"$name\"){pullRequest(number:$n){mergeable mergeStateStatus reviewThreads(first:100){nodes{isResolved isOutdated path comments(first:1){nodes{author{login} createdAt body}}}}}}}")
 mg=$(jq -r .data.repository.pullRequest.mergeable <<<"$g"); ms=$(jq -r .data.repository.pullRequest.mergeStateStatus <<<"$g")
 # GitHub computes mergeability LAZILY: the first read after it goes stale returns UNKNOWN and TRIGGERS the

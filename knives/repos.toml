@@ -106,3 +106,15 @@ origin = "https://github.com/sjawhar/proof-sdk.git"
 [repos.ygo-fork]
 upstream = "https://github.com/reearth/ygo.git"
 origin = "https://github.com/sjawhar/ygo.git"
+
+[repos.cosmic-comp]
+upstream = "https://github.com/pop-os/cosmic-comp.git"
+origin = "https://github.com/sjawhar/cosmic-comp"
+base = "master"
+release_branch = "sami"
+
+[repos.cosmic-settings-daemon]
+upstream = "https://github.com/pop-os/cosmic-settings-daemon.git"
+origin = "https://github.com/sjawhar/cosmic-settings-daemon"
+base = "master"
+release_branch = "sami"

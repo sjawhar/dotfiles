@@ -1,0 +1,58 @@
+#!/bin/bash
+# One time, on the hub machine, after installers/chathub.sh: create @sami:chathub and
+# give agents a token. Stores MATRIX_HUB_URL, MATRIX_HUB_TOKEN and MATRIX_HUB_PASSWORD in
+# the shared agent-tier secrets.env; commit and push that file afterwards so agents on
+# other machines can read them.
+set -euo pipefail
+
+DOTFILES="${DOTFILES_DIR:-$HOME/.dotfiles}"
+HUB=http://127.0.0.1:8008
+
+if secrets get MATRIX_HUB_TOKEN --no-request >/dev/null 2>&1; then
+    echo "MATRIX_HUB_TOKEN already exists: @sami:chathub is bootstrapped." >&2
+    exit 1
+fi
+
+password="$(openssl rand -hex 24)"
+
+systemctl --user stop tuwunel
+# create-user fails harmlessly if a previous run already created @sami (errors are
+# ignored); reset-password then sets the password this run knows either way. Tuwunel
+# logs passwords it sets, so this one-shot run's output is discarded instead of
+# reaching the journal.
+"$DOTFILES/chathub/tuwunel-serve" \
+    -O "admin_execute_errors_ignore=true" \
+    -O "admin_execute=[\"users create-user sami $password\", \"users reset-password sami $password\", \"server shutdown\"]" \
+    >/dev/null 2>&1
+systemctl --user start tuwunel
+
+for _ in $(seq 1 30); do
+    curl -sf "$HUB/_matrix/client/versions" >/dev/null && break
+    sleep 1
+done
+
+login="$(jq -n --arg pw "$password" '{
+    type: "m.login.password",
+    identifier: {type: "m.id.user", user: "sami"},
+    password: $pw,
+    device_id: "AGENTS",
+    initial_device_display_name: "agents (matrix-mcp)"}')"
+token="$(curl -sf -X POST "$HUB/_matrix/client/v3/login" \
+    -H 'Content-Type: application/json' -d "$login" | jq -er .access_token)"
+
+# `secrets edit` hands $EDITOR the decrypted file. This editor appends the three keys;
+# it lives on the per-user tmpfs, never on disk.
+editor="$(mktemp -p "${XDG_RUNTIME_DIR:?}" chathub-editor.XXXXXX)"
+trap 'rm -f "$editor"' EXIT
+cat > "$editor" <<EOF
+#!/bin/bash
+printf '%s\n' \
+    'MATRIX_HUB_URL=http://$(tailscale ip -4):8008' \
+    'MATRIX_HUB_TOKEN=$token' \
+    'MATRIX_HUB_PASSWORD=$password' >> "\$1"
+EOF
+chmod 700 "$editor"
+EDITOR="$editor" secrets edit --source dotfiles
+
+echo "Stored MATRIX_HUB_URL, MATRIX_HUB_TOKEN and MATRIX_HUB_PASSWORD in $DOTFILES/secrets.env."
+echo "Commit and push it so agents on other machines can read them."

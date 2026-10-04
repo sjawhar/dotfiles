@@ -1,0 +1,14 @@
+[Unit]
+Description=Chat hub bridge mautrix-%i
+# Lives and dies with the homeserver: stopping or restarting tuwunel does the same
+# here, and starting tuwunel starts every enabled bridge (WantedBy below).
+After=tuwunel.service
+PartOf=tuwunel.service
+
+[Service]
+ExecStart=%h/.dotfiles/chathub/bridge-serve %i
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=tuwunel.service

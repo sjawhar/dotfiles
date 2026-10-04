@@ -114,6 +114,8 @@ LAPTOP_PKGS=(
     libnotify-bin
     tailscale
     v4l-utils
+    # build-xdg-desktop-portal-cosmic (debian/control Build-Depends)
+    libclang-dev libegl-dev libgbm-dev libglib2.0-dev libpipewire-0.3-dev libwayland-dev libxkbcommon-dev pkg-config
 )
 MISSING=()
 for pkg in "${LAPTOP_PKGS[@]}"; do
@@ -256,9 +258,6 @@ done
 
 # Laptop daemon role opens tunneled URLs without colliding with the SSH LocalForward on 12802.
 bash "${DOTFILES_DIR}/installers/forward.sh" daemon
-# The laptop is the one machine holding the paired WhatsApp session; the
-# installer also registers the loopback MCP client for omp on this machine.
-bash "${DOTFILES_DIR}/installers/whatsapp.sh"
 
 # =============================================================================
 # Desktop apps (separate installers)
@@ -275,6 +274,8 @@ source "${LAPTOP_DIR}/pam-u2f.sh"
 source "${LAPTOP_DIR}/cosmic-greeter-fork.sh"
 # shellcheck source=laptop/cosmic-comp-fork.sh
 source "${LAPTOP_DIR}/cosmic-comp-fork.sh"
+# shellcheck source=laptop/xdg-desktop-portal-cosmic-fork.sh
+source "${LAPTOP_DIR}/xdg-desktop-portal-cosmic-fork.sh"
 
 echo "--- Laptop setup complete ---"
 echo "Next steps:"

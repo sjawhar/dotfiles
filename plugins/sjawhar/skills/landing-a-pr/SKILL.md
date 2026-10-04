@@ -12,13 +12,30 @@ description: >-
 
 # Landing a PR
 
-The owner gets the PR genuinely merge-ready. **Who merges depends on the repo.**
-In `trajectory-labs-pbc/agent-c` the owner merges: once `pr-checks-result` and the
-required `review` check (workflow "Claude PR Review", run from main's copy) both
-pass at the head, run `gh pr merge <N> --squash` (or arm `--auto --squash`). No
-approval is needed; the org ruleset enforces both checks. The required `review` run
-starts only on `opened`, `synchronize` or `reopened` of a non-draft PR: a draft never
-gets it, and marking ready alone starts nothing (measured on #20742 and #20703,
+The owner gets the PR genuinely merge-ready, then auto-merge lands it. Once the PR is
+ready (required proof at the head, every finding dispositioned, its checks and review
+expected to pass), arm auto-merge: `gh pr merge <N> --auto --squash
+--match-head-commit <head sha>`. The arm stays on across a push (agent-c#20935), so
+push only ready work to an armed PR, or disarm it first with `gh pr merge <N>
+--disable-auto`. To point the arm at a new head after a push, run `--disable-auto` and
+then `--auto --squash --match-head-commit <new sha>`, and check that `enabledAt` moved: a
+second `--auto` on an armed PR exits 0 without changing anything (measured on
+agent-c#20873). `--match-head-commit` refuses a sha that is not the current head, so a
+refused re-arm means a second writer pushed. No admin merge or bypass of branch protection. One exception until
+the repo has a merge-time migration check: a PR that adds or changes a database
+migration is merged by hand, not by auto-merge (`gh pr merge <N> --squash
+--match-head-commit <head sha>`), immediately after confirming main still has one
+migration head and it is the one the PR's migration builds on. Auto-merge fires on a
+check run that may have tested an older main, so two PRs adding migrations on the same
+parent can each go green and leave main with two heads. If main's
+head moved, merge main and join the two heads with `alembic merge heads` (agent-c's rule:
+never re-parent or renumber an existing migration), push, and merge by hand when green. **The merge rule
+depends on the repo.** In `trajectory-labs-pbc/agent-c` it is `pr-checks-result` and
+the required `review` check (workflow "Claude PR Review", run from main's copy), both
+passing at the head. No approval is needed; the org ruleset enforces both checks.
+The required `review` run starts only on `opened`, `synchronize` or `reopened` of a
+non-draft PR: a draft never gets it, and marking ready alone starts nothing
+(measured on #20742 and #20703,
 2026-10-01). So mark the PR ready, then push or close and reopen it, but only when no
 PR Checks run is in flight, because either event cancels it. A push starts a fresh
 run at the new head. When a required run FAILED and you only answered and resolved
@@ -26,22 +43,27 @@ threads (no new commit), re-run that run instead: `gh api -X POST
 repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs` (`gh run rerun` 404s on
 these), which reviews the same head and leaves PR Checks alone. The run that counts
 is a `review` check-run on the PR's HEAD sha, and the merge rule reads the newest run
-of the workflow at that head; a `@claude review` comment runs at main's head, never
-satisfies it, and waits behind an in-flight required run rather than cancelling it.
+of the workflow at that head. A `@claude review` comment starts nothing: the review has
+no comment trigger (agent-c#20924, 2026-10-02).
 Any other PR event, `gh stack link` included, starts a `follow` run that copies the
 newest review run's verdict at that head (agent-c#20827, 2026-10-02). After re-running
 a review at a head that has a newer `follow` run, re-run that `follow` run too:
 `rerun-failed-jobs` for a failed one, `.../actions/runs/<id>/rerun` for a passed one,
 or its stale verdict keeps deciding. The verdict
-counts every open thread on the PR, old ones included. The owner merges every agent-c
-PR, migration PRs included (Sami retired the merge queue, AGENTC-1089, 2026-10-02): a
-migration PR re-parents onto main's current alembic head right before merging, and
-two heads that still land are caught on main and fixed forward. A Legion-produced PR is
-merged by the lane that commissioned it. In `sjawhar/legion` the Legion PO's reviewer
-App approves the exact head, then the owner merges with `--match-head-commit`. Other
-repos: the owner merges once their own required checks pass. No admin merge or bypass
-of branch protection. After any merge, the owner still verifies delivery and the
-changed production path.
+counts every open thread on the PR, old ones included. The owner lands every agent-c
+PR (Sami retired the merge queue, AGENTC-1089, 2026-10-02). A Legion-produced PR is
+landed by the lane that commissioned it. In `sjawhar/legion` the rule adds the Legion
+PO's reviewer App approving, and that approval survives a later push just as an armed
+auto-merge does, so arm (and re-arm after a push) only on a head the PO approved, and
+run `gh pr merge <N> --disable-auto` before pushing to an armed PR. Other repos: their
+own required checks and reviews. After any merge, the owner still verifies delivery
+and the changed production path.
+
+Once a PR's required checks and review pass, merging it is usually the right call:
+every extra push restarts all the checks. So before another round, ask whether what
+you'd fix would hurt someone once it's merged: wrong behaviour, a security hole, bad
+data. If it would, fix it first. If it wouldn't, merge, and put the fix in a follow-up
+PR.
 
 `ce-babysit-pr` owns the watch loop: remote snapshots, claim/act/confirm dedup,
 trajectory tracking, review-still-expected guard, settle window and background
@@ -218,11 +240,12 @@ The packet contains:
   or `no reviews posted yet, waiting`. Cite source verdicts by PR-comment URL,
   not an agent message or session file, and bind each to its SHA.
 
-An unread item, unresolved finding, pending expected review or unwaived required
-scenario means **not merge-ready**. Report the exact blocker, command and
-supporting record, keep the detector active where it can make progress, and
-finish reachable work. Once genuinely ready, merge it yourself as the top of this
-skill describes, then stop mutating the head.
+An unread item, unresolved finding, an expected review the merge rule does not wait
+on, or an unwaived required scenario means **not merge-ready**: do not arm
+auto-merge. Report the exact blocker, command and supporting record, keep the
+detector active where it can make progress, and finish reachable work. Once
+genuinely ready, arm auto-merge as the top of this skill describes (a migration PR
+is merged by hand there), then stop mutating the head unless a check or review fails.
 
 ## 6. After someone else merges
 
@@ -246,7 +269,9 @@ post-squash citations and the merged message.
 
 - An unrequested currency update, or a published head rewritten rather than
   extended. A deliberate forward conflict repair is **not** that defect.
-- Posture other than `target`; any PR merge or auto-merge action by the owner.
-- “Ready” based on green CI while a review, finding or required proof is pending.
+- Posture other than `target`; any PR merge or auto-merge action by the babysitter
+  or its leaves.
+- Auto-merge armed or “ready” claimed while a finding, required proof or a review the
+  merge rule does not wait on is pending.
 - Evidence with no named head, no actual covered path or an incomplete API list.
 - A silent watcher treated as success, or a second blind retry of the same red.
