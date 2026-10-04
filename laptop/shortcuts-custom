@@ -4,6 +4,8 @@
     (modifiers: [Ctrl, Shift], key: "slash", description: Some("voxtype cancel")): Spawn("__HOME__/.dotfiles/voxtype/voxtype-record cancel"),
     (modifiers: [Ctrl, Shift], key: "period", description: Some("voxtype retranscribe")): Spawn("__HOME__/.dotfiles/voxtype/voxtype-retranscribe-last"),
 
+    (modifiers: [Ctrl, Alt], key: "v", description: Some("paste clipboard image on devbox")): Spawn("__HOME__/.dotfiles/scripts/devbox-paste-image"),
+
     (modifiers: [Ctrl, Alt], key: "Left"):  SwitchOutput(Left),
     (modifiers: [Ctrl, Alt], key: "Right"): SwitchOutput(Right),
     (modifiers: [Ctrl, Alt], key: "Up"):    SwitchOutput(Up),

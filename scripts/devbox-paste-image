@@ -1,0 +1,35 @@
+#!/bin/bash
+# devbox-paste-image — paste the laptop clipboard's image into a terminal on the devbox.
+#
+# A terminal cannot carry the image itself: Ghostty does not implement OSC 5522
+# (kitty's MIME-aware clipboard), and mosh would drop it anyway. So the image goes
+# out of band: upload it over ssh to ~/.cache/omp/pasted-images on the devbox,
+# which every agent box mounts at the same path, then paste that path into the
+# focused window. omp attaches a pasted image path when the file exists where it
+# runs. The clipboard holds the path afterwards, not the image.
+#
+# Bound to Ctrl+Alt+V in laptop/shortcuts-custom.
+set -euo pipefail
+
+notify() { notify-send --app-name="Devbox paste" "$@"; }
+
+types=$(wl-paste --list-types 2>/dev/null) || types=
+mime=$(grep -m1 -x 'image/png' <<<"$types" || grep -m1 '^image/' <<<"$types" || true)
+if [[ -z "$mime" ]]; then
+    notify "No image on the clipboard"
+    exit 0
+fi
+ext=${mime#image/}
+ext=${ext%%[;+]*}
+name="$(date +%Y%m%d-%H%M%S).${ext}"
+
+err=$(mktemp)
+trap 'rm -f "$err"' EXIT
+# shellcheck disable=SC2016  # $HOME and $d expand on the devbox
+remote='d=$HOME/.cache/omp/pasted-images && mkdir -p "$d" && f="$d/'"$name"'" && cat >"$f" && test -s "$f" && printf %s "$f"'
+if ! path=$(wl-paste --type "$mime" | ssh -o BatchMode=yes -o ConnectTimeout=5 devbox "$remote" 2>"$err"); then
+    notify --urgency=critical "Image upload to the devbox failed" "$(<"$err")"
+    exit 1
+fi
+
+printf '%s' "$path" | "${DOTFILES_DIR:-$HOME/.dotfiles}/voxtype/voxtype-paste"

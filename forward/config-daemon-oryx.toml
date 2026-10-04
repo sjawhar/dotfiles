@@ -1,0 +1,34 @@
+# Laptop role, oryx pair: run by forward-daemon@oryx.service beside the default
+# pair's forward-daemon.service (config.toml). forward trusts exactly one peer
+# per daemon, so each devbox gets its own daemon. This one binds the laptop's
+# tailnet IPv6 address, which lets it use forward's default ports without
+# colliding with the default pair on the IPv4 address. Literal addresses only,
+# for the reason config.toml gives.
+listen = "fd7a:115c:a1e0::e03b:5c61"
+peer = "fd7a:115c:a1e0::2133:f724"
+bridge_port = 12801
+
+# oryx reaches the YubiKey through the SSH tunnel from scripts/devbox, which owns
+# ~/.pcscd/pcscd.comm there, so forward's PC/SC channel is off for this pair.
+pcsc_port = 0
+
+# Same policy as config.toml (scripts/tests/test_forward_environment.py fails if
+# they drift), except the preview host: this pair's is oryx. An IPv6 host is
+# matched with its brackets, as the URL spells it.
+mode = "allowlist"
+opener = ["/usr/bin/xdg-open"]
+clipboard = ["wl-copy"]
+allow = [
+  "*.anthropic.com",
+  "[fd7a:115c:a1e0::2133:f724]",
+  "accounts.google.com",
+  "auth.openai.com",
+  "claude.ai",
+  "d-9267c4f5db.awsapps.com",
+  "device.sso.*.amazonaws.com",
+  "github.com",
+  "oidc.us-west-2.amazonaws.com",
+  "production-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "staging-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "viewer.hawk.internal.trajectorylabs.com",
+]
