@@ -12,14 +12,17 @@ description: "Use when merge conflicts exist after rebase, merge, or branch inte
 Before resolving anything, understand the full picture:
 
 ```bash
-jj resolve --list                # List all conflicted files with conflict types
+git status                                 # List all conflicted files (U* markers in porcelain)
 ```
 
 **For each parent/side of the conflict:**
 ```bash
-jj diff -r <parent-rev> --stat   # What files did this side touch?
-jj diff --git -r <parent-rev>    # What content changes did this side make?
+git diff <merge-base>..<side-rev> --stat   # What files did this side touch?
+git diff <merge-base>..<side-rev>          # What content changes did this side make?
 ```
+`<side-rev>` is `HEAD` for your side and `MERGE_HEAD` (merge) or `REBASE_HEAD`/the
+incoming branch tip (rebase) for the other; `<merge-base>` is
+`git merge-base HEAD <side-rev>`.
 
 **You must be able to answer:**
 1. What did side A change? (paths AND content)
@@ -43,8 +46,8 @@ Always check `--stat` for line counts — `0 insertions, 0 deletions` means pure
 ### Phase 3: Resolve Each File
 
 Read the conflict markers in each file:
-- `+++++++` sections are snapshots (full content of one side)
-- `%%%%%%%` sections are diffs (changes to apply)
+- `<<<<<<<` opens your side's content, `=======` divides it from the other side's,
+  `>>>>>>>` closes it
 - Pick the right content, remove all markers
 
 **For each file, document your choice:** "Taking side B because it has the grading cache improvement" — not just "taking side B."
@@ -55,7 +58,7 @@ Verify the composed tree, not only the marked conflicts:
 
 - Compare paths deleted by the new base with the result:
   ```bash
-  jj diff --from <old-base> --to <new-base> --summary   # D entries are paths the new base deleted
+  git diff <old-base> <new-base> --summary   # D entries are paths the new base deleted
   ```
   Each must be absent from the result unless the approved change deliberately restores it; say
   so in the description. Remove accidental resurrections.
@@ -77,8 +80,8 @@ remediation and obtain an explicit decision to exclude it; “pre-existing” is
 |---|---|
 | Rebase to bypass a conflicting parent | You're avoiding the conflict, not resolving it. The parent's changes get lost. |
 | Insert a "fix-up" commit to reverse changes | This creates a new problem to solve instead of solving the original one. |
-| `jj undo` then retry a different approach | Undo loops cause divergent commits in shared repos. One deliberate fix, not trial-and-error. |
-| Abandon divergent commits to clean up | Verify they're actually stale first. Check immutability. Don't touch what you don't understand. |
+| `git reset --hard` then retry a different approach | Resetting and retrying repeatedly leaves no record of what you tried; a reset that discards commits already pushed elsewhere rewrites shared history. One deliberate fix, not trial-and-error. |
+| Drop or discard commits to clean up a messy resolution | Verify they're actually unwanted first. Check they aren't already pushed or relied on elsewhere. Don't touch what you don't understand. |
 | Say changes are "superseded" without checking | Read the actual file content on both sides. "Probably already covered" is not verification. |
 | Take one whole file side without comparing the discarded changes | Valid non-conflicting code or documentation can disappear with the side you discarded. |
 | Chain a second fix after the first one didn't fully work | Stop. Re-read Phase 1. You missed something. |
@@ -87,4 +90,4 @@ remediation and obtain an explicit decision to exclude it; “pre-existing” is
 
 If a conflict involves more than path + content (e.g., architectural disagreements, mutually exclusive approaches), **explain both sides and ask the user** before resolving. Don't guess.
 
-**Done when:** All conflicts resolved, checks pass, changes pushed, no divergent commits created.
+**Done when:** All conflicts resolved, checks pass, changes pushed, no stray or duplicate commits left from the resolution.

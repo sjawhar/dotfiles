@@ -4,7 +4,7 @@ description: Use when accessing, configuring, or optimizing Home Assistant — c
 mcp:
   home-assistant:
     command: secrets
-    args: ["HA_MCP_URL", "--", "bash", "-c", "exec npx -y mcp-remote \"$HA_MCP_URL\" --allow-http"]
+    args: ["HA_MCP_URL", "--", "npx", "-y", "-p", "mcp-remote@0.14.3", "mcp-remote-from-env", "HA_MCP_URL", "--allow-http"]
 ---
 
 # Home Assistant
@@ -13,7 +13,7 @@ Full read/write access to Home Assistant via [ha-mcp](https://github.com/homeass
 
 ## Setup
 
-The ha-mcp server runs **in-process inside Home Assistant** (HACS custom component "HA-MCP Custom Component" → "HA-MCP Server" entry). The connect URL embeds the credential and is stored as the agent-tier secret `HA_MCP_URL`; `npx mcp-remote` bridges stdio to the server's streamable-HTTP endpoint. An admin-only **HA-MCP panel** in the HA sidebar manages tool enable/disable, Read Only Mode, feature flags, and edit backups.
+The ha-mcp server runs **in-process inside Home Assistant** (HACS custom component "HA-MCP Custom Component" → "HA-MCP Server" entry). The connect URL embeds the credential and is stored as the agent-tier secret `HA_MCP_URL`; `mcp-remote` (pinned 0.14.3) bridges stdio to the server's streamable-HTTP endpoint, launched through `scripts/mcp-remote-from-env`, which hands it the URL from the environment so the URL never appears on a command line. An admin-only **HA-MCP panel** in the HA sidebar manages tool enable/disable, Read Only Mode, feature flags, and edit backups.
 
 ## Working effectively
 
@@ -46,7 +46,7 @@ File/YAML editing tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and
 
 ## Operational notes (hard-won, Aug 2026)
 
-- **Access**: `HA_MCP_URL` is a webhook URL with the credential embedded. The shared agent-tier secret holds the LAN form (`http://10.0.51.23:8123/api/webhook/<id>`), which works from oryx and any host on the home LAN; the same webhook id served at `https://dojo.thecybermonk.com/api/webhook/<id>` works from any network. For batch/scripted tool calls use [ha-mcp-call.sh](ha-mcp-call.sh): `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'`.
+- **Access**: `HA_MCP_URL` is a webhook URL with the credential embedded. The shared agent-tier secret holds the LAN form (`http://10.0.51.23:8123/api/webhook/<id>`), which works from oryx and any host on the home LAN; the same webhook id served at `https://dojo.thecybermonk.com/api/webhook/<id>` works from any network. For batch/scripted tool calls use [ha-mcp-call.sh](ha-mcp-call.sh): `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'`. Never expand `$HA_MCP_URL` into a command's arguments (`curl "$HA_MCP_URL"`, `mcp-remote "$HA_MCP_URL"`): every user can read `/proc/<pid>/cmdline`, and any agent's `ps` or `pgrep -af` prints the id into its transcript. Hand it over through the environment, a config file or stdin, as ha-mcp-call.sh does with curl's `--config`.
 - **Add-on options carry secrets**: `ha_get_app(slug=...)` returns the add-on's full `options`, including fields such as the Advanced SSH add-on's `ssh.password`. Select the fields you need with `jq` (e.g. `.addon.options.ssh.authorized_keys`); never print the raw options object. `ha_manage_app` config mode merges one nested level, so writing `{"ssh": {"authorized_keys": [...]}}` preserves the other `ssh.*` fields.
 - **Gated writes need a BestPracticeKey**: config-writing tools (`ha_config_set_automation/_script/_scene/_helper/_dashboard`) reject calls until you read the current key from `ha_get_skill_guide(skill='home-assistant-best-practices', file='references/automation-patterns.md')`. The key rotates hourly — re-read it per session/hour. Pass `MandatoryBPS=false` to skip re-receiving the reference content.
 - **Tool parameter quirks**: automations use `identifier` (updates need `identifier` + `config.id`; omit `identifier` to create). `ha_manage_backup` wants `scope: "snapshot"`; snapshot deletion is gated by a human-set server flag AND refuses backups with unprovable provenance. `ha_set_entity` does renames (`new_entity_id`), `name`, `enabled`, `area_id`. `ha_remove_helpers_integrations` deletes config entries (`target` = entry_id) and helpers (`target` + `helper_type`), always with `confirm: true`. `ha_manage_hacs` can only `add_repository`/`download` — removal is UI-only. `ha_get_history` takes `entity_ids` (list), returns states WITHOUT attributes, ~24h, 100-point cap. `ha_manage_energy_prefs` needs `mode` + fresh `config_hash`. Update installs: use `ha_call_service` `update.install` (not ha_manage_updates).
