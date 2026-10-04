@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# devbox-prune: prune the shared devbox's always-safe class. Run it by hand;
+# a host that wants it every 6 h links and enables agentbox/devbox-prune.timer
+# by hand (install.sh sets up no timer). Only the always-safe class - dangling or unused
+# Docker objects and Go build cache entries idle for days - and nothing that
+# decides whether a workspace or a tagged image is live (the judgment-based
+# reaper was retired on 2026-09-20; see the disk-hygiene skill).
+#
+#   1. host daemon: docker volume prune -f
+#   2. every running agent box (scripts/agentbox names them agentbox-*), on the
+#      box's own daemon: image, builder and volume prune -f. Never -a. An empty
+#      --config dir, because a box's ~/.docker/config.json can alias `builder`
+#      to depot, which fails `builder prune`.
+#   3. host Go build cache: entries unused for more than 2 days. Go refreshes an
+#      entry's mtime when it uses it, and trims only entries idle for 5 days
+#      with no size cap; the directory and its top-level files stay.
+#
+# Logs bytes reclaimed per step and per box, so a later reader can see which
+# boxes regrow. A failing step is named (box and command) and the run carries
+# on; the exit status is nonzero if any step failed. A box that exits while
+# the run is in progress is noted, not failed: its daemon died with it.
+set -euo pipefail
+
+failures=()
+fail() { failures+=("$1"); echo "FAIL: $1" >&2; }
+
+free_bytes() { df -B1 --output=avail / | tail -n1 | tr -d ' '; }
+
+# Bytes reclaimed, from a prune's output: "Total reclaimed space: 1.2GB"
+# (image, volume) or "Total:<tab>1.2GB" (builder). Docker prints decimal units.
+reclaimed_bytes() {
+    awk '
+        /^Total reclaimed space: / { s = $4 }
+        /^Total:[ \t]/ { s = $2 }
+        END {
+            if (s == "" || !match(s, /^[0-9.]+/)) exit 1
+            n = substr(s, 1, RLENGTH); u = substr(s, RLENGTH + 1)
+            m["B"] = 1; m["kB"] = 1e3; m["MB"] = 1e6; m["GB"] = 1e9; m["TB"] = 1e12; m["PB"] = 1e15
+            if (!(u in m)) exit 1
+            printf "%.0f\n", n * m[u]
+        }'
+}
+
+echo "start: / has $(free_bytes) bytes free"
+total=0
+
+# 1. Host daemon volumes.
+if out="$(docker volume prune -f 2>&1)"; then
+    if bytes="$(reclaimed_bytes <<<"$out")"; then
+        echo "host: docker volume prune -f reclaimed $bytes bytes"
+        total=$((total + bytes))
+    else
+        fail "host: docker volume prune -f: no reclaimed total in output: $out"
+    fi
+else
+    fail "host: docker volume prune -f exited $?: $out"
+fi
+
+# 2. Each running box's own daemon. One exec per command, each with its own
+# throwaway config dir, so a failure names exactly one command.
+# shellcheck disable=SC2016  # expanded by the box's sh, not here
+IN_BOX='d="$(mktemp -d)" || exit 1; docker --config "$d" "$@"; rc=$?; rm -rf "$d" || rc=1; exit "$rc"'
+
+# true: running; false: exited or removed; anything else: the host daemon
+# could not answer, which is itself a failure.
+box_state() {
+    local s
+    if s="$(docker inspect -f '{{.State.Running}}' "$1" 2>&1)"; then
+        echo "$s"
+    elif [[ "${s,,}" == *"no such object"* || "${s,,}" == *"no such container"* ]]; then
+        echo false
+    else
+        echo "unknown ($s)"
+    fi
+}
+
+if names="$(docker ps --filter 'name=^agentbox-' --format '{{.Names}}' 2>&1)"; then
+    mapfile -t boxes < <(printf '%s\n' "$names" | sed '/^$/d')
+    echo "boxes: ${#boxes[@]} running"
+    for box in "${boxes[@]}"; do
+        box_total=0 parts=()
+        for kind in image builder volume; do
+            cmd="docker --config <empty> $kind prune -f"
+            if out="$(timeout 30m docker exec "$box" sh -c "$IN_BOX" sh "$kind" prune -f 2>&1)"; then
+                if bytes="$(reclaimed_bytes <<<"$out")"; then
+                    box_total=$((box_total + bytes)) parts+=("$kind $bytes")
+                else
+                    fail "$box: $cmd: no reclaimed total in output: $out"
+                fi
+            else
+                rc=$?
+                state="$(box_state "$box")"
+                if [[ "$state" == false ]]; then
+                    echo "$box: exited during the run; skipped"
+                    continue 2
+                fi
+                fail "$box: $cmd exited $rc (box running: $state): $out"
+            fi
+        done
+        echo "$box: reclaimed $box_total bytes (${parts[*]:-nothing measured})"
+        total=$((total + box_total))
+    done
+else
+    fail "host: docker ps (listing agent boxes) exited $?: $names"
+fi
+
+# 3. Host Go build cache.
+gocache="$HOME/.cache/go-build"
+idle() { ionice -c3 nice -n19 "$@"; }
+if [[ -d "$gocache" ]]; then
+    if before="$(idle du -sb "$gocache" | cut -f1)" && [[ -n "$before" ]]; then
+        if idle find "$gocache" -mindepth 2 -type f -mtime +2 -delete; then
+            if after="$(idle du -sb "$gocache" | cut -f1)" && [[ -n "$after" ]]; then
+                echo "go build cache: $before -> $after bytes (reclaimed $((before - after)))"
+                total=$((total + before - after))
+            else
+                fail "host: du -sb $gocache (after the trim) failed"
+            fi
+        else
+            fail "host: find $gocache -mindepth 2 -type f -mtime +2 -delete exited $?"
+        fi
+    else
+        fail "host: du -sb $gocache (before the trim) failed"
+    fi
+else
+    echo "go build cache: $gocache absent; nothing to trim"
+fi
+
+echo "end: / has $(free_bytes) bytes free; reclaimed $total bytes in total"
+if (( ${#failures[@]} )); then
+    echo "devbox-prune: ${#failures[@]} step(s) failed:" >&2
+    printf '  %s\n' "${failures[@]}" >&2
+    exit 1
+fi

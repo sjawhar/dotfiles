@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # agentbox: one disposable Sysbox container per agent session, working in a
-# jj workspace made for it.
+# checkout made for it.
 #
-#   agentbox new <repo> <cmd> [args…]     run a command in a fresh box
+#   agentbox new [-e NAME[=VALUE]]… <repo>… -- <cmd> [args…]
+#                                       run a command in a fresh box holding a
+#                                       checkout of each repo, working in the
+#                                       first; each -e sets a variable in the box
+#                                       (docker run -e: a bare NAME passes the
+#                                       caller's value)
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
 #   agentbox ls                         running boxes
 #   agentbox doctor                     health checks, host side and box side
@@ -13,10 +18,12 @@
 #                                       `agentbox restart` (in-box form: this session,
 #                                       now) when safe; --now hangs it up at once
 #
-# <repo> is a canonical checkout under ~/src. The box works in a jj workspace
-# of it at ~/boxes/<box>/<repo>; at exit the workspace is snapshotted,
-# forgotten and removed, so work survives only as commits in the canonical
-# repo. omp flags pass straight through.
+# Each <repo> is a canonical checkout under ~/src. The box holds a git clone of
+# its own of each, from the canonical checkout's origin, at
+# ~/boxes/<box>/<repo>, and works in the first. At exit a clone holding nothing
+# its remote lacks is removed with the box; a clone with uncommitted changes or
+# commits no remote has keeps ~/boxes/<box> in place, named on the pane, for its
+# owner to push or remove. omp flags pass straight through after `--`.
 #
 # The box mounts an allow-list of $HOME (below). Host services arrive two ways:
 # the session bus, the metadata service and the Envoy API through socat relays
@@ -28,11 +35,35 @@
 # every connection a different, short-lived peer, so nothing through a relay is
 # ever a descendant of anything. The daemon (>= 3.2.3) accepts the mapped uid.
 # Image: agentbox/Dockerfile.
+#
+# Secrets (AGENTC-393): each box gets its own broker identity — a P-256 key generated inside
+# it (docker exec … agent-secrets keygen) in its private runtime dir, and one enrollment made
+# from the host with the operator's launcher credential (agent-secrets-login, once per host).
+# The key dir is bind-mounted into that box only; the credential lives in the host helper's
+# memory. close_box revokes the enrollment; a detached `agent-secrets renew` loop in the box
+# (start_renew) keeps its lease, which lapses within 15 min if the launcher never gets there.
+# A box started while the host's helper holds no live launcher credential gets no identity at
+# all (no key, no enrollment.pending): its agents use secretsd, and `new` says so (broker_ready).
+# So does a box whose enrollment fails: enroll_failed removes its key.
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 SRC="${AGENTBOX_SRC:-$HOME/src}"
 BOXES="$HOME/boxes"
+# One template clone per repo that every box's clone of that repo is copied from (clone_checkout),
+# outside every box mount so no box can change it.
+CLONE_TEMPLATES="${XDG_CACHE_HOME:-$HOME/.cache}/agentbox-clones"
+# Every repo is a git clone of the box's own (AGENTC-1420, Sami, 2026-10-02: "Let's just switch to
+# Git everywhere"). On the shared jj store of agent-c, 298 workspaces and 135,748 refs/jj/keep refs,
+# every jj command took about 11 s against 0.1 s for git. A repo listed here also gets a sparse
+# checkout with these patterns, set before the first checkout. agent-c leaves out tasks/ (3.8 GB of
+# its 4.2 GB tree): a full clone takes 194 s and this one about 30 s. Every tasks/*/basic_info.json
+# stays, because tl validate's deployment-catalog check reads all of them; an agent adds the task it
+# works on with `git sparse-checkout add /tasks/<id>/`.
+declare -A CLONE_SPARSE=([agent-c]='/* !/tasks/ /tasks/*/basic_info.json')
+# git with the same GitHub App credential routing a box's own git has (session_env), so a clone made
+# here acts as the repo owner's App whoever runs the launcher.
+APP_GIT=(env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig" git)
 RUNTIME=sysbox-runc
 NETWORK=agentbox
 EMBED_NAME=omp-embed
@@ -49,6 +80,15 @@ BUS_SOCK="$RUN_BASE/bus/bus"
 # systemd's secretsd.socket unit holds this listener, so the node is stable
 # across daemon restarts and a bare-file bind stays live.
 SECRETSD_SOCK="/run/user/$UID_/secretsd.sock"
+# The secrets broker (AGENTC-393): AGENT_SECRETS_URL in the environment, else broker.env's.
+if [[ -z "${AGENT_SECRETS_URL:-}" ]]; then
+    # shellcheck source=SCRIPTDIR/../agent-secrets/broker.env
+    . "$DOTFILES_DIR/agent-secrets/broker.env"
+fi
+# The operator agent-secrets-login recorded.
+LAUNCHER_DIR="$HOME/.config/agent-secrets"
+# Why broker_ready last said no, with the command that fixes it.
+BROKER_UNREADY=""
 
 # What a session relies on, and nothing more: agentbox/mounts, one "<rw|ro>
 # <path>" per line. Read here (host) and by doctor (box); both see the file
@@ -58,6 +98,177 @@ MOUNTS_FILE="$DOTFILES_DIR/agentbox/mounts"
 mounts_of() { awk -v m="$1" '$1 == m { print $2 }' "$MOUNTS_FILE"; }
 
 die() { echo "agentbox: $*" >&2; exit 1; }
+
+# Whether a new box can get a broker identity: the client installed and the helper holding a live
+# launcher credential (which also means the helper answers and an operator logged in). Until then
+# (a host before its one `agent-secrets-login`, a helper restarted since) a box starts without
+# one: no key, no enrollment.pending, so its agents use secretsd. Sets BROKER_UNREADY when it
+# answers no, with login-status's own answer.
+broker_ready() {
+    local status
+    BROKER_UNREADY=""
+    if ! command -v agent-secrets >/dev/null 2>&1; then
+        BROKER_UNREADY="agent-secrets is not installed (run: mise install agent-secrets)"
+        return 1
+    fi
+    status="$(agent-secrets launcher login-status 2>&1)" && return 0
+    BROKER_UNREADY="the helper holds no live launcher credential (login-status: ${status%%$'\n'*}; run: agent-secrets-login <email>)"
+    return 1
+}
+
+# The host side of a box's key dir: bind-mounted at /run/user/$UID_/agent-secrets in that box only.
+box_keydir() { echo "$RUN_BASE/$1/run-user/agent-secrets"; }
+
+# The box's key dir is the box's to write too (keygen writes key.pem there as the box's user), so
+# the host keeps its own files beside it, in $RUN_BASE/<box>, which no box mounts: each enroll
+# attempt's error (enroll.attempt-error) and the enrollment id close_box revokes (enrollment-id).
+# What agentbox itself puts in the key dir is written to a temp file in $RUN_BASE/<box> and
+# renamed into place, which replaces whatever the box left at that name (a symlink included)
+# instead of following it. The `enrollment` file the host-side `agent-secrets enroll` writes gets
+# the same treatment only from the legion #1589 release on; the pinned client writes it in place.
+put_keyfile() {
+    local box="$1" name="$2" content="$3" tmp
+    tmp="$(mktemp "$RUN_BASE/$box/.keyfile.XXXXXX")" || return 1
+    printf '%s' "$content" >"$tmp" && mv -fT "$tmp" "$(box_keydir "$box")/$name"
+}
+
+# How a box's enrollment ends when it does not end enrolled: the reason in enrollment.error
+# (`agentbox doctor` reports it), then key.pem and the enrollment.pending marker removed, so the
+# box has no broker identity and its agents use secretsd, as when the host could not enroll it.
+enroll_failed() {
+    local keydir; keydir="$(box_keydir "$1")"
+    put_keyfile "$1" enrollment.error "$2"$'\n'
+    rm -f "$keydir/key.pem" "$keydir/enrollment.pending"
+    return 1
+}
+
+# Wait for the container to be Running (docker exec needs that), giving up if the launcher's
+# docker run child is gone.
+wait_for_running() {
+    local box="$1" child="$2" _
+    for _ in $(seq 1 120); do
+        [[ "$(docker inspect -f '{{.State.Running}}' "$box" 2>/dev/null)" == true ]] && return 0
+        kill -0 "$child" 2>/dev/null || return 1
+        sleep 0.5
+    done
+    return 1
+}
+
+# Enroll a running box with the secrets broker. The key is generated INSIDE the box by a
+# process in its namespaces, into its private runtime dir (tmpfs, this box only); only the
+# public thumbprint comes back. The enrollment is made from the host with the launcher
+# credential, which no box can read, and the client writes the enrollment id beside the key.
+# sid is the box's omp session id when known (the broker wakes that session on a decision),
+# else empty. Ten attempts 3 s apart. The enrollment.pending marker (cmd_new creates it before
+# docker run) is renewed before keygen and before each attempt: from the legion #1589 release a
+# client in the box waits on a marker younger than 160 s, so it stays fresh for exactly as long
+# as the launcher is still working, however slow the broker. Success removes the marker and
+# every error file; every other end is enroll_failed. The box runs on either way. Re-running is
+# safe: the broker answers a repeat of the same key with the same enrollment.
+enroll_box() {
+    local box="$1" sid="$2" keydir errfile tp eid attempt
+    keydir="$(box_keydir "$box")"
+    errfile="$RUN_BASE/$box/enroll.attempt-error"
+    broker_ready || { enroll_failed "$box" "not enrolled: $BROKER_UNREADY"; return 1; }
+    put_keyfile "$box" enrollment.pending ""
+    if ! tp="$(docker exec --user ubuntu "$box" agent-secrets keygen --out "/run/user/$UID_/agent-secrets" 2>"$errfile")"; then
+        enroll_failed "$box" "agent-secrets keygen failed in $box: $(<"$errfile")"
+        return 1
+    fi
+    tp="${tp//[[:space:]]/}"
+    if [[ ! "$tp" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+        enroll_failed "$box" "agent-secrets keygen printed no thumbprint: '$tp'"
+        return 1
+    fi
+    local args=(enroll --helper --kind box --runtime-id "$box" --thumbprint "$tp")
+    [[ -n "$sid" ]] && args+=(--session-id "$sid")
+    for attempt in $(seq 1 10); do
+        put_keyfile "$box" enrollment.pending ""
+        # enroll prints the enrollment id alone, and writes it into the key dir for the box.
+        if eid="$(AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENT_SECRETS_KEY_DIR="$keydir" \
+            agent-secrets "${args[@]}" 2>"$errfile")"; then
+            [[ -n "$eid" && -s "$keydir/enrollment" ]] \
+                || { enroll_failed "$box" "agent-secrets enroll printed '$eid' and left $keydir/enrollment empty"; return 1; }
+            printf '%s\n' "$eid" >"$RUN_BASE/$box/enrollment-id"
+            rm -f "$keydir/enrollment.pending" "$keydir/enrollment.error" "$errfile"
+            return 0
+        fi
+        (( attempt < 10 )) && sleep 3
+    done
+    enroll_failed "$box" "agent-secrets enroll failed 10 times; last: $(<"$errfile")"
+}
+
+# The box's enrollment lease: `agent-secrets renew` inside it, for every box, restarted after it
+# exits. renew retries a transient failure itself but exits on any refusal, and something in the
+# box can kill it; without the restart the lease would lapse within 15 min while the box kept its
+# key. The restart waits 10 s, doubling after each renew that exits quickly, up to 10 min, and
+# back to 10 s after one that ran over a minute: a revoked or lapsed enrollment, which only meets
+# the same refusal again, then costs the broker one call per 10 min. Each exit and the next delay
+# go to renew.log beside renew's own output. The loop survives an omp relaunch
+# (`agentbox restart`, same container) and dies with the box.
+# shellcheck disable=SC2016  # expands in the box's sh
+RENEW_LOOP='d=10
+while :; do
+    s=$(date +%s)
+    agent-secrets renew
+    rc=$?
+    [ $(($(date +%s) - s)) -gt 60 ] && d=10
+    echo "agentbox: agent-secrets renew exited $rc; restarting in ${d}s"
+    sleep "$d"
+    d=$((d * 2))
+    [ "$d" -gt 600 ] && d=600
+done >>"$AGENT_SECRETS_KEY_DIR/renew.log" 2>&1'
+start_renew() {
+    docker exec -d --user ubuntu "$1" sh -c "$RENEW_LOOP"
+}
+
+# Enroll a box from `new` once it is up, then start its renew: for omp once its session id is
+# known (omp opens its session file 4–10 s after start, before any tool can run), so the
+# enrollment carries the id the broker wakes on a decision; any other command at once; after
+# 120 s without a session id (an omp --no-session run) without one. The enrollment.pending marker
+# is renewed on every pass of the wait, so it stays inside the client's 160 s trust window
+# however long the box takes. A box that never runs, or ends first, ends in enroll_failed too.
+enroll_when_up() {
+    local box="$1" child="$2" cmd="$3" sid="" deadline=$(( SECONDS + 120 ))
+    wait_for_running "$box" "$child" || { enroll_failed "$box" "$box never reached Running; not enrolled"; return 1; }
+    while kill -0 "$child" 2>/dev/null; do
+        put_keyfile "$box" enrollment.pending ""
+        [[ "$cmd" == omp ]] && sid="$(box_session_id "$box")"
+        if [[ "$cmd" != omp || -n "$sid" ]] || (( SECONDS >= deadline )); then
+            enroll_box "$box" "$sid" || return 1
+            start_renew "$box" || echo "agentbox: renew start for $box failed; its enrollment lapses within 15 min" >&2
+            return 0
+        fi
+        sleep 2
+    done
+    enroll_failed "$box" "$box ended before it was enrolled"
+}
+
+# Revoke a box's enrollment and every grant under it: the id the host recorded at enrollment,
+# never the box-writable copy. Idempotent on the broker; a failure is noted, and the lease the
+# box stopped renewing lapses within 15 minutes.
+unenroll_box() {
+    local box="$1" eid
+    [[ -s "$RUN_BASE/$box/enrollment-id" ]] || return 0
+    eid="$(<"$RUN_BASE/$box/enrollment-id")"
+    AGENT_SECRETS_URL="$AGENT_SECRETS_URL" agent-secrets unenroll --helper --enrollment "$eid" \
+        || echo "agentbox: unenroll $box ($eid) failed; the broker drops it when its lease lapses (15 min)" >&2
+}
+
+# Run a command as a fresh process under the user manager: a child of systemd --user, inside
+# no registered host session. What a check of the helper's refusal, or of a brand-new
+# registration, needs when the caller itself runs inside an agent session. The unit
+# environment carries nothing of ours, so the broker, socket and a PATH holding the real
+# binary (a mise shim cannot run there) are passed explicitly.
+fresh_process() {
+    local bin_dir
+    bin_dir="$(mise where agent-secrets)/bin" || return 1
+    systemd-run --user --pipe --wait --quiet --collect \
+        --setenv="AGENT_SECRETS_URL=$AGENT_SECRETS_URL" \
+        --setenv="AGENT_SECRETS_HELPER_SOCK=/run/user/$UID_/agent-secrets/helper.sock" \
+        --setenv="PATH=$bin_dir:/usr/local/bin:/usr/bin:/bin" \
+        -- "$@"
+}
 
 # The canonical checkouts, one name per line.
 repos() { find "$SRC" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -printf '%f\n' 2>/dev/null | sort; }
@@ -175,9 +386,11 @@ mount_args() {
     # the host sockets bound at their usual paths. Never the host's whole
     # /run/user/$UID_. secretsd/ is the token dir the omp extension writes to;
     # created here so it is the user's, 0700, not a root-owned mountpoint.
+    # agent-secrets/ holds the box's broker key (written by keygen inside the box) and its
+    # enrollment id (written by the launcher, enroll_box): tmpfs, this box only, gone with it.
     local run_user="$RUN_BASE/$box/run-user"
-    mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd"
-    chmod 700 "$run_user/secretsd"
+    mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd" "$run_user/envoy" "$run_user/agent-secrets"
+    chmod 700 "$run_user/secretsd" "$run_user/agent-secrets"
     a+=(-v "$run_user:/run/user/$UID_")
     a+=(-v "$(dirname "$BUS_SOCK"):/run/user/$UID_/bus")
     [[ -S "$SECRETSD_SOCK" ]] || die "secretsd socket $SECRETSD_SOCK missing (systemctl --user status secretsd.socket)"
@@ -188,6 +401,11 @@ mount_args() {
     # Created here so a box started before the serve still sees it later.
     mkdir -p -m 700 "/run/user/$UID_/forward"
     a+=(-v "/run/user/$UID_/forward:/run/user/$UID_/forward")
+    # The host's cached NATS nkey seed (scripts/envoy-nats-seed), as a directory
+    # so the rename a refresh does reaches a running box, and so an in-box
+    # fetch, when the host had none at launch, lands in the host's cache.
+    mkdir -p -m 700 "/run/user/$UID_/envoy"
+    a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
     # The inner dockerd's image store: anonymous, dies with the box.
     a+=(-v /var/lib/docker)
     printf '%s\n' "${a[@]}"
@@ -208,6 +426,15 @@ session_env() {
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
     e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
     e+=(-e "ENVOY_URL=http://$NETWORK_GATEWAY:$ENVOY_PORT")
+    # The omp-session NATS nkey seed, fetched on the host into the directory
+    # mount_args binds at the same path, so a launch never waits on AWS from
+    # inside a box. Nothing when there is none: the box's omp connects without a
+    # credential. Mirrors shims/omp.
+    local seed_file
+    seed_file="$(XDG_RUNTIME_DIR="/run/user/$UID_" "$DOTFILES_DIR/scripts/envoy-nats-seed")" || seed_file=""
+    if [[ -n "$seed_file" ]]; then
+        e+=(-e "NATS_NKEY_SEED_FILE=$seed_file")
+    fi
     # ECR: the box's instance role is already allowed, but docker only asks for it when the
     # config names a helper for that registry host — without the entry it sends nothing at all
     # ("no basic auth credentials", measured 2026-09-26). Pass the host's OWN ecr-login hosts so a
@@ -218,6 +445,9 @@ session_env() {
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
     e+=(-e "AGENTBOX_BOX=$box" -e AGENTBOX_USER=ubuntu)
+    # The box's broker identity: its key dir (mount_args) and the broker. The launcher enrolls
+    # the key once the box is up (enroll_box). No helper socket: a box is not a host session.
+    e+=(-e "AGENT_SECRETS_URL=$AGENT_SECRETS_URL" -e "AGENT_SECRETS_KEY_DIR=/run/user/$UID_/agent-secrets")
     if curl -fsS -m 1 "http://127.0.0.1:${EMBED_PORT}/health" >/dev/null 2>&1; then
         e+=(-e "MNEMOPI_EMBEDDING_API_URL=http://$EMBED_NAME/v1")
     fi
@@ -257,11 +487,11 @@ box_session_id() {
     sed -n '1s#.*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' <<<"$files"
 }
 
-# Close-phase jj/knives run in their own session (`setsid`): the pane's
-# hangup reaches only the terminal's session, and jj cannot be made to ignore
-# it - it installs its own SIGHUP handler (ctrlc, "termination") that exits 1,
-# replacing whatever disposition it inherited. A snapshot killed that way is a
-# workspace left behind. `-w` returns the child's status.
+# A clone and the close-phase knives run in their own session (`setsid`): the
+# pane's hangup reaches only the terminal's session, and jj, which knives runs,
+# cannot be made to ignore it - it installs its own SIGHUP handler (ctrlc,
+# "termination") that exits 1, replacing whatever disposition it inherited.
+# `-w` returns the child's status.
 detached() { setsid -w "$@"; }
 
 # Release every knives claim the session holds. Claims are keyed by the omp
@@ -284,13 +514,89 @@ finish_knives_claims() {
     done < <(jq -r --arg s "$sid" '.. | objects | select(.owner? == $s) | "\(.repo)\t\(.branch)"' "$state")
 }
 
-# Everything the box made goes: the knives claims its session holds, then its
-# own workspace (snapshotted first, so uncommitted edits are a commit in the
-# canonical repo), then the directory. The container must be gone first — it
-# holds the mounts, and docker recreates a removed mountpoint root-owned.
+# The template of one repo, at the remote's current default branch: made on first use as a clone
+# without old file contents (git fetches a file's contents from GitHub the first time something
+# reads them), with the repo's sparse patterns (CLONE_SPARSE) set before the first checkout so the
+# files it keeps arrive in one fetch, then brought up to date by a fetch on every launch. Automatic
+# maintenance is off: with it on, every on-demand fetch starts a background repack, and adding 1,040
+# small files to a test clone took over 900 s, a repack notice after each file's fetch; with it off,
+# adding a 94-file task took 1.4 s. Callers hold the repo's template lock and run this under `||`,
+# where set -e does not apply, so every step checks its own status.
+refresh_template() {
+    local repo="$1" tpl="$CLONE_TEMPLATES/$1" url upstream pats=()
+    if [[ ! -d "$tpl/.git" ]]; then
+        url="$(git -C "$SRC/$repo" remote get-url origin)" || return 1
+        rm -rf "$tpl.partial"
+        detached "${APP_GIT[@]}" clone --quiet --filter=blob:none --no-checkout "$url" "$tpl.partial" >&2 || return 1
+        git -C "$tpl.partial" config gc.auto 0 && git -C "$tpl.partial" config maintenance.auto false || return 1
+        if [[ -n "${CLONE_SPARSE[$repo]:-}" ]]; then
+            read -ra pats <<<"${CLONE_SPARSE[$repo]}"
+            "${APP_GIT[@]}" -C "$tpl.partial" sparse-checkout set --no-cone "${pats[@]}" || return 1
+        fi
+        mv "$tpl.partial" "$tpl" || return 1
+    fi
+    detached "${APP_GIT[@]}" -C "$tpl" fetch --quiet --prune origin >&2 || return 1
+    upstream="$(git -C "$tpl" symbolic-ref --short refs/remotes/origin/HEAD)" || return 1
+    detached "${APP_GIT[@]}" -C "$tpl" checkout --quiet -f -B "${upstream#origin/}" "$upstream" >&2
+}
+
+# The box's git clone of one repo at $ws: a copy of the repo's template, refreshed first. Its .git is
+# copied, all but the objects and the index; the objects are hard-linked, which is what a local
+# `git clone` does, and safe because git never changes an object file in place. A checkout from those
+# local objects then writes the working tree and a fresh index, needing no network. Each box's clone
+# is its own repository - refs, config and index - and stays whole if the template is rebuilt or
+# deleted. A fresh clone of agent-c took 64-78 s at load 200 (2026-10-02), almost all of it the
+# checkout fetching the kept files' contents; the copy took 1.4 s and its checkout 17.6 s. (A local
+# `git clone` of a clone without old file contents fails: `pack has 1 unresolved delta`.) The lock
+# keeps a launch from copying a template another launch is refreshing.
+clone_checkout() {
+    local repo="$1" ws="$2" tpl
+    tpl="$CLONE_TEMPLATES/$repo"
+    mkdir -p "$CLONE_TEMPLATES" || return 1
+    if ! {
+        flock 9 \
+            && refresh_template "$repo" \
+            && mkdir -p "$ws/.git" \
+            && tar -C "$tpl/.git" --exclude=./objects --exclude=./index -cf - . | tar -C "$ws/.git" -xf - \
+            && cp -al "$tpl/.git/objects" "$ws/.git/objects"
+    } 9>"$CLONE_TEMPLATES/$repo.lock"; then
+        echo "agentbox: could not copy $repo from its template $tpl; remove that directory to have the next launch rebuild it" >&2
+        return 1
+    fi
+    detached git -C "$ws" checkout --quiet -f HEAD >&2
+}
+
+# What a box's clone holds that its remote does not, as one line, empty when nothing: uncommitted
+# changes, tracked or untracked, and each branch, stash or detached HEAD with commits no
+# remote-tracking ref reaches. A clone the launcher never finished checking out holds nothing; one git
+# cannot read says so, and close_box keeps it like any other.
+unpushed_work() {
+    local ws="$1" status ref found=()
+    git -C "$ws" rev-parse --verify --quiet HEAD >/dev/null || return 0
+    if ! status="$(git -C "$ws" status --porcelain 2>&1)"; then
+        echo "a checkout git cannot read: ${status%%$'\n'*}"
+        return 0
+    fi
+    if [[ -n "$status" ]]; then found+=("$(wc -l <<<"$status") uncommitted paths"); fi
+    if ! git -C "$ws" symbolic-ref --quiet HEAD >/dev/null && [[ -n "$(git -C "$ws" rev-list -1 HEAD --not --remotes)" ]]; then
+        found+=("a detached HEAD")
+    fi
+    while read -r ref; do
+        if [[ -n "$(git -C "$ws" rev-list -1 "$ref" --not --remotes)" ]]; then found+=("${ref#refs/heads/}"); fi
+    done < <(git -C "$ws" for-each-ref --format='%(refname)' refs/heads refs/stash)
+    if (( ${#found[@]} )); then echo "${found[*]}"; fi
+    return 0
+}
+
+# Everything the box made goes: the knives claims its session holds, then the directory. The
+# container must be gone first — it holds the mounts, and docker recreates a removed mountpoint
+# root-owned. The work in a clone is its agent's to push or remove (Sami, AGENTC-1420, 2026-10-02:
+# "Just tell the agents to migrate off of the JJ workspaces, and then they can handle it"), and
+# nothing is saved for it; a clone holding work its remote does not have keeps the whole box
+# directory in place, named on the pane, so nothing is discarded unseen.
 close_box() {
-    local box="$1" repo="$2" sid="$3" _
-    local ws="$BOXES/$box/$repo"
+    local box="$1" sid="$2" repo ws work kept=0 _
+    shift 2
     for _ in $(seq 1 60); do
         docker inspect "$box" >/dev/null 2>&1 || break
         sleep 1
@@ -299,76 +605,111 @@ close_box() {
         echo "agentbox: $box is still running after 60s; removing it" >&2
         docker rm -f "$box" >/dev/null 2>&1 || true
     fi
-    finish_knives_claims "$sid"
-    if [[ -d "$ws/.jj" ]]; then
-        # `jj st` snapshots the working copy into @. On a shared store another
-        # session's operations routinely leave a workspace stale, and `jj st`
-        # refuses a stale one; `update-stale` first recovers it, putting any
-        # unsnapshotted edits in a commit, and is a no-op on a fresh workspace.
-        if detached jj -R "$ws" workspace update-stale >/dev/null 2>&1 \
-            && detached jj -R "$ws" st >/dev/null 2>&1; then
-            detached jj -R "$SRC/$repo" workspace forget "$box" \
-                || echo "agentbox: workspace forget $box failed; $ws left in place" >&2
-        else
-            echo "agentbox: could not snapshot $ws; left in place" >&2
-            return 0
-        fi
+    # An omp in the box may have queued this pane for the attention cockpit, and
+    # its own shutdown drop died with the container. The launcher runs in the same
+    # host pane, so it drops that pane here, stamped after everything the box sent.
+    if [[ -n "${TMUX_PANE:-}" ]]; then
+        "$DOTFILES_DIR/scripts/tmux-attention" drop "$TMUX_PANE" >/dev/null || true
     fi
-    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+    # The container is gone: nothing inside can use the key any more, and the broker must not
+    # accept it either. Before the rm -rf below, which takes the key dir with it.
+    unenroll_box "$box"
+    finish_knives_claims "$sid"
+    for repo in "$@"; do
+        ws="$BOXES/$box/$repo"
+        [[ -d "$ws/.git" ]] || continue
+        work="$(unpushed_work "$ws")"
+        if [[ -n "$work" ]]; then
+            echo "agentbox: $ws holds work its remote does not have ($work); $BOXES/$box is left in place for its owner to push or remove" >&2
+            kept=1
+        fi
+    done
+    rm -rf "${RUN_BASE:?}/$box"
+    if (( ! kept )); then rm -rf "${BOXES:?}/$box"; fi
 }
 
 cmd_new() {
-    local repo="${1:-}"
-    [[ -n "$repo" && "$repo" != -* ]] || die "usage: agentbox new <repo> <cmd> [args…]  (repos: $(repos | tr '\n' ' '))"
+    local usage="usage: agentbox new [-e NAME[=VALUE]]… <repo>… -- <cmd> [args…]"
+    local user_env=() box_repos=() repo
+    while (( $# )) && [[ "$1" != -- ]]; do
+        case "$1" in
+            -e)
+                [[ "${2:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*(=.*)?$ ]] || die "-e takes NAME or NAME=VALUE, got '${2:-}'  ($usage)"
+                user_env+=(-e "$2")
+                shift 2
+                ;;
+            -*) die "unknown option '$1'; the command goes after \`--\`  ($usage)" ;;
+            *) box_repos+=("$1"); shift ;;
+        esac
+    done
+    [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} )) || die "$usage  (repos: $(repos | tr '\n' ' '))"
     shift
-    (( $# )) || die "usage: agentbox new <repo> <cmd> [args…]"
-    [[ -d "$SRC/$repo" ]] || die "no checkout $SRC/$repo (repos: $(repos | tr '\n' ' '))"
-    [[ -e "$SRC/$repo/.jj" ]] || die "$SRC/$repo is not a jj repository"
+    (( $# )) || die "$usage"
+    for repo in "${box_repos[@]}"; do
+        [[ -d "$SRC/$repo" ]] || die "no checkout $SRC/$repo (repos: $(repos | tr '\n' ' '))"
+        git -C "$SRC/$repo" remote get-url origin >/dev/null 2>&1 || die "$SRC/$repo has no origin remote to clone from"
+    done
+    local dup
+    dup="$(printf '%s\n' "${box_repos[@]}" | sort | uniq -d)"
+    [[ -z "$dup" ]] || die "repo listed twice: $dup"
+    local use_broker=1
+    broker_ready || use_broker=0
     local box tag
     box="agentbox-$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-12)"
+    echo "agentbox: box $box" >&2
+    if (( ! use_broker )); then
+        echo "agentbox: $box starts without a secrets-broker identity, so its agents use secretsd: $BROKER_UNREADY" >&2
+    fi
     tag="$(image_tag)"
     build_image "$tag"
     ensure_network
     ensure_forwarders
 
-    local ws="$BOXES/$box/$repo"
     # From here the box has state on disk: whatever fails before or during the
-    # session, its directory and workspace never outlive the launcher.
+    # session, its directory never outlives the launcher (close_box).
     # Values are expanded now (the trap outlives this function's locals) and
     # the trap runs only in the launcher itself, never in a $(…) subshell,
     # which inherits EXIT traps in bash.
     local launcher_pid=$BASHPID
     # shellcheck disable=SC2064
-    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '$repo' ''" EXIT
+    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '' $(printf '%q ' "${box_repos[@]}")" EXIT
     # A pane kill or TERM lands here; the trap forwards a hangup into the box
     # (--init delivers it to the command), --rm fires, close runs. Before the
-    # box exists it is remembered instead and honoured once the workspace add
-    # returns. After a hangup the terminal is gone: a write to it fails with
-    # EIO, and under set -e the first chatty step of close_box (jj's
-    # "concurrent modification" note, an echo) would end the launcher after the
-    # workspace forget and before the rm -rf - which is how ~/boxes/<box> trees
-    # outlived their boxes. Nothing printed from here on has a reader.
+    # box exists it is remembered instead and honoured once the clone returns.
+    # After a hangup the terminal is gone: a write to it fails with EIO, and
+    # under set -e the first chatty step of close_box (an echo) would end the
+    # launcher before the rm -rf - which is how ~/boxes/<box> trees outlived
+    # their boxes. Nothing printed from here on has a reader.
     local interrupted=0
     trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
     trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
     mkdir -p "$BOXES/$box"
-    # Detached so a pane hangup cannot end it half-way (see `detached`): a
-    # registered workspace with a partial tree could not be snapshotted, so
-    # close would have to leave it.
-    detached jj -R "$SRC/$repo" workspace add --name "$box" "$ws" >&2
+    # Every repo is cloned at once, each in a subshell that ignores the hangup and TERM/INT: the
+    # launcher acts on those itself, once every clone has returned, and the clones' git runs detached
+    # (see `detached`). A trapped signal ends `wait` early with 128+n while the clone still runs, so a
+    # clone that is still alive is waited for again.
+    local pids=() pid rc failed=0
+    for repo in "${box_repos[@]}"; do
+        ( trap '' HUP TERM INT; clone_checkout "$repo" "$BOXES/$box/$repo" ) &
+        pids+=("$!")
+    done
+    for pid in "${pids[@]}"; do
+        while :; do
+            rc=0; wait "$pid" || rc=$?
+            (( rc > 128 )) && kill -0 "$pid" 2>/dev/null && continue
+            break
+        done
+        (( rc == 0 )) || failed=1
+    done
+    (( failed )) && exit 1
     (( interrupted )) && exit 130
-    # The workspace is a git worktree of the shared checkout, and its path
-    # exists only on the host and inside this box. From every other box it
-    # looks missing, so a `git worktree prune` run there - an agent's cleanup
-    # after `git worktree remove`, Legion's provisioning - would drop its
-    # registration and leave git in the box fatal (14 live boxes at once,
-    # 2026-09-21). A locked worktree is what prune skips; jj's forget in
-    # close_box still removes it.
-    git -C "$SRC/$repo" worktree lock \
-        --reason "agentbox $box: path exists only on the host and inside its box" "$ws"
 
     local mounts=() env=()
     mapfile -t mounts < <(mount_args "$box")
+    # mount_args made the key dir. From the legion #1589 release, enrollment.pending tells the
+    # box's agent-secrets that an enrollment is on its way; enroll_box renews it and ends it
+    # either way. A box with no broker identity gets no marker and no key.
+    if (( use_broker )); then : >"$(box_keydir "$box")/enrollment.pending"; fi
     mapfile -t env < <(session_env "$box")
     # omp runs under the in-box runner so `restart` can relaunch it in the same
     # container (scripts/agentbox-run.ts); any other command runs bare.
@@ -386,9 +727,11 @@ cmd_new() {
     # per box that nothing reads (the transcript is in ~/.omp; attach is live).
     docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
-        -w "$ws" "${tty[@]}" \
-        "${mounts[@]}" "${env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
+        -w "$BOXES/$box/${box_repos[0]}" "${tty[@]}" \
+        "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
     child=$!
+    # The broker identity first (enroll_when_up), when the host can give one.
+    if (( use_broker )); then enroll_when_up "$box" "$child" "$1" || true; fi
     # An omp inside reveals its session id once up; close releases that
     # session's knives claims. Other commands have none.
     while kill -0 "$child" 2>/dev/null; do
@@ -402,17 +745,16 @@ cmd_new() {
         if wait "$child"; then rc=0; else rc=$?; fi
         kill -0 "$child" 2>/dev/null || break
     done
-    # The pane can go away while close is still running (a pane kill during
-    # the jj snapshot, a server exit). That must not stop the box's removal:
-    # the launcher ignores the hangup from here on (jj and knives run in their
-    # own session, see `detached`), and its output goes through a reader that
-    # writes to the terminal while it exists and drops the rest - a direct
-    # write to a hung-up pty fails with EIO, which set -e would turn into an
-    # exit between the workspace forget and the rm -rf.
+    # The pane can go away while close is still running (a pane kill, a server
+    # exit). That must not stop the box's removal: the launcher ignores the
+    # hangup from here on (knives runs in its own session, see `detached`), and
+    # its output goes through a reader that writes to the terminal while it
+    # exists and drops the rest - a direct write to a hung-up pty fails with
+    # EIO, which set -e would turn into an exit before the rm -rf.
     trap - TERM INT EXIT
     trap '' HUP
     exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
-    close_box "$box" "$repo" "$sid"
+    close_box "$box" "$sid" "${box_repos[@]}"
     exit "$rc"
 }
 
@@ -523,15 +865,17 @@ set -u
 fails=0
 ok() { echo "ok   box: $*"; }
 fail() { echo "FAIL box: $*"; fails=$((fails + 1)); }
-for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets hawk-token; do
+for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets hawk-token agent-secrets; do
     command -v "$t" >/dev/null 2>&1 && ok "tool $t" || fail "tool $t does not resolve"
 done
-for d in .config/gh .ssh/id_ed25519 .gnupg; do
+for d in .config/gh .ssh/id_ed25519 .gnupg .config/agent-secrets; do
     [ -e "$HOME/$d" ] && fail "$d is present in the box" || ok "$d absent"
 done
 # .config/gcloud is not simply forbidden: deploy.py (_DEVBOX_WIF_ADC, and its refusal at ~1315)
-# REQUIRES ~/.config/gcloud/agent-devbox-wif-adc.json for any devN up/destroy, and
-# verify-machine-identity.sh writes it. That file is keyless - an external_account WIF config bound
+# REQUIRES ~/.config/gcloud/agent-devbox-wif-adc.json for any devN up/destroy, and the writer is
+# agent-c meta/infra/pulumi/scripts/provision_devbox_wif_adc.py. An earlier version of this comment
+# credited verify-machine-identity.sh, which only verifies identity and writes no ADC file.
+# That file is keyless - an external_account WIF config bound
 # to the box instance role, no token and no user - so it is a machine credential, not a login.
 # Deleting it to satisfy this check breaks the next slot apply (reported by a lane that had done one).
 if [ -e "$HOME/.config/gcloud" ]; then
@@ -559,12 +903,30 @@ r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os
 [ "$(ls -A "$HOME/.ssh" | sort | tr "\n" " ")" = "jj-signing jj-signing.pub " ] && ok ".ssh holds exactly the jj-signing pair" || fail ".ssh contents: $(ls -A "$HOME/.ssh" | tr "\n" " ")"
 auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && ok ".docker holds only the box ghcr login" || fail ".docker auths: ${auths:-none}"
 [ "$(stat -c %U /run/user/$(id -u))" = ubuntu ] && ok "runtime dir owned by ubuntu" || fail "runtime dir owner $(stat -c %U /run/user/$(id -u))"
-[ -n "$(jj log -r @ --no-graph -T change_id 2>/dev/null)" ] && ok "cwd is a jj workspace" || fail "cwd is not a jj workspace (cwd-dependent: run doctor from your workspace, not /tmp)"
+if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git clone of its own"; else fail "cwd is not a git clone of its own (cwd-dependent: run doctor from your checkout, not /tmp)"; fi
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
 gh auth status 2>&1 | grep -q "not logged" && ok "gh auth: no user login" || fail "gh auth status shows a login"
 n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && ok "secrets agent-tier" || fail "secrets agent-tier"
 jq -e ".credHelpers[\"https://index.docker.io/v1/\"] == \"secretsd\"" "$HOME/.docker/config.json" >/dev/null 2>&1 && ok "docker config names the secretsd helper for Docker Hub" || fail "docker config: no secretsd credHelper for Docker Hub"
 printf "%s" https://index.docker.io/v1/ | timeout 20 docker-credential-secretsd get 2>/dev/null | jq -e ".Secret | length > 0" >/dev/null && ok "docker-credential-secretsd answers for Docker Hub" || fail "docker-credential-secretsd get"
+[ -z "${AGENT_SECRETS_HELPER_SOCK:-}" ] && [ ! -S "/run/user/$(id -u)/agent-secrets/helper.sock" ] && ok "no helper socket in the box (a box is not a host session)" || fail "helper socket reachable from the box"
+# A box with no broker identity is a supported state, not a defect: one started before the key
+# dir existed, or while the host could not enroll boxes (no key, no enrollment.error). Its agents
+# use secretsd.
+kd="${AGENT_SECRETS_KEY_DIR:-}"
+if [ -z "$kd" ]; then
+    echo "note box: no broker identity (no AGENT_SECRETS_KEY_DIR: the box predates it); its agents use secretsd"
+elif [ -z "${AGENT_SECRETS_URL:-}" ] || [ "$kd" != "/run/user/$(id -u)/agent-secrets" ]; then
+    fail "agent-secrets env: URL=${AGENT_SECRETS_URL:-unset} KEY_DIR=$kd"
+elif [ ! -e "$kd/key.pem" ] && [ ! -e "$kd/enrollment.error" ]; then
+    ok "agent-secrets env (url, key dir)"
+    echo "note box: no broker identity (the host could not enroll boxes when this box started); its agents use secretsd"
+else
+    ok "agent-secrets env (url, key dir)"
+    [ "$(stat -c %a "$kd/key.pem" 2>/dev/null)" = 600 ] && [ "$(stat -c %U "$kd/key.pem" 2>/dev/null)" = ubuntu ] && ok "box key 0600 ubuntu" || fail "box key: $(ls -l "$kd" 2>&1 | tr "\n" " ")"
+    [ -s "$kd/enrollment" ] && ok "box enrolled ($(cat "$kd/enrollment"))" || fail "box not enrolled: $(cat "$kd/enrollment.error" 2>/dev/null || echo no enrollment.error either)"
+    w="$(timeout 20 agent-secrets whoami 2>&1)"; jq -e ".kind == \"box\"" <<<"$w" >/dev/null 2>&1 && ok "broker knows this box as kind box, operator $(jq -r .operator <<<"$w")" || fail "agent-secrets whoami: $(head -1 <<<"$w")"
+fi
 arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
 t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
 timeout 40 google-user-token >/dev/null 2>&1 && ok "google-user-token mints" || fail "google-user-token"
@@ -573,8 +935,17 @@ c="$(curl -s -m 3 -o /dev/null -w %{http_code} "$ENVOY_URL/" 2>/dev/null)"; [ "$
 c="$(curl -s -m 3 -o /dev/null -w %{http_code} "${MNEMOPI_EMBEDDING_API_URL:-http://none}/../health" 2>/dev/null)"; [ "$c" = 200 ] && ok "mnemopi embed" || echo "note box: mnemopi embed $c"
 n="$(timeout 20 forward doctor 2>&1 | grep -cE "accepted|reachable|accepts")"; echo "@forward-ok $n"
 timeout 30 docker info >/dev/null 2>&1 && ok "inner docker answers" || fail "inner docker"
+if [ -n "${NATS_NKEY_SEED_FILE:-}" ]; then [ -r "$NATS_NKEY_SEED_FILE" ] && ok "NATS nkey seed readable" || fail "NATS_NKEY_SEED_FILE $NATS_NKEY_SEED_FILE unreadable: envoy cannot connect"; else echo "note box: no NATS nkey seed (envoy connects without a credential)"; fi
 exit $fails
 '
+
+# The doctor box and everything it made: the container, its enrollment and its directories.
+remove_doctor_box() {
+    local box="$1"
+    docker rm -f "$box" >/dev/null 2>&1 || true
+    unenroll_box "$box"
+    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+}
 
 cmd_doctor() {
     if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc; then ok "host: sysbox-runc runtime"; else fail "host: sysbox-runc runtime not registered"; fi
@@ -585,28 +956,70 @@ cmd_doctor() {
     ensure_network && ok "host: network $NETWORK gateway $NETWORK_GATEWAY"
     ensure_forwarders && ok "host: forwarders (imds, envoy, bus)"
     local host_forward; host_forward="$(timeout 20 forward doctor 2>&1 | grep -cE 'accepted|reachable|accepts' || true)"
+    # The broker, host side. A host whose helper holds no live launcher credential gives boxes and
+    # host sessions no broker identity, and their agents use secretsd: a supported state, so a
+    # note. Both helper checks run as a child of the user manager: doctor itself may be running
+    # inside an agent session, which would make its own pid a session member.
+    local helper_out
+    if command -v agent-secrets >/dev/null 2>&1; then ok "host: agent-secrets on PATH"; else fail "host: agent-secrets not installed (mise install agent-secrets)"; fi
+    if [[ ! -e "$HOME/.config/systemd/user/agent-secrets-helper.service" ]]; then
+        echo "note host: agent-secrets-helper is not installed here (bash installers/agent-secrets.sh); boxes and host sessions use secretsd"
+    elif ! systemctl --user is-active --quiet agent-secrets-helper.service || [[ ! -S "/run/user/$UID_/agent-secrets/helper.sock" ]]; then
+        fail "host: agent-secrets-helper not active (systemctl --user status agent-secrets-helper)"
+    else
+        ok "host: agent-secrets-helper active ($(agent-secrets-helper sessions 2>/dev/null | wc -l) sessions)"
+        helper_out="$(fresh_process agent-secrets whoami 2>&1 || true)"
+        case "$helper_out" in *NOT_A_SESSION*) ok "host: helper refuses an unregistered process";; *) fail "host: helper answered an unregistered process: $(head -1 <<<"$helper_out")";; esac
+        if broker_ready; then
+            ok "host: launcher credential issued for $(cat "$LAUNCHER_DIR/operator" 2>/dev/null || echo unknown)"
+            helper_out="$(fresh_process agent-secrets register --exec --wait 30 -- agent-secrets whoami 2>&1 || true)"
+            if jq -e '.kind == "host"' <<<"$helper_out" >/dev/null 2>&1; then ok "host: helper enrolls and signs for a fresh session (kind host, operator $(jq -r .operator <<<"$helper_out"))"; else fail "host: helper session: $(head -1 <<<"$helper_out")"; fi
+        else
+            echo "note host: $BROKER_UNREADY; boxes and host sessions start without a broker identity and use secretsd"
+        fi
+    fi
     build_image "$tag"
-    # A throwaway box on a throwaway workspace of the first repo in $SRC.
+    # A throwaway box on a throwaway clone of the first repo in $SRC.
     local repo box ws
     repo="$(repos | head -1)"
     [[ -n "$repo" ]] || die "no repo under $SRC to test with"
     box="agentbox-doctor$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-6)"
     ws="$BOXES/$box/$repo"
+    # Whatever ends doctor from here (a failed step under set -e, ^C, a hangup), the box goes with
+    # it. The trap fires only in doctor itself, never in a $(…) subshell (see cmd_new).
+    local doctor_pid=$BASHPID
+    # shellcheck disable=SC2064
+    trap "[[ \$BASHPID == $doctor_pid ]] && remove_doctor_box '$box'" EXIT
+    trap 'exit 130' INT TERM HUP
     mkdir -p "$BOXES/$box"
-    jj -R "$SRC/$repo" workspace add --name "$box" "$ws" >/dev/null 2>&1
-    local mounts=() env=() out
+    clone_checkout "$repo" "$ws" >/dev/null 2>&1 || die "doctor: could not clone $repo into $box"
+    local mounts=() env=() box_out="" tries=90
     mapfile -t mounts < <(mount_args "$box")
     mapfile -t env < <(session_env "$box")
-    out="$(docker run --rm --init --runtime "$RUNTIME" --name "$box" --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
-        -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
-    # A failed forget leaves a registration whose directory the rm below removes: an orphan in the
-    # shared store that every later `jj workspace list` carries. Count it as a doctor failure.
-    jj -R "$SRC/$repo" workspace forget "$box" >/dev/null 2>&1 \
-        || fail "doctor: workspace forget $box failed; its registration is left in $SRC/$repo"
-    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
-    grep -vE '^@' <<<"$out"
-    FAILS=$((FAILS + $(grep -c '^FAIL ' <<<"$out" || true)))
-    local box_forward; box_forward="$(sed -n 's/^@forward-ok //p' <<<"$out")"
+    # The doctor box runs detached so it can be enrolled like a real box (enroll_box needs the
+    # container up) before the checks run inside it; `sleep` is its session command, and the
+    # entrypoint has finished — inner dockerd up, ghcr login done — once that sleep exists.
+    if docker run -d --init --runtime "$RUNTIME" --name "$box" --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
+        -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" sleep 900 >/dev/null; then
+        until docker exec "$box" pgrep -x sleep >/dev/null 2>&1 || (( --tries == 0 )); do sleep 1; done
+        if (( tries )); then
+            # Enrolled like a box from `new` when the host can enroll one; the host rows above say
+            # why not, and the box-side checks show the rest.
+            if broker_ready; then
+                enroll_box "$box" "" || fail "host: enroll $box: $(cat "$(box_keydir "$box")/enrollment.error" 2>/dev/null)"
+            fi
+            box_out="$(docker exec --user ubuntu -w "$ws" "$box" bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+        else
+            fail "host: doctor box did not reach sleep-running state"
+        fi
+    else
+        fail "host: doctor box failed to start"
+    fi
+    trap - EXIT INT TERM HUP
+    remove_doctor_box "$box"
+    grep -vE '^@' <<<"$box_out"
+    FAILS=$((FAILS + $(grep -c '^FAIL ' <<<"$box_out" || true)))
+    local box_forward; box_forward="$(sed -n 's/^@forward-ok //p' <<<"$box_out")"
     if [[ "$box_forward" == "$host_forward" ]]; then ok "forward: $box_forward channel rows ok in box, same as host"; else fail "forward: $box_forward rows ok in box vs $host_forward on host"; fi
     (( FAILS == 0 )) && { echo "agentbox doctor: all checks passed"; exit 0; }
     echo "agentbox doctor: $FAILS check(s) failed" >&2
@@ -630,11 +1043,14 @@ cmd_doctor_here() {
     exit 1
 }
 
+# Sourced (scripts/tests/test_agentbox_enroll.py), it defines its functions and runs nothing.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;
     sh)      shift; cmd_sh "$@" ;;
     doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
-    *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

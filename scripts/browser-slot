@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Run a command while holding one of N browser-run slots on this box.
+#
+#   browser-slot [--] <command> [args...]      # BROWSER_SLOTS=3 by default
+#
+# Browser suites (Playwright, Chromium, WebKit) are the heaviest thing agent
+# lanes run here, so they take a slot rather than starting freely. One shared
+# lock admitted a single run at a time: a two-hour suite then held every
+# one-minute screenshot job behind it. N slots keep the total bounded while
+# letting short runs through. Slot 1 is the original lock file, so a run that
+# still uses `flock /tmp/dispatch-playwright.lock` counts as one of the N.
+#
+# The slot is held for the command's lifetime and released when it exits,
+# whatever its exit code; the command's exit code is this script's.
+# BROWSER_SLOT is exported to the command (1..N), for logs.
+set -uo pipefail
+
+slots=${BROWSER_SLOTS:-3}
+case $slots in ''|*[!0-9]*|0) echo "browser-slot: BROWSER_SLOTS must be a positive integer, got '$slots'" >&2; exit 2 ;; esac
+[ "${1:-}" = "--" ] && shift
+[ $# -gt 0 ] || { echo "usage: browser-slot [--] <command> [args...]" >&2; exit 2; }
+
+lock_path() { if [ "$1" -eq 1 ]; then echo /tmp/dispatch-playwright.lock; else echo "/tmp/dispatch-playwright.slot$1.lock"; fi; }
+
+waited=0
+while :; do
+  for i in $(seq 1 "$slots"); do
+    exec {fd}>>"$(lock_path "$i")"
+    if flock -n "$fd"; then
+      [ "$waited" -gt 0 ] && echo "browser-slot: took slot $i after ${waited}s" >&2
+      export BROWSER_SLOT=$i
+      "$@"
+      exit $?
+    fi
+    exec {fd}>&-
+  done
+  sleep 5
+  waited=$((waited + 5))
+done
