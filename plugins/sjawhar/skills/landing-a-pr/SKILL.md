@@ -35,8 +35,7 @@ the required `review` check (workflow "Claude PR Review", run from main's copy),
 passing at the head. No approval is needed; the org ruleset enforces both checks.
 The required `review` run starts only on `opened`, `synchronize` or `reopened` of a
 non-draft PR: a draft never gets it, and marking ready alone starts nothing
-(measured on #20742 and #20703,
-2026-10-01). So mark the PR ready, then push or close and reopen it, but only when no
+(measured on #20742 and #20703). So mark the PR ready, then push or close and reopen it, but only when no
 PR Checks run is in flight, because either event cancels it. A push starts a fresh
 run at the new head. When a required run FAILED and you only answered and resolved
 threads (no new commit), re-run that run instead: `gh api -X POST
@@ -44,14 +43,14 @@ repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs` (`gh run rerun` 404s o
 these), which reviews the same head and leaves PR Checks alone. The run that counts
 is a `review` check-run on the PR's HEAD sha, and the merge rule reads the newest run
 of the workflow at that head. A `@claude review` comment starts nothing: the review has
-no comment trigger (agent-c#20924, 2026-10-02).
+no comment trigger (agent-c#20924).
 Any other PR event, `gh stack link` included, starts a `follow` run that copies the
-newest review run's verdict at that head (agent-c#20827, 2026-10-02). After re-running
+newest review run's verdict at that head (agent-c#20827). After re-running
 a review at a head that has a newer `follow` run, re-run that `follow` run too:
 `rerun-failed-jobs` for a failed one, `.../actions/runs/<id>/rerun` for a passed one,
 or its stale verdict keeps deciding. The verdict
 counts every open thread on the PR, old ones included. The owner lands every agent-c
-PR (Sami retired the merge queue, AGENTC-1089, 2026-10-02). A Legion-produced PR is
+PR (Sami retired the merge queue, AGENTC-1089). A Legion-produced PR is
 landed by the lane that commissioned it. In `sjawhar/legion` the rule adds the Legion
 PO's reviewer App approving, and that approval survives a later push just as an armed
 auto-merge does, so arm (and re-arm after a push) only on a head the PO approved, and
