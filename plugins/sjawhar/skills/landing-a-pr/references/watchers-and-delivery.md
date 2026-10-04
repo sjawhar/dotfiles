@@ -112,8 +112,8 @@ A positive control proves a remote read worked, not that absence of a temporary
 ref answers whether the content merged.
 
 Read the actual merge state and merged message from GitHub, not merely a merge
-command's exit. The owner still does not perform the merge; these are read-back
-checks after the organizer's action.
+command's exit or an armed auto-merge; these are read-back checks after GitHub
+merges.
 
 ```sh
 gh api repos/<owner>/<repo>/pulls/<N> --jq '{merged, merge_commit_sha}'
@@ -122,6 +122,8 @@ gh api repos/<owner>/<repo>/commits/<merge-sha> --jq .commit.message
 
 A repository's squash defaults may concatenate old subjects, including claims
 later retracted. Re-read the PR title/body against the final head before the
-packet and the resulting commit message afterward. Do not rewrite merged
-history to correct it. Name the SHA each figure was measured at: “at the head”
-changes meaning whenever the bookmark moves.
+packet and the resulting commit message afterward. Auto-merge fixes the message
+when it is armed: pass `--subject`/`--body` then, and change it by disarming and
+arming again, because a re-arm on an armed PR keeps the old message
+(agent-c#20935). Do not rewrite merged history to correct it. Name the SHA each
+figure was measured at: “at the head” changes meaning whenever the bookmark moves.

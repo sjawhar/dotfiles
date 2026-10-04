@@ -55,8 +55,8 @@ AGENT_EVAL_VERSION = "0.1.1"
 [tools]
 "github:sjawhar/jj" = "0.45.1-sami.20260910-043938"  # upstream main + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10127 + #10129 + #10130 + reset_head writes HEAD after the index reset + forget unlinks only its own worktree + index write waits for index.lock (#7530) + import keeps @ when the recorded HEAD was lost + merge_view treats a lost git_heads entry as no information
 "github:sjawhar/knives" = "2.0.20"
-"github:sjawhar/legion" = "cli-v7.3.0"  # the `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); replaces a hand-placed 0.3.1 binary in ~/.local/bin that had no `legion threads`
-"github:sjawhar/oh-my-pi" = "18.4.9-sami.20261001-204440"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
+"github:sjawhar/legion" = "legion-v9.0.0"  # the Go `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); it shares the Go daemons' registry, ~/.local/state/legion/legions.json, which a TypeScript cli-v* `legion` would rewrite as an object no Go daemon can read
+"github:sjawhar/oh-my-pi" = "18.6.0-sami.20261004-022805"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
@@ -86,14 +86,22 @@ zoxide = "0.10.0"
 # Vercel CLI: agent boxes read Lyon's Vercel request logs with the host's own CLI
 # login, mounted by agentbox/mounts (AGENTC-61).
 "npm:vercel" = "59.14.0"
-# WhatsApp MCP (Baileys fork): the laptop runs it as a daemon
-# (whatsapp/whatsapp-mcp.service) and its omp reaches it with the same
-# binary's `--connect` stdio client (installers/whatsapp.sh). aube gates: the package is
-# my own (unpopular by download count); better-sqlite3 fetches its prebuilt
-# native binding in an install script; and it pins pino@9.14.0, a 9.x backport
-# matteo.collina published by hand two weeks after 10.0.0 without provenance
-# (reviewed 2026-09-13: same integrity on npmjs.org, maintainer publish).
-"npm:@sjawhar/whatsapp-mcp" = { version = "2.4.0", allow_low_downloads = true, allow_builds = ["better-sqlite3"], trust_policy_excludes = ["pino@9.14.0"] }
+# Chat hub (docs/plans/2026-10-03-chat-hub-design.md): Tuwunel and the mautrix
+# bridges run on oryx only (installers/chathub.sh); matrix-mcp is the agents'
+# client on every machine (scripts/chathub-mcp).
+"github:matrix-construct/tuwunel" = { version = "1.9.3", asset_pattern = "*-x86_64-v2-linux-gnu-tuwunel.zst", bin = "tuwunel" }
+"github:mautrix/gmessages" = { version = "0.2609.0", asset_pattern = "mautrix-gmessages-amd64", bin = "mautrix-gmessages" }
+"github:mautrix/whatsapp" = { version = "0.2609.0", asset_pattern = "mautrix-whatsapp-amd64", bin = "mautrix-whatsapp" }
+"github:mautrix/signal" = { version = "0.2609.0", asset_pattern = "mautrix-signal-amd64", bin = "mautrix-signal" }
+"github:mautrix/discord" = { version = "0.7.7", asset_pattern = "mautrix-discord-amd64", bin = "mautrix-discord" }
+# mautrix/meta publishes Messenger and Instagram as two binaries of one release;
+# the mautrix-instagram alias in [tool_alias] gives the second its own install.
+"github:mautrix/meta" = { version = "0.2609.0", asset_pattern = "mautrix-meta-amd64", bin = "mautrix-meta" }
+mautrix-instagram = { version = "0.2609.0", asset_pattern = "mautrix-instagram-amd64", bin = "mautrix-instagram" }
+"pipx:matrix-mcp" = "0.8.1"
+# mautrix-manager signs bridges in to websites (Google, Facebook, Instagram) in its own
+# window; chathub/login-screen runs it on the hub and shows it in Sami's browser.
+"github:mautrix/manager" = { version = "0.2.1", asset_pattern = "mautrix-manager-linux-x64-*.zip", bin_path = "mautrix-manager-linux-x64", bin = "mautrix-manager" }
 
 # Development
 "npm:basedpyright" = "1.39.10"
@@ -102,7 +110,7 @@ zoxide = "0.10.0"
 # Bump this and "github:sjawhar/oh-my-pi" together. Upstream does not publish this
 # package for every tag: if the exact version is missing from npm, pin the nearest
 # published one after confirming packages/mnemopi is unchanged between the two tags.
-"npm:@oh-my-pi/pi-mnemopi" = "18.4.9"
+"npm:@oh-my-pi/pi-mnemopi" = "18.6.0"
 actionlint = "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
 amazon-ecr-credential-helper = "0.12.0"  # ~/.docker/config.json routes every ECR registry to `ecr-login`; installed since 08-10 but unpinned, so inside a box (no ~/.local/state/mise) the shim had no version and every ECR push failed
@@ -138,6 +146,7 @@ tt = "github:sjawhar/time-tracker"
 forward = "github:sjawhar/forward"
 secrets = "github:sjawhar/forward"
 agent-secrets = "github:sjawhar/legion"
+mautrix-instagram = "github:mautrix/meta"
 
 [tools.tt]
 version = "latest"
@@ -182,9 +191,9 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v4.0.2"
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:2e2d343beb272d1d921f17f29a5ad4593acb814f9d53527e9e9e8c10f74e7bf5" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:29d5c8d700dd55115aff62e958d1a4bae620500ffe1d08251b23bd5c1d5be0e5" }
+version = "legion-envoy-v5.1.0"
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:55ca310a44b1031b406d9d6a9ab6a156257a3c46afc1fb9bda030bd16718ae28" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:3f28ca284d95a2cc15467d955940f35f783076cd5e3efc155f3cc0ec7025fef6" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]

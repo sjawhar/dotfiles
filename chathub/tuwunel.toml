@@ -1,0 +1,15 @@
+# Chat hub homeserver (docs/plans/2026-10-03-chat-hub-design.md). Machine paths and
+# the tailnet bind address come from chathub/tuwunel-serve as -O overrides.
+[global]
+# Host-independent, so IDs (@sami:chathub) survive moving the hub to another machine.
+server_name = "chathub"
+port = 8008
+# One user, created by chathub/bootstrap-user; nobody registers.
+allow_registration = false
+# A private hub: it never talks to other Matrix servers.
+allow_federation = false
+trusted_servers = []
+# Agents read portal rooms through matrix-mcp, which has no E2EE; bridges keep
+# encryption off too.
+allow_encryption = false
+new_user_displayname_suffix = ""

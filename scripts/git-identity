@@ -13,6 +13,9 @@
 #   git-identity                 show the effective identity for both tools
 #   git-identity tl|trajectory   use sami@trajectorylabs.net for this repo
 #   git-identity cm|cybermonk    use sami@thecybermonk.com for this repo
+#
+# sjawhar/legion needs neither: it uses sami@thecybermonk.com by rule in every
+# clone (.gitconfig matches its remote URL, .jjconfig.toml its jj checkouts' paths).
 set -euo pipefail
 
 NAME="Sami Jawhar"
@@ -40,7 +43,7 @@ case "${1-}" in
     tl | trajectory | trajectorylabs) EMAIL="$TL_EMAIL" ;;
     cm | cybermonk | thecybermonk) EMAIL="$CM_EMAIL" ;;
     -h | --help)
-        sed -n '2,15p' "$0" | sed 's/^# \?//'
+        sed -n '2,18p' "$0" | sed 's/^# \?//'
         exit 0
         ;;
     *)

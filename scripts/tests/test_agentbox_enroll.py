@@ -10,7 +10,8 @@ dir never follows a link the box planted there; the id the host revokes is the o
 
 Technique: source scripts/agentbox (its source guard runs nothing) with `docker`, `git`,
 `agent-secrets` and `sleep` stubbed first on PATH, and call its functions on a scratch key dir;
-cmd_new runs with the steps that need a real host (image, network, mounts) replaced by no-ops.
+cmd_new runs with the steps that need a real host (image, network, clones, mounts) replaced by
+no-ops.
 """
 
 from __future__ import annotations
@@ -348,7 +349,7 @@ class CmdNew(EnrollFixture):
     NO_HOST = (
         "build_image() { :; }; ensure_network() { :; }; ensure_forwarders() { :; }\n"
         'mount_args() { mkdir -p "$(box_keydir "$1")"; }\n'
-        "session_env() { :; }; detached() { :; }\n"
+        "session_env() { :; }; clone_checkout() { :; }\n"
         'close_box() { echo "close_box $1" >>"$STUB_CALLS"; }\n'
         "cmd_new repo1 -- bash -c true"
     )

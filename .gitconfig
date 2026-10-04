@@ -24,6 +24,24 @@
 [user]
 	email = sami@trajectorylabs.net
 	name = Sami Jawhar
+# sjawhar/legion is public and commits as sami@thecybermonk.com: every clone of
+# it, on every machine, is matched by its remote URL (`hasconfig:`, git 2.36+).
+# jj's half of the rule is the repository scope in .jjconfig.toml; the two must
+# agree, for the reason scripts/git-identity gives. A repo's own `git-identity`
+# still wins. The path starts at ~ because git resolves a relative include path
+# against ~/.gitconfig, the symlink, rather than this file.
+[includeIf "hasconfig:remote.*.url:https://github.com/sjawhar/legion"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:https://github.com/sjawhar/legion.git"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:git@github.com:sjawhar/legion"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:git@github.com:sjawhar/legion.git"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:ssh://git@github.com/sjawhar/legion"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
+[includeIf "hasconfig:remote.*.url:ssh://git@github.com/sjawhar/legion.git"]
+	path = ~/.dotfiles/cybermonk-identity.gitconfig
 [filter "lfs"]
 	smudge = git-lfs smudge -- %f
 	process = git-lfs filter-process

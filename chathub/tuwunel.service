@@ -1,0 +1,12 @@
+[Unit]
+Description=Chat hub Matrix homeserver (Tuwunel; loopback + tailnet :8008)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.dotfiles/chathub/tuwunel-serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
