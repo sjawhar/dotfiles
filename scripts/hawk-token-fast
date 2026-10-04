@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# hawk-token-fast: print the token `hawk-token-refresh` last mounted, with NO network
+# call, NO git, NO uv, and NO OAuth exchange in the critical path -- so omp's
+# `!command` (killed after 10 s; AGENTC: see scripts/AGENTS.md's `hawk-token` entry)
+# never races a live mint against this box's CPU load.
+#
+# Root cause this exists to remove: `hawk-token` mints live on every call, and under
+# this box's steady ambient load (dozens of concurrent agent sessions, routinely
+# 30-45 runnable on 32 cores) plus its own 6-hourly slot-refresh, an occasional mint
+# takes longer than the budget -- reproduced 2026-10-04 by adding 64 stress-ng CPU
+# hogs: a `hawk-token` call that normally finishes in ~3s took 10.1s wall clock and
+# was still killed mid-print by an external 10s timeout, which is exactly the
+# MissingApiKeyError / 401 failure mode omp's issue describes. Reading a small local
+# file is immune to that class of contention regardless of system load: this script
+# does one stat, one read, one regex match.
+#
+# `hawk-token-refresh.service` (a systemd --user timer, every 3 minutes, no budget of
+# its own) keeps $root/last-good-token fresh well inside its 300 s floor and far
+# inside the 3600 s token lifetime, so in steady state this script's cache read never
+# misses. Cold start or a refresher outage falls back to a live `hawk-token` mint --
+# today's full behavior, cache-fallback and all -- so nothing here removes an
+# existing safety net, it only stops using the slow path as the common case.
+#
+# `cached` logic below is `hawk-token`'s own `cached_token()`/`b64url_decode()`,
+# copied rather than sourced: sourcing would also run hawk-token's top-level mint
+# logic, and the two scripts must keep working independently if either is edited.
+set -euo pipefail
+
+root="${AGENTBOX_SRC:-$HOME/src}/.hawk-token"
+cache="$root/last-good-token"
+CACHE_MIN_TTL_SECONDS=300
+
+log() { echo "hawk-token-fast: $*" >&2; }
+
+# b64url_decode STR VAR: set VAR to the bytes unpadded base64url STR (RFC 7515)
+# encodes, in bash alone -- identical to hawk-token's copy.
+b64url_decode() {
+    local LC_ALL=C _b64_in=$1 _b64_i _b64_word _b64_esc _b64_out=''
+    local _b64_alphabet=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_
+    local -A _b64_val=()
+    for (( _b64_i = 0; _b64_i < 64; _b64_i++ )); do _b64_val[${_b64_alphabet:_b64_i:1}]=$_b64_i; done
+    case $(( ${#_b64_in} % 4 )) in 2) _b64_in+=AA ;; 3) _b64_in+=A ;; esac
+    for (( _b64_i = 0; _b64_i < ${#_b64_in}; _b64_i += 4 )); do
+        _b64_word=$(( _b64_val[${_b64_in:_b64_i:1}] << 18 | _b64_val[${_b64_in:_b64_i+1:1}] << 12 \
+            | _b64_val[${_b64_in:_b64_i+2:1}] << 6 | _b64_val[${_b64_in:_b64_i+3:1}] ))
+        printf -v _b64_esc '\\x%02x\\x%02x\\x%02x' \
+            $(( _b64_word >> 16 )) $(( _b64_word >> 8 & 255 )) $(( _b64_word & 255 ))
+        _b64_out+=$_b64_esc
+    done
+    printf -v "$2" '%b' "$_b64_out"
+}
+
+# fresh_cached_token: set `cached` to the cached token when its `exp` is at least
+# CACHE_MIN_TTL_SECONDS away; otherwise say why not and return 1. No network, no fork
+# beyond this process's own builtins and one `date`/`printf`.
+fresh_cached_token() {
+    local line='' json now ttl
+    local jwt_re='^[A-Za-z0-9_-]+\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+$'
+    local exp_re='[{,][[:space:]]*"exp"[[:space:]]*:[[:space:]]*([0-9]{1,15})[[:space:]]*[,}]'
+    if [ ! -e "$cache" ]; then log "no cached token at $cache"; return 1; fi
+    if ! { read -r line <"$cache" || [ -n "$line" ]; }; then
+        log "cached token $cache is unreadable or empty"
+        return 1
+    fi
+    if [[ ! $line =~ $jwt_re ]]; then log "cached token $cache is not one JWT; refusing it"; return 1; fi
+    b64url_decode "${BASH_REMATCH[1]}" json
+    if [[ ! $json =~ $exp_re ]]; then log "cached token $cache has no readable exp claim; refusing it"; return 1; fi
+    printf -v now '%(%s)T' -1
+    ttl=$(( 10#${BASH_REMATCH[1]} - now ))
+    if (( ttl < CACHE_MIN_TTL_SECONDS )); then
+        log "cached token has ${ttl}s left, under the ${CACHE_MIN_TTL_SECONDS}s floor; refusing it"
+        return 1
+    fi
+    cached=$line
+}
+
+if fresh_cached_token; then
+    printf '%s\n' "$cached"
+    exit 0
+fi
+log "falling back to a live mint (hawk-token-refresh is not keeping the cache warm?)"
+exec "$(dirname "${BASH_SOURCE[0]}")/hawk-token"
