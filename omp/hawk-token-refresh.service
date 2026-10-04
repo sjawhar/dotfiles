@@ -23,5 +23,15 @@ ExecStart=%h/.dotfiles/scripts/hawk-token
 StandardOutput=null
 # Same PATH gap as ctx-ingest.service: systemd user units default to
 # /usr/bin:/bin, which resolves neither the dotfiles git shim nor mise's uv shim
-# that hawk-token's `uv sync`/mint step needs.
-Environment=PATH=/home/ubuntu/.dotfiles/shims:/home/ubuntu/.dotfiles/bin:/home/ubuntu/.dotfiles/scripts:/home/ubuntu/.local/bin:/home/ubuntu/.mise/shims:/usr/local/bin:/usr/bin:/bin
+# that hawk-token's `uv sync`/mint step needs. %h, not a literal /home/ubuntu:
+# this unit runs on more than one machine (sami-agents, devbox-agents-2, the
+# laptop, oryx), each with its own $HOME.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+# mise's own shims (the `uv` one, and whatever the slot-refresh's
+# `gh-app-token` credential helper resolves `secrets` to) need their data dir
+# told explicitly: a systemd user unit does not inherit the interactive
+# .bashrc export, so mise falls back to the XDG default (~/.local/share/mise),
+# finds no installs there, and the slot-refresh's credential helper dies with
+# "secrets is not a valid shim" -- installers/mise.sh's own environment.d
+# drop-in documents exactly this gap for other mise-shimmed user services.
+Environment=MISE_DATA_DIR=%h/.mise

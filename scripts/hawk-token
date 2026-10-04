@@ -251,6 +251,13 @@ if [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; t
         "GIT_CONFIG_VALUE_0=$dotfiles_dir/gh-app-routes.gitconfig"
         "XDG_RUNTIME_DIR=$xdg_runtime_dir"
         "DBUS_SESSION_BUS_ADDRESS=unix:path=$xdg_runtime_dir/bus"
+        # mise falls back to the XDG default data dir (~/.local/share/mise,
+        # no installs) without this -- the credential helper's `secrets get`
+        # resolves through a mise shim too, and failed outright on
+        # devbox-agents-2 with "secrets is not a valid shim" until this line
+        # was added. installers/mise.sh documents the same gap for systemd
+        # user services.
+        "MISE_DATA_DIR=$HOME/.mise"
     )
     [ -n "${AGENTBOX_SRC:-}" ] && refresh_env+=("AGENTBOX_SRC=$AGENTBOX_SRC")
     if command -v setsid >/dev/null 2>&1; then
