@@ -69,6 +69,24 @@ done
 export PATH="${DOTFILES_DIR}/shims:${DOTFILES_DIR}/bin:${DOTFILES_DIR}/scripts:$_path"
 unset _path _parts _p
 
+# Authenticate mise's own GitHub API fallback (version/release lookups for
+# every `github:` backend tool, including the private sjawhar/trajectory-labs
+# repos mise's public versions-host mirror has no data for -- see
+# mise.jdx.dev/getting-started.html#github-api-rate-limiting). Unauthenticated
+# is 60/hour, shared by every session on this box; measured at 0/60 remaining
+# while chasing this (AGENTC, 2026-10-05). gh-app-token already mints and
+# caches this exact credential for git's own GitHub App routing above; reusing
+# it here is the box's existing credential, not a new one. --owner sjawhar
+# covers every `github:`-backed tool in mise.toml (all sjawhar/* or
+# third-party public repos, which an authenticated token's higher bucket
+# covers regardless of installation): never a pasted value, and silent on any
+# failure (a locked keyring, no gh-app-token on PATH yet) the same way
+# envoy-nats-seed is -- a shell with no token just falls back to the
+# unauthenticated limit, exactly as before this existed.
+if command -v gh-app-token &>/dev/null; then
+    MISE_GITHUB_TOKEN="$(gh-app-token agent --owner sjawhar 2>/dev/null)" && export MISE_GITHUB_TOKEN
+fi
+
 # ------------------------------------------------------------------------------
 # Language-specific environments
 # ------------------------------------------------------------------------------
