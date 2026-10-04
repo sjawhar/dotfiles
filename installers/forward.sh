@@ -62,9 +62,20 @@ if [ "${1:-}" = daemon ]; then
         pair="${pair_config##*/config-daemon-}"
         pair="${pair%.toml}"
         ln -sfn "$pair_config" "${HOME}/.config/forward/config-${pair}.toml"
+        # A pair sharing an address with another moves its URL channel with a
+        # drop-in, since that port is a flag, not a config key.
+        if [ -d "${DOTFILES_DIR}/forward/forward-daemon@${pair}.service.d" ]; then
+            ln -sfn "${DOTFILES_DIR}/forward/forward-daemon@${pair}.service.d" \
+                "${HOME}/.config/systemd/user/forward-daemon@${pair}.service.d"
+        fi
         services+=("forward-daemon@${pair}")
     done
     ln -sfn "${DOTFILES_DIR}/forward/forward-daemon@.service" "${HOME}/.config/systemd/user/forward-daemon@.service"
+fi
+# The devbox side of such a pair still dials the laptop's default URL channel
+# port; its host redirects that to the pair's port (a system unit: iptables).
+if [ "${1:-}" = serve ] && [ -f "${DOTFILES_DIR}/forward/channel-nat-${host}.service" ]; then
+    sudo systemctl enable --now "${DOTFILES_DIR}/forward/channel-nat-${host}.service"
 fi
 
 systemctl --user daemon-reload 2>/dev/null \
