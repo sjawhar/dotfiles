@@ -16,10 +16,10 @@ goals and usable slices; decide, look up, or recognize a settled instruction;
 simpler structures and existing mechanisms; correct boundaries and real
 authority; evidence and verification; provisional designs and real decisions.
 They stand alone — a consultation works from this file plus the caller's
-evidence. The full exchanges live in
-`~/.agent-eval/experiments/sami-proxy/precedents.md`, present only on the
-machine that ran the experiment, with source ids, agent tails, verbatim
-replies, and lessons; 20 carry the user's own verdict on the original bucket.
+evidence. The full exchanges live in `experiments/sami-proxy/precedents.md`
+in the private `sjawhar/agent-eval-data` repository, with source ids, agent
+tails, verbatim replies, and lessons; 20 carry the user's own verdict on the
+original bucket.
 Those YES/NO/MEH verdicts judge that bucket, not permission to act and not the
 four proxy types. A NO can reject a bad label; anger does not prove an ask was
 wrong. Some tails are incomplete or empty. Do not fill the missing context with
