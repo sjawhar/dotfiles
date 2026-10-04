@@ -12,15 +12,18 @@ exactly those to the strong model's `completion()`, unchanged from before this p
 existed. Full writeup: `.claude/session-analysis/2026-10-04-work/jev-evaluation.md`.
 
 Standalone script (not loaded into the eval kernel): the TypeSafe SDK needs
-TYPESAFE_API_KEY, which the agent-tier `secrets` CLI only injects into a subprocess's
-environment, not into the persistent eval kernel. Run it between two eval cells:
+TYPESAFE_API_KEY, which `scripts/secret-run` (the agent-secrets broker for a
+registered session, secretsd's agent tier otherwise -- never `secrets` directly, see
+that script's header) injects as TYPESAFE_AI_API_KEY into a subprocess's environment,
+not into the persistent eval kernel. Run it between two eval cells (daily-measure.py's
+`label_with_jev` runs the same two steps unattended, for the daily job):
 
     # eval cell 1
     %load ~/.dotfiles/plugins/sjawhar/skills/reflect/experiments-readout.py
     dump_turns_for_jev(session_dirs=[...], prompts=[...], out_path="turns.jsonl")
 
     # bash
-    secrets TYPESAFE_AI_API_KEY -- sh -c '
+    secret-run TYPESAFE_AI_API_KEY -- sh -c '
       export TYPESAFE_API_KEY=$TYPESAFE_AI_API_KEY
       uv run --with typesafe-sdk python3 ~/.dotfiles/plugins/sjawhar/skills/reflect/jev-turn-label.py \
         --turns turns.jsonl --out jev-labels.jsonl

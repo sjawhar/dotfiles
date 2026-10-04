@@ -1,18 +1,24 @@
 """Label every Sami Dispatch event (ask answers and comments) with the failure codebook.
 
 Each Dispatch ask is an agent's output and Sami's answer is a human label on it, so the
-per-label daily rate is a standing measure of how agents ask. It calls a strong model
-through the omp eval kernel's `completion()` helper, so it is loaded into an eval Python
-cell rather than run as a subprocess:
+per-label daily rate is a standing measure of how agents ask. Inside the omp eval
+kernel, `completion()` is already a global and this uses it unchanged (the weekly
+reflect run's own path):
 
     %load ~/.dotfiles/plugins/sjawhar/skills/reflect/classify-sami-events.py
     await main("dispatch-human.jsonl", "labels.jsonl")
+
+Run standalone (daily-measure.py, or `python3 classify-sami-events.py`, no eval
+kernel), `completion` is not a global here, so `_completion_fn()` falls back to
+standalone-model.py's direct Gemini call -- see that module's docstring for the
+GEMINI_API_KEY credential path and why Gemini, not Anthropic or OpenAI.
 
 Input is `extract-dispatch-human.py --out` output. Events the model fails to label are
 written with `"labels": null` and counted on stdout; rerun those, never read them as
 neutral. DN is the 1-based index of the event in created_at order.
 """
 import asyncio
+import importlib.util
 import json
 import re
 from pathlib import Path
@@ -168,11 +174,27 @@ def batch_prompt(batch_items):
     )
 
 
+def _completion_fn():
+    """The omp eval kernel's `completion()` when this is `%load`ed there (already a
+    global in this module's namespace); standalone-model.py's direct Gemini call
+    otherwise -- resolved every call, not cached, so a script that defines its own
+    `completion` after importing this module (none does today) is still honored."""
+    fn = globals().get("completion")
+    if fn is not None:
+        return fn
+    spec = importlib.util.spec_from_file_location(
+        "standalone_model", Path(__file__).parent / "standalone-model.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.completion
+
+
 async def classify_batch(batch_items, model="default", retries=2):
     prompt = batch_prompt(batch_items)
     by_dn = {}
     for _ in range(retries + 1):
-        h = completion(prompt, model=model, system=SYSTEM, schema=SCHEMA)
+        h = _completion_fn()(prompt, model=model, system=SYSTEM, schema=SCHEMA)
         try:
             raw = await asyncio.wait_for(asyncio.to_thread(h.wait), timeout=180)
         except asyncio.TimeoutError:

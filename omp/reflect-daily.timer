@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily tick for the Sami Dispatch/turn-label measurement job (reflect skill)
+
+[Timer]
+OnCalendar=*-*-* 07:13:00
+# A box that was asleep or rebooted still gets the day it missed (daily-measure.py's
+# watermarks make a late run just as correct as an on-time one).
+Persistent=true
+# Off the top of the hour and away from the other daily/hourly units on this box.
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
