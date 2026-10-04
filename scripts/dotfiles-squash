@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Replace the commits on dotfiles main since a base with one commit per topic.
+
+    dotfiles-squash plan  BASE [--tip REV] [--themes FILE] --messages DIR
+    dotfiles-squash build BASE [--tip REV] [--themes FILE] --messages DIR
+    dotfiles-squash push  OLD NEW [--tag NAME]
+
+`plan` assigns every path that changed between BASE and the tip to one topic in the themes
+file (the longest matching path prefix wins; a path no prefix matches, or two equally long
+prefixes match, is an error) and writes DIR/<topic>.txt for each topic that has paths: a
+subject line to rewrite, then the subjects of every commit that touched the topic's paths.
+Edit each file into the topic's commit message before `build`.
+
+`build` creates the topic commits in the themes file's order on top of BASE with git
+plumbing (no checkout, no worktree): each commit takes the tip's version of its topic's
+paths, so the last commit's tree is the tip's tree, which it checks before printing the new
+tip. A message file still holding the plan's TODO line is an error. Commits are signed.
+
+`push` tags OLD on origin (default `pre-squash-<UTC date>`), then moves origin's main from
+OLD to NEW with --force-with-lease, so a push someone made in between is refused, not lost.
+A session holding commits built on OLD moves them with
+`git rebase --onto origin/main <tag>`.
+"""
+import argparse
+import datetime
+import os
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_THEMES = HERE / "dotfiles-squash.themes.toml"
+TODO = "TODO: subject line for this topic"
+
+
+def git(*args, env=None, input=None):
+    p = subprocess.run(["git", *args], capture_output=True, text=True, env=env, input=input)
+    if p.returncode:
+        sys.exit(f"git {' '.join(args)} failed:\n{p.stderr.strip()}")
+    return p.stdout
+
+
+def load_themes(path):
+    data = tomllib.loads(Path(path).read_text())
+    themes = data["theme"]
+    names = [t["name"] for t in themes]
+    if len(set(names)) != len(names):
+        sys.exit(f"{path}: duplicate theme names")
+    return themes
+
+
+def changed_paths(base, tip):
+    out = git("diff", "--name-only", "--no-renames", "-z", base, tip)
+    return [p for p in out.split("\0") if p]
+
+
+def assign(paths, themes):
+    """Map each path to the theme whose longest prefix matches it."""
+    out, errors = {}, []
+    for path in paths:
+        best, best_len, tied = None, -1, False
+        for t in themes:
+            for prefix in t["paths"]:
+                hit = path == prefix or (prefix.endswith("/") and path.startswith(prefix))
+                if hit and len(prefix) > best_len:
+                    best, best_len, tied = t["name"], len(prefix), False
+                elif hit and len(prefix) == best_len and t["name"] != best:
+                    tied = True
+        if best is None:
+            errors.append(f"no theme matches {path}")
+        elif tied:
+            errors.append(f"two themes match {path} equally")
+        else:
+            out[path] = best
+    if errors:
+        sys.exit("\n".join(errors))
+    return out
+
+
+def subjects_by_theme(base, tip, by_path):
+    out = {}
+    log = git("log", "--reverse", "--no-renames", "--format=%x00%h %s", "--name-only", f"{base}..{tip}")
+    for block in log.split("\0")[1:]:
+        lines = [l for l in block.splitlines() if l.strip()]
+        head, files = lines[0], lines[1:]
+        for theme in sorted({by_path[f] for f in files if f in by_path}):
+            out.setdefault(theme, []).append(head)
+    return out
+
+
+def cmd_plan(a):
+    themes = load_themes(a.themes)
+    tip = git("rev-parse", a.tip).strip()
+    by_path = assign(changed_paths(a.base, tip), themes)
+    subjects = subjects_by_theme(a.base, tip, by_path)
+    d = Path(a.messages)
+    d.mkdir(parents=True, exist_ok=True)
+    for t in themes:
+        files = sorted(p for p, n in by_path.items() if n == t["name"])
+        if not files:
+            continue
+        body = "\n".join(f"- {s}" for s in subjects.get(t["name"], []))
+        (d / f"{t['name']}.txt").write_text(f"{TODO}\n\nAbsorbs:\n{body}\n")
+        print(f"{t['name']}: {len(files)} paths, {len(subjects.get(t['name'], []))} commits")
+    print(f"tip {tip}; messages in {d}")
+
+
+def cmd_build(a):
+    themes = load_themes(a.themes)
+    tip = git("rev-parse", a.tip).strip()
+    by_path = assign(changed_paths(a.base, tip), themes)
+    d = Path(a.messages)
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+        git("read-tree", a.base, env=env)
+        parent = git("rev-parse", a.base).strip()
+        for t in themes:
+            files = sorted(p for p, n in by_path.items() if n == t["name"])
+            if not files:
+                continue
+            msg_file = d / f"{t['name']}.txt"
+            msg = msg_file.read_text()
+            if TODO in msg:
+                sys.exit(f"{msg_file} still holds the plan's TODO line")
+            at_tip = {}
+            for line in git("ls-tree", "-z", tip, "--", *files).split("\0"):
+                if line:
+                    meta, path = line.split("\t", 1)
+                    mode, _, sha = meta.split()
+                    at_tip[path] = (mode, sha)
+            lines = []
+            for f in files:
+                if f in at_tip:
+                    mode, sha = at_tip[f]
+                    lines.append(f"{mode} {sha}\t{f}")
+                else:
+                    lines.append(f"0 {'0' * 40}\t{f}")
+            git("update-index", "--index-info", env=env, input="\n".join(lines) + "\n")
+            tree = git("write-tree", env=env).strip()
+            parent = git("commit-tree", "-S", tree, "-p", parent, "-F", str(msg_file)).strip()
+            print(f"{parent[:12]} {msg.splitlines()[0]}")
+    if git("rev-parse", f"{parent}^{{tree}}").strip() != git("rev-parse", f"{tip}^{{tree}}").strip():
+        sys.exit(f"tree of {parent} differs from the tip {tip}; nothing pushed")
+    print(f"new tip {parent}, tree identical to {tip}")
+
+
+def cmd_push(a):
+    old = git("rev-parse", a.old).strip()
+    new = git("rev-parse", a.new).strip()
+    if git("rev-parse", f"{old}^{{tree}}").strip() != git("rev-parse", f"{new}^{{tree}}").strip():
+        sys.exit("OLD and NEW trees differ; refusing to push")
+    tag = a.tag or f"pre-squash-{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d}"
+    git("push", "origin", f"{old}:refs/tags/{tag}")
+    git("push", f"--force-with-lease=refs/heads/main:{old}", "origin", f"{new}:refs/heads/main")
+    remote = git("ls-remote", "origin", "refs/heads/main").split()[0]
+    if remote != new:
+        sys.exit(f"origin main is {remote}, expected {new}")
+    print(f"origin main {old[:12]} -> {new[:12]}; old tip tagged {tag}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("plan", "build"):
+        p = sub.add_parser(name)
+        p.add_argument("base")
+        p.add_argument("--tip", default="origin/main")
+        p.add_argument("--themes", default=str(DEFAULT_THEMES))
+        p.add_argument("--messages", required=True)
+    p = sub.add_parser("push")
+    p.add_argument("old")
+    p.add_argument("new")
+    p.add_argument("--tag")
+    a = ap.parse_args()
+    {"plan": cmd_plan, "build": cmd_build, "push": cmd_push}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()
