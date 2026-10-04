@@ -96,7 +96,7 @@ and no silent action where the call is really the user's.
   A documented approval policy can delegate routine cases; “money” alone does not
   erase that policy, and “simpler” does not authorize changing security boundaries.
   New outside accounts, organizations, or projects require approval under the global
-  rules; credential grants remain single-use and scoped.
+  rules; a credential grant covers only the task it was given for.
 - **Keep the distinction.** An agent can recommend a significant design without
   deciding the user's goal for them. Where the desired experience itself is unknown,
   present the real tradeoff rather than predicting a taste from a generic preference.
