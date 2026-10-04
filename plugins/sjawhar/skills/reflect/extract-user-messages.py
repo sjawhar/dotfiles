@@ -132,6 +132,15 @@ def main():
         help="Session source(s) to extract (default: omp). OpenCode turns carry no "
         "line numbers in the index and are not supported here.",
     )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Exit 0 on a window with no turns, instead of erroring, as long as the "
+        "index's own newest turn (regardless of window) is fresh -- for a daily "
+        "incremental caller where a quiet day is routine, not an unindexed one. The "
+        "default (no turns in window is always an error) is unchanged for existing "
+        "callers.",
+    )
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else get_db_path()
@@ -160,7 +169,7 @@ def main():
     sessions_seen = set()
     current_path = None
     current_lines = []
-
+    index_newest = ""
     for sid, proj, sts, path, turn, line_start in rows:
         if not path or not line_start:
             continue
@@ -179,6 +188,8 @@ def main():
             continue
 
         ts = record.get("timestamp") or sts or ""
+        if ts > index_newest:
+            index_newest = ts
         if ts[:16].replace(" ", "T") <= cut:
             continue
         scanned += 1
@@ -249,6 +260,17 @@ def main():
     # tell a quiet fortnight from an unindexed one. Fail rather than report a
     # window the index cannot cover.
     if newest is None:
+        if args.allow_empty:
+            if index_newest:
+                lag_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(index_newest)).total_seconds() / 3600
+                if lag_hours > 6:
+                    print(
+                        f"Error: index's newest turn is {lag_hours:.1f}h old; re-run index-sessions.py.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+            print(f"window since {cut}: 0 turns; index is current, nothing new since the last run", file=sys.stderr)
+            return
         print("Error: no turns in window; run index-sessions.py (index -> extract -> read).", file=sys.stderr)
         sys.exit(1)
     lag_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(newest)).total_seconds() / 3600

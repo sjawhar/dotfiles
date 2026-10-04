@@ -44,22 +44,37 @@ core deliverable; rates and taxonomies support them.
 
 ## 2. Measure a failure rate per class
 
-Each Dispatch ask is an agent's output and Sami's answer is a human label on it. Label
-every event from step 1 with `classify-sami-events.py` (the codebook is inside). It uses a
-strong model through the omp eval kernel's `completion()`, so load it in an eval Python
-cell:
+A daily job (`daily-measure.py`, armed by `installers/reflect-daily.sh` as
+`omp/reflect-daily.service`/`.timer` on sami-agents) already extends two label corpora
+one day at a time into `~/.dotfiles/.claude/reflect-store.db` (`reflect-store.py`'s
+schema): Sami's Dispatch events with `classify-sami-events.py`'s codebook, and session
+turns with `jev-turn-label.py`/the strong model's correction/other/not_sami labels.
+Read the store instead of recomputing it:
 
-```python
-%load ~/.dotfiles/plugins/sjawhar/skills/reflect/classify-sami-events.py
-await main("dispatch.jsonl", "labels.jsonl")
+```bash
+python3 "$SKILL_DIR/daily-readout.py"   # every class's daily rate series, next to the
+                                         # prior report's "Landed this run" table
 ```
 
-Report per-label rates by day and by week beside the prior report's. Before trusting a
-label, read 20 random events it carries and state the precision you found. A single event
-cannot show that it repeats an earlier ask, so `already_answered` undercounts; check it
-against your own reading. Your step-1 reading is the gold set: a failure class you found
-by reading that the codebook lacks goes into the codebook, and its rate starts from that
-run.
+If the store's newest day is older than this run's window end (the daily timer missed
+a day, or this is the first run on a new box), catch it up by hand before reading:
+`python3 daily-measure.py run` (needs `secret-run GEMINI_API_KEY TYPESAFE_AI_API_KEY --`;
+its module docstring has the credential path and why those two keys). Report per-label
+rates by day and by week beside the prior report's, same as before. Before trusting a
+label, read 20 random events it carries and state the precision you found. A single
+event cannot show that it repeats an earlier ask, so `already_answered` undercounts;
+check it against your own reading. Your step-1 reading is the gold set: a failure class
+you found by reading that the codebook lacks goes into the codebook
+(`classify-sami-events.py`'s `CODEBOOK`, which `daily-measure.py` imports unchanged),
+and its rate starts from that run — relabel nothing retroactively; the series simply
+gains a new class from here.
+
+**Monthly calibration.** About once a month, read a fresh random sample of ~30 labelled
+events/turns the way step 1 and the paragraph above already do, and state the precision
+found. The daily job runs on a model's own judgment with nobody reading its output
+between weekly sittings; a monthly calibration sample is what catches the labels
+drifting from what Sami actually counts as a mistake before a month of rates have
+quietly gone stale.
 
 ## 3. Find why each top failure happens
 
@@ -98,17 +113,20 @@ A change to harness behavior ships behind a gate in the omp experiments extensio
 (`omp/extensions/experiments/gates.json`), so its effect is randomized per session. Every run
 reads the gates with `experiments-readout.py`: each randomized feature on versus off, per
 session, on the share of Sami's turns that correct the agent, the share of merged PRs marked
-rework, and model spend per merged PR, each with a 95% interval. Turn labelling is Jev-first,
-strong-model-escalated: dump the turns with `dump_turns_for_jev`, run `jev-turn-label.py`
-(confidence >= 0.5; measured 91.2% agreement with the strong model on the 91.6% of turns it
-answers that confidently, escalation is explicit, never silent -- `jev-turn-label.py`'s
-docstring has the exact commands and the full measurement is in
-`.claude/session-analysis/2026-10-04-work/jev-evaluation.md`), then load
-`experiments-readout.py` in an eval cell like the classifier, pass both boxes' session
-directories and step 1's prompt files, the Jev output as `jev_labels_path`, and keep the
-strong-model turn-label cache in the scratch directory. Report every feature's three
-intervals; there is no stop rule. A week of traffic detects only large effects, so a feature
-whose interval includes 0 stays random rather than being called a wash.
+rework, and model spend per merged PR, each with a 95% interval. Turn labelling is daily now
+(step 2): dump the store's turn_labels with
+`python3 "$SKILL_DIR/reflect-store.py" dump-turn-labels --out turn-labels.jsonl` (the
+id shape already matches `experiments-readout.py`'s own cache file, so this is a
+drop-in `turn_labels_path`/`cache_path`), then load `experiments-readout.py` in an eval
+cell, pass both boxes' session directories, step 1's prompt files, and that dump as
+`turn_labels_path`; only turns outside the daily job's window (if any) still escalate
+live through `label_turns`'s own Jev-first, strong-model-escalated path (confidence >=
+0.5; measured 91.2% agreement with the strong model on the 91.6% of turns it answers
+confidently, escalation explicit, never silent -- `jev-turn-label.py`'s docstring has
+the exact commands and the full measurement is in
+`.claude/session-analysis/2026-10-04-work/jev-evaluation.md`). Report every feature's
+three intervals; there is no stop rule. A week of traffic detects only large effects,
+so a feature whose interval includes 0 stays random rather than being called a wash.
 
 A text change lands for everyone and is read from the step-2 rates in later runs; changes
 that land within a day of each other cannot be told apart, so say so instead of attributing.
