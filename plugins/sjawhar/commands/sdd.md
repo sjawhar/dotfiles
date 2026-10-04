@@ -169,14 +169,14 @@ dependencies do not establish completion.
 Legion's GitHub `main` at dispatch time, never a local copy:
 
 - shared opening for implementer, tester and reviewer:
-  `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/common.md`;
+  `https://raw.githubusercontent.com/sjawhar/legion/main/packages/daemon/internal/prompts/roles/core/common.md`;
 - core:
-  `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/core/<role>.md`,
+  `https://raw.githubusercontent.com/sjawhar/legion/main/packages/daemon/internal/prompts/roles/core/<role>.md`,
   selecting by purpose: implementation/debug uses `implementer` (`deep`), acceptance uses `tester`
   (`deep`), review uses `reviewer` (`reviewer`), research uses `oracle` (`oracle`, without the
   shared opening); only Legion fetches `planner` because the coordinator plans here;
 - mechanics:
-  `https://raw.githubusercontent.com/sjawhar/legion/main/packages/pi-envoy/roles/mechanics/interactive.md`.
+  `https://raw.githubusercontent.com/sjawhar/legion/main/packages/daemon/internal/prompts/roles/mechanics/interactive.md`.
 
 Reject non-200 responses and empty bodies:
 
