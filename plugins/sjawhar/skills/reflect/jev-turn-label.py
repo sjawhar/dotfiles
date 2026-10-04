@@ -97,10 +97,12 @@ async def run(turns_path, out_path, confidence_threshold=CONFIDENCE_THRESHOLD, c
     lock = asyncio.Lock()
     n_confident = 0
     n_escalated = 0
+    n_failed = 0
+    first_error = None
 
     async with AsyncTypeSafeClient(model="jev-latest") as client:
         async def one(t):
-            nonlocal n_confident, n_escalated
+            nonlocal n_confident, n_escalated, n_failed, first_error
             for attempt in range(3):
                 try:
                     async with sem:
@@ -108,10 +110,13 @@ async def run(turns_path, out_path, confidence_threshold=CONFIDENCE_THRESHOLD, c
                             client.system_one(t["text"], build_question()), timeout=60
                         )
                     break
-                except Exception:
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = f"{type(exc).__name__}: {exc}"
                     await asyncio.sleep(1.5 * (attempt + 1))
             else:
                 n_escalated += 1
+                n_failed += 1
                 return
             ans = result.choices["label"]
             async with lock:
@@ -129,6 +134,13 @@ async def run(turns_path, out_path, confidence_threshold=CONFIDENCE_THRESHOLD, c
         f"escalating {n_escalated} to the strong model (not written to {out_path})",
         file=sys.stderr,
     )
+    if n_failed:
+        print(
+            f"of those, {n_failed} escalated because every call for them failed, "
+            f"first error: {first_error} - check TYPESAFE_API_KEY and the model name "
+            f"before reading this run as low confidence",
+            file=sys.stderr,
+        )
 
 
 def main():
