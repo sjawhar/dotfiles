@@ -6,7 +6,8 @@
 #   envoy ps --sub-agents — include subagent sessions
 #   envoy ps --json  — JSON output
 #   envoy ps --local — filter to local machine only
-#   envoy send <t> <msg> — send message (ses_* = direct, else publish to topic)
+#   envoy send [--source envoy] <t> <msg> — send message (ses_* = direct, else publish to topic)
+#   envoy notify <topic> <msg> — publish as envoy: `send --source envoy <topic> <msg>`
 #   envoy broadcast <msg> — direct-send <msg> to every live titled session
 #                          `envoy ps` lists for this machine (`--all-machines`
 #                          widens, `--machine <id>` picks one); `--dir <substr>`
@@ -25,9 +26,21 @@
 # Claude Code, or OpenCode session exports one of the markers below) it is
 # stamped source=agent with that session's id as source_session, so the
 # recipient's reply hint names a real inbox instead of an anonymous "agent".
+# A leading `--source envoy` stamps source=envoy with no source_session whatever
+# the environment holds: an automated notice (a timer, a service) speaks for the
+# platform, not as whichever session ran it, and the inbox shows the sender as
+# source_session ?? source. envoy is the only source a caller may assert.
+# `envoy notify` is that send, for the timers that post such notices: an envoy
+# from before it answers `notify` as an unknown command, exits 1 and sends
+# nothing, so a caller needs no probe for it.
 set -euo pipefail
 
 ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
+# Seconds any call to the listener may take before it fails. The listener's own
+# HTTP server times a request out after 10 s, so 30 s only ever cuts off one that
+# accepts the connection and never answers, which would otherwise hang the
+# caller (a timer's run, a session's tool call) for good.
+ENVOY_MAX_TIME="${ENVOY_MAX_TIME:-30}"
 HOSTNAME="${HOSTNAME:-$(hostname)}"
 # --local matches the listener's configured machine_id, which may differ from
 # hostname (it comes from Pulumi's ENVOY_MACHINE_ID). Override when they diverge.
@@ -43,8 +56,8 @@ _envoy_ps() {
         esac
     done
     local raw
-    raw=$(curl -fsS "$ENVOY_URL/v1/sessions" 2>/dev/null) || {
-        echo "error: could not reach Envoy at $ENVOY_URL" >&2
+    raw=$(curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" "$ENVOY_URL/v1/sessions" 2>&1) || {
+        echo "error: Envoy at $ENVOY_URL failed GET /v1/sessions: $raw" >&2
         return 1
     }
     if [ "$sub_agents" = false ]; then
@@ -71,8 +84,16 @@ _envoy_ps() {
 }
 
 _envoy_send() {
+    local asserted_source=""
+    if [ "${1:-}" = "--source" ]; then
+        if [ "${2:-}" != "envoy" ]; then
+            echo "--source accepts only envoy" >&2
+            return 2
+        fi
+        asserted_source="envoy"; shift 2
+    fi
     if [ $# -lt 2 ]; then
-        echo "Usage: envoy send <target> <message>" >&2
+        echo "Usage: envoy send [--source envoy] <target> <message>" >&2
         echo "  target: session ID (ses_...) for direct send, or topic for publish" >&2
         return 1
     fi
@@ -84,7 +105,9 @@ _envoy_send() {
     # marker to its bash tool, so an OpenCode agent using this CLI is stamped
     # human — OpenCode agents have the native envoy_send tool and should use it.
     local source="human" source_session=""
-    if [ -n "${OMP_SESSION_ID:-}" ]; then
+    if [ -n "$asserted_source" ]; then
+        source="$asserted_source"
+    elif [ -n "${OMP_SESSION_ID:-}" ]; then
         source="agent"; source_session="$OMP_SESSION_ID"
     elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
         source="agent"; source_session="$CLAUDE_CODE_SESSION_ID"
@@ -104,12 +127,14 @@ _envoy_send() {
             '{ topic: $t, message: $m, source: $s } + (if $ss == "" then {} else { source_session: $ss } end)')
     fi
 
-    curl -fsS -X POST "$ENVOY_URL$endpoint" \
+    local out
+    out=$(curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" -X POST "$ENVOY_URL$endpoint" \
         -H "Content-Type: application/json" \
-        -d "$payload" 2>/dev/null || {
-        echo "error: could not reach Envoy at $ENVOY_URL" >&2
+        -d "$payload" 2>&1) || {
+        echo "error: Envoy at $ENVOY_URL failed POST $endpoint: $out" >&2
         return 1
     }
+    printf '%s\n' "$out"
 }
 
 _envoy_broadcast() {
@@ -157,8 +182,8 @@ _envoy_broadcast() {
         return
     fi
 
-    local sent=0 failed=0 id machine_id dir title
-    while IFS=$'\t' read -r id machine_id dir title; do
+    local sent=0 failed=0 id title
+    while IFS=$'\t' read -r id _ _ title; do
         if _envoy_send "$id" "$message" >/dev/null; then
             sent=$((sent + 1))
             printf 'sent    %s  %s\n' "$id" "$title"
@@ -171,10 +196,19 @@ _envoy_broadcast() {
     [ "$failed" -eq 0 ]
 }
 
+_envoy_notify() {
+    if [ $# -ne 2 ]; then
+        echo "Usage: envoy notify <topic> <message>" >&2
+        return 1
+    fi
+    _envoy_send --source envoy "$1" "$2"
+}
+
 case "${1:-}" in
     ps)        shift; _envoy_ps "$@"; exit ;;
     send)      shift; _envoy_send "$@"; exit ;;
+    notify)    shift; _envoy_notify "$@"; exit ;;
     broadcast) shift; _envoy_broadcast "$@"; exit ;;
-    "")        echo "Usage: envoy <ps|send|broadcast>" >&2; exit 1 ;;
+    "")        echo "Usage: envoy <ps|send|notify|broadcast>" >&2; exit 1 ;;
     *)         echo "Unknown command: $1" >&2; exit 1 ;;
 esac

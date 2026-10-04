@@ -48,6 +48,7 @@ for (const machine of machines) {
       "PORT=9020",
       `ENVOY_MACHINE_ID=${machine.machineId}`,
       `NATS_URLS=${ENVOY_NATS_URL}`,
+      "ENVOY_ALLOW_REMOTE_NATS=1",
       "ENVOY_HOST_BRIDGE=127.0.0.1",
     ];
     deployWatchdog(machine, envs, `${registry}/envoy:${imageTag}`, [listener]);

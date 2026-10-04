@@ -76,6 +76,10 @@ export function createListener(
         "PORT=9020",
         `ENVOY_MACHINE_ID=${machine.machineId}`,
         `NATS_URLS=${ENVOY_NATS_URL}`,
+        // The listener owns the shared ENVOY_NOTIFICATIONS stream on the fleet's NATS, not this
+        // host's own; a connect refuses a server that is not the machine's without this
+        // (sjawhar/legion packages/envoy/internal/bus/reach.go).
+        "ENVOY_ALLOW_REMOTE_NATS=1",
         "ENVOY_HOST_BRIDGE=127.0.0.1",
         ...webhookEnvs,
       ],
