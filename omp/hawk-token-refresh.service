@@ -14,6 +14,13 @@ Description=Mint a fresh hawk-token credential off any agent turn's budget (scri
 [Service]
 Type=oneshot
 ExecStart=%h/.dotfiles/scripts/hawk-token
+# hawk-token prints the live token itself on stdout (the thing `hawk-token-fast`
+# would otherwise have to mint live) -- a secret this unit's only consumer never
+# reads, since the side effect that matters is its `save_token()` rewrite of
+# last-good-token. Discard it rather than let the journal hold a plaintext token
+# every 3 minutes; its own log() messages (refresh/slot-rebuild status) go to
+# stderr and still reach the journal for debugging.
+StandardOutput=null
 # Same PATH gap as ctx-ingest.service: systemd user units default to
 # /usr/bin:/bin, which resolves neither the dotfiles git shim nor mise's uv shim
 # that hawk-token's `uv sync`/mint step needs.
