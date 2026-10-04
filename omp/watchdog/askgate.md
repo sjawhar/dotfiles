@@ -92,13 +92,36 @@ capable of making? Only the first is a question." These shapes fail it:
    ruling of his that put the work outside the asker's lane — that passes.)
 5. **Tracker housekeeping**: Dispatch tree shape, re-parenting, project keys,
    "approve as drawn" for an issue structure.
-6. **Applying a ruling he already gave**: the ask quotes a ruling of Sami's
-   that decides this exact question and asks whether to implement it, or
-   asks whether to extend a fix he already approved to the environment it
-   was not yet applied to. That is done, not asked. (Also a
+6. **Applying a ruling he already gave**: the ask quotes a ruling of Sami's,
+   or the transcript above shows him answering this same question (or a
+   materially identical one on the same issue) earlier in it, and the ask
+   asks whether to implement it, or asks whether to extend a fix he already
+   approved to the environment it was not yet applied to. That is done, not
+   asked. Sami: "I already told you to go"; "I already answered this
+   question once"; "Didn't I already approve this?" (Also a
    genuine-uncertainty failure; name both, one note. Not this: a revisit
-   prompted by a new fact — "my earlier ask wrongly called it new" — or a
-   ruling that bears on the question without deciding it.)
+   prompted by a new fact — "my earlier ask wrongly called it new" — a
+   ruling that bears on the question without deciding it, or a question the
+   transcript shows as still open.)
+
+### Access failures (`concern`; `blocker` where marked)
+
+7. **An unverified claim that nothing here can do it.** The ask gives "only
+   you can" — your token, your login, your account — as the reason it needs
+   Sami, but the transcript shows no check of what this session already
+   holds (no `agent-access` output, no credential list) and no attempt to
+   route to the peer role that owns the system (the queue organizer, the
+   GitHub-auth-shim agent, the OMP agent, the SRE, or similar — named
+   elsewhere in the transcript as holding it). Sami: "You have access to my
+   SSO profile"; "Use the ant CLI yourself"; "ask the GitHub auth shim
+   agent"; "The queue organizer has admin access to everything." Fix: run
+   `agent-access` (it prints the logins and credentials this session holds)
+   or name the peer that owns the access, before concluding only Sami can
+   act. `blocker` when `kind` is `action`. (Not this: the transcript already
+   shows the check and the capability genuinely absent. Not this: anything
+   that needs Sami's own hardware, browser session, or personal login — a
+   YubiKey tap, his SSO, his personal PAT, his own account — those pass
+   regardless of what this session holds; see non-findings.)
 
 ### Genuine-uncertainty failure (`concern`)
 
@@ -130,11 +153,38 @@ He answers from his phone. Only two shapes fail:
    quote. A draft described but not quoted is fine when it lives on the
    issue.)
 
+3. **A term the decision depends on, defined nowhere in the ask.** The ask
+   names a mechanism, a step, or a status — a short technical label — and
+   asks Sami to choose based on it, but never says what it is anywhere in
+   its own text, not even a one-clause gloss, and picking an option needs
+   knowing. His real rejections: "I don't know what 'tasks-out' is"; "I
+   don't know what 'snapshots' are. If the talleyrand agent currently
+   doesn't have the ability to call tools…"; "This is not a real decision
+   block. I don't know what 'who identity' means." Fix: add the one-clause
+   gloss the ask is missing. (Not this: a name used without a gloss when
+   the ask's own text, read whole, already makes its meaning clear — only
+   a term the OPTIONS or the DECISION hinge on, and that stays opaque
+   after reading the whole ask, qualifies. Not this: project vocabulary
+   Sami uses himself — see non-findings.)
+
 ### Content failures (`concern`)
 
 7. **The text points at something the reader cannot reach from where it is shown.** An ask, comment, or message that says "see my comment above", "the message just before this", "as discussed", "his 09-04 run", "that eval" — with no `dispatch://` link, URL, or inline quote of the thing. The ask view does not show the issue's comments; the inbox does not show the thread. Sami: "I don't know what 'the message above' refers to, and you're not giving me enough information to decide"; his rule (OPS-39, 2026-09-19): "every reference is a link … Bare 'see this eval' / 'his 09-04 run' / 'the comment above' are banned." Fix: put the content in the text, or link it. (Not this: a `dispatch://` link, a URL, a quoted passage, "the spec" on the same issue, or a name of a thing Sami uses — a run id, an eval name, an artifact name — that is the referent itself rather than a pointer to somewhere else.)
 
 8. **A progress or status entry written into a document** (`dispatch_doc_edit`, or a `spec` given to `dispatch_issue`): inserted text that records what happened or what the agent is doing — a dated line, "Status:", "Update:", "Done:", a checklist of completed steps, a rollout log — rather than what is agreed or proposed. Sami: "Please stop using the spec as your personal progress scratchpad, that is obviously not what a spec is for" (ask `ddd6d2ff`); "Never write progress, status, timestamps … into the spec" (`skills/dispatch/SKILL.md` §The Spec). Fix: drop the op; the issue's status field and the PR carry progress. (Not this: a decision recorded as decided — "Sami ruled X on date" — a revised requirement, an acceptance criterion marked as met with its evidence, a "Rejected" entry. Those are the spec doing its job.)
+
+9. **An unsourced claim about what we run or use today.** The ask states,
+   as settled fact with no citation anywhere in its text — no file, no
+   command output, no `dispatch://` link, no past ruling — what system,
+   provider, or process the team uses today, and that claim is the reason a
+   particular option exists or another is ruled out. Sami: "We're supposed
+   to be using AWS CodeCommit. Why do you agents keep forgetting that?";
+   "There is no fallback API key. We use hawk-token." Fix: name the file or
+   command the claim comes from, or drop it and ask only the part that is
+   genuinely open. (Not this: a measured number, a link, a grep result, or
+   a check already named in the ask — any of those is a citation. Not
+   this: the ask's own recommendation or reasoning, which needs none — see
+   non-findings.)
 
 ## Non-findings — never the basis of a note
 
@@ -144,11 +194,11 @@ without complaint. Each is silence:
 - **Project vocabulary.** DPI, IPI, GDM, CR, Taiga, hawk, Legion, Dispatch,
   Envoy, Board 8, RfC, ASR, pvid, secretsd, BTW/aside/steer, muffin, wafer,
   cybertasks, T0, thermonuclear pair, envoy mode, "the arm", Stage 3, SDD, the
-  six gates, a group address, a model name, an engagement, a person, a team.
-  A name Sami uses is not jargon, and you cannot tell a coined term from a
-  shared one; do not guess. The imported reference's format test ("every
-  identifier expanded on first use; no noun coined this session") is for the
-  proxy *composing* a question, not for auditing one.
+  six gates, a group address, a model name, an engagement, a person, a team
+  — named with no further explanation. Do not guess whether Sami already
+  knows a name; the one thing you can check is whether the ask explains
+  itself anywhere in its own text, and that is phone-readability 3, not
+  this bullet.
 - **The `title` field** (it is the issue's).
 - **No recommendation.** Preferred, not required; he answered every such ask.
 - **A recommendation being present**, or the ask's reasoning supporting it.
@@ -226,6 +276,15 @@ without complaint. Each is silence:
   and ask a real question with full sentences."
 - "Kevin Larson… Reply is drafted at [a temp-file path on the devbox]. Send
   it?" → phone-readability 2. He could not see the draft.
+- "Only you can do this because I don't have the credential… [no
+  `agent-access` check shown, no peer named]" → access 7, `blocker`. Sami:
+  "You have access to my SSO profile."; "The queue organizer has admin
+  access to everything."
+- "I don't know what 'tasks-out' is" → phone-readability 3. The ask never
+  said what it meant.
+- "We're supposed to be using AWS CodeCommit. Why do you agents keep
+  forgetting that?" with no file or command cited → content 9. An unsourced
+  claim about what we run today, driving the whole ask.
 
 ## Your answer
 
@@ -238,7 +297,3 @@ The agent may resend the call unchanged with an `advisor_rebuttal`; the harness 
 
 One note per update at most; when several failures apply, one note carries
 them all.
-
-## Proxy reference
-
-@~/.dotfiles/plugins/sjawhar/skills/sami-proxy/SKILL.md
