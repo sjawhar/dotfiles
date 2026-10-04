@@ -4,7 +4,7 @@
   "dependencies": {
     "@bopstack/pi-codegraph": "^0.1.1",
     "@sjawhar/opencode-knives": "github:sjawhar/knives#v2.0.22",
-    "@sjawhar/pi-legion-envoy": "^7.5.1",
+    "@sjawhar/pi-legion-envoy": "^7.6.0",
     "secretsd": "github:sjawhar/forward#v3.5.4",
     "superpowers": "github:obra/superpowers#v6.3.0"
   }
