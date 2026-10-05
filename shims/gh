@@ -52,6 +52,30 @@ if agent_context; then
         esac
         echo "gh shim: GH_TOKEN inherited from the environment (${GH_TOKEN:0:4}…, $_kind); not routing" >&2
     fi
+    # `gh auth status` describes the user's own login, which the config
+    # directory above hides from every agent call, so on its own it always
+    # answers "not logged into any GitHub hosts" while routed calls work. Here
+    # it answers for what an agent call uses instead: it names the routing and,
+    # inside a GitHub repository, makes one routed read of it and exits on that.
+    if [[ "${1:-}" == auth && "${2:-}" == status ]]; then
+        echo "gh shim: agent session. gh calls are routed to the GitHub App for the target repo's owner (an owner without one gets the upstream token), minted per call; the user's own login is not used, so it is not reported."
+        _remote="$(git remote get-url origin 2>/dev/null || true)"
+        _slug=""
+        case "$_remote" in
+            *github.com[:/]*) _slug="${_remote#*github.com[:/]}"; _slug="${_slug%/}"; _slug="${_slug%.git}" ;;
+        esac
+        [[ "$_slug" =~ ^[^/]+/[^/]+$ ]] || _slug=""
+        if [[ -z "$_slug" ]]; then
+            echo "No GitHub repository in this directory to check. To check one, run a read against it, for example: gh api repos/<owner>/<repo> --jq .full_name"
+            exit 0
+        fi
+        if _out="$("$0" api "repos/$_slug" --jq .full_name 2>&1)"; then
+            echo "github.com/$_slug: routed access works"
+            exit 0
+        fi
+        echo "github.com/$_slug: routed access FAILED: ${_out%%$'\n'*}"
+        exit 1
+    fi
     # The config directory hides hosts.yml from API calls, but `gh auth token`
     # and `gh auth git-credential` still read the user's login from the OS
     # keyring (measured: a gho_ token with hosts.yml absent). Every `gh auth`
