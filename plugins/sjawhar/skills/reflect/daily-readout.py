@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Print every failure class's daily rate series from reflect-store.py's store, next to
 the latest weekly report's "Landed this run" table (section 7), so a fix's effect shows
-up by date instead of waiting for the next weekly sitting.
+up by date instead of waiting for the next weekly sitting. Under the turn series it
+also prints Jev's agreement with the Claude series (overall and by Jev's confidence
+threshold), from `turn_labels_alt` -- how far Jev could be trusted, measured daily.
 
 This does not auto-match a landed change to the label(s) it targets -- that free-text
 "targets" column is a human judgment call, same as the report's own "verdict" column
@@ -15,11 +17,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import sqlite3
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+_spec = importlib.util.spec_from_file_location("reflect_store", HERE / "reflect-store.py")
+store = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(store)
 
 
 def get_db_path() -> Path:
@@ -72,33 +79,21 @@ def rate_series(conn: sqlite3.Connection, kind: str, since_day: str | None) -> d
     return series
 
 
-# Monthly-calibration findings (SKILL.md step 2): a class where the standing labeller
-# (standalone-model.py's Gemini) measured materially worse than the kernel model the
-# 2026-10-04 seed used, against the same 462-event gold sample and the same seed
-# population's own kernel-archived opinion (`reflect-store.py agreement --gold`).
-# "Materially worse" here: F1 at least 0.10 lower. Update this by rerunning that command
-# at the next monthly calibration sample (SKILL.md step 2); do not silently drop a class
-# once flagged -- replace its text with the new finding instead.
+# Classes whose daily rate the hand-checked sample cannot vouch for, with the measured
+# numbers (`reflect-store.py agreement --gold`, 462 events). Refresh at each monthly
+# calibration sample (SKILL.md step 2), replacing a class's text with the new finding.
 CALIBRATION_CAVEATS: dict[str, str] = {
-    # Measured 2026-10-04 (`reflect-store.py agreement --gold`, 462-event gold sample,
-    # the 2,352-event seed population): F1 0.191 (current, Gemini) vs 0.292 (the
-    # displaced kernel model, anthropic/claude-fable-5-1:xhigh) -- a 0.10 F1 drop, the
-    # only class crossing that bar either direction. Gemini over-triggers this label
-    # (precision 0.115, 116 false positives on 462 events) more than the kernel model
-    # did (precision 0.184, 84 false positives), and also recalls less (0.556 vs
-    # 0.704). Every other gold-covered class is flat or Gemini is notably better
-    # (invented_scope, reinvented, untested: Gemini's F1 is 0.10-0.21 higher -- over-
-    # triggering was the kernel model's problem there, not Gemini's).
     "wrong_claim": (
-        "Gemini measured materially worse than the kernel model it replaced on this "
-        "class in the 2026-10-04 calibration (F1 0.191 vs 0.292, precision 0.115 vs "
-        "0.184 -- more false positives, not fewer true ones found). Read this rate as "
-        "over-triggered until a monthly recheck shows improvement."
+        "precision 0.15 / recall 0.56 against the 462-event hand-checked sample (2026-10-05, "
+        "claude-fable-5-1:xhigh), and 0.18 / 0.70 for the earlier no-thinking labels: that "
+        "sample was not tagged for this class systematically, so it cannot say whether these "
+        "counts are right. Read the trend, not the level."
     ),
 }
 
 
-def render(dispatch_series: dict, turn_series: dict, landed: list[dict], report_name: str) -> str:
+def render(dispatch_series: dict, turn_series: dict, turn_agreement: dict,
+           refusals: dict, landed: list[dict], report_name: str) -> str:
     lines = ["# Daily failure-class rates\n"]
     lines.append("## Dispatch events (classify-sami-events.py codebook)\n")
     for label in sorted(dispatch_series):
@@ -114,6 +109,22 @@ def render(dispatch_series: dict, turn_series: dict, landed: list[dict], report_
         for day, count, total, rate in turn_series[label]:
             lines.append(f"  {day}  {count:>4}/{total:<4}  {rate:.3f}")
         lines.append("")
+    for alt_model, result in turn_agreement.items():
+        lines.append(f"### {alt_model} vs the series (turn_labels_alt, comparison only)")
+        lines.append("  level    coverage  agreement  kappa    n")
+        for level, d in result["levels"].items():
+            if d["n"] == 0:
+                lines.append(f"  {level:<8} {d['coverage']:>8.3f}  {'-':>9}  {'-':>6}  {0:>4}")
+                continue
+            lines.append(f"  {level:<8} {d['coverage']:>8.3f}  {d['agreement']:>9.3f}  "
+                         f"{d['kappa']:>6.3f}  {d['n']:>4}")
+        lines.append("")
+    lines.append("## Refused by the labeller (left out of the series)\n")
+    if not refusals:
+        lines.append("(none)")
+    for (kind, model), n in refusals.items():
+        lines.append(f"  {kind:<9} {model}: {n}")
+    lines.append("")
     lines.append(f"## Landed this run ({report_name}, section 7)\n")
     if not landed:
         lines.append("(no landed-changes table found)")
@@ -153,13 +164,18 @@ def main() -> None:
 
     dispatch_series = rate_series(conn, "dispatch", since_day)
     turn_series = rate_series(conn, "turn", since_day)
+    turn_agreement = {
+        model: result for model, result in store.compute_turn_agreement(conn).items()
+        if model == store.JEV_MODEL
+    }
 
     reports_dir = Path(args.reports_dir) if args.reports_dir else get_reports_dir()
     report_path = latest_report(reports_dir)
     landed = parse_landed_table(report_path) if report_path else []
     report_name = report_path.name if report_path else "(none found)"
 
-    print(render(dispatch_series, turn_series, landed, report_name))
+    print(render(dispatch_series, turn_series, turn_agreement, store.refusal_counts(conn),
+                 landed, report_name))
 
 
 if __name__ == "__main__":

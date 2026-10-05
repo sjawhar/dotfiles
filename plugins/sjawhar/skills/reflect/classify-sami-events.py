@@ -10,8 +10,8 @@ reflect run's own path):
 
 Run standalone (daily-measure.py, or `python3 classify-sami-events.py`, no eval
 kernel), `completion` is not a global here, so `_completion_fn()` falls back to
-standalone-model.py's direct Gemini call -- see that module's docstring for the
-GEMINI_API_KEY credential path and why Gemini, not Anthropic or OpenAI.
+standalone-model.py's direct Claude call (over the Hawk middleman gateway) -- see
+that module's docstring for the credential path.
 
 Input is `extract-dispatch-human.py --out` output. Events the model fails to label are
 written with `"labels": null` and counted on stdout; rerun those, never read them as
@@ -176,7 +176,7 @@ def batch_prompt(batch_items):
 
 def _completion_fn():
     """The omp eval kernel's `completion()` when this is `%load`ed there (already a
-    global in this module's namespace); standalone-model.py's direct Gemini call
+    global in this module's namespace); standalone-model.py's direct Claude call
     otherwise -- resolved every call, not cached, so a script that defines its own
     `completion` after importing this module (none does today) is still honored."""
     fn = globals().get("completion")
@@ -191,31 +191,62 @@ def _completion_fn():
 
 
 async def classify_batch(batch_items, model="default", retries=2):
+    """One batch, no bisection of its own. Returns `(labels_by_dn, refused)`, where
+    `refused` is true only when every attempt was a content refusal
+    (`stop_reason: "refusal"`, no text block), the one failure that retrying never fixes.
+    A refusal is identified by exception class name, not `isinstance`, against
+    standalone-model.py's `Refusal`: `_completion_fn()` re-resolves that module fresh on
+    every call, so two calls' exception classes are not the same object."""
     prompt = batch_prompt(batch_items)
     by_dn = {}
+    attempts = refusals = 0
     for _ in range(retries + 1):
+        attempts += 1
         h = _completion_fn()(prompt, model=model, system=SYSTEM, schema=SCHEMA)
         try:
             raw = await asyncio.wait_for(asyncio.to_thread(h.wait), timeout=180)
         except asyncio.TimeoutError:
             continue
-        data = json.loads(raw) if isinstance(raw, str) else raw
-        by_dn.update({r["dn"]: r["labels"] for r in data["results"]})
+        except Exception as e:
+            if type(e).__name__ != "Refusal":
+                raise
+            refusals += 1
+            continue
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            by_dn.update({r["dn"]: r["labels"] for r in data["results"]})
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
         if all(it["dn"] in by_dn for it in batch_items):
             break
-    return by_dn
+    return by_dn, (not by_dn and refusals == attempts)
 
 
-async def classify_all(items, batch_size=12, concurrency=8, model="default"):
-    batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+async def classify_all(items, batch_size=12, concurrency=8, model="default", refused=None):
+    """Label every item. A batch with items left over is split until each leftover is
+    tried on its own, so one item the model refuses never costs the rest of its batch.
+    When `refused` is a set, the dn of every item refused on its own on every attempt is
+    added to it; any other unlabelled item (timeouts, malformed replies) is simply absent
+    from the result, for the caller to retry on a later run."""
     sem = asyncio.Semaphore(concurrency)
     results = {}
 
     async def run_one(b):
+        if not b:
+            return
         async with sem:
-            r = await classify_batch(b, model=model)
-            results.update(r)
+            r, all_refused = await classify_batch(b, model=model)
+        results.update(r)
+        if len(b) == 1:
+            if all_refused and refused is not None:
+                refused.add(b[0]["dn"])
+            return
+        remaining = [it for it in b if it["dn"] not in r]
+        if remaining:
+            mid = max(1, len(remaining) // 2)
+            await asyncio.gather(run_one(remaining[:mid]), run_one(remaining[mid:]))
 
+    batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
     await asyncio.gather(*(run_one(b) for b in batches))
     return results
 

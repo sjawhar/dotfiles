@@ -11,7 +11,8 @@
 # Why this exists: the weekly reflect run's failure-class rates (`.claude/session-
 # analysis/*.md` section 1) were recomputed from scratch once a week, so a fix's effect
 # never showed until the next sitting. This job extends the same two label corpora
-# (classify-sami-events.py's Dispatch-event codebook, jev-turn-label.py's turn labels)
+# (classify-sami-events.py's Dispatch-event codebook, standalone-model.py's Claude
+# session-turn labels, with jev-turn-label.py's Jev archived alongside for comparison)
 # by one day at a time, so daily-readout.py can show a fix's effect within days.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
