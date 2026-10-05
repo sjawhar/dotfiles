@@ -50,7 +50,7 @@ ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
 mkdir -p "${HOME}/.claude/skills"
 ensure_link "${DOTFILES_DIR}/plugins/sjawhar/skills"                              "${HOME}/.claude/skills/sjawhar"
 # Legion skills are plugin-carried since legion#773: pi-legion-envoy (OMP),
-# opencode-legion-envoy's config hook (OpenCode), claude-envoy-bridge (Claude
+# opencode-legion-envoy's config hook (OpenCode), claude-envoy (Claude
 # marketplace). Converge machines that still have the old vendor-checkout link.
 [ -L "${HOME}/.claude/skills/legion" ] && rm "${HOME}/.claude/skills/legion"
 rm -rf "${DOTFILES_DIR}/vendor/legion"
