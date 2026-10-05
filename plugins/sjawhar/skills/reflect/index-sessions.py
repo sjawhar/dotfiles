@@ -945,6 +945,9 @@ def main():
 
     conn.commit()
     conn.close()
+    # The DB's mtime is when the index was last brought current, including a run
+    # that found nothing to re-index; extract-user-messages.py reads it as such.
+    db_path.touch()
 
     print(f"\nIndexing complete:")
     print(f"  Database: {db_path}")

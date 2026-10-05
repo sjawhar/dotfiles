@@ -30,6 +30,9 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# An index older than this whose session files have changed on disk is stale.
+STALE_AFTER_HOURS = 6
+
 
 def get_db_path() -> Path:
     return Path.home() / ".dotfiles" / ".claude" / "sessions.db"
@@ -90,6 +93,36 @@ def cutoff_minute(args) -> str:
     return start.strftime("%Y-%m-%dT%H:%M")
 
 
+def stale_index_reason(db_path: Path, sources) -> str | None:
+    """Why the index cannot cover the window, or None when it can.
+
+    The DB's mtime is the last index run (index-sessions.py touches it). A session
+    file whose size differs from the indexed one has changed since that run: routine
+    growth while the index is recent, staleness once the index is more than
+    STALE_AFTER_HOURS old. An old index over unchanged files is still exact, so a
+    quiet machine never counts as stale."""
+    age_hours = (datetime.now(timezone.utc).timestamp() - db_path.stat().st_mtime) / 3600
+    if age_hours <= STALE_AFTER_HOURS:
+        return None
+    conn = sqlite3.connect(str(db_path))
+    placeholders = ",".join("?" for _ in sources)
+    indexed = conn.execute(
+        f"SELECT source_path, source_size FROM sessions WHERE source IN ({placeholders})",
+        sources,
+    ).fetchall()
+    conn.close()
+    changed = [
+        path for path, size in indexed
+        if path and Path(path).exists() and Path(path).stat().st_size != size
+    ]
+    if not changed:
+        return None
+    return (
+        f"index is {age_hours:.1f}h old and {len(changed)} session file(s) changed "
+        f"on disk since (e.g. {changed[0]})"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Extract genuine human-authored user turns from the session index"
@@ -136,10 +169,9 @@ def main():
         "--allow-empty",
         action="store_true",
         help="Exit 0 on a window with no turns, instead of erroring, as long as the "
-        "index's own newest turn (regardless of window) is fresh -- for a daily "
-        "incremental caller where a quiet day is routine, not an unindexed one. The "
-        "default (no turns in window is always an error) is unchanged for existing "
-        "callers.",
+        "index is current -- for a daily incremental caller where a quiet day is "
+        "routine, not an unindexed one. The default (no turns in window is always "
+        "an error) is unchanged for existing callers.",
     )
     args = parser.parse_args()
 
@@ -151,6 +183,13 @@ def main():
 
     cut = cutoff_minute(args)
     sources = SOURCE_MAP[args.source]
+
+    # A count is not coverage: the extractor cannot tell a quiet window from an
+    # unindexed one. Check the index against the files before reading it.
+    stale = stale_index_reason(db_path, sources)
+    if stale:
+        print(f"Error: {stale}; re-run index-sessions.py.", file=sys.stderr)
+        sys.exit(1)
 
     conn = sqlite3.connect(str(db_path))
     placeholders = ",".join("?" for _ in sources)
@@ -169,7 +208,6 @@ def main():
     sessions_seen = set()
     current_path = None
     current_lines = []
-    index_newest = ""
     for sid, proj, sts, path, turn, line_start in rows:
         if not path or not line_start:
             continue
@@ -188,8 +226,6 @@ def main():
             continue
 
         ts = record.get("timestamp") or sts or ""
-        if ts > index_newest:
-            index_newest = ts
         if ts[:16].replace(" ", "T") <= cut:
             continue
         scanned += 1
@@ -256,29 +292,11 @@ def main():
         file=sys.stderr,
     )
 
-    # A count is not coverage: the index can be stale and the extractor cannot
-    # tell a quiet fortnight from an unindexed one. Fail rather than report a
-    # window the index cannot cover.
     if newest is None:
         if args.allow_empty:
-            if index_newest:
-                lag_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(index_newest)).total_seconds() / 3600
-                if lag_hours > 6:
-                    print(
-                        f"Error: index's newest turn is {lag_hours:.1f}h old; re-run index-sessions.py.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
             print(f"window since {cut}: 0 turns; index is current, nothing new since the last run", file=sys.stderr)
             return
         print("Error: no turns in window; run index-sessions.py (index -> extract -> read).", file=sys.stderr)
-        sys.exit(1)
-    lag_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(newest)).total_seconds() / 3600
-    if lag_hours > 6:
-        print(
-            f"Error: index's newest turn is {lag_hours:.1f}h old; re-run index-sessions.py.",
-            file=sys.stderr,
-        )
         sys.exit(1)
 
 
