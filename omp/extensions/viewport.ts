@@ -1,9 +1,7 @@
 // Transcript viewport: the session transcript in an app-owned window on the
 // terminal's alternate screen, with the composer (editor, status line,
-// widgets) pinned below it. Toggle with `/viewport` or Ctrl+Alt+F;
-// `OMP_VIEWPORT=1` opens it when an interactive session starts, and so does
-// `OMP_FULLSCREEN=1`, which boxes launched under the mode's first name still
-// carry in their container environment across `agentbox restart`.
+// widgets) pinned below it. It opens when an interactive session starts;
+// `OMP_VIEWPORT=0` starts one without it. Toggle with `/viewport` or Ctrl+Alt+F.
 //
 //   PageUp / PageDown        scroll a page (while the editor has focus)
 //   Ctrl+Home / Ctrl+End     jump to the top / back to the live tail
@@ -650,6 +648,6 @@ export default function viewport(pi: ExtensionAPI): void {
 		handler: ctx => toggle(ctx),
 	});
 	pi.on("session_start", async (_event, ctx) => {
-		if (process.env.OMP_VIEWPORT === "1" || process.env.OMP_FULLSCREEN === "1") open(ctx);
+		if (process.env.OMP_VIEWPORT !== "0") open(ctx);
 	});
 }
