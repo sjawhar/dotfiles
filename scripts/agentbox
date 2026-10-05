@@ -382,6 +382,21 @@ mount_args() {
     # the ro parent.
     mkdir -p "$HOME/.config/jj/repos" "$BOXES/$box/jj-user-repos"
     a+=(-v "$BOXES/$box/jj-user-repos:$HOME/.config/jj/repos")
+    # omp's runtime state under ~/.omp/run (daemon brokers, their sockets,
+    # tokens and leases) holds for one PID and network namespace only: a
+    # broker that starts deletes every sibling scope older than 5 minutes whose
+    # pids it cannot see, and from another box it sees none. So each box gets
+    # a private ~/.omp/run under its box dir, dying with it, while the rest of
+    # ~/.omp stays shared. collab-hosts is bound back on top from the host so
+    # `omp collab` discovery still spans the host and every box: its entries
+    # and sockets live in that directory, and it prunes an entry only when its
+    # socket is gone or refuses. Docker mounts by destination depth (~/.omp, then
+    # ~/.omp/run, then collab-hosts); the host-side mkdirs make each
+    # mountpoint the user's, 0700 like omp's own.
+    mkdir -p -m 700 "$HOME/.omp/run" "$BOXES/$box/omp-run"
+    mkdir -p -m 700 "$HOME/.omp/run/collab-hosts" "$BOXES/$box/omp-run/collab-hosts"
+    a+=(-v "$BOXES/$box/omp-run:$HOME/.omp/run")
+    a+=(-v "$HOME/.omp/run/collab-hosts:$HOME/.omp/run/collab-hosts")
     # A per-box runtime dir owned by ubuntu (omp refuses a root-owned one), with
     # the host sockets bound at their usual paths. Never the host's whole
     # /run/user/$UID_. secretsd/ is the token dir the omp extension writes to;
