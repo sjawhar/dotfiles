@@ -165,14 +165,6 @@ def main():
         help="Session source(s) to extract (default: omp). OpenCode turns carry no "
         "line numbers in the index and are not supported here.",
     )
-    parser.add_argument(
-        "--allow-empty",
-        action="store_true",
-        help="Exit 0 on a window with no turns, instead of erroring, as long as the "
-        "index is current -- for a daily incremental caller where a quiet day is "
-        "routine, not an unindexed one. The default (no turns in window is always "
-        "an error) is unchanged for existing callers.",
-    )
     args = parser.parse_args()
 
     db_path = Path(args.db) if args.db else get_db_path()
@@ -293,9 +285,6 @@ def main():
     )
 
     if newest is None:
-        if args.allow_empty:
-            print(f"window since {cut}: 0 turns; index is current, nothing new since the last run", file=sys.stderr)
-            return
         print("Error: no turns in window; run index-sessions.py (index -> extract -> read).", file=sys.stderr)
         sys.exit(1)
 
