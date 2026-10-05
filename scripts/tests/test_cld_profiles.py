@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""scripts/cld --profile: the config dir claude runs under, and what a profile links."""
+"""scripts/cld --profile: the config dir claude runs under, what a profile links, and the model route."""
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -21,6 +22,16 @@ TRACKED = tuple(
 )
 SHARED = (*TRACKED, "plugins/")
 PER_ACCOUNT = (".claude.json", ".credentials.json", "policy-limits.json", "remote-settings.json", "projects/")
+GATEWAY = "https://middleman.hawk.internal.trajectorylabs.com/anthropic"
+# The stub claude reports the --settings value it got and the credential variables it inherited.
+STUB = """#!/bin/bash
+echo "CONFIG=${CLAUDE_CONFIG_DIR:-unset}"
+echo "ARGS=$*"
+settings=unset
+while (($#)); do [[ $1 == --settings ]] && settings=$2; shift; done
+echo "SETTINGS=$settings"
+echo "KEYS=${ANTHROPIC_API_KEY-unset} ${ANTHROPIC_AUTH_TOKEN-unset}"
+"""
 
 
 class CldProfiles(unittest.TestCase):
@@ -42,9 +53,7 @@ class CldProfiles(unittest.TestCase):
         stubs = root / "bin"
         stubs.mkdir()
         claude = stubs / "claude"
-        claude.write_text(
-            '#!/bin/bash\necho "CONFIG=${CLAUDE_CONFIG_DIR:-unset}"\necho "ARGS=$*"\n', encoding="utf-8"
-        )
+        claude.write_text(STUB, encoding="utf-8")
         claude.chmod(claude.stat().st_mode | stat.S_IEXEC)
         self.env = {
             "DOTFILES_DIR": str(self.dotfiles),
@@ -67,10 +76,35 @@ class CldProfiles(unittest.TestCase):
             timeout=60,
         )
 
-    def launched(self, result: subprocess.CompletedProcess[str]) -> tuple[str, str]:
+    def fields(self, result: subprocess.CompletedProcess[str]) -> dict[str, str]:
         self.assertEqual(result.returncode, 0, result.stderr)
-        config, args = result.stdout.splitlines()
-        return config.removeprefix("CONFIG="), args.removeprefix("ARGS=")
+        return dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+    def launched(self, result: subprocess.CompletedProcess[str]) -> tuple[str, str]:
+        fields = self.fields(result)
+        return fields["CONFIG"], fields["ARGS"]
+
+    def test_default_profile_reaches_claude_through_the_hawk_gateway(self) -> None:
+        keys = {"ANTHROPIC_API_KEY": "sk-ant-stale", "ANTHROPIC_AUTH_TOKEN": "stale-bearer"}
+        for args, extra in (((), keys), (("--profile", "default"), keys), ((), {})):
+            with self.subTest(args=args, env=extra):
+                result = self.cld(*args, "-p", "hi", **extra)
+                fields = self.fields(result)
+                self.assertEqual(
+                    json.loads(fields["SETTINGS"]),
+                    {"apiKeyHelper": str(self.dotfiles / "scripts" / "hawk-token"), "env": {"ANTHROPIC_BASE_URL": GATEWAY}},
+                )
+                self.assertTrue(fields["ARGS"].endswith("-p hi"), fields["ARGS"])
+                # A key in the environment outranks apiKeyHelper, and every tool subprocess would hold it.
+                self.assertEqual(fields["KEYS"], "unset unset")
+                for name in extra:
+                    self.assertIn(name, result.stderr)
+                self.assertNotIn("sk-ant-stale", result.stderr)
+
+    def test_named_profile_keeps_its_own_login_and_keys(self) -> None:
+        fields = self.fields(self.cld("--profile", "theorem", ANTHROPIC_API_KEY="exported-by-the-caller"))
+        self.assertEqual(fields["SETTINGS"], "unset")
+        self.assertEqual(fields["KEYS"], "exported-by-the-caller unset")
 
     def test_profile_runs_claude_in_its_own_dir_without_the_flag(self) -> None:
         profile = self.dotfiles / ".claude-profiles" / "theorem"
@@ -114,6 +148,10 @@ class CldProfiles(unittest.TestCase):
             with self.subTest(args=args, env=extra):
                 config, _ = self.launched(self.cld(*args, **extra))
                 self.assertEqual(config, expected)
+
+    def test_inherited_named_profile_gets_no_gateway_route(self) -> None:
+        inherited = str(self.dotfiles / ".claude-profiles" / "parent")
+        self.assertEqual(self.fields(self.cld(CLAUDE_CONFIG_DIR=inherited))["SETTINGS"], "unset")
 
     def test_bad_profile_names_refuse_before_claude_runs(self) -> None:
         for args in (("--profile", ".."), ("--profile", ".hidden"), ("--profile", "a/b"), ("--profile",)):

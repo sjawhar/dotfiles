@@ -50,6 +50,25 @@ else
     done
     unset _n
 fi
+_settings=()
+if [[ "$CLAUDE_CONFIG_DIR" == "$_canonical" ]]; then
+    # --- model route: the default profile reaches Anthropic through the Hawk gateway ---
+    # apiKeyHelper re-runs scripts/hawk-token at start, every five minutes and on a 401; each
+    # run mints a token with a fresh jti, which is what the gateway's exchanged-once rule needs
+    # (agent-c docs/onboarding/model-access-clients.md). Claude Code takes ANTHROPIC_AUTH_TOKEN
+    # and ANTHROPIC_API_KEY over apiKeyHelper, and every tool subprocess would hold them, so an
+    # inherited one is removed. A named profile keeps its own login and whatever key it was given.
+    for _k in ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY; do
+        if [[ -n "${!_k+set}" ]]; then
+            echo "cld: removed $_k from the environment; the default profile uses hawk-token" >&2
+            unset "$_k"
+        fi
+    done
+    unset _k
+    _settings=(--settings "$(printf '{"apiKeyHelper":"%s","env":{"ANTHROPIC_BASE_URL":"%s"}}' \
+        "${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/hawk-token" \
+        "https://middleman.hawk.internal.trajectorylabs.com/anthropic")")
+fi
 unset _canonical _shared _profile _profile_given
 
 # --- gh-app routing config (per-repo credential routing for git+gh) ---
@@ -104,4 +123,5 @@ unset _newpath _parts _p
 # Opt the session into the Envoy channel plugin (managed settings allowlist the
 # legion-plugins marketplace); channel events reach the model as <channel> messages.
 exec "${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/agent-secrets-session" \
-    claude --dangerously-skip-permissions --channels plugin:claude-envoy-bridge@legion-plugins "${_args[@]}"
+    claude --dangerously-skip-permissions --channels plugin:claude-envoy-bridge@legion-plugins \
+    ${_settings[@]+"${_settings[@]}"} "${_args[@]}"
