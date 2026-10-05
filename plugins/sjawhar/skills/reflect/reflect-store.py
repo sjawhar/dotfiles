@@ -8,13 +8,19 @@ event/turn, keyed by a stable id so a rerun over the same data is a no-op, plus 
 `daily_rates` table recomputed from those rows each run so a reader (daily-readout.py,
 the weekly reflect run) never recomputes the corpus itself.
 
-One series, one labeller. `dispatch_labels`/`turn_labels` -- the tables `daily_rates`
-reads -- carry exactly one label per event/turn, from whichever model is this run's
-standard (a `model` column on every row, never implicit), so a model swap is visible in
-the series as a `model` change, never a silent step in the rate. A DIFFERENT labeller's
-opinion on the same event (used for calibration, never for the series) goes in
-`dispatch_labels_alt`, keyed by `(event_id, model)` so more than one comparison model can
-coexist; `agreement`/`gold-precision-recall` below read it, `daily_rates` never does.
+One series, one labeller: Claude (`standalone-model.py`, `claude-fable-5-1` at `xhigh`
+effort through the Hawk middleman gateway) labels both corpora. `dispatch_labels`/
+`turn_labels` -- the tables `daily_rates` reads -- carry exactly one label per
+event/turn, from whichever model is this run's standard (a `model` column on every
+row, never implicit), so a model swap is visible in the series as a `model` change,
+never a silent step in the rate. A DIFFERENT labeller's opinion on the same event/turn
+(used for calibration, never for the series) goes in `dispatch_labels_alt`/
+`turn_labels_alt`, keyed by `(event_id, model)`/`(turn_id, model)` so more than one
+comparison model can coexist; `agreement`/`compute_turn_agreement`/`gold-precision-
+recall` below read them, `daily_rates` never does. Jev (`jev-turn-label.py`, TypeSafe
+System One) labels every turn into `turn_labels_alt` with its own confidence, so its
+quality against the Claude series can be measured over time -- it never writes
+`turn_labels`.
 
 Default path: ~/.dotfiles/.claude/reflect-store.db (gitignored, alongside sessions.db).
 
@@ -24,15 +30,18 @@ Tables:
   dispatch_labels(event_id, labels, labeled_at, model)     -- labels is a JSON array; the series
   dispatch_labels_alt(event_id, model, labels, labeled_at) -- a comparison labeller's opinion
   turns(id, session_id, host, project, ts, chars)          -- id = "<session_id>|<ts>"
-  turn_labels(turn_id, label, source, model, labeled_at)   -- source: jev|strong|propagated
+  turn_labels(turn_id, label, source, model, labeled_at)   -- source: claude|propagated; the series
+  turn_labels_alt(turn_id, model, label, confidence, labeled_at) -- a comparison labeller's
+    opinion (Jev, always with confidence; other comparison models may have confidence=NULL)
   daily_rates(day, kind, label, count, total, rate)        -- kind: dispatch|turn
 
 Every insert is `INSERT OR IGNORE` on the row's natural id, so re-running the daily job
 over an overlapping window (the resumability safety margin) never re-labels or
 double-counts a row already stored -- that is the idempotence the daily job relies on.
-`dispatch_labels` itself is the one exception where overwriting is deliberate: a (re)seed
-replaces it with the standing labeller's fresh opinion (`replace_dispatch_label`), never
-silently mixing a different labeller's old opinion into the series.
+`dispatch_labels`/`turn_labels` are the one exception where overwriting is deliberate: a
+(re)seed replaces them with the standing labeller's fresh opinion
+(`replace_dispatch_label`/`replace_turn_label`), never silently mixing a different
+labeller's old opinion into the series.
 `daily_rates` is always a full recompute (DELETE + INSERT): cheap aggregate SQL over label
 rows that already exist, never a model call, so redoing it in full on every run is simpler
 and safer than tracking which days a late-arriving label touched.
@@ -95,6 +104,15 @@ CREATE TABLE IF NOT EXISTS turn_labels (
     model TEXT
 );
 
+CREATE TABLE IF NOT EXISTS turn_labels_alt (
+    turn_id TEXT NOT NULL REFERENCES turns(id),
+    model TEXT NOT NULL,
+    label TEXT NOT NULL,
+    confidence REAL,
+    labeled_at TEXT NOT NULL,
+    PRIMARY KEY (turn_id, model)
+);
+
 CREATE TABLE IF NOT EXISTS daily_rates (
     day TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -104,6 +122,14 @@ CREATE TABLE IF NOT EXISTS daily_rates (
     rate REAL NOT NULL,
     PRIMARY KEY (day, kind, label)
 );
+
+CREATE TABLE IF NOT EXISTS refusals (
+    kind TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    refused_at TEXT NOT NULL,
+    PRIMARY KEY (kind, item_id, model)
+);
 """
 
 # Additive, idempotent (ignore "duplicate column" on a rerun) -- same pattern as
@@ -111,14 +137,10 @@ CREATE TABLE IF NOT EXISTS daily_rates (
 MIGRATIONS = [
     "ALTER TABLE turn_labels ADD COLUMN model TEXT",
 ]
-# One-time backfill for turn_labels rows written before the `model` column existed
-# (this store's first few days): model is implied by `source` for every row written
-# so far (no `propagated` rows existed yet when this landed). Safe to rerun -- it only
-# ever touches NULL models, so a later real model change is never overwritten.
-BACKFILL_TURN_MODEL = """
-UPDATE turn_labels SET model = 'typesafe-jev' WHERE model IS NULL AND source = 'jev';
-UPDATE turn_labels SET model = 'gemini-3.1-pro-preview' WHERE model IS NULL AND source = 'strong';
-"""
+
+# turn_labels_alt's model id for Jev's live comparison pass (jev-turn-label.py --out-all,
+# every turn, with confidence) -- the comparison daily-readout.py reports.
+JEV_MODEL = "typesafe-jev"
 
 
 def get_db_path() -> Path:
@@ -137,7 +159,6 @@ def init_db(db_path: Path | None = None) -> sqlite3.Connection:
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e):
                 raise
-    conn.executescript(BACKFILL_TURN_MODEL)
     conn.commit()
     return conn
 
@@ -290,6 +311,57 @@ def upsert_turn_label(conn: sqlite3.Connection, turn_id: str, label: str, source
     )
 
 
+def replace_turn_label(conn: sqlite3.Connection, turn_id: str, label: str, source: str,
+                        now_iso: str, model: str | None) -> None:
+    """Deliberately overwrite the series' opinion on a turn -- a (re)seed relabelling
+    with the standing labeller, never a daily-run no-op path."""
+    conn.execute(
+        "INSERT OR REPLACE INTO turn_labels (turn_id, label, source, labeled_at, model)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (turn_id, label, source, now_iso, model),
+    )
+
+
+def record_refusal(conn: sqlite3.Connection, kind: str, item_id: str, model: str,
+                   now_iso: str) -> None:
+    """`model` refused to label this item on every attempt (`kind` is "dispatch" or
+    "turn"). The item counts as handled for that model, so it neither holds a stream's
+    watermark nor gets resent every night; a different labeller tries it afresh."""
+    conn.execute(
+        "INSERT OR IGNORE INTO refusals (kind, item_id, model, refused_at) VALUES (?, ?, ?, ?)",
+        (kind, str(item_id), model, now_iso),
+    )
+
+
+def is_refused(conn: sqlite3.Connection, kind: str, item_id: str, model: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM refusals WHERE kind = ? AND item_id = ? AND model = ?",
+        (kind, str(item_id), model),
+    ).fetchone() is not None
+
+
+def refusal_counts(conn: sqlite3.Connection) -> dict[tuple[str, str], int]:
+    """{(kind, model): count}: the items each labeller refused, which the series omits."""
+    return {
+        (kind, model): n
+        for kind, model, n in conn.execute(
+            "SELECT kind, model, COUNT(*) FROM refusals GROUP BY kind, model ORDER BY kind, model"
+        )
+    }
+
+
+def archive_turn_label_alt(conn: sqlite3.Connection, turn_id: str, model: str, label: str,
+                            confidence: float | None, labeled_at: str) -> None:
+    """A different labeller's opinion on a turn (Jev, always with confidence) --
+    comparison only, read by `compute_turn_agreement`, never by `daily_rates`. INSERT OR
+    IGNORE: the archived opinion is a historical fact and is never overwritten."""
+    conn.execute(
+        "INSERT OR IGNORE INTO turn_labels_alt (turn_id, model, label, confidence, labeled_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (turn_id, model, label, confidence, labeled_at),
+    )
+
+
 # --- daily rates ----------------------------------------------------------------------
 
 def recompute_daily_rates(conn: sqlite3.Connection) -> int:
@@ -375,6 +447,58 @@ def compute_agreement(conn: sqlite3.Connection) -> dict[str, dict[str, dict]]:
             kappa = (po - pe) / (1 - pe) if pe < 1 else float("nan")
             per_label[label] = {"agreement": po, "kappa": kappa, "n": n}
         out[alt_model] = per_label
+    return out
+
+
+TURN_AGREEMENT_THRESHOLDS = (0.5, 0.7, 0.9)
+
+
+def compute_turn_agreement(
+    conn: sqlite3.Connection, thresholds: tuple[float, ...] = TURN_AGREEMENT_THRESHOLDS
+) -> dict[str, dict]:
+    """Agreement/kappa between the current turn series (turn_labels, Claude) and every
+    labeller archived in turn_labels_alt (Jev), over the turn ids both have an opinion
+    on -- overall (every turn with a comparison opinion) and at each confidence
+    threshold (coverage = the share of those turns at or above it). Single-label
+    (correction/other/not_sami), so kappa here is the standard multiclass Cohen's kappa,
+    not the per-label binary kappa `compute_agreement` uses for multi-label Dispatch
+    events.
+    {alt_model: {"levels": {"overall"|"0.5"|"0.7"|"0.9": {coverage, agreement, kappa,
+    n}}, "confusion": {alt_label: {cur_label: count}}}}."""
+    rows = conn.execute(
+        "SELECT tl.label, ta.model, ta.label, ta.confidence"
+        " FROM turn_labels tl JOIN turn_labels_alt ta ON ta.turn_id = tl.turn_id"
+    ).fetchall()
+    by_alt_model: dict[str, list[tuple[str, str, float | None]]] = {}
+    for cur_label, alt_model, alt_label, confidence in rows:
+        by_alt_model.setdefault(alt_model, []).append((cur_label, alt_label, confidence))
+
+    def score(pairs: list[tuple[str, str]]) -> dict:
+        n = len(pairs)
+        if n == 0:
+            return {"agreement": None, "kappa": None, "n": 0}
+        agreement = sum(1 for cur, alt in pairs if cur == alt) / n
+        labels = sorted({x for pair in pairs for x in pair})
+        p_cur = {l: sum(1 for cur, _alt in pairs if cur == l) / n for l in labels}
+        p_alt = {l: sum(1 for _cur, alt in pairs if alt == l) / n for l in labels}
+        pe = sum(p_cur[l] * p_alt[l] for l in labels)
+        kappa = (agreement - pe) / (1 - pe) if pe < 1 else float("nan")
+        return {"agreement": agreement, "kappa": kappa, "n": n}
+
+    out: dict[str, dict] = {}
+    for alt_model, triples in by_alt_model.items():
+        n_total = len(triples)
+        confusion: dict[str, dict[str, int]] = {}
+        for cur, alt, _confidence in triples:
+            confusion.setdefault(alt, {}).setdefault(cur, 0)
+            confusion[alt][cur] += 1
+        levels = {"overall": {**score([(cur, alt) for cur, alt, _c in triples]), "coverage": 1.0}}
+        for t in thresholds:
+            subset = [(cur, alt) for cur, alt, c in triples if c is not None and c >= t]
+            levels[f"{t:.1f}"] = {
+                **score(subset), "coverage": len(subset) / n_total if n_total else 0.0,
+            }
+        out[alt_model] = {"levels": levels, "confusion": confusion}
     return out
 
 
@@ -496,7 +620,7 @@ def _cli() -> None:
         print(f"-- {n} rows")
     elif args.cmd == "show":
         for table in ("job_state", "dispatch_events", "dispatch_labels", "dispatch_labels_alt",
-                      "turns", "turn_labels", "daily_rates"):
+                      "turns", "turn_labels", "turn_labels_alt", "daily_rates"):
             (n,) = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
             print(f"{table}: {n}")
     elif args.cmd == "dump-turn-labels":
@@ -523,6 +647,24 @@ def _cli() -> None:
                     c_rate = f"{c[0]}/{c[1]}={c[0]/c[1]:.3f}" if c else "-"
                     a_rate = f"{a[0]}/{a[1]}={a[0]/a[1]:.3f}" if a else "-"
                     print(f"    {label} {week}: current={c_rate}  {alt_model}={a_rate}")
+
+        turn_agreement = compute_turn_agreement(conn)
+        if not turn_agreement:
+            print("\n(no turn_labels_alt rows to compare yet)")
+        for alt_model, result in turn_agreement.items():
+            print(f"\n=== turn series (Claude) vs {alt_model} ===")
+            for level, d in result["levels"].items():
+                if d["n"] == 0:
+                    print(f"  {level}: n=0 (no turns at this threshold)")
+                    continue
+                print(f"  {level}: coverage={d['coverage']:.3f} agreement={d['agreement']:.3f} "
+                      f"kappa={d['kappa']:.3f} n={d['n']}")
+            print(f"  confusion ({alt_model} row vs current-series column):")
+            cur_labels = sorted({cl for row in result["confusion"].values() for cl in row})
+            for alt_label in sorted(result["confusion"]):
+                row = result["confusion"][alt_label]
+                cells = ", ".join(f"{cl}={row.get(cl, 0)}" for cl in cur_labels)
+                print(f"    {alt_label}: {cells}")
 
         if args.gold:
             if not (args.dispatch_human and args.labels):

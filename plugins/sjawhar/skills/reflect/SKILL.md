@@ -48,8 +48,13 @@ A daily job (`daily-measure.py`, armed by `installers/reflect-daily.sh` as
 `omp/reflect-daily.service`/`.timer` on sami-agents) already extends two label corpora
 one day at a time into `~/.dotfiles/.claude/reflect-store.db` (`reflect-store.py`'s
 schema): Sami's Dispatch events with `classify-sami-events.py`'s codebook, and session
-turns with `jev-turn-label.py`/the strong model's correction/other/not_sami labels.
-Read the store instead of recomputing it:
+turns with `experiments-readout.py`'s correction/other/not_sami labels -- both labelled
+by Claude (`standalone-model.py`, over the Hawk middleman gateway). Jev
+(`jev-turn-label.py`) labels every turn too, but only as a comparison opinion in
+`turn_labels_alt` (`reflect-store.py agreement` reports its agreement/kappa against the
+series), never the series itself. An item Claude refuses to label on content grounds
+(some red-team material) is recorded in `refusals` and left out of the series; the
+readout shows how many. Read the store instead of recomputing it:
 
 ```bash
 python3 "$SKILL_DIR/daily-readout.py"   # every class's daily rate series, next to the
@@ -58,16 +63,16 @@ python3 "$SKILL_DIR/daily-readout.py"   # every class's daily rate series, next 
 
 If the store's newest day is older than this run's window end (the daily timer missed
 a day, or this is the first run on a new box), catch it up by hand before reading:
-`python3 daily-measure.py run` (needs `secret-run GEMINI_API_KEY TYPESAFE_AI_API_KEY --`;
-its module docstring has the credential path and why those two keys). Report per-label
-rates by day and by week beside the prior report's, same as before. Before trusting a
-label, read 20 random events it carries and state the precision you found. A single
-event cannot show that it repeats an earlier ask, so `already_answered` undercounts;
-check it against your own reading. Your step-1 reading is the gold set: a failure class
-you found by reading that the codebook lacks goes into the codebook
-(`classify-sami-events.py`'s `CODEBOOK`, which `daily-measure.py` imports unchanged),
-and its rate starts from that run — relabel nothing retroactively; the series simply
-gains a new class from here.
+`python3 daily-measure.py run` (needs `secret-run TYPESAFE_AI_API_KEY --` for Jev's
+comparison pass and `hawk-token-fast` on PATH for Claude's series calls; its module
+docstring has the credential path). Report per-label rates by day and by week beside
+the prior report's, same as before. Before trusting a label, read 20 random events it
+carries and state the precision you found. A single event cannot show that it repeats
+an earlier ask, so `already_answered` undercounts; check it against your own reading.
+Your step-1 reading is the gold set: a failure class you found by reading that the
+codebook lacks goes into the codebook (`classify-sami-events.py`'s `CODEBOOK`, which
+`daily-measure.py` imports unchanged), and its rate starts from that run — relabel
+nothing retroactively; the series simply gains a new class from here.
 
 **Monthly calibration.** About once a month, read a fresh random sample of ~30 labelled
 events/turns the way step 1 and the paragraph above already do, and state the precision

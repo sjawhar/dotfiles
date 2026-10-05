@@ -1,50 +1,42 @@
 #!/usr/bin/env python3
 """Daily incremental version of the reflect skill's two label corpora: extend
-classify-sami-events.py's Dispatch-event labels and jev-turn-label.py's turn labels by
-whatever is new since the last successful run, store everything in reflect-store.py's
-SQLite store, and recompute daily_rates. Read by daily-readout.py and by the weekly
-reflect run (SKILL.md step 2), so a fix's effect on a failure class shows within days
-instead of only at the next weekly sitting.
+classify-sami-events.py's Dispatch-event labels and session-turn labels by whatever is
+new since the last successful run, store everything in reflect-store.py's SQLite
+store, and recompute daily_rates. Read by daily-readout.py and by the weekly reflect
+run (SKILL.md step 2), so a fix's effect on a failure class shows within days instead
+of only at the next weekly sitting.
 
-One series, one labeller: the 2,352-event seed (classify-sami-events.py's weekly run,
-2026-10-04, the omp eval kernel's `completion()` default model) is relabelled from
-scratch by `cmd_seed` with this job's own standalone model before anything is stored
-as the series, so `daily_rates` never has a day where the rate moved because the
-labeller changed rather than the fleet did. The displaced kernel-model opinion is kept
-in `dispatch_labels_alt` for comparison (`reflect-store.py agreement`), never read by
-`daily_rates`. See `reflect-store.py`'s module docstring for the schema this enforces.
+One series, one labeller: Claude (`standalone-model.py`, `claude-fable-5-1` at `xhigh`
+effort, the same model behind the 2026-10-04 weekly baseline's `modelRoles.default`)
+labels both corpora. Jev (`jev-turn-label.py`, TypeSafe System One) also labels every
+turn, but only as a comparison opinion in `turn_labels_alt` (with its own confidence),
+never the series -- see `reflect-store.py`'s module docstring for the schema this
+enforces.
 
 Runs unattended under omp/reflect-daily.service (installers/reflect-daily.sh): no eval
-kernel, so every model call is direct HTTP (standalone-model.py: Gemini) or the
-TypeSafe SDK (jev-turn-label.py, unchanged), authenticated through
-`secret-run GEMINI_API_KEY TYPESAFE_AI_API_KEY -- ...`.
-
-Credentials (the "make it daily" item 2 question: can an unattended unit reach a key
-through the agent-secrets broker, the same one `scripts/agent-secrets-session` gives a
-host agent session): yes, proven 2026-10-04 by wrapping
-`scripts/agent-secrets-session scripts/secret-run GEMINI_API_KEY TYPESAFE_AI_API_KEY --`
-around a command run under `env -i` (no inherited session environment -- the same blank
-slate systemd hands a user unit) and getting both keys back with exit 0, no human
-approval (the broker's grants carry `approver: null` for these two). But the broker
-(AGENTC-393) grants secrets from its own catalog, separate from secretsd's full list:
-`agent-secrets ANTHROPIC_API_KEY -- true` and `agent-secrets OPENAI_API_KEY -- true` both
-fail `UNKNOWN_SECRET` -- the broker has never heard of those names, though secretsd's
-agent tier has both. So this job's strong-model step calls Gemini
-(`gemini-3.1-pro-preview`, standalone-model.py), the only broker-grantable
-judgment-capable key, and TypeSafe/Jev (jev-turn-label.py) for the cheap pre-pass
-(also broker-grantable). It does not call Anthropic or OpenAI and does not fall back to
-a personal credential.
+kernel, so every model call is direct HTTP. The Dispatch and turn series calls go
+through `standalone-model.py`, which reaches Claude over the Hawk middleman gateway
+(`providers.anthropic.baseUrl` in `~/.omp/agent/models.yml`) authenticated with a fresh
+`hawk-token-fast` read per request -- no secret grant needed for this path, since the
+gateway itself holds the credential. The Jev comparison pass uses the TypeSafe SDK
+(`jev-turn-label.py`), authenticated through `secret-run TYPESAFE_AI_API_KEY -- ...`
+(the agent-secrets broker for a registered session, secretsd's agent tier otherwise).
 
 Resumability: each of the three streams (Dispatch events, sami-agents turns,
 devbox-agents-2 turns) tracks its own `job_state` watermark and only advances it after
-that stream's fetch + label + commit fully succeeds, so a mid-run failure (an
-unreachable key, a dead ssh host, a Dispatch API outage) leaves every already-succeeded
-stream's progress intact and only the failed one is retried from the same point next
-run. Every insert is keyed by a stable id (the Dispatch event's own id; `session|ts` for
-a turn) via `INSERT OR IGNORE`, so re-fetching an overlapping window is a no-op, never a
-duplicate row or a re-spent model call. Any stream's failure makes this process exit
-non-zero -- never caught and continued -- so the systemd unit goes `failed` and the
-journal shows exactly which stream and why.
+that stream's series labelling + commit fully succeeds, so a mid-run failure (an
+unreachable gateway, a dead ssh host, a Dispatch API outage) leaves every
+already-succeeded stream's progress intact and only the failed one is retried from the
+same point next run. Every insert is keyed by a stable id (the Dispatch event's own id;
+`session|ts` for a turn) via `INSERT OR IGNORE`, so re-fetching an overlapping window
+is a no-op, never a duplicate row or a re-spent model call. Any stream's failure makes
+this process exit non-zero -- never caught and continued -- so the systemd unit goes
+`failed` and the journal shows exactly which stream and why. The one deliberate
+exception: a turn-phase's Jev comparison pass failing (a TypeSafe outage, a missing
+TYPESAFE_AI_API_KEY) is caught, reported, and still makes the run exit non-zero at the
+very end, but only after that phase's Claude series labels are committed and its
+watermark advanced -- a Jev outage costs that day's `turn_labels_alt` comparison row,
+never the series.
 """
 from __future__ import annotations
 
@@ -125,26 +117,37 @@ def run_dispatch_phase(conn) -> dict:
             "(SKILL.md step 2) to seed dispatch_events/dispatch_labels and set the watermark"
         )
     events = fetch_sami_events_since(since)
-    new_events = [e for e in events if not store.dispatch_event_has_label(conn, e["id"])]
+    model_id = standalone_model.MODEL_ID
+    new_events = [e for e in events
+                  if not store.dispatch_event_has_label(conn, e["id"])
+                  and not store.is_refused(conn, "dispatch", e["id"], model_id)]
     labeled = 0
+    refused: set = set()
     unlabeled_created_at: list[str] = []
     if new_events:
         items = [classify.build_item(e["id"], e) for e in new_events]
-        by_id = asyncio.run(classify.classify_all(items, model="default"))
+        by_id = asyncio.run(classify.classify_all(items, model="default", refused=refused))
         for e in new_events:
+            if e["id"] in refused:
+                store.upsert_dispatch_event(conn, e)
+                store.record_refusal(conn, "dispatch", e["id"], model_id, now_iso())
+                continue
             labels = by_id.get(e["id"])
             if labels is None:
                 unlabeled_created_at.append(e["created_at"])
                 continue
             store.upsert_dispatch_event(conn, e)
-            store.upsert_dispatch_label(conn, e["id"], labels, "gemini-3.1-pro-preview", now_iso())
+            store.upsert_dispatch_label(conn, e["id"], labels, model_id, now_iso())
             labeled += 1
+        if refused:
+            print(f"dispatch: {len(refused)} events {model_id} refused to label; recorded in "
+                  f"refusals and left out of the series", file=sys.stderr)
         if unlabeled_created_at:
             print(f"dispatch: {len(unlabeled_created_at)} events the model failed to label; "
                   f"left for next run", file=sys.stderr)
-    # The watermark must not advance past an event the model failed to label, or the
-    # next run's --since window would never re-fetch it (the dispatch_event_has_label
-    # check that resumes mid-batch work depends on the event still being in range).
+    # The watermark must not advance past an event that failed transiently, or the next
+    # run's --since window would never re-fetch it. A refused event is recorded and does
+    # not hold it: retrying a content refusal never succeeds.
     if unlabeled_created_at:
         watermark_source = min(unlabeled_created_at)
     else:
@@ -152,7 +155,7 @@ def run_dispatch_phase(conn) -> dict:
     if watermark_source is not None:
         store.set_state(conn, "dispatch_since", minus(watermark_source, OVERLAP_HOURS), now_iso())
     conn.commit()
-    return {"fetched": len(events), "labeled": labeled}
+    return {"fetched": len(events), "labeled": labeled, "refused": len(refused)}
 
 
 # --- (b) session turns ---------------------------------------------------------------
@@ -205,16 +208,27 @@ def candidate_ids(rec: dict) -> list[tuple[str, str]]:
     return [(rec["session"], rec["ts"])] + [tuple(x) for x in rec.get("dup_at") or []]
 
 
-async def escalate_to_gemini(todo: list[dict], batch: int = 20, concurrency: int = 8) -> dict[str, str]:
-    """Label turns Jev left out with the strong model, batched like
-    experiments-readout.label_turns but against standalone_model.completion."""
+async def label_with_claude(todo: list[dict], batch: int = 20, concurrency: int = 8,
+                            refused: set | None = None) -> dict[str, str]:
+    """Label every pending turn text with the series labeller (standalone-model.py's
+    Claude), batched like experiments-readout.label_turns. A chunk with texts left over
+    is split until each leftover is tried on its own, so one text the model refuses
+    never costs the rest of its chunk. When `refused` is a set, the id of every text
+    refused on its own on every attempt (`stop_reason: "refusal"`, no text block) is
+    added to it; any other unlabelled text (timeouts, malformed replies) is simply absent
+    from the result, for the caller to retry on a later run."""
     labels: dict[str, str] = {}
     sem = asyncio.Semaphore(concurrency)
 
-    async def run_chunk(chunk):
+    async def label_chunk(chunk):
+        if not chunk:
+            return
         prompt = "\n\n".join(f"--- id t{i}\n{t['text']}" for i, t in enumerate(chunk))
-        async with sem:
-            for _ in range(3):
+        chunk_labels: dict[str, str] = {}
+        attempts = refusals = 0
+        for _ in range(3):
+            attempts += 1
+            async with sem:
                 h = standalone_model.completion(
                     prompt, system=experiments.TURN_SYSTEM, schema=experiments.TURN_SCHEMA
                 )
@@ -222,40 +236,66 @@ async def escalate_to_gemini(todo: list[dict], batch: int = 20, concurrency: int
                     raw = await asyncio.wait_for(asyncio.to_thread(h.wait), timeout=180)
                 except asyncio.TimeoutError:
                     continue
+                except Exception as e:
+                    if type(e).__name__ != "Refusal":
+                        raise
+                    refusals += 1
+                    continue
+            try:
                 data = json.loads(raw)
                 got = {r["id"]: r["label"] for r in data["results"]}
-                for i, t in enumerate(chunk):
-                    if f"t{i}" in got:
-                        labels[t["id"]] = got[f"t{i}"]
-                if all(t["id"] in labels for t in chunk):
-                    return
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+            for i, t in enumerate(chunk):
+                if f"t{i}" in got:
+                    chunk_labels[t["id"]] = got[f"t{i}"]
+            if len(chunk_labels) == len(chunk):
+                break
+        labels.update(chunk_labels)
+        if len(chunk) == 1:
+            if not chunk_labels and refusals == attempts and refused is not None:
+                refused.add(chunk[0]["id"])
+            return
+        remaining = [t for t in chunk if t["id"] not in chunk_labels]
+        if remaining:
+            mid = max(1, len(remaining) // 2)
+            await label_chunk(remaining[:mid])
+            await label_chunk(remaining[mid:])
 
-    await asyncio.gather(*(run_chunk(todo[i:i + batch]) for i in range(0, len(todo), batch)))
+    await asyncio.gather(*(label_chunk(todo[i:i + batch]) for i in range(0, len(todo), batch)))
     return labels
 
 
-def label_with_jev(todo: list[dict], scratch: Path) -> dict[str, str]:
-    """Run jev-turn-label.py (unchanged, standalone) as a subprocess over `todo`
-    ({"id","text"} dicts), returning its confidence>=0.5 labels only -- everything
-    else is left for escalate_to_gemini, the same explicit routing SKILL.md step 4
-    documents (never a silent fallback)."""
+def label_with_jev(todo: list[dict], scratch: Path) -> dict[str, tuple[str, float]]:
+    """Run jev-turn-label.py as a subprocess over `todo` ({"id","text"} dicts),
+    returning every turn it answers with its confidence (jev-turn-label.py's
+    --out-all) -- comparison only (turn_labels_alt), never the series. `turns_path`/
+    `jev_out` are overwritten fresh every call: `todo`'s ids (`text0`, `text1`, ...)
+    are scoped to this run alone, so a stale file from an earlier day would make
+    jev-turn-label.py's own resume logic wrongly treat today's different turns as
+    already answered."""
     if not todo:
         return {}
     turns_path = scratch / "turns-for-jev.jsonl"
     with turns_path.open("w") as f:
         for t in todo:
             f.write(json.dumps({"id": t["id"], "text": t["text"]}) + "\n")
-    jev_out = scratch / "jev-labels.jsonl"
+    jev_out = scratch / "jev-labels-all.jsonl"
+    jev_out.unlink(missing_ok=True)
     env = dict(os.environ)
     env["TYPESAFE_API_KEY"] = os.environ["TYPESAFE_AI_API_KEY"]
     subprocess.run(
         ["uv", "run", "--with", "typesafe-sdk", "python3", str(HERE / "jev-turn-label.py"),
-         "--turns", str(turns_path), "--out", str(jev_out)],
+         "--turns", str(turns_path), "--out-all", str(jev_out)],
         check=True, env=env,
     )
     if not jev_out.exists():
         return {}
-    return {json.loads(line)["id"]: json.loads(line)["label"] for line in jev_out.open()}
+    out = {}
+    for line in jev_out.open():
+        r = json.loads(line)
+        out[r["id"]] = (r["label"], r["confidence"])
+    return out
 
 
 def run_turns_phase(conn, host: str, db_path: Path, home: Path, scratch: Path) -> dict:
@@ -293,48 +333,78 @@ def run_turns_phase(conn, host: str, db_path: Path, home: Path, scratch: Path) -
                 if tid != already:
                     store.upsert_turn_label(conn, tid, existing_label, "propagated", now_iso(), existing_model)
             continue
+        if any(store.is_refused(conn, "turn", tid, standalone_model.MODEL_ID) for tid in ids):
+            continue
         key = f"text{len(pending_texts)}"
         pending_texts.append({"id": key, "text": rec["text"]})
         text_turn_ids[key] = ids
         text_min_ts[key] = min_ts
     conn.commit()
 
-    jev_labels = label_with_jev(pending_texts, scratch)
-    remaining = [t for t in pending_texts if t["id"] not in jev_labels]
-    strong_labels = asyncio.run(escalate_to_gemini(remaining)) if remaining else {}
+    # Series first: every pending text goes to Claude, and the result is committed
+    # (including the watermark) before Jev is even invoked, so a Jev outage below can
+    # never hold up today's series.
+    refused: set = set()
+    claude_labels = (asyncio.run(label_with_claude(pending_texts, refused=refused))
+                     if pending_texts else {})
 
     labeled_texts = 0
     unlabeled_min_ts: list[str] = []
     for key, text_ids in text_turn_ids.items():
-        label = jev_labels.get(key)
-        source, model = "jev", "typesafe-jev"
-        if label is None:
-            label = strong_labels.get(key)
-            source, model = "strong", standalone_model.GEMINI_MODEL
+        if key in refused:
+            for tid in text_ids:
+                store.record_refusal(conn, "turn", tid, standalone_model.MODEL_ID, now_iso())
+            continue
+        label = claude_labels.get(key)
         if label is None:
             unlabeled_min_ts.append(text_min_ts[key])
             continue  # left for next run, same as classify-sami-events.py's null handling
         for tid in text_ids:
-            store.upsert_turn_label(conn, tid, label, source, now_iso(), model)
+            store.upsert_turn_label(conn, tid, label, "claude", now_iso(), standalone_model.MODEL_ID)
         labeled_texts += 1
     conn.commit()
 
+    if refused:
+        print(f"{host} turns: {len(refused)} texts {standalone_model.MODEL_ID} refused to label; "
+              f"recorded in refusals and left out of the series", file=sys.stderr)
     if unlabeled_min_ts:
         print(f"{host} turns: {len(unlabeled_min_ts)} texts the model failed to label; "
               f"left for next run", file=sys.stderr)
-    # Same rule as run_dispatch_phase: never advance the watermark past a text the
-    # model failed to label, or it falls out of every future --since window.
+    # Same rule as run_dispatch_phase: never advance the watermark past a text that failed
+    # transiently; a refused text is recorded and does not hold it.
     watermark_source = min(unlabeled_min_ts) if unlabeled_min_ts else newest_ts
     if watermark_source is not None:
         store.set_state(conn, state_key, minus(watermark_source, OVERLAP_HOURS), now_iso())
         conn.commit()
 
+    # Jev: comparison only, archived into turn_labels_alt with its own confidence,
+    # never read by daily_rates. Runs over the same pending texts the series just
+    # committed; a failure here (caught, not re-raised) must never cost the series or
+    # the watermark above, which are already durable by this point -- cmd_run fails the
+    # whole process at the very end instead, after every phase's series work is done.
+    jev_answered = 0
+    jev_error: str | None = None
+    if pending_texts:
+        try:
+            jev_labels = label_with_jev(pending_texts, scratch)
+        except Exception as exc:
+            jev_labels = {}
+            jev_error = f"{type(exc).__name__}: {exc}"
+        for key, (label, confidence) in jev_labels.items():
+            for tid in text_turn_ids[key]:
+                store.archive_turn_label_alt(conn, tid, store.JEV_MODEL, label, confidence, now_iso())
+        conn.commit()
+        jev_answered = len(jev_labels)
+        if jev_error:
+            print(f"{host} turns: Jev comparison pass failed (series already committed): "
+                  f"{jev_error}", file=sys.stderr)
+
     return {
         "turns_fetched": sum(len(candidate_ids(r)) for r in rows),
         "texts_pending": len(pending_texts),
         "texts_labeled": labeled_texts,
-        "jev": len(jev_labels),
-        "strong": len(strong_labels),
+        "jev_answered": jev_answered,
+        "jev_error": jev_error,
     }
 
 
@@ -344,10 +414,12 @@ def cmd_seed(args) -> None:
     """One-time (re)seed, one series one labeller: the kernel-model opinion already in
     labels.jsonl is archived into dispatch_labels_alt (comparison only, never
     daily_rates), and every one of those 2,352 events is relabelled from scratch with
-    this job's own standalone model (standalone-model.py's Gemini, via
+    this job's own standalone model (standalone-model.py's Claude, via
     classify.classify_all -- there is no eval-kernel `completion` here, so
     `_completion_fn()` always falls back to it), so the series is one labeller end to
-    end from 2026-09-20 rather than switching models at the seed/live boundary."""
+    end from 2026-09-20 rather than switching models at the seed/live boundary. Only
+    needed for a brand-new store (job_state has no `dispatch_since` watermark yet);
+    use `reseed` instead to migrate an already-running store to a new labeller."""
     conn = store.init_db(Path(args.db) if args.db else None)
     kernel_model = (
         "anthropic/claude-fable-5-1:xhigh (2026-10-04 weekly reflect run, "
@@ -364,23 +436,210 @@ def cmd_seed(args) -> None:
     print(f"archived {archived} kernel-model ({kernel_model}) labels into dispatch_labels_alt")
 
     items = [classify.build_item(e["id"], e) for _dn, e, _kl in seed]
-    by_id = asyncio.run(classify.classify_all(items, model="default"))
+    refused: set = set()
+    by_id = asyncio.run(classify.classify_all(items, model="default", refused=refused))
     relabeled = 0
     for _dn, e, _kl in seed:
+        if e["id"] in refused:
+            store.record_refusal(conn, "dispatch", e["id"], standalone_model.MODEL_ID, now_iso())
+            continue
         labels = by_id.get(e["id"])
         if labels is None:
             continue
-        store.replace_dispatch_label(conn, e["id"], labels, standalone_model.GEMINI_MODEL, now_iso())
+        store.replace_dispatch_label(conn, e["id"], labels, standalone_model.MODEL_ID, now_iso())
         relabeled += 1
     conn.commit()
-    print(f"relabeled {relabeled}/{len(seed)} seed events with {standalone_model.GEMINI_MODEL} "
-          f"({len(seed) - relabeled} the model failed to label; rerun seed to retry)")
+    print(f"relabeled {relabeled}/{len(seed)} seed events with {standalone_model.MODEL_ID}; "
+          f"refused {len(refused)}, failed {len(seed) - relabeled - len(refused)}")
 
     newest = conn.execute("SELECT MAX(created_at) FROM dispatch_events").fetchone()[0]
     if newest:
         store.set_state(conn, "dispatch_since", minus(newest, OVERLAP_HOURS), now_iso())
     n_rates = store.recompute_daily_rates(conn)
     print(f"daily_rates: {n_rates} rows; dispatch_since={store.get_state(conn, 'dispatch_since')}")
+
+
+EPOCH = "1970-01-01T00:00:00.000Z"
+
+
+def reseed_dispatch(conn) -> dict:
+    """Move every dispatch_labels row from a labeller other than the standing one into
+    dispatch_labels_alt (tagged with its own model) and out of the series, then refetch
+    every Sami dispatch event and label, with the standing Claude labeller, each one that
+    has neither its label nor its refusal yet. Resumable: a rerun after transient
+    failures labels only what is still missing. Payload isn't persisted in
+    dispatch_events (only event metadata is), so this refetches live from Dispatch --
+    the same fetch `run_dispatch_phase` uses, from the beginning of time."""
+    model_id = standalone_model.MODEL_ID
+    archived = 0
+    for event_id, labels_json, model, labeled_at in conn.execute(
+        "SELECT event_id, labels, model, labeled_at FROM dispatch_labels WHERE model != ?", (model_id,)
+    ).fetchall():
+        store.archive_alt_dispatch_label(conn, event_id, model, json.loads(labels_json), labeled_at)
+        archived += 1
+    conn.execute("DELETE FROM dispatch_labels WHERE model != ?", (model_id,))
+    conn.commit()
+    print(f"moved {archived} dispatch_labels rows from other labellers into dispatch_labels_alt")
+
+    events = fetch_sami_events_since(EPOCH)
+    for e in events:
+        store.upsert_dispatch_event(conn, e)
+    conn.commit()
+
+    todo = [e for e in events
+            if not store.dispatch_event_has_label(conn, e["id"])
+            and not store.is_refused(conn, "dispatch", e["id"], model_id)]
+    refused: set = set()
+    items = [classify.build_item(e["id"], e) for e in todo]
+    by_id = asyncio.run(classify.classify_all(items, model="default", refused=refused)) if items else {}
+    relabeled = 0
+    for e in todo:
+        if e["id"] in refused:
+            store.record_refusal(conn, "dispatch", e["id"], model_id, now_iso())
+            continue
+        labels = by_id.get(e["id"])
+        if labels is None:
+            continue
+        store.replace_dispatch_label(conn, e["id"], labels, model_id, now_iso())
+        relabeled += 1
+    conn.commit()
+    failed = len(todo) - relabeled - len(refused)
+    print(f"dispatch reseed: {len(events)} events, {len(todo)} to label; labelled {relabeled}, "
+          f"refused {len(refused)}, failed {failed}" + ("; rerun reseed to retry" if failed else ""))
+
+    newest = conn.execute("SELECT MAX(created_at) FROM dispatch_events").fetchone()[0]
+    if newest:
+        store.set_state(conn, "dispatch_since", minus(newest, OVERLAP_HOURS), now_iso())
+        conn.commit()
+    return {"events": len(events), "archived": archived, "relabeled": relabeled,
+            "refused": len(refused), "failed": failed}
+
+
+def reseed_turns(conn, scratch: Path, da2_home: Path) -> dict:
+    """Move every turn_labels row from a labeller other than the standing one into
+    turn_labels_alt, tagged `(pre-reseed ... label, archived without confidence)` so it
+    never collides with the live `typesafe-jev` identity on turn_labels_alt's
+    (turn_id, model) key, and out of the series. `turns` stores no text (only metadata),
+    so every known turn id is re-extracted fresh per host (`all_sessions=True`: a
+    reseed must not miss a turn older than the daily job's lookback window); each turn
+    with neither a Claude label nor a Claude refusal is labelled, and each turn without
+    a Jev comparison row gets one with its confidence. Resumable: a rerun after
+    transient failures labels only what is still missing."""
+    model_id = standalone_model.MODEL_ID
+    archived = 0
+    for turn_id, label, source, model, labeled_at in conn.execute(
+        "SELECT turn_id, label, source, model, labeled_at FROM turn_labels WHERE model IS NOT ?",
+        (model_id,),
+    ).fetchall():
+        tag = f"{model} (pre-reseed {source} label, archived without confidence)"
+        store.archive_turn_label_alt(conn, turn_id, tag, label, None, labeled_at)
+        archived += 1
+    conn.execute("DELETE FROM turn_labels WHERE model IS NOT ?", (model_id,))
+    conn.commit()
+    print(f"moved {archived} turn_labels rows from other labellers into turn_labels_alt")
+
+    by_host: dict[str, list[tuple[str, str]]] = {}
+    for turn_id, host, ts in conn.execute("SELECT id, host, ts FROM turns").fetchall():
+        by_host.setdefault(host, []).append((turn_id, ts))
+
+    text_by_turn_id: dict[str, str] = {}
+    for host, host_rows in by_host.items():
+        since = minus(min(ts for _tid, ts in host_rows), OVERLAP_HOURS)
+        if host == DEVBOX_AGENTS_2_HOST:
+            pull_devbox_agents_2(since, da2_home)
+            db_path = scratch / "da2-sessions.db"
+            index_sessions(da2_home, db_path, all_sessions=True, days=0)
+        else:
+            db_path = DOTFILES_DIR / ".claude" / "sessions.db"
+            index_sessions(Path.home(), db_path, all_sessions=True, days=0)
+        rows = extract_turns(db_path, since, scratch / f"reseed-turns-{host}.jsonl")
+        for rec in rows:
+            for sid, ts in candidate_ids(rec):
+                text_by_turn_id[f"{sid}|{ts}"] = rec["text"]
+
+    known_ids = [tid for rows in by_host.values() for tid, _ts in rows]
+    with_text: list[dict] = []
+    missing = []
+    for turn_id in known_ids:
+        text = text_by_turn_id.get(turn_id)
+        if text is None:
+            missing.append(turn_id)
+            continue
+        with_text.append({"id": turn_id, "text": text})
+    if missing:
+        print(f"turns reseed: {len(missing)}/{len(known_ids)} known turn ids have no text in a "
+              f"fresh extraction (session file pruned/moved?); left unlabelled", file=sys.stderr)
+
+    pending = [t for t in with_text
+               if not store.turn_has_label(conn, t["id"])
+               and not store.is_refused(conn, "turn", t["id"], model_id)]
+    refused: set = set()
+    claude_labels = asyncio.run(label_with_claude(pending, refused=refused)) if pending else {}
+    relabeled = 0
+    for turn_id, label in claude_labels.items():
+        store.replace_turn_label(conn, turn_id, label, "claude", now_iso(), model_id)
+        relabeled += 1
+    for turn_id in refused:
+        store.record_refusal(conn, "turn", turn_id, model_id, now_iso())
+    conn.commit()
+    failed = len(pending) - relabeled - len(refused)
+    print(f"turns reseed: {len(with_text)} turns with text, {len(pending)} to label; labelled "
+          f"{relabeled}, refused {len(refused)}, failed {failed}"
+          + ("; rerun reseed to retry" if failed else ""))
+
+    has_jev = {r[0] for r in conn.execute(
+        "SELECT turn_id FROM turn_labels_alt WHERE model = ?", (store.JEV_MODEL,))}
+    jev_todo = [t for t in with_text if t["id"] not in has_jev]
+    jev_answered = 0
+    jev_error: str | None = None
+    if jev_todo:
+        try:
+            jev_labels = label_with_jev(jev_todo, scratch)
+        except Exception as exc:
+            jev_labels = {}
+            jev_error = f"{type(exc).__name__}: {exc}"
+        for turn_id, (label, confidence) in jev_labels.items():
+            store.archive_turn_label_alt(conn, turn_id, store.JEV_MODEL, label, confidence, now_iso())
+        conn.commit()
+        jev_answered = len(jev_labels)
+        if jev_error:
+            print(f"turns reseed: Jev comparison pass failed: {jev_error}", file=sys.stderr)
+
+    return {
+        "archived": archived, "known": len(known_ids), "missing_text": len(missing),
+        "relabeled": relabeled, "refused": len(refused), "failed": failed,
+        "jev_answered": jev_answered, "jev_error": jev_error,
+    }
+
+
+def cmd_reseed(args) -> None:
+    """Migrate the store to a single Claude series: move every dispatch_labels and
+    turn_labels row from another labeller into the _alt tables, label every stored
+    dispatch event and turn that has neither a Claude label nor a Claude refusal, and
+    give every turn a Jev comparison row with its confidence. Resumable: a rerun labels
+    only what is still missing. Exits non-zero while anything failed transiently, so the
+    run is repeated until every item is labelled or refused."""
+    conn = store.init_db(Path(args.db) if args.db else None)
+    dispatch_result = reseed_dispatch(conn)
+    print(f"dispatch reseed: {dispatch_result}")
+
+    scratch = DOTFILES_DIR / ".claude"
+    da2_home = scratch / "da2-home"
+    turns_result = reseed_turns(conn, scratch, da2_home)
+    print(f"turns reseed: {turns_result}")
+
+    n_rates = store.recompute_daily_rates(conn)
+    print(f"daily_rates: {n_rates} rows")
+
+    failed = dispatch_result["failed"] + turns_result["failed"]
+    if failed or turns_result.get("jev_error"):
+        raise SystemExit(
+            f"reseed incomplete: {dispatch_result['failed']} dispatch events and "
+            f"{turns_result['failed']} turns failed transiently"
+            + (f"; Jev comparison pass failed ({turns_result['jev_error']})"
+               if turns_result.get("jev_error") else "")
+            + ". Everything labelled so far is committed; rerun reseed to finish."
+        )
 
 
 def cmd_run(args) -> None:
@@ -404,16 +663,39 @@ def cmd_run(args) -> None:
     n_rates = store.recompute_daily_rates(conn)
     print(f"daily_rates: {n_rates} rows")
 
+    # The Claude series (both hosts) and daily_rates above are already committed by
+    # this point; a Jev comparison-pass outage must still fail the unit (so a human
+    # sees it), but only after everything the series needs is durable -- never before.
+    jev_errors = {
+        host: results[host]["jev_error"] for host in (SAMI_AGENTS_HOST, DEVBOX_AGENTS_2_HOST)
+        if results[host].get("jev_error")
+    }
+    if jev_errors:
+        raise SystemExit(
+            f"Jev comparison labelling failed for {len(jev_errors)} host(s) "
+            f"({jev_errors}); the Claude series and daily_rates are committed "
+            "regardless, but this run still fails so the unit surfaces the outage -- "
+            "that day's turns simply have no turn_labels_alt comparison row"
+        )
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", default=None)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    seed = sub.add_parser("seed", help="One-time seed of dispatch_events/dispatch_labels")
+    seed = sub.add_parser("seed", help="One-time seed of a brand-new dispatch_events/dispatch_labels")
     seed.add_argument("--dispatch-human", required=True)
     seed.add_argument("--labels", required=True)
     seed.set_defaults(func=cmd_seed)
+
+    reseed = sub.add_parser(
+        "reseed",
+        help="One-time full migration of an already-running store to a new series "
+        "labeller: archives every stored dispatch/turn label into the _alt tables "
+        "and relabels everything from scratch (see module docstring).",
+    )
+    reseed.set_defaults(func=cmd_reseed)
 
     run = sub.add_parser("run", help="Daily incremental run (the systemd unit's command)")
     run.set_defaults(func=cmd_run)

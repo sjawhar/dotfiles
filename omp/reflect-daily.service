@@ -1,7 +1,7 @@
 [Unit]
 Description=Daily incremental labelling of Sami's Dispatch events and session turns (reflect skill)
-# Extends classify-sami-events.py's Dispatch-event labels and jev-turn-label.py's turn
-# labels by whatever is new since the last successful run, into
+# Extends classify-sami-events.py's Dispatch-event labels and session-turn labels by
+# whatever is new since the last successful run, into
 # ~/.dotfiles/.claude/reflect-store.db (plugins/sjawhar/skills/reflect/daily-measure.py
 # and reflect-store.py). A failed run exits non-zero and goes `failed` here -- no
 # retry-and-forget: the next day's timer tick tries again from the same resumable
@@ -12,17 +12,19 @@ Description=Daily incremental labelling of Sami's Dispatch events and session tu
 Type=oneshot
 # Same PATH gap as hawk-token-refresh.service and omp-billing-watch.service: a systemd
 # user unit defaults to /usr/bin:/bin, which resolves neither the dotfiles shims nor
-# mise's uv shim that jev-turn-label.py's `uv run --with typesafe-sdk` needs. %h, not a
-# literal /home/ubuntu: this unit runs on sami-agents only today, but every path here is
+# mise's uv shim that jev-turn-label.py's `uv run --with typesafe-sdk` needs, nor
+# scripts/hawk-token-fast (standalone-model.py's Claude auth). %h, not a literal
+# /home/ubuntu: this unit runs on sami-agents only today, but every path here is
 # host-portable. MISE_DATA_DIR is set globally for systemd --user services by
 # installers/mise.sh's environment.d drop-in, so it is not repeated here.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
-# agent-secrets-session registers this process as a host session of the agent-secrets
-# broker (AGENTC-393) when the broker holds a live launcher credential -- proven
-# 2026-10-04 to work from a clean (env -i) process, matching what systemd hands a user
-# unit. secret-run then fetches GEMINI_API_KEY and TYPESAFE_AI_API_KEY from that broker
-# identity (or secretsd's agent tier if no broker identity is live) and injects them as
-# environment variables for daily-measure.py's whole run, including the jev-turn-label.py
-# and Gemini calls it shells out to. See daily-measure.py's module docstring
-# "Credentials" section for why these two keys and not Anthropic/OpenAI.
-ExecStart=%h/.dotfiles/scripts/agent-secrets-session %h/.dotfiles/scripts/secret-run GEMINI_API_KEY TYPESAFE_AI_API_KEY -- python3 %h/.dotfiles/plugins/sjawhar/skills/reflect/daily-measure.py run
+# The Dispatch and turn series calls (standalone-model.py's Claude) need no secret
+# grant here: they authenticate to the Hawk middleman gateway with a fresh
+# hawk-token-fast read per request, kept warm by hawk-token-refresh.service's own
+# 3-minute timer. Only the Jev comparison pass (jev-turn-label.py, archived into
+# turn_labels_alt, never the series) needs a credential, so agent-secrets-session
+# registers this process as a host session of the agent-secrets broker (AGENTC-393)
+# -- proven 2026-10-04 to work from a clean (env -i) process, matching what systemd
+# hands a user unit -- and secret-run fetches TYPESAFE_AI_API_KEY from that broker
+# identity (or secretsd's agent tier if no broker identity is live).
+ExecStart=%h/.dotfiles/scripts/agent-secrets-session %h/.dotfiles/scripts/secret-run TYPESAFE_AI_API_KEY -- python3 %h/.dotfiles/plugins/sjawhar/skills/reflect/daily-measure.py run
