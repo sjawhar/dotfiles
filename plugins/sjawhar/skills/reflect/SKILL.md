@@ -74,7 +74,13 @@ events/turns the way step 1 and the paragraph above already do, and state the pr
 found. The daily job runs on a model's own judgment with nobody reading its output
 between weekly sittings; a monthly calibration sample is what catches the labels
 drifting from what Sami actually counts as a mistake before a month of rates have
-quietly gone stale.
+quietly gone stale. Label the same sample with a second model and archive it
+(`reflect-store.py agreement --gold your-sample.json --dispatch-human ... --labels
+...`; see `reflect-store.py`'s module docstring for `dispatch_labels_alt`'s shape) to
+get per-class agreement/kappa and precision/recall against your reading in one table,
+rather than reading rates on faith. A class where a newer model measures materially
+worse against your sample than the current one belongs in `daily-readout.py`'s
+`CALIBRATION_CAVEATS`, with the finding that earned it, not a vague warning.
 
 ## 3. Find why each top failure happens
 

@@ -6,6 +6,14 @@ SQLite store, and recompute daily_rates. Read by daily-readout.py and by the wee
 reflect run (SKILL.md step 2), so a fix's effect on a failure class shows within days
 instead of only at the next weekly sitting.
 
+One series, one labeller: the 2,352-event seed (classify-sami-events.py's weekly run,
+2026-10-04, the omp eval kernel's `completion()` default model) is relabelled from
+scratch by `cmd_seed` with this job's own standalone model before anything is stored
+as the series, so `daily_rates` never has a day where the rate moved because the
+labeller changed rather than the fleet did. The displaced kernel-model opinion is kept
+in `dispatch_labels_alt` for comparison (`reflect-store.py agreement`), never read by
+`daily_rates`. See `reflect-store.py`'s module docstring for the schema this enforces.
+
 Runs unattended under omp/reflect-daily.service (installers/reflect-daily.sh): no eval
 kernel, so every model call is direct HTTP (standalone-model.py: Gemini) or the
 TypeSafe SDK (jev-turn-label.py, unchanged), authenticated through
@@ -280,12 +288,10 @@ def run_turns_phase(conn, host: str, db_path: Path, home: Path, scratch: Path) -
                 newest_ts = ts
         already = next((tid for tid in ids if store.turn_has_label(conn, tid)), None)
         if already is not None:
-            existing_label = conn.execute(
-                "SELECT label FROM turn_labels WHERE turn_id = ?", (already,)
-            ).fetchone()[0]
+            existing_label, existing_model = store.turn_label_and_model(conn, already)
             for tid in ids:
                 if tid != already:
-                    store.upsert_turn_label(conn, tid, existing_label, "propagated", now_iso())
+                    store.upsert_turn_label(conn, tid, existing_label, "propagated", now_iso(), existing_model)
             continue
         key = f"text{len(pending_texts)}"
         pending_texts.append({"id": key, "text": rec["text"]})
@@ -301,15 +307,15 @@ def run_turns_phase(conn, host: str, db_path: Path, home: Path, scratch: Path) -
     unlabeled_min_ts: list[str] = []
     for key, text_ids in text_turn_ids.items():
         label = jev_labels.get(key)
-        source = "jev"
+        source, model = "jev", "typesafe-jev"
         if label is None:
             label = strong_labels.get(key)
-            source = "strong"
+            source, model = "strong", standalone_model.GEMINI_MODEL
         if label is None:
             unlabeled_min_ts.append(text_min_ts[key])
             continue  # left for next run, same as classify-sami-events.py's null handling
         for tid in text_ids:
-            store.upsert_turn_label(conn, tid, label, source, now_iso())
+            store.upsert_turn_label(conn, tid, label, source, now_iso(), model)
         labeled_texts += 1
     conn.commit()
 
@@ -335,15 +341,46 @@ def run_turns_phase(conn, host: str, db_path: Path, home: Path, scratch: Path) -
 # --- CLI -----------------------------------------------------------------------------
 
 def cmd_seed(args) -> None:
+    """One-time (re)seed, one series one labeller: the kernel-model opinion already in
+    labels.jsonl is archived into dispatch_labels_alt (comparison only, never
+    daily_rates), and every one of those 2,352 events is relabelled from scratch with
+    this job's own standalone model (standalone-model.py's Gemini, via
+    classify.classify_all -- there is no eval-kernel `completion` here, so
+    `_completion_fn()` always falls back to it), so the series is one labeller end to
+    end from 2026-09-20 rather than switching models at the seed/live boundary."""
     conn = store.init_db(Path(args.db) if args.db else None)
-    model = "unknown (strong model, 2026-10-04 reflect run; exact model alias not recorded)"
-    n_events, n_labels = store.seed_dispatch_labels(conn, args.dispatch_human, args.labels, model, now_iso())
+    kernel_model = (
+        "anthropic/claude-fable-5-1:xhigh (2026-10-04 weekly reflect run, "
+        "omp eval kernel completion, modelRoles.default)"
+    )
+    seed = store.load_seed_events(args.dispatch_human, args.labels)
+    archived = 0
+    for _dn, e, kernel_labels in seed:
+        store.upsert_dispatch_event(conn, e)
+        if kernel_labels is not None:
+            store.archive_alt_dispatch_label(conn, e["id"], kernel_model, kernel_labels, now_iso())
+            archived += 1
+    conn.commit()
+    print(f"archived {archived} kernel-model ({kernel_model}) labels into dispatch_labels_alt")
+
+    items = [classify.build_item(e["id"], e) for _dn, e, _kl in seed]
+    by_id = asyncio.run(classify.classify_all(items, model="default"))
+    relabeled = 0
+    for _dn, e, _kl in seed:
+        labels = by_id.get(e["id"])
+        if labels is None:
+            continue
+        store.replace_dispatch_label(conn, e["id"], labels, standalone_model.GEMINI_MODEL, now_iso())
+        relabeled += 1
+    conn.commit()
+    print(f"relabeled {relabeled}/{len(seed)} seed events with {standalone_model.GEMINI_MODEL} "
+          f"({len(seed) - relabeled} the model failed to label; rerun seed to retry)")
+
     newest = conn.execute("SELECT MAX(created_at) FROM dispatch_events").fetchone()[0]
     if newest:
         store.set_state(conn, "dispatch_since", minus(newest, OVERLAP_HOURS), now_iso())
     n_rates = store.recompute_daily_rates(conn)
-    print(f"seeded {n_events} dispatch_events, {n_labels} dispatch_labels, {n_rates} daily_rates rows; "
-          f"dispatch_since={store.get_state(conn, 'dispatch_since')}")
+    print(f"daily_rates: {n_rates} rows; dispatch_since={store.get_state(conn, 'dispatch_since')}")
 
 
 def cmd_run(args) -> None:

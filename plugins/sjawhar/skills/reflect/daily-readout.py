@@ -72,11 +72,39 @@ def rate_series(conn: sqlite3.Connection, kind: str, since_day: str | None) -> d
     return series
 
 
+# Monthly-calibration findings (SKILL.md step 2): a class where the standing labeller
+# (standalone-model.py's Gemini) measured materially worse than the kernel model the
+# 2026-10-04 seed used, against the same 462-event gold sample and the same seed
+# population's own kernel-archived opinion (`reflect-store.py agreement --gold`).
+# "Materially worse" here: F1 at least 0.10 lower. Update this by rerunning that command
+# at the next monthly calibration sample (SKILL.md step 2); do not silently drop a class
+# once flagged -- replace its text with the new finding instead.
+CALIBRATION_CAVEATS: dict[str, str] = {
+    # Measured 2026-10-04 (`reflect-store.py agreement --gold`, 462-event gold sample,
+    # the 2,352-event seed population): F1 0.191 (current, Gemini) vs 0.292 (the
+    # displaced kernel model, anthropic/claude-fable-5-1:xhigh) -- a 0.10 F1 drop, the
+    # only class crossing that bar either direction. Gemini over-triggers this label
+    # (precision 0.115, 116 false positives on 462 events) more than the kernel model
+    # did (precision 0.184, 84 false positives), and also recalls less (0.556 vs
+    # 0.704). Every other gold-covered class is flat or Gemini is notably better
+    # (invented_scope, reinvented, untested: Gemini's F1 is 0.10-0.21 higher -- over-
+    # triggering was the kernel model's problem there, not Gemini's).
+    "wrong_claim": (
+        "Gemini measured materially worse than the kernel model it replaced on this "
+        "class in the 2026-10-04 calibration (F1 0.191 vs 0.292, precision 0.115 vs "
+        "0.184 -- more false positives, not fewer true ones found). Read this rate as "
+        "over-triggered until a monthly recheck shows improvement."
+    ),
+}
+
+
 def render(dispatch_series: dict, turn_series: dict, landed: list[dict], report_name: str) -> str:
     lines = ["# Daily failure-class rates\n"]
     lines.append("## Dispatch events (classify-sami-events.py codebook)\n")
     for label in sorted(dispatch_series):
         lines.append(f"### {label}")
+        if label in CALIBRATION_CAVEATS:
+            lines.append(f"  CAVEAT: {CALIBRATION_CAVEATS[label]}")
         for day, count, total, rate in dispatch_series[label]:
             lines.append(f"  {day}  {count:>4}/{total:<4}  {rate:.3f}")
         lines.append("")
