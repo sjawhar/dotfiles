@@ -6,6 +6,11 @@ modelRoles:
   task: anthropic/claude-sonnet-5
   vision: google/gemini-3.7-flash:medium
   review: openai-codex/gpt-5.5:xhigh
+  # The Legion plugin's agents name these two roles: oracle for oracle and
+  # plan-gap-analyst, deep for deep-worker. Unmapped, those agents fail with
+  # "No model selected". Same models as omp/agents/oracle.md and deep.md (@slow).
+  oracle: openai-codex/gpt-5.5:high
+  deep: openai-codex/gpt-5.6-terra:xhigh
   advisor: anthropic/claude-sonnet-5:medium
   askgate: anthropic/claude-fable-5-1:high
   proactiveMemory: anthropic/claude-sonnet-5
