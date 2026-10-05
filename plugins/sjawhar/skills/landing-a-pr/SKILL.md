@@ -30,9 +30,11 @@ check run that may have tested an older main, so two PRs adding migrations on th
 parent can each go green and leave main with two heads. If main's
 head moved, merge main and join the two heads with `alembic merge heads` (agent-c's rule:
 never re-parent or renumber an existing migration), push, and merge by hand when green. **The merge rule
-depends on the repo.** In `trajectory-labs-pbc/agent-c` it is `pr-checks-result` and
-the required `review` check (workflow "Claude PR Review", run from main's copy), both
-passing at the head. No approval is needed; the org ruleset enforces both checks.
+depends on the repo.** In `trajectory-labs-pbc/agent-c` it is `pr-checks-result`, the
+required `review` check (workflow "Claude PR Review", run from main's copy) and, once
+its gate mode is `act` and the ruleset names it (the rollout on AGENTC-1705),
+`checklist-affirmation` (the body's affirmation line, `docs/pre-pr-checklists.md`), all
+passing at the head. No approval is needed; the org ruleset enforces these checks.
 The required `review` run starts only on `opened`, `synchronize` or `reopened` of a
 non-draft PR: a draft never gets it, and marking ready alone starts nothing
 (measured on #20742 and #20703). So mark the PR ready, then push or close and reopen it, but only when no
@@ -177,6 +179,8 @@ admissibility, read [review and readiness](references/review-and-readiness.md).
 
 - Read a red before rerunning it. “Flaky” is a mechanism claim, not the name of
   a green second attempt. Reproduce a suspected regression; fix real defects.
+- A red `checklist-affirmation` is fixed by editing the body (no push); the check
+  re-runs on the edit.
 - Only a diagnosed external, pre-diff failure gets **one** failed-jobs rerun,
   after checking that the run tested the current head. Never rerun the whole
   graph to try your luck. A cached test-merge can keep replaying an old base.

@@ -26,7 +26,8 @@ working from memory of it.
    against the target branch) and finish anything promised but absent. **If there is no ledger because the work
    started as an interactive request rather than through `sdd`, write one now** from the session: what Sami asked for,
    which decisions got settled along the way, every shortcut you took, and every part of the request you are unsure you
-   covered. An absent ledger means nothing was written down; it never means there was nothing to audit.
+   covered. An absent ledger means nothing was written down; it never means there was nothing to audit. In agent-c,
+   each required checklist's items are ledger rows until done.
 2. **Have a fresh agent check completeness.** Dispatch `task(category="ultrabrain")` with the diff, the ledger, and the
    authorization: the plan or issue if one exists, otherwise Sami's original request and the decisions settled in this
    session, quoted. Its mandate: *"You did not do this work. List everything the authorization promised that this diff
@@ -150,7 +151,10 @@ record. Never ask to omit acceptance. A named blocker that survives that work go
    Keep commit groups coherent; do not hide behavior changes as "cleanup" or bypass hooks; split an unclear scope.
 
    Read the repository PR template before drafting. Keep required fields and facts once under existing headings. Do not
-   summarize with files, functions, or implementation jargon.
+   summarize with files, functions, or implementation jargon. In `trajectory-labs-pbc/agent-c` the body also carries
+   the checklist evidence and the affirmation line: run
+   `uv run python .github/scripts/checklist_routing.py check --local` and follow `docs/pre-pr-checklists.md`; the
+   `checklist-affirmation` check and the reviewer read it.
 
    Write in short paragraphs for a technically capable reader who missed the work. Ordinary bodies should be roughly
    150–250 words; small changes may be shorter, and added detail should be for material reviewer risks. Open with the
