@@ -53,7 +53,7 @@ auto_prune = false
 "github:sjawhar/jj" = "0.45.1-sami.20260910-043938"  # upstream main + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10127 + #10129 + #10130 + reset_head writes HEAD after the index reset + forget unlinks only its own worktree + index write waits for index.lock (#7530) + import keeps @ when the recorded HEAD was lost + merge_view treats a lost git_heads entry as no information
 "github:sjawhar/knives" = "2.0.20"
 "github:sjawhar/legion" = "legion-v9.0.0"  # the Go `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); it shares the Go daemons' registry, ~/.local/state/legion/legions.json, which a TypeScript cli-v* `legion` would rewrite as an object no Go daemon can read
-"github:sjawhar/oh-my-pi" = "18.6.0-sami.20261005-143804"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
+"github:sjawhar/oh-my-pi" = "18.6.0-sami.20261005-234443"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
