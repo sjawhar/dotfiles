@@ -24,8 +24,8 @@ StandardOutput=null
 # Same PATH gap as ctx-ingest.service: systemd user units default to
 # /usr/bin:/bin, which resolves neither the dotfiles git shim nor mise's uv shim
 # that hawk-token's `uv sync`/mint step needs. %h, not a literal /home/ubuntu:
-# this unit runs on more than one machine (sami-agents, devbox-agents-2, the
-# laptop, oryx), each with its own $HOME.
+# this unit runs on more than one machine (sami-agents, the laptop, oryx), each
+# with its own $HOME.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 # mise's own shims (the `uv` one, and whatever the slot-refresh's
 # `gh-app-token` credential helper resolves `secrets` to) need their data dir
