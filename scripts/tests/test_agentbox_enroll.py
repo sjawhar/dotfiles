@@ -37,12 +37,19 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 
 # A box's key dir is $STUB_RUN_BASE/<box>/run-user/agent-secrets. `docker exec -d` runs its
 # script here when STUB_RUN_RENEW is set; `docker run` notes whether the marker is there as the
-# box starts, then lives for a second.
+# box starts, then lives for a second. `inspect` answers false until its STUB_RUNNING_AFTER'th
+# call when that is set, as a box does while it is still starting.
 DOCKER_STUB = rf"""
 echo "docker $*" >>"$STUB_CALLS"
 keydir() {{ echo "$STUB_RUN_BASE/$1/run-user/agent-secrets"; }}
 case "$*" in
-    inspect*) [[ -z "${{STUB_GONE:-}}" ]] || exit 1; echo "${{STUB_RUNNING:-true}}" ;;
+    inspect*)
+        [[ -z "${{STUB_GONE:-}}" ]] || exit 1
+        if [[ -n "${{STUB_RUNNING_AFTER:-}}" ]]; then
+            (( $(grep -c '^docker inspect' "$STUB_CALLS") >= STUB_RUNNING_AFTER )) && echo true || echo false
+        else
+            echo "${{STUB_RUNNING:-true}}"
+        fi ;;
     "run "*)
         while [[ "$1" != --name ]]; do shift; done
         if [[ -e "$(keydir "$2")/enrollment.pending" ]]; then m=yes; else m=no; fi
@@ -332,6 +339,17 @@ class EnrollWhenUp(EnrollFixture):
         self.assertIn("rc=1", result.stdout, result.stderr)
         self.assert_no_identity()
         self.assertEqual(self.calls_matching("enroll "), [])
+
+    def test_a_box_slow_to_reach_running_still_enrolls_with_its_session_id(self) -> None:
+        """A box still starting after hundreds of checks is waited for while its launcher lives."""
+        result = self.when_up(
+            "omp", STUB_RUNNING_AFTER="400", STUB_SID="0192f3a4-5b6c-7d8e-9f01-23456789abcd"
+        )
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertEqual(self.files(), {"key.pem", "enrollment"})
+        self.assertGreaterEqual(len(self.calls_matching("docker inspect")), 400)
+        (enroll,) = self.calls_matching("enroll ")
+        self.assertIn("--session-id 0192f3a4-5b6c-7d8e-9f01-23456789abcd", enroll)
 
     def test_the_marker_stays_fresh_while_it_waits(self) -> None:
         """Each pass of the wait renews the marker; each sleep ages it past 160 s."""
