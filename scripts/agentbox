@@ -142,16 +142,18 @@ enroll_failed() {
     return 1
 }
 
-# Wait for the container to be Running (docker exec needs that), giving up if the launcher's
-# docker run child is gone.
+# Wait for the container to be Running (docker exec needs that) for as long as the launcher's
+# docker run child lives: a box can take minutes to reach Running when several start at once, and
+# the child's exit is the only sign that it never will. Each pass renews the enrollment.pending
+# marker, so a client that starts with the box finds it fresh however long the start took.
 wait_for_running() {
-    local box="$1" child="$2" _
-    for _ in $(seq 1 120); do
+    local box="$1" child="$2"
+    while :; do
         [[ "$(docker inspect -f '{{.State.Running}}' "$box" 2>/dev/null)" == true ]] && return 0
         kill -0 "$child" 2>/dev/null || return 1
+        put_keyfile "$box" enrollment.pending ""
         sleep 0.5
     done
-    return 1
 }
 
 # Enroll a running box with the secrets broker. The key is generated INSIDE the box by a
@@ -225,12 +227,15 @@ start_renew() {
 # Enroll a box from `new` once it is up, then start its renew: for omp once its session id is
 # known (omp opens its session file 4–10 s after start, before any tool can run), so the
 # enrollment carries the id the broker wakes on a decision; any other command at once; after
-# 120 s without a session id (an omp --no-session run) without one. The enrollment.pending marker
-# is renewed on every pass of the wait, so it stays inside the client's 160 s trust window
-# however long the box takes. A box that never runs, or ends first, ends in enroll_failed too.
+# 120 s of running without a session id (an omp --no-session run) without one. The deadline
+# starts once the box is Running, so a box that was slow to start still enrolls with its id. The
+# enrollment.pending marker is renewed on every pass of both waits, so it stays inside the
+# client's 160 s trust window however long the box takes. A box that never runs, or ends first,
+# ends in enroll_failed too.
 enroll_when_up() {
-    local box="$1" child="$2" cmd="$3" sid="" deadline=$(( SECONDS + 120 ))
+    local box="$1" child="$2" cmd="$3" sid="" deadline
     wait_for_running "$box" "$child" || { enroll_failed "$box" "$box never reached Running; not enrolled"; return 1; }
+    deadline=$(( SECONDS + 120 ))
     while kill -0 "$child" 2>/dev/null; do
         put_keyfile "$box" enrollment.pending ""
         [[ "$cmd" == omp ]] && sid="$(box_session_id "$box")"
