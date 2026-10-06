@@ -11,7 +11,7 @@
 # ancestor while live sessions run them. A plain git checkout moves only when it is clean.
 set -euo pipefail
 
-MACHINES=(local devbox-agents-2 sami@sami agent@oryx)
+MACHINES=(local sami@sami agent@oryx)
 
 sync_here() {
   local old="$1"
