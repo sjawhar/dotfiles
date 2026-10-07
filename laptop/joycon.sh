@@ -41,12 +41,15 @@ if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
     rm -f "$tmp"
 fi
 
-# --- udev rule (uaccess for output + stable symlink for combined device) ---
+# --- udev rule (uaccess for output, stable symlink for combined device, combined hidden from browsers) ---
 RULE_DEST="/etc/udev/rules.d/95-joycon-remap.rules"
 if ! diff -q "${JOYCON_DIR}/95-joycon-remap.rules" "$RULE_DEST" &>/dev/null; then
     echo "Installing joycon udev rule..."
     sudo cp "${JOYCON_DIR}/95-joycon-remap.rules" "$RULE_DEST"
     sudo udevadm control --reload-rules
+    # apply it to devices that already exist, too
+    sudo udevadm trigger --action=change --subsystem-match=input
+    sudo udevadm settle
 fi
 
 # --- systemd units (system-level: joycon-remap needs /dev/uinput as root) ---
