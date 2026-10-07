@@ -36,6 +36,8 @@ if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
     tmp="$(mktemp)"
     cc -O2 -Wall -o "$tmp" "$SRC"
     sudo install -m0755 "$tmp" "$BIN"
+    # a running stack keeps the old binary until restarted
+    sudo systemctl try-restart joycon-remap.service
     rm -f "$tmp"
 fi
 
