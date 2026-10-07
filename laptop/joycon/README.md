@@ -34,6 +34,15 @@ joycond's combined device and re-emits a virtual gamepad that:
 The virtual device keeps id `057e:2008` and a name containing "Virtual", so
 joycond ignores it (its own `*Virtual*` exclusion) and doesn't re-grab it.
 
+Brave must never see joycond's combined device. Chromium groups device nodes
+into controllers by their system path cut at the first `input`, and every
+software-made controller sits under `/sys/devices/virtual/input/`, so Chromium
+treats all of them as one controller and reads only the newest. Whenever the
+Joy-Cons re-join, the new combined device (silent, because joycon-remap grabs
+it) would take Brave off "Joy-Cons Luna Virtual". `95-joycon-remap.rules`
+clears `ID_INPUT_JOYSTICK` on the combined device, and Chromium skips input
+devices without it.
+
 ## Usage
 
 ```
@@ -56,7 +65,7 @@ re-selection.
 - `joycon-remap.c` — the remapper + FF forwarder (built to `/usr/local/bin/joycon-remap`)
 - `joycon-remap.service` — runs it (system service; needs `/dev/uinput`)
 - `joycon-remap.path` — starts the service when `/dev/input/joycon-combined` appears
-- `95-joycon-remap.rules` — uaccess for the output + stable symlink for the combined device
+- `95-joycon-remap.rules` — uaccess for the output, stable symlink for the combined device, combined device hidden from browsers
 - `../joycon.sh` — installer: builds joycond from source (pinned), compiles the C remapper, deploys units + rule, disables joycond autostart
 
 ## Notes

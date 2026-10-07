@@ -7,3 +7,10 @@ SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Joy-Cons Luna Virtual", TAG+
 # Stable symlink for joycond's combined device (joycon-remap's input; the
 # event number changes per connection).
 SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Nintendo Switch Combined Joy-Cons", SYMLINK+="input/joycon-combined"
+
+# Hide joycond's combined device from browsers. Chromium treats every
+# software-made controller (all under /sys/devices/virtual/input/) as one device
+# and reads only the newest, so when the Joy-Cons re-join, the combined device
+# (grabbed by joycon-remap, so silent) would take Brave off "Joy-Cons Luna
+# Virtual". Chromium skips input devices without ID_INPUT_JOYSTICK.
+SUBSYSTEM=="input", ATTRS{name}=="Nintendo Switch Combined Joy-Cons", ENV{ID_INPUT_JOYSTICK}=""
