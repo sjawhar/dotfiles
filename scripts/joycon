@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# joycon: on-demand toggle for the joycond + evsieve Luna button-remap stack.
+# joycon: on-demand toggle for the joycond + joycon-remap Luna button-remap stack.
 #   joycon on      arm the stack: start joycond + the remap path-watcher.
 #                  Press L+R whenever; the remap launches automatically.
 #   joycon off     stop everything (nothing left running).

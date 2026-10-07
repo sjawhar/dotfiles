@@ -26,6 +26,10 @@ joycond's combined device and re-emits a virtual gamepad that:
 - **Forwards force-feedback**: it services the virtual device's FF upload/erase/
   play requests and forwards them to the combined device, which joycond drives to
   the physical Joy-Con motors. So rumble works and never stalls.
+- **Survives reconnects**: when a Joy-Con drops, joycond destroys the combined
+  device, but the virtual device stays up, so Luna keeps the same controller.
+  The remapper waits for joycond's next combined device, grabs it, and copies
+  the live rumble effects onto it.
 
 The virtual device keeps id `057e:2008` and a name containing "Virtual", so
 joycond ignores it (its own `*Virtual*` exclusion) and doesn't re-grab it.
@@ -41,6 +45,10 @@ joycon status   # show what's active
 `joycon on` arms a systemd `.path` watcher, so pressing **L+R** at any time makes
 the corrected controller ("Joy-Cons Luna Virtual") appear automatically. Select
 it in Luna.
+
+If a Joy-Con disconnects mid-game, reconnect it and press **L+R** again; the
+same "Joy-Cons Luna Virtual" controller picks back up, so Luna needs no
+re-selection.
 
 ## Layout
 

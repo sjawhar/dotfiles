@@ -15,6 +15,11 @@
 // rumble upload/erase/play from the virtual device back to the combined device,
 // which joycond drives to the physical Joy-Con motors. Without this, Chromium's
 // rumble upload would stall the gamepad thread (intermittent input freeze).
+//
+// It survives reconnects. When a Joy-Con drops, joycond destroys the combined
+// device; the virtual device stays up, so Luna keeps the same gamepad. The
+// program then waits for joycond's next combined device (press L+R again),
+// grabs it, and gives it a copy of every rumble effect live on the virtual one.
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -31,11 +36,15 @@
 
 #define MAX_FF 64
 
+static const char *inpath;
 static int in_fd = -1, ui_fd = -1;
 
-// virtual-device effect id -> combined-device effect id
-static int  ff_map[MAX_FF];
+// Rumble effects live on the virtual device; the combined device holds copies.
+// ff_eff[v]: the effect uploaded to the virtual device as id v (if ff_used[v])
+// ff_map[v]: id of its copy on the current combined device, -1 if none
+static struct ff_effect ff_eff[MAX_FF];
 static char ff_used[MAX_FF];
+static int  ff_map[MAX_FF];
 
 // EV_KEY codes the OUTPUT declares, in ascending order so Chromium's raw index
 // order equals the standard gamepad layout (0-15) plus SL/SR/capture/home above.
@@ -66,12 +75,36 @@ static void cleanup(int sig) {
     _exit(0);
 }
 
-int main(int argc, char **argv) {
-    const char *inpath = argc > 1 ? argv[1] : "/dev/input/joycon-combined";
+// Upload virtual effect v to the combined device: a new copy, or an update of
+// the existing one.
+static void ff_copy(int v) {
+    struct ff_effect eff = ff_eff[v];
+    eff.id = ff_map[v];
+    ff_map[v] = ioctl(in_fd, EVIOCSFF, &eff) < 0 ? -1 : eff.id;
+}
 
-    in_fd = open(inpath, O_RDWR); // O_RDWR: read events + upload/play FF back
-    if (in_fd < 0) { fprintf(stderr, "open %s: %s\n", inpath, strerror(errno)); return 1; }
-    if (ioctl(in_fd, EVIOCGRAB, 1) < 0) { perror("EVIOCGRAB"); return 1; }
+// Grab the combined device and give it a copy of every live rumble effect.
+static int connect_input(void) {
+    int fd = open(inpath, O_RDWR); // O_RDWR: read events + upload/play FF back
+    if (fd < 0) return 0;
+    if (ioctl(fd, EVIOCGRAB, 1) < 0) { close(fd); return 0; }
+    in_fd = fd;
+    for (int v = 0; v < MAX_FF; v++)
+        if (ff_used[v]) ff_copy(v);
+    return 1;
+}
+
+// The combined device is gone; its effect copies went with it. The kernel has
+// already sent releases for any buttons held at the time.
+static void drop_input(void) {
+    close(in_fd);
+    in_fd = -1;
+    for (int v = 0; v < MAX_FF; v++) ff_map[v] = -1;
+}
+
+int main(int argc, char **argv) {
+    inpath = argc > 1 ? argv[1] : "/dev/input/joycon-combined";
+    for (int v = 0; v < MAX_FF; v++) ff_map[v] = -1;
 
     ui_fd = open("/dev/uinput", O_RDWR);
     if (ui_fd < 0) { perror("open /dev/uinput"); return 1; }
@@ -114,19 +147,29 @@ int main(int argc, char **argv) {
     signal(SIGTERM, cleanup);
 
     struct input_event ev;
-    int maxfd = (in_fd > ui_fd ? in_fd : ui_fd) + 1;
+    fprintf(stderr, "waiting for %s\n", inpath);
 
     for (;;) {
-        fd_set fds; FD_ZERO(&fds); FD_SET(in_fd, &fds); FD_SET(ui_fd, &fds);
-        if (select(maxfd, &fds, NULL, NULL, NULL) < 0) {
+        if (in_fd < 0 && connect_input())
+            fprintf(stderr, "grabbed %s\n", inpath);
+
+        fd_set fds; FD_ZERO(&fds); FD_SET(ui_fd, &fds);
+        if (in_fd >= 0) FD_SET(in_fd, &fds);
+        int maxfd = (in_fd > ui_fd ? in_fd : ui_fd) + 1;
+        // While disconnected, look for joycond's next combined device every 500ms.
+        struct timeval retry = { .tv_sec = 0, .tv_usec = 500000 };
+        if (select(maxfd, &fds, NULL, NULL, in_fd < 0 ? &retry : NULL) < 0) {
             if (errno == EINTR) continue;
             perror("select"); break;
         }
 
         // combined device -> remap -> virtual device
-        if (FD_ISSET(in_fd, &fds)) {
+        if (in_fd >= 0 && FD_ISSET(in_fd, &fds)) {
             ssize_t n = read(in_fd, &ev, sizeof(ev));
-            if (n == (ssize_t)sizeof(ev)) {
+            if (n != (ssize_t)sizeof(ev)) {
+                fprintf(stderr, "%s went away; waiting for it to come back\n", inpath);
+                drop_input();
+            } else {
                 if (ev.type == EV_KEY) ev.code = remap_key(ev.code);
                 if (ev.type == EV_KEY || ev.type == EV_ABS || ev.type == EV_SYN)
                     if (write(ui_fd, &ev, sizeof(ev)) < 0) { /* ignore */ }
@@ -142,36 +185,31 @@ int main(int argc, char **argv) {
                 struct uinput_ff_upload up; memset(&up, 0, sizeof(up));
                 up.request_id = ev.value;
                 ioctl(ui_fd, UI_BEGIN_FF_UPLOAD, &up);
-                struct ff_effect eff = up.effect;
-                int oid = up.effect.id;
-                if (oid >= 0 && oid < MAX_FF && ff_used[oid])
-                    eff.id = ff_map[oid];  // update existing
-                else
-                    eff.id = -1;           // allocate new on the combined device
-                if (ioctl(in_fd, EVIOCSFF, &eff) < 0) {
-                    up.retval = errno;
-                } else {
-                    if (oid >= 0 && oid < MAX_FF) { ff_map[oid] = eff.id; ff_used[oid] = 1; }
-                    up.retval = 0;
-                }
+                int v = up.effect.id;  // the kernel keeps it within [0, MAX_FF)
+                ff_eff[v] = up.effect;
+                ff_used[v] = 1;
+                if (in_fd >= 0) ff_copy(v);
+                up.retval = 0;  // held by the virtual device even with no combined device
                 ioctl(ui_fd, UI_END_FF_UPLOAD, &up);
             } else if (ev.type == EV_UINPUT && ev.code == UI_FF_ERASE) {
                 struct uinput_ff_erase er; memset(&er, 0, sizeof(er));
                 er.request_id = ev.value;
                 ioctl(ui_fd, UI_BEGIN_FF_ERASE, &er);
-                int oid = er.effect_id;
-                if (oid >= 0 && oid < MAX_FF && ff_used[oid]) {
-                    ioctl(in_fd, EVIOCRMFF, ff_map[oid]);
-                    ff_used[oid] = 0;
-                }
+                int v = er.effect_id;
+                if (in_fd >= 0 && ff_map[v] >= 0) ioctl(in_fd, EVIOCRMFF, ff_map[v]);
+                ff_used[v] = 0;
+                ff_map[v] = -1;
                 er.retval = 0;
                 ioctl(ui_fd, UI_END_FF_ERASE, &er);
-            } else if (ev.type == EV_FF) {
-                // play/stop: translate virtual effect id -> combined effect id
-                int oid = ev.code;
-                struct input_event play = ev;
-                if (oid >= 0 && oid < MAX_FF && ff_used[oid]) play.code = ff_map[oid];
-                if (write(in_fd, &play, sizeof(play)) < 0) { /* ignore */ }
+            } else if (ev.type == EV_FF && in_fd >= 0) {
+                // play/stop names a virtual effect id: send it to that effect's copy.
+                // Codes at or above MAX_FF (FF_GAIN, FF_AUTOCENTER) pass through.
+                int target = ev.code < MAX_FF ? ff_map[ev.code] : ev.code;
+                if (target >= 0) {
+                    struct input_event play = ev;
+                    play.code = target;
+                    if (write(in_fd, &play, sizeof(play)) < 0) { /* ignore */ }
+                }
             }
         }
     }
