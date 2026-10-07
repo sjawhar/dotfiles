@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""omp-session-slim: shrink an omp session file bloated by proactive-memory-bank snapshots.
+
+The proactive_memory experiment (omp/extensions/experiments/) appended a full snapshot of its
+knowledge bank to the session on every change. In a long session that bank grows past 1 MB and
+thousands of snapshots pile up, so the session file crosses JavaScriptCore's maximum string
+length (2**31-1 bytes). omp builds the whole file as one string whenever it rewrites it
+(resume/re-root, branch, post-turn maintenance), so once a session is that big it can no longer
+be resumed: it exits with `RangeError: Out of memory` in createSessionManager. See AGENTC-1794
+(the omp-side OOM) and AGENTC-1941 (the experiment itself, now gated off).
+
+Only the newest bank entry on each branch leaf is ever read back (loadState in
+proactive-memory-core.ts picks the last proactive-memory-bank entry on the path). This tool
+replaces the `data` of every superseded bank entry with a tiny valid-empty marker, keeping its
+id/parentId/type/customType/timestamp so the entry tree and every cross-reference stay intact.
+No other entry is touched: non-bank lines are copied byte-for-byte. The newest bank entry on
+each leaf is kept verbatim.
+
+Usage:
+  omp-session-slim SESSION.jsonl ...            # dry run: report projected size
+  omp-session-slim --apply SESSION.jsonl ...    # rewrite in place (writes a backup first)
+
+Options:
+  --apply              Rewrite the file in place. Without it, nothing is changed.
+  --backup-dir DIR     Where to write the zstd-compressed backup of the original
+                       (default: ~/.omp/agent/sessions-slim-backups). Use --no-backup to skip.
+  --no-backup          Do not write a backup (dangerous; only with --apply).
+  --force              Rewrite even if a live process appears to hold the file open.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+BANK_PREFIX = b'{"type":"custom","customType":"proactive-memory-bank"'
+JSC_MAX_STRING = 2**31 - 1
+
+
+def eprint(*a: object) -> None:
+    print(*a, file=sys.stderr)
+
+
+def live_holders(path: Path) -> list[str]:
+    """Best-effort: pids that have this exact file open, or name the session id on their cmdline.
+
+    /proc/<pid>/fd is unreadable for processes in a different user namespace (agent boxes under
+    Sysbox), so this cannot see every holder; --force overrides. pgrep on the session id catches
+    an `omp --resume <id>` that this check's fd scan missed."""
+    target = str(path.resolve())
+    hits: set[str] = set()
+    proc = Path("/proc")
+    for p in proc.iterdir():
+        if not p.name.isdigit():
+            continue
+        fddir = p / "fd"
+        try:
+            for fd in fddir.iterdir():
+                try:
+                    if os.readlink(fd) == target:
+                        hits.add(p.name)
+                        break
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    # Session id is the trailing uuid of the filename: ..._<uuid>.jsonl
+    stem = path.name
+    sid = ""
+    if stem.endswith(".jsonl") and "_" in stem:
+        sid = stem[:-6].rsplit("_", 1)[-1]
+    if sid:
+        # Only count a real omp holder: a process whose cmdline names the session id AND runs omp.
+        # This avoids matching our own tooling (and any shell) that merely mentions the file path.
+        mine = {str(os.getpid()), str(os.getppid())}
+        r = subprocess.run(["pgrep", "-f", sid], capture_output=True, text=True)
+        for pid in r.stdout.split():
+            if pid in mine or pid in hits:
+                continue
+            try:
+                cmd = (Path("/proc") / pid / "cmdline").read_bytes()
+            except OSError:
+                continue
+            if b"omp-session-slim" in cmd:
+                continue
+            args = cmd.split(b"\x00")
+            if any(a == b"omp" or a.endswith(b"/omp") or a.endswith(b"omp-linux-x64") for a in args):
+                hits.add(pid)
+    return sorted(hits, key=int)
+
+
+def keep_set(path: Path) -> tuple[set[str], int, int, int]:
+    """Return (bank ids to keep, total entries, total bank entries, file bytes).
+
+    Keep = for every leaf of the parentId tree, the newest bank entry on that leaf's root path
+    (the one loadState would return on that branch). Every other bank entry is superseded."""
+    parent: dict[str, str | None] = {}
+    is_bank: set[str] = set()
+    parents_seen: set[str] = set()
+    order: list[str] = []
+    total = 0
+    banks = 0
+    nbytes = 0
+    with path.open("rb") as f:
+        for line in f:
+            nbytes += len(line)
+            if not line.strip():
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise SystemExit(f"{path}: unparseable line: {e}")
+            t = o.get("type")
+            if t in ("title",):
+                continue
+            total += 1
+            eid = o.get("id")
+            if eid is None:
+                continue  # session header has an id; title has none and is skipped above
+            pid = o.get("parentId")
+            parent[eid] = pid
+            order.append(eid)
+            if pid is not None:
+                parents_seen.add(pid)
+            if t == "custom" and o.get("customType") == "proactive-memory-bank":
+                is_bank.add(eid)
+                banks += 1
+    leaves = [eid for eid in order if eid not in parents_seen]
+    keep: set[str] = set()
+    for leaf in leaves:
+        cur: str | None = leaf
+        seen: set[str] = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            if cur in is_bank:
+                keep.add(cur)
+                break
+            cur = parent.get(cur)
+    return keep, total, banks, nbytes
+
+
+def stub_line(line: bytes) -> bytes:
+    o = json.loads(line)
+    data = o.get("data")
+    turn = data.get("turn") if isinstance(data, dict) else None
+    o["data"] = {
+        "version": 1,
+        "turn": turn if isinstance(turn, int) else 0,
+        "status": "[elided by omp-session-slim]",
+        "knowledge": [],
+        "procedural": [],
+    }
+    return json.dumps(o, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
+
+
+def slim_one(path: Path, apply: bool, backup_dir: Path | None, force: bool) -> None:
+    if not path.exists():
+        eprint(f"{path}: no such file")
+        return
+    holders = live_holders(path)
+    if holders and not force:
+        eprint(f"{path}: held open by live pid(s) {', '.join(holders)}; refuse (use --force to override)")
+        return
+
+    keep, total, banks, nbytes = keep_set(path)
+    superseded = banks - len(keep)
+    print(f"{path}")
+    print(f"  entries={total} bank-snapshots={banks} keep={len(keep)} stub={superseded} size={nbytes/1e9:.3f}GB")
+    if banks == 0:
+        print("  no proactive-memory-bank entries; nothing to do")
+        return
+
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".slim-", suffix=".jsonl")
+    tmp = Path(tmp_name)
+    out_entries = 0
+    out_banks = 0
+    try:
+        with path.open("rb") as fin, os.fdopen(tmp_fd, "wb") as fout:
+            for line in fin:
+                if line.startswith(BANK_PREFIX):
+                    o = json.loads(line)
+                    if o.get("id") in keep:
+                        fout.write(line)
+                    else:
+                        fout.write(stub_line(line))
+                    out_banks += 1
+                else:
+                    fout.write(line)
+                if line.strip() and json_type(line) not in ("title", None):
+                    out_entries += 1
+            fout.flush()
+            os.fsync(fout.fileno())
+        new_size = tmp.stat().st_size
+        print(f"  new size={new_size/1e9:.3f}GB  (JSC limit {JSC_MAX_STRING/1e9:.3f}GB -> {'OK' if new_size < JSC_MAX_STRING else 'STILL OVER'})")
+        # Verify structural equivalence before swapping.
+        verify(path, tmp, keep)
+        if not apply:
+            print("  dry run: not modifying the file (pass --apply to rewrite)")
+            tmp.unlink()
+            return
+        if new_size >= JSC_MAX_STRING and not force:
+            eprint(f"  {path}: still over the JSC limit after slimming; refuse (use --force to keep anyway)")
+            tmp.unlink()
+            return
+        if backup_dir is not None:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            rel = path.parent.name  # the -boxes-...-agent-c dir
+            bdir = backup_dir / rel
+            bdir.mkdir(parents=True, exist_ok=True)
+            bpath = bdir / (path.name + ".zst")
+            print(f"  backing up original -> {bpath}")
+            with path.open("rb") as src, bpath.open("wb") as dst:
+                subprocess.run(["zstd", "-q", "-12", "--long=27", "-"], stdin=src, stdout=dst, check=True)
+            print(f"  backup size={bpath.stat().st_size/1e6:.1f}MB")
+        st = path.stat()
+        os.replace(tmp, path)
+        os.utime(path, (st.st_atime, st.st_mtime))
+        print(f"  rewrote {path} ({nbytes/1e9:.3f}GB -> {new_size/1e9:.3f}GB)")
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
+def json_type(line: bytes) -> str | None:
+    try:
+        return json.loads(line).get("type")
+    except json.JSONDecodeError:
+        return None
+
+
+def verify(orig: Path, new: Path, keep: set[str]) -> None:
+    """Non-bank lines byte-identical and in order; kept bank lines identical; stubbed ones valid
+    and tiny; line count preserved."""
+    with orig.open("rb") as a, new.open("rb") as b:
+        na = nb = 0
+        for la, lb in zip(a, b):
+            na += 1
+            nb += 1
+            if la.startswith(BANK_PREFIX):
+                oid = json.loads(la).get("id")
+                if oid in keep:
+                    if la != lb:
+                        raise SystemExit(f"verify: kept bank {oid} changed")
+                else:
+                    ob = json.loads(lb)
+                    if ob.get("id") != oid or ob.get("parentId") != json.loads(la).get("parentId"):
+                        raise SystemExit(f"verify: stubbed bank {oid} lost id/parent")
+                    if not (isinstance(ob.get("data"), dict) and ob["data"].get("knowledge") == []):
+                        raise SystemExit(f"verify: stubbed bank {oid} not a valid-empty marker")
+            else:
+                if la != lb:
+                    raise SystemExit("verify: a non-bank line changed")
+        rem_a = sum(1 for _ in a)
+        rem_b = sum(1 for _ in b)
+        if rem_a or rem_b:
+            raise SystemExit(f"verify: line count differs (orig +{rem_a}, new +{rem_b})")
+    print("  verified: non-bank lines identical, tree intact, kept bank preserved")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Shrink proactive-memory-bank-bloated omp sessions.")
+    ap.add_argument("sessions", nargs="+", type=Path)
+    ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--backup-dir", type=Path, default=Path.home() / ".omp/agent/sessions-slim-backups")
+    ap.add_argument("--no-backup", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    args = ap.parse_args()
+    backup_dir = None if args.no_backup else args.backup_dir
+    for s in args.sessions:
+        slim_one(s, args.apply, backup_dir, args.force)
+
+
+if __name__ == "__main__":
+    main()
