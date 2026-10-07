@@ -26,20 +26,34 @@ retry:
   modelFallback: true
   usageAwareFallback: true
   fallbackChains:
+    # Every chain runs past claude-opus-4-8 to 4.7 and 4.6. A classifier refusal
+    # walks the chain, and in the 21 days to 2026-10-07 four of the six subagent
+    # turns that died stopped at 4.8 with nothing below it tried, though both
+    # older models answer the same request (dispatch://AGENTC-319). Anthropic
+    # refuses 4.7 and 4.6 as server-side `fallbacks` targets, so this chain is
+    # the only thing that reaches them.
     anthropic/claude-fable-5:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
     anthropic/claude-fable-5-1:
       - anthropic/claude-fable-5
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
     anthropic/claude-opus-5-5:
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
     anthropic/claude-opus-5:
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
     # Codex (ChatGPT Pro subscription) falls to the Anthropic tier that matches
     # the failing model; exact keys beat the wildcard. An empty chain means no
     # fallback at all: gpt-6-astra (the astra and sami-proxy agents) fails loudly
@@ -49,10 +63,14 @@ retry:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
     openai-codex/gpt-5.6-sol:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
     openai-codex/gpt-5.6-terra:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
@@ -63,6 +81,8 @@ retry:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
       # API-billed routes, off for cost; restore by uncommenting.
       # - openai/*
       # - opencode-zen/*
@@ -70,10 +90,14 @@ retry:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
     plan:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
       - anthropic/claude-opus-4-8
+      - anthropic/claude-opus-4-7
+      - anthropic/claude-opus-4-6
 task:
   maxRecursionDepth: 3
   # No session dispatches onto OpenAI API billing (Sami, 2026-10-02, on
