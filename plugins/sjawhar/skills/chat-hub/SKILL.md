@@ -8,7 +8,9 @@ description: Use for Sami's personal chat networks through the chat hub - readin
 Sami's chat networks are bridged into one private Matrix server on oryx. Every
 conversation is a Matrix room the user `@sami:chathub` is in, and the `chathub` MCP
 (mindroom-ai's matrix-mcp) reads and sends in those rooms **as Sami, on his real
-accounts and his real phone number**.
+accounts and his real phone number**. The MCP loads only in omp sessions started in the
+dotfiles repo (`~/.dotfiles/.omp/mcp.json`); a session started anywhere else does not
+have these tools.
 
 ## Which network a room is on
 
