@@ -51,8 +51,8 @@ one user's contacts don't leak to the others on a shared bridge.
   `hs_token`, bridge databases, Tuwunel database, under `~/.local/share/chathub/` (0700).
 - Agent-tier secrets in the shared file: `MATRIX_HUB_URL` (oryx tailnet URL) and
   `MATRIX_HUB_TOKEN` (an access token for `@sami:chathub`, device `agents`). The MCP entry
-  goes in the shared `omp/mcp.json`, because the hub is reachable from every tailnet
-  machine, unlike the loopback-only WhatsApp daemon.
+  is the dotfiles repo's project config, `.omp/mcp.json`, so only omp sessions started in
+  the dotfiles repo load the tools.
 
 ## Behavior rules for agents
 

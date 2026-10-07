@@ -52,15 +52,6 @@
         "Authorization: Bearer ${DEEL_API_KEY}"
       ],
       "enabled": true
-    },
-    "chathub": {
-      "command": "secrets",
-      "args": [
-        "MATRIX_HUB_URL",
-        "MATRIX_HUB_TOKEN",
-        "--",
-        "chathub-mcp"
-      ]
     }
   }
 }

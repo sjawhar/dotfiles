@@ -40,7 +40,7 @@ paths = [
 [[theme]]
 name = "chat-hub"
 paths = [
-  "chathub/", "installers/chathub.sh", "scripts/chathub-mcp",
+  "chathub/", "installers/chathub.sh", "scripts/chathub-mcp", ".omp/mcp.json",
   "scripts/tests/test_chathub_installer.py", "docs/plans/2026-10-03-chat-hub-design.md",
   "docs/plans/2026-10-03-chat-hub-plan.md",
 ]
