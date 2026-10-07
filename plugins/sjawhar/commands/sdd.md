@@ -8,12 +8,6 @@ disable-model-invocation: true
 
 This contract overrides conflicting stock workflow details.
 
-**First action: open the goal.** Call the `goal` tool with `op: "create"` and an objective that
-starts `[sdd] ` followed by one line naming the work. The post-compaction reminder to re-read this
-file fires only while such a goal is active, so a session without it loses this contract at its
-first compaction. Complete the goal (`op: "complete"`) when the change is merged and verified, not
-before; if the work is handed off, the successor resumes the goal rather than opening another.
-
 Load `subagent-driven-development` and `using-subagents`. The coordinator owns the workflow:
 
 - **Plan:** the coordinator uses `writing-plans`; plan authorship is never delegated.
