@@ -1,6 +1,6 @@
 {
 	"selfcompact": "random",
-	"proactive_memory": "random",
+	"proactive_memory": "off",
 	"context_line": "random",
 	"skill_gate": "random",
 	"judge_log": "on"
