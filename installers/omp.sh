@@ -74,6 +74,7 @@ rm -f "${OMP_AGENT_DIR}/extensions/fullscreen.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/attention-queue.ts" "${OMP_AGENT_DIR}/extensions/attention-queue.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/askgate.ts" "${OMP_AGENT_DIR}/extensions/askgate.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/refusal-cooldown.ts" "${OMP_AGENT_DIR}/extensions/refusal-cooldown.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/served-model-notice.ts" "${OMP_AGENT_DIR}/extensions/served-model-notice.ts"
 # The experiments extension: four session features, each behind its own gate (omp/AGENTS.md).
 # Only the entry is linked; its sibling modules resolve from the link's real path.
 ensure_link "${DOTFILES_DIR}/omp/extensions/experiments/index.ts" "${OMP_AGENT_DIR}/extensions/experiments.ts"
