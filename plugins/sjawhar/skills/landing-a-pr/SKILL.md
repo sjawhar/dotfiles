@@ -52,13 +52,25 @@ a review at a head that has a newer `follow` run, re-run that `follow` run too:
 `rerun-failed-jobs` for a failed one, `.../actions/runs/<id>/rerun` for a passed one,
 or its stale verdict keeps deciding. The verdict
 counts every open thread on the PR, old ones included. The owner lands every agent-c
-PR (Sami retired the merge queue, AGENTC-1089). A Legion-produced PR is
+PR; no agent organizes agent-c's merge queue (AGENTC-1089). A Legion-produced PR is
 landed by the lane that commissioned it. In `sjawhar/legion` the rule adds the Legion
 PO's reviewer App approving, and that approval survives a later push just as an armed
 auto-merge does, so arm (and re-arm after a push) only on a head the PO approved, and
 run `gh pr merge <N> --disable-auto` before pushing to an armed PR. Other repos: their
 own required checks and reviews. After any merge, the owner still verifies delivery
 and the changed production path.
+
+**agent-c `main` uses GitHub's native merge queue** (AGENTC-1865): an armed PR enters it
+once its checks pass, and the queue merges entries in order. To move a queued PR to the
+front, dequeue it and re-enqueue it with `jump`, through GraphQL with the App token:
+`dequeuePullRequest(input:{id:<PR node id>})`, then
+`enqueuePullRequest(input:{pullRequestId:<PR node id>, jump:true})`. A jump rebuilds
+every group behind it and restarts their checks, so use it only for a change the queued
+PRs cannot pass without, such as the fix for a gate that reds every chain. An entry in
+state `UNMERGEABLE` never merges and holds its place ahead of everything behind it:
+dequeue it and tell its owner. Read the order with
+`gh api graphql -f query='query { repository(owner:"trajectory-labs-pbc", name:"agent-c") { mergeQueue(branch:"main") { entries(first:20) { nodes { position state jump pullRequest { number } } } } } }'`.
+After a jump the `position` field can lag, so confirm by which entry merges first.
 
 Once a PR's required checks and review pass, merging it is usually the right call:
 every extra push restarts all the checks. So before another round, ask whether what
