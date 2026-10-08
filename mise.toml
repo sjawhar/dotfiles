@@ -50,7 +50,7 @@ idiomatic_version_file_enable_tools = ["rust"]
 auto_prune = false
 
 [tools]
-"github:sjawhar/jj" = "0.46.0-sami.20261008-182506"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166; #10129 and #10127 dropped
+"github:sjawhar/jj" = "0.46.0-sami.20261008-191418"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166; #10129 and #10127 dropped
 "github:sjawhar/knives" = "2.0.22"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
 "github:sjawhar/legion" = "legion-v9.0.0"  # the Go `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); it shares the Go daemons' registry, ~/.local/state/legion/legions.json, which a TypeScript cli-v* `legion` would rewrite as an object no Go daemon can read
 "github:sjawhar/oh-my-pi" = "18.8.3-sami.20261008-071803"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
