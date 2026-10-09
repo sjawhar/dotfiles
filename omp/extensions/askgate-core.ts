@@ -3,11 +3,23 @@
 // binds the fork's completion call and buildSessionContext; everything else lives here so the
 // tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
-// Scope: `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper
-// emits with `toolName = <device>` and the validated arguments, for dispatch_ask,
-// dispatch_message, dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue
-// when its arguments carry `spec`. Top-level sessions only (`ctx.agent.kind === "main"`); the
-// factory is rebound in every subagent, which this check keeps out.
+// Scope: the same six calls on two surfaces, recorded under one tool name (dispatch_ask, …).
+//   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`, the
+//     head rules of the plugin that ships the CLI, copied) naming `ask`, `message`, `edit-ask`,
+//     `comment`, `doc-edit`, or `issue` with `--spec` or `--spec-file`. The gate learns the exact
+//     arguments by running that command with `--dry-run` after the command name, in the call's
+//     working directory and environment, its here-document still on stdin, under a 10 s limit,
+//     and reviews the JSON it prints. A dry-run that fails, times out or prints no JSON object is
+//     recorded as `error` and the call runs (the CLI refuses arguments it cannot parse, before it
+//     sends anything). A command joined to anything else (`dispatch ask …; echo`) is not a
+//     `dispatch` call under those rules and is not reviewed, nor is one carrying `--dry-run` or
+//     `--help`, which sends nothing.
+//   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
+//     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
+//     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
+//     arguments carry `spec`. Only sessions started before the `dispatch` CLI still have them.
+// Top-level sessions only (`ctx.agent.kind === "main"`); the factory is rebound in every
+// subagent, which this check keeps out.
 //
 // OMP_ASKGATE, read when the extension binds to a session: `off` registers nothing; `warn`
 // (unset) runs a revised call and returns the reason as additional context, which the fork
@@ -23,10 +35,12 @@
 //   - killed: `advisor.disableRoster` in local-overrides.yml (under PI_CODING_AGENT_DIR, else
 //     ~/.omp/agent) lists `askgate`. The file is read on every call, so a kill reaches running
 //     sessions; an unparsable file is not a kill.
-//   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON. The key is
-//     stripped on the outer `write` event (before the device validates its arguments) and the
-//     call runs unasked; the agent is told its rebuttal was recorded and the field removed
-//     before sending. At most 64 unspent rebuttals are remembered.
+//   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
+//     `--advisor-rebuttal '<one line>'` among a `dispatch` command's flags. The key is stripped
+//     on the outer `write` event (before the device validates its arguments), the flag from the
+//     `bash` command whatever the gate decides (the CLI would refuse it), and the call runs
+//     unasked; the agent is told its rebuttal was recorded and removed before sending. At most
+//     64 unspent device rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, error, no
 //     parsable answer) stop the gate for the session, with one UI notice. The halt, the
 //     count, the breaker and the rebuttals reset on session_switch and session_branch.
@@ -62,8 +76,15 @@ import systemTemplate from "./askgate-system.md" with { type: "text" };
 
 const SCOPED_DEVICES = ["dispatch_ask", "dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit", "dispatch_issue"] as const;
 const SPEC_ONLY_DEVICE = "dispatch_issue";
+const SCOPED_COMMANDS = ["ask", "message", "edit-ask", "comment", "doc-edit", "issue"] as const;
+const SPEC_ONLY_COMMAND = "issue";
+const SPEC_FLAGS = ["--spec", "--spec-file"];
+/** Flags under which a `dispatch` command sends nothing. */
+const NO_SEND_FLAGS = ["--dry-run", "--help"];
 const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
 const REBUTTAL_KEY = "advisor_rebuttal";
+const REBUTTAL_FLAG = "--advisor-rebuttal";
+export const DRY_RUN_TIMEOUT_MS = 10_000;
 const GATE_TIMEOUT_MS = 90_000;
 // The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
 // gate's deadline stays this far under it: room for the aborted call to report its usage
@@ -127,6 +148,9 @@ export interface GateEntry {
 }
 export interface CompleteRequest { ctx: unknown; model: unknown; system: string; user: string; sessionId: string; signal: AbortSignal }
 export type Completion = { text: string; error?: string; usage?: Usage };
+export interface DryRunOptions { cwd: string; env: Record<string, string | undefined>; timeoutMs: number; signal?: AbortSignal }
+/** `exitCode` is null when the run was killed. */
+export interface DryRunResult { exitCode: number | null; stdout: string; stderr: string; timedOut: boolean }
 interface Deps {
 	env: Record<string, string | undefined>;
 	home: string;
@@ -141,6 +165,8 @@ interface Deps {
 	contextMessages: (ctx: GateCtx) => readonly Message[];
 	/** The runner's ceiling for a tool_call handler: extensionHandlers.toolCallTimeoutMs, read when asked. */
 	handlerCeilingMs: () => number;
+	/** Runs a `dispatch` command's --dry-run script under bash; `spawnDryRun` in the entry. */
+	dryRun: (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -160,6 +186,8 @@ type GateCtx = {
 	/** The session's primary model. */
 	model?: { provider: string; id: string };
 	sessionManager: { getSessionId(): string };
+	/** The session's working directory, against which a `bash` call's `cwd` resolves. */
+	cwd: string;
 };
 /** One AgentMessage of that context, read by `role` (user, assistant, toolResult, custom, compactionSummary, …). */
 export type Message = { role: string } & Record<string, unknown>;
@@ -201,6 +229,185 @@ function isKilled(overlayText: string | undefined, slug: string, onUnparsable?: 
 
 export function scopedDevice(toolName: string, input: Input): boolean {
 	return (SCOPED_DEVICES as readonly string[]).includes(toolName) && (toolName !== SPEC_ONLY_DEVICE || input.spec !== undefined);
+}
+
+// Where a `dispatch` command's own text ends: `dispatchCommandHead` and its helpers below are the
+// rules @sjawhar/pi-envoy applies (`packages/pi-shared/src/shell-command.ts` in sjawhar/legion),
+// copied because this extension cannot import the plugin; keep the two in step. A conservative
+// character scan, not a shell parser: whatever it cannot reason about is no `dispatch` command.
+// Whitespace is bash's blanks, space and tab, never JavaScript's `\s`, which also takes a no-break
+// space that bash reads as part of a word.
+
+/** The one here-document a command's first line may end with, opened with a quoted delimiter so
+ * the shell expands nothing in its body. The second group is `-` for `<<-`, the only form under
+ * which bash strips leading tabs from the delimiter line. */
+const HEREDOC_OPENING = /^(.*?)[ \t]*<<(-?)[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'[ \t]*$/;
+
+/** A line of nothing but blanks, which bash runs as no command. */
+const BLANK_LINE = /^[ \t]*$/;
+
+/** Outside quotes, a `dispatch` head refuses whatever would end the command, start
+ * another, expand something, redirect, start a comment (bash reads the rest of the line as one, a
+ * here-document opener included) or escape a character (the shell's to interpret, so never
+ * modelled here). */
+const REFUSED_UNQUOTED = "\n;&|$`<>()#\\";
+
+/** Inside double quotes bash still expands `$` and backticks and interprets `\`. */
+const REFUSED_DOUBLE_QUOTED = "$`\\";
+
+/** A `dispatch` command's first line, without its here-document opener, when the command is one
+ * `dispatch` command, optionally fed one quoted here-document on stdin; undefined for any other
+ * command. */
+export function dispatchCommandHead(command: unknown): string | undefined {
+	if (typeof command !== "string" || hasControlCharacter(command)) return undefined;
+	// Blank lines before the head and after the command's last line run as no command, so they are
+	// dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
+	// exactly its delimiter (with leading tabs stripped under `<<-`), whatever blanks the line
+	// carries before or after it.
+	const all = command.split("\n");
+	const first = all.findIndex(line => !BLANK_LINE.test(line));
+	if (first === -1) return undefined;
+	const last = all.findLastIndex(line => !BLANK_LINE.test(line));
+	const lines = all.slice(first, last + 1);
+	let head = lines[0] ?? "";
+	if (lines.length > 1) {
+		const opening = HEREDOC_OPENING.exec(head);
+		if (opening === null) return undefined;
+		const stripTabs = opening[2] === "-";
+		const delimiter = opening[3];
+		const end = lines.findIndex((line, index) => index > 0 && (stripTabs ? line.replace(/^\t+/, "") : line) === delimiter);
+		// The first line equal to the delimiter ends the here-document in the shell, so it must be
+		// the last line: anything after it would run as a command.
+		if (end !== lines.length - 1) return undefined;
+		head = opening[1] ?? "";
+	}
+	head = head.replace(/^[ \t]+|[ \t]+$/g, "");
+	return firstWord(head) === "dispatch" && headScan(head) ? head : undefined;
+}
+
+/** The trimmed head's first word as bash splits it, at a space or a tab. */
+function firstWord(head: string): string {
+	return head.split(/[ \t]/, 1)[0] ?? "";
+}
+
+/** Any control character but newline and tab: a `\r` before a line end would make the delimiter
+ * this scan finds differ from the one bash finds (bash ends a here-document at `EOF\r`, not `EOF`). */
+function hasControlCharacter(text: string): boolean {
+	for (let index = 0; index < text.length; index += 1) {
+		const code = text.charCodeAt(index);
+		if ((code < 0x20 && code !== 0x0a && code !== 0x09) || code === 0x7f) return true;
+	}
+	return false;
+}
+
+/** Whether a `dispatch` head is one command whose words the shell takes as written:
+ * single quotes make every character literal, and an unterminated quote is refused. */
+function headScan(head: string): boolean {
+	let quote: '"' | "'" | undefined;
+	for (const char of head) {
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
+			continue;
+		}
+		if (quote === '"') {
+			if (char === '"') quote = undefined;
+			else if (REFUSED_DOUBLE_QUOTED.includes(char)) return false;
+			continue;
+		}
+		if (char === "'" || char === '"') quote = char;
+		else if (REFUSED_UNQUOTED.includes(char)) return false;
+	}
+	return quote === undefined;
+}
+
+type Word = { raw: string; value: string };
+
+/** A head's words as bash splits them at unquoted blanks, each as written and with its quotes
+ * removed. Only for a head `dispatchCommandHead` accepted, which holds no escape or expansion. */
+function headWords(head: string): Word[] {
+	const words: Word[] = [];
+	let word: Word | undefined;
+	let quote: string | undefined;
+	for (const char of head) {
+		if (quote === undefined && (char === " " || char === "\t")) {
+			if (word) words.push(word);
+			word = undefined;
+			continue;
+		}
+		word ??= { raw: "", value: "" };
+		word.raw += char;
+		if (quote === undefined && (char === "'" || char === '"')) quote = char;
+		else if (char === quote) quote = undefined;
+		else word.value += char;
+	}
+	if (word) words.push(word);
+	return words;
+}
+
+/** A scoped `dispatch` command: the tool it calls, the text to run (an override flag removed),
+ * the same text with `--dry-run` after the command name, and the override's line. */
+export interface ScopedCommand { tool: string; label: string; command: string; dryRunScript: string; rebuttal?: string }
+
+/** The `bash` command as a scoped `dispatch` call, or undefined for any other command. */
+export function scopedCommand(command: unknown): ScopedCommand | undefined {
+	const head = dispatchCommandHead(command);
+	if (head === undefined || typeof command !== "string") return undefined;
+	const [program, name, ...flags] = headWords(head);
+	if (name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name.value)) return undefined;
+	if (flags.some(flag => NO_SEND_FLAGS.includes(flag.value))) return undefined;
+	if (name.value === SPEC_ONLY_COMMAND && !flags.some(flag => SPEC_FLAGS.includes(flag.value.split("=", 1)[0]))) return undefined;
+	// An override is `--advisor-rebuttal <line>` or `--advisor-rebuttal=<line>`; a value that starts
+	// with `--` is the next flag, as the CLI reads it. A blank line is no override and stays put.
+	let rebuttal: string | undefined;
+	const kept: Word[] = [];
+	for (let index = 0; index < flags.length; index++) {
+		const { value } = flags[index];
+		const next = flags[index + 1]?.value;
+		const line = value === REBUTTAL_FLAG && next !== undefined && !next.startsWith("--") ? next : value.startsWith(`${REBUTTAL_FLAG}=`) ? value.slice(REBUTTAL_FLAG.length + 1) : undefined;
+		if (line === undefined || !line.trim()) {
+			kept.push(flags[index]);
+			continue;
+		}
+		rebuttal = line.trim();
+		if (value === REBUTTAL_FLAG) index++;
+	}
+	// The head is the command's first non-blank text, so its first occurrence is where it stands.
+	const at = command.indexOf(head);
+	const withHead = (words: string[]) => `${command.slice(0, at)}${words.join(" ")}${command.slice(at + head.length)}`;
+	const rest = kept.map(word => word.raw);
+	return {
+		tool: `dispatch_${name.value.replaceAll("-", "_")}`,
+		label: `dispatch ${name.value}`,
+		command: withHead([program.raw, name.raw, ...rest]),
+		dryRunScript: withHead([program.raw, name.raw, "--dry-run", ...rest]),
+		...(rebuttal === undefined ? {} : { rebuttal }),
+	};
+}
+
+/** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
+export async function spawnDryRun(script: string, { cwd, env, timeoutMs, signal }: DryRunOptions): Promise<DryRunResult> {
+	const child = Bun.spawn(["bash", "-c", script], { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
+	let timedOut = false;
+	const kill = () => {
+		try {
+			process.kill(-child.pid, "SIGKILL");
+		} catch {
+			// The group already exited.
+		}
+	};
+	const timer = setTimeout(() => {
+		timedOut = true;
+		kill();
+	}, timeoutMs);
+	signal?.addEventListener("abort", kill, { once: true });
+	try {
+		const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+		await child.exited;
+		return { exitCode: child.exitCode, stdout, stderr, timedOut };
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", kill);
+	}
 }
 
 function breakerKey(toolName: string, input: Input): string {
@@ -406,8 +613,12 @@ const agentFacing = (text: string) => clipBytes(text.replace(/<(?=[A-Za-z/!?])/g
 // What the agent reads after each gated call: silence only for an allow or a fail-open, since a
 // pass it cannot see is indistinguishable from a gate that broke.
 const SECOND_REVISE = "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
-const renderRevise = (reason: string, second: boolean) =>
-	`AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with "${REBUTTAL_KEY}": "<one line>" added to the JSON to override; an override is always sent and recorded, and the field is removed before sending.${second ? `\n${SECOND_REVISE}` : ""}`;
+/** How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the command. */
+type Override = { name: string; how: string; what: string };
+const DEVICE_OVERRIDE: Override = { name: REBUTTAL_KEY, how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`, what: "field" };
+const COMMAND_OVERRIDE: Override = { name: REBUTTAL_FLAG, how: `${REBUTTAL_FLAG} '<one line>' added to its flags`, what: "flag" };
+const renderRevise = (reason: string, second: boolean, override: Override) =>
+	`AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
 	abandoned: "AskGate did not send this call: it was stopped before a verdict came back. Send it again if it is still wanted.",
@@ -415,8 +626,8 @@ const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
 };
 const renderWarn = (reason: string, second: boolean) =>
 	`<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.${second ? `\n${SECOND_REVISE}` : ""}\n</advisor-gate>`;
-const renderRebuttalAck = (rebuttal: string) =>
-	`<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${REBUTTAL_KEY} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that field removed before sending.\n</advisor-gate>`;
+const renderRebuttalAck = (rebuttal: string, override: Override) =>
+	`<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
 const renderBreakerAck = () =>
 	`<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
 
@@ -526,11 +737,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				? { fields: { decision: "revise", outcome: cause, ...fields }, result: { block: true, reason: NO_VERDICT_REFUSAL[cause] }, effect: "none" }
 				: pass(cause, fields);
 
-		const decide = async (event: ToolCallEvent, ctx: GateCtx, started: number, base: Base, key: string, rebuttal: string | undefined): Promise<Decision> => {
+		const decide = async (event: ToolCallEvent, ctx: GateCtx, started: number, base: Base, key: string, rebuttal: string | undefined, override: Override): Promise<Decision> => {
 			if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) return pass("killed");
 			if (rebuttal !== undefined) {
 				breaker.reset(key);
-				return { fields: { decision: "allow", outcome: "rebuttal", rebuttal }, result: { additionalContext: renderRebuttalAck(rebuttal) }, effect: "none" };
+				return { fields: { decision: "allow", outcome: "rebuttal", rebuttal }, result: { additionalContext: renderRebuttalAck(rebuttal, override) }, effect: "none" };
 			}
 			if (halted) return pass("halted");
 			if (breaker.tripped(key)) {
@@ -567,7 +778,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const second = breaker.reasons(key).length === GATE_BREAKER_REVISES;
 			return {
 				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, deliveredReason: agentFacing(verdict.reason), revisesForKey: base.revisesForKey + 1, ...called },
-				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason, second) } : { additionalContext: renderWarn(verdict.reason, second) },
+				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason, second, override) } : { additionalContext: renderWarn(verdict.reason, second) },
 				effect: "verdict",
 			};
 		};
@@ -605,6 +816,39 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			}
 		};
 
+		/** A scoped command's arguments as the CLI's own --dry-run prints them, or why there are none. */
+		type DryRun = { args: Input } | { failure: string } | { cause: "abandoned" | "shutdown" };
+		const readArgs = async (scoped: ScopedCommand, input: Input, ctx: GateCtx, toolCallId: string): Promise<DryRun> => {
+			// The bash tool's own resolution: `~` is home, a bare `/` is the session's directory, and a
+			// relative path resolves against it.
+			const raw = typeof input.cwd === "string" && input.cwd !== "" ? input.cwd.replace(/^~(?=$|\/)/, deps.home) : undefined;
+			const cwd = raw === undefined || /^\/+$/.test(raw) ? ctx.cwd : path.resolve(ctx.cwd, raw);
+			// Abandoned like a waiting model call: the run's stop or the session's shutdown kills the dry-run.
+			const controller = new AbortController();
+			let cause: "abandoned" | "shutdown" | undefined;
+			inflight.set(toolCallId, given => {
+				cause = given;
+				controller.abort();
+			});
+			let run: DryRunResult;
+			try {
+				run = await deps.dryRun(scoped.dryRunScript, { cwd, env: deps.env, timeoutMs: DRY_RUN_TIMEOUT_MS, signal: controller.signal });
+			} finally {
+				inflight.delete(toolCallId);
+			}
+			if (cause !== undefined) return { cause };
+			if (run.timedOut) return { failure: `${scoped.label} --dry-run did not finish within ${DRY_RUN_TIMEOUT_MS} ms` };
+			const printed = clipBytes((run.stdout || run.stderr).trim(), GATE_REASON_MAX_BYTES);
+			if (run.exitCode !== 0) return { failure: `${scoped.label} --dry-run exited ${run.exitCode ?? "on a signal"}: ${printed}` };
+			try {
+				const args: unknown = JSON.parse(run.stdout);
+				if (isRecord(args)) return { args };
+			} catch {
+				// Not JSON: reported below.
+			}
+			return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
+		};
+
 		/** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
 		const identity = (event: ToolCallEvent): Base => ({
 			advisor: "AskGate",
@@ -620,24 +864,42 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const started = deps.now();
 			let base: Base | undefined;
 			let decision: Decision;
+			// A `dispatch` command with its override flag removed, which runs whatever the gate decides.
+			let revised: Input | undefined;
 			try {
 				if (ctx.agent.kind !== "main") return undefined;
 				if (event.toolName === "write") return stripRebuttal(event);
-				// A remembered rebuttal is spent by its device event, whatever happens to the call.
-				const rebuttal = rebuttals.get(event.toolCallId);
-				rebuttals.delete(event.toolCallId);
-				if (!scopedDevice(event.toolName, event.input)) return undefined;
-				const key = breakerKey(event.toolName, event.input);
-				base = {
-					...identity(event),
-					revisesForKey: breaker.reasons(key).length,
-					argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
-				};
-				decision = await decide(event, ctx, started, base, key, rebuttal);
+				if (event.toolName === "bash") {
+					const scoped = scopedCommand(event.input.command);
+					if (scoped === undefined) return undefined;
+					if (scoped.rebuttal !== undefined) revised = { ...event.input, command: scoped.command };
+					base = { ...identity(event), tool: scoped.tool, path: scoped.label };
+					const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
+					if ("cause" in run) decision = givenUp(run.cause);
+					// The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
+					else if ("failure" in run) decision = pass("error", { reason: run.failure });
+					else {
+						const key = breakerKey(scoped.tool, run.args);
+						base = { ...base, revisesForKey: breaker.reasons(key).length, argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex") };
+						decision = await decide({ toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args }, ctx, started, base, key, scoped.rebuttal, COMMAND_OVERRIDE);
+					}
+				} else {
+					// A remembered rebuttal is spent by its device event, whatever happens to the call.
+					const rebuttal = rebuttals.get(event.toolCallId);
+					rebuttals.delete(event.toolCallId);
+					if (!scopedDevice(event.toolName, event.input)) return undefined;
+					const key = breakerKey(event.toolName, event.input);
+					base = {
+						...identity(event),
+						revisesForKey: breaker.reasons(key).length,
+						argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
+					};
+					decision = await decide(event, ctx, started, base, key, rebuttal, DEVICE_OVERRIDE);
+				}
 			} catch (error) {
 				// Fail open: the runner turns a thrown handler into a refusal. A throw here is the
-				// gate's own (the overlay, the dump, the render), not a missing verdict, so it does not
-				// count toward the halt.
+				// gate's own (the overlay, the dump, the render, the dry-run's spawn), not a missing
+				// verdict, so it does not count toward the halt.
 				decision = pass("error", { reason: messageOf(error) });
 			}
 			// Settled once and recorded once, each on its own, so neither failing can repeat the other.
@@ -651,7 +913,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			} catch {
 				// The entry is best effort; the call still runs.
 			}
-			return decision.result;
+			return revised === undefined ? decision.result : { ...decision.result, input: revised };
 		};
 
 		pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {

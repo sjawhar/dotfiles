@@ -13,7 +13,7 @@ import { buildSessionContext, type ExtensionAPI, type ReadonlySessionManager, se
 import { EXTENSION_HANDLER_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { cfgExtensionHandlersToolCallTimeoutMs } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { type Api, type ApiKeyResolver, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
-import { type CompleteRequest, type Completion, createAskGate, GATE_EFFORT, type Message, type Usage } from "./askgate-core";
+import { type CompleteRequest, type Completion, createAskGate, GATE_EFFORT, type Message, spawnDryRun, type Usage } from "./askgate-core";
 
 // The core passes the fork's objects through untyped: ctx is the ExtensionContext, whose modelRegistry and
 // sessionManager this reads, and model is the full Model<Api> ctx.models.resolve handed back.
@@ -87,6 +87,7 @@ export default createAskGate({
 	complete,
 	charterPath: path.join(path.dirname(fs.realpathSync(import.meta.path)), "..", "watchdog", "askgate.md"),
 	handlerCeilingMs,
+	dryRun: spawnDryRun,
 	contextMessages: ctx => {
 		const { sessionManager } = ctx as unknown as Ctx;
 		return buildSessionContext(sessionManager.getEntries(), sessionManager.getLeafId()).messages as unknown as readonly Message[];
