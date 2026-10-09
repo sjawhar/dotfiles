@@ -1,11 +1,15 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import * as core from "../askgate-core";
 import {
 	ADVISOR_GATE_ENTRY_TYPE,
 	type CompleteRequest,
 	createAskGate,
+	type DryRunOptions,
+	type DryRunResult,
 	type GateEntry,
 	GATE_CONTEXT_MAX_BYTES,
 	loadCharter,
@@ -18,6 +22,9 @@ import {
 	scopedDevice,
 } from "../askgate-core";
 import * as fx from "./askgate-fixtures";
+
+/** Runs a `dispatch` command's --dry-run as the entry's binding does. */
+type DryRunner = (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
 
 const HOME = "/home/tester";
 const CHARTER_PATH = "/dotfiles/omp/watchdog/askgate.md";
@@ -54,6 +61,10 @@ function bind(opts: {
 	recordThrows?: boolean;
 	/** extensionHandlers.toolCallTimeoutMs as the entry reads it; 120 000 ms unless a test says otherwise. */
 	ceiling?: number;
+	/** The session's working directory (ctx.cwd). */
+	cwd?: string;
+	/** Runs a `dispatch` command's --dry-run; the real runner unless a test says otherwise. */
+	dryRun?: DryRunner;
 } = {}) {
 	const handlers = new Map<string, Handler>();
 	const entries: GateEntry[] = [];
@@ -62,6 +73,8 @@ function bind(opts: {
 	const notices: string[] = [];
 	const dumps: Array<[string, string]> = [];
 	const calls: CompleteRequest[] = [];
+	/** Every dry-run the gate started: its script, working directory and time limit. */
+	const dryRuns: Array<{ script: string; cwd: string; timeoutMs: number }> = [];
 	const files = new Map(Object.entries({ [CHARTER_PATH]: "# AskGate charter\nJudge the call.", ...opts.files }));
 	/** Paths whose read fails as an unreadable file would. */
 	const unreadable = new Set<string>();
@@ -91,6 +104,10 @@ function bind(opts: {
 		charterPath: CHARTER_PATH,
 		contextMessages: () => (opts.context ?? (() => [fx.user("Post the comment.")]))(),
 		handlerCeilingMs: () => opts.ceiling ?? 120_000,
+		dryRun: (script, runOpts) => {
+			dryRuns.push({ script, cwd: runOpts.cwd, timeoutMs: runOpts.timeoutMs });
+			return (opts.dryRun ?? core.spawnDryRun)(script, runOpts);
+		},
 	})(pi as never);
 	const ctx = {
 		agent: { kind: opts.kind ?? "main", id: "Main", name: "main", depth: 0 },
@@ -101,6 +118,7 @@ function bind(opts: {
 		/** The session's primary model: on the gate's provider unless a test says otherwise. */
 		model: "primary" in opts ? opts.primary : MODEL,
 		sessionManager: { getSessionId: () => "sess-1", getSessionFile: () => "/sessions/s.jsonl" },
+		cwd: opts.cwd ?? "/work",
 	};
 	const handler = handlers.get("tool_call");
 	const emit = (event: Record<string, unknown>) => {
@@ -115,10 +133,12 @@ function bind(opts: {
 		notices,
 		dumps,
 		calls,
+		dryRuns,
 		files,
 		unreadable,
 		write: (toolCallId: string, path: string, content: string) => emit({ toolName: "write", toolCallId, input: { path, content } }),
 		device: (toolCallId: string, toolName: string, input: Record<string, unknown>) => emit({ toolName, toolCallId, input }),
+		bash: (toolCallId: string, command: string, extra: Record<string, unknown> = {}) => emit({ toolName: "bash", toolCallId, input: { command, ...extra } }),
 		/** Any other event the extension listens to, such as session_switch. */
 		event: (name: string, payload: Record<string, unknown> = {}) => handlers.get(name)?.({ type: name, ...payload }, ctx),
 	};
@@ -675,6 +695,172 @@ describe("population (test 11)", () => {
 		expect(await g.device("t1", "dispatch_search", { query: "q" })).toBeUndefined();
 		expect(await g.device("t2", "dispatch_issue", { title: "t" })).toBeUndefined();
 		expect(g.calls).toHaveLength(0);
+		expect(g.entries).toHaveLength(0);
+	});
+});
+
+describe("dispatch CLI calls", () => {
+	// A stand-in for the plugin's `dispatch`: under --dry-run it prints the arguments its flags name as
+	// JSON (a `-file` flag reads its path, `-` reads stdin), and without it exits 3 as if it had sent.
+	const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-cli-"));
+	const bin = path.join(work, "bin");
+	fs.mkdirSync(bin);
+	fs.writeFileSync(
+		path.join(bin, "dispatch"),
+		`#!${process.execPath}
+const [command, ...rest] = process.argv.slice(2);
+if (!rest.includes("--dry-run")) { console.log("stub dispatch " + command + " would send"); process.exit(3); }
+const args = {};
+for (let i = 0; i < rest.length; i++) {
+	const token = rest[i];
+	if (token === "--dry-run") continue;
+	if (token === "--fail") { console.log("dispatch " + command + " was not called: 1 problem\\n- unknown flag --fail"); process.exit(1); }
+	const eq = token.indexOf("=");
+	const name = (eq === -1 ? token : token.slice(0, eq)).slice(2);
+	const value = eq === -1 ? rest[++i] : token.slice(eq + 1);
+	if (name.endsWith("-file")) args[name.slice(0, -5).replaceAll("-", "_")] = value === "-" ? await Bun.stdin.text() : await Bun.file(value).text();
+	else args[name.replaceAll("-", "_")] = value;
+}
+console.log(JSON.stringify(args, null, 2));
+`,
+		{ mode: 0o755 },
+	);
+	afterAll(() => fs.rmSync(work, { recursive: true, force: true }));
+	const STUB = { PATH: `${bin}:${process.env.PATH}` };
+	const QUESTION = "Should the release wait for the staging soak? Recommendation: wait one day.\n";
+	const ASK = `dispatch ask --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`;
+
+	test("a dispatch ask fed a here-document is reviewed with the JSON its --dry-run printed", async () => {
+		const g = bind({ env: STUB, cwd: work });
+		expect(await g.bash("b1", ASK)).toBeUndefined();
+		expect(g.dryRuns).toEqual([{ script: `dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`, cwd: work, timeoutMs: 10_000 }]);
+		const args = { issue: "X-1", question: QUESTION };
+		expect(g.calls).toHaveLength(1);
+		expect(g.calls[0].user).toContain("The agent is about to run `dispatch ask` with these arguments:");
+		expect(g.calls[0].user).toContain(JSON.stringify(args, null, 2));
+		expect(g.entries).toMatchObject([{ tool: "dispatch_ask", path: "dispatch ask", toolCallId: "b1", decision: "allow", outcome: "verdict", argsDigest: createHash("sha256").update(JSON.stringify(args)).digest("hex") }]);
+	});
+	test("dispatch search is not reviewed", async () => {
+		const g = bind({ env: STUB, cwd: work });
+		expect(await g.bash("b1", "dispatch search --query x")).toBeUndefined();
+		expect(g.dryRuns).toHaveLength(0);
+		expect(g.calls).toHaveLength(0);
+		expect(g.entries).toHaveLength(0);
+	});
+	test("a dispatch ask joined to another command is not treated as a dispatch call", async () => {
+		const g = bind({ env: STUB, cwd: work });
+		for (const command of [
+			"dispatch ask --issue X-1 --question q; echo",
+			"dispatch ask --issue X-1 --question q && make",
+			"dispatch ask --issue X-1 --question q | cat",
+			`${ASK}\necho done`,
+			"cd /tmp && dispatch ask --issue X-1 --question q",
+		]) {
+			expect(await g.bash("b1", command)).toBeUndefined();
+		}
+		expect(g.dryRuns).toHaveLength(0);
+		expect(g.entries).toHaveLength(0);
+	});
+	test("dispatch issue is reviewed with --spec or --spec-file and not without", async () => {
+		const g = bind({ env: STUB, cwd: work });
+		await g.bash("plain", "dispatch issue --project P --title 'A new issue'");
+		await g.bash("file", "dispatch issue --project P --title t --spec-file - <<'EOF'\n# Spec\nEOF");
+		await g.bash("inline", "dispatch issue --project P --title t --spec='# Spec'");
+		await g.bash("spaced", 'dispatch issue --project P --title t --spec "# Spec"');
+		expect(g.dryRuns.map(r => r.script)).toEqual([
+			"dispatch issue --dry-run --project P --title t --spec-file - <<'EOF'\n# Spec\nEOF",
+			"dispatch issue --dry-run --project P --title t --spec='# Spec'",
+			'dispatch issue --dry-run --project P --title t --spec "# Spec"',
+		]);
+		expect(g.entries.map(e => [e.toolCallId, e.tool])).toEqual([["file", "dispatch_issue"], ["inline", "dispatch_issue"], ["spaced", "dispatch_issue"]]);
+		expect(g.calls[0].user).toContain('"spec": "# Spec\\n"');
+	});
+	test("the other four scoped commands are reviewed under their tool names", async () => {
+		const g = bind({ env: STUB, cwd: work });
+		await g.bash("m", "dispatch message --issue X-1 --body 'The run finished.'");
+		await g.bash("e", "dispatch edit-ask --ask a-1 --question 'Which one? Recommendation: A.'");
+		await g.bash("c", "dispatch comment --issue X-1 --body 'Looks right.'");
+		await g.bash("d", `dispatch doc-edit --issue X-1 --artifact spec --ops-json '[{"op":"insert","markdown":"x"}]'`);
+		expect(g.entries.map(e => e.tool)).toEqual(["dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit"]);
+		expect(g.calls).toHaveLength(4);
+	});
+	test("a command the agent already runs with --dry-run or --help sends nothing and is not reviewed", async () => {
+		const g = bind({ env: STUB, cwd: work });
+		await g.bash("a", "dispatch ask --dry-run --issue X-1 --question q");
+		await g.bash("b", "dispatch message --help");
+		expect(g.dryRuns).toHaveLength(0);
+		expect(g.entries).toHaveLength(0);
+	});
+	test("a revise in block mode blocks the bash call with the gate's reason and the command-line override", async () => {
+		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work, complete: async () => ({ text: REVISE }) });
+		const result = await g.bash("b1", ASK);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("see the message above");
+		expect(result?.reason).toContain("--advisor-rebuttal");
+		expect(result?.reason).not.toContain('"advisor_rebuttal"');
+		expect(g.entries).toMatchObject([{ tool: "dispatch_ask", decision: "revise", outcome: "verdict", verdictMode: "block" }]);
+	});
+	test("a revise in warn mode lets the command run and hands the agent the reason", async () => {
+		const g = bind({ env: STUB, cwd: work, complete: async () => ({ text: REVISE }) });
+		const result = await g.bash("b1", ASK);
+		expect(result?.block).toBeUndefined();
+		expect(result?.additionalContext).toContain('verdict="revise"');
+		expect(result?.additionalContext).toContain("see the message above");
+	});
+	test("--advisor-rebuttal sends the command unreviewed, with the flag removed before it runs", async () => {
+		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work, complete: async () => ({ text: REVISE }) });
+		const command = `dispatch ask --issue X-1 --advisor-rebuttal 'the plan is linked in the question' --question-file - <<'EOF'\n${QUESTION}EOF`;
+		const result = await g.bash("b1", command, { cwd: work });
+		expect(result?.block).toBeUndefined();
+		expect(result?.input).toEqual({ command: ASK, cwd: work });
+		expect(result?.additionalContext).toContain('outcome="rebuttal"');
+		expect(result?.additionalContext).toContain('"the plan is linked in the question"');
+		expect(g.dryRuns[0].script).toBe(`dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`);
+		expect(g.calls).toHaveLength(0);
+		expect(g.entries).toMatchObject([{ tool: "dispatch_ask", decision: "allow", outcome: "rebuttal", rebuttal: "the plan is linked in the question" }]);
+		// The inline form is the same override.
+		const inline = await g.bash("b2", "dispatch comment --issue X-1 --advisor-rebuttal='a link' --body hi");
+		expect(inline?.input).toEqual({ command: "dispatch comment --issue X-1 --body hi" });
+	});
+	test("a device call and a command on one target share its breaker", async () => {
+		const g = bind({ env: STUB, cwd: work, complete: async () => ({ text: REVISE }) });
+		await g.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
+		await g.bash("b", "dispatch comment --issue X-1 --body two");
+		const third = await g.bash("c", "dispatch comment --issue X-1 --body three");
+		expect(third?.additionalContext).toContain('outcome="breaker"');
+		expect(g.calls).toHaveLength(2);
+	});
+	test("the dry-run runs in the call's working directory, resolved against the session's", async () => {
+		fs.mkdirSync(path.join(work, "sub"), { recursive: true });
+		fs.writeFileSync(path.join(work, "sub", "note.txt"), "Body from the working directory.");
+		const g = bind({ env: STUB, cwd: work });
+		await g.bash("b1", "dispatch message --issue X-1 --body-file note.txt", { cwd: "sub" });
+		expect(g.dryRuns[0].cwd).toBe(path.join(work, "sub"));
+		expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
+	});
+	test("a dry-run the CLI refuses is recorded as an error and the command runs, in block mode too", async () => {
+		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+		expect(await g.bash("b1", "dispatch message --issue X-1 --fail")).toBeUndefined();
+		expect(g.calls).toHaveLength(0);
+		expect(g.entries).toMatchObject([{ tool: "dispatch_message", path: "dispatch message", decision: "allow", outcome: "error" }]);
+		expect(g.entries[0].reason).toContain("unknown flag --fail");
+	});
+	test("a dry-run past its limit is recorded as an error and the command runs", async () => {
+		const g = bind({ env: { OMP_ASKGATE: "block" }, cwd: work, dryRun: async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true }) });
+		expect(await g.bash("b1", ASK)).toBeUndefined();
+		expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "error" }]);
+		expect(g.entries[0].reason).toContain("10000 ms");
+	});
+	test("the runner kills a dry-run that outlives its limit", async () => {
+		const began = Date.now();
+		const result = await core.spawnDryRun("sleep 5", { cwd: work, env: process.env, timeoutMs: 100 });
+		expect(result.timedOut).toBe(true);
+		expect(Date.now() - began).toBeLessThan(2_000);
+	});
+	test("a subagent's dispatch command is never gated or recorded", async () => {
+		const g = bind({ env: STUB, cwd: work, kind: "sub" });
+		expect(await g.bash("b1", ASK)).toBeUndefined();
+		expect(g.dryRuns).toHaveLength(0);
 		expect(g.entries).toHaveLength(0);
 	});
 });
