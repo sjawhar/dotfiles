@@ -27,8 +27,8 @@ a serial-queue rule for ordinary branch work.
 
 Read a native Dispatch answer from its ask and replies, not a GitHub substitute:
 
-```text
-dispatch_read({ref: "dispatch://<KEY>/ask/<id>"})
+```bash
+dispatch read --ref 'dispatch://<KEY>/ask/<id>'
 ```
 
 Use the linked PR and current role record to find the originating owner. Check

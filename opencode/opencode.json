@@ -8,7 +8,7 @@
   },
   "plugin": [
     "@sjawhar/opencode-knives@git+https://github.com/sjawhar/knives.git#v0.13.3",
-    "@sjawhar/opencode-legion-envoy@latest",
+    "@sjawhar/opencode-legion-envoy@6.5.0",
     "file://{env:HOME}/.dotfiles/opencode/plugins/dotfiles-bridge.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/jj-snapshot.ts",
     "file://{env:HOME}/.dotfiles/opencode/plugins/session-env.ts",

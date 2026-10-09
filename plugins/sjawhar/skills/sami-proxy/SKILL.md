@@ -188,8 +188,8 @@ down; re-measure against them when editing it. Apply both tests to any question
 a verdict would let through, phrased as the caller would send it.
 
 - **Prior-answer search, before any other gate.** Search Dispatch for an issue or an answer that
-  already settles the question: `dispatch_search` on the question's nouns, plus the issue tree
-  around the work (titles, statuses, the owning issue's events). The proxy cannot do this
+  already settles the question: `dispatch search --query '<nouns from the question>'`, plus the issue
+  tree around the work (titles, statuses, the owning issue's events). The proxy cannot do this
   for you. Its tools are read, glob and grep, so a ruling that lives only in Dispatch is
   invisible to it. Run the search yourself and pass the hits in; a settled decision routed
   to the wrong session and left sitting in `backlog` is still found by searching the

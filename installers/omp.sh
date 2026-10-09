@@ -80,7 +80,7 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/served-model-notice.ts" "${OMP_AGENT
 ensure_link "${DOTFILES_DIR}/omp/extensions/experiments/index.ts" "${OMP_AGENT_DIR}/extensions/experiments.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 (cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
-# The envoy extension installs from npm (@sjawhar/pi-legion-envoy). The old
+# The envoy and Legion extensions install from npm (@sjawhar/pi-envoy, @sjawhar/pi-legion). The old
 # git-pinned legion monorepo entry is gone from package.json, but bun install
 # does not prune its leftover directory — and OMP discovers extensions by
 # walking node_modules for omp.extensions, so a leftover copy double-loads the
