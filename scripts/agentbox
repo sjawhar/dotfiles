@@ -827,7 +827,7 @@ box_runner_pid() {
     docker exec "$1" sh -c 'p=$(pgrep -P 1 | head -1); [ -n "$p" ] && tr "\0" " " </proc/$p/cmdline | grep -q agentbox-run && echo "$p"' 2>/dev/null || true
 }
 
-RESTART_NOTICE='agentbox: a restart of your omp is pending (new omp/plugins on the host). Finish the current step and start no new subagents or long jobs. When `hub jobs` shows nothing running, run `agentbox restart` from your bash tool: omp quits gracefully and relaunches in this same box with --resume of this session; the box, its workspace and /tmp stay, hub-supervised processes only if started with persist. If you are idle, do it now.'
+RESTART_NOTICE='agentbox: a restart of your omp is pending (new omp/plugins on the host). Finish the current step and start no new subagents or long jobs. When `read proc://` lists none of your jobs or services still running, run `agentbox restart` from your bash tool: omp quits gracefully and relaunches in this same box with --resume of this session; the box, its workspace and /tmp stay, supervised processes only if started with persist. If you are idle, do it now.'
 
 cmd_restart() {
     # Inside a box this is the agent's own trigger. omp's bash tool has a
