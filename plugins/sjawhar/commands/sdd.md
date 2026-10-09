@@ -255,8 +255,9 @@ human moves a card: `in_progress` when implementation starts, `testing` when acc
 verified in production by the coordinator's own check through its real surface — a green suite, a
 harness screenshot, or a merge is groundwork, not done. That check is the coordinator's work:
 never ask Sami, or whoever requested the change, to look at the result or approve it before moving
-the issue to `done`, and close it with a reason (what shipped and the check that proved it live;
-`dispatch_issue_update` refuses `done` without one). An issue left at `triage` while work is
+the issue to `done`, and close it with a reason (what shipped and the check that proved it live:
+`dispatch issue-update --issue <KEY> --status done --reason '<what shipped; the check>'` refuses
+`done` without one). An issue left at `triage` while work is
 underway is a defect: the roadmap view is read from these statuses, and Sami has no other way to
 see delivery without interrupting a session. Do this for child issues you own as well as the root.
 Deploy queueing is not a status: a merge that waits for the deploy lane is still

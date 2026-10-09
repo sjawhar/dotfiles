@@ -52,7 +52,7 @@ auto_prune = false
 [tools]
 "github:sjawhar/jj" = "0.46.0-sami.20261008-234600"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166 + sparse paths skip-worktree in colocated Git indexes; #10129 and #10127 dropped
 "github:sjawhar/knives" = "2.0.22"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
-"github:sjawhar/legion" = "legion-v9.0.0"  # the Go `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); it shares the Go daemons' registry, ~/.local/state/legion/legions.json, which a TypeScript cli-v* `legion` would rewrite as an object no Go daemon can read
+"github:sjawhar/legion" = "legion-v10.3.0"  # the Go `legion` CLI on an agent session's PATH outside a Legion pane (a pane puts its daemon's own <state_dir>/bin/legion first); it shares the Go daemons' registry, ~/.local/state/legion/legions.json, which a TypeScript cli-v* `legion` would rewrite as an object no Go daemon can read. Speaks daemon API contract 17 (with @sjawhar/pi-legion 8.5.0): `legion controller start` refuses a daemon or a pi-legion of another contract
 "github:sjawhar/oh-my-pi" = "18.8.3-sami.20261008-071803"  # omp daily driver: fork releases auto-built from the sami branch (sami-build.yml on the ci branch, same pattern as sjawhar/opencode); wrapper execs this. upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec them for hub/worker spawns
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the

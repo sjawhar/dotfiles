@@ -6,7 +6,7 @@
     "input_newline": "shift+return,ctrl+return,alt+return,ctrl+j,linefeed"
   },
   "plugin": [
-    "@sjawhar/opencode-legion-envoy@latest",
+    "@sjawhar/opencode-legion-envoy@6.5.0",
     "file://{env:HOME}/.dotfiles/opencode/plugins/pr-status.tsx",
     "https://github.com/sjawhar/opencode-anthropic-auth/releases/download/v0.5.1/sjawhar-opencode-anthropic-auth-0.5.1.tgz"
   ]

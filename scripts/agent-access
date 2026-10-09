@@ -291,11 +291,23 @@ check_modal() {
     fi
 }
 
-# Dispatch has no CLI: the session's identity (xd://dispatch_whoami) is an MCP
-# tool call, not a shell command, so there is nothing for this script to run.
+# Dispatch: the session's harness plugin (pi-envoy, claude-envoy,
+# opencode-legion-envoy) puts `dispatch` on its shell's PATH and names the
+# session for it; `dispatch whoami` answers whom Dispatch takes it for.
 check_dispatch() {
-    row dispatch unknown - - "xd://dispatch_whoami (MCP tool, not a shell command)" \
-        "no CLI or on-disk token to check from a script; call the dispatch_whoami tool"
+    local out rc
+    if ! command -v dispatch >/dev/null 2>&1; then
+        row dispatch missing - - "command -v dispatch" \
+            "no dispatch on PATH; the session's harness plugin puts it there, so this shell is not an agent session's"
+        return
+    fi
+    out="$(timeout "$TIMEOUT_S" dispatch whoami 2>&1)"
+    rc=$?
+    if ((rc == 0)); then
+        row dispatch live "$(first_line "$out")" "n/a" "dispatch whoami"
+    else
+        row dispatch missing - - "dispatch whoami" "$(first_line "$out")"
+    fi
 }
 
 for fn in check_aws check_github_app check_hawk check_ant check_taiga check_vercel \

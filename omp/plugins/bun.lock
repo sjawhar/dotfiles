@@ -7,7 +7,8 @@
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
         "@sjawhar/opencode-knives": "github:sjawhar/knives#v2.0.22",
-        "@sjawhar/pi-legion-envoy": "^7.9.1",
+        "@sjawhar/pi-envoy": "8.5.0",
+        "@sjawhar/pi-legion": "8.5.0",
         "secretsd": "github:sjawhar/forward#v3.5.4",
         "superpowers": "github:obra/superpowers#v6.3.0",
       },
@@ -148,7 +149,9 @@
 
     "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#40e7c6a", {}, "sjawhar-knives-40e7c6a", "sha512-Ux0Y28a93zw9pQ9N8wiHO0UPz+nYPHIbEWfuFi7Bz0Pai2FOcvGHF2UMTGaf80+psiTCbWKCYjztIt2NwWXOXQ=="],
 
-    "@sjawhar/pi-legion-envoy": ["@sjawhar/pi-legion-envoy@7.9.1", "", {}, "sha512-PF3iLF3Hfsnj6OQH7YHolhb4RnbPDqF5jMMSpQGqQShOO53xt9ed5BIDzCHiYeCJCXbkuspS8GPa87VvnG5DNQ=="],
+    "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@8.5.0", "", {}, "sha512-Q2Me+q72i1o8q3oWnR/VfKh5hPVe1QzySF36S/UEftv5jOnchxUqr9+Agn+VX7JqbwM1DRK8dee7rVqUS5kJog=="],
+
+    "@sjawhar/pi-legion": ["@sjawhar/pi-legion@8.5.0", "", {}, "sha512-aOfhBPvNMyoXw8SXWQsXhdRlWOleKRVGQsmFAm/fJVsWvMmbwV+h310TKb35/z3T9XSvd+3vEzM2bhO4YYwAOQ=="],
 
     "@smithy/core": ["@smithy/core@3.33.2", "", { "dependencies": { "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-CUGXpnPkVdjUCbix+83sWLW9VFgQOm44MDOx/ihITJMAnOZKvL8YYIc7DR9pP/tZ8CIRvMiON/TucvygqbHO3w=="],
 
