@@ -52,7 +52,7 @@ a review at a head that has a newer `follow` run, re-run that `follow` run too:
 `rerun-failed-jobs` for a failed one, `.../actions/runs/<id>/rerun` for a passed one,
 or its stale verdict keeps deciding. The verdict
 counts every open thread on the PR, old ones included. The owner lands every agent-c
-PR (Sami retired the merge queue, AGENTC-1089). A Legion-produced PR is
+PR. A Legion-produced PR is
 landed by the lane that commissioned it. In `sjawhar/legion` the rule adds the Legion
 PO's reviewer App approving, and that approval survives a later push just as an armed
 auto-merge does, so arm (and re-arm after a push) only on a head the PO approved, and
