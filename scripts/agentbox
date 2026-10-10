@@ -517,13 +517,15 @@ detached() { setsid -w "$@"; }
 # Release every knives claim the session holds. Claims are keyed by the omp
 # session id (kind harness-session), so acting as that session releases them
 # without --force; knives forgets and removes the workspace itself and keeps
-# the commits. The registry (repos.toml) names each checkout.
+# the commits. A claim's `repo` is its fork's lowercase upstream name
+# (`metr/hawk`), which `knives repos --json` reports as `upstream_name`
+# beside the checkout path.
 finish_knives_claims() {
     local sid="$1" state="$HOME/.config/knives/state.json" repo branch path
     [[ -n "$sid" && -s "$state" ]] || return 0
     while IFS=$'\t' read -r repo branch; do
         [[ -n "$repo" && -n "$branch" ]] || continue
-        path="$(detached knives repos --json 2>/dev/null | jq -r --arg r "$repo" '.repos[] | select(.name == $r) | .path')"
+        path="$(detached knives repos --json 2>/dev/null | jq -r --arg r "$repo" '.repos[] | select(.upstream_name == $r) | .path')"
         if [[ -z "$path" || ! -d "$path" ]]; then
             echo "agentbox: knives claim $repo/$branch: checkout not found; left as is" >&2
             continue

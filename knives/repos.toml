@@ -3,34 +3,40 @@ upstream = "https://github.com/UKGovernmentBEIS/inspect_ai"
 origin = "https://github.com/sjawhar/inspect_ai.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_ai.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+ledger = "trajectory-labs-pbc/knives-ledger"
 workspaces = "~/.worktrees/inspect_ai"
 
 [repos.fleet]
 upstream = "https://github.com/fleetdm/fleet"
 origin = "https://github.com/sjawhar/fleet.git"
+ledger = "trajectory-labs-pbc/knives-ledger"
 
 [repos.hawk]
 upstream = "https://github.com/METR/hawk"
 origin = "https://github.com/sjawhar/hawk.git"
 release = "https://github.com/trajectory-labs-pbc/hawk"
 consumers = ["trajectory-labs-pbc/agent-c"]
+ledger = "trajectory-labs-pbc/knives-ledger"
 workspaces = "~/.worktrees/hawk"
 
 [repos.jj]
 upstream = "https://github.com/jj-vcs/jj"
 origin = "https://github.com/sjawhar/jj"
+ledger = "sjawhar/.knives-ledger"
 
 [repos.k8s-sandbox]
 upstream = "https://github.com/UKGovernmentBEIS/inspect_k8s_sandbox"
 origin = "https://github.com/sjawhar/inspect_k8s_sandbox.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_k8s_sandbox"
 consumers = ["trajectory-labs-pbc/agent-c"]
+ledger = "trajectory-labs-pbc/knives-ledger"
 workspaces = "~/.worktrees/inspect_k8s_sandbox"
 
 [repos.luthien-proxy]
 upstream = "https://github.com/LuthienResearch/luthien-proxy.git"
 origin = "https://github.com/trajectory-labs-pbc/luthien-proxy.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+ledger = "trajectory-labs-pbc/knives-ledger"
 workspaces = "~/.worktrees/luthien-proxy"
 
 [repos.oh-my-openagent]
@@ -38,11 +44,13 @@ upstream = "https://github.com/code-yeongyu/oh-my-opencode"
 origin = "https://github.com/sjawhar/oh-my-opencode"
 base = "dev"
 release_branch = "sami"
+ledger = "sjawhar/.knives-ledger"
 
 [repos.oh-my-pi]
 upstream = "https://github.com/can1357/oh-my-pi"
 origin = "https://github.com/sjawhar/oh-my-pi"
 release_branch = "sami"
+ledger = "sjawhar/.knives-ledger"
 workspaces = "~/.worktrees/oh-my-pi"
 # Internal names an upstream-bound diff must not add (knives audit scans added lines; a
 # fork-only branch is exempt). "sjawhar" is not listed: it is the required changelog attribution.
@@ -53,12 +61,14 @@ forbidden = ["trajectory-labs", "trajectory_labs", "trajectorylabs", "/agent-c",
 [repos.openchamber]
 upstream = "https://github.com/openchamber/openchamber.git"
 origin = "https://github.com/sjawhar/openchamber.git"
+ledger = "sjawhar/.knives-ledger"
 
 [repos.opencode]
 upstream = "https://github.com/anomalyco/opencode"
 origin = "https://github.com/sjawhar/opencode"
 base = "dev"
 release_branch = "sami"
+ledger = "sjawhar/.knives-ledger"
 
 [repos.opencode-pty]
 upstream = "https://github.com/shekohex/opencode-pty"
@@ -71,6 +81,7 @@ upstream = "https://github.com/meridianlabs-ai/inspect_sandboxes.git"
 origin = "https://github.com/sjawhar/inspect_sandboxes.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_sandboxes.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+ledger = "trajectory-labs-pbc/knives-ledger"
 workspaces = "~/.worktrees/inspect_sandboxes_fork"
 
 [repos.scout]
@@ -78,6 +89,7 @@ upstream = "https://github.com/meridianlabs-ai/inspect_scout"
 origin = "https://github.com/sjawhar/inspect_scout.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_scout.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+ledger = "trajectory-labs-pbc/knives-ledger"
 workspaces = "~/.worktrees/inspect_scout"
 
 [repos.swe]
@@ -85,16 +97,19 @@ upstream = "https://github.com/meridianlabs-ai/inspect_swe.git"
 origin = "https://github.com/sjawhar/inspect_swe.git"
 release = "https://github.com/trajectory-labs-pbc/inspect_swe.git"
 consumers = ["trajectory-labs-pbc/agent-c"]
+ledger = "trajectory-labs-pbc/knives-ledger"
 workspaces = "~/.worktrees/inspect_swe"
 
 [repos.toon-rust]
 upstream = "https://github.com/toon-format/toon-rust"
 origin = "https://github.com/sjawhar/toon-rust"
+ledger = "sjawhar/.knives-ledger"
 
 [repos.ts-mono]
 upstream = "https://github.com/meridianlabs-ai/ts-mono"
 origin = "https://github.com/trajectory-labs-pbc/ts-mono"
 consumers = ["trajectory-labs-pbc/agent-c"]
+ledger = "trajectory-labs-pbc/knives-ledger"
 workspaces = "~/.worktrees/ts-mono"
 
 [trust]
@@ -103,10 +118,12 @@ owners = ["sjawhar", "trajectory-labs-pbc"]
 [repos.proof-sdk]
 upstream = "https://github.com/everyinc/proof-sdk.git"
 origin = "https://github.com/sjawhar/proof-sdk.git"
+ledger = "sjawhar/.knives-ledger"
 
 [repos.ygo-fork]
 upstream = "https://github.com/reearth/ygo.git"
 origin = "https://github.com/sjawhar/ygo.git"
+ledger = "sjawhar/.knives-ledger"
 
 [repos.cosmic-comp]
 upstream = "https://github.com/pop-os/cosmic-comp.git"
