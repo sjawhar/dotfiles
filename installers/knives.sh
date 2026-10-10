@@ -59,10 +59,13 @@ while IFS= read -r ledger; do
         git --git-dir="$git_dir" config knives.machine "$machine"
 done <<<"$ledgers"
 
-# Bring in what other machines have pushed now, so the first `knives notch`
-# here reads the shared ledger rather than an empty one. A sweep is
-# single-flight and does nothing when nothing is new, so every install runs
-# one; a sweep that fails stops the install with knives' own message.
+# Move a ledger an older knives wrote to the upstream-named layout, then bring
+# in what other machines have pushed, so the first `knives notch` here reads
+# the shared ledger. Migrate before the sweep: the sweep refuses a ledger
+# still kept under registry keys, and migrate's own pull needs the git
+# directories made above. Both are no-ops when there is nothing to do, so
+# every install runs them; a failure stops the install with knives' message.
 if [[ -n "$ledgers" ]]; then
+    knives ledger migrate
     knives ledger sweep
 fi
