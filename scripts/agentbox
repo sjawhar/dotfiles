@@ -525,7 +525,11 @@ finish_knives_claims() {
     [[ -n "$sid" && -s "$state" ]] || return 0
     while IFS=$'\t' read -r repo branch; do
         [[ -n "$repo" && -n "$branch" ]] || continue
-        path="$(detached knives repos --json 2>/dev/null | jq -r --arg r "$repo" '.repos[] | select(.upstream_name == $r) | .path')"
+        # `knives repos` exits 3 whenever its scan has a problem (an ambiguous
+        # checkout, a fork not on this machine) and still prints every row, so
+        # judge the JSON, not the exit status: under set -euo pipefail the
+        # status would abort close_box before it released anything.
+        path="$( { detached knives repos --json 2>/dev/null || true; } | jq -r --arg r "$repo" '.repos[] | select(.upstream_name == $r) | .path')"
         if [[ -z "$path" || ! -d "$path" ]]; then
             echo "agentbox: knives claim $repo/$branch: checkout not found; left as is" >&2
             continue

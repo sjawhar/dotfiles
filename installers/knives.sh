@@ -22,9 +22,10 @@ ensure_link "${DOTFILES_DIR}/knives/repos.toml" ~/.config/knives/repos.toml
 # this machine.
 #
 # An agentbox mounts the host's ~/.config/knives and shares the host's ledger,
-# so the setup belongs to the host alone.
+# so the setup belongs to the host alone. install.sh sources this file, so
+# `return`, not `exit`, or the rest of install.sh would never run.
 if [[ -f /.dockerenv ]] || [[ "$(systemd-detect-virt 2>/dev/null)" == docker ]]; then
-    exit 0
+    return 0 2>/dev/null || exit 0
 fi
 
 ledger_root="$HOME/.config/knives/ledger"
@@ -32,16 +33,19 @@ repositories="$HOME/.config/knives/ledger-repositories"
 machine="$(hostname -s)"
 mkdir -p "$ledger_root" "$repositories"
 
-# Every distinct `ledger` value in the registry, one per line.
-mapfile -t ledgers < <(python3 - "${DOTFILES_DIR}/knives/repos.toml" <<'PY'
+# Every distinct `ledger` value in the registry, one per line. A plain
+# assignment, not `mapfile < <(...)`: set -e does not see a process
+# substitution fail, and a parse failure here would leave this machine sharing
+# nothing without a word.
+ledgers="$(python3 - "${DOTFILES_DIR}/knives/repos.toml" <<'PY'
 import sys, tomllib
 with open(sys.argv[1], "rb") as registry:
     repos = tomllib.load(registry).get("repos", {})
 print("\n".join(sorted({entry["ledger"] for entry in repos.values() if "ledger" in entry})))
 PY
-)
+)"
 
-for ledger in "${ledgers[@]}"; do
+while IFS= read -r ledger; do
     [[ -n "$ledger" ]] || continue
     git_dir="$repositories/${ledger//\//--}.git"
     if [[ ! -d "$git_dir" ]]; then
@@ -53,4 +57,4 @@ for ledger in "${ledgers[@]}"; do
     fi
     git --git-dir="$git_dir" config knives.machine >/dev/null ||
         git --git-dir="$git_dir" config knives.machine "$machine"
-done
+done <<<"$ledgers"
