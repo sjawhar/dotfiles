@@ -58,3 +58,11 @@ while IFS= read -r ledger; do
     git --git-dir="$git_dir" config knives.machine >/dev/null ||
         git --git-dir="$git_dir" config knives.machine "$machine"
 done <<<"$ledgers"
+
+# Bring in what other machines have pushed now, so the first `knives notch`
+# here reads the shared ledger rather than an empty one. A sweep is
+# single-flight and does nothing when nothing is new, so every install runs
+# one; a sweep that fails stops the install with knives' own message.
+if [[ -n "$ledgers" ]]; then
+    knives ledger sweep
+fi
