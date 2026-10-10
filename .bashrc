@@ -130,15 +130,18 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${HOME}/.config/systemd/user/forward-s
     export PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/forward/pulse.sock"
 fi
 
-# Agent secrets (AGENTC-393): a host session gets its broker proofs from the agent-secrets
-# helper over this socket (installers/agent-secrets.sh; the agent launchers register each session
-# through scripts/agent-secrets-session). Agent boxes have a key dir instead: scripts/agentbox
-# sets AGENT_SECRETS_KEY_DIR and never mounts this socket. Present only where the helper is
-# installed, like PULSE_SERVER above; a value the caller already has wins.
+# Agent secrets (AGENTC-393). The broker's address: every machine carries it (the CLI's secret
+# commands need it; the helper socket below exists only where the helper is installed); a value
+# the caller already has wins.
+[ -n "${AGENT_SECRETS_URL:-}" ] || . "${DOTFILES_DIR}/agent-secrets/broker.env"
+export AGENT_SECRETS_URL
+# A host session gets its broker proofs from the agent-secrets helper over this socket
+# (installers/agent-secrets.sh; the agent launchers register each session through
+# scripts/agent-secrets-session). Agent boxes have a key dir instead: scripts/agentbox sets
+# AGENT_SECRETS_KEY_DIR and never mounts this socket. Present only where the helper is installed,
+# like PULSE_SERVER above; a value the caller already has wins.
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${HOME}/.config/systemd/user/agent-secrets-helper.service" ]; then
     export AGENT_SECRETS_HELPER_SOCK="${AGENT_SECRETS_HELPER_SOCK:-${XDG_RUNTIME_DIR}/agent-secrets/helper.sock}"
-    [ -n "${AGENT_SECRETS_URL:-}" ] || . "${DOTFILES_DIR}/agent-secrets/broker.env"
-    export AGENT_SECRETS_URL
 fi
 
 

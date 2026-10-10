@@ -73,11 +73,11 @@ esac
 # the key dir, as the real client does. renew fails at once, and ends its loop on the third run.
 AGENT_SECRETS_STUB = r"""
 case "$1" in
-    launcher)
+    machine)
         [[ "${STUB_LOGIN_STATUS:-0}" == 0 ]] && { echo issued; exit 0; }
-        # As the legion #1589 client: the state on stdout, then a remedy on stderr.
+        # As the legion-envoy-v9.0.0 client: the state on stdout, then a remedy on stderr.
         echo none
-        echo "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login" >&2
+        echo "agent-secrets machine login-status: no machine login has run on this helper; run: agent-secrets machine login" >&2
         exit 1 ;;
     enroll)
         echo "enroll $* marker-mtime=$(stat -c %Y "$AGENT_SECRETS_KEY_DIR/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"

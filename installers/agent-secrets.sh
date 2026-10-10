@@ -51,6 +51,6 @@ if [ "$(cat "$MARKER" 2>/dev/null)" != "$installed" ]; then
         echo "WARNING: agent-secrets-helper did not restart (systemctl --user status agent-secrets-helper); the next install retries." >&2
     fi
 fi
-if ! agent-secrets launcher login-status >/dev/null 2>&1; then
+if ! agent-secrets machine login-status >/dev/null 2>&1; then
     echo "agent-secrets: no live launcher credential on this host yet — run: agent-secrets-login <email>"
 fi

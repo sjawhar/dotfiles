@@ -178,7 +178,8 @@ version = "3.3.1"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
 # The agent-secrets client and host helper (AGENTC-393), from sjawhar/legion's legion-envoy-v*
-# release: its agent-secrets tarball ships bin/agent-secrets and bin/agent-secrets-helper, and
+# release: its linux agent-secrets tarballs ship bin/agent-secrets and bin/agent-secrets-helper,
+# its darwin ones bin/agent-secrets alone (the helper builds for Linux only), and
 # the alias keeps it apart from the plain "github:sjawhar/legion" CLI entry above (a different
 # tag series and install dir; both measured side by side on mise 2026.8.10). The helper runs
 # this pin from its user unit (only where installers/agent-secrets.sh set it up: devbox/install.sh),
@@ -191,9 +192,11 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v5.1.0"
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:55ca310a44b1031b406d9d6a9ab6a156257a3c46afc1fb9bda030bd16718ae28" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:3f28ca284d95a2cc15467d955940f35f783076cd5e3efc155f3cc0ec7025fef6" }
+version = "legion-envoy-v9.0.0"
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:031c0977df118d224afb2f17bc8f9ffdd2da15093bcf8a0e1d68e9df9d7ff89a" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:f901149eb5b522510bd54b1a4d8f615dc67e2f9717a2104f410bf9fb182b3f0c" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:ff84b2e393a0036aa1c0b64dcb7b29d68b1a0041772006c516e31bc1dc1498f9" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:387ed7f2f8cdc2aab35155e1a39a11ce00036fc2b54a004e47f269dc74e4af58" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
