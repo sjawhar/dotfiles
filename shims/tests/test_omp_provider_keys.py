@@ -73,7 +73,7 @@ exec "$@"
 # first setting whatever STUB_REGISTER_ENV names (a hop after the shim that adds a variable).
 AGENT_SECRETS = r"""
 case "$1" in
-    launcher) echo none ;;
+    machine) echo none ;;
     register)
         while [[ "$1" != -- ]]; do shift; done
         shift

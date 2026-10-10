@@ -3,7 +3,7 @@
 
 On a host with the agent-secrets helper's unit installed, the session execs the agent under
 `agent-secrets register --exec --`, keeping the pid, and adds `--wait 10` only while `agent-secrets
-launcher login-status` prints `issued`. It registers nothing when `login-status` prints no state
+machine login-status` prints `issued`. It registers nothing when `login-status` prints no state
 (the helper does not answer, or the client cannot run), when agent-secrets is missing, in a box
 (AGENT_SECRETS_KEY_DIR) or on a machine without the helper; the agent starts either way.
 
@@ -42,21 +42,21 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 
 AGENT_SECRETS_STUB = r"""
 case "$1" in
-    launcher)
+    machine)
         echo login-status >>"$STUB_LOG"
         # The first call after a pin bump: mise's auto-install progress on stderr, before the state.
         [[ -n "${STUB_AUTOINSTALL:-}" ]] && echo "mise agent-secrets@legion-envoy-v9.9.9 [1/3] download agent-secrets-amd64.tar.gz" >&2
         case "${STUB_LOGIN_STATE:-none}" in
             issued) echo issued; exit 0 ;;
-            unreachable) echo "agent-secrets launcher login-status: dial unix $AGENT_SECRETS_HELPER_SOCK: connect: no such file or directory" >&2; exit 1 ;;
+            unreachable) echo "agent-secrets machine login-status: dial unix $AGENT_SECRETS_HELPER_SOCK: connect: no such file or directory" >&2; exit 1 ;;
             broken) echo "mise ERROR Tool not installed for shim: agent-secrets" >&2; exit 1 ;;
             # A failed auto-install: progress first, the cause last, nothing on stdout.
             installfail) echo "mise agent-secrets@legion-envoy-v9.9.9 [1/3] download agent-secrets-amd64.tar.gz" >&2; echo "mise ERROR Failed to install github:sjawhar/legion@legion-envoy-v9.9.9: checksum mismatch" >&2; exit 1 ;;
-            # The legion #1589 client prints the state on stdout and what to do about it on stderr
-            # (cmd/agent-secrets/main.go, cmdLauncherLoginStatus, at 3d5f07e5).
-            pending) echo pending; echo "agent-secrets launcher login-status: a machine login is waiting for approval (code ABCD-EFGH)" >&2; exit 1 ;;
-            none) echo none; echo "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login" >&2; exit 1 ;;
-            *) echo "$STUB_LOGIN_STATE"; echo "agent-secrets launcher login-status: the last machine login is $STUB_LOGIN_STATE; run: agent-secrets launcher login" >&2; exit 1 ;;
+            # The legion-envoy-v9.0.0 client prints the state on stdout and what to do about it on
+            # stderr (cmd/agent-secrets/machine.go, cmdMachineLoginStatus, at 011b572a).
+            pending) echo pending; echo "agent-secrets machine login-status: a machine login is waiting for approval (code ABCD-EFGH)" >&2; exit 1 ;;
+            none) echo none; echo "agent-secrets machine login-status: no machine login has run on this helper; run: agent-secrets machine login" >&2; exit 1 ;;
+            *) echo "$STUB_LOGIN_STATE"; echo "agent-secrets machine login-status: the last machine login is $STUB_LOGIN_STATE; run: agent-secrets machine login" >&2; exit 1 ;;
         esac
         ;;
     register)
