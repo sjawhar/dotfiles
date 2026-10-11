@@ -116,6 +116,8 @@ LAPTOP_PKGS=(
     v4l-utils
     # build-xdg-desktop-portal-cosmic (debian/control Build-Depends)
     libclang-dev libegl-dev libgbm-dev libglib2.0-dev libpipewire-0.3-dev libwayland-dev libxkbcommon-dev pkg-config
+    # cosmic-greeter-fork.sh (debian/control Build-Depends)
+    libdav1d-dev libinput-dev libpam0g-dev
 )
 MISSING=()
 for pkg in "${LAPTOP_PKGS[@]}"; do

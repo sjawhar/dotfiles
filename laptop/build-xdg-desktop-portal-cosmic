@@ -40,7 +40,10 @@ lc_rev=$(sed -n 's|^source = "git+https://github.com/pop-os/libcosmic#\([0-9a-f]
 
 # --- libcosmic at the pinned revision, its iced with the fix on top ---
 [[ -d $LIBCOSMIC ]] || git clone -q https://github.com/pop-os/libcosmic "$LIBCOSMIC"
-git -C "$LIBCOSMIC" fetch -q origin
+# Without --no-recurse-submodules, a libcosmic commit that references an iced
+# commit no longer on pop-os/iced fails the fetch; the iced revision this build
+# needs is fetched by the submodule update below.
+git -C "$LIBCOSMIC" fetch -q --no-recurse-submodules origin
 git -C "$LIBCOSMIC" checkout -q --detach "$lc_rev"
 git -C "$LIBCOSMIC" submodule update -q --init iced
 iced=$LIBCOSMIC/iced
