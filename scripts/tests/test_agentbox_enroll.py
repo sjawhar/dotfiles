@@ -395,5 +395,16 @@ class CmdNew(EnrollFixture):
         self.assertEqual([c for c in self.calls_matching("docker ") if " keygen " in c], [])
 
 
+class AgentboxDoctorKinds(unittest.TestCase):
+    """Doctor accepts one machine-session kind during the broker rollout."""
+
+    def test_doctor_accepts_session_and_legacy_machine_kinds(self) -> None:
+        source = AGENTBOX.read_text(encoding="utf-8")
+        box_expression = 'jq -e ".kind == \\"session\\" or .kind == \\"box\\" or .kind == \\"host\\""'
+        host_expression = "jq -e '.kind == \"session\" or .kind == \"box\" or .kind == \"host\"'"
+        self.assertIn(box_expression, source)
+        self.assertIn(host_expression, source)
+
+
 if __name__ == "__main__":
     unittest.main()
