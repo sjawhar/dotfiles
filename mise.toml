@@ -104,6 +104,7 @@ mautrix-instagram = { version = "0.2609.0", asset_pattern = "mautrix-instagram-a
 "npm:@oh-my-pi/pi-mnemopi" = "18.8.9"
 actionlint = "1.7.12"  # was "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
+"pipx:azure-cli" = { version = "2.90.0", uvx = "true" }  # `az`: Theorem's Azure credits (per-user resource groups)
 amazon-ecr-credential-helper = "0.12.0"  # ~/.docker/config.json routes every ECR registry to `ecr-login`; installed since 08-10 but unpinned, so inside a box (no ~/.local/state/mise) the shim had no version and every ECR push failed
 cmake = "4.4.2"
 ninja = "1.13.2"  # oh-my-pi's .cargo/config.toml sets CMAKE_GENERATOR=Ninja (audiopus_sys builds Opus via CMake); without a pin the mise shim has no version and `bun check` fails in check:rs
