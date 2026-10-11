@@ -5,7 +5,23 @@ DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 export PATH="${DOTFILES_DIR}/bin:${HOME}/.local/bin:$PATH"
 
-ensure_link() { ln -sfn "$1" "$2"; }
+# Links $2 to $1. A plain file at $2 is replaced only when it is identical to $1:
+# an app that saves by renaming a temp file over the path (COSMIC's cosmic-config
+# does) turns the link into a plain file, and one that differs holds a setting
+# changed in that app. That, or a real directory at $2, fails the install, naming
+# both paths, so nothing there is overwritten or has a link created inside it.
+ensure_link() {
+    if [[ -d $2 && ! -L $2 ]]; then
+        echo "ensure_link: $2 is a directory, not a link to $1; move what it holds that you want into $1, remove it, then re-run" >&2
+        return 1
+    fi
+    if [[ -e $2 && ! -L $2 ]] && ! cmp -s "$1" "$2"; then
+        echo "ensure_link: $2 is a file that differs from $1; copy it over $1 to keep it or delete it, then re-run" >&2
+        diff -u "$1" "$2" >&2 || true
+        return 1
+    fi
+    ln -sfn "$1" "$2"
+}
 
 ensure_clone() {
     local url="$1" dir="$2"
