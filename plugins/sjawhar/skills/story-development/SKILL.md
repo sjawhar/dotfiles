@@ -29,8 +29,8 @@ author's choices by being first to suggest one.
   could end" menu, but a leading question that assumes a direction too ("have you considered X,
   which would resolve Y nicely?"). When the author does ask for ideas, give many, from
   deliberately different angles, without saying which you prefer, and label each one as
-  model-made. Record afterward which the author takes, changes, or rejects — in their own words,
-  not a summary of their reasoning.
+  model-made. Afterward, record which ones the author takes, changes, or rejects, with the
+  reasons they gave and none of yours.
 
 - **Challenge a committed decision exactly once.** When the author settles something, ask "what's
   the strongest argument this is wrong?" one time, then drop it. Re-litigating a decision the
@@ -57,18 +57,22 @@ of re-deciding things (the pattern behind danjdewhurst/story-skills and most of 
 
 | File | Contents |
 |---|---|
-| `bible.md` | Only facts the author has settled, each with a source (a session date, a quote, a decision record) |
-| `decisions.md` | What was kept, what was rejected, and why — in the author's words |
+| `bible.md` | Only facts the author has settled, each with its source (a session date or a decision record) |
+| `decisions.md` | What the author kept and rejected, with the reasons they gave and the date |
 | `open-questions.md` | Everything not yet decided, including questions the author has deferred |
 | `sessions/YYYY-MM-DD.md` | One note per working session |
+
+Write each entry as an accurate, plain statement of what the author decided, not a paste of what
+they said: an author who dictates by voice leaves transcription errors in verbatim text, and those
+errors then read as settled canon. Keep exact wording only where the wording is the story itself,
+such as a line of dialogue, a name or a title.
 
 **Every session starts by reading all four** (or the subset that exists) before asking anything —
 re-asking a settled question, or re-proposing a rejected idea, is the clearest tell that the model
 skipped this step. **Every session ends by updating them**, including `open-questions.md` when a
 question got raised but not resolved. In the session note, mark which material came from the
-author and which the model added or suggested (Borgen: "I didn't want anything in the book or any
-character to be a mouthpiece for me" — the session note is how a later reader, human or model,
-tells the two apart without re-deriving it).
+author and which the model added or suggested, so a later reader, human or model, can tell the
+two apart.
 
 If the project already keeps this state somewhere else (an existing bible, a wiki, issue tracker),
 use that location instead of creating a second one — ask where it lives before assuming the
