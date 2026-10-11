@@ -39,19 +39,21 @@ The required `review` run starts only on `opened`, `synchronize` or `reopened` o
 non-draft PR: a draft never gets it, and marking ready alone starts nothing
 (measured on #20742 and #20703). So mark the PR ready, then push or close and reopen it, but only when no
 PR Checks run is in flight, because either event cancels it. A push starts a fresh
-run at the new head. When a required run FAILED and you only answered and resolved
-threads (no new commit), re-run that run instead: `gh api -X POST
+run at the new head. The `review` check passes or fails as Claude's run does (an error,
+or a refusal on both models), and the decision is the pull request review `claude[bot]`
+submits: `REQUEST_CHANGES` holds the merge until `claude[bot]` approves, and the ruleset
+holds it while any thread is unresolved (agent-c#22085, AGENTC-1702). When a required
+run FAILED, re-run it instead of pushing: `gh api -X POST
 repos/<owner>/<repo>/actions/runs/<id>/rerun-failed-jobs` (`gh run rerun` 404s on
 these), which reviews the same head and leaves PR Checks alone. The run that counts
 is a `review` check-run on the PR's HEAD sha, and the merge rule reads the newest run
 of the workflow at that head. A `@claude review` comment starts nothing: the review has
 no comment trigger (agent-c#20924).
-Any other PR event, `gh stack link` included, starts a `follow` run that copies the
-newest review run's verdict at that head (agent-c#20827). After re-running
+Any other PR event, `gh stack link` included, starts a `follow` run that concludes as
+the newest review run at that head did (agent-c#20827). After re-running
 a review at a head that has a newer `follow` run, re-run that `follow` run too:
 `rerun-failed-jobs` for a failed one, `.../actions/runs/<id>/rerun` for a passed one,
-or its stale verdict keeps deciding. The verdict
-counts every open thread on the PR, old ones included. The owner lands every agent-c
+or its stale result keeps deciding. The owner lands every agent-c
 PR. A Legion-produced PR is
 landed by the lane that commissioned it. In `sjawhar/legion` the rule adds the Legion
 PO's reviewer App approving, and that approval survives a later push just as an armed
