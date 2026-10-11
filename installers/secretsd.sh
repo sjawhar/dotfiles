@@ -11,24 +11,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #   * systemd units come from a local checkout when one exists, so unit edits
 #     are live on a dev machine;
 #   * the socket-activated *.socket* is enabled (enabling the .service is wrong);
-#   * the OpenCode plugin is registered in opencode.json via ensure_json.
 # Optional: set SECRETSD_SRC to a checkout to make unit edits live on a dev
 # machine; only its systemd/ directory is used. Unset, units come from the
 # pinned release -- installers never assume a machine-local checkout path.
 SECRETSD_SRC="${SECRETSD_SRC:-}"
-# The plugin is owned by the same repo as the binary, not this one: it speaks a
-# versioned wire protocol to the broker, so it ships from the same source and is
-# installed here rather than duplicated in dotfiles. OpenCode fetches it from
-# GitHub and resolves @opencode-ai/plugin itself; nothing about the plugin is
-# stored in dotfiles beyond this reference.
-# The plugin is pinned to the tag matching the installed binary. They speak a
-# versioned wire protocol, so they must move together -- and a moving ref like
-# #main would never refresh anyway, because the package manager caches it.
-# The repo is sjawhar/forward as of the consolidation: one tag now publishes
-# `secrets`, `forward`, and this plugin together. The package is still named
-# secretsd, so the dependency spec keeps that name.
-SECRETSD_PLUGIN_REPO="secretsd@git+https://github.com/sjawhar/forward.git"
-OPENCODE_JSON="${DOTFILES_DIR}/opencode/opencode.json"
 # Set when the binary version, the generated drop-in, or a unit file changed.
 secretsd_restart_needed=0
 SECRETSD_VERSION=""
@@ -255,16 +241,4 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     fi
 else
     echo "secretsd: binary or units unavailable — skipping systemd wiring (install stays non-fatal)."
-fi
-
-# --- 3. Register the OpenCode plugin (idempotent). Gated on the installed file,
-#        which comes from the secretsd repo or its release archive. ------------
-if [ -n "$SECRETSD_BIN" ]; then
-    # SECRETSD_VERSION was resolved in section 1, from the same `latest` symlink.
-    SECRETSD_PLUGIN="${SECRETSD_PLUGIN_REPO}#v${SECRETSD_VERSION}"
-    # Replace any earlier pin so the plugin never lags the binary.
-    ensure_json "$OPENCODE_JSON" \
-        "$(printf '.plugin | index(\"%s\")' "$SECRETSD_PLUGIN")" \
-        "$(printf '.plugin |= (map(select(startswith(\"secretsd@\") | not)) + [\"%s\"] | sort)' "$SECRETSD_PLUGIN")" \
-        "Pinning secretsd OpenCode plugin to v${SECRETSD_VERSION}..."
 fi

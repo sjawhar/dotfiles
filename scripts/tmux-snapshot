@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Snapshot tmux workspace: capture pane state and OpenCode session IDs.
+"""Snapshot tmux workspace: capture pane state and omp session IDs.
 
-Non-destructive: reads session IDs from the oc() shell function's registry
-instead of interrupting running sessions. Only detects instances launched
-via the `oc` wrapper (which registers PID, port, and session info).
+Non-destructive: reads each omp pane's session from the session file the omp
+process holds open (on the host, or inside an agent box), the same way
+tmux-resurrect-omp does, instead of interrupting running sessions.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import importlib.machinery
+import importlib.util
 import json
 import os
 import socket
@@ -16,6 +18,16 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+# Session lookup is tmux-resurrect-omp's: find_omp/open_session for host panes,
+# box_sessions for panes running in an agent box.
+_loader = importlib.machinery.SourceFileLoader(
+    "tmux_resurrect_omp", str(Path(__file__).resolve().parent / "tmux-resurrect-omp")
+)
+_spec = importlib.util.spec_from_loader(_loader.name, _loader)
+omp_sessions = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = omp_sessions
+_loader.exec_module(omp_sessions)
 
 
 @dataclass
@@ -27,6 +39,7 @@ class Pane:
     pane_index: int
     cwd: str
     command: str
+    title: str
 
 
 def eprint(message: str = "") -> None:
@@ -59,6 +72,7 @@ def list_panes_for_session(tmux_session: str, own_pane_id: str | None) -> list[P
             "#{pane_index}",
             "#{pane_current_path}",
             "#{pane_current_command}",
+            "#{pane_title}",
         ]
     )
     output = run_tmux("list-panes", "-s", "-t", tmux_session, "-F", fmt)
@@ -68,11 +82,11 @@ def list_panes_for_session(tmux_session: str, own_pane_id: str | None) -> list[P
         if not line.strip():
             continue
         parts = line.split(separator)
-        if len(parts) != 7:
+        if len(parts) != 8:
             eprint(f"warning: unable to parse pane metadata row: {line!r}")
             continue
 
-        pane_id, pane_pid, window_index, window_name, pane_index, cwd, command = parts
+        pane_id, pane_pid, window_index, window_name, pane_index, cwd, command, title = parts
         if own_pane_id and pane_id == own_pane_id:
             continue
 
@@ -85,6 +99,7 @@ def list_panes_for_session(tmux_session: str, own_pane_id: str | None) -> list[P
                 pane_index=int(pane_index),
                 cwd=cwd,
                 command=command,
+                title=title,
             )
             panes.append(pane)
         except ValueError as exc:
@@ -94,63 +109,60 @@ def list_panes_for_session(tmux_session: str, own_pane_id: str | None) -> list[P
     return panes
 
 
-def get_oc_registry_dir() -> Path:
-    """Get the OC registry directory (matches .bashrc oc() convention)."""
-    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
-    return Path(xdg_runtime) / f"opencode-{os.getuid()}"
+def launcher_spec(pane_pid: int) -> str | None:
+    """What an `agentbox new <spec> -- …` launcher under the pane was given before `--`."""
+    frontier = [pane_pid]
+    for _ in range(omp_sessions.MAX_DEPTH):
+        next_frontier: list[int] = []
+        for pid in frontier:
+            try:
+                argv = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+            except OSError:
+                argv = ""
+            m = omp_sessions.LAUNCH_SPEC.search(argv)
+            if m:
+                return m.group("spec")
+            next_frontier += omp_sessions.children(pid)
+        frontier = next_frontier
+    return None
 
 
-def read_oc_registry() -> dict[int, dict]:
-    """Read live OC registry entries, keyed by shell PID.
-
-    Registry files are written by the oc() shell function in .bashrc.
-    Each contains: pid, port, dir, started, and optionally session {id, title}.
-    """
-    registry_dir = get_oc_registry_dir()
-    entries: dict[int, dict] = {}
-    if not registry_dir.is_dir():
-        return entries
-
-    for path in registry_dir.glob("*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        pid = data.get("pid")
-        if not isinstance(pid, int):
-            continue
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            continue
-        entries[pid] = data
-
-    return entries
+def find_session(pane: Pane, boxed: dict[str, tuple[str, str]] | None) -> tuple[str, str | None] | None:
+    """(session id, agentbox spec or None) of the omp session running in the pane."""
+    omp = omp_sessions.find_omp(pane.pane_pid)
+    if omp is not None:
+        sid = omp_sessions.open_session(omp)
+        if sid:
+            return sid, None
+    if boxed and pane.pane_id in boxed:
+        repo, sid = boxed[pane.pane_id]
+        return sid, launcher_spec(pane.pane_pid) or repo
+    return None
 
 
 def build_snapshot(panes: list[Pane], tmux_session: str) -> dict[str, object]:
-    registry = read_oc_registry()
-    eprint(f"OC registry: {len(registry)} live instance(s)")
+    boxed: dict[str, tuple[str, str]] | None = None
+    try:
+        boxed = omp_sessions.box_sessions()
+    except (OSError, subprocess.SubprocessError) as exc:
+        eprint(f"warning: agent boxes not checked: {exc}")
 
     pane_entries: list[dict[str, object]] = []
     matched = 0
     for pane in panes:
         ai_session: dict[str, str] | None = None
-        reg_entry = registry.get(pane.pane_pid)
-        if reg_entry:
-            session = reg_entry.get("session")
-            if session and session.get("id"):
-                ai_session = {
-                    "type": "opencode",
-                    "session_id": session["id"],
-                    "title": session.get("title", ""),
-                    "resume_cmd": f"opencode -s {session['id']}",
-                }
-                matched += 1
-            else:
-                eprint(
-                    f"warning: OC instance in pane {pane.pane_id} has no session info yet"
-                )
+        found = find_session(pane, boxed)
+        if found:
+            sid, spec = found
+            ai_session = {
+                "type": "omp",
+                "session_id": sid,
+                "title": pane.title,
+                "resume_cmd": omp_sessions.resume_command(spec, sid),
+            }
+            matched += 1
+        elif pane.command == "omp":
+            eprint(f"warning: omp in pane {pane.pane_id} has no session file open yet")
 
         pane_entries.append(
             {
@@ -163,7 +175,7 @@ def build_snapshot(panes: list[Pane], tmux_session: str) -> dict[str, object]:
             }
         )
 
-    eprint(f"Matched {matched}/{len(registry)} OC instance(s) to panes")
+    eprint(f"Matched {matched} omp session(s) to panes")
 
     captured_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
     captured_at = captured_at.replace("+00:00", "Z")

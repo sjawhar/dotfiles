@@ -75,7 +75,7 @@ ensure_json() {
     [ -n "$desc" ] && echo "$desc"
     # Write to the symlink target, not the symlink path: mv onto a symlink
     # replaces the link with a plain file, silently forking live config from
-    # its dotfiles canonical (this destroyed the opencode.json link once).
+    # its dotfiles canonical.
     local real tmp
     real=$(readlink -f "$file")
     tmp=$(mktemp)

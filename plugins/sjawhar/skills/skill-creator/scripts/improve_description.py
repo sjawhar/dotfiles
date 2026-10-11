@@ -2,10 +2,7 @@
 """Improve a skill description based on eval results.
 
 Takes eval results (from run_eval.py) and generates an improved description
-by calling the agent CLI as a subprocess. Supports both OpenCode and Claude Code.
-
-For OpenCode: uses `opencode run --format json` and extracts text parts.
-For Claude Code: uses `claude -p --output-format text` (same auth, no API key needed).
+by calling `claude -p` as a subprocess (same auth, no API key needed).
 """
 
 import argparse
@@ -17,47 +14,6 @@ import sys
 from pathlib import Path
 
 from scripts.utils import parse_skill_md
-from scripts.run_eval import detect_cli
-
-
-def _call_opencode(prompt: str, model: str | None, timeout: int = 300) -> str:
-    """Run `opencode run` with the prompt and return the text response.
-
-    Parses the JSON event stream to extract text parts.
-    """
-    cmd = ["opencode", "run", "--format", "json", "--dir", "/tmp"]
-    if model:
-        cmd.extend(["--model", model])
-    cmd.append(prompt)
-
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"opencode run exited {result.returncode}\nstderr: {result.stderr}"
-        )
-
-    # Extract text from JSON event stream
-    text_parts = []
-    for line in result.stdout.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") == "text":
-            part = event.get("part", {})
-            text = part.get("text", "")
-            if text:
-                text_parts.append(text)
-
-    return "".join(text_parts)
 
 
 def _call_claude(prompt: str, model: str | None, timeout: int = 300) -> str:
@@ -89,18 +45,6 @@ def _call_claude(prompt: str, model: str | None, timeout: int = 300) -> str:
     return result.stdout
 
 
-def _call_llm(
-    prompt: str, model: str | None, timeout: int = 300, cli: str = "auto"
-) -> str:
-    """Call the appropriate CLI to get an LLM response."""
-    if cli == "auto":
-        cli = detect_cli()
-    if cli == "opencode":
-        return _call_opencode(prompt, model, timeout)
-    else:
-        return _call_claude(prompt, model, timeout)
-
-
 def improve_description(
     skill_name: str,
     skill_content: str,
@@ -111,7 +55,6 @@ def improve_description(
     test_results: dict | None = None,
     log_dir: Path | None = None,
     iteration: int | None = None,
-    cli: str = "auto",
 ) -> str:
     """Call LLM to improve the description based on eval results."""
     failed_triggers = [
@@ -206,7 +149,7 @@ I'd encourage you to be creative and mix up the style in different iterations si
 
 Please respond with only the new description text in <new_description> tags, nothing else."""
 
-    text = _call_llm(prompt, model, cli=cli)
+    text = _call_claude(prompt, model)
 
     match = re.search(r"<new_description>(.*?)</new_description>", text, re.DOTALL)
     description = (
@@ -234,7 +177,7 @@ Please respond with only the new description text in <new_description> tags, not
             f"important trigger words and intent coverage. Respond with only "
             f"the new description in <new_description> tags."
         )
-        shorten_text = _call_llm(shorten_prompt, model, cli=cli)
+        shorten_text = _call_claude(shorten_prompt, model)
         match = re.search(
             r"<new_description>(.*?)</new_description>", shorten_text, re.DOTALL
         )
@@ -277,12 +220,6 @@ def main():
     parser.add_argument(
         "--verbose", action="store_true", help="Print thinking to stderr"
     )
-    parser.add_argument(
-        "--cli",
-        choices=["opencode", "claude", "auto"],
-        default="auto",
-        help="CLI to use (default: auto-detect)",
-    )
     args = parser.parse_args()
 
     skill_path = Path(args.skill_path)
@@ -295,12 +232,10 @@ def main():
     if args.history:
         history = json.loads(Path(args.history).read_text())
 
-    cli = args.cli if args.cli != "auto" else detect_cli()
     name, _, content = parse_skill_md(skill_path)
     current_description = eval_results["description"]
 
     if args.verbose:
-        print(f"CLI: {cli}", file=sys.stderr)
         print(f"Current: {current_description}", file=sys.stderr)
         print(
             f"Score: {eval_results['summary']['passed']}/{eval_results['summary']['total']}",
@@ -314,7 +249,6 @@ def main():
         eval_results=eval_results,
         history=history,
         model=args.model,
-        cli=cli,
     )
 
     if args.verbose:

@@ -291,8 +291,8 @@ check_modal() {
     fi
 }
 
-# Dispatch: the session's harness plugin (pi-envoy, claude-envoy,
-# opencode-legion-envoy) puts `dispatch` on its shell's PATH and names the
+# Dispatch: the session's harness plugin (pi-envoy, claude-envoy) puts
+# `dispatch` on its shell's PATH and names the
 # session for it; `dispatch whoami` answers whom Dispatch takes it for.
 check_dispatch() {
     local out rc

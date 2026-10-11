@@ -49,7 +49,7 @@ paths = [
 name = "claude-envoy"
 paths = [
   ".claude/settings.json", "envoy/", "scripts/envoy", "scripts/envoy-nats-seed", "scripts/cld",
-  "scripts/oc", "scripts/claude-statusline", "scripts/tests/test_cld_profiles.py",
+  "scripts/claude-statusline", "scripts/tests/test_cld_profiles.py",
   "scripts/tests/test_envoy_send.py",
 ]
 

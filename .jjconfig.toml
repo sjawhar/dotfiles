@@ -19,7 +19,7 @@ editor = "jj-editor"
 # Use git diff format when running inside AI agents
 # (agents can't parse color-words output)
 [[--scope]]
---when.environments = ["AGENT", "OPENCODE", "CLAUDECODE"]
+--when.environments = ["AGENT", "CLAUDECODE"]
 [--scope.ui]
 diff-formatter = ":git"
 [--scope.template-aliases]

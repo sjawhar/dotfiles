@@ -2,10 +2,9 @@
 """Restore tmux workspace from a snapshot file.
 
 Reads a snapshot JSON (written by tmux-snapshot) and recreates the tmux
-workspace: windows, panes, working directories, and OpenCode sessions.
-
-OpenCode sessions are resumed via the `oc` shell wrapper so they get
-registered in the instance registry automatically.
+workspace: windows, panes, working directories, and omp sessions, each resumed
+with the command the snapshot recorded (`omp --resume <id>`, or
+`agentbox new <spec> -- omp --resume <id>` for a session in an agent box).
 """
 
 from __future__ import annotations
@@ -72,7 +71,7 @@ def restore_window(
         for p in panes:
             ai = p.get("ai_session")
             if ai:
-                label = f"oc -s {ai['session_id']}"
+                label = ai["resume_cmd"]
             else:
                 label = p.get("command", "shell")
             eprint(f"    {p['cwd']} \u2192 {label}")
@@ -107,11 +106,7 @@ def _start_pane(pane_id: str, pane_data: dict) -> None:
     ai = pane_data.get("ai_session")
     if not ai or not ai.get("resume_cmd"):
         return
-    resume_cmd = ai["resume_cmd"]
-    # Route through oc wrapper for registry integration
-    if resume_cmd.startswith("opencode "):
-        resume_cmd = "oc" + resume_cmd[len("opencode"):]
-    run_tmux("send-keys", "-t", pane_id, resume_cmd, "Enter")
+    run_tmux("send-keys", "-t", pane_id, ai["resume_cmd"], "Enter")
 
 
 def main() -> int:
@@ -161,7 +156,7 @@ def main() -> int:
         eprint(f"  session: {snapshot.get('tmux_session', '?')}")
         eprint(
             f"  {len(windows)} window(s), {total_panes} pane(s),"
-            f" {ai_panes} OC session(s)"
+            f" {ai_panes} omp session(s)"
         )
         eprint("")
         for _, name, panes in windows:
@@ -172,7 +167,7 @@ def main() -> int:
     eprint(f"Restoring into tmux session: {session}")
     eprint(
         f"  {len(windows)} window(s), {total_panes} pane(s),"
-        f" {ai_panes} OC session(s)"
+        f" {ai_panes} omp session(s)"
     )
 
     for _, name, panes in windows:

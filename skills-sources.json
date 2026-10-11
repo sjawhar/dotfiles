@@ -1,67 +1,45 @@
 {
-  "$comment": "Single source of truth for vendored/adopted skill pools consumed by BOTH harness bridges: opencode/plugins/dotfiles-bridge.ts (OpenCode; skills+commands+agents) and omp/extensions/dotfiles-skills.ts (OMP; resources_discover skillPaths). Marketplace-installed pools do NOT belong here - Claude's installed_plugins.json is their source of truth and both harnesses ingest it natively. Fields: root = package root relative to the dotfiles dir (skills expected at <root>/skills); namespace = bridge namespace; skills=false = bridge skips skills (OpenCode loads them natively from ~/.claude/skills); commands=false = OpenCode bridge skips <root>/commands (a pool whose commands we do not want exposed); OMP ignores this field entirely - it takes commands only from plugins/sjawhar/commands via a single ~/.omp/agent/prompts symlink, see omp/AGENTS.md; omp=false = OMP skips this pool (it gets it via its own plugin install); ompSkillsDir = OMP scans this dir instead of <root>/skills (supports ~/ prefix; for pools living outside the dotfiles tree, e.g. ~/core-ops). OMP never reads a harness-curated dir (~/.claude, ~/.config/opencode): unwanted skills from a vendor pool are excluded via omp/config.yml skills.ignoredSkills.",
+  "$comment": "Vendored/adopted skill pools fed to OMP by omp/extensions/dotfiles-skills.ts (resources_discover skillPaths). Marketplace-installed pools do NOT belong here - Claude's installed_plugins.json is their source of truth and OMP ingests it natively. Fields: root = package root relative to the dotfiles dir (skills expected at <root>/skills); ompSkillsDir = a skills directory to use instead of <root>/skills; omp=false = skip the pool. installers/omp.sh clones the vendor/ checkouts.",
   "sources": [
     {
-      "root": "plugins/sjawhar",
-      "namespace": "sjawhar"
+      "root": "plugins/sjawhar"
     },
     {
-      "root": "vendor/gh-stack",
-      "namespace": "gh"
+      "root": "vendor/gh-stack"
     },
     {
-      "root": "vendor/pup",
-      "namespace": "pup"
+      "root": "vendor/pup"
     },
     {
-      "root": "plugins/cursor-harvest",
-      "namespace": "cursor-harvest"
+      "root": "plugins/cursor-harvest"
     },
     {
-      "root": "vendor/sentry-for-ai",
-      "namespace": "sentry",
-      "skills": false,
-      "commands": false
+      "root": "vendor/sentry-for-ai"
     },
     {
-      "root": "vendor/sentry-cli/plugins/sentry-cli",
-      "namespace": "sentry-cli"
+      "root": "vendor/sentry-cli/plugins/sentry-cli"
     },
     {
       "root": "../src/core-ops",
-      "namespace": "core-ops",
-      "skills": false,
       "ompSkillsDir": "~/src/core-ops/skills"
     },
     {
       "root": "../src/core-context",
-      "namespace": "core-context",
-      "skills": false,
       "ompSkillsDir": "~/src/core-context/skills"
     },
     {
-      "$comment": "One agent-c skill, linked per-skill by installers/opencode.sh into a farm; pointing at agent-c's whole skills directory would publish ~100 skills. Claude Code and OpenCode get the same skill via ~/.claude/skills; OMP does not read that path.",
+      "$comment": "One agent-c skill, linked per-skill by installers/omp.sh into this farm; pointing at agent-c's whole skills directory would publish ~100 skills.",
       "root": "../src/agent-c",
-      "namespace": "agent-c",
-      "skills": false,
-      "commands": false,
       "ompSkillsDir": "~/.omp/skill-farms/agent-c"
     },
     {
-      "root": "vendor/compound-engineering",
-      "namespace": "compound-engineering",
-      "skills": false,
-      "commands": false
+      "root": "vendor/compound-engineering"
     },
     {
-      "root": "vendor/typesafe-ai",
-      "namespace": "typesafe-ai"
+      "root": "vendor/typesafe-ai"
     },
     {
-      "root": "vendor/time-tracker/.opencode",
-      "namespace": "time-tracker",
-      "skills": false,
-      "commands": false
+      "root": "vendor/time-tracker/.opencode"
     }
   ]
 }

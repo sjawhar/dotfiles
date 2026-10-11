@@ -6,7 +6,7 @@
 #   envoy ps --sub-agents — include subagent sessions
 #   envoy ps --json  — JSON output
 #   envoy ps --local — filter to local machine only
-#   envoy send [--source envoy] <t> <msg> — send message (ses_* = direct, else publish to topic)
+#   envoy send [--source envoy] <t> <msg> — send message (session UUID = direct, else publish to topic)
 #   envoy notify <topic> <msg> — publish as envoy: `send --source envoy <topic> <msg>`
 #   envoy broadcast <msg> — direct-send <msg> to every live titled session
 #                          `envoy ps` lists for this machine (`--all-machines`
@@ -22,8 +22,8 @@
 #                          the default and drop the flag.
 #
 # `envoy send` identifies the sender. From an interactive shell the message is
-# stamped source=human. Inside an agent harness (the bash tool of an OMP,
-# Claude Code, or OpenCode session exports one of the markers below) it is
+# stamped source=human. Inside an agent harness (the bash tool of an OMP or
+# Claude Code session exports one of the markers below) it is
 # stamped source=agent with that session's id as source_session, so the
 # recipient's reply hint names a real inbox instead of an anonymous "agent".
 # A leading `--source envoy` stamps source=envoy with no source_session whatever
@@ -94,16 +94,14 @@ _envoy_send() {
     fi
     if [ $# -lt 2 ]; then
         echo "Usage: envoy send [--source envoy] <target> <message>" >&2
-        echo "  target: session ID (ses_...) for direct send, or topic for publish" >&2
+        echo "  target: session ID (UUID) for direct send, or topic for publish" >&2
         return 1
     fi
     local target="$1"; shift
     local message="$*"
 
     # OMP exports OMP_SESSION_ID (and OMPCODE); Claude Code exports
-    # CLAUDE_CODE_SESSION_ID (and CLAUDECODE). OpenCode exports no session
-    # marker to its bash tool, so an OpenCode agent using this CLI is stamped
-    # human — OpenCode agents have the native envoy_send tool and should use it.
+    # CLAUDE_CODE_SESSION_ID (and CLAUDECODE).
     local source="human" source_session=""
     if [ -n "$asserted_source" ]; then
         source="$asserted_source"
@@ -116,8 +114,8 @@ _envoy_send() {
     fi
 
     local endpoint payload
-    # Direct send for session ids: opencode ses_* and OMP UUID session ids.
-    if [[ "$target" == ses_* || "$target" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    # Direct send for session ids (OMP and Claude Code use UUIDs).
+    if [[ "$target" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
         endpoint="/v1/messages/send"
         payload=$(jq -n --arg t "$target" --arg m "$message" --arg s "$source" --arg ss "$source_session" \
             '{ target_session: $t, message: $m, source: $s } + (if $ss == "" then {} else { source_session: $ss } end)')

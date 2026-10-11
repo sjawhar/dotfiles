@@ -77,7 +77,6 @@ exit 99
 LAUNCHERS: dict[str, tuple[list[str], str]] = {
     "omp": ([str(DOTFILES / "shims" / "omp"), "--version"], "AGENT omp --version"),
     "cld": ([str(DOTFILES / "scripts" / "cld"), "--version"], "AGENT claude"),
-    "oc": ([sys.executable, str(DOTFILES / "scripts" / "oc"), "--version"], "AGENT opencode"),
 }
 
 
@@ -96,13 +95,12 @@ class AgentSecretsSession(unittest.TestCase):
         write_stub(self.stub_dir, "agent", 'echo "AGENT pid=$$ $*"')
         # shims/omp reaches omp through `mise x github:sjawhar/oh-my-pi -- …omp` when no local
         # build is on PATH, which runs the command with the release's install dir on PATH;
-        # cld and oc exec their agents by name.
+        # cld execs its agent by name.
         tool_dir = self.home / ".mise" / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin"
         tool_dir.mkdir(parents=True)
         write_stub(tool_dir, "omp", 'echo "AGENT omp $*"')
         write_stub(self.stub_dir, "mise", f'shift 3; PATH="{tool_dir}:$PATH" exec "$@"')
         write_stub(self.stub_dir, "claude", 'echo "AGENT claude"')
-        write_stub(self.stub_dir, "opencode", 'echo "AGENT opencode"')
         self.env = {
             "DOTFILES_DIR": str(DOTFILES),
             "HOME": str(self.home),

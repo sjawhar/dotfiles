@@ -15,7 +15,7 @@ Run the two independent review passes in parallel, then synthesize their results
 3. On OMP, launch both agents in the same message with `task(agent="thermonuclear-deep-review", ...)` and `task(agent="thermonuclear-code-quality", ...)`; pass `run_in_background: true` to each:
    - `thermonuclear-deep-review` covers bugs, breakages, security, developer-experience regressions, and feature-gate leaks.
    - `thermonuclear-code-quality` covers maintainability, structure, file-size growth, ad-hoc branching, abstractions, and codebase health.
-4. On Claude Code or OpenCode, dispatch two independent read-only subagents through that harness's native mechanism with the same names and prompts. If named agents are unavailable, load `thermonuclear-deep-review` and `thermonuclear-code-quality` as separate review passes instead.
+4. On Claude Code, dispatch two independent read-only subagents through its native mechanism with the same names and prompts. If named agents are unavailable, load `thermonuclear-deep-review` and `thermonuclear-code-quality` as separate review passes instead.
 5. Pass each subagent the same scoped diff/file context and ask it to return prioritized findings with file references and evidence.
 6. After both finish, synthesize the results with findings first, deduplicated across reviewers. Weight overlapping findings more heavily, resolve disagreements with your own judgment, and keep summaries brief.
 

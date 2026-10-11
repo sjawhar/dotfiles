@@ -7,7 +7,7 @@ set -euo pipefail
 # Agent context: an omp session (its bash tool carries OMP_SESSION_ID, its
 # eval kernel PI_SESSION_FILE with an allow-listed environment that drops
 # GIT_CONFIG_*), an agentbox session, or anything launched with the gh-app
-# routing include (shims/omp, scripts/oc, scripts/cld). Two guarantees there:
+# routing include (shims/omp, scripts/cld). Two guarantees there:
 # the routing include is present even when the caller's environment was
 # scrubbed, and gh sees a config directory without hosts.yml, so a call with no
 # target owner to route falls to "not logged in", never to the user's own login

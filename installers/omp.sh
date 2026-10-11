@@ -9,8 +9,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 OMP_AGENT_DIR="${HOME}/.omp/agent"
 mkdir -p "$OMP_AGENT_DIR"
 
-# Agents and the other config files are canonical in dotfiles and linked (same
-# layout idea as ~/.config/opencode -> dotfiles/opencode). config.yml is not:
+# Agents and the other config files are canonical in dotfiles and linked.
+# config.yml is not:
 # shims/omp loads the committed file as a read-only PI_CONFIG_FILES overlay,
 # and ~/.omp/agent/config.yml is the machine's own real file, where omp's
 # runtime writes (/model picks, prompt answers) land. Converging the earlier
@@ -57,8 +57,7 @@ ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
 # plugin installed from GitHub. The pins live in the committed
-# omp/plugins/package.json (same idea as opencode.json's git-pinned plugin
-# entries); bun install materializes them. Manage pins with omp plugin
+# omp/plugins/package.json; bun install materializes them. Manage pins with omp plugin
 # install/upgrade - the resulting package.json/lockfile changes get committed here.
 # jj snapshotting is omp/hooks/post/jj-snapshot.ts alone (see omp/AGENTS.md);
 # a stale extension copy is pruned so no second, awaited snapshotter loads.
@@ -87,8 +86,8 @@ ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 # extension and delivers every envoy message twice.
 rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 
-# Skills: pools are declared once in skills-sources.json (shared with the
-# OpenCode dotfiles-bridge); omp/extensions/dotfiles-skills.ts feeds them to
+# Skills: pools are declared once in skills-sources.json;
+# omp/extensions/dotfiles-skills.ts feeds them to
 # OMP via resources_discover at session start and /reload-plugins. The old
 # flat symlink farm (scripts/omp-sync-skills -> ~/.omp/agent/skills) is
 # retired: live sessions snapshotted farm paths, so every re-sync prune broke
@@ -96,6 +95,49 @@ rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 # Convergence: prune leftover farm symlinks on machines that predate the
 # retirement (real user-authored skill dirs in ~/.omp/agent/skills survive).
 [ -d "${HOME}/.omp/agent/skills" ] && find "${HOME}/.omp/agent/skills" -maxdepth 1 -type l -delete
+
+# Vendor checkouts behind the skills-sources.json pools.
+# Our fork of compound-engineering: `sami` branch = the compound-engineering-v*
+# release tag plus fork-local patches (ce-simplify-code reviews on top-tier
+# GPT agents, not the Sonnet class; ce-babysit-pr's pr-snapshot reads a PR
+# stack its token cannot see as no stack). Pinned to a commit on that branch. Bump:
+# rebase `sami` onto the new tag in the vendor checkout, push, re-pin here;
+# check every omp/config.yml skills.ignoredSkills name still exists upstream,
+# and diff the skill set for new arrivals.
+ensure_vendor https://github.com/sjawhar/compound-engineering-plugin.git compound-engineering b4adb2f0312d2e61f9168b3b5bbef8d95c75382a
+if [ -d "${DOTFILES_DIR}/vendor/compound-engineering/.git" ]; then
+    git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote get-url upstream &>/dev/null || \
+        git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote add upstream https://github.com/EveryInc/compound-engineering-plugin.git
+fi
+ensure_vendor https://github.com/github/gh-stack.git gh-stack
+ensure_vendor https://github.com/DataDog/pup.git pup
+# pup ships ~11 dd-* skills (plus 50 agents, pruned from omp/agents); only
+# dd-pup is wanted — the rest swamp session context. Converge fresh clones.
+find "${DOTFILES_DIR}/vendor/pup/skills" -mindepth 1 -maxdepth 1 -type d -name 'dd-*' ! -name 'dd-pup' -exec rm -rf {} +
+# Pinned: upstreams restructured after these commits (skills moved under
+# packages/); skills-sources.json expects this layout.
+ensure_vendor https://github.com/getsentry/sentry-for-ai.git sentry-for-ai 2c34b9a2ecff03005d381e60013d7d5849801a62
+ensure_vendor https://github.com/getsentry/cli.git sentry-cli 33028c2ac93e027ce3faa9045efc91d895deae1a
+# typesafe-ai/skills is a 2-commit, single-skill repo (skills/typesafe-ai/SKILL.md);
+# pinned so reflect's jev-turn-label.py (plugins/sjawhar/skills/reflect/) keeps the
+# API reference its design decisions cite, not whatever the docs say later. Bump:
+# re-pin here and re-check jev-turn-label.py's criteria against the live docs.
+ensure_vendor https://github.com/typesafe-ai/skills.git typesafe-ai 65a39f393687675ce170e6094757de20370365b9
+ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
+
+# agent-c skills required by instructions that apply outside agent-c, linked
+# per-skill into the farm skills-sources.json names (pointing at agent-c's whole
+# skills directory would publish ~100 skills). Linked only where agent-c is checked out.
+AGENT_C_GLOBAL_SKILLS="${HOME}/src/agent-c/.claude/skills"
+OMP_AGENT_C_FARM="${HOME}/.omp/skill-farms/agent-c"
+for global_skill in maintaining-inspect; do
+    if [ -d "${AGENT_C_GLOBAL_SKILLS}/${global_skill}" ]; then
+        mkdir -p "${OMP_AGENT_C_FARM}"
+        ensure_link "${AGENT_C_GLOBAL_SKILLS}/${global_skill}" "${OMP_AGENT_C_FARM}/${global_skill}"
+    else
+        [ -L "${OMP_AGENT_C_FARM}/${global_skill}" ] && rm "${OMP_AGENT_C_FARM}/${global_skill}"
+    fi
+done
 
 
 # Prompt templates (slash commands). OMP loads them from exactly two hardcoded

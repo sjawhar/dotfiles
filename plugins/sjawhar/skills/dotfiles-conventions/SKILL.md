@@ -1,6 +1,6 @@
 ---
 name: dotfiles-conventions
-description: "Use before creating, moving, or wiring ANY file in ~/.dotfiles — wrapper scripts, install steps, config for a new tool, symlinks, plugin/extension consumption, or agent-harness setup (omp, opencode, claude). Also use when tempted to symlink into a vendor/ or repo checkout, install something from a local file path, or invent a new directory. The repo has a fixed placement map and hard portability rules that are not discoverable from one file. Triggers: dotfiles, ~/.dotfiles, shims, installers, omp config, opencode config, add a wrapper, laptop setup, where does this script go."
+description: "Use before creating, moving, or wiring ANY file in ~/.dotfiles — wrapper scripts, install steps, config for a new tool, symlinks, plugin/extension consumption, or agent-harness setup (omp, claude). Also use when tempted to symlink into a vendor/ or repo checkout, install something from a local file path, or invent a new directory. The repo has a fixed placement map and hard portability rules that are not discoverable from one file. Triggers: dotfiles, ~/.dotfiles, shims, installers, omp config, add a wrapper, laptop setup, where does this script go."
 ---
 
 # Dotfiles Conventions
@@ -17,7 +17,7 @@ The layout is a fixed placement map. Before adding anything, read the sibling fi
 | Utility script invoked by name | `scripts/` — no `.sh` extension |
 | Setup for a tool (symlinks, clones, config patching) | `installers/<tool>.sh`, sourced from `install.sh`, built on `installers/lib.sh` helpers |
 | Tool binary | `mise.toml` pin — never a hand-placed file. `bin/` is gitignored bootstrap-only |
-| Config for a tool | Its config dir (`opencode/`, `omp/`, ...), symlinked into place by an installer. Config dirs never contain a `bin/` |
+| Config for a tool | Its config dir (`omp/`, ...), symlinked into place by an installer. Config dirs never contain a `bin/` |
 | Third-party source | `vendor/` via `ensure_vendor` — pristine, never grafted onto |
 | Adopted external skill/agent | Verbatim copy into `plugins/` (real files) |
 
@@ -29,14 +29,14 @@ The layout is a fixed placement map. Before adding anything, read the sibling fi
 
 ## Distribution rules (hard)
 
-- **Sami's own software is consumed from GitHub, pinned.** The pattern is everywhere: `opencode.json` plugins (`name@git+https://github.com/sjawhar/x.git#tag`), `omp/plugins/package.json` (`github:sjawhar/x#ref`), `mise.toml` (`"github:sjawhar/x" = "latest"`). Extending it beats inventing: give the source repo the manifest it needs (an `omp`/`pi` field, a plugin entry) rather than wiring a local path.
+- **Sami's own software is consumed from GitHub, pinned.** The pattern is everywhere: `omp/plugins/package.json` (`github:sjawhar/x#ref`), `mise.toml` (`"github:sjawhar/x" = "latest"`). Extending it beats inventing: give the source repo the manifest it needs (an `omp`/`pi` field, a plugin entry) rather than wiring a local path.
 - **File paths and checkout symlinks are prototyping only.** Fine while iterating; they never land. `file://` plugin entries are the one exception, and only for scripts that live in this repo.
-- **Fork releases follow the opencode fork pattern**: tag `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>`, release title `sami build <tag>`, consumer pins `latest`. New own-repos must be added to `minimum_release_age_excludes` in `mise.toml` by hand or `latest` will not resolve.
+- **Fork releases follow one pattern**: tag `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>`, release title `sami build <tag>`, consumer pins `latest`. New own-repos must be added to `minimum_release_age_excludes` in `mise.toml` by hand or `latest` will not resolve.
 - **Committed build artifacts are rejected in source repos.** If a consumer needs a bundle, fix resolution at the root (export conditions, resolver) or ship via a release asset — do not commit `dist/`.
 
 ## Wrapper parity (hard)
 
-Agent-harness launchers (`scripts/oc`, `scripts/cld`, `scripts/agentbox`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, envoy env, the secrets-broker identity. A capability added to one belongs in all of them — drift means sessions silently act as the user on GitHub, lose messaging, or lose commit attribution. Measured 2026-09-27: four sessions stamped no session trailer on ANY commit, coordinator included, while a fifth started the same day stamped every one, and 202 of 883 merged PRs across a week carried none — invisible to trailer-based attribution. The differing thing was how those sessions were launched. `agentbox` builds that environment for `docker run` (one box per session, `shims/omp` as the container's main process), so a change to what a session needs goes into `session_env()` there and into the shim. Where a step is the same for every host launcher, it lives in one script they all call rather than three copies: `scripts/envoy-nats-seed` for the NATS credential, `scripts/agent-secrets-session` (exec'd around the agent, so the pid is kept) for broker registration.
+Agent-harness launchers (`scripts/cld`, `scripts/agentbox`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, envoy env, the secrets-broker identity. A capability added to one belongs in all of them — drift means sessions silently act as the user on GitHub, lose messaging, or lose commit attribution. Measured 2026-09-27: four sessions stamped no session trailer on ANY commit, coordinator included, while a fifth started the same day stamped every one, and 202 of 883 merged PRs across a week carried none — invisible to trailer-based attribution. The differing thing was how those sessions were launched. `agentbox` builds that environment for `docker run` (one box per session, `shims/omp` as the container's main process), so a change to what a session needs goes into `session_env()` there and into the shim. Where a step is the same for every host launcher, it lives in one script they all call rather than a copy per launcher: `scripts/envoy-nats-seed` for the NATS credential, `scripts/agent-secrets-session` (exec'd around the agent, so the pid is kept) for broker registration.
 
 ## Skills here are repo-agnostic (hard)
 

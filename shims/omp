@@ -49,8 +49,8 @@ export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
 # when NATS_NKEY_SEED_FILE names its seed. scripts/envoy-nats-seed keeps that
 # seed in a per-boot 0600 file and prints its path, or prints nothing (no secret
 # yet, no AWS) and the session connects without a credential. A seed the caller
-# already gave (a box's session_env, a Legion pane) wins. Mirrors scripts/cld,
-# scripts/oc and scripts/agentbox.
+# already gave (a box's session_env, a Legion pane) wins. Mirrors scripts/cld
+# and scripts/agentbox.
 if [[ -z "${NATS_NKEY_SEED_FILE:-}" && -z "${NATS_NKEY_SEED:-}" ]]; then
     _seed_file="$("${DOTFILES_DIR}/scripts/envoy-nats-seed")" || _seed_file=""
     if [[ -n "$_seed_file" ]]; then
@@ -121,7 +121,7 @@ fi
 # Agents authenticate as the GitHub App installation matching each repo's
 # owner; owners without an installation get the upstream token from the
 # secrets store (gh-app.agent.fallback-secret), never your keyring login.
-# Mirrors scripts/oc. See gh-app-routes.gitconfig and shims/gh-app-token.
+# Mirrors scripts/cld. See gh-app-routes.gitconfig and shims/gh-app-token.
 _gc_index="${GIT_CONFIG_COUNT:-0}"
 export "GIT_CONFIG_KEY_${_gc_index}=include.path"
 export "GIT_CONFIG_VALUE_${_gc_index}=${DOTFILES_DIR}/gh-app-routes.gitconfig"
@@ -130,7 +130,7 @@ export GIT_CONFIG_COUNT="$((_gc_index + 1))"
 # --- dotfiles shims must lead PATH ---
 # gh App routing only works when `gh` resolves to shims/gh; a launching shell's
 # mise hook may have prepended tool dirs (including the real gh) ahead of the
-# shims, and sessions inherit PATH forever. Mirrors scripts/oc.
+# shims, and sessions inherit PATH forever. Mirrors scripts/cld.
 _shims="${DOTFILES_DIR}/shims"
 _path=""
 IFS=':' read -ra _dirs <<< "$PATH"
@@ -201,7 +201,7 @@ _prog="${_omp:-omp}"
 # On the host a session's secrets-broker proofs come from the agent-secrets helper, which signs
 # only for descendants of a registered process. scripts/agent-secrets-session registers this
 # pid (every exec below keeps it, so it is omp's) before omp starts, where that applies; the
-# same wrapper as scripts/cld and scripts/oc.
+# same wrapper as scripts/cld.
 _via=("${DOTFILES_DIR}/scripts/agent-secrets-session" ${_via[@]+"${_via[@]}"})
 
 # --- provider keys: the Hawk gateway by default, profile-scoped under a profile ---

@@ -22,19 +22,15 @@ vendor/
 !.claude/settings.json
 
 
-/.opencode-profiles/
 /.claude-profiles/
 
-.sisyphus/
-.omo/
-.tmux-workspace/
 
+.tmux-workspace/
 /ignore
 .overseer/
 .playwright-mcp/
 .superpowers
 omp/plugins/node_modules
-opencode/node_modules/
 
 # local-only secrets (never committed; `secrets` reads these on top of the
 # committed files in the same root)

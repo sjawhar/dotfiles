@@ -5,7 +5,7 @@ Combines run_eval.py and improve_description.py in a loop, tracking history
 and returning the best description found. Supports train/test split to prevent
 overfitting.
 
-Supports both OpenCode and Claude Code via auto-detection.
+Uses Claude Code.
 """
 
 import argparse
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from scripts.generate_report import generate_html
 from scripts.improve_description import improve_description
-from scripts.run_eval import detect_cli, find_project_root, run_eval
+from scripts.run_eval import find_project_root, run_eval
 from scripts.utils import parse_skill_md
 
 
@@ -60,12 +60,9 @@ def run_loop(
     verbose: bool,
     live_report_path: Path | None = None,
     log_dir: Path | None = None,
-    cli: str = "auto",
 ) -> dict:
     """Run the eval + improvement loop."""
-    if cli == "auto":
-        cli = detect_cli()
-    project_root = find_project_root(cli)
+    project_root = find_project_root()
     name, original_description, content = parse_skill_md(skill_path)
     current_description = description_override or original_description
 
@@ -101,7 +98,6 @@ def run_loop(
             runs_per_query=runs_per_query,
             trigger_threshold=trigger_threshold,
             model=model,
-            cli=cli,
         )
         eval_elapsed = time.time() - t0
 
@@ -211,7 +207,6 @@ def run_loop(
             model=model,
             log_dir=log_dir,
             iteration=iteration,
-            cli=cli,
         )
         improve_elapsed = time.time() - t0
 
@@ -263,8 +258,6 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     parser.add_argument("--report", default="auto", help="Generate HTML report at this path (default: 'auto' for temp file, 'none' to disable)")
     parser.add_argument("--results-dir", default=None, help="Save all outputs (results.json, report.html, log.txt) to a timestamped subdirectory here")
-    parser.add_argument("--cli", choices=["opencode", "claude", "auto"], default="auto",
-                        help="CLI to use (default: auto-detect, prefers opencode)")
     args = parser.parse_args()
 
     eval_set = json.loads(Path(args.eval_set).read_text())
@@ -313,7 +306,6 @@ def main():
         verbose=args.verbose,
         live_report_path=live_report_path,
         log_dir=log_dir,
-        cli=args.cli,
     )
 
     # Save JSON output

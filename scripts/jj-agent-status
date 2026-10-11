@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show jj repo status enriched with active agent sessions.
+"""Show jj repo status enriched with this machine's live agent sessions (from envoy ps).
 
 Usage:
   jj-agent-status                        # action-oriented summary (default)
@@ -12,6 +12,9 @@ Usage:
 import json
 import subprocess
 import sys
+from pathlib import Path
+
+ENVOY = Path(__file__).resolve().parent / "envoy"
 
 
 def run(cmd):
@@ -75,12 +78,12 @@ def gather(args, deep=False):
         if path:
             ws_paths[path] = name
 
-    # Active sessions from oc ps
-    oc = run(["bash", "-ic", "oc ps --json 2>/dev/null"])
+    # Live sessions on this machine from Envoy (omp and Claude Code register there)
+    ps = run([str(ENVOY), "ps", "--json", "--local"])
     sessions = []
-    if oc:
+    if ps:
         try:
-            sessions = json.loads(oc)
+            sessions = json.loads(ps)
         except json.JSONDecodeError:
             pass
 
@@ -90,9 +93,8 @@ def gather(args, deep=False):
         ws = ws_paths.get(s.get("dir", ""))
         if ws:
             active.setdefault(ws, []).append({
-                "session": s.get("session", {}).get("id", ""),
-                "title": s.get("session", {}).get("title", ""),
-                "started": s.get("started", ""),
+                "session": s.get("session_id", ""),
+                "title": s.get("title") or s.get("session_id", ""),
             })
 
     # Ancestor tracking
@@ -217,17 +219,6 @@ def summary_action(changes, active, affects):
                         print(f"    {line.strip()}")
     print()
 
-    from datetime import datetime, timezone
-    def ago(iso):
-        if not iso: return ""
-        try:
-            started = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            delta = datetime.now(timezone.utc) - started
-            h = int(delta.total_seconds() // 3600)
-            m = int((delta.total_seconds() % 3600) // 60)
-            return f" ({h}h{m}m)" if h else f" ({m}m)"
-        except: return ""
-
     # --- AGENTS: who else is here? ---
     if has_agents:
         print("\U0001f916 AGENTS:")
@@ -237,7 +228,7 @@ def summary_action(changes, active, affects):
             for a in c.get("agents", []):
                 on_lineage = ws in affects.get(current["change"], set()) if current else False
                 warn = " \u26a0\ufe0f editing @ would rebase them" if on_lineage else ""
-                print(f"  {ws}@ \u2192 {branch}: {a['title']}{ago(a.get('started'))}{warn}")
+                print(f"  {ws}@ \u2192 {branch}: {a['title']}{warn}")
         print()
 
     # --- NEEDS ATTENTION: what's broken or needs action? ---
@@ -450,27 +441,16 @@ def summary_branches(changes, active, affects, full=False, deep=False):
 
     total = len(lineage_agents) + len(other_agents)
     if total:
-        from datetime import datetime, timezone
-        def ago(iso):
-            if not iso: return ""
-            try:
-                started = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-                delta = datetime.now(timezone.utc) - started
-                h = int(delta.total_seconds() // 3600)
-                m = int((delta.total_seconds() % 3600) // 60)
-                return f" ({h}h{m}m)" if h else f" ({m}m)"
-            except: return ""
-
         print(f'AGENTS: {total} active')
         if lineage_agents:
             print(f'  On your lineage:')
             for a in lineage_agents:
-                print(f'    {a["workspace"]}: {a["title"]}{ago(a.get("started"))}')
+                print(f'    {a["workspace"]}: {a["title"]}')
         if other_agents:
             if lineage_agents:
                 print(f'  Elsewhere:')
             for a in other_agents:
-                print(f'    {a["workspace"]}: {a["title"]}{ago(a.get("started"))}')
+                print(f'    {a["workspace"]}: {a["title"]}')
     else:
         print("AGENTS: none active")
     print()

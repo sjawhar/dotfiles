@@ -168,14 +168,3 @@ dslack()
         --volume "${HOME}/.slack:/root/.config/Slack" \
         jess/slack "$@"
 }
-
-doc()
-{
-    docker run --rm -it \
-        -v "${HOME}:${HOME}" \
-        -e "GH_TOKEN=$(gh auth token)" \
-        -w "$(pwd)" \
-        --user sami \
-        sjawhar/devpod:latest \
-        bash -ilc 'opencode "$@"' -- "$@"
-}
