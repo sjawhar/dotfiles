@@ -152,6 +152,22 @@ if "${GENERATOR}" --check --monitors "${SINGLE_MONITORS}" --conf "${bare_marker}
     fail 'a bare ? query must fail'
 fi
 
+# A '!ABSENT' query matches only while no connected monitor matches ABSENT.
+absent_conf="${TMPDIR}/absent.conf"
+printf '%s\n' '1 MB16AC!InnoView,eDP-1 Alt+1 Alt+Shift+1' > "${absent_conf}"
+"${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" --conf "${absent_conf}" \
+    | grep -Fq 'WorkspaceOnOutput("MB16AC", 1),' \
+    || fail 'absent-condition query must match when the absent monitor is not connected'
+"${GENERATOR}" --check --monitors "${HYBRID_MONITORS}" --conf "${absent_conf}" \
+    | grep -Fq 'WorkspaceOnOutput("eDP-1", 1),' \
+    || fail 'absent-condition query must yield to the next query when the absent monitor is connected'
+
+empty_absent="${TMPDIR}/empty-absent.conf"
+printf '%s\n' '1 MB16AC!,eDP-1 Alt+1 Alt+Shift+1' > "${empty_absent}"
+if "${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" --conf "${empty_absent}" > /dev/null 2>&1; then
+    fail 'an empty absent-condition must fail'
+fi
+
 portable_output="${TMPDIR}/portable-custom"
 "${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" > "${portable_output}"
 [[ "$(grep -c '): WorkspaceOnOutput(' "${portable_output}")" -eq 15 ]] \

@@ -205,12 +205,28 @@ other_group_rows() {
     ((${local_counts["${connector}"]:-0} > ${group_counts["${connector}|${fallback_list}"]:-0}))
 }
 
+# True when any connected monitor matches the query (exact connector name or
+# case-insensitive model substring). Presence only, so ambiguity is irrelevant.
+monitor_present() {
+    local query="$1"
+    local connector
+    local model
+
+    [[ -n "${monitor_models["${query}"]+x}" ]] && return 0
+    for connector in "${monitor_connectors[@]}"; do
+        model="${monitor_models["${connector}"]}"
+        [[ "${model,,}" == *"${query,,}"* ]] && return 0
+    done
+    return 1
+}
+
 resolve_monitor() {
     local fallback_list="$1"
     local context="$2"
     local query
     local name
     local unused_only
+    local absent
     local connector
     local model
     local query_lower
@@ -225,15 +241,28 @@ resolve_monitor() {
     for query in "${queries[@]}"; do
         [[ -n "${query}" ]] || error "${context}: monitor fallback list contains an empty query"
 
-        # A trailing '?' means "only if this monitor holds no rows from a different
-        # fallback list": a screen that already won another chord group yields these
-        # rows to the next query, while this group's own rows still stay together.
+        # 'NAME!ABSENT' matches NAME only while no connected monitor matches ABSENT,
+        # for a screen whose role depends on which other screens share the desk.
+        absent=""
+        name="${query%%!*}"
+        if [[ "${query}" == *'!'* ]]; then
+            absent="${query#*!}"
+            [[ -n "${absent}" ]] || error "${context}: monitor query has an empty absent-condition: ${query}"
+        fi
+
+        # A trailing '?' on NAME means "only if this monitor holds no rows from a
+        # different fallback list": a screen that already won another chord group
+        # yields these rows to the next query, while this group's own rows still
+        # stay together.
         unused_only=0
-        name="${query}"
         if [[ "${name}" == *'?' ]]; then
             unused_only=1
             name="${name%'?'}"
-            [[ -n "${name}" ]] || error "${context}: monitor fallback list contains an empty query"
+        fi
+        [[ -n "${name}" ]] || error "${context}: monitor fallback list contains an empty query"
+
+        if [[ -n "${absent}" ]] && monitor_present "${absent}"; then
+            continue
         fi
 
         if [[ -n "${monitor_models["${name}"]+x}" ]]; then
