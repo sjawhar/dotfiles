@@ -43,10 +43,11 @@ piece, and they survive prompt engineering that only targets vocabulary.
 - **Experienced readers can tell, and disclosure is the low-risk path.** Annotators who regularly
   use LLMs for writing "excel at detecting AI-generated text" — five of them together
   misclassified one in 300 articles (Russell, Karpinska and Iyyer,
-  [arXiv:2501.15654](https://arxiv.org/abs/2501.15654), 2025). A tiered detector's own false
-  positive rate on non-native and second-language writing runs above 60% in independent audits
-  (Liang et al., Stanford, *Patterns*, 2023), so treat any detector output — including the tiered
-  pass above — as a signal to investigate, not a verdict.
+  [arXiv:2501.15654](https://arxiv.org/abs/2501.15654), 2025). Automated detectors do much worse:
+  seven GPT detectors flagged over half of a set of non-native English essays as AI-written
+  (average false positive rate 61%; Liang et al., *Patterns*, 2023,
+  [arXiv:2304.02819](https://arxiv.org/abs/2304.02819)), so treat any detector's output as a
+  signal to investigate, not a verdict.
 
 ## Why diversity is the fix, not a word filter
 
