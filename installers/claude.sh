@@ -21,9 +21,6 @@ if [ -d "${DOTFILES_DIR}/.claude/skills" ] && [ ! -L "${DOTFILES_DIR}/.claude/sk
     rm -rf "${DOTFILES_DIR}/.claude/skills"
 fi
 
-# Vendor clones that Claude plugins / OpenCode bridge rely on.
-ensure_vendor https://github.com/intellectronica/agent-skills.git agent-skills
-
 if [ -t 0 ]; then
     echo
     echo "If you haven't installed the sjawhar plugin in Claude Code yet, run:"

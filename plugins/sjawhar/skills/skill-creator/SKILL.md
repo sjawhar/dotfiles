@@ -435,7 +435,7 @@ In Claude.ai, the core workflow is the same (draft → test → review → impro
 
 **The iteration loop**: Same as before — improve the skill, rerun the test cases, ask for feedback — just without the browser reviewer in the middle. You can still organize results into iteration directories on the filesystem if you have one.
 
-**Description optimization**: The scripts (`run_loop.py` / `run_eval.py`) auto-detect whether `opencode` or `claude` is available on PATH and use the appropriate CLI. If you're on Claude.ai where neither CLI is available, skip this section.
+**Description optimization**: The scripts (`run_loop.py` / `run_eval.py`) require `claude` to be available on PATH. If you're on Claude.ai where it isn't available, skip this section.
 
 **Blind comparison**: Requires subagents. Skip it.
 
@@ -457,31 +457,9 @@ If you're in Cowork, the main things to know are:
 - For whatever reason, the Cowork setup seems to disincline Claude from generating the eval viewer after running the tests, so just to reiterate: whether you're in Cowork or in Claude Code, after running tests, you should always generate the eval viewer for the human to look at examples before revising the skill yourself and trying to make corrections, using `generate_review.py` (not writing your own boutique html code). Sorry in advance but I'm gonna go all caps here: GENERATE THE EVAL VIEWER *BEFORE* evaluating inputs yourself. You want to get them in front of the human ASAP!
 - Feedback works differently: since there's no running server, the viewer's "Submit All Reviews" button will download `feedback.json` as a file. You can then read it from there (you may have to request access first).
 - Packaging works — `package_skill.py` just needs Python and a filesystem.
-- Description optimization (`run_loop.py` / `run_eval.py`) auto-detects `opencode` or `claude` CLI. Save it until you've fully finished making the skill and the user agrees it's in good shape.
+- Description optimization (`run_loop.py` / `run_eval.py`) requires `claude` on PATH. Save it until you've fully finished making the skill and the user agrees it's in good shape.
 - **Updating an existing skill**: The user might be asking you to update an existing skill, not create a new one. Follow the update guidance in the claude.ai section above.
 
----
-
-## OpenCode-Specific Instructions
-
-If you're in OpenCode, the main things to know are:
-
-- You have subagents (via `task()`), so the main workflow (spawn test cases in parallel, run baselines, grade, etc.) all works.
-- Skills live in `~/.config/opencode/skills/<name>/SKILL.md` (global) or `.opencode/skills/<name>/SKILL.md` (project-level). The eval scripts create temporary skills in `.opencode/skills/` for trigger testing.
-- `opencode run --format json` is the non-interactive equivalent of `claude -p`. The eval scripts auto-detect which CLI is available and use the right one.
-- For the eval viewer, use `--static <output_path>` to write a standalone HTML file if you're on a headless server. Otherwise the viewer starts an HTTP server on localhost:3117.
-- Description optimization works: `run_loop.py` and `run_eval.py` support `--cli opencode` (or auto-detect). Run as:
-  ```bash
-  python -m scripts.run_loop \
-    --eval-set <path-to-eval-set.json> \
-    --skill-path <path-to-skill> \
-    --model <model-id> \
-    --cli opencode \
-    --verbose
-  ```
-- **Known issue**: `opencode run` may hang on certain tool calls (question tool, permission prompts). Ensure permissions are set to `allow` in your opencode config for eval runs.
-- Packaging works — `package_skill.py` just needs Python and a filesystem.
-- Blind comparison works if you have subagent support.
 ---
 
 ## Reference files

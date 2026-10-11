@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # envoy-nats-seed: the path of this machine's cached `omp-session` NATS nkey
-# seed, which the session launchers (shims/omp, scripts/cld, scripts/oc,
-# scripts/agentbox) export as NATS_NKEY_SEED_FILE. pi-envoy and the
+# seed, which the session launchers (shims/omp, scripts/cld, scripts/agentbox)
+# export as NATS_NKEY_SEED_FILE. pi-envoy and the
 # claude-envoy bridge read that file to authenticate to production NATS.
 #
 #   envoy-nats-seed            print the seed file's path, or nothing when there is none

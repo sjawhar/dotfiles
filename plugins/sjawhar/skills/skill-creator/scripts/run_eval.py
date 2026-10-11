@@ -4,15 +4,13 @@
 Tests whether a skill's description causes the agent to trigger (read the skill)
 for a set of queries. Outputs results as JSON.
 
-Supports both OpenCode (`opencode run`) and Claude Code (`claude -p`).
-Auto-detects which CLI is available, preferring OpenCode.
+Uses Claude Code (`claude -p`).
 """
 
 import argparse
 import json
 import os
 import select
-import shutil
 import subprocess
 import sys
 import time
@@ -23,60 +21,17 @@ from pathlib import Path
 from scripts.utils import parse_skill_md
 
 
-def detect_cli() -> str:
-    """Detect which CLI is available. Prefer opencode over claude."""
-    if shutil.which("opencode"):
-        return "opencode"
-    if shutil.which("claude"):
-        return "claude"
-    raise RuntimeError(
-        "Neither 'opencode' nor 'claude' found on PATH. "
-        "Install one of them to run trigger evaluations."
-    )
-
-
-def find_project_root(cli: str) -> Path:
+def find_project_root() -> Path:
     """Find the project root by walking up from cwd.
 
-    For OpenCode: looks for .opencode/ or AGENTS.md
-    For Claude Code: looks for .claude/
-    Falls back to cwd if nothing found.
+    Looks for .claude/. Falls back to cwd if nothing found.
     """
     current = Path.cwd()
-    markers = (
-        [".opencode", "AGENTS.md", ".claude"] if cli == "opencode" else [".claude"]
-    )
     for parent in [current, *current.parents]:
-        for marker in markers:
-            target = parent / marker
-            if target.exists():
-                return parent
+        target = parent / ".claude"
+        if target.exists():
+            return parent
     return current
-
-
-def _create_temp_skill_opencode(
-    project_root: Path,
-    clean_name: str,
-    skill_name: str,
-    skill_description: str,
-) -> Path:
-    """Create a temporary skill directory for OpenCode discovery.
-
-    OpenCode discovers skills from .opencode/skills/<name>/SKILL.md
-    """
-    skill_dir = project_root / ".opencode" / "skills" / clean_name
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    skill_md = skill_dir / "SKILL.md"
-    content = (
-        f"---\n"
-        f"name: {clean_name}\n"
-        f"description: {skill_description}\n"
-        f"---\n\n"
-        f"# {skill_name}\n\n"
-        f"This skill handles: {skill_description}\n"
-    )
-    skill_md.write_text(content)
-    return skill_dir
 
 
 def _create_temp_skill_claude(
@@ -106,105 +61,10 @@ def _create_temp_skill_claude(
     return command_file
 
 
-def _cleanup_temp_skill(path: Path, cli: str) -> None:
-    """Remove temporary skill/command file."""
-    if cli == "opencode":
-        # Remove the entire temp skill directory
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-    else:
-        # Remove single command file
-        if path.exists():
-            path.unlink()
-
-
-def _run_opencode_query(
-    query: str,
-    clean_name: str,
-    timeout: int,
-    project_root: str,
-    model: str | None = None,
-) -> bool:
-    """Run a query via `opencode run` and check if the skill was triggered.
-
-    OpenCode JSON events have the shape:
-      {"type": "tool_use", "part": {"tool": "skill", "state": {"input": {"name": "..."}}}}
-
-    A skill is triggered if we see a tool_use event where tool=="skill"
-    and the skill name matches our temp skill.
-    """
-    cmd = ["opencode", "run", "--format", "json", "--dir", project_root, query]
-    if model:
-        cmd.extend(["--model", model])
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-
-    triggered = False
-    start_time = time.time()
-    buffer = ""
-
-    try:
-        while time.time() - start_time < timeout:
-            if process.poll() is not None:
-                remaining = process.stdout.read()
-                if remaining:
-                    buffer += remaining.decode("utf-8", errors="replace")
-                break
-
-            ready, _, _ = select.select([process.stdout], [], [], 1.0)
-            if not ready:
-                continue
-
-            chunk = os.read(process.stdout.fileno(), 8192)
-            if not chunk:
-                break
-            buffer += chunk.decode("utf-8", errors="replace")
-
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                # OpenCode tool_use events
-                if event.get("type") == "tool_use":
-                    part = event.get("part", {})
-                    tool = part.get("tool", "")
-                    state = part.get("state", {})
-                    tool_input = state.get("input", {})
-
-                    if tool == "skill":
-                        invoked_name = tool_input.get("name", "")
-                        if clean_name in invoked_name or invoked_name in clean_name:
-                            return True
-                    elif tool == "read":
-                        file_path = tool_input.get("filePath", "")
-                        if clean_name in file_path:
-                            return True
-                    else:
-                        # First tool call is NOT skill — agent didn't trigger
-                        return False
-
-                # step_finish with reason "stop" means the turn ended
-                elif event.get("type") == "step_finish":
-                    reason = event.get("part", {}).get("reason", "")
-                    if reason == "stop" and not triggered:
-                        return False
-
-        return triggered
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+def _cleanup_temp_skill(path: Path) -> None:
+    """Remove temporary command file."""
+    if path.exists():
+        path.unlink()
 
 
 def _run_claude_query(
@@ -339,38 +199,26 @@ def run_single_query(
     timeout: int,
     project_root: str,
     model: str | None = None,
-    cli: str = "opencode",
 ) -> bool:
     """Run a single query and return whether the skill was triggered.
 
-    Creates a temporary skill/command file so it appears in the agent's
+    Creates a temporary command file so it appears in the agent's
     available skills list, runs the query, and checks if the skill was invoked.
     """
     unique_id = uuid.uuid4().hex[:8]
     clean_name = f"{skill_name}-skill-{unique_id}"
 
-    if cli == "opencode":
-        temp_path = _create_temp_skill_opencode(
-            Path(project_root),
-            clean_name,
-            skill_name,
-            skill_description,
-        )
-    else:
-        temp_path = _create_temp_skill_claude(
-            Path(project_root),
-            clean_name,
-            skill_name,
-            skill_description,
-        )
+    temp_path = _create_temp_skill_claude(
+        Path(project_root),
+        clean_name,
+        skill_name,
+        skill_description,
+    )
 
     try:
-        if cli == "opencode":
-            return _run_opencode_query(query, clean_name, timeout, project_root, model)
-        else:
-            return _run_claude_query(query, clean_name, timeout, project_root, model)
+        return _run_claude_query(query, clean_name, timeout, project_root, model)
     finally:
-        _cleanup_temp_skill(temp_path, cli)
+        _cleanup_temp_skill(temp_path)
 
 
 def run_eval(
@@ -383,7 +231,6 @@ def run_eval(
     runs_per_query: int = 1,
     trigger_threshold: float = 0.5,
     model: str | None = None,
-    cli: str = "opencode",
 ) -> dict:
     """Run the full eval set and return results."""
     results = []
@@ -400,7 +247,6 @@ def run_eval(
                     timeout,
                     str(project_root),
                     model,
-                    cli,
                 )
                 future_to_info[future] = (item, run_idx)
 
@@ -479,12 +325,6 @@ def main():
     parser.add_argument(
         "--verbose", action="store_true", help="Print progress to stderr"
     )
-    parser.add_argument(
-        "--cli",
-        choices=["opencode", "claude", "auto"],
-        default="auto",
-        help="CLI to use (default: auto-detect, prefers opencode)",
-    )
     args = parser.parse_args()
 
     eval_set = json.loads(Path(args.eval_set).read_text())
@@ -494,13 +334,11 @@ def main():
         print(f"Error: No SKILL.md found at {skill_path}", file=sys.stderr)
         sys.exit(1)
 
-    cli = args.cli if args.cli != "auto" else detect_cli()
     name, original_description, content = parse_skill_md(skill_path)
     description = args.description or original_description
-    project_root = find_project_root(cli)
+    project_root = find_project_root()
 
     if args.verbose:
-        print(f"CLI: {cli}", file=sys.stderr)
         print(f"Project root: {project_root}", file=sys.stderr)
         print(f"Evaluating: {description}", file=sys.stderr)
 
@@ -514,7 +352,6 @@ def main():
         runs_per_query=args.runs_per_query,
         trigger_threshold=args.trigger_threshold,
         model=args.model,
-        cli=cli,
     )
 
     if args.verbose:

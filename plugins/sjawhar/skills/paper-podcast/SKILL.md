@@ -57,7 +57,7 @@ the config. If neither supplies a source, ask; never invent a topic.
 Use the source from the resolved feed (Phase 0). Set `SKILL` to the **absolute
 path of this skill's directory** — you were given it when this skill loaded (the
 folder containing this `SKILL.md` and its `scripts/`); never hardcode a relative
-path or `.opencode/...`, since the skill can be installed anywhere. Then run the
+path or `.claude/...`, since the skill can be installed anywhere. Then run the
 matching source mode:
 
 ```bash

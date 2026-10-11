@@ -10,29 +10,25 @@ Personal development environment configuration. Targets Linux devcontainers/devp
 .jjconfig.toml       # Shared jj config — loaded via JJ_CONFIG env var
 jj-allowed-signers   # Signing keys trusted for local verification (both identities, all machines)
 .tmux.conf           # Tmux config
-.claude/CLAUDE.md    # User-level Claude/OpenCode instructions — symlinked to ~/.claude/CLAUDE.md
+.claude/CLAUDE.md    # User-level agent instructions — symlinked to ~/.claude/CLAUDE.md
 starship.toml        # Starship prompt config
 aerospace.toml       # macOS window manager (AeroSpace)
 mise.toml            # Tool version manager — pinned versions for all CLI tools
-opencode/            # OpenCode config, OMO profiles, and plugins
 omp/                 # oh-my-pi config, agents, and plugin pins (binary is mise-managed; wrapper in shims/)
-opencode/opencode.json       # Main OpenCode config (models, plugins, commands, permissions)
-opencode/oh-my-opencode.*.json # OMO profiles (switchable via `omo` shell function)
-opencode/plugins/    # OpenCode plugin scripts (jj-snapshot, etc.)
 nvim/init.lua        # Neovim config (single file)
 install.sh           # Main installer — runs all installers/* in order
-installers/          # Per-tool install scripts (shell.sh, mise.sh, docker.sh, jj.sh, tmux.sh, nvim.sh, claude.sh, opencode.sh)
+installers/          # Per-tool install scripts (shell.sh, mise.sh, docker.sh, jj.sh, tmux.sh, nvim.sh, claude.sh, omp.sh)
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 forward/             # Browser-forwarding policy plus devbox serve and laptop daemon user units
 whatsapp/            # WhatsApp MCP daemon: wrapper + laptop user unit (holds the paired session)
-bin/                 # Standalone binaries (mise, bun, opencode, kubectl)
+bin/                 # Standalone binaries (mise, bun, kubectl)
 shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, git, jj, knives, omp, tmux, xdg-open, pyright, basedpyright)
 scripts/             # Utility scripts (git-identity, tmux-attention, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
 agentbox/            # Opt-in agent box: image + home allow-list (scripts/agentbox runs sessions in it)
 agent-secrets/       # Host helper of the secrets broker: user unit, wrapper, broker.env (devbox only, installers/agent-secrets.sh)
 devpod/              # Cloud-init for a bare VM (dormant)
-plugins/             # OpenCode/Claude plugins (sjawhar/ has all custom skills, agents, and commands)
+plugins/             # Claude/omp plugins (sjawhar/ has all custom skills, agents, and commands)
 vendor/              # Third-party vendored content
 docs/                # Documentation and plans
 ```
@@ -44,7 +40,6 @@ Each major subdirectory has its own AGENTS.md with details and conventions:
 | Directory | What it's for |
 |-----------|---------------|
 | `envoy/` | Agent messaging/notification service (GitHub + Slack webhooks) |
-| `opencode/` | OpenCode config, OMO profiles, plugin scripts |
 | `omp/` | oh-my-pi config, agents, extensions, GitHub-pinned plugin tree |
 | `plugins/` | Custom skills, agents, and commands (`sjawhar/`) |
 | `installers/` | Per-tool install scripts run by `install.sh` |
@@ -77,11 +72,11 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 - **All tool versions pinned** in `mise.toml` — no floating versions. My own repos must also be listed in `minimum_release_age_excludes` there, or `latest` silently refuses to resolve their releases.
 - **Idempotent installers** — running `install.sh` twice is safe
 - **Shell config has two zones**: non-interactive (PATH, env vars, mise) above the `[[ $- == *i* ]] || return 0` guard, interactive (aliases, completions, prompts) below it
-- **Shims wrap binaries** (`shims/`; each one's behavior and the rules for changing one are in `shims/AGENTS.md`). Wrappers that launch agent harnesses (`scripts/oc`, `scripts/cld`, `scripts/agentbox`, `shims/omp`) must set up the same session environment — gh-app `GIT_CONFIG_*` routing, shims-first `PATH`, the secrets-broker identity — or sessions silently act as the user on GitHub. The three host launchers get that identity from one place, `scripts/agent-secrets-session`, which they exec their agent through; `scripts/agentbox` gives each box its own (`agentbox/AGENTS.md`).
+- **Shims wrap binaries** (`shims/`; each one's behavior and the rules for changing one are in `shims/AGENTS.md`). Wrappers that launch agent harnesses (`scripts/cld`, `scripts/agentbox`, `shims/omp`) must set up the same session environment — gh-app `GIT_CONFIG_*` routing, shims-first `PATH`, the secrets-broker identity — or sessions silently act as the user on GitHub. The two host launchers get that identity from one place, `scripts/agent-secrets-session`, which they exec their agent through; `scripts/agentbox` gives each box its own (`agentbox/AGENTS.md`).
 - **Agent boxes are opt-in.** `scripts/agentbox new [-e NAME[=VALUE]]… <repo>… -- omp [omp args…]` runs one Sysbox container per agent session from `agentbox/Dockerfile`, holding a git clone of its own of each canonical checkout `~/src/<repo>` at `~/boxes/<box>/<repo>` (plain git; agent-c's is sparse, without `tasks/`) and working in the first; `-e` sets a variable in the box, since the caller's environment does not reach it. At exit it releases the session's knives claims and removes the directory, unless a clone holds uncommitted changes or commits no remote has: then the directory stays, named on the pane, for its owner to push or remove. omp runs under `scripts/agentbox-run.ts`, so `agentbox restart <box|--all>` relaunches it in the same container on the current `mise.toml` pin and plugin tree (`/tmp` and the clones stay): the session gets an Envoy notice and runs `agentbox restart` when it is at a safe point, or `--now` hangs it up at once. The box mounts an allow-list of the home directory (`agentbox/mounts`: checkouts, omp state, dotfiles, mise store, `~/.aws`, `~/.kube`, `~/.pulumi`, tool configs, the login state of CLIs boxes need — fleetctl, sentry, depot, pup, ant, vercel — the jj-signing pair) — no GitHub login, ssh keys or docker login, so a session pushes only as its repo's GitHub App; a new tool is one line in that file. A home path outside the list is silently writable into the box's overlay and lost with it (`agentbox/AGENTS.md`), so state that must outlive the box goes under a listed path. Host services arrive through socat relays (`ensure_forwarders`) where Sysbox's uid mapping makes a uid-checking daemon refuse a box: the session bus (so the keyring and every tool logged into it — hawk, pup, gws — work unchanged), the EC2 metadata service, and the Envoy API. secretsd's socket is bind-mounted instead: it serves only descendants of the process that registered the session, and a forking relay makes every connection a different, short-lived peer. `agentbox doctor` checks both sides. Details: `agentbox/AGENTS.md`.
 - **Config files are symlinked** from this repo to their expected locations, not copied
 - **Everything committed is portable.** No committed file may contain an absolute path, and committed symlinks may only point inside this repo with relative targets. Per-machine links (skill farms, checkout-backed paths) are created at install time by installers or `scripts/omp-sync-*`, never committed.
-- **My own software installs from GitHub, pinned** — `opencode.json` plugin entries, `omp/plugins/package.json`, `mise.toml` all reference `github:sjawhar/...` at a tag or SHA. Installing from a local file path or checkout symlink is for prototyping only and never lands.
+- **My own software installs from GitHub, pinned** — `omp/plugins/package.json` and `mise.toml` reference `github:sjawhar/...` at a tag or SHA. Installing from a local file path or checkout symlink is for prototyping only and never lands.
 - **Placement is fixed**: `shims/` for PATH-priority wrappers, `scripts/` for utilities, `installers/` for setup, `bin/` for standalone binaries (gitignored — nothing hand-written goes there), config dirs for config only. Read the sibling files in a directory before adding to it.
 - **Consolidate commits before pushing** — batch a session's related changes into one described commit per topic. Do not push per-step or per-file; a work session should land on main as 1-2 coherent commits, not a trail of fragments.
 - **`main` is shared by every live session; push only a fast-forward.** Edit dotfiles in a git clone of your own (`git clone https://github.com/sjawhar/dotfiles <dir>`), commit there, then `git fetch` and `git rebase origin/main` before `git push origin main`. git refuses a push that is not a fast-forward, and that refusal is the protection: it means another session pushed in between, so rebase again and push, never `--force`. Read `git status` before committing and leave out anything that is not yours. Where a checkout is still a jj repository (Legion's runtime workspaces), publishing and rebase proofs follow `using-jj` §4 and its publishing reference.

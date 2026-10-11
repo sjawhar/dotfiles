@@ -39,7 +39,7 @@ This tells you:
 - **What needs attention** — undescribed changes, divergent/conflicted, unpushed branches
 - **What branches exist** — sorted by recency, with sync status (`*`), divergence (`⚡`), agents (`🤖`), and trunk distance (`+N`)
 
-`jj-agent-status` combines `jj log`, `jj status`, `jj workspace list`, and `oc ps` into one view. Reach for it when you need the big picture, not for every jj interaction.
+`jj-agent-status` combines `jj log`, `jj status`, `jj workspace list`, and `envoy ps` into one view. Reach for it when you need the big picture, not for every jj interaction.
 
 ## Agent Log: `jj agent-log`
 

@@ -4,7 +4,7 @@
 # Loads gh-app-routes.gitconfig for the agent session so git push and gh CLI
 # authenticate as the GitHub App installation for the target repo's owner;
 # owners without an installation get the upstream token from the secrets store.
-# Mirrors the env setup in scripts/oc. Private key is fetched lazily by the
+# Mirrors the env setup in shims/omp. Private key is fetched lazily by the
 # gh-app-token helper via `secrets get`.
 set -euo pipefail
 
@@ -119,7 +119,7 @@ unset _newpath _parts _p
 
 # Host session identity for agent secrets: claude runs as a registered session of the
 # agent-secrets helper where that applies (scripts/agent-secrets-session, the same wrapper as
-# shims/omp and scripts/oc).
+# shims/omp).
 # Opt the session into the Envoy channel plugin (managed settings allowlist the
 # legion-plugins marketplace); channel events reach the model as <channel> messages.
 exec "${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/agent-secrets-session" \

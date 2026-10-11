@@ -13,7 +13,7 @@ Do not perform destructive or high-blast-radius actions without explicit user ap
 - force pushes or history rewrites in git (jj rewrites are safe — everything is recoverable via `jj undo`)
 - disabling plugins/safety systems to "get unstuck"
 - changing shared/global configuration in ways that can break other workflows — ask first only before upgrading a runtime active sessions use (bun, node, or the omp binary itself) when they must restart for the upgrade. Otherwise, upgrade shared tools without asking, then say what changed and how to roll it back.
-- `pkill opencode`, `tmux kill-server`, or other high-blast-radius process termination
+- `pkill omp`, `tmux kill-server`, or other high-blast-radius process termination
 - sending anything outside the company that commits me to something — an offer, a rate, a payment, an acceptance or rejection, a scheduled call — or replying to a customer, candidate, or vendor at all. Draft it, show me, then send
 - creating an account, org, team, group, repo, or project on an outside platform (Docker Hub, Google Workspace, GitHub, a payment provider). Ask, even when it looks like a prerequisite for work I did authorize
 
