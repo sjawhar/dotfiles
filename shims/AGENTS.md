@@ -18,6 +18,12 @@ before handing the call to the real one.
   `git worktree add`, so no box can prune another box's live registration, and gives every
   `git commit` from an omp session its `Omp-Session` trailer.
 - **`omp`** finds the build to run and sets up the session environment (below).
+- **`knives`** execs the pinned knives (`"github:sjawhar/knives"` in `mise.toml`, looked up with
+  `mise which -C / knives --tool github:sjawhar/knives`), or a local build on PATH past it,
+  never a knives in a mise dir: a session keeps the PATH it started with, and that PATH names
+  the install dir pinned back then. `-C /` keeps a project's own mise pin out, since the knives
+  plugin every session loads is pinned machine-wide beside it. A third entry in one pid within
+  10 s exits with an error; `knives gh` enters twice by design, through `shims/gh`.
 - `gh-app-token`, `gcloud`, `gws`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
 

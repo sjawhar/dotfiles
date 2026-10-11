@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# knives wrapper: exec a local knives build found on PATH past this shim, else the pinned
+# release ("github:sjawhar/knives" in mise.toml), with its arguments and stdin untouched.
+# A session keeps the PATH it started with, and that PATH names the install dir of the knives
+# pinned back then; this shim leads every session's PATH, so it moves them all to the pin.
+set -euo pipefail
+
+# --- never loop ---
+# Every hop from here to knives is an exec, so a resolution that leads back into this shim
+# enters it again in the same pid. knives does that once by design: a direct `knives gh`
+# execs shims/gh (knives src/commands/gh.rs, `reentry_shim`), which execs `knives gh` again.
+# A third entry in one pid within 10 s is a loop. The time bound lets through a later launch
+# that inherited this marker from a long-lived process and happens to get its pid.
+_marker_pid="" _marker_at="" _marker_entry="" _marker_target=""
+read -r _marker_pid _marker_at _marker_entry _marker_target <<< "${DOTFILES_KNIVES_SHIM:-}"
+_now="${EPOCHSECONDS:-$(date +%s)}"
+_entry=1
+if [[ "$_marker_pid" == "$$" && "$_marker_at" =~ ^[0-9]+$ && "$_marker_entry" =~ ^[0-9]+$ ]] \
+    && (( _now - 10#$_marker_at < 10 )); then
+    _entry=$(( 10#$_marker_entry + 1 ))
+fi
+if (( _entry > 2 )); then
+    echo "knives: ${BASH_SOURCE[0]} entered $_entry times in pid $$: the knives it resolved (${_marker_target}) leads back to a knives wrapper; refusing to loop (see \`type -a knives\` and \`mise which -C / knives --tool github:sjawhar/knives\`)" >&2
+    exit 1
+fi
+
+# --- resolve: a local build past this shim on PATH, else the pinned release ---
+# Entries ahead of this shim's own (`-ef`: its dir however PATH spells it) had their turn.
+# mise's dirs are skipped, never matched: the install dir an inherited PATH names is the pin
+# of the day the session started. A knives whose real path is in a `shims/` dir is a wrapper
+# (this file under another name, another checkout's copy), not a build.
+_mise_root="${MISE_DATA_DIR:-$HOME/.mise}"
+IFS=':' read -ra _dirs <<< "$PATH"
+for _i in "${!_dirs[@]}"; do
+    if [[ "${_dirs[_i]}/knives" -ef "${BASH_SOURCE[0]}" ]]; then
+        _dirs=("${_dirs[@]:_i+1}")
+        break
+    fi
+done
+_knives=""
+for _d in "${_dirs[@]}"; do
+    [[ -n "$_d" && "$_d" != "$_mise_root"/* && -f "$_d/knives" && -x "$_d/knives" ]] || continue
+    _real="$(realpath "$_d/knives")"
+    [[ "${_real%/*}" == */shims ]] && continue
+    _knives="$_d/knives"
+    break
+done
+if [[ -z "$_knives" ]]; then
+    # The machine's pin, never a project's (`-C /`): the knives plugin every session loads is
+    # pinned machine-wide beside it (omp/plugins/package.json). Looked up in the data dir whose
+    # copies the scan above skipped. An absolute path, so nothing past here looks knives up on
+    # PATH; stdin stays knives' (a hook's event payload).
+    _knives="$(MISE_DATA_DIR="$_mise_root" mise which -C / knives --tool github:sjawhar/knives </dev/null)" || {
+        echo "knives: ${BASH_SOURCE[0]}: mise did not resolve the pinned github:sjawhar/knives (its error is above)" >&2
+        exit 127
+    }
+fi
+export DOTFILES_KNIVES_SHIM="$$ $_now $_entry $_knives"
+exec "$_knives" "$@"
