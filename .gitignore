@@ -48,3 +48,6 @@ docs/superpowers/
 .secrets/
 omp/models.local.yml
 envoy/env.local
+# cosmic-config writes each setting through a temp directory beside it
+# (atomicwrites), which lands in laptop/cosmic/ while COSMIC saves
+laptop/cosmic/**/.atomicwrite*

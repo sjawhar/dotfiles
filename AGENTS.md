@@ -57,7 +57,7 @@ Each major subdirectory has its own AGENTS.md with details and conventions:
 ## How Install Works
 
 `install.sh` sources each `installers/*.sh` in order. Installers use helpers from `installers/lib.sh`:
-- **`ensure_link`** — symlinks config files to their expected locations
+- **`ensure_link`** — symlinks config files to their expected locations; a plain file there is replaced only when identical to the dotfiles copy, and anything else (a differing file, a real directory) fails the install so an app's saved setting is reconciled, not overwritten
 - **`ensure_clone`** — shallow-clones git repos (e.g., tmux plugins)
 - **`ensure_command`** — installs a binary if not on PATH
 - **`ensure_json`** — idempotently patches JSON config files via jq

@@ -203,10 +203,6 @@ chmod 700 ~/.ssh
 ensure_link "${LAPTOP_DIR}/ssh-config" ~/.ssh/config
 chmod 600 ~/.ssh/config
 
-# --- devbox connect wrapper (ensures YubiKey pcscd tunnel, then mosh/ssh) ---
-chmod +x "${LAPTOP_DIR}/devbox"
-ensure_link "${LAPTOP_DIR}/devbox" ~/.local/bin/devbox
-
 # --- PipeWire: default webcam to 1080p30 instead of 480p25 ---
 mkdir -p ~/.config/pipewire/pipewire.conf.d
 ensure_link "${DOTFILES_DIR}/pipewire/10-video-quality.conf" ~/.config/pipewire/pipewire.conf.d/10-video-quality.conf
@@ -238,25 +234,8 @@ if ! diff -q "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performanc
     sudo sysctl --system -q
 fi
 
-# --- COSMIC desktop settings ---
-declare -A COSMIC_SETTINGS=(
-    ["com.system76.CosmicTheme.Mode/v1/is_dark"]="theme-mode-is-dark"
-    ["com.system76.CosmicAppletTime/v1/military_time"]="applet-time-military"
-    ["com.system76.CosmicAppletTime/v1/show_date_in_top_panel"]="applet-time-show-date"
-    ["com.system76.CosmicNotifications/v1/do_not_disturb"]="notifications-do-not-disturb"
-    ["com.system76.CosmicNotifications/v1/anchor"]="notifications-anchor"
-    ["com.system76.CosmicNotifications/v1/max_notifications"]="notifications-max"
-    ["com.system76.CosmicNotifications/v1/max_per_app"]="notifications-max-per-app"
-    ["com.system76.CosmicIdle/v1/screen_off_time"]="idle-screen-off-time"
-    ["com.system76.CosmicAudio/v1/amplification_sink"]="audio-amplification-sink"
-    ["com.system76.CosmicAudio/v1/amplification_source"]="audio-amplification-source"
-    ["com.system76.CosmicComp/v1/xkb_config"]="comp-xkb-config"
-)
-for cosmic_path in "${!COSMIC_SETTINGS[@]}"; do
-    mkdir -p ~/.config/cosmic/"${cosmic_path%/*}"
-    ensure_link "${LAPTOP_DIR}/cosmic/${COSMIC_SETTINGS[$cosmic_path]}" \
-        ~/.config/cosmic/"${cosmic_path}"
-done
+# shellcheck source=laptop/cosmic-settings.sh
+source "${LAPTOP_DIR}/cosmic-settings.sh"
 
 # Laptop daemon role opens tunneled URLs without colliding with the SSH LocalForward on 12802.
 bash "${DOTFILES_DIR}/installers/forward.sh" daemon
