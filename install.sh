@@ -15,7 +15,6 @@ source "${DOTFILES_DIR}/installers/tmux.sh"
 source "${DOTFILES_DIR}/installers/nvim.sh"
 source "${DOTFILES_DIR}/installers/claude.sh"
 source "${DOTFILES_DIR}/installers/omp.sh"
-source "${DOTFILES_DIR}/installers/knives.sh"
 source "${DOTFILES_DIR}/installers/secretsd.sh"
 
 echo "Generating completions..."
@@ -23,5 +22,9 @@ COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"
 mkdir -p "$COMPLETIONS_DIR"
 timeout 5 jj util completion bash > "${COMPLETIONS_DIR}/jj.bash" 2>/dev/null || true
 timeout 5 gh completion -s bash > "${COMPLETIONS_DIR}/gh.bash" 2>/dev/null || true
+
+# Last: it joins this machine to the shared knives ledger, and a sweep that
+# would strand entries written here stops the install.
+source "${DOTFILES_DIR}/installers/knives.sh"
 
 echo "=== Done! Restart your shell or run: source ~/.bashrc ==="
