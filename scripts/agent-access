@@ -203,16 +203,19 @@ check_gcloud() {
 }
 
 check_gws() {
-    local profile out rc email
+    # gws writes advisories ("Using keyring backend: ...") to stderr, so stdout alone
+    # is parsed and a failure reports stderr's last line.
+    local profile out rc email err
     for profile in personal theorem trajectory; do
         (
-            out="$(GWS_ACCOUNT="$profile" timeout "$TIMEOUT_S" gws drive about get --params '{"fields":"user"}' 2>&1)"
+            err="$tmp/gws_${profile}.stderr"
+            out="$(GWS_ACCOUNT="$profile" timeout "$TIMEOUT_S" gws drive about get --params '{"fields":"user"}' 2>"$err")"
             rc=$?
             if ((rc == 0)); then
                 email="$(jq -r '.user.emailAddress // empty' <<<"$out" 2>/dev/null)"
                 row "google_workspace_${profile}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${profile} gws drive about get"
             else
-                row "google_workspace_${profile}" missing - - "GWS_ACCOUNT=${profile} gws drive about get" "$(first_line "$out")"
+                row "google_workspace_${profile}" missing - - "GWS_ACCOUNT=${profile} gws drive about get" "$(tail -n1 "$err")"
             fi
         ) &
     done
