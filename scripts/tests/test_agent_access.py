@@ -161,7 +161,7 @@ fi
         write_stub(
             self.stub_dir,
             "gws",
-            'echo \'{"user":{"emailAddress":"sami@trajectorylabs.net"}}\'',
+            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "${GWS_ACCOUNT:-unknown}"',
         )
         write_stub(self.stub_dir, "fleetctl", 'echo "{}"')
         write_stub(
@@ -220,7 +220,12 @@ fi
         self.assertEqual(rows["vercel"]["identity"], "sami-2219")
         self.assertEqual(rows["datadog_pup"]["status"], "live")
         self.assertEqual(rows["gcloud"]["status"], "live")
-        self.assertEqual(rows["google_workspace"]["status"], "live")
+        self.assertEqual(rows["google_workspace_personal"]["status"], "live")
+        self.assertEqual(rows["google_workspace_personal"]["identity"], "personal@example.com")
+        self.assertEqual(rows["google_workspace_theorem"]["status"], "live")
+        self.assertEqual(rows["google_workspace_theorem"]["identity"], "theorem@example.com")
+        self.assertEqual(rows["google_workspace_trajectory"]["status"], "live")
+        self.assertEqual(rows["google_workspace_trajectory"]["identity"], "trajectory@example.com")
         self.assertEqual(rows["sentry"]["status"], "live")
         self.assertEqual(rows["kubectl"]["status"], "live")
         self.assertEqual(rows["secretsd_grants"]["identity"], "TEST_KEY")
