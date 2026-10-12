@@ -35,7 +35,7 @@ Habitually appending `2>&1` is the single easiest way to break a gws pipeline, a
 ## Discovering API Methods
 
 ```bash
-GWS_ACCOUNT=personal gws drive --help   # List all resources (any profile works)
+GWS_ACCOUNT=personal gws drive --help   # List all resources (any provisioned profile)
 gws schema drive.files.list             # Inspect params/types for a method; needs no profile
 ```
 
