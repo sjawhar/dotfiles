@@ -203,16 +203,20 @@ check_gcloud() {
 }
 
 check_gws() {
-    local out rc email
-    out="$(timeout "$TIMEOUT_S" gws drive about get --params '{"fields":"user"}' 2>&1)"
-    rc=$?
-    if ((rc == 0)); then
-        email="$(jq -r '.user.emailAddress // empty' <<<"$out" 2>/dev/null)"
-        row google_workspace live "${email:-unknown}" "n/a" "gws drive about get" \
-            "default account only; secrets grants list shows which GWS_*_OAUTH scopes are held"
-    else
-        row google_workspace missing - - "gws drive about get" "$(first_line "$out")"
-    fi
+    local profile out rc email
+    for profile in personal theorem trajectory; do
+        (
+            out="$(GWS_ACCOUNT="$profile" timeout "$TIMEOUT_S" gws drive about get --params '{"fields":"user"}' 2>&1)"
+            rc=$?
+            if ((rc == 0)); then
+                email="$(jq -r '.user.emailAddress // empty' <<<"$out" 2>/dev/null)"
+                row "google_workspace_${profile}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${profile} gws drive about get"
+            else
+                row "google_workspace_${profile}" missing - - "GWS_ACCOUNT=${profile} gws drive about get" "$(first_line "$out")"
+            fi
+        ) &
+    done
+    wait
 }
 
 check_fleetctl() {
@@ -317,7 +321,8 @@ for fn in check_aws check_github_app check_hawk check_ant check_taiga check_verc
 done
 wait
 
-order=(aws github_app anthropic_ant hawk taiga google_workspace gcloud vercel datadog_pup \
+order=(aws github_app anthropic_ant hawk taiga google_workspace_personal google_workspace_theorem \
+    google_workspace_trajectory gcloud vercel datadog_pup \
     fleetctl sentry kubectl secretsd_grants agent_secrets_broker modal dispatch)
 
 if ((json)); then

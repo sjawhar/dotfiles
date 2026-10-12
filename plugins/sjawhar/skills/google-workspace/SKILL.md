@@ -1,11 +1,11 @@
 ---
 name: google-workspace
-description: Use when reading, searching, uploading, downloading, sharing, or organizing files on Google Drive; reading or editing Google Docs/Sheets; reading Calendar; or reading, sending, replying to, and drafting Gmail (the write path is YubiKey-gated via an explicit GWS_WORK_SEND_OAUTH or GWS_PERSONAL_SEND_OAUTH wrapper). Also covers creating/suspending Workspace users and Google Group membership via GWS_WORK_ADMIN_OAUTH. Triggers on "google drive", "gdrive", "workspace", "send an email", "reply to", "draft an email", Gmail/Drive/Docs URLs (drive.google.com, docs.google.com), file IDs, or requests to find, list, export, share, email, or manage cloud documents and spreadsheets.
+description: Use when reading, searching, uploading, downloading, sharing, or organizing files on Google Drive; reading or editing Google Docs/Sheets/Slides; reading Calendar; across Sami's personal, theorem, and trajectory Google profiles. Also covers creating/suspending Workspace users and Google Group membership via GWS_WORK_ADMIN_OAUTH (trajectory only). Triggers on "google drive", "gdrive", "workspace", Gmail/Drive/Docs URLs (drive.google.com, docs.google.com), file IDs, or requests to find, list, export, share, or manage cloud documents, spreadsheets, and slides. Mail — reading, sending, replying, drafts, attachments — goes through the `mailbox` CLI, not this skill.
 ---
 
 # Google Workspace (gws)
 
-Manage Google Drive (and other Workspace APIs) via the `gws` CLI. All output is structured JSON. The dotfiles `gws` shim routes authentication by identity and operation (see the Auth section); there is NO MCP server mode (upstream removed the `mcp` command).
+Manage Google Drive (and other Workspace APIs) via the `gws` CLI. All output is structured JSON. The dotfiles `gws` shim routes authentication by profile (see the Auth section); there is NO MCP server mode (upstream removed the `mcp` command).
 
 ## Docs & Sheets Formatting Rules
 
@@ -35,83 +35,100 @@ Habitually appending `2>&1` is the single easiest way to break a gws pipeline, a
 ## Discovering API Methods
 
 ```bash
-gws drive --help                    # List all resources
-gws schema drive.files.list         # Inspect params/types for a method
+GWS_ACCOUNT=personal gws drive --help   # List all resources (any profile works)
+gws schema drive.files.list             # Inspect params/types for a method; needs no profile
 ```
 
 Use `gws schema` output to build `--params` and `--json` flags.
 
-## Auth — account-scoped credentials
+## Auth — profile-scoped credentials
 
-`gws` on PATH is the dotfiles shim (`~/.dotfiles/shims/gws`). It has five credential keys. Use the task, not a guessed key name, to choose one.
+`gws` on PATH is the dotfiles shim (`~/.dotfiles/shims/gws`). `GWS_ACCOUNT` is required on
+every call except `gws schema`, which reads Google's public discovery documents, and `gws auth`
+with a caller-set `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`. There is no default identity: a bare
+`gws drive …` fails and lists the profiles.
+
+| Profile | Account | Credential | Store |
+|---------|---------|-----------|-------|
+| `personal` | sami.n.jawhar@gmail.com | `GWS_PERSONAL_READ_OAUTH` | `~/.config/gws/personal` |
+| `theorem` | Sami's Theorem Google account | `GWS_THEOREM_READ_OAUTH` (not provisioned yet: waits on Theorem's OAuth client, so `GWS_ACCOUNT=theorem` fails with `secret not found`) | `~/.config/gws/theorem` |
+| `trajectory` | sami@trajectorylabs.net | `GWS_TRAJECTORY_READ_OAUTH` | `~/.config/gws/trajectory` |
+
+All three keys are secretsd agent-tier and need no YubiKey touch. Despite the `READ` in the key
+names, the grants are read-write for Drive, Docs, Sheets, Slides, and Calendar, and read-only for
+Gmail — gws can still read Gmail (`gmail.readonly`), but mail work (reading, sending, replying,
+drafts, attachments) goes through the `mailbox` CLI, not gws.
 
 | Task | Credential | Tier | How |
 |------|-----------|------|-----|
-| Read/search Drive, Docs, Sheets, Calendar, or Gmail as work | `GWS_WORK_READ_OAUTH` | agent | Run `gws …`; the shim obtains the key when needed. On the EC2 devbox, work reads still use the keyless `google-user-token` broker instead. |
-| Read/search those APIs as personal | `GWS_PERSONAL_READ_OAUTH` | agent | Run `GWS_ACCOUNT=personal gws …`; the shim obtains the key when needed. |
-| Send Gmail, reply in-thread, or create/send drafts as work | `GWS_WORK_SEND_OAUTH` | human | Run `secrets GWS_WORK_SEND_OAUTH -- gws gmail …`; one YubiKey touch per session. |
-| Send Gmail, reply in-thread, or create/send drafts as personal | `GWS_PERSONAL_SEND_OAUTH` | human | Run `secrets GWS_PERSONAL_SEND_OAUTH -- gws gmail …`; one YubiKey touch per session. |
-| Create/suspend Workspace users or manage Google Group membership | `GWS_WORK_ADMIN_OAUTH` | human | **Not through `gws`.** `gws` 0.22.5 has no Admin SDK Directory alias (only `admin-reports`), and its documented `<api>:<version>` form for unlisted APIs is broken in this build: `gws admin:directory_v1 …` returns `validationError: Unknown service 'admin'` before auth is attempted (verified 2026-09-12, no credential involved). Use the credential directly under the same one-touch wrapper: `secrets GWS_WORK_ADMIN_OAUTH -- <script>` where the script exchanges the authorized-user JSON (`client_id`, `client_secret`, `refresh_token`) for an access token at `https://oauth2.googleapis.com/token` (`grant_type=refresh_token`) and calls `https://admin.googleapis.com/admin/directory/v1/…` with the bearer token. Never print the token or the JSON. Verified end to end (2026-09-13, 2sv-exempt cleanup): `GET /groups?customer=my_customer&maxResults=200` (find a group by email), `GET /groups/<groupKey>/members`, `GET /users/<email>?fields=primaryEmail,isEnrolledIn2Sv,isEnforcedIn2Sv,suspended,lastLoginTime`, the org-wide 2SV sweep `GET /users?customer=my_customer&query=isEnrolledIn2Sv%3Dfalse&maxResults=200`, and the group-membership REMOVE `DELETE /groups/<groupKey>/members/<memberEmail>` (returns 204, empty body). Gotcha: a members list read immediately after a DELETE can be stale for ~20 s — the 204 is the truth; re-read after a pause before concluding a removal failed. Also verified (2026-09-14, a Slack-seat rename): membership-ADD `POST /groups/<groupKey>/members` with body `{"email": "<user>", "role": "MEMBER"}` (200, response `status: ACTIVE`); password reset `PUT /users/<key>` with `{"password": "<value>", "changePasswordAtNextLogin": false}` (200; generate the value in the script and never print it); `POST /users/<key>/signOut` (204, empty body; invalidates every session). Gotcha: a user in a 2SV-enforced OU who is not enrolled cannot sign in at all (`Your sign-in settings don't meet your organization's 2-Step Verification policy`); the sanctioned grace path is temporary membership in the hand-staffed `2sv-exempt@` group — `isEnforcedIn2Sv` on the user flips to false after ~20 min of propagation (observed 23:32Z add → 23:53Z effective), and removing the membership re-enforces through propagation too, not immediately as this row once said: `isEnforcedIn2Sv` still read false about 30 s after the membership `DELETE` returned 204 and read true within about 4 minutes (2026-09-30: 204 at ~00:02:15Z, false at 00:02:46Z, true at 00:06:19Z; one later read, not a polling loop). The 204 is the truth about membership; re-read `isEnforcedIn2Sv` after a pause before concluding enforcement is back. Do a machine-mailbox sign-in only under that window, then remove the membership, rotate the password to an unrecorded value and `signOut`; neither the password reset nor `signOut` revokes an OAuth grant whose scopes include no Gmail scope (a third-party sign-in grant, Taiga's, scoped only `openid`/`userinfo.email`/`userinfo.profile`, survived a reset plus `signOut` on 2026-09-30, verified by a token refresh and an authenticated API call before and after). Create and suspend writes (`POST /users`, `PUT /users/<key>` with `{"suspended": true}`) remain unexercised — the first session to run them records the exact calls here. The bundle is consented by `admin-sami@` (Sami's admin identity) since 2026-09-17, 8 scopes including `admin.directory.userschema.readonly`; a bundle minted by `sami@` has no admin authority. |
+| Read/search Drive, Docs, Sheets, Slides, Calendar, or Gmail as a given profile | `GWS_<PROFILE>_READ_OAUTH` | agent | Run `GWS_ACCOUNT=<profile> gws …`; the shim obtains the key when needed. |
+| Create/suspend Workspace users or manage Google Group membership (trajectory Workspace only) | `GWS_WORK_ADMIN_OAUTH` | human | **Not through `gws`.** `gws` 0.22.5 has no Admin SDK Directory alias (only `admin-reports`), and its documented `<api>:<version>` form for unlisted APIs is broken in this build: `gws admin:directory_v1 …` returns `validationError: Unknown service 'admin'` before auth is attempted (verified 2026-09-12, no credential involved). Use the credential directly under its one-touch wrapper: `secrets GWS_WORK_ADMIN_OAUTH -- <script>` where the script exchanges the authorized-user JSON (`client_id`, `client_secret`, `refresh_token`) for an access token at `https://oauth2.googleapis.com/token` (`grant_type=refresh_token`) and calls `https://admin.googleapis.com/admin/directory/v1/…` with the bearer token. Never print the token or the JSON. Verified end to end (2026-09-13, 2sv-exempt cleanup): `GET /groups?customer=my_customer&maxResults=200` (find a group by email), `GET /groups/<groupKey>/members`, `GET /users/<email>?fields=primaryEmail,isEnrolledIn2Sv,isEnforcedIn2Sv,suspended,lastLoginTime`, the org-wide 2SV sweep `GET /users?customer=my_customer&query=isEnrolledIn2Sv%3Dfalse&maxResults=200`, and the group-membership REMOVE `DELETE /groups/<groupKey>/members/<memberEmail>` (returns 204, empty body). Gotcha: a members list read immediately after a DELETE can be stale for ~20 s — the 204 is the truth; re-read after a pause before concluding a removal failed. Also verified (2026-09-14, a Slack-seat rename): membership-ADD `POST /groups/<groupKey>/members` with body `{"email": "<user>", "role": "MEMBER"}` (200, response `status: ACTIVE`); password reset `PUT /users/<key>` with `{"password": "<value>", "changePasswordAtNextLogin": false}` (200; generate the value in the script and never print it); `POST /users/<key>/signOut` (204, empty body; invalidates every session). Gotcha: a user in a 2SV-enforced OU who is not enrolled cannot sign in at all (`Your sign-in settings don't meet your organization's 2-Step Verification policy`); the sanctioned grace path is temporary membership in the hand-staffed `2sv-exempt@` group — `isEnforcedIn2Sv` on the user flips to false after ~20 min of propagation (observed 23:32Z add → 23:53Z effective), and removing the membership re-enforces through propagation too, not immediately as this row once said: `isEnforcedIn2Sv` still read false about 30 s after the membership `DELETE` returned 204 and read true within about 4 minutes (2026-09-30: 204 at ~00:02:15Z, false at 00:02:46Z, true at 00:06:19Z; one later read, not a polling loop). The 204 is the truth about membership; re-read `isEnforcedIn2Sv` after a pause before concluding enforcement is back. Do a machine-mailbox sign-in only under that window, then remove the membership, rotate the password to an unrecorded value and `signOut`; neither the password reset nor `signOut` revokes an OAuth grant whose scopes include no Gmail scope (a third-party sign-in grant, Taiga's, scoped only `openid`/`userinfo.email`/`userinfo.profile`, survived a reset plus `signOut` on 2026-09-30, verified by a token refresh and an authenticated API call before and after). Create and suspend writes (`POST /users`, `PUT /users/<key>` with `{"suspended": true}`) remain unexercised — the first session to run them records the exact calls here. The bundle is consented by `admin-sami@` (Sami's admin identity) since 2026-09-17, 8 scopes including `admin.directory.userschema.readonly`; a bundle minted by `sami@` has no admin authority. |
 
-### Select an identity
+### Select a profile
 
-`GWS_ACCOUNT` chooses the read identity and its credential store. It accepts only `work` or `personal` and defaults to `work`; any other value is an error. The stores are separate:
-
-- work: `~/.config/gws/work`
-- personal: `~/.config/gws/personal`
+`GWS_ACCOUNT` chooses the profile and its credential store. It accepts only `personal`,
+`theorem`, or `trajectory`; unset, empty, or any other value is an error. The stores are
+separate, one per profile (see the table above).
 
 An `authorized_user` credential in `secrets` contains the refresh token and the OAuth client config.
-For normal reads and sends, the shim materializes the credential privately and passes its `client_id`
+The shim materializes the credential privately and passes its `client_id`
 and `client_secret` directly to the real CLI. Consuming a credential needs no
-`~/.config/gws/<account>/client_secret.json` file at all.
-
-That file remains machine-local **provisioning** state: `gws auth login` runs a consent flow and
-needs it to create or replace a credential. Create the client config in the target account store
-before running that command, but do not add a different local client config to troubleshoot a
-credential consumer. If a `403 Caller does not have required permission to use project ...` names an
-unrelated project, Application Default Credentials leaked that machine's quota project; the
-credential is not broken.
-
-The work store on the EC2 devbox is the exception — it needs neither half, because the broker mints
-its token.
+`~/.config/gws/<profile>/client_secret.json` file at all, so do not add a local client config to
+troubleshoot a credential consumer. If a `403 Caller does not have required permission to use
+project ...` names an unrelated project, Application Default Credentials leaked that machine's
+quota project; the credential is not broken.
 
 ```bash
-# Work is the default
-gws drive files list --params '{"pageSize": 10}'
-
-# Select personal for this command only
 GWS_ACCOUNT=personal gws drive files list --params '{"pageSize": 10}'
+GWS_ACCOUNT=theorem gws drive files list --params '{"pageSize": 10}'
+GWS_ACCOUNT=trajectory gws drive files list --params '{"pageSize": 10}'
 ```
 
-Reading never needs a `secrets` wrapper and never needs a YubiKey touch. On the EC2 devbox, work reads take the unchanged keyless broker path; otherwise the shim re-executes under `secrets` to fetch the selected account's agent-tier read credential. The shim materializes the credential in a private temporary file and selects that account's store before starting the real CLI.
-
-### Send Gmail — always name the human credential
-
-Sending never follows the automatic read path. Name exactly one send credential in the `secrets` wrapper; the named credential selects the sending identity and its store, regardless of `GWS_ACCOUNT`. Setting both send credentials is an error.
-
-```bash
-# Work: new message
-secrets GWS_WORK_SEND_OAUTH -- gws gmail +send \
-  --to 'a@b.com' --cc 'peter@trajectorylabs.com' --subject 'Subject' --body 'Body text'
-
-# Personal: reply in-thread (handles In-Reply-To/References + threadId automatically)
-secrets GWS_PERSONAL_SEND_OAUTH -- gws gmail +reply \
-  --message-id '<GMAIL_MSG_ID>' --body 'Reply text'
-
-# --html for HTML body, -a PATH to attach, --dry-run to inspect the request without sending
-# Stage a work draft instead of sending, then send it later by draft id
-secrets GWS_WORK_SEND_OAUTH -- gws gmail +reply --message-id '<GMAIL_MSG_ID>' --body 'text' --draft
-secrets GWS_WORK_SEND_OAUTH -- gws gmail users drafts send \
-  --params '{"userId":"me"}' --json '{"id":"<DRAFT_ID>"}'
-```
+Reading never needs a `secrets` wrapper and never needs a YubiKey touch: the shim re-executes
+under `secrets` to fetch the selected profile's agent-tier read credential, materializes it in a
+private temporary file, and selects that profile's store before starting the real CLI.
 
 ### `gws auth` manages a store, not an operation credential
 
-`gws auth …` receives no injected credential, because it creates and inspects credentials. It still honours `GWS_ACCOUNT`: `GWS_ACCOUNT=personal gws auth status` uses the personal store. The shim defaults `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` to the selected account's store but preserves a value the caller already supplied.
+`gws auth …` receives no injected credential, because it creates and inspects credentials. It
+still honours `GWS_ACCOUNT`: `GWS_ACCOUNT=personal gws auth status` uses the personal store. The
+shim defaults `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` to the selected profile's store but preserves a
+value the caller already supplied, in which case `GWS_ACCOUNT` is not needed.
 
 ### Explicit CLI credential overrides
 
-Preset `GOOGLE_WORKSPACE_CLI_TOKEN` (a raw access token) or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` (an authorized-user JSON) and the shim execs the real CLI untouched. This takes priority over account selection and all normal shim credential routing.
+Preset `GOOGLE_WORKSPACE_CLI_TOKEN` (a raw access token) or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` (an authorized-user JSON) and the shim execs the real CLI untouched. This takes priority over profile selection and all normal shim credential routing.
+
+### Adding a profile
+
+1. Add the name to `GWS_PROFILES` in `shims/gws` and to the profile loop in `check_gws` in
+   `scripts/agent-access`.
+2. Get the OAuth client from whoever owns that Google account's org (a Desktop-app client in a
+   project that org owns), then run the consent with the client passed as environment variables;
+   gws did not pick up a hand-built `client_secret.json`:
+
+   ```bash
+   GOOGLE_WORKSPACE_CLI_CLIENT_ID="$(jq -r .installed.client_id client.json)" \
+   GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="$(jq -r .installed.client_secret client.json)" \
+   GWS_ACCOUNT=<profile> gws auth login --scopes 'openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/gmail.readonly'
+   ```
+
+   The consent page shows the OAuth client's app name, not the profile name: tell the human
+   which account to pick in Google's account chooser before opening it.
+3. In a git clone of the dotfiles, store the grant as `GWS_<PROFILE>_READ_OAUTH` in secretsd's
+   dotfiles source, without the value touching argv, then commit and push `secrets.env`:
+
+   ```bash
+   GWS_ACCOUNT=<profile> gws auth export --unmasked | jq -c . | jq -R . \
+     | sops set --value-stdin secrets.env '["GWS_<PROFILE>_READ_OAUTH"]'
+   ```
+
+4. Delete `~/.config/gws/<profile>/credentials.enc` and `client_secret.json`; the shim reads only
+   the secretsd copy.
+
+To undo a login into the wrong store, delete that store's files. Do not revoke the grant at
+Google: Google may revoke every token issued under the same grant (RFC 7009 permits it), which
+would take the stored credential for the same client and account with it.
 
 ## Gotchas
 

@@ -1,47 +1,57 @@
 #!/bin/bash
-# gws wrapper: machine identity (keyless DWD via google-user-token) for Workspace.
+# gws wrapper: one Google identity per profile, with every profile's credential
+# read from secretsd, so the same profiles work on every machine.
 #
 # Resolution order (first match wins):
-#   1. GOOGLE_WORKSPACE_CLI_TOKEN or GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE already
-#      set -> caller controls gws credentials; scrub GWS OAuth variables, then exec.
-#   2. Account := ${GWS_ACCOUNT:-work}; anything but work/personal is an error.
-#   3. First non-flag argument is `auth` -> inject NOTHING. `gws auth *` operates on
-#      the credential store itself, so a credential injected into it is meaningless,
-#      and `gws auth login` is how the credentials rules 4-6 consume get created in
-#      the first place. Default CONFIG_DIR to the account's store unless the caller
-#      already set it, then exec through.
-#   4. GWS_WORK_SEND_OAUTH / GWS_PERSONAL_SEND_OAUTH set (secretsd-injected
-#      authorized_user JSON; the YubiKey-gated Gmail-send paths) -> materialize to
-#      a 0600 tempfile against that account's store, run real gws, clean up. Both
-#      set at once is an error, not a silent win for work.
-#   5. work on EC2 -> mint a DWD user token via google-user-token.
-#   6. otherwise -> re-exec under `secrets` to obtain that account's agent-tier
-#      read credential, then land back in rule 4's materialize path.
+#   1. GOOGLE_WORKSPACE_CLI_TOKEN or GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE
+#      already set -> the caller controls gws credentials; exec.
+#   2. First non-flag argument is `schema` -> exec with no credential. It reads
+#      Google's public discovery documents, so it needs no identity.
+#   3. First non-flag argument is `auth` -> inject NOTHING. `gws auth *`
+#      operates on the credential store itself, and `gws auth login` is how the
+#      credential rule 5 consumes gets created. If the caller set
+#      GOOGLE_WORKSPACE_CLI_CONFIG_DIR, exec through with no profile needed;
+#      otherwise GWS_ACCOUNT is required and CONFIG_DIR defaults to that
+#      profile's store.
+#   4. Otherwise GWS_ACCOUNT must name one of GWS_PROFILES; unset, empty, or any
+#      other value is an error. There is no default identity.
+#   5. GWS_<PROFILE>_READ_OAUTH set -> materialize it to a 0600 tempfile against
+#      that profile's store, run real gws, clean up. Otherwise re-exec under
+#      `secrets` to obtain it first.
+#
+# Every run of real gws unsets every GWS_*_OAUTH variable: a credential reaches
+# real gws as a 0600 file and by no other route.
+#
+# `secrets` here is secretsd's client, called directly. These credentials come
+# from secretsd on every machine, never from the agent-secrets broker, so this
+# shim does not use scripts/secret-run, which sends registered agent sessions to
+# the broker.
 #
 # Doctrine (matches gh -> gh-app-token): fail LOUD where a credential is supposed
-# to exist. On EC2, if the broker fails we exit with its error; we never fall
-# through to another identity's credentials. Off EC2 the broker cannot work at all
-# (no instance role, no IMDS owner-email tag), so the account's stored credential is
-# the correct path, not a fallback -- and a missing one is an error, not a reason to
-# run gws bare against whatever ~/.config/gws happens to hold. `gws auth *` is the
-# single exception, because it is the tool that creates those credentials.
+# to exist. A missing credential is an error, not a reason to run gws bare
+# against whatever ~/.config/gws happens to hold.
 set -euo pipefail
 
-readonly -a GWS_CREDENTIAL_ENV_UNSET_ARGS=(
-    -u GWS_WORK_READ_OAUTH
-    -u GWS_WORK_SEND_OAUTH
-    -u GWS_WORK_ADMIN_OAUTH
-    -u GWS_PERSONAL_READ_OAUTH
-    -u GWS_PERSONAL_SEND_OAUTH
-    -u GWS_SHIM_SECRETS_REEXEC
-)
+readonly -a GWS_PROFILES=(personal theorem trajectory)
+
+set_credential_unset_args() {
+    # CREDENTIAL_UNSET_ARGS := `-u NAME` for the re-exec guard and every set
+    # GWS_*_OAUTH variable, computed at run time so a new profile's key needs no
+    # list of its own.
+    CREDENTIAL_UNSET_ARGS=(-u GWS_SHIM_SECRETS_REEXEC)
+    local name
+    for name in $(compgen -v); do
+        if [[ "$name" == GWS_*_OAUTH ]]; then
+            CREDENTIAL_UNSET_ARGS+=(-u "$name")
+        fi
+    done
+}
 
 exec_real_gws() {
-    # Every credential must reach real gws as a 0600 file, never as an environment
-    # variable. One list, applied at every exec, so a new path cannot forget it.
     local real_gws="$1"
     shift
-    exec env "${GWS_CREDENTIAL_ENV_UNSET_ARGS[@]}" "$real_gws" "$@"
+    set_credential_unset_args
+    exec env "${CREDENTIAL_UNSET_ARGS[@]}" "$real_gws" "$@"
 }
 
 find_real_gws() {
@@ -63,37 +73,6 @@ find_real_gws() {
         fi
     done
     echo "gws shim: real gws binary not found on PATH or in mise installs" >&2
-    return 127
-}
-
-find_broker() {
-    # PATH first so the routing tests can stub the broker; then this shim's own
-    # directory (minimal-PATH spawners again).
-    local self_dir
-    if command -v google-user-token; then
-        return 0
-    fi
-    self_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-    if [[ -x "$self_dir/google-user-token" ]]; then
-        printf '%s\n' "$self_dir/google-user-token"
-        return 0
-    fi
-    echo "gws shim: google-user-token not found on PATH or beside this shim" >&2
-    return 127
-}
-
-find_uv() {
-    local candidate
-    if command -v uv; then
-        return 0
-    fi
-    for candidate in "$HOME/.mise/shims/uv" "$HOME"/.mise/installs/uv/*/uv-*/uv; do
-        if [[ -x "$candidate" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-    echo "gws shim: uv not found on PATH or in mise installs" >&2
     return 127
 }
 
@@ -159,20 +138,32 @@ first_arg() {
     done
 }
 
-on_ec2() {
-    # Machine identity is an EC2 instance-role construct; detect EC2 locally via
-    # DMI -- instant and offline, unlike an IMDS probe (2s timeout per invocation
-    # on non-EC2 machines). Nitro instances report sys_vendor "Amazon EC2";
-    # readable from inside containers too. Env var override is for tests.
-    local vendor_file="${GWS_SHIM_DMI_SYS_VENDOR:-/sys/class/dmi/id/sys_vendor}"
-    [[ -r "$vendor_file" ]] || return 1
-    [[ "$(< "$vendor_file")" == "Amazon EC2"* ]]
+profiles_list() {
+    local IFS=' '
+    printf '%s' "${GWS_PROFILES[*]}"
+}
+
+require_profile() {
+    local profile="${GWS_ACCOUNT:-}"
+    if [[ -z "$profile" ]]; then
+        echo "gws shim: set GWS_ACCOUNT to one of: $(profiles_list)" >&2
+        exit 1
+    fi
+    local candidate
+    for candidate in "${GWS_PROFILES[@]}"; do
+        if [[ "$candidate" == "$profile" ]]; then
+            printf '%s\n' "$profile"
+            return 0
+        fi
+    done
+    echo "gws shim: GWS_ACCOUNT must be one of: $(profiles_list), got '${profile}'" >&2
+    exit 1
 }
 
 materialize_and_run() {
     # Write an authorized_user JSON to a private tempfile, point real gws at it,
-    # and select the per-account store so token caches never mix.
-    local real_gws="$1" account="$2" creds_json="$3"
+    # and select the per-profile store so token caches never mix.
+    local real_gws="$1" profile="$2" creds_json="$3"
     shift 3
     local creds_file jq client_id client_secret
     creds_file="$(mktemp)"
@@ -208,18 +199,20 @@ materialize_and_run() {
         echo "gws shim: credential is missing a non-empty client_secret" >&2
         exit 1
     fi
-    # Task 4's `secrets KEY -- <self>` re-exec EXPORTS the credential JSON into our
-    # own environment, and a plain exec would hand all of it to real gws. Pass the
-    # credential by file only, and unset every credential key for the child. `env -u`
-    # on a name that is not set is a no-op, so the shared list covers every path.
-    # Without this, gws uses the machine ADC's quota project; another account's ADC
-    # produces a 403 that names that unrelated project.
+    # The `secrets KEY -- <self>` re-exec EXPORTS the credential JSON into our own
+    # environment; the unset list keeps it, and every other GWS_*_OAUTH key, out of
+    # real gws, so the credential reaches it only as the file. Real gws runs as a
+    # child, not an exec, so the EXIT trap removes the file afterwards.
+    # GOOGLE_APPLICATION_CREDENTIALS points at the same file: without it, gws uses
+    # the machine ADC's quota project, and another account's ADC produces a 403 that
+    # names that unrelated project.
+    set_credential_unset_args
     if GOOGLE_APPLICATION_CREDENTIALS="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
-        GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${HOME}/.config/gws/${account}" \
+        GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${HOME}/.config/gws/${profile}" \
         GOOGLE_WORKSPACE_CLI_CLIENT_ID="$client_id" \
         GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="$client_secret" \
-        env "${GWS_CREDENTIAL_ENV_UNSET_ARGS[@]}" "$real_gws" "$@"; then
+        env "${CREDENTIAL_UNSET_ARGS[@]}" "$real_gws" "$@"; then
         exit
     else
         exit "$?"
@@ -227,7 +220,7 @@ materialize_and_run() {
 }
 
 main() {
-    local real_gws
+    local real_gws profile
     # split is load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
     real_gws="$(find_real_gws)"
 
@@ -235,70 +228,26 @@ main() {
         exec_real_gws "$real_gws" "$@"
     fi
 
-    local account="${GWS_ACCOUNT:-work}"
-    case "$account" in
-        work | personal) ;;
-        *)
-            echo "gws shim: GWS_ACCOUNT must be 'work' or 'personal', got '${account}'" >&2
-            exit 1
-            ;;
-    esac
-
-    # `gws auth *` operates on the credential store itself, so injecting a credential
-    # into it is meaningless -- and `gws auth login` is how the credentials every
-    # other branch consumes get created in the first place (Tasks 7, 8). Resolve the
-    # account so `GWS_ACCOUNT=personal gws auth status` inspects the right store, but
-    # never override a CONFIG_DIR the caller set: that is how Tasks 7 and 8 drive
-    # consent into a specific directory.
-    if [[ "$(first_arg "$@")" == auth ]]; then
-        export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-${HOME}/.config/gws/${account}}"
+    if [[ "$(first_arg "$@")" == schema ]]; then
         exec_real_gws "$real_gws" "$@"
     fi
 
-    # Checked before either branch: the branches try work first, so without this,
-    # setting both would silently send as work. Naming an identity is the whole
-    # point of the send path, so ambiguity is an error, not a default.
-    if [[ -n "${GWS_WORK_SEND_OAUTH:-}" && -n "${GWS_PERSONAL_SEND_OAUTH:-}" ]]; then
-        echo "gws shim: both GWS_WORK_SEND_OAUTH and GWS_PERSONAL_SEND_OAUTH are set; unset one so the sending identity is unambiguous" >&2
-        exit 1
-    fi
-
-    if [[ -n "${GWS_WORK_SEND_OAUTH:-}" ]]; then
-        materialize_and_run "$real_gws" work "$GWS_WORK_SEND_OAUTH" "$@"
-    fi
-
-    if [[ -n "${GWS_PERSONAL_SEND_OAUTH:-}" ]]; then
-        materialize_and_run "$real_gws" personal "$GWS_PERSONAL_SEND_OAUTH" "$@"
-    fi
-
-    if [[ "$account" == "work" ]] && on_ec2; then
-        local broker token uv
-        # splits are load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
-        broker="$(find_broker)"
-        if command -v uv >/dev/null 2>&1; then
-            token="$("$broker")"
-        else
-            uv="$(find_uv)"
-            token="$("$uv" run --quiet --script "$broker")"
+    # Never override a CONFIG_DIR the caller already set: that is how provisioning a
+    # specific store works. Only without one does a profile pick the store.
+    if [[ "$(first_arg "$@")" == auth ]]; then
+        if [[ -z "${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-}" ]]; then
+            profile="$(require_profile)"
+            export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${HOME}/.config/gws/${profile}"
         fi
-        if [[ -z "$token" ]]; then
-            echo "gws shim: google-user-token returned an empty token" >&2
-            exit 1
-        fi
-        GOOGLE_WORKSPACE_CLI_TOKEN="$token" exec_real_gws "$real_gws" "$@"
+        exec_real_gws "$real_gws" "$@"
     fi
 
-    if [[ "$account" == "work" ]]; then
-        if [[ -n "${GWS_WORK_READ_OAUTH:-}" ]]; then
-            materialize_and_run "$real_gws" work "$GWS_WORK_READ_OAUTH" "$@"
-        fi
-        reexec_under_secrets GWS_WORK_READ_OAUTH "$@"
+    profile="$(require_profile)"
+    local key="GWS_${profile^^}_READ_OAUTH"
+    if [[ -n "${!key:-}" ]]; then
+        materialize_and_run "$real_gws" "$profile" "${!key}" "$@"
     fi
-
-    if [[ -n "${GWS_PERSONAL_READ_OAUTH:-}" ]]; then
-        materialize_and_run "$real_gws" personal "$GWS_PERSONAL_READ_OAUTH" "$@"
-    fi
-    reexec_under_secrets GWS_PERSONAL_READ_OAUTH "$@"
+    reexec_under_secrets "$key" "$@"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
