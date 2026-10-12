@@ -50,9 +50,6 @@ ensure_vendor() {
         git -C "$dir" fetch --depth 1 origin "$ref"
         git -C "$dir" checkout --detach "$ref"
     fi
-    if [ ! -e "${dir}/.jj" ] && command -v jj &>/dev/null; then
-        ( cd "$dir" && jj git init --colocate )
-    fi
 }
 
 ensure_command() {

@@ -1,12 +1,23 @@
 #!/bin/bash
+# vendor-update: move every vendor/* clone to the tip of its origin's default branch, detached.
+# Local edits that do not conflict carry over (git checkout keeps them); a clone whose edits
+# would be overwritten is left where it is and named, and the script exits 1 at the end.
 set -euo pipefail
 VENDOR_DIR="${HOME}/.dotfiles/vendor"
 
+failed=()
 for dir in "$VENDOR_DIR"/*/; do
-    [ -d "$dir/.jj" ] || continue
+    [ -e "$dir/.git" ] || continue
     name=$(basename "$dir")
     echo "Updating $name..."
-    ( cd "$dir" && jj git fetch && jj rebase -d main@origin 2>/dev/null ||
-        jj rebase -d master@origin 2>/dev/null ||
-        echo "  Warning: couldn't rebase $name (check default branch)" )
+    # A shallow clone stays shallow; a full one stays full.
+    depth=()
+    [ "$(git -C "$dir" rev-parse --is-shallow-repository)" = true ] && depth=(--depth 1)
+    if ! git -C "$dir" fetch "${depth[@]}" origin HEAD || ! git -C "$dir" checkout --detach FETCH_HEAD; then
+        failed+=("$name")
+    fi
 done
+if [ "${#failed[@]}" -gt 0 ]; then
+    echo "Not updated: ${failed[*]}" >&2
+    exit 1
+fi
