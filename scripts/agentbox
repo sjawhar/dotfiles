@@ -182,7 +182,7 @@ enroll_box() {
         enroll_failed "$box" "agent-secrets keygen printed no thumbprint: '$tp'"
         return 1
     fi
-    local args=(enroll --helper --kind box --runtime-id "$box" --thumbprint "$tp")
+    local args=(enroll --helper --runtime-id "$box" --thumbprint "$tp")
     [[ -n "$sid" ]] && args+=(--session-id "$sid")
     for attempt in $(seq 1 10); do
         put_keyfile "$box" enrollment.pending ""
@@ -951,7 +951,7 @@ else
     ok "agent-secrets env (url, key dir)"
     [ "$(stat -c %a "$kd/key.pem" 2>/dev/null)" = 600 ] && [ "$(stat -c %U "$kd/key.pem" 2>/dev/null)" = ubuntu ] && ok "box key 0600 ubuntu" || fail "box key: $(ls -l "$kd" 2>&1 | tr "\n" " ")"
     [ -s "$kd/enrollment" ] && ok "box enrolled ($(cat "$kd/enrollment"))" || fail "box not enrolled: $(cat "$kd/enrollment.error" 2>/dev/null || echo no enrollment.error either)"
-    w="$(timeout 20 agent-secrets whoami 2>&1)"; jq -e ".kind == \"session\" or .kind == \"box\" or .kind == \"host\"" <<<"$w" >/dev/null 2>&1 && ok "broker knows this box as kind $(jq -r .kind <<<"$w"), operator $(jq -r .operator <<<"$w")" || fail "agent-secrets whoami: $(head -1 <<<"$w")"
+    w="$(timeout 20 agent-secrets whoami 2>&1)"; jq -e ".kind == \"session\"" <<<"$w" >/dev/null 2>&1 && ok "broker knows this box as kind $(jq -r .kind <<<"$w"), operator $(jq -r .operator <<<"$w")" || fail "agent-secrets whoami: $(head -1 <<<"$w")"
 fi
 arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
 t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
@@ -999,7 +999,7 @@ cmd_doctor() {
         if broker_ready; then
             ok "host: launcher credential issued for $(cat "$LAUNCHER_DIR/operator" 2>/dev/null || echo unknown)"
             helper_out="$(fresh_process agent-secrets register --exec --wait 30 -- agent-secrets whoami 2>&1 || true)"
-            if jq -e '.kind == "session" or .kind == "box" or .kind == "host"' <<<"$helper_out" >/dev/null 2>&1; then ok "host: helper enrolls and signs for a fresh session (kind $(jq -r .kind <<<"$helper_out"), operator $(jq -r .operator <<<"$helper_out"))"; else fail "host: helper session: $(head -1 <<<"$helper_out")"; fi
+            if jq -e '.kind == "session"' <<<"$helper_out" >/dev/null 2>&1; then ok "host: helper enrolls and signs for a fresh session (kind $(jq -r .kind <<<"$helper_out"), operator $(jq -r .operator <<<"$helper_out"))"; else fail "host: helper session: $(head -1 <<<"$helper_out")"; fi
         else
             echo "note host: $BROKER_UNREADY; boxes and host sessions start without a broker identity and use secretsd"
         fi

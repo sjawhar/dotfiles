@@ -195,6 +195,28 @@ class SecretRun(unittest.TestCase):
             ],
         )
 
+    def test_ttl_reaches_the_broker_for_exec_and_request(self) -> None:
+        self.with_client()
+        result = self.run_secret_run("--ttl", "2m", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines()[0],
+            f'BROKER AIRTABLE_TOKEN --ttl 2m -- sh -c echo "via=$VIA" URL={BROKER_URL}',
+        )
+        result = self.run_secret_run("request", "--ttl=5m", "DEEL_API_KEY", STUB_IDENTITY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(), [f"BROKER request DEEL_API_KEY --ttl 5m URL={BROKER_URL}"]
+        )
+
+    def test_ttl_is_dropped_for_secretsd(self) -> None:
+        self.with_client()
+        result = self.run_secret_run("--ttl", "2m", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(), ['SECRETSD AIRTABLE_TOKEN -- sh -c echo "via=$VIA"', "via=secretsd"]
+        )
+
     def test_request_on_secretsd_asks_for_each_key(self) -> None:
         self.with_client()
         result = self.run_secret_run(
@@ -232,6 +254,7 @@ class SecretRun(unittest.TestCase):
             "request without keys": ("request", "--reason", "x"),
             "request takes no wait": ("request", "--wait", "0", "AIRTABLE_TOKEN"),
             "request takes no wait=": ("request", "--wait=0", "AIRTABLE_TOKEN"),
+            "ttl without a value": ("AIRTABLE_TOKEN", "--ttl"),
             "unknown option": ("--bogus", "AIRTABLE_TOKEN", "--", "true"),
         }
         for name, args in cases.items():
