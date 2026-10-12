@@ -5,7 +5,12 @@
 # claude-envoy bridge read that file to authenticate to production NATS.
 #
 #   envoy-nats-seed            print the seed file's path, or nothing when there is none
+#   envoy-nats-seed --value    print the seed itself, or exit 1 naming why there is none
 #   envoy-nats-seed --refresh  fetch the seed from AWS now, whatever the cache holds
+#
+# --value is for a `natsSeed: "!envoy-nats-seed --value"` entry in an envoy.json:
+# the client reads the command's stdout as the seed, so the value never sits in
+# an environment or an argv. It caches and refreshes exactly as launcher mode does.
 #
 # The seed lives in AWS Secrets Manager ($SECRET_ID) and on a machine only in
 # one 0600 file under $XDG_RUNTIME_DIR/envoy, a tmpfs cleared at boot. It never
@@ -116,12 +121,19 @@ umask 077
 # No usable per-boot directory (none on this machine, or not ours): no cache,
 # no miss marker to rate-limit a message with, so say nothing.
 if ! mkdir -p "$dir" 2>/dev/null || ! [[ -O "$dir" && -w "$dir" ]]; then
-    [[ "${1:-}" == --refresh ]] && { say "cannot use $dir"; exit 1; }
+    [[ "${1:-}" == --refresh || "${1:-}" == --value ]] && { say "cannot use $dir"; exit 1; }
     exit 0
 fi
 
+# Launcher mode prints the seed file's path; --value prints the seed. With no
+# seed, launcher mode exits 0 (a session still starts) and --value exits 1.
+value=0
+emit() { if (( value )); then cat "$seed"; else echo "$seed"; fi; }
+none() { if (( value )); then say "no NATS credential: ${1:-none cached and no fetch possible}"; exit 1; fi; exit 0; }
+
 case "${1:-}" in
     "") ;;
+    --value) value=1 ;;
     --refresh)
         if t="$(missing_tool)"; then say "$t is not installed"; exit 1; fi
         take_lock -w $((FETCH_TIMEOUT_S + 5)) || { say "cannot take $lock"; exit 1; }
@@ -138,24 +150,24 @@ case "${1:-}" in
         fetch quiet
         exit 0
         ;;
-    *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
 
 if usable; then
-    echo "$seed"
+    emit
     if older_than_refresh "$seed" && ! recent_miss; then refresh_in_background; fi
     exit 0
 fi
 if [[ -e "$miss" ]]; then
     # An attempt already failed this boot; the session starts without waiting.
     recent_miss || refresh_in_background
-    exit 0
+    none "$(cat "$miss" 2>/dev/null)"
 fi
 # The first launch this boot: fetch now, so this session starts with the seed.
-if t="$(missing_tool)"; then record_miss loud "$t is not installed"; exit 0; fi
-take_lock -w $((FETCH_TIMEOUT_S + 5)) || exit 0
+if t="$(missing_tool)"; then record_miss loud "$t is not installed"; none "$t is not installed"; fi
+take_lock -w $((FETCH_TIMEOUT_S + 5)) || none "cannot take $lock"
 # A parallel launch may have fetched, or failed, while this one waited.
-if usable; then echo "$seed"; exit 0; fi
-[[ -e "$miss" ]] && exit 0
-fetch loud && echo "$seed"
-exit 0
+if usable; then emit; exit 0; fi
+[[ -e "$miss" ]] && none "$(cat "$miss" 2>/dev/null)"
+fetch loud && { emit; exit 0; }
+none "$(cat "$miss" 2>/dev/null)"
