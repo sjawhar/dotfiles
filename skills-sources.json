@@ -40,6 +40,9 @@
     },
     {
       "root": "vendor/time-tracker/.opencode"
+    },
+    {
+      "root": "vendor/asd-ste100"
     }
   ]
 }
