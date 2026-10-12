@@ -161,6 +161,8 @@ fi
         write_stub(
             self.stub_dir,
             "gws",
+            # Real gws prints advisories on stderr next to the JSON on stdout.
+            'echo "Using keyring backend: keyring" >&2\n'
             'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "${GWS_ACCOUNT:-unknown}"',
         )
         write_stub(self.stub_dir, "fleetctl", 'echo "{}"')
