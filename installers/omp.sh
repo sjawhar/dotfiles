@@ -124,6 +124,9 @@ ensure_vendor https://github.com/getsentry/cli.git sentry-cli 33028c2ac93e027ce3
 # re-pin here and re-check jev-turn-label.py's criteria against the live docs.
 ensure_vendor https://github.com/typesafe-ai/skills.git typesafe-ai 65a39f393687675ce170e6094757de20370365b9
 ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
+# The repo is the skill itself (SKILL.md at its root), so it is cloned one level
+# down to give its pool the <root>/skills/<name>/SKILL.md layout. Pinned. Bump: re-pin here.
+ensure_vendor https://github.com/danyuchn/asd-ste100-skill.git asd-ste100/skills/asd-ste100 32511c6992ecb5f1971e46a2943f2e6adceedafe
 
 # agent-c skills required by instructions that apply outside agent-c, linked
 # per-skill into the farm skills-sources.json names (pointing at agent-c's whole
