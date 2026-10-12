@@ -27,6 +27,7 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 SESSION = DOTFILES / "scripts" / "agent-secrets-session"
 LOGIN = DOTFILES / "scripts" / "agent-secrets-login"
+HELPER_WRAPPER = DOTFILES / "agent-secrets" / "agent-secrets-helper"
 BROKER_URL = next(
     line.split("=", 1)[1].strip()
     for line in (DOTFILES / "agent-secrets" / "broker.env").read_text().splitlines()
@@ -257,6 +258,33 @@ class AgentSecretsSession(unittest.TestCase):
                     lines[0], f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL}"
                 )
                 self.assertTrue(lines[1].startswith(agent_line), result.stdout)
+
+
+class HelperWrapper(unittest.TestCase):
+    """agent-secrets/agent-secrets-helper, the unit's ExecStart: `serve` with no arguments, and any
+    other subcommand passed through. A wrapper that always ran `serve` turned `agent-secrets-helper
+    sessions` into a second helper that took the socket and re-pinned every live session."""
+
+    def run_wrapper(self, *args: str) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "bin").mkdir()
+            write_stub(root / "bin", "mise", 'shift 3; echo "HELPER $*"')
+            result = subprocess.run(
+                [str(HELPER_WRAPPER), *args],
+                capture_output=True,
+                text=True,
+                env={"DOTFILES_DIR": str(root), "HOME": str(root), "PATH": "/usr/bin:/bin"},
+                check=True,
+                timeout=30,
+            )
+        return result.stdout.strip()
+
+    def test_no_arguments_serves(self) -> None:
+        self.assertEqual(self.run_wrapper(), "HELPER agent-secrets-helper serve")
+
+    def test_a_subcommand_is_passed_through(self) -> None:
+        self.assertEqual(self.run_wrapper("sessions"), "HELPER agent-secrets-helper sessions")
 
 
 if __name__ == "__main__":
