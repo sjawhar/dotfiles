@@ -81,4 +81,4 @@ Preserve his wording unless something is actually wrong with it — the result s
 
 ## Formatting in external tools
 
-Use each tool's native primitives, matching adjacent content; see `slack-bot` for Slack and `google-workspace` for Docs/Sheets.
+Use each tool's native primitives, matching adjacent content; see `slack-messaging` for Slack and `google-workspace` for Docs/Sheets.

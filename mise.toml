@@ -29,7 +29,6 @@ minimum_release_age_excludes = [
   "github:sjawhar/mailbox",
   "github:sjawhar/oh-my-pi",
   "github:sjawhar/secretsd",  # archived; tags predate the forward merge
-  "github:sjawhar/slack-mcp-server",
   "github:sjawhar/time-tracker",
   "forward",
   "tt",
@@ -73,7 +72,6 @@ uv = "0.12.5"
 yq = "4.53.6"
 zoxide = "0.10.0"
 
-"github:sjawhar/slack-mcp-server" = "v1.3.0-sami.20260817-170849"
 "npm:@googleworkspace/cli" = "0.22.5"
 "npm:@openai/codex" = "0.153.1"
 # Vercel CLI: agent boxes read Lyon's Vercel request logs with the host's own CLI

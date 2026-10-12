@@ -1,6 +1,6 @@
 ---
 name: chat-hub
-description: Use for Sami's personal chat networks through the chat hub - reading or sending SMS/RCS texts, WhatsApp, Signal, Discord, Instagram or Messenger messages, checking what's unread, finding someone's conversation, or re-linking a network whose login expired. Use it whenever Sami mentions texting someone, a text, WhatsApp, Signal, a DM, "did X reply", or messages on any of those networks, even if he doesn't name the hub. Not for Slack (slack-bot) or email (google-workspace).
+description: Use for Sami's personal chat networks through the chat hub - reading or sending SMS/RCS texts, WhatsApp, Signal, Discord, Instagram or Messenger messages, checking what's unread, finding someone's conversation, or re-linking a network whose login expired. Use it whenever Sami mentions texting someone, a text, WhatsApp, Signal, a DM, "did X reply", or messages on any of those networks, even if he doesn't name the hub. Not for Slack (slack-messaging, slack-search) or email (google-workspace).
 ---
 
 # Chat hub
