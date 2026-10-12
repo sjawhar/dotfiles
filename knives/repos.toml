@@ -130,9 +130,18 @@ upstream = "https://github.com/pop-os/cosmic-comp.git"
 origin = "https://github.com/sjawhar/cosmic-comp"
 base = "master"
 release_branch = "sami"
+ledger = "sjawhar/.knives-ledger"
 
 [repos.cosmic-settings-daemon]
 upstream = "https://github.com/pop-os/cosmic-settings-daemon.git"
 origin = "https://github.com/sjawhar/cosmic-settings-daemon"
 base = "master"
 release_branch = "sami"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.voxtype]
+upstream = "https://github.com/peteonrails/voxtype"
+origin = "https://github.com/sjawhar/voxtype"
+base = "dev"
+release_branch = "sami"
+ledger = "sjawhar/.knives-ledger"
