@@ -11,6 +11,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -321,6 +322,53 @@ class GwsRouting(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('ARG={"q": "name contains hello there"}\n', result.stdout)
         self.assertEqual(result.stdout.count("ARG="), 5)
+
+    def _wait_for_file(self, path: Path, timeout: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def test_headless_auth_login_routes_oauth_url_through_forward(self):
+        url = "https://accounts.google.com/o/oauth2/auth?x=1&redirect_uri=http://localhost:4321"
+        for exit_code in (0, 3):
+            with self.subTest(exit_code=exit_code):
+                received = self.stub_dir / f"forward-received-{exit_code}"
+                write_stub(self.stub_dir, "forward", f'printf %s "$2" > {received}\nexit 0')
+                write_stub(
+                    self.stub_dir,
+                    "gws",
+                    f'echo "{url}"\n'
+                    'while IFS= read -r v; do\n'
+                    '  [[ -n "${!v:-}" ]] && echo "LEAKED=$v"\n'
+                    'done < <(compgen -v | grep -E "^GWS_.*_OAUTH$")\n'
+                    '[[ -n "${GWS_SHIM_SECRETS_REEXEC:-}" ]] && echo "LEAKED=GWS_SHIM_SECRETS_REEXEC"\n'
+                    f'exit {exit_code}',
+                )
+                result = self.run_shim(
+                    {
+                        "GWS_ACCOUNT": "personal",
+                        "GWS_PERSONAL_READ_OAUTH": self.default_credential("personal"),
+                    },
+                    args=["auth", "login"],
+                )
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                self.assertNotIn("LEAKED=", result.stdout)
+                self._wait_for_file(received)
+                self.assertEqual(received.read_text(), url)
+
+    def test_auth_status_headless_does_not_call_forward(self):
+        write_stub(self.stub_dir, "forward", "echo SHOULD-NOT-RUN >&2; exit 1")
+        result = self.run_shim({"GWS_ACCOUNT": "personal"}, args=["auth", "status"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+
+    def test_auth_login_with_display_does_not_call_forward(self):
+        write_stub(self.stub_dir, "forward", "echo SHOULD-NOT-RUN >&2; exit 1")
+        result = self.run_shim(
+            {"GWS_ACCOUNT": "personal", "DISPLAY": ":0"}, args=["auth", "login"]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,18 @@
 #      credential rule 5 consumes gets created. If the caller set
 #      GOOGLE_WORKSPACE_CLI_CONFIG_DIR, exec through with no profile needed;
 #      otherwise GWS_ACCOUNT is required and CONFIG_DIR defaults to that
-#      profile's store.
+#      profile's store. For `gws auth login` specifically, when the machine
+#      is headless (DISPLAY, WAYLAND_DISPLAY and MIR_SOCKET all unset) and
+#      `forward` resolves on PATH: gws prints its OAuth URL instead of
+#      opening a browser (github.com/googleworkspace/cli has no opener at
+#      all upstream, PR #888 adds one) and ignores $BROWSER, so headless it
+#      has no better flow than paste-the-URL, paste-back-nothing (there is no
+#      code to paste). Run real gws under `script` for a PTY (the scope
+#      picker needs one), tee its output, and hand the first OAuth URL in it
+#      to `forward open`, which opens the page on the laptop and arms the
+#      callback port. The shim's exit status is real gws's. Any other `auth`
+#      subcommand, a machine with a display, or no `forward` on PATH all keep
+#      the plain exec.
 #   4. Otherwise GWS_ACCOUNT must name one of GWS_PROFILES; unset, empty, or any
 #      other value is an error. There is no default identity.
 #   5. GWS_<PROFILE>_SEND_OAUTH set -> the caller fetched that profile's
@@ -147,6 +158,22 @@ first_arg() {
     done
 }
 
+# First non-flag argument AFTER the `auth` subcommand itself, so `gws auth
+# login` and `gws --json auth login` both resolve to `login` regardless of
+# where flags land.
+auth_subcommand() {
+    local arg found_auth=0
+    for arg in "$@"; do
+        [[ "$arg" == -* ]] && continue
+        if [[ "$found_auth" -eq 0 ]]; then
+            found_auth=1
+            continue
+        fi
+        printf '%s\n' "$arg"
+        return 0
+    done
+}
+
 profiles_list() {
     local IFS=' '
     printf '%s' "${GWS_PROFILES[*]}"
@@ -229,6 +256,29 @@ materialize_and_run() {
     fi
 }
 
+run_auth_login_headless() {
+    # `gws auth login` headless: give real gws a PTY via `script` (its scope
+    # picker needs one), tee the output so the user still sees it, and hand
+    # the first OAuth URL printed to `forward open`, which opens it on the
+    # laptop and arms the ephemeral callback port. `script -e` makes the
+    # exit status of `script` the exit status of the command it ran, which is
+    # how this function's caller gets real gws's exit status back out.
+    local real_gws="$1"
+    shift
+    if ! command -v script &>/dev/null; then
+        echo "gws shim: script not found on PATH; required to run 'gws auth login' headless through forward" >&2
+        exit 127
+    fi
+    set_credential_unset_args
+    local -a full_cmd=(env "${CREDENTIAL_UNSET_ARGS[@]}" "$real_gws" "$@")
+    local cmd
+    cmd="$(printf '%q ' "${full_cmd[@]}")"
+    script -qefc "$cmd" /dev/null \
+        | tee >(grep --line-buffered -oE 'https://accounts\.google\.com/o/oauth2/[^[:space:]]+' \
+            | head -n1 | xargs -r -d '\n' forward open >/dev/null 2>&1)
+    exit "${PIPESTATUS[0]}"
+}
+
 main() {
     local real_gws profile
     # split is load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
@@ -248,6 +298,11 @@ main() {
         if [[ -z "${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-}" ]]; then
             profile="$(require_profile)"
             export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${HOME}/.config/gws/${profile}"
+        fi
+        if [[ "$(auth_subcommand "$@")" == login ]] \
+            && [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${MIR_SOCKET:-}" ]] \
+            && command -v forward &>/dev/null; then
+            run_auth_login_headless "$real_gws" "$@"
         fi
         exec_real_gws "$real_gws" "$@"
     fi
