@@ -70,6 +70,9 @@ ro .config/secretsd
 ro .config/sops
 ro .config/ctx
 ro .config/mailbox
+# Dispatch and Envoy: envoy.json, which a box session without a profile of its
+# own reads, and a profile's own envoy.json may link to (envoy/AGENTS.md)
+ro .config/legion
 ro .npmrc
 ro .gitconfig
 ro .ssh/jj-signing
