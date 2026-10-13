@@ -18,9 +18,12 @@
 #   5. GWS_<PROFILE>_SEND_OAUTH set -> the caller fetched that profile's
 #      human-tier Gmail send credential (`secrets GWS_<PROFILE>_SEND_OAUTH --
 #      gws gmail +send …`, one YubiKey touch per grant); materialize it instead
-#      of the read credential. The shim never fetches a send key itself. A
-#      GWS_*_SEND_OAUTH named for any other profile is an error: run on the read
-#      credential instead, the send would fail as a Gmail scope error.
+#      of the read credential, against a private temporary store removed when
+#      gws exits. The read and send keys share one OAuth client, so in the
+#      profile's store gws would reuse the cached read-only access token (and a
+#      later read could pick up the send one). The shim never fetches a send key
+#      itself. A GWS_*_SEND_OAUTH named for any other profile is an error: run
+#      on the read credential instead, the send would fail as a scope error.
 #   6. GWS_<PROFILE>_READ_OAUTH set -> materialize it to a 0600 tempfile against
 #      that profile's store, run real gws, clean up. Otherwise re-exec under
 #      `secrets` to obtain it first.
@@ -167,21 +170,22 @@ require_profile() {
 }
 
 materialize_and_run() {
-    # Write an authorized_user JSON to a private tempfile, point real gws at it,
-    # and select the per-profile store so token caches never mix.
-    local real_gws="$1" profile="$2" creds_json="$3"
+    # Write an authorized_user JSON into a private temporary directory, point real
+    # gws at it, and run it against STORE, the gws config dir that holds its token
+    # cache. An empty STORE means a private store inside that directory, removed
+    # with the credential.
+    local real_gws="$1" store="$2" creds_json="$3"
     shift 3
-    local creds_file jq client_id client_secret
-    creds_file="$(mktemp)"
-    # Single-quoted so $creds_file expands when the trap FIRES, not when it is set
+    local tmp_dir creds_file jq client_id client_secret
+    tmp_dir="$(mktemp -d)"
+    # Single-quoted so $tmp_dir expands when the trap FIRES, not when it is set
     # (SC2064). Double quotes here would expand it immediately, to the empty string.
-    trap 'rm -f -- "$creds_file"' EXIT
-    if chmod 600 "$creds_file"; then
-        :
-    else
-        exit "$?"
+    trap 'rm -rf -- "$tmp_dir"' EXIT
+    creds_file="${tmp_dir}/credential.json"
+    if [[ -z "$store" ]]; then
+        store="${tmp_dir}/store"
     fi
-    if printf '%s' "$creds_json" > "$creds_file"; then
+    if (umask 077 && printf '%s' "$creds_json" > "$creds_file"); then
         :
     else
         exit "$?"
@@ -215,7 +219,7 @@ materialize_and_run() {
     set_credential_unset_args
     if GOOGLE_APPLICATION_CREDENTIALS="$creds_file" \
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$creds_file" \
-        GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${HOME}/.config/gws/${profile}" \
+        GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" \
         GOOGLE_WORKSPACE_CLI_CLIENT_ID="$client_id" \
         GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="$client_secret" \
         env "${CREDENTIAL_UNSET_ARGS[@]}" "$real_gws" "$@"; then
@@ -257,11 +261,11 @@ main() {
         fi
     done
     if [[ -n "${!send_key:-}" ]]; then
-        materialize_and_run "$real_gws" "$profile" "${!send_key}" "$@"
+        materialize_and_run "$real_gws" "" "${!send_key}" "$@"
     fi
     local key="GWS_${profile^^}_READ_OAUTH"
     if [[ -n "${!key:-}" ]]; then
-        materialize_and_run "$real_gws" "$profile" "${!key}" "$@"
+        materialize_and_run "$real_gws" "${HOME}/.config/gws/${profile}" "${!key}" "$@"
     fi
     reexec_under_secrets "$key" "$@"
 }
