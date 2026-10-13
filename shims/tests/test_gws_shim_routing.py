@@ -149,13 +149,61 @@ class GwsRouting(unittest.TestCase):
         self.assertIn(f"DIR={os.environ['HOME']}/.config/gws/theorem", result.stdout)
         self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
 
+    def test_send_credential_for_selected_profile_replaces_read(self):
+        # The caller wraps the call: `secrets GWS_PERSONAL_SEND_OAUTH -- gws gmail +send`.
+        # The shim must use that key, not fetch the read key, which cannot send.
+        write_stub(self.stub_dir, "secrets", "echo SHOULD-NOT-RUN >&2; exit 1")
+        for exit_code in (0, 42):
+            with self.subTest(exit_code=exit_code):
+                result = self.run_shim(
+                    {
+                        "GWS_ACCOUNT": "personal",
+                        "GWS_PERSONAL_SEND_OAUTH": self.default_credential("personal-send"),
+                        "GWS_PERSONAL_READ_OAUTH": self.default_credential("personal-read"),
+                        "STUB_EXIT": str(exit_code),
+                    },
+                    args=["gmail", "+send", "--to", "a@example.com"],
+                )
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                self.assertIn('"id":"personal-send"', result.stdout)
+                self.assertNotIn('"id":"personal-read"', result.stdout)
+                self.assertIn("CLIENT_ID=personal-send-client-id", result.stdout)
+                self.assertIn("MODE=600", result.stdout)
+                self.assertIn(f"DIR={os.environ['HOME']}/.config/gws/personal", result.stdout)
+                self.assertNotIn("LEAKED=", result.stdout)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+                creds_file = Path(
+                    next(line[5:] for line in result.stdout.splitlines() if line.startswith("FILE="))
+                )
+                self.assertFalse(creds_file.exists())
+
+    def test_send_credential_for_another_profile_is_loud(self):
+        # Without this, GWS_ACCOUNT=personal under `secrets GWS_WORK_SEND_OAUTH` would
+        # run on the personal read key and fail later as a Gmail scope error.
+        write_stub(self.stub_dir, "secrets", "echo SHOULD-NOT-RUN >&2; exit 1")
+        for key in ("GWS_TRAJECTORY_SEND_OAUTH", "GWS_WORK_SEND_OAUTH"):
+            with self.subTest(key=key):
+                result = self.run_shim(
+                    {
+                        "GWS_ACCOUNT": "personal",
+                        "GWS_PERSONAL_READ_OAUTH": self.default_credential("personal"),
+                        key: self.default_credential("other-send"),
+                    },
+                    args=["gmail", "+send", "--to", "a@example.com"],
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(key, result.stderr)
+                self.assertIn("GWS_PERSONAL_SEND_OAUTH", result.stderr)
+                self.assertNotIn("ARG=", result.stdout)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+
     def test_unrelated_oauth_variables_never_leak_into_real_gws(self):
         result = self.run_shim(
             {
                 "GWS_ACCOUNT": "personal",
                 "GWS_PERSONAL_READ_OAUTH": self.default_credential("personal"),
                 "GWS_WORK_ADMIN_OAUTH": '{"type":"authorized_user","id":"admin"}',
-                "GWS_FOO_SEND_OAUTH": '{"type":"authorized_user","id":"foo"}',
+                "GWS_FOO_MODIFY_OAUTH": '{"type":"authorized_user","id":"foo"}',
             }
         )
         self.assertEqual(result.returncode, 0, result.stderr)
