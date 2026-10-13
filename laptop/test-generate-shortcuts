@@ -167,6 +167,27 @@ if "${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" --conf "${empty_abse
     fail 'an empty absent-condition must fail'
 fi
 
+# An EDID serial query follows the physical monitor when a dock renumbers ports, and
+# emits the current connector because the compositor cannot match serials.
+serial_conf="${TMPDIR}/serial.conf"
+printf '%s\n' \
+    '1 LEFTSN Alt+1 Alt+Shift+1' \
+    '2 RIGHTSN Alt+2 Alt+Shift+2' > "${serial_conf}"
+twins="${TMPDIR}/twins.monitors"
+printf '%s\n' 'DP-8 DELL U3225QE serial=LEFTSN' 'DP-4 DELL U3225QE serial=RIGHTSN' > "${twins}"
+twins_swapped="${TMPDIR}/twins-swapped.monitors"
+printf '%s\n' 'DP-8 DELL U3225QE serial=RIGHTSN' 'DP-4 DELL U3225QE serial=LEFTSN' > "${twins_swapped}"
+twins_output="$("${GENERATOR}" --check --monitors "${twins}" --conf "${serial_conf}")"
+grep -Fq 'key: "1", description: Some("WS1 — DP-8 (1)")): WorkspaceOnOutput("DP-8", 1),' <<< "${twins_output}" \
+    || fail 'serial query must resolve to the connector carrying that serial'
+grep -Fq 'key: "2", description: Some("WS2 — DP-4 (1)")): WorkspaceOnOutput("DP-4", 1),' <<< "${twins_output}" \
+    || fail 'serial query must tell identical-model monitors apart'
+swapped_output="$("${GENERATOR}" --check --monitors "${twins_swapped}" --conf "${serial_conf}")"
+grep -Fq 'key: "1", description: Some("WS1 — DP-4 (1)")): WorkspaceOnOutput("DP-4", 1),' <<< "${swapped_output}" \
+    || fail 'serial query must follow the monitor to its renumbered connector'
+grep -Fq 'key: "2", description: Some("WS2 — DP-8 (1)")): WorkspaceOnOutput("DP-8", 1),' <<< "${swapped_output}" \
+    || fail 'serial query must follow the other twin to its renumbered connector'
+
 portable_output="${TMPDIR}/portable-custom"
 "${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" > "${portable_output}"
 [[ "$(grep -c '): WorkspaceOnOutput(' "${portable_output}")" -eq 15 ]] \
