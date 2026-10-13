@@ -26,15 +26,19 @@
 #      the plain exec.
 #   4. Otherwise GWS_ACCOUNT must name one of GWS_PROFILES; unset, empty, or any
 #      other value is an error. There is no default identity.
-#   5. GWS_<PROFILE>_SEND_OAUTH set -> the caller fetched that profile's
-#      human-tier Gmail send credential (`secrets GWS_<PROFILE>_SEND_OAUTH --
-#      gws gmail +send …`, one YubiKey touch per grant); materialize it instead
-#      of the read credential, against a private temporary store removed when
-#      gws exits. The read and send keys share one OAuth client, so in the
-#      profile's store gws would reuse the cached read-only access token (and a
-#      later read could pick up the send one). The shim never fetches a send key
-#      itself. A GWS_*_SEND_OAUTH named for any other profile is an error: run
-#      on the read credential instead, the send would fail as a scope error.
+#   5. GWS_<PROFILE>_MODIFY_OAUTH or GWS_<PROFILE>_SEND_OAUTH set -> the caller
+#      fetched one of that profile's human-tier Gmail credentials (`secrets
+#      GWS_<PROFILE>_SEND_OAUTH -- gws gmail +send …`, one YubiKey touch per
+#      grant): MODIFY carries gmail.modify (labels, archive, drafts), SEND a
+#      send scope plus gmail.readonly (`+send`, `+reply`). Materialize it
+#      instead of the read credential, against a private temporary store removed
+#      when gws exits: a profile's keys can share one OAuth client, and then in
+#      the profile's store gws would reuse the cached read-only access token (and
+#      a later read could pick up this one). The shim never fetches a human-tier
+#      key itself. Both of a profile's keys at once, or a GWS_*_MODIFY_OAUTH /
+#      GWS_*_SEND_OAUTH named for any other profile, is an error: the call would
+#      otherwise run on a credential the caller did not mean and fail as a scope
+#      error, or worse, succeed.
 #   6. GWS_<PROFILE>_READ_OAUTH set -> materialize it to a 0600 tempfile against
 #      that profile's store, run real gws, clean up. Otherwise re-exec under
 #      `secrets` to obtain it first.
@@ -308,15 +312,24 @@ main() {
     fi
 
     profile="$(require_profile)"
-    local send_key="GWS_${profile^^}_SEND_OAUTH" name
+    local modify_key="GWS_${profile^^}_MODIFY_OAUTH" send_key="GWS_${profile^^}_SEND_OAUTH" name
+    local -a human_keys=()
     for name in $(compgen -v); do
-        if [[ "$name" == GWS_*_SEND_OAUTH && "$name" != "$send_key" && -n "${!name:-}" ]]; then
-            echo "gws shim: ${name} is set but GWS_ACCOUNT=${profile} sends with ${send_key}; set GWS_ACCOUNT to the profile ${name} belongs to, or fetch ${send_key}" >&2
+        [[ "$name" == GWS_*_MODIFY_OAUTH || "$name" == GWS_*_SEND_OAUTH ]] || continue
+        [[ -n "${!name:-}" ]] || continue
+        if [[ "$name" != "$modify_key" && "$name" != "$send_key" ]]; then
+            echo "gws shim: ${name} is set but GWS_ACCOUNT=${profile} uses ${modify_key} or ${send_key}; set GWS_ACCOUNT to the profile ${name} belongs to, or fetch that profile's key" >&2
             exit 1
         fi
+        human_keys+=("$name")
     done
-    if [[ -n "${!send_key:-}" ]]; then
-        materialize_and_run "$real_gws" "" "${!send_key}" "$@"
+    if (( ${#human_keys[@]} > 1 )); then
+        echo "gws shim: both ${modify_key} and ${send_key} are set; fetch only the one this call needs" >&2
+        exit 1
+    fi
+    if (( ${#human_keys[@]} == 1 )); then
+        local human_key="${human_keys[0]}"
+        materialize_and_run "$real_gws" "" "${!human_key}" "$@"
     fi
     local key="GWS_${profile^^}_READ_OAUTH"
     if [[ -n "${!key:-}" ]]; then

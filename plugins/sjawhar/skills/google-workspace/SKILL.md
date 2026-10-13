@@ -1,6 +1,6 @@
 ---
 name: google-workspace
-description: Use when reading, searching, uploading, downloading, sharing, or organizing files on Google Drive; reading or editing Google Docs/Sheets/Slides; reading Calendar; across Sami's personal, theorem, and trajectory Google profiles. Also covers creating/suspending Workspace users and Google Group membership via GWS_WORK_ADMIN_OAUTH (trajectory only), and sending a Gmail message as a profile with `gws gmail +send` under that profile's YubiKey-gated send key. Triggers on "google drive", "gdrive", "workspace", Gmail/Drive/Docs URLs (drive.google.com, docs.google.com), file IDs, or requests to find, list, export, share, or manage cloud documents, spreadsheets, and slides. Other mail work (triage, threaded replies, drafts, attachments) goes through the `mailbox` CLI, which can also send.
+description: Use when reading, searching, uploading, downloading, sharing, or organizing files on Google Drive; reading or editing Google Docs/Sheets/Slides; reading Calendar; across Sami's personal, theorem, and trajectory Google profiles. Also covers creating/suspending Workspace users and Google Group membership via GWS_WORK_ADMIN_OAUTH (trajectory only), and Gmail writes as a profile (`gws gmail +send`, `+reply`, labels, drafts) under that profile's YubiKey-gated modify or send key. Triggers on "google drive", "gdrive", "workspace", Gmail/Drive/Docs URLs (drive.google.com, docs.google.com), file IDs, or requests to find, list, export, share, or manage cloud documents, spreadsheets, and slides. Mail triage (inbox, archive, labels, threaded replies, drafts, attachments) goes through the `mailbox` CLI, whose accounts are the same three profiles on the same keys.
 ---
 
 # Google Workspace (gws)
@@ -54,16 +54,27 @@ with a caller-set `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`. There is no default identit
 | `theorem` | sami@theorem.dev | `GWS_THEOREM_READ_OAUTH` (OAuth client: the Internal Desktop client "gws CLI" in Theorem's `theorem-gws-cli` project) | `~/.config/gws/theorem` |
 | `trajectory` | sami@trajectorylabs.net | `GWS_TRAJECTORY_READ_OAUTH` | `~/.config/gws/trajectory` |
 
-All three keys are secretsd agent-tier and need no YubiKey touch. Despite the `READ` in the key
-names, the grants are read-write for Drive, Docs, Sheets, Slides, and Calendar, and read-only for
-Gmail (`gmail.readonly`). Sending mail needs the profile's separate human-tier send key (table
-below). Other mail work (triage, threaded replies, drafts, attachments) goes through the
-`mailbox` CLI, which can also send.
+All three read keys are secretsd agent-tier and need no YubiKey touch. Despite the `READ` in the
+key names, the grants are read-write for Drive, Docs, Sheets, Slides, and Calendar, and read-only
+for Gmail (`gmail.readonly`). Changing or sending mail needs one of the profile's human-tier Gmail
+keys (table below). Mail triage goes through the `mailbox` CLI: its accounts are `personal`
+(default), `theorem` and `trajectory`, on these same keys (`~/.dotfiles/mailbox.toml`).
 
 | Task | Credential | Tier | How |
 |------|-----------|------|-----|
 | Read/search Drive, Docs, Sheets, Slides, Calendar, or Gmail as a given profile | `GWS_<PROFILE>_READ_OAUTH` | agent | Run `GWS_ACCOUNT=<profile> gws …`; the shim obtains the key when needed. |
-| Send a Gmail message as a given profile | `GWS_<PROFILE>_SEND_OAUTH` | human | `secrets GWS_PERSONAL_SEND_OAUTH -- env GWS_ACCOUNT=personal gws gmail +send --to … --subject … --body …`, one YubiKey touch per grant. The shim never fetches a send key; it uses the one the caller fetched in place of the read key, against a private temporary store deleted when gws exits. The read and send keys share one OAuth client, so in the profile's store gws would hand back its cached read-only access token and Gmail would refuse the send with `insufficient authentication scopes`. A send key named for a different profile than `GWS_ACCOUNT` is an error for the same reason. Only `GWS_PERSONAL_SEND_OAUTH` exists. Trajectory's send credential is stored as `GWS_WORK_SEND_OAUTH` (mailbox's `work` account reads it), which the shim rejects; `GWS_ACCOUNT=trajectory` sends once a copy exists as `GWS_TRAJECTORY_SEND_OAUTH`. |
+| Change Gmail as a given profile: labels, archive, drafts, `gws gmail +reply --draft` | `GWS_<PROFILE>_MODIFY_OAUTH` (`gmail.modify`) | human | `secrets GWS_THEOREM_MODIFY_OAUTH -- env GWS_ACCOUNT=theorem gws gmail …`, one YubiKey touch per grant. |
+| Send a Gmail message as a given profile: `gws gmail +send`, `+reply` | `GWS_<PROFILE>_SEND_OAUTH` (a send scope plus `gmail.readonly`, so `+reply` can read the original) | human | `secrets GWS_PERSONAL_SEND_OAUTH -- env GWS_ACCOUNT=personal gws gmail +send --to … --subject … --body …`, one YubiKey touch per grant. |
+
+Every profile has both human-tier keys, in secretsd's dotfiles source. The shim never fetches one;
+it uses the key the caller fetched in place of the read key, against a private temporary store
+deleted when gws exits. A profile's keys can share one OAuth client, and then in the profile's
+store gws would hand back its cached read-only access token and Gmail would refuse the call with
+`insufficient authentication scopes`. A modify or send key named for a different profile than
+`GWS_ACCOUNT`, or both of a profile's keys at once, is an error: fetch exactly the one the call needs.
+
+| Admin task | Credential | Tier | How |
+|------|-----------|------|-----|
 | Create/suspend Workspace users or manage Google Group membership (trajectory Workspace only) | `GWS_WORK_ADMIN_OAUTH` | human | **Not through `gws`.** `gws` 0.22.5 has no Admin SDK Directory alias (only `admin-reports`), and its documented `<api>:<version>` form for unlisted APIs is broken in this build: `gws admin:directory_v1 …` returns `validationError: Unknown service 'admin'` before auth is attempted (verified 2026-09-12, no credential involved). Use the credential directly under its one-touch wrapper: `secrets GWS_WORK_ADMIN_OAUTH -- <script>` where the script exchanges the authorized-user JSON (`client_id`, `client_secret`, `refresh_token`) for an access token at `https://oauth2.googleapis.com/token` (`grant_type=refresh_token`) and calls `https://admin.googleapis.com/admin/directory/v1/…` with the bearer token. Never print the token or the JSON. Verified end to end (2026-09-13, 2sv-exempt cleanup): `GET /groups?customer=my_customer&maxResults=200` (find a group by email), `GET /groups/<groupKey>/members`, `GET /users/<email>?fields=primaryEmail,isEnrolledIn2Sv,isEnforcedIn2Sv,suspended,lastLoginTime`, the org-wide 2SV sweep `GET /users?customer=my_customer&query=isEnrolledIn2Sv%3Dfalse&maxResults=200`, and the group-membership REMOVE `DELETE /groups/<groupKey>/members/<memberEmail>` (returns 204, empty body). Gotcha: a members list read immediately after a DELETE can be stale for ~20 s — the 204 is the truth; re-read after a pause before concluding a removal failed. Also verified (2026-09-14, a Slack-seat rename): membership-ADD `POST /groups/<groupKey>/members` with body `{"email": "<user>", "role": "MEMBER"}` (200, response `status: ACTIVE`); password reset `PUT /users/<key>` with `{"password": "<value>", "changePasswordAtNextLogin": false}` (200; generate the value in the script and never print it); `POST /users/<key>/signOut` (204, empty body; invalidates every session). Gotcha: a user in a 2SV-enforced OU who is not enrolled cannot sign in at all (`Your sign-in settings don't meet your organization's 2-Step Verification policy`); the sanctioned grace path is temporary membership in the hand-staffed `2sv-exempt@` group — `isEnforcedIn2Sv` on the user flips to false after ~20 min of propagation (observed 23:32Z add → 23:53Z effective), and removing the membership re-enforces through propagation too, not immediately as this row once said: `isEnforcedIn2Sv` still read false about 30 s after the membership `DELETE` returned 204 and read true within about 4 minutes (2026-09-30: 204 at ~00:02:15Z, false at 00:02:46Z, true at 00:06:19Z; one later read, not a polling loop). The 204 is the truth about membership; re-read `isEnforcedIn2Sv` after a pause before concluding enforcement is back. Do a machine-mailbox sign-in only under that window, then remove the membership, rotate the password to an unrecorded value and `signOut`; neither the password reset nor `signOut` revokes an OAuth grant whose scopes include no Gmail scope (a third-party sign-in grant, Taiga's, scoped only `openid`/`userinfo.email`/`userinfo.profile`, survived a reset plus `signOut` on 2026-09-30, verified by a token refresh and an authenticated API call before and after). Create and suspend writes (`POST /users`, `PUT /users/<key>` with `{"suspended": true}`) remain unexercised — the first session to run them records the exact calls here. The bundle is consented by `admin-sami@` (Sami's admin identity) since 2026-09-17, 8 scopes including `admin.directory.userschema.readonly`; a bundle minted by `sami@` has no admin authority. |
 
 ### Select a profile
@@ -125,8 +136,26 @@ Preset `GOOGLE_WORKSPACE_CLI_TOKEN` (a raw access token) or `GOOGLE_WORKSPACE_CL
      | sops set --value-stdin secrets.env '["GWS_<PROFILE>_READ_OAUTH"]'
    ```
 
-4. Delete `~/.config/gws/<profile>/credentials.enc` and `client_secret.json`; the shim reads only
-   the secretsd copy.
+4. Mint the two human-tier Gmail keys on the same client, each as its own consent into a
+   throwaway store, and store each with `secrets edit-human` (stdin, never argv). With more than
+   one secretsd source configured, point `SECRETSD_CONFIG` at a config naming only the clone as
+   `[source.dotfiles]`, so the file lands in the clone:
+
+   ```bash
+   # The client env vars from step 2, a throwaway store, and one scope set per key:
+   #   MODIFY: https://www.googleapis.com/auth/gmail.modify
+   #   SEND:   https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/gmail.readonly
+   store="$(mktemp -d)"
+   GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" gws auth login --scopes "$SCOPES"
+   GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" gws auth export --unmasked | jq -c . \
+     | secrets edit-human "GWS_<PROFILE>_${KIND}_OAUTH" --source dotfiles
+   rm -rf "$store"
+   ```
+
+   Commit the `secrets.human.d/` files and add an `[accounts.<profile>]` table to `mailbox.toml`
+   on the same three keys.
+5. Delete `~/.config/gws/<profile>/credentials.enc` and `client_secret.json`; the shim reads only
+   the secretsd copies.
 
 To undo a login into the wrong store, delete that store's files. Do not revoke the grant at
 Google: Google may revoke every token issued under the same grant (RFC 7009 permits it), which
