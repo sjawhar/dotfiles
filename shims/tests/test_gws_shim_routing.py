@@ -151,7 +151,10 @@ class GwsRouting(unittest.TestCase):
 
     def test_send_credential_for_selected_profile_replaces_read(self):
         # The caller wraps the call: `secrets GWS_PERSONAL_SEND_OAUTH -- gws gmail +send`.
-        # The shim must use that key, not fetch the read key, which cannot send.
+        # The shim must use that key, not fetch the read key, which cannot send, and must
+        # not run it against the profile's store: gws caches access tokens there, and the
+        # read and send keys share an OAuth client, so gws would reuse the cached
+        # read-only token and Gmail would refuse the send.
         write_stub(self.stub_dir, "secrets", "echo SHOULD-NOT-RUN >&2; exit 1")
         for exit_code in (0, 42):
             with self.subTest(exit_code=exit_code):
@@ -169,13 +172,15 @@ class GwsRouting(unittest.TestCase):
                 self.assertNotIn('"id":"personal-read"', result.stdout)
                 self.assertIn("CLIENT_ID=personal-send-client-id", result.stdout)
                 self.assertIn("MODE=600", result.stdout)
-                self.assertIn(f"DIR={os.environ['HOME']}/.config/gws/personal", result.stdout)
                 self.assertNotIn("LEAKED=", result.stdout)
                 self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
-                creds_file = Path(
-                    next(line[5:] for line in result.stdout.splitlines() if line.startswith("FILE="))
+                fields = dict(
+                    line.split("=", 1) for line in result.stdout.splitlines() if line[:5] in ("FILE=", "DIR=/")
                 )
-                self.assertFalse(creds_file.exists())
+                store = Path(fields["DIR"])
+                self.assertFalse(store.is_relative_to(Path(os.environ["HOME"]) / ".config" / "gws"))
+                self.assertFalse(store.exists())
+                self.assertFalse(Path(fields["FILE"]).exists())
 
     def test_send_credential_for_another_profile_is_loud(self):
         # Without this, GWS_ACCOUNT=personal under `secrets GWS_WORK_SEND_OAUTH` would
