@@ -53,6 +53,9 @@
 // overlay write publishes the clean overlay-free base. Overlay files land in
 // ~/.cache/omp/jj/ and are never cleaned up here: jj tolerates a missing
 // path in JJ_CONFIG, and cache semantics make the directory safe to purge.
+// session_start awaits the jj call below, so it is bounded: a jj that never
+// answers (a PATH wrapper that loops) degrades to no trailer instead of
+// holding the session past omp's 30 s extension-handler deadline.
 import { execFile } from "node:child_process";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -66,6 +69,8 @@ const TOP_LEVEL_TRANSCRIPT = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d-]+Z_(${UUID}
 // so either implementation can recognize and strip the other's stale overlays.
 const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
 const OVERLAY_DIR = path.join(homedir(), ".cache", "omp", "jj");
+// `jj config path --user` reads no repository and answers in milliseconds.
+const JJ_CONFIG_PATH_TIMEOUT_MS = 10_000;
 
 function withoutOverlays(chain: string): string {
 	return chain
@@ -83,17 +88,25 @@ function withoutOverlays(chain: string): string {
 const inheritedJjConfig = process.env.JJ_CONFIG ? withoutOverlays(process.env.JJ_CONFIG) : "";
 let basePromise: Promise<string | undefined> | undefined;
 
+export async function userConfigChain(
+	timeoutMs = JJ_CONFIG_PATH_TIMEOUT_MS,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<string | undefined> {
+	try {
+		const { stdout } = await promisify(execFile)("jj", ["config", "path", "--user"], {
+			env,
+			timeout: timeoutMs,
+			killSignal: "SIGKILL",
+		});
+		const paths = stdout.split("\n").filter(Boolean);
+		return paths.length > 0 ? paths.join(":") : undefined;
+	} catch {
+		return undefined; // no jj on this machine, or none that answers — OMP_SESSION_ID still exported
+	}
+}
+
 function jjConfigBase(): Promise<string | undefined> {
-	basePromise ??= (async () => {
-		if (inheritedJjConfig) return inheritedJjConfig;
-		try {
-			const { stdout } = await promisify(execFile)("jj", ["config", "path", "--user"]);
-			const paths = stdout.split("\n").filter(Boolean);
-			return paths.length > 0 ? paths.join(":") : undefined;
-		} catch {
-			return undefined; // no jj on this machine — OMP_SESSION_ID still exported
-		}
-	})();
+	basePromise ??= inheritedJjConfig ? Promise.resolve(inheritedJjConfig) : userConfigChain();
 	return basePromise;
 }
 
