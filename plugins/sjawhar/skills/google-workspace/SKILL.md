@@ -63,8 +63,8 @@ keys (table below). Mail triage goes through the `mailbox` CLI: its accounts are
 | Task | Credential | Tier | How |
 |------|-----------|------|-----|
 | Read/search Drive, Docs, Sheets, Slides, Calendar, or Gmail as a given profile | `GWS_<PROFILE>_READ_OAUTH` | agent | Run `GWS_ACCOUNT=<profile> gws …`; the shim obtains the key when needed. |
-| Change Gmail as a given profile: labels, archive, drafts, `gws gmail +reply --draft` | `GWS_<PROFILE>_MODIFY_OAUTH` (`gmail.modify`) | human | `secrets GWS_THEOREM_MODIFY_OAUTH -- env GWS_ACCOUNT=theorem gws gmail …`, one YubiKey touch per grant. |
-| Send a Gmail message as a given profile: `gws gmail +send`, `+reply` | `GWS_<PROFILE>_SEND_OAUTH` (a send scope plus `gmail.readonly`, so `+reply` can read the original) | human | `secrets GWS_PERSONAL_SEND_OAUTH -- env GWS_ACCOUNT=personal gws gmail +send --to … --subject … --body …`, one YubiKey touch per grant. |
+| Change Gmail as a given profile: labels, archive, drafts, `gws gmail +reply`, `+forward` | `GWS_<PROFILE>_MODIFY_OAUTH` (`gmail.modify`, which reads the original and can send) | human | `secrets GWS_THEOREM_MODIFY_OAUTH -- env GWS_ACCOUNT=theorem gws gmail +reply --message-id … --body …`, one YubiKey touch per grant. |
+| Send a new Gmail message as a given profile: `gws gmail +send` | `GWS_<PROFILE>_SEND_OAUTH` (`gmail.send` alone: it cannot read mail, so `+reply` under it fails with `insufficient authentication scopes`) | human | `secrets GWS_PERSONAL_SEND_OAUTH -- env GWS_ACCOUNT=personal gws gmail +send --to … --subject … --body …`, one YubiKey touch per grant. |
 
 Every profile has both human-tier keys, in secretsd's dotfiles source. The shim never fetches one;
 it uses the key the caller fetched in place of the read key, against a private temporary store
@@ -136,21 +136,29 @@ Preset `GOOGLE_WORKSPACE_CLI_TOKEN` (a raw access token) or `GOOGLE_WORKSPACE_CL
      | sops set --value-stdin secrets.env '["GWS_<PROFILE>_READ_OAUTH"]'
    ```
 
-4. Mint the two human-tier Gmail keys on the same client, each as its own consent into a
-   throwaway store, and store each with `secrets edit-human` (stdin, never argv). With more than
-   one secretsd source configured, point `SECRETSD_CONFIG` at a config naming only the clone as
-   `[source.dotfiles]`, so the file lands in the clone:
+4. Mint the two human-tier Gmail keys on the same client, each as its own consent, and store each
+   with `secrets edit-human` (stdin, never argv). With more than one secretsd source configured,
+   point `SECRETSD_CONFIG` at a config naming only the clone as `[source.dotfiles]`, so the file
+   lands in the clone. The send key must carry `gmail.send` and nothing else, because mailbox
+   warns about a send credential with any other scope, and `gws auth login` always adds `openid`
+   and the userinfo scopes; `scripts/google-oauth-login` asks for exactly the scopes given:
 
    ```bash
-   # The client env vars from step 2, a throwaway store, and one scope set per key:
-   #   MODIFY: https://www.googleapis.com/auth/gmail.modify
-   #   SEND:   https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/gmail.readonly
+   # MODIFY, through gws (the client env vars from step 2, a throwaway store):
    store="$(mktemp -d)"
-   GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" gws auth login --scopes "$SCOPES"
+   GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" gws auth login --scopes https://www.googleapis.com/auth/gmail.modify
    GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$store" gws auth export --unmasked | jq -c . \
-     | secrets edit-human "GWS_<PROFILE>_${KIND}_OAUTH" --source dotfiles
+     | secrets edit-human GWS_<PROFILE>_MODIFY_OAUTH --source dotfiles
    rm -rf "$store"
+
+   # SEND, gmail.send alone, on the same client as the read key:
+   secrets GWS_<PROFILE>_READ_OAUTH -- google-oauth-login --client-env GWS_<PROFILE>_READ_OAUTH \
+       --scope https://www.googleapis.com/auth/gmail.send --login-hint <email> \
+     | secrets edit-human GWS_<PROFILE>_SEND_OAUTH --source dotfiles
    ```
+
+   A `gmail.send` key cannot read the account, so prove its identity by sending one message to
+   the profile's own address and finding it in that account's Sent folder with the read key.
 
    Commit the `secrets.human.d/` files and add an `[accounts.<profile>]` table to `mailbox.toml`
    on the same three keys.
