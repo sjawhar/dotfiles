@@ -51,7 +51,7 @@ with a caller-set `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`. There is no default identit
 | Profile | Account | Credential | Store |
 |---------|---------|-----------|-------|
 | `personal` | sami.n.jawhar@gmail.com | `GWS_PERSONAL_READ_OAUTH` | `~/.config/gws/personal` |
-| `theorem` | Sami's Theorem Google account | `GWS_THEOREM_READ_OAUTH` (not provisioned yet: waits on Theorem's OAuth client, so `GWS_ACCOUNT=theorem` fails with `secret not found`) | `~/.config/gws/theorem` |
+| `theorem` | sami@theorem.dev | `GWS_THEOREM_READ_OAUTH` (OAuth client: the Internal Desktop client "gws CLI" in Theorem's `theorem-gws-cli` project) | `~/.config/gws/theorem` |
 | `trajectory` | sami@trajectorylabs.net | `GWS_TRAJECTORY_READ_OAUTH` | `~/.config/gws/trajectory` |
 
 All three keys are secretsd agent-tier and need no YubiKey touch. Despite the `READ` in the key
