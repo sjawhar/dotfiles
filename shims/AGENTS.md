@@ -37,7 +37,13 @@ pass-through wrapper that hands the call straight back to the shim. A shim that 
 real binary takes the first match past its own PATH entry, never the first from the top, and
 a pass-through wrapper hands the next binary the PATH tail past its own entry, so nothing
 below it can find the wrapper again. `shims/gh` still searches from the top, which is safe
-only while nothing puts a gh wrapper above it.
+only while nothing puts a gh wrapper above it. `shims/jj` also searches from the top, and hands
+the jj it finds the whole PATH, because jj's own `git` calls must still reach `shims/git`: the
+first jj it finds is usually mise's shim, which hands the call back to the first jj on PATH
+whenever mise has no jj version for the directory (a relocated `XDG_CONFIG_HOME` hides mise's
+global config). So `DOTFILES_JJ_SHIM` names every jj it has handed the call to in that pid, and
+a re-entry in the same pid skips each one (and every path to the same file), taking the next jj
+or failing with exit 127 instead of looping.
 
 ## How `shims/omp` resolves omp
 
