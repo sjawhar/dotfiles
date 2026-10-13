@@ -104,7 +104,8 @@ export BROWSER="${DOTFILES_DIR}/shims/xdg-open"
 
 
 # Claude Code — state lives in ${DOTFILES_DIR}/.claude/; `cld --profile NAME` uses ${DOTFILES_DIR}/.claude-profiles/NAME.
-export CLAUDE_CONFIG_DIR="${DOTFILES_DIR}/.claude"
+# An inherited value is kept: Claude Code's Bash tool sources this file, and under `cld --profile NAME` its shells keep the profile's directory.
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-${DOTFILES_DIR}/.claude}"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export ANTHROPIC_1M_CONTEXT=true
 
