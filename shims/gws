@@ -29,8 +29,9 @@
 #   5. GWS_<PROFILE>_MODIFY_OAUTH or GWS_<PROFILE>_SEND_OAUTH set -> the caller
 #      fetched one of that profile's human-tier Gmail credentials (`secrets
 #      GWS_<PROFILE>_SEND_OAUTH -- gws gmail +send …`, one YubiKey touch per
-#      grant): MODIFY carries gmail.modify (labels, archive, drafts), SEND a
-#      send scope plus gmail.readonly (`+send`, `+reply`). Materialize it
+#      grant): MODIFY carries gmail.modify (labels, archive, drafts, `+reply`,
+#      `+forward`, which read the original), SEND gmail.send alone (`+send`,
+#      and mailbox's sends: mailbox warns about any other scope). Materialize it
 #      instead of the read credential, against a private temporary store removed
 #      when gws exits: a profile's keys can share one OAuth client, and then in
 #      the profile's store gws would reuse the cached read-only access token (and
