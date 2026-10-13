@@ -1,29 +1,32 @@
-default_account = "work"
+default_account = "personal"
 
-# mailbox <= v0.3.0 scrubbed GWS_*_OAUTH by hardcoded pattern and these names explicitly
-# (F-H2: every previously-pattern-covered variable must be enumerated here).
+# The gws shim's profiles, one account each. Reads use the profile's agent-tier key;
+# write (gmail.modify) and send keys are human tier, one YubiKey touch per grant.
+# Every key comes from secretsd's dotfiles source.
 scrub_env = ["SECRETSD_SESSION_TOKEN_FILE"]
 scrub_env_patterns = ["GWS_*_OAUTH"]
 
-[accounts.work]
-# <= v0.3.0: work reads on EC2 via the keyless broker.
-read_credential_cmd  = ["google-user-token", "--scopes", "gmail.readonly"]
-# <= v0.3.0: write unlock via secrets-wrapped __mint (human tier, YubiKey).
-write_credential_cmd = ["secrets", "GWS_WORK_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_WORK_MODIFY_OAUTH"]
-write_label          = "YubiKey touch (secretsd)"
-# >= v1.1.0: send unlock via secrets-wrapped __mint (human tier, YubiKey).
-# Send unlock works from ANY surface; every use costs a hardware-key touch via
-# the broker.
-send_credential_cmd  = ["secrets", "GWS_WORK_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_WORK_SEND_OAUTH"]
-send_label           = "YubiKey touch (secretsd)"
-credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
-
 [accounts.personal]
-# <= v0.3.0: personal reads re-exec'd under secrets (agent tier, no touch).
 read_credential_cmd  = ["secrets", "GWS_PERSONAL_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_READ_OAUTH"]
 write_credential_cmd = ["secrets", "GWS_PERSONAL_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_MODIFY_OAUTH"]
 write_label          = "YubiKey touch (secretsd)"
 send_credential_cmd  = ["secrets", "GWS_PERSONAL_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_SEND_OAUTH"]
+send_label           = "YubiKey touch (secretsd)"
+credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
+
+[accounts.theorem]
+read_credential_cmd  = ["secrets", "GWS_THEOREM_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_READ_OAUTH"]
+write_credential_cmd = ["secrets", "GWS_THEOREM_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_MODIFY_OAUTH"]
+write_label          = "YubiKey touch (secretsd)"
+send_credential_cmd  = ["secrets", "GWS_THEOREM_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_SEND_OAUTH"]
+send_label           = "YubiKey touch (secretsd)"
+credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
+
+[accounts.trajectory]
+read_credential_cmd  = ["secrets", "GWS_TRAJECTORY_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_READ_OAUTH"]
+write_credential_cmd = ["secrets", "GWS_TRAJECTORY_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_MODIFY_OAUTH"]
+write_label          = "YubiKey touch (secretsd)"
+send_credential_cmd  = ["secrets", "GWS_TRAJECTORY_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_SEND_OAUTH"]
 send_label           = "YubiKey touch (secretsd)"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
