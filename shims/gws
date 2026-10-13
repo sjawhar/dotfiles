@@ -15,7 +15,13 @@
 #      profile's store.
 #   4. Otherwise GWS_ACCOUNT must name one of GWS_PROFILES; unset, empty, or any
 #      other value is an error. There is no default identity.
-#   5. GWS_<PROFILE>_READ_OAUTH set -> materialize it to a 0600 tempfile against
+#   5. GWS_<PROFILE>_SEND_OAUTH set -> the caller fetched that profile's
+#      human-tier Gmail send credential (`secrets GWS_<PROFILE>_SEND_OAUTH --
+#      gws gmail +send …`, one YubiKey touch per grant); materialize it instead
+#      of the read credential. The shim never fetches a send key itself. A
+#      GWS_*_SEND_OAUTH named for any other profile is an error: run on the read
+#      credential instead, the send would fail as a Gmail scope error.
+#   6. GWS_<PROFILE>_READ_OAUTH set -> materialize it to a 0600 tempfile against
 #      that profile's store, run real gws, clean up. Otherwise re-exec under
 #      `secrets` to obtain it first.
 #
@@ -243,6 +249,16 @@ main() {
     fi
 
     profile="$(require_profile)"
+    local send_key="GWS_${profile^^}_SEND_OAUTH" name
+    for name in $(compgen -v); do
+        if [[ "$name" == GWS_*_SEND_OAUTH && "$name" != "$send_key" && -n "${!name:-}" ]]; then
+            echo "gws shim: ${name} is set but GWS_ACCOUNT=${profile} sends with ${send_key}; set GWS_ACCOUNT to the profile ${name} belongs to, or fetch ${send_key}" >&2
+            exit 1
+        fi
+    done
+    if [[ -n "${!send_key:-}" ]]; then
+        materialize_and_run "$real_gws" "$profile" "${!send_key}" "$@"
+    fi
     local key="GWS_${profile^^}_READ_OAUTH"
     if [[ -n "${!key:-}" ]]; then
         materialize_and_run "$real_gws" "$profile" "${!key}" "$@"
