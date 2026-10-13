@@ -1,13 +1,27 @@
 #!/bin/bash
 # gcloud wrapper: select a named gcloud configuration via GCLOUD_ACCOUNT,
 # instead of typing CLOUDSDK_ACTIVE_CONFIG_NAME=<name> per command or mutating
-# global state with `gcloud config configurations activate`.
+# global state with `gcloud config configurations activate`, and route
+# `gcloud auth`/`gcloud init` through `forward` on a headless machine instead
+# of the paste-a-code flow.
 #
 # Resolution:
-#   - GCLOUD_ACCOUNT unset/empty -> exec real gcloud untouched. gcloud is used
-#     by every session and agent on this machine, so this path must be
-#     trivially, obviously byte-identical to no shim existing at all: no env
-#     manipulation, no validation, no output.
+#   - First non-flag argument is `auth` or `init`, DISPLAY, WAYLAND_DISPLAY
+#     and MIR_SOCKET are all unset, and `forward` resolves on PATH -> gcloud
+#     refuses to launch ANY browser on Linux without one of those display
+#     variables set (check_browser._DISPLAY_VARIABLES), even with $BROWSER
+#     pointing somewhere valid, and falls into the paste-the-URL,
+#     paste-back-a-code flow headless. Satisfy the check with a fake display
+#     scoped to gcloud alone, and point BROWSER straight at `forward open` —
+#     NOT the xdg-open shim, whose display branch would see the fake value
+#     and exec the real xdg-open on a machine with no browser. This applies
+#     in both the GCLOUD_ACCOUNT-unset and GCLOUD_ACCOUNT-set paths below;
+#     every other invocation is untouched.
+#   - GCLOUD_ACCOUNT unset/empty -> exec real gcloud untouched (aside from the
+#     auth/init headless case above). gcloud is used by every session and
+#     agent on this machine, so this path must be trivially, obviously
+#     byte-identical to no shim existing at all: no env manipulation, no
+#     validation, no output.
 #   - GCLOUD_ACCOUNT set -> validate that config_<name> exists as a file under
 #     ${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations. That is a
 #     filesystem check, not `gcloud config configurations list`, which would
@@ -21,6 +35,26 @@
 # Doctrine matches shims/gws: fail LOUD where an identity is supposed to exist,
 # never fall through to a different one.
 set -euo pipefail
+
+# First non-flag argument, matching gcloud's own grammar: `gcloud [--flags]
+# auth login` parses the first non-flag token as the command group.
+first_arg() {
+    local arg
+    for arg in "$@"; do
+        [[ "$arg" == -* ]] && continue
+        printf '%s\n' "$arg"
+        return 0
+    done
+}
+
+needs_forward_browser() {
+    case "$(first_arg "$@")" in
+        auth | init) ;;
+        *) return 1 ;;
+    esac
+    [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${MIR_SOCKET:-}" ]] || return 1
+    command -v forward &>/dev/null
+}
 
 find_real_gcloud() {
     local self candidate
@@ -49,6 +83,9 @@ main() {
 
     local account="${GCLOUD_ACCOUNT:-}"
     if [[ -z "$account" ]]; then
+        if needs_forward_browser "$@"; then
+            exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "$@"
+        fi
         exec "$real_gcloud" "$@"
     fi
 
@@ -84,6 +121,9 @@ main() {
     fi
 
     export CLOUDSDK_ACTIVE_CONFIG_NAME="$account"
+    if needs_forward_browser "$@"; then
+        exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "$@"
+    fi
     exec "$real_gcloud" "$@"
 }
 

@@ -228,42 +228,6 @@ if command -v bat &>/dev/null; then
 fi
 
 # ------------------------------------------------------------------------------
-# Auth CLIs that won't open a browser headless — route them through forward
-# ------------------------------------------------------------------------------
-
-# gws prints its OAuth URL instead of opening a browser: the login flow in
-# github.com/googleworkspace/cli has no opener at all (PR #888 adds one
-# upstream), and it ignores $BROWSER. Sniff the URL out of the output and
-# hand it to `forward open`, which arms the ephemeral callback port and opens
-# the page on the laptop. `script` gives gws a real PTY so its interactive
-# behavior (scope picker) is unchanged. Drop this once upstream opens the URL
-# itself.
-gws() {
-    if [ "${1:-}" = "auth" ] && [ "${2:-}" = "login" ] && command -v forward &>/dev/null; then
-        script -qefc "command gws $(printf '%q ' "$@")" /dev/null \
-            | tee >(grep --line-buffered -oE 'https://accounts\.google\.com/o/oauth2/[^[:space:]]+' \
-                | head -n1 | xargs -r -d '\n' forward open >/dev/null 2>&1)
-    else
-        command gws "$@"
-    fi
-}
-
-# gcloud refuses to launch ANY browser on Linux unless DISPLAY/WAYLAND_DISPLAY/
-# MIR_SOCKET is set (check_browser._DISPLAY_VARIABLES), even with $BROWSER
-# pointing somewhere valid — headless it falls into the paste-the-URL,
-# paste-back-a-code flow. Satisfy the check with a fake display scoped to
-# gcloud alone, and point BROWSER straight at `forward open` — NOT the
-# xdg-open shim, whose display branch would see the fake value and exec the
-# real xdg-open on a machine with no browser.
-gcloud() {
-    if command -v forward &>/dev/null && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
-        DISPLAY=:0 BROWSER="forward open %s" command gcloud "$@"
-    else
-        command gcloud "$@"
-    fi
-}
-
-# ------------------------------------------------------------------------------
 # Python development (UV-based)
 # ------------------------------------------------------------------------------
 

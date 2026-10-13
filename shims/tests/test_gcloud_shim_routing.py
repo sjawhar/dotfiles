@@ -34,6 +34,8 @@ class GcloudRouting(unittest.TestCase):
             self.stub_dir,
             "gcloud",
             'echo "CONFIG=${CLOUDSDK_ACTIVE_CONFIG_NAME:-<unset>}"\n'
+            'echo "DISPLAY=${DISPLAY:-<unset>}"\n'
+            'echo "BROWSER=${BROWSER:-<unset>}"\n'
             'printf "ARG=%s\\n" "$@"',
         )
         # Fake $HOME so the default configurations path
@@ -141,6 +143,42 @@ class GcloudRouting(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(self.stub_dir / "gcloud"))
+
+    def test_headless_auth_login_sets_display_and_browser(self):
+        for extra_env in ({}, {"GCLOUD_ACCOUNT": "theorem"}):
+            with self.subTest(extra_env=extra_env):
+                write_stub(self.stub_dir, "forward", "exit 0")
+                result = self.run_shim(extra_env, args=["auth", "login"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("DISPLAY=:0", result.stdout)
+                self.assertIn("BROWSER=forward open %s", result.stdout)
+
+    def test_headless_init_sets_display_and_browser(self):
+        write_stub(self.stub_dir, "forward", "exit 0")
+        result = self.run_shim(args=["init"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DISPLAY=:0", result.stdout)
+        self.assertIn("BROWSER=forward open %s", result.stdout)
+
+    def test_non_auth_command_is_untouched_even_with_forward(self):
+        write_stub(self.stub_dir, "forward", "exit 0")
+        result = self.run_shim(args=["config", "list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DISPLAY=<unset>", result.stdout)
+        self.assertIn("BROWSER=<unset>", result.stdout)
+
+    def test_existing_display_is_preserved(self):
+        write_stub(self.stub_dir, "forward", "exit 0")
+        result = self.run_shim({"DISPLAY": ":99"}, args=["auth", "login"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DISPLAY=:99", result.stdout)
+        self.assertIn("BROWSER=<unset>", result.stdout)
+
+    def test_without_forward_on_path_auth_login_is_untouched(self):
+        result = self.run_shim(args=["auth", "login"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DISPLAY=<unset>", result.stdout)
+        self.assertIn("BROWSER=<unset>", result.stdout)
 
 
 if __name__ == "__main__":
