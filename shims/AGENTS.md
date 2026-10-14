@@ -17,10 +17,10 @@ before handing the call to the real one.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration, and gives every
   `git commit` from an omp session its `Omp-Session` trailer.
-- **`omp`** applies mise's environment, the committed config overlay and a named profile's
-  links, then execs omp through `scripts/agent-session` (below). It sets no Envoy, Dispatch or
-  provider-key variable: the session's plugin reads its `envoy.json`, and keys come from the
-  profile's `models.yml` (`omp/AGENTS.md`).
+- **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights
+  and a named profile's links, then execs omp through `scripts/agent-session` (below). It sets no
+  Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys
+  come from the profile's `models.yml` (`omp/AGENTS.md`).
 - **`knives`** execs the pinned knives (`"github:sjawhar/knives"` in `mise.toml`, looked up with
   `mise which -C / knives --tool github:sjawhar/knives`), or a local build on PATH past it,
   never a knives in a mise dir: a session keeps the PATH it started with, and that PATH names
@@ -55,6 +55,7 @@ PATH can name the install dir of an older pin; mise swaps it for the current pin
 stale PATH still starts the pinned omp. Then `scripts/agent-session` takes the first `omp` on
 PATH that is not a wrapper: it skips mise's shims dir (`~/.mise/shims`), whose `omp` hands the
 call back to PATH when mise has no version for the directory, and every `omp` whose real path is
-in a `shims/` directory (this shim, another checkout's copy). A local build placed on PATH ahead
-of the mise install wins; with the pin not installed and no local build, the launch fails with
+in a `shims/` directory (this shim, another checkout's copy). A local build on PATH ahead of
+mise's shims dir wins: `mise env` keeps the entries ahead of that dir ahead of the tool dirs it
+adds, and puts its tool dirs first on a PATH without it; with the pin not installed and no local build, the launch fails with
 exit 127 instead of looping back into the shim.

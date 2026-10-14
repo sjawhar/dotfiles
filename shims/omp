@@ -2,7 +2,7 @@
 # omp wrapper: what an omp session needs on top of scripts/agent-session, then omp.
 #
 # omp is the first non-wrapper `omp` on PATH once mise has set PATH for this directory: the
-# pinned release ("github:sjawhar/oh-my-pi" in mise.toml), or a local build placed ahead of it.
+# pinned release ("github:sjawhar/oh-my-pi" in mise.toml), or a local build ahead of ~/.mise/shims.
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -18,6 +18,18 @@ eval "$mise_env"
 # memory. Two shared arenas hold it under ~30 MB (measured idle: 24 MB flat versus 104 MB growing
 # 45 MB/min). Bun and JavaScriptCore use mimalloc, so only the native side changes.
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+
+# Mnemopi ranks recall by veracity, and omp labels a deliberate `retain`/`learn` save `tool` and
+# a transcript slice `unknown`. Mnemopi's stock weights (tool 0.5, unknown 0.8) therefore rank
+# raw transcript above curated memory; these weight by provenance instead, and lean semantic over
+# keyword so a one-line fact is not out-matched on term overlap by a long transcript. omp has no
+# setting for them, only these variables; a caller's value wins. Their effect on what recall
+# injects is unmeasured.
+export MNEMOPI_TOOL_WEIGHT="${MNEMOPI_TOOL_WEIGHT:-1.0}"
+export MNEMOPI_UNKNOWN_WEIGHT="${MNEMOPI_UNKNOWN_WEIGHT:-0.5}"
+export MNEMOPI_VEC_WEIGHT="${MNEMOPI_VEC_WEIGHT:-0.6}"
+export MNEMOPI_FTS_WEIGHT="${MNEMOPI_FTS_WEIGHT:-0.2}"
+export MNEMOPI_IMPORTANCE_WEIGHT="${MNEMOPI_IMPORTANCE_WEIGHT:-0.2}"
 
 # omp/config.yml is every profile's settings of record, loaded as a PI_CONFIG_FILES overlay omp
 # never writes; runtime writes (/model picks, prompt answers) land in the profile's own
