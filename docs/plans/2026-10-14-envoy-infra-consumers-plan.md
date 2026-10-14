@@ -40,7 +40,7 @@ inputs. Theorem's `theorem-labs/agent-infra` `docs/specs/envoy.md` and its plan
   (Sami, 2026-10-14).
 - This repository is public. The Theorem hub's NATS URL is a stack secret, encrypted in
   `Pulumi.prod.yaml` like the stack's other secrets, and Theorem's tailnet name never appears in
-  plaintext. Where the laptop's seed lives is the decision at the end of Task 4b.2.
+  plaintext. The laptop's Theorem seed is a stack secret too (Sami, 2026-10-14; Task 4b.2).
 - Per-machine files (`~/.omp/profiles/theorem/agent/envoy.json`,
   `~/.dotfiles/.claude-profiles/theorem/envoy.json`) are written on the machine and never
   committed.
@@ -52,8 +52,7 @@ inputs. Theorem's `theorem-labs/agent-infra` `docs/specs/envoy.md` and its plan
 ## Rulings made while planning
 
 - **D1. The stack's state stays where the stack keeps it today: the S3 backend `envoy/Pulumi.yaml`
-  names.** That follows from one stack, as Sami decided, unless he chooses option B of Task 4b.2's
-  decision, which moves it.
+  names.** That follows from one stack, as Sami decided.
 - **D2. The Theorem listener is created with `waitForHealthy: false`.** The stack is applied from
   the devbox, which reaches the laptop's Docker over Trajectory's tailnet. While the laptop is on
   that tailnet, the Theorem hub's name does not resolve, and the listener exits on its first failed
@@ -91,7 +90,7 @@ and its sessions need Theorem's tailnet, and those belong to agent-infra's Task 
 | Slice | Outcome someone can try | Blocked on |
 | --- | --- | --- |
 | 2 | `pulumi preview --stack prod` shows only the three listener components as creates; after `pulumi up`, all three listeners are unchanged and delivering | Legion slice 1 built (Task 2.2) and released (Task 2.3) |
-| 4b | the `prod` stack runs a Theorem listener on the laptop's port 9021, and a Theorem-profile session reads its seed | 4b.1: none. 4b.2: slice 2 done; 4b.1 done (every option reads the seed through `envoy-nats-seed --gcp-secret`); agent-infra Tasks 4.3 (`natsUrl`) and 4.4 (the laptop's seed written); Sami's seed-location decision (end of Task 4b.2); under option A, Legion's `seedFile` input released; under option B, the stack's migration to the new backend and the devbox's credential for it. 4b.3: 4b.1 and 4b.2 |
+| 4b | the `prod` stack runs a Theorem listener on the laptop's port 9021, and a Theorem-profile session reads its seed | 4b.1: none. 4b.2: slice 2 done; 4b.1 done (the seed is read through `envoy-nats-seed --gcp-secret`); agent-infra Tasks 4.3 (`natsUrl`) and 4.4 (the laptop's seed written). 4b.3: 4b.1 and 4b.2 |
 
 ---
 
@@ -237,25 +236,14 @@ and its sessions need Theorem's tailnet, and those belong to agent-infra's Task 
 **Files:** Modify `envoy/index.ts`, `envoy/machines.ts`, `envoy/Pulumi.prod.yaml`,
 `envoy/AGENTS.md`, `envoy/README.md`
 
-- [ ] Under option A only, first move the plugin pin to the Legion release that adds `seedFile`,
-  as Task 2.3 moves it (attestation check, `pulumi plugin install`, `pulumi package add`), and run
-  Task 2.2's preview pass condition again: the three adopted listeners must still preview `same`
-  under the new plugin.
 - [ ] `MachineConfig` gains `extraListeners?: {name: string; port: number; containerName: string;
-  natsUrlKey: string; seedKey?: string; seedFile?: string}[]`, with exactly one of the last two,
-  as the decision below sets. Under A, `seedFile` is home-relative (`.local/state/envoy-theorem/seed`)
-  and `index.ts` builds the absolute path from the machine's `sshHost` user
-  (`/home/<user>/<seedFile>`), since Docker needs an absolute bind source and the dotfiles commit
-  no absolute path.
+  natsUrlKey: string; seedKey: string}[]`.
 - [ ] For each extra listener, `index.ts` creates
-  `new envoyInfra.host.Listener(extra.name, {machineId: machine.machineId, natsUrls: [cfg.requireSecret(extra.natsUrlKey)], image, port: extra.port, containerName: extra.containerName, <seed>, waitForHealthy: false}, {providers: [docker]})`
-  on that machine's existing docker provider (D2), where `<seed>` is `seed: cfg.requireSecret(extra.seedKey)`
-  under options B and C, and under option A `seedFile:` the absolute path built above from the
-  machine's `sshHost` user and `extra.seedFile`. No watchdog: Legion's R5
-  refuses one for a container other than `envoy-listener`.
+  `new envoyInfra.host.Listener(extra.name, {machineId: machine.machineId, natsUrls: [cfg.requireSecret(extra.natsUrlKey)], image, port: extra.port, containerName: extra.containerName, seed: cfg.requireSecret(extra.seedKey), waitForHealthy: false}, {providers: [docker]})`
+  on that machine's existing docker provider (D2). No watchdog: Legion's R5 refuses one for a
+  container other than `envoy-listener`.
 - [ ] Machine `sami` gets
-  `extraListeners: [{name: sami-theorem, port: 9021, containerName: envoy-listener-theorem, natsUrlKey: theoremNatsUrl, <seed field>}]`,
-  with `seedKey: theoremNatsSeed` (B, C) or `seedFile: .local/state/envoy-theorem/seed` (A).
+  `extraListeners: [{name: sami-theorem, port: 9021, containerName: envoy-listener-theorem, natsUrlKey: theoremNatsUrl, seedKey: theoremNatsSeed}]`.
 - [ ] The NATS URL is written by stdin from the laptop, which has the theorem.dev login, into the
   stack on the devbox, which has the passphrase:
   - It is first read on the laptop into a mode-0600 file under a scratch directory:
@@ -264,17 +252,10 @@ and its sessions need Theorem's tailnet, and those belong to agent-infra's Task 
     The step stops unless the command exited 0 and the file is non-empty.
   - Then `ssh <devbox> 'cd ~/.worktrees/dotfiles/envoy-infra/envoy && secrets PULUMI_CONFIG_PASSPHRASE -- pulumi config set --secret envoy:theoremNatsUrl --stack prod' < <dir>/url`,
     and the file is removed by its literal path. `pulumi config set` with no value reads stdin.
-  - The seed goes where the decision below puts it: under C, the same two steps with
+  - The seed, the same two steps with
     `envoy-nats-seed --gcp-secret envoy-nats-seed-sami --gcp-project theorem-agent-infra --gcloud-configuration theorem --value > <dir>/seed`
-    and `envoy:theoremNatsSeed`; under B, both values are set instead in a devbox agent session that
-    holds the human-tier grant, from files copied there with `scp` and removed by their literal
-    paths after, since a human-tier read refuses a plain `ssh` with a file on stdin. Under A, on the
-    laptop only, and nothing reaches the stack:
-    `install -d -m 0700 ~/.local/state/envoy-theorem`; fetch with the same `envoy-nats-seed … --value`
-    into a temporary file inside that directory; stop unless the command exited 0 and the file is
-    non-empty; `chmod 0444` it and `mv` it to `~/.local/state/envoy-theorem/seed`. A rotation is the
-    same steps followed by `docker restart envoy-listener-theorem`, since the listener reads its
-    seed only when it builds its connection (`internal/bus/nats.go:289,323` in Legion).
+    and `envoy:theoremNatsSeed`. A rotation is the same two steps and an apply: the container's
+    environment changes, so it is recreated with the new seed.
   - `envoy/AGENTS.md` records the commands.
 - [ ] Preview: the only non-`same` steps are the `sami-theorem` component and its image and
   container creates. If anything else shows, stop before `pulumi up` and report it to the
@@ -283,27 +264,18 @@ and its sessions need Theorem's tailnet, and those belong to agent-infra's Task 
   `unless-stopped`, that `envoy-listener`'s `Created` is unchanged, and that
   `docker logs envoy-listener-theorem 2>&1 | grep -c NATS_NKEY_SEED` prints `0`. The listener names
   that variable when the seed it is given is blank or not a user nkey seed
-  (`internal/bus/nkey.go:45-63`), and under A names `NATS_NKEY_SEED_FILE` when the file is
-  unreadable or blank (`:32-43`); a missing file fails the apply first, because a `bind` mount
-  refuses the container's create. So a `0` means a well-formed seed arrived.
+  (`internal/bus/nkey.go:45-63` in Legion), so a `0` means a well-formed seed arrived.
 - [ ] Commit `envoy: Theorem's listener on the laptop` and push. Its health is observed on Theorem's
   tailnet, in agent-infra's Task 4.5.
 
-**Decision for Sami: where the laptop's Theorem seed lives.** The seed is the laptop's NATS
-credential on Theorem's hub. It works only from a machine on Theorem's tailnet.
-
-| Option | Where the seed is | What reaches Trajectory's systems | What it costs |
-| --- | --- | --- | --- |
-| **A (recommended)** | a file on the laptop, `~/.local/state/envoy-theorem/seed`, mode 0444 inside a 0700 directory, so on the host only Sami's user reads it and the container's `envoy` user (`packages/envoy/docker/Dockerfile:96,121` in Legion) reads it through a read-only bind mount (checked live on the laptop's Docker 29.9.0); the listener reads it through `NATS_NKEY_SEED_FILE` | nothing of the seed in Trajectory's storage (state, repository, secretsd); the hub's URL stays a stack secret | Legion's `host:Listener` gains a `seedFile` input (a host path it bind-mounts read-only as a `bind` mount, which fails the container's create when the file is missing rather than creating a directory, and sets `NATS_NKEY_SEED_FILE`; refused together with `seed`, and with `watchdog`, whose recreate would come back without the mount), so a Legion release after 0.1.0 and the pin move above. The seed is plaintext on the laptop's disk (under LUKS), readable by Sami's user. It survives reboots; a rotation is the stop-on-failure write above and a restart of the listener. |
-| **B** | a stack secret, with the whole `prod` stack moved to a backend and secrets provider Trajectory's agents cannot read (Sami's own bucket and a human-tier passphrase) | the ciphertext, in the public `Pulumi.prod.yaml`; on the devbox, the new backend's credential; the human-tier passphrase, held by the session that runs an apply for the rest of that session after one touch; the decrypted seed, during each apply | a task to migrate the whole stack (export, import into the new backend, change of secrets provider, a no-diff preview there), Trajectory's three listeners included; the devbox needs a credential for the new backend; Sami's YubiKey touch on the first preview or apply in each devbox session; the transfers above run in a devbox agent session holding the grant, since a human-tier read refuses a plain `ssh` with a file on stdin; slice 2's C1 runs on the new backend |
-| **C** | a stack secret, as the stack keeps its other secrets | the ciphertext, in the public `Pulumi.prod.yaml` and in the state in Trajectory's S3 bucket; the agent-tier passphrase, which any agent session on the devbox (where Trajectory's agents run) or the laptop can read, decrypts it | nothing to build |
-
-Under every option, the devbox's Tailscale SSH login as `sami`, which the stack drives the laptop's
-Docker with, can read the seed on the laptop while a check is open: under A the file (by ssh or
-`docker exec`), under B and C the container's environment (by `docker inspect`).
-
-A keeps the seed out of Trajectory's storage without changing who can apply the stack; from the
-devbox it stays readable only through that SSH login, as under B and C.
+**Where the seed lives (Sami, 2026-10-14).** Sami ruled that the laptop's Theorem seed is a stack
+secret, as the stack keeps its other secrets. Its ciphertext therefore sits in the public
+`Pulumi.prod.yaml` and in the stack's state in Trajectory's S3 bucket, and the agent-tier
+passphrase, which any agent session on the devbox or the laptop can read, decrypts it. The devbox's
+Tailscale SSH login as `sami` can also read it from the running container (`docker inspect`) while
+a check is open. The options he weighed were a file on the laptop the listener mounts (which needed
+a `seedFile` input in Legion) and a move of the whole stack to a backend Trajectory's agents cannot
+read.
 
 ### Task 4b.3: the Theorem profiles' `envoy.json`
 
@@ -340,10 +312,10 @@ devbox it stays readable only through that SSH login, as under B and C.
 
 | Scenario | Slice | Class | Surface and transport | Identity and grant | Driver |
 | --- | --- | --- | --- | --- | --- |
-| C1. `prod` preview creates only the three `host:Listener` components | 2 | infrastructure | the real `prod` stack on its S3 backend (under option B, again on the new backend after the migration), run from the devbox with the branch plugin and then the released plugin | devbox instance role; the agent-tier passphrase (B, after the migration: the human-tier one) | Tasks 2.2, 2.3 |
+| C1. `prod` preview creates only the three `host:Listener` components | 2 | infrastructure | the real `prod` stack on its S3 backend, run from the devbox with the branch plugin and then the released plugin | devbox instance role; the agent-tier passphrase | Tasks 2.2, 2.3 |
 | C2. All three listeners unchanged and delivering after `pulumi up` | 2 | infrastructure | the three hosts over Tailscale SSH; an Envoy message from the laptop to the devbox | same | Task 2.3, against Task 2.1's baseline |
 | C3. The seed source reads Secret Manager, caches, and refreshes from its own source | 4b | infrastructure | real `gcloud` against `theorem-agent-infra` | Sami's theorem.dev login | Task 4b.1's tests and a live `--value` run |
-| C4. The Theorem listener is deployed beside the 9020 one, which stays unchanged | 4b | infrastructure | the `prod` stack applied from the devbox (under option B, from the new backend, with Sami's touch) | devbox role; the agent-tier passphrase (B: the human-tier one) | Task 4b.2 |
+| C4. The Theorem listener is deployed beside the 9020 one, which stays unchanged | 4b | infrastructure | the `prod` stack applied from the devbox | devbox role; the agent-tier passphrase | Task 4b.2 |
 | C5. The Theorem listener is healthy on 9021, and Theorem-profile omp and `cld` sessions message through the hub, invisible to the other organization's Envoy | 4b | infrastructure | real sessions on the laptop, on Theorem's tailnet | the laptop's NATS user | agent-infra Task 4.5 |
 
 ## Skill catalog
@@ -376,9 +348,8 @@ devbox it stays readable only through that SSH login, as under B and C.
 
 | Permission | Holder | Granted by | Enforced by | Test |
 | --- | --- | --- | --- | --- |
-| Read and write `prod` state | the devbox's instance role (under option B, the new backend's credential) | its IAM policy on the state bucket | AWS S3 | C1, C4 |
-| Decrypt `prod` secrets, the Theorem seed among them under options B and C | under A and C, any process that reads the agent-tier secrets on the devbox or the laptop; under B, a session holding the human-tier grant | secretsd agent tier (`PULUMI_CONFIG_PASSPHRASE`); under B, its human tier | the passphrase | C1, C4 |
-| Read the laptop's seed file (option A) | Sami's user on the laptop, and the Theorem listener's container through its read-only mount | the file's 0444 mode inside a 0700 directory Sami's user owns | the laptop's file permissions | C4, C5 |
+| Read and write `prod` state | the devbox's instance role | its IAM policy on the state bucket | AWS S3 | C1, C4 |
+| Decrypt `prod` secrets, the Theorem seed among them | any process that reads the agent-tier secrets on the devbox or the laptop | secretsd agent tier (`PULUMI_CONFIG_PASSPHRASE`) | the passphrase | C1, C4 |
 | Docker over SSH on `sami` (user `sami`) and `oryx` (user `agent`) | the devbox's SSH identity | Tailscale SSH policy | Tailscale | C1, C2, C4 |
 | Read the laptop's seed secret and agent-infra's `envoy` stack | sami@theorem.dev | ownership of `theorem-agent-infra`; agent-infra bootstrap's `operators` bindings (`roles/storage.objectAdmin` on the state bucket, `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key) | Secret Manager, GCS and Cloud KMS IAM | C3, C4 |
 | NATS access as the laptop | the laptop's nkey user | agent-infra's `hosts` config → `gcp:NatsHub` `users` | nats-server authorization | C5 |
