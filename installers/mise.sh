@@ -21,7 +21,6 @@ if command -v systemctl &>/dev/null && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
 fi
 
 ensure_command mise "curl -fsSL https://mise.run | MISE_INSTALL_PATH=\"${DOTFILES_DIR}/bin/mise\" sh"
-mise trust ~/.config/mise/config.toml || echo "MISE TRUST FAILED"
 
 if [ "$SKIP_MISE" = true ]; then
     echo "Skipping mise install (--skip-mise)"
