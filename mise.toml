@@ -112,6 +112,7 @@ depot = "2.102.7"
 go = "1.27.0"
 helm = "4.2.4"  # was "latest"
 kubectl = "1.36.4"  # was "latest"
+"github:nats-io/natscli" = "0.5.0"  # `nats`: inspects the Envoy NATS hubs from a shell (stream and account info); the Theorem hub's checks run it from the laptop
 node = "22.22.2"  # HOLD: 22 is LTS; 26 is non-LTS Current until Oct 2026 (ABI 147). Next deliberate upgrade target: 24 LTS
 opentofu = "1.12.6"
 shellcheck = "0.11.0"
@@ -127,6 +128,7 @@ sops = "3.13.3"
 sentry-cli = "3.6.2"
 k9s = "0.51.0"  # was "latest"
 gitleaks = "8.30.1"
+opam = { version = "2.5.1", asset_pattern = "opam-*-{gnu_arch}-{os}" }
 
 # Time tracker CLI, kept for reading past data (collection is retired). Its
 # release also publishes a tt-watcher asset, so [tool_alias] + a per-platform
@@ -183,7 +185,10 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # The release is mutable, so each asset's sha256 is pinned: a replaced asset fails to install.
 # From legion-envoy-v3.17.1 on the release also carries a build attestation (release-envoy-listener.yaml
 # on main), which mise verifies on install; check it by hand with
-# `gh attestation verify agent-secrets-amd64.tar.gz --repo sjawhar/legion`. The digests are the ones
+# `gh attestation verify agent-secrets-amd64.tar.gz --repo sjawhar/legion --cert-identity
+# https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main
+# --source-ref refs/heads/main --deny-self-hosted-runners` (`--repo` alone accepts an attestation
+# from any workflow run in the repository). The digests are the ones
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
