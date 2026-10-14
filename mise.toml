@@ -112,6 +112,7 @@ depot = "2.102.7"
 go = "1.27.0"
 helm = "4.2.4"  # was "latest"
 kubectl = "1.36.4"  # was "latest"
+"github:nats-io/natscli" = "0.5.0"  # `nats`: inspects the Envoy NATS hubs from a shell (stream and account info); the Theorem hub's checks run it from the laptop
 node = "22.22.2"  # HOLD: 22 is LTS; 26 is non-LTS Current until Oct 2026 (ABI 147). Next deliberate upgrade target: 24 LTS
 opentofu = "1.12.6"
 shellcheck = "0.11.0"

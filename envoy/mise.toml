@@ -1,0 +1,5 @@
+# The Pulumi CLI for this program. It is pinned here rather than in the root
+# mise.toml so it is the `pulumi` only in this directory: a global pin would put
+# it ahead of whatever the devbox's other deployments run.
+[tools]
+pulumi = "3.268.0"

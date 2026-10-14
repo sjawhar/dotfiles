@@ -41,7 +41,8 @@ other machine names `nats://envoy-nats:4222`. Such a machine needs no
 
 ## Prerequisites
 
-- [Pulumi CLI](https://www.pulumi.com/docs/install/)
+- The Pulumi CLI, which `envoy/mise.toml` pins for this directory only: run
+  `mise install` here
 - Node.js (Pulumi uses ts-node)
 - Docker on each target machine, with the SSH user in the `docker` group (the
   provider runs `docker` as that user, not via sudo)

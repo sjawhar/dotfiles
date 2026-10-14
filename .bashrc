@@ -34,6 +34,17 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # ------------------------------------------------------------------------------
 
 export MISE_DATA_DIR="${HOME}/.mise"
+# mise trusts its global config (this repo's mise.toml) and no other mise.toml,
+# and an untrusted one holding [settings] or [tool_alias] fails to load. A
+# clone's root mise.toml holds both, so without this every mise command in a
+# clone, envoy/ included, fails until a `mise trust` or `mise install` run there
+# trusts it. Trusting the two places this repo is checked out (this checkout,
+# and the git clones agents work in) loads every mise.toml in them from the
+# start. It is this variable, not mise.toml's trusted_config_paths, because a
+# clone reads that setting as a project config's and warns on every mise
+# command. omp's bash tool sets CI=true, under which mise trusts every file, so
+# an untrusted one fails only in a human's shell.
+export MISE_TRUSTED_CONFIG_PATHS="${DOTFILES_DIR}:${HOME}/.worktrees/dotfiles"
 
 if [ -x "${DOTFILES_DIR}/bin/mise" ]; then
     eval "$("${DOTFILES_DIR}/bin/mise" activate --shims "$DOTFILES_SHELL")"
