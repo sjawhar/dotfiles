@@ -77,6 +77,31 @@ Host oryx-tunnel
   ServerAliveCountMax 3
   RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
 
+# forward's channels for sami-leanperf (Azure, off the tailnet), held open by
+# forward-tunnel@sami-leanperf.service. Each port maps to the same port on the
+# far side's loopback: the laptop daemon's ports to the VM, the VM's to here.
+# Its own key, like oryx-tunnel's, so a locked 1Password never stalls a reconnect.
+Host sami-leanperf-tunnel
+  HostName 52.233.92.39
+  Port 443
+  User sami
+  IdentityFile ~/.ssh/sami-leanperf-tunnel
+  IdentitiesOnly yes
+  BatchMode yes
+  StrictHostKeyChecking accept-new
+  ControlMaster no
+  ControlPath none
+  ExitOnForwardFailure yes
+  ServerAliveInterval 15
+  ServerAliveCountMax 3
+  RemoteForward 127.0.0.1:12800 127.0.0.1:12800
+  RemoteForward 127.0.0.1:12803 127.0.0.1:12803
+  RemoteForward 127.0.0.1:12804 127.0.0.1:12804
+  RemoteForward 127.0.0.1:12806 127.0.0.1:12806
+  LocalForward 127.0.0.1:12801 127.0.0.1:12801
+  LocalForward 127.0.0.1:12802 127.0.0.1:12802
+  LocalForward 127.0.0.1:12805 127.0.0.1:12805
+
 Host ghost-wispr
   HostName ghost-wispr.tailb86685.ts.net
   User ghost-wispr

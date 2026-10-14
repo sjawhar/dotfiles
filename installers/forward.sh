@@ -69,8 +69,14 @@ if [ "${1:-}" = daemon ]; then
                 "${HOME}/.config/systemd/user/forward-daemon@${pair}.service.d"
         fi
         services+=("forward-daemon@${pair}")
+        # A pair on loopback is off the tailnet: an SSH tunnel carries its
+        # channels (forward-tunnel@.service, Host <pair>-tunnel in ssh config).
+        if grep -qE '^listen = "127\.' "$pair_config"; then
+            services+=("forward-tunnel@${pair}")
+        fi
     done
     ln -sfn "${DOTFILES_DIR}/forward/forward-daemon@.service" "${HOME}/.config/systemd/user/forward-daemon@.service"
+    ln -sfn "${DOTFILES_DIR}/forward/forward-tunnel@.service" "${HOME}/.config/systemd/user/forward-tunnel@.service"
 fi
 # The devbox side of such a pair still dials the laptop's default URL channel
 # port; its host redirects that to the pair's port (a system unit: iptables).

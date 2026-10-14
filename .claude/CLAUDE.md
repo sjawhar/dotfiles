@@ -1,6 +1,6 @@
 ## Version Control — git
 
-**Use plain git.** Work in a git clone of your own: every agent box's checkouts are git clones of their own, and outside a box you clone the repo yourself rather than edit a shared checkout or another session's workspace. Commit, branch and push with git; commit signing is configured in `.gitconfig`.
+**Use plain git.** Work in a git clone of your own: every agent box's checkouts are git clones of their own, and outside a box you clone the repo yourself rather than edit a shared checkout or another session's workspace. `~/.dotfiles` is the exception: edit it in place. Commit, branch and push with git; commit signing is configured in `.gitconfig`.
 
 jj applies only where a checkout is still a jj repository: the workspaces Legion's runtime manages, and the shared `~/.dotfiles` and `~/src/<repo>` checkouts until they are retired. There, the `using-jj` skill has the reference. Never run `jj git init` in a git clone: a box's clone fetches file contents on demand, and jj fails partway on the ones it lacks.
 
