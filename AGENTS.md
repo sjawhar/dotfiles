@@ -8,7 +8,7 @@ Personal development environment configuration. Targets Linux devcontainers/devp
 .bashrc              # Shell config — sourced by ~/.bashrc, has non-interactive + interactive sections
 .gitconfig           # Git config — symlinked to ~/.gitconfig
 .jjconfig.toml       # Shared jj config — loaded via JJ_CONFIG env var
-jj-allowed-signers   # Signing keys trusted for local verification (both identities, all machines)
+jj-allowed-signers   # Signing keys trusted for local verification (every identity, all machines)
 .tmux.conf           # Tmux config
 .claude/CLAUDE.md    # User-level agent instructions — symlinked to ~/.claude/CLAUDE.md
 starship.toml        # Starship prompt config
@@ -79,10 +79,8 @@ Shell integration works by prepending a source line to `~/.bashrc` that loads `.
 - **My own software installs from GitHub, pinned** — `omp/plugins/package.json` and `mise.toml` reference `github:sjawhar/...` at a tag or SHA. Installing from a local file path or checkout symlink is for prototyping only and never lands.
 - **Placement is fixed**: `shims/` for PATH-priority wrappers, `scripts/` for utilities, `installers/` for setup, `bin/` for standalone binaries (gitignored — nothing hand-written goes there), config dirs for config only. Read the sibling files in a directory before adding to it.
 - **Consolidate commits before pushing** — batch a session's related changes into one described commit per topic. Do not push per-step or per-file; a work session should land on main as 1-2 coherent commits, not a trail of fragments.
-- **`main` is shared by every live session; push only a fast-forward.** Edit dotfiles in a git clone of your own (`git clone https://github.com/sjawhar/dotfiles <dir>`), commit there, then `git fetch` and `git rebase origin/main` before `git push origin main`. git refuses a push that is not a fast-forward, and that refusal is the protection: it means another session pushed in between, so rebase again and push, never `--force`. Read `git status` before committing and leave out anything that is not yours. Where a checkout is still a jj repository (Legion's runtime workspaces), publishing and rebase proofs follow `using-jj` §4 and its publishing reference.
-  The one rewrite is the weekly squash: `scripts/dotfiles-squash` replaces the week's commits with one per topic and tags the old tip `pre-squash-<date>` on origin, and `scripts/dotfiles-sync --old <tag>` moves every machine's checkout onto it. A clone holding commits built on the old main moves them with `git rebase --onto origin/main pre-squash-<date>`; a plain rebase onto the new main replays the whole old week.
-- **Never edit in the shared `~/.dotfiles` working copy.** Every agent box runs `~/.dotfiles/scripts/*` straight from that checkout, so an uncommitted edit there is live on every box at once, half-edited files included, and a dirty `@` cannot be advanced to pick up anything pushed since. Work in a git clone of your own and push from there; if you must edit in place, commit and push within minutes and say so.
-  After your push, advance the shared checkout: `cd ~/.dotfiles && jj git fetch && jj new main@origin`, only when its `@` is empty. `jj git fetch` moves `main@origin` but leaves the files on disk unchanged, so until this runs every box still executes the old version.
+- **`main` is shared by every live session; push only a fast-forward.** Edit `~/.dotfiles` in place and commit there, then `git pull --rebase` before `git push origin main`. git refuses a push that is not a fast-forward, and that refusal is the protection: it means another session pushed in between, so rebase again and push, never `--force`. Read `git status` before committing and leave out anything that is not yours. Where a checkout is still a jj repository (Legion's runtime workspaces), publishing and rebase proofs follow `using-jj` §4 and its publishing reference.
+  The one rewrite is the weekly squash: `scripts/dotfiles-squash` replaces the week's commits with one per topic and tags the old tip `pre-squash-<date>` on origin, and `scripts/dotfiles-sync --old <tag>` moves every machine's checkout onto it. A checkout holding commits built on the old main moves them with `git rebase --onto origin/main pre-squash-<date>`; a plain rebase onto the new main replays the whole old week.
 
 ## Environment Facts
 
@@ -104,9 +102,14 @@ Both are plain versioned config, symlinked into place — no install step. The k
 
 Git needs configuring even though day-to-day work is all jj: agent worktrees under `~/.cache`, scripts, and throwaway clones commit with plain `git commit`, and those were the commits showing up unsigned.
 
-### Two identities
+### Three identities
 
-`sami@trajectorylabs.net` is the default for both tools. `sami@thecybermonk.com` is opt-in per repo, except sjawhar/legion, which uses it by rule: `.gitconfig` includes `cybermonk-identity.gitconfig` for every clone whose remote is sjawhar/legion, and `.jjconfig.toml` scopes it to Legion's jj checkouts by path, since jj has no remote condition. `jj-allowed-signers` lists both as principals on every key, so a commit verifies under either one.
+`sami@trajectorylabs.net` is the default for both tools. `sami@thecybermonk.com` and `sami@theorem.dev` are opt-in per repo, except where a rule applies them:
+
+- **sjawhar/legion** uses `sami@thecybermonk.com`. `.gitconfig` includes `cybermonk-identity.gitconfig` for every clone whose remote is sjawhar/legion, and `.jjconfig.toml` scopes it to Legion's jj checkouts by path, since jj has no remote condition.
+- **Every theorem-labs repository** uses `sami@theorem.dev`. `.gitconfig` includes `theorem-identity.gitconfig` for every clone whose remote is in the theorem-labs organization, and `.jjconfig.toml` scopes it to jj checkouts under `~/Code/personal/theorem`.
+
+`jj-allowed-signers` lists every identity as a principal on every key, so a commit verifies under any of them.
 
 Within a repo the two tools must **agree**. jj's `behavior = "own"` signs a commit only when its author email matches jj's configured `user.email`, and on mismatch it *drops* the signature when rewriting rather than preserving it. That is why the defaults are aligned rather than left to differ per tool: a git-authored commit under one identity would lose its signature the first time jj rewrote it under the other — which is what happens when an agent's commit gets rebased into a jj repo.
 
@@ -116,6 +119,7 @@ Within a repo the two tools must **agree**. jj's `behavior = "own"` signs a comm
 git-identity        # show the effective identity for both tools, flag a mismatch
 git-identity tl     # sami@trajectorylabs.net for this repo
 git-identity cm     # sami@thecybermonk.com for this repo
+git-identity th     # sami@theorem.dev for this repo
 ```
 
 ### Setting up a new machine
@@ -123,6 +127,6 @@ git-identity cm     # sami@thecybermonk.com for this repo
 Two manual steps, the same ones jj already needed:
 
 1. `ssh-keygen -t ed25519 -N "" -C "jj-signing-$(hostname -s)" -f ~/.ssh/jj-signing`
-2. Add the pubkey to `jj-allowed-signers` under both identities, then register it at <https://github.com/settings/ssh/new> as a **Signing Key** — the first is needed for local verification, the second for GitHub to show Verified.
+2. Add the pubkey to `jj-allowed-signers` under every identity, then register it at <https://github.com/settings/ssh/new> as a **Signing Key** — the first is needed for local verification, the second for GitHub to show Verified.
 
-Both emails also have to be *verified* on the GitHub account — an unverified committer email shows Unverified even with a good signature. GitHub vigilant mode makes any unsigned commit claiming these identities visibly Unverified, which is the intended tripwire.
+Every email also has to be *verified* on the GitHub account — an unverified committer email shows Unverified even with a good signature. GitHub vigilant mode makes any unsigned commit claiming these identities visibly Unverified, which is the intended tripwire.

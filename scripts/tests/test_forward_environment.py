@@ -144,10 +144,33 @@ class ForwardServeEnvironment(unittest.TestCase):
         self.assertIn("--user enable --now forward-daemon", enabled)
         self.assertIn("--user enable --now forward-daemon@oryx", enabled)
 
+    def test_daemon_role_tunnels_only_loopback_pairs(self) -> None:
+        """A pair listening on loopback is off the tailnet and needs its SSH tunnel; a tailnet pair must not get one."""
+        forward = self.dotfiles / "forward"
+        (forward / "config-daemon-oryx.toml").write_text('listen = "fd7a:115c:a1e0::e03b:5c61"\n', encoding="utf-8")
+        (forward / "config-daemon-vm.toml").write_text('listen = "127.0.0.1"\npeer = "127.0.0.1"\n', encoding="utf-8")
+        for unit in ("forward-daemon@.service", "forward-tunnel@.service"):
+            (forward / unit).write_text("test\n", encoding="utf-8")
+
+        install = self.install("daemon")
+
+        self.assertEqual(install.returncode, 0, install.stderr)
+        enabled = self.systemctl_log.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--user enable --now forward-tunnel@vm", enabled)
+        self.assertNotIn("--user enable --now forward-tunnel@oryx", enabled)
+        tunnel_unit = self.home / ".config" / "systemd" / "user" / "forward-tunnel@.service"
+        self.assertEqual(tunnel_unit.resolve(), (forward / "forward-tunnel@.service").resolve())
+
 
 def preview_host(address: str) -> str:
     """How a preview URL's host reaches the allowlist: IPv6 keeps its brackets."""
     return f"[{address}]" if ":" in address else address
+
+
+def preview_entries(pair: dict) -> set[str]:
+    """A pair's allow entries for its preview host: bare, or pinned to the preview port 12802."""
+    host = preview_host(pair["peer"])
+    return set(pair["allow"]) & {host, f"{host}:12802"}
 
 
 def load(name: str) -> dict:
@@ -177,14 +200,14 @@ class CommittedForwardPairs(unittest.TestCase):
     def test_laptop_daemons_share_one_url_policy(self) -> None:
         """Extra pairs copy config.toml's policy; only their own preview host differs."""
         default = load("config.toml")
-        shared = set(default["allow"]) - {preview_host(default["peer"])}
+        shared = set(default["allow"]) - preview_entries(default)
         for path in sorted(FORWARD.glob("config-daemon-*.toml")):
             with self.subTest(pair=path.name):
                 pair = load(path.name)
                 for key in ("mode", "opener", "clipboard"):
                     self.assertEqual(pair[key], default[key], key)
-                self.assertIn(preview_host(pair["peer"]), pair["allow"])
-                self.assertEqual(set(pair["allow"]) - {preview_host(pair["peer"])}, shared)
+                self.assertTrue(preview_entries(pair), f"{path.name} does not allow its own preview host")
+                self.assertEqual(set(pair["allow"]) - preview_entries(pair), shared)
 
 
 if __name__ == "__main__":

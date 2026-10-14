@@ -1,8 +1,8 @@
 #!/bin/bash
 # Set (or show) the commit identity for the current repo, for git and jj at once.
 #
-# Both identities sign with the same key and both are trusted in
-# jj-allowed-signers, so either one verifies. The catch is that they must AGREE
+# Every identity signs with the same key and every one is trusted in
+# jj-allowed-signers, so any of them verifies. The catch is that they must AGREE
 # within a repo: jj's signing.behavior = "own" only signs when a commit's author
 # email matches jj's configured user.email, and when it doesn't match it DROPS
 # the signature on rewrite rather than keeping it. A repo where git says
@@ -13,14 +13,17 @@
 #   git-identity                 show the effective identity for both tools
 #   git-identity tl|trajectory   use sami@trajectorylabs.net for this repo
 #   git-identity cm|cybermonk    use sami@thecybermonk.com for this repo
+#   git-identity th|theorem      use sami@theorem.dev for this repo
 #
-# sjawhar/legion needs neither: it uses sami@thecybermonk.com by rule in every
-# clone (.gitconfig matches its remote URL, .jjconfig.toml its jj checkouts' paths).
+# sjawhar/legion (sami@thecybermonk.com) and every theorem-labs repository
+# (sami@theorem.dev) need none of these: they get their identity by rule in every
+# clone (.gitconfig matches the remote URL, .jjconfig.toml the jj checkouts' paths).
 set -euo pipefail
 
 NAME="Sami Jawhar"
 TL_EMAIL="sami@trajectorylabs.net"
 CM_EMAIL="sami@thecybermonk.com"
+TH_EMAIL="sami@theorem.dev"
 
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "not a git repo" >&2; exit 1; }
 in_jj() { jj root >/dev/null 2>&1; }
@@ -32,7 +35,7 @@ show() {
     if in_jj; then
         j=$(jj config get user.email 2>/dev/null || echo "(unset)")
         echo "jj:  ${j}"
-        [ "$g" = "$j" ] || echo "MISMATCH — jj will drop signatures on rewrite. Run: git-identity tl|cm" >&2
+        [ "$g" = "$j" ] || echo "MISMATCH — jj will drop signatures on rewrite. Run: git-identity tl|cm|th" >&2
     else
         echo "jj:  (not a jj repo)"
     fi
@@ -42,12 +45,13 @@ case "${1-}" in
     "") show ;;
     tl | trajectory | trajectorylabs) EMAIL="$TL_EMAIL" ;;
     cm | cybermonk | thecybermonk) EMAIL="$CM_EMAIL" ;;
+    th | theorem) EMAIL="$TH_EMAIL" ;;
     -h | --help)
-        sed -n '2,18p' "$0" | sed 's/^# \?//'
+        sed -n '2,20p' "$0" | sed 's/^# \?//'
         exit 0
         ;;
     *)
-        echo "unknown identity: $1 (want tl or cm)" >&2
+        echo "unknown identity: $1 (want tl, cm or th)" >&2
         exit 1
         ;;
 esac
