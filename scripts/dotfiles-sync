@@ -8,10 +8,21 @@
 # A jj checkout keeps its working-copy change: it is rebased onto main, and the run fails on a
 # conflict instead of resolving it. Before fetching, the working copy's parent is pinned with
 # a bookmark, so the fetch cannot abandon it and roll the files on disk back to an older
-# ancestor while live sessions run them. A plain git checkout moves only when it is clean.
+# ancestor while live sessions run them. A plain git checkout moves only when it is clean and
+# holds no commit origin's main lacks, and it lands on its `main` branch, so a session can
+# commit there and `git pull --rebase`.
 set -euo pipefail
 
-MACHINES=(local sami@sami agent@oryx)
+# HOSTNAME=DESTINATION. The entry whose name is this machine's hostname syncs locally. The
+# tailnet machines go by user@MagicDNS name; the Azure VMs admit only the laptop's address and
+# go by its laptop/ssh-config aliases, so a run from elsewhere fails on them by name.
+MACHINES=(
+  sami=sami@sami
+  sami-agents=ubuntu@sami-agents
+  oryx=agent@oryx
+  sami-leanperf=leanperf
+  sami-rocqperf=rocqperf
+)
 
 sync_here() {
   local old="$1"
@@ -69,12 +80,17 @@ sync_here() {
       git status --short >&2
       return 1
     fi
-    if [ -n "$old" ] && [ -n "$(git rev-list HEAD ^"$old" ^origin/main)" ]; then
+    # Commits on HEAD or the main branch that origin's main (and, after a squash, the old
+    # history) lacks are this machine's own; moving main would drop them from the branch.
+    local own
+    own=$(git rev-list HEAD $(git rev-parse -q --verify refs/heads/main) ^origin/main ${old:+"^$old"})
+    if [ -n "$own" ]; then
       echo "LOCAL COMMITS on $(hostname); not moved:" >&2
-      git log --oneline HEAD ^"$old" ^origin/main >&2
+      git log --oneline --no-walk $own >&2
       return 1
     fi
-    git checkout -q --detach origin/main
+    git checkout -q -B main origin/main
+    git branch -q --set-upstream-to=origin/main main
     printf '%s on %s\n' "$(hostname)" "$(git rev-parse --short HEAD)"
   fi
 }
@@ -91,16 +107,25 @@ if [ "${1:-}" = --old ]; then
   [[ "$old" =~ ^[0-9a-f]{7,40}$ ]] || old=$(git -C ~/.dotfiles ls-remote origin "refs/tags/$old" | cut -f1)
   [ -n "$old" ] || { echo "--old: no such commit or tag on origin" >&2; exit 2; }
 fi
+dest_for() {
+  local m
+  for m in "${MACHINES[@]}"; do
+    if [ "${m%%=*}" = "$1" ]; then echo "${m#*=}"; return; fi
+  done
+  echo "$1"
+}
 hosts=("$@")
-[ ${#hosts[@]} -gt 0 ] || hosts=("${MACHINES[@]}")
+if [ ${#hosts[@]} -eq 0 ]; then
+  for m in "${MACHINES[@]}"; do hosts+=("${m%%=*}"); done
+fi
 
 status=0
 for h in "${hosts[@]}"; do
   echo "== $h"
-  if [ "$h" = local ]; then
+  if [ "$h" = local ] || [ "$h" = "$(hostname)" ]; then
     "$0" --here "$old" || status=1
   else
-    timeout 180 ssh -o BatchMode=yes -o ConnectTimeout=10 "$h" bash -s -- --here "$old" < "$0" || status=1
+    timeout 180 ssh -o BatchMode=yes -o ConnectTimeout=10 "$(dest_for "$h")" bash -s -- --here "$old" < "$0" || status=1
   fi
 done
 exit $status
