@@ -99,14 +99,19 @@ and its sessions need Theorem's tailnet, and those belong to agent-infra's Task 
 
 ### Task 2.0: pin the Pulumi CLI and natscli, and push
 
-- [ ] Add `pulumi = "3.268.0"` and `"github:nats-io/natscli" = "<x.y.z>"` (its latest release, as
-  an exact version) to `mise.toml`'s `[tools]`.
+- [ ] Add `pulumi = "3.268.0"` to a new `envoy/mise.toml`'s `[tools]`, so the pin applies only
+  where the program runs: a global pin would put mise's Pulumi ahead of whatever the devbox's
+  other deployments run today. Add `"github:nats-io/natscli" = "<x.y.z>"` (its latest release, as
+  an exact version) to the root `mise.toml`'s `[tools]`; no `nats` binary exists on the laptop.
+  Check that mise trusts `envoy/mise.toml` both in `~/.dotfiles` and in a clone under
+  `~/.worktrees/dotfiles/`, the way it trusts the root file.
 - [ ] Add `"sdks"` to `envoy/tsconfig.json`'s `exclude`.
 - [ ] Commit and push to `main` on its own.
 - [ ] Run `scripts/dotfiles-sync` on the devbox. With no host argument it syncs the devbox, the
   laptop and oryx (`dotfiles-sync:14`).
-- [ ] Run `mise install` on the laptop and on the devbox. On both, `pulumi version` prints
-  `v3.268.0` and `nats --version` answers.
+- [ ] Run `mise install` on the laptop and on the devbox. On both, `pulumi version` run in
+  `envoy/` prints `v3.268.0`, `pulumi` outside `envoy/` resolves as it did before, and
+  `nats --version` answers.
 
 ### Task 2.1: read the stack's inventory
 
@@ -250,7 +255,8 @@ and its sessions need Theorem's tailnet, and those belong to agent-infra's Task 
 - [ ] The NATS URL is written by stdin from the laptop, which has the theorem.dev login, into the
   stack on the devbox, which has the passphrase:
   - It is first read on the laptop into a mode-0600 file under a scratch directory:
-    `GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud --configuration theorem auth print-access-token) pulumi stack output natsUrl --stack prod --cwd <agent-infra clone>/envoy > <dir>/url`.
+    `cd <agent-infra clone>/envoy && GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud --configuration theorem auth print-access-token) pulumi stack output natsUrl --stack prod > <dir>/url`
+    (in that directory, so mise resolves agent-infra's own Pulumi pin).
     The step stops unless the command exited 0 and the file is non-empty.
   - Then `ssh <devbox> 'cd ~/.worktrees/dotfiles/envoy-infra/envoy && secrets PULUMI_CONFIG_PASSPHRASE -- pulumi config set --secret envoy:theoremNatsUrl --stack prod' < <dir>/url`,
     and the file is removed by its literal path. `pulumi config set` with no value reads stdin.
