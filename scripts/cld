@@ -84,25 +84,9 @@ export "GIT_CONFIG_KEY_${_idx}"=include.path
 export "GIT_CONFIG_VALUE_${_idx}"="${DOTFILES_DIR:-$HOME/.dotfiles}/gh-app-routes.gitconfig"
 unset _idx
 
-# Envoy NATS defaults to the tailnet host; a box that runs its own single-node
-# envoy overrides it in the gitignored envoy/env.local (shims/omp sources the
-# same file).
-if [ -r "${DOTFILES_DIR:-$HOME/.dotfiles}/envoy/env.local" ]; then
-    # shellcheck disable=SC1091  # machine-local, absent in the repo
-    . "${DOTFILES_DIR:-$HOME/.dotfiles}/envoy/env.local"
-fi
-export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
-
-# Envoy NATS credential for the claude-envoy bridge: the `omp-session` nkey
-# seed's per-boot 0600 file, when there is one (scripts/envoy-nats-seed). A seed
-# the caller already gave wins. Mirrors shims/omp.
-if [[ -z "${NATS_NKEY_SEED_FILE:-}" && -z "${NATS_NKEY_SEED:-}" ]]; then
-    _seed_file="$("${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/envoy-nats-seed")" || _seed_file=""
-    if [[ -n "$_seed_file" ]]; then
-        export NATS_NKEY_SEED_FILE="$_seed_file"
-    fi
-    unset _seed_file
-fi
+# No Envoy or Dispatch variable is set here: the claude-envoy bridge reads the
+# profile's envoy.json (envoy/AGENTS.md), and a variable exported here would
+# override that file for every profile.
 
 # --- dotfiles shims must lead PATH ---
 # The gh App routing above only works when `gh` resolves to shims/gh. The

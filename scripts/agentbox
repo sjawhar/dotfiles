@@ -70,7 +70,10 @@ EMBED_NAME=omp-embed
 EMBED_PORT="${OMP_EMBED_PORT:-8087}"
 IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
 # The Envoy HTTP API listens on the host's loopback (envoy-listener, :9020);
-# a box reaches it through the same kind of forwarder as the metadata service.
+# a box reaches it through the same kind of forwarder as the metadata service,
+# and the box's entrypoint relays its own 127.0.0.1:$ENVOY_PORT to that
+# forwarder, so the URL in the envoy.json a host session reads serves a box
+# session too.
 ENVOY_PORT="${AGENTBOX_ENVOY_PORT:-9020}"
 UID_="$(id -u)"
 RUN_BASE="/run/user/$UID_/agentbox"
@@ -421,9 +424,10 @@ mount_args() {
     # Created here so a box started before the serve still sees it later.
     mkdir -p -m 700 "/run/user/$UID_/forward"
     a+=(-v "/run/user/$UID_/forward:/run/user/$UID_/forward")
-    # The host's cached NATS nkey seed (scripts/envoy-nats-seed), as a directory
-    # so the rename a refresh does reaches a running box, and so an in-box
-    # fetch, when the host had none at launch, lands in the host's cache.
+    # The host's cached NATS nkey seed (scripts/envoy-nats-seed), which an envoy.json
+    # `natsSeed: "!$HOME/.dotfiles/scripts/envoy-nats-seed --value"` command run in a box
+    # reads. A directory, so the rename a refresh does reaches a running box,
+    # and so an in-box fetch, when the host had none, lands in the host's cache.
     mkdir -p -m 700 "/run/user/$UID_/envoy"
     a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
     # The inner dockerd's image store: anonymous, dies with the box.
@@ -444,17 +448,6 @@ session_env() {
     # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
     # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
-    e+=(-e "ENVOY_NATS_URL=${ENVOY_NATS_URL:-nats://envoy-nats:4222}")
-    e+=(-e "ENVOY_URL=http://$NETWORK_GATEWAY:$ENVOY_PORT")
-    # The omp-session NATS nkey seed, fetched on the host into the directory
-    # mount_args binds at the same path, so a launch never waits on AWS from
-    # inside a box. Nothing when there is none: the box's omp connects without a
-    # credential. Mirrors shims/omp.
-    local seed_file
-    seed_file="$(XDG_RUNTIME_DIR="/run/user/$UID_" "$DOTFILES_DIR/scripts/envoy-nats-seed")" || seed_file=""
-    if [[ -n "$seed_file" ]]; then
-        e+=(-e "NATS_NKEY_SEED_FILE=$seed_file")
-    fi
     # ECR: the box's instance role is already allowed, but docker only asks for it when the
     # config names a helper for that registry host — without the entry it sends nothing at all
     # ("no basic auth credentials", measured 2026-09-26). Pass the host's OWN ecr-login hosts so a
@@ -463,6 +456,11 @@ session_env() {
     # Also the inner dockerd's firewall rule (agentbox/entrypoint.sh).
     e+=(-e "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://$NETWORK_GATEWAY:$IMDS_PORT")
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
+    # The host's Envoy forwarder, which the entrypoint relays the box's own
+    # 127.0.0.1:$ENVOY_PORT to. No Envoy or Dispatch variable: a box session reads
+    # its profile's envoy.json as a host session does (agentbox/mounts has the
+    # neutral file's directory), and a variable here would override that file.
+    e+=(-e "AGENTBOX_ENVOY_FORWARDER=$NETWORK_GATEWAY:$ENVOY_PORT")
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
     e+=(-e "AGENTBOX_BOX=$box" -e AGENTBOX_USER=ubuntu)
     # The box's broker identity: its key dir (mount_args) and the broker. The launcher enrolls
@@ -956,12 +954,39 @@ fi
 arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
 t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
 timeout 40 google-user-token >/dev/null 2>&1 && ok "google-user-token mints" || fail "google-user-token"
-timeout 5 bash -c "exec 3<>/dev/tcp/envoy-nats/4222" 2>/dev/null && ok "envoy nats reachable" || fail "envoy nats unreachable"
-c="$(curl -s -m 3 -o /dev/null -w %{http_code} "$ENVOY_URL/" 2>/dev/null)"; [ "$c" != 000 ] && ok "envoy api reachable ($ENVOY_URL → $c)" || fail "envoy api $ENVOY_URL unreachable"
+# Envoy and Dispatch as a box session reads them: the envoy.json `envoy config-path` names (for a
+# session without a profile of its own, the neutral file of the host, agentbox/mounts), the switch
+# of each section, the listener through `envoy` itself (the URL in the file or the default, through
+# the entrypoint relay, with the bearer in the file), the NATS by name, the seed command.
+if ! ej="$("$DOTFILES_DIR/scripts/envoy" config-path 2>&1)"; then
+    fail "$ej: box sessions have no Dispatch or Envoy"
+elif [ ! -r "$ej" ]; then
+    fail "envoy.json $ej unreadable: box sessions have no Dispatch or Envoy"
+else
+    case "$(jq -r ".dispatch.enabled" "$ej" 2>/dev/null)" in
+        true) ok "dispatch section enabled in $ej ($(jq -r ".dispatch.serverUrl // \"http://localhost:8766\"" "$ej"))";;
+        false) echo "note box: $ej turns Dispatch off";;
+        *) echo "note box: $ej has no dispatch section with enabled true: box sessions have no Dispatch";;
+    esac
+    case "$(jq -r ".envoy.enabled" "$ej" 2>/dev/null)" in
+        true)
+            out="$(ENVOY_MAX_TIME=3 "$DOTFILES_DIR/scripts/envoy" ps --json 2>&1)" && ok "envoy api answers ($(jq length <<<"$out") sessions)" || fail "envoy api: $(head -1 <<<"$out")"
+            nu="$(jq -r ".envoy.natsUrls[0] // empty" "$ej" 2>/dev/null)"; hp="${nu#*://}"; hp="${hp##*@}"; hp="${hp%%/*}"; case "$hp" in *:*) ;; *) hp="$hp:4222";; esac
+            timeout 5 bash -c "exec 3<>/dev/tcp/${hp%:*}/${hp##*:}" 2>/dev/null && ok "envoy nats reachable ($hp)" || fail "envoy nats ${nu:-unset in $ej} unreachable"
+            s="$(jq -r ".envoy.natsSeed // empty" "$ej" 2>/dev/null)"
+            case "$s" in
+                "") echo "note box: $ej names no natsSeed (envoy connects without a credential)";;
+                "!"*) n="$(timeout 10 sh -c "${s#!}" 2>/dev/null | tr -d "[:space:]" | wc -c)"; [ "$n" -gt 0 ] && ok "natsSeed command prints a seed" || fail "natsSeed command ${s#!} printed nothing";;
+                *) ok "natsSeed set in $ej";;
+            esac
+            ;;
+        false) echo "note box: $ej turns Envoy off";;
+        *) echo "note box: $ej has no envoy section with enabled true: box sessions have no Envoy";;
+    esac
+fi
 c="$(curl -s -m 3 -o /dev/null -w %{http_code} "${MNEMOPI_EMBEDDING_API_URL:-http://none}/../health" 2>/dev/null)"; [ "$c" = 200 ] && ok "mnemopi embed" || echo "note box: mnemopi embed $c"
 n="$(timeout 20 forward doctor 2>&1 | grep -cE "accepted|reachable|accepts")"; echo "@forward-ok $n"
 timeout 30 docker info >/dev/null 2>&1 && ok "inner docker answers" || fail "inner docker"
-if [ -n "${NATS_NKEY_SEED_FILE:-}" ]; then [ -r "$NATS_NKEY_SEED_FILE" ] && ok "NATS nkey seed readable" || fail "NATS_NKEY_SEED_FILE $NATS_NKEY_SEED_FILE unreadable: envoy cannot connect"; else echo "note box: no NATS nkey seed (envoy connects without a credential)"; fi
 exit $fails
 '
 

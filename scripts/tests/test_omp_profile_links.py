@@ -55,7 +55,6 @@ class OmpProfileLinks(unittest.TestCase):
             "HOME": str(self.home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "XDG_CONFIG_HOME": str(self.home / ".config"),
-            "NATS_NKEY_SEED_FILE": "/dev/null",
         }
 
     def tearDown(self) -> None:
@@ -99,6 +98,22 @@ class OmpProfileLinks(unittest.TestCase):
         self.assertFalse(os.path.lexists(agent / "models.yml"))
         self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "the profile's own")
         self.assertEqual((agent / "agent.db").read_text(encoding="utf-8"), "state")
+
+    def test_a_profiles_envoy_json_is_its_own(self) -> None:
+        """A named profile reads Dispatch and Envoy from its own agent dir's envoy.json, and has
+        none without one: the shim neither prunes a profile's envoy.json link (one to the neutral
+        file is how a profile gets them) nor gives a profile the default agent dir's."""
+        neutral = self.home / ".config" / "legion" / "envoy.json"
+        neutral.parent.mkdir(parents=True)
+        neutral.write_text("{}", encoding="utf-8")
+        own = self.omp / "profiles" / "legion" / "agent" / "envoy.json"
+        own.parent.mkdir(parents=True)
+        own.symlink_to(neutral)
+        self.assert_launched(self.omp_run("--profile", "legion"))
+        self.assertEqual(os.readlink(own), str(neutral))
+        (self.omp / "agent" / "envoy.json").symlink_to(neutral)
+        self.assert_launched(self.omp_run("--profile", "theorem"))
+        self.assertFalse(os.path.lexists(self.omp / "profiles" / "theorem" / "agent" / "envoy.json"))
 
     def test_default_profile_creates_nothing(self) -> None:
         for args, extra in (((), {}), (("--profile", "default"), {}), ((), {"OMP_PROFILE": ""})):

@@ -75,8 +75,6 @@ class OmpResolution(unittest.TestCase):
             "XDG_CONFIG_HOME": str(self.home / ".config"),
             "MISE_DATA_DIR": str(self.mise_data),
             "STUB_SHIM": str(SHIM),
-            # A seed file already named: the shim never reaches for the real one.
-            "NATS_NKEY_SEED_FILE": "/dev/null",
         }
 
     def tearDown(self) -> None:

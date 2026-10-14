@@ -22,7 +22,7 @@ paths = [
   "scripts/hawk-token", "scripts/agent-access", "scripts/browser-slot",
   "scripts/tests/test_agent_secrets_launchers.py", "scripts/tests/test_agentbox_enroll.py",
   "scripts/tests/test_secret_run.py", "scripts/tests/test_browser_capture.py",
-  "scripts/tests/test_agent_access.py",
+  "scripts/tests/test_agent_access.py", "scripts/tests/test_agentbox_envoy.py",
   "shims/", "docs/devbox-lane-rules.md",
 ]
 
@@ -50,7 +50,7 @@ name = "claude-envoy"
 paths = [
   ".claude/settings.json", "envoy/", "scripts/envoy", "scripts/envoy-nats-seed", "scripts/cld",
   "scripts/claude-statusline", "scripts/tests/test_cld_profiles.py",
-  "scripts/tests/test_envoy_send.py",
+  "scripts/tests/test_envoy_send.py", "scripts/tests/test_envoy_listener.py",
 ]
 
 [[theme]]
@@ -71,5 +71,5 @@ paths = [
 name = "skills"
 paths = [
   "plugins/", ".claude/CLAUDE.md", "AGENTS.md", "docs/", "skills-sources.json", "vendor/",
-  "scripts/tests/test_ha_mcp_call.py",
+  "scripts/tests/test_ha_mcp_call.py", "scripts/tests/test_reflect_dispatch_settings.py",
 ]

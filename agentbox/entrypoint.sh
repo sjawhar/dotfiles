@@ -1,16 +1,19 @@
 #!/bin/bash
 # Box startup, as root: bring up the inner dockerd, keep the containers it
-# will run away from the host's metadata forwarder, log the inner docker into
-# ghcr.io as ubuntu, then hand off to the session command as ubuntu. The
-# session command is the container's main process (scripts/agentbox passes
-# shims/omp), so the box lives exactly as long as the session and `--rm`
-# cleans it up; the daemon dies with it.
+# will run away from the host's metadata forwarder, relay the box's own Envoy
+# address to the host's Envoy forwarder, log the inner docker into ghcr.io as
+# ubuntu, then hand off to the session command as ubuntu. The session command
+# is the container's main process (scripts/agentbox passes shims/omp), so the
+# box lives exactly as long as the session and `--rm` cleans it up; the daemon
+# and the relay die with it.
 set -euo pipefail
 
-# The forwarder address is required because the firewall rule depends on it:
-# the launcher always passes it, so a missing one is a launcher bug, not a
-# box that silently starts sandboxes with the instance role's access.
+# The forwarder addresses are required because what follows depends on them:
+# the launcher always passes both, so a missing one is a launcher bug, not a
+# box that silently starts sandboxes with the instance role's access, or one
+# whose sessions cannot reach Envoy.
 [[ -n "${AGENTBOX_IMDS_FORWARDER:-}" ]] || { echo "agentbox: AGENTBOX_IMDS_FORWARDER is not set" >&2; exit 1; }
+[[ -n "${AGENTBOX_ENVOY_FORWARDER:-}" ]] || { echo "agentbox: AGENTBOX_ENVOY_FORWARDER is not set" >&2; exit 1; }
 [[ -n "${AGENTBOX_USER:-}" ]] || { echo "agentbox: AGENTBOX_USER is not set" >&2; exit 1; }
 
 mkdir -p /var/log
@@ -28,6 +31,26 @@ chmod 666 /var/run/docker.sock
 # DOCKER-USER exists once dockerd runs; containers the box starts must not
 # reach the metadata forwarder, or every sandbox would hold the devbox role.
 iptables -I DOCKER-USER -d "${AGENTBOX_IMDS_FORWARDER%:*}" -p tcp --dport "${AGENTBOX_IMDS_FORWARDER##*:}" -j DROP
+
+# Envoy at the address the host's envoy.json names (http://127.0.0.1:<port>),
+# relayed to the host's forwarder at the network gateway, so the one file
+# serves the host and every box: a box session without a profile of its own
+# reads it from the mounted ~/.config/legion, and a named profile's envoy.json
+# that links to it resolves there too. Run as the session user, in a session
+# of its own so no signal sent to the terminal's process group reaches it, and
+# restarted a second after socat exits. A relay that does not come up is
+# reported, not fatal: the session starts without Envoy.
+envoy_port="${AGENTBOX_ENVOY_FORWARDER##*:}"
+# shellcheck disable=SC2016  # the inner bash expands $1 and $2; this shell must not
+setsid setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --reset-env \
+    bash -c 'while :; do socat "TCP4-LISTEN:$1,bind=127.0.0.1,fork,reuseaddr" "TCP4:$2"; sleep 1; done' \
+    envoy-relay "$envoy_port" "$AGENTBOX_ENVOY_FORWARDER" </dev/null >>/var/log/envoy-relay.log 2>&1 &
+envoy_relay_up() { [[ "$(ss -Hltn "sport = :$envoy_port")" == *"127.0.0.1:$envoy_port"* ]]; }
+for _ in $(seq 1 20); do
+    envoy_relay_up && break
+    sleep 0.25
+done
+envoy_relay_up || echo "agentbox: no Envoy relay on 127.0.0.1:$envoy_port (/var/log/envoy-relay.log); this box's sessions cannot reach Envoy" >&2
 
 # Private agent-c images: the inner docker logs into ghcr.io with the
 # platform's read-only packages token (agent-tier GHCR_PULL_TOKEN), as the

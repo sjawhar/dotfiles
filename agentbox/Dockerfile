@@ -36,8 +36,9 @@ RUN echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu && chmod 0440 /
     && install -d -o ubuntu -g ubuntu /home/ubuntu/.cache /home/ubuntu/.config /home/ubuntu/.local /home/ubuntu/.local/share /home/ubuntu/.ssh
 
 # The entrypoint runs as root: it starts the inner dockerd, firewalls the
-# metadata forwarder off the containers the box starts, logs the inner docker
-# into ghcr.io as ubuntu, then drops to ubuntu for the session command.
+# metadata forwarder off the containers the box starts, relays the box's own
+# Envoy address to the host's Envoy forwarder, logs the inner docker into
+# ghcr.io as ubuntu, then drops to ubuntu for the session command.
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
