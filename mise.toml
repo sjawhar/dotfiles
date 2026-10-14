@@ -183,7 +183,10 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # The release is mutable, so each asset's sha256 is pinned: a replaced asset fails to install.
 # From legion-envoy-v3.17.1 on the release also carries a build attestation (release-envoy-listener.yaml
 # on main), which mise verifies on install; check it by hand with
-# `gh attestation verify agent-secrets-amd64.tar.gz --repo sjawhar/legion`. The digests are the ones
+# `gh attestation verify agent-secrets-amd64.tar.gz --repo sjawhar/legion --cert-identity
+# https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main
+# --source-ref refs/heads/main --deny-self-hosted-runners` (`--repo` alone accepts an attestation
+# from any workflow run in the repository). The digests are the ones
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
