@@ -1,0 +1,31 @@
+# Laptop role, sami-rocqperf pair: run by forward-daemon@sami-rocqperf.service,
+# carried over SSH by forward-tunnel@sami-rocqperf.service (Host
+# sami-rocqperf-tunnel in laptop/ssh-config). sami-leanperf's pair holds
+# 127.0.0.1 and the default ports, so this daemon listens on 127.0.0.2 and dials
+# the bridge and grant feed at 12811 and 12815 (config-serve-sami-rocqperf.toml).
+# Tunnelled connections arrive from 127.0.0.1, which any local process shares.
+listen = "127.0.0.2"
+peer = "127.0.0.1"
+bridge_port = 12811
+grant_port = 12815
+
+# Same policy as config.toml (scripts/tests/test_forward_environment.py fails if
+# they drift), except the preview host: this pair's is the tunnelled 12802, pinned
+# to that port because a bare loopback entry would open any laptop-local URL.
+mode = "allowlist"
+opener = ["/usr/bin/xdg-open"]
+clipboard = ["wl-copy"]
+allow = [
+  "*.anthropic.com",
+  "127.0.0.2:12802",
+  "accounts.google.com",
+  "auth.openai.com",
+  "claude.ai",
+  "d-9267c4f5db.awsapps.com",
+  "device.sso.*.amazonaws.com",
+  "github.com",
+  "oidc.us-west-2.amazonaws.com",
+  "production-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "staging-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "viewer.hawk.internal.trajectorylabs.com",
+]
