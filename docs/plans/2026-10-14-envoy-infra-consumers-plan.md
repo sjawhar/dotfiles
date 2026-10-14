@@ -28,9 +28,9 @@ inputs. Theorem's `theorem-labs/agent-infra` `docs/specs/envoy.md` and its plan
 
 - The `prod` stack moves onto the component only when its preview creates, updates, replaces or
   deletes no cloud resource and leaves outputs unchanged (Sami, 2026-10-13). The only creates the
-  move allows are the `envoy-infra:host:Listener` components: this stack needs no provider create
-  (its docker providers exist, and D6 keeps the command provider out), and whether a state-only
-  provider create counts as a wrapper is a question Sami has not ruled on. Sami (2026-10-14): the existing deployments move first, or in parallel with
+  move allows are the `envoy-infra:host:Listener` components and any provider that exists only in
+  Pulumi state (Sami, 2026-10-14). This stack needs no provider create (its docker providers exist,
+  and D6 keeps the command provider out). Sami (2026-10-14): the existing deployments move first, or in parallel with
   the GCP work. This plan moves Trajectory's listeners first, because the Theorem listener is a
   `host:Listener` in the same stack.
 - Every `envoy/` edit, preview, apply and `pulumi config set`, and the commits of slices 2 and 4b,
@@ -69,10 +69,8 @@ inputs. Theorem's `theorem-labs/agent-infra` `docs/specs/envoy.md` and its plan
   slice 2 is done.
 - **D6. The watchdog branch is not exercised by this migration.** pulumi-command dials
   `<host>:22` as `root` (v1.2.1 `remote/connection.go:57,196`), so a watchdog for `sami@sami` or
-  `agent@oryx…` has probably never been created. Task 2.1's export decides. With none in state,
-  previews and applies run with `ENVOY_DEPLOY_WATCHDOG` unset. With one in state, stop before
-  writing the program and report it to the coordinator with the export's entry, because adopting it
-  would need a `command` provider create, which the acceptance does not allow.
+  `agent@oryx…` has probably never been created. Task 2.1's export confirmed none is in state on
+  2026-10-14, so previews and applies run with `ENVOY_DEPLOY_WATCHDOG` unset.
 
 ## Order and the human steps
 
