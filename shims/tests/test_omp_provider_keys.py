@@ -53,6 +53,14 @@ done
 echo "OMP $*"
 """
 
+# The variables that override an envoy.json field: the release omp's one line per one it holds.
+ENVOY_VARS = ("ENVOY_URL", "ENVOY_NATS_URL", "NATS_NKEY_SEED_FILE")
+ENVOY_PROBE = f"for v in {' '.join(ENVOY_VARS)}; do\n" + r"""
+    [[ -n "${!v+x}" ]] && echo "$v=${!v}"
+done
+echo "OMP $*"
+"""
+
 # `secrets list` names the profile's scoped keys; `secrets NAME… -- cmd` runs cmd with each set.
 SECRETS = r"""
 if [[ "$1" == list ]]; then
@@ -116,8 +124,6 @@ class OmpProviderKeys(unittest.TestCase):
             "XDG_RUNTIME_DIR": str(self.root / "run"),
             "MISE_DATA_DIR": str(self.mise_data),
             "PATH": f"{self.stub_dir}:/usr/bin:/bin",
-            # A seed file already named: the shim never reaches for the real one.
-            "NATS_NKEY_SEED_FILE": "/dev/null",
         }
 
     def tearDown(self) -> None:
@@ -476,6 +482,38 @@ class OmpProviderKeys(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, f"OMP {' '.join(args)}\n")
                 self.assertEqual(result.stderr, "")
+
+    def test_no_launch_exports_an_envoy_variable(self) -> None:
+        """Every session reads Dispatch and Envoy from its envoy.json, and each of these variables
+        overrides its field there: one the shim exported would turn Envoy on for a named profile
+        that has no envoy.json. A fresh NATS seed cache sits where scripts/envoy-nats-seed finds
+        it, so a shim that still asked that script would export NATS_NKEY_SEED_FILE."""
+        envoy_dir = self.root / "run" / "envoy"
+        envoy_dir.mkdir(parents=True, mode=0o700)
+        seed = envoy_dir / "nats-nkey-seed-omp-session"
+        seed.write_text("SU" + "A" * 56, encoding="utf-8")
+        seed.chmod(0o600)
+        write_stub(
+            self.mise_data / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin", "omp", ENVOY_PROBE
+        )
+        for name, args, extra in (
+            ("default profile", ("--version",), {}),
+            ("named profile", ("--profile", "theorem", "--version"), {"STUB_SECRETS_LIST": ""}),
+            (
+                "named profile with a scoped key",
+                ("--version",),
+                {"OMP_PROFILE": "theorem", "STUB_SECRETS_LIST": "OPENAI_API_KEY_THEOREM"},
+            ),
+        ):
+            with self.subTest(name):
+                result = self.run_shim(*args, **extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, f"OMP {' '.join(args)}\n")
+        # The other direction: a value the caller set (a Legion pane's, from its daemon) reaches omp.
+        given = {v: f"given-{v}" for v in ENVOY_VARS}
+        result = self.run_shim("--version", **given)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "".join(f"{v}=given-{v}\n" for v in ENVOY_VARS) + "OMP --version\n")
 
 
 if __name__ == "__main__":

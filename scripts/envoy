@@ -20,6 +20,7 @@
 #                          inbox still wakes that parked subagent. Once that
 #                          release is installed everywhere, make untitled rows
 #                          the default and drop the flag.
+#   envoy config-path — print the envoy.json envoy reads (below)
 #
 # `envoy send` identifies the sender. From an interactive shell the message is
 # stamped source=human. Inside an agent harness (the bash tool of an OMP or
@@ -33,9 +34,28 @@
 # `envoy notify` is that send, for the timers that post such notices: an envoy
 # from before it answers `notify` as an unknown command, exits 1 and sends
 # nothing, so a caller needs no probe for it.
+#
+# The listener and its bearer come from the envoy.json a command reads, the way
+# Legion's envoy-client resolves them for a script (envoyConfigPath("command"),
+# envoySettings): the file ENVOY_CONFIG_FILE names (a session's plugin sets it in
+# its shell), else a named omp profile's $PI_CODING_AGENT_DIR/envoy.json
+# (OMP_PROFILE set and not default), else, under Claude Code
+# (CLAUDE_CODE_CHILD_SESSION=1, which Claude Code sets in every command it runs),
+# $CLAUDE_CONFIG_DIR/envoy.json, else $OPENCODE_CONFIG_DIR/envoy.json, else
+# ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json.
+# Each of those must be an absolute path, and an empty variable counts as unset.
+# A checkout's .envoy/envoy.json is never read. ENVOY_URL overrides the file's
+# envoy.url (default http://127.0.0.1:9020), but a file that sets envoy.enabled
+# to false wins over it, and a file that is not a valid envoy.json is refused.
+# Without an enabled envoy section, envoy refuses unless ENVOY_URL or
+# ENVOY_NATS_URL is set. The bearer is ENVOY_TOKEN_FILE's trimmed contents, else
+# ENVOY_TOKEN, else the enabled section's envoy.token, which goes only to the
+# listener written beside it: with ENVOY_URL naming another origin, envoy
+# refuses. An envoy.token starting with `!` is a command, run under /bin/sh -c
+# for at most 10 s, whose trimmed stdout is the token; neither of its streams is
+# ever printed. The bearer reaches curl through a file descriptor, never an argv.
 set -euo pipefail
 
-ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
 # Seconds any call to the listener may take before it fails. The listener's own
 # HTTP server times a request out after 10 s, so 30 s only ever cuts off one that
 # accepts the connection and never answers, which would otherwise hang the
@@ -45,6 +65,224 @@ HOSTNAME="${HOSTNAME:-$(hostname)}"
 # --local matches the listener's configured machine_id, which may differ from
 # hostname (it comes from Pulumi's ENVOY_MACHINE_ID). Override when they diverge.
 MACHINE_ID="${ENVOY_MACHINE_ID:-$HOSTNAME}"
+# The listener when neither ENVOY_URL nor envoy.url names one (envoy-client's
+# DEFAULT_ENVOY_URL), and how long a `!` envoy.token may run (its limit too).
+DEFAULT_ENVOY_URL="http://127.0.0.1:9020"
+COMMAND_TIMEOUT_S=10
+
+die() { echo "envoy: $*" >&2; exit 1; }
+
+# absolute NAME VALUE: VALUE, or a refusal naming NAME when VALUE is relative,
+# which would resolve against each caller's working directory.
+absolute() {
+    [[ "$2" == /* ]] || { echo "envoy: $1 is $2, which is not an absolute path" >&2; return 1; }
+    printf '%s\n' "$2"
+}
+
+# The envoy.json envoy reads (the order above), or a refusal of the path the
+# rule picked when it is relative.
+envoy_config_path() {
+    local dir
+    if [ -n "${ENVOY_CONFIG_FILE:-}" ]; then
+        absolute ENVOY_CONFIG_FILE "$ENVOY_CONFIG_FILE"
+    elif [ -n "${OMP_PROFILE:-}" ] && [ "$OMP_PROFILE" != default ] && [ -n "${PI_CODING_AGENT_DIR:-}" ]; then
+        dir="$(absolute PI_CODING_AGENT_DIR "$PI_CODING_AGENT_DIR")" && printf '%s/envoy.json\n' "$dir"
+    elif [ "${CLAUDE_CODE_CHILD_SESSION:-}" = 1 ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        dir="$(absolute CLAUDE_CONFIG_DIR "$CLAUDE_CONFIG_DIR")" && printf '%s/envoy.json\n' "$dir"
+    elif [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then
+        dir="$(absolute OPENCODE_CONFIG_DIR "$OPENCODE_CONFIG_DIR")" && printf '%s/envoy.json\n' "$dir"
+    elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+        dir="$(absolute XDG_CONFIG_HOME "$XDG_CONFIG_HOME")" && printf '%s/legion/envoy.json\n' "$dir"
+    else
+        printf '%s/.config/legion/envoy.json\n' "$HOME"
+    fi
+}
+
+# The first thing envoy-client's schema refuses in an envoy.json (both sections
+# strict, a top-level natsUrls refused), else the envoy section's switch, url,
+# token kind (none, command, literal, or unsendable: whitespace or a control
+# character inside) and the token itself, last and raw. "invalid" for anything
+# that is not exactly one JSON value.
+# shellcheck disable=SC2016  # jq's own $variables
+ENVOY_FILE_JQ='
+def fits($kind):
+  if $kind == "boolean" then type == "boolean"
+  elif $kind == "string" then type == "string"
+  elif $kind == "strings" then type == "array" and all(.[]; type == "string")
+  else type == "string" and test("^https?://[^/?#]"; "i") end;
+def says($kind):
+  {boolean: "expected a boolean", string: "expected a string",
+   strings: "expected an array of strings", http: "must be an http or https URL"}[$kind];
+def section($name; $shape):
+  if has($name) | not then empty
+  elif (.[$name] | type) != "object" then "\($name): expected an object"
+  else .[$name] as $s
+  | [$s | keys[] | select(in($shape) | not)] as $extra
+  | if $extra != [] then "unrecognized \($name) key(s): \($extra | map("\($name).\(.)") | join(", "))"
+    else $shape | to_entries[] | select(.key as $k | $s | has($k))
+      | select(.value as $kind | $s[.key] | fits($kind) | not) | "\($name).\(.key): \(says(.value))"
+    end
+  end;
+def problem:
+  if type != "object" then "expected a JSON object"
+  elif has("natsUrls") then "the top-level natsUrls is not read; move it to envoy.natsUrls"
+  elif has("$schema") and (.["$schema"] | type) != "string" then "$schema: expected a string"
+  else section("dispatch"; {enabled: "boolean", serverUrl: "http", token: "string"}),
+       section("envoy"; {enabled: "boolean", url: "http", natsUrls: "strings", token: "string", natsSeed: "string"})
+  end;
+if length != 1 then "invalid" else .[0]
+  | [problem] as $problems
+  | if $problems != [] then "error\n\($problems[0])"
+    else (.envoy // {}) as $e
+    | ($e.token // null) as $t
+    | "ok\n\(if $e | has("enabled") then $e.enabled else "unset" end)\n\($e.url // "")\n"
+      + (if $t == null then "none" elif ($t | startswith("!")) then "command"
+         elif ($t | test("[\\s[:cntrl:]]")) then "unsendable" else "literal" end)
+      + "\n\($t // "")"
+    end
+end'
+
+# Whether a value holds whitespace or a control character, which an
+# Authorization header line cannot carry.
+unsendable() { [[ "$1" =~ [[:space:][:cntrl:]] ]]; }
+# Whether a file holds a NUL, which a shell variable silently drops.
+holds_nul() { [ "$(wc -c <"$1")" -ne "$(tr -d '\000' <"$1" | wc -c)" ]; }
+# Whether a URL is http(s) with a host.
+http_url() { [[ "${1,,}" =~ ^https?://[^/?#]+ ]]; }
+
+# url_origin URL prints URL's scheme://host[:port], lowercased, without user
+# info or the scheme's default port: the origin envoy-client pairs a file's
+# token with (`new URL(url).origin`).
+url_origin() {
+    local url="${1,,}" authority
+    authority="${url#*://}"
+    authority="${authority%%[/?#]*}"
+    authority="${authority##*@}"
+    case "${url%%://*}:$authority" in
+        http:*:80) authority="${authority%:80}" ;;
+        https:*:443) authority="${authority%:443}" ;;
+    esac
+    printf '%s://%s' "${url%%://*}" "$authority"
+}
+
+# secret_file_value NAME PATH prints the trimmed contents of the file a
+# <NAME> pointer names, or refuses naming NAME and PATH, never the contents.
+secret_file_value() {
+    local name="$1" path="$2" value
+    if [ -d "$path" ] || ! { value="$(<"$path")"; } 2>/dev/null; then
+        die "$name names $path, which could not be read"
+    fi
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    [ -n "$value" ] || die "$name names $path, which is empty"
+    if unsendable "$value" || holds_nul "$path"; then
+        die "$name names $path, which holds whitespace or a control character"
+    fi
+    printf '%s' "$value"
+}
+
+# command_value FIELD FILE COMMAND prints the value of FILE's `!` FIELD: COMMAND
+# under /bin/sh -c, stdin from /dev/null, for at most COMMAND_TIMEOUT_S seconds.
+# timeout runs it in a process group of its own and signals the whole group at
+# the limit. Its stdout goes to a private file rather than a pipe, so a
+# background process that inherited it cannot hold envoy up once the command
+# has exited; its exit status decides, and its trimmed stdout is the value.
+# Neither stream is ever printed: a failure names FIELD and FILE only.
+command_value() {
+    local field="$1" file="$2" command="$3" out status=0 started=$SECONDS value
+    out="$(mktemp)" || die "$file: $field's command could not start: no temporary file"
+    # shellcheck disable=SC2064  # $out is fixed now; this runs in command_value's subshell
+    trap "rm -f '$out'" EXIT
+    timeout -k 2 "$COMMAND_TIMEOUT_S" /bin/sh -c "$command" </dev/null >"$out" 2>/dev/null || status=$?
+    if [ "$status" -ne 0 ]; then
+        if (( SECONDS - started >= COMMAND_TIMEOUT_S )); then
+            die "$file: $field's command did not finish within $COMMAND_TIMEOUT_S s"
+        elif (( status > 128 )); then
+            die "$file: $field's command exited with SIG$(kill -l $((status - 128)))"
+        fi
+        die "$file: $field's command exited with status $status"
+    fi
+    value="$(<"$out")"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    [ -n "$value" ] || die "$file: $field's command printed nothing"
+    if unsendable "$value" || holds_nul "$out"; then
+        die "$file: $field's command printed more than one line, or whitespace inside its value"
+    fi
+    printf '%s' "$value"
+}
+
+# The listener this shell's Envoy session uses (LISTENER_URL) and its bearer
+# (LISTENER_TOKEN, empty for none), resolved once per run as the header says.
+# Call it outside $(…), so every later call, and every subshell, sees the result.
+LISTENER_URL=""
+LISTENER_TOKEN=""
+resolve_listener() {
+    [ -z "$LISTENER_URL" ] || return 0
+    local file named state enabled="unset" url="" kind=none token="" listener
+    file="$(envoy_config_path)" || exit 1
+    named="${ENVOY_URL:-}"
+    if [ ! -e "$file" ]; then
+        state=absent
+    elif [ -d "$file" ] || [ ! -r "$file" ]; then
+        die "$file: could not be read"
+    else
+        {
+            IFS= read -r state || true
+            IFS= read -r enabled || true
+            IFS= read -r url || true
+            IFS= read -r kind || true
+            IFS= read -r -d '' token || true
+        } < <(jq -s -j "$ENVOY_FILE_JQ" "$file" 2>/dev/null || printf invalid)
+        case "$state" in
+            ok) ;;
+            error) die "$file: $enabled" ;;
+            *) die "$file: invalid JSON" ;;
+        esac
+    fi
+    [ "$enabled" != false ] || die "$file sets envoy.enabled to false: Envoy is off"
+    if [ "$enabled" != true ]; then
+        # The file's values count only for an enabled section.
+        url="" kind=none token=""
+        if [ -z "$named" ] && ! [[ "${ENVOY_NATS_URL:-}" =~ [^,[:space:]] ]]; then
+            [ "$state" = absent ] && die "no envoy.json at $file, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off"
+            die "$file has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off"
+        fi
+    fi
+    listener="${url:-$DEFAULT_ENVOY_URL}"
+    if [ -n "$named" ]; then
+        http_url "$named" || die "ENVOY_URL must be an http or https URL"
+        LISTENER_URL="$named"
+    else
+        LISTENER_URL="$listener"
+    fi
+    LISTENER_URL="${LISTENER_URL%"${LISTENER_URL##*[!/]}"}"
+    if [ -n "${ENVOY_TOKEN_FILE:-}" ]; then
+        LISTENER_TOKEN="$(secret_file_value ENVOY_TOKEN_FILE "$ENVOY_TOKEN_FILE")" || exit 1
+    elif [ -n "${ENVOY_TOKEN:-}" ]; then
+        unsendable "$ENVOY_TOKEN" && die "ENVOY_TOKEN holds whitespace or a control character"
+        LISTENER_TOKEN="$ENVOY_TOKEN"
+    elif [ "$kind" != none ]; then
+        if [ -n "$named" ] && [ "$(url_origin "$named")" != "$(url_origin "$listener")" ]; then
+            die "ENVOY_URL names $(url_origin "$named"), but $file's envoy.token is for $(url_origin "$listener"); set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it"
+        fi
+        case "$kind" in
+            literal) LISTENER_TOKEN="$token" ;;
+            command) LISTENER_TOKEN="$(command_value envoy.token "$file" "${token#!}")" || exit 1 ;;
+            *) die "$file: envoy.token holds whitespace or a control character" ;;
+        esac
+    fi
+}
+
+# curl with the listener's bearer, when there is one, as a header read from a
+# file descriptor: printf is a builtin, so the token never enters an argv.
+listener_curl() {
+    if [ -n "$LISTENER_TOKEN" ]; then
+        curl "$@" -H @<(printf 'Authorization: Bearer %s\n' "$LISTENER_TOKEN")
+    else
+        curl "$@"
+    fi
+}
 
 _envoy_ps() {
     local json=false local_only=false sub_agents=false
@@ -55,9 +293,10 @@ _envoy_ps() {
             --sub-agents|--subagents) sub_agents=true ;;
         esac
     done
+    resolve_listener
     local raw
-    raw=$(curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" "$ENVOY_URL/v1/sessions" 2>&1) || {
-        echo "error: Envoy at $ENVOY_URL failed GET /v1/sessions: $raw" >&2
+    raw=$(listener_curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" "$LISTENER_URL/v1/sessions" 2>&1) || {
+        echo "error: Envoy at $LISTENER_URL failed GET /v1/sessions: $raw" >&2
         return 1
     }
     if [ "$sub_agents" = false ]; then
@@ -125,11 +364,12 @@ _envoy_send() {
             '{ topic: $t, message: $m, source: $s } + (if $ss == "" then {} else { source_session: $ss } end)')
     fi
 
+    resolve_listener
     local out
-    out=$(curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" -X POST "$ENVOY_URL$endpoint" \
+    out=$(listener_curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" -X POST "$LISTENER_URL$endpoint" \
         -H "Content-Type: application/json" \
         -d "$payload" 2>&1) || {
-        echo "error: Envoy at $ENVOY_URL failed POST $endpoint: $out" >&2
+        echo "error: Envoy at $LISTENER_URL failed POST $endpoint: $out" >&2
         return 1
     }
     printf '%s\n' "$out"
@@ -156,6 +396,8 @@ _envoy_broadcast() {
     fi
     local message="$*"
 
+    # Here, not in _envoy_ps's subshell below, so a `!` envoy.token runs once.
+    resolve_listener
     local rows
     rows=$(_envoy_ps --json | jq -r \
         --arg m "$machine" --arg d "$dir_filter" --arg self "${OMP_SESSION_ID:-}" --argjson untitled "$untitled" '
@@ -203,10 +445,11 @@ _envoy_notify() {
 }
 
 case "${1:-}" in
-    ps)        shift; _envoy_ps "$@"; exit ;;
-    send)      shift; _envoy_send "$@"; exit ;;
-    notify)    shift; _envoy_notify "$@"; exit ;;
-    broadcast) shift; _envoy_broadcast "$@"; exit ;;
-    "")        echo "Usage: envoy <ps|send|notify|broadcast>" >&2; exit 1 ;;
-    *)         echo "Unknown command: $1" >&2; exit 1 ;;
+    ps)          shift; _envoy_ps "$@"; exit ;;
+    send)        shift; _envoy_send "$@"; exit ;;
+    notify)      shift; _envoy_notify "$@"; exit ;;
+    broadcast)   shift; _envoy_broadcast "$@"; exit ;;
+    config-path) envoy_config_path; exit ;;
+    "")          echo "Usage: envoy <ps|send|notify|broadcast|config-path>" >&2; exit 1 ;;
+    *)           echo "Unknown command: $1" >&2; exit 1 ;;
 esac

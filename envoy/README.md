@@ -33,10 +33,11 @@ provision, no per-listener identity.
 A box that must stay off the tailnet is outside this stack: it runs its own
 single-node `nats-server -js` on `127.0.0.1:4222` (a systemd user unit) and an
 `envoy-listener` pointed at it, so its sessions reach only each other and no
-GitHub/Slack events arrive. The launchers find that NATS through the gitignored
-`envoy/env.local` (`export ENVOY_NATS_URL=nats://127.0.0.1:4222`), which
-`shims/omp` and `scripts/cld` source before falling back to
-`nats://envoy-nats:4222`.
+GitHub/Slack events arrive. Its sessions find that NATS through
+`"natsUrls": ["nats://127.0.0.1:4222"]` in the `envoy` section of the
+machine's `envoy.json` (`AGENTS.md`, "Where the secrets are"), where every
+other machine names `nats://envoy-nats:4222`. Such a machine needs no
+`envoy/env.local`; delete one left from before.
 
 ## Prerequisites
 

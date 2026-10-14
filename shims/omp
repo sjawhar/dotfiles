@@ -2,14 +2,17 @@
 # omp wrapper: set up the session environment, then exec the real omp (the fork
 # release binary, mise-managed: "github:sjawhar/oh-my-pi" in mise.toml).
 # Anthropic auth is deliberately API-key (no Claude Pro/Max OAuth emulation).
-# Every session gets the environment set up below, including: envoy, the gh-app routing
+# Every session gets the environment set up below, including: the gh-app routing
 # gitconfig, the committed config overlay, shims-first PATH, the secrets-broker
-# identity. Provider keys: a default-profile session holds none of the variables
-# in _keys, even when the caller's environment has them, and reaches its providers
-# through the model gateway (omp/models.local.yml); a named profile gets its own
-# <KEY>_<NAME> secrets from secretsd as the provider keys, and any other provider
-# key the caller exported stays. A named profile also gets the shared setup
-# mirrored into ~/.omp/profiles/NAME ("a named profile gets the shared setup").
+# identity. It sets no Envoy or Dispatch variable: each session's plugin reads
+# its envoy.json (envoy/AGENTS.md), and a variable exported here would override
+# that file for every profile. Provider keys: a default-profile session holds
+# none of the variables in _keys, even when the caller's environment has them,
+# and reaches its providers through the model gateway (omp/models.local.yml); a
+# named profile gets its own <KEY>_<NAME> secrets from secretsd as the provider
+# keys, and any other provider key the caller exported stays. A named profile
+# also gets the shared setup mirrored into ~/.omp/profiles/NAME ("a named
+# profile gets the shared setup").
 set -euo pipefail
 
 # --- never re-enter ---
@@ -30,33 +33,6 @@ if [[ "$_marker_pid" == "$$" && "$_marker_at" =~ ^[0-9]+$ ]] && (( _now - 10#$_m
 fi
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
-
-# Machine-local env first: a box that runs its own single-node envoy (its own
-# nats-server, its own listener) sets ENVOY_NATS_URL in envoy/env.local rather
-# than reaching the tailnet name below. Gitignored, so nothing machine-specific
-# is committed; scripts/cld sources the same file. Sourced before every default
-# so it can override any of them.
-if [ -r "${DOTFILES_DIR}/envoy/env.local" ]; then
-    # shellcheck disable=SC1091  # machine-local, absent in the repo
-    . "${DOTFILES_DIR}/envoy/env.local"
-fi
-
-# Envoy NATS defaults to the tailnet; guarantee it for every omp launch (sessions
-# spawned from pre-.bashrc shells, agents, and scripts skip .bashrc).
-export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
-
-# Envoy NATS credential: pi-envoy authenticates as the `omp-session` nkey user
-# when NATS_NKEY_SEED_FILE names its seed. scripts/envoy-nats-seed keeps that
-# seed in a per-boot 0600 file and prints its path, or prints nothing (no secret
-# yet, no AWS) and the session connects without a credential. A seed the caller
-# already gave (a box's session_env, a Legion pane) wins. Mirrors scripts/cld
-# and scripts/agentbox.
-if [[ -z "${NATS_NKEY_SEED_FILE:-}" && -z "${NATS_NKEY_SEED:-}" ]]; then
-    _seed_file="$("${DOTFILES_DIR}/scripts/envoy-nats-seed")" || _seed_file=""
-    if [[ -n "$_seed_file" ]]; then
-        export NATS_NKEY_SEED_FILE="$_seed_file"
-    fi
-fi
 
 # --- glibc malloc arenas ---
 # omp's native addon (pi_natives) and the C libraries linked into it allocate
@@ -377,6 +353,8 @@ esac
 # --- a named profile gets the shared setup ---
 # Its symlinks track installers/omp.sh's (created, re-pointed, retired); its real files are its
 # own. config.yml comes from the overlay above; models.yml (gateway routing) stays per-profile.
+# envoy.json is the profile's own, link or file: pi-envoy reads a named profile's envoy.json from
+# its agent dir and gives it no Dispatch or Envoy without one, so it is neither pruned nor mirrored.
 if ! [[ "$_profile" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
     echo "omp: invalid profile name: $_profile (letters, digits, '.', '-', '_'; not starting with '.')" >&2
     exit 2
@@ -387,12 +365,12 @@ _mirror_links() { # _mirror_links SRC DST
     for entry in "$dst"/*; do
         [[ -L "$entry" ]] || continue
         name="${entry##*/}"
-        case "$name" in config.yml|models.yml) rm -f "$entry"; continue ;; esac
+        case "$name" in config.yml|models.yml) rm -f "$entry"; continue ;; envoy.json) continue ;; esac
         [[ -L "$src/$name" ]] || rm -f "$entry"
     done
     for entry in "$src"/*; do
         name="${entry##*/}"
-        case "$name" in config.yml|models.yml) continue ;; esac
+        case "$name" in config.yml|models.yml|envoy.json) continue ;; esac
         if [[ -L "$entry" ]]; then
             if [[ -L "$dst/$name" || ! -e "$dst/$name" ]] \
                 && [[ "$(readlink "$dst/$name" 2>/dev/null)" != "$(readlink "$entry")" ]]; then

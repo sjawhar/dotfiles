@@ -109,8 +109,6 @@ class AgentSecretsSession(unittest.TestCase):
             "XDG_CONFIG_HOME": str(self.home / ".config"),
             "XDG_RUNTIME_DIR": str(self.root / "run"),
             "STUB_LOG": str(self.log),
-            # A seed file already named: no launcher reaches for the real one.
-            "NATS_NKEY_SEED_FILE": "/dev/null",
         }
 
     def tearDown(self) -> None:

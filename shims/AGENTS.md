@@ -17,7 +17,9 @@ before handing the call to the real one.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration, and gives every
   `git commit` from an omp session its `Omp-Session` trailer.
-- **`omp`** finds the build to run and sets up the session environment (below).
+- **`omp`** finds the build to run and sets up the session environment (below). It sets no
+  Envoy or Dispatch variable: the session's plugin reads its `envoy.json`, and a variable here
+  would override that file for every profile (`envoy/AGENTS.md`).
 - **`knives`** execs the pinned knives (`"github:sjawhar/knives"` in `mise.toml`, looked up with
   `mise which -C / knives --tool github:sjawhar/knives`), or a local build on PATH past it,
   never a knives in a mise dir: a session keeps the PATH it started with, and that PATH names
