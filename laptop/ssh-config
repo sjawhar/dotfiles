@@ -1,8 +1,5 @@
 Include ~/.ssh/config.local
 
-Host *
-  IdentityAgent ~/.1password/agent.sock
-
 Host devbox
   HostName sami-agents.tailb86685.ts.net
   User ubuntu
@@ -15,38 +12,6 @@ Host devbox
   ServerAliveCountMax 3
   TCPKeepAlive yes
   IPQoS lowdelay throughput
-
-Host theorem
-  User sami
-  ProxyCommand env CLOUDSDK_ACTIVE_CONFIG_NAME=theorem gcloud compute start-iap-tunnel sami-devbox %p --listen-on-stdin --zone us-west1-b
-  IdentityFile ~/.ssh/google_compute_engine
-  IdentitiesOnly yes
-  HostKeyAlias compute.5092395176580716040
-  UserKnownHostsFile ~/.ssh/google_compute_known_hosts
-  CheckHostIP no
-  StrictHostKeyChecking yes
-  Compression yes
-  ControlMaster auto
-  ControlPath ~/.ssh/sockets/%r@%h-%p
-  ControlPersist 600
-  ServerAliveInterval 30
-  ServerAliveCountMax 3
-  TCPKeepAlive yes
-  IPQoS lowdelay throughput
-
-Host theorem-tree
-  User sami
-  ProxyCommand env CLOUDSDK_ACTIVE_CONFIG_NAME=theorem gcloud compute start-iap-tunnel sandboxing-tree-1 %p --listen-on-stdin --zone us-west1-b
-  IdentityFile ~/.ssh/google_compute_engine
-  IdentitiesOnly yes
-  CheckHostIP no
-  Compression yes
-  ControlMaster auto
-  ControlPath ~/.ssh/sockets/%r@%h-%p
-  ControlPersist 600
-  ServerAliveInterval 30
-  ServerAliveCountMax 3
-  TCPKeepAlive yes
 
 Host oryx
   HostName oryx.tailb86685.ts.net
