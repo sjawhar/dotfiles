@@ -1,0 +1,15 @@
+# Devbox role on sami-rocqperf, the second Azure VM off the tailnet. Fields mean
+# what config-serve.toml says; the tunnel works as config-serve-sami-leanperf.toml
+# describes (forward-tunnel@sami-rocqperf, Host sami-rocqperf-tunnel). On the
+# laptop, sami-leanperf's pair already holds 127.0.0.1 with the default ports, so
+# this pair takes 127.0.0.2 at both ends: preview URLs name 127.0.0.2:12802 and
+# open through this tunnel. The laptop dials the bridge and grant feed at its
+# 127.0.0.1 peer, so those two move to 12811 and 12815. sshd makes the far-end
+# connection from 127.0.0.1, so that is the peer, and any process on this VM can
+# reach these channels the way the laptop does.
+listen = "127.0.0.2"
+peer = "127.0.0.1"
+
+bridge_port = 12811
+grant_port = 12815
+forward_ttl_secs = 300

@@ -1,16 +1,12 @@
 Include ~/.ssh/config.local
 
+# ssh takes the first value it finds for each option, so per-host settings sit
+# above the Host * defaults at the bottom.
+
 Host devbox
   HostName sami-agents.tailb86685.ts.net
   User ubuntu
   ForwardAgent yes
-  Compression yes
-  ControlMaster auto
-  ControlPath ~/.ssh/sockets/%r@%h-%p
-  ControlPersist 600
-  ServerAliveInterval 30
-  ServerAliveCountMax 3
-  TCPKeepAlive yes
   IPQoS lowdelay throughput
 
 Host oryx
@@ -19,13 +15,6 @@ Host oryx
   ForwardAgent yes
   # YubiKey access for sops human tier: use `devbox oryx` (scripts/devbox),
   # which ensures the oryx-tunnel below exists before connecting. Works with mosh.
-  Compression yes
-  ControlMaster auto
-  ControlPath ~/.ssh/sockets/%r@%h-%p
-  ControlPersist 600
-  ServerAliveInterval 30
-  ServerAliveCountMax 3
-  TCPKeepAlive yes
   IPQoS lowdelay throughput
 
 # YubiKey tunnel for oryx; the devbox pair uses forward's pcsc channel.
@@ -35,14 +24,82 @@ Host oryx-tunnel
   Port 2222
   IdentityFile ~/.ssh/oryx-tunnel
   IdentitiesOnly yes
-  ControlMaster auto
   ControlPath ~/.ssh/sockets/tunnel-%r@%h
+  ControlPersist no
   ExitOnForwardFailure yes
   ServerAliveInterval 15
-  ServerAliveCountMax 3
   RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
 
 Host ghost-wispr
   HostName ghost-wispr.tailb86685.ts.net
   User ghost-wispr
   ForwardAgent yes
+
+# Azure VMs (Theorem subscription, rg sami, westus2), off the tailnet. sshd also
+# listens on 443 because this network drops outbound 22 to some hosts, and the
+# NSG admits only this laptop's public IP.
+Host leanperf
+  HostName 52.233.92.39
+  Port 443
+  User sami
+  ForwardAgent yes
+
+Host rocqperf
+  HostName 20.98.65.233
+  Port 443
+  User sami
+  ForwardAgent yes
+
+# forward's channels for each Azure VM, held open by forward-tunnel@<pair>.service.
+# The laptop daemon's ports go to the VM, the VM's come back here.
+# sami-leanperf's pair has 127.0.0.1 and the default ports. sami-rocqperf's has
+# 127.0.0.2 at both ends, with the bridge and grant feed on 12811 and 12815
+# (config-serve-sami-rocqperf.toml says why). A VM dials the browser relay at its
+# pair's own address, so rocqperf's 12803 binds 127.0.0.2, which its sshd allows
+# (GatewayPorts clientspecified).
+Host sami-leanperf-tunnel
+  HostName 52.233.92.39
+  Port 443
+  User sami
+  BatchMode yes
+  StrictHostKeyChecking accept-new
+  ControlMaster no
+  ControlPath none
+  ExitOnForwardFailure yes
+  ServerAliveInterval 15
+  RemoteForward 127.0.0.1:12800 127.0.0.1:12800
+  RemoteForward 127.0.0.1:12803 127.0.0.1:12803
+  RemoteForward 127.0.0.1:12804 127.0.0.1:12804
+  RemoteForward 127.0.0.1:12806 127.0.0.1:12806
+  LocalForward 127.0.0.1:12801 127.0.0.1:12801
+  LocalForward 127.0.0.1:12802 127.0.0.1:12802
+  LocalForward 127.0.0.1:12805 127.0.0.1:12805
+
+Host sami-rocqperf-tunnel
+  HostName 20.98.65.233
+  Port 443
+  User sami
+  BatchMode yes
+  StrictHostKeyChecking accept-new
+  ControlMaster no
+  ControlPath none
+  ExitOnForwardFailure yes
+  ServerAliveInterval 15
+  RemoteForward 127.0.0.1:12800 127.0.0.2:12800
+  RemoteForward 127.0.0.2:12803 127.0.0.2:12803
+  RemoteForward 127.0.0.1:12804 127.0.0.2:12804
+  RemoteForward 127.0.0.1:12806 127.0.0.2:12806
+  LocalForward 127.0.0.1:12811 127.0.0.2:12811
+  LocalForward 127.0.0.2:12802 127.0.0.2:12802
+  LocalForward 127.0.0.1:12815 127.0.0.2:12815
+
+# Every login key lives in 1Password.
+Host *
+  IdentityAgent ~/.1password/agent.sock
+  Compression yes
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/%r@%h-%p
+  ControlPersist 600
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  TCPKeepAlive yes
