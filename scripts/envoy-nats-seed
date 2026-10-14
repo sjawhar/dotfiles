@@ -1,33 +1,40 @@
 #!/usr/bin/env bash
-# envoy-nats-seed: this machine's cached `omp-session` NATS nkey seed, which
-# pi-envoy and the claude-envoy bridge authenticate to production NATS with
-# when the session's envoy.json names it as a natsSeed command. No launcher
-# runs it.
+# envoy-nats-seed: this machine's cached NATS nkey seed, which pi-envoy and the
+# claude-envoy bridge authenticate to NATS with when the session's envoy.json
+# names it as a natsSeed command. No launcher runs it.
 #
-#   envoy-nats-seed            print the seed file's path, or nothing when there is none
-#   envoy-nats-seed --value    print the seed itself, or exit 1 naming why there is none
-#   envoy-nats-seed --refresh  fetch the seed from AWS now, whatever the cache holds
+#   envoy-nats-seed [SOURCE]            print the seed file's path, or nothing when there is none
+#   envoy-nats-seed [SOURCE] --value    print the seed itself, or exit 1 naming why there is none
+#   envoy-nats-seed [SOURCE] --refresh  fetch the seed now, whatever the cache holds
+#
+#   With no SOURCE the seed is production's `omp-session` seed in AWS. SOURCE names
+#   a seed in GCP Secret Manager instead, in any order around the mode:
+#   --gcp-secret SECRET --gcp-project PROJECT --gcloud-configuration NAME
 #
 # --value is for an envoy.json `"natsSeed": "!$HOME/.dotfiles/scripts/envoy-nats-seed --value"`
 # entry (/bin/sh expands $HOME, so it needs no PATH): the client reads the command's
 # stdout as the seed, so the value never sits in an environment or an argv. It
 # caches and refreshes exactly as path mode does.
 #
-# The seed lives in AWS Secrets Manager ($SECRET_ID) and on a machine only in
-# one 0600 file under $XDG_RUNTIME_DIR/envoy, a tmpfs cleared at boot. It never
-# enters an argv or an environment: aws writes it straight into a temp file,
-# which replaces the cache by rename once it holds a user nkey seed.
+# The default seed lives in AWS Secrets Manager ($SECRET_ID), read with the
+# default credential chain; a GCP source's lives in its secret, read with the
+# login of the gcloud configuration it names. On a machine a seed lives only in
+# one 0600 file per source under $XDG_RUNTIME_DIR/envoy, a tmpfs cleared at
+# boot, beside that source's own miss marker and lock. It never enters an argv
+# or an environment: aws writes it straight into a 0600 temp file beside the
+# cache, and gcloud writes it there through --out-file; the temp file replaces
+# the cache by rename once it holds a user nkey seed.
 #
-# The first call after boot fetches while its caller waits (one AWS call,
-# bounded by FETCH_TIMEOUT_S; a lock makes parallel calls share it). Every
+# The first call after boot fetches while its caller waits (one AWS or gcloud
+# call, bounded by FETCH_TIMEOUT_S; a lock makes parallel calls share it). Every
 # later call only stats the file. Once the file, or the last failed attempt,
 # is older than REFRESH_S, a call starts one detached background refresh and
 # carries on with what it has. A rotated seed therefore reaches sessions started
 # within an hour of the rotation's first call, or at once after --refresh; a
 # running session keeps the seed it connected with until it restarts.
 #
-# No secret, no AWS credentials, no aws CLI: nothing is printed, and the one
-# attempt that failed says why on one stderr line; its retries are silent and in
+# No secret, no credentials, no CLI: nothing is printed, and the one attempt
+# that failed says why on one stderr line; its retries are silent and in
 # the background, at most one per REFRESH_S. A failed refresh keeps the cached
 # seed. Path mode then exits 0, --value exits 1.
 set -uo pipefail
@@ -37,13 +44,55 @@ REGION="us-west-2"
 REFRESH_S=3600
 FETCH_TIMEOUT_S=5
 
+say() { echo "envoy-nats-seed: $*" >&2; }
+
+# The GCP source's flags come out of the arguments wherever they sit; what is
+# left selects the mode exactly as it does with no source. Each value must be a
+# name GCP allows, so a mode flag never stands in for a missing value, no name
+# reaches outside $dir, and the `.` that joins project and secret in the
+# cache's file name is in neither, so two sources never share a file.
+gcp_refused() {
+    say "a GCP source needs --gcp-secret SECRET, --gcp-project PROJECT and --gcloud-configuration NAME: $1"
+    exit 2
+}
+declare -A gcp=()
+source_args=() args=()
+while (( $# )); do
+    case "$1" in
+        --gcp-secret|--gcp-project|--gcloud-configuration)
+            (( $# >= 2 )) && [[ "$2" != -* ]] || gcp_refused "$1 has no value"
+            [[ -z "${gcp[$1]+set}" ]] || gcp_refused "$1 is given twice"
+            if [[ "$1" == --gcp-secret ]]; then re='^[A-Za-z0-9_][A-Za-z0-9_-]*$'; else re='^[a-z][a-z0-9-]*$'; fi
+            [[ "$2" =~ $re ]] || gcp_refused "$1 '$2' is not a name GCP allows"
+            gcp[$1]="$2"
+            source_args+=("$1" "$2")
+            shift 2
+            ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+if (( ${#gcp[@]} )); then
+    for flag in --gcp-secret --gcp-project --gcloud-configuration; do
+        [[ -n "${gcp[$flag]+set}" ]] || gcp_refused "$flag is missing"
+    done
+fi
+gcp_secret="${gcp[--gcp-secret]-}"
+gcp_project="${gcp[--gcp-project]-}"
+gcloud_config="${gcp[--gcloud-configuration]-}"
+
 dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/envoy"
-seed="$dir/nats-nkey-seed-omp-session"
+if [[ -n "$gcp_secret" ]]; then
+    seed="$dir/nats-nkey-seed-gcp-$gcp_project.$gcp_secret"
+    cli=gcloud provider=GCP secret_name="projects/$gcp_project/secrets/$gcp_secret"
+else
+    seed="$dir/nats-nkey-seed-omp-session"
+    cli=aws provider=AWS secret_name="$SECRET_ID"
+fi
 # The last failed attempt: its mtime says when, its content why.
 miss="$seed.miss"
 lock="$seed.lock"
 
-say() { echo "envoy-nats-seed: $*" >&2; }
 usable() { [[ -s "$seed" && -O "$seed" ]]; }
 older_than_refresh() { (( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || echo 0) >= REFRESH_S )); }
 recent_miss() { [[ -e "$miss" ]] && ! older_than_refresh "$miss"; }
@@ -70,6 +119,37 @@ record_miss() {
     fi
 }
 
+# Runs the source's CLI, which writes the seed into the file $1 and nowhere
+# else; the CLI's stderr is left to the caller. -k: a CLI that ignores TERM
+# still cannot hold the first call past the timeout.
+fetch_into() {
+    if [[ -n "$gcp_secret" ]]; then
+        # --configuration outranks any configuration the calling shell selected
+        # (GCLOUD_ACCOUNT, CLOUDSDK_ACTIVE_CONFIG_NAME). stdout is dropped and
+        # stdin closed, so no prompt can wait on a caller's terminal.
+        timeout -k 2 "$FETCH_TIMEOUT_S" gcloud --configuration "$gcloud_config" \
+            secrets versions access latest --secret "$gcp_secret" --project "$gcp_project" \
+            --out-file "$1" >/dev/null </dev/null
+    else
+        # The default credential chain (a devbox's instance role), never a profile
+        # the calling shell selected: one shell's staging profile would otherwise
+        # record a miss for every caller on the machine.
+        env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE timeout -k 2 "$FETCH_TIMEOUT_S" \
+            aws secretsmanager get-secret-value --region "$REGION" \
+            --secret-id "$SECRET_ID" --query SecretString --output text >"$1"
+    fi
+}
+
+# The line of a failed fetch's output that says why: the last non-blank one, or
+# gcloud's last ERROR: line, since gcloud also prints notices (its update
+# notice among them) on stderr.
+why() {
+    local line=""
+    [[ -n "$gcp_secret" ]] && line="$(grep '^ERROR:' <<<"$1" | tail -1)"
+    [[ -n "$line" ]] || line="$(grep -v '^[[:space:]]*$' <<<"$1" | tail -1)"
+    cut -c1-240 <<<"$line"
+}
+
 # One attempt. On failure the cache is left as it was and the miss marker
 # records the reason.
 fetch() {
@@ -78,15 +158,9 @@ fetch() {
         record_miss "$loud" "cannot create a file in $dir"
         return 1
     fi
-    if ! command -v aws >/dev/null 2>&1; then
-        reason="the aws CLI is not installed"
-    # The default credential chain (a devbox's instance role), never a profile
-    # the calling shell selected: one shell's staging profile would otherwise
-    # record a miss for every caller on the machine. -k: an aws that ignores
-    # TERM still cannot hold the first call past the timeout.
-    elif err="$(env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE timeout -k 2 "$FETCH_TIMEOUT_S" \
-        aws secretsmanager get-secret-value --region "$REGION" \
-        --secret-id "$SECRET_ID" --query SecretString --output text 2>&1 >"$tmp")"; then
+    if ! command -v "$cli" >/dev/null 2>&1; then
+        reason="the $cli CLI is not installed"
+    elif err="$(fetch_into "$tmp" 2>&1)"; then
         # The readers trim the file (legion #1471), so a stored value with
         # surrounding whitespace is accepted and cached trimmed.
         if [[ "$(grep -cv '^[[:space:]]*$' "$tmp")" -eq 1 ]] \
@@ -96,11 +170,11 @@ fetch() {
             rm -f "$tmp" "$miss"
             return 0
         fi
-        reason="$SECRET_ID does not hold a user nkey seed"
+        reason="$secret_name does not hold a user nkey seed"
     else
         case $? in
-            124|137) reason="AWS did not answer within ${FETCH_TIMEOUT_S}s" ;;
-            *) reason="$(grep -v '^[[:space:]]*$' <<<"$err" | tail -1 | cut -c1-240)" ;;
+            124|137) reason="$provider did not answer within ${FETCH_TIMEOUT_S}s" ;;
+            *) reason="$(why "$err")" ;;
         esac
     fi
     rm -f "$tmp" "$tmp.v"
@@ -108,8 +182,9 @@ fetch() {
     return 1
 }
 
+# The re-exec keeps the source, so it refreshes this cache and no other.
 refresh_in_background() {
-    setsid "${BASH_SOURCE[0]}" --background </dev/null >/dev/null 2>&1 &
+    setsid "${BASH_SOURCE[0]}" "${source_args[@]}" --background </dev/null >/dev/null 2>&1 &
 }
 
 umask 077
@@ -145,7 +220,7 @@ case "${1:-}" in
         fetch quiet
         exit 0
         ;;
-    *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
 
 if usable; then
