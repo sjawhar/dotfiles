@@ -84,3 +84,14 @@ allowed-signers = "~/.dotfiles/jj-allowed-signers"
 [--scope.user]
 name = "Sami Jawhar"
 email = "sami@thecybermonk.com"
+
+# theorem-labs repositories commit as sami@theorem.dev. As for Legion, jj matches
+# them by path: every jj checkout under ~/Code/personal/theorem is a theorem-labs
+# repository, and git's half of the rule is the theorem-labs remote-URL include
+# in .gitconfig. A theorem-labs jj checkout outside this directory needs
+# `git-identity th`.
+[[--scope]]
+--when.repositories = ["~/Code/personal/theorem"]
+[--scope.user]
+name = "Sami Jawhar"
+email = "sami@theorem.dev"

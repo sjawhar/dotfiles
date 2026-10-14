@@ -1,0 +1,6 @@
+# The sami@theorem.dev identity, included by .gitconfig for every clone of a
+# theorem-labs repository. jj's half of the rule is the repository scope in
+# .jjconfig.toml.
+[user]
+	email = sami@theorem.dev
+	name = Sami Jawhar
