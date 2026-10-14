@@ -118,7 +118,7 @@ else
 fi
 
 (( ${#deviations[@]} )) || exit 0
-msg="omp-billing-watch: API-billed usage outside the allow-list in the last ${HOURS}h — $(IFS='; '; echo "${deviations[*]}"). Nothing should reach openai/* or opencode-zen/* (allowed: ${ALLOW[*]:-none}); a Codex quota wall should fall to Anthropic (omp/config.yml fallbackChains), so check that session's model and the chain."
+msg="omp-billing-watch: API-billed usage outside the allow-list in the last ${HOURS}h — $(IFS='; '; echo "${deviations[*]}"). Check whether that session meant to be on openai/* or opencode-zen/* (allowed: ${ALLOW[*]:-none})."
 echo "DEVIATION: $msg" >&2
 if $ALERT; then
     "$DOTFILES_DIR/scripts/envoy" send notifications.role.sre "$msg" >/dev/null && echo "  alerted notifications.role.sre" >&2
