@@ -253,16 +253,11 @@ class CommittedForwardPairs(unittest.TestCase):
                 continue
             pair = daemon_name.removeprefix("config-daemon-").removesuffix(".toml")
             with self.subTest(pair=pair):
-                # The laptop daemon listens on these; the devbox dials them at its peer,
-                # except the browser relay, which it dials at its own listen address.
-                listened = [p for p in (12800, port(daemon, "pcsc_port"), port(daemon, "pulse_port")) if p]
-                relay = port(daemon, "relay_port")
+                # The laptop daemon listens on these; the devbox dials them at its peer.
+                listened = [p for p in (12800, port(daemon, "relay_port"), port(daemon, "pcsc_port"), port(daemon, "pulse_port")) if p]
                 # The laptop dials these at its peer; the devbox listens on them.
                 dialled = [p for p in (port(daemon, "bridge_port"), port(daemon, "grant_port")) if p]
                 remote = {f"RemoteForward {serve['peer']}:{p} {daemon['listen']}:{p}" for p in listened}
-                if relay:
-                    listened.append(relay)
-                    remote.add(f"RemoteForward {serve['listen']}:{relay} {daemon['listen']}:{relay}")
                 local = {f"LocalForward {daemon['peer']}:{p} {serve['listen']}:{p}" for p in dialled}
                 local.add(f"LocalForward {serve['listen']}:12802 {serve['listen']}:12802")
                 self.assertEqual(host_forwards(ssh_config, f"{pair}-tunnel"), remote | local)
