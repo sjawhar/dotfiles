@@ -54,9 +54,7 @@ Host rocqperf
 # The laptop daemon's ports go to the VM, the VM's come back here.
 # sami-leanperf's pair has 127.0.0.1 and the default ports. sami-rocqperf's has
 # 127.0.0.2 at both ends, with the bridge and grant feed on 12811 and 12815
-# (config-serve-sami-rocqperf.toml says why). A VM dials the browser relay at its
-# pair's own address, so rocqperf's 12803 binds 127.0.0.2, which its sshd allows
-# (GatewayPorts clientspecified).
+# (config-serve-sami-rocqperf.toml says why).
 Host sami-leanperf-tunnel
   HostName 52.233.92.39
   Port 443
@@ -86,7 +84,7 @@ Host sami-rocqperf-tunnel
   ExitOnForwardFailure yes
   ServerAliveInterval 15
   RemoteForward 127.0.0.1:12800 127.0.0.2:12800
-  RemoteForward 127.0.0.2:12803 127.0.0.2:12803
+  RemoteForward 127.0.0.1:12803 127.0.0.2:12803
   RemoteForward 127.0.0.1:12804 127.0.0.2:12804
   RemoteForward 127.0.0.1:12806 127.0.0.2:12806
   LocalForward 127.0.0.1:12811 127.0.0.2:12811
