@@ -18,7 +18,8 @@ paths = [
   "agentbox/", "devbox/", "agent-secrets/", "secrets.env", "secrets.human.d/", ".sops.yaml",
   "installers/agent-secrets.sh", "installers/secretsd.sh",
   "scripts/agentbox", "scripts/agentbox-run.ts", "scripts/agentbox-run.test.ts",
-  "scripts/agent-secrets-login", "scripts/agent-secrets-session", "scripts/secret-run",
+  "scripts/agent-secrets-login", "scripts/agent-secrets-session", "scripts/agent-session",
+  "scripts/secret-run",
   "scripts/hawk-token", "scripts/agent-access", "scripts/browser-slot",
   "scripts/tests/test_agent_secrets_launchers.py", "scripts/tests/test_agentbox_enroll.py",
   "scripts/tests/test_secret_run.py", "scripts/tests/test_browser_capture.py",
@@ -31,10 +32,9 @@ name = "omp"
 paths = [
   "omp/", "shims/omp", "whatsapp/", "installers/omp.sh", "installers/omp-billing-watch.sh",
   "installers/whatsapp.sh", "scripts/ompo", "scripts/omp-billing-watch",
-  "scripts/omp-no-provider-keys", "scripts/selfcompact-sessions", "scripts/tmux-omp-ids",
+  "scripts/selfcompact-sessions", "scripts/tmux-omp-ids",
   "scripts/tmux-resurrect-omp", "scripts/tests/test_omp_profile_links.py",
-  "scripts/tests/test_selfcompact_sessions.py", "shims/tests/test_omp_provider_keys.py",
-  "shims/tests/test_omp_relay_config.py", "shims/tests/test_omp_resolution.py",
+  "scripts/tests/test_selfcompact_sessions.py",
 ]
 
 [[theme]]

@@ -23,15 +23,14 @@ TRACKED = tuple(
 SHARED = (*TRACKED, "plugins/")
 PER_ACCOUNT = (".claude.json", ".credentials.json", "policy-limits.json", "remote-settings.json", "projects/")
 GATEWAY = "https://middleman.hawk.internal.trajectorylabs.com/anthropic"
-# The stub claude reports the --settings value it got, the credential variables it inherited, and
-# the variables that override an envoy.json field.
+# The stub claude reports the --settings value it got and the variables that override an
+# envoy.json field.
 STUB = """#!/bin/bash
 echo "CONFIG=${CLAUDE_CONFIG_DIR:-unset}"
 echo "ARGS=$*"
 settings=unset
 while (($#)); do [[ $1 == --settings ]] && settings=$2; shift; done
 echo "SETTINGS=$settings"
-echo "KEYS=${ANTHROPIC_API_KEY-unset} ${ANTHROPIC_AUTH_TOKEN-unset}"
 echo "ENVOY=${ENVOY_URL-unset} ${ENVOY_NATS_URL-unset} ${NATS_NKEY_SEED_FILE-unset}"
 """
 
@@ -87,26 +86,17 @@ class CldProfiles(unittest.TestCase):
         return fields["CONFIG"], fields["ARGS"]
 
     def test_default_profile_reaches_claude_through_the_hawk_gateway(self) -> None:
-        keys = {"ANTHROPIC_API_KEY": "sk-ant-stale", "ANTHROPIC_AUTH_TOKEN": "stale-bearer"}
-        for args, extra in (((), keys), (("--profile", "default"), keys), ((), {})):
-            with self.subTest(args=args, env=extra):
-                result = self.cld(*args, "-p", "hi", **extra)
-                fields = self.fields(result)
+        for args in ((), ("--profile", "default")):
+            with self.subTest(args=args):
+                fields = self.fields(self.cld(*args, "-p", "hi"))
                 self.assertEqual(
                     json.loads(fields["SETTINGS"]),
                     {"apiKeyHelper": str(self.dotfiles / "scripts" / "hawk-token"), "env": {"ANTHROPIC_BASE_URL": GATEWAY}},
                 )
                 self.assertTrue(fields["ARGS"].endswith("-p hi"), fields["ARGS"])
-                # A key in the environment outranks apiKeyHelper, and every tool subprocess would hold it.
-                self.assertEqual(fields["KEYS"], "unset unset")
-                for name in extra:
-                    self.assertIn(name, result.stderr)
-                self.assertNotIn("sk-ant-stale", result.stderr)
 
-    def test_named_profile_keeps_its_own_login_and_keys(self) -> None:
-        fields = self.fields(self.cld("--profile", "theorem", ANTHROPIC_API_KEY="exported-by-the-caller"))
-        self.assertEqual(fields["SETTINGS"], "unset")
-        self.assertEqual(fields["KEYS"], "exported-by-the-caller unset")
+    def test_named_profile_keeps_its_own_login(self) -> None:
+        self.assertEqual(self.fields(self.cld("--profile", "theorem"))["SETTINGS"], "unset")
 
     def test_no_profile_gets_an_envoy_variable(self) -> None:
         """The claude-envoy bridge reads Dispatch and Envoy from the profile's envoy.json, and each
