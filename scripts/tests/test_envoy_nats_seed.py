@@ -12,7 +12,9 @@ PATH, so no run reaches AWS or GCP. Each fake records its argv and environment, 
 mode of the `--out-file` it was handed; it then fails with the stderr a test gave it, or answers
 with the seed a test gave it (`aws` on stdout, `gcloud` into the `--out-file`). A fresh cache file
 starts no background refresh and a fresh miss marker suppresses the fetch; a cache aged with
-`os.utime` past the script's hour starts one detached refresh, which a test waits for.
+`os.utime` past the script's hour starts one detached refresh, which a test waits for. One test
+puts this repository's `shims/gcloud` in front of the fake `gcloud`, as a dotfiles machine's PATH
+does, and sets the variables a shell selects a gcloud configuration or account with.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "envoy-nats-seed"
+GCLOUD_SHIM = Path(__file__).resolve().parents[2] / "shims" / "gcloud"
 SEED = "SU" + "A" * 56
 AWS_SEED = "SU" + "W" * 56
 GCP_SEED = "SU" + "G" * 56
@@ -93,11 +96,17 @@ class EnvoyNatsSeedTest(unittest.TestCase):
             path.write_text(FAKE.format(fake=str(self.fake), tool=tool))
             path.chmod(0o755)
 
-    def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_script(
+        self, *args: str, path_head: Path | None = None, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        path = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
+        if path_head is not None:
+            path = f"{path_head}{os.pathsep}{path}"
         env = {
-            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "PATH": path,
             "HOME": str(self.runtime),
             "XDG_RUNTIME_DIR": str(self.runtime),
+            **(extra_env or {}),
         }
         return subprocess.run([str(SCRIPT), *args], env=env, capture_output=True, text=True, timeout=30)
 
@@ -270,6 +279,26 @@ class EnvoyNatsSeedTest(unittest.TestCase):
                 self.assertIn("envoy-nats-seed: a GCP source needs", result.stderr)
         self.assertEqual(self.calls("aws") + self.calls("gcloud"), [])
         self.assertEqual(list(self.dir.iterdir()), [])
+
+    def test_gcp_fetch_ignores_the_callers_gcloud_selection(self) -> None:
+        """shims/gcloud refuses a GCLOUD_ACCOUNT naming no configuration before gcloud runs, and
+        CLOUDSDK_CORE_ACCOUNT would outrank the named configuration's account: the fetch must reach
+        gcloud with none of the three selection variables a calling shell may hold."""
+        shim_bin = self.fake / "shim-bin"
+        shim_bin.mkdir()
+        (shim_bin / "gcloud").symlink_to(GCLOUD_SHIM)
+        self.answer("gcloud", GCP_SEED)
+        selection = {
+            "GCLOUD_ACCOUNT": "no-such-configuration",
+            "CLOUDSDK_ACTIVE_CONFIG_NAME": "other-configuration",
+            "CLOUDSDK_CORE_ACCOUNT": "someone-else@example.com",
+        }
+        value = self.run_script(*GCP_ARGS, "--value", path_head=shim_bin, extra_env=selection)
+        self.assertEqual((value.returncode, value.stdout, value.stderr), (0, GCP_SEED, ""))
+        (call,) = self.calls("gcloud")
+        self.assert_gcloud_fetched_into_a_private_temp_file(call)
+        for name in selection:
+            self.assertNotIn(name, call["env"])
 
 
 if __name__ == "__main__":

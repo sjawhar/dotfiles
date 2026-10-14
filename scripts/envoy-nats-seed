@@ -124,10 +124,14 @@ record_miss() {
 # still cannot hold the first call past the timeout.
 fetch_into() {
     if [[ -n "$gcp_secret" ]]; then
-        # --configuration outranks any configuration the calling shell selected
-        # (GCLOUD_ACCOUNT, CLOUDSDK_ACTIVE_CONFIG_NAME). stdout is dropped and
-        # stdin closed, so no prompt can wait on a caller's terminal.
-        timeout -k 2 "$FETCH_TIMEOUT_S" gcloud --configuration "$gcloud_config" \
+        # The named configuration's login, never a selection the calling shell
+        # made: shims/gcloud refuses a GCLOUD_ACCOUNT naming no configuration
+        # before gcloud runs, and CLOUDSDK_CORE_ACCOUNT outranks a
+        # configuration's own account. Either would record a miss for every
+        # caller on the machine. stdout is dropped and stdin closed, so no
+        # prompt can wait on a caller's terminal.
+        env -u GCLOUD_ACCOUNT -u CLOUDSDK_ACTIVE_CONFIG_NAME -u CLOUDSDK_CORE_ACCOUNT \
+            timeout -k 2 "$FETCH_TIMEOUT_S" gcloud --configuration "$gcloud_config" \
             secrets versions access latest --secret "$gcp_secret" --project "$gcp_project" \
             --out-file "$1" >/dev/null </dev/null
     else
