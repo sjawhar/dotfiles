@@ -83,9 +83,8 @@ retry:
       - anthropic/claude-opus-4-8
       - anthropic/claude-opus-4-7
       - anthropic/claude-opus-4-6
-      # API-billed routes, off for cost; restore by uncommenting.
-      # - openai/*
-      # - opencode-zen/*
+      - openai/*
+      - opencode-zen/*
     default:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
@@ -100,15 +99,6 @@ retry:
       - anthropic/claude-opus-4-6
 task:
   maxRecursionDepth: 3
-  # No session dispatches onto OpenAI API billing (Sami, 2026-10-02, on
-  # dispatch://AGENTC-203/ask/5f198a8e: "Make sure that agents on this box and
-  # legion are not using openai API"). On the devbox the `openai` provider goes
-  # through the Hawk gateway, so these two agents spent the same prepaid OpenAI
-  # balance the deploy gate runs on, and it ran dry twice that day. With
-  # disabledProviders below, nothing can reach `openai/*` by another selector.
-  disabledAgents:
-    - gpt-api
-    - astra-api
   agentModelOverrides:
     bug-finder: "@review"
     code-architect: anthropic/claude-opus-5-5
@@ -226,11 +216,6 @@ skills:
     - sentry-setup-ai-monitoring
     - sentry-svelte-sdk
     - sentry-workflow
-# The OpenAI API provider is off for every session; the ChatGPT Pro
-# subscription (`openai-codex`) is a separate provider and stays on. Reason: the
-# task.disabledAgents comment above.
-disabledProviders:
-  - openai
 providers:
   anthropic:
     serverSideFallback: true

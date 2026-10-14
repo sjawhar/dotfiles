@@ -23,14 +23,15 @@ TRACKED = tuple(
 SHARED = (*TRACKED, "plugins/")
 PER_ACCOUNT = (".claude.json", ".credentials.json", "policy-limits.json", "remote-settings.json", "projects/")
 GATEWAY = "https://middleman.hawk.internal.trajectorylabs.com/anthropic"
-# The stub claude reports the --settings value it got and the credential variables it inherited.
+# The stub claude reports the --settings value it got and the variables that override an
+# envoy.json field.
 STUB = """#!/bin/bash
 echo "CONFIG=${CLAUDE_CONFIG_DIR:-unset}"
 echo "ARGS=$*"
 settings=unset
 while (($#)); do [[ $1 == --settings ]] && settings=$2; shift; done
 echo "SETTINGS=$settings"
-echo "KEYS=${ANTHROPIC_API_KEY-unset} ${ANTHROPIC_AUTH_TOKEN-unset}"
+echo "ENVOY=${ENVOY_URL-unset} ${ENVOY_NATS_URL-unset} ${NATS_NKEY_SEED_FILE-unset}"
 """
 
 
@@ -55,12 +56,12 @@ class CldProfiles(unittest.TestCase):
         claude = stubs / "claude"
         claude.write_text(STUB, encoding="utf-8")
         claude.chmod(claude.stat().st_mode | stat.S_IEXEC)
+        self.root = root
         self.env = {
             "DOTFILES_DIR": str(self.dotfiles),
             "HOME": str(home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "XDG_CONFIG_HOME": str(home / ".config"),
-            "NATS_NKEY_SEED_FILE": "/dev/null",
         }
 
     def tearDown(self) -> None:
@@ -85,26 +86,33 @@ class CldProfiles(unittest.TestCase):
         return fields["CONFIG"], fields["ARGS"]
 
     def test_default_profile_reaches_claude_through_the_hawk_gateway(self) -> None:
-        keys = {"ANTHROPIC_API_KEY": "sk-ant-stale", "ANTHROPIC_AUTH_TOKEN": "stale-bearer"}
-        for args, extra in (((), keys), (("--profile", "default"), keys), ((), {})):
-            with self.subTest(args=args, env=extra):
-                result = self.cld(*args, "-p", "hi", **extra)
-                fields = self.fields(result)
+        for args in ((), ("--profile", "default")):
+            with self.subTest(args=args):
+                fields = self.fields(self.cld(*args, "-p", "hi"))
                 self.assertEqual(
                     json.loads(fields["SETTINGS"]),
                     {"apiKeyHelper": str(self.dotfiles / "scripts" / "hawk-token"), "env": {"ANTHROPIC_BASE_URL": GATEWAY}},
                 )
                 self.assertTrue(fields["ARGS"].endswith("-p hi"), fields["ARGS"])
-                # A key in the environment outranks apiKeyHelper, and every tool subprocess would hold it.
-                self.assertEqual(fields["KEYS"], "unset unset")
-                for name in extra:
-                    self.assertIn(name, result.stderr)
-                self.assertNotIn("sk-ant-stale", result.stderr)
 
-    def test_named_profile_keeps_its_own_login_and_keys(self) -> None:
-        fields = self.fields(self.cld("--profile", "theorem", ANTHROPIC_API_KEY="exported-by-the-caller"))
-        self.assertEqual(fields["SETTINGS"], "unset")
-        self.assertEqual(fields["KEYS"], "exported-by-the-caller unset")
+    def test_named_profile_keeps_its_own_login(self) -> None:
+        self.assertEqual(self.fields(self.cld("--profile", "theorem"))["SETTINGS"], "unset")
+
+    def test_no_profile_gets_an_envoy_variable(self) -> None:
+        """The claude-envoy bridge reads Dispatch and Envoy from the profile's envoy.json, and each
+        of these variables overrides its field there: one cld exported would turn Envoy on for a
+        named profile that has no envoy.json. A fresh NATS seed cache sits where
+        scripts/envoy-nats-seed finds it, so a cld that still asked that script would export
+        NATS_NKEY_SEED_FILE."""
+        runtime = self.root / "run"
+        (runtime / "envoy").mkdir(parents=True, mode=0o700)
+        seed = runtime / "envoy" / "nats-nkey-seed-omp-session"
+        seed.write_text("SU" + "A" * 56, encoding="utf-8")
+        seed.chmod(0o600)
+        for name, args in (("default profile", ()), ("named profile", ("--profile", "theorem"))):
+            with self.subTest(name):
+                fields = self.fields(self.cld(*args, XDG_RUNTIME_DIR=str(runtime)))
+                self.assertEqual(fields["ENVOY"], "unset unset unset")
 
     def test_profile_runs_claude_in_its_own_dir_without_the_flag(self) -> None:
         profile = self.dotfiles / ".claude-profiles" / "theorem"

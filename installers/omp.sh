@@ -4,7 +4,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # omp (oh-my-pi) - the binary is mise-managed ("github:sjawhar/oh-my-pi" fork
 # release in mise.toml, built by the fork's fork-release.yml workflow); the
-# shim at shims/omp injects secrets and envoy env. This installer wires config.
+# shim at shims/omp sets up the session environment. This installer wires config.
 
 OMP_AGENT_DIR="${HOME}/.omp/agent"
 mkdir -p "$OMP_AGENT_DIR"

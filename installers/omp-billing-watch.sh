@@ -5,12 +5,9 @@
 # Run it on a machine that runs omp sessions; it is the machine's stats.db the
 # watch reads, so there is nothing to arm on a laptop that only SSHes in.
 #
-# Why this exists: omp/config.yml keeps API-billed providers out of the FALLBACK
-# chains, but a `/model` pick to openai/* is an explicit selection no chain can
-# refuse, and a session left on one bills per token for as long as it runs. That
-# is not hypothetical — two sessions picked openai/gpt-6-astra on 2026-09-19/20
-# and spent ~$3.8k before anyone looked. The chain fix closed the fallback path;
-# only a detector closes this one.
+# Why this exists: a session on openai/* or opencode-zen/* (a /model pick, the
+# gpt-api or astra-api agent, or the end of a Codex fallback chain) bills per
+# token for as long as it runs, and nothing else shows that spend.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

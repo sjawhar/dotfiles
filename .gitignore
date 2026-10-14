@@ -43,6 +43,7 @@ docs/superpowers/
 # Private secrets repo (its own git repo, never part of dotfiles)
 .secrets/
 omp/models.local.yml
+# No longer read; ignored so a copy left on a machine is never snapshotted or committed.
 envoy/env.local
 # cosmic-config writes each setting through a temp directory beside it
 # (atomicwrites), which lands in laptop/cosmic/ while COSMIC saves

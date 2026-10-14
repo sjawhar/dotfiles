@@ -17,7 +17,10 @@ before handing the call to the real one.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration, and gives every
   `git commit` from an omp session its `Omp-Session` trailer.
-- **`omp`** finds the build to run and sets up the session environment (below).
+- **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights
+  and a named profile's links, then execs omp through `scripts/agent-session` (below). It sets no
+  Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys
+  come from the profile's `models.yml` (`omp/AGENTS.md`).
 - **`knives`** execs the pinned knives (`"github:sjawhar/knives"` in `mise.toml`, looked up with
   `mise which -C / knives --tool github:sjawhar/knives`), or a local build on PATH past it,
   never a knives in a mise dir: a session keeps the PATH it started with, and that PATH names
@@ -47,24 +50,12 @@ or failing with exit 127 instead of looping.
 
 ## How `shims/omp` resolves omp
 
-It looks for a local build anywhere on PATH, skipping every `omp` whose real path is in a
-`shims/` directory (itself under another name, another checkout's copy) and mise's own dirs.
-Its fallback is `mise x github:sjawhar/oh-my-pi -- omp`. mise resolves that bare `omp` with the
-tool dirs it adds ahead of the PATH it was given, but it adds a dir only when that install dir
-is not already there. An install dir that arrived on PATH without mise's record of adding it
-(a tmux window opened from a shell outside tmux gets that shell's PATH and none of its
-`__MISE_*` state) counts as the caller's, the shims dir ahead of it wins, and mise and the shim
-hand `omp` back and forth forever. So the shim hands `mise x` a PATH without mise's install
-dirs, which is what makes mise resolve the release, and a second entry into the shim in the
-same pid within 10 s exits with an error instead of looping (a slower same-pid entry is omp's
-`/restart` exec'ing `omp` in place, which must relaunch). A shim that falls back to
-`mise x <tool> -- <bin>` needs the same.
-
-The child `mise x` starts gets a different PATH, decided by whether the PATH mise was handed
-carries mise's own shims dir (`~/.mise/shims`): with it (every PATH `.bashrc` builds has it,
-and the shim keeps it), the entries ahead of that dir, the dotfiles shims dir among them, stay
-ahead of the tool dirs, so `omp` by name in the child is the shim; without it the tool dirs
-come first. That is why `scripts/omp-no-provider-keys`, which the shim execs inside `mise x`
-for a default-profile session, takes a bare `omp` from the first mise install dir on PATH
-instead of looking it up: correct in both cases, because the shim hands mise no install dir of
-its own and the requested tool's dir is the first install dir either way.
+`shims/omp` runs `mise env -s bash` first. A session keeps the PATH it started with, and that
+PATH can name the install dir of an older pin; mise swaps it for the current pin's dir, so a
+stale PATH still starts the pinned omp. Then `scripts/agent-session` takes the first `omp` on
+PATH that is not a wrapper: it skips mise's shims dir (`~/.mise/shims`), whose `omp` hands the
+call back to PATH when mise has no version for the directory, and every `omp` whose real path is
+in a `shims/` directory (this shim, another checkout's copy). A local build on PATH ahead of
+mise's shims dir wins: `mise env` keeps the entries ahead of that dir ahead of the tool dirs it
+adds, and puts its tool dirs first on a PATH without it; with the pin not installed and no local build, the launch fails with
+exit 127 instead of looping back into the shim.
