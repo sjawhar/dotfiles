@@ -83,9 +83,8 @@ retry:
       - anthropic/claude-opus-4-8
       - anthropic/claude-opus-4-7
       - anthropic/claude-opus-4-6
-      # API-billed routes, off for cost; restore by uncommenting.
-      # - openai/*
-      # - opencode-zen/*
+      - openai/*
+      - opencode-zen/*
     default:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
@@ -100,12 +99,6 @@ retry:
       - anthropic/claude-opus-4-6
 task:
   maxRecursionDepth: 3
-  # No session dispatches onto OpenAI API billing: on the devbox the `openai`
-  # provider goes through the Hawk gateway, so these two agents spent the same
-  # prepaid OpenAI balance the deploy gate runs on.
-  disabledAgents:
-    - gpt-api
-    - astra-api
   agentModelOverrides:
     bug-finder: "@review"
     code-architect: anthropic/claude-opus-5-5
