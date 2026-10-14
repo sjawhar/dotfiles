@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# agent-session: the session environment every agent launcher here shares, then the agent.
+#
+#   agent-session <agent> [args…]
+#
+# shims/omp and scripts/cld exec their agent through this; every hop is an exec, so the pid the
+# secrets broker's helper registers is the agent's. It
+#   - includes gh-app-routes.gitconfig once (GIT_CONFIG_*), so git and gh in the session act as
+#     the repo owner's GitHub App, never the user's own login;
+#   - puts this checkout's shims/ first on PATH: a session keeps the PATH it started with, and a
+#     launching shell's mise hook may have put the real gh ahead of shims/gh;
+#   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
+#     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
+#     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
+#     the directory; either would hand the call back to a launcher.
+set -euo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+
+(( $# )) || { echo "usage: agent-session <agent> [args…]" >&2; exit 2; }
+agent="$1"
+shift
+
+routed=""
+for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
+    value="GIT_CONFIG_VALUE_$i"
+    [[ "${!value:-}" == *gh-app-routes.gitconfig ]] && routed=1
+done
+if [[ -z "$routed" ]]; then
+    n="${GIT_CONFIG_COUNT:-0}"
+    export "GIT_CONFIG_KEY_$n=include.path" "GIT_CONFIG_VALUE_$n=$DOTFILES_DIR/gh-app-routes.gitconfig"
+    export GIT_CONFIG_COUNT="$((n + 1))"
+fi
+
+shims="$DOTFILES_DIR/shims"
+dirs=()
+IFS=':' read -ra entries <<< "$PATH"
+for dir in "${entries[@]}"; do
+    [[ -n "$dir" && "$dir" != "$shims" ]] && dirs+=("$dir")
+done
+PATH="$shims"
+for dir in "${dirs[@]}"; do PATH+=":$dir"; done
+export PATH
+
+prog=""
+if [[ "$agent" == */* ]]; then
+    prog="$agent"
+else
+    mise_shims="${MISE_DATA_DIR:-$HOME/.mise}/shims"
+    for dir in "${dirs[@]}"; do
+        [[ "$dir" != "$mise_shims" && -f "$dir/$agent" && -x "$dir/$agent" ]] || continue
+        real="$(realpath "$dir/$agent")"
+        [[ "${real%/*}" == */shims ]] && continue
+        prog="$dir/$agent"
+        break
+    done
+    if [[ -z "$prog" ]]; then
+        echo "agent-session: no $agent on PATH other than a wrapper (a shims/ dir, $mise_shims); a mise-managed agent needs its pinned version installed (mise install)" >&2
+        exit 127
+    fi
+fi
+
+exec "$DOTFILES_DIR/scripts/agent-secrets-session" "$prog" "$@"

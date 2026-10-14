@@ -1,40 +1,35 @@
 #!/usr/bin/env bash
-# envoy-nats-seed: the path of this machine's cached `omp-session` NATS nkey
-# seed, which the session launchers (shims/omp, scripts/cld, scripts/agentbox)
-# export as NATS_NKEY_SEED_FILE. pi-envoy and the
-# claude-envoy bridge read that file to authenticate to production NATS.
+# envoy-nats-seed: this machine's cached `omp-session` NATS nkey seed, which
+# pi-envoy and the claude-envoy bridge authenticate to production NATS with
+# when the session's envoy.json names it as a natsSeed command. No launcher
+# runs it.
 #
 #   envoy-nats-seed            print the seed file's path, or nothing when there is none
 #   envoy-nats-seed --value    print the seed itself, or exit 1 naming why there is none
 #   envoy-nats-seed --refresh  fetch the seed from AWS now, whatever the cache holds
 #
-# --value is for a `natsSeed: "!envoy-nats-seed --value"` entry in an envoy.json:
-# the client reads the command's stdout as the seed, so the value never sits in
-# an environment or an argv. It caches and refreshes exactly as launcher mode does.
+# --value is for an envoy.json `"natsSeed": "!$HOME/.dotfiles/scripts/envoy-nats-seed --value"`
+# entry (/bin/sh expands $HOME, so it needs no PATH): the client reads the command's
+# stdout as the seed, so the value never sits in an environment or an argv. It
+# caches and refreshes exactly as path mode does.
 #
 # The seed lives in AWS Secrets Manager ($SECRET_ID) and on a machine only in
 # one 0600 file under $XDG_RUNTIME_DIR/envoy, a tmpfs cleared at boot. It never
 # enters an argv or an environment: aws writes it straight into a temp file,
 # which replaces the cache by rename once it holds a user nkey seed.
 #
-# The first launch after boot fetches while the session waits (one AWS call,
-# bounded by FETCH_TIMEOUT_S; a lock makes parallel launches share it). Every
-# later launch only stats the file. Once the file, or the last failed attempt,
-# is older than REFRESH_S, a launch starts one detached background refresh and
+# The first call after boot fetches while its caller waits (one AWS call,
+# bounded by FETCH_TIMEOUT_S; a lock makes parallel calls share it). Every
+# later call only stats the file. Once the file, or the last failed attempt,
+# is older than REFRESH_S, a call starts one detached background refresh and
 # carries on with what it has. A rotated seed therefore reaches sessions started
-# within an hour of the rotation's first launch, or at once after --refresh; a
+# within an hour of the rotation's first call, or at once after --refresh; a
 # running session keeps the seed it connected with until it restarts.
 #
-# No secret, no AWS credentials, no aws CLI: nothing is printed, so the session
-# connects to NATS without a credential, and the one attempt that failed says
-# why on one stderr line; its retries are silent and in the background, at most
-# one per REFRESH_S. A failed refresh keeps the cached seed. Launcher mode always
-# exits 0: a missing credential never stops a session from starting.
-#
-# Every process a session starts inherits the pointer, and nats.go refuses an
-# nkey seed from a server that sends no nonce ("nkeys not supported by the
-# server"): a local rig against a throwaway no-auth NATS runs with
-# `env -u NATS_NKEY_SEED_FILE` unless its harness strips the variable itself.
+# No secret, no AWS credentials, no aws CLI: nothing is printed, and the one
+# attempt that failed says why on one stderr line; its retries are silent and in
+# the background, at most one per REFRESH_S. A failed refresh keeps the cached
+# seed. Path mode then exits 0, --value exits 1.
 set -uo pipefail
 
 SECRET_ID="production/envoy/nats-nkey-seed-omp-session"
@@ -71,7 +66,7 @@ record_miss() {
     if usable; then
         say "could not refresh the NATS credential ($reason); keeping the cached one"
     else
-        say "no NATS credential ($reason); sessions connect without one, retried hourly in the background"
+        say "no NATS credential ($reason); retried hourly in the background"
     fi
 }
 
@@ -86,9 +81,9 @@ fetch() {
     if ! command -v aws >/dev/null 2>&1; then
         reason="the aws CLI is not installed"
     # The default credential chain (a devbox's instance role), never a profile
-    # the launching shell selected: one shell's staging profile would otherwise
-    # record a miss for every launcher on the machine. -k: an aws that ignores
-    # TERM still cannot hold the first launch past the timeout.
+    # the calling shell selected: one shell's staging profile would otherwise
+    # record a miss for every caller on the machine. -k: an aws that ignores
+    # TERM still cannot hold the first call past the timeout.
     elif err="$(env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE timeout -k 2 "$FETCH_TIMEOUT_S" \
         aws secretsmanager get-secret-value --region "$REGION" \
         --secret-id "$SECRET_ID" --query SecretString --output text 2>&1 >"$tmp")"; then
@@ -125,8 +120,8 @@ if ! mkdir -p "$dir" 2>/dev/null || ! [[ -O "$dir" && -w "$dir" ]]; then
     exit 0
 fi
 
-# Launcher mode prints the seed file's path; --value prints the seed. With no
-# seed, launcher mode exits 0 (a session still starts) and --value exits 1.
+# Path mode prints the seed file's path; --value prints the seed. With no seed,
+# path mode exits 0 and --value exits 1.
 value=0
 emit() { if (( value )); then cat "$seed"; else echo "$seed"; fi; }
 none() { if (( value )); then say "no NATS credential: ${1:-none cached and no fetch possible}"; exit 1; fi; exit 0; }
@@ -159,14 +154,14 @@ if usable; then
     exit 0
 fi
 if [[ -e "$miss" ]]; then
-    # An attempt already failed this boot; the session starts without waiting.
+    # An attempt already failed this boot; the caller gets no seed without waiting.
     recent_miss || refresh_in_background
     none "$(cat "$miss" 2>/dev/null)"
 fi
-# The first launch this boot: fetch now, so this session starts with the seed.
+# The first call this boot: fetch now, so this caller gets the seed.
 if t="$(missing_tool)"; then record_miss loud "$t is not installed"; none "$t is not installed"; fi
 take_lock -w $((FETCH_TIMEOUT_S + 5)) || none "cannot take $lock"
-# A parallel launch may have fetched, or failed, while this one waited.
+# A parallel call may have fetched, or failed, while this one waited.
 if usable; then emit; exit 0; fi
 [[ -e "$miss" ]] && none "$(cat "$miss" 2>/dev/null)"
 fetch loud && { emit; exit 0; }

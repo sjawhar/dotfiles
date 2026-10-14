@@ -42,20 +42,16 @@ class OmpProfileLinks(unittest.TestCase):
             (agent / name).write_text("{}", encoding="utf-8")
         stubs = root / "bin"
         stubs.mkdir()
-        # `mise x github:sjawhar/oh-my-pi -- …omp` runs the command with the release's install
-        # dir on PATH; the default profile's command is scripts/omp-no-provider-keys, which takes
-        # the bare `omp` from that dir.
+        # `mise env -s bash` puts the pinned release's install dir on PATH.
         tool = self.home / ".mise" / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin"
         tool.mkdir(parents=True)
         write_stub(tool, "omp", 'echo "AGENT omp $*"')
-        write_stub(stubs, "mise", f'shift 3; PATH="{tool}:$PATH" exec "$@"')
-        write_stub(stubs, "secrets", "exit 0")
+        write_stub(stubs, "mise", f"echo 'export PATH=\"{tool}:$PATH\"'")
         self.env = {
             "DOTFILES_DIR": str(DOTFILES),
             "HOME": str(self.home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "XDG_CONFIG_HOME": str(self.home / ".config"),
-            "NATS_NKEY_SEED_FILE": "/dev/null",
         }
 
     def tearDown(self) -> None:
@@ -99,6 +95,22 @@ class OmpProfileLinks(unittest.TestCase):
         self.assertFalse(os.path.lexists(agent / "models.yml"))
         self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "the profile's own")
         self.assertEqual((agent / "agent.db").read_text(encoding="utf-8"), "state")
+
+    def test_a_profiles_envoy_json_is_its_own(self) -> None:
+        """A named profile reads Dispatch and Envoy from its own agent dir's envoy.json, and has
+        none without one: the shim neither prunes a profile's envoy.json link (one to the neutral
+        file is how a profile gets them) nor gives a profile the default agent dir's."""
+        neutral = self.home / ".config" / "legion" / "envoy.json"
+        neutral.parent.mkdir(parents=True)
+        neutral.write_text("{}", encoding="utf-8")
+        own = self.omp / "profiles" / "legion" / "agent" / "envoy.json"
+        own.parent.mkdir(parents=True)
+        own.symlink_to(neutral)
+        self.assert_launched(self.omp_run("--profile", "legion"))
+        self.assertEqual(os.readlink(own), str(neutral))
+        (self.omp / "agent" / "envoy.json").symlink_to(neutral)
+        self.assert_launched(self.omp_run("--profile", "theorem"))
+        self.assertFalse(os.path.lexists(self.omp / "profiles" / "theorem" / "agent" / "envoy.json"))
 
     def test_default_profile_creates_nothing(self) -> None:
         for args, extra in (((), {}), (("--profile", "default"), {}), ((), {"OMP_PROFILE": ""})):
