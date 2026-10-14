@@ -211,14 +211,18 @@ and its sessions need Theorem's tailnet, and those belong to agent-infra's Task 
   - Every mode takes these flags (path, `--value`, `--refresh`, `--background`), and
     `refresh_in_background` (`:111-113`) passes them to its re-exec.
   - The cache, lock, refresh and miss rules are today's, under files named for the source:
-    `nats-nkey-seed-gcp-<project>-<secret>`, with its `.miss` and lock files.
+    `nats-nkey-seed-gcp-<project>.<secret>`, with its `.miss` and lock files (a `.`, since both
+    names may hold `-` and neither may hold `.`, so no two sources share a file).
   - The fetch is
-    `gcloud --configuration <name> secrets versions access latest --secret <secret> --project <project> --out-file <tmp>`,
-    so the value is never in an argv or the environment.
+    `env -u GCLOUD_ACCOUNT -u CLOUDSDK_ACTIVE_CONFIG_NAME -u CLOUDSDK_CORE_ACCOUNT gcloud --configuration <name> secrets versions access latest --secret <secret> --project <project> --out-file <tmp>`,
+    so the value is never in an argv or the environment, and no caller's gcloud selection can
+    record a miss for every session.
   - With no source flag, the script behaves exactly as today.
 - [ ] Tests, with fake `gcloud` and `aws` on `PATH` that record their argv:
   1. a fetched seed is cached and served by `--value`;
-  2. a failing `gcloud` prints one stderr line naming it, and exits 1 under `--value`;
+  2. a failing `gcloud` exits 1 under `--value` with nothing on stdout, and stderr holds only the
+     script's own lines (today's two for a first-call miss), naming the failure; `gcloud`'s raw
+     stderr never passes through;
   3. a GCP cache aged past `REFRESH_S` with `os.utime` makes `gcloud` run with the source's argv
      and replace that cache, and `aws` never runs;
   4. the mirror case: an aged default cache refreshes through `aws`, and `gcloud` never runs;
