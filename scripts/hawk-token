@@ -227,7 +227,7 @@ if [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; t
     # devbox-agents-2, 2026-10-05: "LEGION_GH_PATH is not an absolute path" and
     # a refused askpass, every few minutes for hours, because nothing here
     # touches $stamp on failure so every later call re-triggers it. Re-derive
-    # the same gh-app routing `shims/omp` sets up for a normal session
+    # the same gh-app routing `scripts/agent-session` sets up for a normal session
     # (GIT_CONFIG_* -> gh-app-routes.gitconfig) from scratch in a wiped
     # environment, so the refresh authenticates the same way no matter who
     # triggered it, and never inherits a credential scoped to somebody else's

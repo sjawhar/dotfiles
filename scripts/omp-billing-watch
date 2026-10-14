@@ -44,8 +44,8 @@ done
 # said "none" from a frozen snapshot, and the 09-21 verification run read a db
 # whose newest row was already 18h old.
 #
-# So: sync first (the pinned binary through mise, not shims/omp -- that re-execs
-# under `secrets`, which a tty-less timer cannot satisfy), then assert the db
+# So: sync first (the pinned binary through mise, not shims/omp -- a timer is
+# not an agent session and needs none of its environment), then assert the db
 # actually covers the window before reporting from it. The assertion, not the
 # sync's exit code, is the gate: a sync that times out or loses the race for
 # omp's lock is fine as long as another one left the db current, and a sync that

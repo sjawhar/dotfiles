@@ -42,14 +42,11 @@ class OmpProfileLinks(unittest.TestCase):
             (agent / name).write_text("{}", encoding="utf-8")
         stubs = root / "bin"
         stubs.mkdir()
-        # `mise x github:sjawhar/oh-my-pi -- …omp` runs the command with the release's install
-        # dir on PATH; the default profile's command is scripts/omp-no-provider-keys, which takes
-        # the bare `omp` from that dir.
+        # `mise env -s bash` puts the pinned release's install dir on PATH.
         tool = self.home / ".mise" / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin"
         tool.mkdir(parents=True)
         write_stub(tool, "omp", 'echo "AGENT omp $*"')
-        write_stub(stubs, "mise", f'shift 3; PATH="{tool}:$PATH" exec "$@"')
-        write_stub(stubs, "secrets", "exit 0")
+        write_stub(stubs, "mise", f"echo 'export PATH=\"{tool}:$PATH\"'")
         self.env = {
             "DOTFILES_DIR": str(DOTFILES),
             "HOME": str(self.home),

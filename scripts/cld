@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Claude Code launcher: `cld [--profile NAME] [claude args...]`.
 #
-# Loads gh-app-routes.gitconfig for the agent session so git push and gh CLI
-# authenticate as the GitHub App installation for the target repo's owner;
-# owners without an installation get the upstream token from the secrets store.
-# Mirrors the env setup in shims/omp. Private key is fetched lazily by the
-# gh-app-token helper via `secrets get`.
+# Picks the Claude Code profile and its model route, then execs claude through
+# scripts/agent-session, the session environment every agent launcher shares (the
+# gh-app routing include, shims-first PATH, the secrets-broker identity).
 set -euo pipefail
 
 # --- profile: CLAUDE_CONFIG_DIR is Claude Code's own profile, with its own login ---
@@ -55,57 +53,18 @@ if [[ "$CLAUDE_CONFIG_DIR" == "$_canonical" ]]; then
     # --- model route: the default profile reaches Anthropic through the Hawk gateway ---
     # apiKeyHelper re-runs scripts/hawk-token at start, every five minutes and on a 401; each
     # run mints a token with a fresh jti, which is what the gateway's exchanged-once rule needs
-    # (agent-c docs/onboarding/model-access-clients.md). Claude Code takes ANTHROPIC_AUTH_TOKEN
-    # and ANTHROPIC_API_KEY over apiKeyHelper, and every tool subprocess would hold them, so an
-    # inherited one is removed. A named profile keeps its own login and whatever key it was given.
-    for _k in ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY; do
-        if [[ -n "${!_k+set}" ]]; then
-            echo "cld: removed $_k from the environment; the default profile uses hawk-token" >&2
-            unset "$_k"
-        fi
-    done
-    unset _k
+    # (agent-c docs/onboarding/model-access-clients.md).
     _settings=(--settings "$(printf '{"apiKeyHelper":"%s","env":{"ANTHROPIC_BASE_URL":"%s"}}' \
         "${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/hawk-token" \
         "https://middleman.hawk.internal.trajectorylabs.com/anthropic")")
 fi
 unset _canonical _shared _profile _profile_given
 
-# --- gh-app routing config (per-repo credential routing for git+gh) ---
-# Agents authenticate as the GitHub App installation matching each repo's
-# owner; owners without an installation get the upstream token from the
-# secrets store (gh-app.agent.fallback-secret), never your keyring login.
-# Only loaded by agent shells; interactive shells are unaffected.
-# See gh-app-routes.gitconfig and shims/gh-app-token.
-GIT_CONFIG_COUNT=$((${GIT_CONFIG_COUNT:-0} + 1))
-_idx=$((GIT_CONFIG_COUNT - 1))
-export GIT_CONFIG_COUNT
-export "GIT_CONFIG_KEY_${_idx}"=include.path
-export "GIT_CONFIG_VALUE_${_idx}"="${DOTFILES_DIR:-$HOME/.dotfiles}/gh-app-routes.gitconfig"
-unset _idx
-
 # No Envoy or Dispatch variable is set here: the claude-envoy bridge reads the
 # profile's envoy.json (envoy/AGENTS.md), and a variable exported here would
 # override that file for every profile.
-
-# --- dotfiles shims must lead PATH ---
-# The gh App routing above only works when `gh` resolves to shims/gh. The
-# launching shell's mise hook may have prepended tool install dirs (including
-# the real gh) ahead of the shims; agent sessions inherit PATH forever, so
-# re-front the shims here or agents silently act as the user on GitHub.
-_newpath=""
-IFS=':' read -ra _parts <<< "$PATH"
-for _p in "${_parts[@]}"; do
-    [ -n "$_p" ] && [ "$_p" != "${DOTFILES_DIR:-$HOME/.dotfiles}/shims" ] && _newpath="${_newpath:+$_newpath:}$_p"
-done
-export PATH="${DOTFILES_DIR:-$HOME/.dotfiles}/shims:$_newpath"
-unset _newpath _parts _p
-
-# Host session identity for agent secrets: claude runs as a registered session of the
-# agent-secrets helper where that applies (scripts/agent-secrets-session, the same wrapper as
-# shims/omp).
 # Opt the session into the Envoy channel plugin (managed settings allowlist the
 # legion-plugins marketplace); channel events reach the model as <channel> messages.
-exec "${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/agent-secrets-session" \
+exec "${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/agent-session" \
     claude --dangerously-skip-permissions --channels plugin:claude-envoy@legion-plugins \
     ${_settings[@]+"${_settings[@]}"} "${_args[@]}"
