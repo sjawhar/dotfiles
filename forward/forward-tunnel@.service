@@ -9,10 +9,13 @@ After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
-# ssh exits when a forward cannot bind (ExitOnForwardFailure) or the link goes
-# quiet (ServerAlive), and systemd reconnects. A reconnect after a dead link
-# fails until the devbox's sshd reaps the old session's ports, then succeeds.
-ExecStart=/usr/bin/ssh -N %i-tunnel
+# ssh exits when the server sends no greeting within 30 s (ConnectTimeout), a
+# forward cannot bind (ExitOnForwardFailure) or the link goes quiet
+# (ServerAlive), and systemd reconnects. Without ConnectTimeout, an sshd that
+# accepts TCP but never sends its greeting holds ssh with no time limit, so the
+# tunnel never reconnects. A reconnect after a dead link fails until the devbox's
+# sshd reaps the old session's ports, then succeeds.
+ExecStart=/usr/bin/ssh -o ConnectTimeout=30 -N %i-tunnel
 Restart=always
 RestartSec=10
 
