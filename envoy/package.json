@@ -6,11 +6,14 @@
   "dependencies": {
     "@pulumi/command": "^1.2.1",
     "@pulumi/docker": "4.11.0",
-    "@pulumi/pulumi": "^3.0.0"
+    "@pulumi/pulumi": "^3.0.0",
+    "@sjawhar/envoy-infra": "file:sdks/sjawhar-envoy-infra"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.13",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
+  },
+  "allowScripts": {
+    "file:sdks/sjawhar-envoy-infra": true
   }
 }
