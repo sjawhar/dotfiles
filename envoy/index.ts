@@ -1,10 +1,9 @@
+import * as command from "@pulumi/command";
 import type * as docker from "@pulumi/docker";
 import * as pulumi from "@pulumi/pulumi";
-import { pullImages } from "./images";
+import * as envoyInfra from "@sjawhar/envoy-infra";
 import type { MachineConfig } from "./machines";
 import { createProvider } from "./machines";
-import { ENVOY_NATS_URL, createListener } from "./services";
-import { deployWatchdog } from "./watchdog";
 
 const cfg = new pulumi.Config("envoy");
 
@@ -13,44 +12,50 @@ const registry = cfg.require("registry");
 const imageTag = cfg.require("imageTag");
 const machines = cfg.requireObject<MachineConfig[]>("machines");
 
-// Secrets — webhook secrets are optional at the Pulumi level.
-// Go startup validates required secrets via ENVOY_WEBHOOKS config-gating.
-const githubWebhookSecret = cfg.getSecret("githubWebhookSecret");
-const slackSigningSecret = cfg.getSecret("slackSigningSecret");
-const ghostWisprSigningSecret = cfg.getSecret("ghostWisprSigningSecret");
-
-const secrets = {
-  githubWebhookSecret,
-  slackSigningSecret,
-  ghostWisprSigningSecret,
-};
+// All listeners connect to the AWS Fargate NATS over the host's existing
+// Tailscale connection. The Fargate NATS hostname is exposed on the tailnet
+// via a Tailscale sidecar managed in ~/agent-c/default/meta/infra
+// (see envoy_nats.py). On-prem nodes do not run their own NATS.
+const ENVOY_NATS_URL = "nats://envoy-nats:4222";
 
 // Registry auth for GHCR (private packages)
 const registryAuth: docker.types.input.ProviderRegistryAuth[] = [
   { address: registry, username: "sjawhar", password: cfg.requireSecret("ghcrToken") },
 ];
 
-// Deploy to each machine
+// Watchdog deployment is opt-in via ENVOY_DEPLOY_WATCHDOG=1 because it needs an
+// SSH agent holding a key root accepts on the host (pulumi-command logs in as
+// root). Listener container `restart: unless-stopped` already handles
+// process-level recovery; the watchdog only catches the case where the
+// container is fully removed (e.g. by accident).
+const deployWatchdog = process.env.ENVOY_DEPLOY_WATCHDOG === "1";
+
+// One listener per machine, from Legion's envoy-infra plugin. `adopt` names the
+// root-level resources the program created before the plugin, so the listener
+// takes over their state instead of replacing them.
 for (const machine of machines) {
-  const provider = createProvider(machine, registryAuth);
-  const images = pullImages(provider, machine, registry, imageTag);
-
-  // Listener — on ALL machines
-  const listener = createListener(provider, machine, images.envoy, secrets, []);
-
-  // Watchdog deployment is opt-in via ENVOY_DEPLOY_WATCHDOG=1 because it
-  // requires SSH agent with the right keys (not always available in the
-  // deploy environment). Listener container `restart: unless-stopped`
-  // already handles process-level recovery; the watchdog only catches the
-  // case where the container is fully removed (e.g. by accident).
-  if (machine.sshHost && process.env.ENVOY_DEPLOY_WATCHDOG === "1") {
-    const envs = [
-      "PORT=9020",
-      `ENVOY_MACHINE_ID=${machine.machineId}`,
-      `NATS_URLS=${ENVOY_NATS_URL}`,
-      "ENVOY_ALLOW_REMOTE_NATS=1",
-      "ENVOY_HOST_BRIDGE=127.0.0.1",
-    ];
-    deployWatchdog(machine, envs, `${registry}/envoy:${imageTag}`, [listener]);
+  const providers: pulumi.ProviderResource[] = [createProvider(machine, registryAuth)];
+  let watchdog: envoyInfra.types.input.host.WatchdogArgs | undefined;
+  if (machine.sshHost && deployWatchdog) {
+    providers.push(new command.Provider(`command-${machine.name}`, {}));
+    // The bare address: the component refuses a user or scheme.
+    watchdog = { host: machine.sshHost.replace(/^ssh:\/\/([^@]*@)?/, "") };
   }
+  new envoyInfra.host.Listener(
+    machine.name,
+    {
+      machineId: machine.machineId,
+      natsUrls: [ENVOY_NATS_URL],
+      image: `${registry}/envoy:${imageTag}`,
+      hostBridge: "127.0.0.1",
+      watchdog,
+      adopt: {
+        container: `listener-${machine.name}`,
+        image: `envoy-image-${machine.name}`,
+        // The component refuses adopt.watchdog without a watchdog to adopt it into.
+        ...(watchdog ? { watchdog: `watchdog-${machine.name}` } : {}),
+      },
+    },
+    { providers }
+  );
 }

@@ -6,13 +6,16 @@ Pulumi (TypeScript) infrastructure that deploys the on-prem `envoy-listener` con
 
 ## Key files
 
-- **`index.ts`** — entry point; reads `envoy:` stack config, loops over `machines`, creates a listener (and opt-in watchdog) per host.
-- **`machines.ts` / `services.ts` / `images.ts` / `watchdog.ts`** — provider setup, listener container, image pulls, systemd watchdog.
-- **`Pulumi.yaml` / `Pulumi.prod.yaml`** — project and encrypted prod stack config.
+- **`index.ts`** — entry point; reads `envoy:` stack config, loops over `machines`, creates one `envoy-infra:host:Listener` per host (and its opt-in watchdog).
+- **`machines.ts`** — the machine config type and each host's docker provider.
+- **`sdks/sjawhar-envoy-infra/`** — the Node SDK `pulumi package add` generated for Legion's `envoy-infra` plugin. Generated and committed (CI has no Pulumi CLI); never edit it by hand.
+- **`Pulumi.yaml` / `Pulumi.prod.yaml`** — project (backend, plugin package) and encrypted prod stack config.
+- **`mise.toml`** — pins the Pulumi CLI for this directory only.
 
 ## Conventions
 
-- Stack config lives under the `envoy:` namespace; secrets are encrypted in `Pulumi.prod.yaml` and require `PULUMI_CONFIG_PASSPHRASE`.
+- Stack config lives under the `envoy:` namespace; secrets are encrypted in `Pulumi.prod.yaml` and require `PULUMI_CONFIG_PASSPHRASE`, an agent-tier key in secretsd on the devbox and the laptop.
+- The listener's container, image and watchdog come from Legion's `envoy-infra` plugin (`packages/envoy/infra` in sjawhar/legion), not from code here. A host's resources are children of its `host:Listener`; `adopt` names the root-level resources the program created before the plugin, so the listener takes over their state instead of replacing them. Keep those names.
 - `tsconfig.json` targets `module: commonjs` for ts-node (Pulumi), not Bun. Leave the `ignoreDeprecations` setting in place.
 - Do not commit decrypted secrets or `node_modules`.
 
@@ -24,4 +27,4 @@ Pulumi (TypeScript) infrastructure that deploys the on-prem `envoy-listener` con
 
 ## How changes take effect
 
-Changes deploy via `pulumi up --stack prod` from this directory (`npm install` first). The watchdog is opt-in via `ENVOY_DEPLOY_WATCHDOG=1`.
+Changes deploy via `secrets PULUMI_CONFIG_PASSPHRASE -- pulumi up --stack prod` from this directory (`npm ci` first), with the Pulumi CLI `mise.toml` pins. The watchdog is opt-in via `ENVOY_DEPLOY_WATCHDOG=1`. The plugin is pinned to a Legion release in `Pulumi.yaml`'s `packages`; to move the pin, verify the release's archive, install it, and run `pulumi package add envoy-infra@<v> …`, which regenerates `sdks/`. `README.md`, "The envoy-infra plugin", has the commands.
