@@ -9,11 +9,16 @@ creation_rules:
     age:
       - age1yubikey1qw82gvkljy5h07l7nrrgnqsma7np8ple5xntnq30d2qztdjvzfcqzdu80xr
       - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
+  # Machine keys stay ABOVE the YubiKey: sops tries a file's recipients in order,
+  # and a machine key listed after the YubiKey makes that machine wait on the
+  # card (through the pcsc tunnel on a devbox) on every agent-tier read before
+  # its own key is tried. Add a new machine key above the YubiKey line, then run
+  # `sops updatekeys secrets.env`, which writes recipients in this order.
   - age:
       - age1jf63nvl6uenkwalyysa5hqv0k7ks5k6mjggqxlj7fwwp0gnkfvxszyxd2q
       - age1fqk0qjphxdtglmqgkc2aedy5edn3jykwxkffnygsg5wkzaf5vcqshyajyp
       - age1qz0v8s5fnwvq9g4u49jkl8jdzejmssxxh6rw3cz0yxa370c05ynsak3gkk
-      - age1yubikey1qw82gvkljy5h07l7nrrgnqsma7np8ple5xntnq30d2qztdjvzfcqzdu80xr
-      - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
       - age1z3fstgt9mzepuxel07namy6f5rwkl850r7l3xgrky5u006r5sc4sxhfgn8
       - age1sxqsa047wvs0zr0c5rvawnvk9sqxrk8x5gn4uqzpa9kku3cmuqms6588rd
+      - age1yubikey1qw82gvkljy5h07l7nrrgnqsma7np8ple5xntnq30d2qztdjvzfcqzdu80xr
+      - age18fg9c68mlfmn5nz5tme0xzq4vkhx850p7293jrymhm9m8a2wxshqlmrw8h
