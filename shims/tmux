@@ -54,6 +54,26 @@ fi
 # Real tmux: first executable `tmux` on PATH that is not this shim. Content
 # decides, not the directory string (PATH may spell this directory differently
 # from DOTFILES_DIR); an ELF tmux yields a short marker-free header.
+#
+# A tmux that hands the call to the first tmux on PATH re-enters this shim in the
+# same pid: mise's shim does, when mise has no tmux version for the directory
+# (under a relocated HOME, mise reads no global config), and this shim is that
+# first tmux. DOTFILES_TMUX_SHIM ("<pid> <tmux>:<tmux>…") names every tmux this
+# shim has handed the call to in that pid; the lookup skips each one, and any path
+# to the same file (every shim of one mise), so the call reaches the tmux past
+# them or fails, instead of the two exec'ing each other forever.
+_handed=""
+read -r _marker_pid _marker_handed <<< "${DOTFILES_TMUX_SHIM:-}"
+[[ "$_marker_pid" == "$$" ]] && _handed="$_marker_handed"
+handed_back() {
+    local IFS=':'
+    local tmux
+    for tmux in $_handed; do
+        [[ -n "$tmux" && "$1" -ef "$tmux" ]] && return 0
+    done
+    return 1
+}
+
 IFS=':' read -ra dirs <<< "$PATH"
 for dir in "${dirs[@]}"; do
     candidate="$dir/tmux"
@@ -61,7 +81,9 @@ for dir in "${dirs[@]}"; do
     header=""
     IFS= read -r -n 512 -d '' header < "$candidate" || true
     [[ "$header" == *tmux-guard-shim* ]] && continue
+    handed_back "$candidate" && continue
+    export DOTFILES_TMUX_SHIM="$$ ${_handed:+$_handed:}$candidate"
     exec "$candidate" "$@"
 done
-echo "tmux shim: no real tmux found on PATH" >&2
+echo "tmux shim: no real tmux found on PATH${_handed:+; ${_handed//:/, } handed the call back to this shim, as a mise shim does when mise has no tmux version for the directory}" >&2
 exit 127
