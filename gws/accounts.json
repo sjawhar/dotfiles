@@ -1,0 +1,57 @@
+{
+  "personal": {
+    "description": "sami.n.jawhar@gmail.com, Sami's personal Google account",
+    "tiers": {
+      "read": {
+        "command": ["secrets", "GWS_PERSONAL_READ_OAUTH", "--"],
+        "description": "Drive, Docs, Sheets, Slides and Calendar read-write; Gmail read-only"
+      },
+      "modify": {
+        "command": ["secrets", "GWS_PERSONAL_MODIFY_OAUTH", "--"],
+        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one YubiKey touch per session"
+      },
+      "send": {
+        "command": ["secrets", "GWS_PERSONAL_SEND_OAUTH", "--"],
+        "description": "gmail.send only (+send; cannot read mail); one YubiKey touch per session"
+      }
+    }
+  },
+  "theorem": {
+    "description": "sami@theorem.dev, Theorem's Workspace. OAuth client: the Internal Desktop client \"gws CLI\" in Theorem's theorem-gws-cli project",
+    "tiers": {
+      "read": {
+        "command": ["secrets", "GWS_THEOREM_READ_OAUTH", "--"],
+        "description": "Drive, Docs, Sheets, Slides and Calendar read-write; Gmail read-only"
+      },
+      "modify": {
+        "command": ["secrets", "GWS_THEOREM_MODIFY_OAUTH", "--"],
+        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one YubiKey touch per session"
+      },
+      "send": {
+        "command": ["secrets", "GWS_THEOREM_SEND_OAUTH", "--"],
+        "description": "gmail.send only (+send; cannot read mail); one YubiKey touch per session"
+      }
+    }
+  },
+  "trajectory": {
+    "description": "sami@trajectorylabs.net, Trajectory Labs' Workspace",
+    "tiers": {
+      "read": {
+        "command": ["secrets", "GWS_TRAJECTORY_READ_OAUTH", "--"],
+        "description": "Drive, Docs, Sheets, Slides and Calendar read-write; Gmail read-only"
+      },
+      "modify": {
+        "command": ["secrets", "GWS_TRAJECTORY_MODIFY_OAUTH", "--"],
+        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one YubiKey touch per session"
+      },
+      "send": {
+        "command": ["secrets", "GWS_TRAJECTORY_SEND_OAUTH", "--"],
+        "description": "gmail.send only (+send; cannot read mail); one YubiKey touch per session"
+      },
+      "admin": {
+        "command": ["secrets", "GWS_TRAJECTORY_ADMIN_OAUTH", "--"],
+        "description": "Admin SDK Directory (users, groups), consented by admin-sami@. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks, and ~/.dotfiles/docs/trajectory-workspace-admin.md. One YubiKey touch per session"
+      }
+    }
+  }
+}

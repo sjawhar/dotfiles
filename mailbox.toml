@@ -1,6 +1,6 @@
 default_account = "personal"
 
-# The gws shim's profiles, one account each. Reads use the profile's agent-tier key;
+# The accounts of gws/accounts.json, with the same keys. Reads use the account's agent-tier key;
 # write (gmail.modify) and send keys are human tier, one YubiKey touch per grant.
 # Every key comes from secretsd's dotfiles source.
 scrub_env = ["SECRETSD_SESSION_TOKEN_FILE"]

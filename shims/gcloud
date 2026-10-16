@@ -32,8 +32,8 @@
 #                    a command meant for one identity must never silently run
 #                    as another.
 #
-# Doctrine matches shims/gws: fail LOUD where an identity is supposed to exist,
-# never fall through to a different one.
+# Doctrine: fail LOUD where an identity is supposed to exist, never fall
+# through to a different one.
 set -euo pipefail
 
 # First non-flag argument, matching gcloud's own grammar: `gcloud [--flags]

@@ -203,22 +203,36 @@ check_gcloud() {
 }
 
 check_gws() {
-    # gws writes advisories ("Using keyring backend: ...") to stderr, so stdout alone
-    # is parsed and a failure reports stderr's last line.
-    local profile out rc email err
-    for profile in personal theorem trajectory; do
+    # One row per account in gws-accounts' registry, or one google_workspace row
+    # when the registry is absent, unreadable, not an object, or empty. gws writes
+    # advisories ("Using keyring backend: ...") to stderr, so stdout alone is
+    # parsed and a failure reports stderr's last line.
+    local accounts_file="$HOME/.config/gws/accounts.json" accounts account out rc email err
+    if [[ ! -f "$accounts_file" ]]; then
+        row google_workspace missing - - "jq keys $accounts_file" "no $accounts_file"
+        return
+    fi
+    if ! accounts="$(jq -r 'if type == "object" then keys[] else error("not a JSON object") end' "$accounts_file" 2>&1)"; then
+        row google_workspace missing - - "jq keys $accounts_file" "$(first_line "$accounts")"
+        return
+    fi
+    if [[ -z "$accounts" ]]; then
+        row google_workspace missing - - "jq keys $accounts_file" "no accounts in $accounts_file"
+        return
+    fi
+    while IFS= read -r account; do
         (
-            err="$tmp/gws_${profile}.stderr"
-            out="$(GWS_ACCOUNT="$profile" timeout "$TIMEOUT_S" gws drive about get --params '{"fields":"user"}' 2>"$err")"
+            err="$tmp/gws_${account}.stderr"
+            out="$(GWS_ACCOUNT="$account" timeout "$TIMEOUT_S" gws drive about get --params '{"fields":"user"}' 2>"$err")"
             rc=$?
             if ((rc == 0)); then
                 email="$(jq -r '.user.emailAddress // empty' <<<"$out" 2>/dev/null)"
-                row "google_workspace_${profile}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${profile} gws drive about get"
+                row "google_workspace_${account}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${account} gws drive about get"
             else
-                row "google_workspace_${profile}" missing - - "GWS_ACCOUNT=${profile} gws drive about get" "$(tail -n1 "$err")"
+                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws drive about get" "$(tail -n1 "$err")"
             fi
         ) &
-    done
+    done <<<"$accounts"
     wait
 }
 
@@ -324,8 +338,12 @@ for fn in check_aws check_github_app check_hawk check_ant check_taiga check_verc
 done
 wait
 
-order=(aws github_app anthropic_ant hawk taiga google_workspace_personal google_workspace_theorem \
-    google_workspace_trajectory gcloud vercel datadog_pup \
+# check_gws writes one row per account in the gws registry, so those names come
+# from the files it wrote. An unmatched glob stays literal, and the loops below
+# skip a name with no row file.
+gws_rows=("$tmp"/google_workspace_*)
+order=(aws github_app anthropic_ant hawk taiga google_workspace "${gws_rows[@]##*/}" \
+    gcloud vercel datadog_pup \
     fleetctl sentry kubectl secretsd_grants agent_secrets_broker modal dispatch)
 
 if ((json)); then

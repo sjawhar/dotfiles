@@ -27,8 +27,10 @@ before handing the call to the real one.
   the install dir pinned back then. `-C /` keeps a project's own mise pin out, since the knives
   plugin every session loads is pinned machine-wide beside it. A third entry in one pid within
   10 s exits with an error; `knives gh` enters twice by design, through `shims/gh`.
-- `gh-app-token`, `gcloud`, `gws`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
+- `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
+- `gws`: a relative symlink to the gws-accounts wrapper that the omp plugin pin installs
+  (`omp/plugins/package.json`); its header and github.com/sjawhar/gws-accounts describe it.
 
 ## Adding to a shim
 
