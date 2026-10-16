@@ -173,16 +173,18 @@ check_vercel() {
     fi
 }
 
+# pup exits 0 and prints "Not authenticated" when it holds no token, so the exit code and a text
+# match on "Authenticated" both read as live; its --no-agent JSON carries the real answer.
 check_datadog() {
     local out rc site exp
-    out="$(timeout "$TIMEOUT_S" pup auth status 2>&1)"
+    out="$(timeout "$TIMEOUT_S" pup --no-agent auth status 2>/dev/null)"
     rc=$?
-    if ((rc == 0)) && grep -qi 'Authenticated' <<<"$out"; then
-        site="$(grep -oP 'site:\s*\K\S+' <<<"$out" || true)"
-        exp="$(grep -oP 'expires in:\s*\K\S+' <<<"$out" || true)"
-        row datadog_pup live "${site:-unknown}" "${exp:-unknown} from now" "pup auth status"
+    if ((rc == 0)) && jq -e '.authenticated == true' >/dev/null 2>&1 <<<"$out"; then
+        site="$(jq -r '.site // empty' <<<"$out" 2>/dev/null)"
+        exp="$(jq -r '.expires_at // empty' <<<"$out" 2>/dev/null)"
+        row datadog_pup live "${site:-unknown}" "${exp:-unknown}" "pup --no-agent auth status"
     else
-        row datadog_pup missing - - "pup auth status" "$(first_line "$out")"
+        row datadog_pup missing - - "pup --no-agent auth status" "$(jq -r '.status // empty' <<<"$out" 2>/dev/null || first_line "$out")"
     fi
 }
 
