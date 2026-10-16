@@ -29,8 +29,9 @@ before handing the call to the real one.
   10 s exits with an error; `knives gh` enters twice by design, through `shims/gh`.
 - `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
-- `gws`: a relative symlink to the gws-accounts wrapper that the omp plugin pin installs
-  (`omp/plugins/package.json`); its header and github.com/sjawhar/gws-accounts describe it.
+- `gws`: an executable shim that resolves the gws-accounts wrapper installed by the omp plugin pin
+  (`omp/plugins/package.json`). Its marker lets the package wrapper skip the shim while finding real
+  gws; if the package is absent, the shim fails loudly and directs `bun install` in `omp/plugins`.
 
 ## Adding to a shim
 
