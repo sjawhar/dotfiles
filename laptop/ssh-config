@@ -28,6 +28,17 @@ Host oryx
   # which ensures the oryx-tunnel below exists before connecting. Works with mosh.
   IPQoS lowdelay throughput
 
+# oryx over AWS Session Manager (hybrid node in the personal AWS account), so
+# it stays reachable whichever tailnet it or the laptop is on. sshd's host key
+# is the one already pinned for the tailnet name.
+Host oryx-ssm
+  HostName mi-0c13e59d491bb8ade
+  User agent
+  ForwardAgent yes
+  HostKeyAlias oryx.tailb86685.ts.net
+  ProxyCommand aws ssm start-session --profile personal --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
+  IPQoS lowdelay throughput
+
 # YubiKey tunnel for oryx; the devbox pair uses forward's pcsc channel.
 Host oryx-tunnel
   HostName oryx.tailb86685.ts.net
