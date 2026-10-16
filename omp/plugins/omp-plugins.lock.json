@@ -16,12 +16,17 @@
       "enabled": true
     },
     "secretsd": {
-      "version": "3.5.3",
+      "version": "3.6.0",
       "enabledFeatures": null,
       "enabled": true
     },
     "compound-engineering": {
       "version": "3.24.0",
+      "enabledFeatures": null,
+      "enabled": true
+    },
+    "gws-accounts": {
+      "version": "0.1.2",
       "enabledFeatures": null,
       "enabled": true
     }

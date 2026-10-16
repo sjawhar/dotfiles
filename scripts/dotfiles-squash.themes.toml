@@ -8,6 +8,7 @@ name = "tools"
 paths = [
   ".bashrc", ".tmux.conf", ".gitconfig", ".gitignore", ".jjconfig.toml",
   "cybermonk-identity.gitconfig", "theorem-identity.gitconfig", "mise.toml", "knives/", "ghostty/", "voxtype/",
+  "gws/", "mailbox.toml",
   "install.sh", "installers/", "scripts/", "shims/pyright", "shims/basedpyright",
   "shims/tests/test_pyright_shims.py",
 ]

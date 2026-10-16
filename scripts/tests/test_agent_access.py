@@ -123,6 +123,57 @@ class AgentAccess(unittest.TestCase):
         result = self.run_access("--bogus")
         self.assertEqual(result.returncode, 2)
 
+    def test_gws_rows_follow_the_account_registry(self) -> None:
+        """One google_workspace_<account> row per registry key; one missing row without it."""
+        write_stub(
+            self.stub_dir,
+            "gws",
+            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "$GWS_ACCOUNT"',
+        )
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        self.assertEqual(rows["google_workspace"]["status"], "missing")
+        self.assertEqual([n for n in rows if n.startswith("google_workspace_")], [])
+
+        gws_dir = self.home / ".config" / "gws"
+        gws_dir.mkdir(parents=True)
+        (gws_dir / "accounts.json").write_text(json.dumps({"work": {}}), encoding="utf-8")
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = {row["name"]: row for row in json.loads(result.stdout)}
+        self.assertNotIn("google_workspace", rows)
+        self.assertEqual([n for n in rows if n.startswith("google_workspace_")], ["google_workspace_work"])
+        self.assertEqual(rows["google_workspace_work"]["status"], "live")
+        self.assertEqual(rows["google_workspace_work"]["identity"], "work@example.com")
+
+    def test_gws_unusable_registry_reports_one_missing_row(self) -> None:
+        """A registry jq cannot read as a non-empty object gives one missing google_workspace row."""
+        write_stub(
+            self.stub_dir,
+            "gws",
+            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "$GWS_ACCOUNT"',
+        )
+        gws_dir = self.home / ".config" / "gws"
+        gws_dir.mkdir(parents=True)
+        cases = {
+            "{not json": "parse error",
+            '["work"]': "not a JSON object",
+            '"work"': "not a JSON object",
+            "": "no accounts in",
+            "{}": "no accounts in",
+        }
+        for content, detail in cases.items():
+            with self.subTest(content=content):
+                (gws_dir / "accounts.json").write_text(content, encoding="utf-8")
+                result = self.run_access("--json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("jq:", result.stderr)
+                rows = {row["name"]: row for row in json.loads(result.stdout)}
+                self.assertEqual([n for n in rows if n.startswith("google_workspace_")], [])
+                self.assertEqual(rows["google_workspace"]["status"], "missing")
+                self.assertIn(detail, rows["google_workspace"]["detail"])
+
     def test_stubbed_clis_report_live_identity_without_leaking_token(self) -> None:
         hawk_jwt = make_jwt(
             {"email": "sami@trajectorylabs.net", "exp": int(time.time()) + 3600}
@@ -164,6 +215,11 @@ fi
             # Real gws prints advisories on stderr next to the JSON on stdout.
             'echo "Using keyring backend: keyring" >&2\n'
             'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "${GWS_ACCOUNT:-unknown}"',
+        )
+        gws_dir = self.home / ".config" / "gws"
+        gws_dir.mkdir(parents=True)
+        (gws_dir / "accounts.json").write_text(
+            json.dumps({name: {} for name in ("personal", "theorem", "trajectory")}), encoding="utf-8"
         )
         write_stub(self.stub_dir, "fleetctl", 'echo "{}"')
         write_stub(

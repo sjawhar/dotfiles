@@ -33,6 +33,7 @@
     "typescript-lsp@claude-plugins-official": true,
     "skill-creator@claude-plugins-official": true,
     "knives@knives": true,
+    "gws-accounts@gws-accounts": true,
     "sjawhar@sjawhar": true,
     "claude-envoy@legion-plugins": true,
     "slack@claude-plugins-official": true
@@ -48,6 +49,12 @@
       "source": {
         "source": "github",
         "repo": "sjawhar/knives"
+      }
+    },
+    "gws-accounts": {
+      "source": {
+        "source": "github",
+        "repo": "sjawhar/gws-accounts"
       }
     },
     "legion-plugins": {
