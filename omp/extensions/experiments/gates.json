@@ -1,5 +1,5 @@
 {
-	"selfcompact": "random",
+	"selfcompact": "off",
 	"proactive_memory": "off",
 	"context_line": "random",
 	"skill_gate": "random",
