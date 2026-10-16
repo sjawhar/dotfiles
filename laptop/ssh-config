@@ -9,6 +9,17 @@ Host devbox
   ForwardAgent yes
   IPQoS lowdelay throughput
 
+# The same devbox over AWS Session Manager instead of the tailnet: needs a live
+# AWS SSO login for the Trajectory account, not tailnet membership. The host key
+# is the one already pinned for the tailnet name.
+Host devbox-ssm
+  HostName i-01d7575cd0d055f0e
+  User ubuntu
+  ForwardAgent yes
+  HostKeyAlias sami-agents.tailb86685.ts.net
+  ProxyCommand aws ssm start-session --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
+  IPQoS lowdelay throughput
+
 Host oryx
   HostName oryx.tailb86685.ts.net
   User agent
