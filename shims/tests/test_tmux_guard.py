@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""tmux shim: kill-server is refused on the default server and nowhere else."""
+"""tmux shim: kill-server is refused on the default server and nowhere else, and a tmux that
+hands the call back to the shim is skipped instead of looping."""
 
 from __future__ import annotations
 
 import os
+import signal
 import stat
 import subprocess
 import tempfile
@@ -12,6 +14,20 @@ from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SHIM = DOTFILES / "shims" / "tmux"
+
+# What mise's shim does when mise has no tmux version for the directory (a relocated HOME hides
+# mise's global config): exec the first tmux on PATH outside its own directory, which is
+# shims/tmux when the shims come first.
+HAND_BACK = """#!/bin/bash
+own="${BASH_SOURCE[0]%/*}"
+IFS=':'
+for d in $PATH; do
+    [[ "$d" -ef "$own" ]] && continue
+    [[ -x "$d/tmux" ]] && exec "$d/tmux" "$@"
+done
+echo "hand-back: no tmux on PATH" >&2
+exit 127
+"""
 
 
 class TmuxGuard(unittest.TestCase):
@@ -26,13 +42,24 @@ class TmuxGuard(unittest.TestCase):
             f'#!/bin/bash\nprintf "%s\\n" "$@" > {self.argv_log}\n', encoding="utf-8"
         )
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.hand_back_dir = root / "hand-back"
+        self.hand_back_dir.mkdir()
+        hand_back = self.hand_back_dir / "tmux"
+        hand_back.write_text(HAND_BACK, encoding="utf-8")
+        hand_back.chmod(0o755)
+        # bash for the shim's `#!/usr/bin/env bash` on a PATH without /usr/bin, whose tmux would
+        # answer a call the test expects nothing to answer.
+        self.bash_dir = root / "bash-only"
+        self.bash_dir.mkdir()
+        (self.bash_dir / "bash").symlink_to("/bin/bash")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def run_shim(self, *args: str, tmux: str | None = None, allow: bool = False):
+    def run_shim(self, *args: str, tmux: str | None = None, allow: bool = False,
+                 path: list[Path] | None = None, marker: str | None = None):
         env = {
-            "PATH": f"{SHIM.parent}:{self.stub_dir}:/usr/bin:/bin",
+            "PATH": ":".join(map(str, path)) if path else f"{SHIM.parent}:{self.stub_dir}:/usr/bin:/bin",
             "HOME": self.temp_dir.name,
             "DOTFILES_DIR": str(DOTFILES),
         }
@@ -40,7 +67,19 @@ class TmuxGuard(unittest.TestCase):
             env["TMUX"] = tmux
         if allow:
             env["TMUX_ALLOW_KILL_SERVER"] = "1"
-        return subprocess.run([str(SHIM), *args], env=env, capture_output=True, text=True)
+        if marker is not None:
+            env["DOTFILES_TMUX_SHIM"] = marker
+        # A session of its own, so a shim that loops fails the test at the timeout and leaves no
+        # process behind.
+        proc = subprocess.Popen([str(SHIM), *args], env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
     def assert_forwarded(self, result, *argv: str) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -84,6 +123,24 @@ class TmuxGuard(unittest.TestCase):
     def test_capture_pane_S_is_not_a_socket_option(self) -> None:
         # -S after the command word is capture-pane's start line, not a server socket.
         self.assert_refused(self.run_shim("capture-pane", "-p", "-S", "-200", ";", "kill-server"))
+
+    def test_a_tmux_that_hands_the_call_back_is_skipped_for_the_tmux_past_it(self) -> None:
+        result = self.run_shim("display-message", "-p", "#{client_termfeatures}",
+                               path=[SHIM.parent, self.hand_back_dir, self.stub_dir, self.bash_dir])
+        self.assert_forwarded(result, "display-message", "-p", "#{client_termfeatures}")
+
+    def test_when_every_tmux_hands_the_call_back_the_shim_fails_instead_of_looping(self) -> None:
+        result = self.run_shim("display-message", "-p", "#{client_termfeatures}",
+                               path=[SHIM.parent, self.hand_back_dir, self.bash_dir])
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn(f"{self.hand_back_dir / 'tmux'} handed the call back", result.stderr)
+
+    def test_a_marker_from_another_pid_skips_nothing(self) -> None:
+        # A server the shim started keeps the marker in its global environment, so every pane's
+        # tmux call inherits it under another pid; pid 1 is never the shim.
+        result = self.run_shim("list-panes", path=[SHIM.parent, self.stub_dir, self.bash_dir],
+                               marker=f"1 {self.stub_dir / 'tmux'}")
+        self.assert_forwarded(result, "list-panes")
 
 
 if __name__ == "__main__":
