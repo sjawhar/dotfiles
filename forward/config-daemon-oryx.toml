@@ -4,8 +4,8 @@
 # tailnet IPv6 address, which lets it use forward's default ports without
 # colliding with the default pair on the IPv4 address. Literal addresses only,
 # for the reason config.toml gives.
-listen = "fd7a:115c:a1e0::e03b:5c61"
-peer = "fd7a:115c:a1e0::2133:f724"
+listen = "fd7a:115c:a1e0::8f36:1226"
+peer = "fd7a:115c:a1e0::3336:5706"
 bridge_port = 12801
 
 # oryx reaches the YubiKey through the SSH tunnel from scripts/devbox, which owns
@@ -20,7 +20,7 @@ opener = ["/usr/bin/xdg-open"]
 clipboard = ["wl-copy"]
 allow = [
   "*.anthropic.com",
-  "[fd7a:115c:a1e0::2133:f724]",
+  "[fd7a:115c:a1e0::3336:5706]",
   "accounts.google.com",
   "auth.openai.com",
   "claude.ai",

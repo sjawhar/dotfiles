@@ -2,8 +2,8 @@
 # own file. Fields mean what config-serve.toml says. oryx pairs with the laptop's
 # forward-daemon@oryx (config-daemon-oryx.toml) over tailnet IPv6, because the
 # laptop's IPv4 address and default ports belong to the default pair.
-listen = "fd7a:115c:a1e0::2133:f724"
-peer = "fd7a:115c:a1e0::e03b:5c61"
+listen = "fd7a:115c:a1e0::3336:5706"
+peer = "fd7a:115c:a1e0::8f36:1226"
 
 bridge_port = 12801
 forward_ttl_secs = 300
