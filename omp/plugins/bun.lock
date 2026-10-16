@@ -9,8 +9,8 @@
         "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.0.0",
         "@sjawhar/pi-envoy": "10.0.0",
         "@sjawhar/pi-legion": "10.0.0",
-        "gws-accounts": "github:sjawhar/gws-accounts#v0.1.3",
-        "secretsd": "github:sjawhar/forward#v3.6.0",
+        "gws-accounts": "github:sjawhar/gws-accounts#v0.1.4",
+        "secretsd": "github:sjawhar/forward#v3.6.1",
         "superpowers": "github:obra/superpowers#v6.3.0",
       },
     },
@@ -234,7 +234,7 @@
 
     "grok-mermaid": ["grok-mermaid@0.2.2", "", {}, "sha512-XcJEP5dDC8liHBh52mlLjU18fNvu1ckFsu0QpIG3+APZ270fsj9wxpiA6cOURmbUEuoMVgjbC2+UYgTdCqqgzA=="],
 
-    "gws-accounts": ["gws-accounts@github:sjawhar/gws-accounts#4283076", {}, "sjawhar-gws-accounts-4283076", "sha512-RJpuxoj8iitDs1jZeqThItEYLknKtdS7QvcSlOGYlOSGLjs5f7psskII7e+LsVm0xDlXcibW+tnkm5TNb5B6og=="],
+    "gws-accounts": ["gws-accounts@github:sjawhar/gws-accounts#2cb4dc9", {}, "sjawhar-gws-accounts-2cb4dc9", "sha512-M6g4pImBp+CNJxO8p3awAG5PFLkwOpw5P6FMKRkq24OyeE9PJm7yAZ3x6+exbtW0pdkbDQYpRkZ2Rh0bcyEKfQ=="],
 
     "highlight.js": ["highlight.js@10.7.3", "", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
 
@@ -308,7 +308,7 @@
 
     "safe-buffer": ["safe-buffer@5.2.1", "", {}, "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ=="],
 
-    "secretsd": ["secretsd@github:sjawhar/forward#7fbc03e", { "dependencies": { "@opencode-ai/plugin": "^1.3.0" } }, "sjawhar-forward-7fbc03e", "sha512-CulPe1syD4htO2YxE6exUuVRSDa3j9+cYygjUShGhw0o1Y8jU/ZEmvDPdJUlp02sReHBpnmRIExIaQZG2bZTWQ=="],
+    "secretsd": ["secretsd@github:sjawhar/forward#84e9245", { "dependencies": { "@opencode-ai/plugin": "^1.3.0" } }, "sjawhar-forward-84e9245", "sha512-m6lNx+ZBWACd/M/LVxoReWzXwoNX+CMBKEdOfr9w98eTgajCe0+kD77TcbH7WFMeD6Zw2xgRQCXdWk46aZhm+A=="],
 
     "semver": ["semver@7.8.0", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-AcM7dV/5ul4EekoQ29Agm5vri8JNqRyj39o0qpX6vDF2GZrtutZl5RwgD1XnZjiTAfncsJhMI48QQH3sN87YNA=="],
 

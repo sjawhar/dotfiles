@@ -148,7 +148,7 @@ platforms.linux-x64   = { asset_pattern = "tt-x86_64-unknown-linux-musl.tar.gz" 
 platforms.linux-arm64 = { asset_pattern = "tt-aarch64-unknown-linux-musl.tar.gz" }
 
 [tools.forward]
-version = "3.5.5"  # was "latest"
+version = "3.6.1"  # was "latest"
 # Public releases are verified with GitHub build attestations during installation.
 platforms.linux-x64   = { asset_pattern = "forward-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.tar.gz" }

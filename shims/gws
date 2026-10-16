@@ -1,1 +1,12 @@
-../omp/plugins/node_modules/gws-accounts/bin/gws
+#!/bin/bash
+# gws-accounts-wrapper marker lets the package wrapper skip this shim while finding real gws.
+# Refuse an absent package instead of falling through to real gws with another identity.
+set -euo pipefail
+
+wrapper="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../omp/plugins/node_modules/gws-accounts/bin/gws"
+if [[ ! -x "$wrapper" ]]; then
+    echo "gws-accounts: wrapper missing at $wrapper; run bun install in omp/plugins" >&2
+    exit 127
+fi
+
+exec "$wrapper" "$@"
