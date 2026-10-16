@@ -1,0 +1,33 @@
+[Unit]
+Description=Trajectory prod network and internal.trajectorylabs.com DNS through the devbox, as %i
+Wants=network-online.target
+After=network-online.target systemd-resolved.service
+
+[Service]
+# sshuttle carries TCP for Trajectory's prod VPC (10.1.0.0/16) through
+# `ssh devbox-ssm`, so this machine reaches middleman, hawk, dispatch and
+# secrets while it sits on Theorem's tailnet. sshuttle needs root for its
+# firewall rules; ssh runs as %i in a login shell, so it gets that user's ssh
+# config, AWS SSO login, 1Password agent and mise-managed aws.
+#
+# DNS: the dummy link trajectory0 exists only to carry a route-only domain in
+# systemd-resolved, so *.internal.trajectorylabs.com goes to the VPC resolvers
+# and nothing else does. sshuttle captures queries to those two addresses and
+# answers them from the devbox's side.
+ExecStartPre=-/usr/sbin/ip link del trajectory0
+ExecStartPre=/usr/sbin/ip link add trajectory0 type dummy
+ExecStartPre=/usr/sbin/ip addr add 192.0.2.53/32 dev trajectory0
+ExecStartPre=/usr/sbin/ip link set trajectory0 up
+ExecStartPre=/usr/bin/resolvectl dns trajectory0 10.1.11.116 10.1.10.49
+ExecStartPre=/usr/bin/resolvectl domain trajectory0 ~internal.trajectorylabs.com
+ExecStartPre=/usr/bin/resolvectl default-route trajectory0 false
+ExecStartPre=/usr/bin/resolvectl dnsovertls trajectory0 no
+ExecStart=/usr/bin/sshuttle --method nft --remote devbox-ssm \
+    --ssh-cmd "runuser -u %i -- bash -lc 'exec ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -o ServerAliveInterval=15 \"$$@\"' ssh" \
+    --ns-hosts 10.1.11.116,10.1.10.49 --to-ns 10.1.11.116 10.1.0.0/16
+ExecStopPost=-/usr/sbin/ip link del trajectory0
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

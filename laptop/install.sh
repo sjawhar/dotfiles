@@ -240,6 +240,9 @@ source "${LAPTOP_DIR}/cosmic-settings.sh"
 # Laptop daemon role opens tunneled URLs without colliding with the SSH LocalForward on 12802.
 bash "${DOTFILES_DIR}/installers/forward.sh" daemon
 
+# shellcheck source=laptop/trajectory-route.sh
+source "${LAPTOP_DIR}/trajectory-route.sh"
+
 # =============================================================================
 # Desktop apps (separate installers)
 # =============================================================================
