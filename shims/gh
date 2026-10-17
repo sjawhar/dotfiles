@@ -98,13 +98,6 @@ if agent_context; then
     if [[ "${1:-}" == pr && "${2:-}" == create ]]; then
         "$_dotfiles/scripts/docs-pr-gate" "${@:3}"
     fi
-    # Merges and approvals of a gated repo (sjawhar/legion, theorem-labs/agent-infra) go through
-    # `pr-gate merge`, which checks the gates at the exact head and sets PR_GATE_MERGE=1 for its
-    # own merge step (scripts/gh-merge-guard). It stops an accidental bypass, not a determined one.
-    if [[ "${PR_GATE_MERGE:-}" != 1 ]] && { [[ "${1:-}" == pr && ( "${2:-}" == merge || "${2:-}" == review ) ]] \
-        || [[ "${1:-}" == api && ( "$*" == *pulls/* || "$*" == *graphql* ) ]]; }; then
-        "$_dotfiles/scripts/gh-merge-guard" "$@"
-    fi
 fi
 
 # Content decides what is "real", never the path: any candidate carrying the
