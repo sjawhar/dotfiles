@@ -1,6 +1,5 @@
 [Unit]
 Description=Trajectory prod network and internal.trajectorylabs.com DNS through the devbox, as %i
-Wants=network-online.target
 After=network-online.target systemd-resolved.service
 
 [Service]
@@ -14,6 +13,11 @@ After=network-online.target systemd-resolved.service
 # systemd-resolved, so *.internal.trajectorylabs.com goes to the VPC resolvers
 # and nothing else does. sshuttle captures queries to those two addresses and
 # answers them from the devbox's side.
+#
+# Started and stopped by the NetworkManager dispatcher hook
+# (trajectory-route.dispatcher), never at boot: it runs only while
+# NetworkManager reports full connectivity. Failed connects (an expired AWS
+# SSO login, the devbox down) back off from 30 s to 5 min.
 ExecStartPre=-/usr/sbin/ip link del trajectory0
 ExecStartPre=/usr/sbin/ip link add trajectory0 type dummy
 ExecStartPre=/usr/sbin/ip addr add 192.0.2.53/32 dev trajectory0
@@ -28,6 +32,5 @@ ExecStart=/usr/bin/sshuttle --method nft --remote devbox-ssm \
 ExecStopPost=-/usr/sbin/ip link del trajectory0
 Restart=always
 RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
+RestartSteps=4
+RestartMaxDelaySec=5min
