@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""omp-session-active: active-work seconds of omp sessions, total and since a line.
+
+Active time sums the gaps between consecutive entry timestamps and skips gaps longer
+than --gap-minutes (default 30, the dispatch://INFRA-26 measurement rule: "gaps over
+30 minutes left out"). --since-line N also sums only the activity after line N of the
+file, which is how the skill librarian asks "how much work since the last interview?".
+
+  omp-session-active [--gap-minutes 30] [--since-line N] SESSION.jsonl...
+
+Prints one JSON object per file:
+  {"file", "session_id", "lines", "start", "end", "active_seconds",
+   "active_seconds_since", "mtime"}
+session_id comes from the filename (…_<id>.jsonl). A line that is not JSON, or has no
+readable timestamp, contributes lines but no time. Timestamps are epoch milliseconds
+or ISO-8601 strings; both appear in session files.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def stamp(entry):
+    v = entry.get("timestamp")
+    if isinstance(v, (int, float)):
+        return v / 1000.0
+    if isinstance(v, str):
+        try:
+            return dt.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def one(path: Path, gap_s: float, since_line: int) -> dict:
+    lines = 0
+    first = last = prev = None
+    active = active_since = 0.0
+    with path.open("rb") as fh:
+        for n, raw in enumerate(fh, 1):
+            lines = n
+            try:
+                t = stamp(json.loads(raw))
+            except ValueError:
+                continue
+            if t is None:
+                continue
+            if first is None:
+                first = t
+            last = t
+            if prev is not None and 0 < t - prev <= gap_s:
+                active += t - prev
+                if n > since_line:
+                    active_since += t - prev
+            prev = t
+    iso = lambda x: dt.datetime.fromtimestamp(x, dt.timezone.utc).isoformat() if x else None
+    return {
+        "file": str(path),
+        "session_id": path.stem.rsplit("_", 1)[-1],
+        "lines": lines,
+        "start": iso(first),
+        "end": iso(last),
+        "active_seconds": round(active),
+        "active_seconds_since": round(active_since),
+        "mtime": round(path.stat().st_mtime),
+    }
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("sessions", nargs="+", type=Path)
+    ap.add_argument("--gap-minutes", type=float, default=30.0)
+    ap.add_argument("--since-line", type=int, default=0)
+    args = ap.parse_args()
+    for path in args.sessions:
+        if not path.is_file():
+            print(f"omp-session-active: {path} is not a file", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(one(path, args.gap_minutes * 60, args.since_line)))
+
+
+if __name__ == "__main__":
+    main()
