@@ -12,13 +12,15 @@ Prints one JSON object per file:
   {"file", "session_id", "lines", "start", "end", "active_seconds",
    "active_seconds_since", "mtime"}
 session_id comes from the filename (…_<id>.jsonl). A line that is not JSON, or has no
-readable timestamp, contributes lines but no time. Timestamps are epoch milliseconds
-or ISO-8601 strings; both appear in session files.
+readable timestamp, contributes lines but no time. Every top-level timestamp seen so
+far is an ISO-8601 string; a numeric (epoch-millisecond) timestamp is also accepted
+in case one appears. A timestamp not later than the running maximum is out of order
+(as from an Envoy or IRC custom_message entry carrying the sender's own clock) and is
+skipped, so a gap is never counted twice and `end` stays the true last activity.
 """
 import argparse
 import datetime as dt
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -50,8 +52,10 @@ def one(path: Path, gap_s: float, since_line: int) -> dict:
                 continue
             if first is None:
                 first = t
+            if prev is not None and t <= prev:
+                continue
             last = t
-            if prev is not None and 0 < t - prev <= gap_s:
+            if prev is not None and t - prev <= gap_s:
                 active += t - prev
                 if n > since_line:
                     active_since += t - prev
