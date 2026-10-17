@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""pr-gate run|merge: run one review gate at a PR's head and post it; merge only on gates at head.
+
+pr-gate run   --repo O/R --pr N --gate NAME --brief FILE [--model M] [--out DIR] [--cwd DIR]
+              [--legion-checkout DIR]
+pr-gate merge --repo O/R --pr N --require G[,G...] [--allow-no-checks] [--approve-script PATH]
+
+run exits: 0 posted; 1 usage/refusal/post failed; 2 provider error or refusal; 3 provider or
+model fallback; 4 no VERDICT line; 5 head moved during the run. Nothing is posted unless 0.
+merge exits: 0 merged; 1 refused or failed.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+DEFAULT_MODEL = "anthropic/claude-opus-5-5:xhigh"
+MARKER = re.compile(
+    r"<!-- pr-gate gate=(\S+) head=([0-9a-f]{40}) verdict=(APPROVE|REQUEST_CHANGES) model=(\S+) -->"
+)
+VERDICT = re.compile(r"^\s*\**\s*VERDICT:\s*(APPROVE|REQUEST_CHANGES)\s*\**\s*$")
+CI_OK = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+LEGION_REPO = "sjawhar/legion"
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"pr-gate: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def gh(*args: str) -> str:
+    r = subprocess.run(["gh", *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"gh {' '.join(args)} failed: {r.stderr.strip()}")
+    return r.stdout
+
+
+def head_sha(repo: str, pr: int) -> str:
+    sha = gh("api", f"repos/{repo}/pulls/{pr}", "--jq", ".head.sha").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        die(f"could not read head of {repo}#{pr}: {sha!r}")
+    return sha
+
+
+def split_model(model: str) -> tuple[str, str]:
+    if "/" not in model:
+        die(f"model must be provider/model[:level], got {model!r}")
+    provider, rest = model.split("/", 1)
+    return provider, rest.split(":", 1)[0]
+
+
+def summarize(events: Path) -> dict:
+    ends, error, final_text = [], None, ""
+    for line in events.read_text().splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        m = e.get("message")
+        if not isinstance(m, dict):
+            continue
+        if m.get("stopReason") == "error":
+            error = m.get("errorMessage") or "error"
+        if e.get("type") != "message_end" or m.get("role") != "assistant":
+            continue
+        ends.append(m)
+        text = "".join(
+            c.get("text", "") for c in m.get("content") or [] if c.get("type") == "text"
+        ).strip()
+        if text:
+            final_text = text
+    cost = sum(((m.get("usage") or {}).get("cost") or {}).get("total") or 0.0 for m in ends)
+    return {
+        "ends": [(m.get("provider") or "", m.get("model") or "") for m in ends],
+        "error": error,
+        "cost": cost,
+        "text": final_text,
+    }
+
+
+def legion_check(body: Path, checkout: str | None) -> None:
+    checkout = checkout or os.environ.get("PR_GATE_LEGION_CHECKOUT")
+    if not checkout:
+        die("sjawhar/legion needs --legion-checkout or PR_GATE_LEGION_CHECKOUT for its private-name check")
+    script = Path(checkout) / ".github/scripts/check-private-names.sh"
+    if not script.is_file():
+        die(f"{script} not found; --legion-checkout must be a sjawhar/legion checkout")
+    r = subprocess.run(["bash", str(script), str(body)], cwd=checkout)
+    if r.returncode != 0:
+        die(f"check-private-names.sh refused the comment body (exit {r.returncode}); nothing posted")
+
+
+def cmd_run(a: argparse.Namespace) -> None:
+    if a.model.startswith("openai/"):
+        die("refusing openai/ models: per-token OpenAI spend is paused")
+    want_provider, want_model = split_model(a.model)
+    print("pr-gate run has no deadline: run it as a background job with bash `timeout: 0`.", flush=True)
+    if a.repo == LEGION_REPO and not (a.legion_checkout or os.environ.get("PR_GATE_LEGION_CHECKOUT")):
+        die("sjawhar/legion needs --legion-checkout or PR_GATE_LEGION_CHECKOUT for its private-name check")
+    brief = a.brief.read_text()
+    start = head_sha(a.repo, a.pr)
+    out = a.out or Path(tempfile.mkdtemp(prefix=f"pr-gate-{a.gate}-"))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "tmp").mkdir(exist_ok=True)
+    events = out / "events.jsonl"
+    print(f"head {start}; events in {events}", flush=True)
+    prompt = (
+        f"You are reviewing {a.repo}#{a.pr} at head commit {start} (gate: {a.gate}).\n"
+        "End your reply with a final message whose first line is exactly "
+        "`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`, followed by the review.\n\n" + brief
+    )
+    with events.open("w") as ev, (out / "stderr.log").open("w") as err:
+        rc = subprocess.run(
+            ["omp", "-p", "--mode", "json", "--model", a.model, prompt],
+            stdin=subprocess.DEVNULL, stdout=ev, stderr=err, cwd=a.cwd,
+            env={**os.environ, "TMPDIR": str(out / "tmp")},
+        ).returncode
+    s = summarize(events)
+    print(f"omp exit {rc}; cost ${s['cost']:.2f}; runs on {sorted(set(s['ends']))}", flush=True)
+    if s["error"]:
+        die(f"run stopped on a provider error or refusal: {s['error']}", 2)
+    if not s["ends"] or any(p != want_provider or m != want_model for p, m in s["ends"]):
+        die(f"run did not stay on {want_provider}/{want_model}: {sorted(set(s['ends']))}", 3)
+    lines = s["text"].splitlines()
+    match = VERDICT.match(lines[0]) if lines else None
+    if not match:
+        die(f"final message's first line is not a VERDICT line: {lines[0] if lines else ''!r}", 4)
+    verdict = match.group(1)
+    now = head_sha(a.repo, a.pr)
+    if now != start:
+        die(f"head moved during the run: started at {start}, now {now}; nothing posted", 5)
+    review = "\n".join(lines[1:]).strip()
+    body = (
+        f"**Gate: {a.gate} at {start}** — {verdict}\n\n"
+        f"Model: `{want_model}` · Provider: `{want_provider}` · Cost: ${s['cost']:.2f}\n\n"
+        f"{review}\n\n"
+        f"<!-- pr-gate gate={a.gate} head={start} verdict={verdict} model={a.model} -->\n"
+    )
+    body_file = out / "comment.md"
+    body_file.write_text(body)
+    if a.repo == LEGION_REPO:
+        legion_check(body_file, a.legion_checkout)
+    url = gh("pr", "comment", str(a.pr), "-R", a.repo, "--body-file", str(body_file)).strip()
+    cid = url.rsplit("issuecomment-", 1)[-1]
+    if not cid.isdigit():
+        die(f"could not read the posted comment's id from {url!r}")
+    posted = gh("api", f"repos/{a.repo}/issues/comments/{cid}", "--jq", ".body")
+    if posted.rstrip("\n") != body.rstrip("\n"):
+        die(f"posted comment {url} does not round-trip its body")
+    print(f"posted {verdict} for gate {a.gate} at {start}: {url}")
+
+
+def ci_refusals(rollup: list[dict], allow_no_checks: bool) -> list[str]:
+    newest: dict[tuple[str, str], dict] = {}
+    for c in rollup:
+        if c.get("__typename") == "StatusContext":
+            key, when = ("", c.get("context") or ""), c.get("startedAt") or c.get("createdAt") or ""
+            state = c.get("state") or "PENDING"
+        else:
+            key, when = (c.get("workflowName") or "", c.get("name") or ""), c.get("startedAt") or ""
+            state = c.get("conclusion") if c.get("status") == "COMPLETED" else "PENDING"
+            state = state or "PENDING"
+        if key not in newest or when >= newest[key]["when"]:
+            newest[key] = {"when": when, "state": state.upper()}
+    if not newest:
+        return [] if allow_no_checks else ["CI: no checks at this head (pass --allow-no-checks if no workflow covers its paths)"]
+    return [
+        f"CI: {'/'.join(filter(None, k))} is {v['state']}"
+        for k, v in sorted(newest.items())
+        if v["state"] not in CI_OK
+    ]
+
+
+def gate_refusals(comments: list[dict], required: list[str], head: str) -> tuple[list[str], list[str]]:
+    refusals, urls = [], []
+    for gate in required:
+        mine = []
+        for c in comments:
+            m = MARKER.search(c.get("body") or "")
+            if m and m.group(1) == gate:
+                mine.append((c.get("created_at") or "", c.get("id") or 0, m.group(2), m.group(3), c.get("html_url") or ""))
+        mine.sort()
+        if not mine:
+            refusals.append(f"gate {gate}: no pr-gate comment")
+            continue
+        _, _, sha, verdict, url = mine[-1]
+        if sha != head:
+            refusals.append(f"gate {gate}: newest comment names {sha}, not head {head}")
+        elif verdict != "APPROVE":
+            refusals.append(f"gate {gate}: newest comment at head is {verdict} ({url})")
+        else:
+            urls.append(url)
+    return refusals, urls
+
+
+def cmd_merge(a: argparse.Namespace) -> None:
+    required = [g for g in a.require.split(",") if g]
+    if not required:
+        die("--require names no gate")
+    head = head_sha(a.repo, a.pr)
+    pr = json.loads(gh("pr", "view", str(a.pr), "-R", a.repo, "--json", "statusCheckRollup,headRefOid,state"))
+    if pr["headRefOid"] != head:
+        die(f"head moved while reading: {head} then {pr['headRefOid']}")
+    if pr["state"] != "OPEN":
+        die(f"{a.repo}#{a.pr} is {pr['state']}")
+    comments = json.loads(gh("api", "--paginate", "--slurp", f"repos/{a.repo}/issues/{a.pr}/comments"))
+    comments = [c for page in comments for c in page]
+    refusals = ci_refusals(pr.get("statusCheckRollup") or [], a.allow_no_checks)
+    gate_ref, urls = gate_refusals(comments, required, head)
+    refusals += gate_ref
+    if refusals:
+        die(f"refusing to merge {a.repo}#{a.pr} at {head}:\n  " + "\n  ".join(refusals))
+    if a.approve_script:
+        body = Path(tempfile.mkstemp(prefix="pr-gate-approve-", suffix=".md")[1])
+        body.write_text(f"Gates at {head}:\n" + "".join(f"- {g}: {u}\n" for g, u in zip(required, urls)))
+        subject = f"pr-gate: {','.join(required)} approved at {head}"
+        r = subprocess.run([a.approve_script, str(a.pr), head, str(body), subject])
+        if r.returncode != 0:
+            die(f"{a.approve_script} exited {r.returncode}")
+    else:
+        gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--match-head-commit", head)
+    after = json.loads(gh("pr", "view", str(a.pr), "-R", a.repo, "--json", "state,mergeCommit"))
+    if after["state"] != "MERGED":
+        die(f"{a.repo}#{a.pr} is {after['state']} after the merge step")
+    print(f"merged {a.repo}#{a.pr} at head {head}: merge commit {after['mergeCommit']['oid']}")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(prog="pr-gate")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--repo", required=True)
+    r.add_argument("--pr", type=int, required=True)
+    r.add_argument("--gate", required=True)
+    r.add_argument("--brief", type=Path, required=True)
+    r.add_argument("--model", default=DEFAULT_MODEL)
+    r.add_argument("--out", type=Path)
+    r.add_argument("--cwd", type=Path)
+    r.add_argument("--legion-checkout")
+    m = sub.add_parser("merge")
+    m.add_argument("--repo", required=True)
+    m.add_argument("--pr", type=int, required=True)
+    m.add_argument("--require", required=True)
+    m.add_argument("--allow-no-checks", action="store_true")
+    m.add_argument("--approve-script")
+    a = p.parse_args()
+    if a.cmd == "run" and not re.fullmatch(r"[A-Za-z0-9._-]+", a.gate):
+        die("--gate must be letters, digits, '.', '_' or '-'")
+    (cmd_run if a.cmd == "run" else cmd_merge)(a)
+
+
+if __name__ == "__main__":
+    main()
