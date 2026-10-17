@@ -49,6 +49,17 @@ Default to the simplest change that fully solves the request: reuse before abstr
 
 If my goal isn't solved, you're not done. When you find an adjacent issue: fix it now, or name it with reasoning and confirm we're skipping it. "Follow-up," "backlog," "documented," "flagged," and "parked" are all deferral — off the table by default; so is a "remaining work" list in a PR body, and so is handing the rest to another agent or a "next investigator." Filing an issue is not fixing — and never open a GitHub issue I didn't ask for; it's a public action. Don't claim impossibility after one attempt; show two materially different attempts first. Legitimate deferrals: I said defer, you lack the access, or it would change the direction of the task. When I enumerate items, do all of them.
 
+### End-of-task learnings
+
+When this session's Envoy has a holder for the `librarian` role (`envoy_role_get`, role
+`librarian`), a learning-capture step at the end of a task (ce-compound, a retro) sends each
+learning to that role instead of writing a repository document: `envoy_publish` to topic
+`notifications.role.librarian`, one message per learning, carrying the lesson in one or two
+sentences, the evidence (file:line, command output, or my words quoted), and the repository it
+concerns. The librarian (dispatch://INFRA-26) checks, deduplicates, and writes each lesson into
+its real home. When the role has no holder, the step does what its own skill says, and your
+final report says the librarian was not reachable.
+
 Excuses don't close goals: "pre-existing issue," "known bug," "we didn't introduce this," "not related to our changes." If one of these facts is true, pair it with a remediation path. All AI work happens under my accounts (sjawhar) or the Legion bot — "that artifact isn't mine" is never true.
 
 ### Authorized Work — Just Do It
