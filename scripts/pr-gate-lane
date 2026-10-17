@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""pr-gate run|merge: run one review gate at a PR's head and post it; merge only on gates at head.
+"""pr-gate run|check|merge: run one review gate at a PR's head and post it; check or merge only on
+gates at head.
 
 pr-gate run   --repo O/R --pr N --gate NAME --brief FILE [--model M] [--out DIR] [--cwd DIR]
               [--legion-checkout DIR]
+pr-gate check --repo O/R --pr N [--head SHA] (--require G[,G...] | --require-any) [--allow-no-checks]
 pr-gate merge --repo O/R --pr N --require G[,G...] [--allow-no-checks] [--approve-script PATH]
 
 run exits: 0 posted; 1 usage/refusal/post failed; 2 provider error or refusal; 3 provider or
 model fallback; 4 no VERDICT line; 5 head moved during the run. Nothing is posted unless 0.
 The run's cost goes to stdout and OUT/summary.json only, never into the PR comment.
-merge exits: 0 merged; 1 refused or failed.
+check exits: 0 the gates and CI pass at the head; 1 refused. It merges nothing.
+merge exits: 0 merged; 1 refused or failed. Its merge step runs with PR_GATE_MERGE=1, which the
+gh shim's merge guard lets through in an agent session.
 """
 
 import argparse
@@ -34,8 +38,8 @@ def die(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 
-def gh(*args: str) -> str:
-    r = subprocess.run(["gh", *args], capture_output=True, text=True)
+def gh(*args: str, env: dict | None = None) -> str:
+    r = subprocess.run(["gh", *args], capture_output=True, text=True, env=env)
     if r.returncode != 0:
         die(f"gh {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout
@@ -200,32 +204,81 @@ def gate_refusals(comments: list[dict], required: list[str], head: str) -> tuple
     return refusals, urls
 
 
-def cmd_merge(a: argparse.Namespace) -> None:
-    required = [g for g in a.require.split(",") if g]
-    if not required:
-        die("--require names no gate")
-    head = head_sha(a.repo, a.pr)
-    pr = json.loads(gh("pr", "view", str(a.pr), "-R", a.repo, "--json", "statusCheckRollup,headRefOid,state"))
-    if pr["headRefOid"] != head:
-        die(f"head moved while reading: {head} then {pr['headRefOid']}")
-    if pr["state"] != "OPEN":
-        die(f"{a.repo}#{a.pr} is {pr['state']}")
-    comments = json.loads(gh("api", "--paginate", "--slurp", f"repos/{a.repo}/issues/{a.pr}/comments"))
+def any_gate_refusals(comments: list[dict], head: str) -> tuple[list[str], list[str]]:
+    """At least one gate's newest comment approves the head; no gate's newest at the head rejects it."""
+    newest: dict[str, tuple] = {}
+    for c in comments:
+        m = MARKER.search(c.get("body") or "")
+        if not m:
+            continue
+        entry = (c.get("created_at") or "", c.get("id") or 0, m.group(2), m.group(3), c.get("html_url") or "")
+        if m.group(1) not in newest or entry >= newest[m.group(1)]:
+            newest[m.group(1)] = entry
+    refusals, urls = [], []
+    for gate, (_, _, sha, verdict, url) in sorted(newest.items()):
+        if sha == head and verdict != "APPROVE":
+            refusals.append(f"gate {gate}: newest comment at head is {verdict} ({url})")
+        elif sha == head:
+            urls.append(url)
+    if not urls:
+        stale = [f"gate {g}: newest comment names {e[2]}" for g, e in sorted(newest.items()) if e[2] != head]
+        refusals.append(f"no gate's newest pr-gate comment approves head {head}"
+                        + ("; " + "; ".join(stale) if stale else ": no pr-gate comment"))
+    return refusals, urls
+
+
+def checked_head(repo: str, pr: int, required: list[str] | None, allow_no_checks: bool,
+                 want_head: str | None = None, need_open: bool = False) -> tuple[str, list[str]]:
+    """Merge's checks at the current head; returns (head, approving gate comment URLs) or refuses.
+
+    required=None is --require-any."""
+    head = head_sha(repo, pr)
+    if want_head and head != want_head:
+        die(f"refusing to merge {repo}#{pr}: it heads at {head}, not {want_head}")
+    pr_view = json.loads(gh("pr", "view", str(pr), "-R", repo, "--json", "statusCheckRollup,headRefOid,state"))
+    if pr_view["headRefOid"] != head:
+        die(f"head moved while reading: {head} then {pr_view['headRefOid']}")
+    if need_open and pr_view["state"] != "OPEN":
+        die(f"{repo}#{pr} is {pr_view['state']}")
+    comments = json.loads(gh("api", "--paginate", "--slurp", f"repos/{repo}/issues/{pr}/comments"))
     comments = [c for page in comments for c in page]
-    refusals = ci_refusals(pr.get("statusCheckRollup") or [], a.allow_no_checks)
-    gate_ref, urls = gate_refusals(comments, required, head)
+    refusals = ci_refusals(pr_view.get("statusCheckRollup") or [], allow_no_checks)
+    if required is None:
+        gate_ref, urls = any_gate_refusals(comments, head)
+    else:
+        gate_ref, urls = gate_refusals(comments, required, head)
     refusals += gate_ref
     if refusals:
-        die(f"refusing to merge {a.repo}#{a.pr} at {head}:\n  " + "\n  ".join(refusals))
+        die(f"refusing to merge {repo}#{pr} at {head}:\n  " + "\n  ".join(refusals))
+    return head, urls
+
+
+def required_gates(spec: str) -> list[str]:
+    required = [g for g in spec.split(",") if g]
+    if not required:
+        die("--require names no gate")
+    return required
+
+
+def cmd_check(a: argparse.Namespace) -> None:
+    required = None if a.require_any else required_gates(a.require)
+    head, urls = checked_head(a.repo, a.pr, required, a.allow_no_checks, want_head=a.head)
+    print(f"pr-gate check: {a.repo}#{a.pr} passes at head {head}: {' '.join(urls)}")
+
+
+def cmd_merge(a: argparse.Namespace) -> None:
+    required = required_gates(a.require)
+    head, urls = checked_head(a.repo, a.pr, required, a.allow_no_checks, need_open=True)
+    gated = {**os.environ, "PR_GATE_MERGE": "1"}
     if a.approve_script:
         body = Path(tempfile.mkstemp(prefix="pr-gate-approve-", suffix=".md")[1])
         body.write_text(f"Gates at {head}:\n" + "".join(f"- {g}: {u}\n" for g, u in zip(required, urls)))
         subject = f"pr-gate: {','.join(required)} approved at {head}"
-        r = subprocess.run([a.approve_script, str(a.pr), head, str(body), subject])
+        r = subprocess.run([a.approve_script, str(a.pr), head, str(body), subject], env=gated)
         if r.returncode != 0:
             die(f"{a.approve_script} exited {r.returncode}")
     else:
-        gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--match-head-commit", head)
+        gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--match-head-commit", head, env=gated)
     after = json.loads(gh("pr", "view", str(a.pr), "-R", a.repo, "--json", "state,mergeCommit"))
     if after["state"] != "MERGED":
         die(f"{a.repo}#{a.pr} is {after['state']} after the merge step")
@@ -244,6 +297,14 @@ def main() -> None:
     r.add_argument("--out", type=Path)
     r.add_argument("--cwd", type=Path)
     r.add_argument("--legion-checkout")
+    c = sub.add_parser("check")
+    c.add_argument("--repo", required=True)
+    c.add_argument("--pr", type=int, required=True)
+    c.add_argument("--head")
+    which = c.add_mutually_exclusive_group(required=True)
+    which.add_argument("--require")
+    which.add_argument("--require-any", action="store_true")
+    c.add_argument("--allow-no-checks", action="store_true")
     m = sub.add_parser("merge")
     m.add_argument("--repo", required=True)
     m.add_argument("--pr", type=int, required=True)
@@ -253,7 +314,9 @@ def main() -> None:
     a = p.parse_args()
     if a.cmd == "run" and not re.fullmatch(r"[A-Za-z0-9._-]+", a.gate):
         die("--gate must be letters, digits, '.', '_' or '-'")
-    (cmd_run if a.cmd == "run" else cmd_merge)(a)
+    if a.cmd == "check" and a.head and not re.fullmatch(r"[0-9a-f]{40}", a.head):
+        die(f"--head must be a full 40-character sha, got {a.head!r}")
+    {"run": cmd_run, "check": cmd_check, "merge": cmd_merge}[a.cmd](a)
 
 
 if __name__ == "__main__":

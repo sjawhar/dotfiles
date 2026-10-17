@@ -39,12 +39,17 @@ elif args[:2] == ["pr", "comment"]:
     st["comments"].append({"id": cid, "body": body, "created_at": f"2026-10-17T12:{cid % 60:02d}:00Z", "html_url": url})
     save(); print(url)
 elif args[:2] == ["pr", "view"]:
-    if "statusCheckRollup" in args[args.index("--json") + 1]:
-        print(json.dumps({"statusCheckRollup": st["rollup"], "headRefOid": st["heads"][0], "state": "OPEN"}))
+    fields = args[args.index("--json") + 1]
+    if "--jq" in args and fields == "headRefOid":  # review-app-approve.sh's own reads
+        print(st["heads"][0])
+    elif "--jq" in args and fields == "statusCheckRollup":
+        print("")
+    elif "statusCheckRollup" in fields:
+        print(json.dumps({"statusCheckRollup": st["rollup"], "headRefOid": st["heads"][0], "state": st.get("pr_state", "OPEN")}))
     else:
         print(json.dumps({"state": "MERGED" if st.get("merged") else "OPEN", "mergeCommit": {"oid": "c" * 40} if st.get("merged") else None}))
 elif args[:2] == ["pr", "merge"]:
-    st["merged"] = True; save()
+    st["merged"] = True; st["merge_env"] = os.environ.get("PR_GATE_MERGE"); save()
 else:
     sys.exit(f"unexpected gh {args}")
 '''
@@ -199,6 +204,7 @@ class PrGateTest(unittest.TestCase):
         merge = next(c for c in self.calls() if c[:2] == ["pr", "merge"])
         self.assertEqual(merge[merge.index("--match-head-commit") + 1], A)
         self.assertNotIn("--auto", merge)
+        self.assertEqual(self.st()["merge_env"], "1")
         self.assertIn("c" * 40, r.stdout)
 
     def test_old_failure_superseded_by_success_merges(self):
@@ -237,7 +243,7 @@ class PrGateTest(unittest.TestCase):
     def test_approve_script_receives_head_and_gate_urls_instead_of_gh_merge(self):
         rec = Path(self.tmp.name) / "approve.log"
         script = Path(self.tmp.name) / "approve.sh"
-        script.write_text(f"#!/bin/sh\necho \"$@\" > {rec}\ncat \"$3\" >> {rec}\n"
+        script.write_text(f"#!/bin/sh\necho \"$@\" > {rec}\ncat \"$3\" >> {rec}\necho PR_GATE_MERGE=$PR_GATE_MERGE >> {rec}\n"
                           f"python3 -c 'import json;p=\"{self.state}\";s=json.load(open(p));s[\"merged\"]=True;json.dump(s,open(p,\"w\"))'\n")
         script.chmod(0o755)
         self.set_state(heads=[A], rollup=[check("gate")], comments=self.approved())
@@ -247,6 +253,115 @@ class PrGateTest(unittest.TestCase):
         self.assertTrue(got.startswith(f"1 {A} "))
         self.assertIn("https://x/1", got)
         self.assertFalse(any(c[:2] == ["pr", "merge"] for c in self.calls()))
+        self.assertIn("PR_GATE_MERGE=1", got)
+
+    # --- check ---
+
+    def check(self, *extra):
+        return self.pr_gate("check", "--repo", REPO, "--pr", "1", *extra)
+
+    def test_check_require_any_passes_on_one_approving_gate_and_merges_nothing(self):
+        comments = self.approved() + [gate_comment("other", B, "REQUEST_CHANGES", "2026-10-17T11:30:00Z", 2)]
+        self.set_state(heads=[A], rollup=[check("gate")], comments=comments)
+        r = self.check("--head", A, "--require-any")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("https://x/1", r.stdout)
+        self.assertFalse(any(c[:2] == ["pr", "merge"] for c in self.calls()))
+
+    def test_check_require_any_refuses_with_no_gate(self):
+        self.set_state(heads=[A], rollup=[check("gate")], comments=[])
+        self.assert_refused(self.check("--require-any"), "no gate's newest pr-gate comment approves", "no pr-gate comment")
+
+    def test_check_require_any_refuses_a_gate_at_an_older_head(self):
+        self.set_state(heads=[B], rollup=[check("gate")], comments=self.approved(A))
+        self.assert_refused(self.check("--require-any"), f"gate review: newest comment names {A}")
+
+    def test_check_require_any_refuses_request_changes_at_head_beside_an_approve(self):
+        comments = self.approved() + [gate_comment("security", A, "REQUEST_CHANGES", "2026-10-17T11:30:00Z", 2)]
+        self.set_state(heads=[A], rollup=[check("gate")], comments=comments)
+        self.assert_refused(self.check("--require-any"), "gate security: newest comment at head is REQUEST_CHANGES")
+
+    def test_check_require_any_refuses_request_changes_after_approve_on_the_same_gate(self):
+        comments = self.approved() + [gate_comment("review", A, "REQUEST_CHANGES", "2026-10-17T11:30:00Z", 2)]
+        self.set_state(heads=[A], rollup=[check("gate")], comments=comments)
+        self.assert_refused(self.check("--require-any"), "REQUEST_CHANGES")
+
+    def test_check_head_mismatch_refuses_naming_both(self):
+        self.set_state(heads=[B], rollup=[check("gate")], comments=self.approved(B))
+        self.assert_refused(self.check("--head", A, "--require-any"), A, B)
+
+    def test_check_require_names_gates_and_ci_counts(self):
+        self.set_state(heads=[A], rollup=[check("gate", "FAILURE")], comments=self.approved())
+        self.assert_refused(self.check("--require", "review"), "CI/gate is FAILURE")
+        self.set_state(heads=[A], rollup=[check("gate")], comments=self.approved())
+        self.assertEqual(self.check("--require", "review").returncode, 0)
+        self.assert_refused(self.check("--require", "review,security"), "gate security: no pr-gate comment")
+
+    def test_check_require_and_require_any_are_exclusive(self):
+        r = self.check("--require", "review", "--require-any")
+        self.assertEqual(r.returncode, 2)
+
+    def test_check_reads_a_merged_pr_and_merge_refuses_it(self):
+        self.set_state(heads=[A], rollup=[check("gate")], comments=self.approved(), pr_state="MERGED")
+        self.assertEqual(self.check("--head", A, "--require-any").returncode, 0)
+        self.assert_refused(self.merge(), "is MERGED")
+
+
+APPROVE_SCRIPT = Path.home() / ".worktrees/reports/review-app-approve.sh"
+
+
+@unittest.skipUnless(APPROVE_SCRIPT.is_file(), f"{APPROVE_SCRIPT} is this machine's, not committed")
+class ReviewAppApproveTest(unittest.TestCase):
+    """review-app-approve.sh refuses before minting a token unless pr-gate check --require-any passes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        (d / "gh").write_text(GH_STUB)
+        (d / "secrets").write_text("#!/bin/sh\necho secrets \"$@\" >> \"$STUB_LOG\"\nexit 99\n")
+        for name in ("gh", "secrets"):
+            (d / name).chmod(0o755)
+        self.state, self.log = d / "state.json", d / "calls.log"
+        self.body = d / "body.md"
+        self.body.write_text("Gates at head.\n")
+        self.env = {**os.environ, "PATH": f"{d}:{os.environ['PATH']}", "STUB_STATE": str(self.state),
+                    "STUB_LOG": str(self.log), "DOTFILES_DIR": str(GATE.parents[1])}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def approve(self, head, comments):
+        self.state.write_text(json.dumps({"heads": [A], "rollup": [check("gate")], "comments": comments}))
+        return subprocess.run([str(APPROVE_SCRIPT), "5", head, str(self.body), "subject"], env=self.env,
+                              capture_output=True, text=True)
+
+    def assert_refused_before_mint(self, r, needle):
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(needle, r.stderr)
+        log = self.log.read_text() if self.log.exists() else ""
+        self.assertNotIn("secrets", log)
+        self.assertNotIn('"merge"', log)
+
+    def test_no_gate_at_head_refuses(self):
+        self.assert_refused_before_mint(self.approve(A, []), "no pr-gate comment")
+
+    def test_gate_at_an_older_head_refuses(self):
+        self.assert_refused_before_mint(self.approve(A, [gate_comment("review", B, "APPROVE", "2026-10-17T11:00:00Z", 1)]),
+                                        f"newest comment names {B}")
+
+    def test_request_changes_at_head_refuses(self):
+        comments = [gate_comment("review", A, "APPROVE", "2026-10-17T11:00:00Z", 1),
+                    gate_comment("deep", A, "REQUEST_CHANGES", "2026-10-17T11:30:00Z", 2)]
+        self.assert_refused_before_mint(self.approve(A, comments), "REQUEST_CHANGES")
+
+    def test_a_head_other_than_the_prs_refuses(self):
+        self.assert_refused_before_mint(self.approve(B, [gate_comment("review", B, "APPROVE", "2026-10-17T11:00:00Z", 1)]),
+                                        f"heads at {A}, not {B}")
+
+    def test_an_approving_gate_at_head_reaches_the_mint(self):
+        r = self.approve(A, [gate_comment("review", A, "APPROVE", "2026-10-17T11:00:00Z", 1)])
+        self.assertNotEqual(r.returncode, 0)  # the fake secrets exits 99: the script stops at the mint
+        self.assertIn("secrets GH_REVIEW_APP_PRIVATE_KEY_B64", self.log.read_text())
 
 
 if __name__ == "__main__":
