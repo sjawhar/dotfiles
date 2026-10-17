@@ -132,11 +132,25 @@ ensure_vendor https://github.com/pulumi/agent-skills.git pulumi-agent-skills 251
 
 # GitHub CLI's own "gh" skill (reference for driving `gh`, dispatch://INFRA-26).
 # Installed to user scope (~/.agents/skills), which OMP does not read natively,
-# so skills-sources.json points an ompSkillsDir entry at it. Non-fatal when
-# `gh` is absent (agent boxes without it) or `gh skill` is unavailable.
+# so skills-sources.json points an ompSkillsDir entry at it. Pinned to the
+# cli/cli v2.98.0 tag commit, matching mise.toml's `gh = "2.98.0"` pin (a newer
+# skill documents flags, e.g. `--attach`, that an older installed `gh` rejects) -
+# re-pin here whenever mise.toml's gh version moves. Non-fatal when `gh` is
+# absent (agent boxes without it) or `gh skill` is unavailable.
+GH_SKILL_PIN="a255baf71d13fe5947a4eb7ad521ffd412d64cee"
+GH_SKILL_FILE="${HOME}/.agents/skills/gh/SKILL.md"
 if command -v gh &>/dev/null; then
-    gh skill list 2>/dev/null | grep -q '^gh\b' || \
-        gh skill install cli/cli gh --agent universal --scope user --pin fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd || true
+    gh_skill_present=0
+    if gh skill list 2>/dev/null | awk -F'\t' '$1=="gh"{f=1} END{exit !f}'; then
+        gh_skill_present=1
+    fi
+    gh_skill_pinned=""
+    if [ -f "$GH_SKILL_FILE" ]; then
+        gh_skill_pinned=$(grep -m1 '^\s*github-pinned:' "$GH_SKILL_FILE" | awk '{print $2}') || true
+    fi
+    if [ "$gh_skill_present" != "1" ] || [ "$gh_skill_pinned" != "$GH_SKILL_PIN" ]; then
+        gh skill install cli/cli gh --agent universal --scope user --pin "$GH_SKILL_PIN" --force || true
+    fi
 fi
 
 # agent-c skills required by instructions that apply outside agent-c, linked

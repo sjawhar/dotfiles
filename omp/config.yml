@@ -195,6 +195,14 @@ skills:
     - ce-work
     - ce-worktree
     - lfg
+    # pulumi-overview's description triggers on any cloud/SaaS task "even when
+    # the user does not name Pulumi" and routes to `npx pulumi do ... --yes`,
+    # which can silently provision a Pulumi Cloud account (CLAUDE.md: ask
+    # before creating an account on an outside platform). pulumi-esc triggers
+    # on any secrets/OIDC/1Password question, overlapping using-secrets.
+    # dispatch://INFRA-26 fix round 1.
+    - pulumi-esc
+    - pulumi-overview
     - sentry-android-sdk
     - sentry-browser-sdk
     - sentry-cocoa-sdk
