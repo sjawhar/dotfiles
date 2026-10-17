@@ -196,21 +196,18 @@ skills:
     - ce-worktree
     - lfg
     # Dropped because their live (shortened) descriptions, what a session
-    # actually sees in its skills list, do not name Pulumi or require it to be
-    # involved, so they trigger on unrelated work: pulumi-overview fires on any
-    # cloud/SaaS task and can silently provision a Pulumi Cloud account
-    # (CLAUDE.md requires asking before creating an account on an outside
-    # platform); pulumi-esc fires on any secrets/OIDC/1Password question,
-    # overlapping using-secrets; upstream-patches fires on routine fork-rebase
-    # work (knives-managed forks) with "owning-patch lookup, patch conflicts,
-    # hunk removal, or upstream rebase tasks"; package-usage and
+    # actually sees in its skills list, trigger on work that doesn't need
+    # Pulumi: pulumi-overview fires on any cloud/SaaS task and can silently
+    # provision a Pulumi Cloud account (CLAUDE.md requires asking before
+    # creating an account on an outside platform); pulumi-esc leads with
+    # generic secrets/environments/OIDC triggers that overlap using-secrets,
+    # even though it also names Pulumi stack config; package-usage and
     # pulumi-context-api fire on generic cross-stack/package-audit questions
     # with no Pulumi mention at all.
     - package-usage
     - pulumi-context-api
     - pulumi-esc
     - pulumi-overview
-    - upstream-patches
     - sentry-android-sdk
     - sentry-browser-sdk
     - sentry-cocoa-sdk
