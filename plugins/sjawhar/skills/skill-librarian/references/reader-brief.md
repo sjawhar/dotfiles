@@ -1,8 +1,9 @@
 # The skeptical reader's brief
 
-Dispatch one reader per due session: a read-only subagent (scout) on a Claude model, with
-this prompt filled in. Shared workspace hazard from the trial: readers that share a scratch
-directory overwrite each other — tell each reader to make its own `mktemp -d`.
+Dispatch one reader per due session: a `task` agent (not `scout`, which has no bash) on a
+Claude model, with this prompt filled in. Shared workspace hazard from the trial: readers
+that share a scratch directory overwrite each other — tell each reader to make its own
+`mktemp -d`.
 
 ```text
 You are a skeptical outside reader of one coding-agent session. Read lines {START}-{END} of
