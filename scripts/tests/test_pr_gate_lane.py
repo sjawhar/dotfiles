@@ -168,6 +168,23 @@ class PrGateTest(unittest.TestCase):
         self.assertLess(prompt.index("src/b.py"), prompt.index("Review the docs change."))
         self.assertTrue(any(c[0] == "api" and c[1].endswith(f"/compare/{B}...{A}") for c in self.calls()))
 
+    def test_hdo_repo_refuses_non_anthropic_model_before_any_run(self):
+        for repo, model in (("theorem-labs/foo-hdo", "openai/gpt-6-astra:xhigh"),
+                            ("Theorem-Labs/bar-HDO", "google/gemini-3-pro")):
+            r = self.pr_gate("run", "--repo", repo, "--pr", "1", "--gate", "review", "--brief", str(self.brief),
+                             "--model", model, STUB_EVENTS="[]")
+            self.assertEqual(r.returncode, 1)
+            self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+            self.assertIn("HDO material never reaches a non-Claude agent", r.stderr)
+        self.assertFalse(any(c[0] == "omp" for c in self.calls()))
+        self.assertEqual(self.st()["comments"], [])
+
+    def test_hdo_repo_runs_anthropic_model(self):
+        r = self.pr_gate("run", "--repo", "theorem-labs/foo-hdo", "--pr", "1", "--gate", "review",
+                         "--brief", str(self.brief), "--out", str(self.out),
+                         STUB_EVENTS=json.dumps([end("VERDICT: APPROVE\nok")]))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_provider_fallback_posts_nothing(self):
         r = self.run_gate([end("x"), end("VERDICT: APPROVE\nok", provider="openai", model="gpt-6-astra")])
         self.assertEqual(r.returncode, 3)
