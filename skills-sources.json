@@ -55,10 +55,6 @@
     },
     {
       "root": "vendor/pulumi-agent-skills/delegation"
-    },
-    {
-      "root": "gh-cli-skill",
-      "ompSkillsDir": "~/.agents/skills"
     }
   ]
 }

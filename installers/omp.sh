@@ -131,12 +131,14 @@ ensure_vendor https://github.com/danyuchn/asd-ste100-skill.git asd-ste100/skills
 ensure_vendor https://github.com/pulumi/agent-skills.git pulumi-agent-skills 2517e28e4bc029424e9c9ee48016394296be0f6a
 
 # GitHub CLI's own "gh" skill (reference for driving `gh`, dispatch://INFRA-26).
-# Installed to user scope (~/.agents/skills), which OMP does not read natively,
-# so skills-sources.json points an ompSkillsDir entry at it. Pinned to the
-# cli/cli v2.98.0 tag commit, matching mise.toml's `gh = "2.98.0"` pin (a newer
-# skill documents flags, e.g. `--attach`, that an older installed `gh` rejects) -
-# re-pin here whenever mise.toml's gh version moves. Non-fatal when `gh` is
-# absent (agent boxes without it) or `gh skill` is unavailable.
+# `gh skill install` places it in ~/.agents/skills (user scope), which OMP's
+# built-in "agents" discovery provider already reads natively (on by default) -
+# no skills-sources.json entry needed. This block only materializes/pins it:
+# pinned to the cli/cli v2.98.0 tag commit, matching mise.toml's
+# `gh = "2.98.0"` pin (a newer skill documents flags, e.g. `--attach`, that an
+# older installed `gh` rejects) - re-pin here whenever mise.toml's gh version
+# moves. Non-fatal when `gh` is absent (agent boxes without it) or `gh skill`
+# is unavailable.
 GH_SKILL_PIN="a255baf71d13fe5947a4eb7ad521ffd412d64cee"
 GH_SKILL_FILE="${HOME}/.agents/skills/gh/SKILL.md"
 if command -v gh &>/dev/null; then
