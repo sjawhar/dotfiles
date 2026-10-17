@@ -89,7 +89,8 @@ Hard rules:
         `default`). When any of them is not `anthropic/`, run no reader this round and write
         `reader skipped: task role not Claude-only` in the session's `notes` cell. Then
         dispatch one `task` agent with `<skill dir>/references/reader-brief.md`, START = the
-        ledger's last line (or 1), END = the fork's `cut`, or N when you skipped the fork.
+        ledger's last line (or 1), END = the fork's `cut`, or N when you skipped the fork,
+        SCRATCH = a fresh `mktemp -d` for that reader alone.
         The `task` tool takes no per-call model field: the model comes from the config you
         just checked. After the reader finishes, read its own session's last
         `"type":"model_change"` entry the same way you checked the fork's, and discard its
