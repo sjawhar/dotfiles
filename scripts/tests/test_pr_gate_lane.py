@@ -27,6 +27,8 @@ def head():
     save(); return h
 if args[0] == "api" and "/pulls/" in args[1]:
     print(head())
+elif args[0] == "api" and "/compare/" in args[1]:
+    print(json.dumps({"status": st.get("compare_status", "ahead"), "files": st.get("compare_files", [])}))
 elif args[0] == "api" and "/issues/comments/" in args[1]:
     cid = int(args[1].rsplit("/", 1)[1])
     print(next(c["body"] for c in st["comments"] if c["id"] == cid))
@@ -139,12 +141,32 @@ class PrGateTest(unittest.TestCase):
         self.assertIn(A, omp[-1].splitlines()[0])
         self.assertEqual(omp[omp.index("--model") + 1], "anthropic/claude-opus-5-5:xhigh")
 
-    def test_head_moved_mid_run_posts_nothing_and_names_both(self):
+    def test_head_moved_mid_run_posts_verdict_marked_not_valid_and_exits_5(self):
         r = self.run_gate([end("VERDICT: APPROVE\nok")], STUB_MOVE_HEAD=B)
         self.assertEqual(r.returncode, 5)
         self.assertIn(A, r.stderr)
         self.assertIn(B, r.stderr)
-        self.assertEqual(self.st()["comments"], [])
+        [c] = self.st()["comments"]
+        self.assertEqual(c["body"].splitlines()[0],
+                         f"**Gate: review at {A}** — APPROVE (head has since moved to {B}; not valid for merge)")
+        self.assertIn(f"<!-- pr-gate gate=review head={A} verdict=APPROVE", c["body"])
+        # merge at the moved head must refuse the comment the run just posted
+        st = self.st()
+        st["rollup"] = [check("gate")]
+        self.set_state(**st)
+        self.assert_refused(self.merge(), f"names {A}, not head {B}")
+
+    def test_since_puts_delta_range_and_files_before_the_brief(self):
+        st = self.st()
+        st["compare_files"] = ["docs/a.md", "src/b.py"]
+        self.set_state(**st)
+        r = self.run_gate([end("VERDICT: APPROVE\nok")], "--since", B)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        prompt = next(c for c in self.calls() if c[0] == "omp")[-1]
+        self.assertIn(f"Review only the delta {B}..{A}, which follows a reviewed head", prompt)
+        self.assertIn("- docs/a.md\n- src/b.py\n", prompt)
+        self.assertLess(prompt.index("src/b.py"), prompt.index("Review the docs change."))
+        self.assertTrue(any(c[0] == "api" and c[1].endswith(f"/compare/{B}...{A}") for c in self.calls()))
 
     def test_provider_fallback_posts_nothing(self):
         r = self.run_gate([end("x"), end("VERDICT: APPROVE\nok", provider="openai", model="gpt-6-astra")])

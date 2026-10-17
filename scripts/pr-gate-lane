@@ -8,7 +8,8 @@ pr-gate check --repo O/R --pr N [--head SHA] (--require G[,G...] | --require-any
 pr-gate merge --repo O/R --pr N --require G[,G...] [--allow-no-checks] [--approve-script PATH]
 
 run exits: 0 posted; 1 usage/refusal/post failed; 2 provider error or refusal; 3 provider or
-model fallback; 4 no VERDICT line; 5 head moved during the run. Nothing is posted unless 0.
+model fallback; 4 no VERDICT line; 5 head moved during the run. Nothing is posted on 1-4; on 5 the
+verdict is posted at the reviewed sha, marked not valid for merge. --since SHA makes it a delta review.
 The run's cost goes to stdout and OUT/summary.json only, never into the PR comment.
 check exits: 0 the gates and CI pass at the head; 1 refused. It merges nothing.
 merge exits: 0 merged; 1 refused or failed. Its merge step runs with PR_GATE_MERGE=1, which the
@@ -112,10 +113,21 @@ def cmd_run(a: argparse.Namespace) -> None:
     (out / "tmp").mkdir(exist_ok=True)
     events = out / "events.jsonl"
     print(f"head {start}; events in {events}", flush=True)
+    delta = ""
+    if a.since:
+        if a.since == start:
+            die(f"--since {a.since} is the head itself; there is no delta to review")
+        cmp = json.loads(gh("api", f"repos/{a.repo}/compare/{a.since}...{start}",
+                            "--jq", "{status: .status, files: [.files[].filename]}"))
+        delta = f"Review only the delta {a.since}..{start}, which follows a reviewed head.\n"
+        if cmp["status"] != "ahead":
+            delta += (f"{a.since} is not an ancestor of the head (compare status: {cmp['status']}); "
+                      "the files below are the changes from their merge base.\n")
+        delta += "Files in the delta:\n" + "".join(f"- {f}\n" for f in cmp["files"]) + "\n"
     prompt = (
         f"You are reviewing {a.repo}#{a.pr} at head commit {start} (gate: {a.gate}).\n"
         "End your reply with a final message whose first line is exactly "
-        "`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`, followed by the review.\n\n" + brief
+        "`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`, followed by the review.\n\n" + delta + brief
     )
     with events.open("w") as ev, (out / "stderr.log").open("w") as err:
         rc = subprocess.run(
@@ -138,11 +150,10 @@ def cmd_run(a: argparse.Namespace) -> None:
         die(f"final message's first line is not a VERDICT line: {lines[0] if lines else ''!r}", 4)
     verdict = match.group(1)
     now = head_sha(a.repo, a.pr)
-    if now != start:
-        die(f"head moved during the run: started at {start}, now {now}; nothing posted", 5)
+    moved = f" (head has since moved to {now}; not valid for merge)" if now != start else ""
     review = "\n".join(lines[1:]).strip()
     body = (
-        f"**Gate: {a.gate} at {start}** — {verdict}\n\n"
+        f"**Gate: {a.gate} at {start}** — {verdict}{moved}\n\n"
         f"Model: `{want_model}` · Provider: `{want_provider}`\n\n"
         f"{review}\n\n"
         f"<!-- pr-gate gate={a.gate} head={start} verdict={verdict} model={a.model} -->\n"
@@ -159,6 +170,9 @@ def cmd_run(a: argparse.Namespace) -> None:
     if posted.rstrip("\n") != body.rstrip("\n"):
         die(f"posted comment {url} does not round-trip its body")
     print(f"posted {verdict} for gate {a.gate} at {start}: {url}")
+    if moved:
+        die(f"head moved during the run: reviewed {start}, now {now}; the posted gate is not valid "
+            f"for merge. Re-run with --since {start} for a delta review.", 5)
 
 
 def ci_refusals(rollup: list[dict], allow_no_checks: bool) -> list[str]:
@@ -297,6 +311,7 @@ def main() -> None:
     r.add_argument("--out", type=Path)
     r.add_argument("--cwd", type=Path)
     r.add_argument("--legion-checkout")
+    r.add_argument("--since")
     c = sub.add_parser("check")
     c.add_argument("--repo", required=True)
     c.add_argument("--pr", type=int, required=True)
@@ -314,6 +329,8 @@ def main() -> None:
     a = p.parse_args()
     if a.cmd == "run" and not re.fullmatch(r"[A-Za-z0-9._-]+", a.gate):
         die("--gate must be letters, digits, '.', '_' or '-'")
+    if a.cmd == "run" and a.since and not re.fullmatch(r"[0-9a-f]{40}", a.since):
+        die(f"--since must be a full 40-character sha, got {a.since!r}")
     if a.cmd == "check" and a.head and not re.fullmatch(r"[0-9a-f]{40}", a.head):
         die(f"--head must be a full 40-character sha, got {a.head!r}")
     {"run": cmd_run, "check": cmd_check, "merge": cmd_merge}[a.cmd](a)
