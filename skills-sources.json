@@ -51,7 +51,7 @@
       "root": "vendor/pulumi-agent-skills/migration"
     },
     {
-      "$comment": "Only three of the four plugin groups pulumi/agent-skills ships are vendored. package-maintenance targets Pulumi provider-repo maintainers: its upstream-patches skill operates on a provider's upstream/ git submodule via scripts/upstream.sh, which no ~/src checkout has.",
+      "$comment": "installers/omp.sh clones the whole pulumi/agent-skills repo, but only three of its four plugin groups are fed to omp here. package-maintenance targets Pulumi provider-repo maintainers: its upstream-patches skill operates on a provider's upstream/ git submodule via scripts/upstream.sh, which no ~/src checkout has.",
       "root": "vendor/pulumi-agent-skills/delegation"
     }
   ]
