@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """omp-session-active: active-work seconds of omp sessions, total and since a line.
 
-Active time sums the gaps between consecutive entry timestamps and skips gaps longer
-than --gap-minutes (default 30, the dispatch://INFRA-26 measurement rule: "gaps over
-30 minutes left out"). --since-line N also sums only the activity after line N of the
-file, which is how the skill librarian asks "how much work since the last interview?".
+Active time sums every gap between two entries that is > 0 and <= --gap-minutes (default 30, the
+dispatch://INFRA-26 measurement rule: "gaps over 30 minutes left out"), after sorting all of a
+file's timestamps — file order is not time order: a forked session's line-2 `type: "session"`
+header carries the fork time while its copied history keeps the original, earlier timestamps, and
+an Envoy/IRC `custom_message` entry carries the sender's own clock. --since-line N credits a gap
+to active_seconds_since when the later of its two timestamps belongs to a line past N, which is
+how the skill librarian asks "how much work since the last interview?".
 
   omp-session-active [--gap-minutes 30] [--since-line N] SESSION.jsonl...
 
 Prints one JSON object per file:
   {"file", "session_id", "lines", "start", "end", "active_seconds",
    "active_seconds_since", "mtime"}
-session_id comes from the filename (…_<id>.jsonl). A line that is not JSON, or has no
-readable timestamp, contributes lines but no time. Every top-level timestamp seen so
-far is an ISO-8601 string; a numeric (epoch-millisecond) timestamp is also accepted
-in case one appears. A timestamp not later than the running maximum is out of order
-(as from an Envoy or IRC custom_message entry carrying the sender's own clock) and is
-skipped, so a gap is never counted twice and `end` stays the true last activity.
+session_id comes from the filename (…_<id>.jsonl). A line that is not JSON, or has no readable
+timestamp, contributes to `lines` but is left out of the sort. Every top-level timestamp seen so
+far is an ISO-8601 string; a numeric (epoch-millisecond) timestamp is also accepted in case one
+appears. `start`/`end` are the minimum/maximum timestamp seen, not the first/last line.
 """
 import argparse
 import datetime as dt
@@ -39,8 +40,7 @@ def stamp(entry):
 
 def one(path: Path, gap_s: float, since_line: int) -> dict:
     lines = 0
-    first = last = prev = None
-    active = active_since = 0.0
+    entries = []  # (timestamp, line number), sorted below by timestamp
     with path.open("rb") as fh:
         for n, raw in enumerate(fh, 1):
             lines = n
@@ -50,16 +50,17 @@ def one(path: Path, gap_s: float, since_line: int) -> dict:
                 continue
             if t is None:
                 continue
-            if first is None:
-                first = t
-            if prev is not None and t <= prev:
-                continue
-            last = t
-            if prev is not None and t - prev <= gap_s:
-                active += t - prev
-                if n > since_line:
-                    active_since += t - prev
-            prev = t
+            entries.append((t, n))
+    entries.sort(key=lambda e: e[0])
+    active = active_since = 0.0
+    for (t0, _n0), (t1, n1) in zip(entries, entries[1:]):
+        gap = t1 - t0
+        if 0 < gap <= gap_s:
+            active += gap
+            if n1 > since_line:
+                active_since += gap
+    first = entries[0][0] if entries else None
+    last = entries[-1][0] if entries else None
     iso = lambda x: dt.datetime.fromtimestamp(x, dt.timezone.utc).isoformat() if x else None
     return {
         "file": str(path),
