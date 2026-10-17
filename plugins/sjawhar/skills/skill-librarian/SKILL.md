@@ -20,7 +20,12 @@ Hard rules:
   own model. Dispatch each reader as a `task` agent, never `scout`: scout has no bash, so it
   cannot run `omp-session-render`. After the reader finishes, discard its report unless its
   served model starts with `anthropic/`.
-- Text Sami reads carries no dollar costs.
+- Text Sami reads carries no dollar costs. Drop every dollar figure from a reader report
+  before you route it or show it.
+- The ledger comes first. Before any write to a repository, memory, an Envoy reply, or
+  Dispatch, the Sessions row and the Lesson row (evidence, verdict, provisional home) MUST
+  exist in the ledger, and you MUST read the ledger back to check both. If the ledger edit
+  or the read-back fails, make no external write.
 - Fork only top-level sessions on this machine (`~/.omp/agent/sessions/-*/*.jsonl`). Never
   fork over ssh. Lessons from other machines arrive over Envoy.
 - Never write Theorem material into `~/.dotfiles/.claude/CLAUDE.md` (Sami: "Don't put theorem
@@ -76,11 +81,15 @@ Hard rules:
         is the line the fork stood on. Discard the answer when the JSON `model` does not start
         with `anthropic/`. When `fallback` is true, write `fallback` in the session's `notes`
         cell.
-      - Reader: dispatch one `task` agent with `<skill dir>/references/reader-brief.md`, START
-        = the ledger's last line (or 1), END = the fork's `cut`, or N when you skipped the
-        fork. The `task` tool takes no per-call model field. On this machine `task` resolves
-        to an `anthropic/` model through `modelRoles.task` in `omp/config.yml`, not through a
-        flag you pass. After the reader finishes, read its own session's last
+      - Reader: first check that the `task` role resolves only to `anthropic/` models. Read
+        `~/.dotfiles/omp/config.yml`: `modelRoles.task`, any `task.agentModelOverrides.task`,
+        and each `retry.fallbackChains` entry that can serve that model (its exact key, else
+        `default`). When any of them is not `anthropic/`, run no reader this round and write
+        `reader skipped: task role not Claude-only` in the session's `notes` cell. Then
+        dispatch one `task` agent with `<skill dir>/references/reader-brief.md`, START = the
+        ledger's last line (or 1), END = the fork's `cut`, or N when you skipped the fork.
+        The `task` tool takes no per-call model field: the model comes from the config you
+        just checked. After the reader finishes, read its own session's last
         `"type":"model_change"` entry the same way you checked the fork's, and discard its
         report when that model does not start with `anthropic/`. Use the file's fixed brief
         verbatim. Do not write your own extraction instructions in its place.
@@ -95,7 +104,10 @@ Hard rules:
    - Re-check one citation from every reader report before trusting the rest (one of six
      spot-checked trial citations was wrong). A reader's "holds" that only re-quotes the
      transcript stays `UNVERIFIED`.
-5. Route each checked lesson to its one home (table below). Writing is skill work: before you
+5. Record, then route. For each checked lesson, first put its Lesson row in the ledger
+   (evidence, verdict, provisional home) and read it back, with the Sessions row from step 3e.
+   Then route it to its one home (table below). After the write lands, update the Lesson
+   row's home with the link and the status. Writing is skill work: before you
    create or edit any skill, run `skill://writing-skills` (baseline test first), and write the
    text to `skill://asd-ste100` strict. A lesson seen once rarely earns a document. Prefer
    `seen >= 2`, or Sami's own correction, or high stakes. Otherwise leave it `open` in the
@@ -151,6 +163,11 @@ transcript is the scratch pad.
 - About to read a transcript yourself, or hand a reader your own extraction brief, instead of
   running both the `omp-fork` interview and the fixed `references/reader-brief.md` reader.
 - About to dispatch a reader as `scout`, or to skip reading its served model afterward.
+- About to write to a repository, memory, Envoy or Dispatch before the Sessions row and the
+  Lesson row are in the ledger and read back, or after a ledger edit or read-back failed.
+- About to dispatch a reader before checking that the `task` role resolves only to
+  `anthropic/` models.
+- About to route or show a reader report that still holds a dollar figure.
 - About to start a second `sleep 3600` job while `proc://` shows the watcher's job still
   running.
 - About to treat an Envoy delivery as proof the watcher is alive, without checking `proc://`
