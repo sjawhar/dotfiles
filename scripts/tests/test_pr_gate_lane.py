@@ -11,6 +11,7 @@ GATE = Path(__file__).parents[1] / "pr-gate"
 REPO = "sjawhar/legion-smoke"
 A = "a" * 40
 B = "b" * 40
+BET = "theorem-labs/binary-equivalence-taiga"
 
 # State lives in $STUB_STATE (JSON): heads (consumed one per head read; the last one sticks),
 # rollup, comments, merged. Every call is logged to $STUB_LOG.
@@ -25,7 +26,12 @@ def head():
     h = st["heads"][0]
     if len(st["heads"]) > 1: st["heads"].pop(0)
     save(); return h
-if args[0] == "api" and "/pulls/" in args[1]:
+if args[0] == "api" and args[-1].endswith("/files?per_page=100"):
+    files = st.get("pr_files", [])
+    print(json.dumps([[{"filename": f} for f in files[i:i + 100]] for i in range(0, len(files), 100)] or [[]]))
+elif args[0] == "api" and "/pulls/" in args[1] and ".changed_files" in args:
+    print(st.get("changed_files", len(st.get("pr_files", []))))
+elif args[0] == "api" and "/pulls/" in args[1]:
     print(head())
 elif args[0] == "api" and "/compare/" in args[1]:
     print(json.dumps({"status": st.get("compare_status", "ahead"), "files": st.get("compare_files", [])}))
@@ -60,6 +66,9 @@ else:
 OMP_STUB = r'''#!/usr/bin/env python3
 import json, os, sys
 open(os.environ["STUB_LOG"], "a").write(json.dumps(["omp", *sys.argv[1:]]) + "\n")
+if os.environ.get("STUB_CWD_LOG"):
+    files = sorted(os.path.relpath(os.path.join(d, f)) for d, _, fs in os.walk(".") for f in fs)
+    json.dump({"cwd": os.getcwd(), "files": files}, open(os.environ["STUB_CWD_LOG"], "w"))
 if os.environ.get("STUB_MOVE_HEAD"):
     p = os.environ["STUB_STATE"]; st = json.load(open(p)); st["heads"] = [os.environ["STUB_MOVE_HEAD"]]
     json.dump(st, open(p, "w"))
@@ -223,6 +232,125 @@ class PrGateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("--legion-checkout", r.stderr)
         self.assertFalse(any(c[0] == "omp" for c in self.calls()))
+
+    # --- HDO-derived paths ---
+
+    def bet_setup(self, files):
+        """A local BET stand-in whose PR head holds PEE paths, served as PR_GATE_GIT_URL."""
+        d = Path(self.tmp.name)
+        src = d / "bet-src"
+        for p in ["README.md", "tasks/a.py", "experiments/2026-09-26--sami--pee-screen/items.json",
+                  "experiments/2026-09-26--sami--proof-tree-screen/tasks.json",
+                  "tasks/proof-tasks/sources/pee/pee_launch.py", "tasks/tests/replay/r1.json"]:
+            (src / p).parent.mkdir(parents=True, exist_ok=True)
+            (src / p).write_text(p)
+        g = lambda *a: subprocess.run(["git", "-C", str(src), *a], check=True, capture_output=True, text=True).stdout
+        g("init", "-q")
+        g("add", ".")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "i")
+        sha = g("rev-parse", "HEAD").strip()
+        g("update-ref", "refs/pull/1/head", sha)
+        g("config", "uploadpack.allowFilter", "true")
+        self.local = d / "hdo-paths.local"
+        self.local.write_text(f"{BET}:{d}/pee-outputs/**\n")
+        self.set_state(heads=[sha], rollup=[check("gate")], comments=[], pr_files=files)
+        self.bet_env = {"PR_GATE_GIT_URL": f"file://{src}", "PR_GATE_HDO_LOCAL": str(self.local)}
+        return sha
+
+    def run_bet(self, events, model, *extra, **env):
+        return self.pr_gate("run", "--repo", BET, "--pr", "1", "--gate", "review", "--brief", str(self.brief),
+                            "--out", str(self.out), "--model", model, *extra,
+                            STUB_EVENTS=json.dumps(events), **{**self.bet_env, **env})
+
+    def test_pr_touching_pee_path_refuses_openai_and_allows_anthropic(self):
+        files = [f"src/f{i}.py" for i in range(150)] + ["experiments/2026-09-26--sami--pee-screen/local/x/control-key.json"]
+        self.bet_setup(files)
+        r = self.run_bet([end("VERDICT: APPROVE\nok", provider="openai", model="gpt-6-astra")], "openai/gpt-6-astra:xhigh")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertIn("experiments/2026-09-26--sami--pee-screen/local/x/control-key.json", r.stderr)
+        self.assertIn("pr-gate-hdo-paths", r.stderr)
+        self.assertFalse(any(c[0] == "omp" for c in self.calls()))
+        self.assertEqual(self.st()["comments"], [])
+        r = self.run_bet([end("VERDICT: APPROVE\nok")], "anthropic/claude-opus-5-5:xhigh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        omp = next(c for c in self.calls() if c[0] == "omp")
+        self.assertNotIn("--tools", omp)
+
+    def test_truncated_file_list_refuses_openai(self):
+        self.bet_setup(["src/a.py"])
+        st = self.st()
+        st["changed_files"] = 3001
+        self.set_state(**st)
+        r = self.run_bet([], "openai/gpt-6-astra:xhigh")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("read 1 of", r.stderr)
+        self.assertFalse(any(c[0] == "omp" for c in self.calls()))
+
+    def test_missing_local_list_refuses_openai_on_bet(self):
+        self.bet_setup(["src/a.py"])
+        r = self.run_bet([], "openai/gpt-6-astra:xhigh", PR_GATE_HDO_LOCAL=str(Path(self.tmp.name) / "nope"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is missing", r.stderr)
+        self.assertFalse(any(c[0] == "omp" for c in self.calls()))
+
+    def test_pr_not_touching_pee_runs_openai_in_checkout_without_pee_dirs(self):
+        sha = self.bet_setup(["tasks/a.py"])
+        seen = Path(self.tmp.name) / "cwd.json"
+        r = self.run_bet([end("VERDICT: APPROVE\nok", provider="openai", model="gpt-6-astra")],
+                         "openai/gpt-6-astra:xhigh", STUB_CWD_LOG=str(seen))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(seen.read_text())
+        checkout = self.out / "checkout"
+        self.assertEqual(Path(got["cwd"]).resolve(), checkout.resolve())
+        self.assertIn("tasks/a.py", got["files"])
+        self.assertIn("experiments/2026-09-26--sami--proof-tree-screen/tasks.json", got["files"])
+        self.assertFalse(any("pee-screen" in f or "sources/pee" in f or "tests/replay" in f or ".git" in f
+                             for f in got["files"]), got["files"])
+        omp = next(c for c in self.calls() if c[0] == "omp")
+        self.assertEqual(omp[omp.index("--cwd") + 1], str(checkout))
+        self.assertNotIn("task", omp[omp.index("--tools") + 1].split(","))
+        self.assertIn(sha, omp[-1].splitlines()[0])
+        self.assertEqual(len(self.st()["comments"]), 1)
+
+    def test_caller_cwd_holding_pee_path_refused(self):
+        self.bet_setup(["tasks/a.py"])
+        d = Path(self.tmp.name)
+        held = d / "lane" / "tasks/proof-tasks/sources/pee"
+        held.mkdir(parents=True)
+        (held / "x.py").write_text("x")
+        under_local = d / "pee-outputs" / "run1"
+        under_local.mkdir(parents=True)
+        hist = d / "hist"
+        subprocess.run(["git", "clone", "-q", str(d / "bet-src"), str(hist)], check=True)
+        subprocess.run(["git", "-C", str(hist), "rm", "-rq", "experiments", "tasks/proof-tasks", "tasks/tests"], check=True)
+        subprocess.run(["git", "-C", str(hist), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                        "commit", "-qm", "drop"], check=True)
+        for cwd, needle in ((d / "lane", "tasks/proof-tasks/sources/pee"), (under_local, "pee-outputs"),
+                            (hist, "in its git history")):
+            r = self.run_bet([], "openai/gpt-6-astra:xhigh", "--cwd", str(cwd))
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn("refusing openai/gpt-6-astra:xhigh in --cwd", r.stderr)
+            self.assertIn(needle, r.stderr)
+        self.assertFalse(any(c[0] == "omp" for c in self.calls()))
+
+    def test_events_read_outside_checkout_blocks_the_post(self):
+        self.bet_setup(["tasks/a.py"])
+        outside = Path(self.tmp.name) / "pee-outputs" / "t.jsonl"
+        for call, needle in (({"toolName": "read", "args": {"path": str(outside)}}, "HDO-derived"),
+                             ({"toolName": "bash", "args": {"command": "cat ../../bet-src/README.md"}}, "outside"),
+                             ({"toolName": "read", "args": {"path": "history://abc"}}, "history://abc"),
+                             ({"toolName": "task", "args": {}}, "task ran")):
+            r = self.run_bet([{"type": "tool_execution_start", **call},
+                              end("VERDICT: APPROVE\nok", provider="openai", model="gpt-6-astra")],
+                             "openai/gpt-6-astra:xhigh")
+            self.assertEqual(r.returncode, 6, r.stderr)
+            self.assertIn(needle, r.stderr)
+        self.assertEqual(self.st()["comments"], [])
+        ok = [{"type": "tool_execution_start", "toolName": "read", "args": {"path": "tasks/a.py:1-20"}},
+              {"type": "tool_execution_start", "toolName": "bash", "args": {"command": "ls tasks && cat README.md"}},
+              end("VERDICT: APPROVE\nok", provider="openai", model="gpt-6-astra")]
+        self.assertEqual(self.run_bet(ok, "openai/gpt-6-astra:xhigh").returncode, 0)
 
     # --- merge ---
 

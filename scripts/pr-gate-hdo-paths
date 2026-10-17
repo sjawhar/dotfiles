@@ -1,0 +1,16 @@
+# HDO-derived paths, read by pr-gate run (scripts/pr-gate-lane).
+# HDO model transcripts and their outputs never reach a non-HDO account or a non-Claude agent. A
+# non-anthropic/ model is refused on a PR that changes any path below for its repo, and otherwise
+# runs in a checkout of the PR head with these paths left out.
+# Sami rules on what belongs here; the BET task-pipeline lane (PIPE) names BET's paths.
+# One <owner>/<repo>:<glob> per line, repo-relative: `**` crosses directories, `*` does not, and
+# `dir/**` covers dir itself. A machine's absolute paths (lane checkouts, run outputs) go in its
+# untracked ~/.config/pr-gate/hdo-paths.local in the same form; a non-Claude gate on a repo listed
+# here refuses to run without that file.
+
+# PEE launch records, local results, .pivot locks, items.json, and its gitignored pivot outputs and packages
+theorem-labs/binary-equivalence-taiga:experiments/2026-09-26--sami--pee-screen/**
+# PEE capture source
+theorem-labs/binary-equivalence-taiga:tasks/proof-tasks/sources/pee/**
+# pee16f-pfinish-hdo replays
+theorem-labs/binary-equivalence-taiga:tasks/tests/replay/**
