@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""omp-session-render: read an omp session JSONL file as a human or reader agent.
+
+Reads an omp session JSONL file. Entry numbers are 1-based line numbers of the file.
+
+  render_session.py index <session.jsonl>            friction candidates: user turns, tool errors,
+                                                      error streaks, compactions, long tool loops
+  render_session.py show  <session.jsonl> START END  compact rendering of lines START..END
+  render_session.py grep  <session.jsonl> REGEX      line numbers whose text matches REGEX
+  render_session.py stats <session.jsonl>            counts and time span
+
+Shaken tool output appears in the file as "[shaken ... recover: artifact://N ...]". The original
+text is the file N.shake.log in the session's artifact directory (the session path without
+".jsonl"); `show` prints that path next to the placeholder.
+"""
+import json
+import re
+import sys
+from pathlib import Path
+SHAKE = re.compile(r"\[shaken ~\d+ tokens — recover: artifact://(\d+) \(region (\d+)\)\]")
+_SHAKE_CACHE = {}
+
+
+def shake_regions(path, art):
+    key = (str(path), art)
+    if key not in _SHAKE_CACHE:
+        regions, cur, buf = {}, None, []
+        f = artifact_dir(path) / f"{art}.shake.log"
+        if f.exists():
+            for line in f.read_text(errors="replace").splitlines():
+                m = re.match(r"### region (\d+) \(", line)
+                if m:
+                    if cur is not None:
+                        regions[cur] = "\n".join(buf).strip()
+                    cur, buf = m.group(1), []
+                else:
+                    buf.append(line)
+            if cur is not None:
+                regions[cur] = "\n".join(buf).strip()
+        _SHAKE_CACHE[key] = regions
+    return _SHAKE_CACHE[key]
+
+
+def unshake(path, s):
+    return SHAKE.sub(lambda m: shake_regions(path, m.group(1)).get(m.group(2), m.group(0)), s)
+
+
+def entries(path):
+    with open(path, "rb") as fh:
+        for n, raw in enumerate(fh, 1):
+            try:
+                e = json.loads(raw)
+            except ValueError:
+                continue
+            if b"[shaken ~" in raw and e.get("type") == "message":
+                for b in blocks(e["message"]):
+                    if isinstance(b.get("text"), str) and "[shaken ~" in b["text"]:
+                        b["text"] = unshake(path, b["text"])
+            yield n, e
+
+
+def blocks(msg):
+    content = msg.get("content")
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content or [] if isinstance(b, dict)]
+
+
+def text_of(entry):
+    t = entry.get("type")
+    if t == "message":
+        parts = []
+        for b in blocks(entry["message"]):
+            parts.append(b.get("text") or b.get("thinking") or json.dumps(b.get("arguments", ""))[:2000])
+        return "\n".join(p for p in parts if p)
+    if t == "compaction":
+        return entry.get("summary") or ""
+    if t == "custom_message":
+        c = entry.get("content")
+        return c if isinstance(c, str) else json.dumps(c)[:2000]
+    return ""
+
+
+def clip(s, n):
+    s = s if isinstance(s, str) else json.dumps(s)
+    return s if len(s) <= n else s[:n] + f" …[+{len(s) - n} chars]"
+
+
+def artifact_dir(path):
+    return Path(str(path)[: -len(".jsonl")])
+
+
+def render(path, n, e):
+    t = e.get("type")
+    ts = (e.get("timestamp") or "")[11:19]
+    if t == "message":
+        m = e["message"]
+        role = m.get("role")
+        out = []
+        for b in blocks(m):
+            bt = b.get("type")
+            if bt == "thinking":
+                out.append(f"  [think] {clip(b.get('thinking', ''), 1500)}")
+            elif bt == "text":
+                cap = 4000 if role == "user" else 3000
+                out.append(f"  [{role}] {clip(b.get('text', ''), cap)}")
+            elif bt == "toolCall":
+                out.append(f"  [call {b.get('name')}] {clip(b.get('arguments', ''), 700)}")
+            else:
+                out.append(f"  [{bt}] {clip(b, 300)}")
+        head = f"#{n} {ts} {role}"
+        if role == "toolResult":
+            err = m.get("isError")
+            head += f" {m.get('toolName')}{' ERROR' if err else ''}"
+            body = "\n".join(out)
+            body = clip(body, 2500 if err else 1000)
+            return head + "\n" + body
+        return head + "\n" + "\n".join(out)
+    if t == "compaction":
+        return f"#{n} {ts} COMPACTION tokensBefore={e.get('tokensBefore')}\n  {clip(e.get('summary', ''), 3000)}"
+    if t == "custom_message":
+        return f"#{n} {ts} custom_message {e.get('customType')}: {clip(text_of(e), 300)}"
+    return None
+
+
+def cmd_index(path):
+    streak = []
+    last_user = 0
+    calls_since_user = 0
+    for n, e in entries(path):
+        t = e.get("type")
+        ts = (e.get("timestamp") or "")[:19]
+        if t == "compaction":
+            print(f"#{n} {ts} COMPACTION tokensBefore={e.get('tokensBefore')}")
+            continue
+        if t != "message":
+            continue
+        m = e["message"]
+        role = m.get("role")
+        if role == "user":
+            txt = text_of(e).replace("\n", " ")
+            print(f"#{n} {ts} USER (after {calls_since_user} tool calls): {clip(txt, 300)}")
+            last_user = n
+            calls_since_user = 0
+        elif role == "toolResult":
+            calls_since_user += 1
+            if m.get("isError"):
+                streak.append(n)
+                print(f"#{n} {ts} ERROR {m.get('toolName')}: {clip(text_of(e).replace(chr(10), ' '), 200)}")
+            else:
+                if len(streak) >= 3:
+                    print(f"#{streak[0]}-#{streak[-1]} ERROR STREAK of {len(streak)}")
+                streak = []
+            if calls_since_user and calls_since_user % 150 == 0:
+                print(f"#{n} {ts} LONG LOOP: {calls_since_user} tool calls since user turn #{last_user}")
+
+
+def cmd_show(path, start, end):
+    for n, e in entries(path):
+        if n < start:
+            continue
+        if n > end:
+            break
+        r = render(path, n, e)
+        if r:
+            print(r)
+
+
+def cmd_grep(path, pattern):
+    rx = re.compile(pattern, re.I)
+    for n, e in entries(path):
+        txt = text_of(e)
+        mt = rx.search(txt)
+        if mt:
+            lo = max(0, mt.start() - 80)
+            print(f"#{n} {e.get('type')}/{(e.get('message') or {}).get('role', '')}: {txt[lo:mt.end() + 80].replace(chr(10), ' ')}")
+
+
+def cmd_stats(path):
+    roles = {}
+    first = last = None
+    comp = 0
+    for n, e in entries(path):
+        ts = e.get("timestamp")
+        if ts:
+            first = first or ts
+            last = ts
+        if e.get("type") == "compaction":
+            comp += 1
+        if e.get("type") == "message":
+            r = e["message"].get("role")
+            roles[r] = roles.get(r, 0) + 1
+    print(f"lines={n} span={first}..{last} compactions={comp} roles={roles}")
+    sub = artifact_dir(path)
+    if sub.is_dir():
+        subs = sorted(p.name for p in sub.glob("*.jsonl"))
+        print(f"subagent transcripts ({len(subs)}): {', '.join(subs[:40])}{' …' if len(subs) > 40 else ''}")
+
+
+if __name__ == "__main__":
+    cmd, path = sys.argv[1], sys.argv[2]
+    if cmd == "index":
+        cmd_index(path)
+    elif cmd == "show":
+        cmd_show(path, int(sys.argv[3]), int(sys.argv[4]))
+    elif cmd == "grep":
+        cmd_grep(path, sys.argv[3])
+    elif cmd == "stats":
+        cmd_stats(path)
+    else:
+        sys.exit(__doc__)
