@@ -56,6 +56,8 @@ elif args[:2] == ["pr", "view"]:
         print(json.dumps({"statusCheckRollup": st["rollup"], "headRefOid": st["heads"][0], "state": st.get("pr_state", "OPEN")}))
     else:
         print(json.dumps({"state": "MERGED" if st.get("merged") else "OPEN", "mergeCommit": {"oid": "c" * 40} if st.get("merged") else None}))
+elif args[:2] == ["pr", "diff"]:
+    print("diff --git a/tasks/a.py b/tasks/a.py")
 elif args[:2] == ["pr", "merge"]:
     st["merged"] = True; st["merge_env"] = os.environ.get("PR_GATE_MERGE"); save()
 else:
@@ -66,6 +68,12 @@ else:
 OMP_STUB = r'''#!/usr/bin/env python3
 import json, os, sys
 open(os.environ["STUB_LOG"], "a").write(json.dumps(["omp", *sys.argv[1:]]) + "\n")
+# Like this omp build, which disables find and ast_grep: an unavailable --tools name fails at start.
+if "--tools" in sys.argv:
+    off = set(os.environ.get("STUB_UNAVAILABLE_TOOLS", "find,ast_grep").split(","))
+    bad = [t for t in sys.argv[sys.argv.index("--tools") + 1].split(",") if t in off]
+    if bad:
+        sys.exit(f"Error: Built-in tools unavailable in this session: {', '.join(bad)}.\nRun `omp --help` for available flags.")
 if os.environ.get("STUB_CWD_LOG"):
     files = sorted(os.path.relpath(os.path.join(d, f)) for d, _, fs in os.walk(".") for f in fs)
     json.dump({"cwd": os.getcwd(), "files": files}, open(os.environ["STUB_CWD_LOG"], "w"))
@@ -310,8 +318,20 @@ class PrGateTest(unittest.TestCase):
         omp = next(c for c in self.calls() if c[0] == "omp")
         self.assertEqual(omp[omp.index("--cwd") + 1], str(checkout))
         self.assertNotIn("task", omp[omp.index("--tools") + 1].split(","))
-        self.assertIn(sha, omp[-1].splitlines()[0])
+        self.assertIn(sha, omp[-1])
+        self.assertIn("This run is isolated", omp[-1].splitlines()[0])
+        self.assertIn("diff --git", (self.out / "tmp" / "pr-1.diff").read_text())
         self.assertEqual(len(self.st()["comments"]), 1)
+
+    def test_omp_start_failure_on_unknown_tool_exits_7_naming_it(self):
+        self.bet_setup(["tasks/a.py"])
+        r = self.run_bet([end("VERDICT: APPROVE\nok", provider="openai", model="gpt-6-astra")],
+                         "openai/gpt-6-astra:xhigh", STUB_UNAVAILABLE_TOOLS="grep")
+        self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertIn("omp failed to start", r.stderr)
+        self.assertIn("Built-in tools unavailable in this session: grep", r.stderr)
+        self.assertNotIn("did not stay on", r.stderr)
+        self.assertEqual(self.st()["comments"], [])
 
     def test_caller_cwd_holding_pee_path_refused(self):
         self.bet_setup(["tasks/a.py"])
@@ -340,6 +360,9 @@ class PrGateTest(unittest.TestCase):
         for call, needle in (({"toolName": "read", "args": {"path": str(outside)}}, "HDO-derived"),
                              ({"toolName": "bash", "args": {"command": "cat ../../bet-src/README.md"}}, "outside"),
                              ({"toolName": "read", "args": {"path": "history://abc"}}, "history://abc"),
+                             ({"toolName": "read", "args": {"path": "xd://codegraph"}}, "xd://codegraph"),
+                             ({"toolName": "bash", "args": {"command": "dispatch read BET-40"}}, "ran dispatch"),
+                             ({"toolName": "bash", "args": {"command": "ls && gh pr view 911"}}, "ran gh"),
                              ({"toolName": "task", "args": {}}, "task ran")):
             r = self.run_bet([{"type": "tool_execution_start", **call},
                               end("VERDICT: APPROVE\nok", provider="openai", model="gpt-6-astra")],

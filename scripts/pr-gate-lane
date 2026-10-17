@@ -9,7 +9,8 @@ pr-gate merge --repo O/R --pr N --require G[,G...] [--allow-no-checks] [--approv
 
 run exits: 0 posted; 1 usage/refusal/post failed; 2 provider error or refusal; 3 provider or
 model fallback; 4 no VERDICT line; 5 head moved during the run; 6 a non-Claude run touched a path
-outside its HDO-free checkout. Nothing is posted on 1-4 and 6; on 5 the verdict is posted at the
+outside its HDO-free checkout; 7 omp exited before any assistant message (a start failure, such as
+an unknown --tools name). Nothing is posted on 1-4, 6 and 7; on 5 the verdict is posted at the
 reviewed sha, marked not valid for merge. --since SHA makes it a delta review.
 HDO-derived paths (pr-gate-hdo-paths beside this script, plus the machine's local list) keep a
 non-anthropic model off any PR that touches them, and off the paths themselves otherwise.
@@ -40,7 +41,7 @@ HDO_PATHS = Path(__file__).resolve().with_name("pr-gate-hdo-paths")
 HDO_LOCAL = Path("~/.config/pr-gate/hdo-paths.local")
 # Tools a non-Claude run gets on a repo with HDO paths: each one's file reads show in events.jsonl.
 # task is left out because a subagent's reads never reach the parent's events.
-ISOLATED_TOOLS = ("read", "bash", "grep", "glob", "find", "ast_grep")
+ISOLATED_TOOLS = ("read", "bash", "grep", "glob")
 SYSTEM_PREFIXES = ("/dev/", "/usr/", "/bin/")
 
 
@@ -267,6 +268,9 @@ SELECTOR = re.compile(r":(?:raw|img|conflicts|[-+\d,]+)(?::raw)?$")
 # Internal URIs a run may read: skills, rules and harness docs, and the web. history://, agent://,
 # artifact://, local:// and ssh:// can reach other sessions' transcripts or other machines.
 ALLOWED_SCHEMES = ("skill", "rule", "omp", "http", "https")
+# Commands that reach GitHub, Dispatch, Envoy or other sessions, where HDO material may live.
+NETWORKED = re.compile(r"(?:^|[;&|(`]|\$\()\s*(?:\S+=\S*\s+)*(?:\S*/)?"
+                       r"(dispatch|gh|envoy|knives|curl|wget|ssh|scp|rsync|omp|git)\b")
 
 
 def outside(path: str, base: Path, allowed: list[Path]) -> bool:
@@ -315,6 +319,9 @@ def stray_access(events: Path, checkout: Path, tmp: Path, rel: list[str], absolu
         command = args.get("command") if isinstance(args.get("command"), str) else ""
         if HOME_TOKEN.search(command):
             return f"{name} reached the home directory: {command[:200]!r}"
+        net = NETWORKED.search(command)
+        if net:
+            return f"{name} ran {net.group(1)}, which reaches outside {checkout}: {command[:200]!r}"
         paths += PATH_TOKEN.findall(command) + UP_TOKEN.findall(command)
         for pre in prefixes:
             if any(pre in p for p in paths) or pre in command:
@@ -375,6 +382,15 @@ def cmd_run(a: argparse.Namespace) -> None:
             cwd = out / "checkout"
             scratch_checkout(a.repo, a.pr, start, rel, cwd)
             print(f"HDO-free checkout of {start} in {cwd}", flush=True)
+        diff = out / "tmp" / f"pr-{a.pr}.diff"
+        diff.write_text(gh("pr", "diff", str(a.pr), "-R", a.repo))
+        prompt = (
+            f"This run is isolated. Your working directory {cwd} is a checkout of the head with no git history, "
+            f"and the PR's diff is {diff}. Use only the read, bash, grep and glob tools, on paths inside those two "
+            f"places ({cwd} and {out / 'tmp'}). Read no internal URI other than skill://, and run no git, gh, "
+            "dispatch, envoy, knives, curl, ssh or other command that reaches beyond them. Any tool call outside "
+            "these limits voids the gate and nothing is posted.\n\n" + prompt
+        )
         argv += ["--cwd", str(cwd), "--tools", ",".join(ISOLATED_TOOLS)]
     with events.open("w") as ev, (out / "stderr.log").open("w") as err:
         rc = subprocess.run(
@@ -387,6 +403,10 @@ def cmd_run(a: argparse.Namespace) -> None:
         {"omp_rc": rc, "providers": sorted(set(s["ends"])), "error": s["error"],
          "cost_usd": round(s["cost"], 4), "head": start, "gate": a.gate, "model": a.model}, indent=2) + "\n")
     print(f"omp exit {rc}; cost ${s['cost']:.2f}; runs on {sorted(set(s['ends']))}", flush=True)
+    if not s["ends"] and not s["error"]:
+        errs = [l.strip() for l in (out / "stderr.log").read_text().splitlines() if l.strip()]
+        first = next((l for l in errs if l.startswith("Error")), errs[0] if errs else "no stderr")
+        die(f"omp failed to start (exit {rc}, no assistant message): {first}", 7)
     if rel:
         stray = stray_access(events, Path(cwd), out / "tmp", rel, absolute)
         if stray:
