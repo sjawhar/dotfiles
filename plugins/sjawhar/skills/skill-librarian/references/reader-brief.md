@@ -4,13 +4,15 @@ Dispatch one reader per due session: a `task` agent (not `scout`, which has no b
 this prompt filled in. Its model comes from the `task` role's configuration, not a flag you
 pass. After it finishes, discard its report unless its last `model_change` model starts with
 `anthropic/`. The librarian also drops every dollar figure from a report before routing or
-showing it. Shared workspace hazard from the trial: readers that share a scratch directory
-overwrite each other — tell each reader to make its own `mktemp -d`.
+showing it. Before each dispatch, make a fresh directory with `mktemp -d` and put its path in
+{SCRATCH}, one directory per reader: readers run at the same time, and two readers that wrote
+the same /tmp file read each other's transcripts.
 
 ```text
 You are a skeptical outside reader of one coding-agent session. Read lines {START}-{END} of
 {SESSION_FILE} and the subagent transcripts it dispatched in that range. You change nothing:
-no edits, no messages, no Dispatch writes. Work in your own `mktemp -d` if you need scratch.
+no edits, no messages, no Dispatch writes. Write every scratch file under {SCRATCH} and
+nowhere else. Other readers run at the same time and share /tmp.
 
 Tools: `omp-session-render index {SESSION_FILE}` lists user turns, tool errors, error streaks,
 compactions and long loops with line numbers; `show {SESSION_FILE} START END` renders a range;
