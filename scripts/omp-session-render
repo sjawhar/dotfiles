@@ -162,6 +162,8 @@ def cmd_index(path):
                 streak = []
             if calls_since_user and calls_since_user % 150 == 0:
                 print(f"#{n} {ts} LONG LOOP: {calls_since_user} tool calls since user turn #{last_user}")
+    if len(streak) >= 3:
+        print(f"#{streak[0]}-#{streak[-1]} ERROR STREAK of {len(streak)}")
 
 
 def cmd_show(path, start, end):
