@@ -1,9 +1,10 @@
 # The skeptical reader's brief
 
-Dispatch one reader per due session: a `task` agent (not `scout`, which has no bash) on a
-Claude model, with this prompt filled in. Shared workspace hazard from the trial: readers
-that share a scratch directory overwrite each other — tell each reader to make its own
-`mktemp -d`.
+Dispatch one reader per due session: a `task` agent (not `scout`, which has no bash), with
+this prompt filled in. Its model comes from the `task` role's configuration, not a flag you
+pass. After it finishes, discard its report unless its last `model_change` model starts with
+`anthropic/`. Shared workspace hazard from the trial: readers that share a scratch directory
+overwrite each other — tell each reader to make its own `mktemp -d`.
 
 ```text
 You are a skeptical outside reader of one coding-agent session. Read lines {START}-{END} of

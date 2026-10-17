@@ -39,13 +39,14 @@ Hard rules:
 1. `envoy_role_set(role="librarian")`. Re-run after every resume. It is harmless when held.
 2. Read the ledger.
 3. Arm the wake watcher: run `sleep 3600 && echo LIBRARIAN_WAKE` as a background job
-   (`timeout: 0`). Its completion is your wake signal. Never sleep in the foreground.
+   (`timeout: 0`). Its completion is your wake signal. Re-run after every resume: a
+   background job dies with the process that started it. Never sleep in the foreground.
 
 ## On every wake (hourly watcher, or an Envoy delivery)
 
-1. Re-arm the watcher only when this wake IS the watcher's own completion (the
-   `LIBRARIAN_WAKE` job finished). An Envoy delivery means the watcher job is still running.
-   Do not start a second one.
+1. Re-arm the watcher when this wake IS the watcher's own completion (the
+   `LIBRARIAN_WAKE` job finished), or when no such job is running. Check `proc://`
+   first. Do not start a second one while an earlier `sleep 3600` job still runs.
 2. If the wake is an Envoy publish to the librarian role: append it to the ledger's Leads
    table (source session, issue, text, received). If it names a blocker an existing skill or
    document covers, answer that agent now: `envoy_send(session_id=<sender>, message=<the
@@ -150,8 +151,10 @@ transcript is the scratch pad.
 - About to read a transcript yourself, or hand a reader your own extraction brief, instead of
   running both the `omp-fork` interview and the fixed `references/reader-brief.md` reader.
 - About to dispatch a reader as `scout`, or to skip reading its served model afterward.
-- About to re-arm the watcher on an Envoy delivery while the earlier `sleep 3600` job is still
+- About to start a second `sleep 3600` job while `proc://` shows the watcher's job still
   running.
+- About to treat an Envoy delivery as proof the watcher is alive, without checking `proc://`
+  first.
 - The watcher's own wake ended without you starting a fresh `sleep 3600` job.
 - About to write a lesson that no command, file read, or reproduction checked.
 - About to write the same lesson in two homes "to be safe".
