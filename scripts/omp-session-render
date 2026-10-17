@@ -3,15 +3,16 @@
 
 Reads an omp session JSONL file. Entry numbers are 1-based line numbers of the file.
 
-  render_session.py index <session.jsonl>            friction candidates: user turns, tool errors,
-                                                      error streaks, compactions, long tool loops
-  render_session.py show  <session.jsonl> START END  compact rendering of lines START..END
-  render_session.py grep  <session.jsonl> REGEX      line numbers whose text matches REGEX
-  render_session.py stats <session.jsonl>            counts and time span
+  omp-session-render index <session.jsonl>            friction candidates: user turns, tool errors,
+                                                       error streaks, compactions, long tool loops
+  omp-session-render show  <session.jsonl> START END  compact rendering of lines START..END
+  omp-session-render grep  <session.jsonl> REGEX      line numbers whose text matches REGEX
+  omp-session-render stats <session.jsonl>            counts and time span
 
-Shaken tool output appears in the file as "[shaken ... recover: artifact://N ...]". The original
-text is the file N.shake.log in the session's artifact directory (the session path without
-".jsonl"); `show` prints that path next to the placeholder.
+Shaken tool output appears in the file as "[shaken ... recover: artifact://N ...]". `show` and
+`grep` substitute the recovered text from N.shake.log in the session's artifact directory (the
+session path without ".jsonl") inline in place of the placeholder; a placeholder whose region is
+missing from that file is left as-is.
 """
 import json
 import re
@@ -52,10 +53,16 @@ def entries(path):
                 e = json.loads(raw)
             except ValueError:
                 continue
-            if b"[shaken ~" in raw and e.get("type") == "message":
-                for b in blocks(e["message"]):
-                    if isinstance(b.get("text"), str) and "[shaken ~" in b["text"]:
-                        b["text"] = unshake(path, b["text"])
+            if b"[shaken ~" in raw:
+                t = e.get("type")
+                if t == "message":
+                    for b in blocks(e["message"]):
+                        if isinstance(b.get("text"), str) and "[shaken ~" in b["text"]:
+                            b["text"] = unshake(path, b["text"])
+                elif t == "custom_message":
+                    c = e.get("content")
+                    if isinstance(c, str) and "[shaken ~" in c:
+                        e["content"] = unshake(path, c)
             yield n, e
 
 
@@ -119,7 +126,9 @@ def render(path, n, e):
     if t == "compaction":
         return f"#{n} {ts} COMPACTION tokensBefore={e.get('tokensBefore')}\n  {clip(e.get('summary', ''), 3000)}"
     if t == "custom_message":
-        return f"#{n} {ts} custom_message {e.get('customType')}: {clip(text_of(e), 300)}"
+        ct = e.get("customType")
+        cap = 2500 if ct == "async-result" else 300
+        return f"#{n} {ts} custom_message {ct}: {clip(text_of(e), cap)}"
     return None
 
 
@@ -198,14 +207,28 @@ def cmd_stats(path):
 
 
 if __name__ == "__main__":
-    cmd, path = sys.argv[1], sys.argv[2]
-    if cmd == "index":
-        cmd_index(path)
-    elif cmd == "show":
-        cmd_show(path, int(sys.argv[3]), int(sys.argv[4]))
-    elif cmd == "grep":
-        cmd_grep(path, sys.argv[3])
-    elif cmd == "stats":
-        cmd_stats(path)
-    else:
-        sys.exit(__doc__)
+    def usage():
+        sys.stderr.write(__doc__)
+        sys.exit(2)
+
+    args = sys.argv[1:]
+    if len(args) < 2:
+        usage()
+    cmd, path = args[0], args[1]
+    try:
+        if cmd == "index":
+            cmd_index(path)
+        elif cmd == "show":
+            if len(args) < 4:
+                usage()
+            cmd_show(path, int(args[2]), int(args[3]))
+        elif cmd == "grep":
+            if len(args) < 3:
+                usage()
+            cmd_grep(path, args[2])
+        elif cmd == "stats":
+            cmd_stats(path)
+        else:
+            usage()
+    except ValueError:
+        usage()
