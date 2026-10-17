@@ -1,0 +1,13 @@
+#!/bin/sh
+# NetworkManager dispatcher hook for trajectory-route@<user>.service, installed
+# as /etc/NetworkManager/dispatcher.d/90-trajectory-route@<user>; the unit
+# instance comes from the file name. The tunnel runs only while NetworkManager
+# reports full internet connectivity, so on a captive-portal network it stays
+# off until the portal is signed in, and it never retries against a network
+# with no way out.
+[ "$2" = connectivity-change ] || exit 0
+unit="trajectory-route@${0##*@}.service"
+if [ "$CONNECTIVITY_STATE" = FULL ]; then
+    exec systemctl start --no-block "$unit"
+fi
+exec systemctl stop --no-block "$unit"

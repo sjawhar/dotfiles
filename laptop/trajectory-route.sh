@@ -17,4 +17,14 @@ if ! diff -q "${DOTFILES_DIR}/laptop/${UNIT}" "/etc/systemd/system/${UNIT}" &>/d
     sudo systemctl daemon-reload
     sudo systemctl try-restart "trajectory-route@${USER}.service"
 fi
-sudo systemctl enable --now "trajectory-route@${USER}.service"
+# NetworkManager starts and stops the tunnel on connectivity changes; nothing
+# starts it at boot.
+sudo systemctl disable "trajectory-route@${USER}.service" 2>/dev/null || true
+HOOK="/etc/NetworkManager/dispatcher.d/90-trajectory-route@${USER}"
+if ! diff -q "${DOTFILES_DIR}/laptop/trajectory-route.dispatcher" "$HOOK" &>/dev/null; then
+    echo "Installing ${HOOK}..."
+    sudo install -m 0755 -o root -g root "${DOTFILES_DIR}/laptop/trajectory-route.dispatcher" "$HOOK"
+fi
+if [ "$(nmcli networking connectivity)" = full ]; then
+    sudo systemctl start "trajectory-route@${USER}.service"
+fi
