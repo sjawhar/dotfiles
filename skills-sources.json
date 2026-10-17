@@ -43,6 +43,22 @@
     },
     {
       "root": "vendor/asd-ste100"
+    },
+    {
+      "root": "vendor/pulumi-agent-skills/pulumi"
+    },
+    {
+      "root": "vendor/pulumi-agent-skills/migration"
+    },
+    {
+      "root": "vendor/pulumi-agent-skills/package-maintenance"
+    },
+    {
+      "root": "vendor/pulumi-agent-skills/delegation"
+    },
+    {
+      "root": "gh-cli-skill",
+      "ompSkillsDir": "~/.agents/skills"
     }
   ]
 }

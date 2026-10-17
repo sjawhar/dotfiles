@@ -127,6 +127,17 @@ ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
 # The repo is the skill itself (SKILL.md at its root), so it is cloned one level
 # down to give its pool the <root>/skills/<name>/SKILL.md layout. Pinned. Bump: re-pin here.
 ensure_vendor https://github.com/danyuchn/asd-ste100-skill.git asd-ste100/skills/asd-ste100 32511c6992ecb5f1971e46a2943f2e6adceedafe
+# Pulumi's own agent skills (vendor skill for tool facts, dispatch://INFRA-26).
+ensure_vendor https://github.com/pulumi/agent-skills.git pulumi-agent-skills 2517e28e4bc029424e9c9ee48016394296be0f6a
+
+# GitHub CLI's own "gh" skill (reference for driving `gh`, dispatch://INFRA-26).
+# Installed to user scope (~/.agents/skills), which OMP does not read natively,
+# so skills-sources.json points an ompSkillsDir entry at it. Non-fatal when
+# `gh` is absent (agent boxes without it) or `gh skill` is unavailable.
+if command -v gh &>/dev/null; then
+    gh skill list 2>/dev/null | grep -q '^gh\b' || \
+        gh skill install cli/cli gh --agent universal --scope user --pin fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd || true
+fi
 
 # agent-c skills required by instructions that apply outside agent-c, linked
 # per-skill into the farm skills-sources.json names (pointing at agent-c's whole
