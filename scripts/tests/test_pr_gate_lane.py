@@ -125,7 +125,9 @@ class PrGateTest(unittest.TestCase):
         self.assertIn("timeout: 0", r.stdout.splitlines()[0])
         [c] = self.st()["comments"]
         self.assertEqual(c["body"].splitlines()[0], f"**Gate: review at {A}** — APPROVE")
-        self.assertIn("$0.75", c["body"])
+        self.assertNotRegex(c["body"], r"\$\s*\d")
+        self.assertIn("$0.75", r.stdout)
+        self.assertEqual(json.loads((self.out / "summary.json").read_text())["cost_usd"], 0.75)
         self.assertIn("Looks right.", c["body"])
         self.assertIn(f"<!-- pr-gate gate=review head={A} verdict=APPROVE", c["body"])
         omp = next(c for c in self.calls() if c[0] == "omp")
@@ -159,11 +161,17 @@ class PrGateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 4)
         self.assertEqual(self.st()["comments"], [])
 
-    def test_openai_model_refused_before_any_run(self):
-        r = self.run_gate([end("VERDICT: APPROVE")], "--model", "openai/gpt-6-astra:xhigh")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("OpenAI spend is paused", r.stderr)
-        self.assertFalse(any(c[0] == "omp" for c in self.calls()))
+    def test_openai_model_runs_and_posts_without_a_dollar_amount(self):
+        r = self.run_gate([end("VERDICT: REQUEST_CHANGES\nFix it.", provider="openai", model="gpt-6-astra", cost=1.25)],
+                          "--model", "openai/gpt-6-astra:xhigh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        omp = next(c for c in self.calls() if c[0] == "omp")
+        self.assertEqual(omp[omp.index("--model") + 1], "openai/gpt-6-astra:xhigh")
+        [c] = self.st()["comments"]
+        self.assertEqual(c["body"].splitlines()[0], f"**Gate: review at {A}** — REQUEST_CHANGES")
+        self.assertIn("`openai`", c["body"])
+        self.assertNotRegex(c["body"], r"\$\s*\d")
+        self.assertEqual(json.loads((self.out / "summary.json").read_text())["cost_usd"], 1.25)
 
     def test_legion_without_checkout_refused_before_any_run(self):
         r = self.pr_gate("run", "--repo", "sjawhar/legion", "--pr", "1", "--gate", "review", "--brief",

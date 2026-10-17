@@ -7,6 +7,7 @@ pr-gate merge --repo O/R --pr N --require G[,G...] [--allow-no-checks] [--approv
 
 run exits: 0 posted; 1 usage/refusal/post failed; 2 provider error or refusal; 3 provider or
 model fallback; 4 no VERDICT line; 5 head moved during the run. Nothing is posted unless 0.
+The run's cost goes to stdout and OUT/summary.json only, never into the PR comment.
 merge exits: 0 merged; 1 refused or failed.
 """
 
@@ -96,8 +97,6 @@ def legion_check(body: Path, checkout: str | None) -> None:
 
 
 def cmd_run(a: argparse.Namespace) -> None:
-    if a.model.startswith("openai/"):
-        die("refusing openai/ models: per-token OpenAI spend is paused")
     want_provider, want_model = split_model(a.model)
     print("pr-gate run has no deadline: run it as a background job with bash `timeout: 0`.", flush=True)
     if a.repo == LEGION_REPO and not (a.legion_checkout or os.environ.get("PR_GATE_LEGION_CHECKOUT")):
@@ -121,6 +120,9 @@ def cmd_run(a: argparse.Namespace) -> None:
             env={**os.environ, "TMPDIR": str(out / "tmp")},
         ).returncode
     s = summarize(events)
+    (out / "summary.json").write_text(json.dumps(
+        {"omp_rc": rc, "providers": sorted(set(s["ends"])), "error": s["error"],
+         "cost_usd": round(s["cost"], 4), "head": start, "gate": a.gate, "model": a.model}, indent=2) + "\n")
     print(f"omp exit {rc}; cost ${s['cost']:.2f}; runs on {sorted(set(s['ends']))}", flush=True)
     if s["error"]:
         die(f"run stopped on a provider error or refusal: {s['error']}", 2)
@@ -137,7 +139,7 @@ def cmd_run(a: argparse.Namespace) -> None:
     review = "\n".join(lines[1:]).strip()
     body = (
         f"**Gate: {a.gate} at {start}** — {verdict}\n\n"
-        f"Model: `{want_model}` · Provider: `{want_provider}` · Cost: ${s['cost']:.2f}\n\n"
+        f"Model: `{want_model}` · Provider: `{want_provider}`\n\n"
         f"{review}\n\n"
         f"<!-- pr-gate gate={a.gate} head={start} verdict={verdict} model={a.model} -->\n"
     )
