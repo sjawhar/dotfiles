@@ -3,7 +3,8 @@
 Dispatch one reader per due session: a `task` agent (not `scout`, which has no bash), with
 this prompt filled in. Its model comes from the `task` role's configuration, not a flag you
 pass. After it finishes, discard its report unless its last `model_change` model starts with
-`anthropic/`. Shared workspace hazard from the trial: readers that share a scratch directory
+`anthropic/`. The librarian also drops every dollar figure from a report before routing or
+showing it. Shared workspace hazard from the trial: readers that share a scratch directory
 overwrite each other — tell each reader to make its own `mktemp -d`.
 
 ```text
@@ -30,5 +31,6 @@ LESSON: <one sentence>
 KIND: design / taste / workflow / tool
 EVIDENCE: <verbatim quote + transcript line number>
 CHECKED: <the independent check you ran and its result, or UNVERIFIED>
+Put no dollar cost in any lesson, evidence quote or check result.
 Cap yourself at the 12 most valuable lessons plus any number of tool facts.
 ```
