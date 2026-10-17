@@ -8,8 +8,11 @@ pr-gate check --repo O/R --pr N [--head SHA] (--require G[,G...] | --require-any
 pr-gate merge --repo O/R --pr N --require G[,G...] [--allow-no-checks] [--approve-script PATH]
 
 run exits: 0 posted; 1 usage/refusal/post failed; 2 provider error or refusal; 3 provider or
-model fallback; 4 no VERDICT line; 5 head moved during the run. Nothing is posted on 1-4; on 5 the
-verdict is posted at the reviewed sha, marked not valid for merge. --since SHA makes it a delta review.
+model fallback; 4 no VERDICT line; 5 head moved during the run; 6 a non-Claude run touched a path
+outside its HDO-free checkout. Nothing is posted on 1-4 and 6; on 5 the verdict is posted at the
+reviewed sha, marked not valid for merge. --since SHA makes it a delta review.
+HDO-derived paths (pr-gate-hdo-paths beside this script, plus the machine's local list) keep a
+non-anthropic model off any PR that touches them, and off the paths themselves otherwise.
 The run's cost goes to stdout and OUT/summary.json only, never into the PR comment.
 check exits: 0 the gates and CI pass at the head; 1 refused. It merges nothing.
 merge exits: 0 merged; 1 refused or failed. Its merge step runs with PR_GATE_MERGE=1, which the
@@ -20,6 +23,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +36,12 @@ MARKER = re.compile(
 VERDICT = re.compile(r"^\s*\**\s*VERDICT:\s*(APPROVE|REQUEST_CHANGES)\s*\**\s*$")
 CI_OK = {"SUCCESS", "SKIPPED", "NEUTRAL"}
 LEGION_REPO = "sjawhar/legion"
+HDO_PATHS = Path(__file__).resolve().with_name("pr-gate-hdo-paths")
+HDO_LOCAL = Path("~/.config/pr-gate/hdo-paths.local")
+# Tools a non-Claude run gets on a repo with HDO paths: each one's file reads show in events.jsonl.
+# task is left out because a subagent's reads never reach the parent's events.
+ISOLATED_TOOLS = ("read", "bash", "grep", "glob", "find", "ast_grep")
+SYSTEM_PREFIXES = ("/dev/", "/usr/", "/bin/")
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -101,9 +111,236 @@ def legion_check(body: Path, checkout: str | None) -> None:
         die(f"check-private-names.sh refused the comment body (exit {r.returncode}); nothing posted")
 
 
+
+def glob_regex(pattern: str) -> re.Pattern:
+    """`**` crosses directories, `*` and `?` do not; `dir/**` also matches `dir` itself."""
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("/**", i) and i + 3 == len(pattern):
+            out += "(?:/.*)?"
+            i += 3
+        elif pattern.startswith("**", i):
+            out += ".*"
+            i += 2
+        elif pattern[i] == "*":
+            out += "[^/]*"
+            i += 1
+        elif pattern[i] == "?":
+            out += "[^/]"
+            i += 1
+        else:
+            out += re.escape(pattern[i])
+            i += 1
+    return re.compile(out + r"\Z")
+
+
+def literal_prefix(pattern: str) -> str:
+    """The pattern up to its first glob character, without a trailing slash."""
+    return re.split(r"[*?\[]", pattern, maxsplit=1)[0].rstrip("/")
+
+
+def load_patterns(path: Path, repo: str) -> list[str]:
+    pats = []
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        scope, sep, glob = line.partition(":")
+        if not sep or not glob:
+            die(f"{path}:{n}: expected <owner>/<repo>:<glob>, got {line!r}")
+        if scope.lower() == repo.lower():
+            pats.append(glob)
+    return pats
+
+
+def hdo_patterns(repo: str) -> tuple[list[str], list[str]]:
+    """(repo-relative globs from the committed list, absolute globs from this machine's list)."""
+    rel = load_patterns(HDO_PATHS, repo)
+    bad = [p for p in rel if p.startswith(("/", "~"))]
+    if bad:
+        die(f"{HDO_PATHS} holds an absolute path ({bad[0]}); those go in the machine's local list")
+    if not rel:
+        return [], []
+    local = Path(os.environ.get("PR_GATE_HDO_LOCAL") or HDO_LOCAL).expanduser()
+    if not local.is_file():
+        die(f"refusing a non-Claude gate on {repo}: {local} is missing, so this machine's HDO-derived "
+            "paths are unknown (one <owner>/<repo>:<absolute glob> per line)")
+    absolute = [os.path.expanduser(p) for p in load_patterns(local, repo)]
+    rel_bad = [p for p in absolute if not p.startswith("/")]
+    if rel_bad:
+        die(f"{local} holds a relative path ({rel_bad[0]}); repo-relative globs go in {HDO_PATHS}")
+    return rel, absolute
+
+
+def first_match(paths, patterns: list[str]) -> tuple[str, str] | None:
+    regexes = [(p, glob_regex(p)) for p in patterns]
+    for path in paths:
+        for pat, rx in regexes:
+            if rx.match(path):
+                return path, pat
+    return None
+
+
+def pr_files(repo: str, pr: int) -> list[str]:
+    changed = int(gh("api", f"repos/{repo}/pulls/{pr}", "--jq", ".changed_files").strip())
+    pages = json.loads(gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{pr}/files?per_page=100"))
+    entries = [f for page in pages for f in page]
+    if len(entries) != changed:
+        die(f"read {len(entries)} of {repo}#{pr}'s {changed} changed files; refusing a non-Claude gate "
+            "on a list GitHub truncated")
+    return [n for f in entries for n in (f["filename"], f.get("previous_filename")) if n]
+
+
+def cwd_holding(cwd: Path, rel: list[str], absolute: list[str]) -> str | None:
+    """The first HDO-derived path a caller's --cwd holds: by location, on disk, or in any commit of a git
+    repository there, since a straying run can read a repository's objects as easily as its files."""
+    cwd = cwd.resolve()
+    for pat in absolute:
+        prefix = Path(literal_prefix(pat)).resolve()
+        if glob_regex(pat).match(str(cwd)) or prefix == cwd or cwd in prefix.parents:
+            return f"{cwd} (against {pat})"
+    top = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True)
+    roots = [Path(top.stdout.strip())] if top.returncode == 0 else []
+    regexes = [glob_regex(p) for p in rel]
+    for dirpath, dirs, files in os.walk(cwd):
+        here = Path(dirpath)
+        if ".git" in dirs or ".git" in files:
+            roots.append(here)
+        dirs[:] = [d for d in dirs if d != ".git"]
+        base = next((r for r in sorted(roots, key=lambda r: len(r.parts), reverse=True)
+                     if r == here or r in here.parents), cwd)
+        for name in dirs + files:
+            relpath = (here / name).relative_to(base).as_posix()
+            if any(rx.match(relpath) for rx in regexes):
+                return str(here / name)
+    for root in dict.fromkeys(roots):
+        r = subprocess.run(["git", "-C", str(root), "log", "--all", "-n1", "--format=%H", "--name-only", "--",
+                            *(f":(glob){p}" for p in rel)], capture_output=True, text=True)
+        lines = r.stdout.split() if r.returncode == 0 else []
+        hit = first_match(lines[1:], rel)
+        if hit:
+            return f"{root}: {hit[0]} in its git history (commit {lines[0]})"
+    return None
+
+
+def scratch_checkout(repo: str, pr: int, sha: str, rel: list[str], dest: Path) -> None:
+    """The PR head without the HDO-derived paths and without git history: their blobs are never fetched."""
+    url = os.environ.get("PR_GATE_GIT_URL", "https://github.com/{repo}.git").format(repo=repo)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    gitdir = Path(tempfile.mkdtemp(prefix="pr-gate-git-"))
+    try:
+        def git(*args: str) -> str:
+            r = subprocess.run(["git", f"--git-dir={gitdir}", f"--work-tree={dest}", *args],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                die(f"git {' '.join(args)} failed building the HDO-free checkout: {r.stderr.strip()}")
+            return r.stdout
+        git("init", "-q")
+        git("config", "core.repositoryformatversion", "1")
+        git("remote", "add", "origin", url)
+        git("config", "remote.origin.promisor", "true")
+        git("config", "remote.origin.partialclonefilter", "blob:none")
+        git("config", "extensions.partialClone", "origin")
+        git("fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", f"refs/pull/{pr}/head")
+        got = git("rev-parse", "FETCH_HEAD").strip()
+        if got != sha:
+            die(f"{repo}#{pr} head moved to {got} before its checkout; re-run")
+        git("sparse-checkout", "set", "--no-cone", "/*", *(f"!/{p}" for p in rel))
+        git("checkout", "-q", "--detach", sha)
+    finally:
+        shutil.rmtree(gitdir, ignore_errors=True)
+    left = [p for p in dest.rglob("*") if p.name == ".git"]
+    if left:
+        die(f"HDO-free checkout {dest} still holds {left[0]}")
+    hit = first_match((p.relative_to(dest).as_posix() for p in dest.rglob("*")), rel)
+    if hit:
+        die(f"HDO-free checkout {dest} still holds {hit[0]} (against {hit[1]})")
+
+
+PATH_TOKEN = re.compile(r"""(?<![\w.:/~-])(~?/[^\s'"`;|&<>(){}$,]*)""")
+UP_TOKEN = re.compile(r"""(?<![\w/.-])(\.\.(?:/[^\s'"`;|&<>(){}$,]*)?)""")
+HOME_TOKEN = re.compile(r"\$HOME\b|\$\{HOME\}|(?<![\w/.-])~(?=$|[\s/'\"])")
+SELECTOR = re.compile(r":(?:raw|img|conflicts|[-+\d,]+)(?::raw)?$")
+# Internal URIs a run may read: skills, rules and harness docs, and the web. history://, agent://,
+# artifact://, local:// and ssh:// can reach other sessions' transcripts or other machines.
+ALLOWED_SCHEMES = ("skill", "rule", "omp", "http", "https")
+
+
+def outside(path: str, base: Path, allowed: list[Path]) -> bool:
+    p = Path(os.path.expanduser(path))
+    p = (p if p.is_absolute() else base / p).resolve()
+    if str(p).startswith(SYSTEM_PREFIXES):
+        return False
+    return not any(p == a or a in p.parents for a in allowed)
+
+
+def stray_access(events: Path, checkout: Path, tmp: Path, rel: list[str], absolute: list[str]) -> str | None:
+    """The first tool call of the run that reached outside its checkout or named an HDO-derived path.
+
+    Reads the args omp logged for each tool call: path arguments, and path-like tokens of a bash
+    command. It does not follow `cd` or variables, so it is a check on a cooperating run, not a sandbox."""
+    checkout, tmp = checkout.resolve(), tmp.resolve()
+    allowed = [checkout, tmp]
+    prefixes = [x for x in (literal_prefix(p) for p in rel) if x]
+    for line in events.read_text().splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("type") == "session" and e.get("cwd") and Path(e["cwd"]).resolve() != checkout:
+            return f"session started in {e['cwd']}, not {checkout}"
+        if e.get("type") != "tool_execution_start":
+            continue
+        name, args = e.get("toolName") or "", e.get("args") or {}
+        if name not in ISOLATED_TOOLS:
+            return f"{name} ran, which is not one of {','.join(ISOLATED_TOOLS)}"
+        base = checkout
+        if isinstance(args.get("cwd"), str):
+            if outside(args["cwd"], checkout, allowed):
+                return f"{name} ran in {args['cwd']}, outside {checkout}"
+            base = (checkout / os.path.expanduser(args["cwd"])).resolve()
+        paths = []
+        for key in ("path", "paths"):
+            v = args.get(key)
+            for item in v if isinstance(v, list) else [v] if isinstance(v, str) else []:
+                for part in (s.strip() for s in item.split(";")):
+                    if "://" in part:
+                        if part.split("://", 1)[0] not in ALLOWED_SCHEMES:
+                            return f"{name} read {part}, outside {checkout}"
+                    elif part:
+                        paths.append(SELECTOR.sub("", part))
+        command = args.get("command") if isinstance(args.get("command"), str) else ""
+        if HOME_TOKEN.search(command):
+            return f"{name} reached the home directory: {command[:200]!r}"
+        paths += PATH_TOKEN.findall(command) + UP_TOKEN.findall(command)
+        for pre in prefixes:
+            if any(pre in p for p in paths) or pre in command:
+                return f"{name} named HDO-derived {pre}"
+        for p in paths:
+            if outside(p, base, allowed):
+                full = str((base / os.path.expanduser(p)).resolve())
+                hdo = next((pat for pat in absolute if glob_regex(pat).match(full)), None)
+                return f"{name} reached {p}, outside {checkout}" + (f" and HDO-derived ({hdo})" if hdo else "")
+    return None
+
+
 def cmd_run(a: argparse.Namespace) -> None:
     if re.fullmatch(r"theorem-labs/[^/]+-hdo", a.repo, re.IGNORECASE) and not a.model.startswith("anthropic/"):
         die(f"refusing {a.model} for {a.repo}: HDO material never reaches a non-Claude agent; use an anthropic/ model")
+    rel, absolute = ([], []) if a.model.startswith("anthropic/") else hdo_patterns(a.repo)
+    if rel:
+        hit = first_match(pr_files(a.repo, a.pr), rel)
+        if hit:
+            die(f"refusing {a.model} for {a.repo}#{a.pr}: it changes HDO-derived {hit[0]} (pr-gate-hdo-paths: "
+                f"{hit[1]}), and HDO material never reaches a non-Claude agent; use an anthropic/ model")
+        if a.cwd:
+            held = cwd_holding(a.cwd, rel, absolute)
+            if held:
+                die(f"refusing {a.model} in --cwd {a.cwd}: it holds HDO-derived {held}; omit --cwd for an "
+                    "HDO-free checkout")
     want_provider, want_model = split_model(a.model)
     print("pr-gate run has no deadline: run it as a background job with bash `timeout: 0`.", flush=True)
     if a.repo == LEGION_REPO and not (a.legion_checkout or os.environ.get("PR_GATE_LEGION_CHECKOUT")):
@@ -131,10 +368,18 @@ def cmd_run(a: argparse.Namespace) -> None:
         "End your reply with a final message whose first line is exactly "
         "`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`, followed by the review.\n\n" + delta + brief
     )
+    cwd = a.cwd
+    argv = ["omp", "-p", "--mode", "json", "--model", a.model]
+    if rel:
+        if not cwd:
+            cwd = out / "checkout"
+            scratch_checkout(a.repo, a.pr, start, rel, cwd)
+            print(f"HDO-free checkout of {start} in {cwd}", flush=True)
+        argv += ["--cwd", str(cwd), "--tools", ",".join(ISOLATED_TOOLS)]
     with events.open("w") as ev, (out / "stderr.log").open("w") as err:
         rc = subprocess.run(
-            ["omp", "-p", "--mode", "json", "--model", a.model, prompt],
-            stdin=subprocess.DEVNULL, stdout=ev, stderr=err, cwd=a.cwd,
+            [*argv, prompt],
+            stdin=subprocess.DEVNULL, stdout=ev, stderr=err, cwd=cwd,
             env={**os.environ, "TMPDIR": str(out / "tmp")},
         ).returncode
     s = summarize(events)
@@ -142,6 +387,10 @@ def cmd_run(a: argparse.Namespace) -> None:
         {"omp_rc": rc, "providers": sorted(set(s["ends"])), "error": s["error"],
          "cost_usd": round(s["cost"], 4), "head": start, "gate": a.gate, "model": a.model}, indent=2) + "\n")
     print(f"omp exit {rc}; cost ${s['cost']:.2f}; runs on {sorted(set(s['ends']))}", flush=True)
+    if rel:
+        stray = stray_access(events, Path(cwd), out / "tmp", rel, absolute)
+        if stray:
+            die(f"not posting: the {a.model} run left its HDO-free checkout ({stray})", 6)
     if s["error"]:
         die(f"run stopped on a provider error or refusal: {s['error']}", 2)
     if not s["ends"] or any(p != want_provider or m != want_model for p, m in s["ends"]):
