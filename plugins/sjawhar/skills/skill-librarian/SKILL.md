@@ -22,10 +22,12 @@ Hard rules:
   served model starts with `anthropic/`.
 - Text Sami reads carries no dollar costs. Drop every dollar figure from a reader report
   before you route it or show it.
-- The ledger comes first. Before any write to a repository, memory, an Envoy reply, or
-  Dispatch, the Sessions row and the Lesson row (evidence, verdict, provisional home) MUST
-  exist in the ledger, and you MUST read the ledger back to check both. If the ledger edit
-  or the read-back fails, make no external write.
+- The ledger comes first. Before any write into a lesson's home (a repository, CLAUDE.md,
+  memory, the marketplace, a tool fix), the Sessions row and the Lesson row (evidence,
+  verdict, provisional home) MUST exist in the ledger, and you MUST read the ledger back to
+  check both. If the ledger edit or the read-back fails, make no external write. A Leads row
+  is a ledger write, not an external one. An Envoy reply for a covered blocker needs only its
+  Leads row, with `replied` and the pointer you send, written and read back first.
 - Fork only top-level sessions on this machine (`~/.omp/agent/sessions/-*/*.jsonl`). Never
   fork over ssh. Lessons from other machines arrive over Envoy.
 - Never write Theorem material into `~/.dotfiles/.claude/CLAUDE.md` (Sami: "Don't put theorem
@@ -54,9 +56,9 @@ Hard rules:
    first. Do not start a second one while an earlier `sleep 3600` job still runs.
 2. If the wake is an Envoy publish to the librarian role: append it to the ledger's Leads
    table (source session, issue, text, received). If it names a blocker an existing skill or
-   document covers, answer that agent now: `envoy_send(session_id=<sender>, message=<the
-   skill:// or file that covers it, one line on what it says>)`. Write `replied` in the lead's
-   `status` cell.
+   document covers, write `replied` and the pointer in the lead's `status` cell, read the
+   row back, then answer that agent: `envoy_send(session_id=<sender>, message=<the
+   skill:// or file that covers it, one line on what it says>)`.
 3. Interview round:
    a. List candidates: every `*.jsonl` file directly inside a directory of
       `~/.omp/agent/sessions/` whose name starts with `-` (glob `-*/*.jsonl`), except your own
@@ -93,8 +95,11 @@ Hard rules:
         `"type":"model_change"` entry the same way you checked the fork's, and discard its
         report when that model does not start with `anthropic/`. Use the file's fixed brief
         verbatim. Do not write your own extraction instructions in its place.
-   e. Update each due session's ledger row: `last interview (UTC)` to now, and `last line` to
-      the fork's `cut`, or to N when you skipped the fork.
+   e. Record each due session's ledger row. When the session has no row, insert one (session,
+      harness, machine, title, `last interview (UTC)` now, `last line`). Otherwise update
+      `last interview (UTC)` to now and `last line`. `last line` is the fork's `cut`, or N
+      when you skipped the fork. Read the row back before any per-session ledger update or
+      routing.
 4. Cross-reference before any write:
    - Merge duplicates into one ledger lesson. `seen` counts sessions. Forks of one parent
      count once (the trial triple-counted a shared fork history).
@@ -163,8 +168,8 @@ transcript is the scratch pad.
 - About to read a transcript yourself, or hand a reader your own extraction brief, instead of
   running both the `omp-fork` interview and the fixed `references/reader-brief.md` reader.
 - About to dispatch a reader as `scout`, or to skip reading its served model afterward.
-- About to write to a repository, memory, Envoy or Dispatch before the Sessions row and the
-  Lesson row are in the ledger and read back, or after a ledger edit or read-back failed.
+- About to write into a lesson's home before the Sessions row and the Lesson row are in the
+  ledger and read back, or after a ledger edit or read-back failed.
 - About to dispatch a reader before checking that the `task` role resolves only to
   `anthropic/` models.
 - About to route or show a reader report that still holds a dollar figure.
