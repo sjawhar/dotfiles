@@ -12,20 +12,7 @@ before handing the call to the real one.
   refuses the user's own login, so an agent never reaches the keyring. `gh pr create` for an
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
-  (`scripts/docs-pr-gate`). A merge or approval of a pull request in sjawhar/legion or
-  theorem-labs/agent-infra is refused with one line naming `pr-gate merge`
-  (`scripts/gh-merge-guard`): `gh pr merge` (arming `--auto` too; `--disable-auto` passes),
-  `gh pr review --approve`, `gh api` PUT `repos/O/R/pulls/N/merge`, POST
-  `…/pulls/N/reviews` with event APPROVE, and `gh api graphql` with `mergePullRequest`,
-  `enablePullRequestAutoMerge` or `enqueuePullRequest` (or an APPROVE review mutation). The
-  repository is `-R`/`--repo`, a pull request URL, `GH_REPO`, the api path, or the directory's
-  origin; a graphql mutation's is read from its `PR_kw…` node id, and one whose id names no
-  repository is refused. `PR_GATE_MERGE=1`, which `pr-gate merge` sets for its own merge step,
-  lets the call through; that guards against an accidental bypass, not a determined one. All of
-  this applies in an agent session only (`agent_context` in the shim: `OMP_SESSION_ID`,
-  `PI_SESSION_FILE`, `PI_TOOL_BRIDGE_URL`, `AGENTBOX_SESSION`, or the gh-app routing include in
-  `GIT_CONFIG_*`); a login shell sets none of those, so Sami's own terminal is untouched.
-  Legion's own panes and pods resolve their own gh, not this shim.
+  (`scripts/docs-pr-gate`).
 - **`jj`** locks the git worktree of every workspace `jj workspace add` creates.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration, and gives every
