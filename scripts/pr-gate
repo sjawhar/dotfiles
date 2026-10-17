@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# pr-gate run|merge ... runs one review gate at the head and posts it, or merges only on gates
+# and green CI at the head: see scripts/pr-gate-lane. The fact printer below is the bare form.
 # pr-gate <owner/repo> <N> [expected-head-prefix]
 # Prints a pull request's merge-gate facts straight from GitHub - the reads a merge controller
 # makes on arrival. Run it BEFORE sending a READY packet; paste its output into the packet.
@@ -12,8 +14,11 @@
 #   - the Omp-Session trailers on the commits (who owns it)
 # Exit 0 = every hard gate reads green (head matches, no .legion/ file left, aggregate success, 0 non-minor
 # unresolved, MERGEABLE, and a verdict-bearing artifact whose newest instance covers the head). Exit 1 otherwise.
-# It never approves or merges.
+# The fact printer never approves or merges.
 set -euo pipefail
+case "${1:-}" in
+  run|merge) exec "$(dirname "${BASH_SOURCE[0]}")/pr-gate-lane" "$@" ;;
+esac
 unset GH_TOKEN GH_CONFIG_DIR GH_REPO 2>/dev/null || true
 # Self-staleness. A lane running a gate out of a checkout that is behind main is how a FIXED gate bug
 # keeps red-ing PRs: on 2026-09-25 the shared ~/.dotfiles sat 30 commits behind on one dirty lockfile,
