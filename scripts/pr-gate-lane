@@ -102,6 +102,8 @@ def legion_check(body: Path, checkout: str | None) -> None:
 
 
 def cmd_run(a: argparse.Namespace) -> None:
+    if re.fullmatch(r"theorem-labs/[^/]+-hdo", a.repo, re.IGNORECASE) and not a.model.startswith("anthropic/"):
+        die(f"refusing {a.model} for {a.repo}: HDO material never reaches a non-Claude agent; use an anthropic/ model")
     want_provider, want_model = split_model(a.model)
     print("pr-gate run has no deadline: run it as a background job with bash `timeout: 0`.", flush=True)
     if a.repo == LEGION_REPO and not (a.legion_checkout or os.environ.get("PR_GATE_LEGION_CHECKOUT")):
