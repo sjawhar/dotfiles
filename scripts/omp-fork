@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""omp-fork: ask a read-only fork of an omp session one question, and print its answer as JSON.
+
+  omp-fork [--at ENTRY] [--model M] [--max-time T] [--cwd DIR] [--keep DIR]
+           SESSION.jsonl (PROMPT | --prompt-file FILE)
+
+The session file is copied into a private scratch directory and the copy is resumed for one
+non-interactive turn (`omp -p --mode json`), in the session's own working directory and with its
+own model unless --model or --cwd say otherwise. The original file is never written.
+
+--at ENTRY cuts the copy after that line of the file, so the fork answers as the agent stood then.
+The cut moves back to the last message after which no tool call is waiting for its result; a call
+whose result never arrived within 60 lines is treated as abandoned.
+
+The fork runs with Envoy off: a resumed copy otherwise re-registers under the live session's id,
+takes messages addressed to it and re-claims its roles, and on exit drops the live session's
+registration until its next heartbeat. The config the session reads is copied with
+`envoy.enabled` set to false; its Dispatch section is kept, so `dispatch` reads still work.
+Telling the fork not to change anything is the prompt's job.
+
+Prints {"text", "model", "fallback", "cost", "tokens", "cut", "fork_session"} on stdout. `fallback` is
+true when an answer came from a model other than the session's own (omp's fallback chain, often
+after a refusal); `fork_session` is the fork's own transcript when --keep DIR saved it, else null.
+Exits 1 when the fork gave no answer.
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ABANDONED_AFTER = 60
+
+
+def cut_line(path: Path, at: int) -> int:
+    pending: dict[str, int] = {}
+    best = 0
+    with path.open("rb") as fh:
+        for n, raw in enumerate(fh, 1):
+            if n > at:
+                break
+            entry = json.loads(raw)
+            if entry.get("type") != "message":
+                continue
+            msg = entry["message"]
+            if msg.get("role") == "assistant":
+                for block in msg.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "toolCall":
+                        pending[block.get("id")] = n
+            elif msg.get("role") == "toolResult":
+                pending.pop(msg.get("toolCallId"), None)
+            if not any(n - line <= ABANDONED_AFTER for line in pending.values()):
+                best = n
+    if best == 0:
+        sys.exit(f"omp-fork: no complete message at or before line {at} of {path}")
+    return best
+
+
+def envoy_config_source() -> Path:
+    handed = os.environ.get("ENVOY_CONFIG_FILE")
+    if handed:
+        return Path(handed)
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "legion" / "envoy.json"
+
+
+def write_envoy_off(dest: Path) -> None:
+    src = envoy_config_source()
+    config = json.loads(src.read_text()) if src.exists() else {}
+    config["envoy"] = {**config.get("envoy", {}), "enabled": False}
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(config, fh)
+
+
+def session_cwd(path: Path) -> str:
+    with path.open("rb") as fh:
+        for raw in fh:
+            entry = json.loads(raw)
+            if entry.get("type") == "session":
+                return entry["cwd"]
+    sys.exit(f"omp-fork: {path} has no session header")
+
+
+def last_model(path: Path) -> str | None:
+    """The model the copy resumes on: its last model_change, without a thinking suffix."""
+    model = None
+    with path.open("rb") as fh:
+        for raw in fh:
+            if b'"type":"model_change"' in raw[:60]:
+                model = json.loads(raw).get("model")
+    return model.split(":")[0] if model else None
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("session", type=Path)
+    ap.add_argument("prompt", nargs="?")
+    ap.add_argument("--prompt-file", type=Path)
+    ap.add_argument("--at", type=int, help="cut the copy after this line of the session file")
+    ap.add_argument("--model", help="model for the fork; default: the session's own")
+    ap.add_argument("--max-time", default="15m", help="omp --max-time for the fork (default 15m)")
+    ap.add_argument("--cwd", help="working directory; default: the session's own")
+    ap.add_argument("--keep", type=Path, help="copy the fork's transcript into this directory")
+    args = ap.parse_args()
+    if (args.prompt is None) == (args.prompt_file is None):
+        ap.error("give exactly one of PROMPT and --prompt-file")
+    prompt = args.prompt if args.prompt is not None else args.prompt_file.read_text()
+    session = args.session.resolve()
+    cwd = args.cwd or session_cwd(session)
+    if not Path(cwd).is_dir():
+        sys.exit(f"omp-fork: working directory {cwd} does not exist; pass --cwd")
+
+    scratch = Path(tempfile.mkdtemp(prefix="omp-fork-"))
+    try:
+        os.chmod(scratch, 0o700)
+        write_envoy_off(scratch / "envoy.json")
+        copy = scratch / session.name
+        cut = None
+        if args.at is None:
+            shutil.copyfile(session, copy)
+        else:
+            cut = cut_line(session, args.at)
+            with session.open("rb") as src, copy.open("wb") as dst:
+                for n, raw in enumerate(src, 1):
+                    if n > cut:
+                        break
+                    dst.write(raw)
+        expected = args.model.split(":")[0] if args.model else last_model(copy)
+        before = set(scratch.glob("*.jsonl"))
+        cmd = ["omp", "-p", "--mode", "json", "--session-dir", str(scratch), "--resume", str(copy), "--max-time", args.max_time]
+        if args.model:
+            cmd += ["--model", args.model]
+        proc = subprocess.run(cmd + [prompt], cwd=cwd, env={**os.environ, "ENVOY_CONFIG_FILE": str(scratch / "envoy.json")},
+                              capture_output=True, text=True)
+        text, cost, model, models = "", 0.0, None, set()
+        tokens = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        for line in proc.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = event.get("message") or {}
+            if event.get("type") == "message_end" and msg.get("role") == "assistant":
+                usage = msg.get("usage") or {}
+                cost += (usage.get("cost") or {}).get("total") or 0.0
+                for key in tokens:
+                    tokens[key] += usage.get(key) or 0
+                model = f"{msg.get('provider')}/{msg.get('model')}"
+                models.add(model)
+                said = "".join(b.get("text", "") for b in msg.get("content") or [] if isinstance(b, dict))
+                if said.strip():
+                    text = said.strip()
+        fork_session = None
+        if args.keep:
+            args.keep.mkdir(parents=True, exist_ok=True)
+            written = sorted(set(scratch.glob("*.jsonl")) - before) or [copy]
+            fork_session = str(args.keep / written[-1].name)
+            shutil.copyfile(written[-1], fork_session)
+        fallback = expected is not None and any(m != expected for m in models)
+        print(json.dumps({"text": text, "model": model, "fallback": fallback, "cost": round(cost, 4), "tokens": tokens,
+                          "cut": cut, "fork_session": fork_session}))
+        if not text:
+            sys.exit(f"omp-fork: the fork gave no answer (omp exit {proc.returncode}): {proc.stderr.strip()[-300:]}")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
