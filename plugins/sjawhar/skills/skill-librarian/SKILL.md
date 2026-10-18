@@ -35,6 +35,10 @@ Hard rules:
   never CLAUDE.md, even when no existing ledger row covers it yet.
 - Never start a fork with bare `omp --resume`. Only `omp-fork` runs one. It copies the session
   file and turns Envoy off. A bare resume steals the live session's messages and its roles.
+- Never signal or stop a process, yourself or through a reader: no kill, pkill, killall,
+  docker kill, docker stop or docker rm, not even in a reproduction. Other sessions share
+  this machine and this user, and a pattern match reaches their processes. Check a claim
+  about killing or signals by reading the code or the man page.
 - Every due session's round runs BOTH channels below: the `omp-fork` interview AND the reader
   subagent. Reading the transcript yourself, or writing your own extraction brief for a reader
   instead of the fixed `references/reader-brief.md`, replaces neither channel. A large
