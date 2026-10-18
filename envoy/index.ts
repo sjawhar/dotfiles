@@ -11,12 +11,11 @@ const cfg = new pulumi.Config("envoy");
 const registry = cfg.require("registry");
 const imageTag = cfg.require("imageTag");
 const machines = cfg.requireObject<MachineConfig[]>("machines");
-
-// All listeners connect to the AWS Fargate NATS over the host's existing
-// Tailscale connection. The Fargate NATS hostname is exposed on the tailnet
-// via a Tailscale sidecar managed in ~/agent-c/default/meta/infra
-// (see envoy_nats.py). On-prem nodes do not run their own NATS.
-const ENVOY_NATS_URL = "nats://envoy-nats:4222";
+// The NATS URL each listener of this stack dials. prod's listeners reach the AWS Fargate NATS by
+// its tailnet name (a Tailscale sidecar managed in agent-c's meta/infra); the laptop stack's
+// reaches it by its VPC name, through the laptop's route into Trajectory's VPC, so it works on
+// either tailnet. On-prem nodes do not run their own NATS.
+const natsUrl = cfg.require("natsUrl");
 
 // Registry auth for GHCR (private packages)
 const registryAuth: docker.types.input.ProviderRegistryAuth[] = [
@@ -45,7 +44,7 @@ for (const machine of machines) {
     machine.name,
     {
       machineId: machine.machineId,
-      natsUrls: [ENVOY_NATS_URL],
+      natsUrls: [natsUrl],
       image: `${registry}/envoy:${imageTag}`,
       hostBridge: "127.0.0.1",
       watchdog,

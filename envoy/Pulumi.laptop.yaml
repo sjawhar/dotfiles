@@ -1,0 +1,10 @@
+encryptionsalt: v1:s9UxY6qoXBM=:v1:trIzHxaGcZ6DRlEl:tabTcSo1f6RMuJKpKCPh5Ypyam/6zg==
+config:
+  envoy:ghcrToken:
+    secure: v1:TXsu8dKAiP0YIzGR:kgyfmBSdY1KRGUjtVJb+EcMBX8nQS1Z+4bejxacOiXAvhbr0bDDQ30tq5myjilQSJeeP16vZL28=
+  envoy:registry: ghcr.io/sjawhar/legion
+  envoy:imageTag: 297f4c0f670fa6c198bda51ae3aa3719d1b2d206
+  envoy:natsUrl: nats://nats.internal.trajectorylabs.com:4222
+  envoy:machines:
+    - name: sami
+      machineId: sami
