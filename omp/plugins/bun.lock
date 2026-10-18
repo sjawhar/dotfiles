@@ -9,7 +9,7 @@
         "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.0.0",
         "@sjawhar/pi-envoy": "10.6.1",
         "@sjawhar/pi-legion": "10.6.1",
-        "gws-accounts": "github:sjawhar/gws-accounts#v0.1.4",
+        "gws-accounts": "github:sjawhar/gws-accounts#v0.1.5",
         "secretsd": "github:sjawhar/forward#v3.6.1",
         "superpowers": "github:obra/superpowers#v6.3.0",
       },
@@ -234,7 +234,7 @@
 
     "grok-mermaid": ["grok-mermaid@0.2.2", "", {}, "sha512-XcJEP5dDC8liHBh52mlLjU18fNvu1ckFsu0QpIG3+APZ270fsj9wxpiA6cOURmbUEuoMVgjbC2+UYgTdCqqgzA=="],
 
-    "gws-accounts": ["gws-accounts@github:sjawhar/gws-accounts#2cb4dc9", {}, "sjawhar-gws-accounts-2cb4dc9", "sha512-M6g4pImBp+CNJxO8p3awAG5PFLkwOpw5P6FMKRkq24OyeE9PJm7yAZ3x6+exbtW0pdkbDQYpRkZ2Rh0bcyEKfQ=="],
+    "gws-accounts": ["gws-accounts@github:sjawhar/gws-accounts#bb30374", {}, "sjawhar-gws-accounts-bb30374", "sha512-Ot6kJ0Kh7C033GqmB7ri5cbaoxNuPojWLmcXdoW3nWLFuB8KJ8JDKIvJD/CGasYv4dvYDBkHRb281tdiItvQCA=="],
 
     "highlight.js": ["highlight.js@10.7.3", "", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
 
