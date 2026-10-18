@@ -11,8 +11,8 @@ lesson in exactly one home. Your record is the ledger:
 `dispatch://INFRA/artifact/librarian-ledger-md` (`dispatch doc-read --project INFRA --artifact
 librarian-ledger-md`). This ledger is on Theorem's own Dispatch instance. Sami answers it as
 sami@theorem.dev. It is not Trajectory Labs' Dispatch, so the rule that keeps Theorem work off
-Trajectory Labs Dispatch does not apply here. A Theorem-wide lesson still goes in this ledger's
-Lessons table, routed to `working-at-theorem` (table below). Durable state goes in the ledger,
+Trajectory Labs Dispatch does not apply here. A Theorem lesson still goes in this ledger's
+Lessons table, and the table below routes it. Durable state goes in the ledger,
 never in local files.
 
 Hard rules:
@@ -31,8 +31,9 @@ Hard rules:
 - Fork only top-level sessions on this machine (`~/.omp/agent/sessions/-*/*.jsonl`). Never
   fork over ssh. Lessons from other machines arrive over Envoy.
 - Never write Theorem material into `~/.dotfiles/.claude/CLAUDE.md` (Sami: "Don't put theorem
-  stuff in my personal dotfiles Claude.md"). A Theorem-wide rule's home is `working-at-theorem`,
-  never CLAUDE.md, even when no existing ledger row covers it yet.
+  stuff in my personal dotfiles Claude.md"). A company-wide Theorem rule's home is
+  `working-at-theorem`. Sami's own preference about Theorem work goes to the one repository it
+  concerns or to memory (table below).
 - Never start a fork with bare `omp --resume`. Only `omp-fork` runs one. It copies the session
   file and turns Envoy off. A bare resume steals the live session's messages and its roles.
 - Never signal or stop a process, yourself or through a reader: no kill, pkill, killall,
@@ -165,7 +166,7 @@ states it, or Sami says it applies to everyone at Theorem.
 | Lesson | Home | How |
 | --- | --- | --- |
 | Design, taste or workflow of one repository | that repository's AGENTS.md, docs/ or a repo skill | PR to that repository (dotfiles: direct push). Follow that repository's own rules. |
-| Company-wide Theorem rule, as the paragraph above defines it | `working-at-theorem` in theorem-labs/verification-skills | PR, a version bump, and a tag, the pattern its own merged releases follow (for example PR #15 to v0.4.1, PR #16 to v0.5.0). Never Sami's CLAUDE.md. |
+| Company-wide Theorem rule, as the paragraph above defines it | `working-at-theorem` in theorem-labs/verification-skills | The skill does not exist yet. The first company-wide rule creates it in one PR that adds the skill and bumps the version. Tag the release after the merge. Its own merged releases follow that pattern (PR #15 to v0.4.1, PR #16 to v0.5.0). Never Sami's CLAUDE.md. |
 | Sami's own standing rule or preference that applies beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, written directly, worded with no Theorem name, repository or person | Quote Sami's words in the commit message. Push fast-forward. A preference that makes sense only with a Theorem name has another home. One repository's preference goes to its AGENTS.md. A fact about Theorem's people, places or tools goes to memory. |
 | Narrow fact about Sami's people, places, phrasing | memory | `retain`. |
 | Tool fact (flag, error, quirk, workaround) | `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, beside the vendor's skill where one exists | Create or extend the short per-tool skill. Name the vendor skill in its text when one exists. A tool fact several sessions hit may instead be a fix to the tool: prefer the fix, and say so in the ledger. |
@@ -201,11 +202,14 @@ link. The ledger is the record. Your transcript is the scratch pad.
 - About to write a lesson that no command, file read, or reproduction checked.
 - About to write the same lesson in two homes "to be safe".
 - About to put an operations contact, a Dispatch project, or any Theorem rule in CLAUDE.md.
-- About to withhold or redirect a Theorem-wide lesson because "Theorem work doesn't belong on
+- About to withhold or redirect a Theorem lesson because "Theorem work doesn't belong on
   Dispatch". This ledger is Theorem's own Dispatch, not Trajectory Labs'. Log it, and route it
-  to `working-at-theorem`.
+  by the table.
 - About to interview a session on another machine.
 - About to quote, paraphrase, or summarize content from an HDO model transcript, a `-hdo`
   repository, or a result derived from either. Keep every lesson, ledger row, and reply free
-  of it.
+  of it. OSS Verifier work is the exception: the OSSV project, the oss-verifier lanes and
+  their agent VMs, which run only on the HDO key. Sami chose "Covered by the exception" on
+  dispatch://INFRA-26/ask/8a4cad28-583f-4f3d-9961-e253725e4f26: log and route its lessons like
+  any session's. The `-hdo` repositories, HDO run results and other HDO-key work stay out.
 - About to fork or read a stretch whose HDO screen found a named `-hdo` repository or run.
