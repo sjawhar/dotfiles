@@ -31,7 +31,10 @@ inputs. Theorem's `theorem-labs/agent-infra` `docs/specs/envoy.md` and its plan
   the GCP work.
 - Every `envoy/` edit, preview and apply of slice 2 happens in one devbox clone at
   `~/.worktrees/dotfiles/envoy-infra`, cut from `origin/main`.
-- One Envoy stack in the dotfiles (Sami, 2026-10-14).
+- One Envoy project in the dotfiles (Sami, 2026-10-14), with two stacks since 2026-10-18: `prod`,
+  applied from the devbox, and `laptop`, applied from the laptop, which Sami ruled on 2026-10-18
+  should apply its own listener. A machine with no `sshHost` uses the Docker socket of whoever runs
+  Pulumi, so each stack holds only the machines its own runner can reach.
 - This repository is public: Theorem's tailnet name and its hub's addresses never appear in it.
 - Per-machine files (`~/.omp/profiles/theorem/agent/envoy.json`,
   `~/.dotfiles/.claude-profiles/theorem/envoy.json`) are written on the machine and never
@@ -43,8 +46,8 @@ inputs. Theorem's `theorem-labs/agent-infra` `docs/specs/envoy.md` and its plan
 
 ## Rulings made while planning
 
-- **D1. The stack's state stays where the stack keeps it today: the S3 backend `envoy/Pulumi.yaml`
-  names.** That follows from one stack, as Sami decided.
+- **D1. The state stays where the project keeps it today: the S3 backend `envoy/Pulumi.yaml`
+  names**, for both stacks.
 - **D2. Theorem-profile sessions on this laptop talk to Theorem's hub directly** (decided
   2026-10-17, once Sami had put the laptop on Theorem's tailnet). The hub runs Envoy's listener and
   admits sessions that hold no credential (sjawhar/legion#1974), so this stack runs no Theorem

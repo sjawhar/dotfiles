@@ -1,21 +1,20 @@
 config:
   envoy:registry: ghcr.io/sjawhar/legion
   envoy:imageTag: 297f4c0f670fa6c198bda51ae3aa3719d1b2d206
+  envoy:natsUrl: nats://envoy-nats:4222
   envoy:machines:
-    # On-prem listeners are stateless NATS subscribers. They connect outbound
-    # to the AWS Fargate `envoy-nats` over the host's existing Tailscale.
-    # No tsnet sidecar — listeners are not their own Tailscale devices.
-    # Webhook ingress (GitHub/Slack) lives on the Fargate envoy-listener
-    # behind the ALB, NOT on on-prem listeners.
+    # Applied from the devbox. On-prem listeners are stateless NATS subscribers.
+    # They connect outbound to the AWS Fargate `envoy-nats` over the host's
+    # existing Tailscale. No tsnet sidecar — listeners are not their own
+    # Tailscale devices. Webhook ingress (GitHub/Slack) lives on the Fargate
+    # envoy-listener behind the ALB, NOT on on-prem listeners. This laptop's
+    # listener is the `laptop` stack's, applied from the laptop itself.
     # machineId matches this host's tailnet name so anything holding a registry
     # entry can reach the machine by that name. `name` stays `devbox-sami`: it is
     # the Pulumi URN component, and renaming it would replace the resource, which
     # collides on the fixed `envoy-listener` container name.
     - name: devbox-sami
       machineId: sami-agents
-    - name: sami
-      sshHost: "ssh://sami@sami"
-      machineId: sami
     # oryx is reached over Tailscale SSH by MagicDNS FQDN; the bare name has no
     # ~/.ssh/config entry today, and the FQDN keeps it that way deliberately.
     - name: oryx

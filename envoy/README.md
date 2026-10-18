@@ -7,8 +7,17 @@ through the `host:Listener` component of Legion's `envoy-infra` Pulumi plugin.
 
 There is **one** NATS — the AWS Fargate `envoy-nats`, exposed on the tailnet by
 a Tailscale sidecar managed in `~/agent-c/default/meta/infra` (see
-`envoy_nats.py`). All on-prem listeners connect to it as
-`nats://envoy-nats:4222` over the host's existing Tailscale.
+`envoy_nats.py`). On-prem listeners connect to it as `envoy:natsUrl` names.
+
+The project has two stacks, one per place it is applied from:
+
+| Stack | Applied from | Machines | `envoy:natsUrl` |
+|---|---|---|---|
+| `prod` | the devbox | the devbox (local socket) and oryx (SSH) | `nats://envoy-nats:4222`, over the host's Tailscale |
+| `laptop` | the laptop | the laptop (local socket) | `nats://nats.internal.trajectorylabs.com:4222`, through the laptop's route into the VPC (`laptop/trajectory-route@.service`), so it works on either tailnet |
+
+Each stack's machine with no `sshHost` uses the Docker socket of the machine
+running Pulumi, so apply a stack only from its own machine.
 
 ```
 GitHub/Slack webhook
@@ -38,7 +47,7 @@ legion's docs site, "Running Envoy on one machine", has the steps), so its
 sessions reach only each other and no GitHub/Slack events arrive. Its sessions
 find that NATS through `"natsUrls": ["nats://127.0.0.1:4222"]` in the `envoy`
 section of the machine's `envoy.json` (`AGENTS.md`, "Where the secrets are"),
-where every other machine names `nats://envoy-nats:4222`. Such a machine needs
+where every other machine names the NATS URL its stack's `envoy:natsUrl` does. Such a machine needs
 no `envoy/env.local`; delete one left from before.
 
 ## Prerequisites
@@ -116,9 +125,13 @@ under a `host:Listener` must be `same` before you apply.
 
 ```bash
 cd ~/.dotfiles/envoy
-npm install
-secrets PULUMI_CONFIG_PASSPHRASE -- pulumi up --stack prod
+npm ci
+secrets PULUMI_CONFIG_PASSPHRASE -- pulumi up --stack prod     # on the devbox
+AWS_PROFILE=default secrets PULUMI_CONFIG_PASSPHRASE -- pulumi up --stack laptop   # on the laptop
 ```
+
+The state is in S3 (`Pulumi.yaml`'s `backend`): the devbox reads it with its
+instance role, and the laptop with Sami's AWS SSO login (`aws sso login --sso-session trajectorylabs`).
 
 ## Secrets
 
@@ -144,6 +157,7 @@ pulumi config set --secret envoy:githubWebhookSecret "<value>" --stack prod
 |---|---|
 | `envoy:registry` | Container image registry (e.g. `ghcr.io/sjawhar/legion`) |
 | `envoy:imageTag` | Envoy image tag to deploy |
+| `envoy:natsUrl` | The NATS URL each of the stack's listeners dials |
 | `envoy:machines` | Array of machine definitions |
 
 ### Machine fields
