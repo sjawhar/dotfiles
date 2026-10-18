@@ -78,6 +78,14 @@ Hard rules:
       stretch.
    d. Per due session, run both channels on the same stretch (the ledger's last line, or line
       1, through N):
+      - HDO screen, first: run `omp-session-render grep <file>
+        '\b[A-Za-z0-9][A-Za-z0-9._-]*-hdo\b'` and count the hits whose line number falls in the
+        stretch. Any hit means the stretch names an HDO repository or run, such as
+        `theorem-labs/lean-linux-hdo`. Then run no fork and no reader on it. Sami's rule on
+        dispatch://BET-40 keeps HDO material from every account that BET-40 has not cleared.
+        Write `skipped: HDO material` in the `notes` cell and still advance `last line` to N.
+        The pattern does not match the rule's own wording (`theorem-labs/*-hdo`, "-hdo
+        repos"), so a session that only holds a memory of the rule still gets interviewed.
       - Model: read the session's last `"type":"model_change"` entry. When its `model` does
         not start with `anthropic/`, skip the fork and run only the reader. Write `fork
         skipped: non-Claude session` in the session's `notes` cell.
@@ -200,3 +208,4 @@ link. The ledger is the record. Your transcript is the scratch pad.
 - About to quote, paraphrase, or summarize content from an HDO model transcript, a `-hdo`
   repository, or a result derived from either. Keep every lesson, ledger row, and reply free
   of it.
+- About to fork or read a stretch whose HDO screen found a named `-hdo` repository or run.
