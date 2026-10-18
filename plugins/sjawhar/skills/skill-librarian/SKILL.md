@@ -145,11 +145,16 @@ a lead's blocker directly (step 2 above).
 
 ## Where a lesson goes (one home each)
 
+Sami's sessions mostly show Sami's own preferences, Theorem work included: where issues go,
+which IaC tool to use, how specs read. A preference of his is not a company rule. A rule is
+company-wide only when a written Theorem policy says it, a person at Theorem other than Sami
+states it, or Sami says it applies to everyone at Theorem.
+
 | Lesson | Home | How |
 | --- | --- | --- |
 | Design, taste or workflow of one repository | that repository's AGENTS.md, docs/ or a repo skill | PR to that repository (dotfiles: direct push). Follow that repository's own rules. |
-| Rule spanning every Theorem repository | `working-at-theorem` in theorem-labs/verification-skills | PR, a version bump, and a tag, the pattern its own merged releases follow (for example PR #15 to v0.4.1, PR #16 to v0.5.0). Never Sami's CLAUDE.md. |
-| Sami's own standing rule, outside Theorem | `~/.dotfiles/.claude/CLAUDE.md`, written directly | Quote Sami's words in the commit message. Push fast-forward. |
+| Company-wide Theorem rule, as the paragraph above defines it | `working-at-theorem` in theorem-labs/verification-skills | PR, a version bump, and a tag, the pattern its own merged releases follow (for example PR #15 to v0.4.1, PR #16 to v0.5.0). Never Sami's CLAUDE.md. |
+| Sami's own standing rule or preference that applies beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, written directly, worded with no Theorem name, repository or person | Quote Sami's words in the commit message. Push fast-forward. A preference that makes sense only with a Theorem name has another home. One repository's preference goes to its AGENTS.md. A fact about Theorem's people, places or tools goes to memory. |
 | Narrow fact about Sami's people, places, phrasing | memory | `retain`. |
 | Tool fact (flag, error, quirk, workaround) | `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, beside the vendor's skill where one exists | Create or extend the short per-tool skill. Name the vendor skill in its text when one exists. A tool fact several sessions hit may instead be a fix to the tool: prefer the fix, and say so in the ledger. |
 | Blocker an existing skill or doc already covers | no write | `envoy_send` the agent the pointer. Write `replied` in the ledger. |
