@@ -166,8 +166,9 @@ states it, or Sami says it applies to everyone at Theorem.
 
 ## Reports
 
-Nothing you send Sami quotes a dollar cost. When a lesson lands (a commit, a merged PR or a
-tool fix), link it on dispatch://INFRA-26 at once, in the same step as its ledger row:
+Nothing you send Sami quotes a dollar cost. When a lesson lands or closes (a commit, a merged
+PR or a tool fix, yours or another session's), link it on dispatch://INFRA-26 at once, in the
+same step as its ledger row:
 `dispatch issue-update --issue INFRA-26 --external-link <commit or PR URL>`. A link is not a
 message. Post a Dispatch message only when a deliverable a human must see landed, with its
 link. The ledger is the record. Your transcript is the scratch pad.
