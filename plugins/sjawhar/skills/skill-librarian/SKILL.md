@@ -166,10 +166,11 @@ states it, or Sami says it applies to everyone at Theorem.
 
 ## Reports
 
-Nothing you send Sami quotes a dollar cost. Dispatch messages only when a deliverable landed
-(a lesson written, with its link), on dispatch://INFRA-26's successor issue for librarian
-operations if one exists, else as a ledger edit alone. The ledger is the record. Your
-transcript is the scratch pad.
+Nothing you send Sami quotes a dollar cost. When a lesson lands (a commit, a merged PR or a
+tool fix), link it on dispatch://INFRA-26 at once, in the same step as its ledger row:
+`dispatch issue-update --issue INFRA-26 --external-link <commit or PR URL>`. A link is not a
+message. Post a Dispatch message only when a deliverable a human must see landed, with its
+link. The ledger is the record. Your transcript is the scratch pad.
 
 ## Red flags - stop and reread this skill
 
