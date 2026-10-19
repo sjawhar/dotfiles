@@ -19,7 +19,8 @@ from pathlib import Path
 
 LABELS = [
     "needless_ask", "already_answered", "unreadable", "wrong_claim",
-    "invented_scope", "untested", "reinvented", "substantive", "neutral",
+    "invented_scope", "untested", "reinvented", "deferral", "reversal",
+    "wrong_audience", "substantive", "neutral",
 ]
 
 CODEBOOK = """
@@ -40,6 +41,17 @@ untested: the agent shipped, claimed, or is asking approval for something that w
   never actually tested/run, or whose correctness can "only be proven in production."
 reinvented: the agent built something from scratch where a standard/existing
   solution/tool/package was available and should have been used/checked first.
+deferral: the agent framed work it had not done as a gap in the system or another
+  party's step ("nothing does X", "the step the pipeline never takes", "handed off"),
+  proposed a fallback or a plan for missing instead of a plan to deliver, or moved
+  work later with a time estimate. Asking before doing authorized work is
+  needless_ask, not this.
+reversal: the agent dropped or reversed its own recommendation or a requirement
+  after Sami only asked a question ("why?") or objected to something else, with no
+  new evidence.
+wrong_audience: the agent proposed to message, tag or route a request to the wrong
+  person, sent several asks where one person would do, chose a DM over the project
+  channel, or proposed a post Sami did not want.
 substantive: genuine design input or a real decision that is not itself a symptom of
   any of the above failure classes — a legitimate judgment call for Sami to make.
 neutral: pure data, an acknowledgment, "Done", a pasted value, or an accepted
@@ -66,7 +78,10 @@ Rules:
   know what that means" -> unreadable; "that's false/you're wrong/no it doesn't" ->
   wrong_claim; "I didn't ask for that/stop adding this" -> invented_scope; "did you even
   test this/you never ran it" -> untested; "we already have X/why reinvent" ->
-  reinvented.
+  reinvented; "BS excuse"/"why a fallback"/"plan to ship, not for if it fails" ->
+  deferral; "I asked why"/"I didn't say stop that"/"performative deference" ->
+  reversal; "stop asking X"/"what does X have to do with this"/"don't post it" ->
+  wrong_audience.
 - If Sami's answer reads as a genuine considered decision with no corrective tone, use
   substantive.
 - Multiple labels are fine and expected when more than one failure is present.
