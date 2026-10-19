@@ -86,32 +86,32 @@ Slice 2 runs from the devbox, which reaches the laptop's Docker over Trajectory'
 
 ### Task 2.0: pin the Pulumi CLI and natscli, and push
 
-- [ ] Add `pulumi = "3.268.0"` to a new `envoy/mise.toml`'s `[tools]`, so the pin applies only
+- [x] Add `pulumi = "3.268.0"` to a new `envoy/mise.toml`'s `[tools]`, so the pin applies only
   where the program runs: a global pin would put mise's Pulumi ahead of whatever the devbox's
   other deployments run today. Add `"github:nats-io/natscli" = "<x.y.z>"` (its latest release, as
   an exact version) to the root `mise.toml`'s `[tools]`; no `nats` binary exists on the laptop.
   Check that mise trusts `envoy/mise.toml` both in `~/.dotfiles` and in a clone under
   `~/.worktrees/dotfiles/`, the way it trusts the root file.
-- [ ] Add `"sdks"` to `envoy/tsconfig.json`'s `exclude`.
-- [ ] Commit and push to `main` on its own.
-- [ ] Run `scripts/dotfiles-sync` on the devbox. With no host argument it syncs the devbox, the
+- [x] Add `"sdks"` to `envoy/tsconfig.json`'s `exclude`.
+- [x] Commit and push to `main` on its own.
+- [x] Run `scripts/dotfiles-sync` on the devbox. With no host argument it syncs the devbox, the
   laptop and oryx (`dotfiles-sync:14`).
-- [ ] Run `mise install` on the laptop and on the devbox. On both, `pulumi version` run in
+- [x] Run `mise install` on the laptop and on the devbox. On both, `pulumi version` run in
   `envoy/` prints `v3.268.0`, `pulumi` outside `envoy/` resolves as it did before, and
   `nats --version` answers.
 
 ### Task 2.1: read the stack's inventory
 
-- [ ] Work in the devbox clone (Global constraints). The `devbox-sami` machine has no `sshHost`
+- [x] Work in the devbox clone (Global constraints). The `devbox-sami` machine has no `sshHost`
   (`envoy/Pulumi.prod.yaml:14-16`), so the program runs where its Docker socket is. Export the
   state:
   `cd envoy && npm ci && secrets PULUMI_CONFIG_PASSPHRASE -- pulumi stack export --stack prod --file <tmpdir>/prod-export.json`.
-- [ ] Record every resource's `type`, URN name, `parent` and `provider`, and whether any
+- [x] Record every resource's `type`, URN name, `parent` and `provider`, and whether any
   `command:remote:Command watchdog-*` is in state.
-- [ ] Before any apply, record
+- [x] Before any apply, record
   `docker inspect envoy-listener --format '{{.Created}} {{.State.Health.Status}}'` on `sami-agents`,
   `sami` and `oryx`.
-- [ ] Delete the export by its literal path.
+- [x] Delete the export by its literal path.
 
 ### Task 2.2: the program on `host:Listener`, against the branch's plugin
 
@@ -124,12 +124,12 @@ Slice 2 runs from the devbox, which reaches the laptop's Docker over Trajectory'
   `envoy/__tests__/services.test.ts` (it imports `services.ts`, and `index.ts` cannot be imported
   without running the program)
 
-- [ ] Build the plugin from Legion's `envoy-infra` branch:
+- [x] Build the plugin from Legion's `envoy-infra` branch:
   `cd <legion clone>/packages/envoy/infra && go build -o <dir>/pulumi-resource-envoy-infra ./cmd/pulumi-resource-envoy-infra`.
-- [ ] Add `plugins: {providers: [{name: envoy-infra, path: <dir>}]}` to `envoy/Pulumi.yaml`. This
+- [x] Add `plugins: {providers: [{name: envoy-infra, path: <dir>}]}` to `envoy/Pulumi.yaml`. This
   entry stays local and is removed in Task 2.3.
-- [ ] Run `cd envoy && pulumi package add <dir>/pulumi-resource-envoy-infra`.
-- [ ] Rewrite `index.ts`. For each machine:
+- [x] Run `cd envoy && pulumi package add <dir>/pulumi-resource-envoy-infra`.
+- [x] Rewrite `index.ts`. For each machine:
   - keep `createProvider` (`docker-<name>`) unchanged;
   - when the machine has an `sshHost` and `ENVOY_DEPLOY_WATCHDOG=1`, add
     `command.Provider("command-<name>", {})` (D6);
@@ -153,14 +153,14 @@ Slice 2 runs from the devbox, which reaches the laptop's Docker over Trajectory'
     The watchdog `host` is the address only: Legion's component refuses `@` and `://`, and
     pulumi-command logs in as root.
   - `ENVOY_NATS_URL` (`nats://envoy-nats:4222`) moves from `services.ts` into `index.ts`.
-- [ ] Run `npx tsc --noEmit` in `envoy/`.
-- [ ] Preview from the devbox, with `ENVOY_DEPLOY_WATCHDOG` unset (D6):
+- [x] Run `npx tsc --noEmit` in `envoy/`.
+- [x] Preview from the devbox, with `ENVOY_DEPLOY_WATCHDOG` unset (D6):
   `secrets PULUMI_CONFIG_PASSPHRASE -- pulumi preview --stack prod --json --show-sames > <tmp>/preview.json`.
   A short script checks the pass condition, and its output goes in the report:
   - every step whose URN is under an `envoy-infra:host:Listener` is `same`;
   - the only other non-`same` steps are the three component `create`s;
   - no `docker:` or `command:` resource has a `delete`, `replace`, `update` or `create`.
-- [ ] If anything else shows, stop before any `pulumi up` and report it to the coordinator with the
+- [x] If anything else shows, stop before any `pulumi up` and report it to the coordinator with the
   step. This is Legion's scenario E4. sjawhar/legion#1946 gets only the operation counts by
   resource type, with no URNs, because the URNs carry machine names.
 
