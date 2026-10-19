@@ -227,12 +227,14 @@ systemctl --user enable --now workspace-shortcuts.path 2>/dev/null \
 systemctl --user enable workspace-shortcuts.service 2>/dev/null \
     || echo "NOTE: could not enable workspace-shortcuts.service (no user systemd session here?) — enable it on the target machine."
 
-# --- Sysctl: desktop performance tuning ---
-if ! diff -q "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performance.conf &>/dev/null; then
-    echo "Installing sysctl performance tuning..."
-    sudo cp "${LAPTOP_DIR}/sysctl-performance.conf" /etc/sysctl.d/10-performance.conf
-    sudo sysctl --system -q
-fi
+# --- Sysctl: desktop performance tuning, container-safe IPv6 link-local ---
+for conf in performance network; do
+    if ! diff -q "${LAPTOP_DIR}/sysctl-${conf}.conf" "/etc/sysctl.d/10-${conf}.conf" &>/dev/null; then
+        echo "Installing sysctl ${conf} settings..."
+        sudo cp "${LAPTOP_DIR}/sysctl-${conf}.conf" "/etc/sysctl.d/10-${conf}.conf"
+        sudo sysctl --system -q
+    fi
+done
 
 # shellcheck source=laptop/cosmic-settings.sh
 source "${LAPTOP_DIR}/cosmic-settings.sh"
