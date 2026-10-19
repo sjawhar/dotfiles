@@ -50,7 +50,8 @@ capable of making? Only the first is a question." These shapes fail it:
    a Vercel or GitHub CLI step — with no statement of two failed attempts.
    Sami: "Is there some reason you can't do this yourself?" `blocker` when
    `kind` is `action`. (Not this: a command the ask says needs *his* token,
-   login, YubiKey, browser session, SSO, personal PAT, GitHub org-owner or
+   a login of his that the transcript shows is not live on this box, YubiKey,
+   browser session, SSO, personal PAT, GitHub org-owner or
    Google super-admin console, Slack workspace admin, or his own calendar —
    those pass, however small; so does a vendor-dashboard step behind his own
    account login, such as re-scoping or minting an API token in Deel or
@@ -79,9 +80,9 @@ capable of making? Only the first is a question." These shapes fail it:
    customer — what to do about a delivered record is his call. Not this:
    an upstream PR on an outside repo opened under his name, or any PR whose
    disposition the ask says he claimed or held for himself — those are his.
-   Not this: changing shared or global configuration that other sessions or
-   workflows resolve through — his standing rule makes broad shared-config
-   changes his to approve, so such an ask passes.)
+   Not this: an upgrade that forces running sessions to restart (bun, node,
+   the omp binary) - his standing rule makes that his to approve, so such an
+   ask passes.)
 4. **Allocation of work between agent sessions**: which session takes the
    batch, a second session in parallel or one in sequence, who lands the
    commit. Sami: "this all feels very parallelizable… am I missing
@@ -104,6 +105,18 @@ capable of making? Only the first is a question." These shapes fail it:
    prompted by a new fact — "my earlier ask wrongly called it new" — a
    ruling that bears on the question without deciding it, or a question the
    transcript shows as still open.)
+7. **A control nobody asked for**: the ask asks him to approve a control,
+   policy, protection or pause, justified by a security, isolation,
+   compliance or spend risk the agent inferred, which his own words in the
+   transcript never named. Sami: "No, stop it"; "Haven't you made enough
+   unrequested changes to legion already?" (branch protection proposed on
+   agent-infra); "Please stop manufacturing a crisis" (a crisis over
+   platform terms); "You're over-optimizing for 'keep agents away from
+   credentials'" (credential designs built to keep agents away from
+   credentials). Fix: retract, record the finding on the issue the work
+   belongs to, keep building what he asked for. (Not this: a risk his words
+   named. Not this: deletion or exposure of production data. Not this: an
+   IAM change the requested work needs.)
 
 ### Access failures (`concern`; `blocker` where marked)
 
