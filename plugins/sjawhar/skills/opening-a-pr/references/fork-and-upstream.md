@@ -13,10 +13,7 @@ or red-to-green test) and verified on a production-like surface (step 4).
 
 Every upstream PR lands under Sami's personal GitHub identity, so the bar is his reputation with
 METR/AISI. That is a quality bar, not a permission gate: he is not in the loop per interaction, and
-there is no grant, env var, or approval step. Do not open an upstream PR without loading the
-`maintaining-inspect` skill (and `fork-work`/`using-knives` for the fork mechanics) and thinking
-through, in writing, in the PR body or the `knives notch`, whether the change actually needs to go
-upstream at all.
+there is no grant, env var, or approval step.
 
 ## Shipping a fork member
 

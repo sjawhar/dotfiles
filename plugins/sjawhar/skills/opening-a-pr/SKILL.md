@@ -184,12 +184,10 @@ record. Never ask to omit acceptance. A named blocker that survives that work go
    while making history easier to review.
 10. **Resolve the PR target — never our own fork; upstream only when the change belongs there.** If the repository is a
     knives-managed fork (`knives repos` lists it), our org forks hold branches and releases and never receive PRs; a
-    PR, when one is warranted, targets the **upstream** repository. Do not open an upstream PR without loading the
-    `maintaining-inspect` skill (and `fork-work`/`using-knives` for the fork mechanics) and writing down, in the PR body
-    or the `knives notch`, whether the change actually needs to go upstream at all. That judgment is yours to make and
-    record, not a permission to ask Sami for. Most of our changes are fork members that go into the release in hand and
-    never need an upstream PR, and using a fork change never waits on upstream review. Walk the `pr-preflight` skill
-    before any `gh pr create` against upstream; once an upstream PR is open, its whole lifecycle is the session's under
+    PR, when one is warranted, targets the **upstream** repository. Most of our changes are fork members that go into
+    the release in hand and never need an upstream PR, and using a fork change never waits on upstream review. Walk the
+    `pr-preflight` skill before any `gh pr create` against upstream; once an upstream PR is open, its whole lifecycle
+    is the session's under
     `maintaining-fork-pr`. Before shipping a fork member or opening an upstream PR, read
     [references/fork-and-upstream.md](references/fork-and-upstream.md) for the placement test and the release mechanics.
 11. **Open or update the PR — and default to NOT opening a new one.** One line of work gets one PR. Before creating,

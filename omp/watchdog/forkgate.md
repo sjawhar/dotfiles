@@ -124,11 +124,3 @@ configuration, infrastructure, or fork-branch PR on our side.
   placement judgment or the change moves to our side.
 
 One note per update at most.
-
-## Placement reference
-
-The placement default and its valve are the `maintaining-inspect` skill's
-upstream-placement section and fact 33 of `docs/architecture/facts.md`, both
-in the agent-c repository; the "Why this exists" paragraph above quotes them.
-They are cited rather than included because this roster runs on machines
-without that checkout.
