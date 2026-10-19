@@ -5,7 +5,7 @@ import { draw, ENTRY_TYPE, type ExperimentRecord, FEATURES, resolve, resolveGate
 // The entry imports the memory agent's and the judge log's bindings, which import @oh-my-pi/pi-ai; that resolves only inside omp.
 mock.module("@oh-my-pi/pi-ai", () => ({ completeSimple: async () => undefined, retryTransientCompletion: (run: () => unknown) => run() }));
 
-const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", context_line: "random", skill_gate: "random", judge_log: "random" };
+const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", context_line: "random", skill_gate: "random", judge_log: "random", rules_refresh: "random" };
 const ids = Array.from({ length: 400 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
 const ROOT = "01a0f8aa-2f87-720f-8260-1d84b54c192b";
 const ROOT_FILE = `/home/u/.omp/agent/sessions/-tmp-x/2026-10-01T18-11-37-991Z_${ROOT}.jsonl`;
@@ -49,14 +49,14 @@ describe("resolveGates", () => {
 	});
 	test("OMP_EXPERIMENT_<FEATURE> overrides the file for that feature only", () => {
 		const gates = resolveGates(ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_SKILL_GATE: "on", OTHER: "x" });
-		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", context_line: "random", skill_gate: "on", judge_log: "random" });
+		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", context_line: "random", skill_gate: "on", judge_log: "random", rules_refresh: "random" });
 	});
 	test.each([
 		["a variable whose value is not a gate", ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "maybe" }, /OMP_EXPERIMENT_SELFCOMPACT must be on, off or random, got "maybe"/],
 		["an empty variable", ALL_RANDOM, { OMP_EXPERIMENT_CONTEXT_LINE: "" }, /OMP_EXPERIMENT_CONTEXT_LINE must be on, off or random, got ""/],
 		["a variable naming no feature", ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPAKT: "on" }, /OMP_EXPERIMENT_SELFCOMPAKT names no feature/],
 		["a gate file naming an unknown feature", { ...ALL_RANDOM, budget: "on" }, {}, /unknown feature "budget"/],
-		["a gate file missing a feature", { selfcompact: "on", proactive_memory: "on", context_line: "on", skill_gate: "on" }, {}, /no gate for feature "judge_log"/],
+		["a gate file missing a feature", { selfcompact: "on", proactive_memory: "on", context_line: "on", skill_gate: "on", judge_log: "on" }, {}, /no gate for feature "rules_refresh"/],
 		["a gate file giving a feature a non-gate", { ...ALL_RANDOM, proactive_memory: true }, {}, /feature "proactive_memory" the gate true/],
 		["a gate file that is not an object", ["selfcompact"], {}, /must map each feature/],
 	] as const)("refuses %s, naming it", (_label, file, env, message) => {
