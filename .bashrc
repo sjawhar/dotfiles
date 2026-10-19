@@ -142,7 +142,10 @@ fi
 # Agent secrets (AGENTC-393). The broker's address: every machine carries it (the CLI's secret
 # commands need it; the helper socket below exists only where the helper is installed); a value
 # the caller already has wins.
-[ -n "${AGENT_SECRETS_URL:-}" ] || . "${DOTFILES_DIR}/agent-secrets/broker.env"
+if [ -z "${AGENT_SECRETS_URL:-}" ]; then
+    . "${DOTFILES_DIR}/agent-secrets/broker.env"
+    [ ! -f "${HOME}/.config/agent-secrets/env.local" ] || . "${HOME}/.config/agent-secrets/env.local"
+fi
 export AGENT_SECRETS_URL
 # A host session gets its broker proofs from the agent-secrets helper over this socket
 # (installers/agent-secrets.sh; the agent launchers register each session through
