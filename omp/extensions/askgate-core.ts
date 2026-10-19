@@ -11,9 +11,16 @@
 //     working directory and environment, its here-document still on stdin, under a 10 s limit,
 //     and reviews the JSON it prints. A dry-run that fails, times out or prints no JSON object is
 //     recorded as `error` and the call runs (the CLI refuses arguments it cannot parse, before it
-//     sends anything). A command joined to anything else (`dispatch ask …; echo`) is not a
-//     `dispatch` call under those rules and is not reviewed, nor is one carrying `--dry-run` or
-//     `--help`, which sends nothing.
+//     sends anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
+//     reviewed.
+//   - A `bash` call that holds a scoped `dispatch` write those rules cannot read — joined to
+//     anything else (`cd x && dispatch ask …`, `dispatch ask … 2>&1 | tail`, `cat > f <<EOF …;
+//     dispatch ask --spec-file f`), or one using an unquoted here-document, a redirect or an
+//     expansion — is refused before anything in it runs, whatever the mode, with a reason telling
+//     the agent to send that `dispatch` command again on its own (`unreadableDispatchWrite`, a
+//     quote- and here-document-aware scan for a scoped `dispatch` at a command position). The
+//     entry reads `unreadable`; it never counts toward the halt. A kill, a halt, or a session the
+//     gate would skip (no `@askgate` model, a primary on another provider) lets it run.
 //   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
 //     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
@@ -41,15 +48,19 @@
 //     `bash` command whatever the gate decides (the CLI would refuse it), and the call runs
 //     unasked; the agent is told its rebuttal was recorded and removed before sending. At most
 //     64 unspent device rebuttals are remembered.
-//   - halted: three consecutive failures to reach a verdict (no model, timeout, error, no
-//     parsable answer) stop the gate for the session, with one UI notice. The halt, the
-//     count, the breaker and the rebuttals reset on session_switch and session_branch.
+//   - halted: three consecutive failures to reach a verdict (no model, timeout, every model of the
+//     chain erroring, no parsable answer) stop the gate for the session, with one UI notice. The
+//     halt, the count, the breaker and the rebuttals reset on session_switch and session_branch.
 //   - breaker: two revises on one target (the device plus its issue/ask/artifact/project
 //     values) send the third attempt unasked, and say so; the second revise already warns that
 //     it will. An allow, a rebuttal or a trip resets the target.
 //   - unavailable / skipped: no model for `@askgate`, or a session whose primary model is on
 //     another provider than the gate's: nothing is rendered or sent, and the call runs.
-//   - verdict: `@askgate` (modelRoles.askgate) is asked once, raced against the deadline. Its
+//   - verdict: `@askgate` (modelRoles.askgate) is asked once, raced against the deadline. A model
+//     that answers with an error (a provider 404 or 5xx) hands the request to the next model of
+//     the role's retry.fallbackChains, as omp resolves it (`fallbackModels`, bound in the entry),
+//     within the same deadline and on the primary's provider only; the entry records the model
+//     that answered as `model` and each one that failed first in `failedModels`. Its
 //     system prompt is askgate-system.md and the charter, nothing else. The user message
 //     (askgate-request.md) carries the agent under review as data: its system prompt and the
 //     newest 256 KiB of its context (the fork's buildSessionContext), every piece XML-escaped
@@ -103,7 +114,9 @@ const GATE_REASON_MAX_BYTES = 2 * 1024;
 const GATE_BREAKER_REVISES = 2;
 const GATE_HALT_AFTER_FAILURES = 3;
 export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
-const MODEL_ROLE = "@askgate";
+/** The modelRoles entry the gate asks; its retry.fallbackChains chain is walked on a model error. */
+export const GATE_ROLE = "askgate";
+const MODEL_ROLE = `@${GATE_ROLE}`;
 export const GATE_EFFORT = "high";
 const SLUG = "askgate";
 const REBUTTAL_CAP = 64;
@@ -124,10 +137,11 @@ export interface GateEntry {
 	toolCallId: string;
 	/**
 	 * `revise`: the gate did not pass the call as sent (a revise verdict, or in block mode a call given up
-	 * without a verdict). A call was refused exactly when `verdictMode` is `block` and this is `revise`.
+	 * without a verdict, or in any mode a command it cannot read). A call was refused exactly when this is
+	 * `revise` and either `verdictMode` is `block` or `outcome` is `unreadable`.
 	 */
 	decision: "allow" | "revise";
-	outcome: "verdict" | "rebuttal" | "breaker" | "timeout" | "error" | "no-verdict" | "unavailable" | "halted" | "killed" | "skipped" | "abandoned" | "shutdown";
+	outcome: "verdict" | "rebuttal" | "breaker" | "timeout" | "error" | "no-verdict" | "unavailable" | "halted" | "killed" | "skipped" | "abandoned" | "shutdown" | "unreadable";
 	verdictMode: Exclude<Mode, "off">;
 	reason?: string;
 	rebuttal?: string;
@@ -139,13 +153,17 @@ export interface GateEntry {
 	revisesForKey: number;
 	argsDigest: string;
 	promptBytes?: number;
-	/** `provider/id` that `@askgate` resolved to, on every entry that reached the model call. */
+	/** `provider/id` that answered (or, with no answer, the last one asked), on every entry that reached the model call. */
 	model?: string;
+	/** Each model of the chain that answered with an error before `model` was asked, with that error. */
+	failedModels?: Array<{ model: string; error: string }>;
 	/** The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's handler ceiling. */
 	deadlineMs?: number;
 	/** Every attempt's spend, the aborted one included. */
 	usage?: Usage;
 }
+/** A model as the gate passes it around: the fork's full Model, of which the core reads only these. */
+export type GateModel = { provider: string; id: string };
 export interface CompleteRequest { ctx: unknown; model: unknown; system: string; user: string; sessionId: string; signal: AbortSignal }
 export type Completion = { text: string; error?: string; usage?: Usage };
 export interface DryRunOptions { cwd: string; env: Record<string, string | undefined>; timeoutMs: number; signal?: AbortSignal }
@@ -160,6 +178,12 @@ interface Deps {
 	/** Appends to a file; serves OMP_ASKGATE_DUMP. */
 	appendFile: (p: string, text: string) => void;
 	complete: (req: CompleteRequest) => Promise<Completion>;
+	/**
+	 * The models after `primary` in the gate role's retry.fallbackChains chain, in the order omp walks
+	 * it, resolved to the session's available models; empty when the chain is empty or model fallback
+	 * is off. Bound in the entry to omp's own chain resolution.
+	 */
+	fallbackModels: (ctx: GateCtx, primary: GateModel) => readonly GateModel[];
 	charterPath: string;
 	/** The primary's context as its model sees it: the fork's buildSessionContext over this session's branch. */
 	contextMessages: (ctx: GateCtx) => readonly Message[];
@@ -182,9 +206,9 @@ type GateCtx = {
 	hasUI: boolean;
 	ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
 	getSystemPrompt(): string[];
-	models: { resolve(spec: string): { provider: string; id: string } | undefined };
+	models: { resolve(spec: string): GateModel | undefined };
 	/** The session's primary model. */
-	model?: { provider: string; id: string };
+	model?: GateModel;
 	sessionManager: { getSessionId(): string };
 	/** The session's working directory, against which a `bash` call's `cwd` resolves. */
 	cwd: string;
@@ -382,6 +406,134 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
 		dryRunScript: withHead([program.raw, name.raw, "--dry-run", ...rest]),
 		...(rebuttal === undefined ? {} : { rebuttal }),
 	};
+}
+
+/** Words that may stand before a command's name without being it: assignments are matched apart. */
+const COMMAND_PREFIXES: Record<string, true> = { "!": true, "{": true, then: true, do: true, else: true, elif: true, if: true, while: true, until: true, time: true, command: true, exec: true, nohup: true, env: true, timeout: true };
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * The words of each simple command in a `bash` command, quotes removed, as far as a character scan
+ * can tell them apart: a new command starts at an unquoted newline, `;`, `&`, `|`, `(`, `)`, `$(`
+ * or backtick (a `&` inside `2>&1` or `&>` is a redirect, not a separator). Single and double
+ * quotes and backslashes are honoured, a comment runs to the line's end, and a here-document body
+ * is skipped, so text a command only writes (`cat > f <<EOF … EOF`, `echo "dispatch ask"`) is
+ * never a command. Not a shell parser: a command substitution inside double quotes stays text.
+ */
+function commandWords(command: string): string[][] {
+	const segments: string[][] = [];
+	const pending: Array<{ delimiter: string; stripTabs: boolean }> = [];
+	let words: string[] = [];
+	let word: string | undefined;
+	let quote: '"' | "'" | undefined;
+	const endWord = () => {
+		if (word !== undefined) words.push(word);
+		word = undefined;
+	};
+	const endSegment = () => {
+		endWord();
+		if (words.length > 0) segments.push(words);
+		words = [];
+	};
+	/** Past the bodies of the here-documents opened on the line that ended just before `from`. */
+	const skipBodies = (from: number): number => {
+		let at = from;
+		for (const { delimiter, stripTabs } of pending.splice(0)) {
+			while (at < command.length) {
+				const end = command.indexOf("\n", at);
+				const line = command.slice(at, end === -1 ? command.length : end);
+				at = end === -1 ? command.length : end + 1;
+				if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) break;
+			}
+		}
+		return at;
+	};
+	for (let i = 0; i < command.length; i++) {
+		const c = command[i];
+		if (quote === "'") {
+			if (c === "'") quote = undefined;
+			else word += c;
+			continue;
+		}
+		if (quote === '"') {
+			if (c === '"') quote = undefined;
+			else if (c === "\\" && '$`"\\\n'.includes(command[i + 1] ?? "")) {
+				if (command[i + 1] !== "\n") word += command[i + 1];
+				i++;
+			} else word += c;
+			continue;
+		}
+		if (c === "\\") {
+			if (command[i + 1] !== "\n") word = (word ?? "") + (command[i + 1] ?? "");
+			i++;
+		} else if (c === "'" || c === '"') {
+			quote = c;
+			word ??= "";
+		} else if (c === "#" && word === undefined) {
+			const end = command.indexOf("\n", i);
+			i = (end === -1 ? command.length : end) - 1;
+		} else if (c === "\n") {
+			endSegment();
+			i = skipBodies(i + 1) - 1;
+		} else if (c === " " || c === "\t") {
+			endWord();
+		} else if (c === "<" && command[i + 1] === "<" && command[i + 2] !== "<") {
+			// A here-document opener: its delimiter, quotes removed, ends the body that starts on the next line.
+			endWord();
+			i += 2;
+			const stripTabs = command[i] === "-";
+			if (stripTabs) i++;
+			while (command[i] === " " || command[i] === "\t") i++;
+			let delimiter = "";
+			for (; i < command.length && !" \t\n;&|<>()".includes(command[i]); i++) if (command[i] !== "'" && command[i] !== '"' && command[i] !== "\\") delimiter += command[i];
+			pending.push({ delimiter, stripTabs });
+			i--;
+		} else if (c === "$" && command[i + 1] === "(") {
+			endSegment();
+			i++;
+		} else if (c === "&" && (command[i - 1] === ">" || command[i - 1] === "<" || command[i + 1] === ">")) {
+			endWord();
+		} else if (";&|()`".includes(c)) {
+			endSegment();
+		} else if (c === "<" || c === ">") {
+			endWord();
+		} else {
+			word = (word ?? "") + c;
+		}
+	}
+	endSegment();
+	return segments;
+}
+
+/** A scoped `dispatch` write the gate cannot review: the tool it calls and the command's name. */
+export interface UnreadableCommand { tool: string; label: string }
+
+/**
+ * A scoped `dispatch` write anywhere in a `bash` command, found at a command's position (after any
+ * assignments and prefixes such as `env` or `timeout 30`); one carrying `--dry-run` or `--help`, or
+ * a `dispatch issue` without `--spec`/`--spec-file`, sends nothing for review and is not one. Only
+ * for a command `scopedCommand` could not read.
+ */
+export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
+	if (typeof command !== "string" || !command.includes("dispatch")) return undefined;
+	for (const words of commandWords(command)) {
+		let at = 0;
+		while (at < words.length) {
+			const prefix = words[at];
+			if (ASSIGNMENT.test(prefix)) at++;
+			else if (Object.hasOwn(COMMAND_PREFIXES, prefix)) {
+				at++;
+				if (prefix === "env" || prefix === "timeout") while (words[at]?.startsWith("-")) at++;
+				if (prefix === "timeout") at++;
+			} else break;
+		}
+		const [program, name, ...flags] = words.slice(at);
+		if (program?.split("/").at(-1) !== "dispatch" || name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name)) continue;
+		if (flags.some(flag => NO_SEND_FLAGS.includes(flag))) continue;
+		if (name === SPEC_ONLY_COMMAND && !flags.some(flag => SPEC_FLAGS.includes(flag.split("=", 1)[0]))) continue;
+		return { tool: `dispatch_${name.replaceAll("-", "_")}`, label: `dispatch ${name}` };
+	}
+	return undefined;
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
@@ -630,6 +782,9 @@ const renderRebuttalAck = (rebuttal: string, override: Override) =>
 	`<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
 const renderBreakerAck = () =>
 	`<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
+/** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
+const renderUnreadable = (label: string) =>
+	`AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it is the whole bash call. Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own: no \`cd … &&\`, no pipe or \`2>&1\`, no \`;\` and no other command in the same call (set the working directory with the bash tool's \`cwd\`). Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
 	return function askGate(pi: Pi): void {
@@ -762,9 +917,26 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 
 			// Raced from handler entry, so the render above counts against the runner's ceiling too.
 			const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
-			const request = { ctx, model, system, user, sessionId: ctx.sessionManager.getSessionId() };
-			const answer = await ask(request, event.toolCallId, Math.max(0, deadlineMs - (deps.now() - started)));
-			const called = { promptBytes, model: `${model.provider}/${model.id}`, deadlineMs, ...(answer.usage ? { usage: answer.usage } : {}) };
+			const sessionId = ctx.sessionManager.getSessionId();
+			// A model that answers with an error hands the request to the next one in the role's chain, inside
+			// the same deadline. Only models on the primary's provider are asked: the transcript stays there.
+			const chain = [model, ...deps.fallbackModels(ctx, model).filter(next => next.provider === model.provider)];
+			const failedModels: Array<{ model: string; error: string }> = [];
+			const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+			let billed = false;
+			let answer: Answer = { kind: "error", reason: "no model asked" };
+			let asked = model;
+			for (const next of chain) {
+				asked = next;
+				answer = await ask({ ctx, model: next, system, user, sessionId }, event.toolCallId, Math.max(0, deadlineMs - (deps.now() - started)));
+				if (answer.usage) {
+					billed = true;
+					for (const k of Object.keys(usage) as Array<keyof Usage>) usage[k] += answer.usage[k];
+				}
+				if (answer.kind !== "error" || next === chain.at(-1)) break;
+				failedModels.push({ model: `${next.provider}/${next.id}`, error: answer.reason });
+			}
+			const called = { promptBytes, model: `${asked.provider}/${asked.id}`, deadlineMs, ...(failedModels.length > 0 ? { failedModels } : {}), ...(billed ? { usage } : {}) };
 			if (answer.kind === "timeout") return pass("timeout", called, "failure");
 			if (answer.kind === "abandoned" || answer.kind === "shutdown") return givenUp(answer.kind, called);
 			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...called }, "failure");
@@ -871,17 +1043,30 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				if (event.toolName === "write") return stripRebuttal(event);
 				if (event.toolName === "bash") {
 					const scoped = scopedCommand(event.input.command);
-					if (scoped === undefined) return undefined;
-					if (scoped.rebuttal !== undefined) revised = { ...event.input, command: scoped.command };
-					base = { ...identity(event), tool: scoped.tool, path: scoped.label };
-					const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
-					if ("cause" in run) decision = givenUp(run.cause);
-					// The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
-					else if ("failure" in run) decision = pass("error", { reason: run.failure });
-					else {
-						const key = breakerKey(scoped.tool, run.args);
-						base = { ...base, revisesForKey: breaker.reasons(key).length, argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex") };
-						decision = await decide({ toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args }, ctx, started, base, key, scoped.rebuttal, COMMAND_OVERRIDE);
+					if (scoped === undefined) {
+						const unreadable = unreadableDispatchWrite(event.input.command);
+						if (unreadable === undefined) return undefined;
+						// Refused before anything in the call runs, in every mode, when its resend would be reviewed;
+						// a kill, a halt, or no gate model on the primary's provider lets it run as the resend would.
+						base = { ...identity(event), tool: unreadable.tool, path: unreadable.label };
+						const model = ctx.models.resolve(MODEL_ROLE);
+						if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) decision = pass("killed");
+						else if (halted) decision = pass("halted");
+						else if (!model) decision = pass("unavailable");
+						else if (ctx.model?.provider !== model.provider) decision = pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
+						else decision = { fields: { decision: "revise", outcome: "unreadable" }, result: { block: true, reason: renderUnreadable(unreadable.label) }, effect: "none" };
+					} else {
+						if (scoped.rebuttal !== undefined) revised = { ...event.input, command: scoped.command };
+						base = { ...identity(event), tool: scoped.tool, path: scoped.label };
+						const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
+						if ("cause" in run) decision = givenUp(run.cause);
+						// The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
+						else if ("failure" in run) decision = pass("error", { reason: run.failure });
+						else {
+							const key = breakerKey(scoped.tool, run.args);
+							base = { ...base, revisesForKey: breaker.reasons(key).length, argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex") };
+							decision = await decide({ toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args }, ctx, started, base, key, scoped.rebuttal, COMMAND_OVERRIDE);
+						}
 					}
 				} else {
 					// A remembered rebuttal is spent by its device event, whatever happens to the call.

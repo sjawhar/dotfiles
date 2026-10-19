@@ -11,6 +11,7 @@ import {
 	type DryRunOptions,
 	type DryRunResult,
 	type GateEntry,
+	type GateModel,
 	GATE_CONTEXT_MAX_BYTES,
 	loadCharter,
 	type Message,
@@ -20,6 +21,7 @@ import {
 	renderTemplate,
 	renderTranscript,
 	scopedDevice,
+	unreadableDispatchWrite,
 } from "../askgate-core";
 import * as fx from "./askgate-fixtures";
 
@@ -65,6 +67,8 @@ function bind(opts: {
 	cwd?: string;
 	/** Runs a `dispatch` command's --dry-run; the real runner unless a test says otherwise. */
 	dryRun?: DryRunner;
+	/** The gate role's fallback chain after its first model, as the entry resolves it; none unless a test says otherwise. */
+	fallbacks?: Array<{ provider: string; id: string }>;
 } = {}) {
 	const handlers = new Map<string, Handler>();
 	const entries: GateEntry[] = [];
@@ -101,6 +105,7 @@ function bind(opts: {
 			calls.push(req);
 			return complete(req);
 		},
+		fallbackModels: () => opts.fallbacks ?? [],
 		charterPath: CHARTER_PATH,
 		contextMessages: () => (opts.context ?? (() => [fx.user("Post the comment.")]))(),
 		handlerCeilingMs: () => opts.ceiling ?? 120_000,
@@ -492,6 +497,55 @@ describe("fail-open", () => {
 	});
 });
 
+describe("fallback chain", () => {
+	const NOT_FOUND = "404 not_found_error model: claude-fable-5-1";
+	const FABLE_5 = { provider: "anthropic", id: "claude-fable-5" };
+	const OPUS = { provider: "anthropic", id: "claude-opus-5-5" };
+	/** The model a request went to: the gate passes the GateModel it resolved, so this is `provider/id`. */
+	const modelOf = (req: CompleteRequest): string => {
+		const model: GateModel = req.model as GateModel; // the core only ever passes a resolved GateModel
+		return `${model.provider}/${model.id}`;
+	};
+	/** Errors for the first model with a 404, then answers with `text` from any other. */
+	const failFirst = (text: string) => async (req: CompleteRequest): Promise<Completion> =>
+		modelOf(req) === `${MODEL.provider}/${MODEL.id}` ? { text: "", error: NOT_FOUND, usage: USAGE } : { text, usage: USAGE };
+
+	test("a 404 on the role's model asks the next model in its chain, and the entry names the one that answered", async () => {
+		const g = bind({ env: { OMP_ASKGATE: "block" }, fallbacks: [FABLE_5, OPUS], complete: failFirst(REVISE) });
+		const result = await g.device("t1", "dispatch_comment", COMMENT);
+		expect(result?.block).toBe(true);
+		expect(g.calls.map(modelOf)).toEqual(["anthropic/claude-fable-5-1", "anthropic/claude-fable-5"]);
+		expect(g.entries).toMatchObject([{ outcome: "verdict", decision: "revise", model: "anthropic/claude-fable-5", failedModels: [{ model: "anthropic/claude-fable-5-1", error: NOT_FOUND }] }]);
+		// Both attempts were billed.
+		expect(g.entries[0].usage?.input).toBe(USAGE.input * 2);
+	});
+	test("404s that a later model in the chain answers never halt the gate", async () => {
+		const g = bind({ fallbacks: [FABLE_5], complete: failFirst(ALLOW) });
+		for (const id of ["a", "b", "c", "d"]) await g.device(id, "dispatch_comment", COMMENT);
+		expect(g.entries.map(e => e.outcome)).toEqual(["verdict", "verdict", "verdict", "verdict"]);
+		expect(g.notices).toHaveLength(0);
+	});
+	test("when every model of the chain errors, the last error is recorded and counts once toward the halt", async () => {
+		const g = bind({ fallbacks: [FABLE_5], complete: async req => ({ text: "", error: `500 from ${modelOf(req)}` }) });
+		for (const id of ["a", "b", "c", "d"]) await g.device(id, "dispatch_comment", COMMENT);
+		expect(g.entries.map(e => e.outcome)).toEqual(["error", "error", "error", "halted"]);
+		expect(g.entries[0]).toMatchObject({ reason: "500 from anthropic/claude-fable-5", model: "anthropic/claude-fable-5", failedModels: [{ model: "anthropic/claude-fable-5-1" }] });
+		expect(g.calls).toHaveLength(6);
+	});
+	test("a fallback on another provider than the primary's is never sent the transcript", async () => {
+		const g = bind({ fallbacks: [{ provider: "openai", id: "gpt-5.5" }, FABLE_5], complete: failFirst(ALLOW) });
+		await g.device("t1", "dispatch_comment", COMMENT);
+		expect(g.calls.map(modelOf)).toEqual(["anthropic/claude-fable-5-1", "anthropic/claude-fable-5"]);
+		expect(g.entries).toMatchObject([{ outcome: "verdict", model: "anthropic/claude-fable-5" }]);
+	});
+	test("a timeout is not handed down the chain: the deadline covers the whole walk", async () => {
+		const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "30" }, fallbacks: [FABLE_5], complete: untilAborted });
+		await g.device("t1", "dispatch_comment", COMMENT);
+		expect(g.calls).toHaveLength(1);
+		expect(g.entries).toMatchObject([{ outcome: "timeout", model: "anthropic/claude-fable-5-1" }]);
+	});
+});
+
 describe("deadline and abandonment", () => {
 	test("the deadline sits under the runner's handler ceiling, and each entry records it", async () => {
 		const defaults = bind({ ceiling: 30_000 });
@@ -747,19 +801,68 @@ console.log(JSON.stringify(args, null, 2));
 		expect(g.calls).toHaveLength(0);
 		expect(g.entries).toHaveLength(0);
 	});
-	test("a dispatch ask joined to another command is not treated as a dispatch call", async () => {
-		const g = bind({ env: STUB, cwd: work });
-		for (const command of [
+	test("a scoped dispatch write the gate cannot read is refused before it runs, in every mode, with the resend reason", async () => {
+		const compound = [
 			"dispatch ask --issue X-1 --question q; echo",
 			"dispatch ask --issue X-1 --question q && make",
-			"dispatch ask --issue X-1 --question q | cat",
+			"dispatch ask --issue X-1 --question q 2>&1 | tail -3",
 			`${ASK}\necho done`,
 			"cd /tmp && dispatch ask --issue X-1 --question q",
-		]) {
-			expect(await g.bash("b1", command)).toBeUndefined();
+			"cat > /tmp/q.md <<EOF\nShould it wait?\nEOF\ndispatch ask --issue X-1 --question-file /tmp/q.md",
+			"cd ~/x && FOO=1 timeout 30 dispatch comment --issue X-1 --body \"$(cat note.md)\"",
+			"dispatch issue --project P --title t --spec \"$SPEC\"",
+			"(cd sub; /usr/local/bin/dispatch doc-edit --issue X-1 --artifact spec --ops-json x)",
+		];
+		for (const mode of ["warn", "block"]) {
+			const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+			for (const [index, command] of compound.entries()) {
+				const result = await g.bash(`b${index}`, command);
+				expect(result?.block).toBe(true);
+				expect(result?.reason).toMatch(/send that `dispatch (ask|comment|issue|doc-edit)` again on its own/);
+				expect(result?.reason).toContain("Nothing in the call ran");
+			}
+			expect(g.dryRuns).toHaveLength(0);
+			expect(g.calls).toHaveLength(0);
+			expect(g.entries.map(e => [e.tool, e.outcome, e.decision])).toEqual([
+				...Array(5).fill(["dispatch_ask", "unreadable", "revise"]),
+				["dispatch_ask", "unreadable", "revise"],
+				["dispatch_comment", "unreadable", "revise"],
+				["dispatch_issue", "unreadable", "revise"],
+				["dispatch_doc_edit", "unreadable", "revise"],
+			]);
+			expect(g.notices).toHaveLength(0);
 		}
-		expect(g.dryRuns).toHaveLength(0);
+	});
+	test("a compound command whose dispatch sends nothing, or names dispatch only as text, is not refused", async () => {
+		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+		for (const command of [
+			"cd /tmp && dispatch ask --help",
+			"dispatch ask --dry-run --issue X-1 --question q | jq .",
+			"dispatch search --query 'ask' && dispatch read --issue X-1",
+			"cd /tmp && dispatch issue --project P --title t",
+			"echo 'dispatch ask --issue X-1' && grep -n 'dispatch comment' notes.md",
+			"cat > /tmp/n.md <<'EOF'\ndispatch ask --issue X-1 --question q\nEOF\necho written",
+			"rg dispatch src | head  # dispatch comment later",
+		]) {
+			expect(await g.bash("b", command)).toBeUndefined();
+		}
 		expect(g.entries).toHaveLength(0);
+	});
+	test("a kill, a halt or a session the gate would skip lets a compound write run", async () => {
+		const compound = "cd /tmp && dispatch comment --issue X-1 --body b";
+		const killed = bind({ env: { OMP_ASKGATE: "block" }, files: { [OVERLAY]: "advisor:\n  disableRoster: [askgate]\n" } });
+		expect(await killed.bash("k", compound)).toBeUndefined();
+		const elsewhere = bind({ env: { OMP_ASKGATE: "block" }, primary: { provider: "openai-codex", id: "gpt-5.5" } });
+		expect(await elsewhere.bash("s", compound)).toBeUndefined();
+		const halted = bind({ env: { OMP_ASKGATE: "block", OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: untilAborted });
+		for (const id of ["a", "b", "c"]) await halted.device(id, "dispatch_comment", COMMENT);
+		expect(await halted.bash("h", compound)).toBeUndefined();
+		expect([killed, elsewhere, halted].map(g => g.entries.at(-1)?.outcome)).toEqual(["killed", "skipped", "halted"]);
+	});
+	test("unreadableDispatchWrite finds the write a here-document or quotes do not hide", () => {
+		expect(unreadableDispatchWrite("cat <<'EOF' > f\ndispatch ask --issue X\nEOF\ndispatch comment --issue X --body-file f")).toEqual({ tool: "dispatch_comment", label: "dispatch comment" });
+		expect(unreadableDispatchWrite("git commit -m 'dispatch ask'; dispatch message --issue X --body \"a; b\" | cat")).toEqual({ tool: "dispatch_message", label: "dispatch message" });
+		expect(unreadableDispatchWrite("echo \"run dispatch ask later\"")).toBeUndefined();
 	});
 	test("dispatch issue is reviewed with --spec or --spec-file and not without", async () => {
 		const g = bind({ env: STUB, cwd: work });
@@ -1010,25 +1113,52 @@ describe("askgate.ts, the entry", () => {
 	const completions: Array<Record<string, unknown>> = [];
 	let attempts: Attempt[] = [];
 	let throwAfterAttempts = false;
+	/** Models the stubbed provider answers with a 404, as Anthropic did for claude-fable-5-1. */
+	const notFound = new Set<string>();
 	mock.module("@oh-my-pi/pi-ai", () => ({
-		completeSimple: async (_model: unknown, _context: unknown, options: Record<string, unknown> & { onAttempt?: (m: unknown) => void }) => {
-			completions.push(options);
+		completeSimple: async (model: { id: string }, _context: unknown, options: Record<string, unknown> & { onAttempt?: (m: unknown) => void }) => {
+			completions.push({ ...options, modelId: model.id });
+			if (notFound.has(model.id)) return { content: [], usage: answer("", 0, 0, 0).usage, stopReason: "error", errorMessage: `404 not_found_error model: ${model.id}` };
 			for (const attempt of attempts) options.onAttempt?.(attempt);
 			if (throwAfterAttempts) throw new Error("provider went away");
 			return attempts.at(-1);
 		},
 		retryTransientCompletion: (run: () => Promise<unknown>) => run(),
 	}));
-	// The entry's other fork imports: the primary's context (one user message) and the handler ceiling.
-	mock.module("@oh-my-pi/pi-coding-agent", () => ({ buildSessionContext: () => ({ messages: [fx.user("Post it.")] }), settings: {} }));
+	// The entry's other fork imports: the primary's context (one user message), the handler ceiling, and
+	// omp's chain resolution, stubbed as a lookup in CHAINS keyed by `provider/id` (the real resolution is
+	// exercised by the smoke run in a real omp).
+	const CHAINS: Record<string, string[]> = {
+		"anthropic/claude-fable-5-1": ["anthropic/claude-fable-5", "openai/gpt-5.5", "anthropic/claude-opus-5-5"],
+		"anthropic/claude-fable-5": ["anthropic/claude-opus-5-5", "anthropic/claude-opus-5"],
+	};
+	let modelFallback = true;
+	const stubModel = (selector: string) => {
+		const [provider, id] = selector.split("/");
+		return { provider, id };
+	};
+	mock.module("@oh-my-pi/pi-coding-agent", () => ({
+		buildSessionContext: () => ({ messages: [fx.user("Post it.")] }),
+		settings: { getModelRole: (role: string) => (role === "askgate" ? "anthropic/claude-fable-5-1:high" : undefined) },
+	}));
 	mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({ cfgExtensionHandlersToolCallTimeoutMs: { get: () => 120_000 } }));
 	mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/runner", () => ({ EXTENSION_HANDLER_TIMEOUT_MS: 30_000 }));
+	mock.module("@oh-my-pi/pi-coding-agent/session/settings", () => ({ cfgRetry: { get: () => ({ enabled: true, modelFallback }) } }));
+	mock.module("@oh-my-pi/pi-coding-agent/config/model-settings", () => ({ cfgDisabledProviders: { get: () => [] } }));
+	mock.module("@oh-my-pi/pi-coding-agent/config/model-resolver", () => ({ resolveModelOverride: ([raw]: string[]) => ({ model: stubModel(raw) }) }));
+	mock.module("@oh-my-pi/pi-coding-agent/session/retry-fallback-chains", () => ({
+		getRetryFallbackChains: () => CHAINS,
+		resolveRetryFallbackChainKey: (_context: unknown, _selector: string, model: { provider: string; id: string }) => (CHAINS[`${model.provider}/${model.id}`] ? `${model.provider}/${model.id}` : undefined),
+		findRetryFallbackCandidates: (_context: unknown, key: string) => CHAINS[key].map(raw => ({ raw })),
+	}));
 	const saved = { ...process.env };
 	const dirs: string[] = [];
 	afterEach(() => {
 		completions.length = 0;
 		attempts = [answer(ALLOW, 5, 7, 0.25)];
 		throwAfterAttempts = false;
+		notFound.clear();
+		modelFallback = true;
 		for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
 		Object.assign(process.env, saved);
 		for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -1077,11 +1207,37 @@ describe("askgate.ts, the entry", () => {
 		expect(entries).toMatchObject([{ outcome: "verdict", usage: { input: 80_000, output: 3500, cacheRead: 0, cacheWrite: 0, cost: 0.98 } }]);
 	});
 	test("a completion that throws still records what its attempts spent", async () => {
+		modelFallback = false;
 		attempts = [answer("partial", 40_000, 100, 0.41)];
 		throwAfterAttempts = true;
 		const { result, entries } = await gateOnce();
 		expect(result).toBeUndefined();
 		expect(entries).toMatchObject([{ outcome: "error", reason: "provider went away", usage: { input: 40_000, output: 100, cost: 0.41 } }]);
+	});
+	test("a 404 on the askgate role's model walks the configured chain, and its own chain after it, to the model that answers", async () => {
+		notFound.add("claude-fable-5-1");
+		notFound.add("claude-fable-5");
+		const { result, entries } = await gateOnce();
+		expect(result).toBeUndefined();
+		// fable-5-1 → its chain's fable-5 → fable-5's own chain's opus-5-5; openai/gpt-5.5 is on another provider and never asked.
+		expect(completions.map(c => c.modelId)).toEqual(["claude-fable-5-1", "claude-fable-5", "claude-opus-5-5"]);
+		expect(entries).toMatchObject([
+			{
+				outcome: "verdict",
+				model: "anthropic/claude-opus-5-5",
+				failedModels: [
+					{ model: "anthropic/claude-fable-5-1", error: "404 not_found_error model: claude-fable-5-1" },
+					{ model: "anthropic/claude-fable-5", error: "404 not_found_error model: claude-fable-5" },
+				],
+			},
+		]);
+	});
+	test("with retry.modelFallback off, a 404 is the gate's error and no other model is asked", async () => {
+		notFound.add("claude-fable-5-1");
+		modelFallback = false;
+		const { entries } = await gateOnce();
+		expect(completions.map(c => c.modelId)).toEqual(["claude-fable-5-1"]);
+		expect(entries).toMatchObject([{ outcome: "error", model: "anthropic/claude-fable-5-1" }]);
 	});
 	test("the prompt dump is created readable by its owner only, whatever the umask", async () => {
 		const dump = path.join(scratch("askgate-dump-"), "dump.txt");

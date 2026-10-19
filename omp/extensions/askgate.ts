@@ -1,23 +1,64 @@
 // Entry of the AskGate pre-send gate; the behaviour is described and implemented in
-// askgate-core.ts. This file binds the fork's objects the core needs — the completion, and
-// buildSessionContext for the primary's context — so the core imports nothing from the fork and
-// runs under `bun test` with fakes. (Omp's loader would resolve the fork's packages from any
-// module the entry imports; keeping them here is for the tests, not for the loader.) A transient
-// provider failure gets one retry inside the gate's own deadline, and a failure never falls back to
-// another model. The installer links only this file; askgate-core.ts, the prompt files and
-// ../watchdog/askgate.md resolve from its real path.
+// askgate-core.ts. This file binds the fork's objects the core needs — the completion, the
+// gate role's retry.fallbackChains chain, and buildSessionContext for the primary's context — so the
+// core imports nothing from the fork and runs under `bun test` with fakes. (Omp's loader would
+// resolve the fork's packages from any module the entry imports; keeping them here is for the tests,
+// not for the loader.) A transient provider failure gets one retry inside the gate's own deadline; a
+// model that still fails hands the request to the next model of the chain, which the core walks.
+// The chain comes from omp's own resolution (`resolveRetryFallbackChainKey` and
+// `findRetryFallbackCandidates`, walked depth-first into each fallback's own chain as the eval
+// `completion()` bridge walks it), because `ctx.models.resolve` returns the role's first model only.
+// The installer links only this file; askgate-core.ts, the prompt files and ../watchdog/askgate.md
+// resolve from its real path.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildSessionContext, type ExtensionAPI, type ReadonlySessionManager, settings } from "@oh-my-pi/pi-coding-agent";
+import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { EXTENSION_HANDLER_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { cfgExtensionHandlersToolCallTimeoutMs } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+import { findRetryFallbackCandidates, getRetryFallbackChains, type RetryFallbackResolutionContext, resolveRetryFallbackChainKey } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import { cfgRetry } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { type Api, type ApiKeyResolver, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
-import { type CompleteRequest, type Completion, createAskGate, GATE_EFFORT, type Message, spawnDryRun, type Usage } from "./askgate-core";
+import { type CompleteRequest, type Completion, createAskGate, GATE_EFFORT, GATE_ROLE, type GateModel, type Message, spawnDryRun, type Usage } from "./askgate-core";
 
 // The core passes the fork's objects through untyped: ctx is the ExtensionContext, whose modelRegistry and
 // sessionManager this reads, and model is the full Model<Api> ctx.models.resolve handed back.
-type Ctx = { modelRegistry: { resolver: (model: Model<Api>, sessionId: string) => ApiKeyResolver }; sessionManager: ReadonlySessionManager };
+type Registry = {
+	resolver: (model: Model<Api>, sessionId: string) => ApiKeyResolver;
+	getAvailable: () => Model<Api>[];
+	find: (provider: string, id: string) => Model<Api> | undefined;
+	hasProvider: (provider: string) => boolean;
+};
+type Ctx = { modelRegistry: Registry; sessionManager: ReadonlySessionManager };
+
+/** The models after `primary` in the gate role's chain, each followed by its own chain, deduplicated; none when model fallback is off. */
+function fallbackModels(ctx: unknown, primary: GateModel): GateModel[] {
+	const retry = cfgRetry.get(settings);
+	if (!retry.enabled || !retry.modelFallback) return [];
+	const registry = (ctx as Ctx).modelRegistry;
+	const context: RetryFallbackResolutionContext = { chains: getRetryFallbackChains(settings), getModelRole: role => settings.getModelRole(role), modelLookup: registry };
+	const disabled = new Set(cfgDisabledProviders.get(settings));
+	const seen = new Set([`${primary.provider}/${primary.id}`]);
+	const expanded = new Set<string>();
+	const out: Model<Api>[] = [];
+	const walk = (selector: string, model: Model<Api>, roleHint: string | undefined) => {
+		if (expanded.has(selector)) return;
+		expanded.add(selector);
+		const chainKey = resolveRetryFallbackChainKey(context, selector, model, roleHint);
+		if (!chainKey) return;
+		for (const entry of findRetryFallbackCandidates(context, chainKey, selector, model, { allowMissingPrimary: true })) {
+			const candidate = resolveModelOverride([entry.raw], registry, settings).model;
+			if (!candidate || disabled.has(candidate.provider) || seen.has(`${candidate.provider}/${candidate.id}`)) continue;
+			seen.add(`${candidate.provider}/${candidate.id}`);
+			out.push(candidate);
+			walk(entry.raw, candidate, undefined);
+		}
+	};
+	walk(settings.getModelRole(GATE_ROLE) ?? `${primary.provider}/${primary.id}`, primary as Model<Api>, GATE_ROLE);
+	return out;
+}
 
 async function complete({ ctx, model, system, user, sessionId, signal }: CompleteRequest): Promise<Completion> {
 	const full = model as Model<Api>;
@@ -85,6 +126,7 @@ export default createAskGate({
 	// The dump holds the primary system prompt and transcript: owner-only, like the session files.
 	appendFile: appendDump,
 	complete,
+	fallbackModels,
 	charterPath: path.join(path.dirname(fs.realpathSync(import.meta.path)), "..", "watchdog", "askgate.md"),
 	handlerCeilingMs,
 	dryRun: spawnDryRun,
