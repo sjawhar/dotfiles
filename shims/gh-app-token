@@ -13,6 +13,10 @@ Git credential-helper usage (wired up in gh-app-routes.gitconfig):
 Direct usage prints a raw installation token:
   gh-app-token <profile> [--owner <login>]
 
+A returned installation token comes from a cache and may have as little as five minutes
+left (TOKEN_REFRESH_MARGIN). A caller that copies it elsewhere refreshes the copy at least
+every four minutes, or asks again just before each use.
+
 A profile lives in git config and needs the app and its key; a fallback secret
 is optional:
   [gh-app "<profile>"]
