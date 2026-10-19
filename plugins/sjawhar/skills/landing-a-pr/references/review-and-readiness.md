@@ -116,7 +116,9 @@ Ask the tester to plant the defect where the guard does not look; see
 
 Verdicts live on the PR. Include each PR-comment URL, not an agent message or a
 session file. If posting failed, the reviewer must say so and post the artifact
-before it is cited. Bind the verdict to a commit ID, never a branch name.
+before it is cited. Bind the verdict to a commit ID, never a branch name. In a
+repository another person maintains, verdicts live on the tracking issue instead,
+and the PR carries one line linking them.
 
 Under a shared App identity, GitHub rejects both APPROVE and REQUEST_CHANGES on
 its own PR. Do not route around that as a permissions defect. Post a COMMENT

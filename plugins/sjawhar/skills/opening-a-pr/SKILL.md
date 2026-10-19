@@ -203,7 +203,9 @@ record. Never ask to omit acceptance. A named blocker that survives that work go
     `gh pr list --head <name>`, never from the tail of the create output. Before posting, complete step 8's cold-reader check and
     retain every repository-required field exactly once. A PR without current, observed end-to-end `## Verification`
     evidence is not merge-ready; test-suite and static-checker output — `pytest`, `basedpyright`, lint, a CI link — are
-    supporting evidence, not verification.
+    supporting evidence, not verification. In a repository another person maintains, write the body for them: what
+    changes on their production, the number measured on their setup, and how to roll back; `## Verification` and any
+    census go on the tracking issue, linked in one line.
 
     **The unit is a reviewable slice of one line of work, and it is sized before review, not after.** A PR heading for
     its ninth review round, or a diff in the thousands of lines, should have been split at the point where its pieces
