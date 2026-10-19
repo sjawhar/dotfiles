@@ -99,7 +99,11 @@ check_github_app() {
 }
 
 check_hawk() {
-    local errfile token rc email exp now ttl status
+    local errfile token rc email exp now ttl status models="$HOME/.omp/agent/models.local.yml"
+    if ! grep -qs 'hawk-token' "$models"; then
+        row hawk unused - - "grep hawk-token $models" "no model provider on this machine routes through Hawk"
+        return
+    fi
     errfile="$tmp/.hawk.err"
     token="$(timeout "$HAWK_TIMEOUT_S" hawk-token 2>"$errfile")"
     rc=$?
@@ -134,31 +138,33 @@ check_ant() {
     row anthropic_ant "$status" "${email:-unknown}" "${exp:-unknown}" "ant auth status"
 }
 
-# Taiga has no CLI (agent-c's `tl` is not installed here); its OAuth tokens
-# live in trajectory-labs.json. Decode the id_token's own exp - never print it
-# - and note the refresh_token lets the client refresh past that.
+# Taiga has no CLI; its OAuth tokens live in the client's own file, whose path differs by
+# company (taiga/auth.json at Theorem, trajectory-labs/taiga.json at Trajectory). Each file
+# present gets its own row. Decode the id_token's own exp - never print it - and note the
+# refresh_token lets the client refresh past that.
 check_taiga() {
-    local f tok exp now ttl status
-    f="$HOME/.config/trajectory-labs/taiga.json"
-    if [[ ! -f "$f" ]]; then
-        row taiga missing - - "$f" "no config file"
-        return
-    fi
-    tok="$(jq -r '.id_token // empty' "$f" 2>/dev/null)"
-    if [[ -z "$tok" ]]; then
-        row taiga unknown - - "$f" "config present, no id_token field"
-        return
-    fi
-    exp="$(JWT_FIELD_TOKEN="$tok" jwt_field exp)"
-    if [[ -z "$exp" ]]; then
-        row taiga unknown - - "$f" "id_token present, exp claim unreadable"
-        return
-    fi
-    now=$(date +%s)
-    ttl=$((exp - now))
-    if ((ttl > 0)); then status=live; else status=expired; fi
-    row taiga "$status" "trajectory-labs taiga client (no CLI; config only)" "$(iso "$exp")" "$f" \
-        "id_token only; refresh_token is also present and the taiga client refreshes on use"
+    local f tok exp now ttl status name found=0
+    for f in "$HOME/.config/taiga/auth.json" "$HOME/.config/trajectory-labs/taiga.json"; do
+        [[ -f "$f" ]] || continue
+        found=1
+        name="taiga_$(basename "$(dirname "$f")")"
+        tok="$(jq -r '.id_token // empty' "$f" 2>/dev/null)"
+        if [[ -z "$tok" ]]; then
+            row "$name" unknown - - "$f" "config present, no id_token field"
+            continue
+        fi
+        exp="$(JWT_FIELD_TOKEN="$tok" jwt_field exp)"
+        if [[ -z "$exp" ]]; then
+            row "$name" unknown - - "$f" "id_token present, exp claim unreadable"
+            continue
+        fi
+        now=$(date +%s)
+        ttl=$((exp - now))
+        if ((ttl > 0)); then status=live; else status=expired; fi
+        row "$name" "$status" "taiga client (no CLI; config only)" "$(iso "$exp")" "$f" \
+            "id_token only; refresh_token is also present and the taiga client refreshes on use"
+    done
+    ((found)) || row taiga missing - - "$HOME/.config/taiga/auth.json" "no taiga client config"
 }
 
 check_vercel() {
@@ -344,7 +350,7 @@ wait
 # from the files it wrote. An unmatched glob stays literal, and the loops below
 # skip a name with no row file.
 gws_rows=("$tmp"/google_workspace_*)
-order=(aws github_app anthropic_ant hawk taiga google_workspace "${gws_rows[@]##*/}" \
+order=(aws github_app anthropic_ant hawk taiga taiga_taiga taiga_trajectory-labs google_workspace "${gws_rows[@]##*/}" \
     gcloud vercel datadog_pup \
     fleetctl sentry kubectl secretsd_grants agent_secrets_broker modal dispatch)
 

@@ -116,7 +116,7 @@ class AgentAccess(unittest.TestCase):
         for row in rows:
             for field in ("name", "status", "identity", "expiry", "command", "detail"):
                 self.assertIn(field, row)
-            self.assertIn(row["status"], {"live", "expired", "missing", "unknown"})
+            self.assertIn(row["status"], {"live", "expired", "missing", "unknown", "unused"})
         self.assert_no_secrets(result.stdout)
 
     def test_rejects_unknown_flag(self) -> None:
@@ -179,6 +179,9 @@ class AgentAccess(unittest.TestCase):
             {"email": "sami@trajectorylabs.net", "exp": int(time.time()) + 3600}
         )
         write_stub(self.stub_dir, "hawk-token", f'echo "{hawk_jwt}"')
+        models = self.home / ".omp" / "agent"
+        models.mkdir(parents=True)
+        (models / "models.local.yml").write_text('apiKey: "!hawk-token-fast"\n')
         write_stub(
             self.stub_dir,
             "aws",
@@ -197,9 +200,8 @@ echo "               expires:        2099-01-01T00:00:00Z"
             self.stub_dir,
             "pup",
             r"""
-if [[ "$1 $2" == "auth status" ]]; then
-    echo "Authenticated for site: us5.datadoghq.com"
-    echo "Token expires in: 24m"
+if [[ "$1 $2 $3" == "--no-agent auth status" ]]; then
+    echo '{"authenticated":true,"site":"us5.datadoghq.com","expires_at":"2026-01-01T00:00:00Z"}'
     exit 0
 fi
 """,
@@ -274,7 +276,7 @@ fi
         self.assertEqual(rows["anthropic_ant"]["status"], "live")
         self.assertEqual(rows["github_app"]["status"], "live")
         self.assertIn("sjawhar", rows["github_app"]["identity"])
-        self.assertEqual(rows["taiga"]["status"], "expired")
+        self.assertEqual(rows["taiga_trajectory-labs"]["status"], "expired")
         self.assertEqual(rows["vercel"]["identity"], "sami-2219")
         self.assertEqual(rows["datadog_pup"]["status"], "live")
         self.assertEqual(rows["gcloud"]["status"], "live")
