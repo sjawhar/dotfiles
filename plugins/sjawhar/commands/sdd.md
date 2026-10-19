@@ -10,17 +10,19 @@ This contract overrides conflicting stock workflow details.
 
 Load `subagent-driven-development` and `using-subagents`. The coordinator owns the workflow:
 
-- **Plan:** the coordinator uses `writing-plans`; plan authorship is never delegated.
+- **Plan:** the coordinator uses `writing-plans` and owns the plan. The plan lives in the issue (its Dispatch document, or the GitHub issue body), never in a repository file or a pull request, whatever `writing-plans` says about where to save it. When the work has several independent avenues, dispatch one planner per avenue and integrate their plans.
 - **Implement or debug:** dispatch `task` with `agent: "deep"`.
 - **Review plans and PRs:** dispatch `task` with `agent: "reviewer"`.
 - **Bounded research or advice:** dispatch `task` with `agent: "oracle"`; it is read-only.
 
-This mapping is mandatory: never delegate plan authorship, substitute a cheap tier for a mapped
+This mapping is mandatory: never hand the plan to another session, substitute a cheap tier for a mapped
 role, or serialize disjoint work.
 
-The coordinator does not implement. Bounded research and advice may inform the plan or resolve a
-concrete gap, but do not restart an approved design or turn the researcher into a planner. Reuse
-existing specs, plans, and reviews; repair an actual gap, then re-review the affected work. A
+The coordinator does not implement. Write the plan's skeleton from what you already know first, then
+fan subagents out to fill the gaps it names; reading before a first draft exists is the stall to avoid.
+Bounded research and advice may inform the plan or resolve a concrete gap, but do not restart an
+approved design or turn the researcher into a planner. Reuse existing specs, plans, and reviews;
+repair an actual gap, then re-review the affected work. A
 `reviewer` gates every new or materially changed plan before implementation.
 
 ## Adopt the existing work first
