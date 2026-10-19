@@ -23,6 +23,7 @@ import {
 	scopedDevice,
 	unreadableDispatchWrite,
 } from "../askgate-core";
+import { draw } from "../experiments/gates";
 import * as fx from "./askgate-fixtures";
 
 /** Runs a `dispatch` command's --dry-run as the entry's binding does. */
@@ -69,6 +70,8 @@ function bind(opts: {
 	dryRun?: DryRunner;
 	/** The gate role's fallback chain after its first model, as the entry resolves it; none unless a test says otherwise. */
 	fallbacks?: Array<{ provider: string; id: string }>;
+	/** This session's askgate_block experiment arm, read on each call; off unless a test says otherwise. */
+	blockArm?: boolean | (() => boolean);
 } = {}) {
 	const handlers = new Map<string, Handler>();
 	const entries: GateEntry[] = [];
@@ -113,6 +116,7 @@ function bind(opts: {
 			dryRuns.push({ script, cwd: runOpts.cwd, timeoutMs: runOpts.timeoutMs });
 			return (opts.dryRun ?? core.spawnDryRun)(script, runOpts);
 		},
+		blockArm: () => (typeof opts.blockArm === "function" ? opts.blockArm() : (opts.blockArm ?? false)),
 	})(pi as never);
 	const ctx = {
 		agent: { kind: opts.kind ?? "main", id: "Main", name: "main", depth: 0 },
@@ -151,10 +155,39 @@ function bind(opts: {
 
 const COMMENT = { issue: "X-1", body: "The acceptance run started." };
 
-describe("parseMode (test 1)", () => {
-	test("undefined is warn and block is block", () => {
-		expect(parseMode(undefined)).toBe("warn");
+describe("mode (test 1)", () => {
+	test("OMP_ASKGATE unset defers to the session's arm; a set value is that mode", () => {
+		expect(parseMode(undefined)).toBeUndefined();
 		expect(parseMode("block")).toBe("block");
+	});
+	test("with OMP_ASKGATE unset, the askgate_block arm on makes the session block and off makes it warn", async () => {
+		const on = bind({ blockArm: true, complete: async () => ({ text: REVISE }) });
+		const blocked = await on.device("t1", "dispatch_comment", COMMENT);
+		expect(blocked?.block).toBe(true);
+		expect(on.entries).toMatchObject([{ outcome: "verdict", decision: "revise", verdictMode: "block" }]);
+		const off = bind({ blockArm: false, complete: async () => ({ text: REVISE }) });
+		const warned = await off.device("t1", "dispatch_comment", COMMENT);
+		expect(warned?.block).toBeUndefined();
+		expect(warned?.additionalContext).toContain("The call ran.");
+		expect(off.entries).toMatchObject([{ outcome: "verdict", decision: "revise", verdictMode: "warn" }]);
+	});
+	test("an explicit OMP_ASKGATE overrides the arm either way", async () => {
+		const warnOverArm = bind({ env: { OMP_ASKGATE: "warn" }, blockArm: true, complete: async () => ({ text: REVISE }) });
+		expect((await warnOverArm.device("t1", "dispatch_comment", COMMENT))?.block).toBeUndefined();
+		expect(warnOverArm.entries[0].verdictMode).toBe("warn");
+		const blockOverArm = bind({ env: { OMP_ASKGATE: "block" }, blockArm: false, complete: async () => ({ text: REVISE }) });
+		expect((await blockOverArm.device("t1", "dispatch_comment", COMMENT))?.block).toBe(true);
+		expect(blockOverArm.entries[0].verdictMode).toBe("block");
+		expect(bind({ env: { OMP_ASKGATE: "off" }, blockArm: true }).handlers.size).toBe(0);
+	});
+	test("the arm is read for each call, so a switch to a session in the other arm changes the mode", async () => {
+		let arm = false;
+		const g = bind({ blockArm: () => arm, complete: async () => ({ text: REVISE }) });
+		expect((await g.device("a", "dispatch_comment", { issue: "X-1", body: "one" }))?.block).toBeUndefined();
+		arm = true;
+		await g.event("session_switch");
+		expect((await g.device("b", "dispatch_comment", { issue: "X-2", body: "two" }))?.block).toBe(true);
+		expect(g.entries.map(e => e.verdictMode)).toEqual(["warn", "block"]);
 	});
 	test("off registers no handler", () => {
 		expect(bind({ env: { OMP_ASKGATE: "off" } }).handlers.size).toBe(0);
@@ -878,14 +911,24 @@ console.log(JSON.stringify(args, null, 2));
 		expect(g.entries.map(e => [e.toolCallId, e.tool])).toEqual([["file", "dispatch_issue"], ["inline", "dispatch_issue"], ["spaced", "dispatch_issue"]]);
 		expect(g.calls[0].user).toContain('"spec": "# Spec\\n"');
 	});
-	test("the other four scoped commands are reviewed under their tool names", async () => {
+	test("the other five scoped commands are reviewed under their tool names", async () => {
 		const g = bind({ env: STUB, cwd: work });
 		await g.bash("m", "dispatch message --issue X-1 --body 'The run finished.'");
 		await g.bash("e", "dispatch edit-ask --ask a-1 --question 'Which one? Recommendation: A.'");
 		await g.bash("c", "dispatch comment --issue X-1 --body 'Looks right.'");
 		await g.bash("d", `dispatch doc-edit --issue X-1 --artifact spec --ops-json '[{"op":"insert","markdown":"x"}]'`);
-		expect(g.entries.map(e => e.tool)).toEqual(["dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit"]);
-		expect(g.calls).toHaveLength(4);
+		await g.bash("r", "dispatch request-approval --issue X-1 --summary 'A live sync replaces the nightly export.'");
+		expect(g.entries.map(e => e.tool)).toEqual(["dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit", "dispatch_request_approval"]);
+		expect(g.calls).toHaveLength(5);
+		// The summary is what Sami approves, so it is what the gate reads.
+		expect(g.calls[4].user).toContain("The agent is about to run `dispatch request-approval` with these arguments:");
+		expect(g.calls[4].user).toContain('"summary": "A live sync replaces the nightly export."');
+	});
+	test("a request-approval joined to another command is refused like any other scoped write", async () => {
+		const g = bind({ env: STUB, cwd: work });
+		const result = await g.bash("r", "cd /tmp && dispatch request-approval --issue X-1 --summary-file s.md");
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("send that `dispatch request-approval` again on its own");
 	});
 	test("a command the agent already runs with --dry-run or --help sends nothing and is not reviewed", async () => {
 		const g = bind({ env: STUB, cwd: work });
@@ -1170,10 +1213,17 @@ describe("askgate.ts, the entry", () => {
 		return dir;
 	};
 
-	/** Binds the real entry to a fake `pi` and runs one gated dispatch_comment through it. */
-	async function gateOnce(env: Record<string, string> = {}) {
-		Object.assign(process.env, { PI_CODING_AGENT_DIR: scratch("askgate-entry-") }, env);
+	/** Root session ids whose askgate_block draw is on and off, by the experiments extension's own hash. */
+	const rootIds = Array.from({ length: 64 }, (_, i) => `01a15300-0000-7000-8000-${String(i).padStart(12, "0")}`);
+	const ARM_ON = rootIds.find(id => draw(id, "askgate_block")) as string;
+	const ARM_OFF = rootIds.find(id => !draw(id, "askgate_block")) as string;
+	const sessionFileOf = (rootId: string) => `/home/u/.omp/agent/sessions/-x/2026-10-19T00-00-00-000Z_${rootId}.jsonl`;
+
+	/** Binds the real entry to a fake `pi` and runs one gated dispatch_comment through it, in a session under root `opts.rootId`. */
+	async function gateOnce(env: Record<string, string> = {}, opts: { rootId?: string; text?: string } = {}) {
 		delete process.env.OMP_ASKGATE;
+		for (const name of Object.keys(process.env)) if (name.startsWith("OMP_EXPERIMENT_")) delete process.env[name];
+		Object.assign(process.env, { PI_CODING_AGENT_DIR: scratch("askgate-entry-") }, env);
 		// Imported after mock.module so the entry binds the stubs; a static import would load it first.
 		const { default: askgate } = await import("../askgate");
 		const handlers = new Map<string, Handler>();
@@ -1187,11 +1237,26 @@ describe("askgate.ts, the entry", () => {
 			models: { resolve: () => MODEL },
 			model: MODEL,
 			modelRegistry: { resolver: () => "resolved-key" },
-			sessionManager: { getEntries: () => [], getLeafId: () => null, getSessionId: () => "sess-e" },
+			sessionManager: { getEntries: () => [], getLeafId: () => null, getSessionId: () => "sess-e", getSessionFile: () => sessionFileOf(opts.rootId ?? ARM_OFF) },
 		};
+		if (opts.text !== undefined) attempts = [answer(opts.text, 5, 7, 0.25)];
 		const result = await handlers.get("tool_call")?.({ type: "tool_call", toolName: "dispatch_comment", toolCallId: "t1", input: COMMENT }, ctx);
 		return { result, entries };
 	}
+	test("with OMP_ASKGATE unset, a session whose askgate_block draw is on blocks a revise and one whose draw is off warns", async () => {
+		const blocked = await gateOnce({}, { rootId: ARM_ON, text: REVISE });
+		expect(blocked.result?.block).toBe(true);
+		expect(blocked.entries).toMatchObject([{ decision: "revise", verdictMode: "block" }]);
+		const warned = await gateOnce({}, { rootId: ARM_OFF, text: REVISE });
+		expect(warned.result?.block).toBeUndefined();
+		expect(warned.entries).toMatchObject([{ decision: "revise", verdictMode: "warn" }]);
+	});
+	test("OMP_EXPERIMENT_ASKGATE_BLOCK forces the arm, and OMP_ASKGATE overrides the arm", async () => {
+		expect((await gateOnce({ OMP_EXPERIMENT_ASKGATE_BLOCK: "on" }, { rootId: ARM_OFF, text: REVISE })).entries[0].verdictMode).toBe("block");
+		expect((await gateOnce({ OMP_EXPERIMENT_ASKGATE_BLOCK: "off" }, { rootId: ARM_ON, text: REVISE })).entries[0].verdictMode).toBe("warn");
+		expect((await gateOnce({ OMP_EXPERIMENT_ASKGATE_BLOCK: "on", OMP_ASKGATE: "warn" }, { rootId: ARM_ON, text: REVISE })).entries[0].verdictMode).toBe("warn");
+		expect((await gateOnce({ OMP_EXPERIMENT_ASKGATE_BLOCK: "off", OMP_ASKGATE: "block" }, { rootId: ARM_OFF, text: REVISE })).entries[0].verdictMode).toBe("block");
+	});
 
 	test("the completion runs at high effort with prompt caching off, and its usage is recorded", async () => {
 		const { result, entries } = await gateOnce();

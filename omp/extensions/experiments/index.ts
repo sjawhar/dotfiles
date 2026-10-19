@@ -1,5 +1,5 @@
-// The experiments extension: one extension holding six experimental session features, each
-// behind its own gate (gates.ts says how a gate is read and drawn).
+// The experiments extension: one extension holding the gates of seven experimental session features
+// (gates.ts says how a gate is read and drawn), six of them run from here.
 //
 //   selfcompact       compacts early at a task boundary when the model says its history can be
 //                     summarized (selfcompact.ts)
@@ -12,6 +12,9 @@
 //                     rating to ~/.omp/judge/ratings.jsonl, routing on nothing (judge-log-core.ts)
 //   rules_refresh     before each prompt, quotes context-file paragraphs that changed on disk since
 //                     the session loaded its system prompt (rules-refresh.ts)
+//   askgate_block     AskGate (../askgate.ts) refuses a revised Dispatch write instead of letting it
+//                     run with a warning, when OMP_ASKGATE is unset; AskGate reads the arm itself
+//                     through this resolution, so nothing registers here and the record still names it
 //
 // A bad gate throws here, so omp loads none of it and says why. Each feature registers its
 // handlers once, through a view of `pi` whose `on` runs a handler only while that feature is on

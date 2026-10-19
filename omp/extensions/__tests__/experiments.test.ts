@@ -5,7 +5,7 @@ import { draw, ENTRY_TYPE, type ExperimentRecord, FEATURES, resolve, resolveGate
 // The entry imports the memory agent's and the judge log's bindings, which import @oh-my-pi/pi-ai; that resolves only inside omp.
 mock.module("@oh-my-pi/pi-ai", () => ({ completeSimple: async () => undefined, retryTransientCompletion: (run: () => unknown) => run() }));
 
-const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", context_line: "random", skill_gate: "random", judge_log: "random", rules_refresh: "random" };
+const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", context_line: "random", skill_gate: "random", judge_log: "random", rules_refresh: "random", askgate_block: "random" };
 const ids = Array.from({ length: 400 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
 const ROOT = "01a0f8aa-2f87-720f-8260-1d84b54c192b";
 const ROOT_FILE = `/home/u/.omp/agent/sessions/-tmp-x/2026-10-01T18-11-37-991Z_${ROOT}.jsonl`;
@@ -22,7 +22,9 @@ describe("the draw", () => {
 			expect(on).toBeLessThan(250);
 		}
 		for (const a of FEATURES) for (const b of FEATURES) if (a < b) expect(ids.filter(id => draw(id, a) !== draw(id, b)).length).toBeGreaterThan(150);
-		const combinations = new Set(ids.map(id => FEATURES.map(f => (draw(id, f) ? 1 : 0)).join("")));
+		// 2^7 combinations need more ids than the bounds above: 400 draws leave about six of them unseen.
+		const many = Array.from({ length: 2_000 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
+		const combinations = new Set(many.map(id => FEATURES.map(f => (draw(id, f) ? 1 : 0)).join("")));
 		expect(combinations.size).toBe(2 ** FEATURES.length);
 	});
 	test("a subagent draws from its root: the root id is the first Z_<uuid> in the session file's path", () => {
@@ -49,7 +51,7 @@ describe("resolveGates", () => {
 	});
 	test("OMP_EXPERIMENT_<FEATURE> overrides the file for that feature only", () => {
 		const gates = resolveGates(ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_SKILL_GATE: "on", OTHER: "x" });
-		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", context_line: "random", skill_gate: "on", judge_log: "random", rules_refresh: "random" });
+		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", context_line: "random", skill_gate: "on", judge_log: "random", rules_refresh: "random", askgate_block: "random" });
 	});
 	test.each([
 		["a variable whose value is not a gate", ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "maybe" }, /OMP_EXPERIMENT_SELFCOMPACT must be on, off or random, got "maybe"/],

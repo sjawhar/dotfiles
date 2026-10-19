@@ -3,10 +3,12 @@
 // binds the fork's completion call and buildSessionContext; everything else lives here so the
 // tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
-// Scope: the same six calls on two surfaces, recorded under one tool name (dispatch_ask, …).
+// Scope: seven calls on the command line and six of them as devices, each recorded under one tool
+// name (dispatch_ask, …).
 //   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`, the
 //     head rules of the plugin that ships the CLI, copied) naming `ask`, `message`, `edit-ask`,
-//     `comment`, `doc-edit`, or `issue` with `--spec` or `--spec-file`. The gate learns the exact
+//     `comment`, `doc-edit`, `request-approval` (its `summary` is what Sami approves), or `issue`
+//     with `--spec` or `--spec-file`. The gate learns the exact
 //     arguments by running that command with `--dry-run` after the command name, in the call's
 //     working directory and environment, its here-document still on stdin, under a 10 s limit,
 //     and reviews the JSON it prints. A dry-run that fails, times out or prints no JSON object is
@@ -28,11 +30,13 @@
 // Top-level sessions only (`ctx.agent.kind === "main"`); the factory is rebound in every
 // subagent, which this check keeps out.
 //
-// OMP_ASKGATE, read when the extension binds to a session: `off` registers nothing; `warn`
-// (unset) runs a revised call and returns the reason as additional context, which the fork
-// delivers only when the call succeeds and ran through the agent loop (a failing call, or a
-// write made from eval, drops it); `block` refuses a revised call with the reason as the
-// `write`'s error result. Any other value throws at bind.
+// The mode, read for each gated call: OMP_ASKGATE when it is set (read when the extension binds),
+// else `block` in a session whose `askgate_block` experiment arm is on (experiments/gates.ts,
+// read through `blockArm`) and `warn` in one whose arm is off. `off` registers nothing; `warn`
+// runs a revised call and returns the reason as additional context, which the fork delivers only
+// when the call succeeds and ran through the agent loop (a failing call, or a write made from
+// eval, drops it); `block` refuses a revised call with the reason as the call's error result. Any
+// other value throws at bind. Each entry records the mode it ran under as `verdictMode`.
 //
 // Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
 // tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) and raced from
@@ -87,7 +91,7 @@ import systemTemplate from "./askgate-system.md" with { type: "text" };
 
 const SCOPED_DEVICES = ["dispatch_ask", "dispatch_message", "dispatch_edit_ask", "dispatch_comment", "dispatch_doc_edit", "dispatch_issue"] as const;
 const SPEC_ONLY_DEVICE = "dispatch_issue";
-const SCOPED_COMMANDS = ["ask", "message", "edit-ask", "comment", "doc-edit", "issue"] as const;
+const SCOPED_COMMANDS = ["ask", "message", "edit-ask", "comment", "doc-edit", "issue", "request-approval"] as const;
 const SPEC_ONLY_COMMAND = "issue";
 const SPEC_FLAGS = ["--spec", "--spec-file"];
 /** Flags under which a `dispatch` command sends nothing. */
@@ -191,6 +195,8 @@ interface Deps {
 	handlerCeilingMs: () => number;
 	/** Runs a `dispatch` command's --dry-run script under bash; `spawnDryRun` in the entry. */
 	dryRun: (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
+	/** Whether this session's `askgate_block` experiment arm is on: the experiments extension's own resolution, bound in the entry. */
+	blockArm: (ctx: GateCtx) => boolean;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -209,7 +215,7 @@ type GateCtx = {
 	models: { resolve(spec: string): GateModel | undefined };
 	/** The session's primary model. */
 	model?: GateModel;
-	sessionManager: { getSessionId(): string };
+	sessionManager: { getSessionId(): string; getSessionFile(): string | undefined };
 	/** The session's working directory, against which a `bash` call's `cwd` resolves. */
 	cwd: string;
 };
@@ -221,8 +227,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-export function parseMode(raw: string | undefined): Mode {
-	const value = (raw ?? "warn").trim();
+/** OMP_ASKGATE as a mode, or undefined when it is unset and the session's `askgate_block` arm decides. */
+export function parseMode(raw: string | undefined): Mode | undefined {
+	if (raw === undefined) return undefined;
+	const value = raw.trim();
 	if ((MODES as readonly string[]).includes(value)) return value as Mode;
 	throw new Error(`OMP_ASKGATE must be one of ${MODES.join("|")}, got ${JSON.stringify(raw)}`);
 }
@@ -788,8 +796,8 @@ const renderUnreadable = (label: string) =>
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
 	return function askGate(pi: Pi): void {
-		const mode = parseMode(deps.env.OMP_ASKGATE);
-		if (mode === "off") return;
+		const envMode = parseMode(deps.env.OMP_ASKGATE);
+		if (envMode === "off") return;
 		const timeoutMs = parseTimeout(deps.env.OMP_ASKGATE_TIMEOUT_MS);
 		const ceiling = deps.handlerCeilingMs();
 		if (ceiling - CEILING_MARGIN_MS < MIN_DEADLINE_MS) {
@@ -887,7 +895,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		 * (defence in depth: the runner awaiting it has usually refused the call already), warn mode lets it
 		 * go. The cause stays recorded.
 		 */
-		const givenUp = (cause: "abandoned" | "shutdown", fields: Partial<GateEntry> = {}): Decision =>
+		const givenUp = (mode: Exclude<Mode, "off">, cause: "abandoned" | "shutdown", fields: Partial<GateEntry> = {}): Decision =>
 			mode === "block"
 				? { fields: { decision: "revise", outcome: cause, ...fields }, result: { block: true, reason: NO_VERDICT_REFUSAL[cause] }, effect: "none" }
 				: pass(cause, fields);
@@ -904,7 +912,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				return { fields: { decision: "allow", outcome: "breaker" }, result: { additionalContext: renderBreakerAck() }, effect: "none" };
 			}
 
-			if (closing) return givenUp("shutdown");
+			if (closing) return givenUp(base.verdictMode, "shutdown");
 			const model = ctx.models.resolve(MODEL_ROLE);
 			if (!model) return pass("unavailable", {}, "failure");
 			// A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
@@ -938,7 +946,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			}
 			const called = { promptBytes, model: `${asked.provider}/${asked.id}`, deadlineMs, ...(failedModels.length > 0 ? { failedModels } : {}), ...(billed ? { usage } : {}) };
 			if (answer.kind === "timeout") return pass("timeout", called, "failure");
-			if (answer.kind === "abandoned" || answer.kind === "shutdown") return givenUp(answer.kind, called);
+			if (answer.kind === "abandoned" || answer.kind === "shutdown") return givenUp(base.verdictMode, answer.kind, called);
 			if (answer.kind === "error") return pass("error", { reason: answer.reason, ...called }, "failure");
 			const verdict = parseVerdict(answer.text);
 			if (!verdict) return pass("no-verdict", { raw: answer.text.slice(-2000), ...called }, "failure");
@@ -950,7 +958,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			const second = breaker.reasons(key).length === GATE_BREAKER_REVISES;
 			return {
 				fields: { decision: "revise", outcome: "verdict", reason: verdict.reason, deliveredReason: agentFacing(verdict.reason), revisesForKey: base.revisesForKey + 1, ...called },
-				result: mode === "block" ? { block: true, reason: renderRevise(verdict.reason, second, override) } : { additionalContext: renderWarn(verdict.reason, second) },
+				result: base.verdictMode === "block" ? { block: true, reason: renderRevise(verdict.reason, second, override) } : { additionalContext: renderWarn(verdict.reason, second) },
 				effect: "verdict",
 			};
 		};
@@ -1022,7 +1030,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 		};
 
 		/** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
-		const identity = (event: ToolCallEvent): Base => ({
+		const identity = (event: ToolCallEvent, mode: Exclude<Mode, "off">): Base => ({
 			advisor: "AskGate",
 			tool: event.toolName,
 			path: `xd://${event.toolName}`,
@@ -1038,9 +1046,13 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 			let decision: Decision;
 			// A `dispatch` command with its override flag removed, which runs whatever the gate decides.
 			let revised: Input | undefined;
+			// OMP_ASKGATE when set; else this session's experiment arm, read per call because one binding
+			// serves every session the process switches to.
+			let mode: Exclude<Mode, "off"> = envMode ?? "warn";
 			try {
 				if (ctx.agent.kind !== "main") return undefined;
 				if (event.toolName === "write") return stripRebuttal(event);
+				if (envMode === undefined && deps.blockArm(ctx)) mode = "block";
 				if (event.toolName === "bash") {
 					const scoped = scopedCommand(event.input.command);
 					if (scoped === undefined) {
@@ -1048,7 +1060,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 						if (unreadable === undefined) return undefined;
 						// Refused before anything in the call runs, in every mode, when its resend would be reviewed;
 						// a kill, a halt, or no gate model on the primary's provider lets it run as the resend would.
-						base = { ...identity(event), tool: unreadable.tool, path: unreadable.label };
+						base = { ...identity(event, mode), tool: unreadable.tool, path: unreadable.label };
 						const model = ctx.models.resolve(MODEL_ROLE);
 						if (isKilled(deps.readFile(overlayPath(deps.env, deps.home)), SLUG, unparsable)) decision = pass("killed");
 						else if (halted) decision = pass("halted");
@@ -1057,9 +1069,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 						else decision = { fields: { decision: "revise", outcome: "unreadable" }, result: { block: true, reason: renderUnreadable(unreadable.label) }, effect: "none" };
 					} else {
 						if (scoped.rebuttal !== undefined) revised = { ...event.input, command: scoped.command };
-						base = { ...identity(event), tool: scoped.tool, path: scoped.label };
+						base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
 						const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
-						if ("cause" in run) decision = givenUp(run.cause);
+						if ("cause" in run) decision = givenUp(mode, run.cause);
 						// The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
 						else if ("failure" in run) decision = pass("error", { reason: run.failure });
 						else {
@@ -1075,7 +1087,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 					if (!scopedDevice(event.toolName, event.input)) return undefined;
 					const key = breakerKey(event.toolName, event.input);
 					base = {
-						...identity(event),
+						...identity(event, mode),
 						revisesForKey: breaker.reasons(key).length,
 						argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
 					};
@@ -1094,7 +1106,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 				// The halt notice is best effort.
 			}
 			try {
-				pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, { ...(base ?? identity(event)), ...decision.fields, latencyMs: deps.now() - started } satisfies GateEntry);
+				pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, { ...(base ?? identity(event, mode)), ...decision.fields, latencyMs: deps.now() - started } satisfies GateEntry);
 			} catch {
 				// The entry is best effort; the call still runs.
 			}

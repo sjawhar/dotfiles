@@ -8,8 +8,12 @@
 // The chain comes from omp's own resolution (`resolveRetryFallbackChainKey` and
 // `findRetryFallbackCandidates`, walked depth-first into each fallback's own chain as the eval
 // `completion()` bridge walks it), because `ctx.models.resolve` returns the role's first model only.
-// The installer links only this file; askgate-core.ts, the prompt files and ../watchdog/askgate.md
-// resolve from its real path.
+// The block/warn mode, when OMP_ASKGATE is unset, is the session's `askgate_block` arm, read through
+// the experiments extension's own pure resolution (`resolveGates` over its gates.json and the
+// environment, then `resolve` for the session's root id), so both extensions agree on the arm and
+// the `experiments` entry the other one records names it. A bad gate throws here, as it does there.
+// The installer links only this file; askgate-core.ts, the prompt files, ./experiments/gates.* and
+// ../watchdog/askgate.md resolve from its real path.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,6 +26,8 @@ import { findRetryFallbackCandidates, getRetryFallbackChains, type RetryFallback
 import { cfgRetry } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { type Api, type ApiKeyResolver, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { type CompleteRequest, type Completion, createAskGate, GATE_EFFORT, GATE_ROLE, type GateModel, type Message, spawnDryRun, type Usage } from "./askgate-core";
+import gateFile from "./experiments/gates.json" with { type: "json" };
+import { resolve, resolveGates, rootSessionId } from "./experiments/gates";
 
 // The core passes the fork's objects through untyped: ctx is the ExtensionContext, whose modelRegistry and
 // sessionManager this reads, and model is the full Model<Api> ctx.models.resolve handed back.
@@ -118,20 +124,25 @@ function readFile(p: string): string | undefined {
 	}
 }
 
-export default createAskGate({
-	env: process.env,
-	home: os.homedir(),
-	now: Date.now,
-	readFile,
-	// The dump holds the primary system prompt and transcript: owner-only, like the session files.
-	appendFile: appendDump,
-	complete,
-	fallbackModels,
-	charterPath: path.join(path.dirname(fs.realpathSync(import.meta.path)), "..", "watchdog", "askgate.md"),
-	handlerCeilingMs,
-	dryRun: spawnDryRun,
-	contextMessages: ctx => {
-		const { sessionManager } = ctx as unknown as Ctx;
-		return buildSessionContext(sessionManager.getEntries(), sessionManager.getLeafId()).messages as unknown as readonly Message[];
-	},
-}) as (pi: ExtensionAPI) => void;
+export default function askgate(pi: ExtensionAPI): void {
+	// Resolved at bind, as the experiments extension resolves them, so a bad gate refuses the load.
+	const gates = resolveGates(gateFile, process.env);
+	createAskGate({
+		env: process.env,
+		home: os.homedir(),
+		now: Date.now,
+		readFile,
+		// The dump holds the primary system prompt and transcript: owner-only, like the session files.
+		appendFile: appendDump,
+		complete,
+		fallbackModels,
+		charterPath: path.join(path.dirname(fs.realpathSync(import.meta.path)), "..", "watchdog", "askgate.md"),
+		handlerCeilingMs,
+		dryRun: spawnDryRun,
+		contextMessages: ctx => {
+			const { sessionManager } = ctx as unknown as Ctx;
+			return buildSessionContext(sessionManager.getEntries(), sessionManager.getLeafId()).messages as unknown as readonly Message[];
+		},
+		blockArm: ({ sessionManager }) => resolve(gates, rootSessionId(sessionManager.getSessionFile(), sessionManager.getSessionId())).features.askgate_block.on,
+	})(pi);
+}
