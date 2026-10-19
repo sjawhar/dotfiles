@@ -6,7 +6,7 @@ import { DEFAULT_RULES, ompModules } from "./omp-interceptor";
 // The entry imports the memory agent's and the judge log's bindings, which import @oh-my-pi/pi-ai; that resolves only inside omp.
 mock.module("@oh-my-pi/pi-ai", () => ({ completeSimple: async () => undefined, retryTransientCompletion: (run: () => unknown) => run() }));
 // The bash gate's binding imports omp's interceptor modules, which resolve only inside omp: these are the same modules by path, and the rules omp would read.
-mock.module("@oh-my-pi/pi-coding-agent/exec/settings", () => ({ cfgBashInterceptorPatterns: { get: () => DEFAULT_RULES } }));
+mock.module("@oh-my-pi/pi-coding-agent/exec/settings", () => ({ cfgBashInterceptorEnabled: { override() {} }, cfgBashInterceptorPatterns: { get: () => DEFAULT_RULES } }));
 mock.module("@oh-my-pi/pi-coding-agent/tools/bash-interceptor", () => ompModules.interceptor);
 mock.module("@oh-my-pi/pi-coding-agent/tools/shell-tokenize", () => ompModules.tokenize);
 
