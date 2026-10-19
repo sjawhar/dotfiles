@@ -1,5 +1,5 @@
 [Unit]
-Description=SSH tunnel carrying forward's channels to the %i devbox (off the tailnet)
+Description=SSH tunnel carrying forward's channels to the %i devbox
 # One per pair whose laptop daemon listens on loopback; installers/forward.sh
 # enables it beside forward-daemon@%i. The forwards live in Host %i-tunnel
 # (~/.ssh/config.local); the login key is the 1Password agent's (Host *), so a

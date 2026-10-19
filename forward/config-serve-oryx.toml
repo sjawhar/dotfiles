@@ -1,10 +1,20 @@
 # Devbox role on oryx, chosen by installers/forward.sh because this host has its
-# own file. Fields mean what config-serve.toml says. oryx pairs with the laptop's
-# forward-daemon@oryx (config-daemon-oryx.toml) over tailnet IPv6, because the
-# laptop's IPv4 address and default ports belong to the default pair.
+# own file (every devbox does; a host without one fails the install). This file
+# is the reference for every config-serve-*.toml: the fields are explained here
+# once, and the other pairs say only how they differ. oryx pairs with the
+# laptop's forward-daemon@oryx (config-daemon-oryx.toml) over tailnet IPv6; that
+# file explains the literal-address rule for listen and peer.
+#
+# listen is this machine's address, and it is what preview URLs are minted
+# against, never peer, which is the laptop, where the browser is rather than
+# where the file is. peer is the laptop's address for the pair: dialled for the
+# URL channel, and compared against for every inbound connection.
 listen = "fd7a:115c:a1e0::3336:5706"
 peer = "fd7a:115c:a1e0::8f36:1226"
 
+# The single port the laptop asks for OAuth callback hops on. Only ports a local
+# `forward open` armed, from a URL that actually named them, are reachable
+# through it, and only until the lease (forward_ttl_secs) expires.
 bridge_port = 12801
 forward_ttl_secs = 300
 

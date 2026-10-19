@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""focused-window-title: print the title of the focused window (COSMIC).
+
+COSMIC has no command that reports the focused window, so this is a small Wayland
+client for the two protocols that do: ext_foreign_toplevel_list_v1 names every
+window (title, app id), and COSMIC's zcosmic_toplevel_info_v1 reports each one's
+state, including whether it is activated. cosmic-comp sends those states on its
+next refresh after get_cosmic_toplevel, followed by the info object's done event,
+and only for windows that have a state, so the client waits for that done.
+
+Exit 1, with the reason on stderr, when no window is focused or the compositor
+lacks the protocols. Used by scripts/devbox-paste-image.
+"""
+
+import os
+import select
+import socket
+import struct
+import sys
+import time
+
+TIMEOUT_S = 2.0
+ACTIVATED = 2  # zcosmic_toplevel_handle_v1.state.activated
+
+
+class Wayland:
+    def __init__(self) -> None:
+        display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+        path = display if display.startswith("/") else os.path.join(os.environ["XDG_RUNTIME_DIR"], display)
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(path)
+        self.buf = bytearray()
+        self.next = 2  # 1 is wl_display
+
+    def new_id(self) -> int:
+        self.next += 1
+        return self.next - 1
+
+    def send(self, obj: int, opcode: int, payload: bytes = b"") -> None:
+        self.sock.sendall(struct.pack("<IHH", obj, opcode, 8 + len(payload)) + payload)
+
+    def events(self, deadline: float):
+        """Yield (object, opcode, payload) until the deadline; a wl_display error raises."""
+        while True:
+            while len(self.buf) >= 8 and len(self.buf) >= struct.unpack_from("<IHH", self.buf)[2]:
+                obj, op, size = struct.unpack_from("<IHH", self.buf)
+                payload = bytes(self.buf[8:size])
+                del self.buf[:size]
+                if obj == 1 and op == 0:
+                    _, code = struct.unpack_from("<II", payload)
+                    raise RuntimeError(f"wayland protocol error {code}: {string(payload, 8)[0]}")
+                yield obj, op, payload
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self.sock], [], [], remaining)[0]:
+                return
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise RuntimeError("the compositor closed the connection")
+            self.buf.extend(chunk)
+
+    def roundtrip(self, handle, deadline: float) -> None:
+        callback = self.new_id()
+        self.send(1, 0, struct.pack("<I", callback))  # wl_display.sync
+        for obj, op, payload in self.events(deadline):
+            if obj == callback:
+                return
+            handle(obj, op, payload)
+        raise TimeoutError("the compositor did not answer")
+
+
+def string(payload: bytes, offset: int) -> tuple[str, int]:
+    (length,) = struct.unpack_from("<I", payload, offset)
+    text = payload[offset + 4 : offset + 4 + length - 1].decode(errors="replace")
+    return text, offset + 4 + length + (-length % 4)
+
+
+def wire_string(text: str) -> bytes:
+    data = text.encode() + b"\0"
+    return struct.pack("<I", len(data)) + data + b"\0" * (-len(data) % 4)
+
+
+def focused_title() -> str:
+    deadline = time.monotonic() + TIMEOUT_S
+    wl = Wayland()
+    registry = wl.new_id()
+    wl.send(1, 1, struct.pack("<I", registry))  # wl_display.get_registry
+    globals_: dict[str, tuple[int, int]] = {}
+
+    def on_registry(obj: int, op: int, payload: bytes) -> None:
+        if obj == registry and op == 0:  # wl_registry.global
+            (name,) = struct.unpack_from("<I", payload)
+            interface, offset = string(payload, 4)
+            (version,) = struct.unpack_from("<I", payload, offset)
+            globals_[interface] = (name, version)
+
+    wl.roundtrip(on_registry, deadline)
+
+    def bind(interface: str, minimum: int, wanted: int) -> int:
+        if interface not in globals_:
+            raise RuntimeError(f"the compositor offers no {interface} (COSMIC only)")
+        name, offered = globals_[interface]
+        if offered < minimum:
+            raise RuntimeError(f"the compositor offers {interface} version {offered}, not {minimum}")
+        obj = wl.new_id()
+        version = min(wanted, offered)
+        wl.send(registry, 0, struct.pack("<I", name) + wire_string(interface) + struct.pack("<II", version, obj))
+        return obj
+
+    toplevel_list = bind("ext_foreign_toplevel_list_v1", 1, 1)
+    # get_cosmic_toplevel and the done event arrived in version 2.
+    info = bind("zcosmic_toplevel_info_v1", 2, 3)
+    titles: dict[int, str] = {}
+    cosmic: dict[int, int] = {}
+    activated: list[int] = []
+
+    def on_event(obj: int, op: int, payload: bytes) -> None:
+        if obj == toplevel_list and op == 0:  # ext_foreign_toplevel_list_v1.toplevel
+            titles[struct.unpack_from("<I", payload)[0]] = ""
+        elif obj in titles and op == 2:  # ext_foreign_toplevel_handle_v1.title
+            titles[obj] = string(payload, 0)[0]
+        elif obj in cosmic and op == 8:  # zcosmic_toplevel_handle_v1.state
+            (size,) = struct.unpack_from("<I", payload)
+            if ACTIVATED in struct.unpack_from(f"<{size // 4}I", payload, 4):
+                activated.append(cosmic[obj])
+
+    wl.roundtrip(on_event, deadline)
+    for handle in titles:
+        cosmic_handle = wl.new_id()
+        cosmic[cosmic_handle] = handle
+        wl.send(info, 1, struct.pack("<II", cosmic_handle, handle))  # get_cosmic_toplevel
+    for obj, op, payload in wl.events(deadline):
+        if obj == info and op == 2:  # zcosmic_toplevel_info_v1.done
+            break
+        on_event(obj, op, payload)
+    if not activated:
+        raise LookupError("no window is focused")
+    return titles[activated[-1]]
+
+
+def main() -> int:
+    try:
+        print(focused_title())
+    except (OSError, KeyError, RuntimeError, TimeoutError, LookupError) as error:
+        print(f"focused-window-title: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

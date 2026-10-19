@@ -1199,7 +1199,7 @@ def _local_stack_workspaces() -> dict[str, str]:
 
 def _docker_daemon_is_box_local() -> bool:
     """True iff `docker info` reports a box-local daemon. A box's own daemon names itself
-    `agentbox-<id>`; the shared host daemon reports `sami-agents`. A query that fails (timeout,
+    `agentbox-<id>`; the shared host daemon reports the host's name. A query that fails (timeout,
     docker absent, non-zero exit) is conservatively NOT box-local."""
     try:
         rc, out = run(["docker", "info", "--format", "{{.Name}}"], timeout=10)
@@ -1262,7 +1262,7 @@ def cmd_containers(_args: argparse.Namespace) -> None:
                     '{{.Name}}'` starts with "agentbox-") no other box's container can ever exist,
                     so a container that is `created`, has State.Pid 0, State.StartedAt at docker's
                     zero time, is older than 1h, and has no holders is leaked -- it can only be this
-                    box's own dead fixture. On the shared host daemon ("sami-agents") other boxes'
+                    box's own dead fixture. On the shared host daemon (named for the host) other boxes'
                     containers are legitimately present, so this row stays unknown regardless of age
                     or state. Four independent lanes (e2e, env typing, Reaper, agent-c#20033)
                     rediscovered this same discriminator on 2026-09-25 while chasing the AGENTC-751

@@ -1,16 +1,17 @@
 # Laptop role, sami-leanperf pair: run by forward-daemon@sami-leanperf.service.
-# sami-leanperf is off the tailnet, so this daemon listens on loopback and
-# forward-tunnel@sami-leanperf.service carries every channel over SSH (Host
-# sami-leanperf-tunnel in ~/.ssh/config.local). The other pairs hold the
-# laptop's tailnet addresses, so forward's default ports are free here. Tunnelled
-# connections arrive from 127.0.0.1, which any local process shares.
+# Fields and URL policy are explained in config-daemon-oryx.toml. This pair is
+# carried over an SSH tunnel to the VM, so the daemon listens on
+# loopback and forward-tunnel@sami-leanperf.service carries every channel (Host
+# sami-leanperf-tunnel in ~/.ssh/config.local). oryx's pair holds the laptop's
+# tailnet address, so forward's default ports are free on 127.0.0.1 here.
+# Tunnelled connections arrive from 127.0.0.1, which any local process shares.
 listen = "127.0.0.1"
 peer = "127.0.0.1"
 bridge_port = 12801
 
-# Same policy as config.toml (scripts/tests/test_forward_environment.py fails if
-# they drift), except the preview host: this pair's is the tunnelled 12802, pinned
-# to that port because a bare loopback entry would open any laptop-local URL.
+# Same policy as config-daemon-oryx.toml, except the preview host: this pair's is
+# the tunnelled 12802, pinned to that port because a bare loopback entry would
+# open any laptop-local URL.
 mode = "allowlist"
 opener = ["/usr/bin/xdg-open"]
 clipboard = ["wl-copy"]

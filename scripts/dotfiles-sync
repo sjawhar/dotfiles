@@ -13,15 +13,13 @@
 # commit there and `git pull --rebase`.
 set -euo pipefail
 
-# HOSTNAME=DESTINATION. The entry whose name is this machine's hostname syncs locally. The
-# tailnet machines go by user@MagicDNS name; the Azure VMs admit only the laptop's address and
-# go by its ssh aliases (~/.ssh/config.local), so a run from elsewhere fails on them by name.
+# HOSTNAME=DESTINATION, every machine by user@MagicDNS name. The entry whose name is this
+# machine's hostname syncs locally.
 MACHINES=(
   sami=sami@sami
-  sami-agents=ubuntu@sami-agents
   oryx=agent@oryx
-  sami-leanperf=leanperf
-  sami-rocqperf=rocqperf
+  sami-leanperf=sami@sami-leanperf
+  sami-rocqperf=sami@sami-rocqperf
 )
 
 sync_here() {

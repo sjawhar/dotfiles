@@ -13,17 +13,20 @@ MISE="${DOTFILES_DIR}/bin/mise"
 case "${1:-}" in
     serve)
         units=(forward-serve.service)
-        # A devbox with its own pairing ships forward/config-serve-<host>.toml
-        # (oryx does); every other devbox is the default pair.
-        config_source=config-serve.toml
+        # Every devbox has its own pairing: forward/config-serve-<host>.toml and
+        # the laptop's forward/config-daemon-<host>.toml. A host without one is
+        # not paired, and installing another host's addresses would mint its
+        # preview URLs, so there is no default.
         host="$(hostname -s)"
-        if [ -f "${DOTFILES_DIR}/forward/config-serve-${host}.toml" ]; then
-            config_source="config-serve-${host}.toml"
+        config_source="config-serve-${host}.toml"
+        if [ ! -f "${DOTFILES_DIR}/forward/${config_source}" ]; then
+            echo "forward.sh serve: this machine (${host}) has no forward pair; add forward/config-serve-${host}.toml and forward/config-daemon-${host}.toml" >&2
+            exit 1
         fi
         ;;
     daemon)
-        units=(forward-daemon.service omp-browser-relay.service)
-        config_source=config.toml
+        # The laptop's daemons are the per-pair forward-daemon@<pair> units below.
+        units=(omp-browser-relay.service)
         "$MISE" which omp >/dev/null 2>&1 || "$MISE" install "github:sjawhar/oh-my-pi@latest"
         ;;
     *)
@@ -38,9 +41,12 @@ fi
 
 mkdir -p "${HOME}/.config/systemd/user"
 mkdir -p "${HOME}/.config/forward"
-# The two roles run on different machines, so both use the same well-known
-# config path and neither wrapper nor unit ExecStart has to know its role.
-ln -sfn "${DOTFILES_DIR}/forward/${config_source}" "${HOME}/.config/forward/config.toml"
+# forward-serve reads ~/.config/forward/config.toml, so the devbox role links its
+# pair's file there. Laptop daemons name their pair's file with --config instead
+# (below), and the laptop has no config.toml.
+if [ "${1:-}" = serve ]; then
+    ln -sfn "${DOTFILES_DIR}/forward/${config_source}" "${HOME}/.config/forward/config.toml"
+fi
 # Earlier releases wrote an ambient relay endpoint; remove it wherever it
 # still exists so no machine keeps a bypass-era configuration.
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -53,10 +59,15 @@ services=()
 for unit in "${units[@]}"; do
     services+=("${unit%.service}")
 done
-# forward trusts one peer per daemon, so the laptop runs one more daemon for each
-# extra devbox: forward/config-daemon-<pair>.toml is linked to
+# forward trusts one peer per daemon, so the laptop runs one daemon for each
+# devbox: forward/config-daemon-<pair>.toml is linked to
 # ~/.config/forward/config-<pair>.toml and read by forward-daemon@<pair>.
 if [ "${1:-}" = daemon ]; then
+    # Earlier installs ran a default pair (forward-daemon.service, linked
+    # config.toml) beside the named ones; remove it wherever it still exists.
+    systemctl --user disable --now forward-daemon.service 2>/dev/null || true
+    rm -f "${HOME}/.config/systemd/user/forward-daemon.service" "${HOME}/.config/forward/config.toml"
+    systemctl --user reset-failed forward-daemon.service 2>/dev/null || true
     for pair_config in "${DOTFILES_DIR}"/forward/config-daemon-*.toml; do
         [ -e "$pair_config" ] || continue
         pair="${pair_config##*/config-daemon-}"
@@ -69,8 +80,8 @@ if [ "${1:-}" = daemon ]; then
                 "${HOME}/.config/systemd/user/forward-daemon@${pair}.service.d"
         fi
         services+=("forward-daemon@${pair}")
-        # A pair on loopback is off the tailnet: an SSH tunnel carries its
-        # channels (forward-tunnel@.service, Host <pair>-tunnel in ssh config).
+        # A pair on loopback is carried over an SSH tunnel: forward-tunnel@.service
+        # holds it open (Host <pair>-tunnel in ssh config).
         if grep -qE '^listen = "127\.' "$pair_config"; then
             services+=("forward-tunnel@${pair}")
         fi

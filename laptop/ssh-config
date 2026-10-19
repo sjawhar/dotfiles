@@ -3,15 +3,10 @@ Include ~/.ssh/config.local
 # ssh takes the first value it finds for each option, so per-host settings sit
 # above the Host * defaults at the bottom.
 
-Host devbox
-  HostName sami-agents.tailb86685.ts.net
-  User ubuntu
-  ForwardAgent yes
-  IPQoS lowdelay throughput
-
-# The same devbox over AWS Session Manager instead of the tailnet: needs a live
-# AWS SSO login for the Trajectory account, not tailnet membership. The host key
-# is the one already pinned for the tailnet name.
+# sami-agents, the Trajectory devbox, over AWS Session Manager: it is on the old
+# tailnet, which this laptop has left, so this is the only way in. Needs a live
+# AWS SSO login for the Trajectory account. The host key is the one pinned for
+# its old tailnet name.
 Host devbox-ssm
   HostName i-01d7575cd0d055f0e
   User ubuntu
@@ -39,7 +34,7 @@ Host oryx-ssm
   ProxyCommand aws ssm start-session --profile personal --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
   IPQoS lowdelay throughput
 
-# YubiKey tunnel for oryx; the devbox pair uses forward's pcsc channel.
+# YubiKey tunnel for oryx (scripts/devbox); every other devbox uses forward's pcsc channel.
 Host oryx-tunnel
   HostName oryx.tail12ec1c.ts.net
   User agent
@@ -51,11 +46,6 @@ Host oryx-tunnel
   ExitOnForwardFailure yes
   ServerAliveInterval 15
   RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
-
-Host ghost-wispr
-  HostName ghost-wispr.tailb86685.ts.net
-  User ghost-wispr
-  ForwardAgent yes
 
 # Every login key lives in 1Password.
 Host *

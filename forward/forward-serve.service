@@ -1,5 +1,5 @@
 [Unit]
-Description=forward file server and callback bridge (tailnet :12802 and :12801, read-only preview)
+Description=forward file server and callback bridge (read-only preview)
 
 [Service]
 ExecStart=%h/.dotfiles/forward/forward-serve
