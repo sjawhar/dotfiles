@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import gateFile from "../experiments/gates.json" with { type: "json" };
 import { draw, ENTRY_TYPE, type ExperimentRecord, FEATURES, resolve, resolveGates, rootSessionId } from "../experiments/gates";
+import { DEFAULT_RULES, ompModules } from "./omp-interceptor";
 
 // The entry imports the memory agent's and the judge log's bindings, which import @oh-my-pi/pi-ai; that resolves only inside omp.
 mock.module("@oh-my-pi/pi-ai", () => ({ completeSimple: async () => undefined, retryTransientCompletion: (run: () => unknown) => run() }));
+// The bash gate's binding imports omp's interceptor modules, which resolve only inside omp: these are the same modules by path, and the rules omp would read.
+mock.module("@oh-my-pi/pi-coding-agent/exec/settings", () => ({ cfgBashInterceptorPatterns: { get: () => DEFAULT_RULES } }));
+mock.module("@oh-my-pi/pi-coding-agent/tools/bash-interceptor", () => ompModules.interceptor);
+mock.module("@oh-my-pi/pi-coding-agent/tools/shell-tokenize", () => ompModules.tokenize);
 
-const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", context_line: "random", skill_gate: "random", judge_log: "random", rules_refresh: "random", askgate_block: "random" };
+const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", context_line: "random", skill_gate: "random", judge_log: "random", rules_refresh: "random", askgate_block: "random", bash_gate_leading: "random" };
 const ids = Array.from({ length: 400 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
 const ROOT = "01a0f8aa-2f87-720f-8260-1d84b54c192b";
 const ROOT_FILE = `/home/u/.omp/agent/sessions/-tmp-x/2026-10-01T18-11-37-991Z_${ROOT}.jsonl`;
@@ -22,7 +27,7 @@ describe("the draw", () => {
 			expect(on).toBeLessThan(250);
 		}
 		for (const a of FEATURES) for (const b of FEATURES) if (a < b) expect(ids.filter(id => draw(id, a) !== draw(id, b)).length).toBeGreaterThan(150);
-		// 2^7 combinations need more ids than the bounds above: 400 draws leave about six of them unseen.
+		// 2^8 combinations need more ids than the bounds above: 400 draws leave many of them unseen.
 		const many = Array.from({ length: 2_000 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
 		const combinations = new Set(many.map(id => FEATURES.map(f => (draw(id, f) ? 1 : 0)).join("")));
 		expect(combinations.size).toBe(2 ** FEATURES.length);
@@ -51,7 +56,7 @@ describe("resolveGates", () => {
 	});
 	test("OMP_EXPERIMENT_<FEATURE> overrides the file for that feature only", () => {
 		const gates = resolveGates(ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_SKILL_GATE: "on", OTHER: "x" });
-		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", context_line: "random", skill_gate: "on", judge_log: "random", rules_refresh: "random", askgate_block: "random" });
+		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", context_line: "random", skill_gate: "on", judge_log: "random", rules_refresh: "random", askgate_block: "random", bash_gate_leading: "random" });
 	});
 	test.each([
 		["a variable whose value is not a gate", ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "maybe" }, /OMP_EXPERIMENT_SELFCOMPACT must be on, off or random, got "maybe"/],
@@ -89,6 +94,8 @@ describe("the extension", () => {
 			appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
 			logger: { error: (message: string) => errors.push(message), warn: () => {}, debug: () => {} },
 			typebox: { Type: {} },
+			pi: { settings: {} },
+			getActiveTools: () => ["bash", "read", "grep", "glob", "edit", "write"],
 		};
 		experiments(pi as never);
 		let usage: () => { tokens: number; contextWindow: number } = () => ({ tokens: 1_000, contextWindow: 200_000 });
@@ -109,6 +116,7 @@ describe("the extension", () => {
 			start: () => emit("session_start", { type: "session_start" }),
 			context: () => emit("context", { type: "context", messages: [{ role: "user", content: "hi", timestamp: 1 }] }) as Promise<{ messages: Array<{ content: string }> } | undefined>,
 			gh: () => emit("tool_call", { toolName: "bash", toolCallId: "c1", input: { command: "gh pr create --fill" } }) as Promise<{ block?: boolean } | undefined>,
+			bash: (command: string) => emit("tool_call", { toolName: "bash", toolCallId: "c2", input: { command } }) as Promise<{ block?: boolean; reason?: string } | undefined>,
 			setUsage: (fn: typeof usage) => (usage = fn),
 		};
 	}
@@ -145,6 +153,16 @@ describe("the extension", () => {
 		await on.start();
 		expect((await on.context())?.messages.at(-1)?.content).toBe("hi\n\n[Token usage: 1,000/200,000]");
 		expect((await on.gh())?.block).toBe(true);
+	});
+	test("the bash gate runs in both arms: on lets a later read step through, off blocks it as omp does", async () => {
+		const on = await bind({ OMP_EXPERIMENT_BASH_GATE_LEADING: "on" });
+		await on.start();
+		expect(await on.bash("ls d && cat f")).toBeUndefined();
+		expect((await on.bash("cat f"))?.block).toBe(true);
+		const off = await bind({ OMP_EXPERIMENT_BASH_GATE_LEADING: "off" });
+		await off.start();
+		expect((await off.bash("ls d && cat f"))?.reason).toContain("`cat f`");
+		expect(await off.bash("ps | grep x")).toBeUndefined();
 	});
 	test("a feature whose handler throws is logged and stays off for the session; the others keep running", async () => {
 		const b = await bind({ ...allOff, OMP_EXPERIMENT_CONTEXT_LINE: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
