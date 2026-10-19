@@ -147,9 +147,9 @@ release_branch = "sami"
 ledger = "sjawhar/.knives-ledger"
 
 [repos.lean4]
-upstream = "https://github.com/theorem-labs/lean4"
+upstream = "https://github.com/leanprover/lean4"
 origin = "https://github.com/sjawhar/lean4"
-base = "machcsl"
+base = "releases/v4.36.0"
 ledger = "sjawhar/.knives-ledger"
 workspaces = "/theorem/knives-ws/lean4"
 
