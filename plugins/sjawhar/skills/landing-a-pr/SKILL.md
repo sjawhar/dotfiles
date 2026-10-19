@@ -55,9 +55,11 @@ a review at a head that has a newer `follow` run, re-run that `follow` run too:
 `rerun-failed-jobs` for a failed one, `.../actions/runs/<id>/rerun` for a passed one,
 or its stale result keeps deciding. The owner lands every agent-c
 PR. A Legion-produced PR is
-landed by the lane that commissioned it. In `sjawhar/legion` the rule adds the Legion
-PO's reviewer App approving, and that approval survives a later push just as an armed
-auto-merge does, so arm (and re-arm after a push) only on a head the PO approved, and
+landed by the lane that commissioned it. In `sjawhar/legion` main requires one approving
+review. A session that opened its own PR gets it from a review subagent's verdict at the
+head, then posts the approval as the review App, pinned to that head
+(`GH_REVIEW_APP_PRIVATE_KEY_B64`). The approval survives a later push just as an armed
+auto-merge does, so arm (and re-arm after a push) only on an approved head, and
 run `gh pr merge <N> --disable-auto` before pushing to an armed PR. Other repos: their
 own required checks and reviews. In a repository another person maintains, the merge
 is theirs: get the PR ready, tell them in one short note, and leave the merge and the
