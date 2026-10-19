@@ -4,5 +4,6 @@
 	"context_line": "random",
 	"skill_gate": "random",
 	"judge_log": "on",
-	"rules_refresh": "random"
+	"rules_refresh": "random",
+	"askgate_block": "random"
 }
