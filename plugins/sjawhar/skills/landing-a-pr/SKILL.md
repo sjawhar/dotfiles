@@ -61,10 +61,12 @@ head, then posts the approval as the review App, pinned to that head
 (`GH_REVIEW_APP_PRIVATE_KEY_B64`). The approval survives a later push just as an armed
 auto-merge does, so arm (and re-arm after a push) only on an approved head, and
 run `gh pr merge <N> --disable-auto` before pushing to an armed PR. Other repos: their
-own required checks and reviews. In a repository another person maintains, the merge
-is theirs: get the PR ready, tell them in one short note, and leave the merge and the
-auto-merge arm to them or their agent. After any merge, the owner still verifies
-delivery and the changed production path.
+own required checks and reviews. In a repository another person maintains, its maintainer
+is not our quality gate. A PR reaches them only after our own review passes at its head and
+its benefit is measured on their setup. Merge only a change that helps them, and tell them
+before the merge in one short note. A change that does not help them is closed, not handed
+to them to judge. After any merge, the owner still verifies delivery and the changed
+production path.
 
 Once a PR's required checks and review pass, merging it is usually the right call:
 every extra push restarts all the checks. So before another round, ask whether what
