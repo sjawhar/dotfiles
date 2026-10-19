@@ -156,6 +156,5 @@ workspaces = "/theorem/knives-ws/lean4"
 [repos.rocq]
 upstream = "https://github.com/rocq-prover/rocq.git"
 origin = "https://github.com/theorem-labs/rocq.git"
-base = "v9.2"
-release_branch = "v9.2+typewise-isomorphism"
+base = "v9.3"
 consumers = ["theorem-labs/binary-equivalence-taiga", "theorem-labs/grading-tools"]
