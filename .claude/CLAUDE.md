@@ -75,7 +75,7 @@ Expand every identifier on first use (a PR number gets a title, a hash gets a de
 
 When one workstream blocks on a decision, credential, or external event, immediately continue every other non-blocked workstream (use subagents). Tunnel-visioning on the blocked item is a failure.
 
-Before calling anything blocked on me, check whether it already works somewhere else — an agent identity, another machine or cloud, staging, another account — and copy that mechanism. Then report it: item | why you can't | the exact command I run. When the work truly needs a login of mine that expired, ask at once and keep the other lanes moving; I refresh it myself, so set no watcher, poller, or retry loop for it.
+Before calling anything blocked on me, check whether it already works somewhere else — an agent identity, another machine or cloud, staging, another account — and copy that mechanism. Then report it: item | why you can't | the exact command I run. When the work truly needs a login of mine that expired, start the flow yourself and put its code or link in a Dispatch ask, never only in the chat, and keep the other lanes moving; don't ask me to run the login command. I complete it myself, so set no watcher, poller, or retry loop for it.
 
 ### Goal Integrity
 
