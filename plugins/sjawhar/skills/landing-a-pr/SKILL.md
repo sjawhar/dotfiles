@@ -175,6 +175,14 @@ an unpushed child or scratch copy, never in the checkout being measured.
 - A delta review covers the delta **and every open finding**. “Findings: none”
   on the delta cancels no earlier finding. An old verdict is reusable only after
   proving its SHA is an ancestor and measuring the changed contribution.
+- Run a delta review (a re-review after a fix round) at high effort. Scope its
+  brief to the change since the last reviewed head plus every open finding. Give
+  it a tool-call budget and a verdict deadline inside the gate's cap. Give a
+  PR's first full review, and a review of a rewritten or non-ancestor head, the
+  highest effort. A budget or deadline never turns an incomplete review into an
+  approval.
+- When a gate ends at its cap with no verdict, read its transcript to find where
+  the time went. Do this before you raise the cap or rerun the gate unchanged.
 - Check the repository's live automated-review triggers. Do not post a manual
   request that cancels an automatically started run. Request review when the
   applicable trigger produced none, including path exclusions. A fixed head
