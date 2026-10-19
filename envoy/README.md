@@ -13,7 +13,7 @@ The project has two stacks, one per place it is applied from:
 
 | Stack | Applied from | Machines | `envoy:natsUrl` |
 |---|---|---|---|
-| `prod` | the devbox | the devbox (local socket) and oryx (SSH) | `nats://envoy-nats:4222`, over the host's Tailscale |
+| `prod` | the devbox | the devbox (local socket) | `nats://envoy-nats:4222`, over the host's Tailscale |
 | `laptop` | the laptop | the laptop (local socket) | `nats://nats.internal.trajectorylabs.com:4222`, through the laptop's route into the VPC (`laptop/trajectory-route@.service`), so it works on either tailnet |
 
 Each stack's machine with no `sshHost` uses the Docker socket of the machine
