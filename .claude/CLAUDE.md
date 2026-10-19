@@ -145,5 +145,4 @@ When compacting, preserve:
 - Designs I rejected, and why — so nobody re-proposes them
 - Topics I parked, in my own words — I will raise them again when I'm ready
 - Credential grants, with their scope (the task they were given for, unless I said otherwise)
-- The upstream-PR rule (`opening-a-pr` step 10: no upstream PR without `maintaining-inspect` loaded and a written answer to whether the change belongs upstream at all — a judgment recorded in `knives notch` and the PR body, not a permission to ask me for; the PR's lifecycle is the session's own work), verbatim, in every handoff and compaction
 - Provenance on every constraint and rule you pass forward: mine, or inferred. A successor treats an inferred constraint as a hypothesis to verify, never as law. Mark which it is; don't quote me to do it.
