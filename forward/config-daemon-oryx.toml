@@ -1,9 +1,16 @@
-# Laptop role, oryx pair: run by forward-daemon@oryx.service beside the default
-# pair's forward-daemon.service (config.toml). forward trusts exactly one peer
-# per daemon, so each devbox gets its own daemon. This one binds the laptop's
-# tailnet IPv6 address, which lets it use forward's default ports without
-# colliding with the default pair on the IPv4 address. Literal addresses only,
-# for the reason config.toml gives.
+# Laptop role, oryx pair: run by forward-daemon@oryx.service. forward trusts
+# exactly one peer per daemon, so each devbox gets its own daemon. This file is
+# the reference for every config-daemon-*.toml: the fields and the URL policy are
+# explained here once, and the other pairs say only how they differ.
+#
+# listen is this machine's literal address for the pair, bound by the daemon and
+# compared against by nothing; peer is the devbox's literal address, compared
+# against every inbound connection and dialled for nothing on this side. Literal
+# addresses only: a MagicDNS name is mutable from the admin console and must never
+# sit inside a security decision. oryx's are tailnet IPv6 addresses. A pair
+# carried over an SSH tunnel uses loopback instead (see the sami-leanperf and
+# sami-rocqperf files). bridge_port is the devbox's OAuth callback bridge port,
+# which this side dials; config-serve-oryx.toml explains the bridge.
 listen = "fd7a:115c:a1e0::8f36:1226"
 peer = "fd7a:115c:a1e0::3336:5706"
 bridge_port = 12801
@@ -12,12 +19,27 @@ bridge_port = 12801
 # ~/.pcscd/pcscd.comm there, so forward's PC/SC channel is off for this pair.
 pcsc_port = 0
 
-# Same policy as config.toml (scripts/tests/test_forward_environment.py fails if
-# they drift), except the preview host: this pair's is oryx. An IPv6 host is
-# matched with its brackets, as the URL spells it.
+# URL policy, the same for every pair (scripts/tests/test_forward_environment.py
+# fails if the pairs drift), except the preview host: each pair allows its own
+# devbox's. An IPv6 host is matched with its brackets, as the URL spells it.
+#
+# Listed URLs open straight in the browser. Everything else fires a critical
+# notification and lands in the clipboard, so it costs one paste and cannot open
+# by itself. Allowlist was unusable before forward learned that handoff, because
+# unlisted URLs were dropped silently. COSMIC renders no notification buttons, so
+# there is no ask-me-first option on this machine; paste is the gate.
 mode = "allowlist"
+
+# Use the system opener on the laptop: bare xdg-open resolves to the dotfiles
+# shim, which re-enters `forward open` and creates an opener feedback loop.
 opener = ["/usr/bin/xdg-open"]
+
+# COSMIC notifications are not clickable, so non-allowlisted URLs are handed over
+# via clipboard.
 clipboard = ["wl-copy"]
+
+# Entries are the only remote URLs that open without a paste. Chosen from 14 days
+# of daemon logs, so routine traffic does not turn into constant pasting.
 allow = [
   "*.anthropic.com",
   "[fd7a:115c:a1e0::3336:5706]",

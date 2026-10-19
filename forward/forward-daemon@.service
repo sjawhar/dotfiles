@@ -2,7 +2,12 @@
 Description=forward opener daemon for the %i devbox (receives URLs from %i)
 # One daemon per devbox: forward trusts a single peer per daemon. The instance
 # name selects ~/.config/forward/config-%i.toml, linked by installers/forward.sh
-# from forward/config-daemon-%i.toml. Ordering as forward-daemon.service.
+# from forward/config-daemon-%i.toml.
+# It needs the compositor: it opens a browser and copies to the clipboard via
+# wl-copy. Under default.target this raced the compositor at boot and started
+# without WAYLAND_DISPLAY, after which every clipboard handoff failed for the life
+# of the process -- so non-allowlisted URLs were neither opened nor copied, they
+# vanished.
 After=graphical-session.target
 PartOf=graphical-session.target
 

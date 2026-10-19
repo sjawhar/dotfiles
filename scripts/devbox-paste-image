@@ -1,17 +1,101 @@
 #!/bin/bash
-# devbox-paste-image — paste the laptop clipboard's image into a terminal on the devbox.
+# devbox-paste-image — paste the laptop clipboard's image into the focused terminal,
+# on whichever machine that terminal is on.
 #
 # A terminal cannot carry the image itself: Ghostty does not implement OSC 5522
 # (kitty's MIME-aware clipboard), and mosh would drop it anyway. So the image goes
-# out of band: upload it over ssh to ~/.cache/omp/pasted-images on the devbox,
-# which every agent box mounts at the same path, then paste that path into the
-# focused window. omp attaches a pasted image path when the file exists where it
-# runs. The clipboard holds the path afterwards, not the image.
+# out of band: it is copied over ssh to ~/.cache/omp/pasted-images on the machine
+# the focused window is on (into the laptop's own when that is the laptop), and the
+# path ~/.cache/omp/pasted-images/<name> is pasted into the window. That one path is
+# right on any machine and inside every agent box, which mounts ~/.cache/omp; omp
+# attaches a pasted image path when the file exists where it runs, expanding ~
+# against its own home. The clipboard holds the path afterwards, not the image.
+#
+# The machine comes from the focused window's title (scripts/focused-window-title),
+# read innermost first:
+#   - tmux titles its terminal "<machine>: <pane title>" (.tmux.conf set-titles), and
+#     a shell prompt "<user>@<machine>: <dir>"; a name counts only when it is this
+#     laptop or a machine on the tailnet.
+#   - mosh shows a remote title as "[mosh] <title>". Such a title that then names no
+#     machine is refused: the window is remote, but its machine is unknown.
+#   - Before a remote sets a title, Ghostty titles the window with its command:
+#     "devbox <host> …", "mosh [user@]<host> …", "ssh [user@]<host> …".
+#   - A title that names no machine (a local terminal, any other window) is the laptop.
 #
 # Bound to Ctrl+Alt+V in laptop/shortcuts-custom.
 set -euo pipefail
 
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+readonly PASTE_DIR='.cache/omp/pasted-images'
+
 notify() { notify-send --app-name="Devbox paste" "$@"; }
+
+# The laptop's own name and every tailnet machine's, one per line, lowercase.
+known_machines() {
+    hostname -s
+    tailscale status --json 2>/dev/null \
+        | jq -r '.Self, (.Peer // {} | .[]) | .HostName, (.DNSName | split(".")[0])' 2>/dev/null
+}
+
+# The host an ssh/mosh/devbox command line names: its first argument that is not an
+# option or an option's value, without any user@.
+command_host() {
+    local command="$1"; shift
+    local takes_value='' arg
+    case "$command" in
+        ssh) takes_value='bcDEeFIiJLlmOoopQRSWw' ;;
+        mosh) takes_value='p' ;;
+    esac
+    while (( $# )); do
+        arg="$1"; shift
+        case "$arg" in
+            --) break ;;
+            --*) continue ;;
+            -?*)
+                [[ -n "$takes_value" && "${arg:1:1}" == ["$takes_value"] && ${#arg} -eq 2 ]] && shift
+                continue
+                ;;
+        esac
+        printf '%s\n' "${arg#*@}"
+        return
+    done
+    if (( $# )); then printf '%s\n' "${1#*@}"; fi
+}
+
+# Prints the machine the title names, "" for the laptop; exits 1 when it cannot tell.
+title_machine() {
+    local title="$1" machine='' remote=0 label known
+    known="$(known_machines | tr '[:upper:]' '[:lower:]')"
+    while true; do
+        if [[ "$title" == '[mosh] '* ]]; then
+            title="${title#'[mosh] '}"
+            remote=1
+            continue
+        fi
+        if [[ "$title" =~ ^([^[:space:]@:]+@)?([A-Za-z0-9][A-Za-z0-9.-]*):\ (.*)$ ]]; then
+            label="${BASH_REMATCH[2],,}"
+            if grep -qxF -- "$label" <<<"$known"; then
+                machine="$label"
+                remote=0
+                title="${BASH_REMATCH[3]}"
+                continue
+            fi
+        fi
+        if [[ "$title" =~ ^(devbox|mosh|ssh)\ (.+)$ ]]; then
+            local -a words
+            read -r -a words <<<"${BASH_REMATCH[2]}"
+            label="$(command_host "${BASH_REMATCH[1]}" "${words[@]}")"
+            if [[ -n "$label" ]]; then
+                machine="${label,,}"
+                remote=0
+            fi
+        fi
+        break
+    done
+    (( remote == 0 )) || return 1
+    [[ "$machine" == "$(hostname -s | tr '[:upper:]' '[:lower:]')" ]] && machine=''
+    printf '%s\n' "$machine"
+}
 
 types=$(wl-paste --list-types 2>/dev/null) || types=
 mime=$(grep -m1 -x 'image/png' <<<"$types" || grep -m1 '^image/' <<<"$types" || true)
@@ -19,17 +103,32 @@ if [[ -z "$mime" ]]; then
     notify "No image on the clipboard"
     exit 0
 fi
+
+if ! title="$("$DOTFILES_DIR/scripts/focused-window-title" 2>&1)"; then
+    notify --urgency=critical "Cannot read the focused window" "$title"
+    exit 1
+fi
+if ! machine="$(title_machine "$title")"; then
+    notify --urgency=critical "Cannot tell which machine this window is on" \
+        "Its title names no machine: ${title}. Run tmux there, or connect with devbox <host>."
+    exit 1
+fi
+
 ext=${mime#image/}
 ext=${ext%%[;+]*}
 name="$(date +%Y%m%d-%H%M%S).${ext}"
 
 err=$(mktemp)
 trap 'rm -f "$err"' EXIT
-# shellcheck disable=SC2016  # $HOME and $d expand on the devbox
-remote='d=$HOME/.cache/omp/pasted-images && mkdir -p "$d" && f="$d/'"$name"'" && cat >"$f" && test -s "$f" && printf %s "$f"'
-if ! path=$(wl-paste --type "$mime" | ssh -o BatchMode=yes -o ConnectTimeout=5 devbox "$remote" 2>"$err"); then
-    notify --urgency=critical "Image upload to the devbox failed" "$(<"$err")"
+# shellcheck disable=SC2016  # $HOME and $d expand where the file lands
+store='d="$HOME/'"$PASTE_DIR"'" && mkdir -p "$d" && f="$d/'"$name"'" && cat >"$f" && test -s "$f"'
+if [[ -z "$machine" ]]; then
+    wl-paste --type "$mime" | bash -c "$store" 2>"$err" \
+        || { notify --urgency=critical "Saving the image on this laptop failed" "$(<"$err")"; exit 1; }
+elif ! wl-paste --type "$mime" | ssh -o BatchMode=yes -o ConnectTimeout=5 "$machine" "$store" 2>"$err"; then
+    notify --urgency=critical "Image upload to ${machine} failed" "$(<"$err")"
     exit 1
 fi
 
-printf '%s' "$path" | "${DOTFILES_DIR:-$HOME/.dotfiles}/voxtype/voxtype-paste"
+# shellcheck disable=SC2088  # a literal ~: omp expands it on the machine the path is pasted into
+printf '%s' "~/${PASTE_DIR}/${name}" | "$DOTFILES_DIR/voxtype/voxtype-paste"

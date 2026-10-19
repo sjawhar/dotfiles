@@ -43,9 +43,7 @@ class ForwardServeEnvironment(unittest.TestCase):
         write_executable(self.stub_dir / "hostname", 'echo "${STUB_HOSTNAME:-somebox}"')
         self.systemctl_log = self.root / "systemctl.log"
         for name in (
-            "config.toml",
-            "config-serve.toml",
-            "forward-daemon.service",
+            "config-serve-somebox.toml",
             "forward-serve.service",
             "omp-browser-relay.service",
         ):
@@ -120,18 +118,29 @@ class ForwardServeEnvironment(unittest.TestCase):
         )
         self.assertFalse((self.config_home / "omp" / "browser-relay.yml").exists())
 
-    def test_serve_role_uses_the_hosts_own_pairing_when_it_has_one(self) -> None:
-        """A devbox with config-serve-<host>.toml must not run the default pair's
-        addresses: that is how oryx ended up minting sami-agents' preview URLs."""
+    def test_serve_role_installs_the_hosts_own_pairing(self) -> None:
+        """Each devbox runs its own pair's addresses: a shared one made oryx mint another host's preview URLs."""
         (self.dotfiles / "forward" / "config-serve-oryx.toml").write_text("oryx\n", encoding="utf-8")
         link = self.home / ".config" / "forward" / "config.toml"
-        for host, expected in (("oryx", "config-serve-oryx.toml"), ("sami-agents", "config-serve.toml")):
+        for host in ("oryx", "somebox"):
             with self.subTest(host=host):
                 install = self.install("serve", STUB_HOSTNAME=host)
                 self.assertEqual(install.returncode, 0, install.stderr)
-                self.assertEqual(link.resolve(), (self.dotfiles / "forward" / expected).resolve())
+                self.assertEqual(link.resolve(), (self.dotfiles / "forward" / f"config-serve-{host}.toml").resolve())
 
-    def test_daemon_role_runs_one_daemon_per_extra_pair(self) -> None:
+    def test_serve_role_fails_on_a_host_without_its_own_pairing(self) -> None:
+        install = self.install("serve", STUB_HOSTNAME="unpaired")
+
+        self.assertNotEqual(install.returncode, 0)
+        self.assertEqual(
+            install.stderr.strip(),
+            "forward.sh serve: this machine (unpaired) has no forward pair; add "
+            "forward/config-serve-unpaired.toml and forward/config-daemon-unpaired.toml",
+        )
+        self.assertFalse((self.home / ".config" / "forward" / "config.toml").is_symlink())
+        self.assertFalse(self.systemctl_log.exists())
+
+    def test_daemon_role_runs_one_daemon_per_pair(self) -> None:
         (self.dotfiles / "forward" / "config-daemon-oryx.toml").write_text("oryx\n", encoding="utf-8")
         (self.dotfiles / "forward" / "forward-daemon@.service").write_text("test\n", encoding="utf-8")
 
@@ -141,11 +150,29 @@ class ForwardServeEnvironment(unittest.TestCase):
         pair_config = self.home / ".config" / "forward" / "config-oryx.toml"
         self.assertEqual(pair_config.resolve(), (self.dotfiles / "forward" / "config-daemon-oryx.toml").resolve())
         enabled = self.systemctl_log.read_text(encoding="utf-8").splitlines()
-        self.assertIn("--user enable --now forward-daemon", enabled)
         self.assertIn("--user enable --now forward-daemon@oryx", enabled)
+        self.assertNotIn("--user enable --now forward-daemon", enabled)
+        self.assertFalse((self.home / ".config" / "forward" / "config.toml").is_symlink())
+
+    def test_daemon_role_removes_the_old_default_pair(self) -> None:
+        """Reinstalling cleans up the default daemon an earlier install left, and stays idempotent."""
+        user_dir = self.home / ".config" / "systemd" / "user"
+        forward_dir = self.home / ".config" / "forward"
+        user_dir.mkdir(parents=True)
+        forward_dir.mkdir(parents=True)
+        (user_dir / "forward-daemon.service").symlink_to(self.dotfiles / "gone.service")
+        (forward_dir / "config.toml").symlink_to(self.dotfiles / "gone.toml")
+
+        for _ in range(2):
+            install = self.install("daemon")
+            self.assertEqual(install.returncode, 0, install.stderr)
+            self.assertFalse((user_dir / "forward-daemon.service").is_symlink())
+            self.assertFalse((forward_dir / "config.toml").is_symlink())
+        log = self.systemctl_log.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--user disable --now forward-daemon.service", log)
 
     def test_daemon_role_tunnels_only_loopback_pairs(self) -> None:
-        """A pair listening on loopback is off the tailnet and needs its SSH tunnel; a tailnet pair must not get one."""
+        """A pair listening on loopback is carried over an SSH tunnel and needs forward-tunnel@<pair>; a tailnet pair must not get one."""
         forward = self.dotfiles / "forward"
         (forward / "config-daemon-oryx.toml").write_text('listen = "fd7a:115c:a1e0::e03b:5c61"\n', encoding="utf-8")
         (forward / "config-daemon-vm.toml").write_text('listen = "127.0.0.1"\npeer = "127.0.0.1"\n', encoding="utf-8")
@@ -187,7 +214,7 @@ def port(config: dict, key: str) -> int:
 
 
 def is_tunnel(config: dict) -> bool:
-    """A pair off the tailnet listens on loopback and travels over forward-tunnel@<pair>."""
+    """A tunnelled pair listens on loopback and travels over forward-tunnel@<pair>."""
     return config["listen"].startswith("127.")
 
 
@@ -195,14 +222,14 @@ class CommittedForwardPairs(unittest.TestCase):
     """Each devbox config and its laptop daemon config must name each other."""
 
     def pairs(self) -> list[tuple[str, str]]:
-        pairs = [("config-serve.toml", "config.toml")]
+        pairs = []
         for serve in sorted(FORWARD.glob("config-serve-*.toml")):
             host = serve.name.removeprefix("config-serve-").removesuffix(".toml")
             pairs.append((serve.name, f"config-daemon-{host}.toml"))
         return pairs
 
     def test_each_devbox_and_laptop_daemon_trust_each_other(self) -> None:
-        daemons = {daemon_name for _, daemon_name in self.pairs()[1:]}
+        daemons = {daemon_name for _, daemon_name in self.pairs()}
         self.assertEqual({path.name for path in FORWARD.glob("config-daemon-*.toml")}, daemons, "a laptop daemon has no devbox side")
         for serve_name, daemon_name in self.pairs():
             with self.subTest(pair=serve_name):
@@ -219,17 +246,23 @@ class CommittedForwardPairs(unittest.TestCase):
                     self.assertEqual(port(serve, key), port(daemon, key), key)
 
     def test_laptop_daemons_share_one_url_policy(self) -> None:
-        """Extra pairs copy config.toml's policy; only their own preview host differs."""
-        default = load("config.toml")
-        shared = set(default["allow"]) - preview_entries(default["allow"], load("config-serve.toml")["listen"])
-        for serve_name, daemon_name in self.pairs()[1:]:
+        """Every pair's daemon has the same URL policy; only its own preview host differs."""
+        pairs = self.pairs()
+        self.assertGreater(len(pairs), 1, "nothing to compare")
+        configs = {daemon_name: load(daemon_name) for _, daemon_name in pairs}
+        own = {
+            daemon_name: preview_entries(configs[daemon_name]["allow"], load(serve_name)["listen"])
+            for serve_name, daemon_name in pairs
+        }
+        for daemon_name, entries in own.items():
+            self.assertTrue(entries, f"{daemon_name} does not allow its own preview host")
+        first_name, first = next(iter(configs.items()))
+        shared = set(first["allow"]) - own[first_name]
+        for daemon_name, pair in configs.items():
             with self.subTest(pair=daemon_name):
-                pair = load(daemon_name)
                 for key in ("mode", "opener", "clipboard"):
-                    self.assertEqual(pair[key], default[key], key)
-                own = preview_entries(pair["allow"], load(serve_name)["listen"])
-                self.assertTrue(own, f"{daemon_name} does not allow its own preview host")
-                self.assertEqual(set(pair["allow"]) - own, shared)
+                    self.assertEqual(pair[key], first[key], key)
+                self.assertEqual(set(pair["allow"]) - own[daemon_name], shared)
 
 
 if __name__ == "__main__":
