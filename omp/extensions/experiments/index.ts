@@ -1,5 +1,5 @@
-// The experiments extension: one extension holding the gates of seven experimental session features
-// (gates.ts says how a gate is read and drawn), six of them run from here.
+// The experiments extension: one extension holding the gates of eight experimental session features
+// (gates.ts says how a gate is read and drawn), seven of them run from here.
 //
 //   selfcompact       compacts early at a task boundary when the model says its history can be
 //                     summarized (selfcompact.ts)
@@ -15,6 +15,9 @@
 //   askgate_block     AskGate (../askgate.ts) refuses a revised Dispatch write instead of letting it
 //                     run with a warning, when OMP_ASKGATE is unset; AskGate reads the arm itself
 //                     through this resolution, so nothing registers here and the record still names it
+//   bash_gate_leading omp's bash interceptor, run from here in both arms: on, a read, grep or glob
+//                     rule blocks only the command's leading segment; off, every segment, as omp
+//                     does (bash-gate-core.ts). Its handler is not gated: the arm is read per call
 //
 // A bad gate throws here, so omp loads none of it and says why. Each feature registers its
 // handlers once, through a view of `pi` whose `on` runs a handler only while that feature is on
@@ -25,6 +28,7 @@
 // is logged through omp's logger and its feature stays off until the next resolution; the others
 // keep running. The installer links only this file; its imports resolve from its real path.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import bashGate from "./bash-gate";
 import contextLine from "./context-line";
 import gateFile from "./gates.json" with { type: "json" };
 import { ENTRY_TYPE, type ExperimentRecord, type Feature, resolve, resolveGates, rootSessionId } from "./gates";
@@ -69,6 +73,8 @@ export default function experiments(pi: ExtensionAPI): void {
 	pi.on("session_start", resolveSession);
 	pi.on("session_switch", resolveSession);
 	pi.on("session_branch", resolveSession);
+	// Before the first resolution a call gets the off arm, which is omp's own behavior.
+	bashGate(pi, () => current?.features.bash_gate_leading.on === true);
 
 	const fail = (feature: Feature, event: string, error: unknown) => {
 		stopped.add(feature);
