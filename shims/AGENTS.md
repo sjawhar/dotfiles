@@ -27,6 +27,9 @@ before handing the call to the real one.
   the install dir pinned back then. `-C /` keeps a project's own mise pin out, since the knives
   plugin every session loads is pinned machine-wide beside it. A third entry in one pid within
   10 s exits with an error; `knives gh` enters twice by design, through `shims/gh`.
+- **`ssh-keygen`** drops `SSH_AUTH_SOCK` for `-Y`, the operations git and jj sign and verify commits
+  with: the signing key is a file, and ssh-keygen asks the agent first, so a stuck agent socket
+  hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
 - `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
 - `gws`: an executable shim that resolves the gws-accounts wrapper installed by the omp plugin pin

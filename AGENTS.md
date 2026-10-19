@@ -99,6 +99,8 @@ Commits are signed with a per-machine ssh key at `~/.ssh/jj-signing`, registered
 - **jj** — `.jjconfig.toml` `[signing]`: `behavior = "own"`, `key`, `allowed-signers`.
 - **git** — `.gitconfig`: `gpg.format = ssh`, `allowedSignersFile`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`.
 
+Both run `ssh-keygen` by name, and `shims/ssh-keygen` drops `SSH_AUTH_SOCK` for its `-Y` operations: the key is a file, signing never needs the ssh agent, and a stuck agent socket otherwise hangs every signed commit. A process without `shims/` on `PATH` runs the real `ssh-keygen`, agent included.
+
 Both are plain versioned config, symlinked into place — no install step. The key path is identical on every machine, so there is nothing machine-specific to factor out. A machine missing the key fails to commit rather than committing unsigned, in both tools; that is the desired failure, since an unsigned commit under vigilant mode looks like impersonation.
 
 Git needs configuring even though day-to-day work is all jj: agent worktrees under `~/.cache`, scripts, and throwaway clones commit with plain `git commit`, and those were the commits showing up unsigned.

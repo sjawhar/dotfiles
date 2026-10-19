@@ -1,0 +1,40 @@
+#!/bin/bash
+# ssh-keygen with no ssh agent for -Y, the operations git and jj sign and verify commits with.
+# The signing key is a file (.gitconfig user.signingkey, .jjconfig.toml signing.key), so signing
+# never needs the agent, and ssh-keygen asks the agent before it reads the key file: a stuck
+# SSH_AUTH_SOCK hung every signed commit. Every other ssh-keygen call passes through unchanged.
+# A process without this directory on PATH runs the real ssh-keygen, agent and all.
+set -euo pipefail
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+self_dir="$(dirname "$self")"
+
+# The first ssh-keygen past this shim's own PATH entry; from the top, skipping this file, when
+# the shim was run by path from outside PATH.
+real=""
+past_self=false
+IFS=: read -ra path_dirs <<< "${PATH:-}"
+for pass in after-self from-top; do
+    for d in "${path_dirs[@]}"; do
+        [ -n "$d" ] || continue
+        if [ "$(readlink -f "$d" 2>/dev/null)" = "$self_dir" ]; then
+            past_self=true
+            continue
+        fi
+        [ "$pass" = from-top ] || $past_self || continue
+        if [ -x "$d/ssh-keygen" ] && [ "$(readlink -f "$d/ssh-keygen")" != "$self" ]; then
+            real="$d/ssh-keygen"
+            break 2
+        fi
+    done
+    $past_self && break
+done
+[ -n "$real" ] || { echo "shims/ssh-keygen: no real ssh-keygen on PATH" >&2; exit 127; }
+
+for arg in "$@"; do
+    if [ "$arg" = -Y ]; then
+        unset SSH_AUTH_SOCK
+        break
+    fi
+done
+exec "$real" "$@"

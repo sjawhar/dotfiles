@@ -72,6 +72,10 @@
 # machine-local override. A machine without the key fails to commit rather than
 # committing unsigned -- same as jj, and the failure we want, since an unsigned
 # commit under vigilant mode looks like impersonation.
+#
+# Signing reads the key file and never needs the ssh agent: git runs ssh-keygen
+# by name, and shims/ssh-keygen drops SSH_AUTH_SOCK for -Y, so a stuck agent
+# socket cannot hang a signed commit.
 [gpg]
 	format = ssh
 [gpg "ssh"]
