@@ -128,11 +128,10 @@ compaction:
   methodOrder: [shake, remote, snapcompact, handoff, soft]
 advisor:
   enabled: true
-# omp's own interceptor is off: the experiments extension's bash gate (experiments/bash-gate*.ts)
-# applies the same rules (bashInterceptor.patterns) from a tool_call handler, in both arms of its
-# `bash_gate_leading` experiment, and would block twice if both ran.
+# omp's own interceptor stays on in this shared file: a session that predates the experiments
+# extension's bash gate (experiments/bash-gate*.ts) has no other bash gate.
 bashInterceptor:
-  enabled: false
+  enabled: true
 # The status-line git integration (branch, dirty counts, PR) re-runs
 # `git status --porcelain --untracked-files=normal` as a child process every
 # 2-3 s per session; in agent-c that is ~150k filesystem calls and 0.45 s per
