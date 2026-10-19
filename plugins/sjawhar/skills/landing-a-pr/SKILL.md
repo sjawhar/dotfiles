@@ -59,8 +59,10 @@ landed by the lane that commissioned it. In `sjawhar/legion` the rule adds the L
 PO's reviewer App approving, and that approval survives a later push just as an armed
 auto-merge does, so arm (and re-arm after a push) only on a head the PO approved, and
 run `gh pr merge <N> --disable-auto` before pushing to an armed PR. Other repos: their
-own required checks and reviews. After any merge, the owner still verifies delivery
-and the changed production path.
+own required checks and reviews. In a repository another person maintains, the merge
+is theirs: get the PR ready, tell them in one short note, and leave the merge and the
+auto-merge arm to them or their agent. After any merge, the owner still verifies
+delivery and the changed production path.
 
 Once a PR's required checks and review pass, merging it is usually the right call:
 every extra push restarts all the checks. So before another round, ask whether what
