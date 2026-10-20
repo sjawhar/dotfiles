@@ -24,18 +24,22 @@ compactions and long loops with line numbers; `show {SESSION_FILE} START END` re
 `grep {SESSION_FILE} REGEX` finds lines; `stats {SESSION_FILE}` lists the session's subagent
 transcript files (render those the same way). Shaken output is recovered automatically.
 
-Find lessons of two kinds, kept apart:
-1. DESIGN/TASTE/WORKFLOW: a design decision and its reason; the user's taste shown by what he
-   accepted, rejected or corrected; how this team works. Mistakes the agent did not report
-   about itself count double — look for user corrections, reversals, abandoned work, rules
-   broken while loaded.
-2. TOOL FACTS: a flag, error, quirk or workaround of a tool, CLI or API.
+Find lessons of three kinds, kept apart:
+1. DESIGN/TASTE: a design decision and its reason; the user's taste shown by what he
+   accepted, rejected or corrected.
+2. BLIND SPOTS: a mistake the agent did not recognize. Look for user corrections,
+   reversals and abandoned work. For each one, name the skill, tool or doc that would have
+   let the agent see it, and say what that text should state.
+3. TOOL FACTS: a flag, error, quirk or workaround of a tool, CLI or API.
+
+Report lessons, not conduct: never report what an agent failed to disclose or whom it
+blamed.
 
 For every lesson: VERIFY it before you report it. Re-run the command, read the cited file at
 the quoted line, or reproduce it in a throwaway directory. Quoting the transcript line again
 is not verification; say HOW you checked. Report, per lesson, exactly:
 LESSON: <one sentence>
-KIND: design / taste / workflow / tool
+KIND: design / taste / blind spot / tool
 EVIDENCE: <verbatim quote + transcript line number>
 CHECKED: <the independent check you ran and its result, or UNVERIFIED>
 Put no dollar cost in any lesson, evidence quote or check result.

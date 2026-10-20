@@ -22,6 +22,9 @@ Hard rules:
   served model starts with `anthropic/`.
 - Text Sami reads carries no dollar costs. Drop every dollar figure from a reader report
   before you route it or show it.
+- Send no one a report of what an agent did wrong: not the agent, not its coordinator, not
+  Sami. A mistake becomes a lesson routed to the home that would have prevented it.
+- Write into a lesson's home only after Sami says yes. Bring him proposed edits in batches.
 - The ledger comes first. Before any write into a lesson's home (a repository, CLAUDE.md,
   memory, the marketplace, a tool fix), the Sessions row and the Lesson row (evidence,
   verdict, provisional home) MUST exist in the ledger, and you MUST read the ledger back to
