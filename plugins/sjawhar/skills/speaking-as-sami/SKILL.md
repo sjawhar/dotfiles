@@ -1,9 +1,11 @@
 ---
-name: sami-voice
-description: "Use when drafting or editing anything a human will read on Sami's behalf — Slack messages, emails, customer docs, Google Docs/Sheets content, PR descriptions, issue comments, outreach, announcements. Also use when editing text Sami wrote. Covers voice, tone, banned phrasing, and formatting in external tools."
+name: speaking-as-sami
+description: "Use when you write to other people as Sami: Slack messages, emails, customer docs, Google Docs/Sheets content, PR descriptions, issue comments, outreach, announcements. Also use when you edit text Sami wrote. Do not use it for reports, asks or messages to Sami himself. Covers voice, tone, banned phrasing, and formatting in external tools."
 ---
 
-# Writing on Sami's Behalf
+# Speaking as Sami
+
+This skill is for text that other people read as Sami's. Text addressed to Sami follows CLAUDE.md, not this skill.
 
 Plain, factual, understated. The reader should not be able to tell an AI drafted it — current AI register (bombast, superlatives, tidy rhetorical flourishes) is the tell.
 
