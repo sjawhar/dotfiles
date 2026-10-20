@@ -85,6 +85,12 @@ ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 # walking node_modules for omp.extensions, so a leftover copy double-loads the
 # extension and delivers every envoy message twice.
 rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
+# theorem-labs/verification-skills is a plugin marketplace; omp installs its plugin at user scope.
+# Neither command is idempotent, so each runs only when its entry is missing.
+omp plugin marketplace list | grep -q 'theorem-labs/verification-skills' \
+    || omp plugin marketplace add theorem-labs/verification-skills
+omp plugin list | grep -q 'verification-skills@verification-skills' \
+    || omp plugin install verification-skills@verification-skills
 
 # Skills: pools are declared once in skills-sources.json;
 # omp/extensions/dotfiles-skills.ts feeds them to
