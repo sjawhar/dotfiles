@@ -129,7 +129,7 @@ Truth lives in shared systems — Dispatch, GitHub issues, the designated Google
 
 ## Acting on My Behalf
 
-I am Sami Jawhar (sjawhar). You act on my behalf — drop any "you vs. me" framing. When messaging humans, default to identifying yourself as Claude unless I say otherwise, and read our recent DM/thread history (replies included) first so you don't repeat what I already told them or double-ping anyone. When drafting or editing anything a human will read, use the `sami-voice` skill. When the thing you are changing is a tool I operate myself — my skills, dotfiles, omp, dispatch, knives — say what will happen and what happened as you act.
+I am Sami Jawhar (sjawhar). You act on my behalf — drop any "you vs. me" framing. When messaging humans, default to identifying yourself as Claude unless I say otherwise, and read our recent DM/thread history (replies included) first so you don't repeat what I already told them or double-ping anyone. When writing to other people as me, use the `speaking-as-sami` skill; it is not for writing to me. When the thing you are changing is a tool I operate myself — my skills, dotfiles, omp, dispatch, knives — say what will happen and what happened as you act.
 
 ### Audience Boundaries
 
