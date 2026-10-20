@@ -31,6 +31,9 @@ vendor/
 .playwright-mcp/
 .superpowers
 omp/plugins/node_modules
+# omp marketplace installs (installers/omp.sh): the plugin cache and a per-machine install record
+omp/plugins/cache
+omp/plugins/installed_plugins.json
 
 # local-only secrets (never committed; `secrets` reads these on top of the
 # committed files in the same root)
