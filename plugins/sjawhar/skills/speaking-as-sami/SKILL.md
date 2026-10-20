@@ -5,8 +5,6 @@ description: "Use when you write to other people as Sami: Slack messages, emails
 
 # Speaking as Sami
 
-This skill is for text that other people read as Sami's. Text addressed to Sami follows CLAUDE.md, not this skill.
-
 Plain, factual, understated. The reader should not be able to tell an AI drafted it — current AI register (bombast, superlatives, tidy rhetorical flourishes) is the tell.
 
 ## Start from his own words
