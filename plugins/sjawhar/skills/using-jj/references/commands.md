@@ -1,209 +1,97 @@
-# Covers jj mental model, destructive-command safety, editing, command lookup, push, bookmarks, and non-TTY gotchas.
+# jj command lookup
 
-## Foundation
+Ownership and descendant checks from the skill apply to every rewriting command here.
 
-This user uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) instead of git. **Never use git commands** unless explicitly told to. If you're thinking `git commit`, `git push`, `git checkout`, `git rebase`, etc. — STOP and use the jj equivalent from this skill.
+## Model
 
-## Core Mental Model
+- `@` is the on-disk working-copy change, with uncommitted work. `@-` is its parent. It is not git's `HEAD`.
+- Prefer change IDs (letters k-z). Commit IDs (hex) change on every rewrite.
+- A rebase that succeeds can record conflicts. A refusal is not success. Read the result.
+- A rewrite of an ancestor rewrites its working-copy descendants.
+- Files not yet snapshotted are not stored. Inspect saved states with `jj op log --limit N` and `jj --at-op=<op> file list`, then recover with `jj restore --from <commit> <paths>`.
+- Two commits on one change ID (`/0`, `/4` suffixes) is divergence: bookkeeping, not corruption. Resolve it ([stacks and conflicts](stack-and-conflict-details.md)).
 
-- **No staging area.** Every `jj` command auto-snapshots the working copy. There is no `git add`.
-- **Changes vs Commits.** Change IDs (letters k-z, e.g. `qzmzpxyl`) are *stable* across rewrites. Commit IDs (hex) change when the commit is modified. Prefer change IDs to refer to things.
-- **`@` = working copy change.** Not like git HEAD — it represents what's on disk right now, including uncommitted work. `@-` is its parent.
-- **A successful rebase can record conflicts.** A refusal is not success; read the result. Descendants can rebase automatically when a parent changes.
-- **Repo operations can move working copies indirectly.** Rewriting an ancestor can rewrite its working-copy descendants. Rebasing a different branch does not select it for your next edit; inspect `@` afterward.
-- **Snapshots are recoverable; unsnapshotted files are not yet stored.** Inspect saved operations with `jj op log` and `--at-op`, then recover the identified paths with a forward `jj restore --from <commit> <paths>` in your own workspace. Never use `jj op restore`, `jj op revert` or `jj undo` in a shared repository.
-- **Divergent commits are routine bookkeeping, not damage.** Two commits sharing one change ID (the `/0`, `/4` suffixes) is simply what jj records when a change is rewritten while something still references the old commit — a bookmark, another workspace, or an octopus merge that pins it. It is not corruption and not a reason to stop working. Do not leave it lying around either; see [Resolving divergence](divergence.md).
-
-## CRITICAL: Scope Destructive Commands
-
-Before any jj command that reverts, discards, or rewrites, ask its blast radius and scope it to a path or revision. An instruction not to touch a file does not protect it from an unscoped command that affects the whole tree.
-
-- **`jj restore` without a path reverts the WHOLE working copy.** Always name a path: `jj restore --from <rev> <path>`. If you mean one file, name that file.
-- **`jj abandon`** discards a whole change.
-- **`jj undo` / `jj op restore`** are repo-wide time travel: they also undo unrelated work since that operation, including other agents' work in other workspaces.
-- New files are not recoverable until snapshotted. Once saved, inspect their commit rather than assuming they exist only in the current directory.
-
-**Recover an accidental restore:** run `jj op log` to find the offending operation, then use a **path-scoped** `jj restore --from <commit-before-it> <path>`. Before restoring, `jj op log --limit N` plus `jj --at-op=<op> file list` lets you inspect what existed at a past operation.
-
-## Edit an unpublished, unshared change in place
-
-For your own unpublished change with no other owner's descendants, `jj edit <change>`
-and ordinary file edits are the intended mechanism. A bookmark alone does not change
-that. Do not create temporary children just to squash them back into such a private change.
-
-A published or reviewed head is different: run `jj new <head>` before the first edit,
-then publish the appended change. Editing the old head amends it and automatically
-rebases any descendants. A bookmark does not make a published or shared commit safe
-to amend.
-
-For a merge, resolve it in its own working-copy commit, but do not path-extract its
-resolution with split or squash. `--ignore-working-copy` is for inspection that must
-not snapshot somebody else's workspace, never for proving your own on-disk changes.
-
-## Recover with one inspected forward change
-
-Read the complete failure and inspect `@`, bookmarks, ownership and descendants before
-repairing anything. Never use repository-global undo, restore-operation or revert-operation
-commands in a shared store, even once and even with your own operation ID.
-
-Use `jj-agent-status` when available, or ordinary `jj status`, `jj log` and
-`jj workspace list`. Divergence is bookkeeping, not proof of damage. Investigate an
-unexpected state from the saved commits rather than guessing or looping on undo.
-
-## Before and after publication
-
-1. Accumulate related edits in your own unpublished, unshared change.
-2. Keep its description meaningful. Describe with `-m` when needed; `describe` is a
-   rewrite, not a staging operation.
-3. Publish only its named bookmark, after inspecting the dry run and recording the
-   intended commit ID. Verify that exact remote bookmark afterward.
-4. Run `jj new` after the successful push. Any later review fix starts on that child,
-   never by editing and re-pushing the published commit itself.
-
-When combining private changes, name the revisions and paths, check descendants first,
-and give split/squash an explicit non-interactive description policy (`-m` or squash `-u`).
-Do not use a squash into a published head as a workaround for the append-only rule.
-
-## Commands (use these instead of git)
+## Commands
 
 | Task | Command |
 |------|---------|
 | Status | `jj status` |
-| Log (human-readable) | `jj log` |
-| Log (agent — Sami JSONL alias) | `jj agent-log` |
-| Log (stock, flat) | `jj log --no-graph` |
-| Diff of current change | `jj diff` |
-| Diff of specific change | `jj diff -r <rev>` |
-| Show current change | `jj log -r @` |
-| Describe current change | `jj describe -m "message"` |
-| Create new empty change | `jj new` |
-| New change on specific parent | `jj new <rev>` |
-| New change with message | `jj new -m "message"` |
-| Insert change before current | `jj new -B @` |
-| Edit an existing change | `jj edit <rev>` |
-| Move to next/prev change | `jj next --edit` / `jj prev --edit` |
-| Squash a private `@` into its private parent | `jj squash -u` (check ownership and descendants first) |
-| Collapse a stack into one commit | `jj squash --from 'aaa::eee' --into zzz -m "msg"` (`-m` required) |
-| Squash interactively (TUI) | `jj squash -i` |
-| Redistribute edits to ancestors | `jj absorb` (see Gotchas) |
-| Abandon a change | `jj abandon <rev>` |
-| Rebase (default: branch) | `jj rebase -o <dest>` (defaults to `-b @`) |
-| Rebase revisions only | `jj rebase -r <rev> -o <dest>` |
-| Rebase revision + descendants | `jj rebase -s <rev> -o <dest>` |
-| Rebase whole branch | `jj rebase -b <rev> -o <dest>` |
-| Insert revision after target | `jj rebase -r <rev> -A <target>` |
-| Insert revision before target | `jj rebase -r <rev> -B <target>` |
-| Create merge commit | `jj rebase -s <rev> -o <parent1> -o <parent2>` |
-| List bookmarks | `jj bookmark list` |
-| Create/move bookmark to `@` | `jj bookmark set <name>` |
-| Push a named bookmark | `jj git push --bookmark <name>` |
+| Log | `jj log`. Flat: `jj log --no-graph`. JSONL: `jj agent-log` (local alias) |
+| Diff | `jj diff --git [-r <rev>] [--stat]` |
+| Show `@` | `jj log -r @` |
+| Describe `@` | `jj describe -m "message"` |
+| New change | `jj new [<rev>] [-m "message"]` |
+| Insert before `@` | `jj new -B @` |
+| Edit a change | `jj edit <rev>` |
+| Next/previous | `jj next --edit` / `jj prev --edit` |
+| Squash private `@` into private parent | `jj squash -u` |
+| Collapse a stack | `jj squash --from 'aaa::eee' --into zzz -m "msg"` |
+| Squash into one ancestor by path | `jj squash --into <change> -m "msg" -- <paths>` (never into a published head, as a workaround for the append-only rule) |
+| Split by path | `jj split [-r <rev>] -m "child description" <paths>` (named paths stay. The rest move to the child) |
+| Abandon | `jj abandon <rev>` (discards the whole change) |
+| Rebase | see [rebase](rebase.md) |
+| Bookmarks | `jj bookmark list`. `jj bookmark set <name>` |
+| Push one bookmark | `jj git push --bookmark <name>` |
 | Fetch | `jj git fetch` |
 | Update stale workspace | `jj workspace update-stale` |
 
-## Conflicts
+- Never pipe a rewriting command. Check `jj log` afterward to check it ran.
+- Do not re-describe commits only to push them.
 
-jj conflict markers differ from git:
-- `<<<<<<<` / `>>>>>>>` — start/end of conflict
-- `+++++++` — start of a **snapshot** (full content of one side)
-- `%%%%%%%` — start of a **diff** (changes to apply to the snapshot)
+## Non-TTY rules
 
-To resolve: edit the file to remove all markers, keeping the correct content. Resolving a parent conflict auto-resolves descendants via automatic rebasing.
+- Always pass `-m` to `split` and `-m` or `-u` to `squash`. Paths alone still open an editor. `jj-editor` refuses to start an editor without a TTY only as a fail-safe.
+- Use `jj diff --git`. The default word-level diff concatenates old and new text without color and is unreadable.
 
-## Pushing Changes
+## Revsets
 
-**Before pushing, ALWAYS run `jj bookmark list` to see what bookmarks actually exist.**
-
-| Action | Command |
+| Revset | Meaning |
 |--------|---------|
-| Check the intended named push without publishing | `jj git push --bookmark <name> --dry-run` |
-| Push a specific local bookmark, including its first remote publication | `jj git push --bookmark <name>` |
-| Create and publish a named remote bookmark | `jj git push --named <name>=@` |
-
-Use only a named push in a shared store. Bare push and `--tracked` can select other
-work, and `--all` / `--deleted` are repository-wide, not substitutes for a failed flag.
-
-- A plain `jj git push` refuses a local bookmark the remote has never seen. With a local `feature` bookmark and an `origin` remote, stock jj says:
-  ```text
-  Warning: Refusing to create new remote bookmark feature@origin
-  Hint: Run `jj bookmark track feature --remote=origin` and try again.
-  Nothing changed.
-  ```
-- Publish that existing local bookmark with `jj git push --bookmark feature`, or create a named remote bookmark with `jj git push --named feature=@`.
-- **There is no `--allow-new`.** Stock jj reports `error: unexpected argument '--allow-new' found`.
-- Don't re-describe commits when pushing — just push
-
-### Identity is a push precondition
-
-Configure identity before creating commits you may push. jj rejects any commit in the pushed ancestry with an empty author or committer:
-
-```text
-Error: Won't push commit <commit> since it has no author and/or committer set
-```
-
-```bash
-# User default
-jj config set --user user.name "Your Name"
-jj config set --user user.email "you@example.com"
-
-# Repository-specific override
-jj config set --repo user.name "Your Name"
-jj config set --repo user.email "you@example.com"
-
-# One command / CI
-JJ_USER="Your Name" JJ_EMAIL="you@example.com" jj new -m "message"
-```
-
-`--repo` and user settings affect future commits; set them before the first commit. Redirecting `XDG_CONFIG_HOME` does **not** disable the legacy `~/.jjconfig.toml`, which jj loads before the XDG config. For a hermetic invocation, use `JJ_CONFIG= jj ...`.
-
-Changing shared user-level identity requires the user's authorization. Prefer the
-already configured identity; a missing identity is not permission to invent one or
-silently change other sessions' configuration.
-
-**Common mistake**: Labels ending with `@` in `jj log` output (e.g. `default@`, `my-workspace@`) are **workspace markers**, NOT bookmarks. Only names in the bookmark position (without trailing `@`) are actual bookmarks. **Always verify with `jj bookmark list`.**
+| `@`, `@-`, `@+` | Working copy, parent, child |
+| `trunk()` | Default remote bookmark, or `root()` |
+| `root()` | Root commit (`zzzzzzzz`) |
+| `mine()` | Authored by you (never a mutation target in a shared store) |
+| `heads(all())` | All heads |
+| `::x` / `x::` | Ancestors / descendants of x |
+| `x..y` | Ancestors of y that are not ancestors of x |
+| `ancestors(x, depth)` | Ancestors, depth-limited |
+| `description(substring:x)` | Description contains x |
+| `bookmarks()` / `remote_bookmarks()` | Commits with local / remote bookmarks |
 
 ## Bookmarks
 
-- Bookmarks do **not** auto-advance (unlike git branches).
-- `jj bookmark create <name>` creates only a new bookmark and fails if that name exists.
-- `jj bookmark set <name>` creates or updates a bookmark by name; it targets `@` by default.
-- `jj bookmark move <name> --to <rev>` moves existing bookmarks only; use `--allow-backwards` for a backwards or sideways move.
-- When a remote branch is deleted (e.g., after PR merge), the local tracking bookmark is automatically deleted
-- Untracked local bookmarks must be deleted manually if desired
+- Bookmarks do not advance with new commits.
+- `create` makes a new name and fails if it exists. `set` creates or updates and targets `@` by default. `move <name> --to <rev>` moves an existing one. A backward or sideways move needs `--allow-backwards`.
+- Labels ending in `@` in `jj log` (`default@`) are workspace markers, not bookmarks. Check with `jj bookmark list` before a push.
+- A deleted remote branch deletes its tracking bookmark. Delete untracked local bookmarks yourself.
+- Plain `jj git push` refuses a bookmark the remote has never seen (`Refusing to create new remote bookmark`, `Nothing changed.`). Bare push and `--tracked` can select other work. Use `--bookmark` or `--named`.
 
-### `jj split` and `jj squash`: `-m`/`-u` is mandatory in non-TTY runs
+## Identity
 
-**Never invoke either command bare in an agent/piped shell.** `jj split` needs a fileset
-AND a description policy; paths alone do not prevent an editor launch. `jj squash` likewise
-needs an explicit resulting-description policy.
+jj refuses to push a commit with no author or committer. Set identity before the first commit:
 
 ```bash
-# Keep named paths in the current/original change; move every other changed path to its child.
-jj split -m "child change description" <path1> <path2>
-
-# Split a specific revision by path.
-jj split -r <rev> -m "child change description" <path1>
-
-# Squash with an explicit resulting description, or deliberately retain the destination's.
-jj squash -m "resulting description"
-jj squash -u
-jj squash --from 'aaa::eee' --into zzz -m "combined description"
+jj config set --user user.name "Your Name"   # or --repo
+jj config set --user user.email "you@example.com"
+JJ_USER="Your Name" JJ_EMAIL="you@example.com" jj new -m "message"   # one command
 ```
 
-`jj-editor` is configured to reject editor launches without a TTY and prints these forms. That
-is a fail-safe only: **always pass `-m` or `-u` yourself.** Never pipe a rewriting `jj` command;
-check `jj log` afterward to confirm the operation actually occurred.
+- Use the identity already configured. A missing identity is not permission to invent one or change shared user config without the user's authorization.
+- `XDG_CONFIG_HOME` does not disable `~/.jjconfig.toml`. For a hermetic call use `JJ_CONFIG= jj ...`.
 
-Choose logical commits for reviewability. Published review fixes are appended commits;
-consolidation of private work must not rewrite a published head or another owner's work.
+## Conflict markers
 
-### `jj diff` in non-TTY / agent contexts
+- `<<<<<<<` / `>>>>>>>`: start and end. `+++++++`: a snapshot of one side. `%%%%%%%`: a diff to apply to the snapshot.
+- Delete all markers. Resolving a parent conflict resolves descendants by automatic rebase.
 
-Standard `jj diff` uses **word-level diffs** that concatenate old and new text without ANSI color codes in non-TTY output. This makes diffs unreadable — e.g. `my-org/aboreturn-value` is actually `[deleted:ab][added:return-value]` rendered without color.
+## Local helpers
 
-**Always use `--git` for verification in agent/piped contexts:**
+- `jj-agent-status [--deep] [--json]`: orientation in one view, with other agents and changes that need attention. Use it at session start or for triage. Without it: `jj status`, `jj log`, `jj workspace list`.
+- `jj agent-log [-r <revset>]`: `jj log --no-graph -T agent_log`, one JSON object per line (`bookmarks` marks unsynced with `*`). Stock fallback: `jj log --no-graph`. Show the user `jj log` or `-T builtin_log_compact`.
+- `jj tug`: moves the closest bookmark to `@`. Elsewhere: `jj bookmark move <name> --to @`.
 
-```bash
-jj diff --git          # Standard unified diff format (readable without color)
-jj diff --git -r <rev> # For a specific revision
-jj diff --git --stat   # Summary of changed files
-```
+## `jj absorb`
+
+- Use it only when `@` sits on a merge of several branches, to route each fix to the branch that last touched the line. To fix one ancestor, use `jj edit <change>` then `jj new`, or `jj squash --into`.
+- It leaves new files, ambiguous boundary insertions, mode changes and conflicted files in `@`.
+- It records conflicts in destinations instead of aborting, and rebases them and every descendant. Afterwards run `jj diff` and `jj log -r ::@`.

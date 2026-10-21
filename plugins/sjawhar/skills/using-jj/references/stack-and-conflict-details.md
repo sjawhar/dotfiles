@@ -1,61 +1,46 @@
-# Publishing from a shared stack
+# Stacks, conflicts and divergence
 
-When several sessions' commits sit in one local stack (a shared checkout, or an unpushed
-chain nobody owns whole), publish each line of work with `jj duplicate <commit> -d main@origin`
-and open the PR from the duplicate. The duplicate has its own commit ID and no descendants
-in the stack, so a later `jj split` / `jj describe` / `jj rebase` on the original stack rewrites
-the originals and never moves a published PR head. Duplicating is therefore the right move for
-publication from a stack you cannot restructure yet; it is the wrong move where a release pin
-must follow the change ID (the using-jj fork-release rule).
+## Publishing from a shared stack
 
-## Conflict chains: squash first, resolve once
+- When several sessions' commits sit in one local stack, publish each line with `jj duplicate <commit> -d main@origin` and open the PR from the duplicate. It has no descendants in the stack, so later rewrites of the originals never move the PR head.
+- Never do this where a release pin must follow the change ID.
 
-When a rebase drags a many-commit branch across a moved trunk, each commit re-conflicts on the
-same hunks. Do not grind through the chain: squash the branch to one commit, or the few the
-reviewer genuinely needs under the user's commit-structure rule, then rebase and resolve one
-commit's worth of conflicts. Do not rebase at all when there is no conflict. The same shape holds
-in an octopus merge: its members share one fork point, never several. The exceptions are a shared
-stack you cannot restructure (duplicate instead) and a fork branch whose release pin must follow
-the change ID.
+## Conflict chains
 
-**After a squash merge, the merged commits have no ancestry a rebase can recognise.** GitHub's
-squash lands the PR as one new commit whose parents do not include any of the branch's commits,
-so a branch stacked on that PR still carries them and `jj rebase -b`/`-s` onto `main@origin`
-re-applies them: as **empty** commits when main has not touched those files since (clutter;
-`--skip-emptied` drops them), and as **conflicts** when main has changed one of them since (a
-2-sided conflict on the file, propagated into your own commits; `--skip-emptied` does nothing for
-those, because a conflicted commit is not empty). The outcome is decided per **file**, so a real
-case is a mix of empty commits and a conflicted one. That reads as a broken rebase rather than a
-duplicate replay: `--skip-emptied` drops the empties and leaves the conflict, and the tool looks
-confused. jj does no patch-ID matching. Before any rebase, `git merge-tree` of the un-rebased head
-against main already names the conflicting file.
+- When a rebase across a moved trunk re-conflicts each commit on the same hunks, do not grind through it. Squash the branch to one commit, or the few the reviewer needs. Then rebase and resolve once.
+- The members of an octopus merge share one fork point.
+- Exceptions: a shared stack you cannot restructure (duplicate instead) and a fork branch whose release pin follows the change ID.
 
-The probe is positive, not a reading of commit subjects: `jj log -r '<their-commit> & ::main@origin'`
-**empty** proves the squash left no ancestry. The formulation that drops the duplicates is
-`jj rebase -r <your own commit ids> -d main@origin`; the merged commits stay on the old base and
-are nothing to keep. Two more things break in the same event (jj 0.45.1-sami):
+## Resolving conflicts
 
-- The merged PR's head branch is auto-deleted, so `<base-branch>@origin` stops resolving
-  (`Error: Revision \`A@origin\` doesn't exist`, after a fetch that printed `A@origin [deleted]`).
-  That is the loud failure, not a wrong answer.
-- A stacked branch's base is the commit it actually forked from, not the base branch's final
-  head, so "rebase the stack" is a per-branch list derived from the remote, never one instruction.
+1. Run `jj log` to see what diverged.
+2. Review what changed in each side. Never lose functionality, and never delete local changes without permission.
+3. When one side is the old version and the other the new version of the same logic, keep only the new. Then scan for duplicated blocks.
+4. Compare the diff against main with the pre-rebase diff to check nothing was lost or reverted.
+5. Run tests, lint and format before you squash commits together.
 
-**A read used as evidence of absence must first be shown to return something.** `jj file show -r
-<rev> <path>` has three ways to hand you zero bytes, and a `grep` over the result reads all three
-as "the clause is not there" (jj 0.45.1-sami):
+## After a squash merge
 
-- A **literal path that matches nothing**: jj paths are cwd-relative, so `docs/x.md` from a
-  subdirectory looks for `<subdir>/docs/x.md`. It fails loud (`Error: No such path`, exit 1), but a
-  stdout-only capture (`$(...)`, `| grep`, `2>/dev/null`) throws the error and the status away.
-- A **glob that matches nothing** (`glob:docs/nothing*.md`) is genuinely silent: exit 0, no
-  output, no warning.
-- A genuinely **empty file** is exit 0 and empty too.
+- GitHub's squash commit has none of the branch's commits as parents, and jj does no patch-ID matching. A `rebase -b`/`-s` of a stacked branch onto `main@origin` replays them per file. Where main left the file alone, they are empty commits (`--skip-emptied` drops them). Where main changed it, they are conflicts.
+- Prove it: `jj log -r '<their-commit> & ::main@origin'` is empty. `git merge-tree` of the old head against main names the conflicting file before any rebase.
+- Fix: `jj rebase -r <your own commit ids> -d main@origin`. Leave the merged commits on the old base.
+- The merged PR's head branch is deleted, so `<base-branch>@origin` stops resolving.
+- Each stacked branch's base is the commit it forked from, not the base branch's last head. Derive one rebase per branch from the remote.
 
-Only the byte count separates them: `wc -c` the output before asking it anything, and anchor paths
-at the root (`root:docs/x.md`) when the cwd is not the repository root. A control has to be
-non-empty for a reason **independent** of what you are testing. A "known-present" item that shares
-the query's blind spot returns the same empty and proves nothing; for example, a control for
-`gh search issues` must not be a pull request, which that command excludes. Pick something the
-tool must return by a different mechanism, and confirm with an independent read such as
-`git show origin/main:<path>`.
+## Moving a child stack onto a rewritten parent
+
+- Compute `-s`. Never read it off `jj log`, where short change IDs overlap across a fork. A start too late merges against a stale base and conflicts every file.
+- Use `jj rebase -s 'roots(<commit the stack sits on>..<child>)' -d <new-parent>`. When the parent was rewritten elsewhere and fetched, `roots(::<child> ~ ::<new-parent>)` selects the old parent and conflicts the chain. When it was rewritten in this repository, jj already rebased the children.
+- Before and after, check that `jj diff --name-only --from 'heads(::<child> & ::<parent>)' -r <child>` lists the same files and `(::<child> ~ ::<parent>) & conflicts()` is empty.
+
+## Divergence
+
+1. List the copies: `jj log -r 'change_id(<id>)'`. Inspect each by commit ID: content, bookmarks, workspace owner.
+2. Find the copy the current work uses. An operation-log snapshot can predate later edits. A recovery copy can hold work that looks unsaved.
+3. Check `descendants(<commit>) ~ <commit>` before any rewrite or abandon.
+4. Check the real remote head before you change a published bookmark.
+
+- Point an owned conflicted bookmark at the verified survivor. Do not delete the remote branch to tidy the local view.
+- Abandon a stale copy only when it is your own change, its content stays reachable, `jj log -r 'descendants(<id>) ~ <id>'` is empty and `jj log -r <id> --no-graph -T bookmarks` prints 0 bytes. Empty is not an ownership test.
+- A recreated empty commit can be another workspace's `@`. Identify it by workspace name. Never abandon or forget a live workspace.
+- An abandon can delete local bookmarks and rebase other work, and a later push can then delete the remote branch. Read the dry-run direction before each push.
