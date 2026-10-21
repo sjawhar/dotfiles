@@ -1,93 +1,47 @@
 ---
 name: resolve-conflicts
-description: "Use when merge conflicts exist after rebase, merge, or branch integration; when file moves or renames cause path-level conflicts; or when verifying a reconstructed PR head even though no conflict markers remain."
+description: "Use when merge conflicts exist after a rebase, merge, or branch integration, or when file moves or renames cause path-level conflicts. Also use when verifying a reconstructed PR head that has no conflict markers."
 ---
 
 # Resolve Conflicts
 
-## Process
+## 1. Map both sides first
 
-### Phase 1: Map Both Sides (DO THIS FIRST)
+- List the conflicted files with `git status`.
+- For each side, read `git diff $(git merge-base HEAD <side>)..<side> --stat`, then the full diff. `<side>` is `HEAD`, then `MERGE_HEAD` for a merge, or `REBASE_HEAD` or the incoming branch tip for a rebase.
+- Keep reading until you know each side's path and content changes and where they overlap. For each overlap, know which version is better, and why. Resolve nothing before that.
 
-Before resolving anything, understand the full picture:
+## 2. Classify each conflict
 
-```bash
-git status                                 # List all conflicted files (U* markers in porcelain)
-```
+- Moved or renamed on one side, changed on the other: use the right path and keep the content changes.
+- Same lines changed on both sides: read both, then combine them or take the better one.
+- Moved and changed differently on each side: resolve the path first, then the content.
+- Deleted on one side, changed on the other: decide if the file must exist. If yes, keep the changes.
+- In `--stat`, `0 insertions, 0 deletions` is a pure move. Other counts add content changes.
+- Architectural disagreement or mutually exclusive approaches: explain both sides and ask the user before you resolve. Do not guess.
 
-**For each parent/side of the conflict:**
-```bash
-git diff <merge-base>..<side-rev> --stat   # What files did this side touch?
-git diff <merge-base>..<side-rev>          # What content changes did this side make?
-```
-`<side-rev>` is `HEAD` for your side and `MERGE_HEAD` (merge) or `REBASE_HEAD`/the
-incoming branch tip (rebase) for the other; `<merge-base>` is
-`git merge-base HEAD <side-rev>`.
+## 3. Resolve each file
 
-**You must be able to answer:**
-1. What did side A change? (paths AND content)
-2. What did side B change? (paths AND content)
-3. Do they overlap? Where?
-4. Which side's version is better for each overlapping area, and why?
+- Delete all markers. `<<<<<<<` to `=======` is your side, `=======` to `>>>>>>>` is theirs.
+- Give each file a reason: "Taking side B: it has the cache fix", not "Taking side B".
+- Read the content on both sides before you call a change "superseded".
 
-**If you can't answer all four, keep reading. Do not proceed.**
+## 4. Test the composed tree, not only the marked conflicts
 
-### Phase 2: Classify Conflicts
+- Delete each path that `git diff <old-base> <new-base> --summary` marks `D`, unless the approved change deliberately restores it and you say so in the description.
+- In files that both sides changed, find lost hunks that did not conflict, docs included. Taking one whole side can discard the other side's valid work.
+- Trace renamed or changed interfaces to their dynamic consumers: string-keyed registries, import loaders, monkeypatch targets.
+- Run the affected packages' syntax, type, lint and test commands the way CI runs them, with the same test layout. Do not run only the test next to a conflict.
+- Run focused tests while you fix, and the full affected set once before you publish.
+- Before you name the cause of a failure, run the same commands in the same environment on the intended base.
+- Fix integration defects before you publish. For a defect the base already has, fix it, or state the remediation and get an explicit decision to exclude it. "Pre-existing" is not a resolution.
 
-| Conflict Type | What It Looks Like | Resolution |
-|---|---|---|
-| **Path-only** | File moved/renamed on one side, modified on other | Pick the correct path, keep the content changes |
-| **Content-only** | Both sides modified same lines | Read both changes, combine or pick the better version |
-| **Path + content** | File moved AND modified differently on each side | Resolve path first (where should it live?), then resolve content |
-| **Delete vs modify** | One side deleted file, other modified it | Decide if file should exist; if yes, keep modifications |
+## Stop and rethink before you
 
-Always check `--stat` for line counts — `0 insertions, 0 deletions` means pure move, anything else means move + content changes.
+- Rebase around a conflicting parent: that loses the parent's changes.
+- Add a fix-up commit that reverses changes: fix the original resolution.
+- Run `git reset --hard` to try again: make one deliberate fix. Resets leave no record of what you tried, and a reset of pushed commits rewrites shared history.
+- Drop commits to clean up a resolution: first make sure they are unwanted, and not pushed or relied on elsewhere. Do not touch what you don't understand.
+- Start a second fix after the first fell short: redo step 1. You missed something.
 
-### Phase 3: Resolve Each File
-
-Read the conflict markers in each file:
-- `<<<<<<<` opens your side's content, `=======` divides it from the other side's,
-  `>>>>>>>` closes it
-- Pick the right content, remove all markers
-
-**For each file, document your choice:** "Taking side B because it has the grading cache improvement" — not just "taking side B."
-
-### Phase 4: Verify
-
-Verify the composed tree, not only the marked conflicts:
-
-- Compare paths deleted by the new base with the result:
-  ```bash
-  git diff <old-base> <new-base> --summary   # D entries are paths the new base deleted
-  ```
-  Each must be absent from the result unless the approved change deliberately restores it; say
-  so in the description. Remove accidental resurrections.
-- Check files changed on both sides for lost non-conflicting hunks, including documentation
-  accompanying a code change. Taking one whole side can discard the other side's valid work.
-- Check renamed or changed interfaces and their dynamic consumers, including string-keyed
-  registries, import loaders and monkeypatch targets. Marker-free text can still be invalid code.
-
-Run the affected packages' syntax, type, lint and test checks after integration, with the same
-commands and test layout CI uses, not only the one test beside a conflict. Use focused checks
-while repairing and the full affected set once before publishing. Compare a failure against
-the intended base with the same commands and environment before attributing its cause.
-Resolve integration defects before publishing. For a baseline defect, fix it or state the
-remediation and obtain an explicit decision to exclude it; “pre-existing” is not a resolution.
-
-## Red Flags — STOP and Rethink
-
-| What you're about to do | Why it's wrong |
-|---|---|
-| Rebase to bypass a conflicting parent | You're avoiding the conflict, not resolving it. The parent's changes get lost. |
-| Insert a "fix-up" commit to reverse changes | This creates a new problem to solve instead of solving the original one. |
-| `git reset --hard` then retry a different approach | Resetting and retrying repeatedly leaves no record of what you tried; a reset that discards commits already pushed elsewhere rewrites shared history. One deliberate fix, not trial-and-error. |
-| Drop or discard commits to clean up a messy resolution | Verify they're actually unwanted first. Check they aren't already pushed or relied on elsewhere. Don't touch what you don't understand. |
-| Say changes are "superseded" without checking | Read the actual file content on both sides. "Probably already covered" is not verification. |
-| Take one whole file side without comparing the discarded changes | Valid non-conflicting code or documentation can disappear with the side you discarded. |
-| Chain a second fix after the first one didn't fully work | Stop. Re-read Phase 1. You missed something. |
-
-## When Conflicts Are Complex
-
-If a conflict involves more than path + content (e.g., architectural disagreements, mutually exclusive approaches), **explain both sides and ask the user** before resolving. Don't guess.
-
-**Done when:** All conflicts resolved, checks pass, changes pushed, no stray or duplicate commits left from the resolution.
+**Done when:** you resolved all conflicts, every command from step 4 passes, you pushed the changes, and no stray or duplicate resolution commits remain.
