@@ -1,37 +1,40 @@
 ---
 name: bunker-down
-description: Harden an EC2 instance used as a development machine
+description: Use when hardening a publicly reachable EC2 instance used as a daily development machine. Also use when adding Tailscale, a host firewall, SSH hardening or SSM access to one.
 ---
 
-# Harden EC2 Devbox
+# Harden an EC2 devbox
 
-Security hardening for a publicly accessible EC2 instance used as a daily driver development machine. Establishes Tailscale VPN, host firewall, SSH hardening, and SSM escape hatch.
+- Never lock the user out. Open each new access path and confirm that it works before you close the old one.
+- At each **GATE**, stop until the user confirms.
+- Prerequisites: an authenticated AWS CLI (on the instance or the user's laptop), a Tailscale account for the user, and working SSH access now.
 
-**Safety principle:** Never lock the user out. Establish escape hatches before restricting access. Confirm each access path works before closing the previous one.
+## Step 1: Assess
 
-## Quick Reference
+Run all of these. Present the findings as "good" or "concerning".
 
-| Step | Purpose | Gate |
-|------|---------|------|
-| 1 | Assess current security posture | Present findings |
-| 2 | SSM escape hatch (out-of-band access) | User verifies SSM from laptop |
-| 3 | Tailscale VPN | User SSHes over Tailscale |
-| 4 | UFW firewall (deny all except Tailscale) | User SSHes over Tailscale |
-| 5 | SSH hardening + fail2ban | — |
-| 6 | Security group (WireGuard UDP only) | User confirms Tailscale works |
-| 7 | OS hardening (kernel, IMDS, services) | — |
-| 8 | Security audit via cybersecurity-expert agent | Fix HIGH findings |
-| 9 | Final verification | Present summary |
+```bash
+uname -a && cat /etc/os-release
+ss -tlnp && ss -ulnp
+sudo iptables -L -n && sudo ufw status && sudo nft list ruleset
+sudo sshd -T | grep -iE 'permit|password|x11|maxauth|subsystem|clientalive'
+cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null
+grep -vE 'nologin|/bin/false|/bin/sync' /etc/passwd
+ls -la /root/.ssh/authorized_keys 2>/dev/null
+sudo grep 'PermitRootLogin' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null
+dpkg -l | grep -iE 'fail2ban|unattended-upgrades|apparmor|auditd'
+cat /etc/apt/apt.conf.d/20auto-upgrades
+sysctl net.ipv4.ip_forward net.ipv4.conf.all.accept_redirects \
+  net.ipv4.conf.all.accept_source_route net.ipv4.conf.all.send_redirects
+sudo systemctl list-unit-files --state=enabled --type=service
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 60") && \
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id
+aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+  --query 'Reservations[0].Instances[0].{SGs:SecurityGroups,IMDS:MetadataOptions,IAM:IamInstanceProfile}'
+```
 
-## Prerequisites
-
-- AWS CLI authenticated (on instance or user's laptop)
-- User has a Tailscale account
-- User has SSH access to the machine right now
-
-## Variables
-
-Collect during Step 1:
+Collect these values:
 
 | Variable | Source |
 |----------|--------|
@@ -42,128 +45,41 @@ Collect during Step 1:
 | `$OLD_SG_ID` | Current security group on the instance |
 | `$TAILSCALE_IP` | `tailscale ip -4` after Step 3 |
 
-## Step 1: Assess Current State
+## Step 2: SSM escape hatch
 
-Run all of these and present findings as "good" vs "concerning":
+Do this first: SSM gives access that does not depend on SSH, Tailscale or network rules.
 
-```bash
-# OS and kernel
-uname -a && cat /etc/os-release
-
-# Listening ports
-ss -tlnp && ss -ulnp
-
-# Firewall state
-sudo iptables -L -n && sudo ufw status && sudo nft list ruleset
-
-# SSH config
-sudo sshd -T | grep -iE 'permit|password|x11|maxauth|subsystem|clientalive'
-cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null
-
-# User accounts with login shells
-grep -vE 'nologin|/bin/false|/bin/sync' /etc/passwd
-
-# Root SSH access
-ls -la /root/.ssh/authorized_keys 2>/dev/null
-sudo grep 'PermitRootLogin' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null
-
-# Security tools
-dpkg -l | grep -iE 'fail2ban|unattended-upgrades|apparmor|auditd'
-
-# Auto-update config
-cat /etc/apt/apt.conf.d/20auto-upgrades
-
-# Kernel network params
-sysctl net.ipv4.ip_forward net.ipv4.conf.all.accept_redirects \
-  net.ipv4.conf.all.accept_source_route net.ipv4.conf.all.send_redirects
-
-# Enabled services
-sudo systemctl list-unit-files --state=enabled --type=service
-
-# IMDS
-TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 60") && \
-curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id
-```
-
-Instance details:
-
-```bash
-aws ec2 describe-instances --instance-ids $INSTANCE_ID \
-  --query 'Reservations[0].Instances[0].{SGs:SecurityGroups,IMDS:MetadataOptions,IAM:IamInstanceProfile}'
-```
-
-## Step 2: SSM Escape Hatch
-
-**Do this FIRST.** SSM provides out-of-band access independent of SSH, Tailscale, or network rules.
-
-Check if SSM agent is running:
+1. Confirm that the agent runs. If it is missing: `sudo snap install amazon-ssm-agent --classic`.
 
 ```bash
 sudo systemctl status snap.amazon-ssm-agent.amazon-ssm-agent.service
 # or: sudo systemctl status amazon-ssm-agent
 ```
 
-If not installed: `sudo snap install amazon-ssm-agent --classic`
+2. Do NOT use `AmazonSSMManagedInstanceCore`: it grants 15 or more actions. The policies below grant 5.
+3. Before you apply them, have the `cybersecurity-expert` agent (the `task` tool) review both policies.
 
-Create a minimal IAM role. **Do NOT use `AmazonSSMManagedInstanceCore`** — it grants ~15+ actions. The policy below grants 5.
+Trust policy (`aws:SourceAccount` blocks the confused-deputy problem):
 
-Use the cybersecurity-expert agent to review the policies before applying.
-
-Trust policy (with confused deputy protection):
 ```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"Service": "ec2.amazonaws.com"},
-    "Action": "sts:AssumeRole",
-    "Condition": {
-      "StringEquals": {"aws:SourceAccount": "$ACCOUNT_ID"}
-    }
-  }]
-}
+{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+  "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole",
+  "Condition": {"StringEquals": {"aws:SourceAccount": "$ACCOUNT_ID"}}}]}
 ```
 
-Inline policy — Session Manager only (explicit deny on everything else):
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "SSMAgentHeartbeat",
-      "Effect": "Allow",
-      "Action": ["ssm:UpdateInstanceInformation"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SessionManagerChannels",
-      "Effect": "Allow",
-      "Action": [
-        "ssmmessages:CreateControlChannel",
-        "ssmmessages:CreateDataChannel",
-        "ssmmessages:OpenControlChannel",
-        "ssmmessages:OpenDataChannel"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "DenyEverythingExceptSessionManager",
-      "Effect": "Deny",
-      "NotAction": [
-        "ssm:UpdateInstanceInformation",
-        "ssmmessages:CreateControlChannel",
-        "ssmmessages:CreateDataChannel",
-        "ssmmessages:OpenControlChannel",
-        "ssmmessages:OpenDataChannel"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
+Inline policy (Session Manager only, explicit deny on all else):
 
-Create role, instance profile, and associate:
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "SSMAgentHeartbeat", "Effect": "Allow", "Action": ["ssm:UpdateInstanceInformation"], "Resource": "*"},
+  {"Sid": "SessionManagerChannels", "Effect": "Allow", "Resource": "*", "Action": [
+    "ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel",
+    "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel"]},
+  {"Sid": "DenyEverythingExceptSessionManager", "Effect": "Deny", "Resource": "*", "NotAction": [
+    "ssm:UpdateInstanceInformation",
+    "ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel",
+    "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel"]}]}
+```
 
 ```bash
 aws iam create-role --role-name EC2-SSM-SessionOnly \
@@ -178,32 +94,19 @@ aws iam add-role-to-instance-profile --instance-profile-name EC2-SSM-SessionOnly
 sleep 10  # IAM propagation
 aws ec2 associate-iam-instance-profile --instance-id $INSTANCE_ID \
   --iam-instance-profile Name=EC2-SSM-SessionOnly
-```
-
-Restart agent and verify:
-
-```bash
 sudo snap restart amazon-ssm-agent  # or sudo systemctl restart amazon-ssm-agent
 sleep 15
 aws ssm describe-instance-information --filters Key=InstanceIds,Values=$INSTANCE_ID
-```
-
-Install Session Manager plugin:
-
-```bash
 curl -so /tmp/session-manager-plugin.deb \
   "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
 sudo dpkg -i /tmp/session-manager-plugin.deb && rm /tmp/session-manager-plugin.deb
 ```
 
-**GATE:** Ask user to verify SSM works from their laptop:
-```bash
-aws ssm start-session --target $INSTANCE_ID --region $REGION
-```
+**GATE:** the user runs `aws ssm start-session --target $INSTANCE_ID --region $REGION` from their laptop.
 
-## Step 3: Tailscale VPN
+## Step 3: Tailscale
 
-Install via apt repo (not curl-pipe-sh, for supply chain safety):
+Install from the apt repo, not with curl-pipe-sh (supply-chain safety):
 
 ```bash
 curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/$(lsb_release -cs).noarmor.gpg \
@@ -214,11 +117,11 @@ sudo apt-get update && sudo apt-get install -y tailscale
 sudo tailscale up
 ```
 
-User must open the auth URL. After success: `tailscale ip -4`
+The user opens the auth URL. Then run `tailscale ip -4`.
 
-**GATE:** Ask user to confirm they can SSH to the Tailscale IP from their laptop/phone.
+**GATE:** the user SSHes to the Tailscale IP from their laptop or phone.
 
-## Step 4: UFW Firewall
+## Step 4: UFW
 
 ```bash
 sudo ufw default deny incoming
@@ -229,15 +132,13 @@ sudo ufw --force enable
 sudo ufw status verbose
 ```
 
-The `tailscale0` rule covers SSH — no separate port 22 rule needed.
+The `tailscale0` rule covers SSH: you do not need a port 22 rule.
 
-**GATE:** Verify user can still SSH to the Tailscale IP.
+**GATE:** the user can still SSH to the Tailscale IP.
 
-## Step 5: SSH Hardening
+## Step 5: SSH and fail2ban
 
-**Ask the user first:** Do you use SFTP (VS Code Remote, scp, rsync over SSH)?
-
-Create drop-in config:
+Ask the user first: do you use SFTP (VS Code Remote, scp, rsync over SSH)?
 
 ```bash
 # Set based on user's answer:
@@ -260,17 +161,7 @@ ClientAliveCountMax 2
 $SFTP_LINE
 EOF
 sudo sshd -t && sudo systemctl reload ssh
-```
-
-Remove root's authorized keys:
-
-```bash
 sudo rm -f /root/.ssh/authorized_keys
-```
-
-Install fail2ban:
-
-```bash
 sudo apt-get install -y fail2ban
 sudo tee /etc/fail2ban/jail.local << 'EOF'
 [sshd]
@@ -283,25 +174,15 @@ EOF
 sudo systemctl enable --now fail2ban
 ```
 
-**Optional — Tailscale SSH** (keyless SSH from mobile):
+Optional, for keyless SSH from mobile: `sudo tailscale up --ssh`, then add this SSH ACL in the Tailscale admin console:
 
-```bash
-sudo tailscale up --ssh
-```
-
-Configure SSH ACL in Tailscale admin console:
 ```json
-"ssh": [{
-  "action": "check",
-  "src": ["autogroup:member"],
-  "dst": ["autogroup:self"],
-  "users": ["autogroup:nonroot"]
-}]
+"ssh": [{"action": "check", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot"]}]
 ```
 
-**Note:** Tailscale SSH bypasses `sshd` entirely — the hardening above and fail2ban do NOT apply to Tailscale SSH connections. Access control is via Tailscale ACLs only.
+Tailscale SSH bypasses `sshd`, so the `sshd` hardening and fail2ban do not apply to it. Only Tailscale ACLs control it.
 
-## Step 6: Security Group Lockdown
+## Step 6: Security group
 
 ```bash
 VPC_ID=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
@@ -319,15 +200,11 @@ ENI=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
 aws ec2 modify-network-interface-attribute --network-interface-id $ENI --groups $SG_ID
 ```
 
-**GATE:** Ask user to confirm Tailscale SSH still works, then delete the old SG:
+**GATE:** the user confirms that SSH over Tailscale still works. Then `aws ec2 delete-security-group --group-id $OLD_SG_ID`.
 
-```bash
-aws ec2 delete-security-group --group-id $OLD_SG_ID
-```
+## Step 7: OS hardening
 
-## Step 7: OS Hardening
-
-Kernel network params:
+Before you run this block, change the service list to match what Step 1 found running.
 
 ```bash
 sudo tee /etc/sysctl.d/99-hardening.conf << 'EOF'
@@ -342,28 +219,20 @@ net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 EOF
 sudo sysctl --system
-```
-
-If IPv6 is not needed, also add `net.ipv6.conf.all.disable_ipv6 = 1`.
-
-IMDS hardening (enforce v2, hop limit 1):
-
-```bash
 aws ec2 modify-instance-metadata-options --instance-id $INSTANCE_ID \
   --http-tokens required --http-put-response-hop-limit 1
-```
-
-Disable unnecessary services (adapt based on what's running):
-
-```bash
 for svc in ModemManager.service open-iscsi.service multipathd.service open-vm-tools.service; do
     if systemctl list-unit-files "$svc" &>/dev/null; then
         sudo systemctl disable --now "$svc"
     fi
 done
+sudo apt-get install -y unattended-upgrades
+cat /etc/apt/apt.conf.d/20auto-upgrades  # should show "1" for both
 ```
 
-Shell hardening — add to user's bashrc:
+- If the machine does not need IPv6, also add `net.ipv6.conf.all.disable_ipv6 = 1`.
+- IMDS: the `modify-instance-metadata-options` line enforces IMDSv2 with hop limit 1.
+- Add to the user's bashrc:
 
 ```bash
 # Idle timeout (skip inside tmux)
@@ -378,24 +247,15 @@ if [ -f /var/run/reboot-required ]; then
 fi
 ```
 
-Ensure unattended-upgrades:
+## Step 8: Security review
 
-```bash
-sudo apt-get install -y unattended-upgrades
-cat /etc/apt/apt.conf.d/20auto-upgrades  # should show "1" for both
-```
+Send the `cybersecurity-expert` agent (the `task` tool) this brief:
 
-## Step 8: Security Assessment
+> Review the security posture of this EC2 instance. It is a personal development machine. Access is over Tailscale VPN, with SSM as an escape hatch. Review open ports, listening services, SSH config, firewall rules, IAM role scope, IMDS configuration and kernel params. Review permissions on sensitive files (~/.ssh, /etc/shadow, sudoers), AppArmor status, and Docker daemon config if installed. Report anything else concerning. Prioritize by risk.
 
-Dispatch the cybersecurity-expert agent to review the final state:
+If that agent is not available, review the Step 9 output yourself. Act on every HIGH finding before Step 9.
 
-> Review the security posture of this EC2 instance. It's a personal development machine accessed via Tailscale VPN with SSM as an escape hatch. Check for: open ports, listening services, SSH config, firewall rules, IAM role scope, IMDS configuration, kernel params, file permissions on sensitive files (~/.ssh, /etc/shadow, sudoers), AppArmor status, Docker daemon config (if installed), and anything else concerning. Prioritize by risk.
-
-If the cybersecurity-expert agent is not available, manually review the Step 9 output.
-
-Act on any HIGH findings before proceeding.
-
-## Step 9: Final Verification
+## Step 9: Final verification
 
 ```bash
 echo "=== UFW ===" && sudo ufw status numbered
@@ -410,14 +270,14 @@ echo "=== SG ===" && aws ec2 describe-security-group-rules \
   --filter Name=group-id,Values=$SG_ID --query 'SecurityGroupRules[?IsEgress==`false`]' --output table
 ```
 
-Present results as a summary table.
+Present the results as a summary table.
 
-## Common Issues
+## Common issues
 
 | Problem | Fix |
 |---------|-----|
-| SSM agent won't register | Check IAM role attached, restart agent, wait 30s |
-| Tailscale auth link expires | Run `sudo tailscale up` again |
-| Locked out after UFW enable | Connect via SSM, run `sudo ufw disable` |
+| SSM agent does not register | Confirm that the instance has the IAM role, restart the agent, wait 30s |
+| Tailscale auth link expires | `sudo tailscale up` again |
+| Locked out after UFW enable | Connect over SSM, run `sudo ufw disable` |
 | fail2ban bans you | `sudo fail2ban-client set sshd unbanip <YOUR_IP>` |
 | SFTP clients break | Rerun Step 5 with `SFTP_LINE="Subsystem sftp internal-sftp"` |
