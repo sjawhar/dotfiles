@@ -11,7 +11,7 @@ Complements `ce-code-review`.
 1. Set the scope from the request: the PR, the current branch, or the changed files that apply.
 2. Collect the diff and the file excerpts the reviewers need, so that they do not guess.
 3. On omp, start `thermonuclear-deep-review` (correctness, security) and `thermonuclear-code-quality` (maintainability) in one `task` call, as two entries in `tasks[]`.
-4. On Claude Code, dispatch two independent read-only subagents in parallel, with the same names and prompts. If named agents are not available, load the two skills of the same names as separate review passes.
+4. On Claude Code, dispatch two independent read-only subagents in parallel, with the same names and prompts. Each reads its rubric from Legion: `https://raw.githubusercontent.com/sjawhar/legion/main/skills/<name>/SKILL.md`. A failed read blocks that reviewer.
 5. Give each reviewer the same scoped diff and context. Ask for prioritized findings, each with a file reference and evidence.
 6. When both finish, synthesize:
    - Findings first. Merge duplicates across the reviewers.
