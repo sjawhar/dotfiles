@@ -5,8 +5,7 @@ description: |
   or permission to continue. Consult with the proposed question, original goal,
   relevant user messages, evidence, and any standing approvals.
 model:
-  - "openai-codex/gpt-6-astra:xhigh"
-  - "anthropic/claude-opus-5-5:xhigh"
+  - "openai-codex/gpt-6-astra:high"
 tools: read, glob, grep
 ---
 
