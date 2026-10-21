@@ -5,7 +5,13 @@ description: Use when a task needs fresh web results or built-in knowledge is li
 
 # Ceramic Search
 
-Call the `ceramic_search` MCP tool directly.
+Call the `ceramic_search` MCP tool when the session has one. Otherwise call the API (the key is in `secrets`):
+
+```bash
+secrets CERAMIC_API_KEY -- sh -c 'curl -sS https://api.ceramic.ai/search \
+  -H "Authorization: Bearer $CERAMIC_API_KEY" -H "Content-Type: application/json" \
+  -d "{\"query\":\"<keywords>\"}"'
+```
 
 Ceramic is lexical, not semantic: it matches exact keywords and phrases. It does not match synonyms (`BBQ` ≠ `barbecue`), infer intent, or correct misspellings. Word order matters (`cat house` ≠ `house cat`). English only.
 
