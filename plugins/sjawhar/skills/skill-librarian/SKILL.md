@@ -60,6 +60,8 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
   ```
 - An anchor on `block:<table-id>` makes a paragraph, not a row.
 - Remove a row with `delete_row` and the ids from `doc-read --blocks`. Row 0 is the header. Each table starts with one blank row.
+- Dispatch caps a markdown document at 1 MiB. Before the ledger reaches it, move settled rows (lessons with a terminal status, leads not open or held) to `--artifact librarian-ledger-archive-md`: append them there first, then remove them from the ledger. Lesson ids continue across both documents, so search both before you add or match a lesson.
+- In a cell, escape a lone `*` or a `_` that is not between two letters, and write no bold. Dispatch's round trip otherwise turns the text between two of them into emphasis.
 
 ## Where a lesson goes (one home each)
 
