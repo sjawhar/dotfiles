@@ -10,6 +10,15 @@ echo "--- trajectory-route (Trajectory VPC through the devbox) ---"
 
 dpkg -s sshuttle &>/dev/null || sudo apt-get install -y -qq sshuttle >/dev/null
 
+# The route signs in to sami-agents with its own key (Host trajectory-route in
+# laptop/ssh-config), so it never waits on 1Password. A new key connects only
+# once its public half is in ubuntu's authorized_keys there.
+KEY="${HOME}/.ssh/trajectory-route"
+if [ ! -f "$KEY" ]; then
+    ssh-keygen -q -t ed25519 -N '' -C "trajectory-route@$(hostname -s)" -f "$KEY"
+    echo "Created ${KEY}; add ${KEY}.pub to ubuntu's ~/.ssh/authorized_keys on sami-agents."
+fi
+
 UNIT="trajectory-route@.service"
 if ! diff -q "${DOTFILES_DIR}/laptop/${UNIT}" "/etc/systemd/system/${UNIT}" &>/dev/null; then
     echo "Installing ${UNIT}..."

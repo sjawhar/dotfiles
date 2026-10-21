@@ -7,9 +7,9 @@ After=network-online.target systemd-resolved.service
 # `ssh trajectory-route`, so this machine reaches middleman, hawk, dispatch and
 # secrets while it sits on Theorem's tailnet. sshuttle needs root for its
 # firewall rules; ssh runs as %i in a login shell, so it gets that user's ssh
-# config, AWS SSO login and mise-managed aws. That host signs in with a
-# one-minute EC2 Instance Connect key (laptop/ssh-config), so no 1Password
-# prompt or running 1Password app is needed to connect.
+# config, AWS SSO login and mise-managed aws. That host signs in with its own
+# key file (laptop/ssh-config), so no 1Password prompt or running 1Password
+# app is needed to connect.
 #
 # DNS: the dummy link trajectory0 exists only to carry a route-only domain in
 # systemd-resolved, so *.internal.trajectorylabs.com goes to the VPC resolvers
