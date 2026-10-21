@@ -7,7 +7,7 @@ description: |
   be served under Anthropic's policy; content that must not reach Anthropic goes to astra or gpt-api.
 model:
   - "@slow"
-tools: read, edit, write, glob, grep, bash, todo
+tools: read, edit, write, glob, grep, bash, todo, task
 color: blue
 ---
 
