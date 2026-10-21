@@ -1,58 +1,48 @@
 ---
 name: centaur-review
-description: "Use when reviewing someone else's PR together — Sami narrates his review and wants comments tracked, challenged, and posted as inline GitHub review comments."
+description: "Use when Sami reviews someone else's pull request with you. He narrates his observations as he reads the diff, and the result goes to GitHub as inline review comments."
 args: "<pr_url_or_number>"
 ---
 
 # Centaur Review
 
-Sami leads the review by narrating as he reads. Track his observations, find their
-exact diff locations, challenge weak suggestions after he finishes, and compose a
-friendly review together. Do not replace his judgment with unsolicited analysis.
+Sami leads. Do not replace his judgment with analysis he did not ask for.
 
-> **jj workspace note** (applies only when the PR's checkout is one of the
-> remaining jj repositories — a Legion-managed workspace, or the shared
-> `~/.dotfiles`/`~/src` stores): a colocated workspace has Git metadata; a
-> non-colocated one does not, and branch detection varies. Pass the repository
-> explicitly: `gh -R <owner>/<repo> ...`. Never export `GIT_DIR` or
-> `GIT_WORK_TREE`; they redirect unrelated Git subprocesses, including test
-> fixtures, into the shared repository.
+In a jj checkout, pass the repository explicitly (`gh -R <owner>/<repo> ...`). Never export `GIT_DIR` or `GIT_WORK_TREE`: they send unrelated git subprocesses, test fixtures too, into the shared repository.
 
-## Set up the review
+## 1. Set up
 
-Require a PR URL or number. Fetch its metadata, changed files, diff, linked issues,
-and existing reviews, line comments, and conversation comments:
+1. Without a PR URL or number, do not start.
+2. Fetch the PR, its diff, its linked issues, and all reviews and comments:
 
-```bash
-gh pr view <pr> --json number,title,body,url,headRefName,baseRefName,headRefOid,files
-gh pr diff <pr>
-REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
-gh api repos/$REPO/pulls/<number>/reviews
-gh api repos/$REPO/pulls/<number>/comments
-gh pr view <pr> --comments
-```
+   ```bash
+   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+   gh pr view <pr> --json number,title,body,url,headRefName,baseRefName,headRefOid,files
+   gh pr diff <pr>
+   gh api repos/$REPO/pulls/<number>/reviews
+   gh api repos/$REPO/pulls/<number>/comments
+   gh pr view <pr> --comments
+   ```
 
-For a re-review, summarize outstanding requests, unanswered questions, unresolved
-threads, changes since Sami's review, and material concerns from other reviewers.
+3. For a re-review, summarize open requests, unanswered questions, unresolved threads, changes since Sami's review, and material concerns from other reviewers.
+4. Start these agents in parallel with the `task` tool. Keep their results until step 3.
 
-Launch these agents in parallel and hold their results until consolidation:
+   | Agent | Finds |
+   | --- | --- |
+   | `bug-finder` | significant correctness, security, concurrency, edge-case defects |
+   | `code-simplifier` | consequential needless complexity or abstraction |
+   | `code-architect` | structural effects, pattern drift, cross-module effects |
+   | `code-reviewer` | omissions, scope creep and material deviations from the linked issue |
 
-- **bug-finder** — significant correctness, security, concurrency, and edge-case defects.
-- **code-simplifier** — consequential unnecessary complexity or avoidable abstraction.
-- **code-architect** — structural implications, pattern drift, and cross-module effects.
-- **code-reviewer** — compare the diff with linked issue requirements; identify omissions,
-  scope creep, and material deviations.
+## 2. Track the narration
 
-## Narrated review
+- Keep a private tracker: `# | file:start_line-end_line | severity | observation`.
+- Find each location from an explicit reference or the diff. If a quote or concept is ambiguous, ask Sami which file or line. Never guess.
+- Use new-file lines for additions, old-file lines for deletions.
+- Acknowledge each observation briefly, without interrupting his flow.
+- When he asks, show the tracker, show your analysis, or drop the last item.
 
-Keep a private tracker: `# | file:start_line-end_line | severity | observation`.
-Resolve locations from explicit references or the diff; if a quote or concept is
-ambiguous, ask which changed file or line Sami means. Never guess a location.
-
-Briefly acknowledge each observation without interrupting flow. On request, show the
-tracker, show analysis, or drop the last item. Interpret severity words as follows:
-
-| Label | Signals |
+| Severity | His words |
 | --- | --- |
 | BLOCKING | blocking, must fix, cannot merge |
 | IMPORTANT | important, should fix, concern |
@@ -60,58 +50,43 @@ tracker, show analysis, or drop the last item. Interpret severity words as follo
 | QUESTION | question, wondering, why |
 | NITPICK | nitpick, minor, tiny |
 
-Use actual new-file line numbers for additions and old-file lines for deletions.
+## 3. Consolidate and write
 
-## Consolidate and write
+When Sami ends his narration:
 
-When Sami says he is done, verify every tracked location. Ask the **red-teamer** to
-challenge each comment—not to review the PR—checking whether it is correct, has
-missing context, or would improve the code. Gather the four background results,
-discarding “Nothing to add,” then show Sami his comments, challenges, and candidate
-findings. He decides what remains.
+1. Check every tracked location.
+2. Ask the `red-teamer` agent to challenge each comment, not to review the PR: is it right, does it miss context, will it make the code better?
+3. Collect the four results from step 1. Discard each "Nothing to add".
+4. Show Sami his comments, the challenges and the candidate findings. He decides what stays.
+5. Write each kept comment as a clear observation, then a concrete question or change where one fits. Be friendly and direct. Put clarity and actionability before softening. No emojis in place of precision.
 
-Write each retained inline comment with a clear observation, a concrete question or
-change when appropriate, and a friendly, direct tone. Clarity and actionability come
-before softening; do not use emojis as a substitute for precision. Example:
+   ```markdown
+   **Suggestion:** Could we return early when `items` is empty? The caller can supply
+   an empty list, so indexing `items[0]` would raise here. Let me know if I missed an
+   invariant.
+   ```
 
-```markdown
-**Suggestion:** Could we return early when `items` is empty? The caller can supply
-an empty list, so indexing `items[0]` would raise here. Let me know if I missed an
-invariant.
-```
+6. After the inline comments, write a concise summary that starts with `## Review Summary`.
+7. Post only after Sami explicitly approves.
 
-Write a concise overall summary after the inline comments. Ask for explicit approval
-before posting.
+## 4. Post the review
 
-## Post inline review comments
-
-Get the PR head SHA and post to the **reviews** endpoint. Use `-f` array notation:
+Post to the **reviews** endpoint with `-f` array notation:
 
 ```bash
-COMMIT_SHA=$(gh pr view <pr> --json headRefOid -q '.headRefOid')
-REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
-
-gh api repos/$REPO/pulls/<number>/reviews \
-  --method POST \
-  -f body="## Review Summary\n\n<concise assessment>" \
-  -f event="COMMENT" \
-  -f commit_id="$COMMIT_SHA" \
-  -f 'comments[0][path]=src/example.py' \
-  -f 'comments[0][line]=42' \
-  -f 'comments[0][body]=**Suggestion:** Could we handle the empty case here?' \
-  -f 'comments[1][path]=src/other.py' \
-  -f 'comments[1][line]=89' \
-  -f 'comments[1][body]=**Question:** What invariant makes this safe?'
+gh api repos/$REPO/pulls/<number>/reviews --method POST \
+  -f body="$SUMMARY" -f event=COMMENT \
+  -f commit_id="$(gh pr view <pr> --json headRefOid -q .headRefOid)" \
+  -f 'comments[0][path]=src/example.py' -f 'comments[0][line]=42' \
+  -f 'comments[0][body]=**Suggestion:** Could we handle the empty case here?'
 ```
 
-Each `comments[N]` needs only `path`, `line`, and `body`; `path` must match the diff
-and `line` must exist in the new file. Do not silently fall back to a top-level PR
-comment: the purpose is line-level feedback.
+- Each `comments[N]` needs only `path` (as in the diff), `line` (in the new file) and `body`.
+- Never fall back silently to a top-level PR comment.
 
-| Error | Cause and correction |
+| Error | Remedy |
 | --- | --- |
-| `"line" is not a permitted key` | Wrong endpoint. Use `/pulls/{number}/reviews`, **not** `/pulls/{number}/comments`. |
-| HTTP 422 | Check the exact `comments[0][path]`, `[line]`, and `[body]` array notation. |
-| Inline comment missing | Confirm the precise diff path and a valid line in the new file. |
+| `"line" is not a permitted key` | Wrong endpoint: use `/pulls/{number}/reviews`, not `/comments`. |
+| HTTP 422 or a missing inline comment | Check the `comments[N][path]`, `[line]`, `[body]` notation, the diff path and the new-file line. |
 
-Confirm the resulting review URL after GitHub accepts the request.
+Report the review URL that GitHub returns.
