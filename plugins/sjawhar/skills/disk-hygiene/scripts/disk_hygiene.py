@@ -18,7 +18,9 @@ Subcommands (all read-only except `apply`, and `tmp --apply`):
   apply --plan P --protected PR --ledger L [--io-limit PCT] [--releases R]
                                  paced executor: one item at a time, ionice idle,
                                  single-instance per store (flock), re-verifies each
-                                 item's class and disk-vs-store divergence before acting
+                                 item's class and disk-vs-store divergence before acting,
+                                 and refuses a removal another clone's objects/info/alternates
+                                 borrows from (one scan of the inventory roots and $HOME)
   release-capture --path P --repo R --kind git|jj [--name N] [--releases R]
                                  print an owner-release entry binding the slot's
                                  identity (HEAD hash + worktree admin id + dir mtime);
@@ -67,6 +69,8 @@ from typing import Any
 
 JJ = ["jj", "--ignore-working-copy", "--config", "fsmonitor.backend=none"]
 RM = ["sudo", "ionice", "-c3", "nice", "-n19", "rm", "-rf", "--one-file-system"]
+WALK_HIDDEN = (".worktrees", ".omp", ".local", ".cache")  # dot-dirs the root walks descend into
+WALK_DEPTH = 6
 
 
 # ---------------------------------------------------------------- helpers
@@ -372,7 +376,7 @@ def cmd_inventory(args: argparse.Namespace) -> None:
                         dirs[dp] = jj_workspace_name(dp)
                 dn[:] = [d for d in dn if d == ".worktrees"]
                 continue
-            dn[:] = [d for d in dn if not d.startswith(".") or d in (".worktrees", ".omp", ".local", ".cache")]
+            dn[:] = [d for d in dn if not d.startswith(".") or d in WALK_HIDDEN]
             if dp.count("/") - root.count("/") >= args.max_depth:
                 dn[:] = []
     # git worktrees registered on the colocated repo (covers /tmp etc.)
@@ -462,7 +466,7 @@ def cmd_inventory(args: argparse.Namespace) -> None:
         # host; inside a box it is most often another box's live workspace.
         rows.append({"path": None, "name": name, "exists": False, "registered": True,
                      "class": "STALE_REGISTRATION" if obs is None else "UNOBSERVABLE"})
-    json.dump({"repo": repo, "trunk": trunk, "rows": rows}, sys.stdout, indent=1)
+    json.dump({"repo": repo, "trunk": trunk, "roots": roots, "rows": rows}, sys.stdout, indent=1)
     print(file=sys.stderr)
     print(Counter(str(r["class"]) for r in rows), file=sys.stderr)
 
@@ -671,9 +675,10 @@ def cmd_plan(args: argparse.Namespace) -> None:
     plan: list[dict[str, Any]] = []
     refused: list[dict[str, Any]] = []
     trunk = "trunk()"
+    roots: list[str] = []
     if args.inventory:
         inv: dict[str, Any] = json.load(open(args.inventory))
-        trunk, repo = inv["trunk"], inv["repo"]
+        trunk, repo, roots = inv["trunk"], inv["repo"], inv["roots"]
         for r in inv["rows"]:
             path, cls = r.get("path"), r["class"]
             if cls == "STALE_REGISTRATION":
@@ -746,7 +751,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
             plan.append({"kind": "released", "path": e["path"], "name": e.get("name"), "repo": e.get("repo"),
                          "class": "RELEASED", "release": e, "reason": f"owner-released slot; {note}"})
     json.dump({"plan": plan, "refused": refused, "protected": protected, "anchors": anchors,
-               "trunk": trunk, "fresh_hours": args.fresh_hours}, sys.stdout, indent=1)
+               "trunk": trunk, "fresh_hours": args.fresh_hours, "roots": roots}, sys.stdout, indent=1)
     print(f"\n{len(plan)} items, {len(refused)} refused", file=sys.stderr)
 
 
@@ -759,6 +764,79 @@ def _pace(io_limit: float, ledger: Path, path: str | None) -> None:
         waited += 15
     if waited:
         ledger_write(ledger, {"op": "paced", "path": path, "waited_s": waited})
+
+
+def _store_git_dirs(dp: Path) -> list[Path]:
+    """The git dirs whose object store serves the checkout or bare repo at <dp>. A worktree's
+    alternates live in its common dir, not in its own .git/worktrees/<id> entry."""
+    found: list[Path] = []
+    dotgit = dp / ".git"
+    if dotgit.is_dir():
+        found.append(dotgit)
+    elif dotgit.is_file():
+        text = dotgit.read_text()
+        if text.startswith("gitdir:"):
+            gd = dp / text.split(":", 1)[1].strip()
+            commondir = gd / "commondir"
+            found.append(gd / commondir.read_text().strip() if commondir.is_file() else gd)
+    jj_repo = dp / ".jj" / "repo"
+    if jj_repo.is_file():
+        jj_repo = dp / ".jj" / jj_repo.read_text().strip()
+    found.append(jj_repo / "store" / "git")
+    if (dp / "objects").is_dir() and (dp / "HEAD").is_file():
+        found.append(dp)  # bare repo
+    return found
+
+
+def borrowed_object_dirs(roots: list[str], ledger: Path) -> dict[str, set[str]]:
+    """realpath of every object dir some clone under <roots> borrows from through
+    objects/info/alternates -> the clones (checkout or bare repo paths) that borrow it.
+    Walks once per apply, with the inventory walk's pruning. An alternates file that
+    exists but cannot be read is ledgered: its borrows are unknown."""
+    borrowed: dict[str, set[str]] = {}
+    for root in roots:
+        for dp, dn, _fn in os.walk(root):
+            here = Path(dp)
+            try:
+                git_dirs = _store_git_dirs(here)
+            except OSError as exc:
+                ledger_write(ledger, {"op": "error", "path": dp, "stage": "alternates-scan", "out": repr(exc)[-400:]})
+                git_dirs = []
+            for gd in git_dirs:
+                alternates = gd / "objects" / "info" / "alternates"
+                try:
+                    lines = alternates.read_text().splitlines()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    ledger_write(ledger, {"op": "error", "path": str(alternates), "stage": "alternates-scan", "out": repr(exc)[-400:]})
+                    continue
+                for line in lines:
+                    entry = line.strip()
+                    if entry and not entry.startswith("#"):
+                        target = os.path.realpath(gd / "objects" / entry)
+                        borrowed.setdefault(target, set()).add(dp)
+            if here in git_dirs:
+                dn[:] = []  # a bare repo's internals hold no clones
+                continue
+            dn[:] = [d for d in dn if not d.startswith(".") or d in WALK_HIDDEN]
+            if dp.count("/") - root.count("/") >= WALK_DEPTH:
+                dn[:] = []
+    return borrowed
+
+
+def borrowers_of(path: str, borrowed: dict[str, set[str]]) -> list[str]:
+    """Clones outside <path> that borrow an object dir at or under <path>."""
+    real = os.path.realpath(path)
+
+    def inside(p: str) -> bool:
+        r = os.path.realpath(p)
+        return r == real or r.startswith(real + "/")
+
+    return sorted({b for obj, clones in borrowed.items() if inside(obj) for b in clones if not inside(b)})
+
+
+BORROWED_REASON = "object store borrowed through objects/info/alternates by {clones}: removal would break them and lose their commits"
 
 
 def _apply_forget(item: dict[str, Any], trunk: str, fresh_hours: float, ledger: Path) -> None:
@@ -830,7 +908,9 @@ def _cleanup_admin_entry(repo: str, admin_id: str) -> str:
     return f"admin entry removed: {admin}"
 
 
-def _apply_released(args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path) -> None:
+def _apply_released(
+    args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path, borrowed: dict[str, set[str]]
+) -> None:
     """Owner-released slot: verify identity, guard reachability, refuse divergence, retire one-shot."""
     e: dict[str, Any] = item["release"]
     path, kind, repo = e["path"], e["kind"], e.get("repo")
@@ -862,6 +942,10 @@ def _apply_released(args: argparse.Namespace, item: dict[str, Any], trunk: str, 
     pu = procs_under(path)
     if pu:
         refuse(f"live processes {pu[:4]}")
+        return
+    clones = borrowers_of(path, borrowed)
+    if clones:
+        refuse(BORROWED_REASON.format(clones=clones))
         return
     ident = slot_identity(path, repo=repo, name=e.get("name"))
     if ident is None:
@@ -939,7 +1023,8 @@ def _apply_released(args: argparse.Namespace, item: dict[str, Any], trunk: str, 
 
 
 def _apply_path_item(
-    args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path, fresh_hours: float = 24.0
+    args: argparse.Namespace, item: dict[str, Any], trunk: str, ledger: Path, borrowed: dict[str, set[str]],
+    fresh_hours: float = 24.0,
 ) -> None:
     path, name, cls = item["path"], item.get("name"), item.get("class")
     repo = item.get("repo")
@@ -964,6 +1049,10 @@ def _apply_path_item(
     pu = procs_under(path)
     if pu:
         skip(f"live processes {pu[:4]}")
+        return
+    clones = borrowers_of(path, borrowed)
+    if clones:
+        skip(BORROWED_REASON.format(clones=clones))
         return
     if item["kind"] == "scratch":
         # A plain directory's evidence is age + liveness + "not a working copy", and all three
@@ -1072,13 +1161,16 @@ def cmd_apply(args: argparse.Namespace) -> None:
         return
     try:
         ledger_write(ledger, {"op": "apply-start", "items": len(plan), "plan": args.plan})
+        # Every removal below is refused while a clone borrows objects from inside it. The
+        # inventory's roots plus $HOME (its default root) bound where such a clone can be seen.
+        borrowed = borrowed_object_dirs(sorted({str(Path.home()), *doc["roots"]}), ledger)
         for item in plan:
             if item["kind"] == "forget":
                 _apply_forget(item, trunk, fresh_hours, ledger)
             elif item["kind"] == "released":
-                _apply_released(args, item, trunk, ledger)
+                _apply_released(args, item, trunk, ledger, borrowed)
             else:
-                _apply_path_item(args, item, trunk, ledger, fresh_hours)
+                _apply_path_item(args, item, trunk, ledger, borrowed, fresh_hours)
         ledger_write(ledger, {"op": "apply-complete", "items": len(plan)})
     finally:
         lock_fd.close()
@@ -1411,7 +1503,7 @@ def main() -> None:
     p.add_argument("--repo", required=True)
     p.add_argument("--root", action="append")
     p.add_argument("--trunk", default="trunk()")
-    p.add_argument("--max-depth", type=int, default=6)
+    p.add_argument("--max-depth", type=int, default=WALK_DEPTH)
     p.add_argument("--box-dir", default="auto",
                    help="where absence can be judged: auto (inside an agentbox, its own ~/boxes/<host> dir; "
                         "on the host, everywhere), none (host semantics), or a directory")

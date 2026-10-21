@@ -126,6 +126,7 @@ nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger 
 - Run it as a supervised background process. It can take hours. A `while pgrep -f` loop needs a pattern that cannot match itself (`'exec3[.]py'`).
 - Under `systemd-run --user`, launch with `-E PATH="$PATH"`, or `jj` is not found. A script must keep the folder when a `jj` call fails.
 - Apply runs once per store (a second one logs `locked`) and checks each item again before it acts. Before a manual `rm`, check liveness at that time.
+- Apply refuses to delete a folder if another clone borrows objects from it through `objects/info/alternates`. The ledger names the clone. Apply scans the inventory roots and `$HOME` once per run. Before a manual `rm` of a folder that holds a git store, find every `objects/info/alternates` file under the roots that names it.
 - Before you delete a finished lane's scratch, make sure that no running agent's brief names the path.
 - Before you delete a whole folder, archive every entry in it, not only the workspaces. Archive a jj-only workspace from its `tree_state` tree.
 - `jj op revert <forget_op>` (from the ledger) restores a registration, not files, and does nothing if someone reused the name.
