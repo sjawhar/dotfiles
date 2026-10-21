@@ -12,3 +12,4 @@ sami@trajectorylabs.net,sami@thecybermonk.com,sami@theorem.dev ssh-ed25519 AAAAC
 sami@trajectorylabs.net,sami@thecybermonk.com,sami@theorem.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICff1ryx0+ULTCQDUsYR/8G/OdeYtmtpnIbyZ84Ssszo jj-signing-oryx
 sami@trajectorylabs.net,sami@thecybermonk.com,sami@theorem.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINS7ukqH3Ii9crHKzGJLmJZeNZpCQqetQb1WqBvOO60G jj-signing-sami-devbox
 sami@trajectorylabs.net,sami@thecybermonk.com,sami@theorem.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEloaxDKjqrxS/vZNdXVO08lX+OjS4J7oFOiG4mJnG0G jj-signing-sami-leanperf
+sami@trajectorylabs.net,sami@thecybermonk.com,sami@theorem.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID+sNt79IFdaQSwH+s5AUfn3Knxi+NjCz/PO/FGW4oaa jj-signing-sami-rocqperf
