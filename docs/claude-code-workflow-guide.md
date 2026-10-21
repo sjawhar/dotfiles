@@ -57,7 +57,7 @@ Use git worktrees to run multiple agents in parallel on different features witho
 
 ### Review, Don't Verify
 
-When execution completes, run `/analyze` to catch code quality issues. This command launches three sub-agents in parallel—a bug finder, a type checker, and a code simplifier—then synthesizes their findings. Sub-agents fix problems directly rather than just reporting them.
+When execution completes, run `/analyze` to catch code quality issues. This command launches four sub-agents in parallel—a type checker, a bug finder, a code simplifier, and a code reviewer—plus a test analyzer when the diff touches tests, then synthesizes their findings. The type checker, bug finder, and code simplifier fix problems directly; the code reviewer and test analyzer have no edit tools, so they report and the orchestrating agent fixes what they find.
 
 Then open a PR and run `/requesting-code-review`. Only sometimes do I read the code myself—maybe one in fifteen PRs gets a detailed manual review. This isn't verification—that already happened during execution via the ground truth you built into the plan. This is just catching style issues, unnecessary complexity, and obvious bugs before merging.
 
