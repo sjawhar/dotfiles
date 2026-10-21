@@ -1,22 +1,21 @@
 ---
 name: thermonuclear
-description: "Run independent deep-review and code-quality passes in parallel, then synthesize their evidence-backed findings. Use for thermonuclear, double review, or combined bug/security and maintainability branch audits."
+description: "Use when asked for a thermonuclear review or a double review. Also use when a branch, PR or diff needs an uncompromising, diff-scoped bug/security audit and maintainability audit together."
 disable-model-invocation: true
 ---
 
 # Thermonuclear Review
 
-Run the two independent review passes in parallel, then synthesize their results. This complements `ce-code-review`: use it when an uncompromising, diff-scoped security/correctness and structural-quality pass is wanted.
+Complements `ce-code-review`.
 
-## Workflow
-
-1. Determine the review scope from the user request, PR, current branch, or relevant changed files.
-2. Gather the diff and any file/context excerpts needed for reviewers to evaluate the change without guessing.
-3. On OMP, launch both agents in the same message with `task(agent="thermonuclear-deep-review", ...)` and `task(agent="thermonuclear-code-quality", ...)`; pass `run_in_background: true` to each:
-   - `thermonuclear-deep-review` covers bugs, breakages, security, developer-experience regressions, and feature-gate leaks.
-   - `thermonuclear-code-quality` covers maintainability, structure, file-size growth, ad-hoc branching, abstractions, and codebase health.
-4. On Claude Code, dispatch two independent read-only subagents through its native mechanism with the same names and prompts. If named agents are unavailable, load `thermonuclear-deep-review` and `thermonuclear-code-quality` as separate review passes instead.
-5. Pass each subagent the same scoped diff/file context and ask it to return prioritized findings with file references and evidence.
-6. After both finish, synthesize the results with findings first, deduplicated across reviewers. Weight overlapping findings more heavily, resolve disagreements with your own judgment, and keep summaries brief.
-
-If individual background summaries are already visible to the user, do not restate them wholesale. Surface the unified verdict, the highest-signal findings, and any remaining uncertainty.
+1. Set the scope from the request: the PR, the current branch, or the changed files that apply.
+2. Collect the diff and the file excerpts the reviewers need, so that they do not guess.
+3. On omp, start `thermonuclear-deep-review` (correctness, security) and `thermonuclear-code-quality` (maintainability) in one `task` call, as two entries in `tasks[]`.
+4. On Claude Code, dispatch two independent read-only subagents in parallel, with the same names and prompts. If named agents are not available, load the two skills of the same names as separate review passes.
+5. Give each reviewer the same scoped diff and context. Ask for prioritized findings, each with a file reference and evidence.
+6. When both finish, synthesize:
+   - Findings first. Merge duplicates across the reviewers.
+   - Give more weight to a finding that both reviewers report.
+   - Where the reviewers disagree, decide with your own judgment.
+   - Keep summaries brief.
+   - If the user already sees each reviewer's summary, do not restate them in full. Report the unified verdict, the highest-signal findings, and what stays uncertain.
