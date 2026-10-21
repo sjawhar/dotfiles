@@ -1,39 +1,18 @@
 ---
 name: analyze
-description: "Run code quality agents on recent changes"
+description: Use when code changes in the working copy need a quality pass before a commit or a PR. Also use when asked to analyze recent changes.
 ---
 
-Analyze the code in my current working copy changes.
+# Analyze
 
-**1. Identify what to analyze:**
-- Run `git diff` to see modified files
-- Run `git diff --name-only` to get the list of changed files
-- If there are no changes, report that and ask what to analyze
+1. **Find the working-copy changes** with `git diff` and `git diff --name-only`. If there are none, report that and ask what to analyze.
+2. **Run these agents in parallel** with the `task` tool, in read-write mode: `type-checker`, `bug-finder`, `code-simplifier` and `code-reviewer`. Add `test-analyzer` only if the diff has test files. Tell each agent: "Find issues and fix them directly. Edit files to implement your suggested improvements."
+3. **Summarize** after all agents finish. Put each finding in a severity:
+   - **Critical**, must fix before shipping: bugs, security issues, type errors that cause runtime failures.
+   - **High**, should fix: subtle bugs, missing edge cases, unsafe type casts.
+   - **Medium**, consider fixing: type improvements, simplifications that make the code clearer.
+   - **Low**, optional: style, minor suggestions.
 
-**2. Run agents in parallel (READ-WRITE mode):**
+   For each finding, give the file and line, a short description, and the suggested fix, with a code example where it helps.
 
-When spawning each agent, include this instruction: "Find issues and fix them directly. Edit files to implement your suggested improvements."
-
-**Always run:**
-1. **type-checker** - Improve type safety, replace Any types, add proper annotations
-2. **bug-finder** - Find subtle bugs, edge cases, and potential failure modes
-3. **code-simplifier** - Check for unnecessary complexity and simplification opportunities
-4. **code-reviewer** - Check project guideline compliance and general code quality
-
-**Conditionally run:**
-5. **test-analyzer** - Review test coverage and quality (only if test files are in the diff)
-
-**3. After all agents complete, provide a unified summary:**
-
-Categorize findings by severity:
-- **Critical:** Must fix before shipping — bugs, security issues, type errors that cause runtime failures
-- **High:** Should fix — subtle bugs, missing edge cases, unsafe type casts
-- **Medium:** Consider fixing — type improvements, simplifications that improve clarity
-- **Low:** Optional — style improvements, minor suggestions
-
-For each issue, include:
-- File and line number
-- Brief description of the issue
-- Suggested fix (with code example where helpful)
-
-**Done when:** Summary is presented with all findings categorized by severity.
+**Done when** the summary shows all findings by severity.
