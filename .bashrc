@@ -317,25 +317,24 @@ alog() {
 # GNOME keyring / Secret Service unlock (headless boxes)
 # ------------------------------------------------------------------------------
 
-# On a headless SSH box there is no GUI prompter and PAM never receives a login
-# password (public-key auth), so the Secret Service "login" keyring loads locked
-# and tools like `pup` fail with "result not returned from SS API". This unlocks
-# it with a real password you type: the first run creates the keyring encrypted
-# with that password, later runs just unlock it. Linger is on, so you unlock
-# once per boot and it stays unlocked for every SSH session until reboot.
-# (An already-running daemon can't be unlocked via the CLI, so we kill+restart.)
+# On a headless SSH box PAM never receives a login password (public-key auth),
+# so the Secret Service "login" keyring loads locked and keyring clients fail.
+# This unlocks it with the password you type. It follows the unlock-keyring
+# skill (plugins/sjawhar/skills/unlock-keyring/SKILL.md), which holds the
+# failure modes: --unlock unlocks only a daemon it starts, so the stock units
+# stop first, and a failed run needs that skill's recovery, not a bare retry.
 unlock-keyring() {
-    local pw
+    local pw locked
+    systemctl --user stop gnome-keyring-daemon.service gnome-keyring-daemon.socket || return
     read -rsp 'Keyring password: ' pw; echo
-    killall -q gnome-keyring-daemon 2>/dev/null
-    sleep 0.3
-    eval "$(printf '%s' "$pw" | gnome-keyring-daemon --replace --daemonize --components=secrets --unlock 2>/dev/null)"
+    printf '%s' "$pw" | gnome-keyring-daemon --unlock --components=pkcs11,secrets --daemonize >/dev/null
     unset pw
-    if printf 'x' | secret-tool store --label=_probe _keyring_probe 1 >/dev/null 2>&1; then
-        secret-tool clear _keyring_probe 1 >/dev/null 2>&1
+    locked=$(busctl --user get-property org.freedesktop.secrets \
+        /org/freedesktop/secrets/collection/login org.freedesktop.Secret.Collection Locked)
+    if [[ "$locked" == 'b false' ]]; then
         echo 'keyring unlocked'
     else
-        echo 'keyring still locked — wrong password? re-run unlock-keyring' >&2
+        echo "keyring still locked (Locked: ${locked:-unreadable}); follow the unlock-keyring skill's recovery" >&2
         return 1
     fi
 }
