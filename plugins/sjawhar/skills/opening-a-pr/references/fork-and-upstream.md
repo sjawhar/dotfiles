@@ -1,40 +1,24 @@
-# Fork members and upstream PRs
+# Step 10: fork members and upstream PRs
 
-Read this from step 10 of `opening-a-pr` when the repository is a knives-managed fork (`knives
-repos` lists it), when a change touches a fork pin, or before any upstream PR. The step's rules
-are in `SKILL.md`; this file carries the placement test and the mechanics.
+## Placement
 
-## Is it upstream material?
-
-Most of our changes are fork members that go into the release in hand and never need an upstream
-PR. A fork-specific workaround, an infra knob only we use, or an unproven fix is NOT upstream
-material. What IS: a defect any user of the library would hit, fixed with evidence (a reproduction
-or red-to-green test) and verified on a production-like surface (step 4).
-
-Every upstream PR lands under Sami's personal GitHub identity, so the bar is his reputation with
-METR/AISI. That is a quality bar, not a permission gate: he is not in the loop per interaction, and
-there is no grant, env var, or approval step.
+- Our org forks hold branches and releases and never receive PRs. A warranted PR targets upstream.
+- Most changes are fork members in the release in hand, with no upstream PR.
+- Not upstream material: a fork-specific workaround, an infra knob only we use, an unproven fix.
+- Upstream material: a defect any user of the library would hit, with a reproduction or red-to-green test, verified on a production-like surface.
+- Upstream PRs land under Sami's GitHub identity: a high quality bar, but no permission gate or approval step.
 
 ## Shipping a fork member
 
-The default for a hawk/inspect bug is a fork member:
+The default for a hawk or inspect bug:
 
-1. One signed commit on the release base, pushed to the fork remote, and `knives notch`ed.
-2. The tip and red-to-green evidence go to whoever holds the release claim. They include it in the
-   release in hand, cutting the next dated name first, right then, when every consumer pin of that
-   release is frozen on a revision (as the consumer's `rev = "release/…"` pins are), and publish.
-   With no claim held, you do the same yourself.
+1. Make one signed commit on the release base, push it to the fork remote, and `knives notch` it.
+2. Send the tip and red-to-green evidence to the release-claim holder, who includes it in the release in hand and publishes. When every consumer pin of that release is frozen on a revision (`rev = "release/…"`), cut the next dated name first. With no claim held, do this yourself.
 3. The consumer pins the published release name and deploys.
 
-Using a fork change takes exactly as long as making it. The upstream PR, when the placement
-verdict is UPSTREAM, opens alongside and gates none of that; never wait for upstream review before
-using a fork change.
+An UPSTREAM verdict opens the upstream PR alongside. It gates none of this. Never wait for upstream review to use a fork change.
 
-## Opening and owning an upstream PR
+## Upstream PRs
 
-Walk the `pr-preflight` skill (`knives preflight`) before any `gh pr create`, and follow the
-upstream repository's own contribution policy (read its AGENTS.md or contributing guide for
-requirements such as an accepted issue for non-trivial PRs or an agent-review disclosure). Once an
-upstream PR is open, its whole lifecycle is the session's under `maintaining-fork-pr`: review
-rounds, body updates, rebases and the close decision. Never leave maintainer feedback unanswered
-waiting for a human.
+- Walk `pr-preflight` (`knives preflight`) before `gh pr create`. Follow the upstream contribution policy in its AGENTS.md or contributing guide.
+- An open upstream PR is the session's under `maintaining-fork-pr`: reviews, body updates, rebases, the close decision. Never leave maintainer feedback waiting for a human.
