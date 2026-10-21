@@ -1,223 +1,127 @@
 ---
 name: running-the-merge-queue
-description: "Use when Sami asks a session to manage the open-PR queue, get PRs through review, tell him what's ready to approve, or act as the merge controller over PRs other agent sessions own. Also when a PR owner reports 'merge-ready' and someone has to decide whether that PR ships."
+description: "Use when Sami asks a session to manage the open-PR queue, get PRs through review, or tell him which PRs are ready to approve. Also use when a session is merge controller over PRs other agent sessions own. Also when a PR owner reports 'merge-ready' and someone must decide whether that PR ships."
 ---
 
 # Running the Merge Queue
 
-Owners drive their PRs. The controller verifies the gates and merges under current
-permission. You are not a code reviewer, implementer, planner, coach or dispatcher
-for other owners. Do not collect their plans, assign follow-up PRs, relay their
-questions to Sami, or broadcast new rules. The one review you commission is an
-independent oracle's red-team of the end-to-end plan and evidence.
+Owners drive their PRs. You, the controller, verify the gates and merge under current permission.
+
+- Never review code, classify findings, implement, plan, coach or dispatch for owners. Never collect their plans, assign follow-up PRs, relay their questions to Sami or broadcast new rules.
+- Never run another owner's E2E, rebase or push their branch, or change CI, validators or models to get a PR through.
+- The one review you commission is an independent `oracle` red-team of the end-to-end plan and evidence.
+- A repository's one-time exemption needs its actual authorization. It is not a general bypass.
+- Never give inspectors write access to a shared workspace.
+- Return precise gaps to the owner and continue other ready work.
 
 ## 1. Read current authority and priorities
 
-Find the existing queue record from the request or authoritative role notes. If
-none is supplied, keep evidence on the existing PR/issue; do not invent another
-tracker or queue issue. Record each ruling's source, timestamp and scope. Re-read
-this record at each wake and before merging.
+- Use the queue record from the request or the role notes. With none, keep evidence on the existing PR or issue. Never create another tracker or queue issue.
+- Record each ruling's source, time and scope: standing approvals (kept through handoffs until superseded), holds, release conditions, priorities, approved windows. Read the record again at each wake and before each merge.
+- Never restore a lifted hold or infer a quiet window from history.
+- Merge only by an ordinary protected squash merge. No admin bypass, no permission inferred from earlier use. A grant given to this queue session stays live for it: keep merging under it, and ask once for the window the queue needs. Never carry a token in from an earlier task or session.
+- At registration, verify the author, session-bound write identity, required reviews and CODEOWNERS. A self-approval restriction is an unmet gate.
+- With no explicit priority, sequence by user value and dependencies, including the integration cost of large corpus changes. Never by READY arrival order.
+- Ask Sami on the existing Dispatch issue.
+- For holds that need a composition test, migration batches, colliding PRs, stacks or a Dispatch answer, read [sequencing](references/sequencing.md).
 
-- Preserve standing approvals through handoffs until superseded. Do not ask again.
-- Keep active holds, release conditions, priorities and approved windows in that
-  current record. Never restore a lifted hold or infer a quiet window from history.
-- Use ordinary protected squash merges. No admin bypass and no permission
-  inferred from earlier use. A grant given to this queue session stays live for
-  it: keep merging under it and ask once, for the window the queue needs. What is
-  banned is carrying a token in from an earlier task or session.
-- Verify author, session-bound write identity, required reviews and CODEOWNERS
-  requirements at registration. A self-approval restriction is an unmet gate.
-- With no explicit priority, sequence by user value and dependencies, not READY
-  arrival order. Include the integration cost of large corpus changes.
+## 2. Register ownership and act on packets
 
-Read [sequencing](references/sequencing.md) for holds needing composition checks,
-coordinated migration batches, colliding PRs, stacks or a native Dispatch answer.
-Ask questions requiring Sami's authority, taste or risk appetite on the existing
-Dispatch issue. Make ordinary engineering and sequencing decisions yourself.
+- Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates, the surface the owner will exercise. Give the gate contract then.
+- Act on READY packets and CI events for packeted PRs. Do not sweep all owners.
+- Every 30 minutes, find orphans: PRs whose owner is gone and that nobody will packet. Adopt or close them only under your authority. A stalled PR in your queue stays yours.
+- Who sends the packet:
+  - A PR for a coordinator-owned issue: that coordinator's gate packet, naming the head.
+  - An uncoordinated lane: itself, with an independent reviewer's verdict.
+  - Anyone but the work owner: before merging, also ask the work owner whether a round is in flight. Green CI cannot tell "finished" from "between pushes".
+  - Neither the owner nor you can replace an active gate lane's packet.
+- A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`. Hold it for the actual clearance or independent verdict, never one inferred from an earlier general approval.
+- For each surfaced head, record the registration facts, the gate lane and each fact that steps 3 to 6 verify. Give each its read time and source link. Add the disposition and the next responsible action.
+- GitHub is the live truth, not your record. Re-read held items there at each wake before you write "unchanged".
+- Use supervised background watchers, not foreground CI polling.
+- Never ask for a rebase or push only to pick up main when there is no conflict or real content change. For stale-main reds, empty results or missing logs, read [evidence quality](references/evidence-quality.md).
 
-## 2. Register ownership; act on packets
+## 3. Verify findings and review scope
 
-Register a PR when it opens: owner, purpose, intended published parent, file scope,
-required gates and the surface the owner will exercise. Give the gate contract then.
-Act on READY packets and CI events for packeted PRs, not periodic sweeps of all
-active owners. The standing orphan check is every 30 minutes: identify PRs whose
-owner is gone and which nobody will packet; adopt or close only under your authority.
-A stalled PR within your assigned queue does not disappear because nobody reported it.
+Before you declare READY or merge, read [review evidence](references/review-evidence.md).
 
-**Gate owner and work owner answer different questions.** A PR delivering a
-coordinator-owned issue needs that coordinator's gate packet naming the head. An
-uncoordinated lane may packet itself with an independent reviewer's verdict. If the
-packet comes from anyone other than the PR's work owner, confirm with that owner
-that no round is in flight before merging. Green CI cannot tell finished from
-between pushes. Neither the owner nor the controller substitutes for an active
-gate lane's packet.
+- Enumerate all authors and all pages of review threads, review bodies, issue comments, the PR body and linked verdict artifacts. Zero unresolved threads is not zero open findings. Read each whole verdict, not a grep for severity markers.
+- Bind each artifact to its subject, reviewed SHA, author and finding scope. An unrelated green artifact never cancels another's open finding, in either direction. A narrow delta review does not clear the whole PR.
+- Before merging, find each claimed closure posted on the PR.
+- The owner dispositions findings and the independent reviewer states that nothing blocking remains. You verify the enumeration and dispositions, not code or severity. On disagreement, return the exact undispositioned list.
 
-A self-verdict packet must begin `SELF-VERDICT - needs clearance or an independent
-reader`. Hold for the actual clearance or independent verdict; do not infer it
-from an earlier general approval.
+| Finding | Disposition |
+|---|---|
+| Correctness or security defect in shipped behavior | Blocking. Fixed in this PR |
+| Test that would pass on the bug it is offered to prove | Blocking. Fixed in this PR |
+| Other valid finding | Fixed, or a named destination (follow-up PR, existing backlog item, next lane task) in the thread reply and merge record, thread resolved. "Later" is not a destination |
+| Refuted | Owner's evidence plus independent confirmation, never a silently resolved thread |
+| Human thread | Blocking until the human resolves it |
 
-For every surfaced head, record checked-at time and source links for:
-
-- PR, owner, gate lane, current head, branch tip, base, purpose and file list;
-- required CI and run IDs, mergeability, active holds and review artifacts;
-- all finding dispositions, reviewer/pair heads and applicable simplify result;
-- each acceptance scenario, consuming component, revision, run/observation,
-  outcome and duration, oracle artifact and any named waiver;
-- disposition and next responsible action.
-
-GitHub is live truth, not a derived queue database. Re-read held items on each wake;
-write “unchanged” only after a fresh read. Use supervised background watchers, not
-foreground CI polling. For stale-main reds or missing logs, read
-[evidence quality](references/evidence-quality.md); do not request a rebase or push
-merely to pick up main when there is no conflict or real content change.
-
-## 3. Verify the packet, findings and review scope
-
-Before declaring READY or merging, read
-[review evidence](references/review-evidence.md). Enumerate **all authors and all
-pages** of review threads, review bodies and issue comments, plus the PR body and
-linked gate/verdict artifacts. Zero unresolved threads is not zero open findings.
-Read the whole relevant verdict, not a grep for severity markers.
-
-For every artifact, identify its subject, reviewed SHA, author and finding scope.
-An unrelated green artifact never cancels another artifact's open finding, in
-either direction. A narrow delta review does not clear the whole PR. Verify that
-a claimed closure is actually posted before merging.
-
-The owner dispositions findings; the independent reviewer confirms that nothing
-blocking remains. You verify the enumeration and dispositions, not the code or
-severity yourself. Return a disagreement with the exact undispositioned list.
-
-- Correctness/security defects in shipped behavior and tests that would pass on
-  the very bug offered as their proof are blocking: fix them in this PR.
-- Other valid findings may go to a named follow-up PR, existing backlog item or
-  next lane task. Reply with the destination, resolve the thread and include the
-  destination in the merge record. “Later” without a destination is not disposition.
-- A refuted finding needs the owner's evidence and independent confirmation, not
-  a silently resolved thread. Human threads remain blocking until the human resolves
-  them. Every valid finding gets fixed or a permitted named destination.
-- One push per review round, not per finding. Never tell an owner to stop pushing a
-  correctness fix. Do not turn minor wording or disposition updates into new campaigns.
+- One push per review round, not per finding. Never tell an owner to stop pushing a correctness fix. Do not turn minor wording or disposition updates into new campaigns.
 
 ## 4. Bind evidence to the head
 
-Take the reviewed SHA from the review **body**, not its `commit_id`: metadata can
-name the head at posting time rather than the commit the reviewer read. Ask for a
-missing or contradictory reviewed-head claim; never substitute current metadata.
+- Take the reviewed SHA from the review body, not `commit_id`, which can name the head at posting time. The body SHA is still a claim to verify. If it is missing or contradictory, ask. Never substitute metadata.
+- When the head moved, read [head changes](references/head-changes.md) before you keep any evidence. Prove ancestry before you treat a change as an appended delta. A rewritten head needs explicit current-head confirmation backed by a runnable comparison of the PR's own contributions.
+- Missing inputs, unreachable revisions and a comparison that did not run are gaps, not equivalence. Never read hunks yourself to call a change harmless.
+- Required acceptance runs on the intended current head in every case.
 
-When the head moved, read [head changes](references/head-changes.md) before deciding
-what evidence remains valid. Prove graph ancestry before treating anything as a
-post-verdict appended delta. A forward merge can retain the reviewed ancestor;
-a rewritten rebase or amend cannot claim that ancestry.
-
-A rewritten head needs explicit current-head confirmation supported by a runnable
-comparison of the PR's own old and new contributions, with reachable old/new bases
-and tips. An identical clean-rebase contribution need not trigger a whole new pair;
-it is not proof that the old SHA became an ancestor. Changed contributions require
-review of the change. Required acceptance still runs on the intended current head.
-Missing inputs, unreachable revisions and a comparison that did not run are gaps,
-not equivalence. Do not inspect hunks yourself to pronounce a change harmless.
-
-## 5. Check all gates
+## 5. Verify all gates
 
 ### CI and scope
 
-Required aggregate and required lanes must be green at the head to merge. Identify
-superseded cancelled runs by run ID; “expected red” or in-progress is not green.
-Check mergeability, declared holds and the intended base separately. Compare the
-packet's file list/count with the paginated PR files API, and its commit claims
-with the PR commits API, not local `HEAD`. Check the remote branch tip against the
-PR's head association; disagreement stops a merge until the intended head is clear.
-An unexplained scope increase or decrease goes back to the owner.
-
-The PR must name its Dispatch issue in title, body, branch or commit message. In a
-public repository use the bare issue key, never an internal link. A missing key is
-fixed in the body without another push; the requirement includes outage fast paths.
+- The required aggregate and required lanes are green at the head. Identify superseded cancelled runs by run ID. "Expected red" and in-progress are not green.
+- Verify mergeability, declared holds and the intended base separately.
+- Compare the packet's files and count with the paginated PR files API, and its commits with the PR commits API, not local `HEAD`.
+- The remote branch tip must match the PR's head association. If not, do not merge until the intended head is clear.
+- Return an unexplained scope increase or decrease to the owner.
+- The PR names its Dispatch issue in title, body, branch or commit message, outage fast paths included. In a public repository, use the bare key, never an internal link. Fix a missing key in the body, without a push.
 
 ### Independent review, simplify and thermonuclear
 
-Require an independent review artifact on the PR naming the applicable head, with
-all blocking findings closed and all others dispositioned. Self-approval is not it.
-For work produced under `/sdd`, the READY packet also names the post-acceptance FINAL
-reviewer head; the thermonuclear pair does not replace those review gates.
+- An independent review artifact on the PR names the applicable head, with all blocking findings closed and all others dispositioned. Self-approval is not one.
+- For `/sdd` work, the READY packet also names the post-acceptance FINAL reviewer head. The thermonuclear pair does not replace those gates.
+- Runtime code, CI configuration, scripts, Dockerfiles and infrastructure:
+  1. Finish the ordinary review rounds.
+  2. The owner (under `/sdd`, the coordinator) runs `ce-simplify-code` once, with GPT reviewers, on the PR's own diff. If it changes code, that is the final code head. Rerun CI and acceptance for the affected surface there.
+  3. The owner (under `/sdd`, the coordinator) runs the deep + quality thermonuclear pair once at the final code head, as the last review before merge. Both verdicts and dispositions go on the PR.
+- Simplify is the last code change and the pair is the last review: not per push, not after merge.
 
-For runtime code, CI configuration, scripts, Dockerfiles and infrastructure:
+| Scoped exception (never a runtime-code waiver) | Needs |
+|---|---|
+| Documented minor-only prose round after the pair | Keeps verdict and pair. Verify its scope by the head-change procedure, not the owner's word |
+| Prose, comment or docstring-only PR | One reviewer. No simplify, no pair |
+| Test-only PR | One reviewer, no pair, if adversarial exercises show the assertions are non-vacuous in both directions and no gate was deleted or loosened |
+| Test-only delta on a paired PR | Keeps the pair, with reviewer confirmation of the new head |
 
-1. Finish the ordinary review rounds.
-2. Owner runs `ce-simplify-code` once, with GPT reviewers, on the PR's own diff.
-   If it changes code, that result is the final code head: rerun CI and acceptance
-   for the affected surface there.
-3. Owner runs the deep + quality thermonuclear pair once at that final code head,
-   as the last review before merge. Post both verdicts and dispositions on the PR.
+- Seats: read the actual reports and substitution disclosures. A rubric loaded into a different seat is not the named review. A rubric name does not prove the model, depth, tool access or cross-model independence. A quota error, provider error or refusal is neither a verdict nor a finding. Use the approved route, disclose the actual seat, and keep the failed attempt recorded. Never silently swap a cross-model review for the same family. Never turn one failed call into a fleet-wide policy.
 
-Simplify is the last code change; the pair is the last review, not a per-push ritual
-or an after-merge task. A documented minor-only prose round can retain its verdict
-and pair; verify its scope under the head-change procedure, not by owner assertion.
-Genuinely prose/comment/docstring-only PRs need one reviewer, neither code pass.
-Test-only PRs may use one reviewer without the pair when adversarial exercises show
-assertions are non-vacuous in both directions and no gate was deleted or loosened.
-A test-only delta on an already paired PR can retain the pair, with reviewer
-confirmation of the new head. These are scoped exceptions, not a runtime-code waiver.
-Inspect substitution disclosures: loading a rubric into a different seat is not the
-named review. A provider error or policy refusal is not a verdict; use the approved
-review route and record any substitution, not a fleet-wide new policy.
+### Pre-merge acceptance
 
-### Actual pre-merge acceptance
-
-**Every change that alters what runs needs the changed end-to-end scenarios before
-merge**, including application, infrastructure, tasks, agents, harnesses and their
-instructions/configuration. A Markdown or YAML suffix does not make an operative
-change prose-only. The developer owns the proof on a production-like surface and
-its later production verification. CI, unit tests, an internal helper or testing
-after merge is not a substitute.
-
-Each required scenario is `RAN`, `WAIVED-BY-SAMI` or `BLOCKED`. Record what ran,
-revision, actual consumer/surface, outcome, duration and evidence link. `BLOCKED`,
-including never run, stops readiness. Only Sami's explicit waiver of the **named
-blocker**, linked with its scope, earns `WAIVED-BY-SAMI`; it covers no other scenario.
-Return infrastructure/tooling gaps to the owner to fix. Do not run their acceptance
-for them or invent a waiver.
-
-For behavior-changing PRs, read [acceptance](references/acceptance.md) before
-checking the evidence and commissioning its oracle. Reuse an independent oracle
-artifact already posted on the PR when it names this head or explicitly shared
-tree and covers the actual evidence. Dispatch your own read-only oracle only for
-missing coverage or new evidence it did not see. Require each oracle gap's
-disposition; a claimed but unposted verdict is testimony. Genuinely non-operative
-prose has no runtime scenario and needs no E2E oracle.
+- Every change to what runs needs its changed end-to-end scenarios before merge: application, infrastructure, tasks, agents, harnesses, and their instructions and configuration. A `.md` or `.yaml` suffix does not make an operative change prose-only. Its consumer path is the acceptance surface.
+- The developer owns the proof on a production-like surface, and its later production verification. CI, unit tests, an internal helper or testing after merge do not replace it.
+- Each required scenario row records the behavior or contract, the consuming component with its revision or config, and the environment. For a shared-tree identity, it names both SHAs and the shared tree. It records the entry point and exact command, run ID, outcome, duration and evidence link. Its state is one of:
+  - `RAN`
+  - `BLOCKED`, including never run. It stops readiness.
+  - `WAIVED-BY-SAMI`: only Sami's explicit waiver of the named blocker, linked with its scope. It covers no other scenario.
+- Return infrastructure, tooling and skill gaps to the owner to fix before merge. Never run their acceptance or invent a waiver.
+- For behavior-changing PRs, read [acceptance](references/acceptance.md) before you verify the evidence. Reuse a qualifying oracle verdict already posted on the PR. Otherwise run a read-only `oracle` task for the missing coverage only. Require a disposition for each oracle gap. A claimed but unposted verdict is testimony.
+- Genuinely non-operative prose has no runtime scenario and no oracle.
 
 ## 6. Merge through the protected, pinned path
 
-Before any write, read [merge mechanics](references/merge-mechanics.md). Refresh
-current authority, owner completion, head/branch identity, checks, findings and
-required evidence. Gate the merge on successful verification, not printed output
-followed by an unconditional command. The merge operation must re-read its gates
-and refuse on failure, and pin the exact verified head SHA. Never bypass branch
-protection or self-approval restrictions. A moved head means re-verify, not retry
-an unpinned merge.
+Before any write, read [merge mechanics](references/merge-mechanics.md).
 
-Write the actual squash title/message with gate facts, evidence, justified review
-reuse and named follow-up destinations. Read the resulting commit message back;
-an APPROVE body alone is not the squash record. Keep the existing queue/PR record
-current with the merge result.
+- Refresh authority, owner completion, head and branch identity, CI, findings and evidence, all for one SHA.
+- The merge operation re-reads its gates, refuses on failure, and pins the verified head SHA. Printed output followed by an unconditional command is not a gate.
+- Never bypass branch protection or self-approval restrictions. A moved head means verify again, never an unpinned retry.
+- The squash title and message carry the verified head, CI run links, review and acceptance artifacts, and justified review reuse. They also carry any scoped waiver and the named follow-up destinations. Read the resulting commit message back. An APPROVE body is not the squash record.
+- Update the queue or PR record with the merge result.
 
 ## 7. Close the loop
 
-Use `post-merge`. Name the developer's production proof, expected signature and
-owner. For a stack, enumerate the merged PR's children immediately and send each
-owner the parent result and required restack in one message; do not do their rebase.
-Follow [sequencing](references/sequencing.md) for squash-parent and native stack
-mechanics, including shared-store descendant safeguards.
-
-The owner runs `ce-compound` after the green light and puts useful learnings into
-the repository's docs-only follow-up path in their next working block. Do not push
-again to the merged PR to record them. After a slow round, have the owner review its
-own transcript for avoidable waits; do the same for the controller's work.
-
-## Controller boundaries
-
-Do not review code, classify findings, run another owner's E2E, rebase or push their
-branch, or change CI/validators/models to get a PR through. A repository-provided
-one-time exemption requires its actual authorization; it is not a general bypass.
-Never give inspectors write access to a shared workspace. Return precise gaps and
-continue other ready work. Do not turn ordinary engineering calls into user holds.
+- Use `post-merge`. Name the developer's production proof, its expected signature and its owner.
+- For a stack, enumerate the merged PR's children at once. Send each owner the parent result, actual base and required restack in one message. Never do their rebase. [Sequencing](references/sequencing.md) covers squash parents, native stacks and shared-store safeguards.
+- After the green light, the owner runs `ce-compound`. Useful learnings go into the repository's docs-only follow-up path in their next working block, never into another push to the merged PR.
+- After a slow round, the owner reviews its own transcript for avoidable waits. Do the same for your own work.
