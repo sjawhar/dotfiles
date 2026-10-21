@@ -4,7 +4,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
 
 # =============================================================================
 # trajectory-route - Trajectory's prod VPC and internal.trajectorylabs.com DNS
-# through the devbox (`ssh devbox-ssm`), for a machine on Theorem's tailnet.
+# through the devbox (`ssh trajectory-route`), for a machine on Theorem's tailnet.
 # =============================================================================
 echo "--- trajectory-route (Trajectory VPC through the devbox) ---"
 
