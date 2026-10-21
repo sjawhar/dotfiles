@@ -1,71 +1,75 @@
 ---
 name: using-docker
-description: Use when running ANY docker, docker compose, or buildx command — building images, starting or debugging containers, reading logs, cleaning up — and when a docker command fails. Also triggers on Dockerfile or compose file edits, "container won't start", suspected stale images, registry/auth errors, and any temptation to claim Docker infrastructure is unavailable.
+description: Use when running any docker, docker compose, buildx or depot command, or when one fails or hangs. Also use when editing a Dockerfile or compose file, or when a container won't start or an image may be stale. Also use on registry or auth errors, and before claiming Docker is unavailable.
 ---
 
 # Using Docker
 
-Rules mined from 90 days of real agent failures on this machine. The theme: agents guess where they must verify, and improvise where a harness exists.
-
 ## Step zero: use the project's run path
 
-Before any hand-rolled `docker run`, find the repo's real harness — `tl run`, a make target, a compose project, the CI workflow. If one exists, use it. An ad-hoc container reproduces a *different* environment; its results don't transfer.
+- Before a hand-rolled `docker run`, use the repo's harness if it has one: `tl run`, a make target, a compose project, the CI workflow. An ad-hoc container tests a different environment.
+- Docker, depot and registry access work here. To claim one is unavailable, or that the repo has no Docker setup, show a failing command's output. For the repo claim, also search the whole repo (`fd -HI 'Dockerfile|compose.*\.ya?ml'` from the root) and its CI workflows.
 
-Docker, depot, and registry access all work here. Every past "sandbox infra not available" claim was wrong. Same rule for "this repo has no Docker setup": an absence claim requires a repo-wide search (`fd -HI 'Dockerfile|compose.*\.ya?ml'` from the root, plus CI workflows) and a failing command's output — not a glance at the repo root.
+## Check, never guess
 
-## Never guess — verify
-
-| Before you... | Run |
+| Before you | Run |
 |---|---|
-| reuse a container ID from an earlier step | `docker ps` — containers exit or auto-remove between steps (#1 failure: 62 sessions) |
-| reference an image tag or registry path | `docker images` / `docker manifest inspect` — never invent refs |
-| pass `-f <compose path>` or name a service | find the file (`fd 'compose.*\.ya?ml'`) and read it |
-| exec a binary inside a container | `docker exec <c> which <bin>` — wget/kubectl/your-tool may not exist there |
-| explain where/how a build executes | `docker buildx ls` / `docker buildx inspect` — no inferred topology claims |
-| claim Docker isn't installed or a daemon isn't running | `docker version` |
-| assume a build is (or isn't) still running | look at the actual process/log output, not your memory of launching it |
+| reuse a container ID from an earlier step | `docker ps` (it may have exited or auto-removed) |
+| name an image tag or registry path | `docker images`, `docker manifest inspect` |
+| pass `-f <compose file>` or name a service | find the file and read it |
+| run a binary in a container | `docker exec <c> which <bin>` |
+| describe where or how a build runs | `docker buildx ls`, `docker buildx inspect` |
+| say Docker or its daemon is missing | `docker version` |
+| say a build is or isn't running | read its process or log output |
 
 ## Lifecycle
 
-- Never combine `-d --rm` for anything whose logs you might want — on crash, the logs vanish with the container. Use `-d`, read logs, `docker rm` when done.
-- Reusing `--name`: `docker stop` returns before `--rm` removal finishes and the next `run --name` collides. `docker rm -f <name>` (your own only) or use unique names.
-- Extracting files from a CMD-less image: `docker create <img> true` (dummy command) — bare `docker create` fails with "no command specified".
-- Can't reach a published port: the app must bind `0.0.0.0` inside the container, not `127.0.0.1`; then check the `-p` mapping.
-- Container misbehaving? `docker exec -it <c> sh` and look from the INSIDE — `ps`, `ls`, `cat` the config, `curl localhost` — before theorizing from the outside.
-- A container outlives the process that started it. If a `timeout`, Ctrl-C, or a kill stops `docker run`, only the client ends. `docker run` forwards the signal (`--sig-proxy`, on by default). But PID 1 ignores a signal that it has no handler for, so a shell or script as PID 1 keeps running. Stop and remove your own container by its name: `docker rm -f <name>`. Start it with `--init` so that PID 1 handles the signal.
-- **`docker rm -f` that never returns is a wedged unmount, and `docker ps` will lie to you about it.** Measured 2026-10-02: two 30 s timeouts then a `timeout 600 docker rm -f` that burned the full 600 s, while `docker ps` kept reporting the container `Up 26 minutes (healthy)`. **The discriminator is one command pair: `docker ps -a` answers and `docker inspect <id>` hangs.** That means the daemon is alive and the inspect path is touching what the stuck teardown holds — not a dead daemon, which fails both. Confirm it in `/proc` rather than guessing: `for t in /proc/$(pgrep -x dockerd)/task/*; do awk '$3=="D"{print FILENAME}' $t/stat; done`, then read that thread's `wchan` and `syscall`. On this box both wedged threads read `syscall=166` (`umount2`) and `wchan=sync_inodes_sb` — an unmount blocked flushing that filesystem's dirty inodes, under load 241. Measured today on three containers, the lock is per container, held by dockerd from the first hung removal, so other containers and other Docker commands are unaffected, which is why the daemon must not be restarted. **Two traps this closes:** "healthy" from `docker ps` can mean "the daemon has not noticed" (cross-check that some pid's `/proc/<pid>/cgroup` actually names the container id — if none does, the init is already gone), and the symptom looks like a sandbox/seccomp fault when it is plain IO. A dropped seccomp listener makes the kernel **return ENOSYS**; a wedged unmount **waits**, uninterruptibly. **Do not retry the removal** — each attempt parks another daemon thread, and the hang is in the kernel, so the second one tells you nothing the first did not.
+- Do not use `-d --rm` when you may need the logs: a crash takes them with the container. Use `-d`, read the logs, then `docker rm`.
+- `docker stop` returns before `--rm` removal ends, so a reused `--name` collides. Use unique names, or `docker rm -f` your own container.
+- Copy files out of a CMD-less image with `docker create <img> true`. Bare `docker create` fails with "no command specified".
+- Port unreachable: the app must bind `0.0.0.0` in the container, not `127.0.0.1`. Then check the `-p` host:container order.
+- Misbehaving container: `docker exec -it <c> sh` and look inside (`ps`, the config, `curl localhost`) before you theorize.
+- Stopping the `docker run` client (`timeout`, Ctrl-C, kill) does not stop a container whose PID 1 is a shell or script with no signal handler. Start such a container with `--init`, so that PID 1 handles the signal. Stop your own with `docker rm -f <name>`.
 
-## Build cache: warm until proven cold
+## `docker rm -f` that never returns
 
-Just because it's the first time YOU run a build doesn't mean it's the first time the build has been run. This daemon and depot's remote cache are shared across every agent and session — assume warm. Never `--no-cache` "to be safe", and don't quote cold-cache time estimates.
+If `docker ps -a` answers and `docker inspect <id>` hangs, an unmount is stuck. A dead daemon fails both. It is IO, not seccomp: a dropped seccomp listener returns ENOSYS, a stuck unmount waits.
 
-Caches are per-builder, so know which one you're on: `docker buildx ls` (this box has several — `default`, stray docker-container builders, depot's). `docker build`, `docker buildx build`, and `depot build` can all hit different caches.
+- Do not retry the removal. Each try parks another daemon thread.
+- Do not restart the daemon. The lock holds only that container.
+- Do not trust "healthy" from `docker ps`. If no pid's `/proc/<pid>/cgroup` names the container id, its init is gone.
+- Check in `/proc`, do not guess. List the dockerd threads in state D, then read each one's `wchan` and `syscall`. Expect `syscall=166` (`umount2`) and `wchan=sync_inodes_sb`:
 
-## Stale images
+  ```bash
+  for t in /proc/$(pgrep -x dockerd)/task/*; do awk '$3=="D"{print FILENAME}' $t/stat; done
+  ```
 
-The inverse mistake: after editing source, the image still contains the old code — rebuild before testing, every time. Mutable tags (`:main`, `:task-X-local`) get cached by ref string downstream (Modal, compose); pin digests when freshness matters.
+## Builds
+
+- Run the build. Tests do not replace it, and you are not done without it.
+- Assume a warm cache: every agent and session shares this daemon and depot's remote cache. Never use `--no-cache` "to be safe", and never quote cold-cache times.
+- Each builder has its own cache, and this machine has several. Know which builder you use: run `docker buildx ls`. `docker build`, `docker buildx build` and `depot build` can use different caches.
+- Rebuild after every source edit, before you test.
+- Downstream tools (Modal, compose) cache mutable tags such as `:main` by ref string. Pin digests when freshness matters.
+- Know the expected build time before you start: full-image builds can hang for hours. Build in the background, check progress, stop at about 30 minutes and report.
 
 ## Blast radius
 
-Kill/remove only containers YOU started this session. Never `docker kill` / `docker rm -f` someone else's, never broad `--filter ... | xargs docker rm` sweeps — other agents' sandboxes share this daemon. Clean up your own on completion: forgotten containers accumulate for weeks (today's `docker container ls -a`: a nameless one up 7 days) and this box has hit 682 GB of image clutter. Use `--rm` for true one-offs, and always `--name` what you start so cleanup is targeted.
+- Stop or remove only containers you started this session. Other agents share this daemon: never `docker kill` or `docker rm -f` theirs, and never sweep with `--filter ... | xargs docker rm`.
+- Clean up your containers when you finish. Use `--rm` for true one-offs. Give every container a `--name`, so cleanup can target it.
 
-**`~/.docker/config.json` is Sami's file; no agent writes to it.** `docker login`, `crane auth login`, and `docker-credential-*` helpers all rewrite that file by default — three logins did on 2026-09-17 (two agents' `crane auth login`, one unintended), and every fresh `tl run` on the box then failed to pull `ghcr.io/<org>/<image>` until he repaired it by hand. When a session needs a registry credential, it is the service token, scoped to the session's own process and its own config dir — `DOCKER_CONFIG=$(mktemp -d) secrets GHCR_PULL_TOKEN -- crane auth login ghcr.io -u x --password-stdin`, or `docker --config <tmpdir> login …` — never his login and never the shared file (verified: with `DOCKER_CONFIG` set, crane writes `<dir>/config.json` and `~/.docker/config.json`'s mtime does not move). If a pull fails with `denied` or `token does not match expected scopes`, the fix is your own scoped login, not a rewrite of his; a shared-file credential that stopped working is a finding to report, per the CLAUDE.md rule on personal credentials.
+## Registry credentials
 
-## Long builds
+- Never write `~/.docker/config.json`. It is Sami's file, and a bad write breaks pulls for every session. `docker login`, `crane auth login` and `docker-credential-*` helpers write it by default.
+- Log in with the service token in a private config dir, never with Sami's login:
 
-Know the expected build time before launching — full-image bakes have wedged 4+ hours. Run in background with progress checks and a ~30 min cap, then report; never sit blind on a foreground build.
+  ```bash
+  DOCKER_CONFIG=$(mktemp -d) secrets GHCR_PULL_TOKEN -- crane auth login ghcr.io -u x --password-stdin
+  # or: docker --config <tmpdir> login …
+  ```
 
-## Rationalization table
-
-| You're thinking | Reality |
-|---|---|
-| "Docker/depot isn't available here" | It is. Show the failing command or drop the claim. |
-| "Building the image is optional, tests cover it" | "Running Docker builds is not optional. If you haven't done it, you're not done." |
-| "A quick ad-hoc `docker run` reproduces enough" | Use the harness. Ad-hoc runs test a different environment. |
-| "The container ID from earlier is still valid" | 62 sessions thought so. `docker ps` first. |
-| "I'll sweep up all the matching containers" | Some are other agents'. Touch only your own. |
-| "Fresh checkout, so the cache is cold" | The cache outlives you. Check before estimating or `--no-cache`-ing. |
+- On `denied` or `token does not match expected scopes`, fix your own scoped login, never his file. Report a shared-file credential that stopped working as a finding.
 
 ## Dockerfile authoring
 
-Writing or reviewing a Dockerfile → [references/dockerfile.md](references/dockerfile.md) (layer caching, multi-stage, ARG vs ENV, secrets, non-root, debugging table).
+Writing or reviewing a Dockerfile: read [references/dockerfile.md](references/dockerfile.md).
