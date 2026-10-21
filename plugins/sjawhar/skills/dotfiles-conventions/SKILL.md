@@ -1,47 +1,61 @@
 ---
 name: dotfiles-conventions
-description: "Use before creating, moving, or wiring ANY file in ~/.dotfiles — wrapper scripts, install steps, config for a new tool, symlinks, plugin/extension consumption, or agent-harness setup (omp, claude). Also use when tempted to symlink into a vendor/ or repo checkout, install something from a local file path, or invent a new directory. The repo has a fixed placement map and hard portability rules that are not discoverable from one file. Triggers: dotfiles, ~/.dotfiles, shims, installers, omp config, add a wrapper, laptop setup, where does this script go."
+description: "Use before you create, move or wire any file in ~/.dotfiles. That includes wrappers, shims, scripts, installers, tool config, symlinks, plugin consumption, and omp or claude harness setup. Use when tempted to symlink into vendor/ or a checkout, install from a local path, or add a directory. Use when you upgrade a shared tool. Use when you change a tool Sami operates himself (his skills, omp, dispatch, knives)."
 ---
 
 # Dotfiles Conventions
 
-`~/.dotfiles` is installed on every machine (devbox, laptop, agents hosts). Everything committed must work on all of them. These rules exist because violating them breaks other machines silently.
+Everything committed to `~/.dotfiles` must work on every machine that installs it (devbox, laptop, agent hosts). A violation breaks the other machines silently.
 
-## Read before writing
+## Placement
 
-The layout is a fixed placement map. Before adding anything, read the sibling files and the directory's AGENTS.md — the pattern you need almost certainly exists:
+Before you add a file, read its siblings and the AGENTS.md of its directory. The pattern almost always exists.
 
 | What you have | Where it goes |
 |---|---|
-| Wrapper around a binary (inject env/auth, then exec) | `shims/` — one file, named exactly like the binary it wraps |
-| Utility script invoked by name | `scripts/` — no `.sh` extension |
-| Setup for a tool (symlinks, clones, config patching) | `installers/<tool>.sh`, sourced from `install.sh`, built on `installers/lib.sh` helpers |
-| Tool binary | `mise.toml` pin — never a hand-placed file. `bin/` is gitignored bootstrap-only |
-| Config for a tool | Its config dir (`omp/`, ...), symlinked into place by an installer. Config dirs never contain a `bin/` |
-| Third-party source | `vendor/` via `ensure_vendor` — pristine, never grafted onto |
-| Adopted external skill/agent | Verbatim copy into `plugins/` (real files) |
+| Wrapper: sets env or auth, then execs a binary | `shims/<binary name>`, one file |
+| Script called by name | `scripts/<name>`, no `.sh` |
+| Tool setup (symlinks, clones, config patches) | `installers/<tool>.sh` on `installers/lib.sh` helpers, sourced from `install.sh` |
+| Tool binary | A `mise.toml` pin, never a hand-placed file. `bin/` (gitignored) is only for bootstrap |
+| Tool config | Its config dir (`omp/`, ...), linked into place by an installer. No `bin/` in a config dir |
+| Third-party source | `vendor/` through `ensure_vendor`, unchanged. Never graft onto it |
+| Adopted external skill or agent | A verbatim copy (real files) in `plugins/` |
 
-## Portability rules (hard)
+## Portability (hard)
 
-- **No committed absolute paths.** Not in symlink targets, not in manifests, not in generated files. `$HOME`, `$DOTFILES_DIR`, and relative targets resolve at run time; `/home/ubuntu/...` breaks every other machine.
-- **Committed symlinks: relative, intra-repo only.** A link to `vendor/` or `plugins/` content from elsewhere in the repo is usually wrong — copy verbatim or point the consumer at the source dir instead.
-- **Per-machine state is built, not committed.** Link farms (`~/.omp/agent/skills`), checkout-backed paths, and anything derived from what exists on a machine get created by installers or `scripts/*-sync-*` scanning at run time. No frozen manifests of paths.
+- No committed absolute paths: not in symlink targets, manifests or generated files. Use `$HOME`, `$DOTFILES_DIR` or relative paths.
+- Committed symlinks are relative and stay in the repo. A link from elsewhere in the repo to `vendor/` or `plugins/` content is usually wrong: copy verbatim or point the consumer at the source dir.
+- Installers or `scripts/*-sync-*` build per-machine state at run time: link farms (`~/.omp/agent/skills`), checkout-backed paths, all that comes from what a machine has. Never commit it or a frozen manifest of paths.
 
-## Distribution rules (hard)
+## Distribution (hard)
 
-- **Sami's own software is consumed from GitHub, pinned.** The pattern is everywhere: `omp/plugins/package.json` (`github:sjawhar/x#ref`), `mise.toml` (`"github:sjawhar/x" = "latest"`). Extending it beats inventing: give the source repo the manifest it needs (an `omp`/`pi` field, a plugin entry) rather than wiring a local path.
-- **File paths and checkout symlinks are prototyping only.** Fine while iterating; they never land. `file://` plugin entries are the one exception, and only for scripts that live in this repo.
-- **Fork releases follow one pattern**: tag `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>`, release title `sami build <tag>`, consumer pins `latest`. New own-repos must be added to `minimum_release_age_excludes` in `mise.toml` by hand or `latest` will not resolve.
-- **Committed build artifacts are rejected in source repos.** If a consumer needs a bundle, fix resolution at the root (export conditions, resolver) or ship via a release asset — do not commit `dist/`.
+- Consume Sami's own software from GitHub, pinned: `github:sjawhar/x#ref` in `omp/plugins/package.json`, `"github:sjawhar/x" = "latest"` in `mise.toml`. Give the source repo the manifest it needs (an `omp`/`pi` field, a plugin entry), not a local path.
+- File paths and checkout symlinks are for prototypes and never land. The one exception: `file://` plugin entries for scripts in this repo.
+- Fork releases: tag `v<upstream>-sami.<YYYYMMDD>-<HHMMSS>`, title `sami build <tag>`, consumers pin `latest`. Add each new own-repo to `minimum_release_age_excludes` in `mise.toml` by hand, or `latest` does not resolve.
+- Never commit build artifacts (`dist/`) in a source repo. Fix resolution at the root (export conditions, resolver) or ship a release asset.
 
 ## Wrapper parity (hard)
 
-Agent-harness launchers (`scripts/cld`, `scripts/agentbox`, `shims/omp`) must provide the same session environment: gh-app `GIT_CONFIG_*` routing include, dotfiles `shims/` first on `PATH`, the secrets-broker identity. Drift means sessions silently act as the user on GitHub, lose messaging, or lose commit attribution. On the host that environment lives in one script, `scripts/agent-session`, which `shims/omp` and `scripts/cld` exec their agent through (it execs in turn, so the pid is kept); a change to what every session needs goes there. `agentbox` builds that environment for `docker run` (one box per session, `shims/omp` as the container's main process), so the same change also goes into `session_env()` there. No launcher sets an Envoy or Dispatch variable: every session reads its `envoy.json`, and a variable would override that file for every profile; a box reaches the host's file through `agentbox/mounts` and the host's listener through its entrypoint's relay. No launcher sets or clears a provider key either: keys are `apiKey` entries in each profile's `models.yml`.
+`scripts/cld`, `scripts/agentbox` and `shims/omp` must give each session the same environment: the gh-app `GIT_CONFIG_*` routing include, `shims/` first on `PATH`, the secrets-broker identity. Drift makes sessions act as the user on GitHub, or lose messaging or commit attribution.
+
+- Put a change that all sessions need in `scripts/agent-session`. On the host, `shims/omp` and `scripts/cld` exec their agent through it, and it execs in turn, so the pid stays.
+- Put the same change in `session_env()` of `agentbox`. It builds that environment for `docker run`: one box per session, `shims/omp` as the main process.
+- No launcher sets an Envoy or Dispatch variable. It would override the `envoy.json` of every profile. A box reaches the host file through `agentbox/mounts` and the host listener through its entrypoint relay.
+- No launcher sets or clears a provider key. Keys are `apiKey` entries in the `models.yml` of each profile.
 
 ## Skills here are repo-agnostic (hard)
 
-A skill in this repo (`opening-a-pr`, `landing-a-pr`, `disk-hygiene`, all of `plugins/sjawhar/skills/`) runs in every repo Sami works in, so it names no project: no agent-c paths, lanes, workflow names, or task vocabulary. A project's rule lives in that project's AGENTS.md or its own `.claude/skills/`, and the generic skill points at "the repo's own X" where one exists. A dated incident from one repo may illustrate a generic rule; the rule itself must still read correctly with that repo's name removed.
+- A skill here (`opening-a-pr`, `landing-a-pr`, `disk-hygiene`, all of `plugins/sjawhar/skills/`) runs in every repo Sami works in. It names no project: no agent-c paths, lanes, workflow names or task vocabulary.
+- Put a project rule in the AGENTS.md or `.claude/skills/` of that project. Point the generic skill at "the repo's own X" where one exists.
+- An incident from one repo can show a rule. The rule must read correctly with the repo name removed.
 
-## Commit discipline
+## Changes to tools Sami operates
 
-Consolidate a session's work into 1-2 described commits per topic before pushing — never a trail of per-step fragments. A push here belongs to a task that is about these files (a skill or config change he asked for, or a standing role that owns them, such as the librarian's skill-mechanics lane); a dotfiles edit made on the way to something else stays in the working copy and is named in your report. If Sami is actively working in the repo, leave changes in the working copy and say so.
+- Upgrade a shared tool without asking, then say what changed and how to roll it back. Ask first only when active sessions must restart for the upgrade (bun, node, the omp binary).
+- When you change a tool Sami operates himself (his skills, dotfiles, omp, dispatch, knives), say what will happen and what happened as you act.
+
+## Commits and pushes
+
+- Before you push, consolidate the session into 1-2 described commits per topic, never a trail of per-step fragments.
+- Push only for a task about these files: a skill or config change Sami asked for, or a standing role that owns them. Leave an edit made on the way to other work in the working copy, and name it in your report.
+- If Sami is working in the repo, leave your changes in the working copy and say so.
