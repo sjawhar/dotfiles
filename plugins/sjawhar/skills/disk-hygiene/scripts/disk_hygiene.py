@@ -29,8 +29,8 @@ Subcommands (all read-only except `apply`, and `tmp --apply`):
                                  stale temp-dir families by directory mtime
   containers                     every container with family (platform-e2e, local-stack, ryuk,
                                  tc-fixture, agentbox, other), owner attribution, liveness verdict
-  images [--older-than-hours H]  tagged images no container uses, older than H (cheap;
-                                 avoids `docker system df -v`, which stalls under IO load)
+  images [--older-than-hours H]  tagged images no container uses, neither built nor pulled in the
+                                 last H (cheap; avoids `docker system df -v`, which stalls under IO load)
 
 Protected file format: {"protected": ["/abs/path", ...], "anchors": ["/abs/path", ...]}.
 "protected" has prefix semantics both ways: an item is protected if it is under a
@@ -1466,7 +1466,9 @@ def cmd_containers(_args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------- images
 
 def cmd_images(args: argparse.Namespace) -> None:
-    """Tagged images no container references, older than N hours. Cheap: no `docker system df`."""
+    """Tagged images no container references, neither built nor pulled in the last N hours. Cheap: no
+    `docker system df`. An image's CreatedAt is its build time, so an old image a session pulled an hour ago
+    counts from that pull (the daemon's image pull events)."""
     rc, cids = run(["timeout", "120", "docker", "ps", "-aq", "--no-trunc"])
     used: set[str] = set()
     if cids.strip():
@@ -1475,7 +1477,16 @@ def cmd_images(args: argparse.Namespace) -> None:
     rc, out = run(["timeout", "120", "docker", "images", "--no-trunc", "--format", "{{.ID}}\t{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}\t{{.Size}}"])
     if rc != 0:
         sys.exit(out)
-    cutoff = time.time() - args.older_than_hours * 3600
+    now = time.time()
+    cutoff = now - args.older_than_hours * 3600
+    rc, ev = run(["timeout", "120", "docker", "events", "--since", str(int(cutoff)), "--until", str(int(now)),
+                  "--filter", "type=image", "--filter", "event=pull", "--format", "{{.Time}}\t{{.Actor.ID}}"])
+    if rc != 0:
+        sys.exit(ev)
+    pulled: dict[str, float] = {}
+    for line in ev.splitlines():
+        t, ref = line.split("\t", 1)
+        pulled[ref] = max(pulled.get(ref, 0.0), float(t))
     rows: list[str] = []
     for line in out.splitlines():
         iid, ref, created, size = line.split("\t")
@@ -1483,11 +1494,11 @@ def cmd_images(args: argparse.Namespace) -> None:
             continue
         # CreatedAt looks like "2026-09-10 21:28:03 +0000 UTC"
         ts = time.mktime(time.strptime(created[:19], "%Y-%m-%d %H:%M:%S")) - time.timezone
-        if ts > cutoff:
+        if max(ts, pulled.get(ref, 0.0)) > cutoff:
             continue
         rows.append(f"{size:>8}  {created[:16]}  {ref}")
     print("\n".join(sorted(rows)))
-    print(f"\n{len(rows)} unused tagged images older than {args.older_than_hours}h; remove with plain `docker rmi <ref>` (a refusal means a container uses it)", file=sys.stderr)
+    print(f"\n{len(rows)} unused tagged images neither built nor pulled in the last {args.older_than_hours}h; remove with plain `docker rmi <ref>` (a refusal means a container uses it)", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- main
