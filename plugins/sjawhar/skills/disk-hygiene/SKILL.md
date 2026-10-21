@@ -47,6 +47,7 @@ This is not a sweep. Delete only paths that you prove are yours. A name proves n
 - Never `lsof +D` or `fuser` a tree per candidate. Take one `/proc/*/cwd` snapshot (`$S procs`) again before each item.
 - Do not size things to decide a deletion. `df` before and after measures the result.
 - To find where the space went, run `sudo python3 $SKILL/scripts/disk_attribution.py --out <file.tsv> <roots>`. Use `systemd-run` when it can outlive a tool call. Never run one `du` of everything. It can run for hours.
+- To find what fills a disk now, read `write_bytes` in `/proc/*/io` twice, 15 s apart, and sort by the difference. To total deleted-but-open space, count each `lsof +L1` path once.
 
 ## Phase 2: Check-in
 

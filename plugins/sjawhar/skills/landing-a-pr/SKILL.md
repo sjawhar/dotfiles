@@ -16,6 +16,7 @@ The owner makes the PR merge-ready. Auto-merge lands it.
 
 - Ready: required proof at the head, every finding dispositioned, checks and review expected to pass. Then arm `gh pr merge <N> --auto --squash --match-head-commit <sha>`. Pass `--subject`/`--body` at arming to set the merge message.
 - The arm survives a push. Push only ready work to an armed PR, or disarm first (`--disable-auto`).
+- Before you arm, stop every lane that can push to the branch. Tell each lane that handed back a PR: a message that wakes it gets an answer, never a push, an amend or a body edit.
 - To move the arm or change its message, disarm, arm again, and check that `enabledAt` moved. A second `--auto` exits 0 and changes nothing. A refused `--match-head-commit` means a second writer pushed.
 - No admin merge. No bypass of branch protection.
 - A PR that adds or changes a database migration: merge by hand (`gh pr merge <N> --squash --match-head-commit <sha>`) until the repo has a merge-time migration check. Merge right after you check that main has one migration head and the PR builds on it. Two auto-merged migration PRs can leave main with two heads. If main's head moved, merge main, run `alembic merge heads`, push, and merge by hand when green. Never re-parent or renumber an existing migration.
@@ -51,6 +52,7 @@ In agent-c:
 - In a stack, watch only the lowest unmerged PR, with one babysitter per stack. Never restack, reorder, split or rewrite it. Topology goes to the stack owner.
 - Every change to what runs (application, infrastructure, tasks, agents, harnesses) needs the `opening-a-pr` proof at the current head. Run the changed end-to-end scenarios on a production-like surface before merge. Link outcome and duration in `## Verification`. Unit tests, a preview and green CI are not that proof.
 - If merge deploys, prove it first on an isolated development surface or a recorded throwaway probe. Production is not the experiment.
+- Apply infrastructure to production only from main, after the merge. Apply a branch to a dev stack whenever you want.
 - A required blocked or skipped scenario is unmet acceptance. Fix the surface or tooling and run it. The one exception is a named blocker Sami explicitly waived. Cite that decision and its scope, keep the scenario unverified, and meet every other requirement. No small-change, docs, harness or green-CI exemption exists.
 - A fork-pin bump carries `## Production behavior delta`: each behavior change per release member, concrete values, fork-only policy marked, or `none`. Follow the repo's fork-placement and review contracts.
 

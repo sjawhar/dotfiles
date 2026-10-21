@@ -79,6 +79,7 @@ Run the lanes in parallel with the `task` tool. Give each the step-1 corpora, th
 | Prompt Repeater | Repeated session-opening requests and Dispatch ask templates |
 | CLAUDE.md Miner | Always-loaded text against step 4's rule constraints, for net shrinkage |
 | Memory Groomer | Memory grooming, below |
+| Workstream Reviewer | One lane per workstream: what the agents built, where the hours went, the shortest path that would have worked, in hindsight, and the specific mistakes |
 
 - Use no cheap-tier model for judgment: readers, classifiers, verifiers, synthesis, grooming. A shallow reader poisons every later step. Fast models do mechanical inventory only (counting, globbing, symlink maps).
 - Rank patterns by frequency and impact. From the rates and the prior landed table, rate each earlier improvement improved, unchanged or regressed.
@@ -109,4 +110,4 @@ First run (no prior report has a "Memory grooming" section): propose only, with 
 
 ## Report
 
-Save to `~/.dotfiles/.claude/session-analysis/YYYY-MM-DD.md`, with the ledger under "Memory grooming". If an agent fails, continue and record it. End by suggesting the user run `/memory enqueue`.
+Post the report to Dispatch as an artifact where Sami reads it, with the evidence it cites uploaded beside it. Keep a copy at `~/.dotfiles/.claude/session-analysis/YYYY-MM-DD.md`, with the ledger under "Memory grooming". If an agent fails, continue and record it. End by suggesting the user run `/memory enqueue`.
