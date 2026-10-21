@@ -9,8 +9,7 @@ Every reboot locks the `login` keyring. SSH login cannot unlock it: `ubuntu` has
 
 ## Unlock
 
-1. Only Sami has the password. Ask him, and let him type it at the prompt.
-2. Run:
+1. Only Sami has the password. Ask him to run `unlock-keyring` in a terminal on the box and type it at the prompt. The function is in `~/.dotfiles/.bashrc`. It runs these commands:
 
    ```bash
    systemctl --user stop gnome-keyring-daemon.service gnome-keyring-daemon.socket
@@ -20,6 +19,8 @@ Every reboot locks the `login` keyring. SSH login cannot unlock it: `ubuntu` has
      /org/freedesktop/secrets/collection/login \
      org.freedesktop.Secret.Collection Locked   # must print: b false
    ```
+
+2. If you change this procedure, change the function and this block together.
 
 - Never automate the password. Never bypass the lock with `PYTHON_KEYRING_BACKEND` or a plaintext backend.
 - Always stop the stock units first. `--unlock` unlocks only a daemon that it starts. While the stock service runs, each attempt logs `another secret service is running` and changes nothing. `--start` is incompatible with `--unlock`.
