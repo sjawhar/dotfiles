@@ -6,6 +6,7 @@ description: |
   relevant user messages, evidence, and any standing approvals.
 model:
   - "openai-codex/gpt-6-astra:xhigh"
+  - "anthropic/claude-opus-5-5:xhigh"
 tools: read, glob, grep
 ---
 

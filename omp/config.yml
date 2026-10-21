@@ -56,9 +56,10 @@ retry:
       - anthropic/claude-opus-4-6
     # Codex (ChatGPT Pro subscription) falls to the Anthropic tier that matches
     # the failing model; exact keys beat the wildcard. An empty chain means no
-    # fallback at all: gpt-6-astra (the astra and sami-proxy agents) and the
-    # per-token models behind astra-api and gpt-api fail loudly rather than
-    # answer from another provider; the caller then decides.
+    # fallback at all: gpt-6-astra (the astra agent) and the per-token models
+    # behind astra-api and gpt-api fail loudly rather than answer from another
+    # provider; the caller then decides. The sami-proxy agent lists its own
+    # fallback (Opus 5.5) in its model list, which overrides this chain.
     openai-codex/gpt-6-astra: []
     openai/gpt-6-astra: []
     openai/gpt-5.6-terra: []
