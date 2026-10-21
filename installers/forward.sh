@@ -81,9 +81,16 @@ if [ "${1:-}" = daemon ]; then
         fi
         services+=("forward-daemon@${pair}")
         # A pair on loopback is carried over an SSH tunnel: forward-tunnel@.service
-        # holds it open (Host <pair>-tunnel in ssh config).
+        # holds it open (Host <pair>-tunnel in ssh config), signed in with its own
+        # key, which connects only once its public half is in the devbox's
+        # authorized_keys.
         if grep -qE '^listen = "127\.' "$pair_config"; then
             services+=("forward-tunnel@${pair}")
+            if [ ! -f "${HOME}/.ssh/forward-tunnel" ]; then
+                mkdir -p -m 700 "${HOME}/.ssh"
+                ssh-keygen -q -t ed25519 -N '' -C "forward-tunnel@$(hostname -s)" -f "${HOME}/.ssh/forward-tunnel"
+                echo "Created ~/.ssh/forward-tunnel; add ~/.ssh/forward-tunnel.pub to the authorized_keys of each tunnelled devbox."
+            fi
         fi
     done
     ln -sfn "${DOTFILES_DIR}/forward/forward-daemon@.service" "${HOME}/.config/systemd/user/forward-daemon@.service"
