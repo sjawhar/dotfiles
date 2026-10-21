@@ -85,20 +85,33 @@ ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 # walking node_modules for omp.extensions, so a leftover copy double-loads the
 # extension and delivers every envoy message twice.
 rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
-# theorem-labs/verification-skills is a plugin marketplace; omp installs its plugin at user scope.
-# Neither command is idempotent, so each runs only when its entry is missing.
-omp plugin marketplace list | grep -q 'theorem-labs/verification-skills' \
-    || omp plugin marketplace add theorem-labs/verification-skills
-omp plugin list | grep -q 'verification-skills@verification-skills' \
-    || omp plugin install verification-skills@verification-skills
+# Marketplace plugins install at user scope. The install record (installed_plugins.json) is
+# machine-local, but the plugin's runtime entry in the committed omp-plugins.lock.json is not, and
+# omp refuses to install a plugin whose name the lock already holds ("Runtime package name ...
+# conflicts") while exiting 0. So on a machine without the install, the stale lock entry is dropped
+# first; the install writes it back at the end of the map, and when that is the only difference the
+# committed bytes are put back so the checkout stays clean. A failed install is reported here.
+install_marketplace_plugin() {
+    local marketplace="$1" plugin="$2" lock="${DOTFILES_DIR}/omp/plugins/omp-plugins.lock.json"
+    omp plugin marketplace list | grep -q "$marketplace" || omp plugin marketplace add "$marketplace"
+    omp plugin list | grep -q "$plugin" && return 0
+    cp "$lock" "${lock}.saved"
+    jq --arg name "${plugin%@*}" 'del(.plugins[$name])' "${lock}.saved" > "$lock"
+    omp plugin install "$plugin"
+    if cmp -s <(jq -S . "$lock") <(jq -S . "${lock}.saved"); then
+        mv "${lock}.saved" "$lock"
+    else
+        rm "${lock}.saved"
+    fi
+    omp plugin list | grep -q "$plugin" || echo "omp: installing ${plugin} failed" >&2
+}
+# theorem-labs/verification-skills: Theorem's verification skills, which repos that copied them dropped.
+install_marketplace_plugin theorem-labs/verification-skills verification-skills@verification-skills
 # slack@claude-plugins-official brings the Slack skills (slack-messaging, slack-search, ...) written
 # for the tools of the slack server in omp/mcp.json. Claude Code installs it from .claude/settings.json,
 # but omp reads Claude's plugin registry only when enabledProviders lists claude-plugins, so omp holds
-# its own install. Guarded like the block above.
-omp plugin marketplace list | grep -q 'anthropics/claude-plugins-official' \
-    || omp plugin marketplace add anthropics/claude-plugins-official
-omp plugin list | grep -q 'slack@claude-plugins-official' \
-    || omp plugin install slack@claude-plugins-official
+# its own install.
+install_marketplace_plugin anthropics/claude-plugins-official slack@claude-plugins-official
 
 # Skills: pools are declared once in skills-sources.json;
 # omp/extensions/dotfiles-skills.ts feeds them to
