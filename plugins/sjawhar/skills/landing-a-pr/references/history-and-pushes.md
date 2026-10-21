@@ -1,124 +1,41 @@
 # History, conflicts and push rounds
 
-Read before conflict repair, required base integration, stack changes or a push
-that follows a review. Use `using-jj` for commands and shared-store safety.
+Read before you resolve a conflict, integrate a base, change a stack, or push after a review. `using-jj` has the commands and shared-store safety.
 
-## Decide whether the base needs integrating
+## When to integrate the base
 
-`BEHIND` alone does not justify touching the head. Integrate for a real conflict,
-a required dependency or an explicit coordination decision, not currency.
-GitHub `update-branch` is not the babysitter's repair path. The owner controls the
-integration, its proof and its publication.
+- Integrate for a real conflict, a required dependency or an explicit coordination decision, never for currency.
+- On a published or reviewed head, merge forward. A rewrite deletes the commit its verdict names. Never rebase, amend, describe over or squash into a commit that the remote or a reviewer holds.
+- Unpublished work follows `using-jj`, with its ownership and descendant checks. This never permits rewriting another session's stack or bypassing immutability.
+- A parent rewritten elsewhere: agree one freeze SHA for the next round. Do not chase each push.
+- After a parent squash-merges, its old commits are not ancestors of the squash commit, though their content is there. Diagnose duplicate content before you pick a fix. Never replay or discard another session's commits on an ancestry guess.
 
-Keep published/reviewed commits as ancestors. The boundary is **unrequested
-currency work versus required owner-controlled integration**. A required
-integration of a reviewed head is a forward merge, because a rewrite would remove
-the commit its verdict names.
+## Forward fix of a published head
 
-- Published/reviewed head: make a forward merge with jj. Do not rebase, amend,
-  describe over, or squash into a commit the remote or reviewer already holds.
-- Unpublished work: follow `using-jj`, including ownership/descendant checks
-  before a rewrite. Do not interpret this as permission to rewrite another
-  lane's stack or bypass immutability.
-- Stacked PR: work the lowest unmerged member. Ask the stack owner to perform
-  topology work; the babysitter does not restack the series.
-- A parent being rewritten elsewhere needs one agreed freeze SHA for the next
-  integration round. Do not chase every intermediate push.
+1. Read the remote head, base and ownership. Fetch through jj. Check which commit `@` is.
+2. `jj new <published-head> <base>`. Use `jj new @ <base>` only when `@` is exactly that head.
+3. Resolve by meaning. A counted sentence needs a fresh count of the merged tree. For a positional list, check its consumer: length, maximum index, deliberately unread slots. Two clean appends can break it with no conflict marker.
+4. Find the intended merge base from the graph, never by a blind pick in a criss-cross. Read `jj diff --git --from <verified-merge-base> --to <head>` with concrete revisions, merge-resolution content included. A patch-id list misses that content.
+5. Record what each side gave, what you kept, and the delta. Run the affected behavior at the new head, including earlier fixes a diff selector no longer picks.
+6. Check that the old head is still an ancestor: `jj log -r '<published-head> & ::<candidate-head>'`. Empty means lost. Read `jj git push --dry-run --bookmark <name>` in its own call. Stop on sideways, backwards or deletion.
+7. Push only that bookmark. Check that `jj log -r '<name>@origin'` names the intended commit. Run `jj new` in the same `&&` chain as the push.
+8. Request a verdict at the new SHA over the real delta and all open findings. Ancestry permits a delta review. It does not certify behavior.
 
-After a parent squash-merges, its old commits are not ancestors of the new
-squash commit merely because their content is present. Diagnose duplicate
-content before selecting a repair. Do not replay or discard another lane's
-commits by assuming that ancestry proves content equivalence.
+Chain dependent mutations with `&&`. Read the measurement that licenses a mutation in its own call. Never gate a push on a paged pipeline's status.
 
-## Forward repair of a published head
+## Verdict carry and comparisons
 
-1. Read the current remote head, base and ownership. Fetch through jj. Confirm
-   which commit `@` names and that the workspace is yours.
-2. Create a merge child of the actual published head and the required base.
-   The shape is `jj new <published-head> <base>`; when `@` is exactly that head,
-   `jj new @ <base>` is equivalent. Do not infer `@` from your last command.
-3. Resolve semantically. A conflict in a counted sentence needs a new
-   enumeration of the merged tree, not either parent's number. A positional
-   list needs its consumer checked too: compare length, maximum index and
-   intentionally unread slots. Two independent appends can break that contract
-   even when no conflict markers appear.
-4. Compare the PR's own contribution against its new base, including all
-   merge-resolution content. A per-commit patch-id list misses content created
-   by the merge itself. Establish the intended merge base from the graph, then
-   inspect `jj diff --git --from <verified-merge-base> --to <head>` with concrete
-   revisions. Do not choose one common ancestor blindly in a criss-cross graph.
-5. Record what each conflict side contributed, what was kept and the actual
-   delta. Run the affected behavior at the new head, including earlier fixes
-   whose tests a current-diff selector no longer chooses.
-6. Before pushing, verify the old published head is still an ancestor:
-   `jj log -r '<published-head> & ::<candidate-head>'`. Empty is not preserved.
-   Read a named `jj git push --dry-run --bookmark <name>` separately. A published
-   branch must move forward; stop on sideways, backwards or deletion.
-7. Publish only the named bookmark after the checks. Confirm
-   `jj log -r '<name>@origin'` names the intended commit, and leave that commit
-   with `jj new` before any edit. Keep the successful push and that `jj new`
-   in one dependent command sequence so a later tool cannot amend the head.
-8. Request a verdict at the new SHA over the real delta and all open findings.
-   Forward ancestry permits a delta review; it does not certify the new
-   behavior or silently carry a verdict across a changed contribution.
+- A verdict names a commit, not a bookmark. Check ancestry with `jj log -r '<verdict-sha> & ::<new-head>'`, and carry it only as SKILL.md step 3 says. "I only appended" is intent, not evidence.
+- Name the base and tip at both ends of a comparison, and make both fetchable by other readers. List the commits, not just a count. Mark any mapping only you can see as unverified.
+- A two-commit diff and a merge-base diff answer different questions. To see what changed between two commits, read the files at both. For the PR's contribution, diff from the intended merge base, merge-resolution content included.
+- Where a new base can change behavior, run one real matrix on old base, old head, new base and new head. Use one environment, and rerun old captures in the same window. Compare the patch effects. State what the matrix cannot see. A base change can explain an absolute difference, never a changed patch effect.
 
-Use `&&` between dependent mutation commands. A failed first command must stop
-its push. Read the licensing measurement in its own call before constructing
-the mutation. Never gate a push on a paged pipeline's status.
+## One wave per round
 
-## Review ancestry and comparison endpoints
+- Before you dispatch a head-bound review, read the queue predecessor's state. Fold a near required integration into the next round. Do not wait on unrelated predecessors or a moving main.
+- While a reviewer judges a held head, a plain jj read can snapshot the working copy and so rewrite a held commit you edited. Stage on an unpushed child or scratch tree, and combine it with a blocking fix on purpose. Never move or change the checkout while a long run reads it. Runtime changes void acceptance rows from the prior head.
+- A blocking defect after READY: read the PR's state right before you send HOLD. If it merged, fix it as a new change.
 
-A verdict names a commit, not a bookmark. Before re-citing it, query
-`jj log -r '<verdict-sha> & ::<new-head>'`. No result means a full review is
-needed. “I only appended” is intent, not graph evidence.
+## Unrequested changes
 
-Name the base and tip at both ends of any before/after comparison, and make the
-objects reachable to independent readers. List the commits or their meaningful
-classification, not just a count. A locally recoverable old tip that others
-cannot fetch is not independently verified; name which mappings are unverified.
-
-A direct two-commit delta and a merge-base comparison answer different questions.
-A merge-base view can show an unchanged line as re-added. Read the files at the
-two exact commits when asking what changed between them. For PR contribution,
-compare from the intended base/merge base and include merge-resolution content.
-
-Patch equality does not prove identical behavior against a new base. Where the
-interaction matters, run the same real matrix on old base, old head, new base
-and new head. Compare patch effects, not just absolute outputs. Hold the
-environment constant, rerun old captures in the same window, and state what the
-matrix cannot observe. A base-only change can explain an absolute difference;
-it does not excuse a changed patch effect.
-
-## Keep one publication wave per round
-
-Repair conflicts first, then findings, then CI. Run fast checks and the suites
-for affected callers and inventory changes before pushing the combined wave.
-Do not change the checkout while a long run reads it.
-
-When a reviewer is judging a held head, stage on a new unpushed child or in a
-scratch tree. An ordinary jj read can snapshot the working copy; editing the
-held commit then reading it would rewrite the artifact under review. If a
-blocking finding arrives, combine the staged work deliberately with its fix.
-Runtime changes invalidate acceptance rows observed at the prior head.
-
-Before dispatching a head-bound review, read the queue predecessor's current
-state. If a required integration is imminent, combine it with the next round
-rather than buying a verdict for a head already known to need replacement.
-Do not impose a general wait on unrelated predecessors or moving main.
-
-Useful additions that do not block a held head belong in the next coherent
-change. If a real blocking defect is found after sending READY, read the PR's
-state immediately before sending HOLD. If already merged, repair it as a new
-change; a late stop message cannot undo a merge.
-
-## Unrequested changes and recovery
-
-An unexpected head move stops mutation until ownership is settled. An accidental
-rewrite or unrequested base merge is disclosed, not hidden with a force push.
-Use `using-jj`'s forward recovery procedures; do not perform repository-global
-undo or broad revision-set surgery in a shared store.
-
-Pass `-R <owner>/<repo>` to `gh` where supported. Workspace colocation varies;
-explicit repository selection avoids relying on discovery. Never export
-`GIT_DIR` or `GIT_WORK_TREE`: they redirect unrelated subprocesses into the
-shared repository.
+- Disclose an accidental rewrite or unrequested base merge. Never hide it with a force push. Use `using-jj`'s forward recovery, never a repo-wide undo or broad revset surgery in a shared store.
