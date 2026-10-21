@@ -1,17 +1,33 @@
 ---
 name: post-merge
-description: "Use after a PR is merged — when the user says 'merged', 'PR is merged', 'any cleanup or follow-up?', or a merge notification arrives for work from this session."
+description: "Use when a PR merged: the user says 'merged' or 'PR is merged', or asks 'any cleanup or follow-up?'. Also use when a merge notification arrives for work from this session."
 ---
 
-# Post-Merge Sweep
+# Post-merge sweep
 
-A PR just merged. Run the closing sweep — execute each item, don't present a list of suggestions.
+Do each step now. Do not list suggestions. The bar is pristine clean.
 
-1. **Confirm the merge**: verify the PR is merged and post-merge CI on the target branch is green (if still running, set up a watcher and continue with the other items).
-2. **Clean up your own local state**: fetch (`git fetch`), confirm the tracking branch was deleted, and remove the clones YOU created for this work, each by name (delete its directory). Never run a bare `git worktree prune` on a shared store: from inside a box it deletes the admin entry of every worktree whose path that box cannot see. The `disk-hygiene` skill owns this.
-3. **Tracking state**: move the Dispatch issue to `done`, with a reason naming the merge and the live check, once the change is verified live (until then it stays `testing`); close or update any linked GitHub issue(s), tracking docs, and roadmap items. Plan/spec content belongs in the issue body, not file-path references. While production is frozen, a status stops telling readers anything: `testing` or `needs_review` looks the same for 'packet sent, not merged' as for 'merged, waiting on the freeze'. So at merge time under a freeze, post one message on the issue naming the merge sha, the time, and where it is and is not yet deployed (main, staging, production), and audit from artifacts and merged PRs rather than from statuses.
-4. **Deploy**: if the repo has a deployment step (check AGENTS.md), follow it and verify the change is live. Live means observed on the NEW version: the proof carries evidence that its observation postdates the deploy, such as a scheduled tick that started after the deploy's completedAt, a node or pod created after the apply began, or the deployed image digest or squash sha. Without that it may be reading the old version. Three ways this goes wrong in practice: an in-flight tick can finish on the OLD definition when production-apply lands mid-tick; pods can still sit on the old runtime right after apply; and a check keyed to the PR's head sha can never fire, because a squash merge lands a different sha on main. Merges queue for the deploy lane: one chain runs, one waits, and a newer merge replaces the waiting one, so your merge rides the newest chain and lands when it finishes. A "cancelled" pending run is that queue working, not a failure — it was cancelled because a chain was already applying, so it could not have deployed then anyway; the cancel subtracts nothing. Find the newest run; that one carries your merge. A watcher keys to the named apply job succeeding (for example `deploy / deploy`), never to a run completing: a chain can finish red with the apply SKIPPED, and a dev-slot `workflow_dispatch` of the same workflow completes too — don't conflate either with the apply. Match that name exactly, never as a substring: a reusable workflow prefixes every child job with its own name, so in agent-c a match on `production-apply` hits about 26 jobs, and the first to succeed is a pre-apply gate (`production-apply / wait-for-apply-images`), not the apply (`production-apply / production-apply`). On 2026-10-08 a substring watcher reported a deploy live 38 minutes before it applied, red teamers were told to re-run against the old code, and a second chain still queued was reported applied. Never report a cancellation, treat it as blocking, or narrate it as the reason a change is not yet live. The only deploy event worth reporting is a FAILED chain that carries your merge, and that one is yours to fix. A merged skill, plugin or dotfiles change is live only in the checkout sessions load it from (core-ops skills from `~/src/core-ops`, dotfiles from `~/.dotfiles`), and no deploy step being written down is not evidence it is live. Advance that checkout when its `@` is empty (`jj git fetch && jj new main@origin`), then read the served file back — a checkout can sit several merges behind main with no deploy step ever having run to tell you so.
-5. **Announce, if the change moved someone's workflow**: name who the merge affects — people authoring against a changed convention, users of a changed page, anyone invoking a changed CLI or following a changed doc — and tell them in their channel in this sweep, in `speaking-as-sami` and under the repo's own announcement skill where one exists (a draft for Sami where his outside-audience rule in CLAUDE.md applies); the announcement is part of the change, not a follow-up. An internal-only merge moves no one else's workflow and gets no announcement; record "no one" and move on. Before recording "no one", read the merged PR's own text for consumers outside the repository: a grep of the repo cannot see them, and "every in-repo producer is fixed" is not "every consumer is fixed".
-6. **Report**: the short list of items you just handled (or "nothing left"), then **clearly state any applicable follow-ups or cleanups that remain** — full sentences with context, not bare issue numbers or shorthand.
-
-The bar is "pristine clean."
+1. **Verify the merge.** Verify that the PR is merged and target-branch CI is green. If CI still runs, set a watcher and continue.
+2. **Clean up your own local state.**
+   - Run `git fetch`. Verify that the tracking branch is gone.
+   - Delete the directory of each clone that you created for this work, by name.
+   - Never run a bare `git worktree prune` on a shared store (see `disk-hygiene`).
+3. **Deploy and verify live.** If the repo has a deployment step (see its AGENTS.md), run it. Examples of each trap: [verifying-live.md](references/verifying-live.md).
+   - Live means observed on the NEW version. The proof must postdate the deploy, for example:
+     - a scheduled tick started after the deploy's `completedAt`
+     - a node or pod created after the apply began
+     - the deployed image digest or squash sha
+   - Key a watcher to the named apply job succeeding (for example `deploy / deploy`). Match the job name exactly, never as a substring.
+   - Never key it to a run that completes, to a dev-slot `workflow_dispatch` run of the same workflow, or to the PR's head sha. A squash merge lands a different sha on main.
+   - Your merge rides the newest deploy-lane run. A cancelled pending run is the queue working, not a failure. Never report it, block on it, or call it the reason the change is not live.
+   - Report only a FAILED chain that carries your merge, and fix it.
+   - A merged skill, plugin or dotfiles change is live only in the checkout that sessions load: `~/src/core-ops` for core-ops skills, `~/.dotfiles` for dotfiles. No deploy step is not evidence that it is live. If the checkout's `@` is empty, run `jj git fetch && jj new main@origin`, then read the served file back.
+4. **Update tracking state.**
+   - When the change is live, move the Dispatch issue to `done`, with a reason that names the merge and the live proof. Until then, it stays `testing`.
+   - Close or update each linked GitHub issue, tracking doc and roadmap item. Plan and spec content goes in the issue body, not a file path.
+   - If production is frozen, statuses do not show the merge state: `testing` looks the same for "not merged" as for "merged, waiting on the freeze". At merge time, post one message on the issue: merge sha, time, and where the change is and is not deployed (main, staging, production). Audit from artifacts and merged PRs, not statuses.
+5. **Announce if the merge changes how others work.**
+   - Name who it affects: persons who write to a changed convention, and users of a changed page, CLI or doc.
+   - Tell them in their channel during this sweep, as part of the change. Use `speaking-as-sami` and the repo's announcement skill if it has one. If the CLAUDE.md outside-audience rule applies, draft it for Sami.
+   - Internal-only merge: record "no one". Before you do, read the merged PR text for consumers outside the repository. A repo grep cannot find them.
+6. **Report.** List the items that you did, or write "nothing left". Then state each remaining follow-up or cleanup in full sentences with context, not bare issue numbers or shorthand.
