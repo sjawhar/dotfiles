@@ -1,22 +1,13 @@
 ---
 name: reflect
-description: "Analyze recent Claude Code, OpenCode, and Oh My Pi sessions and Sami's Dispatch answers for recurring corrections, preferences, and automation opportunities, and measure whether earlier fixes worked. Use for a retrospective over recent agent work."
+description: Use when running a retrospective over recent agent sessions (Claude Code, OpenCode, Oh My Pi) and Sami's Dispatch answers. Also use to find recurring corrections, preferences and automation chances, or to check whether earlier fixes worked.
 ---
 
 # Reflect
 
-A reflection over the window (default: 7 days) reads everything Sami said, measures how
-often each kind of agent failure happened, finds why the top ones happen, and fixes them in
-the cheapest place. The newest prior report in `~/.dotfiles/.claude/session-analysis/` is
-the baseline: its failure rates and its table of landed changes are what this run compares
-against.
+Window: 7 days by default. Baseline: the newest report in `~/.dotfiles/.claude/session-analysis/`, with its failure rates and its table of landed changes.
 
 ## 1. Read Sami's own words, yourself
-
-Sami's words live in two places: his session turns, and his Dispatch comments and ask
-answers (agents put decisions to him there). The orchestrating agent MUST read every one
-personally, end to end, in time order. Subagents may pre-filter noise mechanically; a
-summary of Sami's words is not Sami's words.
 
 ```bash
 SKILL_DIR=~/.dotfiles/plugins/sjawhar/skills/reflect
@@ -26,168 +17,96 @@ python3 "$SKILL_DIR/extract-dispatch-human.py" --since <ISO start> --out dispatc
 python3 "$SKILL_DIR/extract-tool-errors.py" --days <N> --summary   # failed tool calls, top stems
 ```
 
-When the fleet runs on more than one devbox, copy each other box's
-`~/.omp/agent/sessions` files for the window into a scratch directory laid out as a home
-(`<scratch>/.omp/agent/sessions`) and run the same helpers with `HOME=<scratch>`. Sessions
-moved between hosts carry their history, so dedupe by text.
-
-`extract-user-messages.py` drops injected noise and dedupes exact repeats, but scheduled
-runner prompts, probes and agent-written child briefs still get through; mark them as you
-read. Redact secrets: Sami pastes tokens, cookies and OAuth codes into answers.
-
-The highest-value learnings are the TURNING POINTS: the small fraction of his messages
-that demonstrably changed an architecture or implementation direction, or unstuck an
-agent that was spinning. For each one, pull the surrounding session or issue context and
-answer: what was the agent doing or stuck on, what did Sami say (verbatim), what changed
-after, and what would have let the agent get there without him. Those write-ups are the
-core deliverable; rates and taxonomies support them.
+- Read all of Sami's session turns, Dispatch comments and ask answers yourself, end to end, in time order. Subagents only pre-filter noise mechanically: a summary of his words is not his words.
+- Other devboxes: copy their window's `~/.omp/agent/sessions` files to `<scratch>/.omp/agent/sessions`, run the helpers with `HOME=<scratch>`, and dedupe by text.
+- Mark runner prompts, probes and agent-written child briefs as you read. Redact the tokens, cookies and OAuth codes Sami pastes.
+- The core deliverable is a write-up per turning point. A turning point is one of the few messages that demonstrably changed architecture or implementation direction, or unstuck a spinning agent. Use the surrounding session or issue context. State what the agent was doing, Sami's words verbatim, what changed, and what would have got the agent there alone.
 
 ## 2. Measure a failure rate per class
 
-Each Dispatch ask is an agent's output and Sami's answer is a human label on it. Label
-every event from step 1 with `classify-sami-events.py` (the codebook is inside). It uses a
-strong model through the omp eval kernel's `completion()`, so load it in an eval Python
-cell:
+Sami's answer to a Dispatch ask labels that agent output. Label every step-1 event in an eval Python cell (the codebook is in the script):
 
 ```python
 %load ~/.dotfiles/plugins/sjawhar/skills/reflect/classify-sami-events.py
 await main("dispatch.jsonl", "labels.jsonl")
 ```
 
-Report per-label rates by day and by week beside the prior report's. Before trusting a
-label, read 20 random events it carries and state the precision you found. A single event
-cannot show that it repeats an earlier ask, so `already_answered` undercounts; check it
-against your own reading. Your step-1 reading is the gold set: a failure class you found
-by reading that the codebook lacks goes into the codebook, and its rate starts from that
-run.
+- Report per-label rates by day and by week beside the prior report's.
+- Before you trust a label, read 20 random events with it and state the precision.
+- `already_answered` undercounts. Check it against your reading.
+- Your reading is the gold set. Add each class it found to the codebook, rated from this run.
 
 ## 3. Find why each top failure happens
-
-`extract-agent-narrative.py` renders every omp transcript in the window (top-level
-sessions and every subagent sidecar) as a readable agent-only narrative and writes one
-digest row per file. Population is the population: run it over the whole window, then read
-narratives chosen from the digest. Its step-back and retry markers are mostly false
-positives; choose by tool errors, subagent failures and the sessions behind Sami's
-corrections (Dispatch events name the asking session), and verify by reading.
 
 ```bash
 python3 "$SKILL_DIR/extract-agent-narrative.py" --days <N> --out narratives/   # + digest.jsonl
 ```
 
-For each top failure class, trace 2-4 instances to the transcript where the agent made the
-mistake, check what it had loaded, and decide which applies:
+Run it over the whole window. Read narratives picked from the digest by tool errors, subagent failures and the sessions behind Sami's corrections (each Dispatch event names its session). Its step-back and retry markers are mostly false positives, so check each signal by reading. For each top class, trace 2-4 instances to the mistake, check what the agent loaded, and name the cause:
 
-- **Rule-induced:** an instruction it loaded caused the behavior (quote file:line and when
-  the text landed).
-- **Not discovered:** the right text exists but was not loaded or found where the action
-  happened.
-- **Ignored:** loaded and clear, violated anyway.
+- **Rule-induced:** a loaded instruction caused it. Quote file:line and when the text landed.
+- **Not discovered:** the right text exists but was not found where the action happened.
+- **Ignored:** loaded, clear, and violated.
 - **Missing:** nothing says it.
 - **Capability:** the tool or access is genuinely absent.
 
 ## 4. Fix in the cheapest place
 
-In order: delete or correct the text that caused it; make the right text discoverable
-where the action happens (a pointer from the skill or tool the agent actually opens); a
-mechanical gate (a tool refusal, a lint, a default); a new rule last, and CLAUDE.md last of
-all. Rule text states the rule: no incident narratives, no dates or Sami's quotes as
-justification, no absolute always/never that agents will apply pedantically. Tighten the
-existing text rather than adding a paragraph.
+1. Delete or rewrite the text that caused it.
+2. Point to the right text from the skill or tool the agent opens there.
+3. Add a mechanical gate: a tool refusal, a lint, a default.
+4. Add a rule, CLAUDE.md last of all.
 
-A change to harness behavior ships behind a gate in the omp experiments extension
-(`omp/extensions/experiments/gates.json`), so its effect is randomized per session. Every run
-reads the gates with `experiments-readout.py`: each randomized feature on versus off, per
-session, on the share of Sami's turns that correct the agent, the share of merged PRs marked
-rework, and model spend per merged PR, each with a 95% interval. Turn labelling is Jev-first,
-strong-model-escalated: dump the turns with `dump_turns_for_jev`, run `jev-turn-label.py`
-(confidence >= 0.5; measured 91.2% agreement with the strong model on the 91.6% of turns it
-answers that confidently, escalation is explicit, never silent -- `jev-turn-label.py`'s
-docstring has the exact commands and the full measurement is in
-`.claude/session-analysis/2026-10-04-work/jev-evaluation.md`), then load
-`experiments-readout.py` in an eval cell like the classifier, pass both boxes' session
-directories and step 1's prompt files, the Jev output as `jev_labels_path`, and keep the
-strong-model turn-label cache in the scratch directory. Report every feature's three
-intervals; there is no stop rule. A week of traffic detects only large effects, so a feature
-whose interval includes 0 stays random rather than being called a wash.
-
-A text change lands for everyone and is read from the step-2 rates in later runs; changes
-that land within a day of each other cannot be told apart, so say so instead of attributing.
-Every report ends with a table of what landed in this run (commit or PR, timestamp, the
-failure class it targets): the next run's before/after.
+- Rules state the rule: no incident stories, dates, Sami's quotes or pedantic always/never. Tighten existing text instead of adding a paragraph.
+- Ship harness behavior changes behind a per-session random gate in `omp/extensions/experiments/gates.json`.
+- Read the gates every run. Label turns Jev-first, then escalate to the strong model (exact commands in `jev-turn-label.py`'s docstring):
+  1. In an eval Python cell, `%load` `experiments-readout.py` and run `dump_turns_for_jev` over both boxes' session directories and the step-1 prompt files.
+  2. In bash, run `jev-turn-label.py` under `secret-run` on those turns.
+  3. In the same kernel, `await main(...)` with the Jev output as `jev_labels_path`. Keep the strong-model turn-label cache in the scratch directory.
+- Report three 95% intervals per feature: share of Sami's turns that are corrections, share of merged PRs marked rework, model spend per merged PR. No stop rule. A week detects only large effects, so an interval including 0 keeps the feature random, never a wash.
+- Later runs read text changes from the step-2 rates. Changes that land within a day of each other can't be told apart: say so.
+- End the report with a table of what this run landed: commit or PR, timestamp, targeted class.
 
 ## Lanes and synthesis
 
-Run these in parallel; each gets the step-1 corpora, the narratives, and the prior report:
+Run the lanes in parallel with the `task` tool. Give each the step-1 corpora, the narratives and the prior report.
 
-- **Mistake Finder:** step 3 for the top classes.
-- **Preference Learner:** recurring preferences; for each, where it is written and whether
-  it was violated after it was written.
-- **Command Repeater:** failed tool calls and repeated command sequences, fixed
-  mechanically where possible.
-- **Prompt Repeater:** repeated session-opening requests and repeated Dispatch ask
-  templates.
-- **CLAUDE.md Miner:** always-loaded text audited against the step-4 rule-writing
-  constraints; the target is net shrinkage.
-- **Memory Groomer:** long-term memory cleanup (procedure below).
+| Lane | Work |
+|---|---|
+| Mistake Finder | Step 3 for the top classes |
+| Preference Learner | Recurring preferences: where each is written, and violations since |
+| Command Repeater | Failed tool calls and repeated command sequences, fixed mechanically where possible |
+| Prompt Repeater | Repeated session-opening requests and Dispatch ask templates |
+| CLAUDE.md Miner | Always-loaded text against step 4's rule constraints, for net shrinkage |
+| Memory Groomer | Memory grooming, below |
 
-Model floor: no smol/cheap-tier models anywhere judgment is involved — readers,
-classifiers, verifiers, synthesis, grooming. Fast models are only for mechanical inventory
-(counting, globbing, symlink maps). A cheap reader produces confident shallow output that
-poisons every downstream step.
+- Use no cheap-tier model for judgment: readers, classifiers, verifiers, synthesis, grooming. A shallow reader poisons every later step. Fast models do mechanical inventory only (counting, globbing, symlink maps).
+- Rank patterns by frequency and impact. From the rates and the prior landed table, rate each earlier improvement improved, unchanged or regressed.
+- Approved changes go in `plugins/sjawhar/skills/`, `agents/` or `commands/`, and global rules in `.claude/CLAUDE.md`.
+- `retain` 3–5 durable facts about the period (recurring corrections, changed decisions).
 
-Rank patterns by frequency and impact. Assess each earlier improvement as improved,
-unchanged or regressed from the rates and the prior landed table. Put approved skills in
-`plugins/sjawhar/skills/`, agents in `plugins/sjawhar/agents/`, commands in
-`plugins/sjawhar/commands/`, and global rules in `.claude/CLAUDE.md`. Distill the period
-into 3–5 durable summary facts (recurring corrections, changed decisions) and store them
-with `retain`.
+## Presenting decisions
 
-## Presenting findings and decisions
-
-Never end the retro by dumping a numbered menu of every open decision. That format is
-itself one of the failure patterns this skill exists to catch (buried context, zero
-explanation, cognitive offload onto Sami).
-
-- **At most 3 decisions per message**, each as current state → what changed / what the
-  evidence says → concrete options with tradeoffs → your recommendation. If more are
-  pending, present the top ones and say what's queued; bring the rest in later messages
-  as the earlier ones resolve.
-- **Every decision gets its explanation inline.** A one-line label plus a section
-  reference ("§D, 9 items") is not a presentable decision. If a decision needs the
-  report open in another window to understand, it isn't ready to present.
-- **Rule proposals are reviewed one at a time, not as a batch.** Say for each why the
-  cheaper homes in step 4 don't fit.
-- **Plain language throughout**: no counts-as-argument ("57 rows say…") without one
-  concrete example, no internal shorthand from the analysis (reader names, category
-  labels) unless defined in the same sentence.
+- Never end with a numbered menu of every open decision.
+- Present at most 3 decisions per message. Give each as current state → what changed or what the evidence says → concrete options with tradeoffs → your recommendation. Say what's queued, and bring it as earlier ones resolve.
+- Explain each decision inline. A one-line label plus a section reference ("§D, 9 items") is not a decision. One that needs the report open is not ready.
+- Present rule proposals one at a time, each with why step 4's cheaper homes don't fit.
+- Use plain language. Don't use a count as an argument without one concrete example. Define analysis shorthand (reader names, category labels) in the same sentence.
 
 ## Memory grooming
 
-The Memory Groomer cleans long-term memory instead of reading sessions. Banks are
-SQLite under `~/.omp/agent/memories/mnemopi/` (`mnemopi.db` global, `banks/*/mnemopi.db`
-per project); `memory_edit` reaches only the active scope (global + current project) —
-inventory other banks read-only and flag them for grooming from their own project.
+Banks: `~/.omp/agent/memories/mnemopi/mnemopi.db` (global) and `banks/*/mnemopi.db` (per project). `memory_edit` reaches only global and the current project. Read other banks only, and flag them for grooming from their own project.
 
-1. Inventory candidates via read-only SQLite reads (`working_memory`, `facts`,
-   low-veracity rows). Never write SQL; mutate only through `memory_edit`.
-2. `recall` sweeps: topics from the window's corrections, plus user preferences, project
-   decisions, and tooling facts.
-3. Near-duplicates: keep the best-worded memory; `invalidate` the rest with
-   `replacement_id` pointing at the survivor.
-4. Contradictions: decide current truth by recency and transcript evidence; `update`
-   the survivor (read the full `memory://<id>` first — previews truncate) and
-   `invalidate` the losers.
-5. A ruling Sami gave for one context, stored as a standing rule, gets re-scoped with
-   `update` or invalidated; point-in-time status (a PR "merge-ready", a pin, "blocked
-   on X") that is no longer true gets invalidated.
-6. `forget` only pure noise with zero historical value; otherwise `invalidate`.
-7. Return a ledger: every id, operation, one-line reason.
+1. Find candidates with read-only SQLite (`working_memory`, `facts`, low-veracity rows). Change memory only through `memory_edit`, never SQL.
+2. `recall` the window's correction topics, user preferences, project decisions and tooling facts.
+3. Near-duplicates: keep the best-worded. `invalidate` the rest with `replacement_id` set to it.
+4. Contradictions: decide by recency and transcript evidence. Read the full `memory://<id>` (previews truncate), `update` the survivor, and `invalidate` the losers.
+5. Re-scope with `update`, or invalidate, a one-context ruling stored as a standing rule. Invalidate point-in-time status that is no longer true (a PR "merge-ready", a pin, "blocked on X").
+6. `forget` only pure noise with no historical value. Otherwise `invalidate`.
+7. Return a ledger: each id, operation and one-line reason.
 
-The first grooming run is propose-only: if no prior report has a "Memory grooming"
-section, apply nothing and put the full proposed ledger in the report for review.
-Later runs apply directly, except a run proposing more than 20 mutations presents
-the list and waits for approval.
+First run (no prior report has a "Memory grooming" section): propose only, with the full ledger in the report. Later runs apply directly, but more than 20 changes means present the list and wait for approval.
 
-Save reports as `YYYY-MM-DD.md` in `~/.dotfiles/.claude/session-analysis/`, with the
-grooming ledger under a "Memory grooming" heading. If an agent fails, continue and record
-it. End by suggesting the user run `/memory enqueue` to consolidate the groomed state.
+## Report
+
+Save to `~/.dotfiles/.claude/session-analysis/YYYY-MM-DD.md`, with the ledger under "Memory grooming". If an agent fails, continue and record it. End by suggesting the user run `/memory enqueue`.
