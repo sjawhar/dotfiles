@@ -129,6 +129,7 @@ sentry-cli = "3.6.2"
 k9s = "0.51.0"  # was "latest"
 gitleaks = "8.30.1"
 opam = { version = "2.5.1", asset_pattern = "opam-*-{gnu_arch}-{os}" }
+pulumi = "3.268.0"
 
 # Time tracker CLI, kept for reading past data (collection is retired). Its
 # release also publishes a tt-watcher asset, so [tool_alias] + a per-platform
@@ -192,11 +193,11 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v12.4.0"
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:fc4598da6bce6ff0fd6c50770cf9248ab6511fc34b6cac8662275bba6bc7f713" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:b600a93cd4044cbcb76addcf080db7a5064e5a8ae03218400abd00e6a4c9f993" }
-platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:42f52c3af8afdbc6a5af32eefd4dd7a0f75051876e20dfc965b56198cf211ee4" }
-platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:32f491ac166f9d7dbcc1932b83cd43bf975dd41551d895b9ee0625383880ddce" }
+version = "legion-envoy-v13.22.0"  # from v12.4.0: `agent-secrets secret` gained the GCP Secret Manager backend (3d692a6e4, first in legion-envoy-v13.11.0), which the Theorem broker's store needs
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:e10891ced1a2f516850421a098e06e58231c32c421b2fa6f5084b2a9448ead48" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:7c9a17cca6193626fe59f150daf705a5f954a817603c1a5387fb880be09af6f4" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:1e2f36fd4f3fa006f9a4b2c6b0396d9b3b7181def898b8ef50800436afe3dd36" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:8dc21e9c610fe8265853e698e79c25cf558b01c030965fbfa9fdc044e6bb1662" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
