@@ -15,19 +15,19 @@ Host devbox-ssm
   ProxyCommand aws ssm start-session --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
   IPQoS lowdelay throughput
 
-# The same machine for trajectory-route@.service, which runs unattended: each
-# connect makes a fresh key and pushes it for one minute through EC2 Instance
-# Connect (scripts/aws-eic-proxy), so the route needs only the AWS SSO login,
-# never 1Password or a prompt.
+# The same machine for trajectory-route@.service, which runs unattended, so it
+# signs in with its own key file instead of 1Password and never waits on a
+# prompt. trajectory-route.sh makes the key; its public half is in ubuntu's
+# authorized_keys on sami-agents.
 Host trajectory-route
   HostName i-01d7575cd0d055f0e
   User ubuntu
   HostKeyAlias sami-agents.tailb86685.ts.net
-  IdentityFile ~/.cache/trajectory-route/id_ed25519
+  IdentityFile ~/.ssh/trajectory-route
   IdentitiesOnly yes
   IdentityAgent none
   ForwardAgent no
-  ProxyCommand aws-eic-proxy us-west-2 ~/.cache/trajectory-route/id_ed25519 %r %h %p
+  ProxyCommand aws ssm start-session --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
   IPQoS lowdelay throughput
 
 Host oryx
@@ -62,7 +62,7 @@ Host oryx-tunnel
   ServerAliveInterval 15
   RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
 
-# Every login key lives in 1Password, except trajectory-route's one-minute key.
+# Every login key lives in 1Password, except trajectory-route's key file.
 Host *
   IdentityAgent ~/.1password/agent.sock
   Compression yes
