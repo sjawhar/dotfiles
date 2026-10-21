@@ -1,81 +1,47 @@
 ---
 name: session-attribution
-description: "Use when tracing an artifact back to the agent session that produced it, or listing everything a session touched. Triggers on: who made this commit, which session/agent wrote this, attribute this commit/PR/comment, what did session X do, resume the session that did this, Omp-Session trailer, legion footer, session forensics."
+description: "Use when tracing an artifact back to the agent session that produced it, or listing everything a session touched. Triggers: who made this commit, which session or agent wrote this, attribute a commit/PR/comment. Also: what did session X do, resume the session that did this, Omp-Session trailer, legion footer, session forensics."
 ---
 
 # Session Attribution
 
-Every commit an OMP agent session makes carries an `Omp-Session: <session-id>`
-trailer, added without the agent doing anything: `shims/git` adds it to each
-`git commit`, and in a jj repository (a Legion-managed workspace, or the shared
-`~/.dotfiles`/`~/src` jj stores) a JJ_CONFIG overlay does
-(`omp/extensions/session-env.ts` for interactive sessions, the Legion extension
-for Legion roots). The id is the resumable session id: `omp --resume <id>`
-accepts it, prefix included. A git commit made through an alias, a merge, a
-cherry-pick or `git commit-tree` carries no trailer; attribute those by author,
-timestamp and transcript correlation instead. Legion GitHub comments and
-reviews carry an HTML footer with the same kind of id.
+## Where the id is
 
-## Artifact → session
-
-**Commit:**
+- Every omp-session commit gets an `Omp-Session: <id>` trailer automatically. In git, `shims/git` adds it. In jj, a JJ_CONFIG overlay adds it: `omp/extensions/session-env.ts` for interactive sessions, the Legion extension for Legion roots.
+- A git commit made through an alias, a merge, a cherry-pick or `git commit-tree` has no trailer. Attribute it by author, timestamp and transcript correlation.
+- Legion GitHub comments and reviews end with `<!-- legion: {"session":"<id>", ...} -->`.
+- `omp --resume` accepts the id or a prefix of it.
+- `jj` lines work only in jj repos: Legion workspaces and the shared `~/.dotfiles` and `~/src` stores.
 
 ```bash
-git log -1 --format=%b <sha> | grep Omp-Session         # plain git checkout
-jj log -r <rev> --no-graph -T description | grep Omp-Session   # jj repos only: Legion workspaces, shared ~/.dotfiles/~/src stores
-```
-
-**GitHub issue/PR comment or review** (Legion-posted):
-
-```bash
+git log -1 --format=%b <sha> | grep Omp-Session
+jj log -r <rev> --no-graph -T description | grep Omp-Session
 gh api repos/<owner>/<repo>/issues/comments/<id> -q .body | grep -o '<!-- legion: .* -->'
 ```
 
-The footer JSON is `{"session":"<id>", ...}`.
+## Reach the session, in order
 
-## Session → reachability
+1. Live: `hub` op `list` or `envoy_sessions`. Message it.
+2. Resume: `omp --resume <id-prefix>` on the machine that has the transcript.
+3. Read: `~/.omp/agent/sessions/<project-slug>/<timestamp>_<id>.jsonl`. The directory with the same name holds:
+   - `<AgentName>.jsonl` for each subagent. Its brief is the `task` field of the `session_init` record near the top.
+   - `local/<name>` for each `local://<name>` file the session wrote, on the host disk. Files in `/tmp` or a box workspace are gone with the box.
 
-With an id in hand, in order:
+## List what a session touched
 
-1. **Live?** `hub` op `list` / `envoy_sessions` — if the session is registered live, message it.
-2. **Resume it:** `omp --resume <id-prefix>` on the machine where the session ran.
-3. **Read only:** transcript at `~/.omp/agent/sessions/<project-slug>/<timestamp>_<id>.jsonl`;
-   subagent transcripts are `<AgentName>.jsonl` inside the session's same-named directory.
-   A subagent's opening brief is the `task` field of the `session_init` record near the top of its
-   file. A `local://<name>` file the session itself wrote is `local/<name>` inside that same
-   directory, on the host's disk under `~/.omp`; a brief written to `/tmp` or a box workspace
-   instead is gone with the box.
-
-## Session → artifacts (inventory)
+Run both `gh search` lines, because `issues` skips PR comments. The `gh api` line is the deterministic sweep of one repo.
 
 ```bash
 git log --all --format='%h %s %(trailers:key=Omp-Session,valueonly)' | grep <id>
-jj log -r 'all()' --no-graph -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"' \
-  -r 'description(glob:"*Omp-Session: <id>*")'   # jj repos only: Legion workspaces, shared ~/.dotfiles/~/src stores
-gh search issues "<id> in:comments" --owner <owner>          # ISSUE comments only - excludes PRs (measured 2026-09-21)
-gh search prs    "<id> in:comments" --owner <owner>          # PR comments; run both, or a PR hit reads as "never reported"
-gh api "repos/<owner>/<repo>/issues/comments" --paginate \
-  -q '.[] | select(.body | contains("<id>")) | .html_url'   # deterministic per-repo sweep
+jj log --no-graph -r 'description(glob:"*Omp-Session: <id>*")' -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
+gh search issues "<id> in:comments" --owner <owner>
+gh search prs    "<id> in:comments" --owner <owner>
+gh api "repos/<owner>/<repo>/issues/comments" --paginate -q '.[] | select(.body | contains("<id>")) | .html_url'
 ```
 
-## Caveats
+## Read the evidence
 
-- Commits predating the mechanism, and commits humans make in their own terminals, have no
-  trailer — absence means "not an agent session commit", not an error.
-- Legion phase workers are subagents of the root architect: their commits carry the **root**
-  session id. Worker-level provenance lives in the comment footers and `.legion/` handoffs.
-- The trailer names the session, not the machine. Resume works where the transcript lives.
-- **In one of the remaining shared jj stores (the shared `~/.dotfiles`/`~/src` checkouts) the
-  trailer names who snapshotted, not who wrote.** jj snapshots every
-  pending edit in the working copy under whichever session runs the next `jj` command there,
-  so one commit can carry four sessions' edits under one trailer. Measured 2026-09-12 in
-  `~/core-ops`: hiring's 09-06 edits landed under the Gray Swan coordinator's trailer because
-  that session ran a jj command in the shared tree. Trailer attribution is reliable in a
-  per-session workspace (`jj workspace add`); in a shared checkout, attribute from content
-  and ask the candidate sessions, and split the commit on file boundaries once owners claim.
-- **A command's text in a transcript is not evidence the session ran the command.** Read the
-  record's role: an invocation is a `message` record whose role is `user` or `fileMention`; the
-  same text inside a `toolResult` or `compaction` record is the session reading the file. The
-  post-compaction reminder tells every long session to reread `commands/sdd.md`, so its text sits
-  in most long transcripts. Measured 2026-09-24: 19 coordinator transcripts carried
-  sdd.md's description line, and 4 of them had an invocation record.
+- No trailer on an old commit or a human's commit means "not an agent commit", not an error.
+- Legion phase workers commit under the root architect's id. Find the worker in comment footers and `.legion/` handoffs.
+- In a shared jj checkout (`~/.dotfiles`, `~/src`), the trailer names the session that ran the next `jj` command, not the author. Trust it only in a per-session workspace (`jj workspace add`). Otherwise attribute from content, ask the candidate sessions, and split the commit by file when owners claim files.
+- Command text in a transcript does not prove that the session ran it. An invocation is a `message` record whose role is `user` or `fileMention`. The same text in a `toolResult` or `compaction` record is a file read. Example: the post-compaction reminder puts `commands/sdd.md` in most long transcripts.
