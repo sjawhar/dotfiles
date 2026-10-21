@@ -85,25 +85,41 @@ ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 # walking node_modules for omp.extensions, so a leftover copy double-loads the
 # extension and delivers every envoy message twice.
 rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
-# Marketplace plugins install at user scope. The install record (installed_plugins.json) is
-# machine-local, but the plugin's runtime entry in the committed omp-plugins.lock.json is not, and
+# Marketplace plugins install at user scope, at the version the committed omp-plugins.lock.json
+# records. The install record (installed_plugins.json) is machine-local; the lock entry is not, and
 # omp refuses to install a plugin whose name the lock already holds ("Runtime package name ...
 # conflicts") while exiting 0. So on a machine without the install, the stale lock entry is dropped
 # first; the install writes it back at the end of the map, and when that is the only difference the
-# committed bytes are put back so the checkout stays clean. A failed install is reported here.
+# committed bytes are put back so the checkout stays clean. An install behind the lock (another
+# machine upgraded and committed the lock) refreshes the marketplace catalog, which omp otherwise
+# keeps from the day it was added, and upgrades. An install that ends away from the lock is reported.
+marketplace_plugin_version() {
+    jq -r --arg p "$1" '.plugins[$p][0].version // empty' "${DOTFILES_DIR}/omp/plugins/installed_plugins.json" 2>/dev/null || true
+}
 install_marketplace_plugin() {
-    local marketplace="$1" plugin="$2" lock="${DOTFILES_DIR}/omp/plugins/omp-plugins.lock.json"
+    local marketplace="$1" plugin="$2" lock="${DOTFILES_DIR}/omp/plugins/omp-plugins.lock.json" want have
     omp plugin marketplace list | grep -q "$marketplace" || omp plugin marketplace add "$marketplace"
-    omp plugin list | grep -q "$plugin" && return 0
-    cp "$lock" "${lock}.saved"
-    jq --arg name "${plugin%@*}" 'del(.plugins[$name])' "${lock}.saved" > "$lock"
-    omp plugin install "$plugin"
-    if cmp -s <(jq -S . "$lock") <(jq -S . "${lock}.saved"); then
-        mv "${lock}.saved" "$lock"
-    else
-        rm "${lock}.saved"
+    want=$(jq -r --arg n "${plugin%@*}" '.plugins[$n].version // empty' "$lock")
+    have=$(marketplace_plugin_version "$plugin")
+    if [ -z "$have" ]; then
+        cp "$lock" "${lock}.saved"
+        jq --arg name "${plugin%@*}" 'del(.plugins[$name])' "${lock}.saved" > "$lock"
+        omp plugin install "$plugin"
+        if cmp -s <(jq -S . "$lock") <(jq -S . "${lock}.saved"); then
+            mv "${lock}.saved" "$lock"
+        else
+            rm "${lock}.saved"
+        fi
+    elif [ -n "$want" ] && [ "$have" != "$want" ]; then
+        omp plugin marketplace update "${plugin#*@}"
+        omp plugin upgrade "$plugin"
     fi
-    omp plugin list | grep -q "$plugin" || echo "omp: installing ${plugin} failed" >&2
+    have=$(marketplace_plugin_version "$plugin")
+    if [ -z "$have" ]; then
+        echo "omp: installing ${plugin} failed" >&2
+    elif [ -n "$want" ] && [ "$have" != "$want" ]; then
+        echo "omp: ${plugin} is ${have}, but omp-plugins.lock.json records ${want}" >&2
+    fi
 }
 # theorem-labs/verification-skills: Theorem's verification skills, which repos that copied them dropped.
 install_marketplace_plugin theorem-labs/verification-skills verification-skills@verification-skills
