@@ -91,6 +91,14 @@ omp plugin marketplace list | grep -q 'theorem-labs/verification-skills' \
     || omp plugin marketplace add theorem-labs/verification-skills
 omp plugin list | grep -q 'verification-skills@verification-skills' \
     || omp plugin install verification-skills@verification-skills
+# slack@claude-plugins-official brings the Slack skills (slack-messaging, slack-search, ...) written
+# for the tools of the slack server in omp/mcp.json. Claude Code installs it from .claude/settings.json,
+# but omp reads Claude's plugin registry only when enabledProviders lists claude-plugins, so omp holds
+# its own install. Guarded like the block above.
+omp plugin marketplace list | grep -q 'anthropics/claude-plugins-official' \
+    || omp plugin marketplace add anthropics/claude-plugins-official
+omp plugin list | grep -q 'slack@claude-plugins-official' \
+    || omp plugin install slack@claude-plugins-official
 
 # Skills: pools are declared once in skills-sources.json;
 # omp/extensions/dotfiles-skills.ts feeds them to

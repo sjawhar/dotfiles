@@ -1,5 +1,5 @@
 {
-  "$comment": "Vendored/adopted skill pools fed to OMP by omp/extensions/dotfiles-skills.ts (resources_discover skillPaths). Marketplace-installed pools do NOT belong here - Claude's installed_plugins.json is their source of truth and OMP ingests it natively. Fields: root = package root relative to the dotfiles dir (skills expected at <root>/skills); ompSkillsDir = a skills directory to use instead of <root>/skills; omp=false = skip the pool. installers/omp.sh clones the vendor/ checkouts.",
+  "$comment": "Vendored/adopted skill pools fed to OMP by omp/extensions/dotfiles-skills.ts (resources_discover skillPaths). Marketplace-installed pools do NOT belong here - installers/omp.sh installs them into omp's own plugin tree with omp plugin install (omp does not read Claude Code's plugin registry). Fields: root = package root relative to the dotfiles dir (skills expected at <root>/skills); ompSkillsDir = a skills directory to use instead of <root>/skills; omp=false = skip the pool. installers/omp.sh clones the vendor/ checkouts.",
   "sources": [
     {
       "root": "plugins/sjawhar"
