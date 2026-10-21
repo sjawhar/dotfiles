@@ -161,7 +161,7 @@ fetch_part() {
 
 **PRs.**
 
-- The implementer opens each PR under `opening-a-pr` and owns `landing-a-pr`, resumed for checks, reviews and conflicts. The coordinator sends the packet to the merge queue, which merges.
+- The implementer opens each PR under `opening-a-pr` and owns `landing-a-pr`, resumed for checks, reviews and conflicts. When a merge-queue controller runs (`running-the-merge-queue`), the coordinator sends it the packet and it merges. Otherwise the implementer arms auto-merge.
 - Each stacked PR follows the same path, plus a reviewer as it lands. Use `gh-stack` for dependent PRs and `squash-stack` for finished stacks it applies to.
 - If consolidation changes the delivered diff, refresh acceptance and PR gates. Don't stop to ask about stacking.
 
