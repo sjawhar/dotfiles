@@ -87,3 +87,12 @@ These block unless the author justifies them with evidence:
 - a duplicated helper, or logic in the wrong layer, when a clear canonical home exists
 
 When the bar is not met, leave explicit, actionable feedback and push for a cleaner decomposition.
+
+## Verdict
+
+Make the first line of the report the verdict, in exactly this form, with the short sha of the head commit you reviewed (`git rev-parse --short=8 HEAD`):
+
+- `Verdict: APPROVE at <sha>` when the diff meets the approval bar.
+- `Verdict: CHANGES at <sha>` when it does not.
+
+`pr-gates` reads only the first line of each PR comment, so put nothing before the verdict.

@@ -54,6 +54,15 @@ For each row whose surface the diff touches, answer with a file:line citation.
 - Never misreport priority. Developers who get false High findings stop listening. Trace each issue end to end.
 - Never report a finding with research still open. If you can read the code that settles it, read it. Not: "the client has issue X, but if the backend handles it, this is ok."
 
+## Verdict
+
+Make the first line of the report the verdict, in exactly this form, with the short sha of the head commit you reviewed (`git rev-parse --short=8 HEAD`):
+
+- `Verdict: CHANGES at <sha>` when the report has a finding that the author must fix before merge.
+- `Verdict: APPROVE at <sha>` when it has none. Hardening items alone do not block.
+
+`pr-gates` reads only the first line of each PR comment, so put nothing before the verdict.
+
 ## PR discussion
 
 Only after your independent audit, and only when you have Medium-to-High findings and the branch has a PR:
