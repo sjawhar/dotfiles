@@ -9,6 +9,9 @@
         defaultBranch = main
 [push]
         autoSetupRemote = true
+# Shared boxes have 64 cores, and git grep's default (0) starts one thread per core.
+[grep]
+	threads = 8
 
 [credential "https://github.com"]
 	helper = 
