@@ -4,7 +4,7 @@
   "dependencies": {
     "@bopstack/pi-codegraph": "^0.1.1",
     "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.1.1",
-    "@sjawhar/pi-envoy": "10.14.1",
+    "@sjawhar/pi-envoy": "10.15.1",
     "@sjawhar/pi-legion": "10.11.1",
     "gws-accounts": "github:sjawhar/gws-accounts#v0.1.6",
     "secretsd": "github:sjawhar/forward#v3.6.3",
