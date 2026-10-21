@@ -47,7 +47,7 @@ gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<node
 - `pr-gate` checks head, scope, mergeability, threads, checks and verdicts. It does not read findings or prove paths for you. An initial UNKNOWN mergeability is not a conflict.
 - Measure deploy consequence from the full file list and diff against the workflow filters, not the body or a stat. Read incidental changes. Reread rollback, version and deploy claims when the awaited event happens.
 - Never call a missing required scenario "remaining work" in a ready report.
-- No merge-queue organizer exists. The owner arms, and re-arms at each new sha.
+- With no merge-queue controller on the PR (`running-the-merge-queue`), the owner arms auto-merge, and re-arms at each new sha.
 
 ## Public text
 
