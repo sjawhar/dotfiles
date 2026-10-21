@@ -1,7 +1,7 @@
 # Laptop role, sami-leanperf pair: run by forward-daemon@sami-leanperf.service.
 # sami-leanperf is off the tailnet, so this daemon listens on loopback and
 # forward-tunnel@sami-leanperf.service carries every channel over SSH (Host
-# sami-leanperf-tunnel in laptop/ssh-config). The other pairs hold the
+# sami-leanperf-tunnel in ~/.ssh/config.local). The other pairs hold the
 # laptop's tailnet addresses, so forward's default ports are free here. Tunnelled
 # connections arrive from 127.0.0.1, which any local process shares.
 listen = "127.0.0.1"

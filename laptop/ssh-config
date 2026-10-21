@@ -57,62 +57,6 @@ Host ghost-wispr
   User ghost-wispr
   ForwardAgent yes
 
-# Azure VMs (Theorem subscription, rg sami, westus2), off the tailnet. sshd also
-# listens on 443 because this network drops outbound 22 to some hosts, and the
-# NSG admits only this laptop's public IP.
-Host leanperf
-  HostName 52.233.92.39
-  Port 443
-  User sami
-  ForwardAgent yes
-
-Host rocqperf
-  HostName 20.98.65.233
-  Port 443
-  User sami
-  ForwardAgent yes
-
-# forward's channels for each Azure VM, held open by forward-tunnel@<pair>.service.
-# The laptop daemon's ports go to the VM, the VM's come back here.
-# sami-leanperf's pair has 127.0.0.1 and the default ports. sami-rocqperf's has
-# 127.0.0.2 at both ends, with the bridge and grant feed on 12811 and 12815
-# (config-serve-sami-rocqperf.toml says why).
-Host sami-leanperf-tunnel
-  HostName 52.233.92.39
-  Port 443
-  User sami
-  BatchMode yes
-  StrictHostKeyChecking accept-new
-  ControlMaster no
-  ControlPath none
-  ExitOnForwardFailure yes
-  ServerAliveInterval 15
-  RemoteForward 127.0.0.1:12800 127.0.0.1:12800
-  RemoteForward 127.0.0.1:12803 127.0.0.1:12803
-  RemoteForward 127.0.0.1:12804 127.0.0.1:12804
-  RemoteForward 127.0.0.1:12806 127.0.0.1:12806
-  LocalForward 127.0.0.1:12801 127.0.0.1:12801
-  LocalForward 127.0.0.1:12802 127.0.0.1:12802
-  LocalForward 127.0.0.1:12805 127.0.0.1:12805
-
-Host sami-rocqperf-tunnel
-  HostName 20.98.65.233
-  Port 443
-  User sami
-  BatchMode yes
-  StrictHostKeyChecking accept-new
-  ControlMaster no
-  ControlPath none
-  ExitOnForwardFailure yes
-  ServerAliveInterval 15
-  RemoteForward 127.0.0.1:12800 127.0.0.2:12800
-  RemoteForward 127.0.0.1:12803 127.0.0.2:12803
-  RemoteForward 127.0.0.1:12804 127.0.0.2:12804
-  RemoteForward 127.0.0.1:12806 127.0.0.2:12806
-  LocalForward 127.0.0.1:12811 127.0.0.2:12811
-  LocalForward 127.0.0.2:12802 127.0.0.2:12802
-  LocalForward 127.0.0.1:12815 127.0.0.2:12815
-
 # Every login key lives in 1Password.
 Host *
   IdentityAgent ~/.1password/agent.sock
