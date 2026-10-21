@@ -22,4 +22,4 @@ Do not report unchanged-code issues. Do not report speculative findings. If an a
 
 ## Output
 
-Prioritize concrete findings by severity. Include evidence, affected behavior, and a concise remediation. State when no actionable issue survived the review.
+Start the report with the verdict line that the skill's Verdict section defines. Then prioritize concrete findings by severity. Include evidence, affected behavior, and a concise remediation. State when no actionable issue survived the review.

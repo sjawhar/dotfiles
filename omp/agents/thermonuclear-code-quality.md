@@ -22,4 +22,4 @@ Do not demand abstraction before two real change axes exist. Do not flag unchang
 
 ## Output
 
-Order surviving findings by structural impact, simplification opportunity, branching growth, boundary clarity, file size, modularity, and legibility. State when the change is sound.
+Start the report with the verdict line that the skill's Verdict section defines. Then order surviving findings by structural impact, simplification opportunity, branching growth, boundary clarity, file size, modularity, and legibility. State when the change is sound.
