@@ -1,55 +1,37 @@
 # Dockerfile authoring
 
-## Layer caching
+## Layers
 
-- Copy dependency manifests first (`package*.json`, `uv.lock`, `Cargo.toml`), install deps, THEN `COPY` source — source edits must not invalidate the dependency layer.
-- Cache mounts for package managers:
+- Copy the dependency manifests (`package*.json`, `uv.lock`, `Cargo.toml`) and install deps before you `COPY` the source. Then a source edit keeps the dependency layer.
+- Give package managers a cache mount:
 
   ```dockerfile
   RUN --mount=type=cache,target=/root/.npm npm ci
   RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen
   ```
 
-- `.dockerignore` must exist and exclude `.git`, dependency dirs, build artifacts, env/secret files — a bloated context slows every build and can leak secrets into the image.
-- Multi-stage: build stage owns the toolchain; runtime stage copies artifacts only (`COPY --from=build`).
+- Keep a `.dockerignore` that excludes `.git`, dependency dirs, build artifacts and env or secret files. A large context slows builds and can leak secrets into the image.
+- Multi-stage: the build stage holds the toolchain. The runtime stage copies only artifacts (`COPY --from=build`), onto the smallest base that stays correct (slim, alpine, distroless).
+- Remove package caches in the same `RUN` layer (`rm -rf /var/lib/apt/lists/*`). A later layer can't shrink an earlier one.
 
-## ARG vs ENV — the #1 recurring confusion
+## ARG, ENV and secrets
 
-| Declared as | Visible at build | Visible at runtime | In `docker history` |
-|---|---|---|---|
-| `ARG` | yes | **no** | yes (if used in a layer) |
-| `ENV` | yes | yes | yes |
-
-- Runtime config the app reads → `ENV` (or runtime `-e`). `ARG DATABASE_URL` silently produces an unset variable in the running container.
-- Secrets → **neither**. Both persist in image history. Use:
+- `ARG` exists only at build time. Put runtime config the app reads in `ENV` or `-e`. An `ARG DATABASE_URL` is unset in the running container.
+- Put secrets in neither. `docker history` keeps both (an `ARG` once a layer uses it). Use a secret mount, then search the history:
 
   ```dockerfile
   RUN --mount=type=secret,id=api_key \
       API_KEY=$(cat /run/secrets/api_key) some-build-step
   ```
 
-- Then verify the fix actually worked:
-
   ```bash
   docker history --no-trunc <img> | grep -iE 'secret|key|password|token'
   ```
 
-## Correctness checklist
+## Runtime
 
-- [ ] Non-root: create user with explicit UID/GID, `USER` before `CMD`, `COPY --chown`
-- [ ] Exec-form `CMD`/`ENTRYPOINT` (`["bin", "arg"]`) — shell form blocks signals from reaching PID 1, so `docker stop` waits 10s then SIGKILLs
-- [ ] Entrypoint scripts are executable and have correct shebang/line-endings
-- [ ] `HEALTHCHECK` present if compose uses `depends_on: condition: service_healthy` — and its probe binary (curl/wget) actually exists in the image
-- [ ] Package caches cleaned in the SAME `RUN` layer (`rm -rf /var/lib/apt/lists/*`) — a later layer can't shrink an earlier one
-- [ ] Runtime base as small as correctness allows (slim/alpine/distroless); build tools never in the runtime stage
-
-## Runtime debugging
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Can't connect to published port | App binds `127.0.0.1` inside container | Bind `0.0.0.0`; verify `-p` host:container order |
-| Env var empty at runtime | Declared as `ARG` | `ENV`, or pass `-e` at run time |
-| Container exits immediately | Bad CMD, non-executable entrypoint, CRLF line endings | `docker logs <c>`; `docker inspect --format '{{.Config.Cmd}} {{.Config.Entrypoint}}' <img>` |
-| `docker stop` takes exactly 10s | Shell-form CMD swallows SIGTERM | Exec-form CMD/ENTRYPOINT |
-| Healthcheck always unhealthy | Probe binary missing from image | Install it, or probe with what exists |
-| File missing inside container | `.dockerignore` excluded it, or stale image | Check `.dockerignore`; rebuild |
+- Run as non-root: a user with explicit UID/GID, `USER` before `CMD`, `COPY --chown`.
+- Use exec-form `CMD`/`ENTRYPOINT` (`["bin", "arg"]`). With shell form, PID 1 gets no signals, so `docker stop` takes exactly 10 s and then sends SIGKILL.
+- Entrypoint scripts need the exec bit, a correct shebang and LF line endings. If the container exits at once, run `docker logs <c>` and `docker inspect --format '{{.Config.Cmd}} {{.Config.Entrypoint}}' <img>`.
+- If compose uses `depends_on: condition: service_healthy`, add a `HEALTHCHECK`. Its probe binary (curl, wget) must be in the image, or the check never passes. Install it, or probe with a binary the image has.
+- A file is missing in the container: `.dockerignore` excluded it, or the image is stale. Check `.dockerignore`, then rebuild.
