@@ -31,6 +31,8 @@ Scenario map (verification table in the plan):
   18  admin-id safety    -> test_s18_crafted_admin_id_never_escapes_worktrees_dir
   19  D4 cwd anchor      -> test_s19_d4_proc_cwd_anchor_protects_only_containing_slot
   20  D4 loud failure    -> test_s20_d4_generator_fails_loud_without_knives
+  21  borrowed store     -> test_s32_scratch_another_clone_borrows_from_is_refused_and_named
+  22  borrowed via wt    -> test_s33_store_borrowed_through_a_worktrees_common_dir_is_refused
 """
 
 from __future__ import annotations
@@ -602,7 +604,10 @@ class ReaperScenarioTest(unittest.TestCase):
         self.assertTrue(foreign_admin.is_dir())
         shutil.rmtree(foreign)  # another session's residue: stale (prunable) admin entry, no release
         entry = self.capture_release(wt, repo, "git")
-        sh("git", "-C", repo, "worktree", "lock", wt)
+        # shims/git locks on add and lifts its own lock before remove; only a foreign lock fails it
+        if (repo / ".git" / "worktrees" / entry["admin_id"] / "locked").exists():
+            sh("git", "-C", repo, "worktree", "unlock", wt)
+        sh("git", "-C", repo, "worktree", "lock", "--reason", "test: force remove to fail", wt)
         rel = self.releases_file(entry)
         _, plan_path = self.plan("--releases", rel)
         _, ledger = self.apply(plan_path, "--releases", rel)
@@ -962,6 +967,50 @@ class ReaperScenarioTest(unittest.TestCase):
         finally:
             proc.terminate()
             proc.wait(timeout=30)
+
+    # ------------------------------------------------------------- borrowed object stores
+
+    def borrowed_store(self) -> tuple[Path, Path]:
+        """A scratch directory holding a bare repo; returns (directory, bare repo)."""
+        src = self.make_git_repo()
+        donor = self.base / "donor"
+        donor.mkdir()
+        sh("git", "clone", "-q", "--bare", src, donor / "store.git")
+        return donor, donor / "store.git"
+
+    def assert_refused_for(self, donor: Path, borrower: Path, plan_path: Path) -> None:
+        self.age(donor, 48)
+        _, entries = self.apply(plan_path)
+        skips = [e for e in entries if e["op"] == "skip" and e["path"] == str(donor)]
+        self.assertTrue(skips and str(borrower) in skips[0]["reason"],
+                        f"borrowed store not refused with the borrower named: {entries}")
+        self.assertTrue(donor.exists(), "removed an object store another clone borrows from")
+        sh("git", "-C", borrower, "log", "-1")  # the borrower still reads its objects
+
+    def test_s32_scratch_another_clone_borrows_from_is_refused_and_named(self) -> None:
+        """A `git clone --shared` reads its objects from the source through
+        objects/info/alternates; removing the source breaks the clone and loses its commits."""
+        donor, store = self.borrowed_store()
+        borrower = self.base / "borrower"
+        sh("git", "clone", "-q", "--shared", store, borrower)
+        self.age(donor, 48)
+        doc, plan_path = self.plan("--protected", self.protected_file(), inventory=self.inventory(self.make_jj_repo()))
+        self.assertIn(str(donor), self.plan_paths(doc), f"donor not planned as scratch: {doc['plan']}")
+        self.assert_refused_for(donor, borrower, plan_path)
+
+    def test_s33_store_borrowed_through_a_worktrees_common_dir_is_refused(self) -> None:
+        """The borrowing clone sits outside every search root; only its worktree is under one.
+        The worktree's common dir carries the alternates, so the worktree is the borrower named."""
+        donor, store = self.borrowed_store()
+        outside = Path(tempfile.mkdtemp(prefix="reaper-outside-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        sh("git", "clone", "-q", "--shared", store, outside / "clone")
+        wt = self.base / "borrower-wt"
+        sh("git", "-C", outside / "clone", "worktree", "add", "-q", "--detach", wt)
+        self.age(donor, 48)
+        doc, plan_path = self.plan("--protected", self.protected_file(), inventory=self.inventory(self.make_jj_repo()))
+        self.assertIn(str(donor), self.plan_paths(doc), f"donor not planned as scratch: {doc['plan']}")
+        self.assert_refused_for(donor, wt, plan_path)
 
 
 class ContainerCensusOtherFamilyTest(unittest.TestCase):
