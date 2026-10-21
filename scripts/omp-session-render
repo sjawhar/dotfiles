@@ -7,6 +7,7 @@ Reads an omp session JSONL file. Entry numbers are 1-based line numbers of the f
                                                        error streaks, compactions, long tool loops
   omp-session-render show  <session.jsonl> START END  compact rendering of lines START..END
   omp-session-render grep  <session.jsonl> REGEX      line numbers whose text matches REGEX
+                                                       (case-insensitive)
   omp-session-render stats <session.jsonl>            counts and time span
 
 Shaken tool output appears in the file as "[shaken ... recover: artifact://N ...]". `show` and
@@ -16,6 +17,7 @@ missing from that file is left as-is.
 """
 import json
 import re
+import signal
 import sys
 from pathlib import Path
 SHAKE = re.compile(r"\[shaken ~\d+ tokens — recover: artifact://(\d+) \(region (\d+)\)\]")
@@ -209,6 +211,7 @@ def cmd_stats(path):
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     def usage():
         sys.stderr.write(__doc__)
         sys.exit(2)
