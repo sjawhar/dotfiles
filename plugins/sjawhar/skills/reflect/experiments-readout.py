@@ -202,10 +202,13 @@ async def label_turns(turns, cache_path, jev_labels_path=None, model="default", 
     jev_labels = {}
     if jev_labels_path is not None:
         jev_path = Path(jev_labels_path).expanduser()
-        if jev_path.exists():
-            for line in jev_path.open():
-                r = json.loads(line)
-                jev_labels[r["id"]] = r["label"]
+        if not jev_path.exists():
+            raise FileNotFoundError(
+                f"jev_labels_path {jev_path} does not exist: run jev-turn-label.py first, "
+                "or pass jev_labels_path=None to send every turn to the strong model")
+        for line in jev_path.open():
+            r = json.loads(line)
+            jev_labels[r["id"]] = r["label"]
 
     cache_path = Path(cache_path).expanduser()
     labels = {}
