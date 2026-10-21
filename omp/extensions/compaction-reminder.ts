@@ -1,5 +1,5 @@
 // Re-assert what a compaction loses, in two cases: the sdd process contract for
-// a top-level session while an sdd goal is active, and what a subagent was told
+// a top-level session that invoked /sdd, and what a subagent was told
 // to do, on its first compaction. Every successful automatic shake also leaves
 // a `compaction-marker` entry recording the context size before and after it.
 //
@@ -9,14 +9,18 @@
 // Firing on every compaction of every session was measured as noise: over 15
 // sessions that invoked /sdd and 268 compactions, the reminder led to a re-read
 // of sdd.md within 60 turns 22 times (8%), and most sessions were not running
-// sdd at all. So the reminder is bound to a goal: sdd.md has the coordinator
-// create a goal whose objective starts `[sdd]`, and this handler fires only
-// while such a goal is active. The goal is read from the session branch at
-// compaction time rather than tracked from `goal_updated` events, because a
-// resumed session restores its goal from the persisted `mode_change` entry
-// without re-emitting the event. The last `mode_change` on the branch decides:
-// `mode: "goal"` with `data.goal.status === "active"` and the `[sdd]` prefix
-// arms it; `goal_paused`, `none`, or a complete/dropped status disarms it.
+// sdd at all. So the reminder is bound to the command: it fires only when the
+// session branch holds a user message that is the expanded /sdd template. omp
+// persists a template invocation as its expanded body (frontmatter stripped,
+// arguments appended), so the test is that a non-synthetic user message starts
+// with the first line of sdd.md's body, read from the file itself so a new
+// heading cannot silently disarm it. The branch is read at compaction time: it
+// keeps entries from before a committed compaction, a shake leaves a markdown
+// heading in place, and a resumed session reads the same persisted entries. Once
+// armed, the reminder stays armed for the rest of the session; its text tells
+// the model to re-read sdd.md only while it is still following that process. A
+// goal cannot carry the binding: omp's `goal` tool is active only in goal mode,
+// which the user enters, so the coordinator cannot open one.
 //
 // Two events carry a compaction. `session_compact` fires after every committed
 // one — auto, /compact, remote, snapcompact, handoff, soft — once the summary
@@ -130,10 +134,13 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import sddReminder from "./compaction-reminder.md" with { type: "text" };
 import subagentReminder from "./compaction-reminder-subagent.md" with { type: "text" };
+import sddCommand from "../../plugins/sjawhar/commands/sdd.md" with { type: "text" };
 
 const SDD_REMINDER = sddReminder.trim();
 const SUBAGENT_REMINDER = subagentReminder.trim();
-const SDD_PREFIX = "[sdd]";
+/** The first line of sdd.md's body: how an expanded /sdd invocation starts on the branch. */
+const SDD_HEAD = sddCommand.replace(/^---\n[\s\S]*?\n---\n/, "").trim().split("\n")[0];
+if (!SDD_HEAD) throw new Error("compaction-reminder: sdd.md has no body line to recognise /sdd by");
 /** The fork's `prompts/steering/parent-irc.md` wrapper, stripped from a steer when present. */
 const PARENT_STEER_PREFIX = "[Wait interrupted by message]\n";
 const PARENT_STEER_BODY = /^<irc from="parent" agent="[^"]*">\n([\s\S]*)\n<\/irc>$/;
@@ -141,11 +148,6 @@ const PARENT_STEER_BODY = /^<irc from="parent" agent="[^"]*">\n([\s\S]*)\n<\/irc
 const BUDGET_NOTICE_PREFIX = "[budget notice] ";
 
 type BranchEntry = { type: string };
-type ModeChangeEntry = {
-	type: "mode_change";
-	mode: string;
-	data?: { goal?: { objective?: string; status?: string } };
-};
 type InitEntry = { type: "session_init"; task: string };
 type BranchMessage = {
 	role: string;
@@ -163,18 +165,13 @@ type CompactCtx = {
 	getContextUsage: () => { tokens: number } | undefined;
 };
 
-/** True while the branch's latest mode change is an active goal whose objective starts `[sdd]`. */
-function sddGoalActive(ctx: CompactCtx): boolean {
-	const branch = ctx.sessionManager.getBranch();
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (entry.type !== "mode_change") continue;
-		const mode = entry as ModeChangeEntry;
-		if (mode.mode !== "goal") return false;
-		const goal = mode.data?.goal;
-		return goal?.status === "active" && (goal.objective ?? "").trimStart().startsWith(SDD_PREFIX);
-	}
-	return false;
+/** True when the branch holds a user-typed message that is the expanded /sdd template. */
+function sddInvoked(ctx: CompactCtx): boolean {
+	return ctx.sessionManager.getBranch().some(entry => {
+		if (entry.type !== "message") return false;
+		const { message } = entry as MessageEntry;
+		return message.role === "user" && !message.synthetic && messageText(message).trimStart().startsWith(SDD_HEAD);
+	});
 }
 
 /** Text parts of a message, joined. */
@@ -238,7 +235,7 @@ export default function (pi: ExtensionAPI) {
 		);
 	const remind = (ctx: CompactCtx) => {
 		if (ctx.agent.kind === "main") {
-			if (sddGoalActive(ctx)) deliver("post-compaction-reminder", SDD_REMINDER, ctx);
+			if (sddInvoked(ctx)) deliver("post-compaction-reminder", SDD_REMINDER, ctx);
 			return;
 		}
 		if (subagentReminded) return;
