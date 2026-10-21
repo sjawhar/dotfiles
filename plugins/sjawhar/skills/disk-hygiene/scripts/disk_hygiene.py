@@ -1465,10 +1465,18 @@ def cmd_containers(_args: argparse.Namespace) -> None:
 
 # ---------------------------------------------------------------- images
 
+def _utc_ts(stamp: str) -> float:
+    """Seconds since the epoch of a docker UTC time ("2026-09-10 21:28:03 +0000 UTC", or LastTagTime's
+    "2026-10-21T16:59:00Z" form); docker's zero time is 0."""
+    if stamp.startswith("0001-01-01"):
+        return 0.0
+    return time.mktime(time.strptime(stamp[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")) - time.timezone
+
+
 def cmd_images(args: argparse.Namespace) -> None:
     """Tagged images no container references, neither built nor pulled in the last N hours. Cheap: no
     `docker system df`. An image's CreatedAt is its build time, so an old image a session pulled an hour ago
-    counts from that pull (the daemon's image pull events)."""
+    counts from that pull: its Metadata.LastTagTime, which a pull or a tag sets."""
     rc, cids = run(["timeout", "120", "docker", "ps", "-aq", "--no-trunc"])
     used: set[str] = set()
     if cids.strip():
@@ -1477,26 +1485,17 @@ def cmd_images(args: argparse.Namespace) -> None:
     rc, out = run(["timeout", "120", "docker", "images", "--no-trunc", "--format", "{{.ID}}\t{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}\t{{.Size}}"])
     if rc != 0:
         sys.exit(out)
-    now = time.time()
-    cutoff = now - args.older_than_hours * 3600
-    rc, ev = run(["timeout", "120", "docker", "events", "--since", str(int(cutoff)), "--until", str(int(now)),
-                  "--filter", "type=image", "--filter", "event=pull", "--format", "{{.Time}}\t{{.Actor.ID}}"])
-    if rc != 0:
-        sys.exit(ev)
-    pulled: dict[str, float] = {}
-    for line in ev.splitlines():
-        t, ref = line.split("\t", 1)
-        pulled[ref] = max(pulled.get(ref, 0.0), float(t))
-    rows: list[str] = []
-    for line in out.splitlines():
-        iid, ref, created, size = line.split("\t")
-        if iid in used or ref.startswith("<none>"):
-            continue
-        # CreatedAt looks like "2026-09-10 21:28:03 +0000 UTC"
-        ts = time.mktime(time.strptime(created[:19], "%Y-%m-%d %H:%M:%S")) - time.timezone
-        if max(ts, pulled.get(ref, 0.0)) > cutoff:
-            continue
-        rows.append(f"{size:>8}  {created[:16]}  {ref}")
+    cutoff = time.time() - args.older_than_hours * 3600
+    old = [line.split("\t") for line in out.splitlines()]
+    old = [r for r in old if r[0] not in used and not r[1].startswith("<none>") and _utc_ts(r[2]) <= cutoff]
+    tagged: dict[str, float] = {}
+    if old:
+        rc, ins = run(["timeout", "120", "docker", "image", "inspect", "--format", "{{.Id}}\t{{.Metadata.LastTagTime}}",
+                       *sorted({r[0] for r in old})])
+        if rc != 0:
+            sys.exit(ins)
+        tagged = {iid: _utc_ts(t) for iid, t in (line.split("\t", 1) for line in ins.splitlines())}
+    rows = [f"{size:>8}  {created[:16]}  {ref}" for iid, ref, created, size in old if tagged[iid] <= cutoff]
     print("\n".join(sorted(rows)))
     print(f"\n{len(rows)} unused tagged images neither built nor pulled in the last {args.older_than_hours}h; remove with plain `docker rmi <ref>` (a refusal means a container uses it)", file=sys.stderr)
 

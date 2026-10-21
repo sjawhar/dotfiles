@@ -1079,26 +1079,27 @@ class ImageCensusTest(unittest.TestCase):
     """cmd_images through the CLI, against a stub `docker` on PATH: an image's CreatedAt is its build time, so an
     old image a session pulled an hour ago must not be listed for removal."""
 
-    def run_images(self, pulls: str) -> subprocess.CompletedProcess[str]:
+    def run_images(self, harness_last_tag: float) -> subprocess.CompletedProcess[str]:
         d = Path(tempfile.mkdtemp(prefix="dh-images-"))
         self.addCleanup(shutil.rmtree, d)
-        week_ago = time.strftime("%Y-%m-%d %H:%M:%S +0000 UTC", time.gmtime(time.time() - 7 * 86400))
+        stamp = lambda t: time.strftime("%Y-%m-%d %H:%M:%S +0000 UTC", time.gmtime(t))  # noqa: E731
+        week_ago = stamp(time.time() - 7 * 86400)
         (d / "images.txt").write_text(
             f"sha256:aaa\treg/harness:v6\t{week_ago}\t9GB\nsha256:bbb\treg/old:v1\t{week_ago}\t1GB\n")
-        (d / "events.txt").write_text(pulls)
+        (d / "inspect.txt").write_text(f"sha256:aaa\t{stamp(harness_last_tag)}\nsha256:bbb\t0001-01-01 00:00:00 +0000 UTC\n")
         stub = d / "docker"
         stub.write_text('#!/bin/sh\ncase "$1" in\n  ps) ;;\n  images) cat "$(dirname "$0")/images.txt" ;;\n'
-                        '  events) cat "$(dirname "$0")/events.txt" ;;\n  *) exit 3 ;;\nesac\n')
+                        '  image) cat "$(dirname "$0")/inspect.txt" ;;\n  *) exit 3 ;;\nesac\n')
         stub.chmod(0o755)
         return script("images", "--older-than-hours", "48", env={**os.environ, "PATH": f"{d}:{os.environ['PATH']}"})
 
     def test_old_image_pulled_an_hour_ago_is_kept(self) -> None:
-        r = self.run_images(f"{int(time.time() - 3600)}\treg/harness:v6\n")
+        r = self.run_images(time.time() - 3600)
         self.assertNotIn("reg/harness:v6", r.stdout)
         self.assertIn("reg/old:v1", r.stdout)
 
-    def test_old_image_without_a_recent_pull_is_listed(self) -> None:
-        r = self.run_images("")
+    def test_old_image_last_pulled_long_ago_is_listed(self) -> None:
+        r = self.run_images(time.time() - 5 * 86400)
         self.assertIn("reg/harness:v6", r.stdout)
         self.assertIn("reg/old:v1", r.stdout)
 
