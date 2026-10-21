@@ -2,8 +2,8 @@
 Description=SSH tunnel carrying forward's channels to the %i devbox
 # One per pair whose laptop daemon listens on loopback; installers/forward.sh
 # enables it beside forward-daemon@%i. The forwards live in Host %i-tunnel
-# (~/.ssh/config.local); the login key is the 1Password agent's (Host *), so a
-# reconnect waits for 1Password to be unlocked. It stops and starts with the
+# (~/.ssh/config.local), which signs in with its own key (~/.ssh/forward-tunnel)
+# so a reconnect never waits on 1Password. It stops and starts with the
 # graphical session, as forward-daemon@.service does.
 After=graphical-session.target
 PartOf=graphical-session.target
@@ -14,7 +14,10 @@ PartOf=graphical-session.target
 # (ServerAlive), and systemd reconnects. Without ConnectTimeout, an sshd that
 # accepts TCP but never sends its greeting holds ssh with no time limit, so the
 # tunnel never reconnects. A reconnect after a dead link fails until the devbox's
-# sshd reaps the old session's ports, then succeeds.
+# sshd reaps the old session's ports, then succeeds. That needs the devbox's
+# OpenSSH (ClientAlive): Host %i-tunnel names port 443, because on port 22 the
+# tailnet answers with Tailscale's own ssh server, which kept a dead session's
+# ports for over an hour on 2026-10-21 (dispatch://INFRA-103).
 ExecStart=/usr/bin/ssh -o ConnectTimeout=30 -N %i-tunnel
 Restart=always
 RestartSec=10

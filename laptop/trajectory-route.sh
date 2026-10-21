@@ -15,6 +15,7 @@ dpkg -s sshuttle &>/dev/null || sudo apt-get install -y -qq sshuttle >/dev/null
 # once its public half is in ubuntu's authorized_keys there.
 KEY="${HOME}/.ssh/trajectory-route"
 if [ ! -f "$KEY" ]; then
+    mkdir -p -m 700 "${HOME}/.ssh"
     ssh-keygen -q -t ed25519 -N '' -C "trajectory-route@$(hostname -s)" -f "$KEY"
     echo "Created ${KEY}; add ${KEY}.pub to ubuntu's ~/.ssh/authorized_keys on sami-agents."
 fi
