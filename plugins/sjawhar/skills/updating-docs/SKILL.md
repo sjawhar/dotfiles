@@ -1,71 +1,72 @@
 ---
 name: updating-docs
-description: "Use when creating or updating documentation, READMEs, AGENTS.md files, skills, runbooks, or any prose that describes how a system works. Trigger whenever a change touches documented behavior, even if the user only asked for the code change."
+description: "Use when creating or updating documentation, READMEs, AGENTS.md files, skills, runbooks, code comments, or any prose that describes how a system works. Also use whenever a change touches documented behavior, even if the user asked only for the code change."
 ---
 
 # Updating Docs
 
-## Evergreen, not archaeological
+## Write what is true now
 
-Write what is true now. Remove on sight:
+- Describe current behavior, in code comments too. Git log is the changelog.
+- Delete on sight: PR or issue breadcrumbs ("as of #1234"), migration trails ("previously X, now Y"), "NEW:" or "UPDATED:" markers, dated notes.
+- When the old way is gone, delete warnings against it and describe the correct way.
 
-- PR/issue-number breadcrumbs ("as of #1234...")
-- Migration trails ("previously we did X, now we do Y")
-- Deprecation lists ("don't use the old JSON format") once the old way is gone — describe the correct way instead
-- "NEW:" / "UPDATED:" markers and dated notes
+## Write a rule
 
-If a reader needs to know the old way existed, that's what `git log` is for.
+- State the rule and its boundary: what it requires and what it does not cover.
+- Provenance (who, when, the incident) goes in the commit message or PR body. The rule text gets at most a one-line citation (a link, a `file:line`), never a dated story, a tally or a justifying quote.
+- Delete a committed policy (a gating file, a threshold, a process doc) that has no source. Its source is what Sami said, and when, recorded in the commit message or PR body.
+- Write "always" or "never" only for a rule with no exception. State the exception where one exists.
+- Before you add a sentence, find the existing sentence that is wrong, incomplete or ambiguous and correct it. If a sentence caused the failure, usually delete or narrow it. Don't append a correction beside it.
 
-## Writing a rule
+## Correct an overturned belief
 
-A rule states the rule and its boundary — what it requires, and what it doesn't cover.
+- Correct every copy in place: headings, titles, flags, acceptance rows, downstream steps. A correction under a heading that still asserts the old model has not landed.
+- Find every copy with the steps in "Sweep the whole owning tree" below. Grep can't find a copy that shares no words with the claim, so also list what depended on the old state and check each item.
+- Re-apply the rule to the case that prompted it, not only restate it.
+- Record what changed in the commit message, never in a note beside the corrected text.
+- Label what you infer apart from what you observed. A correction's overreach spreads faster than the original error.
+- Land a ruling about what code may accept as a refusal in the code, in the same change. A spec or comment alone is not enough.
 
-- **Provenance stays out of the rule.** Who decided it, when, and the incident that prompted it belong in the commit message or PR body, with at most a one-line citation in the rule text (a link, a `file:line`) — never a dated story, a lane count, or a quote used to justify the rule. A reader needs the rule, not the trial that produced it.
-- **No always/never unless the rule truly has none.** Absolute phrasing invites an agent to apply it past its real edge; state the exception where one exists rather than writing an exceptionless rule and hoping nobody hits the edge.
-- **Tighten before you add.** Before writing a new paragraph, find the existing sentence that's wrong, incomplete or ambiguous and fix that one. If a sentence caused the failure, the fix is usually to delete or narrow it, not to append a correction beside it.
-- **When a ruling overturns a belief, find and correct every copy** — not just the sentence that stated it, but headings, flags, acceptance rows and downstream steps that assumed it, even where they share no words with the original claim (see the sweep rules below).
+## Sweep the whole owning tree on a cutover
 
-## A cutover sweeps the whole owning tree
+- List files with a tree walk (`git ls-files <dir>`, `rg --files <dir>`), never a hand-written glob, which misses nested paths. Check every file type: scripts and configs in a skill tree are the record of what runs.
+- Before you sweep a surface, write down each question it must answer (stale claim? resolved?).
+- When the claim matters, have a second agent (`task` with `scout`) sweep from the claim itself, not from your search terms. Merge the hits.
 
-Enumerate the owning tree by a tree walk (`git ls-files <dir>`, `rg --files <dir>`), never a hand-written glob — a glob misses nested paths a tree walk doesn't, and what it misses keeps teaching the old behavior. Cover every file type: scripts and configs in a skill tree are the doc of record for what actually runs, not just the `.md`.
+## Read the whole artifact back
 
-- **One searcher's grep false-negatives in its own way** (a remembered phrase instead of the claim, an alternation that misses a spelling, a truncated listing). When the claim matters, have a second agent sweep independently from the claim itself, not from your fragment, and merge the hits.
-- **A copy that shares no words with the retracted claim is invisible to any grep.** Enumerate what DEPENDED on the overturned state instead — a heading, a flag, a downstream step, an acceptance row — and check each one directly. Re-apply a stated rule to the case that prompted it, not just restate it; before characterizing a format, print one instance of it verbatim rather than deriving it from an aggregate.
-- **A surface list fixes WHERE to look but silently also fixes WHAT you're checking.** A surface can carry more than one question (does it hold a stale claim? is it resolved?) — write down each surface's question before sweeping it.
-- **A ruling about what code may accept lands as a refusal in the code, in the same change** — not only in a spec or comment. Otherwise later work re-derives the old answer from what the code still accepts.
+- After an edit, read the whole document, not a grep for what you added. Check that the neighbors your edit never touched survived.
+- Before you trust a read-back, make it find a string you know is there.
+- Check each part of a multi-part edit for presence and position.
+- A change to a string invalidates offsets computed on it. Apply `(start, end, text)` edits back to front, or replace the region in one slice. Assert on the result.
+- Chain a publish command to its guard with `&&`, not on the next line, or start the script with `set -euo pipefail`.
 
-## Read the whole artifact back after you edit it
+## Claims in prose
 
-Not a grep for what you added — that finds only what you already suspect. Read the document through once and confirm the neighbours survived: the clauses a reader needs that your edit never mentions.
+- Scope "A and B: X" to the member you measured. Say what you didn't check.
+- Paraphrase a result from the run's own summary line, with every category. A claim about one test needs its own record.
+- Before you describe a format, print one instance verbatim.
+- Prose owns only what its own diff makes true. When another PR, branch or system it describes changes, correct the text in place.
+- Sweep test and witness docstrings too. Each states only what its assertion checks.
 
-- A read-back only counts if its reader can distinguish present from absent; before trusting one, make it find a string you know is there.
-- A multi-paragraph edit (replace plus insert) can land its insert against the wrong anchor; verify both presence and position, not just presence.
-- An index or offset computed on a string is invalidated by any mutation of that string. Apply edits as `(start, end, text)` triples back-to-front, or replace the whole region once in a single slice — then assert on the result, not on the inputs.
-- Chain the command that publishes a guarded step's output to the guard itself (`&&`), not on the next line — a newline is not a guard; `set -euo pipefail` at the top of a script guards without needing the chain.
-- A conjunctive claim ("A and B: X") inherits its evidence only from whichever member you actually measured; scope the claim to that member and say outright what you didn't check.
-- Paraphrase a result from the run's own summary line, not from your conclusion — a paraphrase that drops a category is a selection, not a summary. A claim about one specific test needs the per-test record, not the aggregate line.
-- Prose can only own what its own diff makes true. A claim about another PR, branch or system expires at that thing's next change; correct it in place when it moves, with what changed in the commit message, never in the corrected text.
-- Sweep test and witness docstrings too — a docstring on a passing assertion inherits that assertion's authority without anything having checked the docstring itself. State in it only what the assertion checks.
-- A correction that leaves the heading or title asserting the old model has not landed — the heading is what a skim reads. Correct it in place; say what changed in the commit message, never append a note below an uncorrected heading.
-- When correcting an overturned claim, write what you observed and label separately what you infer — a correction inherits the authority of the thing it corrects, so its overreach spreads faster than the original error did.
+## A rule agents know but keep forgetting
 
-## A rule broken by people who can quote it wants a mechanism
-
-When agents who know a standing instruction keep violating it, and the honest answer to "why" is "they forgot," stop rewording it: build a refusal or an automatic step at the point of action instead, and measure who it reaches — a mechanism only binds the population that actually goes through it (a cached binary, an unmigrated caller).
+- Stop rewording it. Build a refusal or an automatic step at the point of action.
+- A mechanism binds only callers that go through it. Measure who it reaches: a cached binary or an unmigrated caller escapes it.
 
 ## Integrate, don't accrete
 
-Before adding a section, check whether an existing section already covers the topic. If it mostly does, rewrite that section — don't append a near-duplicate beside it. Symptoms you're accreting instead of integrating:
+- Before you add a section, look for one on the topic. If it mostly covers it, rewrite it. Rewrite sections rather than patch sentences in.
+- Signs of accretion:
+  - The doc grows on every edit, even edits that simplified.
+  - Two sections disagree.
+  - Per-case sections (per provider, per version) repeat each other. Merge them into one and call out the differences.
+- A consolidation leaves the doc shorter.
+- One doc per audience or purpose. Consolidate files rather than proliferate them. A new file needs a reason an existing one can't serve.
+- Match the tone and format of the doc you edit.
 
-- The doc gets longer every edit, even when the change simplified things
-- Two sections disagree slightly about the same behavior
-- Per-case sections (per-provider, per-version) that share most of their content — merge into one section with the differences called out
+## Markdown tables
 
-Same test as code: an update whose purpose is consolidation should leave the doc shorter.
-
-## Structure
-
-- One doc per audience/purpose; consolidate rather than proliferate files. A new file needs a reason an existing one can't serve.
-- Match the tone and formatting of the doc you're editing.
-- Prefer rewriting a section over patching sentences into it — patched-in sentences are how docs drift into incoherence.
-- A pipe inside a table cell needs escaping even inside backticks (`` head \| tr \| wc ``) — GitHub's table extension splits a row on every unescaped `|` before inline parsing, so a code span doesn't protect it, and a doc change must be reviewed as rendered, not only as source. Check with `sed 's/\\|//g' FILE | awk -F'|' '{print NR": "NF}'` against the header count.
+- Escape every `|` in a table cell, even inside backticks (`` head \| wc ``). GitHub splits the row before it parses code spans.
+- Review a doc change as rendered. Compare each row's field count to the header's: `sed 's/\\|//g' FILE | awk -F'|' '{print NR": "NF}'`.
