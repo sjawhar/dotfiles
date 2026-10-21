@@ -1,229 +1,88 @@
 ---
 name: paper-podcast
-description: Use when the user wants to turn research papers into a podcast episode (or "make a podcast" / "paper podcast" / "audio digest" / "research digest"). Works for any field. Takes a user-supplied paper source (arXiv query, arXiv IDs, or a PDF list), confirms the lineup with the user, extracts a faithful ground-truth JSON, grounds each paper against related work, writes a long-form two-host script, and renders an MP3 with Gemini 3.1 Flash TTS.
+description: Use when the user wants to turn research papers into a podcast episode. Also use when asked to "make a podcast", a "paper podcast", an "audio digest" or a "research digest". Applies to any field and to an arXiv query, arXiv IDs or a PDF list.
 ---
 
 # Paper Podcast
 
-Turn a configurable set of papers into a faithful, critical, long-form two-host
-audio episode. The skill is topic-agnostic — the user supplies the subject and
-the paper source; this skill never assumes a field.
+Turn papers into a faithful, critical, long-form two-host MP3. Never assume a field. The user gives the topic and the source.
 
-**Key principle:** *You* (the agent) do the thinking — read the papers, ground
-them against related work, extract the ground truth, write the script. The
-bundled scripts do the mechanical work — fetch PDFs, search arXiv, synthesize
-audio. Never outsource the extraction or script to a helper script, and never let
-the audio contain claims that aren't in the ground-truth JSON.
+- You read, ground, extract and write. Scripts only fetch, search and render. Never give extraction or script writing to a script.
+- `ground-truth.json` is the real product. The user also quizzes themselves from it with a voice AI, so keep it accurate, structured and complete. The audio states no claim that is not in it.
+- Never write to the user's Google Drive or any cloud account. Deliver locally. Upload only when the user asks, and ask where first.
 
-**The ground-truth JSON is the real product.** The MP3 is one rendering of it.
-The same JSON is what the user feeds to any voice-enabled AI to self-quiz on the
-papers — so it must be accurate, structured, and complete.
+Set `SKILL` to the absolute path of this skill's directory, given when the skill loaded. Never hardcode a relative path or `.claude/...`. Output goes to `./out` by default. Each script in `$SKILL/scripts/` takes `--help`.
 
-**Three hard rules:**
-- **Confirm the paper lineup with the user before extracting** (Phase 2). Never
-  silently decide which papers make the episode.
-- **Ground claims, don't parrot them** (Phase 4). A paper that claims it beats a
-  baseline must be checked against what that baseline actually reports and against
-  competing/prior/follow-up work.
-- **Never write to the user's Google Drive or any external/cloud account.**
-  Deliver locally. Upload only if the user explicitly asks, and confirm the
-  destination first.
+## Phase 0 — Resolve the source
 
-## Artifacts (all written under the output dir, default `./out`)
+- The user's inline query, IDs, PDFs, instructions and voices override the config.
+- Config: `$PAPER_PODCAST_CONFIG` or `~/.config/paper-podcast/config.md`. Use the named `## Feed: NAME`, else the **Default feed**. Take its verbatim **Query** (or **IDs**/**PDFs**), **Since**, **Max**, **Voices** and **Instructions**. Apply instructions in Phases 3 and 5, voices in Phase 6.
+- No source from either? Ask. Never invent a topic.
 
-| File | Produced by | Purpose |
-|------|-------------|---------|
-| `manifest.json`, `text/<id>.txt`, `pdfs/<id>.pdf` | `fetch_papers.py` | downloaded candidates + full text |
-| `ground-truth.json` | **you** | faithful structured extraction + grounding (also the quiz source) |
-| `script.txt` | **you** | long-form two-host dialogue, speaker-labelled |
-| `episode.mp3` | `tts.py` | the audio episode |
-
-Helpers: `fetch_papers.py` (fetch + extract text), `alphaxiv.py` (alphaXiv:
-similar-papers, comments, AI overview), `litground.py` (citation-graph grounding
-via Semantic Scholar + OpenAlex: citation counts, influential citations, TLDRs,
-reception), `arxiv_search.py` (arXiv metadata + abstracts), `tts.py` (render).
-
-## Phase 0 — Resolve the source and optional feed config
-
-Inline user-supplied query, IDs, PDFs, instructions, and voices are the default.
-If `$PAPER_PODCAST_CONFIG` or `~/.config/paper-podcast/config.md` exists, use the
-named `## Feed: NAME` or its **Default feed**. Take its verbatim **Query** (or
-**IDs**/**PDFs**), **Since**, **Max**, **Voices**, and **Instructions**; carry
-instructions into Phases 3 and 5 and voices into Phase 6. Inline inputs override
-the config. If neither supplies a source, ask; never invent a topic.
-
-## Phase 1 — Resolve the source into candidate papers
-
-Use the source from the resolved feed (Phase 0). Set `SKILL` to the **absolute
-path of this skill's directory** — you were given it when this skill loaded (the
-folder containing this `SKILL.md` and its `scripts/`); never hardcode a relative
-path or `.claude/...`, since the skill can be installed anywhere. Then run the
-matching source mode:
+## Phase 1 — Fetch candidates
 
 ```bash
-# arXiv query (use the feed's query / since_days / max from the config)
-uv run "$SKILL/scripts/fetch_papers.py" --out ./out --since 7 --max 40 \
-  --query '<feed query from config>'
-
-# specific papers / arbitrary PDFs
-uv run $SKILL/scripts/fetch_papers.py --out ./out --ids 2501.00001,2501.00002
-uv run $SKILL/scripts/fetch_papers.py --out ./out --pdf-list papers.txt
+uv run "$SKILL/scripts/fetch_papers.py" --out ./out --since 7 --max 40 --query '<feed query>'
+# or --ids 2501.00001,2501.00002, or --pdf-list papers.txt
 ```
 
-Query hygiene (applies to any field):
-- **Match abstracts, not just titles.** A `ti:`-only query silently misses papers
-  whose relevance is in the abstract. If the user hands you a title-only query,
-  widen each term to also match `abs:`. Gate broad or ambiguous terms with a
-  field anchor to cut noise — e.g. `(ti:TERM OR abs:TERM) AND (abs:ANCHOR ...)`
-  where ANCHOR names the field (so a generic word doesn't pull in other domains).
-- **Fetch wide, then curate.** Pull ~40 and narrow to the final lineup in Phase 2,
-  rather than capping low and missing strong papers.
+- It writes `out/manifest.json`, `out/pdfs/<id>.pdf` and full text in `out/text/<id>.txt`.
+- Take `--since` and `--max` from the feed.
+- Match abstracts, not only titles. Widen every `ti:` term to `(ti:TERM OR abs:TERM)`, also in a user's query. Gate broad or ambiguous terms with a field anchor: `... AND (abs:ANCHOR ...)`.
+- Fetch wide (about 40), then curate in Phase 2.
 
-Downloads PDFs, extracts full text, writes `out/manifest.json`.
+## Phase 2 — The user picks the lineup (mandatory)
 
-## Phase 2 — Confirm the lineup with the user (MANDATORY)
+- List every candidate in `out/manifest.json`, numbered: title, arXiv ID, primary category, one-line relevance note. Flag tangential ones. Show your reasoning. Do not pre-filter.
+- Ask which papers to keep or drop, and wait. Extract and write nothing until the user answers. Keep only the papers they choose.
 
-Read `manifest.json` and present **every** candidate as a compact, numbered list:
-title, arXiv id, primary category, one-line relevance note (flag tangential
-ones). Show the full fetched set and your reasoning — do not silently pre-filter.
-**Ask which papers to include or drop, and wait.** Do not extract or generate
-anything until the user confirms. Keep only the confirmed papers.
+## Phase 3 — Extract the ground truth
 
-## Phase 3 — Extract the ground truth (you do this)
+Read each paper's full `out/text/<id>.txt`, not the abstract. Capture enough for about 8-12 minutes of dialogue per paper. Write `out/ground-truth.json` in the [schema](references/ground-truth-schema.md).
 
-Read each confirmed paper's `out/text/<id>.txt` (**full paper**, not the
-abstract). Extract deeply — enough material to support ~8-12 minutes of dialogue
-per paper, so capture MULTIPLE claims, the full mechanism, the experimental
-setup, every headline number, and the authors' own limitations and open
-questions. Anti-dilution rules:
+- Record several claims, the full mechanism, the setup, and every exact number, method name and benchmark name. Never invent one. Omit what the paper lacks.
+- Keep the authors' hedging.
+- Limitations and open questions are first-class, one set per paper.
+- `evidence` explains how it works, not vibes.
 
-- **Exact numbers, method names, benchmark names.** Capture them all here — the JSON is the complete quiz source, so it should be exhaustive. (Phase 5 decides which few are actually spoken aloud; the script never recites them all.) Never invent; omit if absent.
-- **Preserve the authors' hedging.** Qualified claims stay qualified.
-- **Limitations and open questions are first-class**, one set per paper.
-- **Mechanism over vibes** — `evidence` explains *how* it works.
+## Phase 4 — Ground each paper (required)
 
-## Phase 4 — Ground each paper against related work (you do this)
+1. `uv run "$SKILL/scripts/alphaxiv.py" --ids <ids> --similar 6`. Similar papers show baselines and competing work. Comments hold replications and critiques. For papers only days old, comments are usually empty and the AI overview can 404: rely on similar papers.
+2. For each baseline the paper claims to beat, and key prior, competing or follow-up work it cites, fetch its reception and its own numbers:
+   ```bash
+   uv run "$SKILL/scripts/litground.py" --ids <baseline ids>       # citations, influential citations, TLDRs
+   uv run "$SKILL/scripts/litground.py" --reception <baseline id>  # when useful: how the field cites it
+   uv run "$SKILL/scripts/arxiv_search.py" --ids <baseline ids>    # abstracts, exact numbers
+   ```
+   New papers lag indexing, so ground them through the older works they cite. Set `SEMANTIC_SCHOLAR_API_KEY` for reliable rate limits. OpenAlex is the automatic fallback.
+3. Dispatch `scout` subagents with the `task` tool in parallel, one per paper or theme, for deeper search and synthesis.
+4. Record in `grounding` whether each related work corroborates, contests or contextualizes the framing. Look for a weakened or compute-capped baseline, a favorable metric, or a competitor with similar results.
 
-Start with alphaXiv to discover related work automatically — its `similar-papers`
-surfaces the relevant baselines/competing work, and (when present) community
-`comments` are replication results and critiques straight from other researchers:
+- Frame a gap as a limitation that calibrates the real delta, not an indictment. Weak baselines are near-universal. State the gap plainly and assume good faith.
+- Recency is not a red flag, here or in the script. New releases have thin corroboration. Do not manufacture doubt that one is real or present "it is new" as a finding. Check what you can, note real uncertainty in one line, move on.
+
+## Phase 5 — Write the script (long-form)
+
+Write `out/script.txt`: one `Speaker: text` turn per line, exactly two labels matching `--voices` (default `Alex`, `Jordan`).
+
+- Length: roughly 1,200-1,800 spoken words (8-12 minutes) per paper, about 7,000-9,000 for five papers. TTS speaks about 150 words a minute. Never compress to save effort. A thin script is this skill's top failure.
+- Alex is a calm, precise skeptic. Alex tests claims against `grounding` and asks for the real delta ("Y's own paper reports Z under setting W, so the gap is narrower"). Calibrate, never prosecute.
+- Jordan explains each mechanism and setup, and gives results mostly in qualitative terms. Jordan uses a number when the magnitude is the point.
+- Never two co-equal experts.
+- Per paper, give real time to claim → mechanism → significance → grounding → limitations → open questions. Lead with what happened and why it matters.
+- Speak only numbers whose magnitude changes the takeaway. Summarize the rest.
+- Measured, specific language. No superlatives or hype. State limitations plainly, assume good faith, and never allege misconduct.
+- Open with a concrete hook. Attribute to the authors in third person. No filler affirmations, no Q&A rhythm.
+
+## Phase 6 — Render
 
 ```bash
-uv run $SKILL/scripts/alphaxiv.py --ids <paper arxiv ids> --similar 6
+uv run "$SKILL/scripts/tts.py" --script ./out/script.txt --out ./out/episode.mp3 --voices "Alex=Kore,Jordan=Puck"
 ```
 
-Caveat: for papers only days old, alphaXiv comments are usually empty (cold
-start) and the AI overview may 404 — `similar-papers` is the reliable signal for
-fresh papers; comments become valuable on older / high-traction papers.
+Auth: Vertex AI through `gcloud auth print-access-token`, no API key. A long episode takes several minutes. Run it in the background and check its progress. Do not block on it.
 
-Then ground the claims in the literature with the citation graph. For each
-baseline the paper claims to beat (and key prior/competing work it cites), look
-up how the field actually received it — citation count, influential-citation
-count, TLDR — and, when useful, how it is cited:
+## Phase 7 — Deliver locally
 
-```bash
-uv run $SKILL/scripts/litground.py --ids <baseline arxiv ids the paper cites>
-uv run $SKILL/scripts/litground.py --reception <a baseline arxiv id>   # how the field cites it
-uv run $SKILL/scripts/arxiv_search.py --ids <baseline arxiv ids>       # abstracts + exact numbers
-```
-
-Brand-new papers lag indexing, so ground them via the OLDER works they cite
-(those are indexed). Set SEMANTIC_SCHOLAR_API_KEY for reliable limits; OpenAlex is
-the automatic fallback.
-
-**Recency is not a red flag.** A new model, dataset, or paper is *by definition* under-represented in search and citation indexes simply because it is new — thin corroboration for a recent release is expected, not suspicious. Don't manufacture doubt about whether a recently-released thing is real, and don't treat "this is new" as if it were a finding. New releases are new; that is what makes them new. Verify what you reasonably can, note any genuine uncertainty in a single line, and move on.
-
-This literature research IS part of the job, not optional. Dispatch `librarian`
-sub-agents (in parallel, one per paper or theme) for the deeper search and synthesis.
-Then, for each related work, decide whether it **corroborates** or
-**contests/contextualizes** the paper's framing — e.g. is a baseline run in a
-weakened or compute-capped setting, is the comparison metric a favorable one, has
-a competing method already shown similar results? Record this in
-`ground-truth.json`. Frame these as limitations that calibrate the real delta, not
-as indictments: weak or unfavorably-configured baselines are near-universal in
-this literature, so note the specific gap plainly and assume the authors acted in
-good faith rather than dwelling on it as a failing.
-
-Full schema, one object per paper (fields are general — adapt wording to the field):
-
-```json
-{
-  "papers": [{
-    "id": "2501.00001",
-    "title": "...",
-    "authors": ["..."],
-    "context": "the problem setting — what the paper addresses and under what assumptions",
-    "claims": [{
-      "claim": "the assertion the paper makes",
-      "evidence": "the experiment / mechanism / reasoning — HOW it works",
-      "conclusion": "what it implies for the field",
-      "numbers": [{"metric": "<metric>", "value": "X", "baseline": "<prior method> Y"}],
-      "source": "§4.2"
-    }],
-    "limitations": ["what the authors admit doesn't work / where it breaks"],
-    "open_questions": ["what the paper raises but does not answer"],
-    "grounding": [{
-      "related_id": "<arxiv id>",
-      "related_title": "...",
-      "relevance": "baseline | prior | competing | follow-up",
-      "what_it_shows": "the specific claim/number from THAT work",
-      "verdict": "corroborates | contests | contextualizes",
-      "skeptic_note": "the substantive caveat or check a knowledgeable host would note — calm and specific, framed as a limitation rather than an accusation"
-    }]
-  }]
-}
-```
-
-## Phase 5 — Write the script (you do this) — LONG-FORM
-
-Write `out/script.txt` as a two-host dialogue, one turn per line,
-`Speaker: text`. Exactly two speaker labels matching the `--voices` map (default
-`Alex` and `Jordan`).
-
-**Length: this is a deep dive, not a digest. Target ~8-12 minutes of dialogue
-PER paper — roughly 1,200-1,800 spoken words per paper — so a 5-paper episode is
-~45-60 minutes / ~7,000-9,000 words.** Do NOT compress to save effort; a thin
-script is the #1 failure of this skill. As a rough calibration, the TTS speaks
-~150 words/minute, so word count drives runtime directly.
-
-Host dynamic — asymmetric, never two co-equal experts:
-- **Alex** — a careful skeptic who checks claims against the `grounding` notes and
-  asks what the real delta is ("the authors report X over prior method Y; Y's own
-  paper reports Z under setting W, so the gap is narrower than the headline").
-  Calm and precise, not adversarial — the aim is to calibrate a claim, not to
-  prosecute the authors.
-- **Jordan** — the explainer who walks through each mechanism and setup and
-  conveys results mostly in qualitative terms (what's large, what's marginal, what
-  it means), reaching for a specific number when the magnitude is the actual point.
-
-Per paper, move through **claim → mechanism → significance → grounding/context →
-limitations → open questions**, and spend real time on each. Lead with qualitative
-meaning: the listener wants to understand what happened and why it matters more
-than they want a recital of figures.
-
-Tone constraints:
-- Speak only numbers whose magnitude changes the takeaway; summarize the rest.
-- Use measured, specific language; avoid superlatives and hype.
-- State limitations plainly, assume good faith, and do not allege misconduct.
-- Treat thin evidence for recent work as expected; name genuine uncertainty once and continue.
-
-Conventions: open with a concrete hook; attribute to authors in third person; no
-filler affirmations, no Q&A rhythm.
-
-## Phase 6 — Render audio
-
-```bash
-uv run $SKILL/scripts/tts.py --script ./out/script.txt --out ./out/episode.mp3 \
-  --voices "Alex=Kore,Jordan=Puck"
-```
-
-Vertex AI via `gcloud auth print-access-token` (no API key). A long episode means
-many chunked TTS calls and several minutes — run it in the background and poll,
-don't block on it.
-
-## Phase 7 — Deliver (locally)
-
-- Confirm `episode.mp3` plays and the duration matches the target (script prints it).
-- Report the **local paths** of `episode.mp3` and `ground-truth.json`; remind the
-  user they can paste the JSON into any voice-enabled AI to be quizzed.
-- **No Drive / cloud upload unless the user explicitly asks** (then confirm where).
+- Check that `episode.mp3` plays and that its printed duration matches the target.
+- Report the local paths of `episode.mp3` and `ground-truth.json`. Tell the user they can paste the JSON into any voice AI to be quizzed.
