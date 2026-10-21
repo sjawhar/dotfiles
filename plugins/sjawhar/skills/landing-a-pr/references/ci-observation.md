@@ -1,172 +1,67 @@
 # Observe CI before acting
 
-Read for red checks, missing checks, incomplete API responses or CI reproduction.
-The snapshot is the index; raw job evidence decides what actually ran.
+Read for red, missing or misleading checks, incomplete API responses, or CI reproduction. The snapshot is the index. Raw job evidence decides what ran.
 
-## Establish a complete current-head population
+## A complete current-head population
 
-Name the PR head and the check/run being judged. Read the **latest attempt per
-check name**, not every historical failure. Do not infer success from a filter
-that returns zero while no expected checks exist yet.
+- Name the head and the check under judgment. Read the latest attempt per check name. Zero results before the expected checks exist is not success.
+- Every list has a scope and maybe a cap. Paginate, reconcile with a reported total, and say "unknown" when they differ.
 
-Every list has a scope and possibly a cap. Paginate, reconcile against a separate
-reported total, and state unknown when they differ. Useful endpoint distinctions:
+| Source | Limit |
+|---|---|
+| `gh pr view --json files` | Short for large PRs. Use the paginated PR files endpoint, reconciled with `changed_files`. |
+| compare endpoint | Files capped at 300, even paginated. Never use it for scope proof. |
+| PR files, GraphQL files | 3,000 files. PR commits: 250. At a ceiling, diff locally. |
+| REST lists | Often 30 rows. Reconcile check-runs with `total_count`. |
+| `gh api --paginate --jq` | Runs per page. Use `--slurp` and aggregate once. |
+| `runs/<id>/jobs?filter=all` | Mixes attempts. Use `runs/<id>/attempts/<n>/jobs?per_page=100`, or group by `run_attempt`. Say whether you counted jobs, legs or checks. |
 
-- `gh pr view --json files` is not a complete file-list instrument for large PRs.
-  Use the paginated PR files endpoint and reconcile with `changed_files`.
-- The compare endpoint's file list is capped at 300; pagination does not turn
-  that single object into a complete list. Do not use it for scope proof.
-- PR files and GraphQL files have a 3,000-file ceiling; PR commits have a
-  250-commit ceiling. At/over a ceiling, use an uncapped local revision diff.
-- REST lists commonly default to 30 rows. Reconcile check-runs against
-  `total_count`; a missing check on page one is not absent.
-- `gh api --paginate --jq` applies the query per page. An aggregate can print
-  several plausible numbers. Use `--slurp` and aggregate the pages deliberately;
-  reconcile the result. Multiple verdict lines are not one aggregate verdict.
-- `runs/<id>/jobs?filter=all` mixes attempts. Use
-  `runs/<id>/attempts/<n>/jobs?per_page=100` with pagination, or group by
-  `run_attempt` before counting. State whether you counted jobs, legs or checks.
+- A commit's file list: `jj diff --name-only --from <parent-sha> --to <sha>`. A count shows how many. A set difference shows which.
+- A failed API call can print an error object to stdout. Check the status and content before you count. Keep stderr. Use a known-content control through the same path.
 
-For a commit-bound file list, use concrete endpoints:
-`jj diff --name-only --from <parent-sha> --to <sha>`. Completeness and membership
-are different questions: a count proves how many, a set difference proves which.
+## Read where the outcome lives
 
-Check the command's own status and content before accepting a list. A failed
-API call can put an error object on stdout; counting its lines produces a number
-with no relation to the requested population. Keep stderr. Use a known-content
-control through the same access path, not another count of the same error body.
+1. The job's conclusion and step list first. A setup failure can leave a collector's table green.
+2. For a red job, compare each affected step with the base's run. A known red can hide a new failure.
+3. Under `continue-on-error`, the REST step `conclusion` is post-processed. Read the outcome table and annotations. Skips after a failure are not completed checks.
+4. A workflow that tolerates a nonzero exit by design: read its positive verdict artifact, and the emitter's code when unclear.
+5. Check that the assertion-bearing cells ran. A green excluded lane is no evidence. Zero covered is a failure.
 
-## Read at the level that carries the outcome
+For tooling you own, construct a disputed state and run it, because a green history cannot show how skips and setup failures count. Report judged-good, judged-bad and never-judged apart.
 
-1. Read the job's own conclusion and step list first. A setup failure can leave
-   a later collector's table all green/skipped while the job is rightly red.
-2. For a red job, inspect every affected step against the base's run of that
-   job. A known-red job can hide a new typecheck or test failure underneath it.
-3. Under `continue-on-error`, step `conclusion=success` is post-processed. Read
-   the emitted outcome table and annotations; the REST steps API does not expose
-   the original outcome field. Skips after a failure are not completed checks.
-4. If a workflow tolerates a nonzero exit by design, inspect its positive
-   verdict/status artifact. An error annotation alone may not decide the review,
-   just as a green collector alone may not decide the job. Read the emitter's
-   code when its vocabulary, location or conditions are uncertain.
-5. Confirm the exact assertion-bearing cells executed. A green excluded lane
-   is no evidence; zero scenarios or files covered is not a passing proof.
-
-A sample that cannot distinguish competing interpretations cannot establish the
-rule. For tooling you own, construct the disputed state and run it: all-green
-history alone cannot tell how the collector treats skipped checks or setup
-failure. Report judged-good, judged-bad and never-judged separately.
-
-## Diagnose a failure, then decide whether to retry
-
-Read the failing run's logs, for example:
+## Diagnose, then decide on a retry
 
 ```sh
 gh run view <run-id> -R <owner>/<repo> --log-failed
-```
-
-The run ID comes from the snapshot's failing-check URL. While the run is pending,
-full-run log reads may refuse. Annotations are available immediately, and a
-finished job's own log can be read even while sibling jobs run:
-
-```sh
 gh api repos/<owner>/<repo>/check-runs/<check-id>/annotations
-gh api repos/<owner>/<repo>/actions/jobs/<job-id>/logs \
-  --allow-escape-sequences
-```
-
-Classify by the mechanism, not the step name, error string or chain color. A
-repeated signature need not have the same cause. Before claiming “all failures
-are X”, filter failure/error rows for **not-X**, read every residual, and account
-for all categories in the terminal summary.
-
-Write the predicted failure signature before the next run, including what would
-refute it. Distinguish setup, timeout and actual assertion failures. A crash is
-not a successful negative control. At the second defect of the same origin,
-audit the whole driver and its contracts rather than fixing one more instance.
-
-A suspected regression is reproduced locally and fixed. A diagnosed external,
-pre-diff failure gets one fresh **failed-jobs-only** attempt, and only if the run
-validates the current head:
-
-```sh
+gh api repos/<owner>/<repo>/actions/jobs/<job-id>/logs --allow-escape-sequences
 gh run rerun <run-id> -R <owner>/<repo> --failed
 ```
 
-No bare rerun of the full graph. If the detector reports a recurring failure or
-head churn, name the invariant the next repair will restore or return
-`needs-human`. A green retry does not retroactively prove flakiness.
+- Take the run ID from the snapshot's failing-check URL. While a run is pending, annotations and a finished job's own log are readable.
+- Classify by mechanism, not step name, error string or color. Before "all failures are X", read every not-X row, and account for every category in the terminal summary.
+- Write the predicted failure signature, and what refutes it, before the next run. Keep setup, timeout and assertion failures apart. A crash is not a passing negative control.
+- At the second defect of one origin, audit the whole driver ([proof design](proof-design.md)).
+- Rerun only failed jobs, once, for a diagnosed external failure on a run that tested the current head. A green retry does not prove flakiness.
 
-## Cached merge refs and missing runs
+## Cached merges and missing runs
 
-Checks may execute the event's cached test-merge, not the PR head alone or the
-merge that current main would create. Read the checkout line and test-merge
-parents when a changed shared base, such as a migration, matters. A briefly stale
-test-merge is normal; do not impose a blanket currency block on every PR.
+- Checks can run a cached test-merge. Read the checkout line and test-merge parents when a shared base (such as a migration) matters. A briefly stale test-merge is normal. Put no blanket currency block on every PR.
+- A rerun can replay the cached merge with its old base and workflow. Compare the tested head and base with the intended ones before another retry. An identical failure is a reason to inspect that input, not proof of a stale base or flake. For failures in untouched files, reproduce at the exact head and a pristine base.
+- A conflicted PR can get no `pull_request` run. Read mergeability before you blame webhooks or vanished SHAs. A mergeable head with zero runs: check trigger and path filters and commit-message skip directives. A rerun or close and reopen may not change the cached input. Any fix keeps published ancestry.
+- Count the CI app's suites, not another integration's queued empty suite. Re-snapshot after UNKNOWN mergeability computes. Read the gate's code before you claim how it treats UNKNOWN.
 
-A rerun can replay the same cached merge, including its old base and workflow.
-It does not prove a later base fix was included. Before another retry, compare
-actual tested head/base with the intended ones. An identical failure is a reason
-to inspect that input, not proof by itself of a stale base or external flake.
-Untouched files failing can reflect base drift or an interaction; reproduce at
-the exact head and pristine base before attributing it.
+## Reproduce the workflow literally
 
-A conflicted PR can receive no `pull_request` dispatch. Read its mergeability
-before blaming webhooks or vanished SHAs. A mergeable head with zero runs needs
-its trigger/path filters and commit-message skip directives checked. Re-running
-or closing/reopening does not necessarily change the cached input. Any required
-repair must preserve published ancestry; use the history reference, not a
-published rebase or message amendment.
-
-Count the relevant CI app's suites, not every integration's permanently queued
-empty suite. UNKNOWN mergeability triggers GitHub's computation; re-snapshot
-once it has computed rather than classifying the first UNKNOWN as a conflict.
-Read the gate's implementation before claiming how it handles that state.
-
-## Reproduce the workflow, not a paraphrase
-
-Use the workflow's literal invocation, package cwd, interpreter and arguments.
-The prose command can be stale. Include caller tests and census tests affected
-by additions, deletions, moved modules or shared-factory arguments. Search for a
-sibling entry or the old module name to find tests a diff-only selector misses.
-For moved modules, collect every affected package and run distinct import-boundary
-and import-graph gates by name; similarly named gates are not interchangeable.
-
-When a config key/helper is read by every render or import, run that package's
-whole suite once before pushing. After a required base integration, cover your
-own earlier fixes too. Compare a failing file at head, pristine base and current
-main before regenerating a fixture. Dirty working-copy results are not main.
-
-Typecheck proof includes its summary (`0 errors, 0 warnings`, or equivalent JSON),
-not exit status alone. A threaded worker can crash with no summary. Inspect first
-diagnostics before rerunning an implausibly large count: unresolved imports can
-mean the wrong interpreter; silence at a heap ceiling can mean wrong cwd/config
-and GC thrash. Follow the CI command's heap and environment settings rather than
-inventing a different check, weakening it or treating silence as progress.
-
-Preserve full logs for expensive runs. Use supervised processes in an unchanged
-workspace, not one bounded call. After push, leave the full lanes to CI unless a
-named question needs a local run, such as a merge-with-main interaction. Changed
-end-to-end paths still require step 4's proof at the new head.
+- Use the workflow's own invocation, cwd, interpreter and arguments. Include caller and census tests touched by additions, deletions, moved modules or shared-factory arguments. Search for a sibling entry or the old module name. For moved modules, collect every affected package and run each import-boundary and import-graph gate by name.
+- Compare a failing file at head, pristine base and main before you regenerate a fixture. Dirty working-copy results are not main.
+- Typecheck proof includes its summary (`0 errors, 0 warnings` or the equivalent JSON), not the exit status. Read the first diagnostics before you rerun an implausible count. Unresolved imports can mean the wrong interpreter. Silence at a heap ceiling can mean the wrong cwd or config and GC thrash. Silence is not progress. Use the CI command's heap and environment. Never weaken the check.
+- After the push, run a full local lane only for a named question, such as a merge-with-main interaction.
 
 ## Shell and transport traps
 
-- Never read the producer's exit status through a pager/filter pipeline. With
-  pipefail a closed reader can kill an otherwise useful chain; without it a
-  failed test can inherit the reader's zero status. Run licensing checks bare
-  or preserve their own code, then read the artifact before mutation.
-- Scope shell options to a subshell. Never `export` persistent environment
-  pointers; set them per command. Treat inherited venv/config pointers as
-  untrusted and identify what the run actually loaded.
-- Quote jq/jaq programs with single quotes or read them from a file. Make empty
-  or failed parses loud, and compare expected labels against delivered labels
-  so partial output does not masquerade as complete.
-- Let each `gh` call obtain a fresh routed token; do not capture one in a loop.
-  Under App routing, `gh api user` can return 403 by design. Probe the repository
-  endpoint instead. A write-rate 403 needs its own headers/reset time, not an
-  inference from a full core-rate bucket. Resume at the reset and serialize
-  writes; do not hammer the endpoint.
-- For an upstream token lacking `read:org`, body editing can use
-  `gh api -X PATCH repos/<owner>/<repo>/pulls/<N> -F body=@<file>`.
-  Ownerless GraphQL mutations need command-local `GH_REPO=<owner>/<repo>` so the
-  router selects the intended identity. Confirm every write with a separate GET.
+- Never read a producer's exit status through a pager or filter pipeline. Run licensing checks bare or keep their own exit code, then read the artifact before you mutate.
+- Scope shell options to a subshell. Never `export` environment pointers. Set them per command. Treat inherited venv and config pointers as untrusted, and identify what a run loaded.
+- Single-quote jq programs. Fail loud on an empty parse. Compare expected labels with delivered labels. Call `gh` fresh each time so the token refreshes.
+- Under App routing, `gh api user` can return 403 by design. Probe the repo endpoint. A write-rate 403 has its own reset time. Wait for it and serialize writes.
+- A token without `read:org` can edit a body with `gh api -X PATCH repos/<owner>/<repo>/pulls/<N> -F body=@<file>`. Ownerless GraphQL mutations need command-local `GH_REPO=<owner>/<repo>`. Check every write with a separate GET.
