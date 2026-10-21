@@ -1,35 +1,33 @@
-# Pushing and opening: checks and mechanics
+# Step 11: pushing and opening
 
-Read this from step 11 of `opening-a-pr` before the first push of a PR, before any push after a
-red CI run, and before `gh pr create`. It holds the exact commands behind the step's rules.
+## One line of work, one PR
 
-## Which checks, scoped how
+- Look for this session's PR first: `git branch -vv`, `gh pr view 2>/dev/null`, `gh pr list --author @me`. Fold same-line work in with `git push`, then `gh pr edit`. No sibling one-off PRs.
+- Use `gh-stack` only for dependent work that lands as one reviewed unit. Keep an unmerged base small, merge it fast, and split off what does not need it.
+- Size the PR before review: split where each piece can be verified alone. Ship the pieces in dependency order and rebase the rest onto each merged one. An unused slice can ship dark if production stays unbroken.
+- Fix correctness findings before merge. Push once per review round.
+- With no PR yet:
 
-The set is CI's own lane map for the changed paths: read the workflow that gates those paths and
-run its fast steps (lint, type, package-local unit lanes, and browser/e2e suites when the diff
-touches a frontend), not a subset chosen for speed. A change can pass every unit, type and review
-lane locally and still go red only in the browser lane CI runs for those paths.
+  ```bash
+  git checkout -b <name> && git push -u origin <name>
+  gh pr create --head <name>   # closing keywords for the issues it resolves
+  gh pr list --head <name>     # read the URL here, not from the create output
+  ```
 
-"Scoped to the diff" means the packages the diff changes AND every test file that imports a
-module the diff changed, not the files the diff edited:
+- In a box or worktree that is not your shell's own, use `gh -R <owner>/<repo>`. Never export `GIT_DIR` or `GIT_WORK_TREE`.
 
-```bash
-grep -rl '<module names>' tests | xargs pytest -q
-```
+## Which checks
 
-A behavior-tightening change breaks exactly the tests that encoded the looser behavior, and those
-live elsewhere. A lane in CI's *skipped* set is not a coverage gap on its own: it skips because it
-is irrelevant to the paths, environment-gated, or broken, and only the third is a gap; read which
-lanes do cover the tree.
+- Run the fast steps of the CI workflow that gates the changed paths: lint, type, package-local unit lanes. Add browser or e2e suites for a frontend. Skip the full matrix, deploys and image builds.
+- Scope: the changed packages AND every test file that imports a changed module:
 
-A red head costs a CI cycle plus a fresh reviewer wave on code you are about to replace. Cite the
-green output lines (command and result) in the push's report.
+  ```bash
+  grep -rl '<module names>' tests | xargs pytest -q
+  ```
 
-## Run them outside your agent shell's environment
+- A skipped CI lane is a gap only when it skips because it is broken.
 
-An omp session exports variables a clean runner has none of (`SECRETSD_SESSION_TOKEN_FILE`,
-`XDG_RUNTIME_DIR` pointing at live sockets, gh-app routing), and a test that spawns a real binary
-hands them to it unless it sets its own. Run the suite once with only the toolchain's own paths:
+## Outside the agent shell
 
 ```bash
 env -i HOME="$HOME" USER="$USER" PATH="$PATH" \
@@ -37,31 +35,15 @@ env -i HOME="$HOME" USER="$USER" PATH="$PATH" \
   <command>
 ```
 
-When CI goes red, re-run the whole suite that way with fail-fast off (`--no-fail-fast`) before
-pushing a fix: a fail-fast runner cancels everything after its first failure, so the one failure
-CI names may not be the only one. A test that never sets a variable it depends on, such as
-`SECRETSD_SESSION_TOKEN_FILE`, passes in every session that exports it and fails on the runner;
-`env -u <VARIABLE> <command>` reproduces that failure locally.
+- omp exports variables that a runner does not have, such as `SECRETSD_SESSION_TOKEN_FILE`. `env -u <VARIABLE> <command>` reproduces a failure that one of them hides.
+- Anything that touches AWS or Bedrock: add `AWS_EC2_METADATA_DISABLED=true`. Otherwise the devbox instance role signs the calls.
+- After red CI, run the whole suite this way with `--no-fail-fast` before you push a fix.
 
-## `env -i` does not remove the instance role
+## Labels
 
-A devbox shell reaches the EC2 metadata service, so any AWS SDK in a spawned binary signs in as
-`<project>-devbox-admin-instance-role` with no variable in sight; a runner has no such role. For
-anything that touches AWS or Bedrock, add `AWS_EC2_METADATA_DISABLED=true` to the `env -i` run.
-Check: in an agent shell with no `AWS_*` variables, `aws sts get-caller-identity` returns that role;
-with `AWS_EC2_METADATA_DISABLED=true` it finds no credentials.
+- A label at creation fires `opened` and `labeled` together and doubles each `labeled` workflow.
+- Do not add labels that CI applies itself. Add a needed label only after the head's checks settle.
 
-## Labels at creation
+## From a jj workspace
 
-A workflow that runs on `labeled` cannot filter the trigger by label name, so a label passed at
-creation fires `opened` and `labeled` in the same second: two identical runs on one head, one
-cancelled a minute in. Where the repository's own workflow applies classifier labels, a label at
-creation duplicates that work. A label a lane genuinely needs restarts the whole graph too, so add
-it after the current head's checks have settled.
-
-## `gh pr create` from a jj workspace
-
-The push rule moves `@` off the pushed commit in the same command (`jj new`), which leaves the
-colocated HEAD detached, and `gh pr create` without `--head` then cannot infer a branch: it exits
-without a URL and prints a jj hint instead, and a `| tail -1` shows only that hint. Pass `--head`
-always and read the URL from the API afterwards (`gh pr list --head <name>`).
+The push leaves HEAD detached, so `gh pr create` without `--head` prints a jj hint and no URL.
