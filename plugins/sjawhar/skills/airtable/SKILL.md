@@ -1,57 +1,26 @@
 ---
 name: airtable
-description: Use when reading, searching, or updating Airtable records — applicant/hiring data or any Airtable base. Triggers on airtable.com URLs, base IDs (app...), table IDs (tbl...), or requests to list, query, filter, or update Airtable records.
+description: Use when listing, searching, filtering, or updating Airtable records, including applicant or hiring data. Also use for airtable.com URLs, base IDs (app...), and table IDs (tbl...).
 ---
 
 # Airtable
 
-Access Airtable via the official `@airtable/mcp-cli` (a CLI wrapper over Airtable's
-MCP server — auto-discovers tools at runtime, so it never loads anything into
-context). The PAT lives in `secrets.env` as `AIRTABLE_TOKEN` and is injected per-call.
-
-## Invocation
-
-Every call follows this shape — `secrets` injects the token, `npx` runs the CLI:
+Call the official `@airtable/mcp-cli` this way. The token is `AIRTABLE_TOKEN` in `secrets.env`. It needs no login or `configure`.
 
 ```bash
-secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli <tool> [--flags]
+secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli <tool> [flags]
 ```
 
-`AIRTABLE_TOKEN` is read from the environment, so no `configure`/login is needed.
-
-## Discover before calling
-
-Tool names and flags come from the server at runtime and may change. **Source of
-truth is the live `tools` list** — don't assume.
-
-```bash
-# List available tools (human-readable)
-secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli tools
-
-# Show flags/schema for one tool
-secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli <tool> --help
-
-# Confirm auth
-secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli whoami
-```
-
-## Hiring applicants base is retired
-
-The old Applications base (`appvSQts63ngMSoCP`) is no longer the hiring system of record.
-Candidate pipeline data now lives in Terminal; see the project's `hiring` skill and its
-`hire` CLI (`hire show <email>`, `hire stats`, and so on). Do not re-pin this tool to that
-base.
-
-## Tips
-
-- **Flags are per-tool**: records tools use `--baseId` + `--tableId` (NOT `--tableIdOrName`). Always run `<tool> --help` when unsure.
-- **JSON args for complex inputs** (filters, sort, --tables): pipe via stdin with `--input -`:
+- Tool names and flags come from the server and change. Run `tools`, then `<tool> --help`, before you call a tool. `whoami` checks auth.
+- Candidate pipeline data now lives in Terminal, not Airtable: use the project's `hiring` skill and its `hire` CLI (for example `hire show <email>`, `hire stats`). The old Applications base (`appvSQts63ngMSoCP`) is no longer the system of record. Do not pin this tool to it again.
+- Records tools take `--baseId` and `--tableId`, not `--tableIdOrName`.
+- Pipe complex inputs (filters, sort, `--tables`) as JSON to `--input -`:
   ```bash
   echo '{"baseId":"appXXX","tableId":"tblXXX","pageSize":20}' \
     | secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli list-records-for-table --input - -q
   ```
-- **Filtering**: `--filters` takes a structured operator tree keyed by field ID (not Airtable formula strings). For select/multi-select, call `get-table-schema`/`list-tables-for-base` first to get choice IDs. See `list-records-for-table --help` for filter examples.
-- **Records are returned as `cellValuesByFieldId`** — map field IDs to names via `list-tables-for-base`.
-- **Output**: defaults to formatted JSON; add `--output raw` for the raw server response, `-q` to silence stderr status.
-- **Quotas**: uses Airtable's public API under the hood — subject to standard rate limits; create is capped at 10 records/request.
-- **Permissions**: the CLI can only do what the PAT's scopes allow (e.g. read-only token = no writes).
+- `--filters` takes an operator tree keyed by field ID, not a formula. `list-records-for-table --help` has examples. For select and multi-select fields, get choice IDs from `get-table-schema` or `list-tables-for-base` first.
+- Records come back as `cellValuesByFieldId`. `list-tables-for-base` maps field IDs to names.
+- `--output raw` gives the raw server response. `-q` stops stderr status output.
+- Create takes 10 records per request at most. Standard Airtable API rate limits apply.
+- The token's scopes limit the calls. A read-only token cannot write.
