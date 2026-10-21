@@ -15,7 +15,7 @@ set -euo pipefail
 
 # HOSTNAME=DESTINATION. The entry whose name is this machine's hostname syncs locally. The
 # tailnet machines go by user@MagicDNS name; the Azure VMs admit only the laptop's address and
-# go by its laptop/ssh-config aliases, so a run from elsewhere fails on them by name.
+# go by its ssh aliases (~/.ssh/config.local), so a run from elsewhere fails on them by name.
 MACHINES=(
   sami=sami@sami
   sami-agents=ubuntu@sami-agents

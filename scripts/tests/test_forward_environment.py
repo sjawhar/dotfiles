@@ -191,17 +191,6 @@ def is_tunnel(config: dict) -> bool:
     return config["listen"].startswith("127.")
 
 
-def host_forwards(ssh_config: str, host: str) -> set[str]:
-    forwards, inside = set(), False
-    for line in ssh_config.splitlines():
-        words = line.split()
-        if words[:1] == ["Host"]:
-            inside = words[1:] == [host]
-        elif inside and words[:1] in (["RemoteForward"], ["LocalForward"]):
-            forwards.add(" ".join(words))
-    return forwards
-
-
 class CommittedForwardPairs(unittest.TestCase):
     """Each devbox config and its laptop daemon config must name each other."""
 
@@ -241,30 +230,6 @@ class CommittedForwardPairs(unittest.TestCase):
                 own = preview_entries(pair["allow"], load(serve_name)["listen"])
                 self.assertTrue(own, f"{daemon_name} does not allow its own preview host")
                 self.assertEqual(set(pair["allow"]) - own, shared)
-
-    def test_tunnels_carry_their_pairs_ports_without_colliding_on_the_laptop(self) -> None:
-        """Each tunnel's Host block forwards exactly its pair's channels, and no two
-        tunnel pairs claim one laptop address and port."""
-        ssh_config = (DOTFILES / "laptop" / "ssh-config").read_text(encoding="utf-8")
-        claimed: dict[str, str] = {}
-        for serve_name, daemon_name in self.pairs():
-            serve, daemon = load(serve_name), load(daemon_name)
-            if not is_tunnel(daemon):
-                continue
-            pair = daemon_name.removeprefix("config-daemon-").removesuffix(".toml")
-            with self.subTest(pair=pair):
-                # The laptop daemon listens on these; the devbox dials them at its peer.
-                listened = [p for p in (12800, port(daemon, "relay_port"), port(daemon, "pcsc_port"), port(daemon, "pulse_port")) if p]
-                # The laptop dials these at its peer; the devbox listens on them.
-                dialled = [p for p in (port(daemon, "bridge_port"), port(daemon, "grant_port")) if p]
-                remote = {f"RemoteForward {serve['peer']}:{p} {daemon['listen']}:{p}" for p in listened}
-                local = {f"LocalForward {daemon['peer']}:{p} {serve['listen']}:{p}" for p in dialled}
-                local.add(f"LocalForward {serve['listen']}:12802 {serve['listen']}:12802")
-                self.assertEqual(host_forwards(ssh_config, f"{pair}-tunnel"), remote | local)
-                laptop_ends = [f"{daemon['listen']}:{p}" for p in listened] + [line.split()[1] for line in local]
-                for end in laptop_ends:
-                    self.assertNotIn(end, claimed, f"{pair} and {claimed.get(end)} both claim {end} on the laptop")
-                    claimed[end] = pair
 
 
 if __name__ == "__main__":

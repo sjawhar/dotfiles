@@ -1,7 +1,7 @@
 # Devbox role on sami-leanperf (an Azure VM off the tailnet), chosen by
 # installers/forward.sh because this host has its own file. Fields mean what
 # config-serve.toml says. The laptop's forward-tunnel@sami-leanperf carries every
-# channel over SSH (Host sami-leanperf-tunnel in laptop/ssh-config), each port to
+# channel over SSH (Host sami-leanperf-tunnel in ~/.ssh/config.local), each port to
 # the same port on the far side's loopback. sshd makes the far-end connection,
 # so the laptop arrives from 127.0.0.1 and both addresses are loopback: any
 # process on this VM can reach these channels the way the laptop does.
