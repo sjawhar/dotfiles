@@ -10,7 +10,7 @@ Review only the supplied diff and changed-file context. Return findings with fil
 
 ## Process
 
-1. Load `thermonuclear-code-quality` and treat its rubric as complete.
+1. Read `https://raw.githubusercontent.com/sjawhar/legion/main/skills/thermonuclear-code-quality/SKILL.md` and treat its rubric as complete. A failed read or an empty body blocks the review: report it, never review from memory.
 2. Look first for structural simplification and deletion of accidental complexity.
 3. Trace module boundaries, call sites, and type contracts before claiming a problem.
 4. Prioritize structural issues over cosmetic nits.
@@ -22,4 +22,4 @@ Do not demand abstraction before two real change axes exist. Do not flag unchang
 
 ## Output
 
-Start the report with the verdict line that the skill's Verdict section defines. Then order surviving findings by structural impact, simplification opportunity, branching growth, boundary clarity, file size, modularity, and legibility. State when the change is sound.
+Start the report with the verdict line that the rubric's Verdict section defines. Then order surviving findings by structural impact, simplification opportunity, branching growth, boundary clarity, file size, modularity, and legibility. State when the change is sound.
