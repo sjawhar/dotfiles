@@ -32,8 +32,11 @@
 # platform, not as whichever session ran it, and the inbox shows the sender as
 # source_session ?? source. envoy is the only source a caller may assert.
 # `envoy notify` is that send, for the timers that post such notices: an envoy
-# from before it answers `notify` as an unknown command, exits 1 and sends
+# from before it answers `notify` as an unknown command, exits nonzero and sends
 # nothing, so a caller needs no probe for it.
+#
+# `envoy --help` (also -h, help) prints the usage and exits 0; an unknown or
+# missing command prints it to stderr and exits 2.
 #
 # The listener and its bearer come from the envoy.json a command reads, the way
 # Legion's envoy-client resolves them for a script (envoyConfigPath("command"),
@@ -444,12 +447,28 @@ _envoy_notify() {
     _envoy_send --source envoy "$1" "$2"
 }
 
+usage() {
+    cat <<'EOF'
+Usage: envoy <command> [args]
+
+Commands:
+  ps [--json] [--local] [--sub-agents]    list live sessions registered with Envoy
+  send [--source envoy] <target> <msg>    send to a session UUID, else publish to a topic
+  notify <topic> <msg>                    publish as envoy (send --source envoy)
+  broadcast [--all-machines|--machine <id>] [--untitled] [--dir <substr>] [--dry-run] <msg>
+                                          direct-send to every live titled session
+  config-path                             print the envoy.json envoy reads
+  help, -h, --help                        print this usage
+EOF
+}
+
 case "${1:-}" in
     ps)          shift; _envoy_ps "$@"; exit ;;
     send)        shift; _envoy_send "$@"; exit ;;
     notify)      shift; _envoy_notify "$@"; exit ;;
     broadcast)   shift; _envoy_broadcast "$@"; exit ;;
     config-path) envoy_config_path; exit ;;
-    "")          echo "Usage: envoy <ps|send|notify|broadcast|config-path>" >&2; exit 1 ;;
-    *)           echo "Unknown command: $1" >&2; exit 1 ;;
+    help|-h|--help) usage; exit 0 ;;
+    "")          usage >&2; exit 2 ;;
+    *)           echo "envoy: unknown command: $1" >&2; usage >&2; exit 2 ;;
 esac
