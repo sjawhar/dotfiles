@@ -47,7 +47,11 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
    - Merge duplicates into one lesson. `seen` counts sessions. Forks of one parent count once.
    - Settle a contradiction empirically (run it, read the source, reproduce it in a throwaway directory), never by majority or recency. Record the check in `verdict`.
    - Check one citation per reader report before you trust the rest. A "holds" that only quotes the transcript stays `UNVERIFIED`.
-5. Record, then route. Write the Lesson row, read it back, route to its one home (table below), then put the link and status in its home cell. Route only a lesson that a command, file read or reproduction checked. Before you create or edit a skill, run `skill://writing-skills` (baseline test first) and write to `skill://asd-ste100` strict. Prefer `seen >= 2`, Sami's own correction, or high stakes. Else leave it `open`.
+5. Record, then route. Write the Lesson row, read it back, route to its one home (table below), then put the link and status in its home cell. Route only a lesson that a command, file read or reproduction checked. Before you create or edit a skill, run `skill://writing-skills` (baseline test first) and write to `skill://asd-ste100` strict.
+   - A lesson that shows a defect in a tool gets a code fix in that tool, made by the librarian. Never write a doc line that works around it.
+   - No agent owns a repository: make the fix yourself, never route it to a lane.
+   - Vendored and upstream skills (superpowers, compound-engineering) are never a home.
+   - A mistake an agent made once is not a rule. Propose an edit to Sami's CLAUDE.md or skills only for his own words not yet written there, or a costly failure seen in several sessions. Else drop the lesson.
 6. Do no catch-up search for Envoy publishes you missed. A later reader round reads those from a session on this machine that crosses 3 more active hours. Accept the loss of the others.
 
 ## Writing to the ledger
@@ -71,9 +75,9 @@ A preference of Sami's is not a company rule. A rule is company-wide only when a
 | --- | --- | --- |
 | One repository's design, taste or workflow | its AGENTS.md, docs/ or a repo skill | PR by its rules (dotfiles: direct push). |
 | Company-wide Theorem rule | `working-at-theorem` in theorem-labs/verification-skills | Every PR bumps the version. Create the skill in its first PR if it does not exist. Tag after the merge. |
-| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, direct | No Theorem name, repository, person, operations contact or Dispatch project. Quote Sami in the commit message. Push fast-forward. |
+| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Quote Sami in the commit message. Push fast-forward. |
 | Fact about Sami's people, places, phrasing, or Theorem's people, places, tools | memory | `retain`. |
-| Tool fact | `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, beside any vendor skill | Create or extend it. Name the vendor skill. A fact several sessions hit: prefer a tool fix, and say so in the ledger. |
+| Tool fact | `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, after his yes, beside any vendor skill | Create or extend it. Name the vendor skill. A fact several sessions hit: prefer a tool fix, and say so in the ledger. |
 | Blocker a skill or document covers | no write | `envoy_send` the pointer. Ledger `replied`. |
 | Covered, too narrow, unverifiable | no write | Ledger `dropped`, with the reason. |
 
