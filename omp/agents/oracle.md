@@ -1,9 +1,11 @@
 ---
 name: oracle
 description: |
-  Strategic technical advisor on a non-Anthropic model. Read-only. Use for architecture
+  Strategic technical advisor, primarily on a non-Anthropic model. Read-only. Use for architecture
   decisions, hard tradeoffs, and complex debugging where correctness matters more than
-  speed. Consulted by the /sdd workflow for strategy questions.
+  speed. Consulted by the /sdd workflow for strategy questions. Its model falls back to Anthropic
+  Opus on failure or quota, so it is not a cross-family reviewer when the Codex quota is spent; for
+  a review that must be cross-family, use astra, which fails instead of falling back.
 model:
   - "openai-codex/gpt-5.5:high"
 tools: read, glob, grep, bash, todo
