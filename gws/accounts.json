@@ -30,6 +30,10 @@
       "send": {
         "command": ["secrets", "GWS_THEOREM_SEND_OAUTH", "--"],
         "description": "gmail.send only (+send; cannot read mail); one YubiKey touch per session"
+      },
+      "admin": {
+        "command": ["secrets", "GWS_THEOREM_ADMIN_OAUTH", "--"],
+        "description": "Admin SDK Directory (users, groups, org units, roles) and Groups Settings, consented by sami@theorem.dev. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks, and ~/.dotfiles/docs/theorem-workspace-admin.md. One YubiKey touch per session"
       }
     }
   },
