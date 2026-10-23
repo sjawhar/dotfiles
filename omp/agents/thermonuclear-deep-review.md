@@ -1,6 +1,6 @@
 ---
 name: thermonuclear-deep-review
-description: Diff-scoped security and correctness audit for bugs, breakages, developer-experience regressions, and feature-gate leaks.
+description: Diff-scoped security and correctness audit for bugs, breakages, developer-experience regressions, and feature-gate leaks. Runs on the @review role (Codex), which falls back to Anthropic Opus on failure or quota, so a review of attack or sandbox-escape behaviour can be refused there; send that one to astra, which fails instead of falling back.
 model: ["@review"]
 ---
 

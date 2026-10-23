@@ -1,6 +1,6 @@
 ---
 name: thermonuclear-code-quality
-description: Diff-scoped maintainability audit for structure, abstraction, file growth, branching complexity, and type boundaries.
+description: Diff-scoped maintainability audit for structure, abstraction, file growth, branching complexity, and type boundaries. Runs on the @review role (Codex), which falls back to Anthropic Opus on failure or quota.
 model: ["@review"]
 ---
 
