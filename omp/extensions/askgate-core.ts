@@ -6,8 +6,9 @@
 // Scope: seven calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
 //   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`: the
-//     head rules of the plugin that ships the CLI, copied, plus AskGate's two harmless wrappers,
-//     one leading `cd <path> &&` with a path the shell does not expand and one trailing `2>&1`)
+//     head rules of the plugin that ships the CLI, copied, with the program taken by a literal
+//     path to `dispatch` as well as by name, plus AskGate's two harmless wrappers, one leading
+//     `cd <path> &&` with a path the shell does not expand and one trailing `2>&1`)
 //     naming `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what Sami approves), or `issue` with `--spec` or `--spec-file`. The gate learns
 //     the exact arguments by running that command with `--dry-run` after the command name, in the
@@ -19,13 +20,17 @@
 //     reviewed.
 //   - A `bash` call that holds a scoped `dispatch` write those rules cannot read — joined to
 //     anything else (`cd $X && dispatch ask …`, `cd a && cd b && dispatch ask …`, `dispatch ask …
-//     2>&1 | tail`, `cat > f <<EOF …; dispatch ask --spec-file f`), or one using an unquoted
-//     here-document, another redirect or an expansion — is refused before anything in it runs,
-//     whatever the mode, with a reason telling the agent to send that `dispatch` command again on
-//     its own (`unreadableDispatchWrite`, a quote- and here-document-aware scan for a scoped
-//     `dispatch` at a command position). The entry reads `unreadable`; it never counts toward the
-//     halt. A kill, a halt, or a session the gate would skip (no `@askgate` model, a primary on
-//     another provider) lets it run.
+//     2>&1 | tail`, `cat > f <<EOF …; dispatch ask --spec-file f`), one using an unquoted
+//     here-document, another redirect or an expansion, or one calling `dispatch` by a path the
+//     shell expands (`~/…/dispatch`, `$HOME/…/dispatch`) — or a scoped subcommand run by a
+//     program an expansion names (`$D comment …`, `"${D}" ask …`, `$(command -v dispatch) …`),
+//     which may be `dispatch`, is refused before anything in it runs, whatever the mode, with a
+//     reason telling the agent to send that `dispatch` command again on its own; when the word
+//     that runs it is what AskGate cannot read, the reason names the characters in it and says to
+//     call `dispatch` by name (`unreadableDispatchWrite`, a scan aware of quotes, here-documents
+//     and command substitutions, for a scoped write at a command position). The entry reads
+//     `unreadable`; it never counts toward the halt. A kill, a halt, or a session the gate would
+//     skip (no `@askgate` model, a primary on another provider) lets it run.
 //   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
 //     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
@@ -321,18 +326,28 @@ function headLine(command: string): { text: string; at: number } | undefined {
 	return { text: head.replace(/^[ \t]+|[ \t]+$/g, ""), at: lineAt + leading };
 }
 
-// AskGate's own additions to those rules, the two wrappers agents put around a `dispatch` command
-// that change neither its words nor what it sends: one leading `cd <path> && `, whose path is one
-// word the shell does not expand, and one trailing `2>&1`.
+// AskGate's own additions to those rules: the program may be a literal path to `dispatch` as well
+// as the bare name, which is all the plugin's rule takes, and the two wrappers agents put around a
+// `dispatch` command that change neither its words nor what it sends: one leading `cd <path> && `,
+// whose path is one word the shell does not expand, and one trailing `2>&1`.
 
-/** Characters an unquoted `cd` path may hold: none the shell expands (`~`, globs, braces, `$`). */
-const CD_PATH_UNQUOTED = /^[A-Za-z0-9._/+@%:,=-]$/;
+/** Characters an unquoted literal word (a `cd` path, a path to `dispatch`) may hold: none the shell
+ * expands (`~`, globs, braces, `$`) or interprets (`\`). */
+const LITERAL_UNQUOTED = /^[A-Za-z0-9._/+@%:,=-]$/;
 
-/** The end of the one-word path after a leading `cd ` at `from`, or undefined when the word is
- * empty, an option, unterminated, or holds anything the shell would expand or treat specially. */
-function cdPathEnd(text: string, from: number): number | undefined {
+/** The characters that start an expansion, unquoted or in double quotes: a program word holding
+ * one names a program AskGate cannot know. */
+const EXPANSIONS = "$`";
+
+/**
+ * The word at `from` in `text`, up to an unquoted blank or the text's end: where it ends, its value
+ * with quotes removed, and each character in it AskGate does not take as literal, in order (an
+ * unterminated quote's opening one last). The word is literal when that list is empty.
+ */
+function scanWord(text: string, from: number): { end: number; value: string; unread: string[] } {
 	let quote: '"' | "'" | undefined;
 	let value = "";
+	const unread: string[] = [];
 	let index = from;
 	for (; index < text.length; index++) {
 		const char = text[index];
@@ -341,14 +356,28 @@ function cdPathEnd(text: string, from: number): number | undefined {
 			else value += char;
 		} else if (quote === '"') {
 			if (char === '"') quote = undefined;
-			else if (REFUSED_DOUBLE_QUOTED.includes(char)) return undefined;
-			else value += char;
+			else if (REFUSED_DOUBLE_QUOTED.includes(char)) {
+				unread.push(char);
+				// A backslash takes the next character with it.
+				if (char === "\\") index++;
+			} else value += char;
 		} else if (char === " " || char === "\t") break;
 		else if (char === "'" || char === '"') quote = char;
-		else if (CD_PATH_UNQUOTED.test(char)) value += char;
-		else return undefined;
+		else if (LITERAL_UNQUOTED.test(char)) value += char;
+		else {
+			unread.push(char);
+			if (char === "\\") index++;
+		}
 	}
-	return quote === undefined && value !== "" && !value.startsWith("-") ? index : undefined;
+	if (quote !== undefined) unread.push(quote);
+	return { end: Math.min(index, text.length), value, unread };
+}
+
+/** The end of the one-word path after a leading `cd ` at `from`, or undefined when the word is
+ * empty, an option, unterminated, or holds anything the shell would expand or treat specially. */
+function cdPathEnd(text: string, from: number): number | undefined {
+	const path = scanWord(text, from);
+	return path.unread.length === 0 && path.value !== "" && !path.value.startsWith("-") ? path.end : undefined;
 }
 
 /** A trailing `2>&1` after the `dispatch` command, with the blanks before it. */
@@ -376,15 +405,12 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
 	}
 	const suffix = STDERR_TO_STDOUT.exec(text);
 	const head = suffix === null ? text : text.slice(0, suffix.index);
-	// One `dispatch` command whose words the shell takes as written.
-	if (firstWord(head) !== "dispatch" || !headScan(head)) return undefined;
+	// One `dispatch` command, called by name or by a literal path ending in it that is no
+	// assignment, whose words the shell takes as written.
+	const program = scanWord(head, 0);
+	if (program.unread.length > 0 || program.value.split("/").at(-1) !== "dispatch" || ASSIGNMENT.test(head) || !headScan(head)) return undefined;
 	const at = line.at + offset;
 	return { head, at, ...(cdEnd === undefined ? {} : { cdEnd }), end: at + text.length };
-}
-
-/** The trimmed head's first word as bash splits it, at a space or a tab. */
-function firstWord(head: string): string {
-	return head.split(/[ \t]/, 1)[0] ?? "";
 }
 
 /** Any control character but newline and tab: a `\r` before a line end would make the delimiter
@@ -488,28 +514,58 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
 const COMMAND_PREFIXES: Record<string, true> = { "!": true, "{": true, then: true, do: true, else: true, elif: true, if: true, while: true, until: true, time: true, command: true, exec: true, nohup: true, env: true, timeout: true };
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+/** An open subshell, or an open command substitution with the command and word it sits in, which
+ * go on at its end. */
+type Open = { kind: "(" } | { kind: "$(" | "`"; words: Word[]; start: number; value: string; quote: '"' | undefined };
+
 /**
- * The words of each simple command in a `bash` command, quotes removed, as far as a character scan
- * can tell them apart: a new command starts at an unquoted newline, `;`, `&`, `|`, `(`, `)`, `$(`
- * or backtick (a `&` inside `2>&1` or `&>` is a redirect, not a separator). Single and double
- * quotes and backslashes are honoured, a comment runs to the line's end, and a here-document body
- * is skipped, so text a command only writes (`cat > f <<EOF … EOF`, `echo "dispatch ask"`) is
- * never a command. Not a shell parser: a command substitution inside double quotes stays text.
+ * The words of each simple command in a `bash` command, each as written and with its quotes
+ * removed, as far as a character scan can tell them apart: a new command starts at an unquoted
+ * newline, `;`, `&`, `|`, `(` or `)` (a `&` inside `2>&1` or `&>` is a redirect, not a separator).
+ * A command substitution, `$(…)` or backticks, quoted or not, holds commands of its own and is part
+ * of the word it sits in, which goes on after it. Single and double quotes and backslashes are
+ * honoured, a comment runs to the line's end, and a here-document body is skipped, so text a
+ * command only writes (`cat > f <<EOF … EOF`, `echo "dispatch ask"`) is never a command. Not a
+ * shell parser: a `)` in a `case` pattern ends a substitution early.
  */
-function commandWords(command: string): string[][] {
-	const segments: string[][] = [];
+function commandWords(command: string): Word[][] {
+	const segments: Word[][] = [];
 	const pending: Array<{ delimiter: string; stripTabs: boolean }> = [];
-	let words: string[] = [];
-	let word: string | undefined;
+	const open: Open[] = [];
+	let words: Word[] = [];
+	/** The word being read: where it starts in `command`, and its value so far; undefined between words. */
+	let start = 0;
+	let value: string | undefined;
 	let quote: '"' | "'" | undefined;
-	const endWord = () => {
-		if (word !== undefined) words.push(word);
-		word = undefined;
+	const add = (at: number, text: string) => {
+		if (value === undefined) {
+			start = at;
+			value = "";
+		}
+		value += text;
 	};
-	const endSegment = () => {
-		endWord();
+	const endWord = (at: number) => {
+		if (value !== undefined) words.push({ raw: command.slice(start, at), value });
+		value = undefined;
+	};
+	const endSegment = (at: number) => {
+		endWord(at);
 		if (words.length > 0) segments.push(words);
 		words = [];
+	};
+	/** A command substitution opens at `at`: the command and word it sits in wait for its end. */
+	const openSubstitution = (kind: "$(" | "`", at: number) => {
+		add(at, "");
+		open.push({ kind, words, start, value: value ?? "", quote: quote === '"' ? quote : undefined });
+		words = [];
+		value = undefined;
+		quote = undefined;
+	};
+	/** The innermost command substitution, `outer`, ends at `at`: its last command ends and the word around it goes on. */
+	const closeSubstitution = (at: number, outer: Exclude<Open, { kind: "(" }>) => {
+		endSegment(at);
+		open.pop();
+		({ words, start, value, quote } = outer);
 	};
 	/** Past the bodies of the here-documents opened on the line that ended just before `from`. */
 	const skipBodies = (from: number): number => {
@@ -526,36 +582,41 @@ function commandWords(command: string): string[][] {
 	};
 	for (let i = 0; i < command.length; i++) {
 		const c = command[i];
+		const top = open.at(-1);
 		if (quote === "'") {
 			if (c === "'") quote = undefined;
-			else word += c;
+			else value += c;
 			continue;
 		}
 		if (quote === '"') {
 			if (c === '"') quote = undefined;
 			else if (c === "\\" && '$`"\\\n'.includes(command[i + 1] ?? "")) {
-				if (command[i + 1] !== "\n") word += command[i + 1];
+				if (command[i + 1] !== "\n") value += command[i + 1];
 				i++;
-			} else word += c;
+			} else if (c === "$" && command[i + 1] === "(") {
+				openSubstitution("$(", i);
+				i++;
+			} else if (c === "`") openSubstitution("`", i);
+			else value += c;
 			continue;
 		}
 		if (c === "\\") {
-			if (command[i + 1] !== "\n") word = (word ?? "") + (command[i + 1] ?? "");
+			if (command[i + 1] !== "\n") add(i, command[i + 1] ?? "");
 			i++;
 		} else if (c === "'" || c === '"') {
+			add(i, "");
 			quote = c;
-			word ??= "";
-		} else if (c === "#" && word === undefined) {
+		} else if (c === "#" && value === undefined) {
 			const end = command.indexOf("\n", i);
 			i = (end === -1 ? command.length : end) - 1;
 		} else if (c === "\n") {
-			endSegment();
+			endSegment(i);
 			i = skipBodies(i + 1) - 1;
 		} else if (c === " " || c === "\t") {
-			endWord();
+			endWord(i);
 		} else if (c === "<" && command[i + 1] === "<" && command[i + 2] !== "<") {
 			// A here-document opener: its delimiter, quotes removed, ends the body that starts on the next line.
-			endWord();
+			endWord(i);
 			i += 2;
 			const stripTabs = command[i] === "-";
 			if (stripTabs) i++;
@@ -565,49 +626,69 @@ function commandWords(command: string): string[][] {
 			pending.push({ delimiter, stripTabs });
 			i--;
 		} else if (c === "$" && command[i + 1] === "(") {
-			endSegment();
+			openSubstitution("$(", i);
 			i++;
+		} else if (c === "`") {
+			if (top?.kind === "`") closeSubstitution(i, top);
+			else openSubstitution("`", i);
+		} else if (c === ")" && top?.kind === "$(") {
+			closeSubstitution(i, top);
 		} else if (c === "&" && (command[i - 1] === ">" || command[i - 1] === "<" || command[i + 1] === ">")) {
-			endWord();
-		} else if (";&|()`".includes(c)) {
-			endSegment();
+			endWord(i);
+		} else if (c === "(") {
+			endSegment(i);
+			open.push({ kind: "(" });
+		} else if (c === ")") {
+			if (top?.kind === "(") open.pop();
+			endSegment(i);
+		} else if (";&|".includes(c)) {
+			endSegment(i);
 		} else if (c === "<" || c === ">") {
-			endWord();
+			endWord(i);
 		} else {
-			word = (word ?? "") + c;
+			add(i, c);
 		}
 	}
-	endSegment();
+	endSegment(command.length);
 	return segments;
 }
 
-/** A scoped `dispatch` write the gate cannot review: the tool it calls and the command's name. */
-export interface UnreadableCommand { tool: string; label: string }
+/** A scoped `dispatch` write the gate cannot review: the tool it calls, the command's name and,
+ * when the word that runs it is not literal, whether that word calls `dispatch` by name or path
+ * and the characters in it AskGate does not take as literal (only its expansions when it does not). */
+export interface UnreadableCommand { tool: string; label: string; program?: { namesDispatch: boolean; unread: string[] } }
 
 /**
  * A scoped `dispatch` write anywhere in a `bash` command, found at a command's position (after any
- * assignments and prefixes such as `env` or `timeout 30`); one carrying `--dry-run` or `--help`, or
- * a `dispatch issue` without `--spec`/`--spec-file`, sends nothing for review and is not one. Only
- * for a command `scopedCommand` could not read.
+ * assignments and prefixes such as `env` or `timeout 30`), or a scoped subcommand run by a program
+ * an expansion names (`$D comment …`, `$(command -v dispatch) ask …`), which may be `dispatch`. One
+ * carrying `--dry-run` or `--help`, or a `dispatch issue` without `--spec`/`--spec-file`, sends
+ * nothing for review and is not one. Only for a command `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
-	if (typeof command !== "string" || !command.includes("dispatch")) return undefined;
+	// A write names `dispatch`, or reaches it through an expansion.
+	if (typeof command !== "string" || !/dispatch|[$`]/.test(command)) return undefined;
 	for (const words of commandWords(command)) {
 		let at = 0;
 		while (at < words.length) {
 			const prefix = words[at];
-			if (ASSIGNMENT.test(prefix)) at++;
-			else if (Object.hasOwn(COMMAND_PREFIXES, prefix)) {
+			if (ASSIGNMENT.test(prefix.raw)) at++;
+			else if (Object.hasOwn(COMMAND_PREFIXES, prefix.value)) {
 				at++;
-				if (prefix === "env" || prefix === "timeout") while (words[at]?.startsWith("-")) at++;
-				if (prefix === "timeout") at++;
+				if (prefix.value === "env" || prefix.value === "timeout") while (words[at]?.value.startsWith("-")) at++;
+				if (prefix.value === "timeout") at++;
 			} else break;
 		}
 		const [program, name, ...flags] = words.slice(at);
-		if (program?.split("/").at(-1) !== "dispatch" || name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name)) continue;
-		if (flags.some(flag => NO_SEND_FLAGS.includes(flag))) continue;
-		if (name === SPEC_ONLY_COMMAND && !flags.some(flag => SPEC_FLAGS.includes(flag.split("=", 1)[0]))) continue;
-		return { tool: `dispatch_${name.replaceAll("-", "_")}`, label: `dispatch ${name}` };
+		if (program === undefined || name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name.value)) continue;
+		const named = program.value.split("/").at(-1) === "dispatch";
+		const unread = [...new Set(scanWord(program.raw, 0).unread)];
+		const expansions = unread.filter(char => EXPANSIONS.includes(char));
+		if (!named && expansions.length === 0) continue;
+		if (flags.some(flag => NO_SEND_FLAGS.includes(flag.value))) continue;
+		if (name.value === SPEC_ONLY_COMMAND && !flags.some(flag => SPEC_FLAGS.includes(flag.value.split("=", 1)[0]))) continue;
+		const found = { tool: `dispatch_${name.value.replaceAll("-", "_")}`, label: `dispatch ${name.value}` };
+		return unread.length === 0 ? found : { ...found, program: { namesDispatch: named, unread: named ? unread : expansions } };
 	}
 	return undefined;
 }
@@ -860,9 +941,21 @@ const renderRebuttalAck = (rebuttal: string, override: Override) =>
 	`<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
 const renderBreakerAck = () =>
 	`<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
+/** Characters for a reason, each in code; a backtick, which inline code cannot hold, is named. */
+function characters(chars: readonly string[]): string {
+	const named = chars.map(char => (char === "`" ? "a backtick" : `\`${char}\``));
+	return named.length < 2 ? (named[0] ?? "") : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
+}
 /** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
-const renderUnreadable = (label: string) =>
-	`AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it is the whole bash call, optionally after one \`cd <path> && \` (a literal path: no \`$\`, \`~\` or glob) and before one trailing \`2>&1\`. Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+function renderUnreadable({ label, program }: UnreadableCommand): string {
+	const why =
+		program === undefined
+			? ""
+			: program.namesDispatch
+				? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
+				: ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`;
+	return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it calls \`dispatch\` by name or by a literal path (no \`$\`, \`~\`, glob or backslash) and is the whole bash call, optionally after one \`cd <path> && \` (a literal path too) and before one trailing \`2>&1\`.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+}
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
 	return function askGate(pi: Pi): void {
@@ -1136,7 +1229,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 						else if (halted) decision = pass("halted");
 						else if (!model) decision = pass("unavailable");
 						else if (ctx.model?.provider !== model.provider) decision = pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
-						else decision = { fields: { decision: "revise", outcome: "unreadable" }, result: { block: true, reason: renderUnreadable(unreadable.label) }, effect: "none" };
+						else decision = { fields: { decision: "revise", outcome: "unreadable" }, result: { block: true, reason: renderUnreadable(unreadable) }, effect: "none" };
 					} else {
 						if (scoped.rebuttal !== undefined) revised = { ...event.input, command: scoped.command };
 						base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
