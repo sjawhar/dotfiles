@@ -1,11 +1,24 @@
 #!/bin/bash
 # gcloud wrapper: select a named gcloud configuration via GCLOUD_ACCOUNT,
 # instead of typing CLOUDSDK_ACTIVE_CONFIG_NAME=<name> per command or mutating
-# global state with `gcloud config configurations activate`, and route
-# `gcloud auth`/`gcloud init` through `forward` on a headless machine instead
-# of the paste-a-code flow.
+# global state with `gcloud config configurations activate`.
 #
-# Resolution:
+# On a box, a plain `gcloud auth login` goes to Sami's `theorem`
+# configuration instead of overwriting the machine's `box` identity. This
+# applies only when `active_config` is `box`, GCLOUD_ACCOUNT and
+# CLOUDSDK_ACTIVE_CONFIG_NAME are unset or empty, neither `--configuration`
+# nor `--cred-file` appears in argv, and `config_theorem` exists. Routed
+# logins drop --update-adc so the box's application default credentials (ADC)
+# remain its own identity.
+#
+# `gcloud auth application-default login` and `revoke` are refused whenever
+# the ADC in CLOUDSDK_CONFIG is an `external_account` credential. Sami's login
+# instead belongs in its `legacy_credentials/<account>/adc.json`, which client
+# libraries use through GOOGLE_APPLICATION_CREDENTIALS. This check ignores
+# GOOGLE_APPLICATION_CREDENTIALS and the active configuration.
+#
+# `gcloud auth`/`gcloud init` run through `forward` on a headless machine
+# instead of the paste-a-code flow:
 #   - First non-flag argument is `auth` or `init`, DISPLAY, WAYLAND_DISPLAY
 #     and MIR_SOCKET are all unset, and `forward` resolves on PATH -> gcloud
 #     refuses to launch ANY browser on Linux without one of those display
@@ -14,26 +27,11 @@
 #     paste-back-a-code flow headless. Satisfy the check with a fake display
 #     scoped to gcloud alone, and point BROWSER straight at `forward open` —
 #     NOT the xdg-open shim, whose display branch would see the fake value
-#     and exec the real xdg-open on a machine with no browser. This applies
-#     in both the GCLOUD_ACCOUNT-unset and GCLOUD_ACCOUNT-set paths below;
-#     every other invocation is untouched.
-#   - GCLOUD_ACCOUNT unset/empty -> exec real gcloud untouched (aside from the
-#     auth/init headless case above). gcloud is used by every session and
-#     agent on this machine, so this path must be trivially, obviously
-#     byte-identical to no shim existing at all: no env manipulation, no
-#     validation, no output.
-#   - GCLOUD_ACCOUNT set -> validate that config_<name> exists as a file under
-#     ${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations. That is a
-#     filesystem check, not `gcloud config configurations list`, which would
-#     recurse into this very shim and is slow.
-#       exists    -> export CLOUDSDK_ACTIVE_CONFIG_NAME=<name>, exec real gcloud.
-#       missing   -> fail loud, naming the bad value and listing the
-#                    configurations that DO exist. Never fall back to `default`:
-#                    a command meant for one identity must never silently run
-#                    as another.
+#     and exec the real xdg-open on a machine with no browser.
 #
-# Doctrine: fail LOUD where an identity is supposed to exist, never fall
-# through to a different one.
+# All other calls retain the existing GCLOUD_ACCOUNT routing and pass-through
+# behavior. Doctrine: fail LOUD where an identity is supposed to exist, never
+# fall through to a different one.
 set -euo pipefail
 
 # First non-flag argument, matching gcloud's own grammar: `gcloud [--flags]
@@ -54,6 +52,90 @@ needs_forward_browser() {
     esac
     [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${MIR_SOCKET:-}" ]] || return 1
     command -v forward &>/dev/null
+}
+
+has_configuration_flag() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --configuration | --configuration=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+has_credential_file_flag() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --cred-file | --cred-file=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+
+is_auth_login() {
+    local first="" second="" arg
+    for arg in "$@"; do
+        [[ "$arg" == -* ]] && continue
+        if [[ -z "$first" ]]; then
+            first="$arg"
+        else
+            second="$arg"
+            break
+        fi
+    done
+    [[ "$first" == auth && "$second" == login ]]
+}
+
+application_default_operation() {
+    local first="" second="" third="" arg
+    for arg in "$@"; do
+        [[ "$arg" == -* ]] && continue
+        if [[ -z "$first" ]]; then
+            first="$arg"
+        elif [[ -z "$second" ]]; then
+            second="$arg"
+        else
+            third="$arg"
+            break
+        fi
+    done
+    [[ "$first" == auth && "$second" == application-default ]] || return 1
+    case "$third" in
+        login | revoke)
+            printf '%s\n' "$third"
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+box_is_active() {
+    local config_root active_config
+    config_root="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
+    active_config="${config_root}/active_config"
+    [[ -f "$active_config" && "$(<"$active_config")" == box ]]
+}
+
+is_external_account_adc() {
+    local config_root adc_file adc_json
+    config_root="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
+    adc_file="${config_root}/application_default_credentials.json"
+    [[ -f "$adc_file" ]] || return 1
+    adc_json="$(<"$adc_file")"
+    [[ "$adc_json" =~ \"type\"[[:space:]]*:[[:space:]]*\"external_account\" ]]
+}
+
+is_box_routed_auth_login() {
+    [[ -z "${GCLOUD_ACCOUNT:-}" && -z "${CLOUDSDK_ACTIVE_CONFIG_NAME:-}" ]] || return 1
+    is_auth_login "$@" || return 1
+    box_is_active || return 1
+    if has_configuration_flag "$@" || has_credential_file_flag "$@"; then
+        return 1
+    fi
+    return 0
 }
 
 find_real_gcloud() {
@@ -81,6 +163,40 @@ main() {
     # split is load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
     real_gcloud="$(find_real_gcloud)"
 
+    local config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations"
+    local adc_operation
+    if adc_operation="$(application_default_operation "$@")" && is_external_account_adc; then
+        echo "gcloud shim: refusing auth application-default ${adc_operation}: the box's ADC is its own identity; run gcloud auth login, which renews legacy_credentials/<account>/adc.json; client libraries use it through GOOGLE_APPLICATION_CREDENTIALS." >&2
+        exit 1
+    fi
+
+    if is_box_routed_auth_login "$@"; then
+        if [[ ! -f "${config_dir}/config_theorem" ]]; then
+            echo "gcloud shim: configuration theorem is missing at ${config_dir}/config_theorem; create it with gcloud config configurations create theorem --no-activate." >&2
+            exit 1
+        fi
+
+        local -a routed_args=()
+        local arg update_adc=no
+        for arg in "$@"; do
+            if [[ "$arg" == --update-adc ]]; then
+                update_adc=yes
+                continue
+            fi
+            routed_args+=("$arg")
+        done
+
+        echo "gcloud shim: routing auth login to configuration theorem because box is this machine's own identity." >&2
+        if [[ "$update_adc" == yes ]]; then
+            echo "gcloud shim: dropping --update-adc: the box's ADC stays its own identity; this login renews legacy_credentials/<account>/adc.json for client libraries." >&2
+        fi
+        export CLOUDSDK_ACTIVE_CONFIG_NAME=theorem
+        if needs_forward_browser "${routed_args[@]}"; then
+            exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "${routed_args[@]}"
+        fi
+        exec "$real_gcloud" "${routed_args[@]}"
+    fi
+
     local account="${GCLOUD_ACCOUNT:-}"
     if [[ -z "$account" ]]; then
         if needs_forward_browser "$@"; then
@@ -99,7 +215,6 @@ main() {
             ;;
     esac
 
-    local config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations"
     local config_file="${config_dir}/config_${account}"
 
     if [[ ! -f "$config_file" ]]; then
