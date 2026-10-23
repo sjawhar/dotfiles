@@ -9,6 +9,7 @@ description: "Use when tracing an artifact back to the agent session that produc
 
 - Every omp-session commit gets an `Omp-Session: <id>` trailer automatically. In git, `shims/git` adds it. In jj, a JJ_CONFIG overlay adds it: `omp/extensions/session-env.ts` for interactive sessions, the Legion extension for Legion roots.
 - A git commit made through an alias, a merge, a cherry-pick or `git commit-tree` has no trailer. Attribute it by author, timestamp and transcript correlation.
+- A commit in a public theorem-labs repository (or one whose visibility GitHub could not report when it was made) has no trailer either, by design: `shims/git` and `shims/jj` leave it off there (`scripts/omp-session-trailer`). Attribute it the same way.
 - Legion GitHub comments and reviews end with `<!-- legion: {"session":"<id>", ...} -->`.
 - `omp --resume` accepts the id or a prefix of it.
 - `jj` lines work only in jj repos: Legion workspaces and the shared `~/.dotfiles` and `~/src` stores.
