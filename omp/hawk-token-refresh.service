@@ -1,8 +1,10 @@
 [Unit]
 Description=Mint a fresh hawk-token credential off any agent turn's budget (scripts/AGENTS.md's `hawk-token` entry)
-# Runs the ordinary `hawk-token` mint (its own cache-fallback and slot-refresh
-# machinery are unchanged) with no 9/10 s budget of its own: a systemd oneshot has
-# nothing racing it, so a slow mint under load just takes longer, it does not fail.
+# Runs the ordinary `hawk-token` mint under `agent-secrets-session`, so its
+# GitHub App credential helper has the broker identity that serves
+# trajectory-labs-pbc's private clone. Its cache-fallback and slot-refresh
+# machinery are unchanged. A systemd oneshot has no 9/10 s budget and nothing
+# racing it, so a slow mint under load just takes longer.
 # Its ONLY effect that matters here is the atomic rewrite of
 # $root/last-good-token (hawk-token's own `save_token()`), which
 # `scripts/hawk-token-fast` -- what omp's `!command` actually calls now -- reads
@@ -13,7 +15,7 @@ Description=Mint a fresh hawk-token credential off any agent turn's budget (scri
 
 [Service]
 Type=oneshot
-ExecStart=%h/.dotfiles/scripts/hawk-token
+ExecStart=%h/.dotfiles/scripts/agent-secrets-session %h/.dotfiles/scripts/hawk-token
 # hawk-token prints the live token itself on stdout (the thing `hawk-token-fast`
 # would otherwise have to mint live) -- a secret this unit's only consumer never
 # reads, since the side effect that matters is its `save_token()` rewrite of
@@ -27,11 +29,12 @@ StandardOutput=null
 # this unit runs on more than one machine (sami-agents, the laptop, oryx), each
 # with its own $HOME.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
-# mise's own shims (the `uv` one, and whatever the slot-refresh's
-# `gh-app-token` credential helper resolves `secrets` to) need their data dir
-# told explicitly: a systemd user unit does not inherit the interactive
-# .bashrc export, so mise falls back to the XDG default (~/.local/share/mise),
-# finds no installs there, and the slot-refresh's credential helper dies with
-# "secrets is not a valid shim" -- installers/mise.sh's own environment.d
-# drop-in documents exactly this gap for other mise-shimmed user services.
+# mise's own shims (the `uv` one, `agent-secrets` for
+# `agent-secrets-session`, and whichever `agent-secrets`/`secrets` binary
+# `gh-app-token` resolves through `secret-run`) need their data dir told
+# explicitly: a systemd user unit does not inherit the interactive .bashrc
+# export, so mise falls back to the XDG default (~/.local/share/mise), finds no
+# installs there, and the slot-refresh's credential helper dies with "secrets
+# is not a valid shim" -- installers/mise.sh's own environment.d drop-in
+# documents exactly this gap for other mise-shimmed user services.
 Environment=MISE_DATA_DIR=%h/.mise
