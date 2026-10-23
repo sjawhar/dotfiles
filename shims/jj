@@ -3,9 +3,11 @@
 # its git worktree locked. From inside an agent box every other box's workspace
 # path looks missing, and an unlocked registration under <store>/.git/worktrees/
 # can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
-# still removes it. In an agent session `jj git push --deleted` is also refused,
-# and in a public theorem-labs repository the session's Omp-Session trailer is
-# dropped (both below). Everything else goes straight to the real jj.
+# still removes it. In an agent session `jj git push --deleted` is refused, so is
+# `jj git push` to a public theorem-labs repository unless the backing git
+# repository sets omp.publicPush, and in a public theorem-labs repository the
+# session's Omp-Session trailer is dropped (all below). Everything else goes
+# straight to the real jj.
 set -euo pipefail
 
 # A jj that hands the call to the first jj on PATH re-enters this shim in the same
@@ -94,10 +96,53 @@ while ((_pi < ${#_pargs[@]})); do
         *) break ;;
     esac
 done
+# The git repository backing the jj repository a command runs in (`-R`, else the
+# current directory): prints its path and returns 0; returns 2 when there is none
+# (no jj repository, which jj reports itself, or one not backed by git) and 1 when
+# a secondary workspace's pointer to its repository is unreadable.
+backing_git_dir() {
+    local d="" repo target="" a prev=""
+    for a in "$@"; do
+        [[ "$a" == -- ]] && break
+        case "$prev" in -R | --repository) d="$a" ;; esac
+        case "$a" in --repository=*) d="${a#*=}" ;; -R?*) d="${a#-R}" ;; esac
+        prev="$a"
+    done
+    d="${d:-$PWD}"
+    [[ "$d" == /* ]] || d="$PWD/$d"
+    d="${d%/}"
+    while [[ ! -d "$d/.jj" ]]; do
+        [[ -n "$d" ]] || return 2
+        d="${d%/*}"
+    done
+    repo="$d/.jj/repo"
+    if [[ -f "$repo" ]]; then # a secondary workspace names its repository
+        IFS= read -r target < "$repo" || true
+        [[ -n "$target" ]] || return 1
+        [[ "$target" == /* ]] || target="$d/.jj/$target"
+        repo="$target"
+        target=""
+    fi
+    IFS= read -r target < "$repo/store/git_target" 2> /dev/null || true
+    [[ -n "$target" ]] || return 2
+    [[ "$target" == /* ]] || target="$repo/store/$target"
+    echo "$target"
+}
+
 if agent_context; then
     if [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
+        _remote="" _dry=0 _next=0
         for _parg in "${_pargs[@]:_pi+2}"; do
             [[ "$_parg" == -- ]] && break
+            if ((_next)); then
+                _remote="$_parg" _next=0
+                continue
+            fi
+            case "$_parg" in
+                --remote) _next=1 ;;
+                --remote=*) _remote="${_parg#--remote=}" ;;
+                --dry-run) _dry=1 ;;
+            esac
             if [[ "$_parg" == --deleted ]]; then
                 cat >&2 << 'EOF'
 jj shim: `jj git push --deleted` is refused in an agent session.
@@ -113,6 +158,18 @@ EOF
                 exit 1
             fi
         done
+        # A push to a public repository of a PUBLISHING_OWNERS owner (theorem-labs)
+        # is refused unless the backing git repository sets omp.publicPush, as for
+        # `git push` (scripts/omp-public-push). The remote is `--remote`, else jj's
+        # `git.push` setting, else origin. A dry run passes.
+        if ((!_dry)) && _gitdir="$(backing_git_dir "$@")"; then
+            if [[ -z "$_remote" ]]; then
+                # In a subshell that names its own pid in the marker, as below.
+                _remote="$(DOTFILES_JJ_SHIM="$BASHPID $_handed"; exec "$_real" "${_pargs[@]:0:_pi}" config get git.push 2> /dev/null)" || _remote=""
+                _remote="${_remote:-origin}"
+            fi
+            "${BASH_SOURCE[0]%/*}/../scripts/omp-public-push" git --git-dir="$_gitdir" -- "$_remote" > /dev/null || exit 1
+        fi
     fi
 fi
 
@@ -133,31 +190,10 @@ fi
 # overrides it either way.
 _pre=()
 trailer_on() {
-    local d="" repo target="" a prev=""
-    for a in "$@"; do
-        [[ "$a" == -- ]] && break
-        case "$prev" in -R | --repository) d="$a" ;; esac
-        case "$a" in --repository=*) d="${a#*=}" ;; -R?*) d="${a#-R}" ;; esac
-        prev="$a"
-    done
-    d="${d:-$PWD}"
-    [[ "$d" == /* ]] || d="$PWD/$d"
-    d="${d%/}"
-    while [[ ! -d "$d/.jj" ]]; do
-        [[ -n "$d" ]] || return 0 # no jj repository: jj says so itself
-        d="${d%/*}"
-    done
-    repo="$d/.jj/repo"
-    if [[ -f "$repo" ]]; then # a secondary workspace names its repository
-        IFS= read -r target < "$repo" || true
-        [[ -n "$target" ]] || return 1
-        [[ "$target" == /* ]] || target="$d/.jj/$target"
-        repo="$target"
-        target=""
-    fi
-    IFS= read -r target < "$repo/store/git_target" 2> /dev/null || true
-    [[ -n "$target" ]] || return 0 # not git-backed, so no remote
-    [[ "$target" == /* ]] || target="$repo/store/$target"
+    local target rc=0
+    target="$(backing_git_dir "$@")" || rc=$?
+    ((rc != 2)) || return 0 # no git remote to ask about
+    ((rc == 0)) || return 1
     "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" git --git-dir="$target" > /dev/null 2>&1
 }
 if [[ ":${JJ_CONFIG:-}:" == *"/omp-attribution-"* ]]; then
@@ -168,7 +204,7 @@ if [[ ":${JJ_CONFIG:-}:" == *"/omp-attribution-"* ]]; then
             ;;
     esac
 fi
-unset _pargs _pi _parg
+unset _pargs _pi _parg _remote _dry _next _gitdir
 
 _add=0 _prev=""
 for _a in "$@"; do
