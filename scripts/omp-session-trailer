@@ -5,27 +5,21 @@
 # jj command that can write a description (`shims/AGENTS.md`).
 #
 # The trailer names an agent session, and the published release repositories of the
-# owners in PUBLISHING_OWNERS must not carry one: theorem-labs' public repositories
-# (oss-verify, oss-verify-proofs, rocq, …) gathered dozens before this check existed. So
-# the trailer is left off when any github.com remote of the repository belongs to one of
-# those owners and GitHub says the repository is public, or GitHub cannot say: any
-# remote, not only origin, because a commit made against a private origin is pushed to
-# the public remote beside it. Every other repository keeps it; Sami's own public
-# repositories use it on purpose (Legion's Delivery page, scripts/pr-gate, session
-# attribution). `git config omp.sessionTrailer true|false` decides before any of this.
-#
-# Public is what an anonymous api.github.com request can read: 200 is public, 404 is
-# not (private, internal, or gone). A rate-limited anonymous request (403/429) asks the
-# GitHub App through `gh api` instead. An answer is cached under
-# ~/.cache/omp/github-visibility/<owner>/<repo>: a private or internal one for 5
-# minutes, since a repository can be made public at any time; a public one for 30,
-# since a public repository made private only loses attribution meanwhile; an unknown
-# one (offline, timeout, error) for 1, so a dead network costs one wait a minute rather
-# than one per commit. An unknown answer leaves the trailer off: attribution may be
-# absent, never leaked.
+# owners in PUBLISHING_OWNERS (scripts/github-visibility.bash) must not carry one:
+# theorem-labs' public repositories (oss-verify, oss-verify-proofs, rocq, …) gathered
+# dozens before this check existed. So the trailer is left off when any github.com remote
+# of the repository belongs to one of those owners and GitHub says the repository is
+# public, or GitHub cannot say: any remote, not only origin, because a commit made against
+# a private origin is pushed to the public remote beside it. Every other repository keeps
+# it; Sami's own public repositories use it on purpose (Legion's Delivery page,
+# scripts/pr-gate, session attribution). `git config omp.sessionTrailer true|false`
+# decides before any of this. The visibility answer and its cache come from
+# scripts/github-visibility.bash: an unknown answer leaves the trailer off, so
+# attribution may be absent, never leaked.
 set -euo pipefail
 
-PUBLISHING_OWNERS=(theorem-labs)
+# shellcheck source=github-visibility.bash
+source "${BASH_SOURCE[0]%/*}/github-visibility.bash"
 
 git=("$@")
 case "$("${git[@]}" config --type=bool --get omp.sessionTrailer 2>/dev/null || true)" in
@@ -34,56 +28,18 @@ case "$("${git[@]}" config --type=bool --get omp.sessionTrailer 2>/dev/null || t
 esac
 
 # `git remote -v` prints each remote's fetch and push URL after insteadOf rewriting.
-github_re='^([a-z+]+://)?([^@/]+@)?(ssh\.)?github\.com(:443)?[:/]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/?$'
-slugs=()
+urls=()
 while read -r _name url _kind; do
-    [[ "$url" =~ $github_re ]] || continue
-    owner="${BASH_REMATCH[5],,}"
-    repo="${BASH_REMATCH[6],,}"
-    repo="${repo%.git}"
-    for o in "${PUBLISHING_OWNERS[@]}"; do
-        [[ "$owner" == "$o" ]] || continue
-        [[ " ${slugs[*]} " == *" $owner/$repo "* ]] || slugs+=("$owner/$repo")
-    done
+    urls+=("$url")
 done < <("${git[@]}" remote -v 2>/dev/null || true)
+mapfile -t slugs < <(publishing_slugs "${urls[@]}")
 if ((${#slugs[@]} == 0)); then
     echo "on: no github.com remote owned by ${PUBLISHING_OWNERS[*]}"
     exit 0
 fi
 
-cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/omp/github-visibility"
-visibility() {
-    local slug="$1" file="$cache_root/$1" at answer code
-    if read -r at answer 2> /dev/null < "$file"; then
-        local ttl=60
-        case "$answer" in
-            public) ttl=1800 ;;
-            private | internal) ttl=300 ;;
-        esac
-        if [[ "$at" =~ ^[0-9]+$ ]] && ((EPOCHSECONDS - at < ttl)); then
-            echo "$answer"
-            return
-        fi
-    fi
-    code="$(curl -s -L -o /dev/null -w '%{http_code}' --max-time 2 \
-        -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$slug" 2> /dev/null || true)"
-    case "$code" in
-        200) answer=public ;;
-        404) answer=private ;;
-        403 | 429)
-            answer="$(timeout 3 gh api "repos/$slug" --jq .visibility 2> /dev/null < /dev/null || true)"
-            [[ "$answer" == public || "$answer" == private || "$answer" == internal ]] || answer=unknown
-            ;;
-        *) answer=unknown ;;
-    esac
-    if mkdir -p "${file%/*}" 2> /dev/null; then
-        printf '%s %s\n' "$EPOCHSECONDS" "$answer" > "$file.$$" 2> /dev/null && mv -f "$file.$$" "$file" 2> /dev/null || rm -f "$file.$$"
-    fi
-    echo "$answer"
-}
-
 for slug in "${slugs[@]}"; do
-    answer="$(visibility "$slug")"
+    answer="$(github_visibility "$slug")"
     case "$answer" in
         private | internal) ;;
         *) echo "off: github.com/$slug is $answer"; exit 1 ;;

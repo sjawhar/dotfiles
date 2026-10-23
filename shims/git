@@ -1,8 +1,9 @@
 #!/bin/bash
 # git-worktree-shim: in an agent session, refuse a bare `git worktree prune`, lock
-# every `git worktree add`, unlock a lock of ours before `git worktree remove`, and
+# every `git worktree add`, unlock a lock of ours before `git worktree remove`,
 # give every `git commit` from an omp session its Omp-Session trailer, except in a
-# public theorem-labs repository.
+# public theorem-labs repository, and refuse a `git push` to a public theorem-labs
+# repository unless the checkout sets omp.publicPush.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -97,6 +98,46 @@ done
 if [[ "${args[i]:-}" == commit && "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
     "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
     exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
+fi
+
+# A push from an agent session to a public repository of a PUBLISHING_OWNERS owner
+# (theorem-labs, whose public repositories are its releases) is refused unless the
+# checkout opts in with `git config omp.publicPush true`; scripts/omp-public-push
+# decides, on the remote git would push to: the repository argument (a remote name
+# or a URL), `--repo`, or with neither the branch's push remote as git resolves it.
+# A dry run passes. Only `git push` itself is seen, not one through an alias, and
+# `gh api` writes never pass through git.
+if [[ "${args[i]:-}" == push ]]; then
+    positional="" repo_opt="" dry=0 next="" dashdash=0
+    for a in "${args[@]:i+1}"; do
+        if [[ -n "$next" ]]; then
+            [[ "$next" == repo ]] && repo_opt="$a"
+            next=""
+            continue
+        fi
+        if ((!dashdash)); then
+            case "$a" in
+                --) dashdash=1; continue ;;
+                -n | --dry-run) dry=1; continue ;;
+                --repo) next=repo; continue ;;
+                --repo=*) repo_opt="${a#--repo=}"; continue ;;
+                -o | --push-option | --receive-pack | --exec) next=value; continue ;;
+                --*) continue ;;
+                -?*)
+                    # A cluster of short flags; -o takes the rest of it as its value.
+                    a="${a#-}"
+                    [[ "${a%%o*}" == *n* ]] && dry=1
+                    [[ "$a" == *o ]] && next=value
+                    continue
+                    ;;
+            esac
+        fi
+        [[ -n "$positional" ]] || positional="$a"
+    done
+    if ((!dry)) && ! "${BASH_SOURCE[0]%/*}/../scripts/omp-public-push" "$_real" "${args[@]:0:i}" -- "${positional:-$repo_opt}" > /dev/null; then
+        exit 1
+    fi
+    exec "$_real" "$@"
 fi
 [[ "${args[i]:-}" == worktree ]] || exec "$_real" "$@"
 verb="${args[i + 1]:-}"

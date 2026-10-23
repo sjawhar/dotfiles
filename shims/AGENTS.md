@@ -19,7 +19,10 @@ before handing the call to the real one.
   `builtin_immutable_heads()`: the session overlay's cross-session guard (AGENTC-318) tells a
   session's own commits by their trailer, so it is off there, and another session's unpushed
   commits in such a repository can be rewritten without `--ignore-immutable`. Read-only commands
-  (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`, …) skip the check.
+  (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`, …) skip the check. In an agent session it
+  refuses `jj git push --deleted`, and refuses `jj git push` to a public theorem-labs repository
+  as `git push` does (below), judging `--remote`, else jj's `git.push` setting, else origin, with
+  the opt-in read from the backing git repository's config.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration, and gives every
   `git commit` from an omp session its `Omp-Session` trailer unless `scripts/omp-session-trailer`
@@ -31,6 +34,16 @@ before handing the call to the real one.
   cached per owner/repo under `~/.cache/omp/github-visibility/` (5 minutes for private, 30 for
   public, 1 for unknown); a commit pays about 7 ms for the check with a warm cache and about 50 ms
   more with a cold one. `omp-session-trailer git` in a repository prints why.
+  It also refuses a `git push` from an agent session to a public repository of a
+  `PUBLISHING_OWNERS` owner, or one whose visibility GitHub cannot report, unless the checkout
+  opts in with `git config omp.publicPush true` (`scripts/omp-public-push` decides). The target
+  is the remote git would push to: the repository argument, a remote name or a URL, else
+  `--repo`, else the branch's `pushRemote`, `remote.pushDefault`, the branch's remote or origin;
+  a remote counts when any of its URLs or pushurls, as written or after `insteadOf`, names such a
+  repository. A dry run (`-n`, `--dry-run`) passes. Both checks share `PUBLISHING_OWNERS` and the
+  visibility cache through `scripts/github-visibility.bash`. A push pays about 10 ms for it with
+  a warm cache; every other git command pays nothing. A push through a git alias is not seen,
+  and `gh api` writes (contents PUT, `git/refs`) never pass through git.
 - **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights
   and a named profile's links, then execs omp through `scripts/agent-session` (below). It sets no
   Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys
