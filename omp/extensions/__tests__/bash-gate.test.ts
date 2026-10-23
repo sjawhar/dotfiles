@@ -53,7 +53,7 @@ describe("the refusal", () => {
 		const reason = run("ls d && cat f", false) ?? "";
 		expect(reason).toContain("`cat f`");
 		expect(reason).toContain("`read`");
-		expect(reason).toContain("other steps with bash");
+		expect(reason).toContain("No step of this command ran. Run the command's other steps with bash");
 		expect(reason).toEndWith("Original command: ls d && cat f");
 	});
 	test("for a single-step command, does not mention other steps", () => {

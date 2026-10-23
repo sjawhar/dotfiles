@@ -56,7 +56,7 @@ export function intercept(omp: Interceptor, input: Record<string, unknown>, rule
 			const scope = leadingOnly && READ_ONLY_TOOLS[rule.tool] ? (omp.segments(candidate)[0]?.text ?? candidate) : candidate;
 			if (!omp.check(scope, tools, [rule]).block) continue;
 			const step = blockedStep(omp, scope, tools, rule);
-			const others = step === raw.trim() ? "" : "\n\nRun the command's other steps with bash, without that one.";
+			const others = step === raw.trim() ? "" : "\n\nNo step of this command ran. Run the command's other steps with bash, without that one.";
 			return `Blocked: \`${step}\` has a dedicated tool, \`${rule.tool}\`. ${rule.message}${others}\n\nOriginal command: ${raw}`;
 		}
 	}
