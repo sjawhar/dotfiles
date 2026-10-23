@@ -14,8 +14,14 @@ Direct usage prints a raw installation token:
   gh-app-token <profile> [--owner <login>]
 
 A returned installation token comes from a cache and may have as little as five minutes
-left (TOKEN_REFRESH_MARGIN). A caller that copies it elsewhere refreshes the copy at least
-every four minutes, or asks again just before each use.
+left (TOKEN_REFRESH_MARGIN). A caller that holds it longer sets GH_APP_TOKEN_MIN_LIFETIME
+to the seconds it needs: a cached token with less life left than that is not reused, and a
+freshly minted one (an hour) is returned instead. `knives gh` sets it for each gh call it
+runs, because gh reads its token once and keeps it for the whole call: a `gh run watch`
+handed a cached token with twelve minutes left failed with 401 Bad credentials twelve
+minutes in (2026-10-22). A fresh mint is returned whatever the request: GitHub issues an
+installation token for one hour, so asking for an hour (as a watch does) means a fresh token,
+never a loop, and a caller needing more than that hour asks again.
 
 A profile lives in git config and needs the app and its key; a fallback secret
 is optional:
@@ -58,6 +64,7 @@ from typing import Any
 
 CACHE_DIR = Path.home() / ".cache" / "gh-app-token"
 TOKEN_REFRESH_MARGIN = 300  # Refresh five minutes before expiry.
+MIN_LIFETIME_ENV = "GH_APP_TOKEN_MIN_LIFETIME"
 INSTALLATION_CACHE_TTL = 24 * 60 * 60
 
 
@@ -146,14 +153,27 @@ def token_cache_file(profile: str, owner: str) -> Path:
     return CACHE_DIR / f"token-{cache_component(profile)}--{cache_component(owner)}.json"
 
 
-def get_cached_token(profile: str, owner: str) -> str | None:
+def required_lifetime() -> int:
+    """Seconds a returned token must stay valid: the caller's GH_APP_TOKEN_MIN_LIFETIME,
+    never less than TOKEN_REFRESH_MARGIN."""
+    raw = os.environ.get(MIN_LIFETIME_ENV, "")
+    if not raw:
+        return TOKEN_REFRESH_MARGIN
+    try:
+        requested = int(raw)
+    except ValueError:
+        raise AppTokenError(f"{MIN_LIFETIME_ENV} must be a whole number of seconds, not {raw!r}") from None
+    return max(TOKEN_REFRESH_MARGIN, requested)
+
+
+def get_cached_token(profile: str, owner: str, min_lifetime: int = TOKEN_REFRESH_MARGIN) -> str | None:
     cache_file = token_cache_file(profile, owner)
     if not cache_file.exists():
         return None
     try:
         data = json.loads(cache_file.read_text())
         expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
-        if (expires_at - datetime.now(timezone.utc)).total_seconds() > TOKEN_REFRESH_MARGIN:
+        if (expires_at - datetime.now(timezone.utc)).total_seconds() > min_lifetime:
             return data["token"]
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
@@ -356,10 +376,11 @@ def select_owner(explicit_owner: str | None, request: dict[str, str]) -> str | N
     return explicit_owner or os.environ.get("GH_APP_OWNER") or path_owner or None
 
 
-def get_token(profile: str, owner: str) -> str:
-    """Return a token for one owner, never reusing another owner's cache."""
+def get_token(profile: str, owner: str, min_lifetime: int = TOKEN_REFRESH_MARGIN) -> str:
+    """Return a token for one owner, never reusing another owner's cache, and never a
+    cached one with min_lifetime seconds or less left."""
     owner = owner.casefold()
-    cached_token = get_cached_token(profile, owner)
+    cached_token = get_cached_token(profile, owner, min_lifetime)
     if cached_token:
         return cached_token
 
@@ -426,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         try:
-            token = get_token(args.profile, owner)
+            token = get_token(args.profile, owner, required_lifetime())
             decision = "app"
         except UninstalledOwnerError:
             token = fallback_token(args.profile, owner)
