@@ -185,6 +185,46 @@ class GcloudRouting(unittest.TestCase):
         self.assertEqual(result.stderr.count("\n"), 2)
         self.assertIn("box's ADC stays its own identity", result.stderr)
 
+    def test_value_taking_global_flags_preserve_box_login_protection(self):
+        cases = (
+            (
+                ["--project", "autoformalization", "auth", "login", "--update-adc"],
+                ["--project", "autoformalization", "auth", "login"],
+            ),
+            (["--account", "sami@theorem.dev", "auth", "login"], None),
+            (["--format", "json", "auth", "login"], None),
+        )
+
+        for args, expected_args in cases:
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=theorem", result.stdout)
+                self.assertIn("routing auth login", result.stderr)
+                self.assertEqual(stub_argv(result), expected_args or args)
+
+    def test_external_adc_refusal_ignores_explicit_configuration_flag(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        for operation in ("login", "revoke"):
+            with self.subTest(operation=operation):
+                result = self.run_shim(
+                    args=["--configuration", "theorem", "auth", "application-default", operation]
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("gcloud auth login", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_unknown_leading_global_flag_fails_closed_for_external_adc(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        result = self.run_shim(
+            args=["--future-global-flag", "value", "auth", "application-default", "login"]
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unknown leading global flag", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_update_adc_is_unchanged_when_box_auth_login_bypasses_routing(self):
         bypasses = (
             ({}, ["--configuration", "box", "auth", "login", "--update-adc"]),
