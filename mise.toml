@@ -46,6 +46,13 @@ idiomatic_version_file_enable_tools = ["rust"]
 [settings.upgrade]
 auto_prune = false
 
+# mise's GitHub API calls (release lookups) need a token: this box exhausts the shared 60/h
+# anonymous limit. gh-app-token mints the box's GitHub App installation token, which lives one
+# hour, so it is fetched per mise run here rather than exported once by .bashrc, where a
+# days-old session held an expired token. A failed command falls back to gh's own login.
+[settings.github]
+credential_command = "gh-app-token agent --owner sjawhar"
+
 [tools]
 "github:sjawhar/jj" = "0.46.0-sami.20261008-234600"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166 + sparse paths skip-worktree in colocated Git indexes; #10129 and #10127 dropped
 "github:sjawhar/knives" = "3.1.7"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
@@ -54,7 +61,7 @@ auto_prune = false
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
-"github:syncthing/syncthing" = "2.1.3"  # was "latest"; pinned 2026-10-05 after measuring this box exhausting the unauthenticated GitHub API quota (see MISE_GITHUB_TOKEN in .bashrc) partly from floating resolution checks across this file's several "latest" tools
+"github:syncthing/syncthing" = "2.1.3"  # was "latest"; pinned 2026-10-05 after measuring this box exhausting the unauthenticated GitHub API quota (see [settings.github] above) partly from floating resolution checks across this file's several "latest" tools
 "github:tmux/tmux-builds" = "3.7b"
 bat = "0.26.1"      # Cat with syntax highlighting
 bun = "1.4.2"
@@ -167,11 +174,10 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # when grants are live; a restart drops every live grant). Bump this and
 # restart in the same command - 2026-09-21 a "latest" client rolled to 3.3.1
 # under a 3.2.3 daemon and every human-tier request from every box failed
-# VersionMismatch. mise needs GITHUB_TOKEN for the release lookup (the
+# VersionMismatch. mise needs a GitHub token for the release lookup (the
 # unauthenticated API limit is 60/h and this machine exhausts it) --
-# MISE_GITHUB_TOKEN in .bashrc supplies one (gh-app-token, the same credential
-# git's own GitHub App routing uses), fixed 2026-10-05 after measuring this
-# box at 0/60 remaining.
+# [settings.github] credential_command above supplies one (gh-app-token, the same
+# credential git's own GitHub App routing uses).
 version = "3.3.1"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
