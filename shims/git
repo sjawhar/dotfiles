@@ -88,8 +88,11 @@ done
 # they would without it, and `ifexists=addIfDifferent` keeps an amend from
 # repeating it. A missing or malformed id adds nothing: attribution may be
 # absent, never wrong. Only `git commit` itself is seen: a commit made through an
-# alias, a merge, a cherry-pick or `git commit-tree` carries no trailer.
-if [[ "${args[i]:-}" == commit && "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+# alias, a merge, a cherry-pick or `git commit-tree` carries no trailer. A
+# repository whose commits go to a public fork opts out with
+# `git config omp.sessionTrailer false`.
+if [[ "${args[i]:-}" == commit && "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
+    [[ "$("$_real" "${args[@]:0:i}" config --type=bool --get omp.sessionTrailer 2>/dev/null)" != false ]]; then
     exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
 fi
 [[ "${args[i]:-}" == worktree ]] || exec "$_real" "$@"
