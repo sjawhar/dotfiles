@@ -5,16 +5,26 @@ description: Use when running gcloud compute ssh or scp against several VMs, or 
 
 # Using gcloud
 
+## Which identity gcloud uses
+
+On an Azure VM enrolled in the box identity (`installers/gcloud-box.sh`, run by `devbox/install.sh`), gcloud and the application default credentials (ADC) act as the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`. Its active configuration is `box` (project `autoformalization`). It needs no sign-in and does not expire. Client libraries (Python `google-cloud-storage`) use it too.
+
+Sami's own Google login is in the configuration `theorem`. Use it only for admin work, or for a step that fails as the box with a permission error (example: a push to `us-east1-docker.pkg.dev/gcp-taiga`):
+
+- gcloud: `gcloud --configuration theorem …` or `GCLOUD_ACCOUNT=theorem gcloud …`.
+- Client libraries: `GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/legacy_credentials/sami@theorem.dev/adc.json`.
+
+Never change the active configuration or the ADC file to get Sami's login: every session on the machine uses them.
+
 ## Expired login ("Reauthentication failed")
 
-On sami-rocqperf, gcloud uses Sami's Google login. It expires about once each day.
+Sami's login expires about once each day. As the box you do not see this error.
 
-1. Retry as the box account, which does not expire: `GCLOUD_ACCOUNT=box gcloud … --project <project>`. Name the project, because `box` defaults to `theorem-agent-infra`. The box account reaches some projects and not others.
-2. Scripts that set their own configuration (`CLOUDSDK_ACTIVE_CONFIG_NAME=theorem`) and client libraries (Python `google-cloud-storage`) ignore `GCLOUD_ACCOUNT`. For these, set `CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box` and `GOOGLE_APPLICATION_CREDENTIALS=/mnt/nvme/sami/boxid/box-cred.json`. Every configuration in `gcloud-box` uses the box account.
-3. For a build or measurement machine, do not ask Sami to log in. Use `az vm create` (resource group `sami`, location `westus2`). `az` needs no daily login.
-4. Only a step that needs Google and fails as `box` with a permission error waits for Sami's login (example: a push to `us-east1-docker.pkg.dev/gcp-taiga`):
-   - Start the login yourself. Do not ask Sami to run it. In a terminal that stays open (`tmux`), run `gcloud auth login --no-launch-browser`. For a client library, also run `gcloud auth application-default login --no-launch-browser`.
-   - Put each printed link and the `box` error in the open Dispatch re-login ask. Do not open a new ask. If the ask has a link from another session, add only your need.
+1. If the command does not need Sami's login, run it without `--configuration theorem` or `GCLOUD_ACCOUNT=theorem`.
+2. For a build or measurement machine, do not ask Sami to log in. Use `az vm create` (resource group `sami`, location `westus2`). `az` needs no daily login.
+3. When a step needs Sami's login:
+   - Start the login yourself. Do not ask Sami to run it. In a terminal that stays open (`tmux`), run `gcloud --configuration theorem auth login --no-launch-browser`. It also renews `legacy_credentials/sami@theorem.dev/adc.json` for client libraries. Never add `--update-adc` or run `gcloud auth application-default login`: both replace the box's ADC.
+   - Put each printed link and the box error in the open Dispatch re-login ask. Do not open a new ask. If the ask has a link from another session, add only your need.
    - Type the code from Sami's answer into the waiting command.
 
 ## Host keys: one gcloud ssh call at a time

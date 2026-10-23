@@ -29,4 +29,8 @@ bash "${DOTFILES_DIR}/installers/omp-embed.sh"
 # registers them and enrolls their boxes (see installers/agent-secrets.sh).
 bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 
+# On an Azure VM enrolled in box-identity, gcloud and ADC act as dev-sjawhar with no
+# sign-in; Sami's login stays in configuration `theorem` (see installers/gcloud-box.sh).
+bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
+
 echo "--- Devbox setup complete ---"
