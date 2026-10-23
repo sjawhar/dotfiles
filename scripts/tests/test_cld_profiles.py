@@ -85,10 +85,28 @@ class CldProfiles(unittest.TestCase):
         fields = self.fields(result)
         return fields["CONFIG"], fields["ARGS"]
 
-    def test_default_profile_reaches_claude_through_the_hawk_gateway(self) -> None:
+    def test_default_profile_keeps_its_own_login_without_cld_settings(self) -> None:
         for args in ((), ("--profile", "default")):
             with self.subTest(args=args):
                 fields = self.fields(self.cld(*args, "-p", "hi"))
+                self.assertEqual(fields["SETTINGS"], "unset")
+                self.assertTrue(fields["ARGS"].endswith("-p hi"), fields["ARGS"])
+
+    def test_a_profiles_cld_settings_is_its_model_route(self) -> None:
+        """The trajectory profile's own file wins over its Hawk gateway too."""
+        for name, args in (("default", ()), ("theorem", ("--profile", "theorem")), ("trajectory", ("--profile", "trajectory"))):
+            directory = self.canonical if name == "default" else self.dotfiles / ".claude-profiles" / name
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "cld-settings.json").write_text('{"apiKeyHelper": "x"}', encoding="utf-8")
+            with self.subTest(name):
+                self.assertEqual(self.fields(self.cld(*args))["SETTINGS"], str(directory / "cld-settings.json"))
+
+    def test_trajectory_profile_reaches_claude_through_the_hawk_gateway(self) -> None:
+        trajectory = str(self.dotfiles / ".claude-profiles" / "trajectory")
+        for name, args, extra in (("flag", ("--profile", "trajectory"), {}), ("inherited", (), {"CLAUDE_CONFIG_DIR": trajectory})):
+            with self.subTest(name):
+                fields = self.fields(self.cld(*args, "-p", "hi", **extra))
+                self.assertEqual(fields["CONFIG"], trajectory)
                 self.assertEqual(
                     json.loads(fields["SETTINGS"]),
                     {"apiKeyHelper": str(self.dotfiles / "scripts" / "hawk-token"), "env": {"ANTHROPIC_BASE_URL": GATEWAY}},

@@ -21,6 +21,32 @@ if [ -d "${DOTFILES_DIR}/.claude/skills" ] && [ ! -L "${DOTFILES_DIR}/.claude/sk
     rm -rf "${DOTFILES_DIR}/.claude/skills"
 fi
 
+# A default cld session reads .claude/envoy.json and has no Dispatch or Envoy without one
+# (envoy/AGENTS.md): link it to the neutral file this machine's Dispatch and Envoy setup wrote.
+envoy_json="${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json"
+if [ -f "$envoy_json" ]; then
+    ensure_link "$envoy_json" "${DOTFILES_DIR}/.claude/envoy.json"
+fi
+
+# cld asks for the claude-envoy channel with --channels, which Claude Code loads only when managed
+# settings turn channels on and allowlist the plugin (agent-infra docs/joining.md). Managed settings
+# are machine-wide, so this merges into a file that is already there rather than replacing it.
+case "$(uname -s)" in
+    Darwin) managed="/Library/Application Support/ClaudeCode/managed-settings.json" ;;
+    *) managed=/etc/claude-code/managed-settings.json ;;
+esac
+channel='{"marketplace": "legion-plugins", "plugin": "claude-envoy"}'
+current='{}'
+[ -f "$managed" ] && current=$(jq . "$managed")
+if ! jq -e --argjson c "$channel" '.channelsEnabled == true and any((.allowedChannelPlugins // [])[]; . == $c)' \
+    <<<"$current" >/dev/null; then
+    sudo mkdir -p "$(dirname "$managed")"
+    jq --argjson c "$channel" '.channelsEnabled = true | .allowedChannelPlugins = ((.allowedChannelPlugins // []) + [$c] | unique)' \
+        <<<"$current" | sudo tee "$managed" >/dev/null
+    sudo chmod 644 "$managed"
+    echo "Wrote $managed: Claude Code channels on, claude-envoy@legion-plugins allowlisted."
+fi
+
 if [ -t 0 ]; then
     echo
     echo "If you haven't installed the sjawhar plugin in Claude Code yet, run:"
