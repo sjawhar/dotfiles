@@ -13,10 +13,24 @@ before handing the call to the real one.
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
   (`scripts/docs-pr-gate`).
-- **`jj`** locks the git worktree of every workspace `jj workspace add` creates.
+- **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and in a
+  repository where `scripts/omp-session-trailer` says no (below) runs every command that can write
+  a description with `templates.commit_trailers` empty and `immutable_heads()` back at
+  `builtin_immutable_heads()`: the session overlay's cross-session guard (AGENTC-318) tells a
+  session's own commits by their trailer, so it is off there, and another session's unpushed
+  commits in such a repository can be rewritten without `--ignore-immutable`. Read-only commands
+  (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`, …) skip the check.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration, and gives every
-  `git commit` from an omp session its `Omp-Session` trailer.
+  `git commit` from an omp session its `Omp-Session` trailer unless `scripts/omp-session-trailer`
+  says no. It says no for a repository with a github.com remote owned by one of its
+  `PUBLISHING_OWNERS` (theorem-labs, whose public repositories are its published releases) that
+  GitHub reports public, or cannot report on (offline, error, a 2 s timeout); every other
+  repository, Sami's own public ones included, keeps the trailer. `git config omp.sessionTrailer
+  true|false` decides before it, for jj too (the backing git repository's config). The answer is
+  cached per owner/repo under `~/.cache/omp/github-visibility/` (5 minutes for private, 30 for
+  public, 1 for unknown); a commit pays about 7 ms for the check with a warm cache and about 50 ms
+  more with a cold one. `omp-session-trailer git` in a repository prints why.
 - **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights
   and a named profile's links, then execs omp through `scripts/agent-session` (below). It sets no
   Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys

@@ -1,7 +1,8 @@
 #!/bin/bash
 # git-worktree-shim: in an agent session, refuse a bare `git worktree prune`, lock
 # every `git worktree add`, unlock a lock of ours before `git worktree remove`, and
-# give every `git commit` from an omp session its Omp-Session trailer.
+# give every `git commit` from an omp session its Omp-Session trailer, except in a
+# public theorem-labs repository.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -88,11 +89,13 @@ done
 # they would without it, and `ifexists=addIfDifferent` keeps an amend from
 # repeating it. A missing or malformed id adds nothing: attribution may be
 # absent, never wrong. Only `git commit` itself is seen: a commit made through an
-# alias, a merge, a cherry-pick or `git commit-tree` carries no trailer. A
-# repository whose commits go to a public fork opts out with
-# `git config omp.sessionTrailer false`.
+# alias, a merge, a cherry-pick or `git commit-tree` carries no trailer.
+# scripts/omp-session-trailer decides per repository: none in a repository of an
+# owner its PUBLISHING_OWNERS names (theorem-labs, whose public repositories are
+# its releases) that GitHub says is public or cannot say is not;
+# `git config omp.sessionTrailer true|false` overrides it either way.
 if [[ "${args[i]:-}" == commit && "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
-    [[ "$("$_real" "${args[@]:0:i}" config --type=bool --get omp.sessionTrailer 2>/dev/null)" != false ]]; then
+    "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
     exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
 fi
 [[ "${args[i]:-}" == worktree ]] || exec "$_real" "$@"

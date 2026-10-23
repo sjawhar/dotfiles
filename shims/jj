@@ -3,8 +3,9 @@
 # its git worktree locked. From inside an agent box every other box's workspace
 # path looks missing, and an unlocked registration under <store>/.git/worktrees/
 # can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
-# still removes it. In an agent session `jj git push --deleted` is also refused
-# (see below). Everything else goes straight to the real jj.
+# still removes it. In an agent session `jj git push --deleted` is also refused,
+# and in a public theorem-labs repository the session's Omp-Session trailer is
+# dropped (both below). Everything else goes straight to the real jj.
 set -euo pipefail
 
 # A jj that hands the call to the first jj on PATH re-enters this shim in the same
@@ -82,18 +83,18 @@ agent_context() {
     done
     return 1
 }
+# Locate the subcommand past jj's global options, same approach as shims/git's
+# search for `worktree`.
+_pargs=("$@")
+_pi=0
+while ((_pi < ${#_pargs[@]})); do
+    case "${_pargs[_pi]}" in
+        -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
+        -*) _pi=$((_pi + 1)) ;;
+        *) break ;;
+    esac
+done
 if agent_context; then
-    # Locate the `git push` subcommand past jj's global options, same
-    # approach as shims/git's search for `worktree`.
-    _pargs=("$@")
-    _pi=0
-    while ((_pi < ${#_pargs[@]})); do
-        case "${_pargs[_pi]}" in
-            -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
-            -*) _pi=$((_pi + 1)) ;;
-            *) break ;;
-        esac
-    done
     if [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
         for _parg in "${_pargs[@]:_pi+2}"; do
             [[ "$_parg" == -- ]] && break
@@ -113,15 +114,68 @@ EOF
             fi
         done
     fi
-    unset _pargs _pi _parg
 fi
+
+# The Omp-Session trailer comes from an `omp-attribution-*.toml` overlay in
+# JJ_CONFIG (omp/extensions/session-env.ts, or the Legion extension), which jj
+# cannot make conditional on a remote. So the shim asks
+# scripts/omp-session-trailer, as shims/git does, about the repository's backing
+# git repository, and where it says no (a public repository of one of its
+# PUBLISHING_OWNERS, theorem-labs) runs jj with `templates.commit_trailers` empty.
+# That call also takes `immutable_heads()` back to `builtin_immutable_heads()`:
+# session-env.ts's cross-session guard (AGENTC-318) tells a session's own commits
+# by their trailer, so without one every commit the session describes would be
+# immutable to it. The guard is therefore off in those repositories: another
+# session's unpushed commits there can be rewritten without --ignore-immutable.
+# Commands that never write a description skip the check, which costs a few
+# milliseconds with the answer cached; any other command, an alias included,
+# pays it. `git config omp.sessionTrailer true|false` in the backing repository
+# overrides it either way.
+_pre=()
+trailer_on() {
+    local d="" repo target="" a prev=""
+    for a in "$@"; do
+        [[ "$a" == -- ]] && break
+        case "$prev" in -R | --repository) d="$a" ;; esac
+        case "$a" in --repository=*) d="${a#*=}" ;; -R?*) d="${a#-R}" ;; esac
+        prev="$a"
+    done
+    d="${d:-$PWD}"
+    [[ "$d" == /* ]] || d="$PWD/$d"
+    d="${d%/}"
+    while [[ ! -d "$d/.jj" ]]; do
+        [[ -n "$d" ]] || return 0 # no jj repository: jj says so itself
+        d="${d%/*}"
+    done
+    repo="$d/.jj/repo"
+    if [[ -f "$repo" ]]; then # a secondary workspace names its repository
+        IFS= read -r target < "$repo" || true
+        [[ -n "$target" ]] || return 1
+        [[ "$target" == /* ]] || target="$d/.jj/$target"
+        repo="$target"
+        target=""
+    fi
+    IFS= read -r target < "$repo/store/git_target" 2> /dev/null || true
+    [[ -n "$target" ]] || return 0 # not git-backed, so no remote
+    [[ "$target" == /* ]] || target="$repo/store/$target"
+    "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" git --git-dir="$target" > /dev/null 2>&1
+}
+if [[ ":${JJ_CONFIG:-}:" == *"/omp-attribution-"* ]]; then
+    case "${_pargs[_pi]:-}" in
+        "" | log | st | status | show | diff | evolog | interdiff | op | help | config | version | root | file | bookmark | b | tag | workspace | sparse | util | git) ;;
+        *)
+            trailer_on "$@" || _pre=(--config 'templates.commit_trailers=""' --config 'revset-aliases."immutable_heads()"="builtin_immutable_heads()"')
+            ;;
+    esac
+fi
+unset _pargs _pi _parg
 
 _add=0 _prev=""
 for _a in "$@"; do
     if [[ "$_prev" == workspace && "$_a" == add ]]; then _add=1; break; fi
     _prev="$_a"
 done
-((_add)) || exec "$_real" "$@"
+((_add)) || exec "$_real" "${_pre[@]}" "$@"
 
 _err="$(mktemp)"
 trap 'rm -f "$_err"' EXIT

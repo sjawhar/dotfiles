@@ -14,6 +14,9 @@
 //     unpushed commit is immutable to this session (AGENTC-318, approved by
 //     Sami 2026-09-18): `abandon`/`rebase`/`squash` on another lane's commits
 //     fails without `--ignore-immutable`, the same guard that protects main.
+//     In a public theorem-labs repository shims/jj drops both for its call
+//     (scripts/omp-session-trailer, shims/AGENTS.md): no trailer there, and
+//     so no guard, which tells a session's own commits by that trailer.
 //     The revset guards the frontier — `ancestors(visible_heads(), 4)` minus
 //     everything already behind `builtin_immutable_heads()` (trunk, tags,
 //     untracked remote bookmarks: immutable either way, so dropping them
