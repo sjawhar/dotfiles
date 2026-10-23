@@ -34,19 +34,48 @@
 # fall through to a different one.
 set -euo pipefail
 
-# First non-flag argument, matching gcloud's own grammar: `gcloud [--flags]
-# auth login` parses the first non-flag token as the command group.
-first_arg() {
+# The command words drive both the box-login routing and ADC protection.
+# Value-taking global flags are from `gcloud --help` on the installed Cloud
+# SDK 589.0.0 (read 2026-10-23); that output lists every flag below.
+declare -a GCLOUD_COMMAND_WORDS=()
+
+parse_gcloud_command_path() {
+    GCLOUD_COMMAND_WORDS=()
     local arg
-    for arg in "$@"; do
-        [[ "$arg" == -* ]] && continue
-        printf '%s\n' "$arg"
-        return 0
+    while (($#)); do
+        arg="$1"
+        case "$arg" in
+            --account | --billing-project | --configuration | --flags-file | --flatten | --format | --project | --verbosity | --access-token-file | --impersonate-service-account | --trace-token)
+                [[ $# -ge 2 ]] || return 2
+                shift 2
+                ;;
+            --account=* | --billing-project=* | --configuration=* | --flags-file=* | --flatten=* | --format=* | --project=* | --verbosity=* | --access-token-file=* | --impersonate-service-account=* | --trace-token=*)
+                shift
+                ;;
+            --help | -h | --quiet | -q | --version | -v | --log-http | --user-output-enabled | --no-user-output-enabled)
+                shift
+                ;;
+            --)
+                return 2
+                ;;
+            -*)
+                # An unfamiliar flag before the command may take a separate
+                # value, so its command path is unknowable and ADC must fail closed.
+                [[ "${#GCLOUD_COMMAND_WORDS[@]}" -gt 0 ]] || return 2
+                shift
+                ;;
+            *)
+                GCLOUD_COMMAND_WORDS+=("$arg")
+                [[ "${#GCLOUD_COMMAND_WORDS[@]}" -ge 3 ]] && return 0
+                shift
+                ;;
+        esac
     done
+    return 0
 }
 
 needs_forward_browser() {
-    case "$(first_arg "$@")" in
+    case "${GCLOUD_COMMAND_WORDS[0]:-}" in
         auth | init) ;;
         *) return 1 ;;
     esac
@@ -76,36 +105,14 @@ has_credential_file_flag() {
 
 
 is_auth_login() {
-    local first="" second="" arg
-    for arg in "$@"; do
-        [[ "$arg" == -* ]] && continue
-        if [[ -z "$first" ]]; then
-            first="$arg"
-        else
-            second="$arg"
-            break
-        fi
-    done
-    [[ "$first" == auth && "$second" == login ]]
+    [[ "${GCLOUD_COMMAND_WORDS[0]:-}" == auth && "${GCLOUD_COMMAND_WORDS[1]:-}" == login ]]
 }
 
 application_default_operation() {
-    local first="" second="" third="" arg
-    for arg in "$@"; do
-        [[ "$arg" == -* ]] && continue
-        if [[ -z "$first" ]]; then
-            first="$arg"
-        elif [[ -z "$second" ]]; then
-            second="$arg"
-        else
-            third="$arg"
-            break
-        fi
-    done
-    [[ "$first" == auth && "$second" == application-default ]] || return 1
-    case "$third" in
+    [[ "${GCLOUD_COMMAND_WORDS[0]:-}" == auth && "${GCLOUD_COMMAND_WORDS[1]:-}" == application-default ]] || return 1
+    case "${GCLOUD_COMMAND_WORDS[2]:-}" in
         login | revoke)
-            printf '%s\n' "$third"
+            printf '%s\n' "${GCLOUD_COMMAND_WORDS[2]}"
             return 0
             ;;
     esac
@@ -163,14 +170,27 @@ main() {
     # split is load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
     real_gcloud="$(find_real_gcloud)"
 
-    local config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations"
-    local adc_operation
-    if adc_operation="$(application_default_operation "$@")" && is_external_account_adc; then
-        echo "gcloud shim: refusing auth application-default ${adc_operation}: the box's ADC is its own identity; run gcloud auth login, which renews legacy_credentials/<account>/adc.json; client libraries use it through GOOGLE_APPLICATION_CREDENTIALS." >&2
-        exit 1
+    local command_parse_status
+    if parse_gcloud_command_path "$@"; then
+        command_parse_status=0
+    else
+        command_parse_status=$?
     fi
 
-    if is_box_routed_auth_login "$@"; then
+    local config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations"
+    local adc_operation
+    if is_external_account_adc; then
+        if [[ "$command_parse_status" -eq 2 ]]; then
+            echo "gcloud shim: refusing command with an unknown leading global flag while the box ADC is an external_account credential; run gcloud auth login without that flag." >&2
+            exit 1
+        fi
+        if adc_operation="$(application_default_operation)"; then
+            echo "gcloud shim: refusing auth application-default ${adc_operation}: the box's ADC is its own identity; run gcloud auth login, which renews legacy_credentials/<account>/adc.json; client libraries use it through GOOGLE_APPLICATION_CREDENTIALS." >&2
+            exit 1
+        fi
+    fi
+
+    if [[ "$command_parse_status" -eq 0 ]] && is_box_routed_auth_login "$@"; then
         if [[ ! -f "${config_dir}/config_theorem" ]]; then
             echo "gcloud shim: configuration theorem is missing at ${config_dir}/config_theorem; create it with gcloud config configurations create theorem --no-activate." >&2
             exit 1
