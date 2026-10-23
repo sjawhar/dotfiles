@@ -293,6 +293,67 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIsNone(gh_app_token.get_cached_token("agent", "trajectory-labs-pbc"))
         self.assertIsNone(gh_app_token.get_cached_token("other-profile", "sjawhar"))
 
+    def test_a_cached_token_is_reused_only_with_the_life_the_caller_asks_for(self):
+        # Given: a cached token with twelve minutes left, the way a long `gh run watch`
+        # was handed one and failed with 401 twelve minutes in (2026-10-22).
+        token_data = {
+            "token": "cached-token",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=12)).isoformat(),
+        }
+        gh_app_token.write_cache_file(gh_app_token.token_cache_file("agent", "sjawhar"), token_data)
+        request = "host=github.com\npath=sjawhar/repo.git\n\n"
+        urlopen = fake_github()
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=urlopen):
+            # When: a caller asks with no lifetime, then for half an hour.
+            _, default_answer, _ = self.run_main(["agent", "get"], stdin=request)
+            with patch.dict(os.environ, {gh_app_token.MIN_LIFETIME_ENV: "1800"}):
+                _, long_answer, _ = self.run_main(["agent", "get"], stdin=request)
+        # Then: the default keeps the five-minute margin and reuses the cache; the
+        # half-hour caller gets a fresh mint, which replaces the cached token.
+        self.assertIn("password=cached-token", default_answer)
+        self.assertIn("password=token-111", long_answer)
+        self.assertEqual(sum("access_tokens" in url for url in urlopen.calls), 1)
+        self.assertEqual(gh_app_token.get_cached_token("agent", "sjawhar"), "token-111")
+
+    def test_an_hour_request_reuses_only_a_token_with_more_than_an_hour_left(self):
+        def cache(remaining):
+            gh_app_token.write_cache_file(
+                gh_app_token.token_cache_file("agent", "sjawhar"),
+                {
+                    "token": "cached-token",
+                    "expires_at": (datetime.now(timezone.utc) + remaining).isoformat(),
+                },
+            )
+
+        urlopen = fake_github()
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=urlopen):
+            with redirect_stderr(io.StringIO()):
+                # A token cached a second ago has just under an hour left: a watch's
+                # hour is a fresh mint, returned as is, with no loop.
+                cache(timedelta(minutes=59, seconds=59))
+                self.assertEqual(gh_app_token.get_token("agent", "sjawhar", 3600), "token-111")
+                # Only a token with more than the hour left is reused.
+                cache(timedelta(minutes=61))
+                self.assertEqual(gh_app_token.get_token("agent", "sjawhar", 3600), "cached-token")
+        self.assertEqual(sum("access_tokens" in url for url in urlopen.calls), 1)
+
+    def test_a_fresh_mint_is_returned_even_when_it_is_short_of_the_request(self):
+        # A caller asking for more than GitHub's hour gets the fresh token, not a loop.
+        urlopen = fake_github()
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=urlopen):
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(gh_app_token.get_token("agent", "sjawhar", 10**9), "token-111")
+        self.assertEqual(sum("access_tokens" in url for url in urlopen.calls), 1)
+
+    def test_a_malformed_min_lifetime_refuses(self):
+        with patch.dict(os.environ, {gh_app_token.MIN_LIFETIME_ENV: "an hour"}):
+            rc, stdout, stderr = self.run_main(
+                ["agent", "get"], stdin="host=github.com\npath=sjawhar/repo.git\n\n"
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("quit=1", stdout)
+        self.assertIn("GH_APP_TOKEN_MIN_LIFETIME must be a whole number", stderr)
+
     def test_stale_cached_installation_404_rediscovers_once(self):
         # Prime the cache with an installation id that no longer mints.
         with patch.object(
