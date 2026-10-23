@@ -28,8 +28,10 @@ def shake_regions(path, art):
     key = (str(path), art)
     if key not in _SHAKE_CACHE:
         regions, cur, buf = {}, None, []
-        f = artifact_dir(path) / f"{art}.shake.log"
-        if f.exists():
+        # A subagent's transcript sits inside its parent's artifact directory, and its shake logs are written
+        # there, beside it, not under a directory of its own.
+        f = next((p for p in (artifact_dir(path) / f"{art}.shake.log", Path(path).parent / f"{art}.shake.log") if p.exists()), None)
+        if f is not None:
             for line in f.read_text(errors="replace").splitlines():
                 m = re.match(r"### region (\d+) \(", line)
                 if m:
