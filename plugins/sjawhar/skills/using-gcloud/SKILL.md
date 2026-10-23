@@ -23,7 +23,8 @@ Sami's login expires about once each day. As the box you do not see this error.
 1. If the command does not need Sami's login, run it without `--configuration theorem` or `GCLOUD_ACCOUNT=theorem`.
 2. For a build or measurement machine, do not ask Sami to log in. Use `az vm create` (resource group `sami`, location `westus2`). `az` needs no daily login.
 3. When a step needs Sami's login:
-   - Start the login yourself. Do not ask Sami to run it. In a terminal that stays open (`tmux`), run `gcloud --configuration theorem auth login --no-launch-browser`. It also renews `legacy_credentials/sami@theorem.dev/adc.json` for client libraries. Never add `--update-adc` or run `gcloud auth application-default login`: both replace the box's ADC.
+   - Start the login yourself. Do not ask Sami to run it. In a terminal that stays open (`tmux`), run `gcloud auth login --no-launch-browser` with no `--configuration`, `GCLOUD_ACCOUNT` or `CLOUDSDK_ACTIVE_CONFIG_NAME`. While `box` is the active configuration, `shims/gcloud` routes this plain login to `theorem`, says so, and drops `--update-adc`, so the box's ADC stays its own identity. The login renews `legacy_credentials/sami@theorem.dev/adc.json`, the file client libraries use (above). `--cred-file` forms pass through untouched so the box credential can be stored.
+   - Do not run `gcloud auth application-default login` or `revoke` for this: the shim refuses both while the box's ADC is an `external_account` credential.
    - Put each printed link and the box error in the open Dispatch re-login ask. Do not open a new ask. If the ask has a link from another session, add only your need.
    - Type the code from Sami's answer into the waiting command.
 

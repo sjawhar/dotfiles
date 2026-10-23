@@ -26,6 +26,11 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def stub_argv(result: subprocess.CompletedProcess[str]) -> list[str]:
+    """The argv the stub gcloud received, one `ARG=` line per entry."""
+    return [line.removeprefix("ARG=") for line in result.stdout.splitlines() if line.startswith("ARG=")]
+
+
 class GcloudRouting(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -38,13 +43,15 @@ class GcloudRouting(unittest.TestCase):
             'echo "BROWSER=${BROWSER:-<unset>}"\n'
             'printf "ARG=%s\\n" "$@"',
         )
-        # Fake $HOME so the default configurations path
-        # ($HOME/.config/gcloud/configurations) never touches Sami's real one.
+        # Fake $HOME so the default config root ($HOME/.config/gcloud) never
+        # touches Sami's real one.
         self.fake_home = self.stub_dir / "home"
-        self.configs_dir = self.fake_home / ".config" / "gcloud" / "configurations"
+        self.cloudsdk_config = self.fake_home / ".config" / "gcloud"
+        self.configs_dir = self.cloudsdk_config / "configurations"
         self.configs_dir.mkdir(parents=True)
         for name in ("default", "gws-personal", "theorem"):
             (self.configs_dir / f"config_{name}").write_text("[core]\n", encoding="utf-8")
+        (self.cloudsdk_config / "active_config").write_text("box\n", encoding="utf-8")
         self.env = {
             "PATH": f"{self.stub_dir}:{SHIMS}:/usr/bin:/bin",
             "HOME": str(self.fake_home),
@@ -80,6 +87,147 @@ class GcloudRouting(unittest.TestCase):
         result = self.run_shim({"GCLOUD_ACCOUNT": "theorem"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CONFIG=theorem", result.stdout)
+
+    def test_box_auth_login_routes_to_theorem(self):
+        result = self.run_shim(args=["auth", "login"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertIn("configuration theorem", result.stderr)
+
+    def test_box_auth_login_uses_cloudsdk_config_override(self):
+        (self.cloudsdk_config / "active_config").write_text("default\n", encoding="utf-8")
+        override_root = self.stub_dir / "override-cloudsdk"
+        override_configs = override_root / "configurations"
+        override_configs.mkdir(parents=True)
+        (override_root / "active_config").write_text("box\n", encoding="utf-8")
+        (override_configs / "config_theorem").write_text("[core]\n", encoding="utf-8")
+
+        result = self.run_shim(
+            {"CLOUDSDK_CONFIG": str(override_root)},
+            args=["auth", "login"],
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertIn("configuration theorem", result.stderr)
+
+    def test_explicit_configuration_disables_box_auth_login_routing(self):
+        for args in (
+            ["--configuration", "box", "auth", "login"],
+            ["--configuration=box", "auth", "login"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=<unset>", result.stdout)
+                self.assertNotIn("routing auth login", result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_account_and_active_configuration_disable_box_auth_login_routing(self):
+        for extra_env in (
+            {"GCLOUD_ACCOUNT": "default"},
+            {"CLOUDSDK_ACTIVE_CONFIG_NAME": "default"},
+        ):
+            with self.subTest(extra_env=extra_env):
+                result = self.run_shim(extra_env, args=["auth", "login"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=default", result.stdout)
+                self.assertNotIn("routing auth login", result.stderr)
+
+    def test_credential_file_disables_box_auth_login_routing(self):
+        for args in (
+            ["auth", "login", "--cred-file=/tmp/credential.json"],
+            ["auth", "login", "--cred-file", "/tmp/credential.json"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=<unset>", result.stdout)
+                self.assertNotIn("routing auth login", result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_non_box_active_configuration_leaves_auth_login_untouched(self):
+        (self.cloudsdk_config / "active_config").write_text("default\n", encoding="utf-8")
+        result = self.run_shim(args=["auth", "login"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=<unset>", result.stdout)
+        self.assertNotIn("routing auth login", result.stderr)
+
+    def test_missing_theorem_configuration_fails_before_running_gcloud(self):
+        (self.configs_dir / "config_theorem").unlink()
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        result = self.run_shim(args=["auth", "login"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("gcloud config configurations create theorem --no-activate", result.stderr)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+
+    def test_non_auth_commands_containing_auth_words_are_untouched(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        for args in (
+            ["compute", "instances", "create", "auth", "login"],
+            ["compute", "instances", "create", "auth", "application-default", "login"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=<unset>", result.stdout)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_routed_login_removes_update_adc_and_keeps_other_arguments_in_order(self):
+        args = ["auth", "login", "--no-launch-browser", "--update-adc", "--project", "my-project"]
+        result = self.run_shim(args=args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertNotIn("ARG=--update-adc", result.stdout)
+        self.assertEqual(stub_argv(result), ["auth", "login", "--no-launch-browser", "--project", "my-project"])
+        self.assertEqual(result.stderr.count("\n"), 2)
+        self.assertIn("box's ADC stays its own identity", result.stderr)
+
+    def test_update_adc_is_unchanged_when_box_auth_login_bypasses_routing(self):
+        bypasses = (
+            ({}, ["--configuration", "box", "auth", "login", "--update-adc"]),
+            ({}, ["--configuration=box", "auth", "login", "--update-adc"]),
+            ({"GCLOUD_ACCOUNT": "default"}, ["auth", "login", "--update-adc"]),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "default"}, ["auth", "login", "--update-adc"]),
+            ({}, ["auth", "login", "--cred-file=/tmp/credential.json", "--update-adc"]),
+            ({}, ["auth", "login", "--cred-file", "/tmp/credential.json", "--update-adc"]),
+        )
+
+        for extra_env, args in bypasses:
+            with self.subTest(extra_env=extra_env, args=args):
+                result = self.run_shim(extra_env, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("routing auth login", result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_external_account_adc_refuses_application_default_login_and_revoke(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        for operation in ("login", "revoke"):
+            with self.subTest(operation=operation):
+                result = self.run_shim(args=["auth", "application-default", operation])
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("gcloud auth login", result.stderr)
+                self.assertIn("legacy_credentials", result.stderr)
+                self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_non_external_or_missing_adc_allows_application_default_operations(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        for contents in ('{"type":"authorized_user"}\n', None):
+            if contents is None:
+                adc.unlink(missing_ok=True)
+            else:
+                adc.write_text(contents, encoding="utf-8")
+            for operation in ("login", "revoke"):
+                with self.subTest(contents=contents, operation=operation):
+                    args = ["auth", "application-default", operation]
+                    result = self.run_shim(args=args)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("CONFIG=<unset>", result.stdout)
+                    self.assertEqual(stub_argv(result), args)
 
     def test_unknown_account_is_loud_and_never_runs_real_gcloud(self):
         write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
@@ -150,6 +298,8 @@ class GcloudRouting(unittest.TestCase):
                 write_stub(self.stub_dir, "forward", "exit 0")
                 result = self.run_shim(extra_env, args=["auth", "login"])
                 self.assertEqual(result.returncode, 0, result.stderr)
+                # CONFIG=theorem with no GCLOUD_ACCOUNT proves the box-routed branch forwarded.
+                self.assertIn("CONFIG=theorem", result.stdout)
                 self.assertIn("DISPLAY=:0", result.stdout)
                 self.assertIn("BROWSER=forward open %s", result.stdout)
 
