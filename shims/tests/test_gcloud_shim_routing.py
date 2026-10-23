@@ -203,6 +203,48 @@ class GcloudRouting(unittest.TestCase):
                 self.assertIn("routing auth login", result.stderr)
                 self.assertEqual(stub_argv(result), expected_args or args)
 
+    def test_flags_file_refuses_implicit_box_login(self):
+        flags_file = self.stub_dir / "login.yaml"
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        cases = (
+            (["auth", "login", f"--flags-file={flags_file}"], "--update-adc:\n"),
+            (["auth", "login", "--flags-file", str(flags_file)], "--configuration: box\n"),
+        )
+
+        for args, contents in cases:
+            with self.subTest(args=args):
+                flags_file.write_text(contents, encoding="utf-8")
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("--configuration theorem", result.stderr)
+                self.assertIn("GCLOUD_ACCOUNT=theorem", result.stderr)
+                self.assertEqual(result.stderr.count("\n"), 1)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+
+    def test_explicit_configuration_login_passes_through_flags_file(self):
+        flags_file = self.stub_dir / "login.yaml"
+        flags_file.write_text("--update-adc:\n", encoding="utf-8")
+        args = ["--configuration", "theorem", "auth", "login", f"--flags-file={flags_file}"]
+        result = self.run_shim(args=args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=<unset>", result.stdout)
+        self.assertNotIn("flags-file", result.stderr)
+        self.assertEqual(stub_argv(result), args)
+
+    def test_external_adc_refusal_ignores_flags_file(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        flags_file = self.stub_dir / "login.yaml"
+        flags_file.write_text("--configuration: theorem\n", encoding="utf-8")
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        result = self.run_shim(
+            args=["auth", "application-default", "login", f"--flags-file={flags_file}"]
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("gcloud auth login", result.stderr)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+
     def test_external_adc_refusal_ignores_explicit_configuration_flag(self):
         adc = self.cloudsdk_config / "application_default_credentials.json"
         adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
