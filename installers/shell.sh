@@ -11,7 +11,7 @@ elif [ "$(sed -n '1p' ~/.bashrc)" != "$DOTFILES_SOURCE_LINE" ]; then
     # ;; *) return;; esac`) before reaching anything after that guard, so a
     # source line left after it -- a hand-edit, or a machine whose ~/.bashrc
     # predates this installer's prepend step -- is invisible to exactly the
-    # shells that most need PATH/mise/MISE_GITHUB_TOKEN: `ssh host cmd`,
+    # shells that most need PATH and mise: `ssh host cmd`,
     # cron, this installer's own non-interactive callers. The old check here
     # (`grep -qF` for mere presence) treated that wrong position as already
     # installed and never moved it, which is how devbox-agents-2 stayed
