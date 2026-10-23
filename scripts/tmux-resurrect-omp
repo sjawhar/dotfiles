@@ -6,11 +6,18 @@ is the resolved mise binary path plus whatever flags it was started with —
 usually nothing, since a session started fresh has no id on its command line.
 Restoring that would start a new session, not the one that was running.
 
-The omp TUI holds its current session file open, so the running session is
-read from the process's fd table: ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl.
-That is true whichever way the session was entered (fresh, --resume, -c, or the
-in-app picker). Each omp pane line is rewritten to a command that resumes that
-session where it was running:
+A running session is read from the omp process's fd table, where its session
+file ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl is open: omp's session writer
+keeps that fd for its lifetime. The writer is created by the first write, so a
+session that has not been written to since this process started it has no fd —
+an agent idle at its prompt, which is the state an autosave usually finds. Its
+own argv still names the session (`--resume`/`--restore`/`-r`, as an id or a
+session file path), so that is read next, and the pane's saved command last.
+A session entered fresh, with `-c`, or through the in-app picker leaves nothing
+on the command line, and is resolvable only while its fd is open.
+
+Each omp pane line is rewritten to a command that resumes that session where it
+was running:
 
 - a pane running omp on the host becomes `omp --resume <id>`;
 - a pane running `agentbox new … -- …` (scripts/agentbox) shows the launcher
@@ -43,7 +50,12 @@ SESSION_FILE = re.compile(
     r"/\.omp/agent/sessions/(?P<bucket>[^/]+)/"
     r"\d{4}-\d{2}-\d{2}T[0-9-]+Z_(?P<sid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
 )
-RESUME_ARG = re.compile(r"(?:^|\s)(?:--resume|-r)[=\s]+([0-9a-f-]{36})(?:\s|$)")
+# How a session was named on the command line that started this omp: a session
+# file path, a full id, or the id prefix omp also accepts. Each is already a
+# value `omp --resume` takes, so whatever was matched is passed through as-is
+# unless it is a path, whose id is read out of it.
+RESUME_ARG = re.compile(r"(?:^|\s)(?:--resume|--restore|-r)[=\s]+(?P<value>\S+)")
+SESSION_ID = re.compile(r"[0-9a-f]{8}(?:[0-9a-f-]*[0-9a-f])?$")
 # A pane whose foreground process is a box session. resurrect records the pane
 # leader's argv: the launcher itself (`bash /…/scripts/agentbox new …`, since
 # it waits on `docker run` to run the close phase rather than exec-ing it), a
@@ -55,16 +67,17 @@ MAX_DEPTH = 4
 MAX_PROCESSES = 32
 FIELD_SEP = "\t"
 
-# Run inside a box: every omp process's pane id and open session files.
+# Run inside a box: every omp process's pane id, open session files and argv.
 BOX_SESSIONS_SCRIPT = r"""
 for p in $(pgrep -x omp); do
   pane="$(tr '\0' '\n' < /proc/$p/environ 2>/dev/null | sed -n 's/^TMUX_PANE=//p')"
   [ -n "$pane" ] || continue
+  printf 'arg\t%s\t0\t%s\n' "$pane" "$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)"
   for fd in /proc/$p/fd/*; do
     t="$(readlink "$fd" 2>/dev/null)" || continue
     case "$t" in
       */.omp/agent/sessions/*.jsonl)
-        printf '%s\t%s\t%s\n' "$pane" "$(stat -c %Y "$t" 2>/dev/null || echo 0)" "$t" ;;
+        printf 'fd\t%s\t%s\t%s\n' "$pane" "$(stat -c %Y "$t" 2>/dev/null || echo 0)" "$t" ;;
     esac
   done
 done
@@ -147,27 +160,60 @@ def open_session(pid: int) -> str | None:
     return best[1] if best else None
 
 
+def named_session(command: str) -> str | None:
+    """The session a command line names, from `--resume`/`--restore`/`-r`.
+
+    omp opens a session file only to write to it (the writer holds the fd for
+    its lifetime, `packages/coding-agent/src/session/session-storage.ts`), so a
+    session resumed into a pane that has not written since — an agent idle at
+    its prompt, which is exactly the state autosave finds — has no fd to read.
+    Its own argv still names the session.
+    """
+    for m in RESUME_ARG.finditer(command):
+        value = m.group("value")
+        in_path = SESSION_FILE.search(value)
+        if in_path:
+            return in_path.group("sid")
+        if SESSION_ID.fullmatch(value):
+            return value
+    return None
+
+
+def cmdline(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace").replace("\0", " ")
+    except OSError:
+        return ""
+
+
 def host_session_for(pane_pid: int, full_command: str) -> str | None:
     omp = find_omp(pane_pid)
     if omp is not None:
         sid = open_session(omp)
         if sid:
             return sid
-    m = RESUME_ARG.search(full_command)
-    return m.group(1) if m else None
+        sid = named_session(cmdline(omp))
+        if sid:
+            return sid
+    return named_session(full_command)
 
 
 # The bucket a boxed session lives in: `-boxes-agentbox-<12 hex>-<repo>`.
 BOX_BUCKET = re.compile(r"^-boxes-agentbox-[0-9a-f]{12}-(?P<repo>.+)$")
 
 
-def box_sessions() -> dict[str, tuple[str, str]]:
-    """pane id -> (repo, session id) for every omp running in any agentbox."""
+def box_sessions() -> dict[str, tuple[str | None, str]]:
+    """pane id -> (repo or None, session id) for every omp running in any agentbox.
+
+    An open session file names both; an idle session's argv names only the id,
+    and that pane is restorable only when its own launcher line carries the
+    repo (`rewrite`).
+    """
     boxes = subprocess.run(
         ["docker", "ps", "--filter", "name=^agentbox-", "--format", "{{.Names}}"],
         capture_output=True, text=True, timeout=10,
     ).stdout.split()
-    best: dict[str, tuple[float, str, str]] = {}
+    best: dict[str, tuple[float, str | None, str]] = {}
     for box in boxes:
         # A wedged box must not stall every autosave (resurrect runs this hook inline).
         try:
@@ -180,23 +226,30 @@ def box_sessions() -> dict[str, tuple[str, str]]:
                   file=sys.stderr)
             continue
         for line in out.splitlines():
-            parts = line.split(FIELD_SEP, 2)
-            if len(parts) != 3:
+            parts = line.split(FIELD_SEP, 3)
+            if len(parts) != 4:
                 continue
-            pane_id, mtime, target = parts
-            m = SESSION_FILE.search(target)
-            if not m:
-                continue
-            bucket = BOX_BUCKET.match(m.group("bucket"))
-            if not bucket:
+            kind, pane_id, mtime, target = parts
+            repo: str | None = None
+            if kind == "fd":
+                m = SESSION_FILE.search(target)
+                if not m:
+                    continue
+                sid = m.group("sid")
+                bucket = BOX_BUCKET.match(m.group("bucket"))
                 # A session started outside a box (resumed into one from a
-                # mounted directory): resurrect cannot name its repo.
-                continue
+                # mounted directory) has no repo in its bucket.
+                repo = bucket.group("repo") if bucket else None
+            else:
+                sid = named_session(target)
+                if sid is None:
+                    continue
             current = best.get(pane_id)
+            # An open session file is the live answer and outranks the argv the
+            # process started with, which is why `arg` lines carry mtime 0.
             if current is None or float(mtime) > current[0]:
-                best[pane_id] = (float(mtime), bucket.group("repo"), m.group("sid"))
+                best[pane_id] = (float(mtime), repo, sid)
     return {pane: (repo, sid) for pane, (_, repo, sid) in best.items()}
-
 
 
 def resume_command(spec: str | None, sid: str) -> str:
@@ -205,7 +258,7 @@ def resume_command(spec: str | None, sid: str) -> str:
 
 def rewrite(save_file: Path) -> tuple[int, int]:
     pane_map = panes()
-    boxed: dict[str, tuple[str, str]] | None = None
+    boxed: dict[str, tuple[str | None, str]] | None = None
     lines = save_file.read_text().split("\n")
     rewritten = 0
     omp_panes = 0
@@ -234,6 +287,11 @@ def rewrite(save_file: Path) -> tuple[int, int]:
             repo, sid = found
             launch = LAUNCH_SPEC.search(full_command)
             spec = launch.group("spec") if launch else repo
+            if spec is None:
+                # Neither the launcher line nor the session's bucket names the
+                # box's repo; a host `omp --resume` would resume a boxed session
+                # outside its box, so the pane is left as saved.
+                continue
         else:
             sid = host_session_for(pane_pid, full_command)
             if sid is None:
