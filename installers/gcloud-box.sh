@@ -47,9 +47,20 @@ if ! box_identity_present; then
     exit 0
 fi
 
-GCLOUD="$(command -v gcloud || true)"
+# The real SDK binary, not shims/gcloud: the shim fails when no SDK is installed,
+# and that failure would be hidden by the quiet calls below.
+GCLOUD=""
+shim="$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../shims/gcloud")"
+while IFS= read -r candidate; do
+    [[ "$(readlink -f "$candidate")" == "$shim" ]] && continue
+    GCLOUD="$candidate"
+    break
+done < <(type -ap gcloud)
 [[ -n "$GCLOUD" ]] || GCLOUD="$HOME/.gcloud/google-cloud-sdk/bin/gcloud"
-[[ -x "$GCLOUD" ]] || { echo "gcloud-box: box identity present but gcloud is not installed" >&2; exit 1; }
+[[ -x "$GCLOUD" ]] || {
+    echo "gcloud-box: box identity present but the Google Cloud SDK is not installed (looked on PATH and at $GCLOUD)" >&2
+    exit 1
+}
 
 # Plain gcloud against GCLOUD_DIR: no shim account selection, no inherited
 # configuration or credential override, no prompts.
