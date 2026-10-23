@@ -6,10 +6,11 @@
 # On a box, a plain `gcloud auth login` goes to Sami's `theorem`
 # configuration instead of overwriting the machine's `box` identity. This
 # applies only when `active_config` is `box`, GCLOUD_ACCOUNT and
-# CLOUDSDK_ACTIVE_CONFIG_NAME are unset or empty, neither `--configuration`
-# nor `--cred-file` appears in argv, and `config_theorem` exists. Routed
-# logins drop --update-adc so the box's application default credentials (ADC)
-# remain its own identity.
+# CLOUDSDK_ACTIVE_CONFIG_NAME are unset or empty, and neither
+# `--configuration` nor `--cred-file` appears in argv. An otherwise-routable
+# login with `--flags-file` fails loud: gcloud expands that opaque file after
+# the shim checks identity flags. Routed logins drop --update-adc so the box's
+# application default credentials (ADC) remain its own identity.
 #
 # `gcloud auth application-default login` and `revoke` are refused whenever
 # the ADC in CLOUDSDK_CONFIG is an `external_account` credential. Sami's login
@@ -103,6 +104,16 @@ has_credential_file_flag() {
     return 1
 }
 
+has_flags_file_flag() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --flags-file | --flags-file=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 
 is_auth_login() {
     [[ "${GCLOUD_COMMAND_WORDS[0]:-}" == auth && "${GCLOUD_COMMAND_WORDS[1]:-}" == login ]]
@@ -191,6 +202,10 @@ main() {
     fi
 
     if [[ "$command_parse_status" -eq 0 ]] && is_box_routed_auth_login "$@"; then
+        if has_flags_file_flag "$@"; then
+            echo "gcloud shim: refusing implicit box auth login with --flags-file; name a configuration explicitly with --configuration theorem or GCLOUD_ACCOUNT=theorem." >&2
+            exit 1
+        fi
         if [[ ! -f "${config_dir}/config_theorem" ]]; then
             echo "gcloud shim: configuration theorem is missing at ${config_dir}/config_theorem; create it with gcloud config configurations create theorem --no-activate." >&2
             exit 1
