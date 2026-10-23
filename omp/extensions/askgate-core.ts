@@ -852,8 +852,10 @@ const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
 	abandoned: "AskGate did not send this call: it was stopped before a verdict came back. Send it again if it is still wanted.",
 	shutdown: "AskGate did not send this call: the session shut down before a verdict came back. Send it again from a live session if it is still wanted.",
 };
+// A comment or message cannot be edited or deleted, so its only fix is one more post; the note says so,
+// rather than offering an edit the agent cannot make (two lanes resent whole comments chasing one).
 const renderWarn = (reason: string, second: boolean) =>
-	`<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix (edit the ask, retract it, or resend), or state your rebuttal in your next step.${second ? `\n${SECOND_REVISE}` : ""}\n</advisor-gate>`;
+	`<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix: an ask with \`dispatch edit-ask\` or \`dispatch resolve-ask --kind retracted\`, a document with \`dispatch doc-edit\`. A comment or message cannot be edited, so post one reply carrying only the correction, and only when the original would mislead its reader. Or state your rebuttal in your next step.${second ? `\n${SECOND_REVISE}` : ""}\n</advisor-gate>`;
 const renderRebuttalAck = (rebuttal: string, override: Override) =>
 	`<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
 const renderBreakerAck = () =>
