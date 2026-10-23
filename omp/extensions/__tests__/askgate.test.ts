@@ -908,6 +908,105 @@ console.log(JSON.stringify(args, null, 2));
 		expect(unreadableDispatchWrite("git commit -m 'dispatch ask'; dispatch message --issue X --body \"a; b\" | cat")).toEqual({ tool: "dispatch_message", label: "dispatch message" });
 		expect(unreadableDispatchWrite("echo \"run dispatch ask later\"")).toBeUndefined();
 	});
+	test("unreadableDispatchWrite reads a command substitution, quoted or not, as a command of its own", () => {
+		expect(unreadableDispatchWrite('out="$(dispatch comment --issue X --body y)"')).toEqual({ tool: "dispatch_comment", label: "dispatch comment" });
+		expect(unreadableDispatchWrite('echo "posted: `dispatch message --issue X --body y`"')).toEqual({ tool: "dispatch_message", label: "dispatch message" });
+		expect(unreadableDispatchWrite("git commit -m \"$(cat <<'EOF'\nThen dispatch ask --issue X.\nEOF\n)\"")).toBeUndefined();
+		expect(unreadableDispatchWrite('echo "$((1 + 2))" "$(echo "a)b")" && dispatch read --issue X')).toBeUndefined();
+		expect(unreadableDispatchWrite('echo "run \\`dispatch ask\\` later"')).toBeUndefined();
+	});
+	test("dispatch called by a literal path is reviewed as bare dispatch is: absolute, relative or quoted", async () => {
+		// No stub on PATH: only the path the command names reaches it.
+		const g = bind({ env: { PATH: "/usr/bin:/bin" }, cwd: work });
+		expect(await g.bash("abs", `${bin}/dispatch message --issue X-1 --body 'The run finished.'`)).toBeUndefined();
+		expect(await g.bash("rel", "./bin/dispatch comment --issue X-1 --body hi")).toBeUndefined();
+		expect(await g.bash("quoted", `'${bin}/dispatch' comment --issue X-1 --body hi 2>&1`)).toBeUndefined();
+		expect(await g.bash("cd", "cd bin && ./dispatch ask --issue X-1 --question q")).toBeUndefined();
+		expect(g.dryRuns.map(r => r.script)).toEqual([
+			`${bin}/dispatch message --dry-run --issue X-1 --body 'The run finished.'`,
+			"./bin/dispatch comment --dry-run --issue X-1 --body hi",
+			`'${bin}/dispatch' comment --dry-run --issue X-1 --body hi`,
+			"cd bin >/dev/null && ./dispatch ask --dry-run --issue X-1 --question q",
+		]);
+		expect(g.calls[0].user).toContain('"body": "The run finished."');
+		// A literal path joined to another command gets the plain resend reason: the path is not why.
+		const piped = await g.bash("piped", `${bin}/dispatch comment --issue X-1 --body hi | tail -1`);
+		expect(piped?.block).toBe(true);
+		expect(piped?.reason).toContain("send that `dispatch comment` again on its own:");
+		expect(piped?.reason).not.toContain("Here ");
+		expect(g.entries.map(e => [e.toolCallId, e.tool, e.outcome, e.decision])).toEqual([
+			["abs", "dispatch_message", "verdict", "allow"],
+			["rel", "dispatch_comment", "verdict", "allow"],
+			["quoted", "dispatch_comment", "verdict", "allow"],
+			["cd", "dispatch_ask", "verdict", "allow"],
+			["piped", "dispatch_comment", "unreadable", "revise"],
+		]);
+	});
+	test("a dispatch write called by a path the shell expands is refused, in every mode, its reason naming what AskGate cannot read", async () => {
+		const expanded: Array<[string, string]> = [
+			["~/.dotfiles/omp/plugins/node_modules/@sjawhar/pi-envoy/bin/dispatch message --issue X-1 --body hi", "`~`"],
+			["$HOME/bin/dispatch comment --issue X-1 --body hi", "`$`"],
+			["/opt/*/bin/dispatch comment --issue X-1 --body hi", "`*`"],
+			["\\dispatch ask --issue X-1 --question q", "`\\`"],
+			["~/x/$V/dispatch ask --issue X-1 --question q", "`~` and `$`"],
+		];
+		for (const mode of ["warn", "block"]) {
+			const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+			for (const [command, holds] of expanded) {
+				const result = await g.bash("b", command);
+				expect(result?.block).toBe(true);
+				expect(result?.reason).toContain(`Here the word that calls \`dispatch\` holds ${holds}, which AskGate does not take as literal.`);
+				expect(result?.reason).toContain("again on its own, calling `dispatch` by name:");
+				expect(result?.reason).toContain("Nothing in the call ran");
+			}
+			expect(g.dryRuns).toHaveLength(0);
+			expect(g.calls).toHaveLength(0);
+			expect(g.entries.map(e => [e.tool, e.outcome, e.decision])).toEqual(
+				["dispatch_message", "dispatch_comment", "dispatch_comment", "dispatch_ask", "dispatch_ask"].map(tool => [tool, "unreadable", "revise"]),
+			);
+		}
+	});
+	test("a scoped subcommand run by a program an expansion names is refused, in every mode, telling the agent to call dispatch by name", async () => {
+		const viaExpansion: Array<[string, string, string]> = [
+			[`D=${bin}/dispatch; $D comment --issue X-1 --body y | tail -1`, "dispatch_comment", "`$`"],
+			["$D comment --issue X-1 --body y", "dispatch_comment", "`$`"],
+			["${D} message --issue X-1 --body y", "dispatch_message", "`$`"],
+			['"$D" ask --issue X-1 --question q', "dispatch_ask", "`$`"],
+			['"${D}" edit-ask --ask a-1 --question q', "dispatch_edit_ask", "`$`"],
+			["env $D doc-edit --issue X-1 --artifact spec --ops-json x", "dispatch_doc_edit", "`$`"],
+			["$D issue --project P --title t --spec-file s.md", "dispatch_issue", "`$`"],
+			["$(command -v dispatch) request-approval --issue X-1 --summary s", "dispatch_request_approval", "`$`"],
+			["`command -v dispatch` comment --issue X-1 --body y", "dispatch_comment", "a backtick"],
+		];
+		for (const mode of ["warn", "block"]) {
+			const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+			for (const [index, [command, , holds]] of viaExpansion.entries()) {
+				const result = await g.bash(`v${index}`, command);
+				expect(result?.block).toBe(true);
+				expect(result?.reason).toContain(`Here its program's name holds ${holds}, so AskGate cannot tell which program would run.`);
+				expect(result?.reason).toContain("again on its own, calling `dispatch` by name:");
+				expect(result?.reason).toContain("Nothing in the call ran");
+			}
+			expect(g.dryRuns).toHaveLength(0);
+			expect(g.calls).toHaveLength(0);
+			expect(g.entries.map(e => [e.tool, e.outcome, e.decision])).toEqual(viaExpansion.map(([, tool]) => [tool, "unreadable", "revise"]));
+		}
+	});
+	test("an expansion before an unscoped subcommand, or before a scoped one that sends nothing, is not refused", async () => {
+		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+		for (const command of [
+			"$D search --query x",
+			"$D comment --issue X-1 --help",
+			"$D ask --dry-run --issue X-1 --question q | jq .",
+			"$D issue --project P --title t",
+			"'$D' comment --issue X-1 --body y",
+			"echo $D comment",
+			"$EDITOR notes.md",
+		]) {
+			expect(await g.bash("b", command)).toBeUndefined();
+		}
+		expect(g.entries).toHaveLength(0);
+	});
 	test("dispatch issue is reviewed with --spec or --spec-file and not without", async () => {
 		const g = bind({ env: STUB, cwd: work });
 		await g.bash("plain", "dispatch issue --project P --title 'A new issue'");
