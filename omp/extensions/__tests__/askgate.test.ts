@@ -840,7 +840,19 @@ console.log(JSON.stringify(args, null, 2));
 			"dispatch ask --issue X-1 --question q && make",
 			"dispatch ask --issue X-1 --question q 2>&1 | tail -3",
 			`${ASK}\necho done`,
-			"cd /tmp && dispatch ask --issue X-1 --question q",
+			"cd $X && dispatch ask --issue X-1 --question q",
+			"cd a && cd b && dispatch ask --issue X-1 --question q",
+			"dispatch ask --issue X-1 --question q | cat",
+			"cd ~/x && dispatch ask --issue X-1 --question q",
+			"cd /tmp/* && dispatch ask --issue X-1 --question q",
+			"cd \"$HOME\" && dispatch ask --issue X-1 --question q",
+			"cd -P /tmp && dispatch ask --issue X-1 --question q",
+			"cd /tmp || dispatch ask --issue X-1 --question q",
+			"cd /tmp; dispatch ask --issue X-1 --question q",
+			"cd && dispatch ask --issue X-1 --question q",
+			"dispatch ask --issue X-1 --question q 2>&1 >/dev/null",
+			"dispatch ask --issue X-1 --question q 2>/dev/null",
+			"dispatch ask --issue X-1 --question q 2>&1; echo",
 			"cat > /tmp/q.md <<EOF\nShould it wait?\nEOF\ndispatch ask --issue X-1 --question-file /tmp/q.md",
 			"cd ~/x && FOO=1 timeout 30 dispatch comment --issue X-1 --body \"$(cat note.md)\"",
 			"dispatch issue --project P --title t --spec \"$SPEC\"",
@@ -857,8 +869,7 @@ console.log(JSON.stringify(args, null, 2));
 			expect(g.dryRuns).toHaveLength(0);
 			expect(g.calls).toHaveLength(0);
 			expect(g.entries.map(e => [e.tool, e.outcome, e.decision])).toEqual([
-				...Array(5).fill(["dispatch_ask", "unreadable", "revise"]),
-				["dispatch_ask", "unreadable", "revise"],
+				...Array(18).fill(["dispatch_ask", "unreadable", "revise"]),
 				["dispatch_comment", "unreadable", "revise"],
 				["dispatch_issue", "unreadable", "revise"],
 				["dispatch_doc_edit", "unreadable", "revise"],
@@ -882,7 +893,7 @@ console.log(JSON.stringify(args, null, 2));
 		expect(g.entries).toHaveLength(0);
 	});
 	test("a kill, a halt or a session the gate would skip lets a compound write run", async () => {
-		const compound = "cd /tmp && dispatch comment --issue X-1 --body b";
+		const compound = "dispatch comment --issue X-1 --body b | cat";
 		const killed = bind({ env: { OMP_ASKGATE: "block" }, files: { [OVERLAY]: "advisor:\n  disableRoster: [askgate]\n" } });
 		expect(await killed.bash("k", compound)).toBeUndefined();
 		const elsewhere = bind({ env: { OMP_ASKGATE: "block" }, primary: { provider: "openai-codex", id: "gpt-5.5" } });
@@ -926,7 +937,7 @@ console.log(JSON.stringify(args, null, 2));
 	});
 	test("a request-approval joined to another command is refused like any other scoped write", async () => {
 		const g = bind({ env: STUB, cwd: work });
-		const result = await g.bash("r", "cd /tmp && dispatch request-approval --issue X-1 --summary-file s.md");
+		const result = await g.bash("r", "cd /tmp; dispatch request-approval --issue X-1 --summary-file s.md");
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain("send that `dispatch request-approval` again on its own");
 	});
@@ -983,6 +994,55 @@ console.log(JSON.stringify(args, null, 2));
 		await g.bash("b1", "dispatch message --issue X-1 --body-file note.txt", { cwd: "sub" });
 		expect(g.dryRuns[0].cwd).toBe(path.join(work, "sub"));
 		expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
+	});
+	test("a leading cd and a trailing 2>&1 are reviewed, the dry-run in the cd's directory resolved against the call's", async () => {
+		fs.mkdirSync(path.join(work, "sub", "inner"), { recursive: true });
+		fs.writeFileSync(path.join(work, "sub", "note.txt"), "Body from the working directory.");
+		fs.writeFileSync(path.join(work, "sub", "inner", "note.txt"), "Body from the inner directory.");
+		for (const mode of ["warn", "block"]) {
+			const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+			expect(await g.bash("cd", "cd sub && dispatch message --issue X-1 --body-file note.txt")).toBeUndefined();
+			expect(await g.bash("rel", "cd inner && dispatch message --issue X-1 --body-file note.txt", { cwd: "sub" })).toBeUndefined();
+			expect(await g.bash("err", "dispatch comment --issue X-1 --body 'Looks right.' 2>&1")).toBeUndefined();
+			expect(await g.bash("both", `cd sub && dispatch ask --issue X-1 --question-file - 2>&1 <<'EOF'\n${QUESTION}EOF`)).toBeUndefined();
+			expect(g.dryRuns).toEqual([
+				{ script: "cd sub >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt", cwd: work, timeoutMs: 10_000 },
+				{ script: "cd inner >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt", cwd: path.join(work, "sub"), timeoutMs: 10_000 },
+				{ script: "dispatch comment --dry-run --issue X-1 --body 'Looks right.'", cwd: work, timeoutMs: 10_000 },
+				{ script: `cd sub >/dev/null && dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`, cwd: work, timeoutMs: 10_000 },
+			]);
+			expect(g.calls).toHaveLength(4);
+			expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
+			expect(g.calls[1].user).toContain('"body": "Body from the inner directory."');
+			expect(g.calls[2].user).toContain('"body": "Looks right."');
+			expect(g.calls[3].user).toContain(JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2));
+			expect(g.entries.map(e => [e.tool, e.outcome, e.decision])).toEqual([
+				["dispatch_message", "verdict", "allow"],
+				["dispatch_message", "verdict", "allow"],
+				["dispatch_comment", "verdict", "allow"],
+				["dispatch_ask", "verdict", "allow"],
+			]);
+		}
+	});
+	test("a cd that CDPATH resolves prints nothing into the dry-run's JSON", async () => {
+		const g = bind({ env: { ...STUB, CDPATH: work }, cwd: bin });
+		expect(await g.bash("b1", "cd sub && dispatch message --issue X-1 --body-file note.txt")).toBeUndefined();
+		expect(g.entries).toMatchObject([{ tool: "dispatch_message", outcome: "verdict" }]);
+		expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
+	});
+	test("the wrappers run as written, a rebuttal removed, and a quoted cd path is never taken for the command", async () => {
+		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work, complete: async () => ({ text: REVISE }) });
+		const result = await g.bash("b1", "cd 'sub' && dispatch comment --issue X-1 --advisor-rebuttal 'r' --body hi 2>&1");
+		expect(result?.input).toEqual({ command: "cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1" });
+		expect(g.dryRuns[0].script).toBe("cd 'sub' >/dev/null && dispatch comment --dry-run --issue X-1 --body hi");
+		expect(core.scopedCommand("cd 'dispatch comment --body x' && dispatch comment --body x")).toMatchObject({
+			command: "cd 'dispatch comment --body x' && dispatch comment --body x",
+			dryRunScript: "cd 'dispatch comment --body x' >/dev/null && dispatch comment --dry-run --body x",
+		});
+		expect(core.scopedCommand('cd "my dir" && dispatch comment --body x')?.dryRunScript).toBe('cd "my dir" >/dev/null && dispatch comment --dry-run --body x');
+		// A `2>&1` inside the command's quotes is its text, not the wrapper.
+		expect(core.scopedCommand("dispatch comment --body 'a 2>&1'")?.dryRunScript).toBe("dispatch comment --dry-run --body 'a 2>&1'");
+		expect(core.scopedCommand("dispatch comment --body 'a 2>&1")).toBeUndefined();
 	});
 	test("a dry-run the CLI refuses is recorded as an error and the command runs, in block mode too", async () => {
 		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });

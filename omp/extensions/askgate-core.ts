@@ -5,24 +5,27 @@
 //
 // Scope: seven calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
-//   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`, the
-//     head rules of the plugin that ships the CLI, copied) naming `ask`, `message`, `edit-ask`,
-//     `comment`, `doc-edit`, `request-approval` (its `summary` is what Sami approves), or `issue`
-//     with `--spec` or `--spec-file`. The gate learns the exact
-//     arguments by running that command with `--dry-run` after the command name, in the call's
-//     working directory and environment, its here-document still on stdin, under a 10 s limit,
-//     and reviews the JSON it prints. A dry-run that fails, times out or prints no JSON object is
-//     recorded as `error` and the call runs (the CLI refuses arguments it cannot parse, before it
-//     sends anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
+//   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`: the
+//     head rules of the plugin that ships the CLI, copied, plus AskGate's two harmless wrappers,
+//     one leading `cd <path> &&` with a path the shell does not expand and one trailing `2>&1`)
+//     naming `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
+//     `summary` is what Sami approves), or `issue` with `--spec` or `--spec-file`. The gate learns
+//     the exact arguments by running that command with `--dry-run` after the command name, in the
+//     call's working directory (then its `cd`, as the call will) and environment, its
+//     here-document still on stdin and without its `2>&1`, under a 10 s limit, and reviews the
+//     JSON it prints. A dry-run that fails, times out or prints no JSON object is recorded as
+//     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
+//     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
 //     reviewed.
 //   - A `bash` call that holds a scoped `dispatch` write those rules cannot read — joined to
-//     anything else (`cd x && dispatch ask …`, `dispatch ask … 2>&1 | tail`, `cat > f <<EOF …;
-//     dispatch ask --spec-file f`), or one using an unquoted here-document, a redirect or an
-//     expansion — is refused before anything in it runs, whatever the mode, with a reason telling
-//     the agent to send that `dispatch` command again on its own (`unreadableDispatchWrite`, a
-//     quote- and here-document-aware scan for a scoped `dispatch` at a command position). The
-//     entry reads `unreadable`; it never counts toward the halt. A kill, a halt, or a session the
-//     gate would skip (no `@askgate` model, a primary on another provider) lets it run.
+//     anything else (`cd $X && dispatch ask …`, `cd a && cd b && dispatch ask …`, `dispatch ask …
+//     2>&1 | tail`, `cat > f <<EOF …; dispatch ask --spec-file f`), or one using an unquoted
+//     here-document, another redirect or an expansion — is refused before anything in it runs,
+//     whatever the mode, with a reason telling the agent to send that `dispatch` command again on
+//     its own (`unreadableDispatchWrite`, a quote- and here-document-aware scan for a scoped
+//     `dispatch` at a command position). The entry reads `unreadable`; it never counts toward the
+//     halt. A kill, a halt, or a session the gate would skip (no `@askgate` model, a primary on
+//     another provider) lets it run.
 //   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
 //     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
@@ -263,7 +266,7 @@ export function scopedDevice(toolName: string, input: Input): boolean {
 	return (SCOPED_DEVICES as readonly string[]).includes(toolName) && (toolName !== SPEC_ONLY_DEVICE || input.spec !== undefined);
 }
 
-// Where a `dispatch` command's own text ends: `dispatchCommandHead` and its helpers below are the
+// Where a `dispatch` command's own text ends: `headLine`, `headScan` and their helpers below are the
 // rules @sjawhar/pi-envoy applies (`packages/pi-shared/src/shell-command.ts` in sjawhar/legion),
 // copied because this extension cannot import the plugin; keep the two in step. A conservative
 // character scan, not a shell parser: whatever it cannot reason about is no `dispatch` command.
@@ -287,11 +290,11 @@ const REFUSED_UNQUOTED = "\n;&|$`<>()#\\";
 /** Inside double quotes bash still expands `$` and backticks and interprets `\`. */
 const REFUSED_DOUBLE_QUOTED = "$`\\";
 
-/** A `dispatch` command's first line, without its here-document opener, when the command is one
- * `dispatch` command, optionally fed one quoted here-document on stdin; undefined for any other
- * command. */
-export function dispatchCommandHead(command: unknown): string | undefined {
-	if (typeof command !== "string" || hasControlCharacter(command)) return undefined;
+/** A command's first line, without its here-document opener and its blanks, and where that text
+ * starts in the command, when the command is that one line, optionally fed one quoted
+ * here-document on stdin; undefined for any other command. */
+function headLine(command: string): { text: string; at: number } | undefined {
+	if (hasControlCharacter(command)) return undefined;
 	// Blank lines before the head and after the command's last line run as no command, so they are
 	// dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
 	// exactly its delimiter (with leading tabs stripped under `<<-`), whatever blanks the line
@@ -313,8 +316,70 @@ export function dispatchCommandHead(command: unknown): string | undefined {
 		if (end !== lines.length - 1) return undefined;
 		head = opening[1] ?? "";
 	}
-	head = head.replace(/^[ \t]+|[ \t]+$/g, "");
-	return firstWord(head) === "dispatch" && headScan(head) ? head : undefined;
+	const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
+	const leading = /^[ \t]*/.exec(head)?.[0].length ?? 0;
+	return { text: head.replace(/^[ \t]+|[ \t]+$/g, ""), at: lineAt + leading };
+}
+
+// AskGate's own additions to those rules, the two wrappers agents put around a `dispatch` command
+// that change neither its words nor what it sends: one leading `cd <path> && `, whose path is one
+// word the shell does not expand, and one trailing `2>&1`.
+
+/** Characters an unquoted `cd` path may hold: none the shell expands (`~`, globs, braces, `$`). */
+const CD_PATH_UNQUOTED = /^[A-Za-z0-9._/+@%:,=-]$/;
+
+/** The end of the one-word path after a leading `cd ` at `from`, or undefined when the word is
+ * empty, an option, unterminated, or holds anything the shell would expand or treat specially. */
+function cdPathEnd(text: string, from: number): number | undefined {
+	let quote: '"' | "'" | undefined;
+	let value = "";
+	let index = from;
+	for (; index < text.length; index++) {
+		const char = text[index];
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
+			else value += char;
+		} else if (quote === '"') {
+			if (char === '"') quote = undefined;
+			else if (REFUSED_DOUBLE_QUOTED.includes(char)) return undefined;
+			else value += char;
+		} else if (char === " " || char === "\t") break;
+		else if (char === "'" || char === '"') quote = char;
+		else if (CD_PATH_UNQUOTED.test(char)) value += char;
+		else return undefined;
+	}
+	return quote === undefined && value !== "" && !value.startsWith("-") ? index : undefined;
+}
+
+/** A trailing `2>&1` after the `dispatch` command, with the blanks before it. */
+const STDERR_TO_STDOUT = /[ \t]+2>&1$/;
+
+/** A `dispatch` command in a `bash` command, bare or in the two wrappers above: its head, where the
+ * head starts, where a leading `cd` path ends (to silence `cd` in the dry-run) and where the
+ * trailing `2>&1` ends (to leave it out of the dry-run, whose stdout must be the CLI's JSON). */
+interface DispatchHead { head: string; at: number; cdEnd?: number; end: number }
+
+function dispatchCommandHead(command: string): DispatchHead | undefined {
+	const line = headLine(command);
+	if (line === undefined) return undefined;
+	let text = line.text;
+	let offset = 0;
+	let cdEnd: number | undefined;
+	const cd = /^cd[ \t]+/.exec(text);
+	if (cd !== null) {
+		const pathEnd = cdPathEnd(text, cd[0].length);
+		const and = pathEnd === undefined ? null : /^[ \t]*&&[ \t]*/.exec(text.slice(pathEnd));
+		if (pathEnd === undefined || and === null) return undefined;
+		cdEnd = line.at + pathEnd;
+		offset = pathEnd + and[0].length;
+		text = text.slice(offset);
+	}
+	const suffix = STDERR_TO_STDOUT.exec(text);
+	const head = suffix === null ? text : text.slice(0, suffix.index);
+	// One `dispatch` command whose words the shell takes as written.
+	if (firstWord(head) !== "dispatch" || !headScan(head)) return undefined;
+	const at = line.at + offset;
+	return { head, at, ...(cdEnd === undefined ? {} : { cdEnd }), end: at + text.length };
 }
 
 /** The trimmed head's first word as bash splits it, at a space or a tab. */
@@ -382,8 +447,10 @@ export interface ScopedCommand { tool: string; label: string; command: string; d
 
 /** The `bash` command as a scoped `dispatch` call, or undefined for any other command. */
 export function scopedCommand(command: unknown): ScopedCommand | undefined {
-	const head = dispatchCommandHead(command);
-	if (head === undefined || typeof command !== "string") return undefined;
+	if (typeof command !== "string") return undefined;
+	const found = dispatchCommandHead(command);
+	if (found === undefined) return undefined;
+	const { head, at, cdEnd, end } = found;
 	const [program, name, ...flags] = headWords(head);
 	if (name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name.value)) return undefined;
 	if (flags.some(flag => NO_SEND_FLAGS.includes(flag.value))) return undefined;
@@ -403,15 +470,16 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
 		rebuttal = line.trim();
 		if (value === REBUTTAL_FLAG) index++;
 	}
-	// The head is the command's first non-blank text, so its first occurrence is where it stands.
-	const at = command.indexOf(head);
-	const withHead = (words: string[]) => `${command.slice(0, at)}${words.join(" ")}${command.slice(at + head.length)}`;
+	// The command runs as written, its wrappers included. The dry-run keeps the `cd`, with its output
+	// silenced (bash prints the directory when CDPATH found it), so it runs where the command will;
+	// it drops the `2>&1`, so the CLI's JSON is all its stdout holds.
+	const before = cdEnd === undefined ? command.slice(0, at) : `${command.slice(0, cdEnd)} >/dev/null${command.slice(cdEnd, at)}`;
 	const rest = kept.map(word => word.raw);
 	return {
 		tool: `dispatch_${name.value.replaceAll("-", "_")}`,
 		label: `dispatch ${name.value}`,
-		command: withHead([program.raw, name.raw, ...rest]),
-		dryRunScript: withHead([program.raw, name.raw, "--dry-run", ...rest]),
+		command: `${command.slice(0, at)}${[program.raw, name.raw, ...rest].join(" ")}${command.slice(at + head.length)}`,
+		dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...rest].join(" ")}${command.slice(end)}`,
 		...(rebuttal === undefined ? {} : { rebuttal }),
 	};
 }
@@ -792,7 +860,7 @@ const renderBreakerAck = () =>
 	`<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
 /** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
 const renderUnreadable = (label: string) =>
-	`AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it is the whole bash call. Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own: no \`cd … &&\`, no pipe or \`2>&1\`, no \`;\` and no other command in the same call (set the working directory with the bash tool's \`cwd\`). Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+	`AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it is the whole bash call, optionally after one \`cd <path> && \` (a literal path: no \`$\`, \`~\` or glob) and before one trailing \`2>&1\`. Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
 	return function askGate(pi: Pi): void {
