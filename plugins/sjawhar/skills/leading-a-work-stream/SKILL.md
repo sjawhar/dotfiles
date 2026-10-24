@@ -25,6 +25,7 @@ The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in 
 - Ask agents for a report of each decision or each step they took. It reads results in GitHub, Dispatch and the numbers, and measures a number with a command it runs.
 - Ration a shared resource (disk, VMs, compute) by approving each use. It sets the limit, and the agents apply it themselves or through a tool.
 - Relay messages between agents who can talk directly.
+- Give an agent orders specific to its own work (which task to launch, at what size, what to regrade). The agent has the facts of its own work; the lead does not. Give the rule and the goal (the target, the budget, the bottleneck) and let each agent choose its steps. Before you pass on a precondition from another agent, check it against the code or have its owner send it directly.
 
 ## Decision rights
 
@@ -82,6 +83,7 @@ When a rule here failed or was missing, edit this file directly. Put the evidenc
 | "Tell me what you did", "send me the values for the scoreboard" | Read GitHub, Dispatch and the numbers; measure a value with a command you run. |
 | "Wait for my word before you start", "I tell you when there is space" | State the limit; the agent checks it itself, or a tool does. |
 | "If you wait on Sami, tell me and I open the ask" | The agent opens its own Dispatch ask. |
+| "Launch these five now", "regrade those 155 attempts" | State the rule and the goal; the agent chooses which of its tasks it applies to. |
 | "Add a guard just in case" | Build what speeds agents up. |
 
 ## Sources
