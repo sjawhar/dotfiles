@@ -24,6 +24,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # honoured, so a throwaway config dir can stand in for ~/.config/gcloud.
 
 BOX_ACCOUNT="dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
+SAMI_ACCOUNT="sami@theorem.dev"
 BOX_PROJECT="autoformalization"
 # Client ID of the managed identity box-sjawhar (resource group sami).
 BOX_CLIENT_ID="15c6fb2c-a770-43c9-840b-291d65265bae"
@@ -102,6 +103,15 @@ fi
 if [[ "$(gc --configuration box config get core/project 2>/dev/null)" != "$BOX_PROJECT" ]]; then
     gc --configuration box config set core/project "$BOX_PROJECT" >/dev/null 2>&1
     echo "gcloud-box: configuration box project -> ${BOX_PROJECT}"
+fi
+
+# 2b. Configuration `theorem`: Sami's own login, never active. shims/gcloud sends a plain
+# `gcloud auth login` here, and refuses it on a box that lacks this configuration.
+if [[ ! -f "${GCLOUD_DIR}/configurations/config_theorem" ]]; then
+    gc config configurations create theorem --no-activate >/dev/null 2>&1
+    gc --configuration theorem config set core/account "$SAMI_ACCOUNT" >/dev/null 2>&1
+    gc --configuration theorem config set core/project "$BOX_PROJECT" >/dev/null 2>&1
+    echo "gcloud-box: created configuration theorem (${SAMI_ACCOUNT}); sign in with gcloud auth login"
 fi
 
 # 3. `box` is the active configuration.
