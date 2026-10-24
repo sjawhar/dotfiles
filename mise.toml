@@ -30,6 +30,7 @@ minimum_release_age_excludes = [
   "github:sjawhar/oh-my-pi",
   "github:sjawhar/secretsd",  # archived; tags predate the forward merge
   "github:sjawhar/time-tracker",
+  "github:sjawhar/tmux-builds",
   "forward",
   "tt",
   "agent-secrets",
@@ -62,7 +63,12 @@ credential_command = "gh-app-token agent --owner sjawhar"
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
 "github:syncthing/syncthing" = "2.1.3"  # was "latest"; pinned 2026-10-05 after measuring this box exhausting the unauthenticated GitHub API quota (see [settings.github] above) partly from floating resolution checks across this file's several "latest" tools
-"github:tmux/tmux-builds" = "3.7b"
+# tmux: static build of the 3.8 release by my fork of tmux/tmux-builds (its v3.8 tag runs
+# upstream's own release workflow, unchanged; upstream has not tagged 3.8). 3.7b and 3.7c
+# hang the server in tty_draw_line when a client narrower than the window draws a pane's
+# border title (tmux/tmux#5664, dispatch://INFRA-169). Back on "github:tmux/tmux-builds"
+# once upstream publishes a release past 3.7c.
+"github:sjawhar/tmux-builds" = "3.8"
 bat = "0.26.1"      # Cat with syntax highlighting
 bun = "1.4.2"
 eza = "0.23.5"
