@@ -95,18 +95,15 @@ GCLOUD_GLOBAL_BOOLEAN_FLAGS=(
 # so the shim strips one.
 GCLOUD_RELEASE_TRACKS=(alpha beta preview)
 
-# Readings of one command path past which the shim stops enumerating an unknown
-# flag's possible values and treats the path as possibly protected.
-GCLOUD_MAX_READINGS=64
-
 # The command path this SDK's own parser reads, and what other readings of an
 # unknown flag's value could make it. GCLOUD_READING_KINDS holds one bit per kind
 # of path some reading names: 1 `auth login`, 2 `auth application-default
 # login|revoke`, 4 anything else.
 declare -a GCLOUD_COMMAND_WORDS=()
 declare -a GCLOUD_ARGV=()
+declare -A GCLOUD_PATH_KINDS_MEMO=()
+GCLOUD_PATH_KINDS=0
 GCLOUD_READING_KINDS=0
-GCLOUD_READINGS=0
 GCLOUD_COMMAND_AMBIGUOUS=0
 GCLOUD_POSSIBLE_LOGIN=0
 GCLOUD_POSSIBLE_ADC_OPERATION=0
@@ -172,21 +169,38 @@ read_command_words() {
     return 0
 }
 
-record_reading() {
-    GCLOUD_READING_KINDS=$((GCLOUD_READING_KINDS | $1))
-    GCLOUD_READINGS=$((GCLOUD_READINGS + 1))
+# Necessary for any reading to name a protected command: `auth`, then later
+# `login`, or `application-default` and then `login` or `revoke`. Reading a flag
+# as taking a value or not can only drop entries from the path, never add or
+# reorder them, so without these words in this order every reading is ordinary.
+protected_words_in_order() {
+    local arg seen_auth=0 seen_application_default=0
+    for arg in "$@"; do
+        if ((seen_application_default)) && [[ "$arg" == login || "$arg" == revoke ]]; then
+            return 0
+        fi
+        if ((seen_auth)); then
+            [[ "$arg" == login ]] && return 0
+            [[ "$arg" == application-default ]] && seen_application_default=1
+        fi
+        [[ "$arg" == auth ]] && seen_auth=1
+    done
+    return 1
 }
 
-# Every reading of the path from GCLOUD_ARGV index $1, in state $2: 0 nothing
-# read, 1 a release track read, 2 `auth`, 3 `auth application-default`. An
-# unknown flag written without `=` and followed by a non-flag entry is a choice
-# point, since a later SDK could make it take that entry as its value; the walk
-# reads it both ways. A choice point after the path is decided changes nothing,
-# so it is never reached.
-explore_command_path() {
-    local index="$1" state="$2" arg
-    if ((GCLOUD_READINGS >= GCLOUD_MAX_READINGS)); then
-        GCLOUD_READING_KINDS=7
+# Sets GCLOUD_PATH_KINDS to the kinds of path every reading of GCLOUD_ARGV from
+# index $1, in state $2, names. States: 0 nothing read, 1 a release track read,
+# 2 `auth`, 3 `auth application-default`. An unknown flag written without `=` and
+# followed by a non-flag entry is a choice point, since a later SDK could make it
+# take that entry as its value; the walk reads it both ways. The result for each
+# (index, state) is computed once and kept, so the walk is exact for any number
+# of choice points: at most four states per argv index, with no reading limit to
+# give up at. A choice point after the path is decided changes nothing, so it is
+# never reached.
+path_kinds_from() {
+    local index="$1" state="$2" key="$1:$2" kinds=0 arg
+    if [[ -n "${GCLOUD_PATH_KINDS_MEMO[$key]:-}" ]]; then
+        GCLOUD_PATH_KINDS="${GCLOUD_PATH_KINDS_MEMO[$key]}"
         return 0
     fi
     while ((index < ${#GCLOUD_ARGV[@]})); do
@@ -198,42 +212,48 @@ explore_command_path() {
                     [[ "$arg" == *=* ]] || index=$((index + 1))
                 elif ! is_boolean_flag "$arg" && [[ "$arg" != *=* && "$arg" != -- ]] &&
                     ((index < ${#GCLOUD_ARGV[@]})) && [[ "${GCLOUD_ARGV[index]}" != -* ]]; then
-                    explore_command_path $((index + 1)) "$state"
+                    # The reading where the flag takes the next entry; the loop goes
+                    # on with the reading where it takes none.
+                    path_kinds_from $((index + 1)) "$state"
+                    kinds=$((kinds | GCLOUD_PATH_KINDS))
                 fi
-                ;;
-            *)
-                if ((state == 0)) && contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
-                    state=1
-                    continue
-                fi
-                case "$state:$arg" in
-                    [01]:auth) state=2 ;;
-                    2:application-default) state=3 ;;
-                    2:login)
-                        record_reading 1
-                        return 0
-                        ;;
-                    3:login | 3:revoke)
-                        record_reading 2
-                        return 0
-                        ;;
-                    *)
-                        record_reading 4
-                        return 0
-                        ;;
-                esac
+                continue
                 ;;
         esac
+        if ((state == 0)) && contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
+            state=1
+            continue
+        fi
+        case "$state:$arg" in
+            [01]:auth) state=2 ;;
+            2:application-default) state=3 ;;
+            2:login) state=login ;;
+            3:login | 3:revoke) state=adc ;;
+            *) state=other ;;
+        esac
+        case "$state" in
+            login | adc | other) break ;;
+        esac
     done
-    record_reading 4
+    case "$state" in
+        login) kinds=$((kinds | 1)) ;;
+        adc) kinds=$((kinds | 2)) ;;
+        *) kinds=$((kinds | 4)) ;;
+    esac
+    GCLOUD_PATH_KINDS_MEMO[$key]="$kinds"
+    GCLOUD_PATH_KINDS="$kinds"
 }
 
 parse_gcloud_command_path() {
-    GCLOUD_ARGV=("$@")
-    GCLOUD_READING_KINDS=0
-    GCLOUD_READINGS=0
     read_command_words "$@"
-    explore_command_path 0 0
+    if protected_words_in_order "$@"; then
+        GCLOUD_ARGV=("$@")
+        GCLOUD_PATH_KINDS_MEMO=()
+        path_kinds_from 0 0
+        GCLOUD_READING_KINDS="$GCLOUD_PATH_KINDS"
+    else
+        GCLOUD_READING_KINDS=4
+    fi
     GCLOUD_POSSIBLE_LOGIN=$((GCLOUD_READING_KINDS & 1 ? 1 : 0))
     GCLOUD_POSSIBLE_ADC_OPERATION=$((GCLOUD_READING_KINDS & 2 ? 1 : 0))
     # Ambiguous when the readings disagree: more than one kind bit is set.

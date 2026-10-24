@@ -444,6 +444,48 @@ class GcloudRouting(unittest.TestCase):
                 self.assertNotIn("ambiguous", result.stderr)
                 self.assertEqual(stub_argv(result), args)
 
+    def test_many_unknown_flags_pass_through_without_protected_words_in_order(self):
+        """No reading of a flag can add a word, so without `auth` followed by a protected
+        operation word no number of unknown flags makes the path protected."""
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        for args in (
+            ["--future-flag", "alpha"] * 12 + ["config", "list"],
+            ["--future-flag", "auth"] * 12 + ["list"],
+            ["--future-flag", "login"] * 6 + ["auth", "list"],
+            ["--future-flag", "x"] * 40 + ["compute", "instances", "list"],
+        ):
+            with self.subTest(args=args[-4:], length=len(args)):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("ambiguous", result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_many_unknown_flags_still_refuse_a_reachable_protected_command(self):
+        """With the words in order, every reading is weighed, however many flags
+        precede them: an exact walk, with no reading limit to give up at."""
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        for args in (
+            ["--future-flag", "alpha"] * 12 + ["auth", "login"],
+            ["--future-flag", "x"] * 40 + ["auth", "login"],
+            ["auth"] + ["--future-flag", "x"] * 40 + ["application-default", "revoke"],
+        ):
+            with self.subTest(args=args[-4:], length=len(args)):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("ambiguous", result.stderr)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+
+    def test_unknown_flags_only_after_a_decided_path_change_nothing(self):
+        """Many unknown flags after `auth login` cannot move it: the login is routed."""
+        args = ["auth", "login"] + ["--future-flag", "x"] * 40
+        result = self.run_shim(args=args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertEqual(stub_argv(result), args)
+
     def test_unknown_flag_refuses_a_possible_protected_command(self):
         write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
         adc = self.cloudsdk_config / "application_default_credentials.json"
