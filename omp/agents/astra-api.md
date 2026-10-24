@@ -2,9 +2,8 @@
 name: astra-api
 description: |
   OpenAI GPT-6 Astra billed to the OpenAI API: the `astra` agent for when the Codex
-  subscription's usage window is exhausted. It spends API money, so dispatch it only when
-  Sami has approved API spend for the task; say so in the brief. Full tool access; finishes
-  the task it is handed and reports with evidence.
+  subscription's usage window is exhausted. Full tool access; finishes the task it is
+  handed and reports with evidence.
 model:
   - "openai/gpt-6-astra:xhigh"
 color: green
