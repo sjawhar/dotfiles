@@ -43,9 +43,19 @@
 #     NOT the xdg-open shim, whose display branch would see the fake value
 #     and exec the real xdg-open on a machine with no browser.
 #
-# All other calls retain the existing GCLOUD_ACCOUNT routing and pass-through
-# behavior. Doctrine: fail LOUD where an identity is supposed to exist, never
-# fall through to a different one.
+# GCLOUD_ACCOUNT=<name> selects configuration <name>: config_<name> must exist as
+# a file under gcloud's configuration directory's configurations/ (a filesystem
+# check, not `gcloud config configurations list`, which would recurse into this
+# shim and is slow), and the real gcloud then runs with
+# CLOUDSDK_ACTIVE_CONFIG_NAME=<name>. A missing one fails loud, naming the value
+# and listing the configurations that exist; it never falls back to `default`.
+# gcloud's configuration directory is a non-empty CLOUDSDK_CONFIG, else
+# .config/gcloud under HOME, else under the current uid's passwd home, as gcloud
+# finds it; the shim looks it up only for a check that reads it, and refuses
+# that check when none resolves. With GCLOUD_ACCOUNT unset or empty, a call no
+# rule above touches runs the real gcloud unchanged, HOME unset included.
+# Doctrine: fail LOUD where an identity is supposed to exist, never fall
+# through to a different one.
 set -euo pipefail
 
 # The global flags of the installed SDK, split by how many values each takes.
@@ -100,14 +110,13 @@ GCLOUD_RELEASE_TRACKS=(alpha beta preview)
 # The command path this SDK's own parser reads, and what other readings of an
 # unknown flag's value could make it. GCLOUD_READING_KINDS holds one bit per kind
 # of path some reading names: 1 `auth login`, 2 `auth application-default
-# login|revoke`, 4 anything else. GCLOUD_PATH_KINDS_TABLE holds, at
-# index*4 + state, the kinds every reading from that argv index in that state
-# names. It is an indexed array, not an associative one: bash 3.2, the
-# /bin/bash of macOS, has no associative arrays and would stop this shim at
-# its declaration.
+# login|revoke`, 4 anything else. GCLOUD_ARGV is the argv compute_reading_kinds
+# walks. It is a global, not that function's arguments: under bash 3.2 every
+# function call costs time in proportion to the caller's positional parameters,
+# and the walk calls helpers for each entry, so passing 6,000 entries as
+# arguments took the 3,000-flag case from 2 s to 11 s.
 declare -a GCLOUD_COMMAND_WORDS=()
 declare -a GCLOUD_ARGV=()
-declare -a GCLOUD_PATH_KINDS_TABLE=()
 GCLOUD_READING_KINDS=0
 GCLOUD_COMMAND_AMBIGUOUS=0
 GCLOUD_POSSIBLE_LOGIN=0
@@ -197,16 +206,19 @@ protected_words_in_order() {
 # names. States: 0 nothing read, 1 a release track read, 2 `auth`, 3 `auth
 # application-default`. An unknown flag written without `=` and followed by a
 # non-flag entry is a choice point, since a later SDK could make it take that
-# entry as its value; both readings count. Each entry's result depends only on
-# the entries after it, so one loop from the last index back to 0 fills the
-# table exactly: at most four states per index, no reading limit to give up at,
-# and no recursion, so no number of unknown flags can exhaust the stack.
+# entry as its value; both readings count. The table holds, at index*4 + state,
+# the kinds every reading from that argv index in that state names. Each entry's
+# result depends only on the entries after it, so one loop from the last index
+# back to 0 fills the table exactly: at most four states per index, and no
+# recursion, so no number of unknown flags can exhaust the stack. It is an
+# indexed array, not an associative one: bash 3.2, the /bin/bash of macOS, has
+# no associative arrays and would stop this shim at the declaration.
 compute_reading_kinds() {
+    local -a table=()
     local count="${#GCLOUD_ARGV[@]}" index state arg next row skip_row move is_track
-    GCLOUD_PATH_KINDS_TABLE=()
     # Past the last entry the path has not reached a protected command.
     for ((state = 0; state < 4; state++)); do
-        GCLOUD_PATH_KINDS_TABLE[count * 4 + state]=4
+        table[count * 4 + state]=4
     done
     for ((index = count - 1; index >= 0; index--)); do
         arg="${GCLOUD_ARGV[index]}"
@@ -231,18 +243,18 @@ compute_reading_kinds() {
         skip_row=$(((index + 2 > count ? count : index + 2) * 4))
         for ((state = 0; state < 4; state++)); do
             case "$move" in
-                flag) next="${GCLOUD_PATH_KINDS_TABLE[row + state]}" ;;
-                value) next="${GCLOUD_PATH_KINDS_TABLE[skip_row + state]}" ;;
+                flag) next="${table[row + state]}" ;;
+                value) next="${table[skip_row + state]}" ;;
                 choice)
-                    next=$((GCLOUD_PATH_KINDS_TABLE[row + state] | GCLOUD_PATH_KINDS_TABLE[skip_row + state]))
+                    next=$((table[row + state] | table[skip_row + state]))
                     ;;
                 word)
                     if ((state == 0 && is_track)); then
-                        next="${GCLOUD_PATH_KINDS_TABLE[row + 1]}"
+                        next="${table[row + 1]}"
                     else
                         case "$state:$arg" in
-                            [01]:auth) next="${GCLOUD_PATH_KINDS_TABLE[row + 2]}" ;;
-                            2:application-default) next="${GCLOUD_PATH_KINDS_TABLE[row + 3]}" ;;
+                            [01]:auth) next="${table[row + 2]}" ;;
+                            2:application-default) next="${table[row + 3]}" ;;
                             2:login) next=1 ;;
                             3:login | 3:revoke) next=2 ;;
                             *) next=4 ;;
@@ -250,10 +262,10 @@ compute_reading_kinds() {
                     fi
                     ;;
             esac
-            GCLOUD_PATH_KINDS_TABLE[index * 4 + state]="$next"
+            table[index * 4 + state]="$next"
         done
     done
-    GCLOUD_READING_KINDS="${GCLOUD_PATH_KINDS_TABLE[0]}"
+    GCLOUD_READING_KINDS="${table[0]}"
 }
 
 parse_gcloud_command_path() {
@@ -315,32 +327,53 @@ needs_forward_browser() {
     command -v forward &>/dev/null
 }
 
-is_auth_login() {
-    [[ "${GCLOUD_COMMAND_WORDS[0]:-}" == auth && "${GCLOUD_COMMAND_WORDS[1]:-}" == login ]]
+# The home directory gcloud would use, in GCLOUD_USER_HOME. gcloud takes it from
+# Python's expanduser (lib/googlecloudsdk/core/util/files.py:1317-1324), which
+# uses HOME when it is set, even empty, else the passwd home of the current uid,
+# and drops trailing slashes (posixpath.py:229-280). With HOME unset bash expands
+# ~ to that passwd home too, but to / when the uid has none, so `id -un` tells
+# the two apart. Fails when the uid has no passwd entry.
+resolve_user_home() {
+    local home
+    if [[ -n "${HOME+set}" ]]; then
+        home="$HOME"
+    else
+        id -un >/dev/null 2>&1 || return 1
+        home=~
+    fi
+    while [[ "$home" == */ ]]; do
+        home="${home%/}"
+    done
+    GCLOUD_USER_HOME="$home"
 }
 
-application_default_operation() {
-    [[ "${GCLOUD_COMMAND_WORDS[0]:-}" == auth && "${GCLOUD_COMMAND_WORDS[1]:-}" == application-default ]] || return 1
-    case "${GCLOUD_COMMAND_WORDS[2]:-}" in
-        login | revoke)
-            printf '%s\n' "${GCLOUD_COMMAND_WORDS[2]}"
-            return 0
-            ;;
-    esac
-    return 1
+# gcloud's configuration directory, in GCLOUD_CONFIG_ROOT: a non-empty
+# CLOUDSDK_CONFIG, else ~/.config/gcloud (lib/googlecloudsdk/core/config.py:
+# 231-244). Resolved once, and only on the paths that read the directory, so a
+# call that cannot be protected runs the same with HOME unset. Where nothing
+# resolves it, the shim cannot tell whether box is active, so it refuses.
+GCLOUD_CONFIG_ROOT=""
+resolve_config_root() {
+    [[ -n "$GCLOUD_CONFIG_ROOT" ]] && return 0
+    if [[ -n "${CLOUDSDK_CONFIG:-}" ]]; then
+        GCLOUD_CONFIG_ROOT="$CLOUDSDK_CONFIG"
+    elif resolve_user_home; then
+        GCLOUD_CONFIG_ROOT="${GCLOUD_USER_HOME}/.config/gcloud"
+    else
+        echo "gcloud shim: cannot find gcloud's configuration directory: CLOUDSDK_CONFIG and HOME are unset and uid ${UID} has no passwd entry; refusing, because without it the shim cannot check which identity this command would use. Set CLOUDSDK_CONFIG or HOME." >&2
+        exit 1
+    fi
 }
 
 box_is_active() {
-    local config_root active_config
-    config_root="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
-    active_config="${config_root}/active_config"
+    resolve_config_root
+    local active_config="${GCLOUD_CONFIG_ROOT}/active_config"
     [[ -f "$active_config" && "$(<"$active_config")" == box ]]
 }
 
 is_external_account_adc() {
-    local config_root adc_file adc_json
-    config_root="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
-    adc_file="${config_root}/application_default_credentials.json"
+    resolve_config_root
+    local adc_file="${GCLOUD_CONFIG_ROOT}/application_default_credentials.json" adc_json
     [[ -f "$adc_file" ]] || return 1
     # An ADC the shim cannot read cannot be shown not to be the box's identity.
     # bash 4 and later fail the read below under set -e; bash 3.2 reads an
@@ -371,11 +404,14 @@ identity_is_selected() {
     [[ -n "$(effective_option_value --cred-file "$@")" ]]
 }
 
+# A login that would land on box: the caller chose no identity and box is active.
+login_lands_on_box() {
+    ! identity_is_selected "$@" && box_is_active
+}
+
+# Every reading names `auth login` (GCLOUD_READING_KINDS is exactly 1).
 is_box_routed_auth_login() {
-    [[ "$GCLOUD_COMMAND_AMBIGUOUS" -eq 0 ]] || return 1
-    is_auth_login || return 1
-    identity_is_selected "$@" && return 1
-    box_is_active
+    ((GCLOUD_READING_KINDS == 1)) && login_lands_on_box "$@"
 }
 
 find_real_gcloud() {
@@ -388,9 +424,12 @@ find_real_gcloud() {
     done < <(type -ap gcloud)
     # Minimal-PATH spawners (MCP servers, cron, etc.) carry neither the
     # dotfiles shims nor the SDK's own bin dir; fall back to the documented
-    # install location before failing.
-    candidate="$HOME/.gcloud/google-cloud-sdk/bin/gcloud"
-    if [[ -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
+    # install location, under the home gcloud itself would use, before failing.
+    candidate=""
+    if resolve_user_home; then
+        candidate="${GCLOUD_USER_HOME}/.gcloud/google-cloud-sdk/bin/gcloud"
+    fi
+    if [[ -n "$candidate" && -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
         printf '%s\n' "$candidate"
         return 0
     fi
@@ -414,20 +453,18 @@ main() {
 
     parse_gcloud_command_path "$@"
 
-    local config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations"
     # Read the ADC only for a command this block can refuse: an ambiguous path that
     # could be a protected one, or application-default login/revoke. Every other call
     # leaves the credential file unopened, so a runtime monitor that watches who opens
     # it sees gcloud, not this wrapper.
-    local adc_operation=""
     if ((GCLOUD_COMMAND_AMBIGUOUS)); then
-        if { ((GCLOUD_POSSIBLE_LOGIN)) && ! identity_is_selected "$@" && box_is_active; } ||
+        if { ((GCLOUD_POSSIBLE_LOGIN)) && login_lands_on_box "$@"; } ||
             { ((GCLOUD_POSSIBLE_ADC_OPERATION)) && is_external_account_adc; }; then
             echo "gcloud shim: refusing a command whose path an unrecognized flag makes ambiguous while it could still be a protected auth command; drop that flag, or name a configuration explicitly with --configuration theorem or GCLOUD_ACCOUNT=theorem." >&2
             exit 1
         fi
-    elif adc_operation="$(application_default_operation)" && is_external_account_adc; then
-        echo "gcloud shim: refusing auth application-default ${adc_operation}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which agent-secrets and gcloud use." >&2
+    elif ((GCLOUD_READING_KINDS == 2)) && is_external_account_adc; then
+        echo "gcloud shim: refusing auth application-default ${GCLOUD_COMMAND_WORDS[2]}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which agent-secrets and gcloud use." >&2
         exit 1
     fi
 
@@ -436,23 +473,25 @@ main() {
             echo "gcloud shim: refusing implicit box auth login with --flags-file; name a configuration explicitly with --configuration theorem or GCLOUD_ACCOUNT=theorem." >&2
             exit 1
         fi
+        resolve_config_root
+        local config_dir="${GCLOUD_CONFIG_ROOT}/configurations"
         if [[ ! -f "${config_dir}/config_theorem" ]]; then
             echo "gcloud shim: configuration theorem is missing at ${config_dir}/config_theorem; create it with gcloud config configurations create theorem --no-activate." >&2
             exit 1
         fi
 
         local -a routed_args=()
-        local arg update_adc=no
+        local arg update_adc=0
         for arg in "$@"; do
             if [[ "$arg" == --update-adc ]]; then
-                update_adc=yes
+                update_adc=1
                 continue
             fi
             routed_args+=("$arg")
         done
 
         echo "gcloud shim: routing auth login to configuration theorem because box is this machine's own identity." >&2
-        if [[ "$update_adc" == yes ]]; then
+        if ((update_adc)); then
             echo "gcloud shim: dropping --update-adc: the box's ADC stays its own identity." >&2
         fi
         export CLOUDSDK_ACTIVE_CONFIG_NAME=theorem
@@ -473,7 +512,8 @@ main() {
             exit 1
             ;;
     esac
-
+    resolve_config_root
+    local config_dir="${GCLOUD_CONFIG_ROOT}/configurations"
     local config_file="${config_dir}/config_${account}"
 
     if [[ ! -f "$config_file" ]]; then

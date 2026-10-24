@@ -10,11 +10,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # Sami's own login stays in configuration `theorem` (admin work:
 # `gcloud --configuration theorem`, or GCLOUD_ACCOUNT=theorem through
-# shims/gcloud) and its ADC in legacy_credentials/<his account>/adc.json. Neither
-# is touched here: gcloud writes only the box account's own legacy_credentials
-# entry. Besides that, the box configuration, active_config and gcloud's credential
-# store, the one file changed is application_default_credentials.json; a user
-# login found there is kept once as application_default_credentials.json.pre-box.
+# shims/gcloud) and its ADC in legacy_credentials/<his account>/adc.json. When
+# `theorem` is missing, this creates it, never active, with his account and the
+# box project, so shims/gcloud has a configuration to send a plain
+# `gcloud auth login` to; an existing `theorem` and his legacy_credentials are
+# never touched. gcloud writes only the box account's own legacy_credentials
+# entry. Besides that, the box configuration, active_config and gcloud's
+# credential store, the one file changed is application_default_credentials.json;
+# a user login found there is kept once as application_default_credentials.json.pre-box.
 #
 # On any other machine (no Azure IMDS, or an IMDS identity that is not
 # box-sjawhar) it changes nothing. Role installer: devbox/install.sh runs it.
@@ -133,6 +136,4 @@ if ! cmp -s "$CRED_FILE" "$ADC_FILE"; then
 fi
 
 echo "gcloud-box: gcloud and ADC act as ${BOX_ACCOUNT}"
-if [[ -f "${GCLOUD_DIR}/configurations/config_theorem" ]]; then
-    echo "gcloud-box: Sami's login is unchanged: gcloud --configuration theorem"
-fi
+echo "gcloud-box: Sami's login is unchanged: gcloud --configuration theorem"

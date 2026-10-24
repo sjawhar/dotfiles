@@ -13,6 +13,7 @@ the tests never read or write Sami's real ~/.config/gcloud.
 import json
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -77,6 +78,15 @@ class GcloudRouting(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def write_external_account_adc(self) -> Path:
+        """The box's ADC: an external_account credential in the fake config root."""
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        return adc
+
+    def stub_gcloud_that_must_not_run(self) -> None:
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
 
     def run_shim(
         self,
@@ -173,7 +183,7 @@ class GcloudRouting(unittest.TestCase):
 
     def test_missing_theorem_configuration_fails_before_running_gcloud(self):
         (self.configs_dir / "config_theorem").unlink()
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         result = self.run_shim(args=["auth", "login"])
         self.assertEqual(result.returncode, 1)
         self.assertIn("gcloud config configurations create theorem --no-activate", result.stderr)
@@ -181,8 +191,7 @@ class GcloudRouting(unittest.TestCase):
         self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
 
     def test_non_auth_commands_containing_auth_words_are_untouched(self):
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         for args in (
             ["compute", "instances", "create", "auth", "login"],
             ["compute", "instances", "create", "auth", "application-default", "login"],
@@ -245,9 +254,8 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(stub_argv(result), expected_args or args)
 
     def test_global_flags_among_the_auth_words_preserve_adc_refusal(self):
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.write_external_account_adc()
+        self.stub_gcloud_that_must_not_run()
         for args in (
             ["auth", "--http-timeout", "30", "application-default", "login"],
             ["auth", "application-default", "--http-timeout", "30", "revoke"],
@@ -326,12 +334,117 @@ class GcloudRouting(unittest.TestCase):
                 self.assertIn("CONFIG=theorem", result.stdout)
                 self.assertIn("routing auth login", result.stderr)
 
+    def run_shim_without_home(
+        self,
+        extra_env: Mapping[str, str] | None = None,
+        args: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = {key: value for key, value in self.env.items() if key != "HOME"}
+        env.update(extra_env or {})
+        return subprocess.run(
+            [str(SHIMS / "gcloud"), *(args or ["config", "list"])],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    def test_home_unset_runs_an_unprotectable_call_without_resolving_the_config(self):
+        """With HOME unset a call no protection covers runs as it did before any of
+        these protections: it reads no gcloud file, so it never needs a home. The
+        failing `id` would make any attempt to find the configuration refuse."""
+        write_stub(self.stub_dir, "id", "exit 1")
+        for args in (
+            ["config", "list"],
+            ["auth", "list"],
+            ["auth", "application-default", "print-access-token"],
+            ["--project", "p", "compute", "instances", "list"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_shim_without_home(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=<unset>", result.stdout)
+                self.assertEqual(stub_argv(result), args)
+                self.assertEqual(result.stderr, "")
+
+    def test_home_unset_box_login_uses_cloudsdk_config_and_is_routed(self):
+        """CLOUDSDK_CONFIG names the configuration before any home is looked up."""
+        write_stub(self.stub_dir, "id", "exit 1")
+        config = {"CLOUDSDK_CONFIG": str(self.cloudsdk_config)}
+        result = self.run_shim_without_home(config, args=["auth", "login", "--update-adc"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertIn("routing auth login", result.stderr)
+        self.assertEqual(stub_argv(result), ["auth", "login"])
+        result = self.run_shim_without_home({**config, "GCLOUD_ACCOUNT": "default"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=default", result.stdout)
+
+    def test_home_unset_and_no_passwd_entry_refuses_protected_commands(self):
+        """No CLOUDSDK_CONFIG, no HOME and no passwd home: the shim cannot see whether
+        box is active, so it refuses rather than let the login replace box."""
+        write_stub(self.stub_dir, "id", "exit 1")
+        self.stub_gcloud_that_must_not_run()
+        for extra_env, args in (
+            ({}, ["auth", "login"]),
+            ({}, ["alpha", "auth", "login", "--update-adc"]),
+            ({}, ["auth", "application-default", "login"]),
+            ({}, ["--future-flag", "value", "auth", "login"]),
+            ({"GCLOUD_ACCOUNT": "default"}, ["config", "list"]),
+        ):
+            with self.subTest(extra_env=extra_env, args=args):
+                result = self.run_shim_without_home(extra_env, args=args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("cannot find gcloud's configuration directory", result.stderr)
+                self.assertIn("Set CLOUDSDK_CONFIG or HOME", result.stderr)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                self.assertNotIn("unbound variable", result.stderr)
+
+    def test_config_root_matches_gcloud_for_each_home(self):
+        """gcloud's config dir is CLOUDSDK_CONFIG when non-empty, else
+        expanduser('~')/.config/gcloud (lib/googlecloudsdk/core/config.py:231-244,
+        core/util/files.py:1317-1324). The shim's resolution is compared with
+        Python's own expanduser under the same environment; neither reads a file."""
+        base = {"PATH": "/usr/bin:/bin"}
+        for extra_env in (
+            {},
+            {"HOME": ""},
+            {"HOME": "/"},
+            {"HOME": "/fixture-home/"},
+            {"HOME": "/fixture-home//"},
+            {"HOME": "/fixture-home", "CLOUDSDK_CONFIG": ""},
+            {"CLOUDSDK_CONFIG": "/fixture-config"},
+        ):
+            with self.subTest(extra_env=extra_env):
+                env = {**base, **extra_env}
+                shim = subprocess.run(
+                    ["/bin/bash", "-c", 'source "$1"; resolve_config_root; printf "%s" "$GCLOUD_CONFIG_ROOT"', "probe", str(SHIMS / "gcloud")],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=True,
+                )
+                gcloud = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import os, sys\n"
+                        "root = os.environ.get('CLOUDSDK_CONFIG') or "
+                        "os.path.join(os.path.expanduser('~'), '.config', 'gcloud')\n"
+                        "sys.stdout.write(root)",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=True,
+                )
+                self.assertEqual(shim.stdout, gcloud.stdout)
+
     def test_flags_file_can_supply_the_last_cred_file_so_it_is_refused(self):
         """A flags file expands in place, so its empty --cred-file comes after argv's
         and wins: argv's non-empty --cred-file is not the effective one."""
         flags_file = self.stub_dir / "login.yaml"
         flags_file.write_text("--cred-file: ''\n--update-adc: true\n", encoding="utf-8")
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         for args in (
             ["auth", "login", "--cred-file=/tmp/credential.json", "--flags-file", str(flags_file)],
             ["auth", "login", "--cred-file", "/tmp/credential.json", f"--flags-file={flags_file}"],
@@ -362,9 +475,8 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(stub_argv(result), [track, "auth", "login"])
 
     def test_release_track_application_default_operations_are_refused(self):
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.write_external_account_adc()
+        self.stub_gcloud_that_must_not_run()
         for track in ("alpha", "beta"):
             for operation in ("login", "revoke"):
                 with self.subTest(track=track, operation=operation):
@@ -398,8 +510,7 @@ class GcloudRouting(unittest.TestCase):
 
     def test_read_only_commands_run_whatever_the_adc_holds(self):
         """A command that cannot change a credential is never refused for the ADC."""
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         for args in (
             ["--no-log-http", "config", "list"],
             ["--log-http", "config", "list"],
@@ -416,8 +527,7 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(stub_argv(result), args)
 
     def test_unknown_flag_passes_through_when_no_auth_command_is_possible(self):
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         args = ["--future-global-flag", "value", "config", "list"]
         result = self.run_shim(args=args)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -427,8 +537,7 @@ class GcloudRouting(unittest.TestCase):
     def test_unknown_flag_passes_through_when_no_reading_is_protected(self):
         """Every reading of the unknown flag's value must be able to name a protected
         command before it counts; an `auth` that no reading leads to one is not enough."""
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         for args in (
             ["auth", "--future-flag=value", "list"],
             ["auth", "--future-flag", "value", "list"],
@@ -448,8 +557,7 @@ class GcloudRouting(unittest.TestCase):
     def test_many_unknown_flags_pass_through_without_protected_words_in_order(self):
         """No reading of a flag can add a word, so without `auth` followed by a protected
         operation word no number of unknown flags makes the path protected."""
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         for args in (
             ["--future-flag", "alpha"] * 12 + ["config", "list"],
             ["--future-flag", "auth"] * 12 + ["list"],
@@ -464,10 +572,9 @@ class GcloudRouting(unittest.TestCase):
 
     def test_many_unknown_flags_still_refuse_a_reachable_protected_command(self):
         """With the words in order, every reading is weighed, however many flags
-        precede them: an exact walk, with no reading limit to give up at."""
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        precede them."""
+        self.stub_gcloud_that_must_not_run()
+        self.write_external_account_adc()
         for args in (
             ["--future-flag", "alpha"] * 12 + ["auth", "login"],
             ["--future-flag", "x"] * 40 + ["auth", "login"],
@@ -482,7 +589,7 @@ class GcloudRouting(unittest.TestCase):
     def test_thousands_of_unknown_flags_are_refused_cleanly(self):
         """The walk is a loop, not recursion: 3000 choice points before `auth login`
         are weighed exactly and refused, with no stack overflow and in little time."""
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         args = ["--future-flag", "x"] * 3000 + ["auth", "login"]
         started = time.monotonic()
         result = self.run_shim(args=args)
@@ -501,7 +608,7 @@ class GcloudRouting(unittest.TestCase):
         self.assertEqual(stub_argv(result), args)
 
     def test_unknown_flag_refuses_a_possible_protected_command(self):
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         adc = self.cloudsdk_config / "application_default_credentials.json"
         for args, adc_contents in (
             (["--future-global-flag", "value", "auth", "login"], None),
@@ -531,7 +638,7 @@ class GcloudRouting(unittest.TestCase):
     def test_unknown_flag_with_flags_file_refuses_an_implicit_box_login(self):
         flags_file = self.stub_dir / "login.yaml"
         flags_file.write_text("--update-adc:\n", encoding="utf-8")
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         for args in (
             ["--future-flag", "value", "auth", "login", f"--flags-file={flags_file}"],
             ["auth", "login", "--future-flag", "value", f"--flags-file={flags_file}"],
@@ -566,9 +673,8 @@ class GcloudRouting(unittest.TestCase):
         command path, so it holds for the flags that select an identity
         (`--configuration`) or carry opaque flags (`--flags-file`) as much as for the
         rest."""
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.write_external_account_adc()
+        self.stub_gcloud_that_must_not_run()
         protected = ["auth", "application-default", "login"]
 
         for flag, count in SDK_FLAGS["flags"].items():
@@ -585,7 +691,7 @@ class GcloudRouting(unittest.TestCase):
 
     def test_flags_file_refuses_implicit_box_login(self):
         flags_file = self.stub_dir / "login.yaml"
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         cases = (
             (["auth", "login", f"--flags-file={flags_file}"], "--update-adc:\n"),
             (["auth", "login", "--flags-file", str(flags_file)], "--configuration: box\n"),
@@ -613,11 +719,10 @@ class GcloudRouting(unittest.TestCase):
         self.assertEqual(stub_argv(result), args)
 
     def test_external_adc_refusal_ignores_flags_file(self):
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         flags_file = self.stub_dir / "login.yaml"
         flags_file.write_text("--configuration: theorem\n", encoding="utf-8")
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         result = self.run_shim(
             args=["auth", "application-default", "login", f"--flags-file={flags_file}"]
         )
@@ -626,8 +731,7 @@ class GcloudRouting(unittest.TestCase):
         self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
 
     def test_external_adc_refusal_ignores_explicit_configuration_flag(self):
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         for operation in ("login", "revoke"):
             with self.subTest(operation=operation):
                 result = self.run_shim(
@@ -641,8 +745,7 @@ class GcloudRouting(unittest.TestCase):
         """Its value could hide the command path, so a possible application-default
         login is refused even where the box is not this machine's identity."""
         (self.cloudsdk_config / "active_config").write_text("default\n", encoding="utf-8")
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         result = self.run_shim(
             args=["--future-global-flag", "value", "auth", "application-default", "login"]
         )
@@ -668,8 +771,7 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(stub_argv(result), args)
 
     def test_external_account_adc_refuses_application_default_login_and_revoke(self):
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        self.write_external_account_adc()
         for operation in ("login", "revoke"):
             with self.subTest(operation=operation):
                 result = self.run_shim(args=["auth", "application-default", operation])
@@ -680,8 +782,7 @@ class GcloudRouting(unittest.TestCase):
     def test_adc_is_opened_only_for_the_commands_it_can_refuse(self):
         """Ordinary calls leave the ADC unopened: a runtime monitor then sees gcloud read it,
         not this wrapper. An unreadable ADC makes any read by the shim fail loudly under set -e."""
-        adc = self.cloudsdk_config / "application_default_credentials.json"
-        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        adc = self.write_external_account_adc()
         adc.chmod(0)
         try:
             for args in (["config", "list"], ["auth", "print-access-token"],
@@ -712,7 +813,7 @@ class GcloudRouting(unittest.TestCase):
                     self.assertEqual(stub_argv(result), args)
 
     def test_unknown_account_is_loud_and_never_runs_real_gcloud(self):
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         result = self.run_shim({"GCLOUD_ACCOUNT": "nonexistent"})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("nonexistent", result.stderr)
@@ -723,7 +824,7 @@ class GcloudRouting(unittest.TestCase):
         self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
 
     def test_traversal_values_are_rejected(self):
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         for bad in ("../evil", "foo/bar", ".", ".."):
             with self.subTest(bad=bad):
                 result = self.run_shim({"GCLOUD_ACCOUNT": bad})
@@ -754,7 +855,7 @@ class GcloudRouting(unittest.TestCase):
         # so the override must be authoritative rather than merely additive.
         other_configs_root = self.stub_dir / "other-cloudsdk"
         (other_configs_root / "configurations").mkdir(parents=True)
-        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        self.stub_gcloud_that_must_not_run()
         result = self.run_shim({"GCLOUD_ACCOUNT": "theorem", "CLOUDSDK_CONFIG": str(other_configs_root)})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("theorem", result.stderr)

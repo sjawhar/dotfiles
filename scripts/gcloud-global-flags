@@ -115,7 +115,7 @@ def partition(flags: dict[str, object]) -> tuple[list[str], list[str]]:
     return sorted(value_flags), sorted(boolean_flags)
 
 
-def shim_arrays(shim: pathlib.Path = SHIM) -> dict[str, list[str]]:
+def shim_arrays() -> dict[str, list[str]]:
     """The arrays the shim declares now, read in one sourcing of it.
 
     The path goes in as the first argument, not as the script name: the shim runs
@@ -128,7 +128,7 @@ def shim_arrays(shim: pathlib.Path = SHIM) -> dict[str, list[str]]:
             'source "$1"; printf "%s\\n" "${' + VALUE_ARRAY + '[@]}"; echo ---;'
             ' printf "%s\\n" "${' + BOOLEAN_ARRAY + '[@]}"',
             "gcloud-global-flags",
-            str(shim),
+            str(SHIM),
         ],
         capture_output=True,
         text=True,
