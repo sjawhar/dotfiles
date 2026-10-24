@@ -205,11 +205,11 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v13.22.0"  # from v12.4.0: `agent-secrets secret` gained the GCP Secret Manager backend (3d692a6e4, first in legion-envoy-v13.11.0), which the Theorem broker's store needs
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:e10891ced1a2f516850421a098e06e58231c32c421b2fa6f5084b2a9448ead48" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:7c9a17cca6193626fe59f150daf705a5f954a817603c1a5387fb880be09af6f4" }
-platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:1e2f36fd4f3fa006f9a4b2c6b0396d9b3b7181def898b8ef50800436afe3dd36" }
-platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:8dc21e9c610fe8265853e698e79c25cf558b01c030965fbfa9fdc044e6bb1662" }
+version = "legion-envoy-v14.0.2"  # from v13.22.0: the machine login is an OAuth device grant the helper keeps in ~/.config/agent-secrets/machine.json (0600) and refreshes itself, so a restart resumes it with no approval (#2115, sjawhar/legion 00eca96e7); a device login holds one database connection (#2134, 0451bf46c)
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:1279f6ef50ae0a1f073e283cb21f11c7b8c2ff7f3531420ff128bfdf0dcfd696" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:ba58cb8af0720901e6bd183d9e5940291dfc59db56207d0759a03b38dddd5c01" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:9a681c1837589b0cfe97fd1f97c8fc15bfe53c7ae0cfa75ed28910c0398cfa1b" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:c00ea68ff21929b2aac8919778ca688ff3ec7a00115ec376ce863b4e5f9d3736" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
