@@ -118,6 +118,20 @@ class GhAppTokenTests(unittest.TestCase):
                 rc = gh_app_token.main(argv)
         return rc, stdout.getvalue(), stderr.getvalue()
 
+    def test_a_secret_resolves_through_mise_shims_when_the_caller_removed_them_from_path(self):
+        # 2026-10-24 (INFRA-219): mise runs [settings.github] credential_command with its
+        # shims dir taken off PATH, and outside an interactive shell that dir is the only
+        # place `secrets` is found. Every mint there failed, and mise fell back to a dead
+        # gh login that GitHub refused with 401.
+        mise_data = Path(self.temp_dir.name) / "mise"
+        (mise_data / "shims").mkdir(parents=True)
+        (mise_data / "shims" / "secrets").write_text(SECRETS_STUB)
+        (mise_data / "shims" / "secrets").chmod(0o700)
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "MISE_DATA_DIR": str(mise_data)}):
+            self.assertEqual(
+                gh_app_token.resolve_secret("GH_PUBLIC_REPO_PAT"), "ghp_stub_upstream_token"
+            )
+
     def test_owner_precedence_uses_flag_then_env_then_path(self):
         request = {"path": "path-owner/repo.git"}
         with patch.dict(os.environ, {"GH_APP_OWNER": "environment-owner"}):

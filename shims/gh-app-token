@@ -53,6 +53,7 @@ import binascii
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -311,10 +312,21 @@ def resolve_installation(
     return installations[target], False
 
 
+def secrets_executable() -> str:
+    """`secrets` on PATH, else mise's shim for it.
+
+    mise runs [settings.github] credential_command with its own shims dir taken off PATH,
+    and outside an interactive shell (where `mise activate` adds the install dirs) that dir
+    is the only place `secrets` is found: every mint then failed (2026-10-24, INFRA-219).
+    """
+    mise_data = os.environ.get("MISE_DATA_DIR") or str(Path.home() / ".mise")
+    return shutil.which("secrets") or str(Path(mise_data) / "shims" / "secrets")
+
+
 def resolve_secret(name: str) -> str:
     try:
         result = subprocess.run(
-            ["secrets", "get", name, "--value"],
+            [secrets_executable(), "get", name, "--value"],
             capture_output=True,
             text=True,
             check=True,
