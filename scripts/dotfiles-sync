@@ -91,6 +91,9 @@ sync_here() {
     git branch -q --set-upstream-to=origin/main main
     printf '%s on %s\n' "$(hostname)" "$(git rev-parse --short HEAD)"
   fi
+  # A checkout rewrites a changed file with the writer's umask (mailbox.toml was found at 0664
+  # after one), and mailbox refuses a group-writable config; restore the installer's mode.
+  [ ! -f mailbox.toml ] || chmod 600 mailbox.toml
 }
 
 if [ "${1:-}" = --here ]; then
