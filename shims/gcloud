@@ -5,12 +5,14 @@
 #
 # On a box, a plain `gcloud auth login` goes to Sami's `theorem`
 # configuration instead of overwriting the machine's `box` identity. This
-# applies only when `active_config` is `box`, GCLOUD_ACCOUNT and
-# CLOUDSDK_ACTIVE_CONFIG_NAME are unset or empty, no `--configuration` appears
-# in argv, and `--cred-file` selects no file. An otherwise-routable login with
+# applies only when `active_config` is `box` and the caller chose no identity:
+# GCLOUD_ACCOUNT and CLOUDSDK_ACTIVE_CONFIG_NAME are unset or empty, and the
+# last `--configuration` and the last `--cred-file` in argv are absent or empty
+# (gcloud reads an empty value as none). An otherwise-routable login with
 # `--flags-file` fails loud: gcloud expands that opaque file after the shim
-# checks identity flags. Routed logins drop --update-adc so the box's
-# application default credentials (ADC) remain its own identity.
+# checks identity flags, and a `--cred-file` inside it would come last and win.
+# Routed logins drop --update-adc so the box's application default
+# credentials (ADC) remain its own identity.
 #
 # `gcloud auth application-default login` and `revoke` are refused whenever
 # the ADC in CLOUDSDK_CONFIG is an `external_account` credential. Sami's login
@@ -21,10 +23,11 @@
 # Both protections classify the command the way gcloud does, so a flag cannot
 # hide the command path: every global flag and its value are consumed wherever
 # they appear among the command words, and one leading release track (`alpha`,
-# `beta`, `preview`) is stripped for classification only. An unrecognized flag
-# whose value is unknowable makes the path ambiguous; where the rest of argv
-# could still name a protected `auth` command, that fails loud rather than
-# running under the wrong identity.
+# `beta`, `preview`) is stripped for classification only. A flag missing from
+# the table may take the next entry as its value in a later SDK, so the path is
+# read both ways; where one reading names a protected `auth` command and
+# another does not, that fails loud rather than running under the wrong
+# identity. A command that no reading makes protected passes through.
 #
 # `gcloud auth`/`gcloud init` run through `forward` on a headless machine
 # instead of the paste-a-code flow:
@@ -88,11 +91,25 @@ GCLOUD_GLOBAL_BOOLEAN_FLAGS=(
 
 # One leading track word selects a surface, not an identity: `alpha auth login`
 # is still the login this shim protects (lib/surface/auth/__init__.py:22-24).
+# The SDK accepts one track word (`alpha beta auth list` is an invalid choice),
+# so the shim strips one.
 GCLOUD_RELEASE_TRACKS=(alpha beta preview)
 
-# The command path gcloud would parse, and whether a flag made it unknowable.
+# Readings of one command path past which the shim stops enumerating an unknown
+# flag's possible values and treats the path as possibly protected.
+GCLOUD_MAX_READINGS=64
+
+# The command path this SDK's own parser reads, and what other readings of an
+# unknown flag's value could make it. GCLOUD_READING_KINDS holds one bit per kind
+# of path some reading names: 1 `auth login`, 2 `auth application-default
+# login|revoke`, 4 anything else.
 declare -a GCLOUD_COMMAND_WORDS=()
+declare -a GCLOUD_ARGV=()
+GCLOUD_READING_KINDS=0
+GCLOUD_READINGS=0
 GCLOUD_COMMAND_AMBIGUOUS=0
+GCLOUD_POSSIBLE_LOGIN=0
+GCLOUD_POSSIBLE_ADC_OPERATION=0
 
 contains_word() {
     local needle="$1" item
@@ -101,6 +118,14 @@ contains_word() {
         [[ "$item" == "$needle" ]] && return 0
     done
     return 1
+}
+
+is_value_flag() {
+    contains_word "${1%%=*}" "${GCLOUD_GLOBAL_VALUE_FLAGS[@]}"
+}
+
+is_boolean_flag() {
+    contains_word "${1%%=*}" "${GCLOUD_GLOBAL_BOOLEAN_FLAGS[@]}"
 }
 
 # True once the collected words decide whether this is a protected command:
@@ -115,45 +140,104 @@ command_path_is_decided() {
     ((count >= 3))
 }
 
-parse_gcloud_command_path() {
+# The words this SDK's parser takes for the command path. A global flag consumes
+# its value; any other flag takes none: argparse sends an unknown option to its
+# extras alone (python3.14/argparse.py:2146-2150), and calliope disables the
+# prefix matching that short-option clustering rests on (parser_extensions.py:
+# 1273-1287), so `-qq` is one unknown option too. A lone `-` is a positional.
+read_command_words() {
+    local arg track_stripped=0
     GCLOUD_COMMAND_WORDS=()
-    GCLOUD_COMMAND_AMBIGUOUS=0
-    local -a argv=("$@")
-    local arg name
     while (($#)); do
         command_path_is_decided && break
         arg="$1"
+        shift
         case "$arg" in
-            -*)
-                name="${arg%%=*}"
-                if contains_word "$name" "${GCLOUD_GLOBAL_VALUE_FLAGS[@]}"; then
-                    shift
-                    # A separate value is one more argv entry; `--flag=value` holds its own.
-                    [[ "$arg" == *=* ]] || { (($#)) && shift; }
-                elif contains_word "$name" "${GCLOUD_GLOBAL_BOOLEAN_FLAGS[@]}"; then
-                    shift
-                else
-                    # An unknown flag may or may not take the next entry, so every
-                    # word after it is only a guess at the command path.
-                    GCLOUD_COMMAND_AMBIGUOUS=1
+            -?*)
+                # A separate value is one more argv entry; `--flag=value` holds its own.
+                if is_value_flag "$arg" && [[ "$arg" != *=* ]] && (($#)); then
                     shift
                 fi
                 ;;
             *)
-                if [[ "${#GCLOUD_COMMAND_WORDS[@]}" -eq 0 ]] && contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
-                    shift
+                if ((${#GCLOUD_COMMAND_WORDS[@]} == 0 && !track_stripped)) &&
+                    contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
+                    track_stripped=1
                     continue
                 fi
                 GCLOUD_COMMAND_WORDS+=("$arg")
-                shift
                 ;;
         esac
     done
-    # Every protected command names `auth`. Without that word in argv, no reading
-    # of an unknown flag's value can make this one, so the guess is good enough.
-    if [[ "$GCLOUD_COMMAND_AMBIGUOUS" -eq 1 ]] && ! contains_word auth "${argv[@]}"; then
-        GCLOUD_COMMAND_AMBIGUOUS=0
+    return 0
+}
+
+record_reading() {
+    GCLOUD_READING_KINDS=$((GCLOUD_READING_KINDS | $1))
+    GCLOUD_READINGS=$((GCLOUD_READINGS + 1))
+}
+
+# Every reading of the path from GCLOUD_ARGV index $1, in state $2: 0 nothing
+# read, 1 a release track read, 2 `auth`, 3 `auth application-default`. An
+# unknown flag written without `=` and followed by a non-flag entry is a choice
+# point, since a later SDK could make it take that entry as its value; the walk
+# reads it both ways. A choice point after the path is decided changes nothing,
+# so it is never reached.
+explore_command_path() {
+    local index="$1" state="$2" arg
+    if ((GCLOUD_READINGS >= GCLOUD_MAX_READINGS)); then
+        GCLOUD_READING_KINDS=7
+        return 0
     fi
+    while ((index < ${#GCLOUD_ARGV[@]})); do
+        arg="${GCLOUD_ARGV[index]}"
+        index=$((index + 1))
+        case "$arg" in
+            -?*)
+                if is_value_flag "$arg"; then
+                    [[ "$arg" == *=* ]] || index=$((index + 1))
+                elif ! is_boolean_flag "$arg" && [[ "$arg" != *=* && "$arg" != -- ]] &&
+                    ((index < ${#GCLOUD_ARGV[@]})) && [[ "${GCLOUD_ARGV[index]}" != -* ]]; then
+                    explore_command_path $((index + 1)) "$state"
+                fi
+                ;;
+            *)
+                if ((state == 0)) && contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
+                    state=1
+                    continue
+                fi
+                case "$state:$arg" in
+                    [01]:auth) state=2 ;;
+                    2:application-default) state=3 ;;
+                    2:login)
+                        record_reading 1
+                        return 0
+                        ;;
+                    3:login | 3:revoke)
+                        record_reading 2
+                        return 0
+                        ;;
+                    *)
+                        record_reading 4
+                        return 0
+                        ;;
+                esac
+                ;;
+        esac
+    done
+    record_reading 4
+}
+
+parse_gcloud_command_path() {
+    GCLOUD_ARGV=("$@")
+    GCLOUD_READING_KINDS=0
+    GCLOUD_READINGS=0
+    read_command_words "$@"
+    explore_command_path 0 0
+    GCLOUD_POSSIBLE_LOGIN=$((GCLOUD_READING_KINDS & 1 ? 1 : 0))
+    GCLOUD_POSSIBLE_ADC_OPERATION=$((GCLOUD_READING_KINDS & 2 ? 1 : 0))
+    # Ambiguous when the readings disagree: more than one kind bit is set.
+    GCLOUD_COMMAND_AMBIGUOUS=$(((GCLOUD_READING_KINDS & (GCLOUD_READING_KINDS - 1)) != 0))
 }
 
 # `--name value` and `--name=value`, matching the flag exactly: the SDK accepts
@@ -233,9 +317,20 @@ is_external_account_adc() {
 }
 
 # An identity the caller chose: the box route never overrides one of these.
+# Each counts only with a non-empty value, the last occurrence winning, as the
+# SDK reads them: _FindFlagValue takes the last --configuration, and an empty
+# name falls through to the environment and then active_config (lib/
+# googlecloudsdk/core/configurations/named_configs.py:119-148,494-511); auth
+# login tests the --cred-file value for truth (lib/surface/auth/login.py:263,276).
 identity_is_selected() {
     [[ -n "${GCLOUD_ACCOUNT:-}" || -n "${CLOUDSDK_ACTIVE_CONFIG_NAME:-}" ]] && return 0
-    has_option --configuration "$@" && return 0
+    [[ -n "$(effective_option_value --configuration "$@")" ]] && return 0
+    # A flags file expands in place after argv is read, so a --cred-file inside it
+    # can come last and win (lib/googlecloudsdk/calliope/cli.py:149-188): with one
+    # present, argv does not show the effective --cred-file. A --configuration
+    # cannot hide there: the SDK reads it from raw argv before it expands flags
+    # files (cli.py:974, before :985).
+    has_option --flags-file "$@" && return 1
     [[ -n "$(effective_option_value --cred-file "$@")" ]]
 }
 
@@ -288,14 +383,9 @@ main() {
     # leaves the credential file unopened, so a runtime monitor that watches who opens
     # it sees gcloud, not this wrapper.
     local adc_operation=""
-    if [[ "$GCLOUD_COMMAND_AMBIGUOUS" -eq 1 ]]; then
-        local ambiguous_refusal=0
-        if ! identity_is_selected "$@" && box_is_active; then
-            ambiguous_refusal=1
-        elif is_external_account_adc; then
-            ambiguous_refusal=1
-        fi
-        if ((ambiguous_refusal)); then
+    if ((GCLOUD_COMMAND_AMBIGUOUS)); then
+        if { ((GCLOUD_POSSIBLE_LOGIN)) && ! identity_is_selected "$@" && box_is_active; } ||
+            { ((GCLOUD_POSSIBLE_ADC_OPERATION)) && is_external_account_adc; }; then
             echo "gcloud shim: refusing a command whose path an unrecognized flag makes ambiguous while it could still be a protected auth command; drop that flag, or name a configuration explicitly with --configuration theorem or GCLOUD_ACCOUNT=theorem." >&2
             exit 1
         fi

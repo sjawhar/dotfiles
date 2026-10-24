@@ -1,24 +1,33 @@
 #!/usr/bin/python3
-"""Print `shims/gcloud`'s global-flag table, read from an installed Cloud SDK.
-
-The shim has to classify a gcloud command path the way gcloud does — consuming
-each global flag's value wherever it appears — or a flag's value poses as a
-command word and the box-identity protections miss the command. That table is
-the SDK's, so it is generated from the SDK's own root parser rather than from
-its documentation: `gcloud --help` omits the hidden globals (`--assert`,
-`--http-timeout`, `--universe-domain`) and every generated `--no-` form.
-
-    scripts/gcloud-global-flags [--sdk-root DIR] [--check]
-
-With no flag it prints the two bash arrays to paste into `shims/gcloud`, with
-the comment that cites this SDK's version. `--check` compares them with the
-arrays the shim currently declares and exits 1 on any difference, naming it;
-run it after a `gcloud components update` to see whether the table moved.
-
-It loads the SDK in-process through the SDK's own bundled interpreter, so it
-reads the real parser rather than re-implementing it, and it needs no
-credentials: building the CLI touches no configuration and makes no request.
-"""
+''''exec python3 "$0" "$@" # '''
+# The line above is a shell command and a Python string at once. Started as
+# "bash gcloud-global-flags" or "sh gcloud-global-flags", a shell reads it as
+# "exec python3 <this file> <args>" and hands the file to Python before it can
+# read the next line; Python reads it as a string and moves on. Nothing below
+# may be shell syntax a shell would run: a shell once read this file's old
+# docstring, ran the command quoted in it, and started an SDK update that
+# broke the shared install. Keep backticks and dollar-paren out of this file.
+#
+# Print the global-flag table of shims/gcloud, read from an installed Cloud SDK.
+#
+# The shim has to classify a gcloud command path the way gcloud does, consuming
+# each global flag's value wherever it appears, or a flag's value poses as a
+# command word and the box-identity protections miss the command. That table is
+# the SDK's, so it is generated from the SDK's own root parser rather than from
+# its documentation: "gcloud --help" omits the hidden globals (--assert,
+# --http-timeout, --universe-domain) and every generated --no- form.
+#
+#     python3 scripts/gcloud-global-flags [--sdk-root DIR] [--check | --json]
+#
+# With no flag it prints the two bash arrays to paste into shims/gcloud.
+# --check compares them with the arrays the shim declares now and exits 1 on any
+# difference, naming it: run it after any SDK components update. --json prints
+# every flag with its value count, the form of the offline test fixture
+# shims/tests/gcloud_global_flags_<version>.json.
+#
+# It loads the SDK in-process through the SDK's own bundled interpreter, so it
+# reads the real parser rather than re-implementing it, and it needs no
+# credentials: building the CLI touches no configuration and makes no request.
 
 import argparse
 import json
@@ -29,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 
+DESCRIPTION = "Print the global-flag table of shims/gcloud, read from an installed Cloud SDK."
 DEFAULT_SDK_ROOT = pathlib.Path.home() / ".gcloud" / "google-cloud-sdk"
 SHIM = pathlib.Path(__file__).resolve().parent.parent / "shims" / "gcloud"
 VALUE_ARRAY = "GCLOUD_GLOBAL_VALUE_FLAGS"
@@ -81,36 +91,51 @@ def sdk_flags(sdk_root: pathlib.Path) -> dict[str, object]:
     return json.loads(result.stdout)
 
 
-def partition(flags: dict[str, object]) -> tuple[list[str], list[str]]:
-    """Flags that consume a value, and flags that consume none.
+def value_count(flag: str, nargs: object) -> int:
+    """How many argv entries a flag consumes after itself.
 
     nargs is None for a plain store action (one value), 0 for a boolean or an
-    action that exits, and an integer for the rest; anything that takes at least
-    one value belongs in the value table.
+    action that exits, and an integer for a fixed count.
     """
+    if nargs is None:
+        return 1
+    if isinstance(nargs, int) and nargs >= 0:
+        return nargs
+    raise SystemExit(f"{flag}: unsupported nargs {nargs!r}; teach this script its arity")
+
+
+def partition(flags: dict[str, object]) -> tuple[list[str], list[str]]:
+    """Flags that consume a value, and flags that consume none."""
     value_flags, boolean_flags = [], []
     for flag, nargs in flags.items():
-        if nargs == 0:
-            boolean_flags.append(flag)
-        elif nargs is None or (isinstance(nargs, int) and nargs >= 1):
-            value_flags.append(flag)
-        else:
-            raise SystemExit(f"{flag}: unsupported nargs {nargs!r}; teach this script its arity")
+        count = value_count(flag, nargs)
+        if count > 1:
+            raise SystemExit(f"{flag}: takes {count} values; the shim consumes one")
+        (value_flags if count else boolean_flags).append(flag)
     return sorted(value_flags), sorted(boolean_flags)
 
 
-def shim_arrays() -> dict[str, list[str]]:
-    """The arrays the shim declares now, read by sourcing it."""
-    arrays = {}
-    for name in (VALUE_ARRAY, BOOLEAN_ARRAY):
-        result = subprocess.run(
-            ["/bin/bash", "-c", f'source "{SHIM}"; printf "%s\\n" "${{{name}[@]}}"'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        arrays[name] = sorted(result.stdout.split())
-    return arrays
+def shim_arrays(shim: pathlib.Path = SHIM) -> dict[str, list[str]]:
+    """The arrays the shim declares now, read in one sourcing of it.
+
+    The path goes in as the first argument, not as the script name: the shim runs
+    its main function when its source path equals the script name.
+    """
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'source "$1"; printf "%s\\n" "${' + VALUE_ARRAY + '[@]}"; echo ---;'
+            ' printf "%s\\n" "${' + BOOLEAN_ARRAY + '[@]}"',
+            "gcloud-global-flags",
+            str(shim),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    value_part, _, boolean_part = result.stdout.partition("---\n")
+    return {VALUE_ARRAY: sorted(value_part.split()), BOOLEAN_ARRAY: sorted(boolean_part.split())}
 
 
 def render(name: str, flags: list[str]) -> str:
@@ -118,27 +143,7 @@ def render(name: str, flags: list[str]) -> str:
     return f"{name}=(\n{body}\n)"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--sdk-root", type=pathlib.Path, default=DEFAULT_SDK_ROOT)
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="compare with shims/gcloud and exit 1 on a difference",
-    )
-    args = parser.parse_args()
-
-    if not args.sdk_root.is_dir():
-        raise SystemExit(f"no Cloud SDK at {args.sdk_root}; pass --sdk-root")
-    version = sdk_version(args.sdk_root)
-    value_flags, boolean_flags = partition(sdk_flags(args.sdk_root))
-
-    if not args.check:
-        print(f"# Google Cloud SDK {version}, read by scripts/gcloud-global-flags")
-        print(render(VALUE_ARRAY, value_flags))
-        print(render(BOOLEAN_ARRAY, boolean_flags))
-        return 0
-
+def check(version: str, value_flags: list[str], boolean_flags: list[str]) -> int:
     current = shim_arrays()
     differences = []
     for name, expected in ((VALUE_ARRAY, value_flags), (BOOLEAN_ARRAY, boolean_flags)):
@@ -147,7 +152,7 @@ def main() -> int:
         if missing:
             differences.append(f"{name}: missing {' '.join(missing)}")
         if extra:
-            differences.append(f"{name}: no longer declared by the SDK: {' '.join(extra)}")
+            differences.append(f"{name}: no longer declared there by the SDK: {' '.join(extra)}")
     cited = re.search(r"Google Cloud SDK (\d[\w.]*)", SHIM.read_text(encoding="utf-8"))
     if cited and cited.group(1) != version:
         differences.append(f"comment cites SDK {cited.group(1)}, this SDK is {version}")
@@ -155,9 +160,43 @@ def main() -> int:
         print(f"shims/gcloud is out of date with Cloud SDK {version}:", file=sys.stderr)
         for difference in differences:
             print(f"  {difference}", file=sys.stderr)
-        print("Regenerate with: scripts/gcloud-global-flags", file=sys.stderr)
+        print("Regenerate with: python3 scripts/gcloud-global-flags", file=sys.stderr)
         return 1
     print(f"shims/gcloud matches Cloud SDK {version}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
+    parser.add_argument("--sdk-root", type=pathlib.Path, default=DEFAULT_SDK_ROOT)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="compare with shims/gcloud and exit 1 on a difference",
+    )
+    mode.add_argument(
+        "--json",
+        action="store_true",
+        help="print every flag with the number of values it takes",
+    )
+    args = parser.parse_args()
+
+    if not args.sdk_root.is_dir():
+        raise SystemExit(f"no Cloud SDK at {args.sdk_root}; pass --sdk-root")
+    version = sdk_version(args.sdk_root)
+    flags = sdk_flags(args.sdk_root)
+
+    if args.json:
+        counts = {flag: value_count(flag, nargs) for flag, nargs in sorted(flags.items())}
+        print(json.dumps({"sdk_version": version, "flags": counts}, indent=2))
+        return 0
+    value_flags, boolean_flags = partition(flags)
+    if args.check:
+        return check(version, value_flags, boolean_flags)
+    print(f"# Google Cloud SDK {version}, read by scripts/gcloud-global-flags")
+    print(render(VALUE_ARRAY, value_flags))
+    print(render(BOOLEAN_ARRAY, boolean_flags))
     return 0
 
 
