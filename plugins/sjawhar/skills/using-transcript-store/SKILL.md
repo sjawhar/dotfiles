@@ -36,6 +36,7 @@ Set the same window on every command you compare (`--days N` or `--from`/`--to`)
 - **Most user-role text is from agents.** Parent briefs and IRC relays have `role = 'user:agent'`. `--human` keeps only messages a person typed.
 - **Words.** Search matches whole words in order. `_ - . ' /` split words, and `’` does not: `can't` matches `can t`, but `can’t` is a different word. Search both forms when the text may hold a curly apostrophe.
 - **Files.** `kind = 'file'` rows hold artifacts: full tool outputs, `*.shake.log` originals of pruned results, `local/` files. Their `role` names the file type.
+- **A subagent's brief.** Its first `kind = 'user'` row is its brief. The shared context of the `task` call that started it is its `role = 'task_context'` row. `parent_session` links it to the session that started it.
 - **Revisions.** In `tq sql`, read `tool_calls` and `sessions` through the views `calls` and `sessions_latest`. The raw tables count one call once per revision.
 
 ## When the store does not have it
