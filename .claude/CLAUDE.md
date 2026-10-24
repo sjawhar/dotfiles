@@ -18,7 +18,7 @@ Get my approval in this session before any destructive or high-blast-radius acti
 Before such an action, say what changes, what could break, and the safest alternative. Do only what I approved.
 
 - Clean up your own workspaces when you're done with them. Do NOT delete your current working directory
-- Kill by exact process ID.
+- Kill and wait on processes by exact process ID.
 - Read auth and config files before you change them, and change them minimally.
 - Never put anything in a gist or any other public place.
 
