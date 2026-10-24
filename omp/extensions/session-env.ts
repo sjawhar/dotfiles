@@ -4,7 +4,8 @@
 //   OMP_SESSION_ID — the resumable session id (`omp --resume <id>`), derived
 //     from the session transcript filename, which is what resume matching
 //     scans. Keys per-session state for tools that track what a session saw,
-//     and `shims/git` adds it to every `git commit` as the `Omp-Session` trailer.
+//     and `shims/git` adds it to every commit a `git commit`, `merge`, `pull`,
+//     `cherry-pick` or `revert` makes, as the `Omp-Session` trailer.
 //   JJ_CONFIG — user config chain plus a generated per-session overlay that
 //     (1) sets `templates.commit_trailers`, so every jj commit made from an
 //     agent session automatically carries an `Omp-Session: <id>` trailer —
@@ -14,9 +15,10 @@
 //     unpushed commit is immutable to this session (AGENTC-318, approved by
 //     Sami 2026-09-18): `abandon`/`rebase`/`squash` on another lane's commits
 //     fails without `--ignore-immutable`, the same guard that protects main.
-//     In a public theorem-labs repository shims/jj drops both for its call
-//     (scripts/omp-session-trailer, shims/AGENTS.md): no trailer there, and
-//     so no guard, which tells a session's own commits by that trailer.
+//     In a checkout that sets `git config omp.sessionTrailer false` shims/jj
+//     drops both for its call (scripts/omp-session-trailer, shims/AGENTS.md):
+//     no trailer there, and so no guard, which tells a session's own commits
+//     by that trailer.
 //     The revset guards the frontier — `ancestors(visible_heads(), 4)` minus
 //     everything already behind `builtin_immutable_heads()` (trunk, tags,
 //     untracked remote bookmarks: immutable either way, so dropping them

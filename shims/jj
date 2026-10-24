@@ -4,8 +4,9 @@
 # path looks missing, and an unlocked registration under <store>/.git/worktrees/
 # can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
 # still removes it. In an agent session `jj git push --deleted` is also refused,
-# and in a public theorem-labs repository the session's Omp-Session trailer is
-# dropped (both below). Everything else goes straight to the real jj.
+# and in a checkout that sets `git config omp.sessionTrailer false` the session's
+# Omp-Session trailer is dropped (both below). Everything else goes straight to
+# the real jj.
 set -euo pipefail
 
 # A jj that hands the call to the first jj on PATH re-enters this shim in the same
@@ -118,19 +119,17 @@ fi
 
 # The Omp-Session trailer comes from an `omp-attribution-*.toml` overlay in
 # JJ_CONFIG (omp/extensions/session-env.ts, or the Legion extension), which jj
-# cannot make conditional on a remote. So the shim asks
+# cannot make conditional on a repository. So the shim asks
 # scripts/omp-session-trailer, as shims/git does, about the repository's backing
-# git repository, and where it says no (a public repository of one of its
-# PUBLISHING_OWNERS, theorem-labs) runs jj with `templates.commit_trailers` empty.
+# git repository, and where it says no (`git config omp.sessionTrailer false`
+# there) runs jj with `templates.commit_trailers` empty.
 # That call also takes `immutable_heads()` back to `builtin_immutable_heads()`:
 # session-env.ts's cross-session guard (AGENTC-318) tells a session's own commits
 # by their trailer, so without one every commit the session describes would be
 # immutable to it. The guard is therefore off in those repositories: another
 # session's unpushed commits there can be rewritten without --ignore-immutable.
-# Commands that never write a description skip the check, which costs a few
-# milliseconds with the answer cached; any other command, an alias included,
-# pays it. `git config omp.sessionTrailer true|false` in the backing repository
-# overrides it either way.
+# Commands that never write a description skip the check, which costs one
+# `git config` read; any other command, an alias included, pays it.
 _pre=()
 trailer_on() {
     local d="" repo target="" a prev=""
