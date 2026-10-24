@@ -22,13 +22,13 @@ The owner makes the PR merge-ready. Auto-merge lands it.
 - A PR that adds or changes a database migration: merge by hand (`gh pr merge <N> --squash --match-head-commit <sha>`) until the repo has a merge-time migration check. Merge right after you check that main has one migration head and the PR builds on it. Two auto-merged migration PRs can leave main with two heads. If main's head moved, merge main, run `alembic merge heads`, push, and merge by hand when green. Never re-parent or renumber an existing migration.
 - Once the person who owns the work approves a PR, merge it. Never hand an approved PR back to that person to click.
 - When the person who owns the work says to merge or consolidate PRs, do it.
-- The session that commissioned a Legion-produced PR lands it.
+- Legion merges the PRs it produces: its merger submits the merge when the issue reaches READY. The session that commissioned the issue watches it and does not merge its PR.
 - After required checks and review pass, merging is usually right, because each push restarts every check. Fix first only what would cause harm after merge: wrong behavior, a security hole, bad data. Merge, and put other fixes in a follow-up PR.
 
 | Repo | Merge rule |
 |---|---|
 | `trajectory-labs-pbc/agent-c` | At the head: `pr-checks-result`, `review` (workflow "Claude PR Review", run from main's copy), and `checklist-affirmation` (`docs/pre-pr-checklists.md`) once its gate mode is `act` and the ruleset names it. The org ruleset enforces these. No approval needed. |
-| `sjawhar/legion` | One approving review from someone other than the author. Legion merges the work it produces. A PR that a devbox agent opens there gets a full review at its head; then the Legion stream lead (Envoy role `lead-legion`) approves that head and merges it with the credential it holds for that. Never approve your own PR, and never use the review App key (`GH_REVIEW_APP_PRIVATE_KEY_B64`). An approval survives a push, so a push after approval needs a new review and approval at the new head. |
+| `sjawhar/legion` | One approving review from someone other than the author. Legion merges the work it produces. A PR that a devbox agent opens there gets a full review at its head; then the Legion stream lead (Envoy role `lead-legion`) approves that head and merges it, with an approve-and-merge credential it requests for that. Never approve your own PR, and never use the review App key (`GH_REVIEW_APP_PRIVATE_KEY_B64`). An approval survives a push, so a push after approval needs a new review and approval at the new head. |
 | Repo another person maintains | The maintainer is not our quality gate. Send a PR only after our review passes at its head and its benefit is measured on their setup. Merge only a change that helps them, after one short note to them. Close the rest. Never hand it to them to judge. |
 | Other repos | Their own required checks and reviews. |
 
