@@ -127,10 +127,22 @@ def du_batch(paths: list[str], timeout: float) -> tuple[dict[str, int], list[str
     return sizes, [p for p in paths if p not in sizes]
 
 
+# One du's arguments must fit the kernel's argv limit (ARG_MAX, 2 MiB on Linux, shared with the
+# environment and an 8-byte pointer per argument). A scratch directory with 575,969 subdirectories,
+# striped over 6 jobs, gave each du about 96k arguments, and Popen failed with E2BIG ("Argument list
+# too long") mid-run on sami-rocqperf, 2026-10-24.
+ARG_BYTES_PER_BATCH = 256 * 1024
+
+
 def chunks(items: list[str], n: int) -> list[list[str]]:
+    """Stripe items over n batches (fewer when there are fewer items), adding batches until
+    every batch's arguments fit in ARG_BYTES_PER_BATCH."""
     if not items:
         return []  # a directory with no subdirectories splits into no batches
-    n = max(1, min(n, len(items)))
+    lengths = [len(os.fsencode(p)) + 1 for p in items]
+    n = max(1, min(n, len(items)), -(-sum(lengths) // ARG_BYTES_PER_BATCH))
+    while n < len(items) and any(sum(lengths[i::n]) > ARG_BYTES_PER_BATCH for i in range(n)):
+        n += 1
     return [items[i::n] for i in range(n)]
 
 

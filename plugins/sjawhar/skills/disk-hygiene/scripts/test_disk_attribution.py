@@ -66,5 +66,23 @@ class EmptyBatchTest(unittest.TestCase):
             self.assertEqual(run.nodes[str(only_files)].files, (only_files / "a").stat().st_blocks * 512 + (only_files / "b").stat().st_blocks * 512)
 
 
+class ArgvLimitTest(unittest.TestCase):
+    """A directory with ~576k subdirectories must not put them on a few du command lines.
+
+    A scratch directory with 575,969 subdirectories, striped over 6 jobs, exceeded ARG_MAX and
+    Popen raised OSError E2BIG mid-run (measured on sami-rocqperf, 2026-10-24).
+    """
+
+    def test_every_batch_fits_the_argv_budget_and_no_path_is_lost(self) -> None:
+        items = [f"/scratch/tmp/tmp.{i:08x}" for i in range(576_000)]
+        batches = disk_attribution.chunks(items, 6)
+        self.assertEqual(sorted(p for batch in batches for p in batch), sorted(items))
+        for batch in batches:
+            self.assertLessEqual(sum(len(os.fsencode(p)) + 1 for p in batch), disk_attribution.ARG_BYTES_PER_BATCH)
+
+    def test_a_small_directory_still_stripes_over_jobs(self) -> None:
+        self.assertEqual(disk_attribution.chunks(["a", "b", "c", "d", "e"], 2), [["a", "c", "e"], ["b", "d"]])
+
+
 if __name__ == "__main__":
     unittest.main()
