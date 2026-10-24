@@ -675,8 +675,6 @@ class GcloudRouting(unittest.TestCase):
                 result = self.run_shim(args=["auth", "application-default", operation])
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("gcloud auth login", result.stderr)
-                self.assertIn("legacy_credentials", result.stderr)
-                self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", result.stderr)
                 self.assertEqual(result.stdout, "")
 
     def test_adc_is_opened_only_for_the_commands_it_can_refuse(self):

@@ -15,9 +15,11 @@
 # credentials (ADC) remain its own identity.
 #
 # `gcloud auth application-default login` and `revoke` are refused whenever
-# the ADC in CLOUDSDK_CONFIG is an `external_account` credential. Sami's login
-# instead belongs in its `legacy_credentials/<account>/adc.json`, which client
-# libraries use through GOOGLE_APPLICATION_CREDENTIALS. This check ignores
+# the ADC in CLOUDSDK_CONFIG is an `external_account` credential. Sami signs in
+# with `gcloud auth login` instead: agent-secrets borrows that login itself
+# (`gcloud auth print-access-token`), and a client library reaches it through
+# GOOGLE_APPLICATION_CREDENTIALS naming `legacy_credentials/<account>/adc.json`
+# (plugins/sjawhar/skills/using-gcloud). This check ignores
 # GOOGLE_APPLICATION_CREDENTIALS and the active configuration.
 #
 # Both protections classify the command the way gcloud does, so a flag cannot
@@ -425,7 +427,7 @@ main() {
             exit 1
         fi
     elif adc_operation="$(application_default_operation)" && is_external_account_adc; then
-        echo "gcloud shim: refusing auth application-default ${adc_operation}: the box's ADC is its own identity; run gcloud auth login, which renews legacy_credentials/<account>/adc.json; client libraries use it through GOOGLE_APPLICATION_CREDENTIALS." >&2
+        echo "gcloud shim: refusing auth application-default ${adc_operation}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which agent-secrets and gcloud use." >&2
         exit 1
     fi
 
@@ -451,7 +453,7 @@ main() {
 
         echo "gcloud shim: routing auth login to configuration theorem because box is this machine's own identity." >&2
         if [[ "$update_adc" == yes ]]; then
-            echo "gcloud shim: dropping --update-adc: the box's ADC stays its own identity; this login renews legacy_credentials/<account>/adc.json for client libraries." >&2
+            echo "gcloud shim: dropping --update-adc: the box's ADC stays its own identity." >&2
         fi
         export CLOUDSDK_ACTIVE_CONFIG_NAME=theorem
         exec_real_gcloud "$real_gcloud" "${routed_args[@]}"
