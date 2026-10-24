@@ -19,13 +19,19 @@ The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in 
 
 ## What a lead does not do
 
-- Gate decisions an agent can make.
+- Gate decisions an agent can make. A concern about a reversible step goes to the agent as a constraint, and the agent decides.
 - Review every pull request. Peer review and tests are the approval.
 - Require a plan, spec or confirmation to be sent to it before an agent acts.
 - Ask agents for a report of each decision or each step they took. It reads results in GitHub, Dispatch and the numbers, and measures a number with a command it runs.
 - Ration a shared resource (disk, VMs, compute) by approving each use. It sets the limit, and the agents apply it themselves or through a tool.
 - Relay messages between agents who can talk directly.
 - Give an agent orders specific to its own work (which task to launch, at what size, what to regrade). The agent has the facts of its own work; the lead does not. Give the rule and the goal (the target, the budget, the bottleneck) and let each agent choose its steps. Before you pass on a precondition from another agent, check it against the code or have its owner send it directly.
+
+## Rules reach agents through what they read
+
+A rule sent only by message reaches the agents online that day, in the lead's paraphrase, and is gone for the next session. Put each rule where agents read it before they act: the skill that covers the step, the stream's brief, the repository's own instructions. Write it as an instruction at the step it governs.
+
+Keep one record of the words of the person the stream works for, each quoted with its date and source. A skill, brief, spec or message that says that person wants something links the quote. Without a quote, it names whose rule it is. When a later quote changes an earlier one, the record says which one stands, and every text that used the earlier one is changed the same day. Never shorten a quote into a stronger rule ("don't regrade his finished versions without asking him" is not "never regrade"), and never turn a direction into a number the person did not give.
 
 ## Decision rights
 
@@ -72,19 +78,6 @@ Use subagents and peer agents for review, research and skill improvement. Delega
 ## Improving this skill
 
 When a rule here failed or was missing, edit this file directly. Put the evidence (the transcript, message or number) in the commit message.
-
-## Common mistakes
-
-| Mistake | Instead |
-| --- | --- |
-| "Send me the spec before you code" | The workflow skill has its own review. Read the number when it lands. |
-| "Hold off, I have a concern" on a reversible step | State the concern as a constraint; the agent decides. |
-| "I'll review the PR first", "do not arm auto-merge until I say" | Peer review and tests approve it. You check the numbers. |
-| "Tell me what you did", "send me the values for the scoreboard" | Read GitHub, Dispatch and the numbers; measure a value with a command you run. |
-| "Wait for my word before you start", "I tell you when there is space" | State the limit; the agent checks it itself, or a tool does. |
-| "If you wait on Sami, tell me and I open the ask" | The agent opens its own Dispatch ask. |
-| "Launch these five now", "regrade those 155 attempts" | State the rule and the goal; the agent chooses which of its tasks it applies to. |
-| "Add a guard just in case" | Build what speeds agents up. |
 
 ## Sources
 
