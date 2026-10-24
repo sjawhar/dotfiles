@@ -144,11 +144,12 @@ install_marketplace_plugin anthropics/claude-plugins-official slack@claude-plugi
 # release tag plus fork-local patches (ce-simplify-code reviews on top-tier
 # GPT agents, not the Sonnet class; ce-babysit-pr's pr-snapshot reads a PR
 # stack its token cannot see as no stack). Pinned to a commit on that branch
-# (currently compound-engineering-v3.32.0 + those patches). Bump: rebase
-# `sami` onto the new tag in the vendor checkout, run its `bun run test`, push, re-pin here;
-# check every omp/config.yml skills.ignoredSkills name still exists upstream,
-# and diff the skill set for new arrivals.
-ensure_vendor https://github.com/sjawhar/compound-engineering-plugin.git compound-engineering 8a776c13a08eea0d6485c26c9bc96ea84d5a6cc6
+# (currently b4adb2f on `sami-v3.24`, compound-engineering-v3.24.0 + those
+# patches; `sami` itself holds an unadopted v3.32.0 rebase, 8a776c13). Bump:
+# rebase `sami` onto the new tag in the vendor checkout, run its `bun run test`,
+# push, re-pin here; check every omp/config.yml skills.ignoredSkills name still
+# exists upstream, and diff the skill set for new arrivals.
+ensure_vendor https://github.com/sjawhar/compound-engineering-plugin.git compound-engineering b4adb2f0312d2e61f9168b3b5bbef8d95c75382a
 if [ -d "${DOTFILES_DIR}/vendor/compound-engineering/.git" ]; then
     git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote get-url upstream &>/dev/null || \
         git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote add upstream https://github.com/EveryInc/compound-engineering-plugin.git
