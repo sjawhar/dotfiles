@@ -1,6 +1,6 @@
 ---
 name: leading-a-work-stream
-description: Use when you lead a work stream or team of agents, when an agent asks you to approve, confirm or review its step or pull request, when you run a check-in, when an agent starts a long project, or when you consider building tooling or a restriction for agents.
+description: Use when you lead a work stream or team of agents, when an agent asks you to approve, confirm or review its step or pull request, when you want to know the state of the stream, when an agent starts a long project, or when you consider building tooling or a restriction for agents.
 ---
 
 # Leading a work stream
@@ -22,16 +22,18 @@ The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in 
 - Gate decisions an agent can make.
 - Review every pull request. Peer review and tests are the approval.
 - Require a plan, spec or confirmation to be sent to it before an agent acts.
+- Ask agents for status, for values for its scoreboard, or for a report of what they did. It reads GitHub, Dispatch and the numbers itself, and measures a number with a command it runs.
+- Ration a shared resource (disk, VMs, compute) by approving each use. It sets the limit, and the agents apply it themselves or through a tool.
 - Relay messages between agents who can talk directly.
 
 ## Decision rights
 
 | The step | Who decides |
 | --- | --- |
-| Easy to undo: a code change, a flag, a branch, a planned experiment, a merge that passed peer review and tests, spend the workflow calls for (a paid-API review, compute, a model run the task needs) | The agent. It acts, then reports the result. |
-| Hard to undo: deleting data, a new financial commitment (a contract, a subscription), a message outside the organization, security, another stream's work or shared state | Goes up to whoever owns it. The lead does not approve it alone. |
+| Easy to undo: a code change, a flag, a branch, opening or merging a pull request that passed peer review and tests, a planned experiment, spend the workflow calls for (a paid-API review, compute, a VM, a model run the task needs) | The agent. It acts and reports to nobody: the lead reads the result in GitHub, Dispatch and the numbers. |
+| Hard to undo: deleting data someone else created, a new financial commitment (a contract, a subscription), a message outside the organization, security, another stream's work or shared state | The agent takes it to its owner directly: Sami through the agent's own Dispatch ask, the other stream's agent or lead, the owner of the shared infrastructure. It does not pass through the lead. |
 
-When an agent asks permission for an easy-to-undo step, reply "your call" and state any constraint it must keep. Add no check of your own before it may act. Give intent and constraints, not step-by-step approval.
+When an agent asks permission for an easy-to-undo step, reply "your call" and state any constraint it must keep. Add no check of your own before it may act. Give intent and constraints, not step-by-step approval. Do not send a "yes" to an agent that said it would not wait.
 
 ## Long projects use their workflow skill
 
@@ -42,21 +44,21 @@ When an agent starts a long project, check that it uses the workflow skill for t
 - When agents keep losing time to the same chore, start an agent (on the dev box or elsewhere) to build the tool that removes it. Do not wait to be asked.
 - Do not build, file or ask for a restriction, guard or gate against a failure nobody has seen. Fix a real failure at its cause, after it happens.
 
-## Check-ins
+## Knowing the state of the stream
 
-Ask the five coaching questions, answered with numbers or links:
+Answer five questions about the stream from records you read yourself (GitHub, Dispatch, the numbers), never by asking agents:
 
 1. What is the target?
 2. What is the actual value now?
-3. What is the obstacle, and which one are you working on?
-4. What is your next step, and what do you expect it to do to the number?
-5. When will you know?
+3. What is the obstacle, and which one is being worked on?
+4. What is the next step, and what should it do to the number?
+5. When will we know?
 
-Check in as often as the loop needs, never as a gate: the agent keeps working while it answers.
+Message an agent only to remove an obstacle or to change its direction.
 
 ## Count yourself as a wait
 
-Agents waiting on your reply are a queue. Know its length and oldest age; keep none older than an hour. When one kind of question keeps arriving, write the answer into the stream's plan or skill.
+Agents waiting on your reply are a queue. Keep it empty: answer at once, or reply "your call". When one kind of question keeps arriving, write the answer into the stream's plan or skill, or build the tool that makes the question unnecessary.
 
 ## Delegate
 
@@ -70,9 +72,12 @@ When a rule here failed or was missing, edit this file directly. Put the evidenc
 
 | Mistake | Instead |
 | --- | --- |
-| "Send me the spec before you code" | The workflow skill has its own review. Ask for the number when it lands. |
+| "Send me the spec before you code" | The workflow skill has its own review. Read the number when it lands. |
 | "Hold off, I have a concern" on a reversible step | State the concern as a constraint; the agent decides. |
-| "I'll review the PR first" | Peer review and tests approve it. You check the numbers. |
+| "I'll review the PR first", "do not arm auto-merge until I say" | Peer review and tests approve it. You check the numbers. |
+| "Tell me what you did", "send me the values for the scoreboard" | Read GitHub, Dispatch and the numbers; measure a value with a command you run. |
+| "Wait for my word before you start", "I tell you when there is space" | State the limit; the agent checks it itself, or a tool does. |
+| "If you wait on Sami, tell me and I open the ask" | The agent opens its own Dispatch ask. |
 | "Add a guard just in case" | Build what speeds agents up. |
 
 ## Sources
