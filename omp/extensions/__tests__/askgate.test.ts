@@ -1104,23 +1104,45 @@ console.log(JSON.stringify(args, null, 2));
 			expect(await g.bash("rel", "cd inner && dispatch message --issue X-1 --body-file note.txt", { cwd: "sub" })).toBeUndefined();
 			expect(await g.bash("err", "dispatch comment --issue X-1 --body 'Looks right.' 2>&1")).toBeUndefined();
 			expect(await g.bash("both", `cd sub && dispatch ask --issue X-1 --question-file - 2>&1 <<'EOF'\n${QUESTION}EOF`)).toBeUndefined();
+			expect(await g.bash("after", `dispatch ask --issue X-1 --question-file - <<'EOF' 2>&1\n${QUESTION}EOF`)).toBeUndefined();
 			expect(g.dryRuns).toEqual([
 				{ script: "cd sub >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt", cwd: work, timeoutMs: 10_000 },
 				{ script: "cd inner >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt", cwd: path.join(work, "sub"), timeoutMs: 10_000 },
 				{ script: "dispatch comment --dry-run --issue X-1 --body 'Looks right.'", cwd: work, timeoutMs: 10_000 },
 				{ script: `cd sub >/dev/null && dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`, cwd: work, timeoutMs: 10_000 },
+				{ script: `dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`, cwd: work, timeoutMs: 10_000 },
 			]);
-			expect(g.calls).toHaveLength(4);
+			expect(g.calls).toHaveLength(5);
 			expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
 			expect(g.calls[1].user).toContain('"body": "Body from the inner directory."');
 			expect(g.calls[2].user).toContain('"body": "Looks right."');
 			expect(g.calls[3].user).toContain(JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2));
+			expect(g.calls[4].user).toContain(JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2));
 			expect(g.entries.map(e => [e.tool, e.outcome, e.decision])).toEqual([
 				["dispatch_message", "verdict", "allow"],
 				["dispatch_message", "verdict", "allow"],
 				["dispatch_comment", "verdict", "allow"],
 				["dispatch_ask", "verdict", "allow"],
+				["dispatch_ask", "verdict", "allow"],
 			]);
+		}
+	});
+	test("a 2>&1 after the here-document opener runs as written and is left out of the dry-run; no other redirect is read there", () => {
+		const after = core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF");
+		expect(after?.command).toBe("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF");
+		expect(after?.dryRunScript).toBe("dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nhi\nEOF");
+		expect(core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' 2>/dev/null\nhi\nEOF")).toBeUndefined();
+		expect(core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' | tail\nhi\nEOF")).toBeUndefined();
+	});
+	test("a revise of a command that names a file says the file was read before the rest of its batch ran", async () => {
+		const NOTE = "AskGate read the file this command names before any other call in the same batch ran";
+		fs.writeFileSync(path.join(work, "note.txt"), "Body.");
+		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work, complete: async () => ({ text: REVISE }) });
+		for (const command of ["dispatch message --issue X-1 --body-file note.txt", "dispatch message --issue X-2 --body-file=note.txt"]) {
+			expect((await g.bash(command, command))?.reason).toContain(NOTE);
+		}
+		for (const command of ["dispatch comment --issue X-3 --body hi", `dispatch ask --issue X-4 --question-file - <<'EOF'\n${QUESTION}EOF`]) {
+			expect((await g.bash(command, command))?.reason).not.toContain(NOTE);
 		}
 	});
 	test("a cd that CDPATH resolves prints nothing into the dry-run's JSON", async () => {
