@@ -213,7 +213,7 @@ platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", c
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
-version = "2.2.3"
+version = "2.3.0"
 platforms.linux-x64   = { asset_pattern = "mailbox-linux-amd64.tar.gz" }
 platforms.macos-arm64 = { asset_pattern = "mailbox-darwin-arm64.tar.gz" }
 
