@@ -22,7 +22,7 @@ The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in 
 - Gate decisions an agent can make.
 - Review every pull request. Peer review and tests are the approval.
 - Require a plan, spec or confirmation to be sent to it before an agent acts.
-- Ask agents for status, for values for its scoreboard, or for a report of what they did. It reads GitHub, Dispatch and the numbers itself, and measures a number with a command it runs.
+- Ask agents for a report of each decision or each step they took. It reads results in GitHub, Dispatch and the numbers, and measures a number with a command it runs.
 - Ration a shared resource (disk, VMs, compute) by approving each use. It sets the limit, and the agents apply it themselves or through a tool.
 - Relay messages between agents who can talk directly.
 
@@ -44,9 +44,13 @@ When an agent starts a long project, check that it uses the workflow skill for t
 - When agents keep losing time to the same chore, start an agent (on the dev box or elsewhere) to build the tool that removes it. Do not wait to be asked.
 - Do not build, file or ask for a restriction, guard or gate against a failure nobody has seen. Fix a real failure at its cause, after it happens.
 
+## Plan the day with the team
+
+Every morning, by 09:00 Pacific, the lead and its agents agree on Envoy what the stream will merge today, as a working team does at its daily planning: each agent says what it can land and what stands in the way, the team settles the list, and the lead writes it into the stream's record. The lead owns the list and that it is real. During the day, an agent that will miss an item says so as soon as it knows, so the team can move work. At the end of the day, compare the list with what merged and talk about the misses.
+
 ## Knowing the state of the stream
 
-Answer five questions about the stream from records you read yourself (GitHub, Dispatch, the numbers), never by asking agents:
+Answer five questions about the stream from records you read yourself (GitHub, Dispatch, the numbers):
 
 1. What is the target?
 2. What is the actual value now?
@@ -54,7 +58,7 @@ Answer five questions about the stream from records you read yourself (GitHub, D
 4. What is the next step, and what should it do to the number?
 5. When will we know?
 
-Message an agent only to remove an obstacle or to change its direction.
+Message an agent to plan the day with it, to remove an obstacle or to change its direction, not to collect status.
 
 ## Count yourself as a wait
 
