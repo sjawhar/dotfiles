@@ -189,13 +189,16 @@ main() {
     fi
 
     local config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations"
-    local adc_operation
-    if is_external_account_adc; then
-        if [[ "$command_parse_status" -eq 2 ]]; then
-            echo "gcloud shim: refusing command with an unknown leading global flag while the box ADC is an external_account credential; run gcloud auth login without that flag." >&2
-            exit 1
-        fi
-        if adc_operation="$(application_default_operation)"; then
+    # Read the ADC only for a command this block can refuse: an unknown leading flag, or
+    # application-default login/revoke. Every other call leaves the credential file unopened, so a
+    # runtime monitor that watches who opens it sees gcloud, not this wrapper.
+    local adc_operation=""
+    if [[ "$command_parse_status" -eq 2 ]] || adc_operation="$(application_default_operation)"; then
+        if is_external_account_adc; then
+            if [[ "$command_parse_status" -eq 2 ]]; then
+                echo "gcloud shim: refusing command with an unknown leading global flag while the box ADC is an external_account credential; run gcloud auth login without that flag." >&2
+                exit 1
+            fi
             echo "gcloud shim: refusing auth application-default ${adc_operation}: the box's ADC is its own identity; run gcloud auth login, which renews legacy_credentials/<account>/adc.json; client libraries use it through GOOGLE_APPLICATION_CREDENTIALS." >&2
             exit 1
         fi
