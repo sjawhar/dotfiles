@@ -4,7 +4,7 @@ description: >-
   Use when a PR is open and not merged, from `gh pr create` on: after any push to its
   branch, before you watch CI, and on a failed or passing check, a bot (CodeRabbit, Sentry) or human review,
   a merge conflict, or silence with nothing running. Use it also before `gh pr checks`,
-  `gh run watch` or a sleep loop on a PR, and when Sami approves a PR or says to merge
+  `gh run watch` or a sleep loop on a PR, and when the person who owns the work approves a PR or says to merge
   or consolidate PRs. Required for every open PR.
 ---
 
@@ -20,15 +20,15 @@ The owner makes the PR merge-ready. Auto-merge lands it.
 - To move the arm or change its message, disarm, arm again, and check that `enabledAt` moved. A second `--auto` exits 0 and changes nothing. A refused `--match-head-commit` means a second writer pushed.
 - No admin merge. No bypass of branch protection.
 - A PR that adds or changes a database migration: merge by hand (`gh pr merge <N> --squash --match-head-commit <sha>`) until the repo has a merge-time migration check. Merge right after you check that main has one migration head and the PR builds on it. Two auto-merged migration PRs can leave main with two heads. If main's head moved, merge main, run `alembic merge heads`, push, and merge by hand when green. Never re-parent or renumber an existing migration.
-- Once Sami approves a PR, merge it. Never hand an approved PR back to Sami to click.
-- When Sami says to merge or consolidate PRs, do it.
+- Once the person who owns the work approves a PR, merge it. Never hand an approved PR back to that person to click.
+- When the person who owns the work says to merge or consolidate PRs, do it.
 - The session that commissioned a Legion-produced PR lands it.
 - After required checks and review pass, merging is usually right, because each push restarts every check. Fix first only what would cause harm after merge: wrong behavior, a security hole, bad data. Merge, and put other fixes in a follow-up PR.
 
 | Repo | Merge rule |
 |---|---|
 | `trajectory-labs-pbc/agent-c` | At the head: `pr-checks-result`, `review` (workflow "Claude PR Review", run from main's copy), and `checklist-affirmation` (`docs/pre-pr-checklists.md`) once its gate mode is `act` and the ruleset names it. The org ruleset enforces these. No approval needed. |
-| `sjawhar/legion` | One approving review. For your own PR, get a review subagent's verdict at the head, then post the approval as the review App pinned to that head (`GH_REVIEW_APP_PRIVATE_KEY_B64`). The approval survives a push. Arm and re-arm only on an approved head, and disarm before any push. |
+| `sjawhar/legion` | One approving review from someone other than the author. Legion merges the work it produces. A PR that a devbox agent opens there gets a full review at its head; then the Legion stream lead (Envoy role `lead-legion`) approves that head and merges it with the credential it holds for that. Never approve your own PR, and never use the review App key (`GH_REVIEW_APP_PRIVATE_KEY_B64`). An approval survives a push, so a push after approval needs a new review and approval at the new head. |
 | Repo another person maintains | The maintainer is not our quality gate. Send a PR only after our review passes at its head and its benefit is measured on their setup. Merge only a change that helps them, after one short note to them. Close the rest. Never hand it to them to judge. |
 | Other repos | Their own required checks and reviews. |
 
@@ -53,7 +53,7 @@ In agent-c:
 - Every change to what runs (application, infrastructure, tasks, agents, harnesses) needs the `opening-a-pr` proof at the current head. Run the changed end-to-end scenarios on a production-like surface before merge. Link outcome and duration in `## Verification`. Unit tests, a preview and green CI are not that proof.
 - If merge deploys, prove it first on an isolated development surface or a recorded throwaway probe. Production is not the experiment.
 - Apply infrastructure to production only from main, after the merge. Apply a branch to a dev stack whenever you want.
-- A required blocked or skipped scenario is unmet acceptance. Fix the surface or tooling and run it. The one exception is a named blocker Sami explicitly waived. Cite that decision and its scope, keep the scenario unverified, and meet every other requirement. No small-change, docs, harness or green-CI exemption exists.
+- A required blocked or skipped scenario is unmet acceptance. Fix the surface or tooling and run it. The one exception is a named blocker that the person who owns the work explicitly waived. Cite that decision and its scope, keep the scenario unverified, and meet every other requirement. No small-change, docs, harness or green-CI exemption exists.
 - A fork-pin bump carries `## Production behavior delta`: each behavior change per release member, concrete values, fork-only policy marked, or `none`. Follow the repo's fork-placement and review contracts.
 
 Read [proof and claims](references/proof-and-claims.md) before you certify proof, select proof or affected callers, state evidence limits, or handle a blocked scenario. Read [history and pushes](references/history-and-pushes.md) before you resolve a conflict or change a stack or base.
@@ -119,7 +119,7 @@ Reread the live PR, checks, reviews, mergeability and deploy claims. Run `pr-gat
 The packet:
 
 - **Head and scope:** full SHA, title, changed files, measured deploy consequence, production-behavior disclosure.
-- **Verification:** scenarios, surface, outcome, duration, evidence links at this head. A Sami waiver is a disclosed limit, never a pass.
+- **Verification:** scenarios, surface, outcome, duration, evidence links at this head. A waiver from the person who owns the work is a disclosed limit, never a pass.
 - **CI:** full current-head check state and diagnosed failures.
 - **Review state:** each review, comment and finding by its author's ID with its GitHub disposition: `fixed @ commit`, `rejected because <evidence>`, or `no reviews posted yet, waiting`. Cite verdicts by PR-comment URL, never an agent message or session file, each bound to its SHA.
 
@@ -129,7 +129,7 @@ An unread item, unresolved finding, expected review the merge rule ignores, or u
 
 - Run `post-merge`. For a deploy, find the run that contains the merge and watch its named production apply or publish job. Drive the changed path through the user's production access. Record the deployed version and result on the PR. Staging or a green chain is not proof.
 - Pin a live carrying run. Re-resolve only when it is cancelled, superseded or gone. Check ancestry and artifact state. A coalescing queue is not a per-PR deploy. Cancellation alone proves neither a defect nor delivery.
-- The author owns a deploy failure the change caused. The work stays in verification until production is proven. Do not hand the wait to Sami.
+- The author owns a deploy failure the change caused. The work stays in verification until production is proven. Do not hand the wait to the person who owns the work.
 
 Read [watchers and delivery](references/watchers-and-delivery.md) for run selection, installed-version proof and post-squash citations.
 
