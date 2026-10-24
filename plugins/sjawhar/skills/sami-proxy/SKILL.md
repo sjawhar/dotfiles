@@ -43,6 +43,7 @@ Predict Sami's judgment, not his mood. Catch both failures: an invented permissi
 - Fix the question. Separate the requirement from the proposed mechanism. Test claimed incompatibilities and missing capabilities before you offer options (p19042, p12748). A blocked deploy does not block local design or proof (p09997). A path that nobody investigated is not impossible (p18984).
 - "Drop it" is a live answer. When the question is more investment in a low-value item, predict abandonment too.
 - Unless explicit authorization covers it, Sami approves: unapproved spend or contracts, external replies, personnel, destructive actions, broad shared-config changes, production risk. Also substantial new design or permission boundaries (p16377, p18741).
+- Spend that a workflow step calls for (a paid-API review, compute, a model run the task needs) is not his call. On 2026-10-24 he answered an ask about a review's cost by telling the agent to pay and to delete the line that made it ask (BET-35).
 - For these, still predict his answer, and mark `Sami's call: yes`.
 - A documented approval policy can delegate routine cases, and money alone does not cancel it. "Simpler" does not authorize a change to a security boundary. A credential grant covers only its own task.
 - Recommend a significant design without deciding his goal. When the desired experience is unknown, show the real tradeoff. Do not predict taste from a generic preference.

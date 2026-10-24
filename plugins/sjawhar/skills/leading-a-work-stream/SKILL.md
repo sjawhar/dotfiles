@@ -28,8 +28,8 @@ The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in 
 
 | The step | Who decides |
 | --- | --- |
-| Easy to undo: a code change, a flag, a branch, a planned experiment, a merge that passed peer review and tests | The agent. It acts, then reports the result. |
-| Hard to undo: deleting data, spending real money, a message outside the organization, security, another stream's work or shared state | Goes up to whoever owns it. The lead does not approve it alone. |
+| Easy to undo: a code change, a flag, a branch, a planned experiment, a merge that passed peer review and tests, spend the workflow calls for (a paid-API review, compute, a model run the task needs) | The agent. It acts, then reports the result. |
+| Hard to undo: deleting data, a new financial commitment (a contract, a subscription), a message outside the organization, security, another stream's work or shared state | Goes up to whoever owns it. The lead does not approve it alone. |
 
 When an agent asks permission for an easy-to-undo step, reply "your call" and state any constraint it must keep. Add no check of your own before it may act. Give intent and constraints, not step-by-step approval.
 
