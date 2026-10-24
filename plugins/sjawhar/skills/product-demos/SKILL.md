@@ -31,13 +31,16 @@ Commands and settings: [pipeline.md](pipeline.md).
 
 1. Convert each cast to MP4. agg compresses idle time: find trim points from thumbnails, not from cast timestamps.
 2. Cut each clip hard to its real action, at constant fps. Measure its duration.
-3. Write the narration after you cut, to that length. Split long lines and put each part at the moment it describes (EDL offsets). Make the build fail if a part overruns its clip.
-4. If narration cannot fit, shorten the words. Cut footage only where reality is unwatchably slow (a sandbox boot).
-5. Choose the voice first: give the user one labeled A/B video of several voice samples.
-6. Generate with ElevenLabs `eleven_turbo_v2_5` at `mp3_44100_192` or better. No key: use gTTS (`pip install gTTS`, lower quality) and replace `<break>` tags with periods.
-7. `.strip()` the API key. Catch transport errors without printing headers: else httpx prints the raw key in a traceback.
-8. After the recordings are final and before the final render, audit every narration line against the screen (mandatory): command output, numbers, feature names, workflow.
-9. Normalize all clips (resolution, fps, pixel format, stereo 44100 Hz AAC) before concat.
+3. Write the narration after you cut, to that length. Split long lines and put each part at the moment it describes (EDL offsets). Make the build fail if a part overruns its clip. The listener hears each sentence once and knows none of the project's words: say what a project name is before you use it.
+4. Check the narration before you voice it, and record both results in `<video>.src/README.md`:
+   - **Lint:** run the asd-ste100 skill's `scripts/ste-lint.py` on the narration text and fix it to 0 hard violations.
+   - **Teach-back:** give a fresh subagent that has never seen the project only the narration, with: "For each sentence, write in your own words what it tells you. If you must guess what a word or phrase refers to, write 'unclear:' and the word or phrase." Score each sentence 2 (the teach-back matches your meaning, carries its number or example, and the facts support it), 1 (matches, but vague where the facts have a number or example) or 0 (wrong, "unclear", or a claim the facts do not support). Pass: no 0, and at most one 1 per section. Rewrite each 0 and 1 and test again on a new subagent; one that read an earlier version has learned the words.
+5. If narration cannot fit, shorten the words. Cut footage only where reality is unwatchably slow (a sandbox boot).
+6. Choose the voice first: give the user one labeled A/B video of several voice samples.
+7. Generate with ElevenLabs `eleven_turbo_v2_5` at `mp3_44100_192` or better. No key: use gTTS (`pip install gTTS`, lower quality) and replace `<break>` tags with periods.
+8. `.strip()` the API key. Catch transport errors without printing headers: else httpx prints the raw key in a traceback.
+9. After the recordings are final and before the final render, audit every narration line against the screen (mandatory): command output, numbers, feature names, workflow.
+10. Normalize all clips (resolution, fps, pixel format, stereo 44100 Hz AAC) before concat.
 
 ## Review before it ships
 
