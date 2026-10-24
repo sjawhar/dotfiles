@@ -296,6 +296,25 @@ class GcloudRouting(unittest.TestCase):
                 self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", result.stderr)
                 self.assertEqual(result.stdout, "")
 
+    def test_adc_is_opened_only_for_the_commands_it_can_refuse(self):
+        """Ordinary calls leave the ADC unopened: a runtime monitor then sees gcloud read it,
+        not this wrapper. An unreadable ADC makes any read by the shim fail loudly under set -e."""
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        adc.chmod(0)
+        try:
+            for args in (["config", "list"], ["auth", "print-access-token"],
+                         ["--configuration", "theorem", "auth", "print-access-token"]):
+                with self.subTest(args=args):
+                    result = self.run_shim(args=args)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(stub_argv(result), args)
+            result = self.run_shim(args=["auth", "application-default", "login"])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("ARG=", result.stdout)
+        finally:
+            adc.chmod(0o600)
+
     def test_non_external_or_missing_adc_allows_application_default_operations(self):
         adc = self.cloudsdk_config / "application_default_credentials.json"
         for contents in ('{"type":"authorized_user"}\n', None):
