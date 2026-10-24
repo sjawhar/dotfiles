@@ -7,12 +7,12 @@
         "description": "Drive, Docs, Sheets, Slides and Calendar read-write; Gmail read-only"
       },
       "modify": {
-        "command": ["secrets", "GWS_PERSONAL_MODIFY_OAUTH", "--"],
-        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one YubiKey touch per session"
+        "command": ["secret-run", "--reason", "gws personal modify", "--wait", "4m", "GWS_PERSONAL_MODIFY_OAUTH", "--"],
+        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       },
       "send": {
-        "command": ["secrets", "GWS_PERSONAL_SEND_OAUTH", "--"],
-        "description": "gmail.send only (+send; cannot read mail); one YubiKey touch per session"
+        "command": ["secret-run", "--reason", "gws personal send", "--wait", "4m", "GWS_PERSONAL_SEND_OAUTH", "--"],
+        "description": "gmail.send only (+send; cannot read mail); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       }
     }
   },
@@ -24,12 +24,12 @@
         "description": "Drive, Docs, Sheets, Slides and Calendar read-write; Gmail read-only"
       },
       "modify": {
-        "command": ["secrets", "GWS_THEOREM_MODIFY_OAUTH", "--"],
-        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one YubiKey touch per session"
+        "command": ["secret-run", "--reason", "gws theorem modify", "--wait", "4m", "GWS_THEOREM_MODIFY_OAUTH", "--"],
+        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       },
       "send": {
-        "command": ["secrets", "GWS_THEOREM_SEND_OAUTH", "--"],
-        "description": "gmail.send only (+send; cannot read mail); one YubiKey touch per session"
+        "command": ["secret-run", "--reason", "gws theorem send", "--wait", "4m", "GWS_THEOREM_SEND_OAUTH", "--"],
+        "description": "gmail.send only (+send; cannot read mail); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       },
       "admin": {
         "command": ["secrets", "GWS_THEOREM_ADMIN_OAUTH", "--"],
