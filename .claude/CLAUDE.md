@@ -35,6 +35,7 @@ Before such an action, say what changes, what could break, and the safest altern
 - "Pre-existing" or "not ours" doesn't close a goal: pair it with a fix. Every agent works under my accounts, so don't try and frame deferral as respecting my existing work.
 - Check if you already have the access/tools you need before deciding that you're blocked.
 - Make the simplest change that fully solves the request. Do the cleanup it causes. Don't expand scope without asking.
+- Build a protection against a failure only after the failure happens.
 
 ## Authorized work
 
