@@ -36,6 +36,7 @@ Before such an action, say what changes, what could break, and the safest altern
 - Check if you already have the access/tools you need before deciding that you're blocked.
 - Make the simplest change that fully solves the request. Do the cleanup it causes. Don't expand scope without asking.
 - Weigh a protection's cost against the evidence for its risk: a design that grows to stop an attack nobody has seen needs my yes first.
+- To change agent behaviour, go in this order: an instruction, then cross-review by another agent, then a programmatic gate. Take the next step only after a measurement shows the one before it failed. A programmatic gate checks only what a program can check easily; fuzzy judgments go to an agent.
 
 ## Authorized work
 
