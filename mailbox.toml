@@ -1,25 +1,29 @@
 default_account = "personal"
 
-# The accounts of gws/accounts.json, with the same keys. Reads use the account's agent-tier key;
-# write (gmail.modify) and send keys are human tier, one YubiKey touch per grant.
-# Every key comes from secretsd's dotfiles source.
+# The accounts of gws/accounts.json, with the same keys. Reads use the account's agent-tier key
+# from secretsd. Where the credential broker holds a write (gmail.modify) or send key, it comes
+# through `secret-run`: one Dispatch grant per session from the broker, or one YubiKey touch where
+# the broker does not serve the session. The other write and send keys come from secretsd, one
+# YubiKey touch per grant. The broker waits up to 4 minutes for a grant, so the credential
+# timeout is longer than that.
+credential_timeout_secs = 300
 scrub_env = ["SECRETSD_SESSION_TOKEN_FILE"]
 scrub_env_patterns = ["GWS_*_OAUTH"]
 
 [accounts.personal]
 read_credential_cmd  = ["secrets", "GWS_PERSONAL_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_READ_OAUTH"]
-write_credential_cmd = ["secrets", "GWS_PERSONAL_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_MODIFY_OAUTH"]
-write_label          = "YubiKey touch (secretsd)"
-send_credential_cmd  = ["secrets", "GWS_PERSONAL_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_SEND_OAUTH"]
-send_label           = "YubiKey touch (secretsd)"
+write_credential_cmd = ["secret-run", "--reason", "mailbox personal write", "--wait", "4m", "GWS_PERSONAL_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_MODIFY_OAUTH"]
+write_label          = "broker grant on Dispatch (YubiKey touch outside the broker)"
+send_credential_cmd  = ["secret-run", "--reason", "mailbox personal send", "--wait", "4m", "GWS_PERSONAL_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_PERSONAL_SEND_OAUTH"]
+send_label           = "broker grant on Dispatch (YubiKey touch outside the broker)"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
 [accounts.theorem]
 read_credential_cmd  = ["secrets", "GWS_THEOREM_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_READ_OAUTH"]
-write_credential_cmd = ["secrets", "GWS_THEOREM_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_MODIFY_OAUTH"]
-write_label          = "YubiKey touch (secretsd)"
-send_credential_cmd  = ["secrets", "GWS_THEOREM_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_SEND_OAUTH"]
-send_label           = "YubiKey touch (secretsd)"
+write_credential_cmd = ["secret-run", "--reason", "mailbox theorem write", "--wait", "4m", "GWS_THEOREM_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_MODIFY_OAUTH"]
+write_label          = "broker grant on Dispatch (YubiKey touch outside the broker)"
+send_credential_cmd  = ["secret-run", "--reason", "mailbox theorem send", "--wait", "4m", "GWS_THEOREM_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_SEND_OAUTH"]
+send_label           = "broker grant on Dispatch (YubiKey touch outside the broker)"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
 [accounts.trajectory]
