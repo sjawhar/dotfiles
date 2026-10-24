@@ -46,6 +46,10 @@ before handing the call to the real one.
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
 - `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
+- **`gcloud`**'s global-flag table is the installed SDK's. After any `gcloud components update`,
+  run `python3 scripts/gcloud-global-flags --check`; on a difference, regenerate the table with
+  `python3 scripts/gcloud-global-flags`, and the test fixture with `--json`. Run it with `python3`,
+  not `bash`.
 - `gws`: an executable shim that resolves the gws-accounts wrapper installed by the omp plugin pin
   (`omp/plugins/package.json`). Its marker lets the package wrapper skip the shim while finding real
   gws; if the package is absent, the shim fails loudly and directs `bun install` in `omp/plugins`.
