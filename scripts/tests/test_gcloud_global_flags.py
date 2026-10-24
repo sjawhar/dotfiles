@@ -6,7 +6,6 @@ a flag table from a JSON file beside it, and PATH holds only a recording
 directory, so no real gcloud is reachable from any invocation here.
 """
 import json
-import os
 import stat
 import subprocess
 import tempfile
