@@ -82,6 +82,18 @@ while ((i < ${#args[@]})); do
     esac
 done
 
+# In a checkout jj manages (colocated), git's HEAD is detached: a `git commit` lands on
+# jj's working-copy commit, and `git pull --rebase` and `git push` find no branch. Say how
+# to publish with jj; the command still runs as given.
+case "${args[i]:-}" in
+    commit | pull | push)
+        top="$("$_real" "${args[@]:0:i}" rev-parse --show-toplevel 2> /dev/null || true)"
+        if [[ -n "$top" && -d "$top/.jj" ]] && ! "$_real" "${args[@]:0:i}" symbolic-ref -q HEAD > /dev/null 2>&1; then
+            echo "git shim: $top is a jj checkout with a detached HEAD. Commit and publish with jj: describe the change, then \`jj bookmark set main -r <change>\` and \`jj git push --bookmark main\` (skill://using-jj)." >&2
+        fi
+        ;;
+esac
+
 # A commit made from an omp session carries `Omp-Session: <id>`, the trailer
 # session attribution reads; omp/extensions/session-env.ts exports the id, and
 # jj commits get the same trailer from its JJ_CONFIG overlay. git's own
