@@ -10,7 +10,7 @@ Read before you certify end-to-end evidence, refresh `## Verification`, or make 
 - A link to evidence that the scenario executed.
 - Each blind spot or blocked or skipped part, with its exact cause.
 
-A unit suite, static check, preview or unrelated green deployment is groundwork, not this proof. Never request a Sami waiver to avoid reachable work. An author, a reviewer or green CI cannot grant an exemption.
+A unit suite, static check, preview or unrelated green deployment is groundwork, not this proof. Never request a waiver from the person who owns the work to avoid reachable work. An author, a reviewer or green CI cannot grant an exemption.
 
 ## Match the instrument to the claim
 
