@@ -6,10 +6,10 @@
 # On a box, a plain `gcloud auth login` goes to Sami's `theorem`
 # configuration instead of overwriting the machine's `box` identity. This
 # applies only when `active_config` is `box`, GCLOUD_ACCOUNT and
-# CLOUDSDK_ACTIVE_CONFIG_NAME are unset or empty, and neither
-# `--configuration` nor `--cred-file` appears in argv. An otherwise-routable
-# login with `--flags-file` fails loud: gcloud expands that opaque file after
-# the shim checks identity flags. Routed logins drop --update-adc so the box's
+# CLOUDSDK_ACTIVE_CONFIG_NAME are unset or empty, no `--configuration` appears
+# in argv, and `--cred-file` selects no file. An otherwise-routable login with
+# `--flags-file` fails loud: gcloud expands that opaque file after the shim
+# checks identity flags. Routed logins drop --update-adc so the box's
 # application default credentials (ADC) remain its own identity.
 #
 # `gcloud auth application-default login` and `revoke` are refused whenever
@@ -18,9 +18,17 @@
 # libraries use through GOOGLE_APPLICATION_CREDENTIALS. This check ignores
 # GOOGLE_APPLICATION_CREDENTIALS and the active configuration.
 #
+# Both protections classify the command the way gcloud does, so a flag cannot
+# hide the command path: every global flag and its value are consumed wherever
+# they appear among the command words, and one leading release track (`alpha`,
+# `beta`, `preview`) is stripped for classification only. An unrecognized flag
+# whose value is unknowable makes the path ambiguous; where the rest of argv
+# could still name a protected `auth` command, that fails loud rather than
+# running under the wrong identity.
+#
 # `gcloud auth`/`gcloud init` run through `forward` on a headless machine
 # instead of the paste-a-code flow:
-#   - First non-flag argument is `auth` or `init`, DISPLAY, WAYLAND_DISPLAY
+#   - First command word is `auth` or `init`, DISPLAY, WAYLAND_DISPLAY
 #     and MIR_SOCKET are all unset, and `forward` resolves on PATH -> gcloud
 #     refuses to launch ANY browser on Linux without one of those display
 #     variables set (check_browser._DISPLAY_VARIABLES), even with $BROWSER
@@ -35,44 +43,153 @@
 # fall through to a different one.
 set -euo pipefail
 
-# The command words drive both the box-login routing and ADC protection.
-# Value-taking global flags are from `gcloud --help` on the installed Cloud
-# SDK 589.0.0 (read 2026-10-23); that output lists every flag below.
+# The global flags of the installed SDK, split by how many values each takes.
+# Generated from the root parser's own declarations by `scripts/gcloud-global-flags`
+# against Google Cloud SDK 589.0.0: lib/googlecloudsdk/calliope/cli.py:565-670
+# (__AddBuiltinGlobalFlags) and :240-246, lib/surface/__init__.py:57-186,
+# lib/googlecloudsdk/calliope/base.py:361-413 and lib/googlecloudsdk/calliope/
+# backend.py:338-370. The `--no-` forms are generated from the boolean flags by
+# lib/googlecloudsdk/calliope/parser_arguments.py:524-600, and the SDK disables
+# flag abbreviations (parser_extensions.py:1273-1287), so each name is exact.
+# A subgroup inherits this table unchanged, so one table classifies every depth.
+GCLOUD_GLOBAL_VALUE_FLAGS=(
+    ---flag-file-line-
+    --access-token-file
+    --account
+    --assert
+    --authority-selector
+    --authorization-token-file
+    --billing-project
+    --configuration
+    --credential-file-override
+    --document
+    --flags-file
+    --flatten
+    --format
+    --http-timeout
+    --impersonate-service-account
+    --project
+    --trace-token
+    --universe-domain
+    --verbosity
+)
+GCLOUD_GLOBAL_BOOLEAN_FLAGS=(
+    --help
+    --log-http
+    --no-log-http
+    --no-user-output-enabled
+    --quiet
+    --user-output-enabled
+    --version
+    -h
+    -q
+    -v
+)
+
+# One leading track word selects a surface, not an identity: `alpha auth login`
+# is still the login this shim protects (lib/surface/auth/__init__.py:22-24).
+GCLOUD_RELEASE_TRACKS=(alpha beta preview)
+
+# The command path gcloud would parse, and whether a flag made it unknowable.
 declare -a GCLOUD_COMMAND_WORDS=()
+GCLOUD_COMMAND_AMBIGUOUS=0
+
+contains_word() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+# True once the collected words decide whether this is a protected command:
+# `auth login`, or `auth application-default login|revoke`. Anything after that
+# is the command's own flags and positionals, which cannot move the path.
+command_path_is_decided() {
+    local count="${#GCLOUD_COMMAND_WORDS[@]}"
+    ((count == 0)) && return 1
+    [[ "${GCLOUD_COMMAND_WORDS[0]}" != auth ]] && return 0
+    ((count == 1)) && return 1
+    [[ "${GCLOUD_COMMAND_WORDS[1]}" != application-default ]] && return 0
+    ((count >= 3))
+}
 
 parse_gcloud_command_path() {
     GCLOUD_COMMAND_WORDS=()
-    local arg
+    GCLOUD_COMMAND_AMBIGUOUS=0
+    local -a argv=("$@")
+    local arg name
     while (($#)); do
+        command_path_is_decided && break
         arg="$1"
         case "$arg" in
-            --account | --billing-project | --configuration | --flags-file | --flatten | --format | --project | --verbosity | --access-token-file | --impersonate-service-account | --trace-token)
-                [[ $# -ge 2 ]] || return 2
-                shift 2
-                ;;
-            --account=* | --billing-project=* | --configuration=* | --flags-file=* | --flatten=* | --format=* | --project=* | --verbosity=* | --access-token-file=* | --impersonate-service-account=* | --trace-token=*)
-                shift
-                ;;
-            --help | -h | --quiet | -q | --version | -v | --log-http | --user-output-enabled | --no-user-output-enabled)
-                shift
-                ;;
-            --)
-                return 2
-                ;;
             -*)
-                # An unfamiliar flag before the command may take a separate
-                # value, so its command path is unknowable and ADC must fail closed.
-                [[ "${#GCLOUD_COMMAND_WORDS[@]}" -gt 0 ]] || return 2
-                shift
+                name="${arg%%=*}"
+                if contains_word "$name" "${GCLOUD_GLOBAL_VALUE_FLAGS[@]}"; then
+                    shift
+                    # A separate value is one more argv entry; `--flag=value` holds its own.
+                    [[ "$arg" == *=* ]] || { (($#)) && shift; }
+                elif contains_word "$name" "${GCLOUD_GLOBAL_BOOLEAN_FLAGS[@]}"; then
+                    shift
+                else
+                    # An unknown flag may or may not take the next entry, so every
+                    # word after it is only a guess at the command path.
+                    GCLOUD_COMMAND_AMBIGUOUS=1
+                    shift
+                fi
                 ;;
             *)
+                if [[ "${#GCLOUD_COMMAND_WORDS[@]}" -eq 0 ]] && contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
+                    shift
+                    continue
+                fi
                 GCLOUD_COMMAND_WORDS+=("$arg")
-                [[ "${#GCLOUD_COMMAND_WORDS[@]}" -ge 3 ]] && return 0
                 shift
                 ;;
         esac
     done
-    return 0
+    # Every protected command names `auth`. Without that word in argv, no reading
+    # of an unknown flag's value can make this one, so the guess is good enough.
+    if [[ "$GCLOUD_COMMAND_AMBIGUOUS" -eq 1 ]] && ! contains_word auth "${argv[@]}"; then
+        GCLOUD_COMMAND_AMBIGUOUS=0
+    fi
+}
+
+# `--name value` and `--name=value`, matching the flag exactly: the SDK accepts
+# no abbreviations (parser_extensions.py:1273-1287).
+has_option() {
+    local name="$1" arg
+    shift
+    for arg in "$@"; do
+        case "$arg" in
+            "$name" | "$name"=*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# The value gcloud would act on: its argparse store action keeps the last
+# occurrence, and an empty value is falsy to `auth login` (lib/surface/auth/
+# login.py:263,276), so it selects no credential file.
+effective_option_value() {
+    local name="$1" arg value="" awaiting_value=0
+    shift
+    for arg in "$@"; do
+        if ((awaiting_value)); then
+            value="$arg"
+            awaiting_value=0
+            continue
+        fi
+        case "$arg" in
+            "$name")
+                value=""
+                awaiting_value=1
+                ;;
+            "$name"=*) value="${arg#*=}" ;;
+        esac
+    done
+    printf '%s' "$value"
 }
 
 needs_forward_browser() {
@@ -83,37 +200,6 @@ needs_forward_browser() {
     [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${MIR_SOCKET:-}" ]] || return 1
     command -v forward &>/dev/null
 }
-
-has_configuration_flag() {
-    local arg
-    for arg in "$@"; do
-        case "$arg" in
-            --configuration | --configuration=*) return 0 ;;
-        esac
-    done
-    return 1
-}
-
-has_credential_file_flag() {
-    local arg
-    for arg in "$@"; do
-        case "$arg" in
-            --cred-file | --cred-file=*) return 0 ;;
-        esac
-    done
-    return 1
-}
-
-has_flags_file_flag() {
-    local arg
-    for arg in "$@"; do
-        case "$arg" in
-            --flags-file | --flags-file=*) return 0 ;;
-        esac
-    done
-    return 1
-}
-
 
 is_auth_login() {
     [[ "${GCLOUD_COMMAND_WORDS[0]:-}" == auth && "${GCLOUD_COMMAND_WORDS[1]:-}" == login ]]
@@ -146,14 +232,18 @@ is_external_account_adc() {
     [[ "$adc_json" =~ \"type\"[[:space:]]*:[[:space:]]*\"external_account\" ]]
 }
 
+# An identity the caller chose: the box route never overrides one of these.
+identity_is_selected() {
+    [[ -n "${GCLOUD_ACCOUNT:-}" || -n "${CLOUDSDK_ACTIVE_CONFIG_NAME:-}" ]] && return 0
+    has_option --configuration "$@" && return 0
+    [[ -n "$(effective_option_value --cred-file "$@")" ]]
+}
+
 is_box_routed_auth_login() {
-    [[ -z "${GCLOUD_ACCOUNT:-}" && -z "${CLOUDSDK_ACTIVE_CONFIG_NAME:-}" ]] || return 1
-    is_auth_login "$@" || return 1
-    box_is_active || return 1
-    if has_configuration_flag "$@" || has_credential_file_flag "$@"; then
-        return 1
-    fi
-    return 0
+    [[ "$GCLOUD_COMMAND_AMBIGUOUS" -eq 0 ]] || return 1
+    is_auth_login || return 1
+    identity_is_selected "$@" && return 1
+    box_is_active
 }
 
 find_real_gcloud() {
@@ -176,36 +266,46 @@ find_real_gcloud() {
     return 127
 }
 
+exec_real_gcloud() {
+    local real_gcloud="$1"
+    shift
+    if needs_forward_browser; then
+        exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "$@"
+    fi
+    exec "$real_gcloud" "$@"
+}
+
 main() {
     local real_gcloud
     # split is load-bearing — `local x=$(cmd)` masks the command's exit status and would defeat fail-loud.
     real_gcloud="$(find_real_gcloud)"
 
-    local command_parse_status
-    if parse_gcloud_command_path "$@"; then
-        command_parse_status=0
-    else
-        command_parse_status=$?
-    fi
+    parse_gcloud_command_path "$@"
 
     local config_dir="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/configurations"
-    # Read the ADC only for a command this block can refuse: an unknown leading flag, or
-    # application-default login/revoke. Every other call leaves the credential file unopened, so a
-    # runtime monitor that watches who opens it sees gcloud, not this wrapper.
+    # Read the ADC only for a command this block can refuse: an ambiguous path that
+    # could be a protected one, or application-default login/revoke. Every other call
+    # leaves the credential file unopened, so a runtime monitor that watches who opens
+    # it sees gcloud, not this wrapper.
     local adc_operation=""
-    if [[ "$command_parse_status" -eq 2 ]] || adc_operation="$(application_default_operation)"; then
-        if is_external_account_adc; then
-            if [[ "$command_parse_status" -eq 2 ]]; then
-                echo "gcloud shim: refusing command with an unknown leading global flag while the box ADC is an external_account credential; run gcloud auth login without that flag." >&2
-                exit 1
-            fi
-            echo "gcloud shim: refusing auth application-default ${adc_operation}: the box's ADC is its own identity; run gcloud auth login, which renews legacy_credentials/<account>/adc.json; client libraries use it through GOOGLE_APPLICATION_CREDENTIALS." >&2
+    if [[ "$GCLOUD_COMMAND_AMBIGUOUS" -eq 1 ]]; then
+        local ambiguous_refusal=0
+        if ! identity_is_selected "$@" && box_is_active; then
+            ambiguous_refusal=1
+        elif is_external_account_adc; then
+            ambiguous_refusal=1
+        fi
+        if ((ambiguous_refusal)); then
+            echo "gcloud shim: refusing a command whose path an unrecognized flag makes ambiguous while it could still be a protected auth command; drop that flag, or name a configuration explicitly with --configuration theorem or GCLOUD_ACCOUNT=theorem." >&2
             exit 1
         fi
+    elif adc_operation="$(application_default_operation)" && is_external_account_adc; then
+        echo "gcloud shim: refusing auth application-default ${adc_operation}: the box's ADC is its own identity; run gcloud auth login, which renews legacy_credentials/<account>/adc.json; client libraries use it through GOOGLE_APPLICATION_CREDENTIALS." >&2
+        exit 1
     fi
 
-    if [[ "$command_parse_status" -eq 0 ]] && is_box_routed_auth_login "$@"; then
-        if has_flags_file_flag "$@"; then
+    if is_box_routed_auth_login "$@"; then
+        if has_option --flags-file "$@"; then
             echo "gcloud shim: refusing implicit box auth login with --flags-file; name a configuration explicitly with --configuration theorem or GCLOUD_ACCOUNT=theorem." >&2
             exit 1
         fi
@@ -229,18 +329,12 @@ main() {
             echo "gcloud shim: dropping --update-adc: the box's ADC stays its own identity; this login renews legacy_credentials/<account>/adc.json for client libraries." >&2
         fi
         export CLOUDSDK_ACTIVE_CONFIG_NAME=theorem
-        if needs_forward_browser "${routed_args[@]}"; then
-            exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "${routed_args[@]}"
-        fi
-        exec "$real_gcloud" "${routed_args[@]}"
+        exec_real_gcloud "$real_gcloud" "${routed_args[@]}"
     fi
 
     local account="${GCLOUD_ACCOUNT:-}"
     if [[ -z "$account" ]]; then
-        if needs_forward_browser "$@"; then
-            exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "$@"
-        fi
-        exec "$real_gcloud" "$@"
+        exec_real_gcloud "$real_gcloud" "$@"
     fi
 
     # Reject path separators and dot-segments before they ever touch a
@@ -274,10 +368,7 @@ main() {
     fi
 
     export CLOUDSDK_ACTIVE_CONFIG_NAME="$account"
-    if needs_forward_browser "$@"; then
-        exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "$@"
-    fi
-    exec "$real_gcloud" "$@"
+    exec_real_gcloud "$real_gcloud" "$@"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

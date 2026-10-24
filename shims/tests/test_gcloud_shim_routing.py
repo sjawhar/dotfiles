@@ -31,6 +31,17 @@ def stub_argv(result: subprocess.CompletedProcess[str]) -> list[str]:
     return [line.removeprefix("ARG=") for line in result.stdout.splitlines() if line.startswith("ARG=")]
 
 
+def shim_array(name: str) -> list[str]:
+    """One of the shim's own flag tables, read by sourcing it."""
+    result = subprocess.run(
+        ["/bin/bash", "-c", f'source "{SHIMS / "gcloud"}"; printf "%s\\n" "${{{name}[@]}}"'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.split()
+
+
 class GcloudRouting(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -203,6 +214,192 @@ class GcloudRouting(unittest.TestCase):
                 self.assertIn("routing auth login", result.stderr)
                 self.assertEqual(stub_argv(result), expected_args or args)
 
+    def test_global_flags_among_the_auth_words_preserve_box_login_protection(self):
+        """A global flag's separate value is not a command word, wherever it sits."""
+        cases = (
+            (
+                ["auth", "--http-timeout", "30", "login", "--update-adc"],
+                ["auth", "--http-timeout", "30", "login"],
+            ),
+            (
+                ["auth", "--http-timeout=30", "login", "--update-adc"],
+                ["auth", "--http-timeout=30", "login"],
+            ),
+            (["--http-timeout", "30", "auth", "login"], None),
+            (["auth", "--verbosity", "debug", "login"], None),
+        )
+
+        for args, expected_args in cases:
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=theorem", result.stdout)
+                self.assertIn("routing auth login", result.stderr)
+                self.assertEqual(stub_argv(result), expected_args or args)
+
+    def test_global_flags_among_the_auth_words_preserve_adc_refusal(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        for args in (
+            ["auth", "--http-timeout", "30", "application-default", "login"],
+            ["auth", "application-default", "--http-timeout", "30", "revoke"],
+            ["auth", "application-default", "--http-timeout=30", "login"],
+            ["--verbosity", "debug", "auth", "application-default", "revoke"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("gcloud auth login", result.stderr)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+
+    def test_empty_cred_file_is_an_ordinary_login_and_is_routed(self):
+        """An unset shell variable expands to an empty value, which selects no
+        credential file for the SDK, so the box protections still apply."""
+        cases = (
+            (["auth", "login", "--cred-file=", "--update-adc"], ["auth", "login", "--cred-file="]),
+            (["auth", "login", "--cred-file", "", "--update-adc"], ["auth", "login", "--cred-file", ""]),
+            (
+                ["auth", "login", "--cred-file=/tmp/credential.json", "--cred-file=", "--update-adc"],
+                ["auth", "login", "--cred-file=/tmp/credential.json", "--cred-file="],
+            ),
+        )
+
+        for args, expected_args in cases:
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=theorem", result.stdout)
+                self.assertIn("routing auth login", result.stderr)
+                self.assertEqual(stub_argv(result), expected_args)
+
+    def test_last_cred_file_value_decides_the_bypass(self):
+        """argparse keeps the last occurrence, so a later real file still bypasses."""
+        args = ["auth", "login", "--cred-file=", "--cred-file=/tmp/credential.json", "--update-adc"]
+        result = self.run_shim(args=args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=<unset>", result.stdout)
+        self.assertNotIn("routing auth login", result.stderr)
+        self.assertEqual(stub_argv(result), args)
+
+    def test_release_track_auth_commands_are_routed(self):
+        for track in ("alpha", "beta"):
+            with self.subTest(track=track):
+                result = self.run_shim(args=[track, "auth", "login", "--update-adc"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=theorem", result.stdout)
+                self.assertIn("routing auth login", result.stderr)
+                self.assertEqual(stub_argv(result), [track, "auth", "login"])
+
+    def test_release_track_application_default_operations_are_refused(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        for track in ("alpha", "beta"):
+            for operation in ("login", "revoke"):
+                with self.subTest(track=track, operation=operation):
+                    result = self.run_shim(args=[track, "auth", "application-default", operation])
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("gcloud auth login", result.stderr)
+                    self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                    self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+
+    def test_release_track_login_keeps_the_explicit_escapes(self):
+        flags_file = self.stub_dir / "login.yaml"
+        flags_file.write_text("--update-adc:\n", encoding="utf-8")
+        with self.subTest(case="flags-file refused"):
+            result = self.run_shim(args=["alpha", "auth", "login", f"--flags-file={flags_file}"])
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("--configuration theorem", result.stderr)
+        with self.subTest(case="explicit configuration passes through"):
+            args = ["beta", "--configuration", "theorem", "auth", "login"]
+            result = self.run_shim(args=args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("CONFIG=<unset>", result.stdout)
+            self.assertEqual(stub_argv(result), args)
+
+    def test_release_track_login_keeps_headless_forwarding(self):
+        write_stub(self.stub_dir, "forward", "exit 0")
+        result = self.run_shim(args=["alpha", "auth", "login"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertIn("DISPLAY=:0", result.stdout)
+        self.assertIn("BROWSER=forward open %s", result.stdout)
+
+    def test_read_only_commands_run_whatever_the_adc_holds(self):
+        """A command that cannot change a credential is never refused for the ADC."""
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        for args in (
+            ["--no-log-http", "config", "list"],
+            ["--log-http", "config", "list"],
+            ["--assert=readonly", "config", "list"],
+            ["--assert", "readonly", "config", "list"],
+            ["--http-timeout", "30", "compute", "instances", "list"],
+            ["--no-user-output-enabled", "config", "list"],
+            ["--universe-domain", "googleapis.com", "config", "list"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=<unset>", result.stdout)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_unknown_flag_passes_through_when_no_auth_command_is_possible(self):
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        args = ["--future-global-flag", "value", "config", "list"]
+        result = self.run_shim(args=args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=<unset>", result.stdout)
+        self.assertEqual(stub_argv(result), args)
+
+    def test_unknown_flag_refuses_a_possible_protected_command(self):
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        for args in (
+            ["--future-global-flag", "value", "auth", "login"],
+            ["auth", "--future-global-flag", "value", "login"],
+            ["auth", "--future-global-flag", "value", "application-default", "login"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("ambiguous", result.stderr)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
+
+    def test_global_flag_table_matches_each_flags_value_arity(self):
+        """Every flag in the shim's table is consumed with exactly the number of
+        values it is listed under, so a value can never pose as a command word.
+
+        The probe is the application-default refusal: it depends only on the command
+        path, so it holds for the flags that select an identity (`--configuration`)
+        or carry opaque flags (`--flags-file`) as much as for the rest."""
+        value_flags = shim_array("GCLOUD_GLOBAL_VALUE_FLAGS")
+        boolean_flags = shim_array("GCLOUD_GLOBAL_BOOLEAN_FLAGS")
+        self.assertTrue(value_flags)
+        self.assertTrue(boolean_flags)
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        protected = ["auth", "application-default", "login"]
+
+        for flag in value_flags:
+            for args in ([flag, "VALUE", *protected], [f"{flag}=VALUE", *protected]):
+                with self.subTest(flag=flag, arity=1, args=args):
+                    result = self.run_shim(args=args)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn("gcloud auth login", result.stderr)
+                    self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+
+        for flag in boolean_flags:
+            with self.subTest(flag=flag, arity=0):
+                result = self.run_shim(args=[flag, *protected])
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("gcloud auth login", result.stderr)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+
     def test_flags_file_refuses_implicit_box_login(self):
         flags_file = self.stub_dir / "login.yaml"
         write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
@@ -258,13 +455,16 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
 
     def test_unknown_leading_global_flag_fails_closed_for_external_adc(self):
+        """Its value could hide the command path, so a possible application-default
+        login is refused even where the box is not this machine's identity."""
+        (self.cloudsdk_config / "active_config").write_text("default\n", encoding="utf-8")
         adc = self.cloudsdk_config / "application_default_credentials.json"
         adc.write_text('{"type":"external_account"}\n', encoding="utf-8")
         result = self.run_shim(
             args=["--future-global-flag", "value", "auth", "application-default", "login"]
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("unknown leading global flag", result.stderr)
+        self.assertIn("ambiguous", result.stderr)
         self.assertEqual(result.stdout, "")
 
     def test_update_adc_is_unchanged_when_box_auth_login_bypasses_routing(self):
