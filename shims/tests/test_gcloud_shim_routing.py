@@ -14,6 +14,7 @@ import json
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -477,6 +478,19 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("ambiguous", result.stderr)
                 self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+
+    def test_thousands_of_unknown_flags_are_refused_cleanly(self):
+        """The walk is a loop, not recursion: 3000 choice points before `auth login`
+        are weighed exactly and refused, with no stack overflow and in little time."""
+        write_stub(self.stub_dir, "gcloud", "echo SHOULD-NOT-RUN\nexit 0")
+        args = ["--future-flag", "x"] * 3000 + ["auth", "login"]
+        started = time.monotonic()
+        result = self.run_shim(args=args)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 1, result.stderr[-500:])
+        self.assertIn("ambiguous", result.stderr)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+        self.assertLess(elapsed, 10)
 
     def test_unknown_flags_only_after_a_decided_path_change_nothing(self):
         """Many unknown flags after `auth login` cannot move it: the login is routed."""

@@ -98,11 +98,14 @@ GCLOUD_RELEASE_TRACKS=(alpha beta preview)
 # The command path this SDK's own parser reads, and what other readings of an
 # unknown flag's value could make it. GCLOUD_READING_KINDS holds one bit per kind
 # of path some reading names: 1 `auth login`, 2 `auth application-default
-# login|revoke`, 4 anything else.
+# login|revoke`, 4 anything else. GCLOUD_PATH_KINDS_TABLE holds, at
+# index*4 + state, the kinds every reading from that argv index in that state
+# names. It is an indexed array, not an associative one: bash 3.2, the
+# /bin/bash of macOS, has no associative arrays and would stop this shim at
+# its declaration.
 declare -a GCLOUD_COMMAND_WORDS=()
 declare -a GCLOUD_ARGV=()
-declare -A GCLOUD_PATH_KINDS_MEMO=()
-GCLOUD_PATH_KINDS=0
+declare -a GCLOUD_PATH_KINDS_TABLE=()
 GCLOUD_READING_KINDS=0
 GCLOUD_COMMAND_AMBIGUOUS=0
 GCLOUD_POSSIBLE_LOGIN=0
@@ -188,69 +191,74 @@ protected_words_in_order() {
     return 1
 }
 
-# Sets GCLOUD_PATH_KINDS to the kinds of path every reading of GCLOUD_ARGV from
-# index $1, in state $2, names. States: 0 nothing read, 1 a release track read,
-# 2 `auth`, 3 `auth application-default`. An unknown flag written without `=` and
-# followed by a non-flag entry is a choice point, since a later SDK could make it
-# take that entry as its value; the walk reads it both ways. The result for each
-# (index, state) is computed once and kept, so the walk is exact for any number
-# of choice points: at most four states per argv index, with no reading limit to
-# give up at. A choice point after the path is decided changes nothing, so it is
-# never reached.
-path_kinds_from() {
-    local index="$1" state="$2" key="$1:$2" kinds=0 arg
-    if [[ -n "${GCLOUD_PATH_KINDS_MEMO[$key]:-}" ]]; then
-        GCLOUD_PATH_KINDS="${GCLOUD_PATH_KINDS_MEMO[$key]}"
-        return 0
-    fi
-    while ((index < ${#GCLOUD_ARGV[@]})); do
+# Sets GCLOUD_READING_KINDS to the kinds of path every reading of GCLOUD_ARGV
+# names. States: 0 nothing read, 1 a release track read, 2 `auth`, 3 `auth
+# application-default`. An unknown flag written without `=` and followed by a
+# non-flag entry is a choice point, since a later SDK could make it take that
+# entry as its value; both readings count. Each entry's result depends only on
+# the entries after it, so one loop from the last index back to 0 fills the
+# table exactly: at most four states per index, no reading limit to give up at,
+# and no recursion, so no number of unknown flags can exhaust the stack.
+compute_reading_kinds() {
+    local count="${#GCLOUD_ARGV[@]}" index state arg next row skip_row move is_track
+    GCLOUD_PATH_KINDS_TABLE=()
+    # Past the last entry the path has not reached a protected command.
+    for ((state = 0; state < 4; state++)); do
+        GCLOUD_PATH_KINDS_TABLE[count * 4 + state]=4
+    done
+    for ((index = count - 1; index >= 0; index--)); do
         arg="${GCLOUD_ARGV[index]}"
-        index=$((index + 1))
+        row=$(((index + 1) * 4))
+        # How the entry moves the walk: "flag" to the next row in the same state,
+        # "value" past the flag's separate value too, "choice" both ways, or
+        # "word" through the state machine.
+        move=word
+        is_track=0
         case "$arg" in
             -?*)
+                move=flag
                 if is_value_flag "$arg"; then
-                    [[ "$arg" == *=* ]] || index=$((index + 1))
+                    [[ "$arg" == *=* ]] || move=value
                 elif ! is_boolean_flag "$arg" && [[ "$arg" != *=* && "$arg" != -- ]] &&
-                    ((index < ${#GCLOUD_ARGV[@]})) && [[ "${GCLOUD_ARGV[index]}" != -* ]]; then
-                    # The reading where the flag takes the next entry; the loop goes
-                    # on with the reading where it takes none.
-                    path_kinds_from $((index + 1)) "$state"
-                    kinds=$((kinds | GCLOUD_PATH_KINDS))
+                    ((index + 1 < count)) && [[ "${GCLOUD_ARGV[index + 1]}" != -* ]]; then
+                    move=choice
                 fi
-                continue
                 ;;
+            *) contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}" && is_track=1 ;;
         esac
-        if ((state == 0)) && contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
-            state=1
-            continue
-        fi
-        case "$state:$arg" in
-            [01]:auth) state=2 ;;
-            2:application-default) state=3 ;;
-            2:login) state=login ;;
-            3:login | 3:revoke) state=adc ;;
-            *) state=other ;;
-        esac
-        case "$state" in
-            login | adc | other) break ;;
-        esac
+        skip_row=$(((index + 2 > count ? count : index + 2) * 4))
+        for ((state = 0; state < 4; state++)); do
+            case "$move" in
+                flag) next="${GCLOUD_PATH_KINDS_TABLE[row + state]}" ;;
+                value) next="${GCLOUD_PATH_KINDS_TABLE[skip_row + state]}" ;;
+                choice)
+                    next=$((GCLOUD_PATH_KINDS_TABLE[row + state] | GCLOUD_PATH_KINDS_TABLE[skip_row + state]))
+                    ;;
+                word)
+                    if ((state == 0 && is_track)); then
+                        next="${GCLOUD_PATH_KINDS_TABLE[row + 1]}"
+                    else
+                        case "$state:$arg" in
+                            [01]:auth) next="${GCLOUD_PATH_KINDS_TABLE[row + 2]}" ;;
+                            2:application-default) next="${GCLOUD_PATH_KINDS_TABLE[row + 3]}" ;;
+                            2:login) next=1 ;;
+                            3:login | 3:revoke) next=2 ;;
+                            *) next=4 ;;
+                        esac
+                    fi
+                    ;;
+            esac
+            GCLOUD_PATH_KINDS_TABLE[index * 4 + state]="$next"
+        done
     done
-    case "$state" in
-        login) kinds=$((kinds | 1)) ;;
-        adc) kinds=$((kinds | 2)) ;;
-        *) kinds=$((kinds | 4)) ;;
-    esac
-    GCLOUD_PATH_KINDS_MEMO[$key]="$kinds"
-    GCLOUD_PATH_KINDS="$kinds"
+    GCLOUD_READING_KINDS="${GCLOUD_PATH_KINDS_TABLE[0]}"
 }
 
 parse_gcloud_command_path() {
     read_command_words "$@"
     if protected_words_in_order "$@"; then
         GCLOUD_ARGV=("$@")
-        GCLOUD_PATH_KINDS_MEMO=()
-        path_kinds_from 0 0
-        GCLOUD_READING_KINDS="$GCLOUD_PATH_KINDS"
+        compute_reading_kinds
     else
         GCLOUD_READING_KINDS=4
     fi
@@ -332,6 +340,13 @@ is_external_account_adc() {
     config_root="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
     adc_file="${config_root}/application_default_credentials.json"
     [[ -f "$adc_file" ]] || return 1
+    # An ADC the shim cannot read cannot be shown not to be the box's identity.
+    # bash 4 and later fail the read below under set -e; bash 3.2 reads an
+    # unreadable file as empty with status 0, which would turn the refusal off.
+    if [[ ! -r "$adc_file" ]]; then
+        echo "gcloud shim: cannot read ${adc_file} to check whether it is the box's external_account credential; refusing." >&2
+        exit 1
+    fi
     adc_json="$(<"$adc_file")"
     [[ "$adc_json" =~ \"type\"[[:space:]]*:[[:space:]]*\"external_account\" ]]
 }
