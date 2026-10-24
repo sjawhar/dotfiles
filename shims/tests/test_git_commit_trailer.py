@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""shims/git gives an omp session's `git commit` its Omp-Session trailer, against the real git."""
+"""shims/git gives every commit an omp session makes with `git commit`, `merge`, `pull`,
+`cherry-pick` or `revert` its Omp-Session trailer, against the real git."""
 import os
 import shutil
 import subprocess
@@ -75,6 +76,98 @@ class GitCommitTrailerTest(unittest.TestCase):
     def test_a_commit_behind_global_options_still_gets_the_trailer(self):
         self.git("-C", str(self.repo), "commit", "-q", "--allow-empty", "-m", "work", env=self.agent, cwd=self.tmp)
         self.assertEqual(self.trailers(), [SESSION])
+
+    def branch_with_commit(self, name: str, message: str, env: dict[str, str]) -> None:
+        self.git("checkout", "-q", "-b", name, env=self.plain)
+        (self.repo / name).write_text(name)
+        self.git("add", name, env=self.plain)
+        self.git("commit", "-q", "-m", message, env=env)
+        self.git("checkout", "-q", "main", env=self.plain)
+
+    def test_a_merge_commit_carries_it_and_stays_signed(self):
+        self.branch_with_commit("side", "side work", self.plain)
+        (self.repo / "main-file").write_text("m")
+        self.git("add", "main-file", env=self.plain)
+        self.git("commit", "-q", "-m", "main work", env=self.plain)
+        self.git("merge", "-q", "--no-edit", "side", env=self.agent)
+        self.assertEqual(self.git("log", "-1", "--format=%P", env=self.plain).count(" "), 1)
+        self.assertEqual(self.trailers(), [SESSION])
+        self.assertEqual(self.git("log", "-1", "--format=%G?", env=self.plain).strip(), "G")
+
+    def test_a_fast_forward_merge_and_a_plain_merge_are_otherwise_unchanged(self):
+        self.branch_with_commit("side", "side work", self.plain)
+        self.git("merge", "-q", "side", env=self.agent)
+        self.assertEqual(self.git("log", "-1", "--format=%B", env=self.plain).strip(), "side work")
+        self.branch_with_commit("other", "other work", self.plain)
+        (self.repo / "x").write_text("x")
+        self.git("add", "x", env=self.plain)
+        self.git("commit", "-q", "-m", "x", env=self.plain)
+        self.git("merge", "-q", "--no-edit", "other", env=self.plain)
+        self.assertEqual(self.trailers(), [])
+
+    def test_a_cherry_pick_and_a_revert_carry_it_once(self):
+        other = "01a0fa64-0000-7415-b143-c2a338b5da8b"
+        self.branch_with_commit("side", "side work", {**self.agent, "OMP_SESSION_ID": other})
+        self.git("cherry-pick", "side", env=self.agent)
+        self.assertEqual(self.trailers(), [other, SESSION])
+        self.git("revert", "--no-edit", "HEAD", env=self.agent)
+        self.assertEqual(self.trailers(), [SESSION])
+        self.git("commit", "-q", "--amend", "--no-edit", env=self.agent)
+        self.assertEqual(self.trailers(), [SESSION])
+
+    def test_a_pull_merge_carries_it_and_a_pull_rebase_leaves_replayed_commits_alone(self):
+        upstream = self.tmp / "upstream"
+        self.git("clone", "-q", str(self.repo), str(upstream), env=self.plain)
+        (upstream / "u").write_text("u")
+        self.git("add", "u", env=self.plain, cwd=upstream)
+        self.git("commit", "-q", "-m", "upstream work", env=self.plain, cwd=upstream)
+        self.git("remote", "add", "up", str(upstream), env=self.plain)
+        (self.repo / "l").write_text("l")
+        self.git("add", "l", env=self.plain)
+        self.git("commit", "-q", "-m", "local work", env=self.plain)
+        self.git("pull", "-q", "--no-rebase", "--no-edit", "up", "main", env=self.agent)
+        self.assertEqual(self.trailers(), [SESSION])
+        self.git("reset", "-q", "--hard", "HEAD^1", env=self.plain)
+        self.git("pull", "-q", "--rebase", "up", "main", env=self.agent)
+        self.assertEqual(self.git("log", "-1", "--format=%B", env=self.plain).strip(), "local work")
+
+    def test_the_repository_hooks_still_run_for_a_merge(self):
+        hooks = self.repo / ".git" / "hooks"
+        for name in ("prepare-commit-msg", "commit-msg", "post-merge"):
+            (hooks / name).write_text(f'#!/bin/sh\necho "$*" > "$(git rev-parse --git-dir)/{name}-ran"\n')
+            (hooks / name).chmod(0o755)
+        self.branch_with_commit("side", "side work", self.plain)
+        (self.repo / "m").write_text("m")
+        self.git("add", "m", env=self.plain)
+        self.git("commit", "-q", "-m", "m", env=self.plain)
+        for name in ("prepare-commit-msg", "commit-msg"):
+            (self.repo / ".git" / f"{name}-ran").unlink()
+        self.git("merge", "-q", "--no-edit", "side", env=self.agent)
+        self.assertEqual(self.trailers(), [SESSION])
+        self.assertEqual((self.repo / ".git" / "prepare-commit-msg-ran").read_text().split()[1], "merge")
+        self.assertTrue((self.repo / ".git" / "commit-msg-ran").exists())
+        self.assertTrue((self.repo / ".git" / "post-merge-ran").exists())
+
+    def test_a_configured_hooks_path_is_still_the_one_that_runs(self):
+        own = self.tmp / "own-hooks"
+        own.mkdir()
+        (own / "commit-msg").write_text('#!/bin/sh\ngit interpret-trailers --in-place --trailer "Hook: yes" "$1"\n')
+        (own / "commit-msg").chmod(0o755)
+        self.git("config", "core.hooksPath", str(own), env=self.plain)
+        self.git("commit", "-q", "--allow-empty", "-m", "base", env=self.plain)
+        self.branch_with_commit("side", "side work", self.plain)
+        self.git("commit", "-q", "--allow-empty", "-m", "m", env=self.plain)
+        self.git("merge", "-q", "--no-edit", "side", env=self.agent)
+        body = self.git("log", "-1", "--format=%B", env=self.plain)
+        self.assertIn("Hook: yes", body)
+        self.assertEqual(self.trailers(), [SESSION])
+
+    def test_a_merge_in_an_opted_out_checkout_carries_none(self):
+        self.git("config", "omp.sessionTrailer", "false", env=self.plain)
+        self.branch_with_commit("side", "side work", self.plain)
+        self.git("commit", "-q", "--allow-empty", "-m", "m", env=self.plain)
+        self.git("merge", "-q", "--no-edit", "side", env=self.agent)
+        self.assertEqual(self.trailers(), [])
 
 
 if __name__ == "__main__":

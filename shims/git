@@ -1,8 +1,8 @@
 #!/bin/bash
 # git-worktree-shim: in an agent session, refuse a bare `git worktree prune`, lock
 # every `git worktree add`, unlock a lock of ours before `git worktree remove`, and
-# give every `git commit` from an omp session its Omp-Session trailer, except in a
-# public theorem-labs repository.
+# give every commit an omp session makes with `git commit`, `merge`, `pull`,
+# `cherry-pick` or `revert` its Omp-Session trailer.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -96,20 +96,35 @@ esac
 
 # A commit made from an omp session carries `Omp-Session: <id>`, the trailer
 # session attribution reads; omp/extensions/session-env.ts exports the id, and
-# jj commits get the same trailer from its JJ_CONFIG overlay. git's own
-# --trailer adds it, so the repository's hooks and commit signing run exactly as
-# they would without it, and `ifexists=addIfDifferent` keeps an amend from
-# repeating it. A missing or malformed id adds nothing: attribution may be
-# absent, never wrong. Only `git commit` itself is seen: a commit made through an
-# alias, a merge, a cherry-pick or `git commit-tree` carries no trailer.
-# scripts/omp-session-trailer decides per repository: none in a repository of an
-# owner its PUBLISHING_OWNERS names (theorem-labs, whose public repositories are
-# its releases) that GitHub says is public or cannot say is not;
-# `git config omp.sessionTrailer true|false` overrides it either way.
-if [[ "${args[i]:-}" == commit && "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
-    "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
-    exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
-fi
+# jj commits get the same trailer from its JJ_CONFIG overlay. A missing or
+# malformed id adds nothing: attribution may be absent, never wrong.
+# scripts/omp-session-trailer says yes everywhere unless the checkout sets
+# `git config omp.sessionTrailer false`.
+# - `git commit`: git's own --trailer adds it, so the repository's hooks and
+#   commit signing run exactly as they would without it, and
+#   `ifexists=addIfDifferent` keeps an amend from repeating it.
+# - `git merge`, `pull`, `cherry-pick`, `revert` take no --trailer, so they run
+#   with `core.hooksPath` at shims/git-hooks/, whose prepare-commit-msg adds the
+#   same line and then runs the repository's own hook; every other hook name
+#   there just runs the repository's own. A rebase (`pull --rebase`) keeps each
+#   replayed commit's message as it was. A caller's own `-c core.hooksPath`
+#   stands, and that command gets no trailer.
+# A commit made through an alias, `git rebase`, `git am` or `git commit-tree`
+# carries none.
+session_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+case "${args[i]:-}" in
+    commit | merge | pull | cherry-pick | revert)
+        if [[ "${OMP_SESSION_ID:-}" =~ $session_re ]] &&
+            "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
+            if [[ "${args[i]}" == commit ]]; then
+                exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
+            fi
+            shopt -s nocasematch
+            [[ " ${args[*]:0:i} " == *core.hookspath=* ]] || exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/git-hooks" "${args[@]:i}"
+            shopt -u nocasematch
+        fi
+        ;;
+esac
 [[ "${args[i]:-}" == worktree ]] || exec "$_real" "$@"
 verb="${args[i + 1]:-}"
 rest=("${args[@]:i+2}")

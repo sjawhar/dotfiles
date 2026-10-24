@@ -1,0 +1,38 @@
+#!/bin/bash
+# git-trailer-hooks: the hooks directory shims/git points `core.hooksPath` at for the one
+# `git merge`, `git pull`, `git cherry-pick` or `git revert` an omp session runs, so the
+# commit that command makes carries the session's Omp-Session trailer, as a `git commit`
+# does through its `--trailer`. Every hook name here is a link to this file.
+#
+# prepare-commit-msg adds `Omp-Session: $OMP_SESSION_ID` to the message unless the same
+# line is there already, the id is malformed, scripts/omp-session-trailer says no, or a
+# rebase is replaying commits (`pull --rebase`, a rebase started from a hook): a replayed
+# commit keeps the trailer of the session that made it.
+#
+# Then every hook, prepare-commit-msg included, runs the repository's own hook of the same
+# name, if it has one, with the same arguments and stdin, and exits with its status. The
+# repository's hooks directory is read with the command line's config dropped
+# (GIT_CONFIG_PARAMETERS), since that is where shims/git's override sits; its own
+# core.hooksPath from a config file still counts. A git run inside a hook (which inherits
+# the override) in another repository therefore reaches that repository's hooks.
+set -euo pipefail
+
+name="${0##*/}"
+here="$(cd -P -- "${0%/*}" && pwd)"
+
+if [[ "$name" == prepare-commit-msg && -n "${1:-}" &&
+    "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
+    [[ ! -d "$(git rev-parse --git-path rebase-merge)" && ! -d "$(git rev-parse --git-path rebase-apply)" ]] &&
+    "$here/../../scripts/omp-session-trailer" git > /dev/null 2>&1; then
+    # git merge writes MERGE_MSG without a final newline, and interpret-trailers
+    # would then glue the trailer onto the subject line.
+    [[ ! -s "$1" || -z "$(tail -c 1 -- "$1")" ]] || printf '\n' >> "$1"
+    git -c trailer.Omp-Session.ifexists=addIfDifferent interpret-trailers --in-place \
+        --trailer "Omp-Session: $OMP_SESSION_ID" "$1"
+fi
+
+own="$(env -u GIT_CONFIG_PARAMETERS git rev-parse --path-format=absolute --git-path hooks 2> /dev/null || true)"
+if [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]; then
+    exec "$own/$name" "$@"
+fi
+exit 0
