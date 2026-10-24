@@ -106,6 +106,9 @@ mautrix-instagram = { version = "0.2609.0", asset_pattern = "mautrix-instagram-a
 # mautrix-manager signs bridges in to websites (Google, Facebook, Instagram) in its own
 # window; chathub/login-screen runs it on the hub and shows it in Sami's browser.
 "github:mautrix/manager" = { version = "0.2.1", asset_pattern = "mautrix-manager-linux-x64-*.zip", bin_path = "mautrix-manager-linux-x64", bin = "mautrix-manager" }
+# Browser CLI the compound-engineering ce-dogfood and ce-polish skills drive. Its
+# Chrome for Testing download is installers/agent-browser.sh.
+agent-browser = "0.39.0"
 
 # Development
 "npm:basedpyright" = "1.39.10"
