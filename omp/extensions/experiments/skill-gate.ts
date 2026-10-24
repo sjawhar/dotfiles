@@ -205,7 +205,7 @@ export default function skillGate(pi: ExtensionAPI): void {
 		const skills = missing.map(skill => `skill://${skill}`).join(" and ");
 		return {
 			block: true,
-			reason: `Skill gate: read ${skills} in a step of its own before this ${event.toolName} call (a read in the same batch does not count), then retry the call.`,
+			reason: `Skill gate: nothing in this ${event.toolName} call ran. Read ${skills} in a step of its own (a read in the same batch does not count), then send the whole call again.`,
 		};
 	});
 }
