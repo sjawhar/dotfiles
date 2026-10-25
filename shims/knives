@@ -50,7 +50,10 @@ if [[ -z "$_knives" ]]; then
     # pinned machine-wide beside it (omp/plugins/package.json). Looked up in the data dir whose
     # copies the scan above skipped. An absolute path, so nothing past here looks knives up on
     # PATH; stdin stays knives' (a hook's event payload).
-    _knives="$(MISE_DATA_DIR="$_mise_root" mise which -C / knives --tool github:sjawhar/knives </dev/null)" || {
+    # mise lives in ~/.dotfiles/bin, which a unit's, harness's or credential helper's PATH can
+    # leave out while it keeps this shim; then the shim runs that mise by its path.
+    _mise="$(command -v mise)" || _mise="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+    _knives="$(MISE_DATA_DIR="$_mise_root" "$_mise" which -C / knives --tool github:sjawhar/knives </dev/null)" || {
         echo "knives: ${BASH_SOURCE[0]}: mise did not resolve the pinned github:sjawhar/knives (its error is above)" >&2
         exit 127
     }

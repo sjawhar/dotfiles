@@ -10,7 +10,11 @@ DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 # mise's environment for this directory. A session keeps the PATH it started with, so a PATH can
 # still name the install dir of an older pin; mise puts the current pin's dir in its place. A pin
 # that is not installed leaves no omp install dir, and agent-session refuses.
-mise_env="$(mise env -s bash)"
+# mise lives in ~/.dotfiles/bin, which a unit's or harness's PATH can leave out while it keeps
+# this shim; then the shim runs that mise by its path, with .bashrc's data dir.
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+mise_bin="$(command -v mise)" || mise_bin="$DOTFILES_DIR/bin/mise"
+mise_env="$("$mise_bin" env -s bash)"
 eval "$mise_env"
 
 # glibc gives each allocating thread its own 64 MiB arena and never returns freed chunks; omp's
