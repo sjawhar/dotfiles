@@ -7,18 +7,27 @@
 // 2026-10-24 and 2026-10-25 (dispatch://INFRA-435).
 //
 // Before such a call, this resolves each target (against the session cwd, through symlinks) and
-// looks for a shell process of the current user holding the same device and inode open on a high
-// fd (10 or above: bash's 255, dash's and busybox sh's 10). Shells put a script they run there;
-// `< data.txt` or `exec 3>log` stay below 10, and `source` reads its file whole. A `tail -f`, an
-// editor or a Python process holding the file is not a shell, so it never blocks. On a match the
-// call is refused with the file, the pid, its command line and what to do instead.
+// looks for a shell process of the current user holding the same device and inode open on a
+// read-only, close-on-exec fd of 10 or above. That is how a shell holds the script it runs: bash on
+// fd 255, dash and busybox sh on fd 10, all O_RDONLY|O_CLOEXEC. fd 10 and above alone is not
+// enough: bash's named fds (`exec {lk}>lock`) and the fds bash and dash save around a redirect live
+// there too, and a user's `exec 10<notes.txt` is read-only but not close-on-exec; none of those
+// blocks. bash's `source` reads its file whole and keeps nothing open, so it is safe and not
+// blocked; dash's and busybox's `.` keep the file on fd 10 like a script, and are blocked. A `tail
+// -f`, an editor or a Python process holding the file is not a shell, so it never blocks. On a
+// match the call is refused with the file, the pid, its command line and what to do instead.
 //
 // Edit targets come from omp's own parser (`editInspect` in pi-natives), so every edit mode's
 // headers count, multi-file hashline and apply_patch input included. ast_edit's `paths` may name a
 // directory or a glob: a running script under the directory or matching the glob counts.
 //
-// It fails open: no /proc (macOS), an unreadable process, a payload that does not parse, or any
-// exception lets the call through and is logged at debug level.
+// It fails open — the call runs and one debug line goes to omp's log — when /proc is missing
+// (macOS), when a payload does not parse, on any exception, and when the whole check (the /proc
+// walk and the target stats) takes longer than WALK_DEADLINE_MS (2 s; OMP_RUNNING_SCRIPT_GUARD_MS
+// overrides it). That bound matters: omp refuses a call whose tool_call handler outlives
+// `extensionHandlers.toolCallTimeoutMs`, and a /proc read of a process stuck in disk wait can hang.
+// A process that cannot be read is skipped. The walk reads a process's `exe` link first and its
+// cmdline only when that names a shell, since a cmdline read takes the target's mmap lock.
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -32,7 +41,10 @@ type Holder = { pid: number; cmdline: string; dev: number; ino: number; file: st
 
 const SHELLS: Record<string, true> = { bash: true, sh: true, dash: true, zsh: true, ksh: true, mksh: true, ash: true, hush: true };
 const MIN_SCRIPT_FD = 10;
+const O_ACCMODE = 0o3;
+const O_CLOEXEC = 0o2000000;
 const GLOB_CHARS = /[*?[{]/;
+const WALK_DEADLINE_MS = Number(process.env.OMP_RUNNING_SCRIPT_GUARD_MS) > 0 ? Number(process.env.OMP_RUNNING_SCRIPT_GUARD_MS) : 2_000;
 
 /** Raw target strings a call names, by tool. */
 function targetsOf(toolName: string, input: Record<string, unknown>): string[] {
@@ -64,14 +76,16 @@ function resolveTarget(raw: string, cwd: string): string | undefined {
 	return path.resolve(cwd, expanded);
 }
 
-function isShell(exe: string, argv: string[]): boolean {
-	const name = path.basename(exe);
+/** Whether a process is a shell, from its exe; busybox only when cmdline names a shell applet. */
+async function isShell(proc: string): Promise<boolean> {
+	const name = path.basename(await fs.readlink(`${proc}/exe`));
 	if (name !== "busybox") return SHELLS[name] === true;
+	const argv = (await fs.readFile(`${proc}/cmdline`, "utf8")).split("\0");
 	const applet = path.basename(argv[0] ?? "");
 	return SHELLS[applet === "busybox" ? (argv[1] ?? "") : applet] === true;
 }
 
-/** Every file the current user's shells (other than this process) hold open on a high fd. */
+/** Every file the current user's shells (other than this process) hold open as a running script. */
 async function shellHeldFiles(): Promise<Holder[]> {
 	const uid = process.getuid?.();
 	const holders: Holder[] = [];
@@ -81,15 +95,21 @@ async function shellHeldFiles(): Promise<Holder[]> {
 			try {
 				const proc = `/proc/${pid}`;
 				if ((await fs.stat(proc)).uid !== uid) return;
-				const argv = (await fs.readFile(`${proc}/cmdline`, "utf8")).split("\0").filter(Boolean);
-				if (!isShell(await fs.readlink(`${proc}/exe`), argv)) return;
+				// The exe link first: a cmdline read takes the process's mmap lock and can hang.
+				if (!(await isShell(proc))) return;
+				let cmdline: string | undefined;
 				for (const fd of await fs.readdir(`${proc}/fd`)) {
 					if (Number(fd) < MIN_SCRIPT_FD) continue;
 					try {
+						// A script fd is read-only and close-on-exec; a `{lk}>lock`, a saved stdout or a
+						// user's `exec 10<file` is not.
+						const flags = Number.parseInt(/^flags:\s+([0-7]+)$/m.exec(await fs.readFile(`${proc}/fdinfo/${fd}`, "utf8"))?.[1] ?? "", 8);
+						if (Number.isNaN(flags) || (flags & O_ACCMODE) !== 0 || (flags & O_CLOEXEC) === 0) continue;
 						const st = await fs.stat(`${proc}/fd/${fd}`);
 						if (!st.isFile()) continue;
 						const file = (await fs.readlink(`${proc}/fd/${fd}`)).replace(/ \(deleted\)$/, "");
-						holders.push({ pid: Number(pid), cmdline: argv.join(" "), dev: st.dev, ino: st.ino, file });
+						cmdline ??= (await fs.readFile(`${proc}/cmdline`, "utf8")).split("\0").filter(Boolean).join(" ");
+						holders.push({ pid: Number(pid), cmdline, dev: st.dev, ino: st.ino, file });
 					} catch {
 						// The fd closed while we looked.
 					}
@@ -127,22 +147,39 @@ function refusal(holder: Holder, toolName: string): string {
 	].join("\n");
 }
 
+/** The running shell whose script one of these targets is, if any. */
+async function findHolder(targets: string[], globs: boolean): Promise<Holder | undefined> {
+	const holders = await shellHeldFiles();
+	if (holders.length === 0) return undefined;
+	for (const target of targets) {
+		const holder = await matchTarget(target, holders, globs);
+		if (holder) return holder;
+	}
+	return undefined;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event: CallEvent, ctx: Ctx) => {
 		if (event.toolName !== "edit" && event.toolName !== "write" && event.toolName !== "ast_edit") return undefined;
+		const { promise: expired, resolve: expire } = Promise.withResolvers<"expired">();
+		const timer = setTimeout(() => expire("expired"), WALK_DEADLINE_MS);
 		try {
 			const targets = targetsOf(event.toolName, event.input)
 				.map(raw => resolveTarget(raw, ctx.cwd))
 				.filter((t): t is string => t !== undefined);
 			if (targets.length === 0) return undefined;
-			const holders = await shellHeldFiles();
-			if (holders.length === 0) return undefined;
-			for (const target of targets) {
-				const holder = await matchTarget(target, holders, event.toolName === "ast_edit");
-				if (holder) return { block: true, reason: refusal(holder, event.toolName) };
+			// omp refuses the call if this handler outlives its deadline, and a /proc read can hang:
+			// past WALK_DEADLINE_MS the check is abandoned and the call runs.
+			const found = await Promise.race([findHolder(targets, event.toolName === "ast_edit"), expired]);
+			if (found === "expired") {
+				pi.logger.debug("running-script-guard: check took longer than its deadline; skipped", { tool: event.toolName, deadlineMs: WALK_DEADLINE_MS });
+				return undefined;
 			}
+			if (found) return { block: true, reason: refusal(found, event.toolName) };
 		} catch (error) {
 			pi.logger.debug("running-script-guard: check skipped", { tool: event.toolName, error: error instanceof Error ? error.message : String(error) });
+		} finally {
+			clearTimeout(timer);
 		}
 		return undefined;
 	});
