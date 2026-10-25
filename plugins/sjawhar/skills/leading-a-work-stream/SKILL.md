@@ -17,6 +17,28 @@ The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in 
 4. **Coaches each agent's loop**: is it measuring, predicting, trying enough designs? Procedure, not solutions. An experiment on a number with a benchmark that runs in minutes runs through `/autoresearch`, with the expected gain in its notes before each run and the change run again before it is kept; ce-optimize instead when the result is noisy or has several objectives. A one-off change still gets its prediction written in the scoreboard before it starts.
 5. **Makes the stream faster**: finds where agents lose time and changes the skill, tool or step that causes it.
 
+## The speed loop
+
+Arm a reminder that wakes you every 3 hours, as [speed-tick.md](references/speed-tick.md) shows. On each tick:
+
+1. Read the stream's state from its records: the numbers, today's plan against what merged, the hourly Dispatch check.
+2. Check in with the team on Envoy: ask each agent what slows it down most right now. Not status.
+3. Answer three questions in writing:
+   - How can I help this go faster without compromising the integrity of the goals?
+   - How can I do better work faster?
+   - How can I help the team do better work faster?
+4. Give the answers to a fresh subagent to attack: is each target ambitious, is each change concrete, is each date padded? Rewrite what it finds weak.
+5. Make the change now, or start an agent on it.
+6. Append the tick to the stream's speed log (an artifact `speed-log.md` on the stream issue): the time, the change, the number it should move and by how much, and on the next tick, what it did.
+
+## Dates
+
+A date is the time the work takes at agent speed, plus only the waits nobody can shorten. Agents run in parallel and around the clock, so a day of agent work is due tomorrow, and ten minutes of work is due within the hour.
+
+- Each date carries its basis in one line: "about 3 h of work, 2 h of Taiga runs".
+- A KPI target's date is the earliest date the fastest credible plan reaches it. Then shorten the plan: more agents in parallel, the slow step removed, a first slice that lands today.
+- When a date will slip, say so the moment you know, with the new date and why. A date beaten by days was padded: set the next one tighter.
+
 ## What a lead does not do
 
 - Gate decisions an agent can make. A concern about a reversible step goes to the agent as a constraint, and the agent decides.
