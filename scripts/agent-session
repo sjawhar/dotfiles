@@ -9,6 +9,7 @@
 #     the repo owner's GitHub App, never the user's own login;
 #   - puts this checkout's shims/ first on PATH: a session keeps the PATH it started with, and a
 #     launching shell's mise hook may have put the real gh ahead of shims/gh;
+#   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
@@ -58,6 +59,37 @@ else
         echo "agent-session: no $agent on PATH other than a wrapper (a shims/ dir, $mise_shims); a mise-managed agent needs its pinned version installed (mise install)" >&2
         exit 127
     fi
+fi
+
+# Model spend (theorem-labs/agent-infra spend/SETUP.md, dispatch://INFRA-165): once agent-spend/endpoint exists and
+# this machine holds the collector's token (installers/agent-spend.sh), every omp and Claude Code session exports one
+# record per model call (tokens and the price the harness computes, no prompt or reply text), tagged with its
+# project and agent-spend/person. A caller that set its own collector (an OSS Verify lane VM) keeps it.
+# agent-spend/projects maps the working directory to a project.
+spend_conf="$DOTFILES_DIR/agent-spend" spend_token="${XDG_CONFIG_HOME:-$HOME/.config}/agent-spend/token"
+if [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" && -s "$spend_conf/endpoint" && -s "$spend_token" ]]; then
+    spend_project="${THEOREM_PROJECT:-}" spend_subproject="${THEOREM_SUBPROJECT:-}"
+    if [[ -z "$spend_project" && -r "$spend_conf/projects" ]]; then
+        while read -r glob project subproject; do
+            [[ -z "$glob" || "$glob" == \#* ]] && continue
+            # shellcheck disable=SC2053 # the glob is a pattern on purpose
+            if [[ "$PWD" == $glob ]]; then spend_project="$project" spend_subproject="${subproject:-}"; break; fi
+        done < "$spend_conf/projects"
+    fi
+    spend_attrs="theorem.project=${spend_project:-shared}"
+    [[ -z "$spend_subproject" ]] || spend_attrs+=",theorem.subproject=$spend_subproject"
+    [[ ! -s "$spend_conf/person" ]] || spend_attrs+=",theorem.person=$(< "$spend_conf/person")"
+    OTEL_EXPORTER_OTLP_ENDPOINT="$(< "$spend_conf/endpoint")"
+    OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(< "$spend_token")"
+    OTEL_RESOURCE_ATTRIBUTES="${OTEL_RESOURCE_ATTRIBUTES:+$OTEL_RESOURCE_ATTRIBUTES,}$spend_attrs"
+    export OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_HEADERS OTEL_RESOURCE_ATTRIBUTES \
+        OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf OTEL_METRICS_EXPORTER=none
+    # omp sends its per-call record as a span; Claude Code sends it as a log record. omp's other logs carry local
+    # paths the collector would only drop.
+    case "${prog##*/}" in
+        claude) export CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_TRACES_EXPORTER=none ;;
+        *) export OTEL_LOGS_EXPORTER=none ;;
+    esac
 fi
 
 exec "$DOTFILES_DIR/scripts/agent-secrets-session" "$prog" "$@"
