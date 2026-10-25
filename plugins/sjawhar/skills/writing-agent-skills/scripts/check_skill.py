@@ -81,11 +81,13 @@ def check(path: Path) -> tuple[dict, list[str], list[str]]:
         fails.append("precedence sentence missing (copy it from writing-agent-skills)")
     if rule_lines > RULE_LINES:
         warns.append(f"{rule_lines} rule lines, over {RULE_LINES}: split or delete")
+    # A skill inside a repository may name a repo-root path (`scripts/deploy/x.sh`) as well as its own files.
+    roots = [skill_dir] + [p for p in skill_dir.parents if (p / ".git").exists()][:1]
     for m in LINK_RE.finditer(body):
         target = m.group(1) or m.group(2)
         if re.match(r"^[a-z]+://|^mailto:|^~|^/", target) or re.search(r"[<>*{}]", target):
             continue
-        if not (skill_dir / target).exists():
+        if not any((root / target).exists() for root in roots):
             fails.append(f"missing path: {target}")
     return stats, fails, warns
 
