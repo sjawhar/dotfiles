@@ -25,7 +25,9 @@ The report lists:
 - (a) each request from the user, and whether it is done;
 - (b) each follow-up a subagent or a report raised, and whether it is done, tracked, asked, or dropped with a stated reason;
 - (c) each sentence that says something waits on a person, and the open ask or owner behind it;
-- (d) each Dispatch record that depends on a file only one machine holds.
+- (d) each Dispatch record that depends on a file only one machine holds;
+- (e) each idle span of more than an hour while an item was open;
+- (f) each long project run without its workflow skill.
 
 ## Close each row
 
