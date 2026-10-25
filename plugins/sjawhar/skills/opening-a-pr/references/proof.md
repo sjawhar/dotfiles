@@ -19,7 +19,7 @@ thing. Report what you ran, what you saw, and every defect.
 - Use a production-like surface that has the resource the change touches: a dev stack, staging, or a local stack with real migrations.
 - When the real path is hard to drive, build the test tooling. It is in scope.
 - Code that runs only after merge stays untested until you run it against a dev stack yourself.
-- A proof must not do by hand a step that the product owns. When it must, record the gap in Dispatch, never as a GitHub issue Sami did not ask for, and name it at the step.
+- If the proof needs you to run by hand a step the shipped product should run itself, it does not prove the product. When you must, record the gap in Dispatch, never as a GitHub issue Sami did not ask for, and name it at the step.
 - For a page or workflow: walk it as each affected role at the final head. Click every element on the changed pages and read what a user reads. Grep the e2e and spec suites for locators the change breaks, and update them.
 - Fix the findings in this change. Production afterwards gets only a smoke test of the changed path.
 
@@ -40,6 +40,6 @@ thing. Report what you ran, what you saw, and every defect.
 ## Merge-ready
 
 - The PR links the pre-merge proof. Without the link, do not arm auto-merge.
-- Any unverified scenario or open grounded finding blocks readiness and merge.
+- Any unverified scenario, and any open finding backed by a file, a command output or a trace, blocks readiness and merge.
 - Surface not reachable: report "not merge-ready, verification blocked on X" with the failed command. Do not open the PR for review. Build the surface and run the scenario again.
-- Never ask to omit acceptance. A blocker that survives that work goes to Sami as a pre-merge decision.
+- Never ask Sami to drop a scenario from this step. A blocker that survives that work goes to Sami as a pre-merge decision.

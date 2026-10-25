@@ -17,7 +17,7 @@ The top PR becomes the consolidated PR: its branch already holds the full diff. 
 
 ## Keep the stack ungrouped while you push
 
-A PR grouped into a native stack (`gh stack link`) gets no `github-actions` check suites on `synchronize` or `labeled`. Let the PR bases carry the order, name each base branch in the PR body, and group only at merge time, if your merge command refuses an ungrouped stack. No check suites on a stack PR: check `gh stack view --json` for grouping before a re-run, which cannot make a suite the event never created. `gh stack unstack <n>` re-queues `PR Checks` in ~30 s, with no push.
+A PR grouped into a native stack (`gh stack link`) gets no `github-actions` check suites on `synchronize` or `labeled`. Let the PR bases carry the order, name each base branch in the PR body, and group only at merge time, if your merge command refuses an ungrouped stack. No check suites on a stack PR: check `gh stack view --json` for grouping before a re-run, which cannot make a suite the event never created. `gh stack unstack <n>` re-queues `PR Checks` in ~30s, with no push.
 
 ## Collapse the stack
 
@@ -40,4 +40,4 @@ A PR grouped into a native stack (`gh stack link`) gets no `github-actions` chec
 
 ## After approval
 
-When Sami approves, squash-merge it yourself; never hand the PR back to him. No admin merge and no bypass of branch protection: bypassing merges a diff whose checks never ran. Then do the `post-merge` sweep.
+When Sami approves, squash-merge it yourself; never hand the PR back. No admin merge or branch-protection bypass, except on `landing-a-pr`'s terms: it merges a diff whose checks never ran. Then run `post-merge`.
