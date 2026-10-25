@@ -159,6 +159,13 @@ origin = "https://github.com/theorem-labs/rocq.git"
 base = "v9.3"
 consumers = ["theorem-labs/binary-equivalence-taiga", "theorem-labs/grading-tools"]
 
+# The 9.0 line (BET-155: the xv6iris grader runs a pinned Rocq 9.0.1). Its members fork
+# from the V9.0.1 tag (9dad753e3d) on upstream's 9.0 release branch, which is the base
+# here because knives resolves a base only as <branch>@<remote> (src/jj.rs:915), never as
+# a tag; cuts are release/9.0/YYYY-MM-DD[.N], selected with --series 9.0.
+[repos.rocq.series."9.0"]
+base = "v9.0"
+
 # The 9.2 line (BET-63: the Rocq version is chosen per task). Its base is our frozen 9.2
 # branch on origin, never moved; cuts are release/9.2/YYYY-MM-DD[.N], selected with --series 9.2.
 [repos.rocq.series."9.2"]
