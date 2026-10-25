@@ -10,9 +10,12 @@
 // looks for a shell process of the current user holding the same device and inode open on a
 // read-only, close-on-exec fd of 10 or above. That is how a shell holds the script it runs: bash on
 // fd 255, dash and busybox sh on fd 10, all O_RDONLY|O_CLOEXEC. fd 10 and above alone is not
-// enough: bash's named fds (`exec {lk}>lock`) and the fds bash and dash save around a redirect live
-// there too, and a user's `exec 10<notes.txt` is read-only but not close-on-exec; none of those
-// blocks. bash's `source` reads its file whole and keeps nothing open, so it is safe and not
+// enough: bash's named fds (`exec {lk}>lock`) live there too, and a user's `exec 10<notes.txt` is
+// read-only but not close-on-exec; neither blocks. One false positive is left: a shell that
+// redirects an fd already open on a read-only file (stdin `< data.txt`, then `{ …; } < other`)
+// saves the original on fd 10 with the same O_RDONLY|O_CLOEXEC flags as a script fd, so an edit to
+// data.txt is refused while that redirect lasts. A saved writable fd (a log) does not block. bash's
+// `source` reads its file whole and keeps nothing open, so it is safe and not
 // blocked; dash's and busybox's `.` keep the file on fd 10 like a script, and are blocked. A `tail
 // -f`, an editor or a Python process holding the file is not a shell, so it never blocks. On a
 // match the call is refused with the file, the pid, its command line and what to do instead.
