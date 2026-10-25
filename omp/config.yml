@@ -206,6 +206,9 @@ skills:
     - ce-work
     - ce-worktree
     - lfg
+    # dispatch://INFRA-245 takes two of ce-noslop's tests into our own writing
+    # rules; the skill itself (41-rule catalog) stays hidden.
+    - ce-noslop
     # Dropped because their live (shortened) descriptions, what a session
     # actually sees in its skills list, trigger on work that doesn't need
     # Pulumi: pulumi-overview fires on any cloud/SaaS task and can silently
