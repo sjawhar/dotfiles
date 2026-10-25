@@ -393,6 +393,50 @@ class GhAppTokenTests(unittest.TestCase):
         gh_app_token.write_cache_file(gh_app_token.token_cache_file("agent", "sjawhar"), {})
         self.assertEqual(gh_app_token.CACHE_DIR.stat().st_mode & 0o777, 0o700)
 
+    def test_a_repo_read_only_token_asks_github_for_exactly_that_scope(self):
+        # 2026-10-25 (INFRA-322): the Lean VMs get a token that can only read one repository.
+        bodies = []
+        base = fake_github()
+
+        def urlopen(request):
+            if "access_tokens" in request.full_url:
+                bodies.append(json.loads(request.data) if request.data else None)
+            return base(request)
+
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=urlopen):
+            rc, stdout, _ = self.run_main(
+                ["agent", "--owner", "sjawhar", "--repo", "sjawhar/proofs-internal", "--read-only"]
+            )
+        self.assertEqual((rc, stdout), (0, "token-111\n"))
+        self.assertEqual(
+            bodies,
+            [{"repositories": ["proofs-internal"], "permissions": {"contents": "read", "metadata": "read"}}],
+        )
+
+    def test_a_scoped_token_and_the_owner_wide_token_never_share_a_cache_entry(self):
+        owner_wide = {
+            "token": "owner-wide-token",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        }
+        gh_app_token.write_cache_file(gh_app_token.token_cache_file("agent", "sjawhar"), owner_wide)
+        urlopen = fake_github()
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=urlopen):
+            scoped = self.run_main(["agent", "--owner", "sjawhar", "--repo", "proofs-internal", "--read-only"])
+            wide = self.run_main(["agent", "--owner", "sjawhar"])
+        # The scoped request minted its own token; the owner-wide cache was neither used nor replaced.
+        self.assertEqual(scoped[:2], (0, "token-111\n"))
+        self.assertEqual(wide[:2], (0, "owner-wide-token\n"))
+        self.assertEqual(sum("access_tokens" in url for url in urlopen.calls), 1)
+
+    def test_a_scoped_request_for_an_uncovered_owner_refuses_the_personal_token(self):
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github()):
+            rc, stdout, stderr = self.run_main(
+                ["agent", "get", "--read-only"], stdin="host=github.com\npath=METR/hawk.git\n\n"
+            )
+        self.assertEqual((rc, stdout), (1, "quit=1\n"))
+        self.assertIn("a --repo/--read-only token has no fallback", stderr)
+        self.assertEqual(self.secrets_calls(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
