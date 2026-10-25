@@ -26,7 +26,7 @@ Ownership and descendant checks from the skill apply to every rewriting command 
 | Next/previous | `jj next --edit` / `jj prev --edit` |
 | Squash private `@` into private parent | `jj squash -u` |
 | Collapse a stack | `jj squash --from 'aaa::eee' --into zzz -m "msg"` |
-| Squash into one ancestor by path | `jj squash --into <change> -m "msg" -- <paths>` (never into a published head, as a workaround for the append-only rule) |
+| Squash into one ancestor by path | `jj squash --into <change> -m "msg" -- <paths>` (never into a published head: a published head only gets new child commits, never amends) |
 | Split by path | `jj split [-r <rev>] -m "child description" <paths>` (named paths stay. The rest move to the child) |
 | Abandon | `jj abandon <rev>` (discards the whole change) |
 | Rebase | see [rebase](rebase.md) |
@@ -35,12 +35,12 @@ Ownership and descendant checks from the skill apply to every rewriting command 
 | Fetch | `jj git fetch` |
 | Update stale workspace | `jj workspace update-stale` |
 
-- Never pipe a rewriting command. Check `jj log` afterward to check it ran.
-- Do not re-describe commits only to push them.
+- Never pipe a rewriting command: the pipe hides its exit code and its first error line. Run `jj log` afterward to check it ran.
+- Do not re-describe commits only to push them: `describe` rewrites the commit and moves every descendant.
 
 ## Non-TTY rules
 
-- Always pass `-m` to `split` and `-m` or `-u` to `squash`. Paths alone still open an editor. `jj-editor` refuses to start an editor without a TTY only as a fail-safe.
+- Always pass `-m` to `split` and `-m` or `-u` to `squash`. Paths alone still open an editor. The local `jj-editor` refuses to start without a TTY. Treat that as a fail-safe, not a reason to leave out `-m`.
 - Use `jj diff --git`. The default word-level diff concatenates old and new text without color and is unreadable.
 
 ## Revsets

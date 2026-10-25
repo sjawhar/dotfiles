@@ -31,4 +31,4 @@
 
 - `jj file show -r <rev> <path>` returns zero bytes three ways: a literal path that matches nothing (paths are cwd-relative. It errors, but `$(...)`, `| grep` or `2>/dev/null` hide it), a glob that matches nothing (exit 0, silent), and an empty file.
 - Count bytes (`wc -c`) before you query the output. Anchor paths with `root:` outside the repository root.
-- A control must be non-empty for a reason independent of the test. A control that shares the blind spot proves nothing (for `gh search issues`, not a pull request, which it excludes). Check with an independent read such as `git show origin/main:<path>`.
+- Before you report that a search found nothing, run it on one item you know exists and that the search can see: `gh search issues` excludes pull requests, so its control must be an issue. A control that shares the test's blind spot proves nothing. Confirm the item with an independent read such as `git show origin/main:<path>`.

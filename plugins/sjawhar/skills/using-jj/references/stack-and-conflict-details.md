@@ -8,13 +8,13 @@
 ## Conflict chains
 
 - When a rebase across a moved trunk re-conflicts each commit on the same hunks, do not grind through it. Squash the branch to one commit, or the few the reviewer needs. Then rebase and resolve once.
-- The members of an octopus merge share one fork point.
+- The members of an octopus merge share one fork point: rebase each from it, not from the member's own base.
 - Exceptions: a shared stack you cannot restructure (duplicate instead) and a fork branch whose release pin follows the change ID.
 
 ## Resolving conflicts
 
 1. Run `jj log` to see what diverged.
-2. Review what changed in each side. Never lose functionality, and never delete local changes without permission.
+2. Review what changed in each side and list what each side adds. After you resolve, check that each item is still in the result. Delete a local change only after its owner says yes.
 3. When one side is the old version and the other the new version of the same logic, keep only the new. Then scan for duplicated blocks.
 4. Compare the diff against main with the pre-rebase diff to check nothing was lost or reverted.
 5. Run tests, lint and format before you squash commits together.

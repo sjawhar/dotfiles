@@ -4,7 +4,7 @@ The graphs are not permission. In a shared store, check ownership and descendant
 
 ## Source flags
 
-**`-r <rev>`: only the revisions.** Descendants are re-parented onto the old parents. Use it only when that re-parenting is allowed.
+**`-r <rev>`: only the revisions.** Descendants are re-parented onto the old parents. Use it only when every descendant is your own or its owner agreed to the re-parenting.
 
 ```
 jj rebase -r K -o M

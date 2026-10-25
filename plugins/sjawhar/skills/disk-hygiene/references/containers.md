@@ -1,6 +1,6 @@
 # Container verdicts (`disk_hygiene.py containers`)
 
-How the census sets each verdict. The removal rules are in SKILL.md, Phase 5 step 5.
+How the census sets each verdict. The removal rules are in [docker.md](docker.md), step 5.
 
 | Family | Identified by | Verdict |
 |---|---|---|
@@ -10,4 +10,4 @@ How the census sets each verdict. The removal rules are in SKILL.md, Phase 5 ste
 | tc-fixture | `org.testcontainers.session-id` | Takes its ryuk's verdict. With no ryuk: `orphan-no-ryuk`, because no live owner can exist. Reap after a 15-minute startup grace with zero clients. |
 | agentbox | session infrastructure | `never` |
 
-The client check matches `docker ps` visibility. Whoever sees the container is on the daemon that its port binds to.
+Trust the client check only on a host whose `docker ps` lists the container: that host is on the daemon the container's port binds to.
