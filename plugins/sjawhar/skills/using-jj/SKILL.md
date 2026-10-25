@@ -1,11 +1,10 @@
 ---
 name: using-jj
-description: "Use for version control in a checkout that has a `.jj` directory, such as a Legion runtime workspace or the shared `~/.dotfiles` checkout. Covers jj commands, bookmarks, jj workspaces, jj errors and conflict resolution there. Skip it in a plain git clone, and never run `jj git init` in one."
+description: "Use for version control in a checkout that has a `.jj` directory, such as a Legion runtime workspace or the shared `~/.dotfiles` checkout. Covers jj commands, bookmarks, jj workspaces, jj errors and conflict resolution there. Skip it in a plain git clone."
 ---
 
 # Using jj (Jujutsu)
 
-- Never run `jj git init` in a git clone. A box's clone fetches file contents on demand, and jj fails partway on the ones it lacks.
 - In a jj repository, use jj, not git, unless the user says otherwise. Git commands in the references are read-only diagnostics or named exceptions.
 - No staging: jj commands snapshot the working copy into `@`. Automatic snapshots are not a hazard or a race condition.
 - Change IDs survive rewrites. Commit IDs do not.
