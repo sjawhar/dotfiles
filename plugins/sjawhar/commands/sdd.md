@@ -170,6 +170,8 @@ fetch_part() {
 
 On Dispatch, move the status at each transition, for the root and every child issue you own. Other trackers: keep the equivalent state current at the same points.
 
+Every piece of work you own is a child issue of the root before it waits on anything: each PR, follow-up, held slice, adjacent defect found in review, and promise made in a PR or comment. Create it the moment you defer or find it, with what it waits on in its spec and status `backlog`. A step that waits on Sami is an ask on that issue. A local ledger, todo list or handoff file may index these issues, but holds no work that has no issue.
+
 | Status | When |
 |---|---|
 | `in_progress` | implementation starts |
