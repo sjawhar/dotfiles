@@ -8,8 +8,8 @@ The lead pastes this file whole into the checker's task, with the records direct
    python3 ~/.dotfiles/plugins/sjawhar/skills/reflect/scripts/check-findings.py <records dir> <rows files...>
    ```
 
-   It lists records with no row (and their batches), duplicate rows, quotes not found in their record, and pushbacks that are not in Sami's words. Read `<records dir>/check.json` for the detail.
-2. Open every flagged finding in its record. A quote that a reader shortened or re-spaced but that says the same thing: fix the quote in the row to the exact text. A quote that is not there: reject the finding.
+   It lists records with no row (and their batches), duplicate rows, quotes not found in their record, pushbacks that are not in Sami's words, and instruction sources no file answers. Read `<records dir>/check.json` for the detail. The three quote kinds mean different things: a missing source is a stale path, not a bad quote; a quote the record does not hold is either a mis-copy or a fabrication, and only reading decides which.
+2. Open every flagged finding in its record. A quote that a reader shortened, re-spaced or stripped of the record's `\"` escapes but that says the same thing: fix the quote in the row to the exact text, and fix `instruction_source` to a path that exists. A quote the record does not hold: reject the finding. Sami's words that reach the record only through an agent's relay are not his words: reject the pattern or pushback that rests on them.
 3. Open 10 more findings at random, so a reader that invented a plausible row is caught even when its quotes exist, and every record whose row has no findings but whose Sami message objects to something ("No", "Why", "I said", "Stop", a swear). Judge each against these reject types:
    - the agent did right, or Sami accepted the choice;
    - the missing action could have happened outside the record;

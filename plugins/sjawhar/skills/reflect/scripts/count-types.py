@@ -49,6 +49,10 @@ def export(a: argparse.Namespace) -> None:
 def count(a: argparse.Namespace) -> None:
     n_records = sum(1 for _ in open(Path(a.records_dir) / "records.jsonl"))
     items = {x["id"]: x for x in map(json.loads, open(a.findings))}
+    verdict = Path(a.records_dir) / "verdict.json"
+    rejected = {r["id"] for r in json.loads(verdict.read_text())["rejected"]} if verdict.is_file() else set()
+    for i in rejected:
+        items.pop(i, None)
     types = {x["id"]: x["type"] for x in map(json.loads, open(a.types))}
     untyped = sorted(set(items) - set(types))
     if untyped:
