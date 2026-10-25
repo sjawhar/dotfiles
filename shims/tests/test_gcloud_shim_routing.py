@@ -60,6 +60,7 @@ class GcloudRouting(unittest.TestCase):
             'echo "CONFIG=${CLOUDSDK_ACTIVE_CONFIG_NAME:-<unset>}"\n'
             'echo "DISPLAY=${DISPLAY:-<unset>}"\n'
             'echo "BROWSER=${BROWSER:-<unset>}"\n'
+            'echo "FILE_LOGGING_OFF=${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-<unset>}"\n'
             'printf "ARG=%s\\n" "$@"',
         )
         # Fake $HOME so the default config root ($HOME/.config/gcloud) never
@@ -110,6 +111,28 @@ class GcloudRouting(unittest.TestCase):
         result = self.run_shim({"GCLOUD_ACCOUNT": ""})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CONFIG=<unset>", result.stdout)
+
+    def test_a_command_that_prints_a_credential_writes_no_log_file(self):
+        """gcloud copies a command's output into its log file, so a token printed for a caller
+        would also land in ~/.config/gcloud/logs. The shim turns file logging off for exactly
+        the commands whose output is a credential, and leaves a caller's own setting and every
+        other command alone."""
+        for args in (["auth", "print-access-token"], ["auth", "print-access-token", "sami@example.com"],
+                     ["beta", "auth", "print-identity-token"], ["--verbosity", "debug", "auth", "docker-helper", "get"]):
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("FILE_LOGGING_OFF=1", result.stdout)
+                self.assertEqual(stub_argv(result), args)
+        with self.subTest("account path"):
+            result = self.run_shim({"GCLOUD_ACCOUNT": "theorem"}, args=["auth", "print-access-token"])
+            self.assertIn("FILE_LOGGING_OFF=1", result.stdout)
+        with self.subTest("caller's own setting"):
+            result = self.run_shim({"CLOUDSDK_CORE_DISABLE_FILE_LOGGING": "false"}, args=["auth", "print-access-token"])
+            self.assertIn("FILE_LOGGING_OFF=false", result.stdout)
+        for args in (["config", "list"], ["auth", "list"], ["compute", "instances", "list"]):
+            with self.subTest(args=args):
+                self.assertIn("FILE_LOGGING_OFF=<unset>", self.run_shim(args=args).stdout)
 
     def test_known_account_sets_active_config_name(self):
         result = self.run_shim({"GCLOUD_ACCOUNT": "theorem"})
