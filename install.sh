@@ -18,6 +18,7 @@ source "${DOTFILES_DIR}/installers/nvim.sh"
 source "${DOTFILES_DIR}/installers/claude.sh"
 source "${DOTFILES_DIR}/installers/omp.sh"
 source "${DOTFILES_DIR}/installers/secretsd.sh"
+source "${DOTFILES_DIR}/installers/agent-spend.sh"
 
 echo "Generating completions..."
 COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"
