@@ -5,6 +5,8 @@ description: Use before you report a body of work done or end a session, when a 
 
 # Finding dropped work
 
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
 An agent under load forgets what it was asked, closes a todo before the work ships, and waits on the user in chat where nobody sees it. Its own memory of the session is the thing that failed. A fresh agent that reads the transcript finds what the session forgot.
 
 ## When
