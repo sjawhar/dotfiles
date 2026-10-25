@@ -12,7 +12,7 @@ secrets AIRTABLE_TOKEN -- npx -y @airtable/mcp-cli <tool> [flags]
 ```
 
 - Tool names and flags come from the server and change. Run `tools`, then `<tool> --help`, before you call a tool. `whoami` checks auth.
-- Candidate pipeline data now lives in Terminal, not Airtable: use the project's `hiring` skill and its `hire` CLI (for example `hire show <email>`, `hire stats`). The old Applications base (`appvSQts63ngMSoCP`) is no longer the system of record. Do not pin this tool to it again.
+- Candidate pipeline data now lives on the agent-c Platform, not Airtable: use the `hiring` skill in `trajectory-labs-pbc/core-ops` (`skills/hiring/SKILL.md`) and its `hire` CLI (`skills/hiring/scripts/hire.py`; for example `hire show <email>`, `hire queue`). The old Applications base (`appvSQts63ngMSoCP`) is no longer the system of record. Do not pin this tool to it again.
 - Records tools take `--baseId` and `--tableId`, not `--tableIdOrName`.
 - Pipe complex inputs (filters, sort, `--tables`) as JSON to `--input -`:
   ```bash
