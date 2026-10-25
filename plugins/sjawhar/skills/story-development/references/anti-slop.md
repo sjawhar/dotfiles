@@ -15,6 +15,6 @@ Cut for shape, pacing and rhythm across the whole piece, not for banned words. W
 
 ## Prose line passes
 
-- Triage flagged lines before you fix them: P0 credibility killers, P1 obvious tells, P2 stylistic polish. Use this for prose only, not plot or structure.
-- Experienced readers detect model prose reliably, so disclosure is the low-risk path.
+- Triage flagged lines before you fix them: P0 credibility killers (a line that breaks belief in the scene), P1 obvious tells (a pattern listed above), P2 stylistic polish. Use this for prose only, not plot or structure.
+- Tell the author which passages you drafted, so they can disclose model prose: experienced readers detect it reliably.
 - Automated AI detectors are unreliable. Treat their output as a signal to investigate, not a verdict.

@@ -1,6 +1,6 @@
 ---
 name: apify
-description: Use when scraping websites or listing sites, extracting structured data in bulk, running prebuilt scrapers (Apify Actors), or automating stubborn web research. Use it whenever apartment hunting, Airbnb or marketplace listings, anti-bot or JS-heavy sites, or batch data collection need a scraping platform, not browser clicks.
+description: Use when scraping websites or listing sites, extracting structured data in bulk, running prebuilt scrapers (Apify Actors), or researching sites that block plain page fetches. Use it whenever apartment hunting, Airbnb or marketplace listings, anti-bot or JS-heavy sites, or batch data collection need a scraping platform, not browser clicks.
 mcp:
   apify:
     command: secrets
@@ -9,14 +9,9 @@ mcp:
 
 # Apify
 
-Use Apify as the heavy scraping and extraction layer. It is best for scale, repeatability or structured output. Prefer it to fragile one-off browser scraping when the task looks repeatable.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-It is especially useful when:
-
-- You need many listings, not one page.
-- The site is JS-heavy or anti-bot-prone.
-- A community Actor exists for the target site.
-- You want structured output, not copy/paste from a browser.
+Use an Apify Actor, not one-off browser scraping, when any one of these holds: the task needs many listings, the site is JS-heavy or blocks bots, a community Actor for the site exists, or the user wants structured output. On such sites browser scraping breaks often and returns unstructured text.
 
 ## Steps
 
@@ -24,7 +19,7 @@ It is especially useful when:
 2. Read the Actor's details and input schema: `fetch-actor-details`.
 3. Run the Actor: `call-actor`.
 4. Read the results: `get-dataset-items` with the run's `datasetId`.
-5. Normalize the results into a shortlist.
+5. Keep the fields the user asked for (for example price, location, URL), drop duplicate items, and give the user a table sorted by their main criterion.
 
 Without an Actor:
 
@@ -33,5 +28,5 @@ Without an Actor:
 
 ## Calling the tools
 
-- The `apify` MCP server supplies these tools. It needs `APIFY_TOKEN`, which the MCP config gets from `secrets`.
+- The `apify` MCP server supplies these tools; its config above gets `APIFY_TOKEN` from `secrets`.
 - In omp, write JSON arguments to `xd://mcp__apify_<tool>`. To get `<tool>`, remove an `apify--` prefix and change dashes to underscores: `search-actors` is `xd://mcp__apify_search_actors`, and `apify--web-fetch` is `xd://mcp__apify_web_fetch`. Read that path first for the argument schema.

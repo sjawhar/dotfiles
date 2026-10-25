@@ -9,6 +9,8 @@ mcp:
 
 # Skiplagged
 
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
 Live travel search through Skiplagged's public MCP server. No auth.
 
 ## Call a tool
@@ -24,11 +26,11 @@ Live travel search through Skiplagged's public MCP server. No auth.
 
 ## Flow
 
-1. Firm route: `sk_flights_search`.
+1. Fixed origin, destination and dates: `sk_flights_search`.
 2. Flexible dates: `sk_flex_departure_calendar` (one-way) or `sk_flex_return_calendar` (round trip), then `sk_flights_search`.
 3. Flexible destination: `sk_destinations_anywhere`.
-4. Multi-city trip: search each leg separately and compare with the carrier's through-fare.
-5. Give the user Skiplagged's booking link. Its price is only an estimate until they click it.
+4. Multi-city trip: search each leg, add the leg prices, and have the user compare that total against the carrier's own multi-city fare.
+5. Give the user Skiplagged's booking link: its price is only an estimate until they click it.
 
 ## Hidden-city caveats
 
@@ -37,4 +39,4 @@ Before the user books a hidden-city itinerary, tell them all of these:
 - No checked bags: bags go to the final ticketed destination.
 - One-way only: a skipped segment cancels the rest of the itinerary.
 - Do not credit the flight to that airline's loyalty program: airlines remove miles and close accounts for repeat use.
-- Use the same passenger name on all bookings: mixed passengers across hidden-city tickets cause trouble.
+- Use the same passenger name on every booking of the trip.

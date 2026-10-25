@@ -5,17 +5,19 @@ description: "Use when you write to other people as Sami or on his behalf. That 
 
 # Speaking as Sami
 
-Write plain, factual and understated, with no AI register: no bombast, superlatives or tidy rhetorical flourishes.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
+Write plain, factual and understated. Use none of the forms in "Never write" below.
 
 ## Before you write
 
-- Message people as Claude unless Sami says otherwise.
-- Read the recent DM and thread history first, replies included. Don't repeat what Sami told them or ping them twice.
-- Never DM in Slack. Post in the project's channel or a shared channel, in a thread. Use a DM only when the content must stay confidential.
+- Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise.
+- Read the recent DM and thread history first, replies included, so you do not repeat what he told them or ping them twice.
+- In Slack, post in the project's channel or a shared channel, in a thread, so the people who need the answer see it. Send a DM only when the content must stay confidential.
 - Check a shared surface's audience first. Customer-facing docs get zero internal ops detail (internal tooling names, pipeline caveats, internal-only tabs).
 - Build the draft from what Sami already said on the topic (transcript, Slack thread, meeting notes, earlier tracker answers). Reuse any answer he gave.
-- Take content and register from his words, not sentence order. Paraphrase cleanly instead of stitching verbatim fragments.
-- If he said nothing on the topic, say so and draft plainly. Invent no framing.
+- Use his facts and tone, in your own sentences. Do not join copied fragments of his messages.
+- If he said nothing on the topic, say so to Sami and keep the draft to facts: no angle he did not give.
 
 ## Never write
 
@@ -34,8 +36,7 @@ Write plain, factual and understated, with no AI register: no bombast, superlati
 
 - Cut each sentence whose subject is you rather than the reader or the work:
   - self-credit: "good thing I checked", "I caught this"
-  - self-abasement: "that's on us", "sorry it took a nudge", "I don't have the authority"
-  - also self-abasement: "you'll get a real answer, not a deflection", a paragraph of "my mistake"
+  - self-abasement: "that's on us", "sorry it took a nudge", "I don't have the authority", "you'll get a real answer, not a deflection", a paragraph of "my mistake"
 - Give a late answer with no apology for lateness.
 - Name a limit on your authority in one clause and route it ("Sami sets that").
 - An apology for any agent's mistake is one sentence, said once: a "sorry for" clause and the cause in a few words. It never opens or closes the message. Say what was wrong and what is true now, then stop.
@@ -50,10 +51,10 @@ Write plain, factual and understated, with no AI register: no bombast, superlati
 
 ## Editing Sami's drafts
 
-- Keep his wording unless it is wrong. The result must sound like him.
+- Keep his wording unless it is wrong in fact or breaks a "Never write" rule. The result must sound like him.
 - When a colleague's style is the reference (sales copy, for example), match that colleague's prior messages.
 - Merge around his live edits in shared docs. Don't overwrite them.
 
 ## Formatting
 
-Use each tool's native primitives, matching adjacent content: `slack-messaging` for Slack, `google-workspace` for Docs and Sheets.
+Use each tool's own formatting, matching the text around it: `skill://slack-messaging` for Slack, `skill://google-workspace` for Docs and Sheets.
