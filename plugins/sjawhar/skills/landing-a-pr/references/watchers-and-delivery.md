@@ -1,14 +1,22 @@
 # Watchers and post-merge delivery
 
-Read before you arm a detector, diagnose a silent watcher or check delivery. Use `ce-babysit-pr` and the existing supervisor.
+Read before you brief `ce-babysit-pr`, start a detector, diagnose a silent watcher or check delivery.
+
+## The rest of the babysitter's brief
+
+- Skip its checkout step, and edit the PR title, body and `## Verification` directly, because `ce-commit-push-pr` is unavailable.
+- GitHub's `mergeable: MERGEABLE` and `mergeStateStatus: CLEAN` (`gh pr view --json mergeable,mergeStateStatus`), no open review items, and checks that stopped changing do not make the PR ready; proof and a review of the current head decide.
+- Its sub-skills (`ce-debug`, `ce-resolve-pr-feedback`, `mode:pipeline`) never rebase, force-push, approve gated runs or merge.
 
 ## The watcher
 
+- Keep `ce-babysit-pr`'s dedup, stale-SHA cancellation, trajectory triggers (the `pr-snapshot` thresholds that pass its `trajectory` facts to `ce-debug` or `ce-resolve-pr-feedback`: `check_recur_max >= 2`, `stream_alternations >= 3`, a rising `unresolved_trend` with new threads, `heads_since_progress >= 2`, or any `invariant_rounds` at 2), settle window and three-day backstop, so one event does not start two fix rounds.
+- A review someone acknowledged but has not posted keeps the PR not ready, green CI included.
 - Events wake the owner. A fresh snapshot says what is true.
-- Do other work while you wait. Run the watcher under supervision, with a real wake route.
+- Do other work while you wait. Run the watcher as a background job whose output or exit reaches you as an Envoy message or a tool follow-up, because a watcher nobody hears is no watcher.
 - Read its first poll. Silence fits a missing command, a broken parser, an expired token and no event alike. Before you act on its exit, read the run's own status.
 - List the real job names before you write a filter. Match the full nested name, never a substring such as "deploy". Record the exact job and conclusion you wait for.
-- Single-quote jq programs or use a file. An empty or failed parse is a loud failure. Reconcile expected labels against partial output. Keep stderr out of compared values.
+- Single-quote jq programs or use a file. An empty or failed parse is a loud failure. Check partial output for every field name you expected. Keep stderr out of compared values.
 - Call `gh` fresh for each observation so the token refreshes. Never capture one token for a long loop. Check run-list limits and event filters before you conclude that all runs for a SHA finished.
 - A long watch stream can stop cleanly. When it underpins proof, reconcile its object IDs with independent reads or driver actions. Resume from the last resource version where supported.
 

@@ -21,9 +21,9 @@ jj log --no-graph -r '<verdict-sha> & ::<current-head>' -T 'commit_id ++ "\n"'
 
 | Shape | What carries over |
 |---|---|
-| Ancestor kept: appended commits, forward merge of main | The delta question is well-defined, but the delta is not proven harmless. A documented minor-only prose round keeps its verdict and pair if its scope verifies mechanically. Code changes need review at the resulting code head |
+| Ancestor kept: appended commits, forward merge of main | The delta question is well-defined, but the delta is not proven harmless. A round the owner documents as prose-only keeps the verdict and the pair when the diff between the two heads touches only comments and docs (check with section 3). Code changes need review at the resulting code head |
 | Ancestor kept: integration update | Prior review, only if conflicts were prose-only, the PR's own code contribution is unchanged, and the behavior proof ran again at the new head |
-| Rewritten: amend or rebase | No ancestry, and no comparison restores it. Stop append-only carry. An identical clean rebase keeps the old review only through an explicit confirmation that names the new head. That confirmation rests on section 3 and is not a new thermonuclear campaign. Changed contribution or code-changing conflict resolution: independent re-review |
+| Rewritten: amend or rebase | No ancestry, and no comparison restores it. Do not carry the old review forward as if new commits were appended. An identical clean rebase keeps the old review only through an explicit confirmation that names the new head. That confirmation rests on section 3 and does not require another thermonuclear pair run. Changed contribution or code-changing conflict resolution: independent re-review |
 
 - A three-dot sibling comparison shows the contribution since the common base, not the amendment. A direct tree diff shows content differences, not that anyone reviewed the new tree.
 - Every shape still needs current required CI and the changed-path acceptance at the intended head, unless a scoped `WAIVED-BY-SAMI` covers it. None of this licenses unnecessary rebases.
@@ -42,9 +42,9 @@ jj diff --git --from <new-base> --to <new-tip>
 - Prefer the repository's reproducible comparison tool. It names endpoints, shows non-empty successful reads, and keeps file boundaries and failed commands visible.
 - Blob equality counts only if the surrounding file did not move. An old-tip/new-tip diff includes base movement, so whole-file inequality after a clean rebase is not by itself a PR change. A count or an owner's "identical" is not proof.
 - Explain file-set growth and shrinkage. A removed contribution may already be on main: read that content there. You may run the comparison yourself: that is not a code-review judgment.
-- After any approved head move, re-read remote files and commits against the packet. A reparented stale tree can look like reverts of later main changes and still pass CI. Investigate scope arithmetic. Do not treat it as proof that a rebase destroyed content.
+- After any approved head move, re-read remote files and commits against the packet. A reparented stale tree can look like reverts of later main changes and still pass CI. Compare the PR's file and commit counts with the packet and explain each difference. Do not treat it as proof that a rebase destroyed content.
 
 ## 4. Record the reuse
 
 - Record the old reviewed head, the current head, graph result, comparison artifact, acceptance rerun and independent confirmation.
-- Never say a verdict examined a tree it did not see. If a stale verdict already merged a PR, fix the record and route the needed code fixes through a follow-up.
+- Never say a verdict examined a tree it did not see. If a stale verdict already merged a PR, fix the record and open a new PR for the needed code fixes, linked from the merged PR.

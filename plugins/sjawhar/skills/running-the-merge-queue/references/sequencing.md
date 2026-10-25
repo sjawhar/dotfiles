@@ -4,11 +4,11 @@ Read the current queue ruling record first. Nothing here creates holds, merge wi
 
 ## Priority and holds
 
-- Equally ready same-file siblings with no stronger priority or dependency: the oldest approved PR goes first. Serialize only the shared boundary. The owner already repairing a collision normally absorbs its resolution.
+- Equally ready same-file siblings with no stronger priority or dependency: the oldest approved PR goes first. Serialize only the shared boundary. When one owner is already repairing a collision, that owner resolves it, so two owners do not fix the same conflict.
 - A hold that needs a conflict check needs the actual three-way composition, not overlap guessed from filenames.
 - A lifted hold ends at once. On the next wake, re-read the live head, verdicts and mergeability. An old "held" label is not an observation.
-- A repeated "escalate next time" means: read the source and use the right route now.
-- For a defined coordinated migration batch, record the intended published parent order once, when the batch is packet-ready, before re-parenting and re-gating. A later sibling does not reopen it. Ordinary branch work gets no serial queue from this.
+- When you see the same "escalate next time" note a second time, read the ruling it refers to and send the escalation now, on the existing Dispatch issue.
+- For a defined coordinated migration batch, record the intended published parent order once, when the batch is packet-ready, before re-parenting and re-gating. A later sibling does not reopen it. This order applies only to that batch; other PRs keep merging in parallel.
 
 ## Answers and owner identity
 
@@ -18,6 +18,7 @@ Read the current queue ruling record first. Nothing here creates holds, merge wi
 
 ## Ordinary stacks and squash parents
 
+- After a merge, list the merged PR's children at once. Send each owner the parent result, actual base and required restack in one message. Never do their rebase.
 - Use `gh-stack` for stack operations and `using-jj` for version control. Identify each child's intended published parent and actual fork point before changing it.
 - A squash merge makes a new commit without the old branch commits. Retargeting a child's base does not remove them from its history.
 - Enumerate children with a limit that covers the population, or a paginated API. A capped list is not exhaustive: `gh pr list --repo O/R --base <merged-branch> --state open --limit <complete-population>`.
