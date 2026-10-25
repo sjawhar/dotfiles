@@ -69,6 +69,16 @@ Every morning by 09:00 Pacific, you and your agents agree on Envoy what the stre
 
 From records you read yourself (GitHub, Dispatch, the numbers), answer: what is the target; what is the actual value now; what is the obstacle, and which one is being worked on; what is the next step and what should it do to the number; when will we know? Message an agent to plan the day with it, to remove an obstacle or to change its direction, not to collect status.
 
+## Before you say something is blocked
+
+**Read the thing itself, not the thing next to it.** Before you write that X is blocked by Y, read X's own state: `gh pr checks` at the head, not the queue's length; the process (`ps -eo pid,etimes,args | grep <session-id>`) and the session's last tool call, not a registry's session list; the job's own start time, not the pool's history. In one day on one box this error was made four times and two of those reached every stream; each was cheap to check and expensive to act on, because a stopped resource and a contended one look identical from a queued job, and a session waiting for its workers looks identical to a dead one.
+
+**A blocker you relay to other streams carries the command that shows it.** Without it, each stream spends a check to disprove it after acting on it.
+
+**Ask a fresh reviewer, for each claimed cause, to name the command or record that would show it FALSE, and to run it.** A reviewer that reads only the prose confirms a confident wrong cause. The causes that cost most are the ones nobody could falsify, because nobody looked for what would disprove them.
+
+**Run a watch that names quiet sessions, and let it restart nothing.** A session that dies mid-task stays dead until a person notices: measured at about 7 hours on a day when one credential failure stopped a box, and at 5 minutes or less once a watch existed. A watch reads the session's transcript modification time, its process and, if it can, its pane; it reports, and the owner decides. Two traps: a systemd user service on a dev box may not reach the tmux server at all (it answers `server exited unexpectedly` while the same command works from a pane), and a watch built on an agent-messaging registry reports live sessions as dead under load. Test it by making it report something you know is true.
+
 ## Delegation and tooling
 
 - Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you: when a delegated result lands, read the number it was meant to move yourself.
