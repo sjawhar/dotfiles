@@ -71,22 +71,25 @@ When Sami ends his narration:
 
 ## 4. Post the review
 
-Post to the **reviews** endpoint with `-f` array notation:
+Post to the **reviews** endpoint with the review as JSON on standard input. Do not build `comments` from `-f`/`-F` fields: gh adds every `-F` field after every `-f` field, so a review with two comments gets their fields mixed up.
 
 ```bash
-gh api repos/$REPO/pulls/<number>/reviews --method POST \
-  -f body="$SUMMARY" -f event=COMMENT \
-  -f commit_id="$(gh pr view <pr> --json headRefOid -q .headRefOid)" \
-  -f 'comments[0][path]=src/example.py' -f 'comments[0][line]=42' \
-  -f 'comments[0][body]=**Suggestion:** Could we handle the empty case here?'
+jq -n --arg body "$SUMMARY" \
+  --arg commit_id "$(gh pr view <pr> -R "$REPO" --json headRefOid -q .headRefOid)" \
+  --arg c1 '**Suggestion:** Could we handle the empty case here?' '{
+  body: $body, event: "COMMENT", commit_id: $commit_id,
+  comments: [
+    {path: "src/example.py", line: 42, body: $c1}
+  ]
+}' | gh api repos/$REPO/pulls/<number>/reviews --method POST --input -
 ```
 
-- Each `comments[N]` needs `path` (as in the diff), `line` (in the new file) and `body`. A comment on a deleted line also needs `side=LEFT`, with `line` in the old file.
+- Each comment needs `path` (as in the diff), `line` (a number, in the new file) and `body`. A comment on a deleted line also needs `side: "LEFT"`, with `line` in the old file. Pass each body with `--arg`, so that its quotes and backslashes reach GitHub unchanged.
 - Never fall back silently to a top-level PR comment.
 
 | Error | Remedy |
 | --- | --- |
 | `"line" is not a permitted key` | Wrong endpoint: use `/pulls/{number}/reviews`, not `/comments`. |
-| HTTP 422 or a missing inline comment | Check the `comments[N][path]`, `[line]`, `[body]` notation, the diff path and the new-file line (for a deleted line, `[side]=LEFT` and the old-file line). |
+| HTTP 422 or a missing inline comment | Check each comment's `path`, `line` and `body`, the diff path and the new-file line (for a deleted line, `side: "LEFT"` and the old-file line). |
 
 Report the review URL that GitHub returns.
