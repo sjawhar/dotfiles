@@ -6,6 +6,11 @@
 //     scans. Keys per-session state for tools that track what a session saw,
 //     and `shims/git` adds it to every commit a `git commit`, `merge`, `pull`,
 //     `cherry-pick` or `revert` makes, as the `Omp-Session` trailer.
+//   PI_COMMIT_TRAILERS — the same trailer, for the commits omp writes itself
+//     through its own git library (autoresearch, `omp commit`, isolated task
+//     merges, the git TUI). Those never run `git`, so no shim reaches them;
+//     omp appends these trailers at every such call site (sjawhar/oh-my-pi
+//     feat/native-commit-session-trailer). An older build ignores the variable.
 //   JJ_CONFIG — user config chain plus a generated per-session overlay that
 //     (1) sets `templates.commit_trailers`, so every jj commit made from an
 //     agent session automatically carries an `Omp-Session: <id>` trailer —
@@ -124,6 +129,7 @@ export default function (pi: ExtensionAPI) {
 		const id = file ? TOP_LEVEL_TRANSCRIPT.exec(path.basename(file))?.[1] : undefined;
 		if (!id) return; // subagent or unpersisted session — keep the top-level identity
 		process.env.OMP_SESSION_ID = id;
+		process.env.PI_COMMIT_TRAILERS = `Omp-Session: ${id}`;
 		const base = await jjConfigBase();
 		if (!base) return;
 		const overlay = path.join(OVERLAY_DIR, `omp-attribution-${id}.toml`);

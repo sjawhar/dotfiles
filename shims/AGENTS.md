@@ -31,8 +31,8 @@ before handing the call to the real one.
   adds the line, and each hook name there then runs the repository's own hook of that name
   (`git-hooks/hook`). A rebase, including `pull --rebase`, leaves replayed commits as they were;
   an alias, `git am` and `git commit-tree` add nothing. Commits omp writes through its own git
-  library never run `git`, so no shim reaches them: omp adds the trailer itself from sjawhar/oh-my-pi
-  commit b008a220 on.
+  library never run `git`, so no shim reaches them: omp appends `PI_COMMIT_TRAILERS`, which
+  `omp/extensions/session-env.ts` sets to the session's line.
 - **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights,
   a `PI_SHELL_PREFIX` that turns errexit, nounset and pipefail off before each bash call (so
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named
