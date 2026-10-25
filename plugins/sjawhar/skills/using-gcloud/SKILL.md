@@ -11,7 +11,7 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 
 On an Azure VM enrolled in the box identity (`~/.dotfiles/installers/gcloud-box.sh`), gcloud, the application default credentials (ADC) and client libraries all act as the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`, in the active configuration `box` (project `autoformalization`). It needs no sign-in and does not expire.
 
-Sami's own Google login is the configuration `theorem`. Use it only for admin work, or for a step that fails as the box with a permission error (example: a push to `us-east1-docker.pkg.dev/gcp-taiga`):
+Sami's own Google login is the configuration `theorem`, for admin work only. When a step fails as the box with a permission error, name the missing permission and propose widening the box account's grant; do not fall back to his login. For admin work:
 
 - gcloud: `gcloud --configuration theorem …` or `GCLOUD_ACCOUNT=theorem gcloud …`.
 - Client libraries: `GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/legacy_credentials/sami@theorem.dev/adc.json`.
