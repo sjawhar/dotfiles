@@ -75,6 +75,10 @@ Agents waiting on your reply are a queue. Keep it empty: answer at once, or repl
 
 Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you, so follow each delegated result through to the number.
 
+## Explainer videos
+
+When the user asks the stream for an explainer video, the lead owns it and has a subagent make it with the `making-explainer-videos` skill.
+
 ## Improving this skill
 
 When a rule here failed or was missing, edit this file directly. Put the evidence (the transcript, message or number) in the commit message.
