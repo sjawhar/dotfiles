@@ -21,7 +21,8 @@ jj log --no-graph -r '<verdict-sha> & ::<current-head>' -T 'commit_id ++ "\n"'
 
 | Shape | What carries over |
 |---|---|
-| Ancestor kept: appended commits, forward merge of main | The delta question is well-defined, but the delta is not proven harmless. A round the owner documents as prose-only keeps the verdict and the pair when the diff between the two heads touches only comments and docs (check with section 3). Code changes need review at the resulting code head |
+| Ancestor kept: forward merge of main, no conflict | The approval stands: a merge of main changes none of the PR's own lines. A PR need not contain the latest main (Sami, dispatch://BET-238/ask/c1daaafa: "why would bumping to the latest main require a whole re-review?") |
+| Ancestor kept: appended commits | The delta question is well-defined, but the delta is not proven harmless. A round the owner documents as prose-only keeps the verdict and the pair when the diff between the two heads touches only comments and docs (check with section 3). Code changes need review at the resulting code head |
 | Ancestor kept: integration update | Prior review, only if conflicts were prose-only, the PR's own code contribution is unchanged, and the behavior proof ran again at the new head |
 | Rewritten: amend or rebase | No ancestry, and no comparison restores it. Do not carry the old review forward as if new commits were appended. An identical clean rebase keeps the old review only through an explicit confirmation that names the new head. That confirmation rests on section 3 and does not require another thermonuclear pair run. Changed contribution or code-changing conflict resolution: independent re-review |
 
