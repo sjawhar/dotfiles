@@ -37,4 +37,8 @@ bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 # (devbox/tmp-empty-prune.service).
 arm_user_timer devbox tmp-empty-prune
 
+# The box's one Go build cache, /mnt/nvme/<user>/gocache (GOCACHE in .bashrc), cleaned hourly
+# once it passes 80 GB (devbox/gocache-cap.service).
+arm_user_timer devbox gocache-cap
+
 echo "--- Devbox setup complete ---"

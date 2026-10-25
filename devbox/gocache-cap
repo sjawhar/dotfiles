@@ -1,0 +1,43 @@
+#!/bin/bash
+# gocache-cap: clean the box's Go build cache when it passes its size cap.
+# devbox/gocache-cap.service runs it every hour; the unit's comment says why the cap is 80 GB.
+#
+# Go has no size-based trim: it drops only entries unused for 5 days. `go clean -cache` is the
+# one supported way to shrink a cache, and it removes the whole cache: every entry directory
+# (00-ff) is deleted, and README, trim.txt and log.txt are kept.
+#
+# GOCACHE_CAP_DIR (default /mnt/nvme/<user>/gocache) and GOCACHE_CAP_BYTES (default 80 GB) can
+# be set to override the defaults, so that a test can run the unit against a scratch cache.
+set -euo pipefail
+
+dir="${GOCACHE_CAP_DIR:-/mnt/nvme/$(id -un)/gocache}"
+cap="${GOCACHE_CAP_BYTES:-80000000000}"
+
+if [[ ! -d "$dir" ]]; then
+    echo "gocache-cap: $dir is absent; nothing to cap"
+    exit 0
+fi
+
+size="$(du -sb "$dir" | cut -f1)"
+if ((size <= cap)); then
+    echo "gocache-cap: $dir is $size bytes, at or under the cap of $cap"
+    exit 0
+fi
+
+# A lane that named its own GOCACHE under this directory (gocache/INFRA, gocache/LINUX)
+# made a second cache inside it. The size above counts that cache, so clean it too. A Go
+# cache directory is one that holds trim.txt.
+caches=()
+[[ -f "$dir/trim.txt" ]] && caches+=("$dir")
+for sub in "$dir"/*/; do
+    sub="${sub%/}"
+    [[ "${sub##*/}" =~ ^[0-9a-f]{2}$ ]] && continue
+    [[ -f "$sub/trim.txt" ]] && caches+=("$sub")
+done
+
+# go clean reads the module in its working directory; / has none.
+cd /
+for cache in "${caches[@]}"; do
+    GOCACHE="$cache" go clean -cache
+done
+echo "gocache-cap: $dir was $size bytes, over the cap of $cap; cleaned ${caches[*]}; now $(du -sb "$dir" | cut -f1) bytes"
