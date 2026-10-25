@@ -28,7 +28,7 @@ B. Each follow-up that a subagent's result or the session's own report raised: "
 C. Each sentence in which the session says something waits on a person ("waiting for your answer", "needs the user's click", "tell me and I'll do it", "after we talk"), and each span where the session stopped work for a person.
 D. Each Dispatch record (ask, comment, message, spec, artifact) that depends on a file only one machine holds: a path under /tmp, /home, ~, /mnt, a local branch, a box path.
 E. Each span of more than an hour in which the session did no work while an item from A to C was still open, and what it was doing instead.
-F. Each long project (several slices, or more than a day) the session ran without its workflow skill (`/sdd` for engineering, `building-and-delivering-tasks` for RL task work).
+F. Each long project (several slices, or more than a day) the session ran without its workflow skill (`skill://sdd` for engineering, `building-and-delivering-tasks` for RL task work).
 
 ## Outcome of each row
 

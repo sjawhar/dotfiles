@@ -48,7 +48,7 @@ Before such an action, say what changes, what could break, and the safest altern
 
 - Work in a worktree under `~/src/<project>`, never in `~/` or `~/Code`.
 - Edit `~/.dotfiles` in place.
-- Long projects run under the SDD process in `~/.dotfiles/plugins/sjawhar/commands/sdd.md`.
+- Long projects run under the SDD process in `skill://sdd`.
 
 ## Asking me
 

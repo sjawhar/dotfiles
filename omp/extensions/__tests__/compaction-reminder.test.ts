@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import extension from "../compaction-reminder";
-import sddCommand from "../../../plugins/sjawhar/commands/sdd.md" with { type: "text" };
+import sddSkill from "../../../plugins/sjawhar/skills/sdd/SKILL.md" with { type: "text" };
 
 type Pi = Parameters<typeof extension>[0];
 type Sent = { message: { customType: string; content: string; display: boolean }; options: { deliverAs?: string } };
@@ -15,9 +15,21 @@ const user = (text: string): Entry => ({ type: "message", message: { role: "user
 const assistant = (text: string): Entry => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
 const sessionInit = (task: string): Entry => ({ type: "session_init", systemPrompt: "you are a subagent", task, tools: [] });
 const compaction: Entry = { type: "compaction", summary: "paraphrase" };
-/** The expanded /sdd template as omp puts it on the branch: sdd.md's body, then the arguments. */
-const SDD_INVOCATION = `${sddCommand.replace(/^---\n[\s\S]*?\n---\n/, "").trim()}\n\nship it`;
+/** A pasted sdd invocation as omp puts it on the branch: the skill's body, then the arguments. */
+const SDD_INVOCATION = `${sddSkill.replace(/^---\n[\s\S]*?\n---\n/, "").trim()}\n\nship it`;
 const sddInvocation = user(SDD_INVOCATION);
+/** The entry omp persists when the user invokes `/skill:sdd`. */
+const sddSkillPrompt: Entry = {
+	type: "custom_message",
+	customType: "skill-prompt",
+	content: `[IMPORTANT: User invoked the "sdd" skill; follow its instructions. Full skill below.]\n\n${sddSkill}`,
+	display: true,
+};
+/** A model-invoked load: the assistant's `read` tool call on the skill URI. */
+const sddSkillRead: Entry = {
+	type: "message",
+	message: { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: { path: "skill://sdd" } }] },
+};
 /** An IRC message delivered to an idle agent, as the fork persists it. */
 const ircIncoming = (from: string, message: string): Entry => ({
 	type: "custom_message",
@@ -374,22 +386,28 @@ describe("compaction-reminder", () => {
 		expect(runEnd.sent.map(s => s.options.deliverAs)).toEqual(["nextTurn"]);
 	});
 
-	test("a top-level session that never invoked /sdd gets nothing, compaction or shake", () => {
+	test("a top-level session that never invoked sdd gets nothing, compaction or shake", () => {
 		const session = bind();
 		session.compact("main", [sessionInit(ASSIGNMENT), user(ASSIGNMENT), compaction], true);
-		// The template only quoted inside a message, or injected by the harness, is no invocation.
+		// The skill text only quoted inside a message, or injected by the harness, is no invocation.
 		const quoted = user(`Look at this:\n${SDD_INVOCATION}`);
 		const synthetic: Entry = { type: "message", message: { role: "user", content: [{ type: "text", text: SDD_INVOCATION }], synthetic: true } };
-		session.compact("main", [quoted, synthetic, compaction], true);
-		session.shakeEnd("main", [quoted, synthetic], true, { skipped: false });
+		const otherSkill: Entry = { type: "custom_message", customType: "skill-prompt", content: '[IMPORTANT: User invoked the "analyze" skill; follow its instructions.]', display: true };
+		const otherRead: Entry = { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: { path: "skill://analyze" } }] } };
+		session.compact("main", [quoted, synthetic, otherSkill, otherRead, compaction], true);
+		session.shakeEnd("main", [quoted, synthetic, otherSkill, otherRead], true, { skipped: false });
 
 		expect(session.sent).toHaveLength(0);
 	});
 
-	test("a top-level session that invoked /sdd gets the sdd reminder on every compaction and shake", async () => {
+	test.each([
+		["pasted body", () => sddInvocation],
+		["/skill:sdd", () => sddSkillPrompt],
+		["read skill://sdd", () => sddSkillRead],
+	])("a top-level session that invoked sdd by %s gets the sdd reminder on every compaction and shake", async (_name, invocation) => {
 		const sddText = (await Bun.file(new URL("../compaction-reminder.md", import.meta.url)).text()).trim();
 		const session = bind();
-		const branch = [user(ASSIGNMENT), sddInvocation, compaction];
+		const branch = [user(ASSIGNMENT), invocation(), compaction];
 		session.compact("main", branch, true);
 		session.turnEnd(1);
 		session.compact("main", [...branch, compaction], false);

@@ -1,26 +1,29 @@
 // Re-assert what a compaction loses, in two cases: the sdd process contract for
-// a top-level session that invoked /sdd, and what a subagent was told
+// a top-level session that invoked the `sdd` skill, and what a subagent was told
 // to do, on its first compaction. Every successful automatic shake also leaves
 // a `compaction-marker` entry recording the context size before and after it.
 //
 // A compaction summary paraphrases the conversation; a workflow contract the
-// session was following (the sdd command's agent mapping and gates) rarely
+// session was following (the sdd skill's agent mapping and gates) rarely
 // survives that intact, and the model has no cue that it should re-read it.
 // Firing on every compaction of every session was measured as noise: over 15
 // sessions that invoked /sdd and 268 compactions, the reminder led to a re-read
 // of sdd.md within 60 turns 22 times (8%), and most sessions were not running
-// sdd at all. So the reminder is bound to the command: it fires only when the
-// session branch holds a user message that is the expanded /sdd template. omp
-// persists a template invocation as its expanded body (frontmatter stripped,
-// arguments appended), so the test is that a non-synthetic user message starts
-// with the first line of sdd.md's body, read from the file itself so a new
-// heading cannot silently disarm it. The branch is read at compaction time: it
-// keeps entries from before a committed compaction, a shake leaves a markdown
-// heading in place, and a resumed session reads the same persisted entries. Once
-// armed, the reminder stays armed for the rest of the session; its text tells
-// the model to re-read sdd.md only while it is still following that process. A
-// goal cannot carry the binding: omp's `goal` tool is active only in goal mode,
-// which the user enters, so the coordinator cannot open one.
+// sdd at all. So the reminder is bound to the invocation: it fires only when the
+// session branch shows this session loaded the skill. `/sdd` was a command until
+// 2026-10-25 and is now the skill `plugins/sjawhar/skills/sdd`, which a session
+// can reach three ways, so all three arm it: the `skill-prompt` entry omp
+// persists when the user invokes `/skill:sdd`, a `read` of `skill://sdd`, and a
+// non-synthetic user message starting with the first line of the skill's body
+// (how omp expanded the old command, and how a pasted invocation still looks),
+// read from the file itself so a new heading cannot silently disarm it. The
+// branch is read at compaction time: it keeps entries from before a committed
+// compaction, a shake leaves a markdown heading in place, and a resumed session
+// reads the same persisted entries. Once armed, the reminder stays armed for the
+// rest of the session; its text tells the model to re-read the skill only while
+// it is still following that process. A goal cannot carry the binding: omp's
+// `goal` tool is active only in goal mode, which the user enters, so the
+// coordinator cannot open one.
 //
 // Two events carry a compaction. `session_compact` fires after every committed
 // one — auto, /compact, remote, snapcompact, handoff, soft — once the summary
@@ -134,13 +137,17 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import sddReminder from "./compaction-reminder.md" with { type: "text" };
 import subagentReminder from "./compaction-reminder-subagent.md" with { type: "text" };
-import sddCommand from "../../plugins/sjawhar/commands/sdd.md" with { type: "text" };
+import sddSkill from "../../plugins/sjawhar/skills/sdd/SKILL.md" with { type: "text" };
 
 const SDD_REMINDER = sddReminder.trim();
 const SUBAGENT_REMINDER = subagentReminder.trim();
-/** The first line of sdd.md's body: how an expanded /sdd invocation starts on the branch. */
-const SDD_HEAD = sddCommand.replace(/^---\n[\s\S]*?\n---\n/, "").trim().split("\n")[0];
-if (!SDD_HEAD) throw new Error("compaction-reminder: sdd.md has no body line to recognise /sdd by");
+/** The first line of the sdd skill's body: how a pasted or expanded invocation starts on the branch. */
+const SDD_HEAD = sddSkill.replace(/^---\n[\s\S]*?\n---\n/, "").trim().split("\n")[0];
+if (!SDD_HEAD) throw new Error("compaction-reminder: sdd SKILL.md has no body line to recognise it by");
+/** How omp labels the `skill-prompt` entry it writes when the user invokes `/skill:sdd`. */
+const SDD_SKILL_PROMPT = '"sdd" skill';
+/** The skill's own URI: a model-invoked load is a `read` tool call on it. */
+const SDD_SKILL_URI = "skill://sdd";
 /** The fork's `prompts/steering/parent-irc.md` wrapper, stripped from a steer when present. */
 const PARENT_STEER_PREFIX = "[Wait interrupted by message]\n";
 const PARENT_STEER_BODY = /^<irc from="parent" agent="[^"]*">\n([\s\S]*)\n<\/irc>$/;
@@ -151,12 +158,12 @@ type BranchEntry = { type: string };
 type InitEntry = { type: "session_init"; task: string };
 type BranchMessage = {
 	role: string;
-	content: string | Array<{ type: string; text?: string }>;
+	content: string | Array<{ type: string; text?: string; name?: string; arguments?: { path?: string } }>;
 	steering?: boolean;
 	synthetic?: boolean;
 };
 type MessageEntry = { type: "message"; message: BranchMessage };
-type IrcEntry = { type: "custom_message"; customType: string; details?: { from?: string; message?: string } };
+type IrcEntry = { type: "custom_message"; customType: string; content?: string; details?: { from?: string; message?: string } };
 type ShakeEndEvent = { action: string; aborted: boolean; skipped?: boolean; errorMessage?: string };
 type CompactCtx = {
 	agent: { kind: "main" | "sub"; parentId?: string };
@@ -165,12 +172,19 @@ type CompactCtx = {
 	getContextUsage: () => { tokens: number } | undefined;
 };
 
-/** True when the branch holds a user-typed message that is the expanded /sdd template. */
+/** True when the branch shows this session loaded the sdd skill, in any of its three forms. */
 function sddInvoked(ctx: CompactCtx): boolean {
 	return ctx.sessionManager.getBranch().some(entry => {
+		if (entry.type === "custom_message") {
+			const { customType, content } = entry as IrcEntry;
+			return customType === "skill-prompt" && (content ?? "").includes(SDD_SKILL_PROMPT);
+		}
 		if (entry.type !== "message") return false;
 		const { message } = entry as MessageEntry;
-		return message.role === "user" && !message.synthetic && messageText(message).trimStart().startsWith(SDD_HEAD);
+		if (message.role === "user" && !message.synthetic) {
+			return messageText(message).trimStart().startsWith(SDD_HEAD);
+		}
+		return Array.isArray(message.content) && message.content.some(part => part.type === "toolCall" && part.name === "read" && (part.arguments?.path ?? "").startsWith(SDD_SKILL_URI));
 	});
 }
 
