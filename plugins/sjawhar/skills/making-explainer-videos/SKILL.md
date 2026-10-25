@@ -39,4 +39,6 @@ Leave it out: their priorities and targets, which streams and leads exist, the r
 4. Build, review and deliver as [production.md](references/production.md) says.
 5. One video per subject. A correction replaces the video under the same name.
 
+At most 3 rounds of any check here (red team, teach-back, video review). Each round re-reads only what changed and may not raise a finding an earlier round raised. After the third, ship it and write what is still weak in the video's `.src/README.md`. Reason: agent checking agent does not converge on its own. One pull request at Anthropic ran 50+ review rounds; a 3-round cap with change-only re-review took one-round passes from 65% to 78% (claude.dev, 2026-10-15). The first video made with this skill ran 36 teach-back rounds and 3 review rounds in one night.
+
 The person who owns the subject makes the video, or has a subagent make it. It never waits on a question to the viewer, and never takes time from the work it describes.
