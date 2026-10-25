@@ -10,4 +10,6 @@ ConditionPathIsDirectory=/mnt/nvme/%u/tmp
 Type=oneshot
 Nice=19
 IOSchedulingClass=idle
-ExecStart=/usr/bin/find /mnt/nvme/%u/tmp -maxdepth 1 -name tmp* -empty -mtime +1 -delete
+# -ignore_readdir_race: other processes remove their own entries during the walk, and find
+# would otherwise fail the run on each one it listed and then could not stat.
+ExecStart=/usr/bin/find /mnt/nvme/%u/tmp -ignore_readdir_race -maxdepth 1 -name tmp* -empty -mtime +1 -delete
