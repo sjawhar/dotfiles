@@ -9,7 +9,7 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 
 ## Where the id is
 
-- An omp session's commits get an `Omp-Session: <id>` trailer. In git, `~/.dotfiles/shims/git` adds it. In jj, a JJ_CONFIG overlay adds it: `~/.dotfiles/omp/extensions/session-env.ts` for interactive sessions, the Legion extension for a session the Legion daemon starts. omp's own commits (autoresearch, `omp commit`, task merges) get it from sjawhar/oh-my-pi b008a220 on.
+- An omp session's commits get an `Omp-Session: <id>` trailer. In git, `~/.dotfiles/shims/git` adds it. In jj, a JJ_CONFIG overlay adds it: `~/.dotfiles/omp/extensions/session-env.ts` for interactive sessions, the Legion extension for a session the Legion daemon starts. That extension also sets `PI_COMMIT_TRAILERS`, which omp's own commits (autoresearch, `omp commit`) use.
 - No trailer means "not attributable from the commit", not an error. A human's commit has none, and neither has an older omp's own commit, one made through an alias, `git rebase`, `git am` or `git commit-tree`, one in a checkout that sets `git config omp.sessionTrailer false`, or any `git merge`, `pull`, `cherry-pick` or `revert` commit from before 2026-10-24. Attribute those from the author email and commit time, plus a session editing the same files at that time (`tq search --commands`, `skill://using-transcript-store`). In jj, `git log --all` also counts hidden copies (`refs/jj/keep/*`).
 - Legion GitHub comments and reviews end with `<!-- legion: {"session":"<id>", ...} -->`.
 - Use the `jj` lines below only where `jj root` succeeds: Legion workspaces, `~/.dotfiles`, parts of `~/src`.
