@@ -180,6 +180,7 @@ Every piece of work you own is a child issue of the root before it waits on anyt
 | `done` | your own check through the real surface shows the change working in production |
 
 - A green suite, a harness screenshot or a merge is groundwork, not `done`.
+- Before you report a slice or the project done, or move it to `done`, run `finding-dropped-work` over this session's transcript. Close each row it finds the way that skill says, then report, with its counts.
 - Never ask Sami or the requester to look at or approve the result before `done`. Close with a reason: `dispatch issue-update --issue <KEY> --status done --reason '<what shipped; the check>'` (it refuses `done` without one).
 - An issue left at `triage` while work runs is a defect. The roadmap view reads these statuses, and they are Sami's only view of delivery that doesn't interrupt a session.
 - Waiting for the deploy lane is not a status. The issue goes from `needs_review` to `done` on its own schedule, and nobody is told about the wait.

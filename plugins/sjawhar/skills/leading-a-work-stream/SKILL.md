@@ -67,6 +67,16 @@ Answer five questions about the stream from records you read yourself (GitHub, D
 
 Message an agent to plan the day with it, to remove an obstacle or to change its direction, not to collect status.
 
+## Keep every request and wait in Dispatch
+
+- **A request from the user goes on a claimed Dispatch issue before work on it starts.** Its spec says what done means (deployed, merged, measured) and a date. A request inside the stream's own issue is a line in that spec with both.
+- **Done is delivered and checked.** Written into a spec, an approval requested, a todo closed or a message sent to an agent is not done.
+- **A wait on a person is an open Dispatch ask the moment you know it.** Never only a chat question, a note, a peer message, a comment on an ask that is already answered, or a review request. Keep working on everything else.
+- **Check a delegated or relayed result against its done before you report it.** Each follow-up the result names becomes a claimed issue, an ask, or a line in the spec with done and a date, the same hour.
+- **A step you keep back from a hand-over becomes its own claimed issue,** blocked by the handed-over one.
+- **After a restart or a compaction, first re-read your claimed issues and your open asks** (`dispatch open-asks`), then the transcript since your last audit.
+- **Every hour, run the stream's Dispatch check:** `uv run --project ~/src/chief-dashboard chief-dashboard dispatch-check --project <KEY>`. **Once a day, run `finding-dropped-work` over each agent's transcript and your own.**
+
 ## Count yourself as a wait
 
 Agents waiting on your reply are a queue. Keep it empty: answer at once, or reply "your call". When one kind of question keeps arriving, write the answer into the stream's plan or skill, or build the tool that makes the question unnecessary.
