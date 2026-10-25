@@ -11,11 +11,16 @@ const OPUS_5: Model = { provider: "anthropic", id: "claude-opus-5" };
 const OPUS_48: Model = { provider: "anthropic", id: "claude-opus-4-8" };
 const key = (m: Model) => `${m.provider}/${m.id}`;
 
+type Health = { state: "healthy" | "reserve" | "depleted" | "unknown"; accounts: Array<{ resetsAt?: number }> };
+
 /** One process's binding of the extension, with a model per agent and the models it was set to. */
 function bind(roster: Model[] = [OPUS_55, OPUS_5, OPUS_48]) {
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
 	const current = new Map<string, Model>();
 	const set: Array<[string, string]> = [];
+	/** Usage health the auth store reports per `provider/id`; absent means healthy. */
+	const health = new Map<string, Health | Error>();
+	const healthQueries: string[] = [];
 	let acting = "";
 	const pi = {
 		on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<unknown>) => handlers.set(event, handler),
@@ -27,6 +32,20 @@ function bind(roster: Model[] = [OPUS_55, OPUS_5, OPUS_48]) {
 	extension(pi);
 	const ctx = (agent: string) => ({
 		agent: { id: agent },
+		sessionManager: { getSessionId: () => `session-${agent}` },
+		modelRegistry: {
+			authStorage: {
+				health: {
+					model: async (provider: string, options: { modelId?: string }) => {
+						const selector = `${provider}/${options.modelId}`;
+						healthQueries.push(selector);
+						const reported = health.get(selector) ?? { state: "healthy", accounts: [] };
+						if (reported instanceof Error) throw reported;
+						return reported;
+					},
+				},
+			},
+		},
 		models: {
 			current: () => current.get(agent),
 			resolve: (selector: string) => roster.find(m => key(m) === selector),
@@ -34,6 +53,8 @@ function bind(roster: Model[] = [OPUS_55, OPUS_5, OPUS_48]) {
 	});
 	return {
 		set,
+		health,
+		healthQueries,
 		model: (agent: string) => key(current.get(agent) as Model),
 		on: (agent: string, model: Model) => current.set(agent, model),
 		/** The chain moved `agent` off `from` onto `to`. */
@@ -148,5 +169,72 @@ describe("refusal-cooldown", () => {
 
 		expect(s.model("main")).toBe(key(OPUS_5));
 		expect(s.set).toEqual([]);
+	});
+
+	test("a configured model whose usage window is exhausted stays off until the reported reset", async () => {
+		setSystemTime(T0);
+		const s = bind();
+		s.on("sub", OPUS_55);
+		await s.fallback("sub", OPUS_55, OPUS_5);
+		const reset = T0.getTime() + 5 * 24 * HOUR;
+		s.health.set(key(OPUS_55), { state: "depleted", accounts: [{ resetsAt: reset }] });
+
+		// Every few hours until the reset: no restore, and the store is asked only once.
+		for (let hour = 1; hour < 5 * 24; hour += 7) {
+			setSystemTime(new Date(T0.getTime() + hour * HOUR));
+			await s.request("sub");
+		}
+		expect(s.model("sub")).toBe(key(OPUS_5));
+		expect(s.set).toEqual([]);
+		expect(s.healthQueries).toEqual([key(OPUS_55)]);
+
+		// At the reset the store reports the window open again, and the model comes back once.
+		s.health.set(key(OPUS_55), { state: "healthy", accounts: [] });
+		setSystemTime(new Date(reset));
+		await s.request("sub");
+		await s.request("sub");
+		expect(s.model("sub")).toBe(key(OPUS_55));
+		expect(s.set).toEqual([["sub", key(OPUS_55)]]);
+	});
+
+	test("a model inside its reserve margin is not restored either, and is checked again only after another cooldown", async () => {
+		setSystemTime(T0);
+		const s = bind();
+		s.on("sub", OPUS_55);
+		await s.fallback("sub", OPUS_55, OPUS_5);
+		s.health.set(key(OPUS_55), { state: "reserve", accounts: [] });
+
+		setSystemTime(new Date(T0.getTime() + HOUR));
+		await s.request("sub");
+		expect(s.set).toEqual([]);
+
+		setSystemTime(new Date(T0.getTime() + HOUR + 10 * 60 * 1000));
+		await s.request("sub");
+		expect(s.healthQueries).toEqual([key(OPUS_55)]);
+
+		s.health.set(key(OPUS_55), { state: "healthy", accounts: [] });
+		setSystemTime(new Date(T0.getTime() + 2 * HOUR));
+		await s.request("sub");
+		expect(s.model("sub")).toBe(key(OPUS_55));
+	});
+
+	test("unknown or unreadable usage restores as before", async () => {
+		setSystemTime(T0);
+		const s = bind();
+		s.on("a", OPUS_55);
+		s.on("b", OPUS_55);
+		await s.fallback("a", OPUS_55, OPUS_5);
+		await s.fallback("b", OPUS_55, OPUS_5);
+		s.health.set(key(OPUS_55), { state: "unknown", accounts: [] });
+
+		setSystemTime(new Date(T0.getTime() + HOUR));
+		await s.request("a");
+		s.health.set(key(OPUS_55), new Error("usage endpoint down"));
+		await s.request("b");
+
+		expect(s.set).toEqual([
+			["a", key(OPUS_55)],
+			["b", key(OPUS_55)],
+		]);
 	});
 });

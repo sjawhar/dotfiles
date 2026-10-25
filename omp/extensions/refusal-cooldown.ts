@@ -24,15 +24,68 @@
 //     flight: that request completes on the old model and the next one uses the restored model.
 //   * A re-refusal needs no special handling: the chain moves the session down again and emits a
 //     new `retry_fallback_applied`, which re-arms the cooldown from that moment.
+//   * It asks the auth store for the configured model's usage health before restoring. The same
+//     event fires when omp's usage preflight moves a session off a provider whose quota window is
+//     spent (the Codex 7-day window, for one). Restoring then sent one request to a model that
+//     cannot serve, the preflight moved the session back, and each round trip rendered the system
+//     prompt twice, so Anthropic rewrote the whole cached context twice an hour per session: 649
+//     retries and about $950 of cache writes in six hours on 2026-10-24 (dispatch://INFRA-262).
+//     A depleted or reserve answer waits until the earliest reset the store reports, or another
+//     cooldown when it reports none; an unknown or failed answer restores as before.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 /** Matches the window Anthropic documents for its own post-refusal routing. */
 const COOLDOWN_MS = Number(process.env.OMP_REFUSAL_COOLDOWN_MS ?? 60 * 60 * 1000);
+/** omp's default `retry.usageReservePct`, the margin its usage preflight falls back at. */
+const RESERVE_FRACTION = 0.1;
 
 interface Armed {
 	/** The selector the fallback moved the session off, as `provider/id`. */
 	restoreTo: string;
-	at: number;
+	/** Earliest time to try restoring. */
+	due: number;
+}
+
+type UsageHealth = { state: string; accounts: Array<{ resetsAt?: number }> };
+type HealthCtx = {
+	sessionManager?: { getSessionId?(): string };
+	modelRegistry?: {
+		authStorage?: {
+			health?: {
+				model(
+					provider: string,
+					options: { modelId?: string; sessionId?: string; baseUrl?: string; reserveFraction: number },
+				): Promise<UsageHealth>;
+			};
+		};
+	};
+};
+
+/** When the target can be restored: now, or the time to look again because its quota is spent. */
+async function nextUsableAt(
+	ctx: HealthCtx,
+	target: { provider: string; id: string; baseUrl?: string },
+	now: number,
+): Promise<number> {
+	const health = ctx.modelRegistry?.authStorage?.health;
+	if (!health) return now;
+	let report: UsageHealth;
+	try {
+		report = await health.model(target.provider, {
+			modelId: target.id,
+			sessionId: ctx.sessionManager?.getSessionId?.(),
+			baseUrl: target.baseUrl,
+			reserveFraction: RESERVE_FRACTION,
+		});
+	} catch {
+		return now;
+	}
+	if (report.state !== "depleted" && report.state !== "reserve") return now;
+	let reset = Infinity;
+	for (const account of report.accounts) {
+		if (account.resetsAt !== undefined && account.resetsAt > now) reset = Math.min(reset, account.resetsAt);
+	}
+	return Number.isFinite(reset) ? reset : now + COOLDOWN_MS;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -43,21 +96,33 @@ export default function (pi: ExtensionAPI) {
 		// Keep the first arming: a chain that walks several models within one turn should restore
 		// to the model the session started on, not to the middle of the chain.
 		if (!armed.has(ctx.agent.id)) {
-			armed.set(ctx.agent.id, { restoreTo: event.from, at: Date.now() });
+			armed.set(ctx.agent.id, { restoreTo: event.from, due: Date.now() + COOLDOWN_MS });
 		}
 		return undefined;
 	});
 
 	pi.on("context", async (_event, ctx) => {
 		const pending = armed.get(ctx.agent.id);
-		if (!pending || Date.now() - pending.at < COOLDOWN_MS) return undefined;
-		armed.delete(ctx.agent.id);
+		const now = Date.now();
+		if (!pending || now < pending.due) return undefined;
 
 		const current = ctx.models.current();
-		if (current && `${current.provider}/${current.id}` === pending.restoreTo) return undefined;
+		if (current && `${current.provider}/${current.id}` === pending.restoreTo) {
+			armed.delete(ctx.agent.id);
+			return undefined;
+		}
 		// Gone from this session's roster (credential lost, catalog change): nothing to restore to.
 		const target = ctx.models.resolve(pending.restoreTo);
-		if (!target) return undefined;
+		if (!target) {
+			armed.delete(ctx.agent.id);
+			return undefined;
+		}
+		const usableAt = await nextUsableAt(ctx as unknown as HealthCtx, target, now);
+		if (usableAt > now) {
+			pending.due = usableAt;
+			return undefined;
+		}
+		armed.delete(ctx.agent.id);
 		await pi.setModel(target);
 		return undefined;
 	});
