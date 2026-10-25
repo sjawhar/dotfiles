@@ -48,7 +48,7 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
    - Merge duplicates into one lesson. `seen` counts sessions. Forks of one parent count once.
    - Settle a contradiction empirically (run it, read the source, reproduce it in a throwaway directory), never by majority or recency. Record the check in `verdict`.
    - Check one citation per reader report before you trust the rest. A "holds" that only quotes the transcript stays `UNVERIFIED`.
-6. Record, then route. Write the Lesson row, read it back, route to its one home (table below), then put the link and status in its home cell. Route only a lesson that a command, file read or reproduction checked. Before you create or edit a skill, run `skill://writing-skills` (baseline test first) and write to `skill://asd-ste100` strict.
+6. Record, then route. Write the Lesson row, read it back, route to its one home (table below), then put the link and status in its home cell. Route only a lesson that a command, file read or reproduction checked. Before you create or edit a skill, follow `skill://writing-agent-skills` (reproduce the failure without guidance first).
    - A lesson that shows a defect in a tool gets a code fix in that tool, made by the librarian. Never write a doc line that works around it.
    - No agent owns a repository: make the fix yourself, never route it to a lane.
    - Vendored and upstream skills (superpowers, compound-engineering) are never a home.
