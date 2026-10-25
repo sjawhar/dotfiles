@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Copy the devbox's single-copy shared state to the transfer bucket.
+#
+# Why: on 2026-10-25 two things that several streams write were found to exist
+# on one disk only — the grading farm's git repository, whose remote
+# (theorem-labs/bet-grade-farm) does not exist, and the shared compute ledger,
+# which records which VM belongs to which stream. That disk fell to 131 GB free
+# that afternoon and a stray script had already deleted 120 run directories
+# that morning. A timed copy is not version control; it bounds the loss to the
+# interval instead of the life of the box.
+#
+# Each run writes a new timestamped object, so a bad local state cannot
+# overwrite a good remote copy. Prune by age in the bucket, never from here.
+set -uo pipefail
+
+BUCKET="${BACKUP_BUCKET:-gs://autoformalization-transfer/devbox-state}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+TMPDIR="${TMPDIR:-/mnt/nvme/sami/tmp}"
+rc=0
+
+copy_file() {
+  local src="$1" name="$2"
+  [ -f "$src" ] || { echo "skip $name: $src is not a file"; return 0; }
+  local ext="${src##*.}"
+  if gcloud storage cp "$src" "$BUCKET/$name-$STAMP.$ext" >/dev/null 2>&1; then
+    echo "copied $name ($(stat -c %s "$src") bytes)"
+  else
+    echo "FAILED $name from $src" >&2
+    rc=1
+  fi
+}
+
+copy_repo() {
+  local repo="$1" name="$2"
+  [ -d "$repo/.git" ] || { echo "skip $name: $repo is not a git repository"; return 0; }
+  local bundle="$TMPDIR/$name-$STAMP.bundle"
+  if git -C "$repo" bundle create "$bundle" --all >/dev/null 2>&1 &&
+    gcloud storage cp "$bundle" "$BUCKET/" >/dev/null 2>&1; then
+    echo "bundled $name ($(stat -c %s "$bundle") bytes)"
+  else
+    echo "FAILED $name from $repo" >&2
+    rc=1
+  fi
+  rm -f "$bundle"
+}
+
+copy_repo /mnt/nvme/sami/grade-farm grade-farm
+copy_file /mnt/nvme/sami/compute-inventory.csv compute-inventory
+
+# ~/src/scrum holds the chief of staff's handoffs, the owner brief every stream
+# lead reads, the playbook and the meta-loop record. It is not a git repository
+# and has no remote, so the whole of it is single-copy (found 2026-10-25).
+copy_tree() {
+  local dir="$1" name="$2"
+  [ -d "$dir" ] || { echo "skip $name: $dir is not a directory"; return 0; }
+  local tgz="$TMPDIR/$name-$STAMP.tgz"
+  if tar -czf "$tgz" --exclude='.git' --exclude='__pycache__' -C "$(dirname "$dir")" "$(basename "$dir")" 2>/dev/null &&
+    gcloud storage cp "$tgz" "$BUCKET/" >/dev/null 2>&1; then
+    echo "archived $name ($(stat -c %s "$tgz") bytes)"
+  else
+    echo "FAILED $name from $dir" >&2
+    rc=1
+  fi
+  rm -f "$tgz"
+}
+
+copy_tree /home/sami/src/scrum scrum-records
+
+exit "$rc"
