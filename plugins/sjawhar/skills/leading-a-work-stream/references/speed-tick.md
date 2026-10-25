@@ -1,4 +1,15 @@
-# The speed tick: a reminder that survives restarts
+# The speed tick: the 3-hourly loop and a reminder that survives restarts
+
+## The loop, on each tick
+
+1. Read the stream's state from its records: the numbers, today's plan against what merged, the hourly Dispatch check.
+2. Ask each agent on Envoy what slows it down most right now. Not status.
+3. Answer in writing: how can I help this go faster while the targets and the checks that gate them stay unchanged; how can I do better work faster; how can I help the team do better work faster?
+4. Give the answers to a fresh subagent to attack — is each target ambitious, is each change concrete, is each date padded — and rewrite what it finds weak, because your own answers read better to you than they are.
+5. Make the change now, or start an agent on it.
+6. Append the tick to the stream's speed log (an artifact `speed-log.md` on the stream issue): the time, the change, the number it should move and by how much; on the next tick, what it did.
+
+## Arming the reminder
 
 A reminder inside the session (`sleep` in a background job) dies with the session's processes. A systemd user timer survives them and wakes the session with an Envoy message. Arm it once, from a shell on the machine the session runs on.
 
@@ -12,7 +23,7 @@ Description=Speed tick for NAME's lead
 
 [Service]
 Type=oneshot
-ExecStart=%h/.dotfiles/scripts/envoy send SESSION "SPEED TICK: run the speed loop in leading-a-work-stream (section The speed loop) now."
+ExecStart=%h/.dotfiles/scripts/envoy send SESSION "SPEED TICK: run the six-step loop in leading-a-work-stream references/speed-tick.md now."
 EOF
 cat > ~/.config/systemd/user/speed-tick-NAME.timer <<'EOF'
 [Unit]

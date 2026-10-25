@@ -4,7 +4,7 @@ use read-only tools: read files and your own transcript, run read-only commands.
 commit, launch or write. Sami may read your answer: put no dollar costs in it.
 
 Did your work in this session so far teach you something important that a future agent on this
-project should know up front? Answer only for the top 20% most valuable learnings. Count
+project should know up front? Give only the one most valuable learning; if none is important, the answer is NONE. Count
 only these kinds:
 - a design decision or principle for this system and its reason. Examples: what it must and
   must not do, what the source of truth is, which trade-off was chosen.

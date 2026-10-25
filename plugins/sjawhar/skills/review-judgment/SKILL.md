@@ -1,10 +1,10 @@
 ---
 name: review-judgment
-description: Use when synthesizing findings from multiple reviewers or review passes - triage into Act on / Consider / Noted / Dismissed
+description: Use when you synthesize findings from multiple reviewers or review passes, or decide which review findings to act on and which to dismiss.
 ---
 
 # Review Judgment
 
-Read and apply the bundled [lead judgment reference](references/lead-judgment.md).
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-Source: `pstack/skills/interrogate/references/lead-judgment.md` at cursor/plugins commit `2a8044425c7bddf429c3bdedf3ab61e791d34d65`.
+Read the [lead judgment reference](references/lead-judgment.md) and sort every finding by it.
