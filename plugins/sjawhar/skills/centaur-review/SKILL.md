@@ -74,17 +74,17 @@ When Sami ends his narration:
 Post to the **reviews** endpoint with the review as JSON on standard input. Do not build `comments` from `-f`/`-F` fields: gh adds every `-F` field after every `-f` field, so a review with two comments gets their fields mixed up.
 
 ```bash
-jq -n --arg body "$SUMMARY" \
+review=$(jq -n --arg body "$SUMMARY" \
   --arg commit_id "$(gh pr view <pr> -R "$REPO" --json headRefOid -q .headRefOid)" \
-  --arg c1 '**Suggestion:** Could we handle the empty case here?' '{
+  --arg c1 "$COMMENT1" '{
   body: $body, event: "COMMENT", commit_id: $commit_id,
   comments: [
     {path: "src/example.py", line: 42, body: $c1}
   ]
-}' | gh api repos/$REPO/pulls/<number>/reviews --method POST --input -
+}') && gh api repos/$REPO/pulls/<number>/reviews --method POST --input - <<<"$review"
 ```
 
-- Each comment needs `path` (as in the diff), `line` (a number, in the new file) and `body`. A comment on a deleted line also needs `side: "LEFT"`, with `line` in the old file. Pass each body with `--arg`, so that its quotes and backslashes reach GitHub unchanged.
+- Each comment needs `path` (as in the diff), `line` (a number, in the new file) and `body`. A comment on a deleted line also needs `side: "LEFT"`, with `line` in the old file. Put each body in a shell variable, as `$SUMMARY` is, and pass it with `--arg`, so that its quotes and backslashes reach GitHub unchanged.
 - Never fall back silently to a top-level PR comment.
 
 | Error | Remedy |
