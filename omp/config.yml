@@ -209,6 +209,15 @@ skills:
     # dispatch://INFRA-245 takes two of ce-noslop's tests into our own writing
     # rules; the skill itself (41-rule catalog) stays hidden.
     - ce-noslop
+    # dispatch://INFRA-323: writing-agent-skills (plugins/sjawhar) is the one
+    # skill-writing skill. These two contradict it, and an agent that loads
+    # both gets two procedures. superpowers' writing-skills (v6.3.0) keeps
+    # detail inline, sets word targets under 500 and requires the TDD skill
+    # first. skill-creator (Anthropic's, copied) asks for "pushy"
+    # what-plus-when descriptions and evals through `claude -p`. ignoredSkills
+    # matches by name, so the new skill has a different name.
+    - writing-skills
+    - skill-creator
     # Dropped because their live (shortened) descriptions, what a session
     # actually sees in its skills list, trigger on work that doesn't need
     # Pulumi: pulumi-overview fires on any cloud/SaaS task and can silently
