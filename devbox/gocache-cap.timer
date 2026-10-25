@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly: clean the box's Go build cache when it passes 80 GB (gocache-cap.service)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
