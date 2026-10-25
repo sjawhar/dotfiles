@@ -11,7 +11,7 @@
   ```
 
 - Keep a `.dockerignore` that excludes `.git`, dependency dirs, build artifacts and env or secret files. A large context slows builds and can leak secrets into the image.
-- Multi-stage: the build stage holds the toolchain. The runtime stage copies only artifacts (`COPY --from=build`), onto the smallest base that stays correct (slim, alpine, distroless).
+- Multi-stage: the build stage holds the toolchain. The runtime stage copies only artifacts (`COPY --from=build`), onto the smallest base (slim, alpine, distroless) on which the image's tests or smoke run still pass.
 - Remove package caches in the same `RUN` layer (`rm -rf /var/lib/apt/lists/*`). A later layer can't shrink an earlier one.
 
 ## ARG, ENV and secrets

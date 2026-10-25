@@ -22,7 +22,7 @@
 
 - `jj rebase` leaves `@` where it was. If `@` is on A and you rebase B onto A, then edit for B, the snapshot amends A, and B carries the hunk at once. `jj new` before editing does not prevent this.
 - After every rebase, edit or workspace update: `jj log -r @ --no-graph -T 'change_id.short() ++ " " ++ description.first_line()'`.
-- If you suspect a rewrite, grep the hunk's identifier in the file at each SHA: pre-rebase, approved tip, current tip. That shows where it entered. Diff from the SHA a gate cited, not the branch name.
+- If you suspect a rewrite, grep the hunk's identifier in the file at each SHA: pre-rebase, approved tip, current tip. That shows where it entered. Diff from the SHA a reviewer or CI check cited, not the branch name.
 
 ## After an interruption, check what `@` is
 

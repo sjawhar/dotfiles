@@ -5,42 +5,24 @@ description: "Use when the devbox GNOME keyring is locked, or after a devbox reb
 
 # Unlock the devbox keyring
 
-Every reboot locks the `login` keyring. SSH login cannot unlock it: `ubuntu` has no Unix password, and only `common-password` loads `pam_gnome_keyring.so`.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
+Every reboot locks the `login` keyring. SSH login cannot unlock it: `ubuntu` has no Unix password, and only `/etc/pam.d/common-password` loads `pam_gnome_keyring.so`.
 
 ## Unlock
 
-1. Only Sami has the password. Ask him to run `unlock-keyring` in a terminal on the box and type it at the prompt. The function is in `~/.dotfiles/.bashrc`. It runs these commands:
+- Only Sami has the password. Ask him to run `unlock-keyring` in a terminal on the box and type it at the prompt. The function is in `~/.dotfiles/.bashrc`: it stops the units Ubuntu ships (`gnome-keyring-daemon.service` and `gnome-keyring-daemon.socket`), starts a daemon with the password, and prints `keyring unlocked` or the failure.
+- Never automate the password, and never bypass the lock with `PYTHON_KEYRING_BACKEND` or a plaintext backend: a secret then sits unencrypted on disk.
+- An unlock attempted without that function must stop both units first: `--unlock` unlocks only a daemon that it starts, so while Ubuntu's daemon runs each attempt logs `another secret service is running` and changes nothing. Never pass `--start` with `--unlock`: the two flags are incompatible, and the working invocation is the function's `--unlock --components=pkcs11,secrets --daemonize`.
+- Never retry by running `gnome-keyring-daemon --unlock` yourself; unlock through the function. Each such run takes `/run/user/1000/keyring/control` and deletes the control directory when it exits, so clients fail with `couldn't access control socket: No such file or directory`. To recover: kill each stray `gnome-keyring-daemon --unlock` by PID, run `systemctl --user restart gnome-keyring-daemon.socket`, then unlock again.
 
-   ```bash
-   systemctl --user stop gnome-keyring-daemon.service gnome-keyring-daemon.socket
-   read -rsp 'Keyring password: ' KP && printf '%s' "$KP" | \
-     gnome-keyring-daemon --unlock --components=pkcs11,secrets --daemonize; unset KP; echo
-   busctl --user get-property org.freedesktop.secrets \
-     /org/freedesktop/secrets/collection/login \
-     org.freedesktop.Secret.Collection Locked   # must print: b false
-   ```
+## Relocks (about daily)
 
-2. If you change this procedure, change the function and this block together.
-
-- Never automate the password. Never bypass the lock with `PYTHON_KEYRING_BACKEND` or a plaintext backend.
-- Always stop the stock units first. `--unlock` unlocks only a daemon that it starts. While the stock service runs, each attempt logs `another secret service is running` and changes nothing. `--start` is incompatible with `--unlock`.
-- Never retry with a bare `gnome-keyring-daemon --unlock`. Each one takes `/run/user/1000/keyring/control` and deletes the control directory when it exits, so clients fail with `couldn't access control socket: No such file or directory`. To recover:
-  1. Kill each stray `gnome-keyring-daemon --unlock` by PID.
-  2. `systemctl --user restart gnome-keyring-daemon.socket`
-  3. Do the unlock again.
-
-## Relocks (approximately daily)
-
-- A relock is a SIGABRT crash of the unlocked daemon. D-Bus activation then starts the stock service, which has no password. Unlock again.
-- The bug is in the Ubuntu `gnome-keyring` package (46.1-2ubuntu0.2), not in a client. Signature:
+- A relock is a SIGABRT crash of the unlocked daemon, from a bug in Ubuntu's `gnome-keyring` package (46.1-2ubuntu0.2), not in a client. D-Bus activation then restarts Ubuntu's unit, which has no password. Unlock again. The crash signature in the journal is:
 
   ```
   GLib-GIO:ERROR:../../../gio/gdbusconnection.c:4749:invoke_get_property_in_idle_cb:
     assertion failed: (error != NULL)
   ```
 
-- A D-Bus property read causes the abort. Never put the `busctl get-property … Locked` check in a watch loop. Check one time after each unlock.
-- To read a crash report:
-  1. apport keeps one report per binary. Move `/var/crash/_usr_bin_gnome-keyring-daemon.1000.crash` aside, if it exists, before you expect a new report.
-  2. `apport-unpack <file> <dir>`
-  3. `gdb -q -batch -ex 'p (char *) __glib_assert_msg' -ex 'bt 12' /usr/bin/gnome-keyring-daemon <dir>/CoreDump`
+- A D-Bus property read causes the abort, so never put a `busctl get-property … Locked` check in a watch loop; check once after each unlock.
