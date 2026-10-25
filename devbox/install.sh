@@ -33,4 +33,8 @@ bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 # sign-in; Sami's login stays in configuration `theorem` (see installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
+# The empty tmp* directories Python's mkdtemp leaves in TMPDIR on the big disk, pruned daily
+# (devbox/tmp-empty-prune.service).
+arm_user_timer devbox tmp-empty-prune
+
 echo "--- Devbox setup complete ---"

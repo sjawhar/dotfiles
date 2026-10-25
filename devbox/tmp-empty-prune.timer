@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily: delete empty tmp* directories from the big disk's TMPDIR (tmp-empty-prune.service)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target
