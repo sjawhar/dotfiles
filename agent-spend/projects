@@ -2,10 +2,17 @@
 # GLOB PROJECT [SUBPROJECT]; the first glob that matches the session's working directory wins; no match: `shared`.
 # A session started with THEOREM_PROJECT (and THEOREM_SUBPROJECT) set uses those instead.
 */oss-verifier*                 oss-verify
+*/oss-verify*                   oss-verify
 */agent-infra*                  agent-infra
-*/binary-equivalence-taiga*     binary-equivalence
+*/binary-equivalence*           binary-equivalence
 */rocq-speed*                   rocq-speed
 */src/speed-*                   rocq-speed
+*/speed-loop*                   rocq-speed
+*/nvme/sami/tmp/speedcoach*     rocq-speed
+*/nvme/sami/gate*               rocq-speed
 */xv6*                          xv6
 */legion*                       legion
 */Code/legion*                  legion
+*/nvme/sami/chief*              agent-process
+*/nvme/sami/librarian*          agent-process
+*/nvme/sami/explainer*          agent-process
