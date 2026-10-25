@@ -11,10 +11,10 @@ The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in 
 
 ## What a lead does
 
-1. **Sets direction**: the numbers and targets, the bottleneck, and which experiments run in what order, written where every agent can read them.
+1. **Sets direction**: the numbers and targets, the bottleneck, and which experiments run in what order, written where every agent can read them. Open the stream's issue with three lines above its targets: the problem the stream exists to solve, the one approach it commits to, and what it will not do. Ask the user the three questions once, in one message, with a draft answer for each taken from the user's own words. Push once on an answer that decides nothing. Agents use the third line as a constraint on their own choices.
 2. **Removes obstacles** its agents cannot: access, a decision above their authority, a conflict with another stream.
 3. **Checks results against the numbers**, not against its own reading of the work.
-4. **Coaches each agent's loop**: is it measuring, predicting, trying enough designs? Procedure, not solutions.
+4. **Coaches each agent's loop**: is it measuring, predicting, trying enough designs? Procedure, not solutions. An experiment on a number with a benchmark that runs in minutes runs through `/autoresearch`, with the expected gain in its notes before each run and the change run again before it is kept; ce-optimize instead when the result is noisy or has several objectives. A one-off change still gets its prediction written in the scoreboard before it starts.
 5. **Makes the stream faster**: finds where agents lose time and changes the skill, tool or step that causes it.
 
 ## What a lead does not do

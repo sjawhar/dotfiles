@@ -33,7 +33,8 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 
 1. Check `proc://`. Start a watcher when this wake is its completion or none runs. Never start a second one. An Envoy delivery does not prove the watcher runs.
 2. Envoy publish to the librarian role: add a Leads row (source session, issue, text, received). When a skill or document covers its blocker, write `replied` and the pointer in `status` and read the row back. Then `envoy_send(session_id=<sender>, message=<skill:// or file, one line on what it says>)`.
-3. Interview round:
+3. Read the user's Slack messages and Dispatch comments since the last wake. Log each correction as a ledger row with its link, and read the rows back before you move the cursor.
+4. Interview round:
    1. Candidates: `~/.omp/agent/sessions/-*/*.jsonl`, except your own (`_<$OMP_SESSION_ID>.jsonl`).
    2. Skip a file whose mtime is before its `last interview (UTC)`: it did nothing since.
    3. Run `omp-session-active --since-line <last line> <file>`, without the flag for a session with no row (stretch starts at 1). Due when `active_seconds_since >= 10800`, or with no row, `active_seconds >= 10800`. N is `lines`.
@@ -43,16 +44,16 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
       - Fork, as a bash job with `timeout: 1500`: `omp-fork --at N --max-time 20m --prompt-file <skill dir>/references/interview-question.md <file>`. JSON `cut` is the line it stood on. Discard the answer unless `model` starts with `anthropic/`. `fallback` true: add `fallback` to `notes`.
       - Reader: the `task` tool takes no model argument. First check `~/.dotfiles/omp/config.yml`: `modelRoles.task`, `task.agentModelOverrides.task`, and each `retry.fallbackChains` entry that can serve that model (its key, else `default`). Any not `anthropic/`: no reader this round, `notes` = `reader skipped: task role not Claude-only`. Else dispatch one `task` agent with `<skill dir>/references/reader-brief.md`: START = last line (or 1), END = `cut` (or N), SCRATCH = a fresh `mktemp -d` for it alone. Afterward, read its session's last `model_change`. Discard the report unless `anthropic/`.
    5. Insert or update the Sessions row (session, harness, machine, title, `last interview (UTC)` = now, `last line` = `cut` or N). Read it back before any later ledger update or routing.
-4. Cross-reference before any write:
+5. Cross-reference before any write:
    - Merge duplicates into one lesson. `seen` counts sessions. Forks of one parent count once.
    - Settle a contradiction empirically (run it, read the source, reproduce it in a throwaway directory), never by majority or recency. Record the check in `verdict`.
    - Check one citation per reader report before you trust the rest. A "holds" that only quotes the transcript stays `UNVERIFIED`.
-5. Record, then route. Write the Lesson row, read it back, route to its one home (table below), then put the link and status in its home cell. Route only a lesson that a command, file read or reproduction checked. Before you create or edit a skill, run `skill://writing-skills` (baseline test first) and write to `skill://asd-ste100` strict.
+6. Record, then route. Write the Lesson row, read it back, route to its one home (table below), then put the link and status in its home cell. Route only a lesson that a command, file read or reproduction checked. Before you create or edit a skill, run `skill://writing-skills` (baseline test first) and write to `skill://asd-ste100` strict.
    - A lesson that shows a defect in a tool gets a code fix in that tool, made by the librarian. Never write a doc line that works around it.
    - No agent owns a repository: make the fix yourself, never route it to a lane.
    - Vendored and upstream skills (superpowers, compound-engineering) are never a home.
    - A mistake an agent made once is not a rule. Propose an edit to Sami's CLAUDE.md or skills only for his own words not yet written there, or a costly failure seen in several sessions. Else drop the lesson.
-6. Do no catch-up search for Envoy publishes you missed. A later reader round reads those from a session on this machine that crosses 3 more active hours. Accept the loss of the others.
+7. Do no catch-up search for Envoy publishes you missed. A later reader round reads those from a session on this machine that crosses 3 more active hours. Accept the loss of the others.
 
 ## Writing to the ledger
 
