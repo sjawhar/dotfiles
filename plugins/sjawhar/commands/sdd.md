@@ -142,6 +142,7 @@ fetch_part() {
   - `BLOCKED`: the failed command and the authoritative record, never a person's name. Check another lane's reported blocker against that record.
   - `WAIVED-BY-SAMI`: a named blocker Sami explicitly waived, linked to his words. It covers that blocker on that change only.
 - Contract census: exercise every human entry point through the real client and the new check. Each unrun entry is `BLOCKED`.
+- For a slice with a browser page, the implementer runs ce-dogfood (read ~/.dotfiles/vendor/compound-engineering/skills/ce-dogfood/SKILL.md) on its branch, with the real data the user sees and the user named as the persona, before handing over. It fixes clipped text, empty states and dead clicks; the report goes on the slice's Dispatch issue, and each decision it leaves for a person becomes a decision block in the spec.
 - Build or repair missing infrastructure, tooling, skills or drivers at the tested head, then rerun the affected scenarios.
 - `BLOCKED` stops merge readiness until every scenario runs or Sami waives its named blocker. Independent work continues.
 - Never ask Sami to omit acceptance or to accept a proxy. A named blocker that survives building or repairing the surface goes to him as a pre-merge decision.
