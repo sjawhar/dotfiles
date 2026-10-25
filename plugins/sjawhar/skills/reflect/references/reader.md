@@ -16,7 +16,7 @@ You read records of Sami's messages to coding agents. Sami runs a fleet of agent
 
 A finding is one agent failure. It needs these quotes, each copied verbatim (whitespace may differ; use `...` to skip words inside a long quote):
 
-- `instruction`: what the agent should have followed. Usually Sami's words (this message, his previous message, or an earlier record of the same session); otherwise a rule file, with `instruction_source` set to its path, e.g. `~/.claude/CLAUDE.md`. Use `record` when the quote is in the record.
+- `instruction`: what the agent should have followed. Usually Sami's words (this message, his previous message, or an earlier record of the same session); otherwise a rule file, with `instruction_source` set to a path that exists on this box, e.g. `~/.dotfiles/.claude/CLAUDE.md` (`~/.claude/CLAUDE.md` does not). Use `record` when the quote is in the record.
 - `action`: the agent's words or tool call that broke it, from the record.
 - `pushback`: Sami's words that object to it, from one of his messages in the record. If he did not push back, set `pushback` to `null` and still record the finding.
 

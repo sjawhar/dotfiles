@@ -11,6 +11,9 @@ This reports, and exits 1 if any are found:
   that is not in the record text (or, for an instruction with `instruction_source` naming a
   file, in that file). Whitespace runs count as one space; `...` or `…` in a quote splits it into
   pieces that must appear in order;
+- missing source: an `instruction_source` path that no file answers, so the quote could not be
+  checked at all. This is not a bad quote: the usual cause is a stale path (`~/.claude/CLAUDE.md`
+  for `~/.dotfiles/.claude/CLAUDE.md`), and the fix is the path, not the finding;
 - pushback not Sami's: a `pushback` that is in the record but not inside one of his messages.
 
 A finding with `pushback: null` is counted as `unpushed`: a failure Sami did not push back on.
@@ -71,7 +74,7 @@ def main() -> None:
             else:
                 rows[rid] = r
     missing = sorted(set(expected) - set(rows))
-    bad, not_sami = [], []
+    bad, not_sami, no_src = [], [], []
     n_find = n_unpushed = n_pat = 0
     for rid, r in rows.items():
         raw = Path(expected[rid][1]).read_text()
@@ -87,7 +90,10 @@ def main() -> None:
                 src = text
                 if key == "instruction" and f.get("instruction_source") not in (None, "", "record"):
                     path = Path(f["instruction_source"].split(":")[0]).expanduser()
-                    src = norm(path.read_text()) if path.is_file() else ""
+                    if not path.is_file():
+                        no_src.append({"record": rid, "finding": k, "source": f["instruction_source"], "quote": q})
+                        continue
+                    src = norm(path.read_text())
                 if not q or not found(q, src):
                     bad.append({"record": rid, "finding": k, "field": key, "quote": q})
                 elif key == "pushback" and not found(q, sami):
@@ -99,15 +105,16 @@ def main() -> None:
     report = {
         "records": len(expected), "rows": len(rows), "missing": missing, "duplicate": dup, "unknown": unknown,
         "findings": n_find, "unpushed": n_unpushed, "patterns": n_pat,
-        "bad_quotes": bad, "pushback_not_sami": not_sami,
+        "bad_quotes": bad, "pushback_not_sami": not_sami, "missing_source": no_src,
         "missing_batches": sorted({expected[m][0] for m in missing}),
     }
     out = Path(a.out) if a.out else d / "check.json"
     out.write_text(json.dumps(report, indent=1, ensure_ascii=False))
     print(f"{len(rows)}/{len(expected)} records have a row; {len(missing)} missing "
           f"(batches {' '.join(report['missing_batches']) or '-'}); {n_find} findings ({n_unpushed} unpushed), "
-          f"{n_pat} patterns; {len(bad)} quotes not found, {len(not_sami)} pushbacks outside Sami's words -> {out}")
-    sys.exit(1 if missing or dup or bad or not_sami else 0)
+          f"{n_pat} patterns; {len(bad)} quotes not found, {len(not_sami)} pushbacks outside Sami's words, "
+          f"{len(no_src)} instruction sources missing -> {out}")
+    sys.exit(1 if missing or dup or bad or not_sami or no_src else 0)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ python3 $S/assign-readers.py records --max-records 12
 ## 4. Check what was read
 
 - A fresh agent that read no records runs `references/checker.md`. A reader cannot certify its own batch, because a reader that skipped a record also skips reporting it.
-- `scripts/check-findings.py` lists records with no row, duplicate rows, quotes that are not in their record and pushbacks that are not in Sami's words, and exits 1 when it finds any.
+- `scripts/check-findings.py` lists records with no row, duplicate rows, quotes that are not in their record, pushbacks that are not in Sami's words and instruction sources no file answers, and exits 1 when it finds any. Split its flagged items across several fresh checkers when they run past about 20: each returns a fix or a rejection per item, and one agent merges them into `verdict.json`.
 - Re-run only the batches the checker names, with fresh readers, at most three rounds, and never re-check a record that passed.
 
 ## 5. Code the findings into types
