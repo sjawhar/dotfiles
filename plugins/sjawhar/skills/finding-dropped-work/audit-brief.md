@@ -54,16 +54,13 @@ tq sql "SELECT session_id, title, path, started_at, ended_at FROM sessions_lates
         WHERE session_id LIKE '<prefix>%' AND parent_session IS NULL"
 ```
 
-The user's own words in the window: typed messages, and Dispatch events whose actor is a person (asks answered, comments, messages, broadcasts):
+The user's own words in the window: what they typed, and what they wrote in Dispatch (an ask answer, a comment, a message, a broadcast). One row per thing they did, newest first, each with its `FILE:LINE`:
 
 ```bash
-tq sql "SELECT ts, raw_line, role, substring(replaceAll(text, '\n', ' '), 1, 400) AS text
-        FROM messages
-        WHERE session_id = '<id>' AND ts >= '<start>' AND ts < '<end>'
-          AND ((kind = 'user' AND role = 'user')
-               OR (role = 'custom:envoy-message' AND match(text, 'actor:\\s+kind: user')))
-        ORDER BY ts"
+tq search --human --session '<id>' --from '<start>' --to '<end>' --limit 500
 ```
+
+Count the rows before you report. A session a person worked with for a day has tens of them; one or two rows means the session id or the window is wrong. `skill://using-transcript-store` says what `--human` covers.
 
 Relays that may quote the user (a parent's brief, an agent's message):
 
@@ -78,7 +75,7 @@ tq sql "SELECT ts, raw_line, substring(text, 1, 300) FROM messages
 The session's own words after a message, and what it did:
 
 ```bash
-tq next '<a phrase from the message>' -n 5
+tq next '<a phrase from the row>' --human --session '<id>' -n 8
 tq sql "SELECT started_at, tool, raw_line, substring(command, 1, 200) FROM calls
         WHERE session_id = '<id>' AND started_at >= '<start>' AND started_at < '<end>'
           AND (positionCaseInsensitive(command, 'dispatch ask') > 0 OR positionCaseInsensitive(command, 'dispatch issue') > 0)
