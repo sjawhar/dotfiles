@@ -6,40 +6,42 @@ args: "<pr_url_or_number>"
 
 # Centaur Review
 
-Sami leads. Do not replace his judgment with analysis he did not ask for.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
+Sami leads: show your analysis or the agents' findings only when he asks, or at §3 step 4. Unasked analysis replaces his judgment.
 
 In a jj checkout, pass the repository explicitly (`gh -R <owner>/<repo> ...`). Never export `GIT_DIR` or `GIT_WORK_TREE`: they send unrelated git subprocesses, test fixtures too, into the shared repository.
 
 ## 1. Set up
 
-1. Without a PR URL or number, do not start.
+1. Without a PR URL or number, do not start: never guess which PR.
 2. Fetch the PR, its diff, its linked issues, and all reviews and comments:
 
    ```bash
-   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-   gh pr view <pr> --json number,title,body,url,headRefName,baseRefName,headRefOid,files
-   gh pr diff <pr>
+   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)   # jj checkout: REPO=<owner>/<repo>
+   gh pr view <pr> -R "$REPO" --json number,title,body,url,headRefName,baseRefName,headRefOid,files
+   gh pr diff <pr> -R "$REPO"
    gh api repos/$REPO/pulls/<number>/reviews
    gh api repos/$REPO/pulls/<number>/comments
-   gh pr view <pr> --comments
+   gh pr view <pr> -R "$REPO" --comments
    ```
 
-3. For a re-review, summarize open requests, unanswered questions, unresolved threads, changes since Sami's review, and material concerns from other reviewers.
-4. Start these agents in parallel with the `task` tool. Keep their results until step 3.
+3. If Sami has already reviewed this PR, summarize open requests, unanswered questions, unresolved threads, changes since Sami's review, and other reviewers' concerns.
+4. Start these agents in parallel with the `task` tool. Keep their results until §3.
 
    | Agent | Finds |
    | --- | --- |
-   | `bug-finder` | significant correctness, security, concurrency, edge-case defects |
-   | `code-simplifier` | consequential needless complexity or abstraction |
+   | `bug-finder` | correctness, security, concurrency and edge-case defects that change what the code does |
+   | `code-simplifier` | complexity or abstraction a smaller change removes |
    | `code-architect` | structural effects, pattern drift, cross-module effects |
-   | `code-reviewer` | omissions, scope creep and material deviations from the linked issue |
+   | `code-reviewer` | omissions, scope creep and deviations the linked issue does not allow |
 
 ## 2. Track the narration
 
 - Keep a private tracker: `# | file:start_line-end_line | severity | observation`.
-- Find each location from an explicit reference or the diff. If a quote or concept is ambiguous, ask Sami which file or line. Never guess.
+- Find each location from an explicit reference or the diff. If his quote or concept matches no place or several, ask Sami which file or line. Never guess: a misplaced comment misleads the author.
 - Use new-file lines for additions, old-file lines for deletions.
-- Acknowledge each observation briefly, without interrupting his flow.
+- Acknowledge each observation in one line, so he keeps reading.
 - When he asks, show the tracker, show your analysis, or drop the last item.
 
 | Severity | His words |
@@ -54,11 +56,11 @@ In a jj checkout, pass the repository explicitly (`gh -R <owner>/<repo> ...`). N
 
 When Sami ends his narration:
 
-1. Check every tracked location.
-2. Ask the `red-teamer` agent to challenge each comment, not to review the PR: is it right, does it miss context, will it make the code better?
-3. Collect the four results from step 1. Discard each "Nothing to add".
-4. Show Sami his comments, the challenges and the candidate findings. He decides what stays.
-5. Write each kept comment as a clear observation, then a concrete question or change where one fits. Be friendly and direct. Put clarity and actionability before softening. No emojis in place of precision.
+1. Open each tracked `file:start_line-end_line` in the diff and confirm the lines show the observation. Ask Sami about each that does not.
+2. Ask the `red-teamer` agent to challenge each comment, not to review the PR: is it right, does it miss context, will it improve the code?
+3. Collect the four agent results from §1 step 4. Discard each that reports no finding.
+4. Show Sami his comments, the challenges and the four agents' findings. He decides what stays.
+5. Write each kept comment as a clear observation, then a concrete question or change where one fits. Open with it, not praise or a hedge, so the author sees the point. No emojis.
 
    ```markdown
    **Suggestion:** Could we return early when `items` is empty? The caller can supply
@@ -67,32 +69,8 @@ When Sami ends his narration:
    ```
 
 6. After the inline comments, write a concise summary that starts with `## Review Summary`.
-7. Post only after Sami explicitly approves.
+7. Post only after Sami explicitly approves: the review goes out under his name.
 
 ## 4. Post the review
 
-Post to the **reviews** endpoint with the review as JSON on standard input. Do not build `comments` from `-f`/`-F` fields: gh adds every `-F` field after every `-f` field, so a review with two comments gets their fields mixed up.
-
-```bash
-COMMENT1=$(cat <<'EOF'
-**Suggestion:** Could we handle the empty case here?
-EOF
-)
-head=$(gh pr view <pr> -R "$REPO" --json headRefOid -q .headRefOid) &&
-review=$(jq -n --arg body "$SUMMARY" --arg commit_id "$head" --arg c1 "$COMMENT1" '{
-  body: $body, event: "COMMENT", commit_id: $commit_id,
-  comments: [
-    {path: "src/example.py", line: 42, body: $c1}
-  ]
-}') && gh api repos/$REPO/pulls/<number>/reviews --method POST --input - <<<"$review"
-```
-
-- Each comment needs `path` (as in the diff), `line` (a number, in the new file) and `body`. A comment on a deleted line also needs `side: "LEFT"`, with `line` in the old file. Set each body, `$SUMMARY` too, with a quoted heredoc as `COMMENT1` is, and pass it with `--arg`, so that its quotes, backticks and backslashes reach GitHub unchanged.
-- Never fall back silently to a top-level PR comment.
-
-| Error | Remedy |
-| --- | --- |
-| `"line" is not a permitted key` | Wrong endpoint: use `/pulls/{number}/reviews`, not `/comments`. |
-| HTTP 422 or a missing inline comment | Check each comment's `path`, `line` and `body`, the diff path and the new-file line (for a deleted line, `side: "LEFT"` and the old-file line). |
-
-Report the review URL that GitHub returns.
+Post to the **reviews** endpoint (`repos/$REPO/pulls/<number>/reviews`) with the review as JSON on stdin: `gh`'s `-f`/`-F` fields mix up the fields of two comments. The exact command, the per-comment keys and the errors are in `references/posting-a-review.md`. Report `.html_url` from the response.

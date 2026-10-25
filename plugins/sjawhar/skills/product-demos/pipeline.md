@@ -9,6 +9,11 @@ uv pip install elevenlabs
 which agg ffmpeg ffprobe
 ```
 
+## Input and readiness traps (GUI or editor recording)
+
+- Playwright input goes to its target page, not always to the screen, and fails silently. `keyboard.type` into an agent in the VS Code terminal is lost. A CDP click does not move X focus. A chord (`F9`) with focus in a sidebar webview never gets to the workbench. For these, click the target with `xdotool mousemove; click`, then type or press at the X level.
+- Do not wait for readiness on text in a viewport-dependent region (xterm renders only visible rows). Wait for any startup line, then sleep a fixed delay. If no line appears, sleep that delay and continue.
+
 ## Record, convert, trim
 
 ```bash

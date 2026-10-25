@@ -5,25 +5,25 @@ description: Use when a gh-stack PR stack is complete and every stacked PR has i
 
 # Squash Stack
 
-The top PR of the stack becomes the consolidated PR. Make no new branch and no new PR.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
+The top PR becomes the consolidated PR: its branch already holds the full diff. Make no new branch and no new PR.
 
 ## Preconditions
 
-- `gh stack view --json` shows the stack. All branches are on the remote and all PRs are open.
-- Each PR has its agent review. Fix open findings on the branch that owns them, then `gh stack rebase --upstack`.
-- The `sdd` smoke test and final review are clean.
+- `gh stack view --json` lists the stack: every branch is on the remote, every PR open.
+- Each PR has a reviewer agent's review. Fix a finding on the branch whose diff introduced the line, then `gh stack rebase --upstack`, so the branches above carry it.
+- From an `sdd` plan: smoke test passes, final review has no open findings.
 
 ## Keep the stack ungrouped while you push
 
-- A PR in a native stack (`gh stack link`) gets no `github-actions` check suites on `synchronize` or `labeled`. `gh stack unstack <n>` re-queues `PR Checks` within about 30 seconds, with no new push. If it doesn't, look for another cause. The cause is unknown, but the symptom reproduces.
-- Let the PR bases carry the order, and name each base in the PR's packet. Group only at merge time, if your merge tooling needs it.
-- A stack you did not create has no CI? Look for grouping before you re-run: a re-run cannot make a suite that the event did not create.
+A PR grouped into a native stack (`gh stack link`) gets no `github-actions` check suites on `synchronize` or `labeled`. Let the PR bases carry the order, name each base branch in the PR body, and group only at merge time, if your merge command refuses an ungrouped stack. No check suites on a stack PR: check `gh stack view --json` for grouping before a re-run, which cannot make a suite the event never created. `gh stack unstack <n>` re-queues `PR Checks` in ~30 s, with no push.
 
 ## Collapse the stack
 
-1. `gh stack view --json`: get the trunk, the branches in order, and the top branch and PR.
-2. `gh stack sync --prune`.
-3. `gh pr edit <top-pr> --base <trunk>`. The top branch already holds the full diff.
+1. `gh stack view --json`: trunk, branches in order, top branch and PR.
+2. `gh stack sync --prune`. Resolve any conflict and re-run.
+3. `gh pr edit <top-pr> --base <trunk>`.
 4. Squash and push. The request to squash the stack is the approval for this force-push.
    ```bash
    git checkout <top-branch>
@@ -31,13 +31,13 @@ The top PR of the stack becomes the consolidated PR. Make no new branch and no n
    git commit -m "<one summary of the whole change>"
    git push --force-with-lease
    ```
-   Keep a small, deliberate series of commits only when the layers really help review. Resolve conflicts as usual and continue the sequence.
-5. `gh pr edit <top-pr>` with a title and body for the whole change, not the last slice. The body summarizes what the stack built, lists each consolidated PR (number, link, review outcome), and has the `## Verification` section from `opening-a-pr`.
-6. Close each base PR and keep its branch: `gh pr close <N> --comment "Consolidated into #<top-pr>; the reviewed diff lives there."`
-7. `gh stack unstack`. It removes tracking only.
+   Keep a series of commits only when the layers help review — a reviewer asked, or each stands alone.
+5. `gh pr edit <top-pr>`: title and body for the whole change, not the last slice: what the stack built, each consolidated PR (number, link, review outcome), and the `## Verification` section from `opening-a-pr`.
+6. Close each base PR and keep its branch, whose commits its review comments point at: `gh pr close <N> --comment "Consolidated into #<top-pr>; the reviewed diff lives there."`
+7. `gh stack unstack`: it removes the local tracking and the GitHub grouping, not the branches or PRs.
 
-`gh stack` has no collapse command. Never use `gh stack merge --squash`: it merges the stack into the trunk and skips the consolidated review.
+`gh stack` has no collapse command. Never use `gh stack merge --squash`: it merges the stack into the trunk, skipping the consolidated review.
 
 ## After approval
 
-When Sami approves, squash-merge. No admin merge, no bypass of branch protection, and never give the PR back to Sami to merge. Then do the `post-merge` sweep.
+When Sami approves, squash-merge it yourself; never hand the PR back to him. No admin merge and no bypass of branch protection: bypassing merges a diff whose checks never ran. Then do the `post-merge` sweep.

@@ -15,8 +15,8 @@ For each arXiv id, pulls:
 Prints JSON: [{id, similar:[{title,abstract,id}], comments:[...], overview_excerpt}]
 
 NOTE: alphaXiv publishes no official API contract; these are observed-stable
-public endpoints. Treat failures as non-fatal — the skill's arXiv/librarian
-grounding remains the source of truth for baseline numbers.
+public endpoints. Treat failures as non-fatal — the `arxiv_search.py` and
+`litground.py` lookups remain the source of truth for baseline numbers.
 """
 import argparse
 import json

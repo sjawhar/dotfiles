@@ -1,6 +1,15 @@
 # ground-truth.json schema
 
-One object per paper. Adapt the field wording to the paper's field.
+## Extraction rules
+
+- Record every claim the paper states, the full mechanism, the setup, and every exact number, method name and benchmark name. Never invent one. Omit what the paper lacks.
+- Keep the authors' hedging, so the script claims no more than the paper.
+- Fill `limitations` and `open_questions` for every paper.
+- `evidence` names the experiment, mechanism or reasoning behind the claim.
+
+## Schema
+
+One object per paper. Keep the JSON keys. Adapt the example values (metric names, units) to the paper's research area.
 
 ```json
 {

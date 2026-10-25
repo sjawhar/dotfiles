@@ -5,36 +5,17 @@ description: Use when hardening a publicly reachable EC2 instance used as a dail
 
 # Harden an EC2 devbox
 
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
 - Never lock the user out. Open each new access path and confirm that it works before you close the old one.
 - At each **GATE**, stop until the user confirms.
 - Prerequisites: an authenticated AWS CLI (on the instance or the user's laptop), a Tailscale account for the user, and working SSH access now.
 
 ## Step 1: Assess
 
-Run all of these. Present the findings as "good" or "concerning".
+Read the current posture and present each finding as "good" or "concerning": OS release and patch state, listening sockets, firewall rules (ufw, iptables, nftables), the effective `sshd -T` settings and every drop-in under `/etc/ssh/sshd_config.d/`, login-capable accounts, `/root/.ssh/authorized_keys`, fail2ban, unattended-upgrades, AppArmor, auditd, network sysctls, enabled services, published Docker ports, and from AWS the instance's security groups, IMDS options and IAM instance profile.
 
-```bash
-uname -a && cat /etc/os-release
-ss -tlnp && ss -ulnp
-sudo iptables -L -n && sudo ufw status && sudo nft list ruleset
-sudo sshd -T | grep -iE 'permit|password|x11|maxauth|subsystem|clientalive'
-cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null
-grep -vE 'nologin|/bin/false|/bin/sync' /etc/passwd
-ls -la /root/.ssh/authorized_keys 2>/dev/null
-sudo grep 'PermitRootLogin' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null
-dpkg -l | grep -iE 'fail2ban|unattended-upgrades|apparmor|auditd'
-cat /etc/apt/apt.conf.d/20auto-upgrades
-sysctl net.ipv4.ip_forward net.ipv4.conf.all.accept_redirects \
-  net.ipv4.conf.all.accept_source_route net.ipv4.conf.all.send_redirects
-sudo systemctl list-unit-files --state=enabled --type=service
-TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 60") && \
-curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id
-aws ec2 describe-instances --instance-ids $INSTANCE_ID \
-  --query 'Reservations[0].Instances[0].{SGs:SecurityGroups,IMDS:MetadataOptions,IAM:IamInstanceProfile}'
-```
-
-Collect these values:
+Collect these values; later steps use them:
 
 | Variable | Source |
 |----------|--------|
@@ -49,64 +30,14 @@ Collect these values:
 
 Do this first: SSM gives access that does not depend on SSH, Tailscale or network rules.
 
-1. Confirm that the agent runs. If it is missing: `sudo snap install amazon-ssm-agent --classic`.
-
-```bash
-sudo systemctl status snap.amazon-ssm-agent.amazon-ssm-agent.service
-# or: sudo systemctl status amazon-ssm-agent
-```
-
-2. Do NOT use `AmazonSSMManagedInstanceCore`: it grants 15 or more actions. The policies below grant 5.
-3. Before you apply them, have the `cybersecurity-expert` agent (the `task` tool) review both policies.
-
-Trust policy (`aws:SourceAccount` blocks the confused-deputy problem):
-
-```json
-{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
-  "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole",
-  "Condition": {"StringEquals": {"aws:SourceAccount": "$ACCOUNT_ID"}}}]}
-```
-
-Inline policy (Session Manager only, explicit deny on all else):
-
-```json
-{"Version": "2012-10-17", "Statement": [
-  {"Sid": "SSMAgentHeartbeat", "Effect": "Allow", "Action": ["ssm:UpdateInstanceInformation"], "Resource": "*"},
-  {"Sid": "SessionManagerChannels", "Effect": "Allow", "Resource": "*", "Action": [
-    "ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel",
-    "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel"]},
-  {"Sid": "DenyEverythingExceptSessionManager", "Effect": "Deny", "Resource": "*", "NotAction": [
-    "ssm:UpdateInstanceInformation",
-    "ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel",
-    "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel"]}]}
-```
-
-```bash
-aws iam create-role --role-name EC2-SSM-SessionOnly \
-  --assume-role-policy-document '<trust_policy_json>' \
-  --tags Key=purpose,Value=ssm-session-only
-aws iam put-role-policy --role-name EC2-SSM-SessionOnly \
-  --policy-name SSMSessionManagerMinimal \
-  --policy-document '<inline_policy_json>'
-aws iam create-instance-profile --instance-profile-name EC2-SSM-SessionOnly
-aws iam add-role-to-instance-profile --instance-profile-name EC2-SSM-SessionOnly \
-  --role-name EC2-SSM-SessionOnly
-sleep 10  # IAM propagation
-aws ec2 associate-iam-instance-profile --instance-id $INSTANCE_ID \
-  --iam-instance-profile Name=EC2-SSM-SessionOnly
-sudo snap restart amazon-ssm-agent  # or sudo systemctl restart amazon-ssm-agent
-sleep 15
-aws ssm describe-instance-information --filters Key=InstanceIds,Values=$INSTANCE_ID
-curl -so /tmp/session-manager-plugin.deb \
-  "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
-sudo dpkg -i /tmp/session-manager-plugin.deb && rm /tmp/session-manager-plugin.deb
-```
+1. Confirm that the agent runs (`sudo systemctl status snap.amazon-ssm-agent.amazon-ssm-agent.service`, or `amazon-ssm-agent` when it is not a snap). If it is missing: `sudo snap install amazon-ssm-agent --classic`.
+2. Create the minimal role, attach it and install the session-manager plugin: follow `references/ssm-escape-hatch.md`, which holds both IAM policies and the exact commands.
 
 **GATE:** the user runs `aws ssm start-session --target $INSTANCE_ID --region $REGION` from their laptop.
 
 ## Step 3: Tailscale
 
-Install from the apt repo, not with curl-pipe-sh (supply-chain safety):
+Install from the apt repo, not with `curl ... | sh`: apt checks each package against Tailscale's signing key, and a piped script runs as root unchecked.
 
 ```bash
 curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/$(lsb_release -cs).noarmor.gpg \
@@ -161,7 +92,12 @@ ClientAliveCountMax 2
 $SFTP_LINE
 EOF
 sudo sshd -t && sudo systemctl reload ssh
-sudo rm -f /root/.ssh/authorized_keys
+```
+
+**GATE:** keep your current session open; the user opens a NEW SSH session to the Tailscale IP and confirms it works. A reload that breaks authentication locks out anyone who has no open session.
+
+```bash
+sudo rm -f /root/.ssh/authorized_keys   # PermitRootLogin no blocks root login; this also blocks it if that line is ever undone
 sudo apt-get install -y fail2ban
 sudo tee /etc/fail2ban/jail.local << 'EOF'
 [sshd]
@@ -174,13 +110,7 @@ EOF
 sudo systemctl enable --now fail2ban
 ```
 
-Optional, for keyless SSH from mobile: `sudo tailscale up --ssh`, then add this SSH ACL in the Tailscale admin console:
-
-```json
-"ssh": [{"action": "check", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot"]}]
-```
-
-Tailscale SSH bypasses `sshd`, so the `sshd` hardening and fail2ban do not apply to it. Only Tailscale ACLs control it.
+If the user wants keyless SSH from a phone, set up Tailscale SSH: `references/tailscale-ssh.md`. It bypasses `sshd`, so nothing above applies to it.
 
 ## Step 6: Security group
 
@@ -220,7 +150,7 @@ net.ipv6.conf.default.accept_redirects = 0
 EOF
 sudo sysctl --system
 aws ec2 modify-instance-metadata-options --instance-id $INSTANCE_ID \
-  --http-tokens required --http-put-response-hop-limit 1
+  --http-tokens required --http-put-response-hop-limit 1   # IMDSv2 only, no hop to a container
 for svc in ModemManager.service open-iscsi.service multipathd.service open-vm-tools.service; do
     if systemctl list-unit-files "$svc" &>/dev/null; then
         sudo systemctl disable --now "$svc"
@@ -230,17 +160,14 @@ sudo apt-get install -y unattended-upgrades
 cat /etc/apt/apt.conf.d/20auto-upgrades  # should show "1" for both
 ```
 
-- If the machine does not need IPv6, also add `net.ipv6.conf.all.disable_ipv6 = 1`.
-- IMDS: the `modify-instance-metadata-options` line enforces IMDSv2 with hop limit 1.
-- Add to the user's bashrc:
+Ask the user whether anything on the machine uses IPv6. If nothing does, also add `net.ipv6.conf.all.disable_ipv6 = 1`.
+
+Add to the user's bashrc, so an abandoned shell closes and a pending reboot is visible:
 
 ```bash
-# Idle timeout (skip inside tmux)
 if [ -z "${TMUX:-}" ]; then
     TMOUT=900
 fi
-
-# Reboot-required notification
 if [ -f /var/run/reboot-required ]; then
     printf '\033[1;33m*** System restart required ***\033[0m\n'
     [ -f /var/run/reboot-required.pkgs ] && sed 's/^/    /' /var/run/reboot-required.pkgs
@@ -251,26 +178,13 @@ fi
 
 Send the `cybersecurity-expert` agent (the `task` tool) this brief:
 
-> Review the security posture of this EC2 instance. It is a personal development machine. Access is over Tailscale VPN, with SSM as an escape hatch. Review open ports, listening services, SSH config, firewall rules, IAM role scope, IMDS configuration and kernel params. Review permissions on sensitive files (~/.ssh, /etc/shadow, sudoers), AppArmor status, and Docker daemon config if installed. Report anything else concerning. Prioritize by risk.
+> Review the security posture of this EC2 instance. It is a personal development machine. Access is over Tailscale VPN, with SSM as an escape hatch. Review open ports, listening services, SSH config, firewall rules, IAM role scope, IMDS configuration and kernel params. Review permissions on sensitive files (~/.ssh, /etc/shadow, sudoers), AppArmor status, and Docker daemon config if installed. Report anything else concerning. Label each finding HIGH, MEDIUM or LOW risk, HIGH first.
 
-If that agent is not available, review the Step 9 output yourself. Act on every HIGH finding before Step 9.
+If that agent is not available, do the review yourself. Act on every HIGH finding before Step 9.
 
 ## Step 9: Final verification
 
-```bash
-echo "=== UFW ===" && sudo ufw status numbered
-echo "=== SSHD ===" && sudo sshd -T | grep -iE 'permitroot|passwordauth|kbdinteractive|authenticationmethods|x11|maxauth|logingrace|clientalive|subsystem|allowagent|permittunnel'
-echo "=== fail2ban ===" && sudo fail2ban-client status sshd
-echo "=== Tailscale ===" && tailscale status
-echo "=== Kernel ===" && sysctl net.ipv4.conf.all.send_redirects net.ipv4.conf.all.log_martians net.ipv4.conf.all.accept_redirects net.ipv4.conf.all.accept_source_route
-echo "=== IMDS ===" && aws ec2 describe-instances --instance-ids $INSTANCE_ID \
-  --query 'Reservations[0].Instances[0].MetadataOptions.{HttpTokens:HttpTokens,HopLimit:HttpPutResponseHopLimit}' --output table
-echo "=== Listening ports ===" && ss -tlnp
-echo "=== SG ===" && aws ec2 describe-security-group-rules \
-  --filter Name=group-id,Values=$SG_ID --query 'SecurityGroupRules[?IsEgress==`false`]' --output table
-```
-
-Present the results as a summary table.
+Check each change end to end and present the results as a summary table: UFW status, the effective `sshd -T` values, the fail2ban sshd jail, Tailscale status, the kernel params, IMDS options, listening ports, and the new security group's ingress rules.
 
 ## Common issues
 
