@@ -65,8 +65,10 @@ fi
 # this machine holds the collector's token (installers/agent-spend.sh), every omp and Claude Code session exports one
 # record per model call (tokens and the price the harness computes, no prompt or reply text), tagged with its
 # project and agent-spend/person. A caller that set its own collector (an OSS Verify lane VM) keeps it.
-# agent-spend/projects maps the working directory to a project.
-spend_conf="$DOTFILES_DIR/agent-spend" spend_token="${XDG_CONFIG_HOME:-$HOME/.config}/agent-spend/token"
+# agent-spend/projects maps the working directory to a project; with no match, the machine's own default
+# (~/.config/agent-spend/default-project, e.g. linux-verify on sami-leanperf), else `shared`.
+spend_conf="$DOTFILES_DIR/agent-spend" spend_local="${XDG_CONFIG_HOME:-$HOME/.config}/agent-spend"
+spend_token="$spend_local/token"
 if [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" && -s "$spend_conf/endpoint" && -s "$spend_token" ]]; then
     spend_project="${THEOREM_PROJECT:-}" spend_subproject="${THEOREM_SUBPROJECT:-}"
     if [[ -z "$spend_project" && -r "$spend_conf/projects" ]]; then
@@ -76,6 +78,7 @@ if [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" && -s "$spend_conf/endpoint" && -s "
             if [[ "$PWD" == $glob ]]; then spend_project="$project" spend_subproject="${subproject:-}"; break; fi
         done < "$spend_conf/projects"
     fi
+    [[ -n "$spend_project" || ! -s "$spend_local/default-project" ]] || spend_project="$(< "$spend_local/default-project")"
     spend_attrs="theorem.project=${spend_project:-shared}"
     [[ -z "$spend_subproject" ]] || spend_attrs+=",theorem.subproject=$spend_subproject"
     [[ ! -s "$spend_conf/person" ]] || spend_attrs+=",theorem.person=$(< "$spend_conf/person")"
