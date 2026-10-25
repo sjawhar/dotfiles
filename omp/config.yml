@@ -272,3 +272,14 @@ isolation:
   backend: auto
 codexResets:
   autoRedeem: "yes"
+# dispatch://INFRA-339: pi-envoy exports DISPATCH_HOST, DISPATCH_SESSION_ID and
+# ENVOY_CONFIG_FILE for the session, and Legion panes get DISPATCH_URL; the
+# Python eval kernel drops every variable outside its allowlist, so `dispatch`
+# from an eval cell failed with "DISPATCH_HOST is not set". This admits them.
+# Read by omp v18.12.2-sami.20261025-065250 and later; older builds load the
+# file and leave the key unread.
+eval:
+  envPassthrough:
+    prefixes:
+      - DISPATCH_
+      - ENVOY_
