@@ -6,16 +6,17 @@ disable-model-invocation: true
 
 # Thermonuclear Review
 
-Complements `ce-code-review`.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-1. Set the scope from the request: the PR, the current branch, or the changed files that apply.
-2. Collect the diff and the file excerpts the reviewers need, so that they do not guess.
+`ce-code-review` is the general diff or PR review; this is the double review.
+
+1. Set the scope from the request: the PR, the current branch, else the files changed against the base branch.
+2. Collect the diff, plus the function holding each changed hunk and the definitions it calls, so they do not guess.
 3. On omp, start `thermonuclear-deep-review` (correctness, security) and `thermonuclear-code-quality` (maintainability) in one `task` call, as two entries in `tasks[]`.
-4. On Claude Code, dispatch two independent read-only subagents in parallel, with the same names and prompts. Each reads its rubric from Legion: `https://raw.githubusercontent.com/sjawhar/legion/main/skills/<name>/SKILL.md`. A failed read blocks that reviewer.
-5. Give each reviewer the same scoped diff and context. Ask for prioritized findings, each with a file reference and evidence.
-6. When both finish, synthesize:
-   - Findings first. Merge duplicates across the reviewers.
-   - Give more weight to a finding that both reviewers report.
-   - Where the reviewers disagree, decide with your own judgment.
-   - Keep summaries brief.
-   - If the user already sees each reviewer's summary, do not restate them in full. Report the unified verdict, the highest-signal findings, and what stays uncertain.
+4. On Claude Code, dispatch the same two as independent read-only subagents in parallel. Each reads its rubric from Legion: `https://raw.githubusercontent.com/sjawhar/legion/main/skills/<name>/SKILL.md`. A failed read stops that reviewer: report the URL and the error.
+5. Give both the same scoped diff and context. Ask for findings ranked Critical, High, Medium or Low, each with a file reference and evidence.
+6. When both finish, report:
+   - Findings first. Merge duplicates.
+   - List a finding both reviewers report first, marked "both reviewers": independent agreement.
+   - Where they disagree, decide and say why.
+   - Do not restate a reviewer's summary. Report only the verdict (merge, or fix first), the findings in severity order, and what neither reviewer settled.
