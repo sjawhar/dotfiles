@@ -3,7 +3,7 @@ name: planner
 description: |
   Planning specialist on the strongest Anthropic model. Use for writing
   implementation plans and structuring multi-step work. Dispatched by the
-  /sdd workflow for planning.
+  sdd workflow for planning.
 model:
   - "@plan"
 tools: read, glob, grep, bash, todo, write

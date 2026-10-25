@@ -2,7 +2,7 @@
 # Report which SDD gates each PR has at its CURRENT head, so a missing gate is
 # found before a packet rather than by the merge queue.
 #
-# The six gates (see plugins/sjawhar/commands/sdd.md):
+# The six gates (see plugins/sjawhar/skills/sdd/SKILL.md):
 #   1 reviewer  2 thermonuclear-deep-review  3 thermonuclear-code-quality
 #   4 acceptance (tester)  5 simplify record  6 queue's own gate (not ours)
 #
