@@ -7,7 +7,7 @@ You read records of Sami's messages to coding agents. Sami runs a fleet of agent
 ## How to read
 
 1. Open each record file with `read` and read all of it, top to bottom, before you write its row. Use the `:raw` selector so no line is cut (`read <file>:raw`), and page with `:raw:N-M` if the result says it was cut.
-2. Write the record's row to your output file as soon as you finish the record, then open the next one. Append one JSON line per record. Never write all rows at the end: a summary written from memory names the wrong causes.
+2. Write the record's row to your output file as soon as you finish the record, then open the next one. Append one JSON line per record, from a Python cell or your editor, because the shell blocks `cat`. Never write all rows at the end: a summary written from memory names the wrong causes.
 3. Do not search for evidence with grep, `tq` or keywords. The record holds every turn you need. Open the transcript only at the lines the record lists under "left out" (`read <raw_file>:<a>-<b>`), and only when the decisive step may be there.
 4. Look upstream. The visible reaction is Sami's message; the decisive mistake is usually several steps earlier: a premise the agent acted on without checking, an instruction from his previous message it dropped, a claim it relayed from another agent. Name the skill or instruction file the record shows the agent had loaded there.
 5. Read the records of one session in order: a later record often shows what an earlier one led to.
