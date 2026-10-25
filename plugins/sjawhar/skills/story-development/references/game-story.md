@@ -5,4 +5,4 @@ A mechanic the player repeats hundreds of times carries the theme or fights it, 
 - *GRIS*: a wordless platformer about grief. Color returns to the world as the player progresses. No dialogue, to leave room for the player's own interpretation. No death or violence, partly for pacing.
 - *Journey*: designed like a Japanese garden. Each element is there because it serves the feeling, not because platformers usually have it.
 - *Celeste*: a "fractal story". The game, each area and each screen has its own emotional arc, and pacing follows that arc, not only a difficulty curve. A story beat bolted onto a finished level does not match what the story needs there.
-- A one-page frame (logline, core fantasy, pillars, themes, tone) comes before the lore bible (wants versus needs, world history, factions). A story with too much to say ends up saying little.
+- A one-page frame (logline, core fantasy, pillars, themes, tone) comes before the lore bible (wants versus needs, world history, factions). Cut lore that serves none of the frame's pillars or themes: a story with too much to say ends up saying little.

@@ -5,14 +5,14 @@ description: "Use when tracing an artifact back to the agent session that produc
 
 # Session Attribution
 
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
 ## Where the id is
 
-- Every omp-session commit gets an `Omp-Session: <id>` trailer automatically. In git, `shims/git` adds it. In jj, a JJ_CONFIG overlay adds it: `omp/extensions/session-env.ts` for interactive sessions, the Legion extension for Legion roots.
-- A git commit made through an alias, `git rebase`, `git am` or `git commit-tree` has no trailer of its own session, and neither has any commit in a checkout that sets `git config omp.sessionTrailer false`. Attribute it by author, timestamp and transcript correlation.
-- Before 2026-10-24 no trailer reached a `git merge`, `pull`, `cherry-pick` or `revert` commit, and from 2026-10-23 05:08Z to 2026-10-24 none reached any commit in a public theorem-labs repository. Attribute those the same way.
+- Every omp-session commit gets an `Omp-Session: <id>` trailer. In git, `~/.dotfiles/shims/git` adds it. In jj, a JJ_CONFIG overlay adds it: `~/.dotfiles/omp/extensions/session-env.ts` for interactive sessions, the Legion extension for a session the Legion daemon starts.
+- No trailer means "not attributable from the commit", not an error. A human's commit has none, and neither has one made through an alias, `git rebase`, `git am` or `git commit-tree`, one in a checkout that sets `git config omp.sessionTrailer false`, or any `git merge`, `pull`, `cherry-pick` or `revert` commit from before 2026-10-24. Attribute those from the author email and commit time, plus a session editing the same files at that time (`tq search --commands`, `skill://using-transcript-store`).
 - Legion GitHub comments and reviews end with `<!-- legion: {"session":"<id>", ...} -->`.
-- `omp --resume` accepts the id or a prefix of it.
-- `jj` lines work only in jj repos: Legion workspaces and the shared `~/.dotfiles` and `~/src` stores.
+- Use the `jj` lines below only where `jj root` succeeds: Legion workspaces, `~/.dotfiles`, parts of `~/src`.
 
 ```bash
 git log -1 --format=%b <sha> | grep Omp-Session
@@ -20,13 +20,13 @@ jj log -r <rev> --no-graph -T description | grep Omp-Session
 gh api repos/<owner>/<repo>/issues/comments/<id> -q .body | grep -o '<!-- legion: .* -->'
 ```
 
-## Reach the session, in order
+## Reach the session, live first: it can answer
 
-1. Live: `hub` op `list` or `envoy_sessions`. Message it.
-2. Resume: `omp --resume <id-prefix>` on the machine that has the transcript.
-3. Read: `~/.omp/agent/sessions/<project-slug>/<timestamp>_<id>.jsonl`. The directory with the same name holds:
+1. Live: list live sessions with `envoy_sessions`, then message the one you want with `envoy_send`.
+2. Resume: `omp --resume <id>`, the full id or a prefix, on the machine that holds the transcript.
+3. Read: find the transcript with `ls ~/.omp/agent/sessions/*/*_<id>*.jsonl`. The directory with the same name holds:
    - `<AgentName>.jsonl` for each subagent. Its brief is the `task` field of the `session_init` record near the top.
-   - `local/<name>` for each `local://<name>` file the session wrote, on the host disk. Files in `/tmp` or a box workspace are gone with the box.
+   - `local/<name>` for each `local://<name>` file the session wrote, on the host disk. Files in `/tmp` or an agent container are gone with it.
 
 ## List what a session touched
 
@@ -42,7 +42,6 @@ gh api "repos/<owner>/<repo>/issues/comments" --paginate -q '.[] | select(.body 
 
 ## Read the evidence
 
-- No trailer on an old commit or a human's commit means "not an agent commit", not an error.
-- Legion phase workers commit under the root architect's id. Find the worker in comment footers and `.legion/` handoffs.
-- In a shared jj checkout (`~/.dotfiles`, `~/src`), the trailer names the session that ran the next `jj` command, not the author. Trust it only in a per-session workspace (`jj workspace add`). Otherwise attribute from content, ask the candidate sessions, and split the commit by file when owners claim files.
-- Command text in a transcript does not prove that the session ran it. An invocation is a `message` record whose role is `user` or `fileMention`. The same text in a `toolResult` or `compaction` record is a file read. Example: the post-compaction reminder puts `commands/sdd.md` in most long transcripts.
+- Legion phase workers commit under the root architect's id, so the trailer names the architect, not the worker. Find the worker in comment footers and `.legion/` handoffs.
+- In a shared jj checkout (`~/.dotfiles`, `~/src`), the trailer names the session that ran the next `jj` command, not the author. Treat it as the author only in a per-session workspace (`jj workspace add`). Otherwise compare the commit's files (`git show --stat <sha>`) with what each candidate edited, message them, and split by file when owners claim files (`jj split -r <rev> <paths>`).
+- Slash-command or skill text in a transcript does not prove the session invoked it. An invocation is a `message` record whose role is `user` or `fileMention`; the same text in a `toolResult` or `compaction` record is a file the session read.
