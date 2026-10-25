@@ -16,13 +16,13 @@ TYPESAFE_API_KEY, which `scripts/secret-run` only injects into a subprocess's
 environment, not into the persistent eval kernel. Run it between two eval cells:
 
     # eval cell 1
-    %load ~/.dotfiles/plugins/sjawhar/skills/reflect/experiments-readout.py
+    %load ~/.dotfiles/plugins/sjawhar/skills/reflect/scripts/experiments-readout.py
     dump_turns_for_jev(session_dirs=[...], prompts=[...], out_path="turns.jsonl")
 
     # bash
     secret-run TYPESAFE_AI_API_KEY -- sh -c '
       export TYPESAFE_API_KEY=$TYPESAFE_AI_API_KEY
-      uv run --with typesafe-sdk python3 ~/.dotfiles/plugins/sjawhar/skills/reflect/jev-turn-label.py \
+      uv run --with typesafe-sdk python3 ~/.dotfiles/plugins/sjawhar/skills/reflect/scripts/jev-turn-label.py \
         --turns turns.jsonl --out jev-labels.jsonl
     '
 

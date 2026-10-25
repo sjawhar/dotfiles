@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 DOTFILES = Path(__file__).resolve().parents[2]
-SCRIPT = DOTFILES / "plugins" / "sjawhar" / "skills" / "reflect" / "extract-dispatch-human.py"
+SCRIPT = DOTFILES / "plugins" / "sjawhar" / "skills" / "reflect" / "scripts" / "extract-dispatch-human.py"
 
 spec = importlib.util.spec_from_file_location("extract_dispatch_human", SCRIPT)
 assert spec is not None and spec.loader is not None
