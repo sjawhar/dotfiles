@@ -127,3 +127,35 @@ arm_user_timer() {
     }
     echo "$name: armed ($(systemctl --user show -p NextElapseUSecRealtime --value "$name.timer"))"
 }
+
+# Arm the systemd user service <name> whose unit is <unit-dir>/<name>.service in
+# ~/.dotfiles: link it into ~/.config/systemd/user, enable and start it, and prove
+# it is running. For a long-lived service; a timed one is arm_user_timer. Same
+# rules as that one: the link comes from ~/.dotfiles so a unit armed from a
+# workspace checkout does not point into a directory that will be removed, and it
+# refuses inside an agentbox, whose ~/.config/systemd the host manager never reads.
+arm_user_service() {
+    local dir="$1" name="$2" state
+    local units="$HOME/.dotfiles/$dir"
+    if [[ -f /.dockerenv ]] || [[ "$(systemd-detect-virt 2>/dev/null)" == docker ]]; then
+        echo "$name: this is an agentbox; the host systemd cannot see its ~/.config/systemd." >&2
+        echo "  Run $0 from a host shell instead." >&2
+        return 1
+    fi
+    [[ -f "$units/$name.service" ]] || {
+        echo "$name: $units/$name.service is missing; advance ~/.dotfiles to a main that has it" >&2
+        return 1
+    }
+    mkdir -p "$HOME/.config/systemd/user" || return 1
+    ensure_link "$units/$name.service" "$HOME/.config/systemd/user/$name.service" || return 1
+    systemctl --user daemon-reload || return 1
+    systemctl --user enable --now "$name.service" || return 1
+    # `enable --now` can exit 0 on a unit that then failed to start, so read the
+    # state back rather than trust it.
+    state="$(systemctl --user show -p ActiveState --value "$name.service")" || return 1
+    [[ "$state" == active ]] || {
+        echo "$name: not active after start (ActiveState=$state); see systemctl --user status $name.service" >&2
+        return 1
+    }
+    echo "$name: armed (active)"
+}
