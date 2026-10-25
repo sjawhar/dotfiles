@@ -17,20 +17,25 @@
 # The client setting is machine-local on purpose: it names a port on this
 # machine's loopback, so it goes in ~/.omp/agent/config.yml, never in the
 # committed overlay that every machine reads. To undo it:
-#   systemctl --user disable --now auth-broker.service
 #   omp config reset auth.broker.url
+#   systemctl --user disable --now omp-auth-broker.service
+#
+# The broker keeps its logins in a database of its own (~/.omp/auth-broker), signed in once with
+# scripts/omp-broker-login, so it never waits on the lock of the agent.db the sessions write; the
+# earlier unit, auth-broker.service on 18777, shared that file and stalled under load
+# (dispatch://INFRA-387). Sessions are moved to it only once it holds a live Anthropic login.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BROKER_URL="http://127.0.0.1:18777"
+BROKER_URL="http://127.0.0.1:18778"
+BROKER_DB="$HOME/.omp/auth-broker/agent.db"
 
-arm_user_service omp auth-broker
+arm_user_service omp omp-auth-broker
 
 # Wait for the listener before the client setting goes in, so a session started
 # in between does not find a URL nothing answers.
 for _ in {1..20}; do
-    if omp auth-broker status --json >/dev/null 2>&1 ||
-        OMP_AUTH_BROKER_URL="$BROKER_URL" omp auth-broker status >/dev/null 2>&1; then
+    if OMP_AUTH_BROKER_URL="$BROKER_URL" omp auth-broker status >/dev/null 2>&1; then
         break
     fi
     sleep 0.5
@@ -38,6 +43,14 @@ done
 
 OMP_AUTH_BROKER_URL="$BROKER_URL" omp auth-broker status >/dev/null || {
     echo "auth-broker: serving, but $BROKER_URL does not answer; leaving sessions as they are" >&2
+    exit 1
+}
+
+# A session pointed at a broker with no login reaches no model, so nothing moves until the broker
+# holds one (non-secret columns only).
+live="$(sqlite3 "$BROKER_DB" "SELECT count(*) FROM auth_credentials WHERE provider = 'anthropic' AND disabled_cause IS NULL" 2>/dev/null || echo 0)"
+[[ "$live" -ge 1 ]] || {
+    echo "auth-broker: the broker holds no live Anthropic login; run omp-broker-login, then this again; leaving sessions as they are" >&2
     exit 1
 }
 
