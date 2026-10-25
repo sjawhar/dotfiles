@@ -23,7 +23,7 @@ draws are independent), as the mean over sessions on minus the mean over session
 Load it in an eval Python cell, run the Jev pre-pass between two cells (see
 `jev-turn-label.py`'s module docstring for the exact commands), then await `main`:
 
-    %load ~/.dotfiles/plugins/sjawhar/skills/reflect/experiments-readout.py
+    %load ~/.dotfiles/plugins/sjawhar/skills/reflect/scripts/experiments-readout.py
     dump_turns_for_jev(
         session_dirs=["~/.omp/agent/sessions", "<scratch>/.omp/agent/sessions"],
         prompts=["prompts.jsonl", "<other-box>-prompts.jsonl"],
