@@ -1,7 +1,7 @@
 {
 	"selfcompact": "off",
 	"proactive_memory": "off",
-	"context_line": "random",
+	"context_line": "off",
 	"skill_gate": "random",
 	"judge_log": "on",
 	"rules_refresh": "random",
