@@ -114,6 +114,22 @@ class KnivesShim(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "PINNED knives --version\nstdin: \n")
 
+    def test_a_path_without_mise_gets_the_pin_through_the_dotfiles_mise(self) -> None:
+        """A unit, harness or git credential helper whose PATH has the shims dir but not
+        ~/.dotfiles/bin, where mise lives: the shim runs that mise by its path."""
+        path = ":".join([str(SHIM.parent), str(self.stale_dir), "/usr/bin", "/bin"])
+        result = subprocess.run(
+            [str(SHIM), "--version"],
+            input="",
+            capture_output=True,
+            text=True,
+            env={**self.env, "DOTFILES_DIR": str(self.root), "PATH": path},
+            check=False,
+            timeout=LOOP_TIMEOUT,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "PINNED knives --version\nstdin: \n")
+
     def test_arguments_and_stdin_reach_knives_untouched(self) -> None:
         payload = '{"hook_event_name":"SessionStart","session_id":"s 1"}'
         result = self.run_shim(

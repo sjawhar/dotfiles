@@ -48,6 +48,10 @@ before handing the call to the real one.
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
 - `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
+- **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
+  harness's or a git credential helper's PATH can hold this dir without `~/.dotfiles/bin`, where
+  mise lives; these shims then run `~/.dotfiles/bin/mise` by its path, with `~/.mise` as its data
+  dir when `MISE_DATA_DIR` is unset.
 - **`gcloud`**'s global-flag table is the installed SDK's. After any `gcloud components update`,
   run `python3 scripts/gcloud-global-flags --check`; on a difference, regenerate the table with
   `python3 scripts/gcloud-global-flags`, and the test fixture with `--json`. Run it with `python3`,
