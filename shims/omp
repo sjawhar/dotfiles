@@ -31,6 +31,14 @@ export MNEMOPI_VEC_WEIGHT="${MNEMOPI_VEC_WEIGHT:-0.6}"
 export MNEMOPI_FTS_WEIGHT="${MNEMOPI_FTS_WEIGHT:-0.2}"
 export MNEMOPI_IMPORTANCE_WEIGHT="${MNEMOPI_IMPORTANCE_WEIGHT:-0.2}"
 
+# omp's bash tool runs every call in one persistent shell, so `set -e`, `-u` or `-o pipefail` at
+# one call's top level stays on for every later call and silently breaks them (`yes | head -n 1`
+# exits 141, a `grep -c` counting zero ends the command). omp puts PI_SHELL_PREFIX in front of
+# each command inside its executor, so the model's command text never shows it; a caller's value
+# wins. Costs: a `!cd` typed in the TUI no longer moves the session's cwd, and `set -x` and
+# `shopt` changes still carry over.
+export PI_SHELL_PREFIX="${PI_SHELL_PREFIX:-set +e +u +o pipefail;}"
+
 # omp/config.yml is every profile's settings of record, loaded as a PI_CONFIG_FILES overlay omp
 # never writes; runtime writes (/model picks, prompt answers) land in the profile's own
 # config.yml and lose to it on the next start. Later entries win, so a caller's overlays stay on
