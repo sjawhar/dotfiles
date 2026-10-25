@@ -31,8 +31,10 @@ before handing the call to the real one.
   adds the line, and each hook name there then runs the repository's own hook of that name
   (`git-hooks/hook`). A rebase, including `pull --rebase`, leaves replayed commits as they were;
   an alias, `git am` and `git commit-tree` add nothing.
-- **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights
-  and a named profile's links, then execs omp through `scripts/agent-session` (below). It sets no
+- **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights,
+  a `PI_SHELL_PREFIX` that turns errexit, nounset and pipefail off before each bash call (so
+  one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named
+  profile's links, then execs omp through `scripts/agent-session` (below). It sets no
   Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys
   come from the profile's `models.yml` (`omp/AGENTS.md`).
 - **`knives`** execs the pinned knives (`"github:sjawhar/knives"` in `mise.toml`, looked up with
