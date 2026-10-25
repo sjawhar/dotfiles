@@ -1,0 +1,13 @@
+[Unit]
+Description=Delete empty tmp* directories older than a day from the big disk's TMPDIR
+# Python's tempfile.mkdtemp() makes tmpXXXXXXXX under TMPDIR (/mnt/nvme/<user>/tmp on the
+# devboxes) and never removes it; a caller that moves its output out leaves the empty directory
+# behind. sami-rocqperf held 624,713 of them on 2026-10-25, 50,000-230,000 made a day
+# (dispatch://INFRA-6). Only empty ones go, and only after a day, so no live run loses its dir.
+ConditionPathIsDirectory=/mnt/nvme/%u/tmp
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/find /mnt/nvme/%u/tmp -maxdepth 1 -name tmp* -empty -mtime +1 -delete
