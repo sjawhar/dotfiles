@@ -437,9 +437,17 @@ find_real_gcloud() {
     return 127
 }
 
+# A command whose whole output is a credential would also write it into gcloud's log file:
+# gcloud copies a command's output into its file logger (calliope/display.py's log.out,
+# core/log.py), and callers run these every few seconds (2,418 of 2026-10-24's 11,944 log
+# files). File logging is off for exactly them, unless the caller set it either way.
 exec_real_gcloud() {
     local real_gcloud="$1"
     shift
+    if [[ "${GCLOUD_COMMAND_WORDS[0]:-}" == auth ]] &&
+        contains_word "${GCLOUD_COMMAND_WORDS[1]:-}" print-access-token print-identity-token docker-helper; then
+        export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-1}"
+    fi
     if needs_forward_browser; then
         exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "$@"
     fi
