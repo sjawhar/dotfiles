@@ -81,12 +81,12 @@ gh api repos/$REPO/pulls/<number>/reviews --method POST \
   -f 'comments[0][body]=**Suggestion:** Could we handle the empty case here?'
 ```
 
-- Each `comments[N]` needs only `path` (as in the diff), `line` (in the new file) and `body`.
+- Each `comments[N]` needs `path` (as in the diff), `line` (in the new file) and `body`. A comment on a deleted line also needs `side=LEFT`, with `line` in the old file.
 - Never fall back silently to a top-level PR comment.
 
 | Error | Remedy |
 | --- | --- |
 | `"line" is not a permitted key` | Wrong endpoint: use `/pulls/{number}/reviews`, not `/comments`. |
-| HTTP 422 or a missing inline comment | Check the `comments[N][path]`, `[line]`, `[body]` notation, the diff path and the new-file line. |
+| HTTP 422 or a missing inline comment | Check the `comments[N][path]`, `[line]`, `[body]` notation, the diff path and the new-file line (for a deleted line, `[side]=LEFT` and the old-file line). |
 
 Report the review URL that GitHub returns.
