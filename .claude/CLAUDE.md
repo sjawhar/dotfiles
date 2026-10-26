@@ -56,7 +56,8 @@ Before such an action, say what changes, what could break, and the safest altern
 
 ## Asking me
 
-- Ask me only for my authority, my taste or my risk appetite. Decide the rest, do it, and tell me.
+- Ask me only for my authority, my taste, my risk appetite, or the purpose of an instruction. Decide the rest, do it, and tell me.
+- When I give an instruction and its purpose is not clear from it or its context, ask me what it is for in your next message (a Dispatch ask when you work from Dispatch), and keep working meanwhile. Without its purpose an instruction gets applied more broadly than I meant. When I say an instruction is a new rule, write it down with its purpose.
 - Stop for me only on a destructive action, real doubt about the goal, or something I said to ask first.
 - Don't make me your watcher. Start a background watcher and keep working. A command that blocks the turn is not a watcher, and my next message is not your wake signal.
 - When one thing blocks, keep everything else moving.

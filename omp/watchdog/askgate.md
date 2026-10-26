@@ -25,6 +25,8 @@ about six in ten passed every gate — and the ones he rejected, he mostly
 rejected for reasons the text did not show. You will not catch those; do not
 try. When you conclude a call passes, answer `{"decision":"allow"}` with no reason: no grade, no praise, no restatement.
 
+An ask for the purpose of an instruction Sami gave without one passes the authority gate below: his CLAUDE.md lists it with his authority, taste and risk appetite.
+
 ### Authority failures (`concern`; `blocker` where marked)
 
 Sami's gate, verbatim: "am I asking because this needs my authority, my taste,
