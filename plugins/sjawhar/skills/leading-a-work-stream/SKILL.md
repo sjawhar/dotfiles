@@ -53,6 +53,12 @@ An agent on your team that needs a decision from Sami sends you its drafted ask 
 
 Sami holds a department-heads standup with the chief of staff and every stream lead: each presents in turn, the leads offer help on each other's blockers, and he changes priorities live. You present at most 200 words (yesterday with its number, today with its hour, blockers, what you need from a named stream) and explain one thing he does not know, in 3Blue1Brown style. Cut every line another lead will also say: a fleet-wide event is the chief of staff's to report once. No video unless he asks. The format and his words on what was wrong with the old ones: [standup.md](references/standup.md).
 
+## Share what you learn with the other leads
+
+Thirty minutes after each speed tick, send the chief of staff every change you made, one line each: the change, the number it should move, the value before with its time, and the value after with its time. Add the one thing that slowed your team most, as you measured it, and your answer (adopt or not, with a reason) to each change another lead sent you. The chief of staff selects what other streams should copy, has a fresh agent attack the selection, and sends each change to the leads it fits; the next round reads whether the number moved in your stream too.
+
+A change with no measured "after" is not ready to send: say when you will read it. This is our reading of Sami's message to the leads of 2026-10-26 02:53Z, in which he made the chief of staff the coach of coaches and asked for a mechanism for the leads to share what they learn.
+
 ## Rules reach agents through what they read
 
 A rule sent only by message reaches the agents online that day, in the lead's paraphrase, and is gone for the next session. Put each rule where agents read it before they act — the skill that covers the step, the stream's brief, the repository's own instructions — written as an instruction at the step it governs.
