@@ -64,13 +64,60 @@ fi
 # Model spend (theorem-labs/agent-infra spend/SETUP.md, dispatch://INFRA-165): once agent-spend/endpoint exists and
 # this machine holds the collector's token (installers/agent-spend.sh), every omp and Claude Code session exports one
 # record per model call (tokens and the price the harness computes, no prompt or reply text), tagged with its
-# project and agent-spend/person. A caller that set its own collector (an OSS Verify lane VM) keeps it.
-# agent-spend/projects maps the working directory to a project; with no match, the machine's own default
-# (~/.config/agent-spend/default-project, e.g. linux-verify on sami-leanperf), else `shared`.
+# project and agent-spend/person. A caller that set its own collector (an OSS Verify lane VM, or any process a
+# session started) keeps it and its tags.
+# The project is a COS dashboard stream, and it sticks to the session: ~/.config/agent-spend/sessions/<session-id>
+# holds `project[ subproject]`, written by omp/extensions/session-project.ts when a session starts and here when a
+# launch names THEOREM_PROJECT. First of: THEOREM_PROJECT (and THEOREM_SUBPROJECT); the file of the session this
+# launch resumes (`--resume`, `-r`, `--restore`, by id, unique id prefix or transcript path); agent-spend/projects,
+# which maps the working directory; the machine's ~/.config/agent-spend/default-project; `shared`. The result is
+# exported as THEOREM_PROJECT and THEOREM_SUBPROJECT, so whatever the session starts inherits it.
 spend_conf="$DOTFILES_DIR/agent-spend" spend_local="${XDG_CONFIG_HOME:-$HOME/.config}/agent-spend"
 spend_token="$spend_local/token"
 if [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" && -s "$spend_conf/endpoint" && -s "$spend_token" ]]; then
-    spend_project="${THEOREM_PROJECT:-}" spend_subproject="${THEOREM_SUBPROJECT:-}"
+    spend_sessions="$spend_local/sessions" spend_session="" spend_session_file="" spend_session_id=""
+    spend_args=("$@")
+    for ((i = 0; i < ${#spend_args[@]}; i++)); do
+        case "${spend_args[i]}" in
+            --resume=* | --restore=*) spend_session="${spend_args[i]#*=}" ;;
+            --resume | -r | --restore) spend_session="${spend_args[i + 1]:-}" ;;
+        esac
+    done
+    # A transcript path's basename is <timestamp>_<uuid>.jsonl.
+    spend_session="${spend_session##*/}" spend_session="${spend_session%.jsonl}" spend_session="${spend_session##*_}"
+    if [[ "$spend_session" =~ ^[0-9a-fA-F][0-9a-fA-F-]*$ ]]; then
+        if [[ -f "$spend_sessions/$spend_session" ]]; then
+            spend_session_file="$spend_sessions/$spend_session"
+        else
+            spend_matches=()
+            for spend_match in "$spend_sessions/$spend_session"*; do
+                [[ -f "$spend_match" ]] && spend_matches+=("$spend_match")
+            done
+            (( ${#spend_matches[@]} != 1 )) || spend_session_file="${spend_matches[0]}"
+        fi
+        if [[ -n "$spend_session_file" ]]; then
+            spend_session_id="${spend_session_file##*/}"
+        elif [[ "$spend_session" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            spend_session_id="$spend_session"
+        fi
+    fi
+
+    spend_project="${THEOREM_PROJECT:-}" spend_subproject=""
+    if [[ -n "$spend_project" ]]; then
+        spend_subproject="${THEOREM_SUBPROJECT:-}"
+        if [[ -n "$spend_session_id" ]]; then
+            # Atomic, so a reader never sees half a line; a failed write leaves the launch alone.
+            spend_tmp="$spend_sessions/.$spend_session_id.$$.tmp"
+            if ! { (umask 077 && mkdir -p "$spend_sessions" \
+                && printf '%s\n' "$spend_project${spend_subproject:+ $spend_subproject}" > "$spend_tmp") \
+                && mv -f "$spend_tmp" "$spend_sessions/$spend_session_id"; } 2> /dev/null; then
+                rm -f "$spend_tmp"
+                echo "agent-session: could not record $spend_project for session $spend_session_id in $spend_sessions" >&2
+            fi
+        fi
+    elif [[ -n "$spend_session_file" ]]; then
+        read -r spend_project spend_subproject _ < "$spend_session_file" || true
+    fi
     if [[ -z "$spend_project" && -r "$spend_conf/projects" ]]; then
         while read -r glob project subproject; do
             [[ -z "$glob" || "$glob" == \#* ]] && continue
@@ -78,8 +125,12 @@ if [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" && -s "$spend_conf/endpoint" && -s "
             if [[ "$PWD" == $glob ]]; then spend_project="$project" spend_subproject="${subproject:-}"; break; fi
         done < "$spend_conf/projects"
     fi
-    [[ -n "$spend_project" || ! -s "$spend_local/default-project" ]] || spend_project="$(< "$spend_local/default-project")"
-    spend_attrs="theorem.project=${spend_project:-shared}"
+    if [[ -z "$spend_project" && -s "$spend_local/default-project" ]]; then
+        read -r spend_project spend_subproject _ < "$spend_local/default-project" || true
+    fi
+    export THEOREM_PROJECT="${spend_project:-shared}"
+    if [[ -n "$spend_subproject" ]]; then export THEOREM_SUBPROJECT="$spend_subproject"; else unset THEOREM_SUBPROJECT; fi
+    spend_attrs="theorem.project=$THEOREM_PROJECT"
     [[ -z "$spend_subproject" ]] || spend_attrs+=",theorem.subproject=$spend_subproject"
     [[ ! -s "$spend_conf/person" ]] || spend_attrs+=",theorem.person=$(< "$spend_conf/person")"
     OTEL_EXPORTER_OTLP_ENDPOINT="$(< "$spend_conf/endpoint")"

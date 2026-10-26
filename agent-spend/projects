@@ -1,16 +1,25 @@
-# The project each agent session's model spend is tagged with (scripts/agent-session), by working directory.
-# GLOB PROJECT [SUBPROJECT]; the first glob that matches the session's working directory wins; no match: `shared`.
-# A session started with THEOREM_PROJECT (and THEOREM_SUBPROJECT) set uses those instead.
+# The COS dashboard stream each agent session's model spend is tagged with (scripts/agent-session), by working
+# directory. Values: oss-verify, verified-linux, task-making, verified-grader, rocq-speed, lean-speed, legion,
+# infra-monitoring; agent-process for the chief of staff, librarian, explainer and box housekeeping; Sami's own
+# non-Theorem work under its own name (omp, pivot); `shared` only when nothing is known.
+# GLOB PROJECT [SUBPROJECT]; the first glob that matches the session's working directory wins, so a specific glob
+# goes before a general one that also matches it. This map is only the fallback: THEOREM_PROJECT, then the
+# resumed session's own ~/.config/agent-spend/sessions/<id>, come first; no match here: the machine's
+# ~/.config/agent-spend/default-project, else `shared`.
 */oss-verifier*                 oss-verify
 */oss-verify*                   oss-verify
-*/agent-infra*                  agent-infra
-*/binary-equivalence*           binary-equivalence
+*/machcsl-riscv*                verified-linux
+*/agent-infra*                  legion
+*/binary-equivalence*           task-making
 */rocq-speed*                   rocq-speed
+*/speed-lane-*                  rocq-speed
 */src/speed-*                   rocq-speed
 */speed-loop*                   rocq-speed
 */nvme/sami/tmp/speedcoach*     rocq-speed
 */nvme/sami/gate*               rocq-speed
-*/xv6*                          xv6
+*/lean-build-perf*              lean-speed
+*/xv6*                          task-making
+*/Code/personal/theorem*        verified-grader
 */legion*                       legion
 */Code/legion*                  legion
 */nvme/sami/chief*              agent-process
