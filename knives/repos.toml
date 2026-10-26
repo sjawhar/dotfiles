@@ -146,6 +146,16 @@ base = "dev"
 release_branch = "sami"
 ledger = "sjawhar/.knives-ledger"
 
+# Restored 2026-10-26: the entry session 01a14b36 added on 2026-10-24 (OSSV-142, with
+# Sami's "Do it yourself" at 22:50Z) lived only in the uncommitted file and was lost, which
+# orphaned its ledger under berriai/litellm and made every knives release plan on this
+# machine exit 3. That lane's 1.106 series (upstream stable/1.106.x, cuts
+# release/1.106/YYYY-MM-DD) is not reconstructed here: it adds its own
+# [repos.litellm.series."1.106"] block.
+[repos.litellm]
+upstream = "https://github.com/BerriAI/litellm.git"
+origin = "https://github.com/sjawhar/litellm.git"
+
 [repos.lean4]
 upstream = "https://github.com/leanprover/lean4"
 origin = "https://github.com/sjawhar/lean4"
