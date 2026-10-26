@@ -18,10 +18,15 @@ Then one short explanation of a single thing he does not already know (see below
 ## What keeps it out of the slop bin
 
 - **Say only what your stream can say.** Before you post, cut every line another lead will also say. A fleet-wide event (an outage, a release, a pause) is the chief of staff's to report once, not yours. Say what it did to your stream's numbers, or say nothing about it.
-- **A number only if a decision turns on it.** A number he cannot act on is noise. Give the value, its target, and what you will do about the gap.
+- **A number only if a decision turns on it, and never bare.** Give it the denominator (62 of how many?), its target and due date, and whether that is good or bad. His words on 2026-10-26: "Quoting raw numbers without any context is meaningless. It just gives the illusion of rigor." If yesterday's post gave a different number for the same thing, say why it changed.
+- **Times in US Pacific**, never UTC.
 - **Explain one thing, the way 3Blue1Brown would.** His words: "maybe a prompt to all the agents, or to all the team leads, should be to do it in the style of 3 blue, 1 brown … currently I feel like the visuals are mostly just boxes of numbers. They don't actually bother to explain any useful concept or anything interesting." Pick the one idea behind your week's work: why the bottleneck is where it is, what a measurement actually proved, why an approach cannot work. Build it from something he already knows, in plain words, and keep it under 100 words.
 - **Expand every name the first time.** An issue key gets its title, a tool gets what it does, a session gets whose it is.
 - **Nothing he can already see.** No status he reads on the dashboard, no restatement of a plan, no narration of your own process.
+
+## The company version
+
+After the meeting the chief of staff turns the thread into a short standup Sami can share with the rest of the company. It covers every stream, one section each. It speaks in terms people outside the agent teams know: projects screened, enrolled, in progress and when each is expected done, not internal counts such as "17 of 100 statements" with no account of what the 100 are. The number rule above applies to every line.
 
 ## Video and audio
 
