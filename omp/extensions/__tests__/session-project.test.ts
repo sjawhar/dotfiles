@@ -50,6 +50,13 @@ describe("recordSessionProject", () => {
 		expect(readFileSync(path.join(dir, ID), "utf8")).toBe("rocq-speed lane-c\n");
 	});
 
+	test("writes an old project name as its COS stream", async () => {
+		const dir = sessions();
+		const env = { ...ENV, OTEL_RESOURCE_ATTRIBUTES: "theorem.project=binary-equivalence,theorem.subproject=pipe" };
+		expect(await recordSessionProject(TOP, env, dir)).toBe("written");
+		expect(readFileSync(path.join(dir, ID), "utf8")).toBe("task-making pipe\n");
+	});
+
 	test("never overwrites a session's existing file", async () => {
 		const dir = sessions();
 		mkdirSync(dir, { recursive: true });
