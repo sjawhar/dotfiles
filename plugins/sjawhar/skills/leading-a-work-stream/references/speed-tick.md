@@ -17,4 +17,4 @@ Arm the reminder as an omp background process in your own session: a bash call w
 sleep $(( 10800 - ($(date +%s) - 3600) % 10800 )) && echo "SPEED TICK: run the six-step loop in leading-a-work-stream references/speed-tick.md now"
 ```
 
-Re-arm it as the first step of each tick. It dies with the session, so put that command in your wake file as the first action after a restart. Never arm it as a systemd unit, timer or screen: those live in no repository, and a rebuilt box loses them (CLAUDE.md).
+Re-arm it as the first step of each tick. It dies with the session, so put that command in your wake file as the first action after a restart. A hand-written systemd unit, timer or screen would outlive the session, but it lives in no repository, so a rebuilt box loses it.
