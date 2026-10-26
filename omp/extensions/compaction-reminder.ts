@@ -1,19 +1,26 @@
 // Re-assert what a compaction loses, in three cases: the sdd process contract for
 // a top-level session that invoked the `sdd` skill, a stream lead's goals
-// document for a top-level session started with `STREAM_GOALS`, and what a
-// subagent was told to do, on its first compaction. Every successful automatic
-// shake also leaves a `compaction-marker` entry recording the context size
-// before and after it.
+// document for a top-level session that names one, and what a subagent was
+// told to do, on its first compaction. Every successful automatic shake also
+// leaves a `compaction-marker` entry recording the context size before and
+// after it.
 //
 // A stream lead loses its stream's goals and Sami's standing rules to a summary
 // the same way: they arrive over hours as messages, and the summary paraphrases
 // or drops them. Each stream keeps them in ONE document (a Dispatch artifact such
-// as dispatch://OSSV/artifact/goals-md, or a file); the lead's pane launcher
-// names it in `STREAM_GOALS`. Then after every compaction and shake of the
+// as dispatch://OSSV/artifact/goals-md, or a file). A session names it in one of
+// two ways: the `STREAM_GOALS` variable in its environment, or an entry for its
+// session id in `~/.config/omp/stream-goals.json`, shaped
+// `{"<session id>": "<dispatch:// URL or file path>"}`. The variable wins when
+// both are set. The map exists because pane launchers did not set the variable,
+// and a restart relaunched every lead without it, so the reminder never fired
+// (measured 2026-10-26: no lead process had it). Both are read at compaction
+// time, so an edit to the map takes effect at the next compaction with no
+// restart; a missing, unreadable or malformed map, or no entry, gives no
+// reminder and never throws. Then after every compaction and shake of the
 // top-level session, the first thing in context is an instruction to read that
-// document before acting. The variable is read at compaction time, so only a
-// session started with it gets the reminder; subagents never do, since they
-// inherit the lead's environment but not its role.
+// document before acting. Subagents never get it: they inherit the lead's
+// environment but not its role.
 //
 // A compaction summary paraphrases the conversation; a workflow contract the
 // session was following (the sdd skill's agent mapping and gates) rarely
@@ -146,6 +153,9 @@
 // single region the next time it ran. Its opening grammar is lowercase-only, so
 // an uppercase name never matches. A large fenced or lowercase-XML block
 // *inside* the restated text is still a region of its own.
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import sddReminder from "./compaction-reminder.md" with { type: "text" };
 import subagentReminder from "./compaction-reminder-subagent.md" with { type: "text" };
@@ -175,6 +185,19 @@ function streamGoalsReminder(goals: string): string {
 	);
 }
 
+/** The session's goals document: `STREAM_GOALS`, else its entry in the map file; undefined on any failure. */
+function streamGoals(ctx: CompactCtx): string | undefined {
+	const fromEnv = process.env.STREAM_GOALS?.trim();
+	if (fromEnv) return fromEnv;
+	try {
+		const map: unknown = JSON.parse(readFileSync(join(process.env.HOME || homedir(), ".config/omp/stream-goals.json"), "utf8"));
+		const entry = map && typeof map === "object" ? (map as Record<string, unknown>)[ctx.sessionManager.getSessionId()] : undefined;
+		return typeof entry === "string" && entry.trim() ? entry.trim() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 type BranchEntry = { type: string };
 type InitEntry = { type: "session_init"; task: string };
 type BranchMessage = {
@@ -188,7 +211,7 @@ type IrcEntry = { type: "custom_message"; customType: string; content?: string; 
 type ShakeEndEvent = { action: string; aborted: boolean; skipped?: boolean; errorMessage?: string };
 type CompactCtx = {
 	agent: { kind: "main" | "sub"; parentId?: string };
-	sessionManager: { getBranch: () => BranchEntry[] };
+	sessionManager: { getBranch: () => BranchEntry[]; getSessionId: () => string };
 	isIdle: () => boolean;
 	getContextUsage: () => { tokens: number } | undefined;
 };
@@ -270,7 +293,7 @@ export default function (pi: ExtensionAPI) {
 		);
 	const remind = (ctx: CompactCtx) => {
 		if (ctx.agent.kind === "main") {
-			const goals = process.env.STREAM_GOALS?.trim();
+			const goals = streamGoals(ctx);
 			if (goals) deliver("post-compaction-stream-goals", streamGoalsReminder(goals), ctx);
 			if (sddInvoked(ctx)) deliver("post-compaction-reminder", SDD_REMINDER, ctx);
 			return;

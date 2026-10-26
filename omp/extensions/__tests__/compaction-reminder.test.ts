@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import extension from "../compaction-reminder";
 import sddSkill from "../../../plugins/sjawhar/skills/sdd/SKILL.md" with { type: "text" };
 
@@ -54,9 +57,23 @@ const yieldReminder: Entry = {
 };
 const context = (kind: Kind, branch: Entry[], idle: boolean, tokens?: number) => ({
 	agent: { kind, parentId: kind === "sub" ? PARENT : undefined },
-	sessionManager: { getBranch: () => branch },
+	sessionManager: { getBranch: () => branch, getSessionId: () => SESSION_ID },
 	isIdle: () => idle,
 	getContextUsage: () => (tokens === undefined ? undefined : { tokens, contextWindow: 1_000_000, percent: 0 }),
+});
+
+const SESSION_ID = "01a00000-0000-7000-8000-000000000001";
+/** Every test runs with HOME at an empty temp dir, so the real `~/.config/omp/stream-goals.json` never leaks in. */
+const HOME_DIR = mkdtempSync(join(tmpdir(), "compaction-reminder-home-"));
+const MAP_DIR = join(HOME_DIR, ".config/omp");
+const MAP_FILE = join(MAP_DIR, "stream-goals.json");
+const savedHome = process.env.HOME;
+beforeAll(() => {
+	process.env.HOME = HOME_DIR;
+});
+afterAll(() => {
+	process.env.HOME = savedHome;
+	rmSync(HOME_DIR, { recursive: true, force: true });
 });
 
 /** One session binding of the extension, driven through a fake `pi`. */
@@ -477,6 +494,77 @@ describe("compaction-reminder: a stream lead's goals document", () => {
 			session.compact("main", [user("lead the stream"), compaction], true);
 
 			expect(session.sent).toHaveLength(0);
+		});
+	});
+
+	describe("the session-id map in ~/.config/omp/stream-goals.json", () => {
+		const MAPPED = "dispatch://LINUX-31/spec";
+		/** Run `body` with the map file holding `content` (undefined: no file), STREAM_GOALS unset unless given. */
+		const withMap = (content: string | undefined, body: () => void, env?: string) => {
+			rmSync(MAP_DIR, { recursive: true, force: true });
+			if (content !== undefined) {
+				mkdirSync(MAP_DIR, { recursive: true });
+				writeFileSync(MAP_FILE, content);
+			}
+			try {
+				withGoals(env, body);
+			} finally {
+				rmSync(MAP_DIR, { recursive: true, force: true });
+			}
+		};
+
+		test("a mapped top-level session is told to read its mapped document on compaction and shake", () => {
+			withMap(JSON.stringify({ [SESSION_ID]: MAPPED, other: "dispatch://X/spec" }), () => {
+				const session = bind();
+				const branch = [user("lead the stream"), compaction];
+				session.compact("main", branch, true);
+				session.turnEnd(1);
+				session.shakeEnd("main", branch, false, { skipped: false });
+
+				expect(session.sent.map(s => s.message.customType)).toEqual([
+					"post-compaction-stream-goals",
+					"post-compaction-stream-goals",
+				]);
+				for (const s of session.sent) expect(s.message.content).toContain(MAPPED);
+			});
+		});
+
+		test("STREAM_GOALS wins over a map entry", () => {
+			withMap(
+				JSON.stringify({ [SESSION_ID]: MAPPED }),
+				() => {
+					const session = bind();
+					session.compact("main", [user("lead the stream"), compaction], true);
+
+					expect(session.sent).toHaveLength(1);
+					expect(session.sent[0].message.content).toContain(GOALS);
+					expect(session.sent[0].message.content).not.toContain(MAPPED);
+				},
+				GOALS
+			);
+		});
+
+		test("a subagent never gets the mapped reminder", () => {
+			withMap(JSON.stringify({ [SESSION_ID]: MAPPED }), () => {
+				const session = bind();
+				session.compact("sub", [sessionInit(ASSIGNMENT), compaction], true);
+
+				expect(session.sent.map(s => s.message.customType)).toEqual(["post-compaction-subagent-reminder"]);
+			});
+		});
+
+		test.each([
+			["no map file", undefined],
+			["no entry for the session", JSON.stringify({ other: MAPPED })],
+			["a malformed file", "{not json"],
+			["a non-object file", JSON.stringify([MAPPED])],
+			["a non-string entry", JSON.stringify({ [SESSION_ID]: 7 })],
+		])("%s gives no goals reminder and does not throw", (_name, content) => {
+			withMap(content, () => {
+				const session = bind();
+				expect(() => session.compact("main", [user("lead the stream"), compaction], true)).not.toThrow();
+				expect(session.sent).toHaveLength(0);
+			});
 		});
 	});
 });
