@@ -83,14 +83,10 @@ BUS_SOCK="$RUN_BASE/bus/bus"
 # systemd's secretsd.socket unit holds this listener, so the node is stable
 # across daemon restarts and a bare-file bind stays live.
 SECRETSD_SOCK="/run/user/$UID_/secretsd.sock"
-# The secrets broker (AGENTC-393): AGENT_SECRETS_URL in the environment, else this machine's
-# env.local, else broker.env's.
-if [[ -z "${AGENT_SECRETS_URL:-}" ]]; then
-    # shellcheck source=SCRIPTDIR/../agent-secrets/broker.env
-    . "$DOTFILES_DIR/agent-secrets/broker.env"
-    # shellcheck source=/dev/null
-    [[ ! -f "$HOME/.config/agent-secrets/env.local" ]] || . "$HOME/.config/agent-secrets/env.local"
-fi
+# The secrets broker (AGENTC-393): the URL the caller chose, else this machine's env.local, else
+# broker.env's (agent-secrets/broker-url.sh).
+# shellcheck source=SCRIPTDIR/../agent-secrets/broker-url.sh
+. "$DOTFILES_DIR/agent-secrets/broker-url.sh"
 # The operator agent-secrets-login recorded.
 LAUNCHER_DIR="$HOME/.config/agent-secrets"
 # Why broker_ready last said no, with the command that fixes it.

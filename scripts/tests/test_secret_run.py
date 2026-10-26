@@ -6,6 +6,11 @@ never by failure: once the broker path is taken, its exit is secret-run's exit a
 never tried. Everything else (identity exits non-zero, an old client without `identity`, no
 agent-secrets at all) runs `secrets` exactly as before, without touching the broker.
 
+On the broker path the client gets the URL agent-secrets/broker-url.sh gives every consumer of
+agent-secrets/broker.env: broker.env's, or env.local's over it, exported with its record
+DOTFILES_AGENT_SECRETS_URL, when the caller has no URL or has the one a dotfiles load recorded (a
+stale default); a URL the caller chose itself stays.
+
 Technique: stub `agent-secrets` and `secrets` first on PATH; each prints the argv it got and,
 for the exec forms, execs the command after `--` with a marker variable set. The `secrets` stub
 refuses `get` with more than one key, as the real CLI does.
@@ -26,6 +31,33 @@ BROKER_URL = next(
     for line in (DOTFILES / "agent-secrets" / "broker.env").read_text().splitlines()
     if line.startswith("AGENT_SECRETS_URL=")
 )
+STALE_URL = "https://stale.example"
+CHOSEN_URL = "http://127.0.0.1:8443"
+LOCAL_URL = "https://local.example"
+# case -> (the caller's environment, env.local's URL or None, the URL and record the broker call
+# gets; "unset" is no record). A stale default is a URL a dotfiles load recorded before broker.env
+# changed. A chosen URL is one exported from outside the dotfiles (Legion's dev-broker.sh prints
+# one for a local broker), also in a shell whose own load recorded the default.
+URL_CASES: dict[str, tuple[dict[str, str], str | None, tuple[str, str]]] = {
+    "unset": ({}, None, (BROKER_URL, BROKER_URL)),
+    "stale default": (
+        {"AGENT_SECRETS_URL": STALE_URL, "DOTFILES_AGENT_SECRETS_URL": STALE_URL},
+        None,
+        (BROKER_URL, BROKER_URL),
+    ),
+    "chosen URL": ({"AGENT_SECRETS_URL": CHOSEN_URL}, None, (CHOSEN_URL, "unset")),
+    "chosen URL over a recorded default": (
+        {"AGENT_SECRETS_URL": CHOSEN_URL, "DOTFILES_AGENT_SECRETS_URL": BROKER_URL},
+        None,
+        (CHOSEN_URL, BROKER_URL),
+    ),
+    "env.local": ({}, LOCAL_URL, (LOCAL_URL, LOCAL_URL)),
+    "env.local over a stale default": (
+        {"AGENT_SECRETS_URL": STALE_URL, "DOTFILES_AGENT_SECRETS_URL": STALE_URL},
+        LOCAL_URL,
+        (LOCAL_URL, LOCAL_URL),
+    ),
+}
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -42,7 +74,7 @@ if [[ "$1" == identity ]]; then
     echo "identity: ${STUB_IDENTITY_MSG:-no broker identity}" >&2
     exit "${STUB_IDENTITY:-1}"
 fi
-echo "BROKER $* URL=${AGENT_SECRETS_URL:-unset}"
+echo "BROKER $* URL=${AGENT_SECRETS_URL:-unset} MARK=${DOTFILES_AGENT_SECRETS_URL:-unset}"
 [[ -n "${STUB_BROKER_EXIT:-}" ]] && exit "$STUB_BROKER_EXIT"
 while (( $# )) && [[ "$1" != -- ]]; do shift; done
 (( $# )) || exit 0
@@ -106,7 +138,7 @@ class SecretRun(unittest.TestCase):
             [
                 (
                     "BROKER AIRTABLE_TOKEN DD_API_KEY --reason skill: smoke --wait 0 -- "
-                    f'sh -c echo "via=$VIA" URL={BROKER_URL}'
+                    f'sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}'
                 ),
                 "via=broker",
             ],
@@ -122,7 +154,7 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(
             result.stdout.splitlines()[0],
             "BROKER AIRTABLE_TOKEN --reason skill: smoke --wait 30s -- "
-            f'sh -c echo "via=$VIA" URL={BROKER_URL}',
+            f'sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
         )
 
     def test_caller_url_is_kept(self) -> None:
@@ -132,6 +164,23 @@ class SecretRun(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("URL=https://b.example", result.stdout)
+
+    def test_url_follows_broker_env_unless_the_caller_chose_one(self) -> None:
+        self.with_client()
+        env_local = Path(self.temp_dir.name) / ".config" / "agent-secrets" / "env.local"
+        env_local.parent.mkdir(parents=True)
+        for case, (caller, local, (url, mark)) in URL_CASES.items():
+            with self.subTest(case=case):
+                if local is None:
+                    env_local.unlink(missing_ok=True)
+                else:
+                    env_local.write_text(f"AGENT_SECRETS_URL={local}\n", encoding="utf-8")
+                result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", **caller)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.splitlines()[0],
+                    f'BROKER AIRTABLE_TOKEN -- sh -c echo "via=$VIA" URL={url} MARK={mark}',
+                )
 
     def test_no_identity_runs_secretsd_and_never_the_broker(self) -> None:
         self.with_client()
@@ -191,7 +240,8 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(
             result.stdout.splitlines(),
             [
-                f"BROKER request DEEL_API_KEY GH_PUBLIC_REPO_PAT --reason task: start URL={BROKER_URL}"
+                "BROKER request DEEL_API_KEY GH_PUBLIC_REPO_PAT --reason task: start "
+                f"URL={BROKER_URL} MARK={BROKER_URL}"
             ],
         )
 
@@ -201,12 +251,13 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[0],
-            f'BROKER AIRTABLE_TOKEN --ttl 2m -- sh -c echo "via=$VIA" URL={BROKER_URL}',
+            f'BROKER AIRTABLE_TOKEN --ttl 2m -- sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
         )
         result = self.run_secret_run("request", "--ttl=5m", "DEEL_API_KEY", STUB_IDENTITY="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            result.stdout.splitlines(), [f"BROKER request DEEL_API_KEY --ttl 5m URL={BROKER_URL}"]
+            result.stdout.splitlines(),
+            [f"BROKER request DEEL_API_KEY --ttl 5m URL={BROKER_URL} MARK={BROKER_URL}"],
         )
 
     def test_ttl_is_dropped_for_secretsd(self) -> None:

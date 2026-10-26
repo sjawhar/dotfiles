@@ -10,6 +10,12 @@ machine login-status` prints `issued`. It registers nothing when `login-status` 
 scripts/agent-secrets-login names the operator by the email they sign in to Dispatch with: a GitHub
 login is refused (exit 2) before the operator file is written.
 
+Every consumer of agent-secrets/broker.env (agent-secrets-session, agent-secrets-login, .bashrc,
+scripts/agentbox; scripts/secret-run in test_secret_run.py) ends with the same AGENT_SECRETS_URL,
+by agent-secrets/broker-url.sh: broker.env's, or env.local's over it, exported with its record
+DOTFILES_AGENT_SECRETS_URL, when the caller has no URL or has the one a dotfiles load recorded (a
+stale default); a URL the caller chose itself stays.
+
 Technique: stub `agent-secrets` (login-status answers as the case needs; `register` prints the
 flags and environment it got, then execs the command after `--`), the agents themselves and, for
 the login, `systemctl`, first on PATH.
@@ -17,6 +23,7 @@ the login, `systemctl`, first on PATH.
 
 from __future__ import annotations
 
+import socket
 import stat
 import subprocess
 import sys
@@ -33,6 +40,35 @@ BROKER_URL = next(
     for line in (DOTFILES / "agent-secrets" / "broker.env").read_text().splitlines()
     if line.startswith("AGENT_SECRETS_URL=")
 )
+BASHRC = DOTFILES / ".bashrc"
+AGENTBOX = DOTFILES / "scripts" / "agentbox"
+STALE_URL = "https://stale.example"
+CHOSEN_URL = "http://127.0.0.1:8443"
+LOCAL_URL = "https://local.example"
+# case -> (the caller's environment, env.local's URL or None, the URL and record the consumer ends
+# with; "unset" is no record). A stale default is a URL a dotfiles load recorded before broker.env
+# changed. A chosen URL is one exported from outside the dotfiles (Legion's dev-broker.sh prints
+# one for a local broker), also in a shell whose own load recorded the default.
+URL_CASES: dict[str, tuple[dict[str, str], str | None, tuple[str, str]]] = {
+    "unset": ({}, None, (BROKER_URL, BROKER_URL)),
+    "stale default": (
+        {"AGENT_SECRETS_URL": STALE_URL, "DOTFILES_AGENT_SECRETS_URL": STALE_URL},
+        None,
+        (BROKER_URL, BROKER_URL),
+    ),
+    "chosen URL": ({"AGENT_SECRETS_URL": CHOSEN_URL}, None, (CHOSEN_URL, "unset")),
+    "chosen URL over a recorded default": (
+        {"AGENT_SECRETS_URL": CHOSEN_URL, "DOTFILES_AGENT_SECRETS_URL": BROKER_URL},
+        None,
+        (CHOSEN_URL, BROKER_URL),
+    ),
+    "env.local": ({}, LOCAL_URL, (LOCAL_URL, LOCAL_URL)),
+    "env.local over a stale default": (
+        {"AGENT_SECRETS_URL": STALE_URL, "DOTFILES_AGENT_SECRETS_URL": STALE_URL},
+        LOCAL_URL,
+        (LOCAL_URL, LOCAL_URL),
+    ),
+}
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -41,9 +77,23 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def write_env_local(home: Path, url: str | None) -> None:
+    """~/.config/agent-secrets/env.local naming url, or no env.local at all."""
+    path = home / ".config" / "agent-secrets" / "env.local"
+    if url is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"AGENT_SECRETS_URL={url}\n", encoding="utf-8")
+
+
 AGENT_SECRETS_STUB = r"""
 case "$1" in
     machine)
+        if [[ "$2" == login ]]; then
+            echo "LOGIN URL=${AGENT_SECRETS_URL:-unset} MARK=${DOTFILES_AGENT_SECRETS_URL:-unset}"
+            exit 0
+        fi
         echo login-status >>"$STUB_LOG"
         # The first call after a pin bump: mise's auto-install progress on stderr, before the state.
         [[ -n "${STUB_AUTOINSTALL:-}" ]] && echo "mise agent-secrets@legion-envoy-v9.9.9 [1/3] download agent-secrets-amd64.tar.gz" >&2
@@ -65,7 +115,7 @@ case "$1" in
         flags=()
         while [[ "$1" != -- ]]; do flags+=("$1"); shift; done
         shift
-        echo "REGISTER ${flags[*]} SOCK=${AGENT_SECRETS_HELPER_SOCK:-unset} URL=${AGENT_SECRETS_URL:-unset}"
+        echo "REGISTER ${flags[*]} SOCK=${AGENT_SECRETS_HELPER_SOCK:-unset} URL=${AGENT_SECRETS_URL:-unset} MARK=${DOTFILES_AGENT_SECRETS_URL:-unset}"
         exec "$@"
         ;;
 esac
@@ -141,7 +191,7 @@ class AgentSecretsSession(unittest.TestCase):
                 self.assertEqual(
                     result.stdout.splitlines(),
                     [
-                        f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL}",
+                        f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL} MARK={BROKER_URL}",
                         f"AGENT pid={pid} --flag",
                     ],
                 )
@@ -157,8 +207,20 @@ class AgentSecretsSession(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[0],
-            "REGISTER --wait 10 --exec SOCK=/elsewhere/helper.sock URL=https://b.example",
+            "REGISTER --wait 10 --exec SOCK=/elsewhere/helper.sock URL=https://b.example MARK=unset",
         )
+
+    def test_url_follows_broker_env_unless_the_caller_chose_one(self) -> None:
+        self.install_helper_unit()
+        for case, (caller, local, (url, mark)) in URL_CASES.items():
+            with self.subTest(case=case):
+                write_env_local(self.home, local)
+                result, _ = self.session(STUB_LOGIN_STATE="issued", **caller)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.splitlines()[0],
+                    f"REGISTER --wait 10 --exec SOCK={self.sock} URL={url} MARK={mark}",
+                )
 
     def test_no_credential_registers_without_waiting(self) -> None:
         """Every state but issued; stderr around the state (auto-install, #1589's remedy) aside."""
@@ -171,7 +233,7 @@ class AgentSecretsSession(unittest.TestCase):
                     self.assertEqual(
                         result.stdout.splitlines(),
                         [
-                            f"REGISTER --exec SOCK={self.sock} URL={BROKER_URL}",
+                            f"REGISTER --exec SOCK={self.sock} URL={BROKER_URL} MARK={BROKER_URL}",
                             f"AGENT pid={pid} --flag",
                         ],
                     )
@@ -237,6 +299,27 @@ class AgentSecretsSession(unittest.TestCase):
         self.assertIn("'sjawhar' is not an email", result.stderr)
         self.assertFalse((self.home / ".config" / "agent-secrets" / "operator").exists())
 
+    def test_login_url_follows_broker_env_unless_the_caller_chose_one(self) -> None:
+        """The login reaches `agent-secrets machine login` once the helper's socket is there."""
+        write_stub(self.stub_dir, "systemctl", "exit 0")
+        self.sock.parent.mkdir(parents=True)
+        listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(listener.close)
+        listener.bind(str(self.sock))
+        for case, (caller, local, (url, mark)) in URL_CASES.items():
+            with self.subTest(case=case):
+                write_env_local(self.home, local)
+                result = subprocess.run(
+                    [str(LOGIN), "operator@example.com"],
+                    capture_output=True,
+                    text=True,
+                    env={**self.env, **caller},
+                    check=False,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [f"LOGIN URL={url} MARK={mark}"])
+
     def test_each_launcher_registers_its_agent(self) -> None:
         self.install_helper_unit()
         for name, (argv, agent_line) in LAUNCHERS.items():
@@ -252,9 +335,57 @@ class AgentSecretsSession(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 lines = result.stdout.splitlines()
                 self.assertEqual(
-                    lines[0], f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL}"
+                    lines[0],
+                    f"REGISTER --wait 10 --exec SOCK={self.sock} URL={BROKER_URL} MARK={BROKER_URL}",
                 )
                 self.assertTrue(lines[1].startswith(agent_line), result.stdout)
+
+
+class SourcedBrokerUrl(unittest.TestCase):
+    """.bashrc, which every shell sources, and scripts/agentbox, sourced as its own tests source it:
+    a child of the sourcing shell gets the URL and its record."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.home = root / "home"
+        (self.home / ".config").mkdir(parents=True)
+        # A DOTFILES_DIR holding only the real agent-secrets/, so .bashrc runs none of the
+        # checkout's tools (bin/mise, dockerfunc).
+        self.dotfiles = root / "dotfiles"
+        self.dotfiles.mkdir()
+        (self.dotfiles / "agent-secrets").symlink_to(DOTFILES / "agent-secrets")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def child_sees(self, path: Path, caller: dict[str, str]) -> str:
+        script = (
+            'source "$1"\n'
+            "exec sh -c 'echo \"URL=${AGENT_SECRETS_URL-unset} MARK=${DOTFILES_AGENT_SECRETS_URL-unset}\"'"
+        )
+        result = subprocess.run(
+            ["bash", "--norc", "-c", script, "--", str(path)],
+            capture_output=True,
+            text=True,
+            env={
+                "HOME": str(self.home),
+                "PATH": "/usr/bin:/bin",
+                "DOTFILES_DIR": str(self.dotfiles),
+                **caller,
+            },
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.splitlines()[-1]
+
+    def test_url_follows_broker_env_unless_the_caller_chose_one(self) -> None:
+        for path in (BASHRC, AGENTBOX):
+            for case, (caller, local, (url, mark)) in URL_CASES.items():
+                with self.subTest(file=path.name, case=case):
+                    write_env_local(self.home, local)
+                    self.assertEqual(self.child_sees(path, caller), f"URL={url} MARK={mark}")
 
 
 class HelperWrapper(unittest.TestCase):
