@@ -70,7 +70,7 @@ Keep one record of the words of the person the stream works for, each quoted wit
 You answer for every request the user gives any of your agents, and for every wait any of them has.
 
 - **A request from the user goes on a claimed Dispatch issue before work on it starts**: a line in that issue spec's `## Open items` checklist, within the hour — what, who asked, a link to the source, what done means (deployed, merged, measured) and a date. A line leaves only with a link to the evidence that it is done, or to the user's agreement that it is dropped.
-- **Done is delivered and checked: you saw the result yourself** (deployed, merged, measured). Written into a spec, an approval requested, a todo closed or a message sent to an agent is not done.
+- **Done is delivered and checked: you saw the result or its evidence** (a merge link, a deploy log, a measurement). Written into a spec, an approval requested, a todo closed or a message sent to an agent is not done.
 - **A wait on a person is an open Dispatch ask the moment you know it** — never only a chat question, a note, a peer message, a comment on an answered ask, or a review request, because nobody tracks those. A wait on anything else is an open-items line naming the blocker, its owner and its link. Keep working on everything else.
 - **Every hour, run the stream's Dispatch check:** `uv run --project ~/src/chief-dashboard chief-dashboard dispatch-check --project <KEY>`. **Once a day, run `skill://finding-dropped-work` over each agent's transcript and your own;** it also lists long idle spans with work open and long projects that do not use their workflow skill. Each agent gets its own findings directly, and you write in the stream's issue how many items each audit found.
 - Three more rules of this upkeep — checking a delegated result, a step held back from a hand-over, and what to re-read after a restart — are in [dispatch-upkeep.md](references/dispatch-upkeep.md).
@@ -93,7 +93,7 @@ From records you read yourself (GitHub, Dispatch, the numbers), answer: what is 
 
 ## Delegation and tooling
 
-- Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you: when a delegated result lands, read the number it was meant to move yourself.
+- Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you: when a delegated result lands, read the number it was meant to move from the evidence it names, and measure it yourself only when it names none.
 - When an agent starts a long project, check that it uses the workflow skill for that kind of work and name the skill: `sdd` for an engineering project, `skill://building-and-delivering-tasks` for RL task work. That skill's own review steps replace review by the lead.
 - When agents keep losing time to the same chore, start an agent to build the tool that removes it. Do not wait to be asked.
 - Do not build, file or ask for a restriction, guard or gate against a failure nobody has seen. Fix a real failure at its cause, after it happens.
