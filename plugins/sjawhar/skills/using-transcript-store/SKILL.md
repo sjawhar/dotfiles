@@ -48,6 +48,7 @@ To list every instruction a person gave one session since a time, and what the s
 ## When the store does not have it
 
 - **Not in the store:** Claude Code logs, other machines, and the last ~10 minutes. sami-leanperf lags more while a timed benchmark runs there. `tq` warns on stderr when a host's last load is over 30 minutes old.
+- **`history://<id>` is a condensed view:** `read` and `grep` on it see message text with each tool call and its result collapsed to one line and thinking left out, so a miss there does not mean a tool never ran; for tool output in the last ~10 minutes, grep the agent's `<id>.jsonl` file.
 - **`tq` not found:** the host is not a store client. Run the query on sami-rocqperf or sami-leanperf.
 - Read raw files by hand only for data the store does not have (the first bullet), and never scan the whole sessions tree on sami-rocqperf: other work shares its CPU and disk.
 
