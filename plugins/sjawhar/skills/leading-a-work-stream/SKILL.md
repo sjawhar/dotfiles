@@ -19,7 +19,7 @@ A lead raises the stream's numbers by making its agents faster, and is not a gat
 
 ## The speed loop
 
-Arm a reminder that wakes you every 3 hours and run the six-step loop it names: [speed-tick.md](references/speed-tick.md). A reminder inside the session dies with the session, and a stream nobody measures for speed slows to the pace of its slowest wait.
+Arm a reminder that wakes you every 3 hours and run the six-step loop it names: [speed-tick.md](references/speed-tick.md). The reminder dies with your session, so your wake file re-arms it first after a restart. A stream nobody measures for speed slows to the pace of its slowest wait.
 
 ## Dates
 
@@ -76,8 +76,6 @@ From records you read yourself (GitHub, Dispatch, the numbers), answer: what is 
 **A blocker you relay to other streams carries the command that shows it.** Without it, each stream spends a check to disprove it after acting on it.
 
 **Ask a fresh reviewer, for each claimed cause, to name the command or record that would show it FALSE, and to run it.** A reviewer that reads only the prose confirms a confident wrong cause. The causes that cost most are the ones nobody could falsify, because nobody looked for what would disprove them.
-
-**Run a watch that names quiet sessions, and let it restart nothing.** A session that dies mid-task stays dead until a person notices: measured at about 7 hours on a day when one credential failure stopped a box, and at 5 minutes or less once a watch existed. A watch reads the session's transcript modification time, its process and, if it can, its pane; it reports, and the owner decides. Two traps: a systemd user service on a dev box may not reach the tmux server at all (it answers `server exited unexpectedly` while the same command works from a pane), and a watch built on an agent-messaging registry reports live sessions as dead under load. Test it by making it report something you know is true.
 
 ## Delegation and tooling
 
