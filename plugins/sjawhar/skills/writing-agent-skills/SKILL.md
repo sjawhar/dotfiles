@@ -60,7 +60,7 @@ Test every new skill and every edit that changes what an agent does: untested ag
 - For each required step you remove, name what now makes it happen (a script, a hook, another rule). If nothing does, keep the step, because a step left to choice gets skipped.
 - Keep the words that set a rule's scope ("before every push", "in Rust files"). Current models apply a rule only as broadly as it says.
 - Shrink by moving or deleting whole blocks, never by squeezing wording, which drops rules unnoticed.
-- A rewrite may make SKILL.md at most 200 bytes longer, room for the precedence sentence (`check_skill.py --old` enforces it). Pay for each added reason or definition by cutting repeats and restated context, because files regrow on their own.
+- A rewrite may make SKILL.md at most 200 bytes longer, room for the precedence sentence (`check_skill.py --old` enforces it). Pay for each added reason or definition by cutting repeats and restated context, because files regrow on their own. Before and after a batch of skill edits, run `python3 ~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/corpus_metrics.py` and put both outputs in the commit message.
 
 ## 6. Rewrite an existing skill
 
