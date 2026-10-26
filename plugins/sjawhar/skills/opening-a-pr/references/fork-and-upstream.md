@@ -16,7 +16,7 @@ The default for a hawk or inspect bug:
 2. Send the tip and red-to-green evidence to the release-claim holder, who includes it in the release in hand and publishes. When every consumer pin of that release is frozen on a revision (`rev = "release/…"`), cut the next dated name first. With no claim held, do this yourself.
 3. The consumer pins the published release name and deploys.
 
-When the placement rules above make the change upstream material, open the upstream PR alongside. It gates none of this. Never wait for upstream review to use a fork change.
+When the placement rules above make the change upstream material, open the upstream PR alongside. It gates none of this. Never wait for upstream review to use a fork change. In the Rocq and Lean forks, `maintaining-prover-forks` sets the timing instead: a bug fix's upstream PR, and the bug report that goes with it, wait until a pushed release carries the fix.
 
 ## Upstream PRs
 
