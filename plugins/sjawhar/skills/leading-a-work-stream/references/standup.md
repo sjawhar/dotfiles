@@ -26,7 +26,14 @@ Then one short explanation of a single thing he does not already know (see below
 
 ## The company version
 
-After the meeting the chief of staff turns the thread into a short standup Sami can share with the rest of the company. It covers every stream, one section each. It speaks in terms people outside the agent teams know: projects screened, enrolled, in progress and when each is expected done, not internal counts such as "17 of 100 statements" with no account of what the 100 are. The number rule above applies to every line.
+After the meeting Sami shares a short standup with the whole company. Each lead writes its own stream's section, because only the lead knows what its numbers mean and which work is ours; the chief of staff assembles them, checks each with a reader who has no context, and only then shows Sami. A section is at most 100 words, in US Pacific times, with one source line per claim kept for the chief of staff and left out of the text. Sami rejected four drafts on 2026-10-26; the rules below are what was wrong with them.
+
+1. **Readers know the projects by name.** Do not explain what a stream is. Say what it delivered and what is next, with dates.
+2. **Report our team's work, not someone else's.** Verified Linux reports the experiments we ran on the methodology and what they showed, not the grounding numbers of Nickolai's own project, to which we have not yet contributed.
+3. **No internal metrics; every number says what it counts and out of what.** "30 projects enrolled" and "a release covering 26 projects" read as two unrelated numbers; write "26 of the 30 enrolled projects". Say "theorem statements" or "proofs", never just "statements".
+4. **Claim exactly what the evidence shows.** "Production grading can no longer be fooled by a proof of a false statement" was not known; "we found and fixed N grader bugs that let a false proof earn credit" was.
+5. **Say concretely what failed.** "Twelve candidates did not pass review" tells a reader nothing; name what was wrong with them.
+6. **Introduce people outsiders do not know by their role, or leave them out**, and use the names people use: "the verified grader", not a description of it.
 
 ## Video and audio
 
