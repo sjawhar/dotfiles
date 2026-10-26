@@ -187,7 +187,12 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # unauthenticated API limit is 60/h and this machine exhausts it) --
 # [settings.github] credential_command above supplies one (gh-app-token, the same
 # credential git's own GitHub App routing uses).
-version = "3.3.1"
+# 3.7.0 (2026-10-26) names the store behind every answer and refusal (sjawhar/forward#67). Its
+# wire protocol is still 4, the same as 3.3.1 (`git diff v3.3.1 v3.7.0 -- crates/proto` adds only
+# a client-side accessor), so this client was proven read-only against the running 3.3.1 daemon
+# (`secrets grants`, `secrets get <human key> --no-request`) and the daemon was not restarted; its
+# unit runs installs/secrets/latest, so its next start runs 3.7.0.
+version = "3.7.0"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
 # The agent-secrets client and host helper (AGENTC-393), from sjawhar/legion's legion-envoy-v*
