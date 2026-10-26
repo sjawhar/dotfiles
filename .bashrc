@@ -136,13 +136,9 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${HOME}/.config/systemd/user/forward-s
 fi
 
 # Agent secrets (AGENTC-393). The broker's address: every machine carries it (the CLI's secret
-# commands need it; the helper socket below exists only where the helper is installed); a value
-# the caller already has wins.
-if [ -z "${AGENT_SECRETS_URL:-}" ]; then
-    . "${DOTFILES_DIR}/agent-secrets/broker.env"
-    [ ! -f "${HOME}/.config/agent-secrets/env.local" ] || . "${HOME}/.config/agent-secrets/env.local"
-fi
-export AGENT_SECRETS_URL
+# commands need it; the helper socket below exists only where the helper is installed). A URL the
+# caller chose wins; one a dotfiles load recorded follows broker.env (agent-secrets/broker-url.sh).
+. "${DOTFILES_DIR}/agent-secrets/broker-url.sh"
 # A host session gets its broker proofs from the agent-secrets helper over this socket
 # (installers/agent-secrets.sh; the agent launchers register each session through
 # scripts/agent-secrets-session). Agent boxes have a key dir instead: scripts/agentbox sets

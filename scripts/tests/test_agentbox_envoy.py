@@ -12,7 +12,8 @@ Technique: source scripts/agentbox (its source guard runs nothing) with `docker`
 `agent-secrets`, `curl` and `sleep` stubbed first on PATH, and run cmd_new with the steps that
 need a real host (image, network, clones, mounts) replaced by no-ops; session_env is the real one.
 DOTFILES_DIR is a scratch tree whose scripts/envoy-nats-seed prints a seed path, and the caller
-exports ENVOY_NATS_URL, so a launcher that still forwarded either would pass it.
+exports ENVOY_NATS_URL, so a launcher that still forwarded either would pass it. The tree's
+agent-secrets/ is the real one, which the launcher sources for the broker's URL.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ class AgentboxEnvoy(unittest.TestCase):
         write_stub(stubs, "agent-secrets", 'echo none; exit 1')
         self.seed = self.root / "run" / "envoy" / "nats-nkey-seed-omp-session"
         write_stub(self.root / "dotfiles" / "scripts", "envoy-nats-seed", f'echo "{self.seed}"')
+        (self.root / "dotfiles" / "agent-secrets").symlink_to(DOTFILES / "agent-secrets")
         self.run_args = self.root / "run-args"
         self.env = {
             "HOME": str(self.home),
