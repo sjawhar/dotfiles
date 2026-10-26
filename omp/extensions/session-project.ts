@@ -8,7 +8,8 @@
 // file when a top-level session starts and has none yet, from the tags its
 // process carries; agent-session itself rewrites it when a launch names
 // THEOREM_PROJECT. No collector (OTEL_EXPORTER_OTLP_ENDPOINT unset) or no
-// project tag: no file.
+// project tag: no file. An old project name is written as its COS stream
+// (OLD_PROJECTS, the same map agent-session applies), so none is written again.
 //
 // Top-level transcripts only, the rule session-env.ts uses: subagents share the
 // parent process, and their session_start events fire process-wide.
@@ -24,6 +25,13 @@ import { TOP_LEVEL_TRANSCRIPT } from "./session-env";
 
 const TIMEOUT_MS = 5_000;
 const VALUE = /^[A-Za-z0-9._-]+$/;
+/** Project names from before the COS streams, and the stream each became. */
+export const OLD_PROJECTS: Readonly<Record<string, string>> = {
+	"linux-verify": "verified-linux",
+	"binary-equivalence": "task-making",
+	xv6: "task-making",
+	"agent-infra": "legion",
+};
 
 /** The last theorem.project / theorem.subproject in OTEL_RESOURCE_ATTRIBUTES (later entries win). */
 export function spendTags(attributes: string | undefined): { project?: string; subproject?: string } {
@@ -55,8 +63,9 @@ export async function recordSessionProject(
 ): Promise<"written" | "exists" | "skipped" | "failed"> {
 	const id = file ? TOP_LEVEL_TRANSCRIPT.exec(path.basename(file))?.[1] : undefined;
 	if (!id || !env.OTEL_EXPORTER_OTLP_ENDPOINT) return "skipped";
-	const { project, subproject } = spendTags(env.OTEL_RESOURCE_ATTRIBUTES);
-	if (!project || !VALUE.test(project)) return "skipped";
+	const { project: tagged, subproject } = spendTags(env.OTEL_RESOURCE_ATTRIBUTES);
+	if (!tagged || !VALUE.test(tagged)) return "skipped";
+	const project = Object.hasOwn(OLD_PROJECTS, tagged) ? OLD_PROJECTS[tagged] : tagged;
 	const line = subproject && VALUE.test(subproject) ? `${project} ${subproject}\n` : `${project}\n`;
 	const target = path.join(dir, id);
 	const tmp = path.join(dir, `.${id}.${process.pid}.tmp`);
