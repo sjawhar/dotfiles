@@ -74,7 +74,7 @@ import { promisify } from "node:util";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
-const TOP_LEVEL_TRANSCRIPT = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d-]+Z_(${UUID})\\.jsonl$`);
+export const TOP_LEVEL_TRANSCRIPT = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d-]+Z_(${UUID})\\.jsonl$`);
 // Shared overlay filename grammar — the Legion extension emits the same shape
 // so either implementation can recognize and strip the other's stale overlays.
 const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;

@@ -66,6 +66,7 @@ mkdir -p "${OMP_AGENT_DIR}/extensions"
 rm -f "${OMP_AGENT_DIR}/extensions/jj-snapshot.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/dotfiles-skills.ts" "${OMP_AGENT_DIR}/extensions/dotfiles-skills.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/session-env.ts" "${OMP_AGENT_DIR}/extensions/session-env.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/session-project.ts" "${OMP_AGENT_DIR}/extensions/session-project.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/compaction-reminder.ts" "${OMP_AGENT_DIR}/extensions/compaction-reminder.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/viewport.ts" "${OMP_AGENT_DIR}/extensions/viewport.ts"
 # Machines set up before the rename hold a now-dangling link under the old name.
