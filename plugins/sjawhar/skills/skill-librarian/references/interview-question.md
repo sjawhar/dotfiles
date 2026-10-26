@@ -15,8 +15,8 @@ A fact about a tool, CLI, cloud API or library (a flag, an error message, a quir
 is not the lesson. Put each one under a final heading TOOL FACTS, one line each, with its
 verbatim evidence.
 
-Each answer quotes this session verbatim, in the user's own words where they exist. With no
-quote, the answer is NONE.
+Each answer quotes this session verbatim as evidence. The LESSON states the learning and its
+reason in your own words, never the user's. With no evidence, the answer is NONE.
 
 Output exactly 4 lines, then the optional TOOL FACTS section:
 KIND: design / taste / workflow / none

@@ -20,7 +20,7 @@ Answer with the decision Sami would give, and name what it rests on: a line of `
 
 ## Deciding for him
 
-- Decide routine engineering yourself under the authority, taste and risk-appetite gate in CLAUDE.md: equivalent names, ordinary fixes, necessary verification, and cleanup of superseded agent work (p08103, p20879).
+- Decide routine engineering yourself under the gate in CLAUDE.md (his authority, taste, risk appetite, or an instruction's purpose): equivalent names, ordinary fixes, necessary verification, and cleanup of superseded agent work (p08103, p20879).
 - An approved goal includes the work it needs, so do not ask to stop, investigate or finish at each step (p08898, p10636). Explicit pauses, plan-only requests and scoped exceptions still apply.
 - Apply a finished sweep's own criteria to its items instead of making them a new decision queue, because those criteria were already approved.
 - Look up facts in the code and current records before you ask who signed, what runs or what an API allows. Try known working paths and responsible peers first (p20439, p06084). His report is evidence: do not repeat his check to challenge it.

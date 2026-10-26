@@ -1,8 +1,8 @@
 # The morning standup
 
-Sami holds a department-heads standup with the chief of staff and every stream lead: each lead presents in turn, the other leads offer help on each other's blockers, and he gives feedback and moves priorities. It started on 2026-10-26 as his experiment ("I would like us to go in like we're going to have a department heads meeting").
+Sami holds a department-heads standup with the chief of staff and every stream lead: each lead presents in turn, the other leads offer help on each other's blockers, and he gives feedback and moves priorities. It started on 2026-10-26 as his experiment.
 
-The format below comes from what he said was wrong with the standups he had been getting: "Every single standup video that I've received so far has been slop and garbage, focusing on metrics that don't matter, not explaining things, or each repeating the same thing. Every single fucking video from this morning had the 7-hour outage, which, yeah, it was a big deal, but fucking shut the fuck up about it already."
+The format below comes from what was wrong with the standups he had been getting: they tracked metrics that did not matter, explained nothing, and each repeated the same fleet-wide news.
 
 ## What you present
 
@@ -18,9 +18,9 @@ Then one short explanation of a single thing he does not already know (see below
 ## What keeps it out of the slop bin
 
 - **Say only what your stream can say.** Before you post, cut every line another lead will also say. A fleet-wide event (an outage, a release, a pause) is the chief of staff's to report once, not yours. Say what it did to your stream's numbers, or say nothing about it.
-- **A number only if a decision turns on it, and never bare.** Give it the denominator (62 of how many?), its target and due date, and whether that is good or bad. His words on 2026-10-26: "Quoting raw numbers without any context is meaningless. It just gives the illusion of rigor." If yesterday's post gave a different number for the same thing, say why it changed.
+- **A number only if a decision turns on it, and never bare.** Give it the denominator (62 of how many?), its target and due date, and whether that is good or bad. A bare number only looks rigorous. If yesterday's post gave a different number for the same thing, say why it changed.
 - **Times in US Pacific**, never UTC.
-- **Explain one thing, the way 3Blue1Brown would.** His words: "maybe a prompt to all the agents, or to all the team leads, should be to do it in the style of 3 blue, 1 brown … currently I feel like the visuals are mostly just boxes of numbers. They don't actually bother to explain any useful concept or anything interesting." Pick the one idea behind your week's work: why the bottleneck is where it is, what a measurement actually proved, why an approach cannot work. Build it from something he already knows, in plain words, and keep it under 100 words.
+- **Explain one thing, the way 3Blue1Brown would.** Boxes of numbers explain nothing; a standup should leave him understanding one useful concept. Pick the one idea behind your week's work: why the bottleneck is where it is, what a measurement actually proved, why an approach cannot work. Build it from something he already knows, in plain words, and keep it under 100 words.
 - **Expand every name the first time.** An issue key gets its title, a tool gets what it does, a session gets whose it is.
 - **Nothing he can already see.** No status he reads on the dashboard, no restatement of a plan, no narration of your own process.
 
@@ -37,8 +37,8 @@ After the meeting Sami shares a short standup with the whole company. Each lead 
 
 ## Video and audio
 
-Do not make a video unless he asks for one. On 2026-10-26 he stopped them: "If the videos are incredibly expensive, then I think the audio is probably enough for me … I feel like the agents have not really been putting much effort into making the video actually explanatory, and maybe I think that the content is currently not yet good enough for the video to actually be helpful." When the standups are good enough that a picture would add something, propose it with the picture you would draw.
+Do not make a video unless he asks for one. On 2026-10-26 he stopped them: the videos explained nothing, and audio was enough for what they cost. When the standups are good enough that a picture would add something, propose it with the picture you would draw.
 
 ## After the meeting
 
-The leads and the chief of staff improve this file together from his feedback in the meeting, including anything he says he could do differently. Quote him, keep each change to what the feedback supports, and record what changed and why in the commit message.
+The leads and the chief of staff improve this file together from his feedback in the meeting, including anything he says he could do differently. Keep each change to what the feedback supports, write its purpose in your own words, and record what changed and why in the commit message.

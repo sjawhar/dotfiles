@@ -45,7 +45,7 @@ Push a branch after every reviewed task, and keep no subagent's work unpushed pa
 
 ## When a lane reports
 
-- A subagent report is a claim, not evidence. Check it file by file against what you asked. When you relay one, attribute it ("my tester reports X"), and do not attach your own causal clause to someone else's measurement — say what was measured and who measured it, and measure the cause yourself if it matters.
+- A subagent report that names the evidence for each claim (command output, a file and line, a diff) is evidence: check it file by file against what you asked, and redo none of its work. A claim with no evidence is a claim; get the evidence before you act on it. When you relay one, attribute it ("my tester reports X"), and do not attach your own causal clause to someone else's measurement — say what was measured and who measured it, and measure the cause yourself if it matters.
 - Read structured output field by field (`agent://<id>/findings/0/title`): reading `agent://<id>` whole cuts long lines at 768 characters, so parsing it as JSON fails.
 - An empty, malformed or schema-valid-but-all-empty result is an unexecuted task, not a clean verdict; so is a provider refusal or a quota failure — only a parsed verdict is a verdict. Read the completion status and the values; a verdict citing no file, line or command is unexecuted. The trigger is zero content or a failure status, not brevity: a terse report that shows its work is a report. Re-dispatch carrying what is known.
 - Recheck a claimed blocker before repeating it: name the exact command that still fails and the record you checked. If the command now succeeds, or the record shows the blocker is gone, drop the blocker and continue the task.

@@ -1,12 +1,7 @@
 # ForkGate — placement before fork mutations
 
-Charter (Sami, 2026-09-17 ~07:20Z, verbatim): "maybe we can use that same
-dispatch gate idea to fix some of the fork-management issues we keep having,
-with agents moving changes into forks that doesn't belong there and re-cutting
-releases multiple times despite them never actually having been pinned in main
-in a consuemer. Maybe there's some way to fire an advisor on those calls, or a
-first-time-per-compaction blockinb advisory when using knives start or knives
-release cut".
+Charter (2026-09-17): agents move changes into forks or upstream where they do
+not belong, and re-cut releases that no consumer on main ever pinned.
 
 The mechanical half lives in `knives` itself: `knives release cut` refuses a
 recut whose previous release no consumer pins (valve `--recut-unpinned --why`),
@@ -30,29 +25,22 @@ acknowledgment, no "no issues". Silence is your default and most common output.
 
 ## Why this exists
 
-Sami, transcript #7398 (2026-09-09), verbatim: "we need to add a step that does
-something like red-team this PR for whether it actually belongs upstream. I
-mean, maybe that's too late because at that point the agent has kind of already
-decided where the fix is needed, but like, agents keep doing things where they
-open PRs upstream when instead it should be a configuration change on our side.
-They open PRs upstream when clearly it's a bug in our code".
+The upstream pull requests behind this gate (2026-09-09 to 09-17, transcripts
+#7398 and #11357, Dispatch ask 575cdebb) shared one fault: the agent had already
+decided where the fix goes before anyone asked whether it belongs upstream. Some
+fixes were a configuration change on our side, some a bug in our own code, one
+put our own production policy into an upstream tool, and one upstream PR was
+opened that nobody authorized.
 
-Sami, transcript #11357 (2026-09-13), verbatim: "I just saw a PR get opened
-upstream on hawk about `hawk delete` and I definitely didn't authorize that."
-
-Sami, Dispatch ask 575cdebb (2026-09-17): "The main thing I don't understand is
-why you think a hawk is the right place to put our own production policies."
-
-The rule they add up to is a placement default with a valve, not a ban and not
+The rule these cases add up to is a placement default with a valve, not a ban and not
 an approval gate: our operating policy (what to kill, when to warn, who is
 told) defaults to our own configuration or infrastructure; a fork member is for
 a defect in the library's machinery or a capability it lacks; a fork-specific
 workaround or deployment-only knob may stay a fork member; and the test is
 whether anyone outside our deployment would miss the change if the fork were
 replaced by upstream main tomorrow. A policy-shaped fork idea goes to Sami with
-options and a recommendation, and his answer decides it. Sami on the shape of
-rules (transcript #3421): "Can you just stop being so black and white? It
-requires some discernment."
+options and a recommendation, and his answer decides it. Apply it with
+judgment, not as a fixed test (transcript #3421).
 
 ## Decision procedure
 
@@ -104,7 +92,7 @@ configuration, infrastructure, or fork-branch PR on our side.
   that no text in the call answers (#11357's `hawk delete` PR read exactly
   like this); you do not judge it, and knives' `notch`/`start -m` ledger is
   where that record lives.
-- An upstream PR the body says Sami asked for, or that quotes his ruling.
+- An upstream PR the body says Sami asked for, or that cites his ruling.
 - Draft PRs, `--fill`, a missing template section, a wrong label, a typo in the
   title.
 - Anything about release naming, pin bumps to our own repos, or whether a

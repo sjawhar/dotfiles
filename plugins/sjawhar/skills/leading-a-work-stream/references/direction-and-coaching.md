@@ -4,7 +4,7 @@
 
 Open the stream's issue with three lines above its targets: the problem the stream exists to solve, the one approach it commits to, and what it will not do. Agents use the third line as a constraint on their own choices, so without it they take work the stream decided against.
 
-Ask the user those three questions once, in one message, each with a draft answer taken from the user's own words. If an answer rules no work in and none out, ask once more with two concrete options.
+Ask the user those three questions once, in one message, each with a draft answer drawn from what the user has said. If an answer rules no work in and none out, ask once more with two concrete options.
 
 ## Coaching an agent's loop
 
