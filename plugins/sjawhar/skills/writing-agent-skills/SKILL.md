@@ -34,7 +34,7 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
   - A program can check it: write the check and name the command.
   - The agent already does it in a control run: write nothing.
 - Write plain English: short sentences, one idea each, the words the code already uses, a verb and an object in every instruction. Not ASD-STE100: a strict rewrite lost 46.8% of the facts, plain simple English 8.5%.
-- State the condition that decides; never add "unless it matters" or "where reasonable". One such clause turned a consistent instruction into a noisy one.
+- State the condition that decides, not the incident: stripped of its repo and people, the rule still decides the case. Keep one failing example. Never add "unless it matters" or "where reasonable". One such clause turned a consistent instruction into a noisy one.
 - Keep incident stories, dates and URLs out of the body; put them in the commit message, because the agent reads a story as an instruction and misses its rule.
 - Check that every path, command and skill you name exists. An agent that follows a dead pointer creates the missing thing.
 - Copy the precedence sentence above word for word into every skill. Agents followed a stale file over the code 90% of the time without it, 9% with it.
@@ -44,7 +44,7 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 Test every new skill and every edit that changes what an agent does: untested agent-written skills scored below no skill at all. Commands and scoring: `references/testing.md`.
 
 - Run each test in a fresh session that gets the raw task, not your diagnosis, and does not know it is a test. Context left over from writing the skill hides its gaps.
-- Compare the old text with the new text, plus a control with no guidance (each is an arm). Without the control you cannot tell a rule from what the model does anyway.
+- Compare the old text with the new text, plus a control with no guidance (each is an arm). Without the control you cannot tell a rule from what the model does anyway. Test a generalized rule on GPT too, without HDO material: one regressed on GPT only.
 - Run 3 times per arm, 3 more if the arms differ by one or two runs; write the pass bar first; report `k/n` per arm. Twelve runs of one unchanged skill passed only 7 times.
 - Take cases from real sessions where the failure happened. An invented set scored 100% where real cases scored 26%.
 - For a description, also run near-miss prompts that must not load it. Otherwise you miss a description that loads on the wrong tasks.
