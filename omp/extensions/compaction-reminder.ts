@@ -1,7 +1,19 @@
-// Re-assert what a compaction loses, in two cases: the sdd process contract for
-// a top-level session that invoked the `sdd` skill, and what a subagent was told
-// to do, on its first compaction. Every successful automatic shake also leaves
-// a `compaction-marker` entry recording the context size before and after it.
+// Re-assert what a compaction loses, in three cases: the sdd process contract for
+// a top-level session that invoked the `sdd` skill, a stream lead's goals
+// document for a top-level session started with `STREAM_GOALS`, and what a
+// subagent was told to do, on its first compaction. Every successful automatic
+// shake also leaves a `compaction-marker` entry recording the context size
+// before and after it.
+//
+// A stream lead loses its stream's goals and Sami's standing rules to a summary
+// the same way: they arrive over hours as messages, and the summary paraphrases
+// or drops them. Each stream keeps them in ONE document (a Dispatch artifact such
+// as dispatch://OSSV/artifact/goals-md, or a file); the lead's pane launcher
+// names it in `STREAM_GOALS`. Then after every compaction and shake of the
+// top-level session, the first thing in context is an instruction to read that
+// document before acting. The variable is read at compaction time, so only a
+// session started with it gets the reminder; subagents never do, since they
+// inherit the lead's environment but not its role.
 //
 // A compaction summary paraphrases the conversation; a workflow contract the
 // session was following (the sdd skill's agent mapping and gates) rarely
@@ -154,6 +166,15 @@ const PARENT_STEER_BODY = /^<irc from="parent" agent="[^"]*">\n([\s\S]*)\n<\/irc
 /** The fork's `buildBudgetNotice` (task/executor.ts): a runtime steer, not an instruction. */
 const BUDGET_NOTICE_PREFIX = "[budget notice] ";
 
+/** The stream-goals reminder: read the one document that holds the stream's goals before the next action. */
+function streamGoalsReminder(goals: string): string {
+	return (
+		`Your context was just compacted. Before your next action, read your stream's goals document in full: ${goals}\n` +
+		"It holds this stream's goals and Sami's standing rules. The summary may have dropped or reworded them; " +
+		"where the summary and the document differ, the document wins."
+	);
+}
+
 type BranchEntry = { type: string };
 type InitEntry = { type: "session_init"; task: string };
 type BranchMessage = {
@@ -249,6 +270,8 @@ export default function (pi: ExtensionAPI) {
 		);
 	const remind = (ctx: CompactCtx) => {
 		if (ctx.agent.kind === "main") {
+			const goals = process.env.STREAM_GOALS?.trim();
+			if (goals) deliver("post-compaction-stream-goals", streamGoalsReminder(goals), ctx);
 			if (sddInvoked(ctx)) deliver("post-compaction-reminder", SDD_REMINDER, ctx);
 			return;
 		}

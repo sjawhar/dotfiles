@@ -420,3 +420,63 @@ describe("compaction-reminder", () => {
 		]);
 	});
 });
+
+describe("compaction-reminder: a stream lead's goals document", () => {
+	const GOALS = "dispatch://OSSV/artifact/goals-md";
+	/** Run `body` with STREAM_GOALS set to `value` (undefined unsets it), restoring the caller's value after. */
+	const withGoals = (value: string | undefined, body: () => void) => {
+		const saved = process.env.STREAM_GOALS;
+		if (value === undefined) delete process.env.STREAM_GOALS;
+		else process.env.STREAM_GOALS = value;
+		try {
+			body();
+		} finally {
+			if (saved === undefined) delete process.env.STREAM_GOALS;
+			else process.env.STREAM_GOALS = saved;
+		}
+	};
+
+	test("a top-level session started with STREAM_GOALS is told to read it on every compaction and shake", () => {
+		withGoals(GOALS, () => {
+			const session = bind();
+			const branch = [user("lead the stream"), compaction];
+			session.compact("main", branch, true);
+			session.turnEnd(1);
+			session.shakeEnd("main", branch, false, { skipped: false });
+
+			expect(session.sent.map(s => [s.message.customType, s.options.deliverAs])).toEqual([
+				["post-compaction-stream-goals", "nextTurn"],
+				["post-compaction-stream-goals", "aside"],
+			]);
+			for (const s of session.sent) expect(s.message.content).toContain(GOALS);
+		});
+	});
+
+	test("the goals reminder comes before the sdd reminder when both apply", () => {
+		withGoals(GOALS, () => {
+			const session = bind();
+			session.compact("main", [user(ASSIGNMENT), sddInvocation, compaction], true);
+
+			expect(session.sent.map(s => s.message.customType)).toEqual(["post-compaction-stream-goals", "post-compaction-reminder"]);
+		});
+	});
+
+	test("a subagent never gets the goals reminder, even though it inherits STREAM_GOALS", () => {
+		withGoals(GOALS, () => {
+			const session = bind();
+			session.compact("sub", [sessionInit(ASSIGNMENT), compaction], true);
+			session.compact("sub", [sessionInit(ASSIGNMENT), compaction, compaction], true);
+
+			expect(session.sent.map(s => s.message.customType)).toEqual(["post-compaction-subagent-reminder"]);
+		});
+	});
+
+	test.each([["unset", undefined], ["blank", "  "]])("STREAM_GOALS %s gives no goals reminder", (_name, value) => {
+		withGoals(value, () => {
+			const session = bind();
+			session.compact("main", [user("lead the stream"), compaction], true);
+
+			expect(session.sent).toHaveLength(0);
+		});
+	});
+});
