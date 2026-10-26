@@ -32,8 +32,8 @@
         "description": "gmail.send only (+send; cannot read mail); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       },
       "admin": {
-        "command": ["secrets", "GWS_THEOREM_ADMIN_OAUTH", "--"],
-        "description": "Admin SDK Directory (users, groups, org units, roles) and Groups Settings, consented by sami@theorem.dev. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks, and ~/.dotfiles/docs/theorem-workspace-admin.md. One YubiKey touch per session"
+        "command": ["secret-run", "--reason", "gws theorem admin", "--wait", "4m", "GWS_THEOREM_ADMIN_OAUTH", "--"],
+        "description": "Admin SDK Directory (users, groups, org units, roles) and Groups Settings, consented by sami@theorem.dev. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks. One approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       }
     }
   },
