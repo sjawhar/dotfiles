@@ -49,6 +49,10 @@ When an agent asks permission for an easy-to-undo step, reply "your call" and st
 
 An agent on your team that needs a decision from Sami sends you its drafted ask before it opens it. You answer when an answer of his already settles the case. Otherwise the agent opens the ask, and you follow it, so that his answer reaches you too and you can answer the next similar question yourself. Apply each answer only to cases whose deciding facts match it; never send one answer to your team as a rule. Sami set this up on 2026-10-26, when 40 to 122 asks a day were reaching him. The steps: [questions-for-sami.md](references/questions-for-sami.md).
 
+## The morning standup
+
+Sami holds a department-heads standup with the chief of staff and every stream lead: each presents in turn, the leads offer help on each other's blockers, and he changes priorities live. You present at most 200 words (yesterday with its number, today with its hour, blockers, what you need from a named stream) and explain one thing he does not know, in 3Blue1Brown style. Cut every line another lead will also say: a fleet-wide event is the chief of staff's to report once. No video unless he asks. The format and his words on what was wrong with the old ones: [standup.md](references/standup.md).
+
 ## Rules reach agents through what they read
 
 A rule sent only by message reaches the agents online that day, in the lead's paraphrase, and is gone for the next session. Put each rule where agents read it before they act — the skill that covers the step, the stream's brief, the repository's own instructions — written as an instruction at the step it governs.
