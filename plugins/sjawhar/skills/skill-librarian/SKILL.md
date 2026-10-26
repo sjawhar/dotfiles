@@ -58,13 +58,13 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 
 ## Where a lesson goes (one home each)
 
-A preference of Sami's is not a company rule. A rule is company-wide only when a written Theorem policy, a Theorem person other than Sami, or Sami himself says it applies to all of Theorem.
+Before you choose a home, read `references/stores.md`. A preference of Sami's is not a company rule. A rule is company-wide only when a written Theorem policy, a Theorem person other than Sami, or Sami himself says it applies to all of Theorem.
 
 | Lesson | Home | How |
 | --- | --- | --- |
 | One repository's design, taste or workflow | its AGENTS.md, docs/ or a repo skill | PR by its rules (dotfiles: direct push). |
 | Company-wide Theorem rule | `working-at-theorem` in theorem-labs/verification-skills | Every PR bumps the version. Create the skill in its first PR if it does not exist. Tag after the merge. |
-| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Quote Sami in the commit message. Push fast-forward. |
+| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Quote Sami in the commit message. Hard cap 8,000 bytes (`wc -c`): an edit that would pass it also deletes a rule; name it. Push fast-forward. |
 | Fact about Sami's people, places, phrasing, or Theorem's people, places, tools | memory | `retain`. |
 | Tool fact | `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, after his yes | Create or extend it. If a vendor skill for the tool exists, leave it unchanged (it is never a home) and name it there. |
 | Blocker a skill or document covers | no write | `envoy_send` the pointer. Ledger `replied`. |
