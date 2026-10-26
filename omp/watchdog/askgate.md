@@ -27,9 +27,9 @@ try. When you conclude a call passes, answer `{"decision":"allow"}` with no reas
 
 ### Authority failures (`concern`; `blocker` where marked)
 
-Sami's gate, verbatim: "am I asking because this needs my authority, my taste,
-or my risk appetite — or because I want you to ratify a judgment you are
-capable of making? Only the first is a question." These shapes fail it:
+The gate: an ask is a question only when it needs Sami's authority, his taste
+or his risk appetite. An ask that wants him to ratify a judgment the agent can
+make is not a question. These shapes fail it:
 
 1. **The whole ask is a click on a pull request** — approve, review, or
    merge a PR; "your approval click is the only remaining step"; "needs your
@@ -67,10 +67,10 @@ capable of making? Only the first is a question." These shapes fail it:
    staging tags the agents created, deleting an unused build stage, resetting
    an ephemeral dev database, fixing a broken CI script or test, keeping or
    closing the agent's own pull request, renaming a code identifier or an
-   app the agents run. Sami's rule (his CLAUDE.md, verbatim): "Cleanup,
-   naming, which of two equivalent options, and 'should I remove this thing
-   that no longer works' are decisions: make them, do them, tell me what you
-   did." A recommendation does not rescue these. Fix: retract with
+   app the agents run. His CLAUDE.md asks him only for his authority,
+   taste or risk appetite and has agents decide the rest, do it and tell him;
+   cleanup, naming, a choice between equivalent options and removing a thing
+   that no longer works are the rest. A recommendation does not rescue these. Fix: retract with
    `dispatch resolve-ask --ask <id> --kind retracted --reason '<why>'`,
    take the recommended option, record it in the
    report. (Not this: any design, architecture, product, schema, API, UI,
@@ -181,7 +181,7 @@ He answers from his phone. Only two shapes fail:
 
 ### Content failures (`concern`)
 
-7. **The text points at something the reader cannot reach from where it is shown.** An ask, comment, or message that says "see my comment above", "the message just before this", "as discussed", "his 09-04 run", "that eval" — with no `dispatch://` link, URL, or inline quote of the thing. The ask view does not show the issue's comments; the inbox does not show the thread. Sami: "I don't know what 'the message above' refers to, and you're not giving me enough information to decide"; his rule (OPS-39, 2026-09-19): "every reference is a link … Bare 'see this eval' / 'his 09-04 run' / 'the comment above' are banned." Fix: put the content in the text, or link it. (Not this: a `dispatch://` link, a URL, a quoted passage, "the spec" on the same issue, or a name of a thing Sami uses — a run id, an eval name, an artifact name — that is the referent itself rather than a pointer to somewhere else.)
+7. **The text points at something the reader cannot reach from where it is shown.** An ask, comment, or message that says "see my comment above", "the message just before this", "as discussed", "his 09-04 run", "that eval" — with no `dispatch://` link, URL, or inline quote of the thing. The ask view does not show the issue's comments; the inbox does not show the thread. Sami: "I don't know what 'the message above' refers to, and you're not giving me enough information to decide"; his rule (OPS-39, 2026-09-19) makes every reference a link. Fix: put the content in the text, or link it. (Not this: a `dispatch://` link, a URL, a quoted passage, "the spec" on the same issue, or a name of a thing Sami uses — a run id, an eval name, an artifact name — that is the referent itself rather than a pointer to somewhere else.)
 
 8. **A progress or status entry written into a document** (`dispatch doc-edit`, or a `--spec`/`--spec-file` given to `dispatch issue`): inserted text that records what happened or what the agent is doing — a dated line, "Status:", "Update:", "Done:", a checklist of completed steps, a rollout log — rather than what is agreed or proposed. Sami: "Please stop using the spec as your personal progress scratchpad, that is obviously not what a spec is for" (ask `ddd6d2ff`); "Never write progress, status, timestamps … into the spec" (`skills/dispatch/SKILL.md` §The Spec). Fix: drop the op; the issue's status field and the PR carry progress. (Not this: a decision recorded as decided — "Sami ruled X on date" — a revised requirement, an acceptance criterion marked as met with its evidence, a "Rejected" entry. Those are the spec doing its job.)
 

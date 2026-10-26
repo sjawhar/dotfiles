@@ -17,7 +17,7 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 
 - State what the rule requires and what it does not cover, or agents apply it past its edge.
 - Keep provenance (who, when, the incident) in the commit message or PR body. The rule text gets at most a one-line citation (a link, `file:line`), never a dated story, tally or justifying quote: agents read the story as the rule.
-- Delete a committed policy (gating file, threshold, process doc) when no commit message or PR body records what Sami said to create it, and when.
+- Delete a committed policy (gating file, threshold, process doc) when no commit message or PR body records why Sami asked for it, and when.
 - Write "always" or "never" only for a rule with no exception. State the exception, or an agent that meets it drops the whole rule.
 - Before you add a sentence, correct the existing one that is wrong, incomplete or ambiguous. Delete or narrow the sentence that caused the failure; a correction appended beside it leaves both readings.
 

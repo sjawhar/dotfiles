@@ -25,7 +25,7 @@ Leave it out: their priorities and targets, which streams and leads exist, the r
 ## Words
 
 - Each term is plain English, or defined in one plain sentence where it first appears. A label from inside the work (a lane code, a run name, an internal tool) comes after that sentence, or not at all.
-- A rule or requirement attributed to the viewer is checked against their own words at the source (transcript, Slack, Dispatch) and quoted, never restated more strictly.
+- A rule or requirement attributed to the viewer is checked against the source (transcript, Slack, Dispatch) and stated in your own words with that source shown, never more strictly.
 
 ## Form
 

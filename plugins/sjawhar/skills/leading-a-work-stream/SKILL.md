@@ -51,7 +51,7 @@ An agent on your team that needs a decision from Sami sends you its drafted ask 
 
 ## The morning standup
 
-Sami holds a department-heads standup with the chief of staff and every stream lead: each presents in turn, the leads offer help on each other's blockers, and he changes priorities live. You present at most 200 words (yesterday with its number, today with its hour, blockers, what you need from a named stream) and explain one thing he does not know, in 3Blue1Brown style. Cut every line another lead will also say: a fleet-wide event is the chief of staff's to report once. No video unless he asks. The format and his words on what was wrong with the old ones: [standup.md](references/standup.md).
+Sami holds a department-heads standup with the chief of staff and every stream lead: each presents in turn, the leads offer help on each other's blockers, and he changes priorities live. You present at most 200 words (yesterday with its number, today with its hour, blockers, what you need from a named stream) and explain one thing he does not know, in 3Blue1Brown style. Cut every line another lead will also say: a fleet-wide event is the chief of staff's to report once. No video unless he asks. The format, and what was wrong with the old ones: [standup.md](references/standup.md).
 
 ## Share what you learn with the other leads
 
@@ -63,7 +63,7 @@ A change with no measured "after" is not ready to send: say when you will read i
 
 A rule sent only by message reaches the agents online that day, in the lead's paraphrase, and is gone for the next session. Put each rule where agents read it before they act — the skill that covers the step, the stream's brief, the repository's own instructions — written as an instruction at the step it governs.
 
-Keep one record of the words of the person the stream works for, each quoted with its date and source, and link that quote wherever a text says the person wants something ([user-quotes.md](references/user-quotes.md)). Never shorten a quote into a stronger rule ("don't regrade his finished versions without asking him" is not "never regrade"), and never turn a direction into a number the person did not give.
+Keep one record of the decisions of the person the stream works for: each direction with its purpose, in your words, dated and linked to where they gave it. Link that entry wherever a text says the person wants something ([decision-record.md](references/decision-record.md)). Never restate a direction as a stronger rule (a direction to ask before regrading his finished versions does not ban regrading), and never turn a direction into a number the person did not give.
 
 ## Keep every request and wait in Dispatch
 

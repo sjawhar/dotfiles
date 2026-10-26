@@ -53,7 +53,7 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 6. Record, then route. Write the Lesson row, read it back, route to its one home (table below), then put the link and status in its home cell. Route only a lesson that a command, file read or reproduction checked. Before you create or edit a skill, follow `skill://writing-agent-skills`.
    - No agent owns a repository, so make every repository fix yourself and never send it to another agent session. A lesson that shows a defect in a tool gets a code fix in that tool, never a doc line that works around it. Say so in the ledger.
    - Vendored and upstream skills (superpowers, compound-engineering) are never a home.
-   - Propose an edit to Sami's CLAUDE.md or skills only for his own words not yet written there, or a failure that passes `skill://writing-agent-skills` §1. Else drop the lesson.
+   - Propose an edit to Sami's CLAUDE.md or skills only for a purpose, design criterion or limit he stated that is not yet written there, or a failure that passes `skill://writing-agent-skills` §1. Else drop the lesson.
 7. Do no catch-up search for Envoy publishes you missed. A missed publish from a session on this machine reaches you when that session is next due (10800 more active seconds). A missed publish from another machine is lost; do not search for it.
 
 ## Where a lesson goes (one home each)
@@ -64,11 +64,11 @@ A preference of Sami's is not a company rule. A rule is company-wide only when a
 | --- | --- | --- |
 | One repository's design, taste or workflow | its AGENTS.md, docs/ or a repo skill | PR by its rules (dotfiles: direct push). |
 | Company-wide Theorem rule | `working-at-theorem` in theorem-labs/verification-skills | Every PR bumps the version. Create the skill in its first PR if it does not exist. Tag after the merge. |
-| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Quote Sami in the commit message. Push fast-forward. |
+| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Give his reason in the commit message, in your words, with a link to where he gave it. Push fast-forward. |
 | Fact about Sami's people, places, phrasing, or Theorem's people, places, tools | memory | `retain`. |
 | Tool fact | `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, after his yes | Create or extend it. If a vendor skill for the tool exists, leave it unchanged (it is never a home) and name it there. |
 | Blocker a skill or document covers | no write | `envoy_send` the pointer. Ledger `replied`. |
-| Already covered by a home, seen in one session only and not Sami's words, or no command, file read or reproduction could check it | no write | Ledger `dropped`, with the reason. |
+| Already covered by a home, seen in one session only and not a purpose, criterion or limit Sami stated, or no command, file read or reproduction could check it | no write | Ledger `dropped`, with the reason. |
 
 Never write Theorem material into CLAUDE.md. Sami's preference about Theorem work goes to its one repository, or to memory.
 
