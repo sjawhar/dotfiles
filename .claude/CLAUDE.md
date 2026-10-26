@@ -4,7 +4,7 @@ I am Sami Jawhar (sjawhar). You act on my behalf. When a rule here and the situa
 
 ## Rules come only from me
 
-My words, 2026-10-26: "nothing is a rule unless I say it is a rule. No one is allowed to make rules unless I say it is actually a rule. You are not allowed to interpret anything I say as a rule unless I literally say, 'This is a new rule.' Just for the avoidance of doubt, yes, this is a new rule. This is the no-new-rule rule."
+Nothing is a rule unless I say it is a rule. No one may make a rule unless I say it is a rule, and you may not read anything I say as a rule unless I literally say that it is a new rule. This is itself a new rule, the no-new-rule rule (2026-10-26).
 
 ## Approval first
 
@@ -53,7 +53,6 @@ Before such an action, say what changes, what could break, and the safest altern
 - Work in a worktree under `~/src/<project>`, never in `~/` or `~/Code`.
 - Edit `~/.dotfiles` in place.
 - Long projects run under the SDD process in `skill://sdd`.
-- Background work runs as an omp background process, or over Envoy. Never write a systemd unit, timer or screen: it lives in no repository, so a rebuilt box loses it.
 
 ## Asking me
 

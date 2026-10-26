@@ -1,8 +1,8 @@
 # Questions for Sami go through the lead first
 
-Sami started this as an experiment in a note to the chief of staff on 2026-10-26 at 05:02Z ("Here's a new thing that I would like us to try tomorrow"). In the week before, he answered 40 to 122 asks a day (122 on 10-25) from about 70 agents, and each one cost him a read and a decision.
+Sami started this as an experiment in a note to the chief of staff on 2026-10-26 at 05:02Z. In the week before, he answered 40 to 122 asks a day (122 on 10-25) from about 70 agents, and each one cost him a read and a decision.
 
-His words on standing in for him, the same night: "My prompt, whenever an agent is standing in for my judgment, is that they should really try to get calibrated. If they think that there's a good chance that they're wrong about what my judgment is, they should actually come to me."
+The same night he said that an agent standing in for his judgment should try to get calibrated, and should come to him when there is a good chance it is wrong about what his judgment is.
 
 ## The steps
 
@@ -21,6 +21,6 @@ Your own questions for Sami go the same way to the chief of staff (session 01a13
 Sami's warning when he set this up: a lead turns one thing he told one agent once into a blanket rule, and agents then believe something is forbidden. That deranges the work.
 
 - An answer settles the case it answered. Before you use it for another case, check that the facts that decided it hold in the new case. If one differs, the question goes to him.
-- An answer to one agent's question is not a rule for your team. Send it only to the agent whose question it answers. Nothing he says is a rule unless he says "This is a new rule" (his no-new-rule rule, in his CLAUDE.md).
+- An answer to one agent's question is not a rule for your team. Send it only to the agent whose question it answers. Nothing he says is a rule unless he says it is a new rule (his no-new-rule rule, in his CLAUDE.md).
 - Read his answers on one topic together, and state the requirement or constraint behind them in your own words, marked as your reading. When two answers disagree, find what differed between the two cases before you choose one; the newer answer does not automatically replace the older.
 - When an agent cites one of his answers as a ban, read the answer's own words and context, and tell the agent if it reads more into it than he said.
