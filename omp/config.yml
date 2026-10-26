@@ -15,6 +15,16 @@ modelRoles:
   askgate: anthropic/claude-fable-5-1:high
   proactiveMemory: anthropic/claude-sonnet-5-5
   judgeLog: anthropic/claude-sonnet-5-5
+# Sami paused the per-token OpenAI API at 02:47Z on 2026-10-26. While this holds,
+# no session reaches the `openai` provider: not as the startup or resume pick
+# when the Anthropic login is down (omp then takes the first provider with a
+# key, which was openai/gpt-5.5 on 2026-10-25), not through a subagent
+# inheriting that pick, not for skill-description compression, and not by name
+# (astra-api, gpt-api, a review gate on openai/gpt-6-astra). The provider and
+# its key stay in models.yml; delete this block to lift the pause. openai-codex
+# (the Codex subscription) is a separate provider and is not affected.
+disabledProviders:
+  - openai
 extensionHandlers:
   # AskGate (omp/extensions/askgate.ts) answers a Dispatch write with a model
   # call bounded at 90 s inside the handler; the runner's own ceiling must sit
