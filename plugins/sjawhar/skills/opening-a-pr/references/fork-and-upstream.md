@@ -22,3 +22,12 @@ When the placement rules above make the change upstream material, open the upstr
 
 - Walk `pr-preflight` (`knives preflight`) before `gh pr create`. Follow the upstream contribution policy in its AGENTS.md or contributing guide.
 - An open upstream PR is the session's under `maintaining-fork-pr`: reviews, body updates, rebases, the close decision. Answer maintainer comments yourself; hold one for Sami only when it asks for a decision only he can make.
+
+## The upstream PR description
+
+A maintainer reads the description as Sami's own writing, and a long one reads as machine output. On rocq-prover/rocq#22610 a maintainer answered one of ours with "Unreadable llm verbosity for a feature I'm not sure we even want." Sami had asked several times for descriptions to be cut down before they go out (dispatch://BET-108/ask/d4db8dea, 2026-10-26). So, before an upstream PR opens and after every body edit:
+
+- **Match the project, not this skill.** Read five recently merged PRs in the target repository and write to their length and form. Our five rocq-prover/rocq descriptions that drew no complaint run 71 to 154 words; the one that did ran 964. The 150 to 250 word aim in [commits-and-body.md](commits-and-body.md) is for our own repositories; upstream, the project's median wins when it is shorter.
+- **Say only what a reviewer needs to decide.** What the change does, why a user of the project wants it, what stays the same without it, and where the tests are. Move every other detail into the documentation or tests the PR adds, where a reader can choose to read it. Name nothing internal: no grade farm, no run IDs, no fork names.
+- **Ask before you build, when the project does.** If the project's guide or its maintainers' past comments prefer an issue or a forum post first, open that first, and open the PR only once a maintainer has said the feature is wanted. Read the comments on our earlier PRs to the same project before you write.
+- **A fresh reader checks it before it goes out.** Give the description, and nothing else, to a fresh read-only agent told it is a maintainer of that project with no context. Fix every sentence it calls verbose, unclear, or written like a machine. Then post.
