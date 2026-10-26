@@ -46,16 +46,19 @@ class AgentSessionSpendTest(unittest.TestCase):
         (dotfiles / "agent-spend" / "endpoint").write_text(f"{ENDPOINT}\n")
         (dotfiles / "agent-spend" / "person").write_text("sami@theorem.dev\n")
         executable(dotfiles / "scripts" / "agent-secrets-session", 'exec "$@"')
+        shutil.copy(DOTFILES / "scripts" / "agent-spend-env.sh", dotfiles / "scripts" / "agent-spend-env.sh")
         self.config = self.root / "config"
         (self.config / "agent-spend").mkdir(parents=True)
         (self.config / "agent-spend" / "token").write_text("t0ken\n")
         self.sessions = self.config / "agent-spend" / "sessions"
-        self.agent = self.root / "agent"
+        self.agent = self.root / "omp"
         executable(
             self.agent,
             'printf "%s\\n" "THEOREM_PROJECT=${THEOREM_PROJECT-}" "THEOREM_SUBPROJECT=${THEOREM_SUBPROJECT-}" '
             '"OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT-}" '
-            '"OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES-}"',
+            '"OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES-}" '
+            '"OTEL_LOGS_EXPORTER=${OTEL_LOGS_EXPORTER-<unset>}" "OTEL_TRACES_EXPORTER=${OTEL_TRACES_EXPORTER-<unset>}" '
+            '"CLAUDE_CODE_ENABLE_TELEMETRY=${CLAUDE_CODE_ENABLE_TELEMETRY-<unset>}"',
         )
         self.cwd = self.root / "work"
         self.cwd.mkdir()
@@ -155,6 +158,19 @@ class AgentSessionSpendTest(unittest.TestCase):
         )
         self.assertEqual(out["THEOREM_PROJECT"], "verified-grader")
         self.assertEqual((self.sessions / CHILD).read_text(), "verified-grader\n")
+
+    def test_an_omp_started_by_claude_code_turns_its_spans_back_on(self) -> None:
+        out = self.run_agent(
+            {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": ENDPOINT,
+                "OTEL_LOGS_EXPORTER": "otlp",
+                "OTEL_TRACES_EXPORTER": "none",
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+            }
+        )
+        self.assertEqual(out["OTEL_LOGS_EXPORTER"], "none")
+        self.assertEqual(out["OTEL_TRACES_EXPORTER"], "<unset>")
+        self.assertEqual(out["CLAUDE_CODE_ENABLE_TELEMETRY"], "<unset>")
 
     def test_the_working_directory_glob_then_shared(self) -> None:
         taiga = self.root / "src" / "binary-equivalence-taiga"

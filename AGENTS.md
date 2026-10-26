@@ -23,7 +23,7 @@ forward/             # Browser-forwarding policy plus devbox serve and laptop da
 whatsapp/            # WhatsApp MCP daemon: wrapper + laptop user unit (holds the paired session)
 gws/                 # gws-accounts account registry (accounts.json), linked to ~/.config/gws/
 bin/                 # Standalone binaries (mise, bun, kubectl)
-shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, git, jj, knives, omp, tmux, xdg-open, pyright, basedpyright)
+shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, git, jj, knives, omp, claude, codex, tmux, xdg-open, pyright, basedpyright)
 scripts/             # Utility scripts (git-identity, tmux-attention, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
 agentbox/            # Opt-in agent box: image + home allow-list (scripts/agentbox runs sessions in it)

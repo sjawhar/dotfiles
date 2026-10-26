@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# claude and codex wrapper (shims/codex is a link to this file): the model-spend environment
+# (scripts/agent-spend-env.sh, dispatch://INFRA-165), then the real binary of the name it was called
+# by, with its arguments, stdin and PATH untouched.
+#
+# It is for a claude or codex that something starts by name: a script or a session's bash tool running
+# `claude -p`. Those inherit their parent's collector and an omp parent's `OTEL_LOGS_EXPORTER=none`,
+# and without this Claude Code sent no record. scripts/cld still starts Claude Code through
+# scripts/agent-session, which skips this file and sets the same spend environment itself.
+# This does only the spend part of agent-session, not all of it: agent-session also registers the
+# process as a secrets-broker host session (agent-secrets-session), and a scripted run's workers
+# would each register, wait on the helper, and lose the identity they inherit from their parent.
+set -euo pipefail
+
+name="${BASH_SOURCE[0]##*/}"
+
+# --- resolve: the first `$name` on PATH past this shim's own entry that is not a wrapper ---
+# Entries ahead of this shim's own (`-ef`: its dir however PATH spells it) had their turn. A file whose
+# real path is in a `shims/` dir is a wrapper (this file, another checkout's copy), and mise's shims dir
+# hands the call back to PATH when mise has no version for the directory; neither is taken. mise's
+# install dirs are: they hold the real codex.
+mise_root="${MISE_DATA_DIR:-${HOME:-}/.mise}"
+IFS=':' read -ra dirs <<< "${PATH:-}"
+for i in "${!dirs[@]}"; do
+    if [[ "${dirs[i]}/$name" -ef "${BASH_SOURCE[0]}" ]]; then
+        dirs=("${dirs[@]:i+1}")
+        break
+    fi
+done
+real=""
+for dir in ${dirs[@]+"${dirs[@]}"}; do
+    [[ -n "$dir" && "$dir" != "$mise_root/shims" && -f "$dir/$name" && -x "$dir/$name" ]] || continue
+    resolved="$(realpath "$dir/$name")"
+    [[ "${resolved%/*}" == */shims ]] && continue
+    real="$dir/$name"
+    break
+done
+if [[ -z "$real" ]]; then
+    # A mise-managed binary (codex) whose install dir is not on this PATH. mise lives in
+    # ~/.dotfiles/bin, which a unit's or harness's PATH can leave out; then run it by its path.
+    mise_bin="$(command -v mise)" || mise_bin="${DOTFILES_DIR:-${HOME:-}/.dotfiles}/bin/mise"
+    real="$(MISE_DATA_DIR="$mise_root" "$mise_bin" which "$name" < /dev/null 2> /dev/null)" || {
+        echo "$name: ${BASH_SOURCE[0]}: no $name on PATH past this shim other than a wrapper, and mise has none" >&2
+        exit 127
+    }
+fi
+
+spend_lib="${DOTFILES_DIR:-${HOME:-}/.dotfiles}/scripts/agent-spend-env.sh"
+if [[ -r "$spend_lib" ]]; then
+    # shellcheck source=../scripts/agent-spend-env.sh
+    . "$spend_lib"
+    agent_spend_env "$name" "$@" || true
+fi
+exec "$real" "$@"

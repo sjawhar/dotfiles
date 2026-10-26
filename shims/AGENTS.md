@@ -45,6 +45,18 @@ before handing the call to the real one.
   killer took two unrelated pods with it; inside a scope only that session dies. `MemoryHigh` is
   deliberately not set: it throttles a session into reclaim instead of killing it, which looks
   like a lane that is thinking.
+- **`claude`** and **`codex`** (a link to `claude`) export the model-spend environment of
+  `scripts/agent-spend-env.sh` (dispatch://INFRA-165), then exec the first real binary of that name
+  past this dir on PATH, skipping mise's shims dir and any file whose real path is in a `shims/` dir,
+  else `mise which` it; arguments, stdin and PATH go through unchanged. They are for a claude or codex
+  that a script or a session's bash tool starts by name (`claude -p` workers): those inherit their
+  omp parent's collector and `OTEL_LOGS_EXPORTER=none`, and Claude Code sent nothing. Through the shim
+  Claude Code gets `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, traces and metrics off,
+  and the project of its parent session's file (`OMP_SESSION_ID`); a different collector is kept as is.
+  Codex takes only the tags from the environment: its exporter is the block `installers/agent-spend.sh`
+  writes into `~/.codex/config.toml`. They do not exec `scripts/agent-session`, which `scripts/cld`
+  still uses: that would also register every scripted worker as its own secrets-broker host session
+  (a helper call and up to 10 s wait per launch) in place of the identity it inherits from its parent.
 - **`knives`** execs the pinned knives (`"github:sjawhar/knives"` in `mise.toml`, looked up with
   `mise which -C / knives --tool github:sjawhar/knives`), or a local build on PATH past it,
   never a knives in a mise dir: a session keeps the PATH it started with, and that PATH names
