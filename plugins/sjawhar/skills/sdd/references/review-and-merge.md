@@ -4,6 +4,7 @@
 
 - The final `reviewer` after acceptance checks correctness, security, dead code, shims, aliases, dual paths and half-migrations. It decides for itself how deeply to read; do not give it a depth or a file subset.
 - Resolve grounded findings (ones the code or a command output confirms) before you send the merge packet; no other approval or follow-up assignment waives them. Ungrounded preferences do not bind.
+- A re-review after fixes resumes the same reviewer session, and reads only the diff from the head it last reviewed to the new head. It raises no finding it raised before and none on code that diff does not touch. A fresh reviewer that never saw the PR reads it whole.
 - Runtime changes: `ce-simplify-code` once per PR after the last review round, scoped to its diff. An applied change becomes the final head for CI, review and refreshed real-surface proof. A pass with no change is normal.
 - Then dispatch `thermonuclear-deep-review` and `thermonuclear-code-quality` yourself, once at that final head (the `reviewer` agent cannot dispatch them), and give their findings to the final reviewer to weigh.
 - Prose-only or minor changes: do not repeat the pair. Docs-only or runtime-free diffs skip both simplify and the pair. The changed paths decide the skip, never a claim that the change looks safe.
