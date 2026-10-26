@@ -62,7 +62,9 @@ retry:
     # a subagent's own included, and an effort-suffixed key matches only that
     # effort, so gpt-6-astra at high (the sami-proxy agent alone) falls to
     # Opus 5.5 while astra at xhigh keeps the empty chain. No other agent may
-    # run gpt-6-astra at high.
+    # run gpt-6-astra at high. No chain ends on a per-token `openai/*` model
+    # while Sami's pause on the OpenAI API (2026-10-26) holds: an outage of
+    # every Anthropic model would otherwise walk Codex sessions onto it.
     openai-codex/gpt-6-astra:high:
       - anthropic/claude-opus-5-5:xhigh
     openai-codex/gpt-6-astra: []
@@ -95,7 +97,6 @@ retry:
       - anthropic/claude-opus-4-8
       - anthropic/claude-opus-4-7
       - anthropic/claude-opus-4-6
-      - openai/*
       - opencode-zen/*
     default:
       - anthropic/claude-opus-5-5
