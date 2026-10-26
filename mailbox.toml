@@ -19,7 +19,7 @@ send_label           = "broker grant on Dispatch (YubiKey touch outside the brok
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
 [accounts.theorem]
-read_credential_cmd  = ["secrets", "GWS_THEOREM_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_READ_OAUTH"]
+read_credential_cmd  = ["secret-run", "--reason", "mailbox theorem read", "GWS_THEOREM_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_READ_OAUTH"]
 write_credential_cmd = ["secret-run", "--reason", "mailbox theorem write", "--wait", "4m", "GWS_THEOREM_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_MODIFY_OAUTH"]
 write_label          = "broker grant on Dispatch (YubiKey touch outside the broker)"
 send_credential_cmd  = ["secret-run", "--reason", "mailbox theorem send", "--wait", "4m", "GWS_THEOREM_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_THEOREM_SEND_OAUTH"]

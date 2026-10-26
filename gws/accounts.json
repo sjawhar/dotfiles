@@ -20,7 +20,7 @@
     "description": "sami@theorem.dev, Theorem's Workspace. OAuth client: the Internal Desktop client \"gws CLI\" in Theorem's theorem-gws-cli project",
     "tiers": {
       "read": {
-        "command": ["secrets", "GWS_THEOREM_READ_OAUTH", "--"],
+        "command": ["secret-run", "--reason", "gws theorem read", "GWS_THEOREM_READ_OAUTH", "--"],
         "description": "Drive, Docs, Sheets, Slides and Calendar read-write; Gmail read-only"
       },
       "modify": {
