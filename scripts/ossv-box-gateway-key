@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# ossv-box-gateway-key -- (sami-rocqperf) keep this box's OSS Verify model-gateway key in tmpfs, where
+# omp/models.local.yml's `apiKey: "!cat ..."` reads it (dispatch://INFRA-398).
+#
+# The gateway keeps one LiteLLM key per consumer in /etc/ossv-gateway/keys/<lane>.key; this box's is lane `box`
+# (team box). The key is written 0600 to $XDG_RUNTIME_DIR/ossv-box/gateway-key, which is tmpfs, so it is gone after a
+# reboot and this unit puts it back. The key passes through this process only, and is never printed or logged.
+#
+# The read runs over the tailnet: the policy grants sami-rocqperf's two addresses tag:model-gateway on tcp:22
+# (agent-infra#335) and on tcp:4000 (agent-infra#336). No copy of the key lives on disk outside tmpfs.
+set -uo pipefail
+d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ossv-box"
+f="$d/gateway-key"
+# Nothing to do while the file is there: this runs often and the key does not rotate on its own.
+[ -s "$f" ] && exit 0
+install -d -m 700 "$d" || exit 1
+k="$(timeout 120 /home/sami/src/oss-verifier/bin/ossv-vm ssh model-gateway \
+  'sudo test -s /etc/ossv-gateway/keys/box.key || sudo /usr/local/sbin/ossv-gateway-add-lane box > /dev/null; sudo cat /etc/ossv-gateway/keys/box.key' \
+  < /dev/null 2> /dev/null | tr -d '\r\n')" || k=""
+case "$k" in
+  sk-*)
+    umask 077
+    printf %s "$k" > "$f.new" && mv -f "$f.new" "$f"
+    logger -t ossv-box-gateway-key -- "key written to $f"
+    ;;
+  *)
+    rm -f "$f.new"
+    logger -t ossv-box-gateway-key -- "no key from ossv-model-gateway"
+    echo "ossv-box-gateway-key: no key from ossv-model-gateway" >&2
+    exit 1
+    ;;
+esac
