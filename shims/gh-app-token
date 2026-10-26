@@ -181,8 +181,15 @@ def scope_key(scope: dict[str, Any] | None) -> str:
 
 
 def token_cache_file(profile: str, owner: str, scope: str = "") -> Path:
+    """The cache entry for one profile, App, owner and scope. The profile's App id is part of
+    the key, so a profile whose app-id changes never gets the old App's token back (2026-10-26:
+    a corrected review profile kept answering with the first App's cached token)."""
+    app_id = git_config_optional(f"gh-app.{profile}.app-id") or "none"
     suffix = f"--{cache_component(scope)}" if scope else ""
-    return CACHE_DIR / f"token-{cache_component(profile)}--{cache_component(owner)}{suffix}.json"
+    return CACHE_DIR / (
+        f"token-{cache_component(profile)}--app-{cache_component(app_id)}"
+        f"--{cache_component(owner)}{suffix}.json"
+    )
 
 
 def required_lifetime() -> int:
