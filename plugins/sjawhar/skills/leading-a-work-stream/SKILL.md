@@ -41,9 +41,13 @@ A date is the time the work takes at agent speed, plus only the waits nobody can
 
 ## Decision rights
 
-A step that is easy to undo is the agent's: it acts and reports to nobody, and you read the result in GitHub, Dispatch and the numbers. A step that is hard to undo goes from the agent to its owner directly — Sami through that agent's own Dispatch ask, the other stream's lead, the owner of the shared infrastructure — never through you, because a relay adds a wait and loses the agent's own facts. Which steps fall where: [decision-rights.md](references/decision-rights.md).
+A step that is easy to undo is the agent's: it acts and reports to nobody, and you read the result in GitHub, Dispatch and the numbers. A step that is hard to undo goes from the agent to its owner directly — the other stream's lead, the owner of the shared infrastructure — never through you, because a relay adds a wait and loses the agent's own facts. The one exception is a decision for Sami, which comes to you first (next section). Which steps fall where: [decision-rights.md](references/decision-rights.md).
 
 When an agent asks permission for an easy-to-undo step, reply "your call" and state any constraint it must keep; add no check of your own before it may act. Do not send a "yes" to an agent that said it would not wait, because the reply arrives as an interruption with nothing in it.
+
+## Questions for Sami go through you first
+
+An agent on your team that needs a decision from Sami sends you its drafted ask before it opens it. You answer when an answer of his already settles the case. Otherwise the agent opens the ask, and you follow it, so that his answer reaches you too and you can answer the next similar question yourself. Apply each answer only to cases whose deciding facts match it; never send one answer to your team as a rule. Sami set this up on 2026-10-26, when 40 to 122 asks a day were reaching him. The steps: [questions-for-sami.md](references/questions-for-sami.md).
 
 ## Rules reach agents through what they read
 
