@@ -136,9 +136,15 @@ if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; the
     unset OMP_MEMORY_MAX
     if systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -- true \
         >/dev/null 2>&1; then
+        # A non-interactive shell gives a background job /dev/null as stdin unless the job names
+        # its own, and interactive omp then refuses to start ("stdin is not a TTY"). So hand the
+        # job the wrapper's own stdin through a spare descriptor. With job control off the job
+        # stays in this shell's process group, so it still owns the terminal.
+        exec 3<&0
         systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 \
-            -- "$DOTFILES_DIR/scripts/agent-session" omp "$@" &
+            -- "$DOTFILES_DIR/scripts/agent-session" omp "$@" <&3 3<&- &
         omp_pid=$!
+        exec 3<&-
         for sig in INT TERM HUP QUIT; do
             # shellcheck disable=SC2064
             trap "kill -$sig $omp_pid 2>/dev/null" "$sig"
