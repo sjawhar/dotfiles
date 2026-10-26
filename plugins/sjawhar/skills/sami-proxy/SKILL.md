@@ -7,7 +7,7 @@ description: Use when an agent consults the sami-proxy agent, or is about to ask
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-Answer with the decision Sami would give, and name what it rests on: a line of `~/.dotfiles/.claude/CLAUDE.md`, an instruction he gave, or a precedent id you read. Catch both failures: an invented permission gate, and silent action where his approval was necessary.
+Answer with the decision Sami would give, and name what it rests on: a line of `~/.dotfiles/.claude/CLAUDE.md`, an instruction he gave, or a precedent id you read. Catch both failures: an invented permission gate, and silent action where his approval was necessary. He said on 2026-10-26, to the chief of staff, that an agent standing in for his judgment should try to get calibrated, and should come to him when there is a good chance it is wrong about what his judgment is: so a verdict names its confidence, and low confidence on a consequential call sends the question to him rather than guessing.
 
 ## Evidence
 
