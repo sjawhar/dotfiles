@@ -116,4 +116,48 @@ if [[ -n "$profile" ]]; then
     mirror_links "$root/agent" "$root/profiles/$profile/agent"
 fi
 
+# OMP_MEMORY_MAX=<systemd size, e.g. 32G> runs this session in a transient systemd user scope with
+# that hard memory cap and swap off. A session that runs away is then killed inside its own cgroup
+# instead of the kernel picking a victim anywhere on the box: on 2026-10-26 at 05:47Z one omp
+# session reached 138.0 GiB and the global OOM killer took two of the box's coredns pods with it.
+# Unset, nothing changes: no scope, no cap, and omp is exec'd as before. A scope is transient, so
+# it leaves no unit file behind. OMP_MEMORY_MAX is removed from the session's own environment, so
+# subprocesses do not each ask for a scope of their own; they share this one and count against it.
+# If systemd-run is missing or refuses (a container with no user manager), the session starts
+# uncapped rather than failing.
+#
+# No MemoryHigh: measured on this box, a cap with MemoryHigh below it does not kill a session that
+# passes it, it throttles the session into reclaim and the lane looks like it is thinking (an omp
+# start under a 192M cap with MemoryHigh at 144M was still in `discoverAndLoadMCPTools` after 84 s).
+# A plain MemoryMax kills promptly, and the wrapper waits for the session so it can say why: a
+# ceiling nobody can see costs a lead more time than the kill itself.
+if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; then
+    mem_max="$OMP_MEMORY_MAX"
+    unset OMP_MEMORY_MAX
+    if systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -- true \
+        >/dev/null 2>&1; then
+        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 \
+            -- "$DOTFILES_DIR/scripts/agent-session" omp "$@" &
+        omp_pid=$!
+        for sig in INT TERM HUP QUIT; do
+            # shellcheck disable=SC2064
+            trap "kill -$sig $omp_pid 2>/dev/null" "$sig"
+        done
+        # `set -e` would end the wrapper on a non-zero `wait`, before it can say why the session
+        # died; and a forwarded signal interrupts `wait` with 128+signal while the session is
+        # still running, so wait again until the child is really gone.
+        omp_status=0
+        until wait "$omp_pid"; do
+            omp_status=$?
+            kill -0 "$omp_pid" 2>/dev/null || break
+        done
+        if ((omp_status == 137)); then
+            echo "omp: this session was killed at its $mem_max memory ceiling (OMP_MEMORY_MAX)." >&2
+            echo "omp: resume it with 'omp --resume <session-id>'; raise the ceiling if it was real work." >&2
+        fi
+        exit "$omp_status"
+    fi
+    echo "omp: systemd-run refused a $mem_max scope; starting without a memory ceiling" >&2
+fi
+
 exec "$DOTFILES_DIR/scripts/agent-session" omp "$@"

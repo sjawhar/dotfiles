@@ -38,7 +38,13 @@ before handing the call to the real one.
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named
   profile's links, then execs omp through `scripts/agent-session` (below). It sets no
   Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys
-  come from the profile's `models.yml` (`omp/AGENTS.md`).
+  come from the profile's `models.yml` (`omp/AGENTS.md`). `OMP_MEMORY_MAX=<size>` (unset by
+  default, so nothing changes without it) runs the session in a transient systemd user scope with
+  that hard memory cap and swap off, waits for it instead of exec'ing, and says on the pane when
+  the cap was what killed it. One session reached 138.0 GiB on 2026-10-26 and the box-wide OOM
+  killer took two unrelated pods with it; inside a scope only that session dies. `MemoryHigh` is
+  deliberately not set: it throttles a session into reclaim instead of killing it, which looks
+  like a lane that is thinking.
 - **`knives`** execs the pinned knives (`"github:sjawhar/knives"` in `mise.toml`, looked up with
   `mise which -C / knives --tool github:sjawhar/knives`), or a local build on PATH past it,
   never a knives in a mise dir: a session keeps the PATH it started with, and that PATH names
