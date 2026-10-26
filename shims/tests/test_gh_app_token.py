@@ -307,6 +307,25 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIsNone(gh_app_token.get_cached_token("agent", "trajectory-labs-pbc"))
         self.assertIsNone(gh_app_token.get_cached_token("other-profile", "sjawhar"))
 
+    def test_a_profile_whose_app_id_changes_never_gets_the_old_apps_token(self):
+        # Given: a token cached for the profile while it named one App. On 2026-10-26 the
+        # review profile was first declared with the wrong App id, then corrected; the cache
+        # kept answering with the first App's token for any later id, nonsense ones included.
+        token_data = {
+            "token": "old-app-token",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        }
+        gh_app_token.write_cache_file(gh_app_token.token_cache_file("agent", "sjawhar"), token_data)
+        # When: the profile's app-id changes, and a caller asks for a token.
+        self.git_config["gh-app.agent.app-id"] = "9999999"
+        urlopen = fake_github()
+        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=urlopen):
+            rc, stdout, _ = self.run_main(["agent", "--owner", "sjawhar"])
+        # Then: the old App's token is not reused; a fresh one is minted for the new App.
+        self.assertEqual(rc, 0)
+        self.assertNotIn("old-app-token", stdout)
+        self.assertEqual(sum("access_tokens" in url for url in urlopen.calls), 1)
+
     def test_a_cached_token_is_reused_only_with_the_life_the_caller_asks_for(self):
         # Given: a cached token with twelve minutes left, the way a long `gh run watch`
         # was handed one and failed with 401 twelve minutes in (2026-10-22).
