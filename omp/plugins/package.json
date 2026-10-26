@@ -6,7 +6,7 @@
     "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.1.10",
     "@sjawhar/pi-envoy": "10.23.0",
     "@sjawhar/pi-legion": "10.11.1",
-    "gws-accounts": "github:sjawhar/gws-accounts#v0.1.8",
+    "gws-accounts": "github:sjawhar/gws-accounts#v0.1.9",
     "secretsd": "github:sjawhar/forward#v3.6.5",
     "superpowers": "github:obra/superpowers#v6.3.0"
   }
