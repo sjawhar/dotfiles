@@ -25,6 +25,7 @@ Executables covering several areas:
 
 - Scripts are executable and self-contained; put a `#!` line and `set -euo pipefail` (bash) or the appropriate interpreter at the top.
 - Import-only shared Python modules here are libraries: they may omit the `#!` line and the executable bit; an executable entrypoint keeps both.
+- A sourced bash library is one too, named `<name>.sh` since nothing runs it by name: `agent-spend-env.sh` (`agent_spend_env AGENT [ARGS…]`, the model-spend environment and the session's project, dispatch://INFRA-165), which `agent-session`, `shims/claude` and `shims/codex` share.
 - Match the naming and interpreter style of neighboring scripts.
 - A secret never goes into a command's arguments: every user can read them from `/proc/<pid>/cmdline`, and any `ps` prints them. Pass it through the environment, a file, or stdin — curl's `--config` or `-H @file` on a `<(printf …)` path (`printf` is a builtin), mcp-remote's `${VAR}` header placeholders, `mcp-remote-from-env` for a URL.
 
