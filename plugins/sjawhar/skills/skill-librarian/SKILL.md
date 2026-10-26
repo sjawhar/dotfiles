@@ -54,7 +54,8 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
    - No agent owns a repository, so make every repository fix yourself and never send it to another agent session. A lesson that shows a defect in a tool gets a code fix in that tool, never a doc line that works around it. Say so in the ledger.
    - Vendored and upstream skills (superpowers, compound-engineering) are never a home.
    - Propose an edit to Sami's CLAUDE.md or skills only for his own words not yet written there, or a failure that passes `skill://writing-agent-skills` §1. Else drop the lesson.
-7. Do no catch-up search for Envoy publishes you missed. A missed publish from a session on this machine reaches you when that session is next due (10800 more active seconds). A missed publish from another machine is lost; do not search for it.
+7. Over 90 days since the ledger's last stale-skill review: run it (`skill://writing-agent-skills` section 5), bring Sami the decisions as one batch, and record the date.
+8. Do no catch-up search for Envoy publishes you missed. A missed publish from a session on this machine reaches you when that session is next due (10800 more active seconds). A missed publish from another machine is lost; do not search for it.
 
 ## Where a lesson goes (one home each)
 
