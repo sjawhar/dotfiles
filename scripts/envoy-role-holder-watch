@@ -503,6 +503,10 @@ def tmux_panes() -> list[dict] | None:
         return None
     if done.returncode != 0:
         if "no server running" in done.stderr or "error connecting" in done.stderr:
+            # Said out loud: a watch that silently sees no pane is the failure this check exists
+            # to catch. The socket is $TMUX_TMPDIR/tmux-<uid>/default, which .bashrc sets and the
+            # service unit repeats, since a systemd service sources no shell.
+            log(f"panes: {done.stderr.strip()} (TMUX_TMPDIR={os.environ.get('TMUX_TMPDIR', '(unset)')})")
             return []
         log(f"panes: tmux list-panes exited {done.returncode}: {done.stderr.strip()}")
         return None

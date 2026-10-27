@@ -11,4 +11,11 @@ IOSchedulingClass=idle
 # A run that cannot finish is killed, so runs can never pile up on the 30 s period. One pass
 # costs ~0.5 s with every holder alive and ~10 s when every role needs a claim lookup.
 TimeoutStartSec=25
+# The pane check talks to the default tmux server. Two things a shell gives it and a systemd
+# service does not: the socket directory .bashrc sets, and the mise-managed tmux the server was
+# started from — /usr/bin/tmux is 3.4 against a 3.8 server and answers "server exited
+# unexpectedly", so the watch would see zero panes and say nothing.
+Environment=TMUX_TMPDIR=%h/.tmux/sockets
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=MISE_DATA_DIR=%h/.mise
 ExecStart=%h/.dotfiles/scripts/envoy-role-holder-watch
