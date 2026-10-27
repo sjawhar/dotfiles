@@ -10,7 +10,7 @@ mock.module("@oh-my-pi/pi-coding-agent/exec/settings", () => ({ cfgBashIntercept
 mock.module("@oh-my-pi/pi-coding-agent/tools/bash-interceptor", () => ompModules.interceptor);
 mock.module("@oh-my-pi/pi-coding-agent/tools/shell-tokenize", () => ompModules.tokenize);
 
-const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", context_line: "random", skill_gate: "random", judge_log: "random", rules_refresh: "random", askgate_block: "random", bash_gate_leading: "random" };
+const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", skill_gate: "random", judge_log: "random", rules_refresh: "random", askgate_block: "random", bash_gate_leading: "random" };
 const ids = Array.from({ length: 400 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
 const ROOT = "01a0f8aa-2f87-720f-8260-1d84b54c192b";
 const ROOT_FILE = `/home/u/.omp/agent/sessions/-tmp-x/2026-10-01T18-11-37-991Z_${ROOT}.jsonl`;
@@ -56,14 +56,14 @@ describe("resolveGates", () => {
 	});
 	test("OMP_EXPERIMENT_<FEATURE> overrides the file for that feature only", () => {
 		const gates = resolveGates(ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_SKILL_GATE: "on", OTHER: "x" });
-		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", context_line: "random", skill_gate: "on", judge_log: "random", rules_refresh: "random", askgate_block: "random", bash_gate_leading: "random" });
+		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", skill_gate: "on", judge_log: "random", rules_refresh: "random", askgate_block: "random", bash_gate_leading: "random" });
 	});
 	test.each([
 		["a variable whose value is not a gate", ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "maybe" }, /OMP_EXPERIMENT_SELFCOMPACT must be on, off or random, got "maybe"/],
-		["an empty variable", ALL_RANDOM, { OMP_EXPERIMENT_CONTEXT_LINE: "" }, /OMP_EXPERIMENT_CONTEXT_LINE must be on, off or random, got ""/],
+		["an empty variable", ALL_RANDOM, { OMP_EXPERIMENT_SKILL_GATE: "" }, /OMP_EXPERIMENT_SKILL_GATE must be on, off or random, got ""/],
 		["a variable naming no feature", ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPAKT: "on" }, /OMP_EXPERIMENT_SELFCOMPAKT names no feature/],
 		["a gate file naming an unknown feature", { ...ALL_RANDOM, budget: "on" }, {}, /unknown feature "budget"/],
-		["a gate file missing a feature", { selfcompact: "on", proactive_memory: "on", context_line: "on", skill_gate: "on", judge_log: "on" }, {}, /no gate for feature "rules_refresh"/],
+		["a gate file missing a feature", { selfcompact: "on", proactive_memory: "on", skill_gate: "on", judge_log: "on" }, {}, /no gate for feature "rules_refresh"/],
 		["a gate file giving a feature a non-gate", { ...ALL_RANDOM, proactive_memory: true }, {}, /feature "proactive_memory" the gate true/],
 		["a gate file that is not an object", ["selfcompact"], {}, /must map each feature/],
 	] as const)("refuses %s, naming it", (_label, file, env, message) => {
@@ -98,11 +98,10 @@ describe("the extension", () => {
 			getActiveTools: () => ["bash", "read", "grep", "glob", "edit", "write"],
 		};
 		experiments(pi as never);
-		let usage: () => { tokens: number; contextWindow: number } = () => ({ tokens: 1_000, contextWindow: 200_000 });
+		let branch: () => unknown[] = () => [];
 		const ctx = {
 			agent: { kind: "main" },
-			sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => ROOT, getEntries: () => entries, getBranch: () => [] },
-			getContextUsage: () => usage(),
+			sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => ROOT, getEntries: () => entries, getBranch: () => branch() },
 		};
 		const emit = async (event: string, payload: unknown) => {
 			let out: unknown;
@@ -114,13 +113,13 @@ describe("the extension", () => {
 			errors,
 			records: () => entries.filter(e => e.customType === ENTRY_TYPE).map(e => e.data as ExperimentRecord),
 			start: () => emit("session_start", { type: "session_start" }),
-			context: () => emit("context", { type: "context", messages: [{ role: "user", content: "hi", timestamp: 1 }] }) as Promise<{ messages: Array<{ content: string }> } | undefined>,
+			context: () => emit("context", { type: "context", messages: [{ role: "user", content: "hi", timestamp: 1 }] }),
 			gh: () => emit("tool_call", { toolName: "bash", toolCallId: "c1", input: { command: "gh pr create --fill" } }) as Promise<{ block?: boolean } | undefined>,
 			bash: (command: string) => emit("tool_call", { toolName: "bash", toolCallId: "c2", input: { command } }) as Promise<{ block?: boolean; reason?: string } | undefined>,
-			setUsage: (fn: typeof usage) => (usage = fn),
+			setBranch: (fn: typeof branch) => (branch = fn),
 		};
 	}
-	const allOff = { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_PROACTIVE_MEMORY: "off", OMP_EXPERIMENT_CONTEXT_LINE: "off", OMP_EXPERIMENT_SKILL_GATE: "off", OMP_EXPERIMENT_JUDGE_LOG: "off" };
+	const allOff = { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_PROACTIVE_MEMORY: "off", OMP_EXPERIMENT_SKILL_GATE: "off", OMP_EXPERIMENT_JUDGE_LOG: "off" };
 
 	test("a bad variable stops the load, naming it", async () => {
 		await expect(bind({ OMP_EXPERIMENT_SELFCOMPACT: "maybe" })).rejects.toThrow(/OMP_EXPERIMENT_SELFCOMPACT/);
@@ -149,9 +148,8 @@ describe("the extension", () => {
 		await off.start();
 		expect(await off.context()).toBeUndefined();
 		expect(await off.gh()).toBeUndefined();
-		const on = await bind({ ...allOff, OMP_EXPERIMENT_CONTEXT_LINE: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
+		const on = await bind({ ...allOff, OMP_EXPERIMENT_SKILL_GATE: "on" });
 		await on.start();
-		expect((await on.context())?.messages.at(-1)?.content).toBe("hi\n\n[Token usage: 1,000/200,000]");
 		expect((await on.gh())?.block).toBe(true);
 	});
 	test("the bash gate runs in both arms: on lets a later read step through, off blocks it as omp does", async () => {
@@ -165,15 +163,15 @@ describe("the extension", () => {
 		expect(await off.bash("ps | grep x")).toBeUndefined();
 	});
 	test("a feature whose handler throws is logged and stays off for the session; the others keep running", async () => {
-		const b = await bind({ ...allOff, OMP_EXPERIMENT_CONTEXT_LINE: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
+		const b = await bind({ ...allOff, OMP_EXPERIMENT_SKILL_GATE: "on", OMP_EXPERIMENT_BASH_GATE_LEADING: "on" });
 		await b.start();
-		b.setUsage(() => {
-			throw new Error("usage unavailable");
+		b.setBranch(() => {
+			throw new Error("branch unavailable");
 		});
-		expect(await b.context()).toBeUndefined();
-		expect(b.errors).toEqual([expect.stringContaining("context_line failed in context")]);
-		b.setUsage(() => ({ tokens: 1_000, contextWindow: 200_000 }));
-		expect(await b.context()).toBeUndefined();
-		expect((await b.gh())?.block).toBe(true);
+		expect(await b.gh()).toBeUndefined();
+		expect(b.errors).toEqual([expect.stringContaining("skill_gate failed in tool_call")]);
+		b.setBranch(() => []);
+		expect(await b.gh()).toBeUndefined();
+		expect((await b.bash("cat f"))?.block).toBe(true);
 	});
 });

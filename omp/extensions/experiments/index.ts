@@ -5,7 +5,6 @@
 //                     summarized (selfcompact.ts)
 //   proactive_memory  a side agent keeps a knowledge bank and slips a reminder into the next
 //                     request when it judges one useful (proactive-memory-core.ts)
-//   context_line      appends "[Token usage: used/window]" to every request (context-line.ts)
 //   skill_gate        refuses `gh pr create` until skill://opening-a-pr is read, and `jj git push`
 //                     until skill://using-jj is read (skill-gate.ts)
 //   judge_log         rates every subagent dispatch with the `@judgeLog` model role and appends the
@@ -29,7 +28,6 @@
 // keep running. The installer links only this file; its imports resolve from its real path.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import bashGate from "./bash-gate";
-import contextLine from "./context-line";
 import gateFile from "./gates.json" with { type: "json" };
 import { ENTRY_TYPE, type ExperimentRecord, type Feature, resolve, resolveGates, rootSessionId } from "./gates";
 import judgeLog from "./judge-log";
@@ -42,7 +40,6 @@ import skillGate from "./skill-gate";
 const REGISTRATIONS: ReadonlyArray<[Feature, (pi: ExtensionAPI) => void]> = [
 	["selfcompact", selfcompact],
 	["proactive_memory", proactiveMemory],
-	["context_line", contextLine],
 	["skill_gate", skillGate],
 	["judge_log", judgeLog],
 	["rules_refresh", rulesRefresh],
