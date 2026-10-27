@@ -1,0 +1,13 @@
+[Unit]
+Description=Check every 30 s that no omp session's scope is heading for its memory ceiling
+
+[Timer]
+OnActiveSec=15s
+OnUnitActiveSec=30s
+# A scope near its ceiling has been measured rising at up to 1.8 GiB/min on this box, so a
+# minute of systemd's default accuracy would spend a quarter of the headroom the threshold
+# leaves. The period and the 60 s grace must both be small against that rise.
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

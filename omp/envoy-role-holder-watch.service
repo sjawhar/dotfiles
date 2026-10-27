@@ -1,0 +1,14 @@
+[Unit]
+Description=Alert when an Envoy role is still registered to a holder session whose process is gone
+Documentation=file:%h/.dotfiles/scripts/envoy-role-holder-watch.md
+
+[Service]
+Type=oneshot
+# Last in line for CPU and disk: this box runs at load 100+, and a liveness watch that
+# competes with the proof lanes it watches is worse than one that answers a second later.
+Nice=15
+IOSchedulingClass=idle
+# A run that cannot finish is killed, so runs can never pile up on the 30 s period. One pass
+# costs ~0.5 s with every holder alive and ~10 s when every role needs a claim lookup.
+TimeoutStartSec=25
+ExecStart=%h/.dotfiles/scripts/envoy-role-holder-watch
