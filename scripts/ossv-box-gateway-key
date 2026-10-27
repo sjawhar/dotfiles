@@ -10,6 +10,9 @@
 # reboot and this unit puts it back; a rotated key replaces the file at the next run (a running omp keeps the value
 # it read at start until it restarts). The key passes through this process only, and is never printed or logged.
 set -uo pipefail
+# The unit runs in systemd's non-login environment, whose PATH has no gcloud, and ossv-vm calls gcloud whenever its
+# instance cache misses: every run failed with "gcloud: command not found" from 2026-10-26 23:06Z until this line.
+export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$PATH"
 d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ossv-box"
 f="$d/gateway-key"
 install -d -m 700 "$d" || exit 1
