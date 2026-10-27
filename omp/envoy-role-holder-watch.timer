@@ -1,0 +1,12 @@
+[Unit]
+Description=Check every 30 s that each Envoy role holder on this machine still has a process
+
+[Timer]
+OnActiveSec=10s
+OnUnitActiveSec=30s
+# The window this watches is one minute wide (60 s grace + one period), so the timer may not
+# drift by systemd's default one-minute accuracy.
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

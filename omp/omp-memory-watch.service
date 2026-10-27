@@ -1,0 +1,14 @@
+[Unit]
+Description=Warn an agent session over Envoy before the kernel OOM-kills its omp scope
+Documentation=file:%h/.dotfiles/scripts/omp-memory-watch.md
+
+[Service]
+Type=oneshot
+# Last in line for CPU and disk, like envoy-role-holder-watch: this box runs at load 100+, and a
+# memory watch that competes with the lanes it watches is worse than one that answers later.
+Nice=15
+IOSchedulingClass=idle
+# A run that cannot finish is killed, so runs can never pile up on the 30 s period. One pass is
+# /proc and /sys reads only: ~0.3 s with no scope near its ceiling, and one Envoy POST per alert.
+TimeoutStartSec=25
+ExecStart=%h/.dotfiles/scripts/omp-memory-watch
