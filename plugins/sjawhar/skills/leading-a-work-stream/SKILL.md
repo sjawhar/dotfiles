@@ -93,7 +93,7 @@ From records you read yourself (GitHub, Dispatch, the numbers), answer: what is 
 
 ## Delegation and tooling
 
-- Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you: when a delegated result lands, read the number it was meant to move from the evidence it names, and measure it yourself only when it names none.
+- Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you: when a delegated result lands, read the number it was meant to move from the evidence it names.
 - When an agent starts a long project, check that it uses the workflow skill for that kind of work and name the skill: `sdd` for an engineering project, `skill://building-and-delivering-tasks` for RL task work. That skill's own review steps replace review by the lead.
 - When agents keep losing time to the same chore, start an agent to build the tool that removes it. Do not wait to be asked.
 - Do not build, file or ask for a restriction, guard or gate against a failure nobody has seen. Fix a real failure at its cause, after it happens.

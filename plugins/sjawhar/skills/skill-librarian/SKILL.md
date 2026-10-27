@@ -22,7 +22,7 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 - Never report what an agent did wrong, to anyone. Make it a lesson for the home that would have prevented it.
 - No HDO material in a lesson, ledger row or reply, because none of them is on an HDO account. Do not quote, paraphrase or summarize it. OSS Verifier work (the OSSV project, its sessions and their VMs) is not HDO material, although it runs on the HDO key. Inside OSSV work, a named `-hdo` repository and HDO run results are still HDO material. Other HDO-key work is HDO material.
 - Ledger first. Before a write into a lesson's home, put its Sessions row and Lesson row (evidence, verdict, provisional home) in the ledger and read them back. If an edit or read-back fails, make no external write: a write the ledger does not record is lost or repeated after a resume. An Envoy reply about a covered blocker needs only its Leads row.
-- A round edits only the rules its lessons name. Bring each deletion, merge or shortening as its own batch item with its `skill://writing-agent-skills` section 5 reason: removal needs other evidence.
+- A round edits only the rules its lessons name; bring each deletion, merge or shortening as its own batch item.
 - Write into a home only after Sami says yes, because every agent on the machine reads a skill or CLAUDE.md edit at once. Bring him proposed edits in batches.
 - Every due session gets BOTH the fork and the reader, each with its file in `references/` verbatim, because those files carry the read-only, signal and dollar rules that your own prompt would drop. Reading the transcript yourself or writing your own prompt replaces neither. A large transcript is no reason to skip either.
 
@@ -66,7 +66,7 @@ Before you choose a home, read `references/stores.md`. A preference of Sami's is
 | --- | --- | --- |
 | One repository's design, taste or workflow | its AGENTS.md, docs/ or a repo skill | PR by its rules (dotfiles: direct push). |
 | Company-wide Theorem rule | `working-at-theorem` in theorem-labs/verification-skills | Every PR bumps the version. Create the skill in its first PR if it does not exist. Tag after the merge. |
-| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Give his reason in the commit message, in your words, with a link to where he gave it. Hard cap 8,000 bytes (`wc -c`): an edit that would pass it also deletes a rule; name it. Push fast-forward. |
+| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Give his reason in the commit message. Hard cap 8,000 bytes: an edit past it also deletes a rule. Push fast-forward. |
 | Fact about Sami's people, places, phrasing, or Theorem's people, places, tools | memory | `retain`. |
 | Tool fact | `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, after his yes | Create or extend it. If a vendor skill for the tool exists, leave it unchanged (it is never a home) and name it there. |
 | Blocker a skill or document covers | no write | `envoy_send` the pointer. Ledger `replied`. |

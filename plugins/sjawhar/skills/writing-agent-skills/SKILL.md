@@ -57,7 +57,7 @@ Test every new skill and every edit that changes what an agent does: untested ag
 Scripts named here are in `~/.dotfiles/plugins/sjawhar/skills/writing-agent-skills/scripts/`.
 
 - To fix a rule agents disobey, delete it and run the same task 3 times with the rest of the skill unchanged; rewrite it only if the failure shows in 2 of the 3. Repeated rewrites made one lesson set worse than none.
-- Before you delete a rule, find its reason: the clause beside it, else the commit that added it (`git log -S '<phrase>' -- SKILL.md`, older wording past a rewrite). Delete it when that reason no longer holds: a duplicate, written for an older model, obeyed unprompted in a control run, one incident that never recurred, or now done differently by the code or the harness.
+- Before you delete a rule, find its reason: the clause beside it, else the commit that added it (`git log -S`). Delete it when that reason no longer holds: a duplicate, written for an older model, obeyed unprompted in a control run, one incident that never recurred, or now done differently by the code or the harness.
 - For a stale-skill review, run `stale_skills.py`. Neither STALE nor "it never fires" is a reason: run the control (deleting ignored rules can remove helpful ones) and decide by the reasons above. Delete, never archive: git log is the archive.
 - For each required step you remove, name what now makes it happen (a script, a hook, another rule). If nothing does, keep the step, because a step left to choice gets skipped.
 - Keep the words that set a rule's scope ("before every push", "in Rust files"). Current models apply a rule only as broadly as it says.
