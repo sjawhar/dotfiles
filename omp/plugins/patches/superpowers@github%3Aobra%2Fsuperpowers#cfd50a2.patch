@@ -1,0 +1,30 @@
+diff --git a/.pi/extensions/superpowers.ts b/.pi/extensions/superpowers.ts
+index a978e80ee0bbffe649ace8826bf6e8b69beea421..9e23776406c5b0bfe7f2db538cee982aa154becb 100644
+--- a/.pi/extensions/superpowers.ts
++++ b/.pi/extensions/superpowers.ts
+@@ -28,10 +28,10 @@ export default function superpowersPiExtension(pi: ExtensionAPI) {
+ 		injectBootstrap = true;
+ 	});
+ 
+-	pi.on("agent_end", async () => {
+-		injectBootstrap = false;
+-	});
+-
++	// The message returned here is sent to the provider but never saved to the
++	// session, so it is injected on every request of every run. Switching it off
++	// after the first run (agent_end) would drop it from later runs and change
++	// the start of the prompt, which invalidates the provider's prompt cache.
+ 	pi.on("context", async (event) => {
+ 		if (!injectBootstrap) return;
+ 		if (event.messages.some(messageContainsBootstrap)) return;
+@@ -42,7 +42,9 @@ export default function superpowersPiExtension(pi: ExtensionAPI) {
+ 		const bootstrapMessage = {
+ 			role: "user" as const,
+ 			content: [{ type: "text" as const, text: bootstrap }],
+-			timestamp: Date.now(),
++			// Fixed, not Date.now(): the message is rebuilt for every request, and
++			// a harness that reads message timestamps would see a new one each time.
++			timestamp: 0,
+ 		};
+ 
+ 		const insertAt = firstNonCompactionSummaryIndex(event.messages);

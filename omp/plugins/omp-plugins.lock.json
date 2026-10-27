@@ -1,7 +1,7 @@
 {
   "plugins": {
     "superpowers": {
-      "version": "6.3.0",
+      "version": "7.0.1",
       "enabledFeatures": null,
       "enabled": true
     },

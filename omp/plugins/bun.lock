@@ -11,9 +11,12 @@
         "@sjawhar/pi-legion": "10.11.1",
         "gws-accounts": "github:sjawhar/gws-accounts#v0.1.9",
         "secretsd": "github:sjawhar/forward#v3.6.5",
-        "superpowers": "github:obra/superpowers#v6.3.0",
+        "superpowers": "github:obra/superpowers#v7.0.1",
       },
     },
+  },
+  "patchedDependencies": {
+    "superpowers@github:obra/superpowers#cfd50a2": "patches/superpowers@github%3Aobra%2Fsuperpowers#cfd50a2.patch",
   },
   "packages": {
     "@ai-sdk/provider": ["@ai-sdk/provider@3.0.8", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ=="],
@@ -318,7 +321,7 @@
 
     "signal-exit": ["signal-exit@3.0.7", "", {}, "sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ=="],
 
-    "superpowers": ["superpowers@github:obra/superpowers#86babb6", {}, "obra-superpowers-86babb6", "sha512-JBj44HOtQPnfUmjg1oo1UiZlbZRTyrD5a+SkCzcPh/C0WK8VL9pcq2fZRbI7hF/cjNvo7H+K9dad8mgvUtpq8A=="],
+    "superpowers": ["superpowers@github:obra/superpowers#cfd50a2", {}, "obra-superpowers-cfd50a2", "sha512-iYkCncdsKo1OU6YGrM+rmz64zc4tfFotbRTUO6yzFGQlzPzUyoWaXaBqMhsd1oX81420WY1/Ar7Rfg9lkPMPCg=="],
 
     "toml": ["toml@4.3.0", "", {}, "sha512-lVb8X9BsPVuH0M4BKeS91tXAmJvCjQ5UIyAbQFaxkKGyUFK2RPkhwaFSQH8vbpl1d23eu/IBH+dwVMHWaq9A5A=="],
 

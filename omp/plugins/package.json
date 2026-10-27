@@ -8,6 +8,9 @@
     "@sjawhar/pi-legion": "10.11.1",
     "gws-accounts": "github:sjawhar/gws-accounts#v0.1.9",
     "secretsd": "github:sjawhar/forward#v3.6.5",
-    "superpowers": "github:obra/superpowers#v6.3.0"
+    "superpowers": "github:obra/superpowers#v7.0.1"
+  },
+  "patchedDependencies": {
+    "superpowers@github:obra/superpowers#cfd50a2": "patches/superpowers@github%3Aobra%2Fsuperpowers#cfd50a2.patch"
   }
 }
