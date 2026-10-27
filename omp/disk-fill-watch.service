@@ -1,0 +1,17 @@
+[Unit]
+Description=Alert over Envoy before a filesystem on this machine fills
+Documentation=file:%h/.dotfiles/scripts/disk-fill-watch.md
+
+[Service]
+Type=oneshot
+# Last in line for CPU and disk, like omp-memory-watch and envoy-role-holder-watch: this box runs
+# at load 100+, and a disk watch whose own reads add to the IO it is watching is worse than one
+# that answers later.
+Nice=15
+IOSchedulingClass=idle
+# A run that cannot finish is killed, so runs can never pile up on the 5-minute period. An
+# ordinary pass is statvfs plus a bounded /tmp scan, ~0.4 s. A pass that alerts also samples
+# /proc/*/io twice 15 s apart and sizes young /tmp directories for up to 20 s, so the ceiling is
+# well above both.
+TimeoutStartSec=120
+ExecStart=%h/.dotfiles/scripts/disk-fill-watch

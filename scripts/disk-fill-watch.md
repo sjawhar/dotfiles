@@ -1,0 +1,172 @@
+# disk-fill-watch
+
+Every 5 minutes, records free space on each watched filesystem of **this** machine, computes the
+fill rate over the last hour, and alerts over Envoy when the disk is about to land — either
+because free space is under a hard floor, or because the time to full at the current rate is
+under the horizon.
+
+## Why it exists
+
+On 2026-10-27T00:00:31Z the root filesystem of sami-rocqperf reached zero bytes free and stayed
+there for 11 seconds. From the previous boot's journal:
+
+```
+00:00:31Z rsyslogd[1617]: file '/var/log/syslog'[7] write error ... No space left on device
+          (8,500 of these between 00:00:31Z and 00:00:42Z)
+00:00:32Z dockerd[2600810]: Error running exec ...: OCI runtime exec failed:
+          write /tmp/runc-process3426999125: no space left on device
+00:00:33Z systemd-journald[1593242]: Failed to open system journal: No space left on device
+00:00:33Z bet-screen-slot[1679672]: screen-pass.sh: line 112: echo: write error: No space left on device
+```
+
+Nothing alerted. The only instrument running was a watch loop inside an agent session
+(`/mnt/nvme/sami/tmp/infra-wake/disk-floor-watch.sh`), which sampled `df` every ten minutes
+against a fixed floor — and which died with its session; its log stops at 08:58:33Z.
+(dispatch://INFRA-613)
+
+**A floor alone is not enough.** That night / fell from 62 GiB free at 18:12Z to 1 GiB at 23:53Z,
+and over the last 38 minutes it fell at 33 GiB/h. The floor watch's own log shows it crossing an
+18 GiB floor at 22:09:56Z — an hour and fifty minutes before the fill — so the floor said "low"
+all night and never said "about to land". The number that says that is the fill **rate**, and the
+horizon it buys.
+
+## What it decides
+
+Per mount, per run:
+
+| | |
+|---|---|
+| Sample | `statvfs(mount).f_bavail × f_frsize` — what an unprivileged writer can still use, which is where ENOSPC arrives. Appended every run, whether or not anything is wrong: a silent log cannot be told from a dead watch |
+| Rate | bytes/s of **fall** between the oldest sample inside `--rate-window` (1 h) and now |
+| Time to full | free ÷ rate, when falling |
+| **Crossing** | free < the mount's hard floor, **or** time-to-full < `--horizon` (2 h) with at least `--min-span` (25 min) of samples behind the rate **and** free at a new low for the hour |
+| Alert | after `--grace` (240 s, so a second consecutive run confirms it) |
+| Escalate | 30 minutes after the alert, if free is lower than it was then |
+| Clear | free ≥ floor × 1.5 **and** no fall that reaches full inside twice the horizon |
+
+**A sawtooth is not a leak.** `/mnt/nvme` on this box swings about 100 GB up and down every hour
+as grade jobs land and are cleaned (its 10-minute log on 2026-10-26 reads 295 GB → 479 → 378 →
+340 → 232 free), so an hour of negative slope on its own fires on every downstroke. The new-low
+test is what keeps it quiet: only a fall to a level the last hour has not seen is a fall towards
+zero.
+
+### The floors
+
+| Mount | Floor | Why |
+|---|---|---|
+| `/` | 18 GiB | Root holds every session's transcript, the journal, apt/dpkg state and `/tmp`, so a full root stops the whole box, not one lane. Root's band on 2026-10-26 afternoon was 25–28 GiB, so 25 would have paged all day; 18 leaves room to act |
+| `/mnt/nvme` | 84 GB (decimal) | The grade farm's build-cache floor — binary-equivalence-taiga farm `e1417ce`, `disk_floor.sh` `FETCH_KIND_BOUND` and `farm_build.py` `PREPARE_FLOOR_BYTES` — the level at which a registration build refuses to start, so it is where real work stops |
+| anything else | `--default-floor`, 20 GiB | |
+
+An alert on `/mnt/nvme` also names every grade-farm transfer kind whose own floor the current
+free space is under (`generic-unmeasured` 150 GB, `build-cache` 84, `registration` 52,
+`nightly-grade` 52, `frozen-drop` 44, `restore` 36, `prepare-staging` 28, `build-stage` 21.6,
+`grade-record` 20.8): that list is the work the farm is already refusing.
+
+`--floor /=400` overrides a floor, for a deliberate test against a scratch threshold or for a
+machine whose disks are not these.
+
+## Who is writing, and whose session it is
+
+A size walk sees what is already written. It cannot name what is being written **now**, which is
+what an alert needs, so each alert carries a two-sample writer attribution
+(skill://disk-hygiene `references/finding-space.md`): `write_bytes` from `/proc/<pid>/io` read
+twice, 15 s apart, sorted by the difference. For each of the top writers the alert gives the
+bytes and the rate, the pid and its age, the **owning agent session**, the working directory when
+it is on the alerting mount, and the largest file it holds open there.
+
+- The session is read from the process, never guessed: `OMP_SESSION_ID` in its environment, else
+  a session id on its command line, else the transcript it holds open
+  (`~/.omp/agent/sessions/**/<stamp>_<session id>.jsonl`), else the same three for an ancestor. A
+  tool subprocess carries its session's environment, so the first test usually answers; an `omp`
+  process itself is the case the other two are for. When none answers, the systemd scope is given
+  instead and the alert says there is no session id.
+- `/proc/<pid>/io` counts writes to **every** filesystem, not only the one that is filling. The
+  cwd and the open file are what tie a writer to the mount, and the alert says so rather than
+  implying the bytes landed there.
+- Another user's `/proc/<pid>/io` is refused to an unprivileged reader, and root owns the writers
+  that failed first on 2026-10-27 (rsyslogd on `/var/log/syslog`, dockerd's `/tmp` exec scratch).
+  So where `sudo -n` is allowed the whole sample — both `/proc` passes and the cwd and fd reads —
+  runs as root in a child of this script (`--writers-json`, which reads `/proc` and prints JSON;
+  it sends nothing and writes nothing). Where it is not, the unprivileged sample is used and the
+  alert says how many processes refused the read, so root's writers are never reported as absent.
+  `--sudo never` turns the privileged half off.
+
+The expensive reads happen only on a run that actually sends. An ordinary run is `statvfs` plus a
+bounded `/tmp` scan: **0.3–0.4 s** measured on this box at load 43.
+
+## The /tmp rule
+
+`/tmp` is on `/` here and agents' scratch there was the repeated root cause on 2026-10-26. A
+top-level `/tmp` entry born in the last 6 hours and now at or over 500 MB is named **once**, to
+the INFRA lead, with the session that owns it (a process whose cwd or an open fd is inside it,
+else "its session has ended").
+
+Unlike the hand-run script this replaces, a young **directory** is sized too, under a few seconds
+of budget per run (`--tmp-idle-walk-budget`, 5 s; `--tmp-walk-budget`, 20 s while building an
+alert). That script sized only non-directories, which is how `/tmp/rev1` was named at 17 GB while
+the directories beside it never were. What a run's budget does not reach, the next run reaches:
+an entry already named is never looked at again.
+
+## Who hears about it
+
+Agent sessions only, never a person:
+
+- the **INFRA lead** (`01a13c57-d826-7242-80fe-5f0670188b11`), who owns this detector;
+- the **chief of staff** (`01a13dca-e979-7264-af32-f654ef57a6f5`) when a crossing is still open
+  and free space is still **lower than at the alert** 30 minutes later.
+
+One alert per crossing, one clear. The clear goes to everyone who heard the crossing.
+
+Every alert ends with what to DO: read the writers first, stop or finish the lane that is writing,
+move its output to the other disk, then reclaim with skill://disk-hygiene — whose check-in comes
+first and which never deletes a directory a live session stands in. **This watch only detects. It
+deletes nothing, kills nothing and moves nothing.**
+
+## One alert per crossing
+
+`/mnt/nvme/sami/tmp/disk-fill-watch/state.json` is the only memory, and the service owns it (a
+machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state.json`):
+
+- held under an exclusive `flock` for the whole run, so a hand run and the timer can never both
+  open the same crossing; the loser logs `another run holds …` and skips its period;
+- `alerted_at` is written and `fsync`ed **before** the first message is sent;
+- it also holds the samples each rate is computed from (3 h, trimmed every run) and the `/tmp`
+  entries already named;
+- `--state <other path>` is for tests only: a run on any other file forces `--dry-run`.
+
+## Inputs
+
+| Input | Source |
+|---|---|
+| Free and total space | `os.statvfs(mount)` — `f_bavail`, `f_blocks`, `f_frsize` |
+| Fill rate | this watch's own samples in its state file |
+| Writers | `/proc/<pid>/io` `write_bytes`, twice, `--writer-sample` apart, through `sudo -n` where allowed |
+| A writer's session | `/proc/<pid>/environ`, `/proc/<pid>/cmdline`, `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl`, then its ancestors |
+| A writer's mount | `/proc/<pid>/cwd` and `/proc/<pid>/fd`, compared with the mount's `st_dev` |
+| Young `/tmp` entries | `os.scandir('/tmp')` with `st_birthtime`, and a budgeted `os.walk` for directories |
+| Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
+| Samples, crossings, named `/tmp` entries | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |
+
+## Running it by hand
+
+```sh
+scripts/disk-fill-watch --dry-run --print-alert                      # decide and print, send nothing
+scripts/disk-fill-watch --state /tmp/x.json --write-state \
+    --print-alert --grace 0 --floor '/=400' --mount /                # deliberate trigger, sends nothing
+scripts/disk-fill-watch --mount / --mount /mnt/nvme --horizon 7200   # the unit's defaults
+```
+
+## Turning it off
+
+```sh
+systemctl --user disable --now disk-fill-watch.timer   # stop it
+systemctl --user enable  --now disk-fill-watch.timer   # start it again
+systemctl --user list-timers disk-fill-watch.timer     # when it next runs
+journalctl --user -u disk-fill-watch.service -n 50     # what the last runs decided
+```
+
+`installers/disk-fill-watch.sh` arms it (links `omp/disk-fill-watch.{service,timer}` into
+`~/.config/systemd/user`). Deleting the state file forgets every open crossing and every rate: the
+next run starts sampling again and re-alerts on a floor that is still crossed, and needs
+`--min-span` of samples before it can alert on a rate.

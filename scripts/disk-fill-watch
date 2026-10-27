@@ -1,0 +1,1081 @@
+#!/usr/bin/env python3
+"""Alert before a filesystem on this machine fills, while there is still time to act.
+
+Why this exists: on 2026-10-27T00:00:31Z the root filesystem of sami-rocqperf reached zero
+bytes free and stayed there for 11 seconds (`rsyslogd: file '/var/log/syslog' write error ...
+No space left on device`, 8,500 of them in that window; `dockerd: OCI runtime exec failed:
+write /tmp/runc-process...: no space left on device`; `systemd-journald: Failed to open system
+journal: No space left on device`). Nothing alerted. The only instrument running was a watch
+loop inside an agent session (/mnt/nvme/sami/tmp/infra-wake/disk-floor-watch.sh), which sampled
+`df` every ten minutes against a fixed floor, and which died with its session at 09:18Z.
+(dispatch://INFRA-613)
+
+A fixed floor alone is not enough, and ten minutes is not enough. On that night / fell from
+62 GiB free at 18:12Z to 1 GiB at 23:53Z, and over the last 38 minutes it fell at 33 GiB/h: a
+floor at 18 GiB left 33 minutes, and the floor watch's own log shows it crossing that floor at
+22:09Z, more than an hour before the fill, so the floor said "low" for hours and never said
+"about to land". The number that says that is the fill RATE, and the horizon it buys.
+
+What one run does, with `statvfs` and /proc reads only, no model call:
+
+  1. Record free space on every watched mount (`--mount`, default / and /mnt/nvme). Every run
+     appends a sample, whether or not anything is wrong: a silent log cannot be told from a
+     dead watch.
+  2. Compute the fill rate over the last hour from its own samples, and from it the
+     TIME TO FULL at that rate.
+  3. A mount is CROSSING when its free space is under its hard floor, or when the time to full
+     is under the horizon (default 2 h) while it sits at a new low for the hour. The low test
+     is what keeps a sawtooth quiet: /mnt/nvme on this box swings 100 GB up and down every
+     hour as grade jobs land and are cleaned, and only a fall to a new low with an hour of
+     negative slope behind it is a fall towards zero.
+  4. A crossing must hold for the grace window before it alerts, so one `rm` and one build do
+     not fire.
+  5. The alert names the TOP WRITERS NOW -- `write_bytes` from /proc/<pid>/io read twice, 15 s
+     apart, as skill://disk-hygiene references/finding-space.md says -- with each writer's
+     owning agent session, its working directory, what it holds open on the alerting mount,
+     and its age. A size walk cannot name those: it sees what is already written, not what is
+     being written now.
+
+It also keeps the /tmp rule of the script it replaces: a top-level /tmp entry born in the last
+6 hours and now at or over 500 MB is named once, with its owning session. /tmp is on / here, and
+agents' scratch there was the repeated root cause on 2026-10-26. Unlike that script, a young
+/tmp DIRECTORY is sized too -- but only while a crossing is open on the mount that holds /tmp,
+and under a bounded walk, because /tmp holds ~20k entries and walking it on every run would
+itself be the load.
+
+Alerts go over Envoy to agent sessions only, never to a person: the INFRA lead, and the chief
+of staff when a crossing is still open and still descending 30 minutes after its alert. This
+watch only detects. It deletes nothing and kills nothing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# The two sessions that own this detector's findings, as in omp-memory-watch.
+CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
+
+DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
+GIB = 1073741824
+GB = 1000000000
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+# Where the state file goes. /mnt/nvme is the big disk on the agent boxes; a machine without it
+# (a laptop) keeps the state under ~/.local/state, which every XDG machine has.
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/disk-fill-watch/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if Path("/mnt/nvme/sami/tmp").is_dir()
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "disk-fill-watch/state.json"
+)
+
+# Hard floors, in bytes, by mount point. A mount with no entry here uses --default-floor.
+#
+#   /          18 GiB. Root holds every agent session's transcript, the apt and dpkg state, the
+#              journal and /tmp, so a full root stops the whole box rather than one lane. The
+#              band root sat in on 2026-10-26 was 25-28 GiB, so a floor at 25 GiB would have
+#              paged all afternoon; 18 GiB warns with room to act and did not fire in the quiet
+#              hours of that log.
+#   /mnt/nvme  84 GB (decimal, the farm's own unit). It is the grade farm's build-cache floor
+#              (binary-equivalence-taiga farm e1417ce, disk_floor.sh FETCH_KIND_BOUND and
+#              farm_build.py PREPARE_FLOOR_BYTES): the level at which a registration build
+#              refuses to start, so it is where real work stops.
+FLOORS = {
+    "/": 18 * GIB,
+    "/mnt/nvme": 84 * GB,
+}
+
+# The grade farm's per-transfer-kind floors on /mnt/nvme, highest first. These do not alert on
+# their own; the alert names every kind whose floor the current free space is under, which is
+# the list of work that is already refused. Same source as the 84 GB floor above.
+NVME_KIND_FLOORS = [
+    ("generic-unmeasured", 150 * GB),
+    ("build-cache", 84 * GB),
+    ("registration", 52 * GB),
+    ("nightly-grade", 52 * GB),
+    ("frozen-drop", 44 * GB),
+    ("restore", 36 * GB),
+    ("prepare-staging", 28 * GB),
+    ("build-stage", 21600000000),
+    ("grade-record", 20800000000),
+]
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"{stamp} {message}", flush=True)
+
+
+def iso(epoch: float | None) -> str:
+    if not epoch:
+        return "unknown"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def human_time(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 90:
+        return f"{seconds} s"
+    minutes, rest = divmod(seconds, 60)
+    if minutes < 90:
+        return f"{minutes} min {rest} s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min"
+
+
+def gib(value: float) -> str:
+    return f"{value / GIB:.1f} GiB"
+
+
+def gb(value: float) -> str:
+    return f"{value / GB:.1f} GB"
+
+
+def size(value: float) -> str:
+    """A byte count at a readable scale. Decimal, like `df -B1` and the farm's floors."""
+    for unit, scale in (("GB", GB), ("MB", 1000000), ("kB", 1000)):
+        if abs(value) >= scale:
+            return f"{value / scale:.1f} {unit}"
+    return f"{int(value)} B"
+
+
+# --------------------------------------------------------------------------- Envoy transport
+
+
+class Envoy:
+    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
+            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "legion/envoy.json"
+        )
+        try:
+            config = json.loads(Path(path).read_text()).get("envoy") or {}
+        except (OSError, ValueError):
+            config = {}
+        if config.get("enabled") is False:
+            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
+        self.url = (os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL).rstrip("/")
+        self.timeout = timeout
+        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
+        if token.startswith("!"):
+            try:
+                done = subprocess.run(
+                    ["/bin/sh", "-c", token[1:]],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    stdin=subprocess.DEVNULL,
+                )
+                token = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                token = ""
+        self.token = token
+
+    def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | list]:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(self.url + path, data=data, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
+                raw = answer.read().decode() or "{}"
+                return answer.status, json.loads(raw)
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode() or "{}"
+            try:
+                return error.code, json.loads(raw)
+            except ValueError:
+                return error.code, {"error": raw.strip()}
+        except (urllib.error.URLError, socket.timeout, ValueError, OSError) as error:
+            return 0, {"error": str(error)}
+
+    def send(self, session_id: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/send",
+            {"target_session": session_id, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+
+# ------------------------------------------------------------------------------- the mounts
+
+
+def free_bytes(mount: str) -> tuple[int, int] | None:
+    """(free bytes for an unprivileged writer, total bytes), or None when unreadable.
+
+    f_bavail, not f_bfree: the reserved blocks are not available to the agents that fill these
+    disks, and ENOSPC for them arrives at f_bavail == 0.
+    """
+    try:
+        stat = os.statvfs(mount)
+    except OSError:
+        return None
+    return stat.f_bavail * stat.f_frsize, stat.f_blocks * stat.f_frsize
+
+
+def device_of(path: str) -> int | None:
+    try:
+        return os.stat(path).st_dev
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------- who is writing now
+
+
+def proc_io_write(pid: int) -> int | None:
+    try:
+        for line in Path(f"/proc/{pid}/io").read_text().splitlines():
+            if line.startswith("write_bytes:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def cmdline_of(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf8", "replace").replace("\0", " ").strip()
+    except OSError:
+        return ""
+
+
+def comm_of(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return ""
+
+
+def ppid_of(pid: int) -> int:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("PPid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def age_of(pid: int) -> float:
+    """Seconds since the process started, from /proc/<pid>/stat field 22 and the boot time."""
+    try:
+        data = Path(f"/proc/{pid}/stat").read_text()
+        ticks = int(data[data.rfind(")") + 2 :].split()[19])
+        with open("/proc/uptime") as handle:
+            uptime = float(handle.read().split()[0])
+        return max(0.0, uptime - ticks / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def environ_of(pid: int) -> dict[str, str]:
+    """The process's environment, for OMP_SESSION_ID. Readable only for our own processes."""
+    found = {}
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes().decode("utf8", "replace")
+    except OSError:
+        return found
+    for item in raw.split("\0"):
+        key, sep, value = item.partition("=")
+        if sep and key in ("OMP_SESSION_ID", "CLAUDE_SESSION_ID"):
+            found[key] = value
+    return found
+
+
+def session_from_fds(pid: int, limit: int = 128) -> str:
+    """The session id of the transcript this process holds open, or "".
+
+    An `omp` process started as `omp --resume <path>` carries no session id in its environment
+    and only the path on its command line, truncated in `ps`; the transcript it has open is
+    `~/.omp/agent/sessions/**/<stamp>_<session id>.jsonl`, which always names it in full.
+    """
+    try:
+        descriptors = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return ""
+    for descriptor in descriptors[:limit]:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{descriptor}")
+        except OSError:
+            continue
+        if "/.omp/agent/sessions/" in target and target.endswith(".jsonl"):
+            found = UUID_RE.findall(os.path.basename(target))
+            if found:
+                return found[0]
+    return ""
+
+
+def session_of(pid: int, depth: int = 12) -> str:
+    """The agent session a writing process belongs to, or "".
+
+    Read from the process, never guessed: its own OMP_SESSION_ID, else a session id on its
+    command line, else the transcript it holds open, else the same three for an ancestor. A tool
+    subprocess (`python3`, `git`, `docker`) carries its session's environment, so the first test
+    usually answers; an `omp` process itself is the case the other two are for.
+    """
+    here = pid
+    for _ in range(depth):
+        if here <= 1:
+            break
+        environment = environ_of(here)
+        for key in ("OMP_SESSION_ID", "CLAUDE_SESSION_ID"):
+            if environment.get(key):
+                return environment[key]
+        if comm_of(here) in ("omp", "claude", "node", "bun"):
+            found = UUID_RE.findall(cmdline_of(here))
+            if found:
+                return found[0]
+            found_fd = session_from_fds(here)
+            if found_fd:
+                return found_fd
+        here = ppid_of(here)
+    return ""
+
+
+def scope_of(pid: int) -> str:
+    """The systemd scope name of a pid: what `systemd-run --user --scope` named its session."""
+    try:
+        for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines():
+            parts = line.split(":", 2)
+            if len(parts) == 3 and parts[0] == "0":
+                return parts[2].strip().rsplit("/", 1)[-1]
+    except OSError:
+        pass
+    return ""
+
+
+def on_mount(pid: int, device: int, limit: int = 64) -> tuple[str, str]:
+    """(the process's cwd if it is on this device, the largest open file it holds there).
+
+    /proc/<pid>/io counts every write the process made, to ANY filesystem, so a top writer is
+    not necessarily writing to the mount that is filling. This is the test that ties it to the
+    mount, and the alert says so rather than implying the bytes landed there.
+    """
+    cwd = ""
+    try:
+        target = os.readlink(f"/proc/{pid}/cwd")
+        if device_of(target) == device:
+            cwd = target
+    except OSError:
+        pass
+    biggest = ("", 0)
+    try:
+        for index, descriptor in enumerate(os.listdir(f"/proc/{pid}/fd")):
+            if index >= limit:
+                break
+            try:
+                target = os.readlink(f"/proc/{pid}/fd/{descriptor}")
+                if not target.startswith("/"):
+                    continue
+                stat = os.stat(target)
+            except OSError:
+                continue
+            if stat.st_dev == device and stat.st_size > biggest[1]:
+                biggest = (target, stat.st_size)
+    except OSError:
+        pass
+    return cwd, (f"{biggest[0]} ({size(biggest[1])})" if biggest[0] else "")
+
+
+def sample_writers(seconds: float) -> tuple[list[dict], int]:
+    """(processes sorted by bytes written during the sample, count of unreadable processes).
+
+    Two reads of /proc/*/io, `seconds` apart, as skill://disk-hygiene references/finding-space.md
+    says. /proc/<pid>/io of another user's process is not readable without privilege, so the
+    count of refusals is returned and said in the alert: root's own writers (rsyslogd, dockerd,
+    containerd) are invisible to an unprivileged run and must not be reported as absent.
+    """
+    def snapshot() -> tuple[dict[int, int], int]:
+        values: dict[int, int] = {}
+        denied = 0
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            written = proc_io_write(pid)
+            if written is None:
+                if os.path.isdir(f"/proc/{pid}"):
+                    denied += 1
+            else:
+                values[pid] = written
+        return values, denied
+
+    first, denied = snapshot()
+    time.sleep(seconds)
+    second, _ = snapshot()
+    rows = []
+    for pid, after in second.items():
+        before = first.get(pid)
+        if before is None or after <= before:
+            continue
+        rows.append({"pid": pid, "written": after - before})
+    rows.sort(key=lambda row: row["written"], reverse=True)
+    return rows, denied
+
+
+def describe_writers(rows: list[dict], device: int, seconds: float, top: int) -> list[dict]:
+    """Resolve the top rows to a session, a command, a cwd and what they hold on the mount."""
+    described = []
+    for row in rows[:top]:
+        pid = row["pid"]
+        cwd, holds = on_mount(pid, device)
+        described.append(
+            {
+                "pid": pid,
+                "written": row["written"],
+                "rate": row["written"] / max(seconds, 1),
+                "command": cmdline_of(pid)[:200] or comm_of(pid),
+                "session": session_of(pid),
+                "scope": scope_of(pid),
+                "cwd": cwd,
+                "holds": holds,
+                "age": age_of(pid),
+            }
+        )
+    return described
+
+
+def writers_text(described: list[dict], denied: int, seconds: float, mount: str, privileged: bool) -> str:
+    missing = (
+        f" Every process was read ({denied} of them exited during the sample)."
+        if privileged
+        else f" {denied} process(es) refused /proc/<pid>/io to this unprivileged run, so root's own"
+        " writers -- rsyslogd on /var/log/syslog, dockerd, containerd -- are not in it."
+    )
+    if not described:
+        return f"Top writers now: nothing wrote during the {int(seconds)} s sample.{missing}"
+    lines = [
+        f"Top writers now ({int(seconds)} s sample of write_bytes in /proc/<pid>/io, which counts"
+        f" every filesystem, not only {mount}; the cwd and the open file below are what ties a"
+        f" writer to this mount).{missing}"
+    ]
+    for row in described:
+        who = f"session {row['session']}" if row["session"] else f"no session id; scope {row['scope'] or 'none'}"
+        where = row["cwd"] or f"(cwd is not on {mount})"
+        holds = f", holds {row['holds']}" if row["holds"] else ""
+        lines.append(
+            f"  {size(row['written'])} in {int(seconds)} s ({gb(row['rate'] * 3600)}/h) -- pid {row['pid']},"
+            f" up {human_time(row['age'])}, {who}, cwd {where}{holds}: {row['command']}"
+        )
+    return "\n".join(lines)
+
+
+def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
+    """The top writers paragraph of an alert, privileged where this machine allows it.
+
+    An unprivileged run cannot read /proc/<pid>/io of another user's process, and root owns the
+    writers that took the box down on 2026-10-27 (rsyslogd on /var/log/syslog, dockerd's exec
+    scratch in /tmp). So where `sudo -n` works, the whole sample runs as root in a child of this
+    script -- both /proc passes and the cwd and fd reads, which are refused to us too -- and the
+    child prints the rows as JSON. Where it does not, the unprivileged sample is used and the
+    alert says how many processes refused the read, rather than implying there were none.
+    """
+    payload = json.dumps({"seconds": options.writer_sample, "device": device, "top": options.top_writers})
+    if options.sudo != "never":
+        try:
+            probe = subprocess.run(
+                ["sudo", "-n", "true"], capture_output=True, timeout=5, stdin=subprocess.DEVNULL
+            )
+            if probe.returncode == 0:
+                done = subprocess.run(
+                    ["sudo", "-n", sys.executable, os.path.abspath(__file__), "--writers-json", payload],
+                    capture_output=True,
+                    text=True,
+                    timeout=options.writer_sample + 45,
+                    stdin=subprocess.DEVNULL,
+                )
+                if done.returncode == 0:
+                    answer = json.loads(done.stdout)
+                    return writers_text(
+                        answer["writers"], answer["denied"], options.writer_sample, mount, privileged=True
+                    )
+                log(f"  privileged writer sample failed ({done.returncode}): {done.stderr.strip()[:200]}")
+            elif options.sudo == "always":
+                log("  sudo -n refused and --sudo always was asked for; sampling unprivileged anyway")
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError) as error:
+            log(f"  privileged writer sample unavailable: {type(error).__name__}: {error}")
+    rows, denied = sample_writers(options.writer_sample)
+    described = describe_writers(rows, device, options.writer_sample, options.top_writers)
+    return writers_text(described, denied, options.writer_sample, mount, privileged=False)
+
+
+# ------------------------------------------------------------------------------ the /tmp rule
+
+
+def tmp_entries(tmp: str, age: float, big: int, walk_dirs: bool, budget: float) -> list[tuple[int, str]]:
+    """Top-level /tmp entries born within `age` seconds and now at or over `big` bytes.
+
+    A file is sized by its own stat. A directory is sized only when `walk_dirs` (a crossing is
+    open on the mount holding /tmp), under a wall-clock budget, because /tmp here holds ~20k
+    entries and the hand-run script this replaces never sized a directory at all -- which is
+    how a 17 GB tree could sit there unnamed.
+    """
+    now = time.time()
+    found = []
+    deadline = now + budget
+    try:
+        entries = list(os.scandir(tmp))
+    except OSError:
+        return found
+    for entry in entries:
+        try:
+            stat = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        birth = getattr(stat, "st_birthtime", 0) or stat.st_ctime
+        if now - birth > age:
+            continue
+        if entry.is_symlink():
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            if not walk_dirs or time.time() > deadline:
+                continue
+            total = 0
+            for root, _dirs, files in os.walk(entry.path, onerror=None):
+                for name in files:
+                    try:
+                        total += os.lstat(os.path.join(root, name)).st_size
+                    except OSError:
+                        continue
+                if time.time() > deadline:
+                    break
+            if total >= big:
+                found.append((total, entry.path))
+        elif stat.st_size >= big:
+            found.append((stat.st_size, entry.path))
+    found.sort(reverse=True)
+    return found
+
+
+def owner_of_path(path: str) -> str:
+    """The session of a process whose cwd or an open fd is inside `path`, or ""."""
+    prefix = path.rstrip("/") + "/"
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = ""
+        inside = cwd == path or cwd.startswith(prefix)
+        if not inside:
+            try:
+                for descriptor in os.listdir(f"/proc/{pid}/fd"):
+                    try:
+                        target = os.readlink(f"/proc/{pid}/fd/{descriptor}")
+                    except OSError:
+                        continue
+                    if target == path or target.startswith(prefix):
+                        inside = True
+                        break
+            except OSError:
+                continue
+        if inside:
+            return session_of(pid) or f"pid {pid} ({comm_of(pid)})"
+    return ""
+
+
+# -------------------------------------------------------------------------------- the state
+
+
+class State:
+    """The one file this watch owns: per-mount samples, open crossings and named /tmp entries.
+
+    Opened under an exclusive, non-blocking flock for the whole run, so a hand run and the timer
+    can never both decide that a crossing is new -- the loser skips its period. `commit` writes
+    the whole file and fsyncs it, and every alert commits before it sends, so the
+    once-per-crossing record is on disk before the message exists.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = open(path, "a+")
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.locked = True
+        except OSError:
+            self.locked = False
+            self.data = {}
+            return
+        self.handle.seek(0)
+        try:
+            self.data = json.loads(self.handle.read() or "{}")
+        except ValueError:
+            self.data = {}
+
+    def commit(self, options: argparse.Namespace) -> None:
+        if options.dry_run and not options.write_state:
+            return
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.data, self.handle, indent=1, sort_keys=True)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+    def close(self) -> None:
+        try:
+            self.handle.close()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------------------- the decision
+
+
+def fall_rate(samples: list[list[float]], window: float) -> tuple[float | None, float]:
+    """(bytes per second of FALL over the last `window` seconds, the span actually measured).
+
+    Positive means free space is falling. The oldest sample inside the window is the anchor, so
+    the rate always describes the last hour and never the whole history.
+    """
+    if len(samples) < 2:
+        return None, 0.0
+    now = samples[-1][0]
+    anchor = samples[0]
+    for sample in samples:
+        if now - sample[0] <= window:
+            anchor = sample
+            break
+    span = now - anchor[0]
+    if span <= 0:
+        return None, 0.0
+    return (anchor[1] - samples[-1][1]) / span, span
+
+
+def low_of(samples: list[list[float]], window: float) -> float | None:
+    now = samples[-1][0] if samples else 0
+    inside = [value for stamp, value in samples if now - stamp <= window]
+    return min(inside) if inside else None
+
+
+def blocked_kinds(free: float) -> list[str]:
+    return [name for name, floor in NVME_KIND_FLOORS if free < floor]
+
+
+def verdict(mount: str, free: int, total: int, samples: list[list[float]], options: argparse.Namespace) -> dict:
+    """Everything one run knows about one mount, and whether it is crossing."""
+    floor = FLOORS.get(mount, options.default_floor * GIB)
+    rate, span = fall_rate(samples, options.rate_window)
+    low = low_of(samples, options.rate_window)
+    time_to_full = None
+    if rate is not None and rate > 0:
+        time_to_full = free / rate
+    # A sawtooth is not a leak. /mnt/nvme swings ~100 GB an hour here as grade jobs land and are
+    # cleaned, so an hour of negative slope alone fires on the downstroke of a disk that is not
+    # going anywhere. At a NEW LOW for the hour the downstrokes are no longer cancelling out.
+    at_new_low = low is None or free <= low + options.low_slack * GIB
+    below_floor = free < floor
+    fast = (
+        time_to_full is not None
+        and time_to_full < options.horizon
+        and span >= options.min_span
+        and at_new_low
+    )
+    reasons = []
+    if below_floor:
+        reasons.append(f"free {gib(free)} is under the {gib(floor)} floor")
+    if fast:
+        reasons.append(
+            f"at {gb(rate * 3600)}/h over the last {human_time(span)} it is {human_time(time_to_full)}"
+            f" from full, under the {human_time(options.horizon)} horizon, and it is at a new low"
+            " for that hour"
+        )
+    return {
+        "mount": mount,
+        "free": free,
+        "total": total,
+        "floor": floor,
+        "rate": rate,
+        "span": span,
+        "low": low,
+        "time_to_full": time_to_full,
+        "below_floor": below_floor,
+        "fast": fast,
+        "crossing": below_floor or fast,
+        "reasons": reasons,
+    }
+
+
+def clears(state_now: dict, options: argparse.Namespace) -> bool:
+    """Hysteresis: a crossing clears well clear of what opened it, never on the threshold."""
+    if state_now["free"] < state_now["floor"] * options.clear_factor:
+        return False
+    if state_now["time_to_full"] is not None and state_now["time_to_full"] < options.horizon * 2:
+        return False
+    return True
+
+
+def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], kind: str, when: float) -> str:
+    mount = now["mount"]
+    used = 100 * (1 - now["free"] / max(now["total"], 1))
+    rate = now["rate"]
+    trend = "unknown (too few samples yet)"
+    if rate is not None:
+        direction = "falling" if rate > 0 else "rising"
+        trend = f"{direction} {gb(abs(rate) * 3600)}/h over the last {human_time(now['span'])}"
+    horizon = (
+        f"At that rate it is {human_time(now['time_to_full'])} from full."
+        if now["time_to_full"] is not None
+        else "It is not falling, so there is no time-to-full."
+    )
+    kinds = blocked_kinds(now["free"]) if mount == "/mnt/nvme" else []
+    blocked = (
+        "Work already refused by the grade farm's own floors at this level: " + ", ".join(kinds) + "."
+        if kinds
+        else ""
+    )
+    lines = [
+        f"DISK FILLING ({kind}): {mount} on {socket.gethostname()} has {gib(now['free'])} free of"
+        f" {gib(now['total'])} ({used:.0f}% used), {trend}. {horizon}",
+        "Why this alerts: " + "; ".join(now["reasons"]) + ".",
+        f"The crossing opened at {iso(incident.get('opened_at'))}, {human_time(when - (incident.get('opened_at') or when))} ago;"
+        f" free space was {gib(incident.get('opened_free') or now['free'])} then.",
+    ]
+    if blocked:
+        lines.append(blocked)
+    lines.append(writers)
+    if tmp_lines:
+        lines.append("Young /tmp entries at or over the size rule (these are on /):")
+        lines.extend("  " + line for line in tmp_lines)
+    lines.append(
+        "DO: read the writers above before you delete anything. Stop or finish the lane that is"
+        " writing; move its output to the other disk (/mnt/nvme for work started on /, and off"
+        " the box for work on /mnt/nvme); then reclaim with skill://disk-hygiene -- its check-in"
+        " comes first, and a directory a live session stands in is never deleted. A full root"
+        " stops every session on the box at once: on 2026-10-27T00:00:31Z it took rsyslog,"
+        " journald and dockerd's exec down together."
+    )
+    lines.append(
+        "This watch only detects. It deletes nothing, kills nothing and moves nothing."
+        f" From disk-fill-watch (~/.dotfiles/scripts/disk-fill-watch) on {socket.gethostname()},"
+        " a systemd --user timer."
+    )
+    return "\n".join(lines)
+
+
+def clear_text(now: dict, incident: dict, when: float) -> str:
+    opened = incident.get("opened_at") or when
+    return (
+        f"DISK FILLING CLEARED: {now['mount']} on {socket.gethostname()} is back to"
+        f" {gib(now['free'])} free, over its {gib(now['floor'])} floor and with no fall that"
+        f" reaches full inside the horizon. The crossing opened at {iso(opened)}, cleared at"
+        f" {iso(when)}, lasted {human_time(when - opened)}, and its lowest point was"
+        f" {gib(incident.get('low_free') or now['free'])}. No action is needed."
+        f" From disk-fill-watch on {socket.gethostname()}."
+    )
+
+
+def run_once(options: argparse.Namespace) -> int:
+    started = time.time()
+    envoy = Envoy(timeout=options.http_timeout)
+    state = State(options.state)
+    if not state.locked:
+        log(f"another run holds {options.state}; skipping this period")
+        return 0
+    mounts_state: dict = state.data.setdefault("mounts", {})
+    incidents: dict = state.data.setdefault("incidents", {})
+    named_tmp: list = state.data.setdefault("named_tmp", [])
+
+    verdicts = []
+    for mount in options.mount:
+        measured = free_bytes(mount)
+        if measured is None:
+            log(f"{mount}: not readable on this machine; skipped")
+            continue
+        free, total = measured
+        record = mounts_state.setdefault(mount, {})
+        samples: list = record.setdefault("samples", [])
+        samples.append([started, free])
+        del samples[: max(0, len(samples) - options.samples)]
+        samples[:] = [s for s in samples if started - s[0] <= options.history]
+        now = verdict(mount, free, total, samples, options)
+        verdicts.append(now)
+        log(
+            f"{mount}: free {gib(free)} of {gib(total)}, floor {gib(now['floor'])},"
+            f" rate {gb((now['rate'] or 0) * 3600)}/h over {human_time(now['span'])},"
+            f" time-to-full {human_time(now['time_to_full']) if now['time_to_full'] else 'n/a'}"
+            f" -> {'CROSSING' if now['crossing'] else 'ok'}"
+        )
+
+    alerts = cleared = 0
+    tmp_device = device_of(options.tmp)
+    for now in verdicts:
+        mount = now["mount"]
+        incident = incidents.get(mount)
+        if not now["crossing"]:
+            if incident and clears(now, options):
+                if incident.get("alerted_at"):
+                    text = clear_text(now, incident, started)
+                    state.data["incidents"].pop(mount, None)
+                    state.commit(options)
+                    for target in incident.get("told") or [INFRA_LEAD]:
+                        if not options.dry_run:
+                            envoy.send(target, text)
+                    if options.print_alert:
+                        print(text)
+                    cleared += 1
+                    log(f"{mount}: CLEARED")
+                else:
+                    incidents.pop(mount, None)
+                    state.commit(options)
+            continue
+
+        incident = incidents.setdefault(mount, {})
+        incident.setdefault("opened_at", started)
+        incident.setdefault("opened_free", now["free"])
+        incident["low_free"] = min(incident.get("low_free") or now["free"], now["free"])
+        incident["free"] = now["free"]
+        open_for = started - incident["opened_at"]
+        if open_for < options.grace:
+            log(f"{mount}: crossing for {int(open_for)} s (< {options.grace} s grace), holding")
+            state.commit(options)
+            continue
+
+        first = not incident.get("alerted_at")
+        still_falling = now["free"] < (incident.get("alert_free") or now["free"])
+        escalating = (
+            not first
+            and not incident.get("escalated_at")
+            and started - incident["alerted_at"] >= options.escalate
+            and still_falling
+        )
+        if not first and not escalating:
+            log(f"{mount}: crossing for {human_time(open_for)}, already alerted at {iso(incident.get('alerted_at'))}")
+            state.commit(options)
+            continue
+
+        # The expensive reads happen only here, on the run that actually sends: a 15 s writer
+        # sample and a bounded /tmp walk on every period would be the load this watch exists to
+        # see. A dry run still does them, so a hand run shows exactly what would be sent.
+        writers = writers_now(options, device_of(mount) or -1, mount)
+        tmp_lines: list[str] = []
+        if tmp_device is not None and tmp_device == device_of(mount):
+            for bytes_there, path in tmp_entries(
+                options.tmp, options.tmp_age, options.tmp_big, True, options.tmp_walk_budget
+            )[: options.top_writers]:
+                owner = owner_of_path(path) or "no live process holds it: its session has ended"
+                tmp_lines.append(f"{size(bytes_there)}  {path}  (owner: {owner})")
+
+        if first:
+            incident["alerted_at"] = started
+            incident["alert_free"] = now["free"]
+            incident["told"] = [INFRA_LEAD]
+            kind = "first alert"
+            targets = [(INFRA_LEAD, "INFRA lead")]
+        else:
+            incident["escalated_at"] = started
+            # The clear goes to everyone who heard a crossing, the chief included: a lead told
+            # that a disk was landing must be told that it is not.
+            incident["told"] = sorted(set((incident.get("told") or [INFRA_LEAD]) + [CHIEF_OF_STAFF]))
+            kind = f"STILL DESCENDING after {human_time(started - incident['alerted_at'])}"
+            targets = [(CHIEF_OF_STAFF, "chief of staff: still descending")]
+        text = alert_text(now, incident, writers, tmp_lines, kind, started)
+        if not first:
+            text += (
+                f"\nNothing has stopped it since the first alert at {iso(incident['alerted_at'])}:"
+                f" {gib(incident.get('alert_free') or 0)} free then, {gib(now['free'])} now."
+            )
+        # On disk before a single message leaves: a resent first alert is worse than a late one.
+        state.commit(options)
+        for target, why in targets:
+            if options.dry_run or envoy.send(target, text):
+                log(f"  -> {target} ({why})")
+        alerts += 1
+        log(f"{mount}: {'ALERT' if first else 'ESCALATED'} ({gib(now['free'])} free)")
+        if options.print_alert:
+            print(text)
+
+    # The /tmp rule: name each young, big entry ONCE, whether or not a mount is crossing. It is
+    # the measurement step before any gate -- a 17 GB tree in /tmp belongs to a session, and the
+    # session is findable while it still runs. A young DIRECTORY is sized here too, under a few
+    # seconds of budget: the script this replaces sized only files, which is why /tmp/rev1 was
+    # named at 17 GB and the directories beside it never were. What the budget does not reach
+    # this run, the next run reaches, since a named entry is never looked at again.
+    if tmp_device is not None and any(tmp_device == device_of(v["mount"]) for v in verdicts):
+        seen = set(named_tmp)
+        fresh = [
+            (bytes_there, path)
+            for bytes_there, path in tmp_entries(
+                options.tmp, options.tmp_age, options.tmp_big, True, options.tmp_idle_walk_budget
+            )
+            if path not in seen
+        ]
+        for bytes_there, path in fresh[: options.top_writers]:
+            owner = owner_of_path(path) or "no live process holds it: its session has ended"
+            named_tmp.append(path)
+            state.commit(options)
+            message = (
+                f"NEW BIG /tmp ENTRY on {socket.gethostname()}: {size(bytes_there)} at {path}, born"
+                f" in the last {human_time(options.tmp_age)} (owner: {owner}). /tmp is on"
+                f" {options.tmp_mount}, which every session on this box shares. If it is yours and"
+                " the work is done, remove it; if it is still running, move it to /mnt/nvme."
+                " From disk-fill-watch; said once per entry."
+            )
+            if not options.dry_run:
+                envoy.send(INFRA_LEAD, message)
+            log(f"/tmp: named {path} ({size(bytes_there)}), owner {owner}")
+            if options.print_alert:
+                print(message)
+        del named_tmp[: max(0, len(named_tmp) - 500)]
+
+    for mount in list(incidents):
+        if mount not in {v["mount"] for v in verdicts}:
+            incidents.pop(mount, None)
+    state.commit(options)
+    state.close()
+    log(
+        f"checked {len(verdicts)} mount(s) in {time.time() - started:.2f}s;"
+        f" {alerts} alert(s), {cleared} clear(s)"
+    )
+    return 0
+
+
+def writers_json(raw: str) -> int:
+    """The privileged half of the writer sample, run as `sudo -n <this script> --writers-json`.
+
+    It prints the described rows as JSON and nothing else: it reads /proc, sends no message,
+    writes no state and touches no file, so the only thing root does here is read.
+    """
+    request = json.loads(raw)
+    rows, denied = sample_writers(float(request["seconds"]))
+    described = describe_writers(
+        rows, int(request["device"]), float(request["seconds"]), int(request["top"])
+    )
+    print(json.dumps({"writers": described, "denied": denied}))
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--mount",
+        action="append",
+        default=None,
+        help="a mount point to watch; repeatable (default / and /mnt/nvme)",
+    )
+    parser.add_argument(
+        "--floor",
+        action="append",
+        default=None,
+        metavar="MOUNT=GiB",
+        help="override a mount's hard floor, in GiB; repeatable. For a deliberate test against a"
+        " scratch threshold, and for a machine whose disks are not these",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=float,
+        default=7200.0,
+        help="seconds to full at the current rate below which it alerts (default 2 h)",
+    )
+    parser.add_argument(
+        "--rate-window", type=float, default=3600.0, help="seconds the fill rate is measured over (default 1 h)"
+    )
+    parser.add_argument(
+        "--min-span",
+        type=float,
+        default=1500.0,
+        help="seconds of samples a rate alert needs (default 25 min: five periods)",
+    )
+    parser.add_argument(
+        "--low-slack",
+        type=float,
+        default=2.0,
+        help="GiB by which free space may sit above the hour's low and still count as a new low",
+    )
+    parser.add_argument(
+        "--default-floor", type=float, default=20.0, help="GiB floor for a mount with no floor of its own"
+    )
+    parser.add_argument(
+        "--clear-factor", type=float, default=1.5, help="a crossing clears above floor x this (hysteresis)"
+    )
+    parser.add_argument("--grace", type=float, default=240.0, help="seconds crossing before it alerts")
+    parser.add_argument(
+        "--escalate",
+        type=float,
+        default=1800.0,
+        help="seconds after the alert, still descending, before the chief of staff is told (default 30 min)",
+    )
+    parser.add_argument("--history", type=float, default=10800.0, help="seconds of samples kept per mount")
+    parser.add_argument("--samples", type=int, default=400, help="samples kept per mount")
+    parser.add_argument("--writer-sample", type=float, default=15.0, help="seconds between the two /proc/*/io reads")
+    parser.add_argument("--top-writers", type=int, default=8, help="writers and /tmp entries named in an alert")
+    parser.add_argument(
+        "--sudo",
+        choices=("auto", "never", "always"),
+        default="auto",
+        help="read every process's /proc/<pid>/io through `sudo -n` when it is allowed without a"
+        " password (default auto). `never` samples only our own processes",
+    )
+    parser.add_argument(
+        "--writers-json",
+        metavar="JSON",
+        help=argparse.SUPPRESS,  # the privileged half of the writer sample, run through sudo
+    )
+    parser.add_argument("--tmp", default="/tmp", help="the shared scratch directory watched for big young entries")
+    parser.add_argument("--tmp-mount", default="/", help="the mount --tmp lives on, named in its message")
+    parser.add_argument("--tmp-age", type=float, default=21600.0, help="seconds: a /tmp entry is young for this long")
+    parser.add_argument("--tmp-big", type=float, default=500000000, help="bytes at which a young /tmp entry is named")
+    parser.add_argument(
+        "--tmp-walk-budget",
+        type=float,
+        default=20.0,
+        help="seconds a run building an ALERT may spend sizing young /tmp directories",
+    )
+    parser.add_argument(
+        "--tmp-idle-walk-budget",
+        type=float,
+        default=5.0,
+        help="seconds an ordinary run may spend sizing young /tmp directories for the once-per-entry rule",
+    )
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help="the owned state file")
+    parser.add_argument("--http-timeout", type=float, default=8.0)
+    parser.add_argument("--dry-run", action="store_true", help="decide and log, send nothing")
+    parser.add_argument("--write-state", action="store_true", help="with --dry-run, still write the state file")
+    parser.add_argument("--print-alert", action="store_true", help="print the alert text it would send")
+    options = parser.parse_args()
+    if options.writers_json:
+        return writers_json(options.writers_json)
+    options.mount = options.mount or ["/", "/mnt/nvme"]
+    options.tmp_big = int(options.tmp_big)
+    for override in options.floor or []:
+        mount, _, value = override.partition("=")
+        if not value:
+            parser.error(f"--floor {override}: expected MOUNT=GiB")
+        FLOORS[mount] = float(value) * GIB
+    # The once-per-crossing record lives in one file. A run on any other state file has its own
+    # memory of what was already said, so two state files would send two first alerts for one
+    # crossing; a run on another file therefore never sends.
+    if options.state != DEFAULT_STATE and not options.dry_run:
+        options.dry_run = True
+        log(f"--state is not {DEFAULT_STATE}: running as --dry-run, sending nothing")
+    try:
+        return run_once(options)
+    except Exception as error:  # a crashing watch must say so in the journal, not vanish
+        log(f"run failed: {type(error).__name__}: {error}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
