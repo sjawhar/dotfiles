@@ -201,12 +201,19 @@ def cgroup_of(pid: int) -> str:
 
 
 def effective_limit(cgroup: str) -> tuple[int, str, bool]:
-    """(ceiling in bytes, where it comes from, whether a cgroup actually limits this).
+    """(ceiling in bytes, where it comes from, whether the session has a cap of its OWN).
 
     The ceiling is the smallest numeric `memory.max` from this cgroup up to the root. A scope
-    started by `shims/omp` carries MemoryMax; its ancestors on this box carry none, so the
-    scope's own value is normally the answer. When nothing in the chain is limited, the ceiling
-    is the machine's RAM and the kill would be the global OOM killer, not a cgroup one.
+    started by `shims/omp` carries MemoryMax, and since 2026-10-27 `user-1000.slice` carries a
+    box-level one too (installers/omp-box-memory-guard.sh): 232 GiB, so the user's sessions
+    together can never take the RAM the system's daemons need.
+
+    The third value is whether THIS cgroup -- not an ancestor -- carries the limit. That is
+    what decides how a session is measured: a session in a scope of its own is measured on the
+    scope, while one that only inherits the slice's ceiling shares that ceiling with every
+    other session in the login and is measured on its own process instead. Before the slice
+    had a ceiling the two tests were the same; with one, charging a session the whole login
+    scope's memory against a 232 GiB slice would warn on nothing at all.
     """
     best: int | None = None
     where = ""
@@ -217,9 +224,10 @@ def effective_limit(cgroup: str) -> tuple[int, str, bool]:
         value = read_int(path / "memory.max")
         if value is not None and (best is None or value < best):
             best, where = value, part or "(cgroup root)"
+    own = read_int(CGROUP_ROOT / cgroup.strip("/") / "memory.max") is not None
     if best is None:
         return mem_total(), "no cgroup limit anywhere in the chain: the machine's RAM", False
-    return best, f"memory.max of {where}", True
+    return best, f"memory.max of {where}", own
 
 
 def scope_pressure(cgroup: str) -> tuple[int, int, dict[str, int]]:
