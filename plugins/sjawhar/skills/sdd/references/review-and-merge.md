@@ -5,6 +5,8 @@
 - The final `reviewer` after acceptance checks correctness, security, dead code, shims, aliases, dual paths and half-migrations. It decides for itself how deeply to read; do not give it a depth or a file subset.
 - Resolve grounded findings (ones the code or a command output confirms) before you send the merge packet; no other approval or follow-up assignment waives them. Ungrounded preferences do not bind.
 - A re-review after fixes resumes the same reviewer session, and reads only the diff from the head it last reviewed to the new head. It raises no finding it raised before and none on code that diff does not touch. A fresh reviewer that never saw the PR reads it whole.
+- Stop at three review rounds per PR, counting every reviewer. A finding still open after the third goes into the plan's `## Hardening ledger` as a commitment, with an owner, done before merge; if it cannot be, change approach or bring Sami options (`opening-a-pr` step 3).
+- Tell each reviewer in its brief: report a defect class once, with every place it occurs, not one finding per line.
 - Runtime changes: `ce-simplify-code` once per PR after the last review round, scoped to its diff. An applied change becomes the final head for CI, review and refreshed real-surface proof. A pass with no change is normal.
 - Then dispatch `thermonuclear-deep-review` and `thermonuclear-code-quality` yourself, once at that final head (the `reviewer` agent cannot dispatch them), and give their findings to the final reviewer to weigh.
 - Prose-only or minor changes: do not repeat the pair. Docs-only or runtime-free diffs skip both simplify and the pair. The changed paths decide the skip, never a claim that the change looks safe.
@@ -14,7 +16,7 @@
 Keep one row per PR and one cell per required gate. At the packet, fill each cell from the artifact
 at the head (the comment, the check run, the summary), never from memory or a summary: the
 artifacts show a skipped gate, an automated review on an earlier commit, and a non-blocking item
-left unapplied under an approved head.
+left unapplied under an approved head. Add a `review rounds` cell (rounds until the final reviewer passed) and report it in the merge packet.
 
 ## PRs
 

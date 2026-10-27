@@ -22,6 +22,7 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 - Never report what an agent did wrong, to anyone. Make it a lesson for the home that would have prevented it.
 - No HDO material in a lesson, ledger row or reply, because none of them is on an HDO account. Do not quote, paraphrase or summarize it. OSS Verifier work (the OSSV project, its sessions and their VMs) is not HDO material, although it runs on the HDO key. Inside OSSV work, a named `-hdo` repository and HDO run results are still HDO material. Other HDO-key work is HDO material.
 - Ledger first. Before a write into a lesson's home, put its Sessions row and Lesson row (evidence, verdict, provisional home) in the ledger and read them back. If an edit or read-back fails, make no external write: a write the ledger does not record is lost or repeated after a resume. An Envoy reply about a covered blocker needs only its Leads row.
+- A round edits only the rules its lessons name; bring each deletion, merge or shortening as its own batch item.
 - Write into a home only after Sami says yes, because every agent on the machine reads a skill or CLAUDE.md edit at once. Bring him proposed edits in batches.
 - Every due session gets BOTH the fork and the reader, each with its file in `references/` verbatim, because those files carry the read-only, signal and dollar rules that your own prompt would drop. Reading the transcript yourself or writing your own prompt replaces neither. A large transcript is no reason to skip either.
 
@@ -53,22 +54,23 @@ Your record is the ledger: `dispatch doc-read --project INFRA --artifact librari
 6. Record, then route. Write the Lesson row, read it back, route to its one home (table below), then put the link and status in its home cell. Route only a lesson that a command, file read or reproduction checked. Before you create or edit a skill, follow `skill://writing-agent-skills`.
    - No agent owns a repository, so make every repository fix yourself and never send it to another agent session. A lesson that shows a defect in a tool gets a code fix in that tool, never a doc line that works around it. Say so in the ledger.
    - Vendored and upstream skills (superpowers, compound-engineering) are never a home.
-   - Propose an edit to Sami's CLAUDE.md or skills only for his own words not yet written there, or a failure that passes `skill://writing-agent-skills` §1. Else drop the lesson.
-7. Do no catch-up search for Envoy publishes you missed. A missed publish from a session on this machine reaches you when that session is next due (10800 more active seconds). A missed publish from another machine is lost; do not search for it.
+   - Propose an edit to Sami's CLAUDE.md or skills only for a purpose, design criterion or limit he stated that is not yet written there, or a failure that passes `skill://writing-agent-skills` §1. Else drop the lesson.
+7. Over 90 days since the ledger's last stale-skill review: run it (`skill://writing-agent-skills` section 5), bring Sami the decisions as one batch, and record the date.
+8. Do no catch-up search for Envoy publishes you missed. A missed publish from a session on this machine reaches you when that session is next due (10800 more active seconds). A missed publish from another machine is lost; do not search for it.
 
 ## Where a lesson goes (one home each)
 
-A preference of Sami's is not a company rule. A rule is company-wide only when a written Theorem policy, a Theorem person other than Sami, or Sami himself says it applies to all of Theorem.
+Before you choose a home, read `references/stores.md`. A preference of Sami's is not a company rule. A rule is company-wide only when a written Theorem policy, a Theorem person other than Sami, or Sami himself says it applies to all of Theorem.
 
 | Lesson | Home | How |
 | --- | --- | --- |
 | One repository's design, taste or workflow | its AGENTS.md, docs/ or a repo skill | PR by its rules (dotfiles: direct push). |
 | Company-wide Theorem rule | `working-at-theorem` in theorem-labs/verification-skills | Every PR bumps the version. Create the skill in its first PR if it does not exist. Tag after the merge. |
-| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Quote Sami in the commit message. Push fast-forward. |
+| Sami's rule or preference beyond one repository | `~/.dotfiles/.claude/CLAUDE.md`, after his yes | No Theorem name, repository, person, operations contact or Dispatch project. Give his reason in the commit message. Hard cap 8,000 bytes: an edit past it also deletes a rule. Push fast-forward. |
 | Fact about Sami's people, places, phrasing, or Theorem's people, places, tools | memory | `retain`. |
 | Tool fact | `~/.dotfiles/plugins/sjawhar/skills/using-<tool>/SKILL.md`, after his yes | Create or extend it. If a vendor skill for the tool exists, leave it unchanged (it is never a home) and name it there. |
 | Blocker a skill or document covers | no write | `envoy_send` the pointer. Ledger `replied`. |
-| Already covered by a home, seen in one session only and not Sami's words, or no command, file read or reproduction could check it | no write | Ledger `dropped`, with the reason. |
+| Already covered by a home, seen in one session only and not a purpose, criterion or limit Sami stated, or no command, file read or reproduction could check it | no write | Ledger `dropped`, with the reason. |
 
 Never write Theorem material into CLAUDE.md. Sami's preference about Theorem work goes to its one repository, or to memory.
 

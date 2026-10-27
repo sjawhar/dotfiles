@@ -12,7 +12,7 @@ The same night he said that an agent standing in for his judgment should try to 
    - When one of his answers covers this case, and the facts that decided it are the same here, answer the agent and link that answer. The agent records the decision with your answer and the link, as `skill://sami-proxy` says under "A recorded decision".
    - When nothing he said covers it, or there is a real chance you are wrong about his answer, tell the agent to open the ask, as written or with your fixes to its format. The agent opens it. Then you run `dispatch follow --ask <id>`, so his answer reaches you as well as the agent. Each time his answer differs from the one you would have given, write that down beside it: that is how you learn where your reading of him is off.
    - Answer within the hour. A question that waits on you costs the agent as much as one that waits on him.
-4. **You keep his answer.** Add each answer of his that reaches you to the stream's record of his words ([user-quotes.md](user-quotes.md)), with the question it answered and the facts that decided it, so the next similar question gets the same answer from you.
+4. **You keep his answer.** Add each answer of his that reaches you to the stream's decision record ([decision-record.md](decision-record.md)), with the question it answered and the facts that decided it, so the next similar question gets the same answer from you.
 
 Your own questions for Sami go the same way to the chief of staff (session 01a13dca-e979-7264-af32-f654ef57a6f5).
 
