@@ -1,10 +1,19 @@
 [Unit]
-Description=Shed the largest agent session before this box runs out of memory
+Description=Watch for the box running out of memory and log which session it WOULD shed (dry run)
 Documentation=file:%h/.dotfiles/scripts/omp-box-memory-guard.md
 
 [Service]
 Type=simple
-ExecStart=%h/.dotfiles/scripts/omp-box-memory-guard
+# --dry-run is REQUIRED here and the kill-enabled form is not installed anywhere. The guard
+# SIGKILLed a live 14.74 GiB lead session at 2026-10-27T16:13:51Z while the box had 140 GiB
+# free, on a first cycle that read a historical memory.events counter as its own cap firing
+# (the counter bug and the baseline bug are both fixed). Approval to run it is conditional on a
+# 48-72 h dry-run bake: the journal must show correct decisions across 2-3 genuine high-water
+# or pressure episodes, including at least one restart of this unit, and ANY "would shed" while
+# the box is healthy holds the flip and reopens the investigation. In --dry-run no Envoy client
+# is constructed and both send() and shed() return before any signal, so a cycle cannot touch a
+# session. Only the reviewer's approval of the bake removes this flag.
+ExecStart=%h/.dotfiles/scripts/omp-box-memory-guard --dry-run
 # A guard that is not running is no guard. It exits only on SIGTERM (a stop), and anything
 # else -- a crash, a kill -- comes back in five seconds.
 Restart=always
