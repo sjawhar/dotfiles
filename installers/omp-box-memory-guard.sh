@@ -154,19 +154,47 @@ if [ "$slice_max" = infinity ] || [ "$slice_max" = unknown ]; then
 fi
 
 # --- 4. the shed daemon ----------------------------------------------------------------------
+# This step INSTALLS the unit. Whether it ARMS it is a separate decision, and the installer is
+# not allowed to make it: on 2026-10-27 at 16:16:46Z a re-run enabled and started the guard two
+# minutes after a lead had deliberately stopped it, silently undoing a safety decision taken
+# because the guard had SIGKILLed a live session. An idempotent installer that re-arms whatever
+# it finds stopped does that every time it runs.
+#
+# Two things stop it, and either is enough:
+#   * the disarm marker below, which outlives the unit being removed altogether (a removed unit
+#     is indistinguishable from a never-installed one, so unit state alone cannot carry the
+#     decision);
+#   * the unit being inactive and not enabled -- someone disarmed it.
+# Neither is overridden here. Arming after a deliberate stop is a human decision: remove the
+# marker, then start the unit by hand.
 mkdir -p "$STATE_DIR" 2>/dev/null \
     || echo "NOTE: ${STATE_DIR} could not be created; pass --state to put the guard's state elsewhere."
 if [ -n "${container:-}" ] || [ -f /.dockerenv ]; then
     echo "omp-box-memory-guard: inside a container; the guard belongs on the host" >&2
     exit 0
 fi
+GUARD_UNIT=omp-box-memory-guard.service
+DISARM_MARKER="${XDG_CONFIG_HOME:-$HOME/.config}/omp-box-memory-guard.disarmed"
 mkdir -p "$HOME/.config/systemd/user"
-ensure_link "$HOME/.dotfiles/omp/omp-box-memory-guard.service" \
-    "$HOME/.config/systemd/user/omp-box-memory-guard.service"
+ensure_link "$HOME/.dotfiles/omp/$GUARD_UNIT" "$HOME/.config/systemd/user/$GUARD_UNIT"
 systemctl --user daemon-reload
-systemctl --user enable omp-box-memory-guard.service
-# restart, not just start: a re-run after the script changed must load the new code.
-systemctl --user restart omp-box-memory-guard.service
-systemctl --user is-active --quiet omp-box-memory-guard.service \
-    || { echo "omp-box-memory-guard: the service did not start" >&2; exit 1; }
-echo "omp-box-memory-guard: armed ($(swapon --show=NAME,SIZE --noheadings | tr '\n' ' '))"
+
+guard_state=$(systemctl --user is-active "$GUARD_UNIT" 2>/dev/null || true)
+guard_enabled=$(systemctl --user is-enabled "$GUARD_UNIT" 2>/dev/null || true)
+if [ -e "$DISARM_MARKER" ]; then
+    echo "omp-box-memory-guard: NOT arming: $DISARM_MARKER says it is deliberately disarmed."
+    echo "  Reason recorded there: $(head -n1 "$DISARM_MARKER" 2>/dev/null)"
+    echo "  The unit file is installed and up to date; it is ${guard_state:-absent}."
+    echo "  To arm it: rm '$DISARM_MARKER' && systemctl --user enable --now $GUARD_UNIT"
+elif [ "$guard_state" != active ] && [ "$guard_enabled" != enabled ]; then
+    echo "omp-box-memory-guard: NOT arming: the unit is ${guard_state:-inactive} and"
+    echo "  ${guard_enabled:-not enabled}, which is how a deliberate stop looks. The unit file is"
+    echo "  installed and up to date. To arm it: systemctl --user enable --now $GUARD_UNIT"
+else
+    systemctl --user enable "$GUARD_UNIT"
+    # restart, not just start: a re-run after the script changed must load the new code.
+    systemctl --user restart "$GUARD_UNIT"
+    systemctl --user is-active --quiet "$GUARD_UNIT" \
+        || { echo "omp-box-memory-guard: the service did not start" >&2; exit 1; }
+    echo "omp-box-memory-guard: armed ($(swapon --show=NAME,SIZE --noheadings | tr '\n' ' '))"
+fi

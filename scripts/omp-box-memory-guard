@@ -563,6 +563,12 @@ class Guard(object):
         self.state = State(options.state)
         self.guard_pid = os.getpid()
         self.last_heartbeat = 0.0
+        # Cycles run by THIS process. The first one only records the slice's event counters: the
+        # state file can be lost, stale or from before a reboot, and a counter that rose while no
+        # guard was running is history, not an incident. On 2026-10-27T16:13:51Z a first cycle
+        # with no usable baseline read a historical counter as "the cap fired" and shed a live
+        # 14.74 GiB session while the box had 140 GiB free.
+        self.cycles = 0
 
     def send(self, targets: list[str], text: str) -> list[str]:
         told = []
@@ -583,6 +589,8 @@ class Guard(object):
 
     def cycle(self) -> None:
         now = time.time()
+        first_cycle = self.cycles == 0
+        self.cycles += 1
         info = meminfo()
         psi = pressure()
         total, available = info["MemTotal"], info["MemAvailable"]
@@ -618,7 +626,7 @@ class Guard(object):
         last_events = data.get("slice_events")
         events = bounded.get("events") or {}
         now_events = {"max": events.get("max", 0), "oom_kill": events.get("oom_kill", 0)}
-        have_baseline = bool(bounded.get("present")) and last_events is not None
+        have_baseline = bool(bounded.get("present")) and last_events is not None and not first_cycle
         # Two distinct own-cap signals, each a RISE since the last cycle, never an absolute value:
         # oom_killed is the slice's own memory.max actually killing a process; cap_hit is its own
         # max boundary being reached and reclaimed from. Both warrant a shed; only the first is
@@ -712,7 +720,18 @@ class Guard(object):
         return ranked
 
     def finish_pending(self, now: float, r: dict) -> None:
-        """SIGKILL what is left of a session we SIGTERMed, once its grace is up."""
+        """SIGKILL what is left of a session we SIGTERMed, once its grace is up.
+
+        This is the THIRD path that can signal a process, after send() and shed(), and it is the
+        one that does not start from a decision made this run: it acts on a `pending` entry the
+        state file carries. A --dry-run therefore has to refuse it explicitly, or a state file
+        written by an earlier kill-enabled run would make a dry run SIGKILL a session. The
+        pending entry is dropped instead, so the dry run starts clean.
+        """
+        if self.options.dry_run:
+            if self.state.data.pop("pending", None):
+                log("DRY RUN: dropping a pending SIGKILL left in the state file; signalling nothing")
+            return
         pending = self.state.data.get("pending")
         if not pending:
             return
@@ -745,6 +764,11 @@ class Guard(object):
         last = self.state.data.get("last_shed_at") or 0
         if now - last < self.options.shed_interval and not hard:
             return
+        # Size CHOOSES the victim; it is never the trigger. Every path into this method has
+        # already found a real shortage (box MemAvailable, the slice's unreclaimable headroom, or
+        # the slice's own cap firing). One legitimate agent process on this box reached 19.96 GiB
+        # resident (`python3 gen_twins.py F11`) and another 16.52 GiB, both real work (XV6's
+        # measurement, 2026-10-27), so a size threshold on its own would kill healthy work.
         protected = set(self.options.protect)
         candidates = []
         for session in ranked:
