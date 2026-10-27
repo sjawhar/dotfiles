@@ -838,11 +838,11 @@ console.log(JSON.stringify(args, null, 2));
 		const compound = [
 			"dispatch ask --issue X-1 --question q; echo",
 			"dispatch ask --issue X-1 --question q && make",
-			"dispatch ask --issue X-1 --question q 2>&1 | tail -3",
+			"dispatch ask --issue X-1 --question q 2>&1 | tee out.txt",
 			`${ASK}\necho done`,
 			"cd $X && dispatch ask --issue X-1 --question q",
 			"cd a && cd b && dispatch ask --issue X-1 --question q",
-			"dispatch ask --issue X-1 --question q | cat",
+			"dispatch ask --issue X-1 --question q | sed -n 1p",
 			"cd ~/x && dispatch ask --issue X-1 --question q",
 			"cd /tmp/* && dispatch ask --issue X-1 --question q",
 			"cd \"$HOME\" && dispatch ask --issue X-1 --question q",
@@ -893,7 +893,7 @@ console.log(JSON.stringify(args, null, 2));
 		expect(g.entries).toHaveLength(0);
 	});
 	test("a kill, a halt or a session the gate would skip lets a compound write run", async () => {
-		const compound = "dispatch comment --issue X-1 --body b | cat";
+		const compound = "dispatch comment --issue X-1 --body b; echo done";
 		const killed = bind({ env: { OMP_ASKGATE: "block" }, files: { [OVERLAY]: "advisor:\n  disableRoster: [askgate]\n" } });
 		expect(await killed.bash("k", compound)).toBeUndefined();
 		const elsewhere = bind({ env: { OMP_ASKGATE: "block" }, primary: { provider: "openai-codex", id: "gpt-5.5" } });
@@ -930,7 +930,7 @@ console.log(JSON.stringify(args, null, 2));
 		]);
 		expect(g.calls[0].user).toContain('"body": "The run finished."');
 		// A literal path joined to another command gets the plain resend reason: the path is not why.
-		const piped = await g.bash("piped", `${bin}/dispatch comment --issue X-1 --body hi | tail -1`);
+		const piped = await g.bash("piped", `${bin}/dispatch comment --issue X-1 --body hi; echo done`);
 		expect(piped?.block).toBe(true);
 		expect(piped?.reason).toContain("send that `dispatch comment` again on its own:");
 		expect(piped?.reason).not.toContain("Here ");
@@ -1133,7 +1133,55 @@ console.log(JSON.stringify(args, null, 2));
 		expect(after?.command).toBe("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF");
 		expect(after?.dryRunScript).toBe("dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nhi\nEOF");
 		expect(core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' 2>/dev/null\nhi\nEOF")).toBeUndefined();
-		expect(core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' | tail\nhi\nEOF")).toBeUndefined();
+	});
+	test("a trailing pipeline of read-only filters runs as written and is left out of the dry-run", async () => {
+		const g = bind({ env: STUB, cwd: work });
+		expect(await g.bash("b1", "dispatch doc-edit --issue X-1 --summary s --ops-json x | tail -3")).toBeUndefined();
+		expect(g.dryRuns[0].script).toBe("dispatch doc-edit --dry-run --issue X-1 --summary s --ops-json x");
+		expect(g.entries).toMatchObject([{ tool: "dispatch_doc_edit", decision: "allow", outcome: "verdict" }]);
+		// The filters read the command's own stdout, so what is sent is what the dry-run read.
+		expect(core.scopedCommand("dispatch comment --issue X-1 --body hi | grep -iE '^Status|status:' | head -2")?.dryRunScript).toBe("dispatch comment --dry-run --issue X-1 --body hi");
+		expect(core.scopedCommand("cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1 | tail -3")?.dryRunScript).toBe("cd 'sub' >/dev/null && dispatch comment --dry-run --issue X-1 --body hi");
+		const heredoc = core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1 | tail -3\nhi\nEOF");
+		expect(heredoc?.command).toBe("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1 | tail -3\nhi\nEOF");
+		expect(heredoc?.dryRunScript).toBe("dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nhi\nEOF");
+		// A `|` the command only sends is its text, not a pipeline.
+		expect(core.scopedCommand("dispatch comment --issue X-1 --body 'a | b'")?.dryRunScript).toBe("dispatch comment --dry-run --issue X-1 --body 'a | b'");
+	});
+	test("a pipeline that could write, run a second command or hide a scoped write is refused whole", () => {
+		for (const tail of [
+			"| tee out.txt",
+			"| sed -n '1,5p'",
+			"| awk '{ print > \"out.txt\" }'",
+			"| sort -o out.txt",
+			"| uniq out.txt",
+			"| tail -3 > out.txt",
+			"| tail -3; echo done",
+			"| tail -3 && echo done",
+			"| tail \"$(cat f)\"",
+			"| tail `cat f`",
+			"| tail <(cat f)",
+			"| xargs dispatch message --issue X-2 --body y",
+			"| tail -3 | xargs /usr/bin/dispatch comment --issue X-2 --body y",
+			"| cat 'unterminated",
+		]) {
+			const command = `dispatch comment --issue X-1 --body hi ${tail}`;
+			expect([tail, core.scopedCommand(command)]).toEqual([tail, undefined]);
+			expect([tail, core.unreadableDispatchWrite(command)?.label]).toEqual([tail, "dispatch comment"]);
+		}
+	});
+	test("a wrapper command keeps the write out of the gate's reach: it is refused, and the reason names the wrapper", async () => {
+		// `nice` is no known prefix, so before 2026-10-27 the gate found no write here at all and the
+		// comment went to Dispatch unreviewed (three calls that day in session 01a1679a).
+		const wrapped = `nice -n 19 env -u X ${bin}/dispatch comment --issue X-1 --body hi`;
+		expect(core.unreadableDispatchWrite(wrapped)).toEqual({ tool: "dispatch_comment", label: "dispatch comment", ran: "nice" });
+		expect(core.unreadableDispatchWrite("timeout 120 dispatch comment --issue X-1 --body hi")).toEqual({ tool: "dispatch_comment", label: "dispatch comment", ran: "timeout" });
+		const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+		const refusal = await g.bash("b1", wrapped);
+		expect(refusal?.block).toBe(true);
+		expect(refusal?.reason).toContain("the call runs `nice`, not `dispatch`");
+		expect(g.dryRuns).toHaveLength(0);
+		expect(g.entries).toMatchObject([{ tool: "dispatch_comment", decision: "revise", outcome: "unreadable" }]);
 	});
 	test("a revise of a command that names a file says the file was read before the rest of its batch ran", async () => {
 		const NOTE = "AskGate read the file this command names before any other call in the same batch ran";
