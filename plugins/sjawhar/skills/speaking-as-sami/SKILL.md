@@ -11,7 +11,7 @@ Write plain, factual and understated. Use none of the forms in "Never write" bel
 
 ## Before you write
 
-- Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise. He did for upstream PRs: write their body, comments and replies in his first person, with no AI header, because the maintainer reads the PR as his (dispatch://BET-122/ask/b28e2fb4).
+- Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise. He did for upstream PRs: write their body, comments and replies in his first person, carrying one line such as "Written with the help of Claude, reviewed by me.", because the maintainer reads the PR as his (dispatch://BET-64/ask/7f10d8e8). Never the old "Written by Claude (an AI assistant) on behalf of Sami Jawhar" header.
 - Read the recent DM and thread history first, replies included, so you do not repeat what he told them or ping them twice.
 - In Slack, post in the project's channel or a shared channel, in a thread, so the people who need the answer see it. Send a DM only when the content must stay confidential.
 - Check a shared surface's audience first. Customer-facing docs get zero internal ops detail (internal tooling names, pipeline caveats, internal-only tabs).
