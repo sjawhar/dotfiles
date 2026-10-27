@@ -77,6 +77,7 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/refusal-cooldown.ts" "${OMP_AGENT_DI
 ensure_link "${DOTFILES_DIR}/omp/extensions/served-model-notice.ts" "${OMP_AGENT_DIR}/extensions/served-model-notice.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/running-script-guard.ts" "${OMP_AGENT_DIR}/extensions/running-script-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/decision-review-gate.ts" "${OMP_AGENT_DIR}/extensions/decision-review-gate.ts"
+ensure_link "${DOTFILES_DIR}/omp/extensions/span-account.ts" "${OMP_AGENT_DIR}/extensions/span-account.ts"
 # The experiments extension: four session features, each behind its own gate (omp/AGENTS.md).
 # Only the entry is linked; its sibling modules resolve from the link's real path.
 ensure_link "${DOTFILES_DIR}/omp/extensions/experiments/index.ts" "${OMP_AGENT_DIR}/extensions/experiments.ts"
