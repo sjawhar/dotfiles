@@ -67,14 +67,6 @@
 	key-secret = GH_AGENT_APP_PRIVATE_KEY_B64
 	fallback-secret = GH_PUBLIC_REPO_PAT
 
-# The Legion review App. GH_REVIEW_APP_PRIVATE_KEY_B64 is the key of
-# trajectory-s-legion-reviewer (App 3202653), read from GitHub's /app with that key.
-# It may approve only a pull request it did not author
-# (dispatch://INFRA-155/ask/3d86f1b6-149d-4e51-bb5f-bb7b8f99c08d).
-[gh-app "review"]
-	app-id = 3202653
-	key-secret = GH_REVIEW_APP_PRIVATE_KEY_B64
-
 # Commit signing, mirroring the jj setup in .jjconfig.toml: same key path, same
 # allowed-signers file, so a commit verifies the same whether jj or plain git
 # made it (agent worktrees, scripts, throwaway clones all use plain git).
