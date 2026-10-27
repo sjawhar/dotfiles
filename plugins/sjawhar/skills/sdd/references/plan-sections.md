@@ -12,13 +12,11 @@
 
 ## A major design change
 
-Architectural changes (under `brainstorming`) are a conversation with Sami in the issue's spec, on
-Dispatch per `dispatch-brainstorming`. Start from the problem and its evidence, with sections that
-follow the topic.
+An architectural change is a conversation with Sami in the issue's spec. On Dispatch, write and
+run that spec as `dispatch-writing-specs` says: its outline, a proposed answer to each point, and an
+ask only for what needs his authority, taste or risk appetite. That skill holds the spec rules he
+approved, so repeating them here would let the two drift apart.
 
-- Put each open question right after its section as a decision block (on Dispatch, an ask block): the options, what each costs, your recommendation.
-- Record each answer there in his words, with its date. It settles what it answers.
-- Ask for approval only when each block carries his answer, folded into the text, and only if the spec still proposes something he did not settle. Name those proposals in the request, never an open question.
 - Without Dispatch, hold the same conversation on the tracker you have, or in chat when none is reachable.
 - Outside that conversation, chat is for execution and for bounded designs already under live discussion.
 
