@@ -28,6 +28,7 @@ Executables covering several areas:
 - A sourced bash library is one too, named `<name>.sh` since nothing runs it by name: `agent-spend-env.sh` (`agent_spend_env AGENT [ARGS…]`, the model-spend environment and the session's project, dispatch://INFRA-165), which `agent-session`, `shims/claude` and `shims/codex` share.
 - Match the naming and interpreter style of neighboring scripts.
 - A secret never goes into a command's arguments: every user can read them from `/proc/<pid>/cmdline`, and any `ps` prints them. Pass it through the environment, a file, or stdin — curl's `--config` or `-H @file` on a `<(printf …)` path (`printf` is a builtin), mcp-remote's `${VAR}` header placeholders, `mcp-remote-from-env` for a URL.
+- A script that ACTS on the system — enables, starts, kills, deletes — checks the intended state before it acts, and never assumes its own happy path. An idempotent installer that re-arms a unit someone deliberately stopped silently undoes a safety decision: on 2026-10-27 an installer re-enabled and started a kill-capable memory guard two minutes after it was stopped for wrongly SIGKILLing a live session, so an arming step must detect "inactive and disabled" and leave it alone, printing what it skipped. The same rule covers a sweep that removes a path and a guard that sheds a process: establish the condition you are acting on, then act.
 
 ## How changes take effect
 
