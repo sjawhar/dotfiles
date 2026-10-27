@@ -33,6 +33,10 @@ bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 # sign-in; Sami's login stays in configuration `theorem` (see installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
+# Swap, reclaim settings, a ceiling on this user's slice and the session shed daemon, so one
+# runaway session can no longer wedge the box (see installers/omp-box-memory-guard.sh).
+bash "${DOTFILES_DIR}/installers/omp-box-memory-guard.sh"
+
 # The empty tmp* directories Python's mkdtemp leaves in TMPDIR on the big disk, pruned daily
 # (devbox/tmp-empty-prune.service).
 arm_user_timer devbox tmp-empty-prune

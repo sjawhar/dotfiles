@@ -1,0 +1,758 @@
+#!/usr/bin/env python3
+"""Shed the largest agent session before the BOX runs out of memory, and say so over Envoy.
+
+Why this exists: on 2026-10-27 sami-rocqperf wedged. earlyoom logged available memory falling
+from 65,039 MiB (28.3%) at 08:45:45Z to 22,521 MiB (9.95%) at 08:48:36Z with swap 0 of 0, acted
+at its default 10% floor at 08:48:40Z by SIGTERMing eleven processes it picked by RSS, the
+kernel's machine-wide OOM followed at 08:53:24Z (4,157 tasks dumped), and from 09:00Z the box
+sat at 95-99% SYSTEM cpu with 0% idle -- direct reclaim with nothing left to reclaim -- until it
+was rebooted at 13:56Z. Per-session scopes did not protect it: their limits sum to about four
+times the machine's RAM, and most sessions on this box have no scope at all: measured
+2026-10-27T14:57Z, `user-1000.slice` held 193 GiB, of which 156 GiB was ONE unlimited login
+scope (session-3.scope, 1,463 processes) and only 36 GiB the per-session scopes under
+app.slice.
+
+This is the part of the guard that ACTS, and it is the last of three layers. The other two are
+configuration the same installer lays down (installers/omp-box-memory-guard.sh):
+
+  1. SWAP on /mnt/nvme, with kswapd watermarks that start reclaim earlier, so the kernel has
+     somewhere to put cold anonymous memory instead of spinning in direct reclaim.
+  2. memory.high and memory.max on `user-1000.slice`, the aggregate nobody bounded.
+     memory.high makes the kernel reclaim and throttle inside the slice -- sessions get slow,
+     nothing dies -- and memory.max is the hard stop that keeps the system's daemons out of
+     any out-of-memory the user's own work causes.
+  3. This guard, which sheds ONE session when the first two are not enough.
+
+What one cycle does, /proc and /sys reads only, no transcript reading and no model call:
+
+  1. Read the box: MemTotal, MemAvailable, swap, /proc/pressure/memory; and the bounded slice:
+     memory.current, memory.high, memory.max, memory.events and its own memory.pressure.
+  2. Attribute memory to agent SESSIONS, using the same attribution as its sibling detector
+     scripts/omp-memory-watch (imported from it, not re-implemented):
+       * a session in a scope of its OWN (`shims/omp` with OMP_MEMORY_MAX starts one) is the
+         scope's unreclaimable memory, anon + shmem + kernel + sock;
+       * a session with no scope of its own -- the common shape on this box -- is its `omp`
+         process plus every descendant, summed over /proc/<pid>/statm. The process alone
+         undercounts: at the 2026-10-27T05:55:14Z kill omp held 14.9 GiB of the 24 GiB that hit
+         the ceiling and its tool subprocesses held the rest.
+  3. Decide, on MemAvailable as a fraction of MemTotal (every default below is a fraction, so
+     the same unit is right on a machine with other RAM):
+       WARN  0.25 (62.9 GiB here)  tell the INFRA lead and the three largest sessions, once.
+       SHED  0.125 (31.5 GiB here) SIGTERM the largest session, after telling it and the lead;
+                                   SIGKILL what is left of it after the grace.
+       HARD  0.08 (20.1 GiB here)  no grace: SIGKILL at once, and shed again every cycle.
+       CLEAR 0.32 (80.5 GiB here)  one clear message, incident closed.
+     and on the slice: over its memory.high AND its own `full` pressure at or above --psi for
+     two cycles is also a shed. That is the throttle biting and getting nowhere, which would
+     otherwise leave every session in the slice crawling instead of one of them dying.
+  4. Act on at most one session per cycle and never oftener than --shed-interval, so a box that
+     is still falling sheds again rather than killing everything at once.
+
+Measured on this box (earlyoom's own minute-by-minute journal, 1,911 samples over the 32 h to
+2026-10-27T14:53Z):
+
+  * MemAvailable p50 123.0 GiB, p10 63.1 GiB, p05 51.7 GiB.
+  * Below 64 GiB: 208 samples. Below 32 GiB: 55 samples, every one of them inside a runaway
+    episode (05:46, 07:41, 01:27, 01:29, 03:35-04:30 and the 08:44 wedge), none in steady work.
+  * Fastest sustained fall 23.0 GiB/min (138.1 -> 22.6 GiB in 302 s on 2026-10-26T07:36:50Z);
+    fastest single minute 54.6 GiB/min. From the SHED level, 23 GiB/min leaves 82 s, and a
+    cycle plus the grace plus the kill costs about 16 s of it.
+  * earlyoom (agent-infra's, untouched by this guard) SIGTERMs at 10% = 24.2 GiB, below SHED:
+    it stays the last-resort net under this guard, and shedding a whole session cleanly comes
+    first.
+
+Alerts go over Envoy to agent sessions only, never to a person: the session being shed, and the
+INFRA lead. One WARN per incident, one message per shed, one clear.
+"""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+import signal
+import socket
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+
+def _sibling(name: str):
+    """Load scripts/omp-memory-watch as a module: one attribution, used by both tools."""
+    path = HERE / name
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+watch = _sibling("omp-memory-watch")
+
+Envoy = watch.Envoy
+GIB = watch.GIB
+INFRA_LEAD = watch.INFRA_LEAD
+cgroup_of = watch.cgroup_of
+cmdline_of = watch.cmdline_of
+effective_limit = watch.effective_limit
+gib = watch.gib
+human = watch.human
+iso = watch.iso
+log = watch.log
+rss_of = watch.rss_of
+scope_pressure = watch.scope_pressure
+scope_tasks = watch.scope_tasks
+session_of = watch.session_of
+
+# The state file lives on the big disk beside omp-memory-watch's, and on a machine that has no
+# /mnt/nvme under XDG_STATE_HOME instead, so an incident always has exactly one owner. Both
+# are "the service's own"; a run on any OTHER path is a test and may not kill a real session
+# (see main()).
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/omp-box-memory-guard/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if Path("/mnt/nvme").is_dir()
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    / "omp-box-memory-guard/state.json"
+)
+PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+
+
+# ------------------------------------------------------------------------------- the box
+
+
+def meminfo() -> dict[str, int]:
+    """MemTotal, MemAvailable, SwapTotal and SwapFree in bytes."""
+    wanted = {"MemTotal", "MemFree", "MemAvailable", "SwapTotal", "SwapFree", "Dirty"}
+    out: dict[str, int] = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        key, _, rest = line.partition(":")
+        if key in wanted:
+            out[key] = int(rest.split()[0]) * 1024
+    return out
+
+
+def pressure() -> dict[str, float]:
+    """/proc/pressure/memory as {some_avg10, some_avg60, full_avg10, full_avg60, ...}.
+
+    `full` is the share of wall time in which EVERY runnable task was stalled on memory: the
+    number that was pinned high while the box sat at 0% idle in reclaim.
+    """
+    out: dict[str, float] = {}
+    try:
+        for line in Path("/proc/pressure/memory").read_text().splitlines():
+            parts = line.split()
+            kind = parts[0]
+            for field in parts[1:]:
+                name, _, value = field.partition("=")
+                if name.startswith("avg"):
+                    out[f"{kind}_{name}"] = float(value)
+    except (OSError, ValueError, IndexError):
+        pass
+    return out
+
+
+def psi_text(psi: dict[str, float]) -> str:
+    return (
+        f"some {psi.get('some_avg10', 0):.1f}/{psi.get('some_avg60', 0):.1f}%,"
+        f" full {psi.get('full_avg10', 0):.1f}/{psi.get('full_avg60', 0):.1f}% (avg10/avg60)"
+    )
+
+
+def pressure_of(path: Path) -> dict[str, float]:
+    """A cgroup's own memory.pressure, in the same shape as the box's."""
+    out: dict[str, float] = {}
+    try:
+        for line in (path / "memory.pressure").read_text().splitlines():
+            parts = line.split()
+            for field in parts[1:]:
+                name, _, value = field.partition("=")
+                if name.startswith("avg"):
+                    out[f"{parts[0]}_{name}"] = float(value)
+    except (OSError, ValueError, IndexError):
+        pass
+    return out
+
+
+def slice_state(name: str) -> dict:
+    """The bounded slice: what it holds, its memory.high and memory.max, and its own stall.
+
+    This is the aggregate that was unbounded when the box died: measured 2026-10-27T14:57Z,
+    `user-1000.slice` held 193 GiB, of which 156 GiB was the single unlimited login scope
+    `session-3.scope` (1,463 processes) and only 36 GiB the per-session scopes under
+    `app.slice`. `memory.high` makes the kernel reclaim and throttle there before anything is
+    killed; this is the guard reading whether that throttle is biting and getting nowhere.
+    """
+    path = watch.CGROUP_ROOT / name.strip("/")
+    state = {"name": name, "present": path.is_dir()}
+    if not state["present"]:
+        return state
+    state["current"] = watch.read_int(path / "memory.current") or 0
+    state["high"] = watch.read_int(path / "memory.high")
+    state["max"] = watch.read_int(path / "memory.max")
+    state["anon"] = 0
+    try:
+        for line in (path / "memory.stat").read_text().splitlines():
+            key, _, value = line.partition(" ")
+            if key == "anon":
+                state["anon"] = int(value)
+    except (OSError, ValueError):
+        pass
+    events: dict[str, int] = {}
+    try:
+        for line in (path / "memory.events").read_text().splitlines():
+            key, _, value = line.partition(" ")
+            events[key] = int(value)
+    except (OSError, ValueError):
+        pass
+    state["events"] = events
+    state["psi"] = pressure_of(path)
+    return state
+
+
+def slice_text(state: dict) -> str:
+    if not state.get("present"):
+        return f"Slice {state['name']}: not on this machine."
+    high = state.get("high")
+    ceiling = state.get("max")
+    return (
+        f"Slice {state['name']}: {gib(state['current'])} held ({gib(state['anon'])} anonymous),"
+        f" memory.high {gib(high) if high else 'unset'},"
+        f" memory.max {gib(ceiling) if ceiling else 'unset'},"
+        f" throttle events high={state['events'].get('high', 0)} max={state['events'].get('max', 0)},"
+        f" its own pressure {psi_text(state.get('psi') or {})}."
+    )
+
+
+# --------------------------------------------------------------------------- the sessions
+
+
+def process_table(comm: str) -> tuple[dict[int, int], dict[int, int], list[int]]:
+    """One pass over /proc: {pid: ppid}, {pid: rss bytes}, and the pids whose comm matches."""
+    parents: dict[int, int] = {}
+    resident: dict[int, int] = {}
+    candidates: list[int] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            # /proc/<pid>/stat in one read: ppid is the field after the comm in parentheses,
+            # and statm's second field is the resident page count.
+            data = Path(f"/proc/{pid}/stat").read_text()
+            tail = data[data.rfind(")") + 2 :].split()
+            parents[pid] = int(tail[1])
+            name = data[data.find("(") + 1 : data.rfind(")")]
+            resident[pid] = int(Path(f"/proc/{pid}/statm").read_text().split()[1]) * PAGE_SIZE
+        except (OSError, ValueError, IndexError):
+            continue
+        if name == comm:
+            candidates.append(pid)
+    return parents, resident, candidates
+
+
+def descendants(root: int, children: dict[int, list[int]]) -> list[int]:
+    found = [root]
+    stack = [root]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+class Session(dict):
+    """One agent session: what it is, how much memory it holds, and how to shed it."""
+
+    @property
+    def key(self) -> str:
+        return self["key"]
+
+
+def sessions(comm: str, guard_pid: int) -> list[Session]:
+    """Every agent session on this machine, largest first.
+
+    The attribution is omp-memory-watch's, in its two shapes. A session whose `omp` process is a
+    descendant of another session's is not its own session: the ancestor owns that memory.
+    """
+    parents, resident, candidates = process_table(comm)
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
+
+    candidate_set = set(candidates)
+    guard_line = set(descendants(guard_pid, children))
+    found: list[Session] = []
+    by_scope: dict[str, Session] = {}
+    for pid in candidates:
+        # A candidate under another candidate is that session's own child process.
+        walker, nested = parents.get(pid, 0), False
+        while walker > 1:
+            if walker in candidate_set:
+                nested = True
+                break
+            walker = parents.get(walker, 0)
+        if nested:
+            continue
+        cgroup = cgroup_of(pid)
+        if not cgroup:
+            continue
+        limit, limit_from, limited = effective_limit(cgroup)
+        tree = descendants(pid, children)
+        if limited:
+            # Its own scope: exactly what the memcg OOM killer measures, tool subprocesses in.
+            scope = cgroup.rsplit("/", 1)[-1]
+            usage, current, _ = scope_pressure(cgroup)
+            session = Session(
+                key=scope, kind="scope", cgroup=cgroup, scope=scope, pid=pid, usage=usage,
+                current=current, limit=limit, limit_from=limit_from, members=scope_tasks(cgroup),
+                measured="anon+shmem+kernel+sock of its own scope",
+            )
+            # Several omp processes in one scope are one session's lanes on one budget.
+            if scope in by_scope:
+                if rss_of(by_scope[scope]["pid"]) < rss_of(pid):
+                    by_scope[scope]["pid"] = pid
+                continue
+            by_scope[scope] = session
+        else:
+            # No scope of its own: the login scope it sits in is shared with every other
+            # session in the login, so the session is its process tree.
+            session = Session(
+                key=f"pid:{pid}", kind="tree", cgroup=cgroup, scope=cgroup.rsplit("/", 1)[-1],
+                pid=pid, usage=sum(resident.get(p, 0) for p in tree), current=0, limit=limit,
+                limit_from=limit_from, members=tree,
+                measured=f"summed RSS of the omp process and its {len(tree) - 1} descendants",
+            )
+        session["tree"] = tree
+        session["is_guard"] = pid in guard_line or guard_pid in session["members"]
+        session["started"] = watch.pid_start(pid)
+        found.append(session)
+    found.sort(key=lambda s: s["usage"], reverse=True)
+    return found
+
+
+def alive(pid: int, started: int) -> bool:
+    """Is that exact process still running? pids wrap inside a day on this box."""
+    try:
+        return watch.pid_start(pid) == started and started != 0
+    except OSError:
+        return False
+
+
+def signal_session(session: Session, sig: int) -> int:
+    """Signal a session. A scope is signalled through its cgroup, a tree through its pids."""
+    sent = 0
+    if session["kind"] == "scope" and sig == signal.SIGKILL:
+        # cgroup.kill is atomic: every task, including ones forked while we were deciding.
+        try:
+            (watch.CGROUP_ROOT / session["cgroup"].strip("/") / "cgroup.kill").write_text("1")
+            return len(session["members"])
+        except OSError:
+            pass
+    members = scope_tasks(session["cgroup"]) if session["kind"] == "scope" else session["members"]
+    # The session leader first, so it can take its own children down on SIGTERM.
+    for pid in sorted(set(members), key=lambda p: p != session["pid"]):
+        try:
+            os.kill(pid, sig)
+            sent += 1
+        except OSError as error:
+            if error.errno not in (errno.ESRCH, errno.EPERM):
+                raise
+    return sent
+
+
+# ------------------------------------------------------------------------------ the state
+
+
+class State(object):
+    """The one file this guard owns, held under an exclusive flock for the whole run.
+
+    A second guard (a hand run against the live file) loses the lock and exits rather than
+    deciding on a copy of the same incident -- the failure mode that sent one crossing's first
+    alert twice on 2026-10-27.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = open(path, "a+")
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.locked = True
+        except OSError:
+            self.locked = False
+            self.data = {}
+            return
+        self.handle.seek(0)
+        try:
+            self.data = json.loads(self.handle.read() or "{}")
+        except ValueError:
+            self.data = {}
+
+    def commit(self) -> None:
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.data, self.handle, indent=1, sort_keys=True)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+
+# ------------------------------------------------------------------------------ the words
+
+
+def box_line(r: dict) -> str:
+    info, psi, levels = r["info"], r["psi"], r["levels"]
+    total = info["MemTotal"]
+    available = info["MemAvailable"]
+    if info.get("SwapTotal"):
+        used = info["SwapTotal"] - info.get("SwapFree", 0)
+        swap = (
+            f" Swap {gib(used)} used of {gib(info['SwapTotal'])}"
+            f" ({100 * used / info['SwapTotal']:.0f}%)."
+        )
+    else:
+        swap = " Swap: none on this box."
+    return (
+        f"Box {socket.gethostname()}: MemAvailable {gib(available)} of {gib(total)}"
+        f" ({100 * available / total:.1f}%)."
+        f"{swap} Memory pressure {psi_text(psi)}."
+        f" Levels: warn {gib(levels['warn'])}, shed {gib(levels['shed'])},"
+        f" no-grace {gib(levels['hard'])}, clear {gib(levels['clear'])}."
+        f"\n{slice_text(r['slice'])}"
+    )
+
+
+def biggest_line(ranked: list[Session], limit: int = 3) -> str:
+    parts = []
+    for session in ranked[:limit]:
+        who = session.get("session_id") or f"pid {session['pid']}"
+        parts.append(f"{who} ({session['key']}) {gib(session['usage'])}")
+    return "; ".join(parts) if parts else "none found"
+
+
+def warn_text(r: dict, ranked: list[Session], reason: str) -> str:
+    return "\n".join([
+        f"BOX MEMORY LOW on {socket.gethostname()} ({reason}). No session has been shed yet.",
+        box_line(r),
+        f"Largest agent sessions now: {biggest_line(ranked)}.",
+        "DO, now, before this guard decides for you: stop spawning lanes; write your handover"
+        " files; shed or finish the lanes you can; restart a session that has been up for hours"
+        f" with `omp --resume <session id>`. If MemAvailable reaches {gib(r['levels']['shed'])}"
+        " -- or the slice stays stuck over its memory.high -- this guard SIGTERMs the largest"
+        " session on the box, which may be yours, and SIGKILLs what is left of it after the"
+        " grace.",
+        "Evidence: /proc/meminfo MemAvailable, /proc/pressure/memory, the slice's own"
+        " memory.current/high/max/events/pressure, and per-session memory from each session's"
+        " own cgroup (scoped sessions) or its process tree (unscoped ones).",
+        "From omp-box-memory-guard (~/.dotfiles/scripts/omp-box-memory-guard), a systemd --user"
+        f" service on {socket.gethostname()}.",
+    ])
+
+
+def shed_text(r: dict, ranked: list[Session], victim: Session, grace: float, hard: bool) -> str:
+    who = victim.get("session_id") or ""
+    naming = (
+        f"session {who}" if who else
+        f"an unidentified session (omp pid {victim['pid']}: no session id on its command line"
+        " and no session transcript open)"
+    )
+    how = (
+        "SIGKILL at once: the box is below the no-grace level" if hard else
+        f"SIGTERM now, SIGKILL of whatever is left in {grace:.0f} s"
+    )
+    return "\n".join([
+        f"SHEDDING THE LARGEST AGENT SESSION on {socket.gethostname()}: {naming},"
+        f" {gib(victim['usage'])} ({victim['measured']}).",
+        box_line(r),
+        f"Why this one: it is the largest agent session on the box. Ranked: {biggest_line(ranked)}.",
+        f"How: {how}. Its memory comes back to the box when it exits.",
+        "If this is you: your work is NOT saved. Resume with `omp --resume <your session id>`"
+        " once the box is back above the clear level; your transcript is on disk, the in-flight"
+        " lanes are not. Then come back under a memory ceiling:"
+        " `OMP_MEMORY_MAX=24G omp --resume <id>` runs the session in a scope of its own, so the"
+        " next time it is the session that dies and not the box.",
+        "This guard sheds one session per cycle and no oftener than its shed interval, so a box"
+        " that is still falling sheds again rather than killing everything at once. Below it,"
+        " the slice's memory.max and agent-infra's earlyoom are the backstops.",
+        "From omp-box-memory-guard (~/.dotfiles/scripts/omp-box-memory-guard) on "
+        f"{socket.gethostname()}.",
+    ])
+
+
+def clear_text(r: dict, incident: dict, now: float) -> str:
+    opened = incident.get("opened_at") or now
+    sheds = incident.get("sheds") or []
+    what = (
+        "Sessions shed in this incident: "
+        + "; ".join(f"{s.get('session_id') or s['key']} ({gib(s['usage'])})" for s in sheds)
+        if sheds
+        else "Nothing was shed: the box recovered on its own."
+    )
+    return "\n".join([
+        f"BOX MEMORY CLEARED on {socket.gethostname()}: back above {gib(r['levels']['clear'])}.",
+        box_line(r),
+        f"The incident opened at {iso(opened)}, cleared at {iso(now)}, lasted"
+        f" {human(now - opened)}, and bottomed out at {gib(incident.get('low') or 0)} available.",
+        what,
+        "No action is needed. From omp-box-memory-guard on " + socket.gethostname() + ".",
+    ])
+
+
+# ----------------------------------------------------------------------------- the cycle
+
+
+class Guard(object):
+    def __init__(self, options: argparse.Namespace) -> None:
+        self.options = options
+        self.envoy = None if options.dry_run else Envoy(timeout=options.http_timeout)
+        self.state = State(options.state)
+        self.guard_pid = os.getpid()
+        self.last_heartbeat = 0.0
+
+    def send(self, targets: list[str], text: str) -> list[str]:
+        told = []
+        for target in dict.fromkeys(t for t in targets if t):
+            if self.options.dry_run or (self.envoy and self.envoy.send(target, text)):
+                told.append(target)
+        if self.options.print_alert:
+            print(text)
+        return told
+
+    def levels(self, total: int) -> dict[str, int]:
+        return {
+            "warn": int(total * self.options.warn),
+            "shed": int(total * self.options.shed),
+            "hard": int(total * self.options.hard),
+            "clear": int(total * self.options.clear),
+        }
+
+    def cycle(self) -> None:
+        now = time.time()
+        info = meminfo()
+        psi = pressure()
+        total, available = info["MemTotal"], info["MemAvailable"]
+        reading = {
+            "info": info, "psi": psi, "levels": self.levels(total),
+            "slice": slice_state(self.options.slice),
+        }
+        levels = reading["levels"]
+        bounded = reading["slice"]
+        data = self.state.data
+        incident: dict | None = data.get("incident")
+
+        swap_low = bool(
+            info.get("SwapTotal") and info.get("SwapFree", 0) < 0.2 * info["SwapTotal"]
+        )
+        # Two ways the box can be in trouble, and the slice is the earlier one. Over
+        # memory.high the kernel reclaims and throttles the slice instead of killing anything;
+        # that is the designed answer to a busy box. It becomes a problem only when the
+        # throttle is biting AND getting nowhere -- the slice's own `full` pressure, the share
+        # of time in which every task in it was stalled on memory.
+        over_high = bool(
+            bounded.get("present") and bounded.get("high") and bounded["current"] > bounded["high"]
+        )
+        slice_stuck = over_high and (bounded.get("psi") or {}).get("full_avg60", 0.0) >= self.options.psi
+        psi_high = psi.get("full_avg60", 0.0) >= self.options.psi or slice_stuck
+        data["psi_cycles"] = data.get("psi_cycles", 0) + 1 if psi_high else 0
+        stalled = psi_high and data["psi_cycles"] >= 2
+
+        if available >= levels["clear"] and not stalled:
+            if incident:
+                if incident.get("alerted"):
+                    self.send(incident.get("told") or [INFRA_LEAD], clear_text(reading, incident, now))
+                log(f"incident cleared: {gib(available)} available, above {gib(levels['clear'])}")
+                data.pop("incident", None)
+                self.state.commit()
+            self.heartbeat(now, reading)
+            return
+
+        if available >= levels["warn"] and not stalled and not swap_low:
+            # Between warn and clear with an incident open: it stays open (hysteresis), and
+            # with none open there is nothing to say yet.
+            self.heartbeat(now, reading)
+            return
+
+        ranked = sessions(self.options.session_comm, self.guard_pid)
+        for session in ranked[:4]:
+            session["session_id"] = session_of(session["pid"])
+        if incident is None:
+            if available < levels["warn"]:
+                reason = f"MemAvailable {gib(available)} is under the warn level"
+            elif slice_stuck:
+                reason = (
+                    f"{bounded['name']} is {gib(bounded['current'])}, over its memory.high"
+                    f" ({gib(bounded['high'])}), and its own stall is"
+                    f" {bounded['psi'].get('full_avg60', 0):.1f}% of wall time"
+                )
+            elif psi_high:
+                reason = f"memory pressure full avg60 {psi.get('full_avg60', 0):.1f}% for two cycles"
+            else:
+                reason = "swap is nearly full"
+            incident = data["incident"] = {
+                "opened_at": now, "low": available, "reason": reason, "sheds": [], "told": [],
+            }
+        incident["low"] = min(incident.get("low", available), available)
+
+        if not incident.get("alerted"):
+            targets = [INFRA_LEAD] + [s.get("session_id") for s in ranked[:3]]
+            incident["alerted"] = now
+            incident["told"] = [t for t in targets if t]
+            self.state.commit()
+            incident["told"] = self.send(targets, warn_text(reading, ranked, incident["reason"])) or incident["told"]
+            log(f"WARN: {incident['reason']}; told {len(incident['told'])} session(s)")
+
+        self.finish_pending(now, reading)
+        if available < levels["shed"] or (slice_stuck and data["psi_cycles"] >= 2):
+            self.shed(now, reading, ranked)
+        self.state.commit()
+        self.heartbeat(now, reading, force=True)
+
+    def finish_pending(self, now: float, r: dict) -> None:
+        """SIGKILL what is left of a session we SIGTERMed, once its grace is up."""
+        pending = self.state.data.get("pending")
+        if not pending:
+            return
+        session = Session(pending["session"])
+        hard = r["info"]["MemAvailable"] < r["levels"]["hard"]
+        if not alive(session["pid"], session["started"]):
+            log(f"shed complete: {session['key']} is gone")
+            self.state.data.pop("pending", None)
+            return
+        if now - pending["termed_at"] < self.options.grace and not hard:
+            return
+        killed = signal_session(session, signal.SIGKILL)
+        log(f"shed escalated: SIGKILL to {killed} process(es) of {session['key']}")
+        self.state.data.pop("pending", None)
+
+    def shed(self, now: float, r: dict, ranked: list[Session]) -> None:
+        if self.state.data.get("pending"):
+            return
+        last = self.state.data.get("last_shed_at") or 0
+        hard = r["info"]["MemAvailable"] < r["levels"]["hard"]
+        if now - last < self.options.shed_interval and not hard:
+            return
+        victim = None
+        for session in ranked:
+            if session["is_guard"]:
+                continue
+            if session["usage"] < self.options.min_victim * GIB:
+                continue
+            if not session["cgroup"].startswith("/user.slice"):
+                # Nothing outside the user's own slice is an agent session.
+                continue
+            if self.options.test_only and self.options.session_comm == "omp":
+                continue
+            victim = session
+            break
+        if victim is None:
+            log(
+                f"over the shed level ({gib(r['info']['MemAvailable'])} available) but no"
+                f" sheddable agent session: {len(ranked)} candidate(s) with comm"
+                f" {self.options.session_comm!r}"
+            )
+            return
+        victim.setdefault("session_id", session_of(victim["pid"]))
+        text = shed_text(r, ranked, victim, self.options.grace, hard)
+        record = {
+            "key": victim["key"], "pid": victim["pid"], "usage": victim["usage"],
+            "session_id": victim.get("session_id"), "at": now, "hard": hard,
+        }
+        self.state.data["last_shed_at"] = now
+        self.state.data.setdefault("incident", {}).setdefault("sheds", []).append(record)
+        if not hard:
+            self.state.data["pending"] = {"session": dict(victim), "termed_at": now}
+        self.state.commit()
+        told = self.send([victim.get("session_id"), INFRA_LEAD], text)
+        if self.options.dry_run:
+            log(f"DRY RUN: would shed {victim['key']} ({gib(victim['usage'])}); told {len(told)}")
+            self.state.data.pop("pending", None)
+            return
+        signalled = signal_session(victim, signal.SIGKILL if hard else signal.SIGTERM)
+        log(
+            f"SHED {victim['key']} ({gib(victim['usage'])}, session"
+            f" {victim.get('session_id') or 'unknown'}):"
+            f" {'SIGKILL' if hard else 'SIGTERM'} to {signalled} process(es); told {len(told)}"
+        )
+
+    def heartbeat(self, now: float, r: dict, force: bool = False) -> None:
+        if not force and now - self.last_heartbeat < self.options.heartbeat:
+            return
+        self.last_heartbeat = now
+        log(box_line(r))
+
+    def run(self) -> int:
+        if not self.state.locked:
+            log(f"another run holds {self.options.state}; exiting")
+            return 0
+        log(
+            f"omp-box-memory-guard starting: every {self.options.interval:g}s,"
+            f" sessions are processes named {self.options.session_comm!r},"
+            f" state {self.options.state}" + (" [DRY RUN]" if self.options.dry_run else "")
+        )
+        stopping = {"now": False}
+
+        def stop(signum, _frame):
+            stopping["now"] = True
+            log(f"signal {signum}: stopping")
+
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        deadline = time.time() + self.options.run_for if self.options.run_for else None
+        while not stopping["now"]:
+            started = time.time()
+            try:
+                self.cycle()
+            except Exception as error:  # a guard that crashes must say so, not vanish
+                log(f"cycle failed: {type(error).__name__}: {error}")
+            if self.options.once or (deadline and time.time() >= deadline):
+                break
+            time.sleep(max(0.2, self.options.interval - (time.time() - started)))
+        return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--interval", type=float, default=5.0, help="seconds between cycles")
+    parser.add_argument("--warn", type=float, default=0.25, help="warn below this fraction of MemTotal")
+    parser.add_argument("--shed", type=float, default=0.125, help="shed below this fraction of MemTotal")
+    parser.add_argument("--hard", type=float, default=0.08, help="below this fraction, SIGKILL with no grace")
+    parser.add_argument("--clear", type=float, default=0.32, help="clear above this fraction (hysteresis)")
+    parser.add_argument(
+        "--psi", type=float, default=25.0,
+        help="full avg60 of memory pressure (box or slice) that counts as stalled, held two cycles",
+    )
+    parser.add_argument(
+        "--slice", default="user.slice/user-1000.slice",
+        help="the bounded slice whose memory.high/max, events and own pressure this guard reads",
+    )
+    parser.add_argument("--grace", type=float, default=10.0, help="seconds between SIGTERM and SIGKILL")
+    parser.add_argument("--shed-interval", type=float, default=20.0, help="seconds between sheds above the no-grace level")
+    parser.add_argument("--min-victim", type=float, default=1.0, help="GiB: never shed a session smaller than this")
+    parser.add_argument("--session-comm", default="omp", help="the process name that marks a session (tests use their own)")
+    parser.add_argument("--heartbeat", type=float, default=300.0, help="seconds between journal heartbeats while healthy")
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help="the owned state file")
+    parser.add_argument("--http-timeout", type=float, default=8.0)
+    parser.add_argument("--once", action="store_true", help="one cycle, then exit")
+    parser.add_argument("--run-for", type=float, default=0.0, help="seconds to run, then exit (0 = forever)")
+    parser.add_argument("--dry-run", action="store_true", help="decide and log; send nothing, kill nothing")
+    parser.add_argument("--print-alert", action="store_true", help="print the text it would send")
+    options = parser.parse_args()
+    # A run on any other state file than the service's own has its own memory of the incident,
+    # so it must not be able to kill a real session: it may act only on a test's own process
+    # name. This is what makes the proof run safe to do on the live box.
+    options.test_only = options.state != DEFAULT_STATE
+    if options.test_only and options.session_comm == "omp":
+        log(f"--state is not {DEFAULT_STATE}: refusing to shed real omp sessions (use --session-comm)")
+    return Guard(options).run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

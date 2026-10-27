@@ -1,0 +1,23 @@
+[Unit]
+Description=Shed the largest agent session before this box runs out of memory
+Documentation=file:%h/.dotfiles/scripts/omp-box-memory-guard.md
+
+[Service]
+Type=simple
+ExecStart=%h/.dotfiles/scripts/omp-box-memory-guard
+# A guard that is not running is no guard. It exits only on SIGTERM (a stop), and anything
+# else -- a crash, a kill -- comes back in five seconds.
+Restart=always
+RestartSec=5s
+# NOT Nice=15 like the detector beside it (omp-memory-watch). That one only measures and may
+# wait; this one has to decide and signal while the box is in reclaim, and five seconds late
+# is 1.9 GiB at the fastest fall measured on this box (23 GiB/min).
+Nice=0
+# It must never become what it is guarding against: one resident python3, ~25 MB, and a cap
+# well above it turns a leak here into a restart instead of a box-wide problem. No swap, so
+# its own pages are never the ones parked on disk when it is needed.
+MemoryMax=256M
+MemorySwapMax=0
+
+[Install]
+WantedBy=default.target
