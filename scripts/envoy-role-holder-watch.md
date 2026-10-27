@@ -110,6 +110,12 @@ or when the pane is gone.
 | Pane foreground | `/proc/*/stat`: `comm`, `ppid` and `tpgid` of every process, once per run |
 | Pane's last session | this watch's own memory, else the title of the first line of each `*.jsonl` in the pane's `~/.omp/agent/sessions/<encoded cwd>/`, else `~/.local/share/tmux/resurrect/tmux_resurrect_*.txt` |
 
+Reaching the default tmux server takes two things a shell has and a systemd service does not, so
+the unit sets both: `TMUX_TMPDIR=%h/.tmux/sockets` (the socket directory `.bashrc` exports) and a
+`PATH` with `~/.mise/shims` on it. `/usr/bin/tmux` is 3.4 against this box's mise-managed 3.8
+server and answers `server exited unexpectedly`; the run logs that line with the `TMUX_TMPDIR` it
+used rather than reporting zero panes in silence.
+
 ## One alert per incident
 
 That state file is the only memory, and the service owns it:
