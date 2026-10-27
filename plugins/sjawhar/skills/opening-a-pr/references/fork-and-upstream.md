@@ -21,7 +21,7 @@ When the placement rules above make the change upstream material, open the upstr
 ## Upstream PRs
 
 - Walk `pr-preflight` (`knives preflight`) before `gh pr create`. Follow the upstream contribution policy in its AGENTS.md or contributing guide.
-- An open upstream PR is the session's under `maintaining-fork-pr`: reviews, body updates, rebases, the close decision. Answer maintainer comments yourself; hold one for Sami only when it asks for a decision only he can make.
+- An open upstream PR is the session's under `maintaining-fork-pr`: reviews, body updates (a description rewrite goes to him first, see the voice bullet), rebases, the close decision. Answer maintainer comments yourself; hold one for Sami only when it asks for a decision only he can make.
 - **Before you open an upstream PR, push to one or post on one** (code, body, comment or reply), it passes this gate, because a weak PR burdens the maintainers, harms our reputation, and leaves us maintaining code we cannot upstream (dispatch://BET-122/ask/b28e2fb4):
   1. The reviewers `sdd` step 7 names, every verdict naming the final commit: `ce-simplify-code` first for a runtime change, then `reviewer`, `thermonuclear-deep-review` and `thermonuclear-code-quality`. For a post with no new commit, they review the draft text against the diff at the PR head. `maintaining-fork-pr` step 6 runs the last three on its candidate, so one round serves both.
   2. `pr-preflight` for a new PR, and the rest of the `maintaining-fork-pr` process for an open one.
