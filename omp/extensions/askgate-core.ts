@@ -297,11 +297,100 @@ const REFUSED_UNQUOTED = "\n;&|$`<>()#\\";
 /** Inside double quotes bash still expands `$` and backticks and interprets `\`. */
 const REFUSED_DOUBLE_QUOTED = "$`\\";
 
-/** A command's first line, without its here-document opener and its blanks, and where that text
- * starts in the command, when the command is that one line, optionally fed one quoted
- * here-document on stdin; undefined for any other command. `stderr` is where a `2>&1` after the
- * opener starts and ends in the command. */
-function headLine(command: string): { text: string; at: number; stderr?: [number, number] } | undefined {
+/**
+ * Filters a `dispatch` write may be piped into. Each reads its input and writes nothing, so the
+ * command still runs whole and sends exactly what the dry-run read: a pipe takes the command's own
+ * stdout, it is no second command, and what is sent is fixed before any filter sees a byte.
+ * Measured over the seven days to 2026-10-27, this shape was 230 of the 668 refusals that named
+ * the whole-call rule, in 72 sessions, nearly all of them `| tail -3` or `| head -30`.
+ * `sed` and `awk` write a file and run a command from their own scripts, `tee` and `sort -o` write
+ * one named by a flag, and `uniq` takes an output file as its second argument, so none is here.
+ */
+const PIPE_FILTERS = ["cat", "cut", "egrep", "fgrep", "fold", "grep", "head", "jq", "nl", "rev", "tail", "tr", "wc"];
+
+/** Where a trailing pipeline of read-only filters starts in `text` (at its first unquoted `|`), or
+ * undefined when the text holds no such pipe. Everything after it must be `| <filter> …`: anything
+ * else leaves the `|` in the head, where `headScan` refuses it as it always has. */
+function filterPipelineAt(text: string): number | undefined {
+	let quote: '"' | "'" | undefined;
+	for (let index = 0; index < text.length; index++) {
+		const char = text[index];
+		if (quote !== undefined) {
+			if (char === quote) quote = undefined;
+		} else if (char === "'" || char === '"') quote = char;
+		else if (char === "|") return isFilterPipeline(text.slice(index)) ? index : undefined;
+	}
+	return undefined;
+}
+
+/** Whether `tail`, which starts at a `|`, is one or more `| <filter> …` stages whose words the
+ * shell takes as written: no expansion, no redirect, no second command, no unterminated quote. */
+function isFilterPipeline(tail: string): boolean {
+	const stages: Word[][] = [];
+	let words: Word[] = [];
+	let quote: '"' | "'" | undefined;
+	let start = 0;
+	let value: string | undefined;
+	const endWord = (at: number) => {
+		if (value !== undefined) words.push({ raw: tail.slice(start, at), value });
+		value = undefined;
+	};
+	for (let index = 0; index < tail.length; index++) {
+		const char = tail[index];
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
+			else value += char;
+			continue;
+		}
+		if (quote === '"') {
+			if (char === '"') quote = undefined;
+			else if (REFUSED_DOUBLE_QUOTED.includes(char)) return false;
+			else value += char;
+			continue;
+		}
+		if (char === "|") {
+			endWord(index);
+			stages.push(words);
+			words = [];
+			continue;
+		}
+		if (char === " " || char === "\t") {
+			endWord(index);
+			continue;
+		}
+		// Every character the head itself refuses: a redirect, a second command, an expansion, a
+		// comment, a backslash. `|` is the one exception, handled above.
+		if (REFUSED_UNQUOTED.includes(char)) return false;
+		if (value === undefined) {
+			start = index;
+			value = "";
+		}
+		if (char === "'" || char === '"') quote = char;
+		else value += char;
+	}
+	if (quote !== undefined) return false;
+	endWord(tail.length);
+	stages.push(words);
+	// The first stage is the empty text before the leading `|`; every later one must be a filter.
+	return stages.length > 1 && stages[0].length === 0 && stages.slice(1).every(isFilterStage);
+}
+
+/** Whether one pipeline stage is a read-only filter running no scoped `dispatch` write of its own:
+ * a second write must reach the gate as a call of its own, whatever would run it (`| xargs
+ * dispatch message …`), so no word of the stage may name `dispatch` before a scoped command. */
+function isFilterStage(words: readonly Word[]): boolean {
+	const program = words[0];
+	if (program === undefined || !PIPE_FILTERS.includes(program.value.split("/").at(-1) ?? "")) return false;
+	return !words.some((word, index) => word.value.split("/").at(-1) === "dispatch" && (SCOPED_COMMANDS as readonly string[]).includes(words[index + 1]?.value ?? ""));
+}
+
+/** A command's first line, without its here-document opener, a trailing pipeline of read-only
+ * filters and its blanks, and where that text starts in the command, when the command is that one
+ * line, optionally fed one quoted here-document on stdin; undefined for any other command.
+ * `stderr` is where a `2>&1` after the opener starts and ends in the command, and `pipeline` where
+ * a trailing `| <filter> …` does: both run as written and are cut out of the dry-run, whose stdout
+ * must be the CLI's JSON alone. */
+function headLine(command: string): { text: string; at: number; stderr?: [number, number]; pipeline?: [number, number] } | undefined {
 	if (hasControlCharacter(command)) return undefined;
 	// Blank lines before the head and after the command's last line run as no command, so they are
 	// dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
@@ -315,6 +404,13 @@ function headLine(command: string): { text: string; at: number; stderr?: [number
 	const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
 	let head = lines[0] ?? "";
 	let stderr: [number, number] | undefined;
+	// The pipeline comes off first, so the rules below read the same text whether or not one follows:
+	// it is the last thing on the line in both shapes (`dispatch … | tail -3`, `… <<'EOF' | tail -3`).
+	const pipe = filterPipelineAt(head);
+	// The blanks before the `|` go with it, so the dry-run ends where the command's words end.
+	const pipeAt = pipe === undefined ? undefined : pipe - (/[ \t]*$/.exec(head.slice(0, pipe))?.[0].length ?? 0);
+	const pipeline: [number, number] | undefined = pipeAt === undefined ? undefined : [lineAt + pipeAt, lineAt + head.length];
+	if (pipe !== undefined) head = head.slice(0, pipe);
 	if (lines.length > 1) {
 		const opening = HEREDOC_OPENING.exec(head);
 		if (opening === null) return undefined;
@@ -329,7 +425,7 @@ function headLine(command: string): { text: string; at: number; stderr?: [number
 		if (redirect) stderr = [lineAt + redirect[0], lineAt + redirect[1]];
 	}
 	const leading = /^[ \t]*/.exec(head)?.[0].length ?? 0;
-	return { text: head.replace(/^[ \t]+|[ \t]+$/g, ""), at: lineAt + leading, ...(stderr ? { stderr } : {}) };
+	return { text: head.replace(/^[ \t]+|[ \t]+$/g, ""), at: lineAt + leading, ...(stderr ? { stderr } : {}), ...(pipeline ? { pipeline } : {}) };
 }
 
 // AskGate's own additions to those rules: the program may be a literal path to `dispatch` as well
@@ -389,11 +485,12 @@ function cdPathEnd(text: string, from: number): number | undefined {
 /** A `2>&1` after the `dispatch` command's words, with the blanks before it. */
 const STDERR_TO_STDOUT = /[ \t]+2>&1$/;
 
-/** A `dispatch` command in a `bash` command, bare or in the two wrappers above: its head, where the
+/** A `dispatch` command in a `bash` command, bare or in the wrappers above: its head, where the
  * head starts, where a leading `cd` path ends (to silence `cd` in the dry-run), where the head's
- * line ends, past a trailing `2>&1`, and where a `2>&1` after a here-document opener lies (both
- * `2>&1` forms are left out of the dry-run, whose stdout must be the CLI's JSON). */
-interface DispatchHead { head: string; at: number; cdEnd?: number; end: number; stderr?: [number, number] }
+ * line ends, past a trailing `2>&1`, where a `2>&1` after a here-document opener lies, and where a
+ * trailing pipeline of read-only filters does (each of those three is left out of the dry-run,
+ * whose stdout must be the CLI's JSON). */
+interface DispatchHead { head: string; at: number; cdEnd?: number; end: number; stderr?: [number, number]; pipeline?: [number, number] }
 
 function dispatchCommandHead(command: string): DispatchHead | undefined {
 	const line = headLine(command);
@@ -417,7 +514,7 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
 	const program = scanWord(head, 0);
 	if (program.unread.length > 0 || program.value.split("/").at(-1) !== "dispatch" || ASSIGNMENT.test(head) || !headScan(head)) return undefined;
 	const at = line.at + offset;
-	return { head, at, ...(cdEnd === undefined ? {} : { cdEnd }), end: at + text.length, ...(line.stderr ? { stderr: line.stderr } : {}) };
+	return { head, at, ...(cdEnd === undefined ? {} : { cdEnd }), end: at + text.length, ...(line.stderr ? { stderr: line.stderr } : {}), ...(line.pipeline ? { pipeline: line.pipeline } : {}) };
 }
 
 /** Any control character but newline and tab: a `\r` before a line end would make the delimiter
@@ -484,7 +581,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
 	if (typeof command !== "string") return undefined;
 	const found = dispatchCommandHead(command);
 	if (found === undefined) return undefined;
-	const { head, at, cdEnd, end, stderr } = found;
+	const { head, at, cdEnd, end, stderr, pipeline } = found;
 	const [program, name, ...flags] = headWords(head);
 	if (name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name.value)) return undefined;
 	if (flags.some(flag => NO_SEND_FLAGS.includes(flag.value))) return undefined;
@@ -506,9 +603,12 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
 	}
 	// The command runs as written, its wrappers included. The dry-run keeps the `cd`, with its output
 	// silenced (bash prints the directory when CDPATH found it), so it runs where the command will;
-	// it drops the `2>&1`, so the CLI's JSON is all its stdout holds.
+	// it drops the `2>&1` and any trailing filters, so the CLI's JSON is all its stdout holds. Both
+	// cuts lie after the command's words and never overlap: the `2>&1` ends before the `|` starts.
 	const before = cdEnd === undefined ? command.slice(0, at) : `${command.slice(0, cdEnd)} >/dev/null${command.slice(cdEnd, at)}`;
-	const after = stderr === undefined ? command.slice(end) : `${command.slice(end, stderr[0])}${command.slice(stderr[1])}`;
+	const cuts = [stderr, pipeline].filter(cut => cut !== undefined).sort((one, two) => one[0] - two[0]);
+	const cut = cuts.reduce((parts, [from, to]) => ({ text: parts.text + command.slice(parts.at, from), at: to }), { text: "", at: end });
+	const after = cut.text + command.slice(cut.at);
 	const rest = kept.map(word => word.raw);
 	const readsFile = kept.some(({ value }, index) => {
 		const eq = value.indexOf("=");
@@ -669,17 +769,21 @@ function commandWords(command: string): Word[][] {
 	return segments;
 }
 
-/** A scoped `dispatch` write the gate cannot review: the tool it calls, the command's name and,
- * when the word that runs it is not literal, whether that word calls `dispatch` by name or path
- * and the characters in it AskGate does not take as literal (only its expansions when it does not). */
-export interface UnreadableCommand { tool: string; label: string; program?: { namesDispatch: boolean; unread: string[] } }
+/** A scoped `dispatch` write the gate cannot review: the tool it calls, the command's name, the
+ * literal word that holds the command's position when the write is an argument to it (a wrapper
+ * such as `timeout 120` or `nice -n 19`), and, when the word that runs it is not literal, whether
+ * that word calls `dispatch` by name or path and the characters in it AskGate does not take as
+ * literal (only its expansions when it does not). */
+export interface UnreadableCommand { tool: string; label: string; ran?: string; program?: { namesDispatch: boolean; unread: string[] } }
 
 /**
- * A scoped `dispatch` write anywhere in a `bash` command, found at a command's position (after any
- * assignments and prefixes such as `env` or `timeout 30`), or a scoped subcommand run by a program
- * an expansion names (`$D comment …`, `$(command -v dispatch) ask …`), which may be `dispatch`. One
- * carrying `--dry-run` or `--help`, or a `dispatch issue` without `--spec`/`--spec-file`, sends
- * nothing for review and is not one. Only for a command `scopedCommand` could not read.
+ * A scoped `dispatch` write anywhere in a `bash` command: at a command's position (after any
+ * assignments and prefixes such as `env` or `timeout 30`), as an argument to any other program
+ * that would run it (`nice -n 19 … dispatch comment …`, which no list of prefixes can cover), or
+ * run by a program an expansion names (`$D comment …`, `$(command -v dispatch) ask …`), which may
+ * be `dispatch`. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
+ * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
+ * `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
 	// A write names `dispatch`, or reaches it through an expansion.
@@ -695,16 +799,30 @@ export function unreadableDispatchWrite(command: unknown): UnreadableCommand | u
 				if (prefix.value === "timeout") at++;
 			} else break;
 		}
-		const [program, name, ...flags] = words.slice(at);
-		if (program === undefined || name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name.value)) continue;
-		const named = program.value.split("/").at(-1) === "dispatch";
-		const unread = [...new Set(scanWord(program.raw, 0).unread)];
-		const expansions = unread.filter(char => EXPANSIONS.includes(char));
-		if (!named && expansions.length === 0) continue;
-		if (flags.some(flag => NO_SEND_FLAGS.includes(flag.value))) continue;
-		if (name.value === SPEC_ONLY_COMMAND && !flags.some(flag => SPEC_FLAGS.includes(flag.value.split("=", 1)[0]))) continue;
-		const found = { tool: `dispatch_${name.value.replaceAll("-", "_")}`, label: `dispatch ${name.value}` };
-		return unread.length === 0 ? found : { ...found, program: { namesDispatch: named, unread: named ? unread : expansions } };
+		// Every word from the command's position on, not just the first: a wrapper the list above does
+		// not hold would otherwise keep the write out of that position and send it unreviewed. Measured
+		// 2026-10-27: three `nice -n 19 … dispatch comment …` calls reached Dispatch that way.
+		for (let index = at; index < words.length; index++) {
+			const [program, name, ...flags] = words.slice(index);
+			if (program === undefined || name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name.value)) continue;
+			const named = program.value.split("/").at(-1) === "dispatch";
+			const unread = [...new Set(scanWord(program.raw, 0).unread)];
+			const expansions = unread.filter(char => EXPANSIONS.includes(char));
+			if (!named && expansions.length === 0) continue;
+			// Past the command's position, only a literal `dispatch` is evidence that one would run: the
+			// word there is usually an argument, and an expansion in one (`echo $D comment`) names nothing.
+			if (index > at && !(named && unread.length === 0)) continue;
+			if (flags.some(flag => NO_SEND_FLAGS.includes(flag.value))) continue;
+			if (name.value === SPEC_ONLY_COMMAND && !flags.some(flag => SPEC_FLAGS.includes(flag.value.split("=", 1)[0]))) continue;
+			const runs = words[0];
+			const found = {
+				tool: `dispatch_${name.value.replaceAll("-", "_")}`,
+				label: `dispatch ${name.value}`,
+				// What the shell would run: the wrapper when one stands before the write, else nothing to name.
+				...(index > 0 && runs !== undefined && !ASSIGNMENT.test(runs.raw) && scanWord(runs.raw, 0).unread.length === 0 ? { ran: runs.value } : {}),
+			};
+			return unread.length === 0 ? found : { ...found, program: { namesDispatch: named, unread: named ? unread : expansions } };
+		}
 	}
 	return undefined;
 }
@@ -968,14 +1086,16 @@ function characters(chars: readonly string[]): string {
 	return named.length < 2 ? (named[0] ?? "") : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
 }
 /** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
-function renderUnreadable({ label, program }: UnreadableCommand): string {
+function renderUnreadable({ label, ran, program }: UnreadableCommand): string {
 	const why =
-		program === undefined
-			? ""
-			: program.namesDispatch
+		program !== undefined
+			? program.namesDispatch
 				? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
-				: ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`;
-	return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it calls \`dispatch\` by name or by a literal path (no \`$\`, \`~\`, glob or backslash) and is the whole bash call, optionally after one \`cd <path> && \` (a literal path too) and with one \`2>&1\` at the end of its first line, before or after a here-document opener.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+				: ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`
+			: ran !== undefined
+				? ` Here the call runs \`${ran}\`, not \`dispatch\`, and the \`${label}\` is an argument to it, so AskGate cannot run that command with \`--dry-run\`. Drop the \`${ran}\` and the rest of its arguments.`
+				: "";
+	return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it calls \`dispatch\` by name or by a literal path (no \`$\`, \`~\`, glob or backslash) and is the whole bash call, optionally after one \`cd <path> && \` (a literal path too), with one \`2>&1\` at the end of its first line, before or after a here-document opener, and with a pipeline of read-only filters (${PIPE_FILTERS.map(filter => `\`${filter}\``).join(", ")}) at its end.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no \`;\`, \`||\` or second \`&&\`, no other redirect, no wrapper command and nothing else in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
 }
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
