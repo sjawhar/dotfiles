@@ -3,8 +3,8 @@ Description=Check every 5 min that no filesystem on this machine is heading for 
 
 [Timer]
 OnActiveSec=30s
-# Five minutes. The fall that ended in the 2026-10-27T00:00:31Z ENOSPC ran at 33 GiB/h over its
-# last 38 minutes, so a period of 5 minutes costs 2.8 GiB of warning and the 240 s grace one more
+# Five minutes. The fall that ended in the 2026-10-27T00:00:31Z ENOSPC ran at 31 GiB/h over its
+# last 38 minutes, so a period of 5 minutes costs 2.6 GiB of warning and the 240 s grace one more
 # period. The hand-run loop this replaces sampled every 10 minutes, which is a quarter of the
 # headroom an 18 GiB floor leaves at that rate.
 OnUnitActiveSec=5min

@@ -12,7 +12,7 @@ there for 11 seconds. From the previous boot's journal:
 
 ```
 00:00:31Z rsyslogd[1617]: file '/var/log/syslog'[7] write error ... No space left on device
-          (8,500 of these between 00:00:31Z and 00:00:42Z)
+          (10,788 of these between 00:00:31Z and 00:00:42Z, of 10,796 ENOSPC lines in all)
 00:00:32Z dockerd[2600810]: Error running exec ...: OCI runtime exec failed:
           write /tmp/runc-process3426999125: no space left on device
 00:00:33Z systemd-journald[1593242]: Failed to open system journal: No space left on device
@@ -24,11 +24,11 @@ Nothing alerted. The only instrument running was a watch loop inside an agent se
 against a fixed floor — and which died with its session; its log stops at 08:58:33Z.
 (dispatch://INFRA-613)
 
-**A floor alone is not enough.** That night / fell from 62 GiB free at 18:12Z to 1 GiB at 23:53Z,
-and over the last 38 minutes it fell at 33 GiB/h. The floor watch's own log shows it crossing an
-18 GiB floor at 22:09:56Z — an hour and fifty minutes before the fill — so the floor said "low"
-all night and never said "about to land". The number that says that is the fill **rate**, and the
-horizon it buys.
+**A floor alone is not enough.** That night / fell from 62 GiB free at 18:12:24Z to 1 GiB at
+23:53:08Z — 61 GiB in 5 h 41 min — and over its last 38 minutes it fell at 31 GiB/h (20.4 GiB
+free at 23:15:10Z, 1 GiB at 23:53:08Z). The floor watch's own log shows it crossing an 18 GiB
+floor at 22:09:56Z — 110 minutes before the fill — so the floor said "low" all night and never
+said "about to land". The number that says that is the fill **rate**, and the horizon it buys.
 
 ## What it decides
 
