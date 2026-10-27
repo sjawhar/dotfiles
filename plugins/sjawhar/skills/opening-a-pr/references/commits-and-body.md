@@ -18,6 +18,8 @@ The fingerprints must match, except for an intended, explained content change. I
 
 ## The body
 
+An upstream PR body (rocq-prover, MetaRocq, any project we do not own) follows `skill://maintaining-prover-forks/references/pr-description.md` instead of this section: its maintainers need what the change does, why it is correct and what it costs, not our verification story. This section is for our own repositories.
+
 - Follow the repository's PR template. Put each required field and fact once, under the existing headings. Omit empty optional sections.
 - In `trajectory-labs-pbc/agent-c`, run `uv run python .github/scripts/checklist_routing.py check --local`, follow `docs/pre-pr-checklists.md`, and add the checklist evidence and affirmation line.
 - Write short paragraphs for a technical reader who missed the work. Aim for about 150 to 250 words. A small change can be shorter. Add detail only for material reviewer risks, and never pad or bury fields to meet a word target.
