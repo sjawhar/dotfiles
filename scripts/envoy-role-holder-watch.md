@@ -84,16 +84,48 @@ The session the pane last ran is resolved in this order, and the alert says whic
 3. the newest `tmux_resurrect_*.txt` save (last 60) whose line for this pane's place
    (session, window index, pane index) under the same title holds an `omp … --resume …` command.
 
-The alert names the pane and its place, how long it has been at a shell, the evidence (shell pid
-and its foreground group, the pane title), the session, its transcript and last write, the
-handover files (same resolution as above), and the restart as a ready command:
-`tmux send-keys -t %57 'omp --resume <id>' Enter`. When nothing resolves the session, it says so
-and names the directory to read. It goes to the INFRA lead and the lane's stream lead (the live
-`lead-*`/`stream-lead-*` holder in the session's working directory); when no stream lead resolves,
-the alert says so.
+The alert names the pane and its place, how long it has been at a shell, and the evidence (shell
+pid and its foreground group, the pane title). It then carries one named line of its own,
+`LAST TRANSCRIPT WRITE: <time> (<age> before this alert)` — the fact that separates a planned
+wind-down from a crash: OSS Verify read `00:51:59Z` off the first of these alerts and recognised
+its own planned stop. After it come the session and its source, the transcript, the handover
+files, and the restart as a ready command: `tmux send-keys -t %57 'omp --resume <id>' Enter`.
+When nothing resolves the session, it says so and names the directory to read.
 
-One alert per pane per incident, and one clear — when omp runs in the pane again (naming the pid),
-or when the pane is gone.
+It goes to the INFRA lead and the lane's stream lead — the live holder of a `lead-*` or
+`stream-lead-*` role whose working directory is the session's — and a `Told:` line names each
+recipient **with the role it was reached by** (`stream lead (lead-oss-verify) 01a14b36-…`), so a
+reader knows who else saw it. When no stream lead resolves, the alert says so.
+
+**A pane left at a shell is treated as a death. A deliberate stop closes its pane.** There is no
+allow-list, no intentionally-down flag, nothing to expire — a suppression entry nobody expires is
+exactly how a real death hides (OSS Verify lead, 2026-10-27, who asked for one and then preferred
+this rule). The failure mode the rule guards against is a lead who stops a lane and walks away
+leaving its pane open: that pane is indistinguishable from a crashed one, so it alerts. Closing
+the pane costs one `tmux kill-pane` and removes the lane from this check entirely.
+
+One alert per pane per incident, and one clear — when omp runs in the pane again (naming the
+pid), or when the pane is gone.
+
+## The two checks, and what neither covers
+
+This watcher now holds two independent checks for two different deaths:
+
+| The lane | Covered by |
+|---|---|
+| holds a role, pane gone or alive | the role check (its holder has no process) |
+| no role, pane alive with no agent in it | the pane check |
+| **no role, and its pane is gone** | **nothing here** |
+
+A lane whose pane is gone **and** whose transcript is gone is undetectable by this watcher. That
+is not hypothetical: the OSS Verify repo lane
+(`01a14b84-6cd3-71af-918c-db534cd8d762`) died on 2026-10-27 with no pane on this box or its VM,
+and a full-disk search on both found nothing of it but its Dispatch client state — no transcript,
+so neither check, and no file, has anything to key on.
+
+The durable fix is therefore not more watcher: **every lane holds an Envoy role**, and the role
+check then covers it however its pane ends. The repo lane is being re-dispatched holding the role
+`ossv-repo` precisely to close its own case.
 
 ## Inputs
 

@@ -613,12 +613,20 @@ def pane_alert_text(incident: dict, now: float) -> str:
         f" /proc/<pid>/stat tpgid), no omp process descends from it, and its title still reads"
         f" \"{incident['title']}\" (omp sets that `π` title; a plain shell never does). cwd {incident['cwd']}.",
     ]
+    last_write = incident.get("last_write")
+    # The one fact that separates a planned wind-down from a crash gets a line of its own: OSS
+    # Verify read 00:51:59Z off the first of these alerts and recognised its own planned stop.
+    lines.append(
+        f"LAST TRANSCRIPT WRITE: {iso(last_write)}"
+        + (f" ({human(now - last_write)} before this alert)." if last_write
+           else " -- no transcript resolved, so there is no last write to compare.")
+        + " A write at the moment the lane was wound down means a planned stop; one that stops"
+        " mid-work means it died."
+    )
     if session:
         lines.append(f"Last session: {session} ({incident['session_source']}).")
         if incident.get("transcript"):
-            lines.append(
-                f"Transcript: {incident['transcript']}, last written {iso(incident.get('last_write'))}."
-            )
+            lines.append(f"Transcript: {incident['transcript']}.")
     else:
         lines.append(
             "Last session: NOT RESOLVED -- this watch never saw omp run here, no transcript in"
@@ -635,6 +643,9 @@ def pane_alert_text(incident: dict, now: float) -> str:
     else:
         lines.append(f"Do: start the lane again in that pane, and {brief}.")
     lines += incident.get("notes") or []
+    told = incident.get("told_why") or []
+    if told:
+        lines.append("Told: " + "; ".join(told) + ".")
     lines.append(
         "One alert per pane per incident, one clear when omp runs there again. From"
         f" envoy-role-holder-watch (~/.dotfiles/scripts/envoy-role-holder-watch) on {socket.gethostname()}."
@@ -782,6 +793,8 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         incident["handover"] = handover_files(session if session and UUID_RE.fullmatch(session) else "-", directory)
         targets, notes = pane_recipients(directory, session, sessions)
         incident["notes"] = notes
+        # Named in the alert, so a reader knows who else saw it and under which role.
+        incident["told_why"] = [f"{why} {target}" for target, why in targets]
         text = pane_alert_text(incident, now)
         incident["alerted_at"] = now
         incident["told"] = [target for target, _ in targets]
