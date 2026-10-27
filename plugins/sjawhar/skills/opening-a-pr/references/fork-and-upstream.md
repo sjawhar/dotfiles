@@ -6,7 +6,7 @@
 - Most changes are fork members: commits on the fork release branch that the current release is building, with no upstream PR.
 - Not upstream material: a fork-specific workaround, an infra knob only we use, an unproven fix.
 - Upstream material: a defect any user of the library would hit, with a reproduction or red-to-green test, verified on a production-like surface.
-- Upstream PRs land under Sami's GitHub account, so the maintainer reads them as his: every claim in the body must be one you ran. They need no approval from Sami, not even for a force-push that replaces the PR's commits as the maintainers asked; every change to one passes the gate under "Upstream PRs".
+- Upstream PRs land under Sami's GitHub account, so the maintainer reads them as his: every claim in the body must be one you ran. Answering a maintainer's review needs no approval from him, not even for a force-push that replaces the PR's commits as the maintainers asked; a description does, as the voice bullet below says. Every change to one passes the gate under "Upstream PRs".
 
 ## Shipping a fork member
 
