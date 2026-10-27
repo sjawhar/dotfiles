@@ -9,6 +9,8 @@
 #     the repo owner's GitHub App, never the user's own login;
 #   - puts this checkout's shims/ first on PATH: a session keeps the PATH it started with, and a
 #     launching shell's mise hook may have put the real gh ahead of shims/gh;
+#   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
+#     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
@@ -42,6 +44,45 @@ done
 PATH="$shims"
 for dir in "${dirs[@]}"; do PATH+=":$dir"; done
 export PATH
+
+# Scratch and language caches on the big disk, where this machine has one (dispatch://INFRA-613).
+# Root holds every session's transcript, so a root that fills wedges the whole box, and on
+# 2026-10-27 it filled in 5h41m - not from one writer, but from thousands of tool runs writing
+# into root-resident scratch and caches (~/.cache/uv 4.4 GB, ~/.cargo 3.1 GB, ~/.cache/go-build,
+# /tmp). .bashrc sets the same cache variables for interactive shells; a session's tool shell is
+# not interactive, which is why they are set here, for the agent and everything it runs.
+#
+# A caller's value always wins, and a machine without the directory keeps the home defaults: a
+# laptop, and an agent box, which mounts an allow-list of $HOME and no /mnt at all
+# (agentbox/AGENTS.md), so no box session is given a path it would lose with the box.
+#
+# TMPDIR is per session and removed when the session ends: the directory is named for this
+# shell's pid, which is the agent's own pid (every hop from here is an exec), and
+# devbox/session-scratch-reap.service removes a directory no live process holds. A nested launch
+# (scripts/omp-fork) inherits the session's directory rather than making one that outlives it.
+nvme_home="/mnt/nvme/${USER:-$(id -un)}"
+if [[ -d "$nvme_home" ]]; then
+    export UV_CACHE_DIR="${UV_CACHE_DIR:-$nvme_home/cache/uv}"
+    export GOCACHE="${GOCACHE:-$nvme_home/gocache}"
+    export GOMODCACHE="${GOMODCACHE:-$nvme_home/gomodcache}"
+    # cargo keeps its registry and git checkouts under CARGO_HOME and has no variable for those
+    # alone, so the whole directory moves and bin/ links back to ~/.cargo/bin, which is on PATH
+    # and holds rustup's shims and every `cargo install` binary. Its own default, $HOME/.cargo,
+    # counts as unset: `mise env` exports exactly that value, so every session launched through
+    # shims/omp arrives here with it already set and no session would ever move.
+    if [[ "${CARGO_HOME:-$HOME/.cargo}" == "$HOME/.cargo" ]] && mkdir -p "$nvme_home/cargo" 2>/dev/null; then
+        if [[ -d "$HOME/.cargo/bin" && ! -e "$nvme_home/cargo/bin" ]]; then
+            ln -sfn "$HOME/.cargo/bin" "$nvme_home/cargo/bin" 2>/dev/null || true
+        fi
+        export CARGO_HOME="$nvme_home/cargo"
+    fi
+    if [[ -n "${AGENT_SESSION_SCRATCH:-}" && -d "${AGENT_SESSION_SCRATCH:-}" ]]; then
+        export TMPDIR="$AGENT_SESSION_SCRATCH"
+    elif mkdir -p -m 700 "$nvme_home/session-tmp" 2>/dev/null \
+        && scratch="$(mktemp -d "$nvme_home/session-tmp/$$-XXXXXXXX" 2>/dev/null)"; then
+        export AGENT_SESSION_SCRATCH="$scratch" TMPDIR="$scratch"
+    fi
+fi
 
 prog=""
 if [[ "$agent" == */* ]]; then

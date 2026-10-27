@@ -1,0 +1,14 @@
+[Unit]
+Description=Hold the shared uv, cargo and Go module caches on /mnt/nvme/<user> under their size caps
+# Caps and their evidence: devbox/nvme-cache-cap.md. The Go BUILD cache has its own unit,
+# devbox/gocache-cap.service (80 GB).
+ConditionPathIsDirectory=/mnt/nvme/%u
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+# A user unit's PATH holds neither the dotfiles nor mise's shims, where `uv` and `go` are.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=MISE_DATA_DIR=%h/.mise
+ExecStart=%h/.dotfiles/devbox/nvme-cache-cap

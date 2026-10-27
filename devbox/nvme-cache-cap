@@ -1,0 +1,103 @@
+#!/bin/bash
+# nvme-cache-cap: hold the shared language caches on the big disk under a size cap.
+#
+# scripts/agent-session and .bashrc point every session's uv, cargo and Go module caches at
+# /mnt/nvme/<user> (dispatch://INFRA-613), where they are shared by every session and reused
+# across them. Shared and reused is the point; unbounded is not, so each one has a cap here and
+# devbox/nvme-cache-cap.service checks them hourly. The Go BUILD cache has its own, older unit
+# (devbox/gocache-cap, 80 GB). devbox/nvme-cache-cap.md says what each cap costs and how to
+# turn it off.
+#
+# Every cap is enforced with the tool's own cleaner, and over the cap the cache is emptied rather
+# than trimmed: none of these tools can trim to a size, and everything removed is re-downloadable
+# or rebuildable. Nothing here is a working copy.
+#
+# NVME_CACHE_ROOT, UV_CACHE_CAP_BYTES, CARGO_CACHE_CAP_BYTES and GOMODCACHE_CAP_BYTES override the
+# defaults, so a test can run the unit against scratch directories. --dry-run reports and cleans
+# nothing.
+set -euo pipefail
+
+root="${NVME_CACHE_ROOT:-/mnt/nvme/$(id -un)}"
+uv_cap="${UV_CACHE_CAP_BYTES:-40000000000}"
+cargo_cap="${CARGO_CACHE_CAP_BYTES:-20000000000}"
+modcache_cap="${GOMODCACHE_CAP_BYTES:-40000000000}"
+dry=""
+[[ "${1:-}" == --dry-run ]] && dry=1
+
+status=0
+
+size_of() { du -sb "$1" | cut -f1; }
+
+report() { # report NAME DIR SIZE CAP
+    echo "nvme-cache-cap: $1 $2 is $3 bytes, cap $4"
+}
+
+# uv: `uv cache prune` removes the entries no environment on this machine still points at, which
+# is the cheap pass; `uv cache clean` empties the cache and is what a cap over budget needs.
+uv_dir="${UV_CACHE_DIR:-$root/cache/uv}"
+if [[ -d "$uv_dir" && "$uv_dir" == "$root"/* ]]; then
+    size="$(size_of "$uv_dir")"
+    if ((size <= uv_cap)); then
+        report uv "$uv_dir" "$size" "$uv_cap"
+    elif [[ -n "$dry" ]]; then
+        echo "nvme-cache-cap: uv $uv_dir is $size bytes, over the cap of $uv_cap; would prune, then clean if still over"
+    elif ! command -v uv >/dev/null 2>&1; then
+        echo "nvme-cache-cap: uv $uv_dir is $size bytes, over the cap of $uv_cap, and uv is not on PATH" >&2
+        status=1
+    else
+        UV_CACHE_DIR="$uv_dir" uv cache prune >/dev/null
+        after="$(size_of "$uv_dir")"
+        if ((after > uv_cap)); then
+            UV_CACHE_DIR="$uv_dir" uv cache clean >/dev/null
+            after="$(size_of "$uv_dir")"
+            echo "nvme-cache-cap: uv $uv_dir was $size bytes, over the cap of $uv_cap; pruned and cleaned; now $after bytes"
+        else
+            echo "nvme-cache-cap: uv $uv_dir was $size bytes, over the cap of $uv_cap; pruned; now $after bytes"
+        fi
+    fi
+fi
+
+# cargo: the registry sources, their .crate downloads and the git checkouts are the whole growth
+# and all three come back from the network. registry/index, the config and bin/ (a symlink to
+# ~/.cargo/bin, where rustup's shims and every `cargo install` binary live) are never touched.
+cargo_dir="${CARGO_HOME:-$root/cargo}"
+if [[ -d "$cargo_dir" && "$cargo_dir" == "$root"/* ]]; then
+    size="$(size_of "$cargo_dir")"
+    if ((size <= cargo_cap)); then
+        report cargo "$cargo_dir" "$size" "$cargo_cap"
+    else
+        targets=()
+        for sub in registry/cache registry/src git/checkouts git/db; do
+            [[ -d "$cargo_dir/$sub" ]] && targets+=("$cargo_dir/$sub")
+        done
+        if [[ -n "$dry" ]]; then
+            echo "nvme-cache-cap: cargo $cargo_dir is $size bytes, over the cap of $cargo_cap; would remove ${targets[*]:-nothing}"
+        elif ((${#targets[@]} == 0)); then
+            echo "nvme-cache-cap: cargo $cargo_dir is $size bytes, over the cap of $cargo_cap, and holds none of the cache directories" >&2
+            status=1
+        else
+            rm -rf -- "${targets[@]}"
+            echo "nvme-cache-cap: cargo $cargo_dir was $size bytes, over the cap of $cargo_cap; removed ${targets[*]}; now $(size_of "$cargo_dir") bytes"
+        fi
+    fi
+fi
+
+# Go modules: `go clean -modcache` is the only supported way to shrink it, and it empties it.
+modcache_dir="${GOMODCACHE:-$root/gomodcache}"
+if [[ -d "$modcache_dir" && "$modcache_dir" == "$root"/* ]]; then
+    size="$(size_of "$modcache_dir")"
+    if ((size <= modcache_cap)); then
+        report gomodcache "$modcache_dir" "$size" "$modcache_cap"
+    elif [[ -n "$dry" ]]; then
+        echo "nvme-cache-cap: gomodcache $modcache_dir is $size bytes, over the cap of $modcache_cap; would run go clean -modcache"
+    elif ! command -v go >/dev/null 2>&1; then
+        echo "nvme-cache-cap: gomodcache $modcache_dir is $size bytes, over the cap of $modcache_cap, and go is not on PATH" >&2
+        status=1
+    else
+        # go clean reads the module in its working directory; / has none.
+        (cd / && GOMODCACHE="$modcache_dir" go clean -modcache)
+        echo "nvme-cache-cap: gomodcache $modcache_dir was $size bytes, over the cap of $modcache_cap; cleaned; now $(size_of "$modcache_dir") bytes"
+    fi
+fi
+
+exit "$status"

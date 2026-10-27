@@ -45,4 +45,12 @@ arm_user_timer devbox tmp-empty-prune
 # once it passes 80 GB (devbox/gocache-cap.service).
 arm_user_timer devbox gocache-cap
 
+# Each agent session's own TMPDIR under /mnt/nvme/<user>/session-tmp (scripts/agent-session),
+# removed once no live process holds it (devbox/session-scratch-reap.md).
+arm_user_timer devbox session-scratch-reap
+
+# The shared uv, cargo and Go module caches on /mnt/nvme/<user>, each held under its own cap
+# (devbox/nvme-cache-cap.md).
+arm_user_timer devbox nvme-cache-cap
+
 echo "--- Devbox setup complete ---"

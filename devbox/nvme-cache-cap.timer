@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly: hold the shared uv, cargo and Go module caches under their caps (nvme-cache-cap.service)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
