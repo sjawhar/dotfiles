@@ -1,0 +1,142 @@
+#!/bin/bash
+# session-scratch-reap: remove the per-session scratch directories under
+# /mnt/nvme/<user>/session-tmp whose session is gone.
+#
+# scripts/agent-session gives every agent session a TMPDIR of its own there, exported as
+# AGENT_SESSION_SCRATCH and named for the session's own pid (every hop from agent-session to the
+# agent is an exec, so that pid is the agent's). Nothing else removes it: a transient systemd
+# scope, which is what shims/omp starts a capped session in, cannot carry an ExecStopPost
+# ("Unknown assignment: ExecStopPost="), and the agentbox exit path removes only a box's own
+# directory, inside a box that mounts no /mnt/nvme at all. So this timer is the second half of
+# that lifecycle, and devbox/session-scratch-reap.md says how to turn it off.
+#
+# Liveness, never age (skill://disk-hygiene). A directory is live while:
+#   - the process it is named for still names it in AGENT_SESSION_SCRATCH or TMPDIR (the cheap
+#     test, one read per directory, and the answer for a session that is simply still running);
+#   - or, for a directory that fails that test, any process of this user names it in those
+#     variables or stands in it (the second pass, which costs one walk of /proc and runs only
+#     when there is something to remove): a tool subprocess or a detached job outliving its
+#     session still owns its scratch.
+# A pid that exists and whose environment cannot be read is not proof of death, so its directory
+# stays. Age only KEEPS a directory longer, never marks one dead: one younger than the grace
+# window stays whatever /proc says, which covers the moment between agent-session's mkdir and the
+# agent's exec.
+#
+# SESSION_SCRATCH_ROOT (default /mnt/nvme/<user>/session-tmp), SESSION_SCRATCH_GRACE_SECONDS
+# (default 600) and SESSION_SCRATCH_IO_PRESSURE_MAX (default 20) override the defaults, so a test
+# can run the unit against a scratch root. --dry-run decides and prints, removing nothing.
+set -euo pipefail
+
+root="${SESSION_SCRATCH_ROOT:-/mnt/nvme/$(id -un)/session-tmp}"
+grace="${SESSION_SCRATCH_GRACE_SECONDS:-600}"
+pressure_max="${SESSION_SCRATCH_IO_PRESSURE_MAX:-20}"
+dry=""
+[[ "${1:-}" == --dry-run ]] && dry=1
+
+if [[ ! -d "$root" ]]; then
+    echo "session-scratch-reap: $root is absent; nothing to reap"
+    exit 0
+fi
+
+# Deleting under IO pressure hangs every shell on the box (skill://disk-hygiene). The next run is
+# two minutes away, so skipping a period costs nothing.
+pressure=0
+if [[ -r /proc/pressure/io ]]; then
+    pressure="$(sed -n 's/^full .*avg10=\([0-9.]*\).*/\1/p' /proc/pressure/io)"
+    pressure="${pressure:-0}"
+fi
+if [[ -z "$dry" ]] && awk -v p="$pressure" -v m="$pressure_max" 'BEGIN{exit !(p+0 > m+0)}'; then
+    echo "session-scratch-reap: io pressure full avg10=$pressure is over $pressure_max; nothing removed this run"
+    exit 0
+fi
+
+kept_live=0 kept_young=0 removed=0 failed=0
+candidates=()
+
+# holds DIR PID: does this pid's environment name DIR? 0 yes, 1 no, 2 cannot tell (the pid is
+# this user's and exists, but its environment could not be read).
+holds() {
+    local dir="$1" pid="$2" value environ=()
+    [[ -d "/proc/$pid" && -O "/proc/$pid" ]] || return 1
+    { mapfile -d '' -t environ < "/proc/$pid/environ"; } 2>/dev/null || return 2
+    for value in "${environ[@]}"; do
+        case "$value" in
+            AGENT_SESSION_SCRATCH="$dir" | TMPDIR="$dir") return 0 ;;
+        esac
+    done
+    return 1
+}
+
+now="$(date +%s)"
+for dir in "$root"/*; do
+    [[ -d "$dir" && ! -L "$dir" ]] || continue
+    owner="${dir##*/}"
+    owner="${owner%%-*}"
+    verdict=1
+    if [[ "$owner" =~ ^[0-9]+$ ]]; then
+        holds "$dir" "$owner" && verdict=0 || verdict=$?
+    fi
+    if ((verdict == 0)); then
+        echo "session-scratch-reap: keep $dir (live: its own pid $owner)"
+        kept_live=$((kept_live + 1))
+        continue
+    fi
+    if ((verdict == 2)); then
+        echo "session-scratch-reap: keep $dir (pid $owner exists, environment unreadable)"
+        kept_live=$((kept_live + 1))
+        continue
+    fi
+    age=$((now - $(stat -c %Y "$dir" 2>/dev/null || echo "$now")))
+    if ((age < grace)); then
+        echo "session-scratch-reap: keep $dir (${age}s old, under the ${grace}s grace)"
+        kept_young=$((kept_young + 1))
+        continue
+    fi
+    candidates+=("$dir")
+done
+
+# Second pass, only for what the first pass would remove: one walk of /proc for any other process
+# of this user that holds one of these directories.
+if ((${#candidates[@]})); then
+    declare -A held=()
+    for proc in /proc/[0-9]*; do
+        pid="${proc#/proc/}"
+        [[ -O "$proc" ]] || continue
+        { mapfile -d '' -t environ < "$proc/environ"; } 2>/dev/null || continue
+        for value in "${environ[@]}"; do
+            case "$value" in
+                AGENT_SESSION_SCRATCH=* | TMPDIR=*) value="${value#*=}" ;;
+                *) continue ;;
+            esac
+            for dir in "${candidates[@]}"; do
+                [[ "$value" == "$dir" || "$value" == "$dir"/* ]] && held["$dir"]="$pid"
+            done
+        done
+        cwd="$(readlink "$proc/cwd" 2>/dev/null)" || continue
+        for dir in "${candidates[@]}"; do
+            [[ "$cwd" == "$dir" || "$cwd" == "$dir"/* ]] && held["$dir"]="$pid"
+        done
+    done
+
+    for dir in "${candidates[@]}"; do
+        if [[ -n "${held["$dir"]:-}" ]]; then
+            echo "session-scratch-reap: keep $dir (live: pid ${held["$dir"]} is still in it)"
+            kept_live=$((kept_live + 1))
+            continue
+        fi
+        age=$((now - $(stat -c %Y "$dir" 2>/dev/null || echo "$now")))
+        if [[ -n "$dry" ]]; then
+            echo "session-scratch-reap: would remove $dir (no live process, ${age}s old)"
+            removed=$((removed + 1))
+        elif rm -rf -- "$dir"; then
+            echo "session-scratch-reap: removed $dir (no live process, ${age}s old)"
+            removed=$((removed + 1))
+        else
+            echo "session-scratch-reap: FAILED to remove $dir" >&2
+            failed=$((failed + 1))
+        fi
+    done
+fi
+
+echo "session-scratch-reap: $root: ${removed} removed, ${kept_live} live, ${kept_young} inside the grace, ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
+((failed == 0))

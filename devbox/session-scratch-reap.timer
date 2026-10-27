@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 2 minutes: remove dead sessions' scratch directories (session-scratch-reap.service)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

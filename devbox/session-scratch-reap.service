@@ -1,0 +1,14 @@
+[Unit]
+Description=Remove the per-session scratch directories (/mnt/nvme/<user>/session-tmp) whose session is gone
+# scripts/agent-session gives every agent session its own TMPDIR there, and nothing else can
+# remove it: a transient systemd scope (what shims/omp starts a capped session in) refuses
+# ExecStopPost, and an agent box, whose exit path does remove its own directory, mounts no
+# /mnt/nvme. The decision is process liveness, never age: devbox/session-scratch-reap.md.
+ConditionPathIsDirectory=/mnt/nvme/%u/session-tmp
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.dotfiles/devbox/session-scratch-reap
