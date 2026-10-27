@@ -11,9 +11,9 @@ loop inside an agent session (/mnt/nvme/sami/tmp/infra-wake/disk-floor-watch.sh)
 (dispatch://INFRA-613)
 
 A fixed floor alone is not enough, and ten minutes is not enough. On that night / fell from
-62 GiB free at 18:12Z to 1 GiB at 23:53Z, and over the last 38 minutes it fell at 33 GiB/h: a
-floor at 18 GiB left 33 minutes, and the floor watch's own log shows it crossing that floor at
-22:09Z, more than an hour before the fill, so the floor said "low" for hours and never said
+62 GiB free at 18:12:24Z to 1 GiB at 23:53:08Z, and over the last 38 minutes it fell at
+31 GiB/h: a floor at 18 GiB left 33 minutes, and the floor watch's own log shows it crossing it
+at 22:09:56Z, 110 minutes before the fill, so the floor said "low" for hours and never said
 "about to land". The number that says that is the fill RATE, and the horizon it buys.
 
 What one run does, with `statvfs` and /proc reads only, no model call:
