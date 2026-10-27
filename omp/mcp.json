@@ -10,6 +10,7 @@
       }
     },
     "apify": {
+      "lazy": true,
       "command": "secrets",
       "args": [
         "APIFY_TOKEN",
