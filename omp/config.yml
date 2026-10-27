@@ -217,9 +217,6 @@ skills:
     - ce-work
     - ce-worktree
     - lfg
-    # dispatch://INFRA-245 takes two of ce-noslop's tests into our own writing
-    # rules; the skill itself (41-rule catalog) stays hidden.
-    - ce-noslop
     # dispatch://INFRA-323: writing-agent-skills (plugins/sjawhar) is the one
     # skill-writing skill. These two contradict it, and an agent that loads
     # both gets two procedures. superpowers' writing-skills (v6.3.0) keeps
