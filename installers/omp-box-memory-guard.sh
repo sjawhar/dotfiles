@@ -47,6 +47,26 @@ command -v python3 >/dev/null || {
     echo "omp-box-memory-guard: no envoy.json; the guard would have nowhere to send its alerts" >&2
     exit 1
 }
+# earlyoom must stay armed once there is swap. earlyoom acts only when memory AND free swap are
+# both under their thresholds; its swap default is 10%, which a swap file keeps satisfied until
+# the box is deep into an incident, so adding swap disarms earlyoom unless its drop-in sets a
+# non-binding -s (theorem-labs/agent-infra PR #602 sets `-s 100,100`). If earlyoom is running
+# here without such an -s, creating swap would silently remove the last-resort net, so refuse to
+# until that PR has landed on this box. A box with no earlyoom (nothing to disarm) is fine.
+earlyoom_swap_ok() {
+    systemctl is-active -q earlyoom.service 2>/dev/null || return 0 # no earlyoom: nothing to disarm
+    local args
+    args=$(tr '\0' ' ' < "/proc/$(systemctl show -p MainPID --value earlyoom.service)/cmdline" 2>/dev/null) || return 1
+    # Armed means an -s whose SIGTERM threshold is 100%: free swap is then never the blocker.
+    [[ "$args" == *" -s 100,"* || "$args" == *" -s 100 "* ]]
+}
+swap_wanted=1
+if ! earlyoom_swap_ok; then
+    swap_wanted=
+    echo "omp-box-memory-guard: earlyoom is running without an '-s 100,...' that keeps it armed" >&2
+    echo "  with swap; NOT creating swap (it would disarm earlyoom). Land theorem-labs/agent-infra" >&2
+    echo "  PR #602 on this box first, then re-run. The slice memory.max and the guard still install." >&2
+fi
 
 # --- 1. swap -------------------------------------------------------------------------------
 # A file on the NVMe array, not zram. zram buys capacity by compressing, and its pool lives in
@@ -61,9 +81,9 @@ command -v python3 >/dev/null || {
 # MemorySwapMax=0, so swap never lets one session grow past its own ceiling. That is the right
 # interaction and the shim should keep it -- a cap that could be paid for in swap would stop
 # bounding the session's footprint and would thrash the array instead of killing one lane. Swap
-# is here for everything else: the login scope's cold pages, idle services, and the reclaim
-# headroom that keeps `memory.high` a slowdown rather than a stall.
-if [ -d "$(dirname "$SWAP_DIR")" ]; then
+# is here for everything else: the login scope's cold pages, idle services, and the box-wide
+# reclaim headroom the kswapd watermarks (part 2) work against.
+if [ -n "$swap_wanted" ] && [ -d "$(dirname "$SWAP_DIR")" ]; then
     if ! swapon --show=NAME --noheadings | grep -qxF "$SWAP_FILE"; then
         # `sudo test`, not `[ -f ]`: the swap directory is 0700 root, so an unprivileged
         # stat of the file inside it says "no such file" and the install silently skips the
@@ -97,7 +117,7 @@ if [ -d "$(dirname "$SWAP_DIR")" ]; then
         echo "Recording ${SWAP_FILE} in /etc/fstab..."
         printf '%s none swap sw,nofail 0 0\n' "$SWAP_FILE" | sudo tee -a /etc/fstab >/dev/null
     fi
-else
+elif [ -n "$swap_wanted" ]; then
     echo "omp-box-memory-guard: $(dirname "$SWAP_DIR") is not on this machine; no swap file" >&2
 fi
 
@@ -126,11 +146,10 @@ if ! sudo diff -q "${DOTFILES_DIR}/devbox/user-slice-memory-guard.conf" "$SLICE_
     sudo systemctl daemon-reload
 fi
 # daemon-reload re-applies a slice's cgroup attributes to the live cgroup; prove it did.
-slice_high=$(systemctl show "user-$(id -u).slice" -p MemoryHigh --value 2>/dev/null || echo unknown)
 slice_max=$(systemctl show "user-$(id -u).slice" -p MemoryMax --value 2>/dev/null || echo unknown)
-echo "user-$(id -u).slice: MemoryHigh=${slice_high} MemoryMax=${slice_max}"
-if [ "$slice_high" = infinity ] || [ "$slice_high" = unknown ]; then
-    echo "omp-box-memory-guard: the slice did not take its MemoryHigh; check ${SLICE_DROPIN}" >&2
+echo "user-$(id -u).slice: MemoryMax=${slice_max}"
+if [ "$slice_max" = infinity ] || [ "$slice_max" = unknown ]; then
+    echo "omp-box-memory-guard: the slice did not take its MemoryMax; check ${SLICE_DROPIN}" >&2
     exit 1
 fi
 
@@ -145,7 +164,9 @@ mkdir -p "$HOME/.config/systemd/user"
 ensure_link "$HOME/.dotfiles/omp/omp-box-memory-guard.service" \
     "$HOME/.config/systemd/user/omp-box-memory-guard.service"
 systemctl --user daemon-reload
-systemctl --user enable --now omp-box-memory-guard.service
+systemctl --user enable omp-box-memory-guard.service
+# restart, not just start: a re-run after the script changed must load the new code.
+systemctl --user restart omp-box-memory-guard.service
 systemctl --user is-active --quiet omp-box-memory-guard.service \
     || { echo "omp-box-memory-guard: the service did not start" >&2; exit 1; }
 echo "omp-box-memory-guard: armed ($(swapon --show=NAME,SIZE --noheadings | tr '\n' ' '))"

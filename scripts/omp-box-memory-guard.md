@@ -35,12 +35,17 @@ measuring:
 |---|---|---|
 | 1 | **Swap**: 64 GiB file on the NVMe array, `vm.swappiness=10` | `installers/omp-box-memory-guard.sh`, `/etc/fstab` |
 | 2 | **Reclaim earlier**: `vm.watermark_scale_factor=100`, `vm.min_free_kbytes` 0.4% of RAM | `devbox/sysctl-memory-guard.conf` → `/etc/sysctl.d/70-omp-memory-guard.conf` |
-| 3 | **Bound the aggregate**: `MemoryHigh=82%`, `MemoryMax=92%` on `user-<uid>.slice` | `devbox/user-slice-memory-guard.conf` → `/etc/systemd/system/user-.slice.d/60-omp-memory-guard.conf` |
+| 3 | **Bound the aggregate**: `MemoryMax=92%` on `user-<uid>.slice` (no `MemoryHigh`, see below) | `devbox/user-slice-memory-guard.conf` → `/etc/systemd/system/user-.slice.d/60-omp-memory-guard.conf` |
 | 4 | **Shed one session**: this script | `omp/omp-box-memory-guard.service` (systemd `--user`) |
 
-Below all four, agent-infra's earlyoom (`-m 10,5`, its own drop-in) is untouched and stays the
-last-resort net. This guard is deliberately **above** it: shedding one whole session cleanly,
-with the session told why, beats earlyoom picking the largest RSS it is allowed to kill.
+Below all four, agent-infra's earlyoom (`-m 10,5`, its own drop-in) is meant to be the
+last-resort net, and this guard is deliberately **above** it: shedding one whole session
+cleanly, with the session told why, beats earlyoom picking the largest RSS it is allowed to
+kill. **Caveat:** a swap file disarms earlyoom's AND-of-memory-and-swap test until its `-s`
+threshold is raised (theorem-labs/agent-infra PR #602 sets `-s 100,100`). Until that lands on a
+box, earlyoom is not a reliable net there, and the slice's hard `memory.max` plus this guard are
+the protection — which is why the installer refuses to create swap on a box whose earlyoom has
+no armed `-s`.
 
 ### 1. Swap, and why a file rather than zram
 
@@ -54,23 +59,26 @@ session.
 `MemorySwapMax=0`, so its ceiling stays a ceiling. That is the right interaction and the shim
 should keep it: a cap payable in swap would stop bounding the session's footprint and would
 thrash the array instead of killing one lane. Swap is here for everything else — the login
-scope's cold pages, idle services, and the reclaim headroom that makes `memory.high` a
-slowdown instead of a stall. Without swap the kernel cannot reclaim anonymous memory at all,
-which is exactly how 09:00Z became 95% system cpu.
+scope's cold pages, idle services, and the box-wide reclaim headroom the kswapd watermarks work
+against. Without swap the kernel cannot reclaim anonymous memory at all, which is exactly how
+09:00Z became 95% system cpu.
 
-### 3. The ceiling on the slice, and what it costs
+### 3. The ceiling on the slice: `MemoryMax` only, and why no `MemoryHigh`
 
-`MemoryHigh=82%` (206 GiB here) **throttles**: over it the kernel reclaims inside the slice and
-charges the reclaim to whichever task keeps allocating. Nothing is killed; sessions get slower.
-82% is above the slice's measured steady state (180-193 GiB, about 72 GiB of it page cache the
-kernel gives back for free) and below the 240 GiB peak it reached while the box was dying.
+`MemoryMax=92%` (231.5 GiB here) is the hard stop. Past it the kernel OOM-kills **inside the
+slice**, so the victim is one of the user's own processes and never journald, sshd, tailscaled,
+dockerd or secretsd: 20 GiB stays outside the slice for them and the kernel, against a measured
+steady `system.slice` of 3.4 GiB (its own `MemoryMin=896M` from agent-infra is untouched).
 
-`MemoryMax=92%` (231.5 GiB) is the hard stop, 25 GiB above the throttle — about one minute at
-the fastest sustained fall measured here (23 GiB/min), which is the time this guard needs to
-shed (a 5 s cycle plus a 10 s SIGTERM grace). Past it the kernel OOM-kills **inside the slice**,
-so the victim is one of the user's own processes and never journald, sshd, tailscaled, dockerd
-or secretsd: 20 GiB stays outside the slice for them, against a measured steady `system.slice`
-of 3.4 GiB (its own `MemoryMin=896M` from agent-infra is untouched).
+**There is deliberately no `MemoryHigh`.** A `memory.high` throttles by charging the allocating
+task for the slice's reclaim whenever `memory.current` (page cache included) is over it. On a
+Rocq/Lean build farm the slice legitimately runs cache-heavy and sits on any `memory.high`: set
+at 82% it logged **114,783 throttle events in 29 minutes**, churning ~82 GiB of file cache and
+pushing ~45 GiB to swap — a throughput charge on every session for no gain, since page cache is
+reclaimed for free anyway. "Reclaim before the kill" is done box-wide and per-task-free by the
+kswapd watermarks (part 2); the graduated step between normal operation and the hard cap is this
+guard, which sheds one session when the slice's **unreclaimable** memory nears the cap, before
+the kernel OOMs.
 
 ## The thresholds, and where they come from
 
@@ -96,10 +104,20 @@ Measured over the 32 h to 2026-10-27T14:53Z, 1,911 one-minute samples from early
 * earlyoom SIGTERMs at 10% = 24.2 GiB, **below** SHED by 7.3 GiB, so this guard always acts
   first and earlyoom only sees a box this guard failed to save.
 
-There is a second shed trigger that does not look at MemAvailable at all: the slice **over its
-`memory.high`** with its own `full` pressure at or above 25% for two cycles. That is the
-throttle biting and getting nowhere — without it, a slice pinned over `high` leaves every
-session in it crawling and nobody decides anything.
+Two more triggers do not look at MemAvailable at all, because MemAvailable counts the slice's
+tens of GiB of reclaimable file cache as free and so stays high while the slice fills toward its
+hard cap:
+
+* **the slice's own unreclaimable headroom** to `memory.max`: warn under 25 GiB, shed under
+  12 GiB, measured on `anon + shmem + kernel + sock` (what reclaim and swap cannot give back),
+  never on `memory.current`. Plus a shed when the slice's **own** `memory.events.local`
+  `oom_kill` or `max` counter *rises* since the last cycle — the slice's hard cap actually
+  firing. It is `memory.events.local`, never `memory.events`: the latter aggregates the
+  per-session child scopes hitting their own 8–24 GiB caps (2,750 of them here) and says nothing
+  about the slice's own cap. The rise is measured against the previous cycle, so a non-zero
+  historical count is not an incident.
+* **free swap under 25%**: the design's reclaim relief is then spent, and it is where earlyoom
+  (once PR #602 arms it) comes back within reach.
 
 ## How a session is measured, and who gets shed
 
@@ -108,8 +126,11 @@ definition of what a session is, used by the detector and by the thing that kill
 
 * **a scope of its own** (`shims/omp` with `OMP_MEMORY_MAX`): the scope's unreclaimable memory,
   `anon + shmem + kernel + sock` — exactly what the memcg OOM killer compares with the ceiling;
-* **no scope of its own** (the common shape here): the `omp` process **plus every descendant**,
-  summed from `/proc/<pid>/statm`. The process alone undercounts: at the 2026-10-27T05:55:14Z
+* **no scope of its own** (the common shape here): the `omp` process **plus every descendant**.
+  A first cheap pass sums `/proc/<pid>/statm` RSS; the top few are then re-measured on summed
+  **Pss** (`/proc/<pid>/smaps_rollup`), which charges a shared page to its sharers in equal
+  parts and so counts what killing the tree actually frees, instead of double-counting the
+  pages a 1,463-process tree shares. The process alone undercounts: at the 2026-10-27T05:55:14Z
   kill omp held 14.9 GiB of the 24 GiB that hit the ceiling and its tool subprocesses held the
   rest.
 
@@ -119,8 +140,11 @@ catches anything forked while the guard was deciding); an unscoped one through i
 process first, so it can take its own children down, and then its whole tree.
 
 The guard never sheds itself, never anything outside `/user.slice`, never a session under
-`--min-victim` (1 GiB), and never more than one session per cycle or oftener than 20 s unless
-the box is under the HARD level.
+`--min-victim` (1 GiB), and never more than one session per cycle, oftener than 20 s, or within
+a 15 s **cooldown** after a SIGKILL (so MemAvailable reflects the freed memory before the next
+decision — one spike must not cascade into shedding bystander sessions) — all unless the box is
+under the HARD level. A **protect-list** (`--protect`, seeded with the INFRA lead and chief of
+staff) spares a coordinator session until it is the only candidate left.
 
 ## Who hears about it
 

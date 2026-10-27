@@ -22,8 +22,9 @@ What one run does, with /proc and /sys reads only, no transcript reading and no 
      from the scope up to the cgroup root. When every level says `max`, the ceiling is the
      machine's RAM and a crossing there is a box-wide OOM, which is said in the alert.
   3. Read what the kernel cannot reclaim: `anon + shmem + kernel + sock` from the scope's
-     memory.stat. Swap is off on this box (MemorySwapMax=0, SwapTotal 0), so file cache is the
-     only reclaimable part of memory.current and must not count towards the ceiling. This is a
+     memory.stat. A scope `shims/omp` starts carries MemorySwapMax=0, so its anonymous memory
+     cannot be paged out even though the box now has a 64 GiB swap file: file cache is the only
+     reclaimable part of its memory.current and must not count towards the ceiling. This is a
      better predictor than the omp process's RSS: at the 05:55:14Z kill the omp process held
      14.9 GiB of the 24 GiB that hit the ceiling and 20 python3 tool subprocesses in the same
      scope held the rest, so an RSS threshold alone would have been watching 62% of the number
@@ -233,9 +234,12 @@ def effective_limit(cgroup: str) -> tuple[int, str, bool]:
 def scope_pressure(cgroup: str) -> tuple[int, int, dict[str, int]]:
     """(unreclaimable bytes, memory.current, the memory.stat fields behind them).
 
-    Unreclaimable is anon + shmem + kernel + sock. Swap is off (MemorySwapMax=0, SwapTotal 0),
-    so file cache is the only part of memory.current the kernel can give back under pressure,
-    and counting it towards the ceiling would alert on a scope that is in no danger.
+    Unreclaimable is anon + shmem + kernel + sock. In a cgroup that `shims/omp` starts with
+    MemorySwapMax=0 that is exact: its anonymous memory cannot be paged out even though the box
+    now has swap, so file cache is the only part of memory.current the kernel can give back, and
+    counting cache towards the ceiling would alert on a scope in no danger. A caller measuring a
+    cgroup that CAN swap (a slice with no MemorySwapMax) gets a conservative over-estimate of the
+    danger, which is the safe direction for a guard.
     """
     directory = CGROUP_ROOT / cgroup.strip("/")
     current = read_int(directory / "memory.current") or 0
@@ -456,7 +460,7 @@ def alert_text(scope: str, incident: dict, now: float, kind: str) -> str:
         f" {gib(limit)} ceiling -- {100 * usage / limit:.0f}%, {gib(headroom)} left. The ceiling"
         f" is {incident.get('limit_from')}. The scope's memory.current is"
         f" {gib(incident.get('current') or 0)}; the difference is file cache, which the kernel can"
-        f" reclaim. Swap is off (MemorySwapMax=0), so the rest it cannot.{eta}"
+        f" reclaim. This scope runs with MemorySwapMax=0, so the rest it cannot.{eta}"
         if limited
         else f"Memory: this omp process holds {gib(usage)} RSS. {gib(limit)} is the ceiling --"
         f" {incident.get('limit_from')} -- and {gib(warn_at)} is the level a CAPPED session is"
