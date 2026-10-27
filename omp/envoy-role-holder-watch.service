@@ -1,5 +1,5 @@
 [Unit]
-Description=Alert when an Envoy role is still registered to a holder session whose process is gone
+Description=Alert when an Envoy role's holder process is gone, or an agent tmux pane sits at a shell
 Documentation=file:%h/.dotfiles/scripts/envoy-role-holder-watch.md
 
 [Service]

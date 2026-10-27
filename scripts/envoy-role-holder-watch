@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Alert when an Envoy role is still registered to a holder session whose process is gone.
+"""Alert when an agent lane on this machine has stopped: a dead Envoy role holder, or an agent
+tmux pane left sitting at a shell.
+
+Part one, the Envoy role check.
 
 Why this exists: on 2026-10-27T05:52Z the Verified Linux owner session
 (01a1798a-9911-7231-a1bb-cf29d7985273, role lead-verified-linux) stopped, wrote no error and
@@ -32,7 +35,20 @@ directory), and the lane's peers (the live holders of the team topics the dead s
 One alert per incident, one more when it clears, and one escalation to the chief of staff when
 an incident is still open 10 minutes after its alert.
 
-Scope: role holders, not every session. A session that holds no role is not watched.
+Part two, the tmux pane check (`check_panes`). After the 2026-10-27T13:56Z reboot, five of six
+Verified Linux panes came back as a bash prompt: tmux-resurrect restored the layout but their omp
+never started. No process died, so nothing above sees it, and only one of the six held a role. So
+every pane of the default tmux server is read directly: an AGENT pane is one whose title omp set
+(it starts "π "), or one this watch has seen omp running in, or one with an omp among the
+descendants of its pane process. It is AT A SHELL when the pane process is a shell and is its own
+terminal foreground process group -- nothing is running in it at all. After a 180 s grace that is
+one alert naming the pane, the session it last ran, its handover files and the exact
+`tmux send-keys` that restarts it, to the INFRA lead and the lane's stream lead; one clear when
+omp runs there again or the pane goes away. The session is resolved from what this watch saw
+running in the pane, else the transcript in the pane's directory whose own title the pane title
+carries, else the `omp --resume` command tmux-resurrect saved for that pane's place.
+
+Scope: role holders, and panes. A session that holds no role and has no pane is not watched.
 """
 
 from __future__ import annotations
@@ -459,6 +475,331 @@ def send_clear(
         print(text)
     return True
 
+# ------------------------------------------------------------- agent panes left at a shell
+#
+# Why: after the 2026-10-27 13:56Z reboot, five of six Verified Linux panes came back as a bash
+# prompt. Their omp never started, so no process vanished, and only one held an Envoy role, so the
+# role check above saw one of six. This check reads the panes themselves.
+
+SHELLS = {"bash", "sh", "zsh", "fish", "dash"}
+RESURRECT_DIR = Path.home() / ".local/share/tmux/resurrect"
+PANE_FIELDS = (
+    "pid", "start_time", "pane_id", "session_name", "window_index", "window_name",
+    "pane_index", "pane_current_command", "pane_pid", "pane_current_path", "pane_title",
+)
+
+
+def tmux_panes() -> list[dict] | None:
+    """Every pane of the default tmux server, once each (grouped sessions list a pane per group
+    member). None when tmux could not be read; [] when no server runs."""
+    fmt = "\t".join("#{" + field + "}" for field in PANE_FIELDS)
+    try:
+        done = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", fmt],
+            capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"panes: tmux list-panes failed: {error}")
+        return None
+    if done.returncode != 0:
+        if "no server running" in done.stderr or "error connecting" in done.stderr:
+            return []
+        log(f"panes: tmux list-panes exited {done.returncode}: {done.stderr.strip()}")
+        return None
+    panes: dict[str, dict] = {}
+    for line in done.stdout.splitlines():
+        values = line.split("\t", len(PANE_FIELDS) - 1)
+        if len(values) == len(PANE_FIELDS):
+            pane = dict(zip(PANE_FIELDS, values))
+            panes.setdefault(pane["pane_id"], pane)
+    return list(panes.values())
+
+
+def process_table() -> tuple[dict[int, list[int]], dict[int, tuple[str, int]]]:
+    """children by parent pid, and (comm, foreground process group of its tty) by pid."""
+    children: dict[int, list[int]] = {}
+    info: dict[int, tuple[str, int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            raw = Path(f"/proc/{entry}/stat").read_text()
+        except OSError:
+            continue
+        comm = raw[raw.index("(") + 1 : raw.rindex(")")]
+        fields = raw[raw.rindex(")") + 2 :].split()
+        pid, ppid, tpgid = int(entry), int(fields[1]), int(fields[5])
+        children.setdefault(ppid, []).append(pid)
+        info[pid] = (comm, tpgid)
+    return children, info
+
+
+def title_text(title: str) -> str:
+    """An omp pane title without its `π` mark and spinner frame: `π ⠼ Fix X` -> `Fix X`."""
+    parts = title.split(" ", 2)
+    return parts[2].strip() if len(parts) == 3 and parts[0] == "π" else title.strip()
+
+
+def session_dir_of(cwd: str) -> Path:
+    """omp's transcript directory for a working directory (-src-x under $HOME, --abs-path-- else)."""
+    home = str(Path.home())
+    if cwd == home or cwd.startswith(home + "/"):
+        return SESSION_ROOT / ("-" + cwd[len(home) + 1 :].replace("/", "-"))
+    return SESSION_ROOT / ("--" + cwd.strip("/").replace("/", "-") + "--")
+
+
+def transcript_by_title(cwd: str, text: str, live: dict[str, int]) -> tuple[str, Path] | None:
+    """The newest top-level transcript in the pane's directory whose title (its first line) the
+    pane title carries, and whose session no live process holds."""
+    best: tuple[float, str, Path] | None = None
+    try:
+        candidates = list(session_dir_of(cwd).glob("*.jsonl"))
+    except OSError:
+        return None
+    for candidate in candidates:
+        try:
+            with candidate.open("rb") as handle:
+                first = json.loads(handle.readline(4096) or b"{}")
+            stamp = candidate.stat().st_mtime
+        except (OSError, ValueError):
+            continue
+        title = (first.get("title") or "").strip() if isinstance(first, dict) else ""
+        ids = UUID_RE.findall(candidate.name)
+        if not title or not ids or title not in text or ids[-1] in live:
+            continue
+        if best is None or stamp > best[0]:
+            best = (stamp, ids[-1], candidate)
+    return (best[1], best[2]) if best else None
+
+
+def resurrect_command(pane: dict, text: str, limit: int = 60) -> tuple[str, str] | None:
+    """The newest tmux-resurrect save in which this pane's place (session, window, pane index),
+    under the same title, ran `omp --resume`: (its command, the save file)."""
+    try:
+        saves = sorted(RESURRECT_DIR.glob("tmux_resurrect_*.txt"), reverse=True)[:limit]
+    except OSError:
+        return None
+    place = (pane["session_name"], pane["window_index"], pane["pane_index"])
+    for save in saves:
+        try:
+            lines = save.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split("\t")
+            if len(fields) < 11 or fields[0] != "pane" or (fields[1], fields[2], fields[5]) != place:
+                continue
+            command = fields[10].lstrip(":")
+            if "--resume" in command and title_text(fields[6]) == text:
+                words = command.split()
+                if words and words[0].endswith("/omp"):
+                    words[0] = "omp"
+                return " ".join(words), str(save)
+    return None
+
+
+def pane_alert_text(incident: dict, now: float) -> str:
+    where = incident["where"]
+    session = incident.get("session")
+    lines = [
+        f"AGENT PANE AT SHELL: tmux pane {incident['pane_id']} ({where}, window"
+        f" \"{incident['window_name']}\") has sat at a {incident['shell']} prompt with no omp in it for"
+        f" {human(now - incident['opened_at'])}, first seen at {iso(incident['opened_at'])}.",
+        f"Evidence: the pane's foreground process group is its own shell (pid {incident['shell_pid']},"
+        f" /proc/<pid>/stat tpgid), no omp process descends from it, and its title still reads"
+        f" \"{incident['title']}\" (omp sets that `π` title; a plain shell never does). cwd {incident['cwd']}.",
+    ]
+    if session:
+        lines.append(f"Last session: {session} ({incident['session_source']}).")
+        if incident.get("transcript"):
+            lines.append(
+                f"Transcript: {incident['transcript']}, last written {iso(incident.get('last_write'))}."
+            )
+    else:
+        lines.append(
+            "Last session: NOT RESOLVED -- this watch never saw omp run here, no transcript in"
+            f" {session_dir_of(incident['cwd'])} carries the pane's title, and no tmux-resurrect save"
+            " records a resume command for this place. Read the newest transcripts there."
+        )
+    files = incident.get("handover") or []
+    brief = "brief it from " + ", ".join(files) if files else "no handover file found: brief it from the tail of its transcript"
+    if incident.get("restart"):
+        lines.append(
+            f"Do: `tmux send-keys -t {incident['pane_id']} {shlex.quote(incident['restart'])} Enter`"
+            f" (that is `{incident['restart']}` typed in that pane), then {brief}."
+        )
+    else:
+        lines.append(f"Do: start the lane again in that pane, and {brief}.")
+    lines += incident.get("notes") or []
+    lines.append(
+        "One alert per pane per incident, one clear when omp runs there again. From"
+        f" envoy-role-holder-watch (~/.dotfiles/scripts/envoy-role-holder-watch) on {socket.gethostname()}."
+    )
+    return "\n".join(lines)
+
+
+def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -> tuple[list[tuple[str, str]], list[str]]:
+    targets = [(INFRA_LEAD, "INFRA lead")]
+    leads = [
+        s for s in sessions
+        if s.get("session_id") not in {session, INFRA_LEAD}
+        and (s.get("dir") or "") == directory
+        and any(LEAD_ROLE_RE.match(name) for name in s.get("roles") or [])
+    ]
+    leads.sort(key=lambda s: 0 if any(n.startswith("stream-lead-") for n in s.get("roles") or []) else 1)
+    if leads:
+        role = next(iter(sorted(leads[0].get("roles") or [])), "?")
+        targets.append((leads[0]["session_id"], f"stream lead ({role})"))
+        return targets, []
+    return targets, [f"No stream lead resolved: no live lead-* or stream-lead-* role holder works in {directory}."]
+
+
+def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, sessions: list[dict], held: dict[str, int], now: float) -> tuple[int, int, int, int]:
+    """(agent panes, agent panes at a shell, alerts, clears) for the default tmux server."""
+    panes = tmux_panes()
+    if panes is None:
+        return 0, 0, 0, 0
+    memory: dict = state.data.setdefault("panes", {})
+    incidents: dict = state.data.setdefault("pane_incidents", {})
+    children, info = process_table()
+    pid_session = {pid: session for session, pid in held.items()}
+    seen_keys = set()
+    agents = at_shell = alerts = clears = 0
+
+    def clear(key: str, incident: dict, cause: str) -> None:
+        nonlocal clears
+        if incident.get("alerted_at") and not incident.get("cleared_at"):
+            incident["cleared_at"] = now
+            state.commit(options)
+            text = (
+                f"AGENT PANE AT SHELL CLEARED: tmux pane {incident['pane_id']} ({incident['where']})."
+                f" What cleared it: {cause}. The incident opened at {iso(incident['opened_at'])} and"
+                f" lasted {human(now - incident['opened_at'])}. No action is needed. From"
+                f" envoy-role-holder-watch on {socket.gethostname()}."
+            )
+            for target in incident.get("told") or [INFRA_LEAD]:
+                if not options.dry_run:
+                    envoy.send(target, text)
+            clears += 1
+            log(f"pane {incident['pane_id']} {incident['where']}: CLEARED ({cause})")
+            if options.print_alert:
+                print(text)
+        incidents.pop(key, None)
+
+    for pane in panes:
+        key = f"{pane['pid']}.{pane['start_time']}:{pane['pane_id']}"
+        seen_keys.add(key)
+        where = f"{pane['session_name']}:{pane['window_index']}.{pane['pane_index']}"
+        pane_pid = int(pane["pane_pid"] or 0)
+        stack, omp_pids = [pane_pid], []
+        while stack:
+            pid = stack.pop()
+            if info.get(pid, ("", 0))[0] == "omp":
+                omp_pids.append(pid)
+            stack.extend(children.get(pid, []))
+        remembered = memory.get(key)
+        if not (pane["pane_title"].startswith("π ") or remembered or omp_pids):
+            continue
+        agents += 1
+        incident = incidents.get(key)
+        if omp_pids:
+            session = next((pid_session[p] for p in omp_pids if p in pid_session), None)
+            record = memory.setdefault(key, {})
+            record.update({"where": where, "title": pane["pane_title"], "cwd": pane["pane_current_path"], "seen_at": now})
+            if session:
+                record["session"] = session
+            if incident:
+                clear(key, incident, f"omp (pid {omp_pids[0]}) runs in the pane again"
+                      + (f", session {session}" if session else ""))
+            continue
+        comm, tpgid = info.get(pane_pid, ("", 0))
+        if not (comm in SHELLS and tpgid == pane_pid):
+            log(f"pane {pane['pane_id']} {where}: agent pane runs {pane['pane_current_command']}, not omp and not a bare shell; holding")
+            continue
+        at_shell += 1
+        text = title_text(pane["pane_title"])
+        # Resolve the session this pane last ran: what this watch saw running here, else the
+        # transcript in its directory titled as the pane is, else the newest resurrect save.
+        if incident is None or "session_source" not in incident:
+            session = restart = transcript = None
+            source = ""
+            if remembered and remembered.get("session"):
+                session = remembered["session"]
+                source = f"seen running in this pane by this watch at {iso(remembered.get('seen_at'))}"
+            else:
+                found = transcript_by_title(pane["pane_current_path"], text, held)
+                if found:
+                    session, transcript = found[0], str(found[1])
+                    source = f"the transcript in the pane's directory whose title is in the pane title, {found[1].name}"
+                else:
+                    saved = resurrect_command(pane, text)
+                    if saved:
+                        restart = saved[0]
+                        ids = UUID_RE.findall(saved[0])
+                        session = ids[-1] if ids else saved[0].split("--resume", 1)[1].split()[0]
+                        source = f"the resume command tmux-resurrect saved for {where} in {saved[1]}"
+            if session and session in held:
+                log(f"pane {pane['pane_id']} {where}: at a shell, but its session {session} runs in pid {held[session]} elsewhere; not an incident")
+                incidents.pop(key, None)
+                continue
+            incident = incidents.setdefault(key, {"opened_at": now})
+            transcript = transcript or (str(transcript_of(session) or "") if session and UUID_RE.fullmatch(session) else "")
+            incident.update({
+                "pane_id": pane["pane_id"], "where": where, "window_name": pane["window_name"],
+                "title": pane["pane_title"], "cwd": pane["pane_current_path"], "shell": comm,
+                "shell_pid": pane_pid, "session": session, "session_source": source,
+                "transcript": transcript,
+                "restart": restart or (f"omp --resume {session}" if session else ""),
+            })
+            try:
+                incident["last_write"] = os.path.getmtime(transcript) if transcript else None
+            except OSError:
+                incident["last_write"] = None
+        open_for = now - incident["opened_at"]
+        if open_for < options.pane_grace:
+            log(f"pane {pane['pane_id']} {where}: at a shell for {int(open_for)} s (< {int(options.pane_grace)} s grace), holding")
+            state.commit(options)
+            continue
+        if incident.get("alerted_at"):
+            log(f"pane {pane['pane_id']} {where}: at a shell for {human(open_for)}, already alerted at {iso(incident['alerted_at'])}")
+            continue
+        session = incident.get("session")
+        directory = pane["pane_current_path"]
+        if incident.get("transcript"):
+            try:
+                with open(incident["transcript"], "rb") as handle:
+                    for _ in range(3):
+                        entry = json.loads(handle.readline(65536) or b"{}")
+                        if entry.get("type") == "session":
+                            directory = entry.get("cwd") or directory
+                            break
+            except (OSError, ValueError):
+                pass
+        incident["handover"] = handover_files(session if session and UUID_RE.fullmatch(session) else "-", directory)
+        targets, notes = pane_recipients(directory, session, sessions)
+        incident["notes"] = notes
+        text = pane_alert_text(incident, now)
+        incident["alerted_at"] = now
+        incident["told"] = [target for target, _ in targets]
+        state.commit(options)
+        for target, why in targets:
+            if options.dry_run or envoy.send(target, text):
+                log(f"  -> {target} ({why})")
+        alerts += 1
+        log(f"pane {pane['pane_id']} {where}: ALERT sent to {len(targets)} sessions")
+        if options.print_alert:
+            print(text)
+
+    for key in list(incidents):
+        if key not in seen_keys:
+            clear(key, incidents[key], "the pane no longer exists (closed, or its tmux server restarted)")
+    for key in list(memory):
+        if key not in seen_keys:
+            memory.pop(key)
+    state.commit(options)
+    return agents, at_shell, alerts, clears
+
+
 
 def run_once(options: argparse.Namespace) -> int:
     started = time.time()
@@ -649,11 +990,15 @@ def run_once(options: argparse.Namespace) -> int:
             log(f"{role}: BAD for {human(dead_for)}, already alerted at {iso(incident.get('alerted_at'))}")
         state.commit(options)
 
+    agents, at_shell, pane_alerts, pane_clears = check_panes(
+        options, state, envoy, sessions, held, started
+    )
     state.commit(options)
     state.close()
     log(
-        f"checked {len(roles_state)} local role(s) in {time.time() - started:.2f}s; "
-        f"{alerts} alert(s), {clears} clear(s)"
+        f"checked {len(roles_state)} local role(s) and {agents} agent pane(s), {at_shell} at a shell,"
+        f" in {time.time() - started:.2f}s; {alerts + pane_alerts} alert(s),"
+        f" {clears + pane_clears} clear(s)"
     )
     return 0
 
@@ -662,6 +1007,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--grace", type=float, default=60.0, help="seconds a role must stay bad before it alerts")
     parser.add_argument("--escalate", type=float, default=600.0, help="seconds after an alert before the chief of staff is told again")
+    parser.add_argument(
+        "--pane-grace",
+        type=float,
+        default=180.0,
+        help="seconds an agent tmux pane must sit at a shell with no omp before it alerts",
+    )
     parser.add_argument(
         "--state",
         type=Path,
