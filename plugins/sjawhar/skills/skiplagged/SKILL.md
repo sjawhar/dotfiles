@@ -9,8 +9,6 @@ mcp:
 
 # Skiplagged
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Live travel search through Skiplagged's public MCP server. No auth.
 
 ## Call a tool

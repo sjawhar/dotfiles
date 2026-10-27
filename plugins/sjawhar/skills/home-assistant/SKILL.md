@@ -9,8 +9,6 @@ mcp:
 
 # Home Assistant
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Read/write access through [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) (78 tools on HA 2026.8), MCP server `home-assistant`. In omp, write JSON args to `xd://mcp__home_assistant_<tool>`. With `skill_mcp`, call `skill_mcp(mcp_name="home-assistant", ...)`.
 
 ## Access

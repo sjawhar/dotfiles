@@ -5,8 +5,6 @@ description: "Use before opening a pull request, and before telling Sami that an
 
 # Opening a PR
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Do every step below, in order, on every change and in every PR-opening flow: a skipped step is how unverified work reaches a human. A skill named inside a step (`analyze`, `updating-docs`, `landing-a-pr`, `pr-preflight`) supplies that step's mechanics and never replaces the step. Scale the evidence to the diff, never the number of steps. "Later" means after the end-to-end proof and before human review, never after the merge. Read a step's reference at that step, not from memory, because these files change.
 
 Two rules bind a plan or spec as well as the PR:

@@ -5,8 +5,6 @@ description: Use when a task needs fresh web results or built-in knowledge is li
 
 # Ceramic Search
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Call the `ceramic_search` MCP tool when the session has one. Otherwise call the API (the key is in `secrets`):
 
 ```bash

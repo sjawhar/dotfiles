@@ -5,7 +5,7 @@ description: Use when making a product demo video, a narrated walkthrough or a p
 
 # Product demo videos
 
-Commands and settings: [pipeline.md](pipeline.md). If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+Commands and settings: [pipeline.md](pipeline.md).
 
 ## Production standard
 

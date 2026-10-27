@@ -5,8 +5,6 @@ description: Use when running as Sami's skill librarian session, for an intervie
 
 # Skill librarian
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Interview Sami's agents about design, his taste and how the team works. Check each lesson. Write it in exactly one home.
 
 Your record is the ledger: `dispatch doc-read --project INFRA --artifact librarian-ledger-md`. Keep durable state there, not in local files, because only the ledger survives a resume. The ledger is on Theorem's Dispatch instance, not Trajectory Labs'; log Theorem lessons in it like every other lesson. It has three tables: Sessions (one row per watched session), Lessons (one row per lesson) and Leads (one row per Envoy message to the librarian role). Before you edit it, read `references/ledger.md`, which lists their columns.

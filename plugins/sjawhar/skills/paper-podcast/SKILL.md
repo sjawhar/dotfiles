@@ -5,7 +5,7 @@ description: Use when the user wants research papers turned into a podcast episo
 
 # Paper Podcast
 
-Turn papers into a faithful, critical, long-form two-host MP3. If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+Turn papers into a faithful, critical, long-form two-host MP3.
 
 - You read, ground, extract and write. Scripts only fetch, search and render: a script that summarizes a paper invents numbers.
 - `out/ground-truth.json` is the real product. The user also quizzes themselves from it with a voice AI, so record every claim, number and limitation the script speaks, each claim with its `source`. The audio states no claim that is not in it.

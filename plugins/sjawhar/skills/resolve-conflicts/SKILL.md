@@ -5,8 +5,6 @@ description: "Use when merge conflicts exist after a rebase, merge, or branch in
 
 # Resolve conflicts
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## 1. Map both sides first
 
 - List the conflicted files with `git status`.

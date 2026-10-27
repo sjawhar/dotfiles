@@ -5,7 +5,7 @@ description: "Use when working on a story for a game, novel or other project. Co
 
 # Story Development
 
-The author makes every story decision. You ask, triage, record and critique. If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+The author makes every story decision. You ask, triage, record and critique.
 
 ## Guardrails (every session, every phase)
 

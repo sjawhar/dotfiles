@@ -5,8 +5,6 @@ description: Use when code changes in the working copy need a quality pass befor
 
 # Analyze
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 1. **Find the working-copy changes** with `git status --porcelain --untracked-files=all` (staged, unstaged and untracked files) and `git diff HEAD` (staged and unstaged changes). If there are none, report that and ask what to analyze.
 2. **Run these agents in parallel** in one `task` call:
    - `type-checker`, `bug-finder` and `code-simplifier` have edit tools. Tell each: "Find issues and fix them directly in the files."

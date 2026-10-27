@@ -5,8 +5,6 @@ description: Use when running any docker, docker compose, buildx or depot comman
 
 # Using Docker
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## One daemon, many sessions
 
 Every agent on this machine shares one Docker daemon, its cache, and depot's remote build cache.

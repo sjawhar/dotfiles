@@ -5,8 +5,6 @@ description: "Use when the devbox GNOME keyring is locked, or after a devbox reb
 
 # Unlock the devbox keyring
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Every reboot locks the `login` keyring. SSH login cannot unlock it: `ubuntu` has no Unix password, and only `/etc/pam.d/common-password` loads `pam_gnome_keyring.so`.
 
 ## Unlock

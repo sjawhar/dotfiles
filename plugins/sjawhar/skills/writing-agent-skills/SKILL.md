@@ -5,8 +5,6 @@ description: "Use when you create, edit, rewrite, shorten, test or delete an age
 
 # Writing agent skills
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## 1. Decide that a rule is needed
 
 - Add a rule only for a failure you saw without it: run the task in a fresh session with no guidance, and see it fail in at least 2 of 3 runs. Otherwise the rule costs tokens on every load and crowds out rules that matter.
@@ -37,7 +35,7 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 - State the condition that decides, not the incident: stripped of its repo and people, the rule still decides the case. Keep one failing example. Never add "unless it matters" or "where reasonable". One such clause turned a consistent instruction into a noisy one.
 - Keep incident stories, dates and URLs out of the body; put them in the commit message, because the agent reads a story as an instruction and misses its rule.
 - Check that every path, command and skill you name exists. An agent that follows a dead pointer creates the missing thing.
-- Copy the precedence sentence above word for word into every skill. Agents followed a stale file over the code 90% of the time without it, 9% with it.
+- Do not copy the rule to follow the code over a skill into a skill: it is in CLAUDE.md, which every session loads.
 
 ## 4. Test it
 
@@ -62,7 +60,7 @@ Scripts named here are in `~/.dotfiles/plugins/sjawhar/skills/writing-agent-skil
 - For each required step you remove, name what now makes it happen (a script, a hook, another rule). If nothing does, keep the step, because a step left to choice gets skipped.
 - Keep the words that set a rule's scope ("before every push", "in Rust files"). Current models apply a rule only as broadly as it says.
 - Shrink by moving or deleting whole blocks, never by squeezing wording, which drops rules unnoticed.
-- A rewrite may make SKILL.md at most 200 bytes longer, room for the precedence sentence (`check_skill.py --old` enforces it). Pay for each added reason or definition by cutting repeats and restated context, because files regrow on their own. Run `corpus_metrics.py` before and after a batch of skill edits; put both outputs in the commit.
+- A rewrite may make SKILL.md at most 200 bytes longer (`check_skill.py --old` enforces it). Pay for each added reason or definition by cutting repeats and restated context, because files regrow on their own. Run `corpus_metrics.py` before and after a batch of skill edits; put both outputs in the commit.
 
 ## 6. Rewrite an existing skill
 

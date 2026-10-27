@@ -5,8 +5,6 @@ description: "Use when Sami asks a session to manage the open-PR queue, get PRs 
 
 # Running the merge queue
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Owners drive their PRs. You, the controller, check the gates and merge under the permission that holds now. A packet is the READY message for one PR: its head SHA and the evidence for each gate below.
 
 ## Limits

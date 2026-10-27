@@ -5,8 +5,6 @@ description: "Use when tracing an artifact back to the agent session that produc
 
 # Session Attribution
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## Where the id is
 
 - An omp session's commits get an `Omp-Session: <id>` trailer. In git, `~/.dotfiles/shims/git` adds it. In jj, a JJ_CONFIG overlay adds it: `~/.dotfiles/omp/extensions/session-env.ts` for interactive sessions, the Legion extension for a session the Legion daemon starts. That extension also sets `PI_COMMIT_TRAILERS`, which omp's own commits (autoresearch, `omp commit`) use.

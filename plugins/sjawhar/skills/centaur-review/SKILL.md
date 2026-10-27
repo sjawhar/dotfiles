@@ -6,8 +6,6 @@ args: "<pr_url_or_number>"
 
 # Centaur Review
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Sami leads: show your analysis or the agents' findings only when he asks, or at §3 step 4. Unasked analysis replaces his judgment.
 
 In a jj checkout, pass the repository explicitly (`gh -R <owner>/<repo> ...`). Never export `GIT_DIR` or `GIT_WORK_TREE`: they send unrelated git subprocesses, test fixtures too, into the shared repository.

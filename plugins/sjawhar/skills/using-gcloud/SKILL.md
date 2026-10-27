@@ -5,8 +5,6 @@ description: Use when running gcloud compute ssh or scp against several VMs, or 
 
 # Using gcloud
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## Which identity gcloud uses
 
 On an Azure VM enrolled in the box identity (`~/.dotfiles/installers/gcloud-box.sh`), gcloud, the application default credentials (ADC) and client libraries all act as the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`, in the active configuration `box` (project `autoformalization`). It needs no sign-in and does not expire.

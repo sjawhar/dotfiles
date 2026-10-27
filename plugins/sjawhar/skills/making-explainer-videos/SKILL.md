@@ -5,8 +5,6 @@ description: Use when making an explainer video, a narrated video that explains 
 
 # Making explainer videos
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 An explainer teaches the viewer what a dashboard cannot: how a thing works and why it gives the result it gives. The viewer is the person who asked for it: an experienced software engineer who has not followed this project's details and is new to its field.
 
 ## What the video is

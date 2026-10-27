@@ -5,8 +5,6 @@ description: "Use before you create, move or wire any file in ~/.dotfiles. That 
 
 # Dotfiles Conventions
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Everything committed to `~/.dotfiles` installs on every machine (devbox, laptop, agent hosts); a file that works only here breaks the others silently.
 
 ## Placement

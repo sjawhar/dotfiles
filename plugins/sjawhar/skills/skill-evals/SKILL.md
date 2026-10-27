@@ -5,8 +5,6 @@ description: "Use when changing skills, agent instructions, advisor prompts, or 
 
 # Skill evals
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 - Pick the route below by what the change changes.
 - Freeze the cases, variants and grading before any model call: results must not steer them.
 - A provider or grader error is never a score: a zero penalizes the wrong arm.
