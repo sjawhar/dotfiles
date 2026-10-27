@@ -306,6 +306,13 @@ const REFUSED_DOUBLE_QUOTED = "$`\\";
  * `sed` and `awk` write a file and run a command from their own scripts, `tee` and `sort -o` write
  * one named by a flag, and `uniq` takes an output file as its second argument, so none is here.
  */
+/**
+ * Why this list is short, and why the head rules stay narrow in general: a bug in this parser sends
+ * an UNREVIEWED message to a human, while a shape it refuses costs one turn. omp's own bash
+ * interceptor (`experiments/bash-gate-core.ts`) weighs the opposite way — its failure is a lost
+ * command, not an unreviewed send — so it widens its parser where this one does not. The two guards
+ * are meant to differ; a refusal here that looks like friction is usually the cheaper side.
+ */
 const PIPE_FILTERS = ["cat", "cut", "egrep", "fgrep", "fold", "grep", "head", "jq", "nl", "rev", "tail", "tr", "wc"];
 
 /** Where a trailing pipeline of read-only filters starts in `text` (at its first unquoted `|`), or
@@ -800,8 +807,11 @@ export function unreadableDispatchWrite(command: unknown): UnreadableCommand | u
 			} else break;
 		}
 		// Every word from the command's position on, not just the first: a wrapper the list above does
-		// not hold would otherwise keep the write out of that position and send it unreviewed. Measured
-		// 2026-10-27: three `nice -n 19 … dispatch comment …` calls reached Dispatch that way.
+		// not hold (`nice -n 19 … dispatch comment …`) keeps the write out of that position, and the
+		// gate saw no write at all. No main session was measured sending one that way in the 14 days to
+		// 2026-10-27 — the only matches were `--dry-run` probes from pi-envoy's own benchmark, which
+		// send nothing, and one subagent call, which the gate skips by design — so this closes a gap
+		// in what the gate claims to review rather than a leak anyone has seen.
 		for (let index = at; index < words.length; index++) {
 			const [program, name, ...flags] = words.slice(index);
 			if (program === undefined || name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name.value)) continue;
