@@ -17,7 +17,7 @@ The top PR becomes the consolidated PR: its branch already holds the full diff. 
 
 ## Keep the stack ungrouped while you push
 
-A PR grouped into a native stack (`gh stack link`) gets no `github-actions` check suites on `synchronize` or `labeled`. Let the PR bases carry the order, name each base branch in the PR body, and group only at merge time, if your merge command refuses an ungrouped stack. No check suites on a stack PR: check `gh stack view --json` for grouping before a re-run, which cannot make a suite the event never created. `gh stack unstack <n>` re-queues `PR Checks` in ~30s, with no push.
+A PR grouped into a native stack (`gh stack link`) gets no `github-actions` check suites on `synchronize` or `labeled`. Let the PR bases carry the order, name each base branch in the PR body, and group only at merge time, if your merge command refuses an ungrouped stack. No check suites on a stack PR: check `gh stack view --json` for grouping before a re-run, which cannot make a suite the event never created. `gh stack unstack <n>` re-queues `PR Checks` in ~30s, with no push. If it does not, grouping was not the cause: look for another one.
 
 ## Collapse the stack
 
