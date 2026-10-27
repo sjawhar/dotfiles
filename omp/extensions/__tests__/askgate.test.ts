@@ -1094,6 +1094,7 @@ console.log(JSON.stringify(args, null, 2));
 		expect(g.dryRuns[0].cwd).toBe(path.join(work, "sub"));
 		expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
 	});
+	// Ten real dry-runs, each a fresh bun process: 3.75 s on an idle devbox, past bun's 5 s default under load.
 	test("a leading cd and a trailing 2>&1 are reviewed, the dry-run in the cd's directory resolved against the call's", async () => {
 		fs.mkdirSync(path.join(work, "sub", "inner"), { recursive: true });
 		fs.writeFileSync(path.join(work, "sub", "note.txt"), "Body from the working directory.");
@@ -1126,7 +1127,7 @@ console.log(JSON.stringify(args, null, 2));
 				["dispatch_ask", "verdict", "allow"],
 			]);
 		}
-	});
+	}, 30_000);
 	test("a 2>&1 after the here-document opener runs as written and is left out of the dry-run; no other redirect is read there", () => {
 		const after = core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF");
 		expect(after?.command).toBe("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF");
