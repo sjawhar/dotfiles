@@ -224,7 +224,8 @@ skills:
     # skill-writing skill. These two contradict it, and an agent that loads
     # both gets two procedures. superpowers' writing-skills (v6.3.0) keeps
     # detail inline, sets word targets under 500 and requires the TDD skill
-    # first. skill-creator (Anthropic's, copied) asks for "pushy"
+    # first. skill-creator (Anthropic's official plugin; the copy in
+    # plugins/sjawhar was deleted) asks for "pushy"
     # what-plus-when descriptions and evals through `claude -p`. ignoredSkills
     # matches by name, so the new skill has a different name.
     - writing-skills
