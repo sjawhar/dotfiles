@@ -5,8 +5,6 @@ description: "Use when creating or updating documentation, READMEs, AGENTS.md fi
 
 # Updating Docs
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## Write what is true now
 
 - Describe current behavior, in code comments too: readers act on the doc. Git log is the changelog.

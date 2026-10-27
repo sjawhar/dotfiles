@@ -5,8 +5,6 @@ description: Use when a shared dev box is low on disk or RAM, or `df` is far abo
 
 # Disk Hygiene on a Shared Agent Box
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## Safety rules
 
 - Never delete a directory that a live session stands in: its shell and tools fail at once.

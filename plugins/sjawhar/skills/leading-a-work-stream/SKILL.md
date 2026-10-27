@@ -5,8 +5,6 @@ description: Use when you lead a work stream or team of agents, when an agent as
 
 # Leading a work stream
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 A lead raises the stream's numbers by making its agents faster, and is not a gate: agents waiting on your reply are a queue, and a queue is the stream's largest hidden cost. Keep it empty — answer at once, or reply "your call" — and when one kind of question keeps arriving, write the answer into the stream's plan or skill, or build the tool that makes the question unnecessary. The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in its issue spec or the organization's stream document; read them there. Why each rule below works: [sources.md](references/sources.md).
 
 ## What a lead does

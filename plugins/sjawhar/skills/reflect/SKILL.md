@@ -5,8 +5,6 @@ description: "Use when looking back over a window of agent sessions to find wher
 
 # Reflect
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 A run reads every message Sami sent agents in one window, each with the agent work around it, and returns the failures it finds, each with its quotes. Propose a fix only after steps 1 to 5, because a run that starts landing changes reports categories instead of failures.
 
 Scratch goes on the big disk (`/mnt/nvme/<user>/<run>/`), never `/tmp`: records run to tens of MB.

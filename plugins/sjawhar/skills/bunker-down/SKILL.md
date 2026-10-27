@@ -5,8 +5,6 @@ description: Use when hardening a publicly reachable EC2 instance used as a dail
 
 # Harden an EC2 devbox
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 - Never lock the user out. Open each new access path and confirm that it works before you close the old one.
 - At each **GATE**, stop until the user confirms.
 - Prerequisites: an authenticated AWS CLI (on the instance or the user's laptop), a Tailscale account for the user, and working SSH access now.
@@ -68,6 +66,8 @@ The `tailscale0` rule covers SSH: you do not need a port 22 rule.
 **GATE:** the user can still SSH to the Tailscale IP.
 
 ## Step 5: SSH and fail2ban
+
+Set the settings below even when a file on the box allows otherwise, and tell the user each one you change.
 
 Ask the user first: do you use SFTP (VS Code Remote, scp, rsync over SSH)?
 

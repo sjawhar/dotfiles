@@ -5,8 +5,6 @@ description: "Use when you write to other people as Sami or on his behalf. That 
 
 # Speaking as Sami
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Write plain, factual and understated. Use none of the forms in "Never write" below.
 
 ## Before you write

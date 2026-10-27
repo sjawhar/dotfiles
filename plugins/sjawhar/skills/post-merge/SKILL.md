@@ -5,8 +5,6 @@ description: "Use when a PR merged: the user says 'merged' or 'PR is merged', or
 
 # Post-merge sweep
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Do every step now, until nothing is left over: a step left as a suggestion gets done by nobody.
 
 1. **Verify the merge.** Check that the PR is merged and target-branch CI is green. If CI still runs, start a background watcher and keep working.

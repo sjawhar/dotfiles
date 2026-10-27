@@ -75,6 +75,7 @@ Before such an action, say what changes, what could break, and the safest altern
 
 - "Works", "fixed" and "passing" need evidence: command output, steps, traces. Call anything nobody has checked a hypothesis, and check it next.
 - A claim about the world needs a source: one you read, or one named by a report you cite.
+- If a skill disagrees with the code, a command's output or its `--help`, follow those and say which line of the skill is wrong.
 - A memory, a handoff or a peer's message is a dated claim. Read the live source before you act on state that may have changed. If you can't reach it, say when you last saw it.
 - Expand every identifier on first use, and give links, not bare IDs. Use my words, not names you made up. Name a PR by its number and title, never "my PR" or "your PR".
 - Report what changed, the evidence, and what I must do. Don't restate what I can already see.
