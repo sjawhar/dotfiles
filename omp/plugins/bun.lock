@@ -6,7 +6,7 @@
       "name": "omp-plugins",
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
-        "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.1.15",
+        "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.1.16",
         "@sjawhar/pi-envoy": "11.1.0",
         "@sjawhar/pi-legion": "10.11.1",
         "gws-accounts": "github:sjawhar/gws-accounts#v0.1.9",
@@ -151,7 +151,7 @@
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
-    "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#1a09538", {}, "sjawhar-knives-1a09538", "sha512-vo7PP1BC+tQR0dFjJSOrKk8++RkHCL4rGSi+DuBiz6QKhTZvNuASBm4gmfGxdWPPzCgKD3jgmmwvevQ7joCmjg=="],
+    "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#a730621", {}, "sjawhar-knives-a730621", "sha512-0JnCMKSF+wbL54qxUtMP+7N8L7zkd4tvccMWK5g6NO2t6kgHxQsP9tb8cttCpZ5oJpz8GEy/yWhlbpTGwFjsFQ=="],
 
     "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@11.1.0", "", {}, "sha512-MvhlTobz0NVxMi3XVgcZU99NrkMqneP63117CQDaywOpFwdKEygxO/GlrH7/y76fw8s0LbMssY91FfICXSAQPQ=="],
 
