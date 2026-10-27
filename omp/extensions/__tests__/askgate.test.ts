@@ -1171,8 +1171,8 @@ console.log(JSON.stringify(args, null, 2));
 		}
 	});
 	test("a wrapper command keeps the write out of the gate's reach: it is refused, and the reason names the wrapper", async () => {
-		// `nice` is no known prefix, so before 2026-10-27 the gate found no write here at all and the
-		// comment went to Dispatch unreviewed (three calls that day in session 01a1679a).
+		// `nice` is no known prefix, so before 2026-10-27 the gate found no write here at all and this
+		// comment would have gone to Dispatch unreviewed. No main session was measured doing it.
 		const wrapped = `nice -n 19 env -u X ${bin}/dispatch comment --issue X-1 --body hi`;
 		expect(core.unreadableDispatchWrite(wrapped)).toEqual({ tool: "dispatch_comment", label: "dispatch comment", ran: "nice" });
 		expect(core.unreadableDispatchWrite("timeout 120 dispatch comment --issue X-1 --body hi")).toEqual({ tool: "dispatch_comment", label: "dispatch comment", ran: "timeout" });
