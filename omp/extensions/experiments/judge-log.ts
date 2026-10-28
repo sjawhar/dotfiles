@@ -1,6 +1,6 @@
 // Binding of the judge-difficulty log; the behaviour is described and implemented in
 // judge-log-core.ts. This file binds the fork's completion (completeSimple through
-// retryTransientCompletion and the model registry's key resolver, the askgate.ts pattern) and the
+// retryTransientCompletion and the model registry's key resolver, as proactive-memory.ts does) and the
 // log's path, so the core imports nothing from the fork and runs under `bun test` with fakes. A
 // transient provider failure gets one retry, and a failure never falls back to another model.
 // The experiments extension (index.ts) registers it under its `judge_log` gate.
