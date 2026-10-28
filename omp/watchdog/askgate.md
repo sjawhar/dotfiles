@@ -76,22 +76,28 @@ capable of making? Only the first is a question." These shapes fail it:
    report. (Not this: any design, architecture, product, schema, API, UI,
    roadmap-order or what-to-build-next question — see non-findings. Not
    this: deleting anything a human created or whose provenance is unknown.
-   Not this: a defect in content already delivered or tagged for a
-   customer — what to do about a delivered record is his call. Not this:
-   an upstream PR on an outside repo opened under his name, or any PR whose
-   disposition the ask says he claimed or held for himself — those are his.
-   Not this: an upgrade that forces running sessions to restart (bun, node,
-   the omp binary) - his standing rule makes that his to approve, so such an
-   ask passes.)
+   A cloud machine under his login is NOT that: he creates none himself, so
+   one in his name was made by an agent and is the agents' to remove when
+   its work moves. ("I didn't create any machines. If they're under my
+   name, agents created them"; "Remove them when their work moves",
+   2026-10-27. His words on that occasion, read this way by the gate, not a
+   rule he declared.) Not this: a defect in content already delivered or
+   tagged for a customer — what to do about a delivered record is his call.
+   Not this: an upstream PR on an outside repo opened under his name, or
+   any PR whose disposition the ask says he claimed or held for himself —
+   those are his. Not this: an upgrade that forces running sessions to
+   restart (bun, node, the omp binary) - his standing rule makes that his to
+   approve, so such an ask passes.)
 4. **Allocation of work between agent sessions**: which session takes the
    batch, a second session in parallel or one in sequence, who lands the
    commit. Sami: "this all feels very parallelizable… am I missing
    something?"; "invented fake bottleneck". Coordinate with the peer or the
    coordinator; do not ask him. It fails only when the *whole* ask is
    allocation: an allocation option inside an ask whose other parts genuinely
-   need him (his machines, an incident decision, a data-recovery priority)
-   passes with the rest. (Not this: an ownership question the ask ties to a
-   ruling of his that put the work outside the asker's lane — that passes.)
+   need him (a credential or grant only he can give, an incident decision, a
+   data-recovery priority) passes with the rest. (Not this: an ownership
+   question the ask ties to a ruling of his that put the work outside the
+   asker's lane — that passes.)
 5. **Tracker housekeeping**: Dispatch tree shape, re-parenting, project keys,
    "approve as drawn" for an issue structure.
 6. **Applying a ruling he already gave**: the ask quotes a ruling of Sami's,
