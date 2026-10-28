@@ -49,8 +49,8 @@ const O_CLOEXEC = 0o2000000;
 const GLOB_CHARS = /[*?[{]/;
 const WALK_DEADLINE_MS = Number(process.env.OMP_RUNNING_SCRIPT_GUARD_MS) > 0 ? Number(process.env.OMP_RUNNING_SCRIPT_GUARD_MS) : 2_000;
 
-/** Raw target strings a call names, by tool. */
-function targetsOf(toolName: string, input: Record<string, unknown>): string[] {
+/** Raw target strings a call names, by tool; path-guard.ts reads the same targets. */
+export function targetsOf(toolName: string, input: Record<string, unknown>): string[] {
 	if (toolName === "write") return typeof input.path === "string" ? [input.path] : [];
 	if (toolName === "ast_edit") {
 		const paths = input.paths;
