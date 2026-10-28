@@ -32,7 +32,7 @@ Commands and settings: [pipeline.md](pipeline.md). If this skill disagrees with 
 2. Cut each clip hard to its real action, at constant fps. Measure its duration.
 3. Write the narration after you cut, to that length. Split long lines and put each part at the moment it describes (EDL offsets). Make the build fail if a part overruns its clip. The listener hears each sentence once and knows none of the project's words: say what a project name is before you use it.
 4. Check the narration before you voice it, and record both results in `<video>.src/README.md`:
-   - **Lint:** run the asd-ste100 skill's `~/.dotfiles/vendor/asd-ste100/skills/asd-ste100/scripts/ste-lint.py` on the narration and fix it to 0 hard violations.
+   - **Lint:** run `ste-lint` (in `~/.dotfiles/scripts`, on `PATH`) on the narration and fix it to 0 hard violations.
    - **Teach-back:** give a fresh subagent only the narration and the audience (for example "a technical leader who knows software and the field, and has not followed this project"), with: "As that reader, for each sentence, write in your own words what it tells you. If you must guess what a word or phrase refers to, write 'unclear:' and the word or phrase. Do not mark words that reader knows."
    - Score each sentence 2 (the teach-back matches your meaning, carries its number or example, and the facts support it), 1 (matches, but vague where the facts have a number or example) or 0 (wrong, "unclear", or a claim the facts do not support). Pass: no 0, and at most one 1 per section. Rewrite each 0 and 1 and test again on a new subagent: one that read an earlier version has learned the words.
 5. If narration cannot fit, shorten the words. Cut footage only where reality is unwatchably slow (a sandbox boot).
