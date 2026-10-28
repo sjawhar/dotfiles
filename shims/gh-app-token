@@ -3,94 +3,84 @@
 
 Interpreter is pinned to the system python3, NOT `env python3`: git invokes a credential
 helper with the caller's environment, so under any activated virtualenv (a uv run, an agent
-shell, a project venv) `env python3` can resolve to an interpreter the helper was never run
-under. It needs nothing past the standard library.
+shell, a project venv) `env python3` resolves to an interpreter without PyJWT and token
+minting dies with ModuleNotFoundError. The failure is invisible until the token cache misses,
+because generate_jwt imports lazily.
 
 Git credential-helper usage (wired up in gh-app-routes.gitconfig):
   gh-app-token <profile> get
 
 Direct usage prints a raw installation token:
-  gh-app-token <profile> [--owner <login>] [--repo <name>]... [--read-only]
+  gh-app-token <profile> [--owner <login>]
 
 A returned installation token comes from a cache and may have as little as five minutes
 left (TOKEN_REFRESH_MARGIN). A caller that holds it longer sets GH_APP_TOKEN_MIN_LIFETIME
 to the seconds it needs: a cached token with less life left than that is not reused, and a
-fresh broker release (an hour) is returned instead. `knives gh` sets it for each gh call it
+freshly minted one (an hour) is returned instead. `knives gh` sets it for each gh call it
 runs, because gh reads its token once and keeps it for the whole call: a `gh run watch`
 handed a cached token with twelve minutes left failed with 401 Bad credentials twelve
-minutes in (2026-10-22). A fresh release is returned whatever the request: GitHub issues an
+minutes in (2026-10-22). A fresh mint is returned whatever the request: GitHub issues an
 installation token for one hour, so asking for an hour (as a watch does) means a fresh token,
 never a loop, and a caller needing more than that hour asks again.
 
-A profile lives in git config and needs the App id (which names its covered-owner file) and
-the secrets-broker secret holding the App's key; a fallback secret is optional:
+A profile lives in git config and needs the app and its key; a fallback secret
+is optional:
   [gh-app "<profile>"]
       app-id          = ...
-      broker-secret   = GITHUB_APP_<PERSON>  ; a github-app secret of the secrets broker
-      fallback-secret = NAME_OF_SECRET       ; a personal access token, from `secrets get`
+      key-secret      = NAME_OF_SECRET   ; resolved via `secrets get`
+      fallback-secret = NAME_OF_SECRET   ; a personal access token, same resolution
 
-The helper never holds the App's key. On a cache miss it asks the secrets broker through
-secret-run, which mints the installation tokens:
-  secret-run --reason "gh-app-token <owner>" GITHUB_APP_<PERSON> -- printenv GITHUB_APP_<PERSON>
-and reads the release from its stdout:
-  {"installations": {"<owner>": {"installation_id": <int>, "token": "...",
-  "expires_at": "<RFC 3339>"}}}
-Every owner's token in a release is cached, and every owner and installation id is merged
-into a covered-owner file that never shrinks.
+The target owner comes from --owner, then GH_APP_OWNER, then the owner
+segment of the credential request's path (requires credential.useHttpPath).
+The app's installation for that owner is discovered via the GitHub API and
+cached for a day. Whether an owner is covered is decided from that installation
+list alone, never from a failed mint:
 
---repo and --read-only narrow the token of one owner (INFRA-322) to those repositories and to
-contents:read and metadata:read: secret-run passes them to the broker as --github-owner,
---github-repo and --github-read-only, which mints the narrowed token with GitHub's
-access_tokens body. A narrowed token has its own cache entry, so it never reuses or replaces
-the owner-wide one, and it never falls back to the personal token, which cannot be narrowed.
-
-The target owner comes from --owner, then GH_APP_OWNER, then the owner segment of the
-credential request's path (requires credential.useHttpPath). Whether an owner is covered is
-decided from the broker's release and the covered-owner file alone, never from a failed
-request:
-
-- Owner in the release: answer with its token. Any broker failure (a pending or denied
-  request, an error, a release that does not parse) emits `quit=1`, which stops git's helper
-  chain. The fallback secret is never read then, so a broker outage cannot swap identity on
-  our own repositories.
-- Owner missing from the release but in the covered-owner file: refuse. A release that drops
-  an owner it covered before is a contradiction, not permission to act as the human.
-- Owner never covered: answer with the profile's fallback secret (the user's personal access
-  token for upstream repositories the App is not installed on). No fallback-secret
-  configured, or the secret unreadable: `quit=1` naming the cause. Nothing ever falls through
-  to the next helper or to the user's keyring login.
+- Owner with an installation: answer with an installation token; any failure
+  minting it (missing secret, network, GitHub error) emits `quit=1`, which
+  stops git's helper chain. The fallback secret is never read for a covered
+  owner, so an App outage cannot swap identity on our own repositories.
+- Owner without an installation: answer with the profile's fallback secret
+  (the user's personal access token for upstream repositories the App is not
+  installed on). No fallback-secret configured, or the secret unreadable:
+  `quit=1` naming the cause. Nothing ever falls through to the next helper or
+  to the user's keyring login.
 """
 
 import argparse
-import fcntl
+import base64
+import binascii
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 CACHE_DIR = Path.home() / ".cache" / "gh-app-token"
 TOKEN_REFRESH_MARGIN = 300  # Refresh five minutes before expiry.
 MIN_LIFETIME_ENV = "GH_APP_TOKEN_MIN_LIFETIME"
+INSTALLATION_CACHE_TTL = 24 * 60 * 60
 
 
 class AppTokenError(Exception):
-    """A configuration, secret, broker or cache failure."""
+    """A configuration, secret, or GitHub API failure."""
+
+
+class ApiError(AppTokenError):
+    def __init__(self, code: int, body: str):
+        super().__init__(f"GitHub API {code}: {body}")
+        self.code = code
 
 
 class UninstalledOwnerError(AppTokenError):
-    """The broker released no token for the requested GitHub owner."""
-
-
-class BrokerInstallation(TypedDict):
-    installation_id: int
-    token: str
-    expires_at: str
+    """The configured app is not installed for the requested GitHub owner."""
 
 
 def git_config_optional(key: str) -> str | None:
@@ -113,14 +103,65 @@ def git_config(key: str) -> str:
     return value
 
 
+def generate_jwt(app_id: str, private_key: str) -> str:
+    # Lazy import keeps a valid token-cache hit independent of PyJWT.
+    import jwt
+
+    now = int(time.time())
+    return jwt.encode(
+        {"iat": now - 60, "exp": now + 600, "iss": app_id},
+        private_key,
+        algorithm="RS256",
+    )
+
+
+def api_json(request: urllib.request.Request) -> Any:
+    try:
+        with urllib.request.urlopen(request) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise ApiError(error.code, error.read().decode("utf-8", errors="replace")) from error
+    except urllib.error.URLError as error:
+        raise AppTokenError(f"network error: {error.reason}") from error
+
+
+def api_headers(bearer: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def get_installation_token(
+    app_id: str, installation_id: int, private_key: str, scope: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Mint an installation token; with scope, narrowed to its repositories and permissions
+    (GitHub's access_tokens body: {"repositories": [...], "permissions": {...}})."""
+    headers = api_headers(generate_jwt(app_id, private_key))
+    body = None
+    if scope:
+        body = json.dumps(scope).encode()
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+        data=body,
+        method="POST",
+        headers=headers,
+    )
+    token_data = api_json(request)
+    if not isinstance(token_data, dict) or not token_data.get("token") or not token_data.get("expires_at"):
+        raise AppTokenError("GitHub returned an invalid installation-token response")
+    return token_data
+
+
 def cache_component(value: str) -> str:
     """Make a profile or owner safe and stable for use in a cache-file name."""
     return re.sub(r"[^A-Za-z0-9._-]", "_", value.lower())
 
 
 def scope_of(repos: list[str] | None, read_only: bool) -> dict[str, Any] | None:
-    """The narrowing --repo/--read-only ask for, in GitHub's access_tokens body shape, or None
-    for an owner-wide token."""
+    """The access_tokens body for --repo/--read-only, or None for an owner-wide token."""
     if not repos and not read_only:
         return None
     scope: dict[str, Any] = {}
@@ -179,85 +220,84 @@ def get_cached_token(profile: str, owner: str, min_lifetime: int = TOKEN_REFRESH
 
 
 def write_cache_file(cache_file: Path, data: dict[str, Any]) -> None:
-    """Atomically replace a mode-0600 JSON cache entry."""
-    temporary_path: Path | None = None
+    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cache_file.write_text(json.dumps(data))
+    cache_file.chmod(0o600)
+
+
+def installation_cache_file(app_id: str) -> Path:
+    return CACHE_DIR / f"installations-{cache_component(app_id)}.json"
+
+
+def get_cached_installations(app_id: str) -> dict[str, int] | None:
+    """Return {owner_casefolded: installation_id}, or None when missing or stale."""
+    cache_file = installation_cache_file(app_id)
+    if not cache_file.exists():
+        return None
     try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=CACHE_DIR,
-            prefix=f".{cache_file.name}.",
-            delete=False,
-        ) as temporary:
-            temporary.write(json.dumps(data))
-            temporary.flush()
-            os.fsync(temporary.fileno())
-            temporary_path = Path(temporary.name)
-        temporary_path.chmod(0o600)
-        os.replace(temporary_path, cache_file)
-    except OSError as error:
-        raise AppTokenError("failed to write credential cache") from error
-    finally:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        data = json.loads(cache_file.read_text())
+        if time.time() - float(data.pop("fetched_at")) >= INSTALLATION_CACHE_TTL:
+            return None
+        return {k: v for k, v in data.items() if isinstance(v, int)}
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def discover_installations(app_id: str, private_key: str) -> dict[str, int]:
+    """Fetch every installation for this app and cache {owner: installation_id}."""
+    bearer = generate_jwt(app_id, private_key)
+    installations: dict[str, int] = {}
+    page = 1
+    while True:
+        request = urllib.request.Request(
+            f"https://api.github.com/app/installations?per_page=100&page={page}",
+            headers=api_headers(bearer),
+        )
+        response = api_json(request)
+        if not isinstance(response, list):
+            raise AppTokenError("GitHub returned an invalid installations response")
+        for item in response:
+            login = item.get("account", {}).get("login") if isinstance(item, dict) else None
+            if isinstance(login, str) and isinstance(item.get("id"), int):
+                installations[login.casefold()] = item["id"]
+        if len(response) < 100:
+            break
+        page += 1
+    write_cache_file(
+        installation_cache_file(app_id),
+        {"fetched_at": time.time(), **installations},
+    )
+    remember_covered_owners(app_id, installations)
+    return installations
 
 
 def covered_owners_file(app_id: str) -> Path:
     return CACHE_DIR / f"covered-{cache_component(app_id)}.json"
 
 
-def covered_owners_lock_file(app_id: str) -> Path:
-    return CACHE_DIR / f"covered-{cache_component(app_id)}.lock"
-
-
 def remember_covered_owners(app_id: str, installations: dict[str, int]) -> None:
     """Record every owner this App has ever been seen installed on.
 
-    Unlike the token caches, this is never expired and never shrinks: it is what lets a
-    later release that omits a known owner be treated as the contradiction it is, instead
-    of as permission to hand out the personal token. The read-merge-write runs under one
-    lock, so two concurrent cache misses never drop each other's owners.
+    Unlike the installations cache, this is never expired and never shrinks:
+    it is what lets a later discovery that omits a known owner be treated as
+    the contradiction it is, instead of as permission to hand out the personal
+    token.
     """
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with covered_owners_lock_file(app_id).open("a", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            covered = covered_owners(app_id)
-            updated = {**covered, **installations}
-            if updated != covered:
-                write_cache_file(covered_owners_file(app_id), updated)
-    except OSError as error:
-        raise AppTokenError("failed to update covered-owner cache") from error
+    covered = covered_owners(app_id)
+    covered.update(installations)
+    write_cache_file(covered_owners_file(app_id), covered)
 
 
 def covered_owners(app_id: str) -> dict[str, int]:
-    """The covered-owner file. A damaged one is unknown coverage, never an empty one."""
     cache_file = covered_owners_file(app_id)
     if not cache_file.exists():
         return {}
     try:
         data = json.loads(cache_file.read_text())
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as error:
-        raise AppTokenError("invalid covered-owner cache") from error
-    if not isinstance(data, dict):
-        raise AppTokenError("invalid covered-owner cache")
+        return {k: v for k, v in data.items() if isinstance(v, int)}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
 
-    covered: dict[str, int] = {}
-    for owner, installation_id in data.items():
-        normalized_owner = owner.casefold() if isinstance(owner, str) else ""
-        if (
-            not normalized_owner
-            or not isinstance(installation_id, int)
-            or isinstance(installation_id, bool)
-            or normalized_owner in covered
-        ):
-            raise AppTokenError("invalid covered-owner cache")
-        covered[normalized_owner] = installation_id
-    return covered
 
 
 def log_decision(profile: str, owner: str, request: dict[str, str], decision: str, detail: str) -> None:
@@ -265,8 +305,8 @@ def log_decision(profile: str, owner: str, request: dict[str, str], decision: st
     answerable after the fact: which owner was resolved, from what path, and
     whether the App, the personal token, or a refusal answered. Never the token
     itself - four characters of prefix say which kind it was (ghs_ App, ghp_
-    personal) - and never the broker's output. 2026-09-17: two review verdicts went
-    out as the human and nothing recorded which of these paths produced them.
+    personal). 2026-09-17: two review verdicts went out as the human and nothing
+    recorded which of these paths produced them.
     """
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -291,36 +331,37 @@ def log_decision(profile: str, owner: str, request: dict[str, str], decision: st
     except OSError:
         pass  # the log is diagnostics; never fail a mint because of it
 
+def resolve_installation(
+    app_id: str, private_key: str, owner: str, *, refresh: bool = False
+) -> tuple[int, bool]:
+    """Resolve an owner to (installation_id, came_from_cache).
 
-def mise_shims() -> Path:
-    """mise's shims dir.
-
-    mise runs [settings.github] credential_command with its own shims dir taken off PATH,
-    and outside an interactive shell (where `mise activate` adds the install dirs) that dir
-    is the only place `secrets` and `agent-secrets` are found: every mint then failed
-    (2026-10-24, INFRA-219).
+    A cache miss for an owner is not authoritative: refresh once before saying
+    the app is uninstalled, so newly installed owners begin working promptly.
     """
-    return Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".mise") / "shims"
+    target = owner.casefold()
+    if not refresh:
+        cached = get_cached_installations(app_id)
+        if cached is not None and target in cached:
+            return cached[target], True
+    installations = discover_installations(app_id, private_key)
+    if target not in installations:
+        raise UninstalledOwnerError(f"GitHub App is not installed for owner {owner}")
+    return installations[target], False
 
 
 def secrets_executable() -> str:
-    """`secrets` on PATH, else mise's shim for it (mise_shims)."""
-    return shutil.which("secrets") or str(mise_shims() / "secrets")
+    """`secrets` on PATH, else mise's shim for it.
 
-
-def secret_run_command() -> tuple[str, dict[str, str]]:
-    """secret-run on PATH, else the one in this shim's own checkout, and the environment to run
-    it in: the caller's, with mise's shims dir after its PATH, so secret-run finds
-    agent-secrets (the broker) and secrets where the caller's PATH lacks them (mise_shims)."""
-    executable = shutil.which("secret-run") or str(Path(__file__).resolve().parents[1] / "scripts" / "secret-run")
-    environment = dict(os.environ)
-    environment["PATH"] = os.pathsep.join(part for part in (environment.get("PATH", ""), str(mise_shims())) if part)
-    return executable, environment
+    mise runs [settings.github] credential_command with its own shims dir taken off PATH,
+    and outside an interactive shell (where `mise activate` adds the install dirs) that dir
+    is the only place `secrets` is found: every mint then failed (2026-10-24, INFRA-219).
+    """
+    mise_data = os.environ.get("MISE_DATA_DIR") or str(Path.home() / ".mise")
+    return shutil.which("secrets") or str(Path(mise_data) / "shims" / "secrets")
 
 
 def resolve_secret(name: str) -> str:
-    """Read the upstream personal-access-token fallback from secretsd. The App's key is the
-    broker's alone, and never read here."""
     try:
         result = subprocess.run(
             [secrets_executable(), "get", name, "--value"],
@@ -337,12 +378,22 @@ def resolve_secret(name: str) -> str:
     return value
 
 
+def resolve_private_key(key_secret: str) -> str:
+    b64_key = resolve_secret(key_secret)
+    try:
+        return base64.b64decode(b64_key).decode()
+    except (binascii.Error, UnicodeDecodeError) as error:
+        raise AppTokenError(
+            f"secret {key_secret} is not valid base64-encoded UTF-8: {error}"
+        ) from error
+
+
 def fallback_token(profile: str, owner: str) -> str:
     """The profile's personal access token for an owner the App is not installed on.
 
-    Read from secretsd on every request; the token is static, so no cache file is written
-    for it. Never silent: the identity about to act is the human's, and the caller has no
-    other way to tell.
+    Read from the secrets broker on every request; the token is static, so no
+    cache file is written for it. Never silent: the identity about to act is
+    the human's, and the caller has no other way to tell.
     """
     app_id = git_config(f"gh-app.{profile}.app-id")
     known = covered_owners(app_id).get(owner.casefold())
@@ -352,9 +403,9 @@ def fallback_token(profile: str, owner: str) -> str:
         # and this path handed out the personal token without a word.
         raise AppTokenError(
             f"owner {owner} was installed for App {app_id} (installation {known}) and is now "
-            "missing from the broker's release; refusing to fall back to the personal token. If "
-            f"the App really was uninstalled there, delete {covered_owners_file(app_id)} to "
-            "re-enable the fallback for it"
+            "missing from discovery; refusing to fall back to the personal token. If the App "
+            f"really was uninstalled there, delete {covered_owners_file(app_id)} to re-enable "
+            "the fallback for it"
         )
     fallback_secret = git_config_optional(f"gh-app.{profile}.fallback-secret")
     if fallback_secret is None:
@@ -367,95 +418,6 @@ def fallback_token(profile: str, owner: str) -> str:
         file=sys.stderr,
     )
     return resolve_secret(fallback_secret)
-
-
-def parse_broker_installations(release: str) -> dict[str, BrokerInstallation]:
-    """Validate a broker release without putting any of it in an error."""
-    try:
-        data = json.loads(release)
-    except json.JSONDecodeError as error:
-        raise AppTokenError("broker returned invalid installations JSON") from error
-    if not isinstance(data, dict) or not isinstance(data.get("installations"), dict):
-        raise AppTokenError("broker returned invalid installations JSON")
-
-    parsed: dict[str, BrokerInstallation] = {}
-    for owner, installation in data["installations"].items():
-        if not isinstance(owner, str) or not owner or not isinstance(installation, dict):
-            raise AppTokenError("broker returned invalid installations JSON")
-        installation_id = installation.get("installation_id")
-        token = installation.get("token")
-        expires_at = installation.get("expires_at")
-        if (
-            not isinstance(installation_id, int)
-            or isinstance(installation_id, bool)
-            or not isinstance(token, str)
-            or not token
-            or not isinstance(expires_at, str)
-        ):
-            raise AppTokenError("broker returned invalid installations JSON")
-        try:
-            expiration = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-        except ValueError as error:
-            raise AppTokenError("broker returned invalid installations JSON") from error
-        normalized_owner = owner.casefold()
-        if expiration.tzinfo is None or normalized_owner in parsed:
-            raise AppTokenError("broker returned invalid installations JSON")
-        parsed[normalized_owner] = {
-            "installation_id": installation_id,
-            "token": token,
-            "expires_at": expires_at,
-        }
-    return parsed
-
-
-def request_broker_installations(
-    secret_name: str, owner: str, scope: dict[str, Any] | None = None
-) -> dict[str, BrokerInstallation]:
-    """Ask the broker for a release of secret_name through secret-run, capturing its stdout
-    without logging it. With scope, the release is narrowed to owner's installation, its
-    repositories and its read-only permissions."""
-    executable, environment = secret_run_command()
-    narrowing: list[str] = []
-    if scope:
-        narrowing = ["--github-owner", owner]
-        for repository in scope.get("repositories", []):
-            narrowing += ["--github-repo", repository]
-        if scope.get("permissions"):
-            narrowing.append("--github-read-only")
-    command = [
-        executable,
-        "--reason",
-        f"gh-app-token {owner}",
-        *narrowing,
-        secret_name,
-        "--",
-        "printenv",
-        secret_name,
-    ]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False, env=environment)
-    except FileNotFoundError as error:
-        raise AppTokenError("secret-run is not available") from error
-    except (OSError, UnicodeDecodeError) as error:
-        raise AppTokenError("failed to run secret-run") from error
-    if result.returncode == 75:
-        raise AppTokenError(
-            f"broker request for {secret_name} is pending; run agent-secrets-login before retrying"
-        )
-    if result.returncode == 77:
-        raise AppTokenError(
-            f"broker request for {secret_name} was denied; run agent-secrets-login before retrying"
-        )
-    if result.returncode:
-        # agent-secrets names the cause on the first line of stderr (broker unreachable, an old
-        # broker that cannot narrow, an old client that lacks a flag) and never a value there;
-        # the release itself goes only to stdout.
-        cause = result.stderr.strip().splitlines()[:1] or ["no message"]
-        detail = f"broker request for {secret_name} failed (exit {result.returncode}): {cause[0]}"
-        if scope:
-            detail += "; a --repo/--read-only token has no fallback"
-        raise AppTokenError(detail)
-    return parse_broker_installations(result.stdout)
 
 
 def select_owner(explicit_owner: str | None, request: dict[str, str]) -> str | None:
@@ -476,33 +438,21 @@ def get_token(
         return cached_token
 
     app_id = git_config(f"gh-app.{profile}.app-id")
-    broker_secret = git_config(f"gh-app.{profile}.broker-secret")
-    print(
-        f"gh-app-token: minting token for profile {profile} (owner={owner}{', ' + key if key else ''}) through the broker...",
-        file=sys.stderr,
-    )
-    installations = request_broker_installations(broker_secret, owner, scope)
-    remember_covered_owners(
-        app_id,
-        {name: installation["installation_id"] for name, installation in installations.items()},
-    )
-    if not scope:
-        # An owner-wide release holds every covered owner's token: cache them all. A narrowed
-        # one is cached under its scope alone, never in an owner-wide entry.
-        for name, installation in installations.items():
-            write_cache_file(
-                token_cache_file(profile, name),
-                {"token": installation["token"], "expires_at": installation["expires_at"]},
-            )
-    installation = installations.get(owner)
-    if installation is None:
-        raise UninstalledOwnerError(f"GitHub App is not installed for owner {owner}")
-    if scope:
-        write_cache_file(
-            token_cache_file(profile, owner, key),
-            {"token": installation["token"], "expires_at": installation["expires_at"]},
-        )
-    return installation["token"]
+    private_key = resolve_private_key(git_config(f"gh-app.{profile}.key-secret"))
+    installation_id, from_cache = resolve_installation(app_id, private_key, owner)
+    print(f"gh-app-token: minting token for profile {profile} (owner={owner}{', ' + key if key else ''})...", file=sys.stderr)
+    try:
+        token_data = get_installation_token(app_id, installation_id, private_key, scope)
+    except ApiError as error:
+        if error.code != 404 or not from_cache:
+            raise
+        # The cached installation no longer exists (app reinstalled or removed
+        # within the cache TTL). Rediscover once; a genuinely uninstalled owner
+        # surfaces as UninstalledOwnerError from resolve_installation.
+        installation_id, _ = resolve_installation(app_id, private_key, owner, refresh=True)
+        token_data = get_installation_token(app_id, installation_id, private_key, scope)
+    write_cache_file(token_cache_file(profile, owner, key), token_data)
+    return str(token_data["token"])
 
 
 def read_credential_request() -> dict[str, str]:
@@ -519,7 +469,7 @@ def read_credential_request() -> dict[str, str]:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Return a target-owner GitHub App installation token from the secrets broker."
+        description="Mint a target-owner GitHub App installation token."
     )
     parser.add_argument("profile")
     parser.add_argument("action", choices=("get", "store", "erase"), nargs="?")
@@ -573,9 +523,9 @@ def main(argv: list[str] | None = None) -> int:
         log_decision(args.profile, owner, request, "refused", str(error))
         print(f"gh-app-token: {error}", file=sys.stderr)
         if credential_mode:
-            # Stop git's helper chain: a broker failure, or an uncovered owner
-            # with no usable fallback, must fail loudly, never silently fall
-            # back to the user's own credentials.
+            # Stop git's helper chain: a broken app setup, or an uncovered
+            # owner with no usable fallback, must fail loudly, never silently
+            # fall back to the user's own credentials.
             print("quit=1")
         return 1
     log_decision(args.profile, owner, request, decision, f"token={token[:4]}…")

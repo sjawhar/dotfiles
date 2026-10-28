@@ -64,7 +64,7 @@
 
 [gh-app "agent"]
 	app-id = 4943528
-	broker-secret = GITHUB_APP_SJAWHAR
+	key-secret = GH_AGENT_APP_PRIVATE_KEY_B64
 	fallback-secret = GH_PUBLIC_REPO_PAT
 
 # Commit signing, mirroring the jj setup in .jjconfig.toml: same key path, same
