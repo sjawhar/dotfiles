@@ -971,7 +971,7 @@ else
         true)
             out="$(ENVOY_MAX_TIME=3 "$DOTFILES_DIR/scripts/envoy" ps --json 2>&1)" && ok "envoy api answers ($(jq length <<<"$out") sessions)" || fail "envoy api: $(head -1 <<<"$out")"
             nu="$(jq -r ".envoy.natsUrls[0] // empty" "$ej" 2>/dev/null)"; hp="${nu#*://}"; hp="${hp##*@}"; hp="${hp%%/*}"; case "$hp" in *:*) ;; *) hp="$hp:4222";; esac
-            timeout 5 bash -c "exec 3<>/dev/tcp/${hp%:*}/${hp##*:}" 2>/dev/null && ok "envoy nats reachable ($hp)" || fail "envoy nats ${nu:-unset in $ej} unreachable"
+            timeout 5 python3 -c "import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 4).close()" "${hp%:*}" "${hp##*:}" 2>/dev/null && ok "envoy nats reachable ($hp)" || fail "envoy nats ${nu:-unset in $ej} unreachable"
             s="$(jq -r ".envoy.natsSeed // empty" "$ej" 2>/dev/null)"
             case "$s" in
                 "") echo "note box: $ej names no natsSeed (envoy connects without a credential)";;
