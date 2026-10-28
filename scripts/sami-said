@@ -1,0 +1,1084 @@
+#!/usr/bin/env python3
+"""sami-said: print what Sami typed into omp sessions in a time window, oldest first, newest last.
+
+    sami-said [--since 90m] [--until TIME] [--session ID]... [--grep REGEX] [--max-chars N]
+              [--json] [--dispatch] [--dispatch-user EMAIL] [--agent-dir DIR]...
+
+--since and --until take a duration back from now (45s, 90m, 2h, 1d) or an ISO 8601 time
+(2026-10-28T02:00Z, '2026-10-28 02:00', 2026-10-28), UTC when it names no zone. --since defaults
+to 24h, --until to now; --since is inclusive, --until exclusive. --session keeps the sessions whose
+id starts with it (repeatable). --grep keeps messages whose text matches it, case-insensitive.
+--max-chars cuts each text to N characters. --json prints one JSON object per line instead of text.
+
+Each message carries its UTC time, its source, the session id, the session title, the session's
+working directory, and the text. Sources:
+
+  terminal          typed in the omp terminal, and found in omp's prompt history (history.db)
+  terminal-history  typed in the omp terminal, in the prompt history, with no copy in a transcript
+                    (a /btw question, a slash command such as /guided-goal, or a prompt pulled
+                    back before it was sent). Its time is the last time that exact text was sent.
+                    A prompt whose transcript copy lands up to 30 minutes after --until counts as
+                    sent, and shows in the window that holds that copy.
+  dispatch-turn     a person typed it on Dispatch's Agents page and it reached the session as the
+                    user's own turn. With --dispatch its author is checked against Dispatch.
+  DISPATCH ...      with --dispatch: an answer, comment, message, approval or change request that
+                    --dispatch-user (default sami@theorem.dev) wrote in Dispatch, read from the
+                    Dispatch event log. These are not in any transcript as typed text.
+
+How a typed message is told apart from text injected into the user role. Structural rules first:
+
+  1. Top-level session files (sessions/<cwd>/<time>_<id>.jsonl) are read. A file below one
+     (sessions/<cwd>/<time>_<id>/...) is a subagent transcript of briefs and relays, and is read
+     only when the prompt history names its session id for the window: a subagent or lane someone
+     typed into. Dispatch messages to such a session show only with --dispatch.
+  2. Only entries of type "message" whose message.role is "user" are candidates, plus one custom
+     type below. That drops every custom_message (Envoy deliveries, IRC from agents, background-job
+     results, compaction and post-compaction reminders, stream goals, rules refresh, LSP and mount
+     notices, Dispatch ask reminders, ...), every "compaction" and "branch_summary" entry, and
+     every "developer" message (slash-command expansions such as /guided-goal, the "Continue."
+     notice the c shortcut sends, advisor and file-mention notes).
+  3. message.attribution "agent" is dropped: a parent's brief, an IRC relay, a compaction handoff.
+     message.synthetic true is dropped: an automatic continue.
+  4. message.tag present: the Dispatch message id of a person's typed input, delivered by Envoy
+     (pi-envoy runTypedInput). Kept as dispatch-turn; no further check.
+  5. custom_message "skill-prompt" with attribution "user": the user ran /skill:NAME ARGS. Kept
+     as the text "/skill:NAME ARGS" from details.name and details.args; the skill body is dropped.
+     A tag on the entry makes it a dispatch-turn, as in rule 4.
+  6. Every other candidate must match a prompt in the same omp agent directory's history.db, which
+     the omp terminal writes on each submit and headless runs (omp -p, RPC prompts from scripts and
+     agents) never write. That drops the launch prompts of scripted sessions: reviewers,
+     architects, audits, drift checkers, model probes. Match: equal after collapsing whitespace,
+     else (same session) one text contains the other and the shorter is 20 or more characters.
+  7. A steering message (message.steering, typed while the agent was running) is kept as typed:
+     omp stores the text unwrapped, and adds its emphasis wrapper only when it builds a request.
+  8. A pruned text "[shaken ~N tokens — recover: artifact://N (region R)]" is restored from the
+     session's artifact directory before rule 6, as omp-session-render does.
+  9. Agents type into another session's pane with tmux, and the terminal records that as typing. A
+     typing call is a bash or eval tool call, in any session file on this machine (nested and
+     symlinked ones included), whose arguments say send-keys, paste-buffer or load-buffer (also
+     through a helper: tm("send-keys", ...)), or that runs a script (.sh, .bash, .py, or a file in a
+     bin/ or scripts/ directory) whose text says so. Its text is its arguments plus every file of
+     256 KB or less that it names, read as the file is now: the script, or a brief it sends with
+     send-keys -l "$(cat FILE)". A terminal or terminal-history text is dropped when a typing call
+     of another session, from 30 minutes before it to 30 seconds after, holds: its first 48
+     letters and digits; or half of its 32-character pieces taken every 16 (a template with its
+     variables filled in); or, for a text under 16 letters and digits, the whole text as one quoted
+     argument. The transcript store (tq) is not used: it cuts a call's arguments at 4000 characters.
+
+Text rules, used only where no structural mark exists:
+
+  T1. A script that types into a pane leaves no tool call (the drift checker's run.sh, the box
+      monitor), and a file a call names can have changed since. Agents and scripts name themselves
+      on the first line, so a terminal text whose first line matches one of these is dropped:
+        ^\\[?From the <up to 100 characters>:<space>   ("From the chief of staff: ...",
+                                                     "From the coach, from the audit (...): ...")
+        ^\\[(From )?Claude\\b                          ("[From Claude, the ENVOY session ...]")
+        ^<CAPS lane tag> here (session <hex>|, at      ("SWITCH here (session 01a174f7). ...")
+        ^<CAPS lane tag>, HH:MMZ\\b                    ("CHIEF, 03:09Z: you have been restarted ...")
+  T2. A terminal-history prompt is dropped when a terminal message of the same session, within 15
+      minutes, starts with its first 60 characters or contains it whole (20 characters or more):
+      a draft, or a piece, of a message that was then sent.
+
+Known limits: omp files text typed into a focused subagent view under the parent's session id, so
+such text prints as terminal-history of the parent session. Rule 9 misses an agent that types
+through a helper defined in an earlier call when the later call never says send-keys, and a script
+that was changed or deleted after it sent its text.
+
+Speed: a session file whose mtime is before --since is never opened; in a file over 1 MB a
+binary search on byte offsets (probing only "message" entries, which omp stamps as it writes
+them) skips to 30 minutes before --since, and reading stops 30 minutes after --until.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+UTC = timezone.utc
+DEFAULT_SINCE = "24h"
+DEFAULT_DISPATCH_USER = "sami@theorem.dev"
+DEFAULT_DISPATCH_URL = "http://localhost:8766"  # the dispatch CLI's default (envoy-client dispatch-config.ts)
+SEEK_MARGIN = timedelta(minutes=30)  # omp appends some entries minutes after their timestamp
+SEEK_MIN_BYTES = 1 << 20  # files smaller than this are read whole
+DRAFT_WINDOW = timedelta(minutes=15)  # rule T2
+DRAFT_PREFIX = 60
+FALLBACK_MIN = 20  # rule 6, containment match
+SSE_IDLE_S = 3.0  # the Dispatch event stream sends nothing more once it has caught up
+SSE_TAIL_S = 1.0  # the same wait once the stream has passed the newest event known at the start
+DISPATCH_MARGIN = timedelta(minutes=10)
+TYPED_BEFORE = timedelta(minutes=30)  # rule 9: how long before a message an agent's send-keys call can be
+TYPED_AFTER = timedelta(seconds=30)  # ... and after it, for clock and write skew
+TYPING_TOOLS = ("bash", "eval")
+TYPED_KEY = 48  # rule 9: letters and digits of a message's start that must appear in the call
+TYPED_KEY_MIN = 16  # a shorter message must fill a quoted argument of the call exactly
+TYPED_CHUNK = 32  # rule 9, templates: pieces of this many letters and digits, every 16
+TYPED_CHUNKS_MIN = 4  # a text this many pieces long or more may match as a filled-in template
+NAMED_FILE_MAX = 256 << 10  # rule 9 reads a file a typing call names only up to this size
+TYPING_VERBS = re.compile(r"send-keys|paste-buffer|load-buffer")
+TYPING_VERB_BYTES = (b"send-keys", b"paste-buffer", b"load-buffer")
+NAMED_PATH = re.compile(r"(?<![\w.~/-])(?:~/|/)[\w.@%+~/-]*\w")
+# A script a call runs: a .sh, .bash or .py file, or any file in a bin/ or scripts/ directory.
+SCRIPT_PATH = re.compile(r"(?:\.(?:sh|bash|py)|/(?:bin|scripts)/[\w.@%+-]+)$")
+SCRIPT_PATH_BYTES = re.compile(rb"(?<![\w.~/-])(?:~/|/)[\w.@%+~/-]*(?:\.(?:sh|bash|py)|/(?:bin|scripts)/[\w.@%+-]+)(?![\w.~/-])")
+SCRIPT_HINTS = (b".sh", b".bash", b".py", b"/bin/", b"/scripts/")
+
+MESSAGE_LINE = b'{"type":"message"'
+ENTRY_TS = re.compile(rb'"timestamp":"(\d{4}-\d\d-\d\dT[\d:.]+Z)"')
+SHAKE = re.compile(r"\[shaken ~\d+ tokens — recover: artifact://(\d+) \(region (\d+)\)\]")
+AGENT_TYPED = re.compile(r"\[?From the [^\n]{1,100}?:\s|\[(?:From )?Claude\b"
+                         r"|[A-Z][A-Z0-9-]{2,}(?: here(?: \(session [0-9a-f]|, at )|, \d\d:\d\dZ\b)")
+ESCAPES = re.compile(r"\\+(?:u[0-9a-fA-F]{4}|[nrtbf])")
+NOT_ALNUM = re.compile(r"[^a-z0-9]+")
+WHITESPACE = re.compile(r"\s+")
+DURATION = re.compile(r"(\d+(?:\.\d+)?)([smhd])")
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+@dataclass
+class Session:
+    sid: str
+    path: Path | None = None
+    title: str = ""
+    cwd: str = ""
+
+
+@dataclass
+class Message:
+    time: datetime
+    source: str
+    text: str
+    session: Session | None = None
+    steering: bool = False
+    dispatch_id: str | None = None  # the Dispatch message id of a dispatch-turn, or the event's item id
+    ref: str | None = None
+    context: str | None = None  # what a Dispatch answer or comment replies to
+    author: str | None = None  # a dispatch-turn's author, once Dispatch confirms it
+    agent_dir: Path | None = None
+    history_ids: list[int] = field(default_factory=list)
+    beyond: bool = False  # read past --until only to match prompt history and Dispatch messages
+
+
+@dataclass
+class HistoryRow:
+    hid: int
+    prompt: str
+    created: datetime
+    cwd: str
+    sid: str
+
+
+@dataclass
+class AgentDir:
+    root: Path
+    history: list[HistoryRow] | None  # None when history.db is missing or unreadable
+    by_text: dict[str, list[int]] = field(default_factory=dict)
+    rows: dict[int, HistoryRow] = field(default_factory=dict)
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(f"sami-said: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def warn(msg: str) -> None:
+    print(f"sami-said: {msg}", file=sys.stderr)
+
+
+def parse_when(value: str, now: datetime) -> datetime:
+    m = DURATION.fullmatch(value.strip())
+    if m:
+        return now - timedelta(seconds=float(m.group(1)) * UNITS[m.group(2)])
+    text = value.strip().replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        t = datetime.fromisoformat(text)
+    except ValueError:
+        die(f"not a duration or an ISO 8601 time: {value!r}")
+    return t.replace(tzinfo=UTC) if t.tzinfo is None else t.astimezone(UTC)
+
+
+def iso(t: datetime) -> str:
+    return t.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def norm(text: str) -> str:
+    return WHITESPACE.sub(" ", text).strip()
+
+
+# ---------------------------------------------------------------- omp agent directories
+
+
+def agent_dirs(given: list[str]) -> list[Path]:
+    if given:
+        return [Path(d).expanduser() for d in given]
+    home = Path.home() / ".omp"
+    found = [home / "agent"] + sorted(home.glob("profiles/*/agent"))
+    return [d for d in found if (d / "sessions").is_dir()]
+
+
+def load_history(root: Path) -> AgentDir:
+    db = root / "history.db"
+    ad = AgentDir(root=root, history=None)
+    if not db.exists():
+        return ad
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = con.execute("select id, prompt, created_at, coalesce(cwd, ''), coalesce(session_id, '') from history").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        warn(f"{db}: {e}; terminal messages from {root} cannot be confirmed and are left out")
+        return ad
+    ad.history = []
+    for hid, prompt, created, cwd, sid in rows:
+        row = HistoryRow(hid, prompt, datetime.fromtimestamp(created, UTC), cwd, sid)
+        ad.history.append(row)
+        ad.rows[hid] = row
+        ad.by_text.setdefault(norm(prompt), []).append(hid)
+    return ad
+
+
+def history_match(ad: AgentDir, text: str, sid: str) -> list[int]:
+    """Rule 6: the history rows this terminal text was submitted as; empty when it was never typed."""
+    exact = ad.by_text.get(norm(text))
+    if exact:
+        return exact
+    t = norm(text)
+    hits = []
+    for row in ad.history or ():
+        if row.sid != sid:
+            continue
+        h = norm(row.prompt)
+        if min(len(h), len(t)) >= FALLBACK_MIN and (h in t or t in h):
+            hits.append(row.hid)
+    return hits
+
+
+# ---------------------------------------------------------------- session files
+
+
+def list_sessions(root: Path) -> list[tuple[Path, float, str]]:
+    """Every top-level session file under root/sessions: (path, mtime, session id)."""
+    out = []
+    try:
+        dirs = list(os.scandir(root / "sessions"))
+    except OSError:
+        return out
+    for d in dirs:
+        if not d.is_dir(follow_symlinks=False):
+            continue
+        try:
+            files = list(os.scandir(d.path))
+        except OSError:
+            continue
+        for f in files:
+            name = f.name
+            if not name.endswith(".jsonl") or "_" not in name:
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            out.append((Path(f.path), st.st_mtime, name[name.index("_") + 1 : -len(".jsonl")]))
+    return out
+
+
+SESSION_NAME = re.compile(r"[^_/]+_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl")
+
+
+def find_nested(root: Path, wanted: set[str], since: float) -> dict[str, Path]:
+    """Session files below a top-level session's directory whose session id is in wanted: a
+    subagent or lane someone typed into. A file named <time>_<id>.jsonl is matched by its name; any
+    other .jsonl only when modified since `since`, by the id in its header."""
+    found: dict[str, Path] = {}
+    for top in (root / "sessions").iterdir() if (root / "sessions").is_dir() else ():
+        if not top.is_dir():
+            continue
+        for dirpath, _dirs, files in os.walk(top, followlinks=True):  # moved sessions are symlinks
+            if dirpath == str(top):
+                continue  # the top-level files list_sessions already holds
+            for name in files:
+                if not name.endswith(".jsonl"):
+                    continue
+                path = Path(dirpath) / name
+                m = SESSION_NAME.fullmatch(name)
+                if m:
+                    sid = m.group(1)
+                else:
+                    try:
+                        if path.stat().st_mtime < since:
+                            continue
+                    except OSError:
+                        continue
+                    sid = read_header(path, "").sid
+                if sid in wanted and sid not in found:
+                    found[sid] = path
+                    if len(found) == len(wanted):
+                        return found
+    return found
+
+
+def read_header(path: Path, sid: str) -> Session:
+    s = Session(sid=sid, path=path)
+    try:
+        with open(path, "rb") as fh:
+            for _ in range(2):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("type") == "title" and e.get("title"):
+                    s.title = str(e["title"])
+                elif e.get("type") == "session":
+                    s.sid = str(e.get("id") or sid)
+                    s.cwd = str(e.get("cwd") or "")
+                    s.title = s.title or str(e.get("title") or "")
+    except OSError:
+        pass
+    return s
+
+
+def seek_start(fh, size: int, target: str) -> int:
+    """A line start before every "message" entry stamped at or after target. Only message entries
+    are probed: omp stamps them as it writes them, while a custom_message keeps the time its delivery
+    began, and one replayed after a resume sits hours late in the file."""
+    lo, hi = 0, size
+    while hi - lo > (1 << 20):
+        mid = (lo + hi) // 2
+        fh.seek(mid)
+        fh.readline()
+        stamp, pos = None, fh.tell()
+        while stamp is None and pos < hi:
+            line = fh.readline()
+            if not line:
+                break
+            if line.startswith(MESSAGE_LINE):
+                m = ENTRY_TS.search(line, 0, 300)
+                stamp = m.group(1).decode() if m else None
+            if stamp is None:
+                pos = fh.tell()
+        if stamp is None or stamp >= target:
+            hi = mid
+        else:
+            lo = pos
+    return lo
+
+
+def shake_regions(path: Path, art: str, cache: dict) -> dict[str, str]:
+    key = (path, art)
+    if key not in cache:
+        regions: dict[str, str] = {}
+        log = Path(str(path)[: -len(".jsonl")]) / f"{art}.shake.log"
+        if log.exists():
+            cur, buf = None, []
+            for line in log.read_text(errors="replace").splitlines():
+                m = re.match(r"### region (\d+) \(", line)
+                if m:
+                    if cur is not None:
+                        regions[cur] = "\n".join(buf).strip()
+                    cur, buf = m.group(1), []
+                else:
+                    buf.append(line)
+            if cur is not None:
+                regions[cur] = "\n".join(buf).strip()
+        cache[key] = regions
+    return cache[key]
+
+
+def content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    parts, images = [], 0
+    for p in content or ():
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "text":
+            parts.append(str(p.get("text") or ""))
+        elif p.get("type") == "image":
+            images += 1
+    text = "".join(parts)
+    if images and "[Image #" not in text:
+        text = (text + " " if text else "") + " ".join("[image]" for _ in range(images))
+    return text
+
+
+def scan_file(path: Path, sid: str, since: datetime, until: datetime, shakes: dict) -> tuple[Session, list[Message]]:
+    """Rules 2-5, 7 and 8: the candidates of one session file from since to SEEK_MARGIN past until.
+    Those at or after until come back marked `beyond`: they are never printed, but a prompt that
+    reached its transcript just after the window is not then shown as one with no transcript copy."""
+    session = read_header(path, sid)
+    out: list[Message] = []
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return session, out
+    with fh:
+        size = os.fstat(fh.fileno()).st_size
+        start = 0
+        if size > SEEK_MIN_BYTES:
+            start = seek_start(fh, size, (since - SEEK_MARGIN).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+        fh.seek(start)
+        end = until + SEEK_MARGIN
+        stop = end.strftime("%Y-%m-%dT%H:%M:%S.000Z").encode()
+        for line in fh:
+            if line.startswith(MESSAGE_LINE):
+                m = ENTRY_TS.search(line, 0, 300)
+                if m and m.group(1) > stop:
+                    break
+            if b'"role":"user"' not in line and b'"customType":"skill-prompt"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            t = parse_ts(e.get("timestamp"))
+            if t is None or t < since or t >= end:
+                continue
+            kind = e.get("type")
+            if kind == "message":
+                m = e.get("message") or {}
+                if m.get("role") != "user" or m.get("attribution") not in (None, "user") or m.get("synthetic"):
+                    continue
+                text = content_text(m.get("content"))
+                if "[shaken ~" in text:
+                    text = SHAKE.sub(lambda g: shake_regions(path, g.group(1), shakes).get(g.group(2), g.group(0)), text)
+                tag = m.get("tag")
+            elif kind == "custom_message" and e.get("customType") == "skill-prompt" and e.get("attribution") == "user":
+                d = e.get("details") or {}
+                if not d.get("name"):
+                    continue
+                text = f"/skill:{d['name']} {d.get('args') or ''}".strip()
+                m, tag = {}, e.get("tag")  # omp puts a Dispatch-typed /skill:'s tag on the entry
+            else:
+                continue
+            tag = tag if isinstance(tag, str) and tag else None
+            out.append(Message(time=t, source="dispatch-turn" if tag else "terminal", text=text, session=session,
+                               steering=bool(m.get("steering")), dispatch_id=tag, beyond=t >= until))
+    return session, out
+
+
+def agent_typed(text: str) -> bool:
+    """Rule T1."""
+    return AGENT_TYPED.match(text.lstrip()) is not None
+
+
+# ---------------------------------------------------------------- rule 9: agents typing into a pane
+
+
+@dataclass
+class TypingCall:
+    time: datetime
+    raw: str  # the call's arguments as recorded: JSON text
+    key: str  # typing_key of the arguments and of the files they name
+    path: Path  # the session file of the agent that made the call
+
+
+def typing_key(text: str) -> str:
+    """Lowercase letters and digits only. A JSON or Python escape (\\n, \\u2011) counts as a gap, so a
+    message and the quoted, escaped copy of it in a tool call reduce to the same string."""
+    return NOT_ALNUM.sub("", ESCAPES.sub(" ", text).lower())
+
+
+def recent_jsonl(root: Path, cut: float) -> list[Path]:
+    """Every .jsonl below root, nested ones included, modified at or after cut."""
+    minutes = int((time.time() - cut) // 60) + 2
+    try:
+        run = subprocess.run(["find", "-L", str(root), "-name", "*.jsonl", "-type", "f", "-mmin", f"-{minutes}"],
+                             capture_output=True, text=True, timeout=120)
+        if run.returncode == 0 or run.stdout:  # a broken symlink makes find exit 1 after a full listing
+            return [Path(p) for p in run.stdout.splitlines()]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    found = []
+    for dirpath, _dirs, files in os.walk(root, followlinks=True):
+        for name in files:
+            path = Path(dirpath) / name
+            try:
+                if name.endswith(".jsonl") and path.stat().st_mtime >= cut:
+                    found.append(path)
+            except OSError:
+                continue
+    return found
+
+
+def named_file(token: str, files: dict[str, str | None]) -> str | None:
+    """The text of a small file a tool call names by absolute or ~ path, as it is on disk now."""
+    if token not in files:
+        files[token] = None
+        try:
+            path = Path(token).expanduser()
+            if path.is_file() and path.stat().st_size <= NAMED_FILE_MAX:
+                files[token] = path.read_bytes().decode("utf-8", "replace")
+        except (OSError, RuntimeError, ValueError):
+            pass
+    return files[token]
+
+
+def script_paths(line: bytes) -> list[bytes]:
+    """The script paths in the tool calls of an assistant entry, not in its thinking or text."""
+    at = line.find(b'"toolCall"')
+    if at < 0 or not any(s in line[at:] for s in SCRIPT_HINTS):
+        return []
+    return SCRIPT_PATH_BYTES.findall(line, at)
+
+
+def types_into_pane(text: str | None) -> bool:
+    return text is not None and TYPING_VERBS.search(text) is not None
+
+
+def typing_call(part: dict, t: datetime, path: Path, files: dict[str, str | None]) -> TypingCall | None:
+    """A bash or eval tool call that types into a pane: its arguments run send-keys, paste-buffer or
+    load-buffer (directly, or through a helper such as tm("send-keys", ...)), or it runs a script
+    that does. The text it can type is its arguments and every small file it names: a script that
+    builds the text from a template, or a brief sent with send-keys -l "$(cat FILE)" or load-buffer."""
+    if part.get("type") != "toolCall" or part.get("name") not in TYPING_TOOLS:
+        return None
+    raw = json.dumps(part.get("arguments"), ensure_ascii=False)
+    types = TYPING_VERBS.search(raw) is not None
+    texts = [raw]
+    for token in NAMED_PATH.findall(ESCAPES.sub(" ", raw)):
+        text = named_file(token, files)
+        if text is not None:
+            texts.append(text)
+            types = types or (SCRIPT_PATH.search(token) is not None and types_into_pane(text))
+    return TypingCall(t, raw, typing_key("\n".join(texts)), path) if types else None
+
+
+def agent_typing_calls(roots: list[Path], start: datetime, end: datetime) -> list[TypingCall]:
+    """Rule 9's calls in [start, end), from the session files, nested ones included. The transcript
+    store is not used: it cuts a call's arguments at 4000 characters, and the 2026-10-25 wind-down
+    cell named send-keys after that."""
+    calls: list[TypingCall] = []
+    files: dict[str, str | None] = {}
+    target = start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    stop = end.strftime("%Y-%m-%dT%H:%M:%S.000Z").encode()
+    names = tuple(f'"name":"{tool}"'.encode() for tool in TYPING_TOOLS)
+    for root in roots:
+        for path in recent_jsonl(root / "sessions", start.timestamp()):
+            try:
+                fh = open(path, "rb")
+            except OSError:
+                continue
+            with fh:
+                size = os.fstat(fh.fileno()).st_size
+                fh.seek(seek_start(fh, size, target) if size > SEEK_MIN_BYTES else 0)
+                for line in fh:
+                    if not line.startswith(MESSAGE_LINE):
+                        continue
+                    stamp = ENTRY_TS.search(line, 0, 300)
+                    if stamp and stamp.group(1) > stop:
+                        break
+                    if b'"role":"assistant"' not in line or not any(n in line for n in names):
+                        continue
+                    if not any(v in line for v in TYPING_VERB_BYTES) and not any(
+                            types_into_pane(named_file(p.decode(errors="replace"), files)) for p in set(script_paths(line))):
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    t = parse_ts(e.get("timestamp"))
+                    if t is None or t < start:
+                        continue
+                    for part in (e.get("message") or {}).get("content") or ():
+                        call = typing_call(part, t, path, files) if isinstance(part, dict) else None
+                        if call is not None:
+                            calls.append(call)
+    return calls
+
+
+def typed_by_agent(m: Message, calls: list[TypingCall]) -> bool:
+    """Rule 9: another session's typing call held this text shortly before it arrived."""
+    key = typing_key(m.text)
+    pattern = None
+    if len(key) < TYPED_KEY_MIN:
+        text = norm(m.text)
+        if not text:
+            return False
+        quoted = re.escape(text)
+        pattern = re.compile(rf"(?<=['\"]){quoted}(?=['\"\\])|(?<=-l ){quoted}(?=\s|\\|$)")
+    chunks = [key[i:i + TYPED_CHUNK] for i in range(0, len(key) - TYPED_CHUNK + 1, TYPED_CHUNK // 2)]
+    for c in calls:
+        if not (m.time - TYPED_BEFORE <= c.time <= m.time + TYPED_AFTER):
+            continue
+        if m.session is not None and m.session.path == c.path:
+            continue  # an agent does not type into its own pane: it quoted what it was sent
+        if pattern is not None:
+            if pattern.search(c.raw):
+                return True
+        elif key[:TYPED_KEY] in c.key:
+            return True  # the start of the text, as typed
+        elif len(chunks) >= TYPED_CHUNKS_MIN and sum(ch in c.key for ch in chunks) * 2 >= len(chunks):
+            return True  # half of it, as a template with its variables filled in
+    return False
+
+
+# ---------------------------------------------------------------- Dispatch
+
+
+@dataclass
+class DispatchConfig:
+    url: str
+    token: str
+
+
+def dispatch_config() -> DispatchConfig:
+    """The Dispatch server and bearer the dispatch CLI would use: the envoy.json `envoy config-path`
+    names, with DISPATCH_URL, DISPATCH_TOKEN_FILE and DISPATCH_TOKEN over it."""
+    envoy = Path(__file__).resolve().parent / "envoy"
+    try:
+        path = subprocess.run([str(envoy), "config-path"], check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"cannot find envoy.json: {envoy} config-path failed: {e}") from e
+    try:
+        cfg = json.loads(Path(path).read_text()).get("dispatch") or {}
+    except FileNotFoundError:
+        cfg = {}
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"{path}: {e}") from e
+    if cfg.get("enabled") is False:
+        raise RuntimeError(f"{path} sets dispatch.enabled to false")
+    url = (os.environ.get("DISPATCH_URL") or cfg.get("serverUrl") or DEFAULT_DISPATCH_URL).rstrip("/")
+    token_file = os.environ.get("DISPATCH_TOKEN_FILE")
+    if token_file:
+        token = Path(token_file).read_text().strip()
+    elif os.environ.get("DISPATCH_TOKEN"):
+        token = os.environ["DISPATCH_TOKEN"].strip()
+    else:
+        token = str(cfg.get("token") or "")
+        if not token:
+            raise RuntimeError(f"no Dispatch token: set dispatch.token in {path}, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE")
+        written_for = urllib.parse.urlsplit((cfg.get("serverUrl") or DEFAULT_DISPATCH_URL).rstrip("/"))
+        if urllib.parse.urlsplit(url)[:2] != written_for[:2]:
+            raise RuntimeError(f"DISPATCH_URL names {url}, but {path}'s dispatch.token is for another server; set DISPATCH_TOKEN")
+        if token.startswith("!"):
+            run = subprocess.run(["/bin/sh", "-c", token[1:]], capture_output=True, text=True, timeout=10)
+            if run.returncode != 0 or not run.stdout.strip():
+                raise RuntimeError(f"{path}: the dispatch.token command failed")
+            token = run.stdout.strip()
+    return DispatchConfig(url=url, token=token)
+
+
+def api_get(cfg: DispatchConfig, path: str, query: dict | None = None):
+    url = cfg.url + path + ("?" + urllib.parse.urlencode(query) if query else "")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+def message_author(cfg: DispatchConfig, mid: str | None, sid: str) -> str | None:
+    """Who wrote a Dispatch message: for a turn whose message.created event is before the scanned
+    stretch of the log (a delivery replayed hours later, after a resume)."""
+    if not mid:
+        return None
+    try:
+        found = api_get(cfg, f"/api/v1/messages/{urllib.parse.quote(mid)}", {"session": sid})
+    except (OSError, urllib.error.URLError, ValueError):
+        return None
+    author = ((found.get("message") or {}).get("author") or {}).get("id") if isinstance(found, dict) else None
+    return str(author) if author else None
+
+
+def open_stream(cfg: DispatchConfig, after: int):
+    req = urllib.request.Request(
+        f"{cfg.url}/api/v1/events?since={after}",
+        headers={"Authorization": f"Bearer {cfg.token}", "Accept": "text/event-stream"},
+    )
+    return urllib.request.urlopen(req, timeout=SSE_IDLE_S)
+
+
+def stream_events(cfg: DispatchConfig, after: int, head: int | None = None):
+    """Events with id > after from the server-sent event log, until it has caught up: a heartbeat,
+    or nothing for SSE_IDLE_S seconds, or for SSE_TAIL_S once an event at or past `head` (the newest
+    event known when the run started) has arrived, since the catch-up sends its backlog in one burst.
+    Other comment lines (`: open`, which newer servers send first) are skipped."""
+    resp = open_stream(cfg, after)
+    with resp:
+        data: list[bytes] = []
+        try:
+            for raw in resp:
+                line = raw.rstrip(b"\r\n")
+                if line.startswith(b":"):
+                    if line[1:].strip() == b"heartbeat":
+                        return
+                    continue
+                if line.startswith(b"data:"):
+                    data.append(line[5:].lstrip())
+                elif not line and data:
+                    event = json.loads(b"\n".join(data))
+                    data = []
+                    if head is not None and isinstance(event.get("id"), int) and event["id"] >= head:
+                        sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+                        if sock is not None:
+                            sock.settimeout(SSE_TAIL_S)
+                        head = None
+                    yield event
+        except TimeoutError:
+            return
+
+
+def first_event_after(cfg: DispatchConfig, after: int) -> dict | None:
+    for event in stream_events(cfg, after):
+        return event
+    return None
+
+
+def recent_event(cfg: DispatchConfig, now: datetime) -> dict | None:
+    """An event near the head of the log: the newest event of the most recently updated issue."""
+    for lookback in (timedelta(hours=2), timedelta(days=3), timedelta(days=60)):
+        found = api_get(cfg, "/api/v1/issues", {"updated_since": iso(now - lookback)})
+        issues = found.get("issues", []) if isinstance(found, dict) else found
+        if issues:
+            newest = max(issues, key=lambda i: i.get("updated_at") or "")
+            events = api_get(cfg, f"/api/v1/issues/{urllib.parse.quote(newest['key'])}/events", {"order": "desc", "limit": 1})
+            if events:
+                return events[0]
+    return None
+
+
+def start_id(cfg: DispatchConfig, target: datetime, now: datetime) -> tuple[int, int | None]:
+    """An event id such that the events after it begin at or just before target, and the id of an
+    event near the head of the log."""
+    anchor = recent_event(cfg, now)
+    if anchor is None:
+        return 0, None
+    head = int(anchor["id"])
+    if (parse_ts(anchor.get("created_at")) or now) < target:
+        return head, None  # an old anchor: its id says nothing about how much comes after it
+    lo, lo_t = 0, None  # the first event after lo is before target
+    hi, hi_t = int(anchor["id"]) - 1, parse_ts(anchor.get("created_at"))  # the first event after hi is at or after target
+    step = 0
+    while hi - lo > 1:
+        step += 1
+        mid = (lo + hi) // 2
+        if lo_t is not None and hi_t is not None and step % 3 and hi_t > lo_t:
+            frac = (target - lo_t) / (hi_t - lo_t)
+            mid = lo + int(frac * (hi - lo))
+            mid = min(max(mid, lo + 1), hi - 1)
+        event = first_event_after(cfg, mid)
+        t = parse_ts(event.get("created_at")) if event else None
+        if t is None or t >= target:
+            hi, hi_t = mid, t
+        else:
+            lo, lo_t = max(mid, int(event["id"]) - 1), t
+    return hi, head
+
+
+def dispatch_rows(cfg: DispatchConfig, user: str, since: datetime, until: datetime, now: datetime):
+    """User-authored Dispatch events in [since, until), and every message.created author in it."""
+    rows: list[Message] = []
+    authors: dict[str, str] = {}
+    titles: dict[str, str] = {}  # message id -> the title of the session it was delivered to
+    after, head = start_id(cfg, since - DISPATCH_MARGIN, now)
+    for e in stream_events(cfg, after, head):
+        t = parse_ts(e.get("created_at"))
+        if t is None:
+            continue
+        if t >= until + DISPATCH_MARGIN or t >= now:
+            break
+        actor = e.get("actor") or {}
+        p = e.get("payload") or {}
+        if e.get("type") == "message.created":
+            a = (p.get("author") or {}).get("id") or actor.get("id")
+            if p.get("id") and a:
+                authors[str(p["id"])] = str(a)
+        elif e.get("type") == "message.delivery" and p.get("message_id") and p.get("title"):
+            titles[str(p["message_id"])] = str(p["title"])
+        if t < since or t >= until or actor.get("kind") != "user" or actor.get("id") != user:
+            continue
+        row = dispatch_row(e, t)
+        if row is not None:
+            rows.append(row)
+    for row in rows:
+        if row.source == "DISPATCH message" and row.session is not None and not row.session.title:
+            row.session.title = titles.get(str(row.dispatch_id), "")
+    return rows, authors
+
+
+def owner_ref(e: dict, p: dict) -> str:
+    if e.get("issue_key"):
+        return f"dispatch://{e['issue_key']}"
+    project = e.get("project") or "?"
+    doc = p.get("artifact_name") or p.get("block_artifact") or p.get("artifact_id") or e.get("artifact_id") or "?"
+    return f"dispatch://{project}/artifact/{doc}"
+
+
+def dispatch_row(e: dict, t: datetime) -> Message | None:
+    kind, p = e.get("type"), e.get("payload") or {}
+    session = None
+    if kind == "ask.answered":
+        a = p.get("answer") or {}
+        picked = [str(s) for s in a.get("selected") or []]
+        text = "; ".join(f"[{s}]" for s in picked)
+        if a.get("text"):
+            text = f"{text} {a['text']}".strip()
+        author = p.get("author") or {}
+        if author.get("kind") == "session":
+            origin = author.get("origin") or {}
+            session = Session(sid=str(author.get("id")), title=str(origin.get("session_title") or ""), cwd=str(origin.get("cwd") or ""))
+        return Message(t, "DISPATCH answer", text or "(no text)", session, dispatch_id=p.get("id"),
+                       ref=f"{owner_ref(e, p)}/ask/{p.get('id')}", context=p.get("question"))
+    if kind == "comment.created":
+        text = str(p.get("body") or "")
+        sug = p.get("suggestion")
+        if isinstance(sug, dict) and sug.get("replacement") is not None:
+            text = f"{text}\n[suggests: {sug.get('replacement')}]".strip()
+        context = None
+        if p.get("ask_question"):
+            context = f"reply to ask: {p['ask_question']}"
+        elif isinstance(p.get("anchor"), dict) and p["anchor"].get("quote"):
+            context = f"on: {p['anchor']['quote']}"
+        elif p.get("reply_to"):
+            context = f"reply to comment {p['reply_to']}"
+        return Message(t, "DISPATCH comment", text, None, dispatch_id=p.get("id"),
+                       ref=f"{owner_ref(e, p)}/comment/{p.get('id')}", context=context)
+    if kind == "message.created":
+        target = str(p.get("target") or "")
+        if target.startswith("session:"):
+            session = Session(sid=target[len("session:"):])
+        ref = f"dispatch://{e['issue_key']}/message/{p.get('id')}" if e.get("issue_key") else f"message {p.get('id')} to {target}"
+        return Message(t, "DISPATCH message", str(p.get("body") or ""), session, dispatch_id=p.get("id"), ref=ref,
+                       context="broadcast" if p.get("broadcast_id") else None)
+    if kind in ("artifact.approved", "artifact.changes_requested"):
+        label = "DISPATCH approval" if kind == "artifact.approved" else "DISPATCH changes requested"
+        return Message(t, label, str(p.get("reason") or "(no reason)"), None,
+                       ref=f"{owner_ref(e, p)} {p.get('name') or ''} v{p.get('version') or '?'}".strip())
+    return None
+
+
+# ---------------------------------------------------------------- output
+
+
+def render_text(m: Message, max_chars: int) -> str:
+    s = m.session
+    head = [iso(m.time), m.source]
+    if s is not None:
+        head.append(s.sid)
+        head.append(s.title or "(untitled)")
+        if s.cwd:
+            head.append(s.cwd)
+    if m.ref:
+        head.append(m.ref)
+    lines = ["  ".join(head)]
+    if m.context:
+        lines.append("    (" + cut(norm(m.context), 200) + ")")
+    text = cut(m.text, max_chars) if max_chars else m.text
+    lines.extend("    " + line for line in text.splitlines() or [""])
+    return "\n".join(lines)
+
+
+def cut(text: str, n: int) -> str:
+    return text if len(text) <= n else text[: max(n - 1, 0)] + "…"
+
+
+def render_json(m: Message, max_chars: int) -> str:
+    s = m.session
+    obj = {
+        "time": iso(m.time),
+        "source": m.source,
+        "session": s.sid if s else None,
+        "title": s.title if s else None,
+        "cwd": s.cwd if s else None,
+        "text": cut(m.text, max_chars) if max_chars else m.text,
+    }
+    if max_chars and len(m.text) > max_chars:
+        obj["truncated"] = True
+    for key in ("steering", "dispatch_id", "ref", "context", "author"):
+        value = getattr(m, key)
+        if value:
+            obj[key] = value
+    return json.dumps(obj, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------- main
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="sami-said", usage=argparse.SUPPRESS, description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--since", default=DEFAULT_SINCE, help="duration back from now (90m) or ISO time; default 24h")
+    ap.add_argument("--until", help="duration back from now or ISO time; default now")
+    ap.add_argument("--session", action="append", default=[], help="session id or id prefix; repeatable")
+    ap.add_argument("--grep", help="keep messages whose text matches this regex, case-insensitive")
+    ap.add_argument("--max-chars", type=int, default=0, help="cut each message to N characters")
+    ap.add_argument("--json", action="store_true", help="one JSON object per line")
+    ap.add_argument("--dispatch", action="store_true", help="also list Dispatch answers, comments and messages")
+    ap.add_argument("--dispatch-user", default=DEFAULT_DISPATCH_USER, help=f"Dispatch login; default {DEFAULT_DISPATCH_USER}")
+    ap.add_argument("--agent-dir", action="append", default=[],
+                    help="omp agent directory; default ~/.omp/agent and ~/.omp/profiles/*/agent (with this "
+                         "option the transcript store is not asked for rule 9)")
+    args = ap.parse_args()
+    started = time.monotonic()
+    now = datetime.now(UTC)
+    since = parse_when(args.since, now)
+    until = parse_when(args.until, now) if args.until else now
+    if until <= since:
+        die("--until must be after --since")
+    grep = None
+    if args.grep:
+        try:
+            grep = re.compile(args.grep, re.IGNORECASE)
+        except re.error as e:
+            die(f"--grep: {e}")
+
+    def wanted(sid: str | None) -> bool:
+        return not args.session or (sid is not None and any(sid.startswith(p) for p in args.session))
+
+    typed: list[Message] = []
+    sessions: dict[str, Session] = {}
+    paths: dict[str, Path] = {}
+    stats = {"files": 0, "read": 0, "launch": 0, "agent": 0}
+    consumed: set[tuple[Path, int]] = set()  # history rows a transcript message in the window was sent as
+    dirs = [load_history(d) for d in agent_dirs(args.agent_dir)]
+    shakes: dict = {}
+
+    def take(ad: AgentDir, path: Path, sid: str) -> None:
+        stats["read"] += 1
+        session, found = scan_file(path, sid, since, until, shakes)
+        sessions[session.sid] = session
+        for m in found:
+            m.agent_dir = ad.root
+            if m.source == "terminal":
+                if ad.history is None:
+                    continue
+                m.history_ids = history_match(ad, m.text, session.sid)
+                if not m.history_ids:
+                    stats["launch"] += not m.beyond
+                    continue
+                consumed.update((ad.root, h) for h in m.history_ids)
+                if agent_typed(m.text):
+                    stats["agent"] += not m.beyond
+                    continue
+            typed.append(m)
+
+    for ad in dirs:
+        if ad.history is None:
+            warn(f"no readable history.db in {ad.root}: its terminal messages cannot be confirmed and are left out")
+        for path, mtime, sid in list_sessions(ad.root):
+            stats["files"] += 1
+            paths.setdefault(sid, path)
+            if mtime >= since.timestamp() and wanted(sid):
+                take(ad, path, sid)
+        # Rule 1's exception: a session below another one's directory that the prompt history says
+        # someone typed into during the window.
+        nested = {row.sid for row in ad.history or () if since <= row.created < until and row.sid
+                  and row.sid not in paths and wanted(row.sid)}
+        for sid, path in find_nested(ad.root, nested, since.timestamp()).items() if nested else ():
+            paths[sid] = path
+            take(ad, path, sid)
+
+    # Prompt history with no transcript copy in the window.
+    for ad in dirs:
+        for row in ad.history or ():
+            if row.created < since or row.created >= until or (ad.root, row.hid) in consumed or not wanted(row.sid):
+                continue
+            if agent_typed(row.prompt):
+                stats["agent"] += 1
+                continue
+            draft = norm(row.prompt)
+            if any(m.session and m.session.sid == row.sid and m.source == "terminal" and abs(m.time - row.created) <= DRAFT_WINDOW
+                   and (norm(m.text).startswith(draft[:DRAFT_PREFIX]) or (len(draft) >= FALLBACK_MIN and draft in norm(m.text)))
+                   for m in typed):
+                continue
+            session = sessions.get(row.sid)
+            if session is None:
+                session = read_header(paths[row.sid], row.sid) if row.sid in paths else Session(sid=row.sid or "?", cwd=row.cwd)
+                sessions[session.sid] = session
+            typed.append(Message(time=row.created, source="terminal-history", text=row.prompt, session=session,
+                                 agent_dir=ad.root, history_ids=[row.hid]))
+
+    # Rule 9: text an agent typed into the pane with tmux send-keys.
+    suspects = [m for m in typed if m.source in ("terminal", "terminal-history") and not m.beyond]
+    if suspects:
+        calls = agent_typing_calls([ad.root for ad in dirs], min(m.time for m in suspects) - TYPED_BEFORE,
+                                   max(m.time for m in suspects) + TYPED_AFTER)
+        dropped = {id(m) for m in suspects if typed_by_agent(m, calls)}
+        stats["agent"] += len(dropped)
+        typed = [m for m in typed if id(m) not in dropped]
+
+    status = 0
+    if args.dispatch:
+        try:
+            cfg = dispatch_config()
+            extra, authors = dispatch_rows(cfg, args.dispatch_user, since, until, now)
+        except (RuntimeError, OSError, urllib.error.URLError, ValueError) as e:
+            warn(f"--dispatch: {e}")
+            status = 1
+        else:
+            turns = set()
+            kept = []
+            for m in typed:
+                if m.source == "dispatch-turn" and not m.beyond:
+                    author = authors.get(m.dispatch_id) or message_author(cfg, m.dispatch_id, m.session.sid if m.session else "")
+                    if author is None:
+                        warn(f"--dispatch: Dispatch did not name the author of message {m.dispatch_id}; it is kept unchecked")
+                    elif author != args.dispatch_user:
+                        continue
+                    m.author = author
+                if m.dispatch_id:
+                    turns.add(m.dispatch_id)
+                kept.append(m)
+            typed = kept
+            for m in extra:
+                if m.source == "DISPATCH message" and m.dispatch_id in turns:
+                    continue  # already shown as the dispatch-turn it became
+                if m.session is not None:
+                    known = sessions.get(m.session.sid)
+                    if known is None and m.session.sid in paths:
+                        known = read_header(paths[m.session.sid], m.session.sid)
+                    if known is not None:
+                        m.session = Session(sid=known.sid, path=known.path, title=known.title or m.session.title,
+                                            cwd=known.cwd or m.session.cwd)
+                if args.session and not wanted(m.session.sid if m.session else None):
+                    continue
+                typed.append(m)
+
+    typed = [m for m in typed if not m.beyond]
+    if grep is not None:
+        typed = [m for m in typed if grep.search(m.text)]
+    typed.sort(key=lambda m: m.time)
+    out = sys.stdout
+    for i, m in enumerate(typed):
+        if args.json:
+            out.write(render_json(m, args.max_chars) + "\n")
+        else:
+            out.write(("\n" if i else "") + render_text(m, args.max_chars) + "\n")
+    counts: dict[str, int] = {}
+    for m in typed:
+        counts[m.source] = counts.get(m.source, 0) + 1
+    summary = ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) or "none"
+    warn(f"{len(typed)} messages ({summary}) from {iso(since)} to {iso(until)}; read {stats['read']} of {stats['files']} session "
+         f"files in {time.monotonic() - started:.1f}s; left out {stats['launch']} prompts never typed in a terminal and "
+         f"{stats['agent']} texts agents typed")
+    return status
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        sys.exit(0)

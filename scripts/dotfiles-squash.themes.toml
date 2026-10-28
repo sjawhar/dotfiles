@@ -35,7 +35,7 @@ paths = [
   "installers/whatsapp.sh", "scripts/ompo", "scripts/omp-billing-watch",
   "scripts/selfcompact-sessions", "scripts/tmux-omp-ids",
   "scripts/tmux-resurrect-omp", "scripts/tests/test_omp_profile_links.py",
-  "scripts/tests/test_selfcompact_sessions.py",
+  "scripts/tests/test_selfcompact_sessions.py", "scripts/sami-said", "scripts/tests/test_sami_said.py",
 ]
 
 [[theme]]
