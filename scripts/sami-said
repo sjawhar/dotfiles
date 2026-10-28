@@ -25,7 +25,11 @@ working directory, and the text. Sources:
                     user's own turn. With --dispatch its author is checked against Dispatch.
   DISPATCH ...      with --dispatch: an answer, comment, message, approval or change request that
                     --dispatch-user (default sami@theorem.dev) wrote in Dispatch, read from the
-                    Dispatch event log. These are not in any transcript as typed text.
+                    Dispatch event log. These are not in any transcript as typed text. The log is
+                    read until it reaches the newest event known at the start; a stream that goes
+                    silent or ends first is resumed from its last event. When it cannot be read
+                    whole, no Dispatch row prints, stderr says --dispatch FAILED (also on the last
+                    line), and the exit status is 1: zero Dispatch rows with status 0 means none.
 
 How a typed message is told apart from text injected into the user role. Structural rules first:
 
@@ -137,6 +141,8 @@ DRAFT_PREFIX = 60
 FALLBACK_MIN = 20  # rule 6, containment match: the shorter text's least length
 SSE_IDLE_S = 3.0  # the Dispatch event stream sends nothing more once it has caught up
 SSE_TAIL_S = 1.0  # the same wait once the stream has passed the newest event known at the start
+SSE_STALL_S = (3.0, 10.0, 30.0)  # how long a connection may stay silent, after 0, 1, 2 that brought nothing
+SSE_ATTEMPTS = 3  # connections in a row that bring nothing before the read is called failed
 DISPATCH_MARGIN = timedelta(minutes=10)
 TYPED_BEFORE = timedelta(minutes=30)  # rule 9: how long before a message an agent's send-keys call can be
 TYPED_AFTER = timedelta(seconds=30)  # ... and after it, for clock and write skew
@@ -744,20 +750,22 @@ def message_author(cfg: DispatchConfig, mid: str | None, sid: str) -> str | None
     return str(author) if author else None
 
 
-def open_stream(cfg: DispatchConfig, after: int):
+def open_stream(cfg: DispatchConfig, after: int, idle: float = SSE_IDLE_S):
     req = urllib.request.Request(
         f"{cfg.url}/api/v1/events?since={after}",
         headers={"Authorization": f"Bearer {cfg.token}", "Accept": "text/event-stream"},
     )
-    return urllib.request.urlopen(req, timeout=SSE_IDLE_S)
+    return urllib.request.urlopen(req, timeout=idle)
 
 
-def stream_events(cfg: DispatchConfig, after: int, head: int | None = None):
-    """Events with id > after from the server-sent event log, until it has caught up: a heartbeat,
-    or nothing for SSE_IDLE_S seconds, or for SSE_TAIL_S once an event at or past `head` (the newest
-    event known when the run started) has arrived, since the catch-up sends its backlog in one burst.
-    Other comment lines (`: open`, which newer servers send first) are skipped."""
-    resp = open_stream(cfg, after)
+def stream_once(cfg: DispatchConfig, after: int, idle: float, head: int | None):
+    """One connection's events with id > after. Its return value says how it ended: "heartbeat"
+    (the server sends one only once its catch-up is done), "head" (an event at or past `head`, the
+    newest event known at the start, arrived, and then SSE_TAIL_S of silence or the end), "idle"
+    (`idle` seconds of silence first) or "closed" (the server ended the stream first). Comment
+    lines other than the heartbeat (`: open`) are skipped."""
+    resp = open_stream(cfg, after, idle)
+    reached = False
     with resp:
         data: list[bytes] = []
         try:
@@ -765,27 +773,75 @@ def stream_events(cfg: DispatchConfig, after: int, head: int | None = None):
                 line = raw.rstrip(b"\r\n")
                 if line.startswith(b":"):
                     if line[1:].strip() == b"heartbeat":
-                        return
+                        return "heartbeat"
                     continue
                 if line.startswith(b"data:"):
                     data.append(line[5:].lstrip())
                 elif not line and data:
                     event = json.loads(b"\n".join(data))
                     data = []
-                    if head is not None and isinstance(event.get("id"), int) and event["id"] >= head:
+                    if not reached and head is not None and isinstance(event.get("id"), int) and event["id"] >= head:
                         sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
                         if sock is not None:
                             sock.settimeout(SSE_TAIL_S)
-                        head = None
+                        reached = True
                     yield event
         except TimeoutError:
+            return "head" if reached else "idle"
+    return "head" if reached else "closed"
+
+
+def stream_events(cfg: DispatchConfig, after: int, head: int | None = None):
+    """Events with id > after from the server-sent event log, until it has caught up: a heartbeat,
+    or `head` reached. The server reads its backlog from Postgres before it sends it, and it can end
+    a stream (a restart), so a connection that goes silent or ends before then is resumed from the
+    last event it gave, with a longer silence allowed after each one that brought nothing; after
+    SSE_ATTEMPTS of those in a row this raises RuntimeError, and the run fails loudly instead of
+    listing a part of the log as all of it. With no `head` (no recent event to aim at), SSE_IDLE_S of
+    silence counts as caught up, as nothing else can be measured."""
+    cursor, failures = after, 0
+    while True:
+        progressed, reason = False, ""
+        try:
+            it = stream_once(cfg, cursor, SSE_STALL_S[min(failures, len(SSE_STALL_S) - 1)], head)
+            try:
+                while True:
+                    try:
+                        event = next(it)
+                    except StopIteration as stop:
+                        reason = stop.value
+                        break
+                    if isinstance(event.get("id"), int) and event["id"] > cursor:
+                        cursor = event["id"]
+                    progressed = True
+                    yield event
+            finally:
+                it.close()
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                raise RuntimeError(f"the Dispatch event stream answered HTTP {e.code} {e.reason}") from e
+            reason = f"HTTP {e.code}"
+        except (urllib.error.URLError, OSError) as e:
+            reason = str(getattr(e, "reason", None) or e)
+        if reason in ("heartbeat", "head") or (reason == "idle" and head is None):
             return
+        failures = 0 if progressed else failures + 1
+        if failures >= SSE_ATTEMPTS:
+            aim = f"the newest event known at the start, {head}" if head is not None else "its end"
+            raise RuntimeError(f"the Dispatch event stream never reached {aim}: it stopped after event {cursor} "
+                               f"({reason}) on {SSE_ATTEMPTS} connections in a row, so its Dispatch rows would be incomplete")
+        if not progressed:
+            time.sleep(failures)
 
 
 def first_event_after(cfg: DispatchConfig, after: int) -> dict | None:
-    for event in stream_events(cfg, after):
-        return event
-    return None
+    """The first event with id > after, on one connection; None when none comes within SSE_IDLE_S.
+    start_id reads a None as "at or past the target", which only starts the read earlier."""
+    it = stream_once(cfg, after, SSE_IDLE_S, None)
+    try:
+        return next(it, None)
+    finally:
+        it.close()
 
 
 def recent_event(cfg: DispatchConfig, now: datetime) -> dict | None:
@@ -1079,7 +1135,7 @@ def main() -> int:
             cfg = dispatch_config()
             extra, authors = dispatch_rows(cfg, args.dispatch_user, since, until, now)
         except (RuntimeError, OSError, urllib.error.URLError, ValueError) as e:
-            warn(f"--dispatch: {e}")
+            warn(f"--dispatch FAILED, so no Dispatch rows are listed and dispatch-turn authors are unchecked: {e}")
             status = 1
         else:
             turns = set()
@@ -1127,6 +1183,8 @@ def main() -> int:
     warn(f"{len(typed)} messages ({summary}) from {iso(since)} to {iso(until)}; read {stats['read']} of {stats['files']} session "
          f"files in {time.monotonic() - started:.1f}s; left out {stats['launch']} prompts never typed in a terminal, "
          f"{stats['agent']} texts agents typed and {stats['resumed']} pause toggles agents pressed")
+    if status:
+        warn("--dispatch FAILED: Dispatch was not read, so its rows are missing, not absent; exit status 1")
     return status
 
 
