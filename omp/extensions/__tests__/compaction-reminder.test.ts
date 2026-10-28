@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import extension from "../compaction-reminder";
@@ -565,6 +565,134 @@ describe("compaction-reminder: a stream lead's goals document", () => {
 				expect(() => session.compact("main", [user("lead the stream"), compaction], true)).not.toThrow();
 				expect(session.sent).toHaveLength(0);
 			});
+		});
+	});
+
+	describe("a goals document that is a local file of at most 16 KB is inlined", () => {
+		const DOC_DIR = join(HOME_DIR, "goals");
+		const DOC = join(DOC_DIR, "decisions.md");
+		const TEXT = "# Decisions\n\n- Owners write Lean in their own session.\n- No restart of the 343 owners.\n";
+		const MTIME = new Date("2026-10-28T03:56:52.000Z");
+		/** Write the goals file with `text` and the fixed mtime, run `body`, then remove it. */
+		const withDoc = (text: string, body: () => void) => {
+			mkdirSync(DOC_DIR, { recursive: true });
+			writeFileSync(DOC, text);
+			utimesSync(DOC, MTIME, MTIME);
+			try {
+				body();
+			} finally {
+				rmSync(DOC_DIR, { recursive: true, force: true });
+			}
+		};
+		const OPEN = `<STREAM_GOALS_DOCUMENT path="${DOC}" mtime="${MTIME.toISOString()}">`;
+
+		test("the reminder carries the file's full text in an uppercase wrapper naming its path and mtime", () => {
+			withDoc(TEXT, () =>
+				withGoals(DOC, () => {
+					const session = bind();
+					session.compact("main", [user("lead the stream"), compaction], true);
+
+					expect(session.sent).toHaveLength(1);
+					const { customType, content } = session.sent[0].message;
+					expect(customType).toBe("post-compaction-stream-goals");
+					expect(content).toContain(`${OPEN}\n${TEXT}</STREAM_GOALS_DOCUMENT>`);
+					expect(content.indexOf(OPEN)).toBeGreaterThan(0);
+					expect(content.trimEnd().endsWith("</STREAM_GOALS_DOCUMENT>")).toBe(true);
+				})
+			);
+		});
+
+		test("a file named by the session-id map is inlined too", () => {
+			withDoc(TEXT, () => {
+				mkdirSync(MAP_DIR, { recursive: true });
+				writeFileSync(MAP_FILE, JSON.stringify({ [SESSION_ID]: DOC }));
+				try {
+					withGoals(undefined, () => {
+						const session = bind();
+						session.compact("main", [user("lead the stream"), compaction], true);
+						expect(session.sent[0].message.content).toContain(`${OPEN}\n${TEXT}</STREAM_GOALS_DOCUMENT>`);
+					});
+				} finally {
+					rmSync(MAP_DIR, { recursive: true, force: true });
+				}
+			});
+		});
+
+		test("a ~/ path is read from HOME", () => {
+			withDoc(TEXT, () =>
+				withGoals("~/goals/decisions.md", () => {
+					const session = bind();
+					session.compact("main", [user("lead the stream"), compaction], true);
+					expect(session.sent[0].message.content).toContain(`${OPEN}\n${TEXT}</STREAM_GOALS_DOCUMENT>`);
+				})
+			);
+		});
+
+		test("the file is read at each compaction, so an edit reaches the next reminder", () => {
+			withDoc(TEXT, () =>
+				withGoals(DOC, () => {
+					const session = bind();
+					const branch = [user("lead the stream"), compaction];
+					session.compact("main", branch, true);
+					writeFileSync(DOC, "# Decisions\n\n- A later ruling.\n");
+					session.turnEnd(1);
+					session.shakeEnd("main", branch, false, { skipped: false });
+
+					expect(session.sent.map(s => s.options.deliverAs)).toEqual(["nextTurn", "aside"]);
+					expect(session.sent[0].message.content).toContain("No restart of the 343 owners.");
+					expect(session.sent[1].message.content).toContain("- A later ruling.\n</STREAM_GOALS_DOCUMENT>");
+					expect(session.sent[1].message.content).not.toContain("No restart of the 343 owners.");
+				})
+			);
+		});
+
+		test("exactly 16 KB is inlined; one byte more keeps the pointer", () => {
+			for (const [size, inlined] of [
+				[16 * 1024, true],
+				[16 * 1024 + 1, false],
+			] as const) {
+				const text = `${"x".repeat(size - 1)}\n`;
+				withDoc(text, () =>
+					withGoals(DOC, () => {
+						const session = bind();
+						session.compact("main", [user("lead the stream"), compaction], true);
+						const { content } = session.sent[0].message;
+						expect(content.includes(text)).toBe(inlined);
+						expect(content.includes("STREAM_GOALS_DOCUMENT")).toBe(inlined);
+						expect(content).toContain(DOC);
+					})
+				);
+			}
+		});
+
+		test.each([
+			["a dispatch:// URL", "dispatch://OSSV/artifact/goals-md"],
+			["a missing file", join(HOME_DIR, "goals", "missing.md")],
+			["a directory", HOME_DIR],
+			["free text naming a document", "dispatch://OSSV/artifact/goals-md (read with: dispatch doc-read)"],
+		])("%s keeps the pointer to read it", (_name, target) => {
+			withGoals(target, () => {
+				const session = bind();
+				session.compact("main", [user("lead the stream"), compaction], true);
+				const { content } = session.sent[0].message;
+				expect(content).toContain(`read your stream's goals document in full: ${target}`);
+				expect(content).not.toContain("STREAM_GOALS_DOCUMENT");
+			});
+		});
+
+		test("no span shake would elide encloses the inlined document", () => {
+			const large = `# Decisions\n\n${"Each owner keeps its own record and never edits another's. ".repeat(60)}\n`;
+			withDoc(large, () =>
+				withGoals(DOC, () => {
+					const session = bind();
+					session.compact("main", [user("lead the stream"), compaction], true);
+					const { content } = session.sent[0].message;
+
+					const docLine = content.split("\n").indexOf("# Decisions");
+					expect(docLine).toBeGreaterThan(0);
+					expect(xmlSpansOf(content).filter(span => span.end >= docLine)).toEqual([]);
+				})
+			);
 		});
 	});
 });
