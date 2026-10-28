@@ -92,6 +92,12 @@ its own planned stop. After it come the session and its source, the transcript, 
 files, and the restart as a ready command: `tmux send-keys -t %57 'omp --resume <id>' Enter`.
 When nothing resolves the session, it says so and names the directory to read.
 
+The watcher never runs that command. `/pause` freezes omp with a process-local gate. It writes no
+paused state to the session JSONL or `$HOME/.omp/agent` state, so a later shell prompt is
+indistinguishable from a failed agent. An automatic restart could revive a session Sami paused
+before its shell appeared. The alert therefore says `Automatic restart: NOT RUN` until omp
+persists a pause marker the watcher can check.
+
 It goes to the INFRA lead and the lane's stream lead — the live holder of a `lead-*` or
 `stream-lead-*` role whose working directory is the session's — and a `Told:` line names each
 recipient **with the role it was reached by** (`stream lead (lead-oss-verify) 01a14b36-…`), so a
