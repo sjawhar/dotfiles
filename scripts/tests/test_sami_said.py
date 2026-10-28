@@ -171,6 +171,8 @@ class Store:
             (AFTER_FORK, at(36), FORK),
             (KICK_RENAME, at(45.2), KICKED),
             (ASKED, at(44), KICKED),
+            # omp writes /pause when the pause screen closes: here an agent's script pressed Escape.
+            ("/pause", at(50), LEAD),
         ])
         # A session an agent started with `omp @kickoff.md`: the kickoff is in no history row, but holds
         # the /rename line the session then typed into its own pane. Then a person re-sends a prompt
@@ -274,6 +276,9 @@ class TranscriptRules(unittest.TestCase):
     def test_a_kickoff_is_not_the_rename_line_it_holds(self):
         self.assertNotIn(KICKOFF, self.texts)
         self.assertNotIn(KICK_RENAME, self.texts)  # the session typed it into its own pane
+
+    def test_pause_row_carries_the_resume_time_and_is_left_out(self):
+        self.assertNotIn("/pause", self.texts)
 
     def test_a_fork_does_not_repeat_its_parents_messages(self):
         self.assertEqual(self.texts.count(TYPED), 1)

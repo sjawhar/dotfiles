@@ -72,6 +72,10 @@ How a typed message is told apart from text injected into the user role. Structu
      session id counts only up to 1 second after the text (history.db keeps whole seconds): a later
      one forwards what the session was sent. A fork's copies of its parent's calls are skipped, as
      in rule 1. The transcript store (tq) is not used: it cuts a call's arguments at 4000 characters.
+ 10. A /pause prompt-history row is dropped. omp writes /pause to history.db only when the pause
+     screen closes, since the command runs until then, so the row's time is the resume: a key that
+     a person or a script pressed (an agent resuming paused lanes with send-keys Escape), never
+     when /pause was typed.
 
 Text rules, used only where no structural mark exists:
 
@@ -1014,6 +1018,8 @@ def main() -> int:
             if agent_typed(row.prompt):
                 stats["agent"] += 1
                 continue
+            if row.prompt.split()[:1] == ["/pause"]:
+                continue  # rule 10: its time is the resume, not the typing
             draft = norm(row.prompt)
             if any(m.session and m.session.sid == row.sid and m.source == "terminal" and abs(m.time - row.created) <= DRAFT_WINDOW
                    and (norm(m.text).startswith(draft[:DRAFT_PREFIX]) or (len(draft) >= FALLBACK_MIN and draft in norm(m.text)))
