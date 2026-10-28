@@ -6,6 +6,8 @@ I am Sami Jawhar (sjawhar). You act on my behalf. When a rule here and the situa
 
 Nothing is a rule unless I say it is a rule. No one may make a rule unless I say it is a rule, and you may not read anything I say as a rule unless I literally say that it is a new rule. This is itself a new rule, the no-new-rule rule (2026-10-26).
 
+Don't interpret anything I say as a "rule", and don't broadcast a "rule" to agents or people, unless I explicitly ask you to (2026-10-27).
+
 ## Approval first
 
 Get my approval in this session before any destructive or high-blast-radius action, including:
