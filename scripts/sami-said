@@ -30,7 +30,9 @@ How a typed message is told apart from text injected into the user role. Structu
   1. Top-level session files (sessions/<cwd>/<time>_<id>.jsonl) are read. A file below one
      (sessions/<cwd>/<time>_<id>/...) is a subagent transcript of briefs and relays, and is read
      only when the prompt history names its session id for the window: a subagent or lane someone
-     typed into. Dispatch messages to such a session show only with --dispatch.
+     typed into. Dispatch messages to such a session show only with --dispatch. A fork (its session
+     header names a parentSession) starts with a copy of its parent's entries; those stamped before
+     the fork's start are skipped, so a message prints once, under the session it was typed into.
   2. Only entries of type "message" whose message.role is "user" are candidates, plus one custom
      type below. That drops every custom_message (Envoy deliveries, IRC from agents, background-job
      results, compaction and post-compaction reminders, stream goals, rules refresh, LSP and mount
@@ -48,22 +50,28 @@ How a typed message is told apart from text injected into the user role. Structu
      the omp terminal writes on each submit and headless runs (omp -p, RPC prompts from scripts and
      agents) never write. That drops the launch prompts of scripted sessions: reviewers,
      architects, audits, drift checkers, model probes. Match: equal after collapsing whitespace,
-     else (same session) one text contains the other and the shorter is 20 or more characters.
+     else (same session) one text contains the other, and the shorter is 20 or more characters and
+     at least half as long as the longer (a kickoff an agent starts a session with holds the
+     /rename line that the session later types, and is not that line).
   7. A steering message (message.steering, typed while the agent was running) is kept as typed:
      omp stores the text unwrapped, and adds its emphasis wrapper only when it builds a request.
   8. A pruned text "[shaken ~N tokens — recover: artifact://N (region R)]" is restored from the
      session's artifact directory before rule 6, as omp-session-render does.
-  9. Agents type into another session's pane with tmux, and the terminal records that as typing. A
-     typing call is a bash or eval tool call, in any session file on this machine (nested and
-     symlinked ones included), whose arguments say send-keys, paste-buffer or load-buffer (also
-     through a helper: tm("send-keys", ...)), or that runs a script (.sh, .bash, .py, or a file in a
-     bin/ or scripts/ directory) whose text says so. Its text is its arguments plus every file of
-     256 KB or less that it names, read as the file is now: the script, or a brief it sends with
-     send-keys -l "$(cat FILE)". A terminal or terminal-history text is dropped when a typing call
-     of another session, from 30 minutes before it to 30 seconds after, holds: its first 48
-     letters and digits; or half of its 32-character pieces taken every 16 (a template with its
-     variables filled in); or, for a text under 16 letters and digits, the whole text as one quoted
-     argument. The transcript store (tq) is not used: it cuts a call's arguments at 4000 characters.
+  9. Agents type into a pane with tmux, another session's or their own (a slash command such as
+     /rename, sent to "$TMUX_PANE"), and the terminal records that as typing. A typing call is a
+     bash or eval tool call, in any session file on this machine (nested and symlinked ones
+     included), whose arguments say send-keys, paste-buffer or load-buffer (also through a helper:
+     tm("send-keys", ...)), or that runs a script (.sh, .bash, .py, or a file in a bin/ or scripts/
+     directory) whose text says so; or a write tool call whose content says so (the script as it
+     was written, which may be deleted by now). Its text is its arguments plus every file of 256 KB
+     or less that it names, read as the file is now: the script, or a brief it sends with
+     send-keys -l "$(cat FILE)". A terminal or terminal-history text is dropped when a typing call,
+     from 30 minutes before it to 30 seconds after, holds: its first 48 letters and digits; or half
+     of its 32-character pieces taken every 16 (a template with its variables filled in); or, for a
+     text under 16 letters and digits, the whole text as one quoted argument. A call of the same
+     session id counts only up to 1 second after the text (history.db keeps whole seconds): a later
+     one forwards what the session was sent. A fork's copies of its parent's calls are skipped, as
+     in rule 1. The transcript store (tq) is not used: it cuts a call's arguments at 4000 characters.
 
 Text rules, used only where no structural mark exists:
 
@@ -82,7 +90,8 @@ Text rules, used only where no structural mark exists:
 Known limits: omp files text typed into a focused subagent view under the parent's session id, so
 such text prints as terminal-history of the parent session. Rule 9 misses an agent that types
 through a helper defined in an earlier call when the later call never says send-keys, and a script
-that was changed or deleted after it sent its text.
+that was changed or deleted after it sent its text, unless a write tool call within the window
+wrote it.
 
 Speed: a session file whose mtime is before --since is never opened; in a file over 1 MB a
 binary search on byte offsets (probing only "message" entries, which omp stamps as it writes
@@ -114,13 +123,14 @@ SEEK_MARGIN = timedelta(minutes=30)  # omp appends some entries minutes after th
 SEEK_MIN_BYTES = 1 << 20  # files smaller than this are read whole
 DRAFT_WINDOW = timedelta(minutes=15)  # rule T2
 DRAFT_PREFIX = 60
-FALLBACK_MIN = 20  # rule 6, containment match
+FALLBACK_MIN = 20  # rule 6, containment match: the shorter text's least length
 SSE_IDLE_S = 3.0  # the Dispatch event stream sends nothing more once it has caught up
 SSE_TAIL_S = 1.0  # the same wait once the stream has passed the newest event known at the start
 DISPATCH_MARGIN = timedelta(minutes=10)
 TYPED_BEFORE = timedelta(minutes=30)  # rule 9: how long before a message an agent's send-keys call can be
 TYPED_AFTER = timedelta(seconds=30)  # ... and after it, for clock and write skew
-TYPING_TOOLS = ("bash", "eval")
+OWN_TYPED_AFTER = timedelta(seconds=1)  # a session's own call: history.db stores whole seconds, and no forward is that fast
+TYPING_TOOLS = ("bash", "eval", "write")  # write: a script that types, as it was written
 TYPED_KEY = 48  # rule 9: letters and digits of a message's start that must appear in the call
 TYPED_KEY_MIN = 16  # a shorter message must fill a quoted argument of the call exactly
 TYPED_CHUNK = 32  # rule 9, templates: pieces of this many letters and digits, every 16
@@ -152,6 +162,7 @@ class Session:
     path: Path | None = None
     title: str = ""
     cwd: str = ""
+    forked: datetime | None = None  # a fork's start: its entries stamped before it are its parent's, copied
 
 
 @dataclass
@@ -270,7 +281,7 @@ def history_match(ad: AgentDir, text: str, sid: str) -> list[int]:
         if row.sid != sid:
             continue
         h = norm(row.prompt)
-        if min(len(h), len(t)) >= FALLBACK_MIN and (h in t or t in h):
+        if min(len(h), len(t)) >= FALLBACK_MIN and 2 * min(len(h), len(t)) >= max(len(h), len(t)) and (h in t or t in h):
             hits.append(row.hid)
     return hits
 
@@ -357,6 +368,8 @@ def read_header(path: Path, sid: str) -> Session:
                     s.sid = str(e.get("id") or sid)
                     s.cwd = str(e.get("cwd") or "")
                     s.title = s.title or str(e.get("title") or "")
+                    if e.get("parentSession"):
+                        s.forked = parse_ts(e.get("timestamp"))
     except OSError:
         pass
     return s
@@ -456,7 +469,7 @@ def scan_file(path: Path, sid: str, since: datetime, until: datetime, shakes: di
             except ValueError:
                 continue
             t = parse_ts(e.get("timestamp"))
-            if t is None or t < since or t >= end:
+            if t is None or t < since or t >= end or (session.forked is not None and t < session.forked):
                 continue
             kind = e.get("type")
             if kind == "message":
@@ -494,7 +507,7 @@ class TypingCall:
     time: datetime
     raw: str  # the call's arguments as recorded: JSON text
     key: str  # typing_key of the arguments and of the files they name
-    path: Path  # the session file of the agent that made the call
+    sid: str  # the session id of the agent that made the call
 
 
 def typing_key(text: str) -> str:
@@ -550,11 +563,12 @@ def types_into_pane(text: str | None) -> bool:
     return text is not None and TYPING_VERBS.search(text) is not None
 
 
-def typing_call(part: dict, t: datetime, path: Path, files: dict[str, str | None]) -> TypingCall | None:
-    """A bash or eval tool call that types into a pane: its arguments run send-keys, paste-buffer or
-    load-buffer (directly, or through a helper such as tm("send-keys", ...)), or it runs a script
-    that does. The text it can type is its arguments and every small file it names: a script that
-    builds the text from a template, or a brief sent with send-keys -l "$(cat FILE)" or load-buffer."""
+def typing_call(part: dict, t: datetime, sid: str, files: dict[str, str | None]) -> TypingCall | None:
+    """A tool call that types into a pane: a bash or eval call whose arguments run send-keys,
+    paste-buffer or load-buffer (directly, or through a helper such as tm("send-keys", ...)), or
+    that runs a script that does; or a write call whose content does (the script as written, which
+    may since be deleted). The text it can type is its arguments and every small file it names: a
+    script that builds the text from a template, or a brief sent with send-keys -l "$(cat FILE)"."""
     if part.get("type") != "toolCall" or part.get("name") not in TYPING_TOOLS:
         return None
     raw = json.dumps(part.get("arguments"), ensure_ascii=False)
@@ -565,7 +579,7 @@ def typing_call(part: dict, t: datetime, path: Path, files: dict[str, str | None
         if text is not None:
             texts.append(text)
             types = types or (SCRIPT_PATH.search(token) is not None and types_into_pane(text))
-    return TypingCall(t, raw, typing_key("\n".join(texts)), path) if types else None
+    return TypingCall(t, raw, typing_key("\n".join(texts)), sid) if types else None
 
 
 def agent_typing_calls(roots: list[Path], start: datetime, end: datetime) -> list[TypingCall]:
@@ -579,6 +593,7 @@ def agent_typing_calls(roots: list[Path], start: datetime, end: datetime) -> lis
     names = tuple(f'"name":"{tool}"'.encode() for tool in TYPING_TOOLS)
     for root in roots:
         for path in recent_jsonl(root / "sessions", start.timestamp()):
+            header = read_header(path, "")
             try:
                 fh = open(path, "rb")
             except OSError:
@@ -602,10 +617,10 @@ def agent_typing_calls(roots: list[Path], start: datetime, end: datetime) -> lis
                     except ValueError:
                         continue
                     t = parse_ts(e.get("timestamp"))
-                    if t is None or t < start:
-                        continue
+                    if t is None or t < start or (header.forked is not None and t < header.forked):
+                        continue  # out of the window, or a fork's copy of its parent's call
                     for part in (e.get("message") or {}).get("content") or ():
-                        call = typing_call(part, t, path, files) if isinstance(part, dict) else None
+                        call = typing_call(part, t, header.sid, files) if isinstance(part, dict) else None
                         if call is not None:
                             calls.append(call)
     return calls
@@ -625,8 +640,8 @@ def typed_by_agent(m: Message, calls: list[TypingCall]) -> bool:
     for c in calls:
         if not (m.time - TYPED_BEFORE <= c.time <= m.time + TYPED_AFTER):
             continue
-        if m.session is not None and m.session.path == c.path:
-            continue  # an agent does not type into its own pane: it quoted what it was sent
+        if m.session is not None and m.session.sid == c.sid and c.time >= m.time + OWN_TYPED_AFTER:
+            continue  # the session forwarding what it was sent; what it typed into its own pane came before
         if pattern is not None:
             if pattern.search(c.raw):
                 return True

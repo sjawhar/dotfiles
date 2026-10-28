@@ -30,6 +30,7 @@ LEAD = "01a15f9c-6bee-7127-b4f1-907ec8d3176d"
 HEADLESS = "01a17f2f-e8e2-70d2-94e4-a9e53604d87b"
 OLD = "01a14ba2-817c-748e-9cb5-d1ad60308a9c"
 LANE = "01a17652-fea6-71e0-843b-0d307be1fe25"
+FORK = "01a17147-4a9e-758d-bfaa-58bac7006089"
 
 
 def at(minutes: float) -> datetime:
@@ -61,10 +62,10 @@ def line(e: dict) -> str:
     return json.dumps(e, separators=(",", ":"), ensure_ascii=False) + "\n"
 
 
-def write_session(path: Path, sid: str, cwd: str, title: str, entries: list[dict]) -> Path:
+def write_session(path: Path, sid: str, cwd: str, title: str, entries: list[dict], **header) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     head = [{"type": "title", "v": 1, "title": title, "source": "user", "pad": " " * 40},
-            {"type": "session", "version": 3, "id": sid, "timestamp": stamp(at(-600)), "cwd": cwd}]
+            {"type": "session", "version": 3, "id": sid, "timestamp": stamp(at(-600)), "cwd": cwd, **header}]
     path.write_text("".join(line(e) for e in head + entries))
     return path
 
@@ -89,6 +90,13 @@ SKILL_ARGS = "I'm thinking we should write down our strategy"
 AGENT_NOTE = "From the chief of staff, for Sami: this typed message only clears an omp latch."
 DRAFT = "i honestly have no idea what this team is working on"
 SENT = DRAFT + "\n\nand i dont see why you need 4 agents working on it"
+AFTER_FORK = "Keep the fork on the pilot only."
+KICKED = "01a1711d-0caf-7740-9b2b-f69dcfeab801"
+KICK_RENAME = "/rename 🧹 S1: delete unused grader settings"
+KICKOFF = (f'<file name="/mnt/nvme/sami/frac-verify/peers/S1-kickoff.md">\nYou lead slice S1 of the grader stream. '
+           f"Set your title first: `tmux send-keys -t \"$TMUX_PANE\" -l '{KICK_RENAME}' && tmux send-keys -t \"$TMUX_PANE\" Enter`. "
+           "Then plan S1 under SDD and implement it, and report to the lead over Envoy.\n</file>\n")
+ASKED = "https://dispatch.example/issues/INFRA-228/asks/c8943356 please help investigate and fix this."
 
 
 class Store:
@@ -139,6 +147,13 @@ class Store:
                               "cwd": "/home/sami/Code/personal/theorem", "title": "🛡️ GuardLane"})
                         + line(user(at(30), "Your brief: check the guard."))
                         + line(user(at(31), "why do you need 4 agents on this?")))
+        # A fork of the lead: omp copies the lead's entries, with their own times, into the new file.
+        write_session(lead_dir / f"2026-10-28T02-35-00-000Z_{FORK}.jsonl", FORK, "/home/sami/src/machcsl-riscv",
+                      "🎼 ORCH: orchestration lead", [
+            user(at(1), TYPED),
+            user(at(5), "I'm getting super excited.", tag="407cb29c-fcc3-406e-8fd8-ecc6d9076ba4"),
+            user(at(36), AFTER_FORK),
+        ], timestamp=stamp(at(35)), parentSession=LEAD)
         write_history(root, [
             ("typed before the window", at(-90), LEAD),
             ("Continue.", at(-200), LEAD),
@@ -153,6 +168,18 @@ class Store:
             ("/btw what are you working on?", at(40), LEAD),
             ("From the coach, from the transcript audit (dispatch://INFRA-167): LANE-E has no issue.", at(41), LEAD),
             ("why do you need 4 agents on this?", at(31), LANE),
+            (AFTER_FORK, at(36), FORK),
+            (KICK_RENAME, at(45.2), KICKED),
+            (ASKED, at(44), KICKED),
+        ])
+        # A session an agent started with `omp @kickoff.md`: the kickoff is in no history row, but holds
+        # the /rename line the session then typed into its own pane. Then a person re-sends a prompt
+        # with a skill in front of it, which only the containment match finds.
+        write_session(sessions / "-Code-personal-theorem" / f"2026-10-28T02-44-00-000Z_{KICKED}.jsonl", KICKED,
+                      "/home/sami/Code/personal/theorem", "🧹 S1", [
+            user(at(45), KICKOFF),
+            tool_call(at(45.1), "bash", {"command": f"tmux send-keys -t \"$TMUX_PANE\" -l '{KICK_RENAME}' && tmux send-keys -t \"$TMUX_PANE\" Enter"}),
+            user(at(46), f"/skill:systematic-debugging {ASKED}"),
         ])
 
 
@@ -201,7 +228,9 @@ class TranscriptRules(unittest.TestCase):
             (f"/skill:ce-strategy {SKILL_ARGS}", "terminal"),  # from the skill-prompt entry, not the history fallback
             (GUIDED, "terminal-history"),
             ("why do you need 4 agents on this?", "terminal"),
+            (AFTER_FORK, "terminal"),
             ("/btw what are you working on?", "terminal-history"),
+            (f"/skill:systematic-debugging {ASKED}", "terminal"),  # found by containment: ASKED is not shown again
         ])
 
     def test_injected_user_role_text_is_left_out(self):
@@ -242,6 +271,16 @@ class TranscriptRules(unittest.TestCase):
         self.assertEqual(lane["source"], "terminal")
         self.assertEqual(lane["title"], "🛡️ GuardLane")
 
+    def test_a_kickoff_is_not_the_rename_line_it_holds(self):
+        self.assertNotIn(KICKOFF, self.texts)
+        self.assertNotIn(KICK_RENAME, self.texts)  # the session typed it into its own pane
+
+    def test_a_fork_does_not_repeat_its_parents_messages(self):
+        self.assertEqual(self.texts.count(TYPED), 1)
+        self.assertEqual(self.texts.count("I'm getting super excited."), 1)
+        self.assertEqual(next(r["session"] for r in self.rows if r["text"] == TYPED), LEAD)
+        self.assertEqual(next(r["session"] for r in self.rows if r["text"] == AFTER_FORK), FORK)
+
     def test_filters(self):
         self.assertEqual([r["session"] for r in rows(self.root, "--session", "01a17652")], [LANE])
         self.assertEqual([r["text"] for r in rows(self.root, "--grep", "raj ASKED")], [TYPED])
@@ -254,7 +293,7 @@ class TranscriptRules(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout, f"2026-10-28T02:01:00Z  terminal  {LEAD}  🎼 ORCH: orchestration lead  "
                                       f"/home/sami/src/machcsl-riscv\n    {TYPED}\n")
-        self.assertIn("left out 2 prompts never typed in a terminal", done.stderr)  # the launch prompt and the brief
+        self.assertIn("left out 3 prompts never typed in a terminal", done.stderr)  # the launch prompt, the brief, the kickoff
 
     def test_bad_arguments(self):
         self.assertEqual(run(self.root, "--grep", "(").returncode, 2)
@@ -293,11 +332,23 @@ tmux send-keys -t "$pane" Enter
 FILED = "Note from LaneStart: one autoresearch.sh run takes about 8 to 15 minutes, so give each call a timeout of 1800 seconds."
 OWN = "Lower METRIC wall_s of autoresearch.sh with METRIC verdict_mismatch at 0, by removing most of the cost."
 KEPT = "Okay, fucking let it rip. And keep the pilot on one region until it works."
+RENAME = "/rename 🪓 R2B: speed lane r2-b"
+PROMPT = ("Call the bash tool exactly once with async set to true (run in background) and timeout 0 for the command: "
+          "sleep 90; echo JOB_FINISHED . Do not wait for it, do not poll it, do not call any other tool at all.")
+DRIVER = f"""#!/usr/bin/env bash
+S=$1
+T() {{ timeout 20 tmux -L iwrlane -f /dev/null "$@"; }}
+PROMPT="{PROMPT}"
+T send-keys -t "$S" -l "$PROMPT"; sleep 1; T send-keys -t "$S" Enter
+"""
+FORK2 = "01a17147-0000-7000-8000-000000000002"
 
 
 class AgentsTypingIntoPanes(unittest.TestCase):
-    """Rule 9 on the two shapes found on 2026-10-24/25: an eval cell that types through a helper and
-    never says "tmux", and a script that fills in a template; plus a brief sent from a file."""
+    """Rule 9 on the shapes found on 2026-10-23/24/25: an eval cell that types through a helper and
+    never says "tmux", a script that fills in a template, a brief sent from a file, a script deleted
+    after it ran (seen only in the write call that made it), and an agent sending /rename into its
+    own pane."""
 
     @classmethod
     def setUpClass(cls):
@@ -321,21 +372,38 @@ class AgentsTypingIntoPanes(unittest.TestCase):
             tool_call(at(1), "bash", {"command": f"S={script}; $S %80 r2 b && echo sent"}),
             tool_call(at(2), "bash", {"command": f'tmux send-keys -t %81 -l "$(cat {note})"; tmux send-keys -t %81 Enter'}),
             tool_call(at(3), "bash", {"command": f"echo {json.dumps(KEPT)} >> /tmp/quotes.md"}),  # quotes, never types
+            tool_call(at(6), "write", {"path": str(base / "gone" / "drive.sh"), "content": DRIVER}),  # deleted since
+            tool_call(at(6.2), "bash", {"command": f"bash {base / 'gone' / 'drive.sh'} main"}),
         ])
         link = root / "sessions" / "-src" / moved.name
         link.parent.mkdir(parents=True)
         link.symlink_to(moved)
-        write_session(root / "sessions" / "-src-speed-r2-b" / f"2026-10-24T05-34-00-000Z_{RECEIVER}.jsonl", RECEIVER,
-                      "/home/sami/src/speed-r2-b", "🪓 R2B", [
+        receiver = [
             user(at(0.5), WIND),
             user(at(1.5), brief),
             user(at(2.5), FILED),
             user(at(3.5), KEPT),
-            tool_call(at(4), "bash", {"command": f"tmux send-keys -t %80 -l {json.dumps(OWN)}"}),
-            user(at(4.5), OWN),  # the receiver's own call quotes it: an agent never types into its own pane
-        ])
+            user(at(4.5), OWN),
+            # The receiver forwards what it was sent to another pane: a call of its own, after the text.
+            tool_call(at(4.8), "bash", {"command": f"tmux send-keys -t %80 -l {json.dumps(OWN)}"}),
+            # It runs a slash command by typing into its own pane: a call of its own, before the text,
+            # though the history row's whole second is earlier than the call's millisecond time.
+            tool_call(at(5) + timedelta(milliseconds=500), "bash",
+                      {"command": f"tmux send-keys -t \"$TMUX_PANE\" -l '{RENAME}' && tmux send-keys -t \"$TMUX_PANE\" Enter"}),
+            user(at(6.5), PROMPT),
+        ]
+        receiver_dir = root / "sessions" / "-src-speed-r2-b"
+        write_session(receiver_dir / f"2026-10-24T05-34-00-000Z_{RECEIVER}.jsonl", RECEIVER, "/home/sami/src/speed-r2-b",
+                      "🪓 R2B", receiver)
+        # A fork of the receiver holds copies of its entries, the forwarding call included. A fork also
+        # gets copies of the files below its parent's directory, so one session id can have two files.
+        fork = receiver_dir / f"2026-10-28T02-10-00-000Z_{FORK2}.jsonl"
+        write_session(fork, FORK2, "/home/sami/src/speed-r2-b", "🪓 R2B", receiver, timestamp=stamp(at(10)), parentSession=RECEIVER)
+        write_session(fork.with_suffix("") / f"2026-10-24T05-34-00-000Z_{RECEIVER}.jsonl", RECEIVER, "/home/sami/src/speed-r2-b",
+                      "🪓 R2B", receiver)
         write_history(root, [(WIND, at(0.5), RECEIVER), (brief, at(1.5), RECEIVER), (FILED, at(2.5), RECEIVER),
-                             (KEPT, at(3.5), RECEIVER), (OWN, at(4.5), RECEIVER)])
+                             (KEPT, at(3.5), RECEIVER), (OWN, at(4.5), RECEIVER), (RENAME, at(5), RECEIVER),
+                             (PROMPT, at(6.5), RECEIVER)])
         cls.done = run(root, "--json")
         cls.texts = [json.loads(r)["text"] for r in cls.done.stdout.splitlines()]
 
@@ -350,10 +418,16 @@ class AgentsTypingIntoPanes(unittest.TestCase):
         self.assertFalse([t for t in self.texts if t.startswith("You run design")])
         self.assertNotIn(FILED, self.texts)
 
+    def test_deleted_script_seen_in_its_write_call(self):
+        self.assertNotIn(PROMPT, self.texts)
+
+    def test_slash_command_typed_into_its_own_pane(self):
+        self.assertNotIn(RENAME, self.texts)
+
     def test_typed_text_stays(self):
         self.assertEqual(self.done.returncode, 0, self.done.stderr)
-        self.assertEqual(self.texts, [KEPT, OWN])
-        self.assertIn("3 texts agents typed", self.done.stderr)
+        self.assertEqual(self.texts, [KEPT, OWN])  # OWN once: the fork's copies are not read, nor its copied call
+        self.assertIn("5 texts agents typed", self.done.stderr)
 
 
 class LargeFile(unittest.TestCase):
