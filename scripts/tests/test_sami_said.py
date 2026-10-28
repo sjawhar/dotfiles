@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -486,6 +487,12 @@ class LargeFile(unittest.TestCase):
 class FakeDispatch(http.server.BaseHTTPRequestHandler):
     events: list[dict] = []
     seen: list[str] = []
+    # How the event stream fails, as Dispatch's does: None; "pause" (silent for PAUSE_S after every
+    # CHUNK events while more remain, as a slow catch-up query is); "close" (the server ends the
+    # stream there, as a restart does); "dead" (it ends every stream right after `: open`).
+    mode: str | None = None
+    CHUNK = 4
+    PAUSE_S = 4.0
 
     def log_message(self, *args):
         pass
@@ -502,12 +509,26 @@ class FakeDispatch(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            for e in self.events:
-                if e["id"] > since:
-                    self.wfile.write(f"id: {e['id']}\nevent: {e['type']}\ndata: {json.dumps(e)}\n\n".encode())
-            self.wfile.write(b": heartbeat\n\n")
+            try:
+                self.stream([e for e in self.events if e["id"] > since])
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the client gave up on a silent stream and reconnected
         else:
             self.send_error(404)
+
+    def stream(self, backlog: list[dict]):
+        self.wfile.write(b": open\n\n")
+        if self.mode == "dead":
+            return
+        for n, e in enumerate(backlog, 1):
+            self.wfile.write(f"id: {e['id']}\nevent: {e['type']}\ndata: {json.dumps(e)}\n\n".encode())
+            if n % self.CHUNK == 0 and n < len(backlog):
+                if self.mode == "close":
+                    return
+                if self.mode == "pause":
+                    self.wfile.flush()
+                    time.sleep(self.PAUSE_S)
+        self.wfile.write(b": heartbeat\n\n")
 
     def reply(self, body):
         data = json.dumps(body).encode()
@@ -523,6 +544,47 @@ def event(eid: int, t: datetime, kind: str, payload: dict, actor: str = "sami@th
             "actor": {"kind": "user", "id": actor}, "notify": True, "created_at": stamp(t), "payload": payload}
 
 
+def start_dispatch(base: Path) -> tuple[http.server.ThreadingHTTPServer, dict]:
+    """The fake Dispatch with its events, serving; and the environment that points sami-said at it."""
+    older = [event(i, at(-300 + i), "artifact.version", {"name": "spec.md"}) for i in range(1, 200)]
+    FakeDispatch.mode = None
+    FakeDispatch.events = older + [
+        event(300, at(-65), "comment.created", {"id": "c-early", "body": "before the window"}),
+        event(301, at(5), "message.created", {"id": "407cb29c-fcc3-406e-8fd8-ecc6d9076ba4", "body": "I'm getting super excited.",
+                                              "author": {"id": "sami@theorem.dev", "kind": "user"}, "target": f"session:{LEAD}"},
+              issue=None),
+        event(302, at(6), "message.created", {"id": "99999999-0000-4000-8000-000000000000", "body": "Someone else's Dispatch message.",
+                                              "author": {"id": "tewaro@theorem.dev", "kind": "user"}, "target": f"session:{LEAD}"},
+              actor="tewaro@theorem.dev", issue=None),
+        event(303, at(38), "comment.created", {"id": "8dbb79ac-7e38-47e5-8913-e5f673adaa8b", "body": "Why are we relitigating it?",
+                                               "ask_question": "Does Lean start on each edge when its two ends agree?"}),
+        event(304, at(39), "ask.answered", {"id": "d3a51496-e7ed-4044-864a-0205e8d61e88", "question": "Where does state live?",
+                                            "answer": {"selected": ["English in git, state in Postgres"], "text": None},
+                                            "author": {"kind": "session", "id": LEAD, "origin": {"session_title": "ORCH"}}}),
+        event(305, at(40), "user_state.updated", {"login": "sami@theorem.dev"}),
+        event(306, at(41), "comment.created", {"id": "c-other", "body": "not Sami's"}, actor="tewaro@theorem.dev"),
+        event(307, at(42), "message.created", {"id": "m-lane", "body": "/rename gateway", "target": f"session:{LANE}",
+                                               "author": {"id": "sami@theorem.dev", "kind": "user"}}, issue=None),
+        event(308, at(42.1), "message.delivery", {"message_id": "m-lane", "title": "⛩️ GATE: gateway"}, actor="system", issue=None),
+        event(309, at(50), "artifact.approved", {"name": "spec.md", "reason": "Ship it", "version": 9}),
+        event(310, at(130), "comment.created", {"id": "c-late", "body": "after the window"}),
+    ]
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeDispatch)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    config = base / "envoy.json"
+    config.write_text(json.dumps({"dispatch": {"enabled": True, "serverUrl": f"http://127.0.0.1:{server.server_port}",
+                                               "token": "test-token"}}))
+    return server, {"ENVOY_CONFIG_FILE": str(config), "DISPATCH_URL": "", "DISPATCH_TOKEN": "", "DISPATCH_TOKEN_FILE": ""}
+
+
+DISPATCH_ROWS = [
+    ("DISPATCH comment", "Why are we relitigating it?"),
+    ("DISPATCH answer", "[English in git, state in Postgres]"),
+    ("DISPATCH message", "/rename gateway"),
+    ("DISPATCH approval", "Ship it"),
+]
+
+
 class DispatchOption(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -530,34 +592,7 @@ class DispatchOption(unittest.TestCase):
         base = Path(cls.tmp.name)
         cls.root = base / "agent"
         Store(cls.root)
-        older = [event(i, at(-300 + i), "artifact.version", {"name": "spec.md"}) for i in range(1, 200)]
-        FakeDispatch.events = older + [
-            event(300, at(-65), "comment.created", {"id": "c-early", "body": "before the window"}),
-            event(301, at(5), "message.created", {"id": "407cb29c-fcc3-406e-8fd8-ecc6d9076ba4", "body": "I'm getting super excited.",
-                                                  "author": {"id": "sami@theorem.dev", "kind": "user"}, "target": f"session:{LEAD}"},
-                  issue=None),
-            event(302, at(6), "message.created", {"id": "99999999-0000-4000-8000-000000000000", "body": "Someone else's Dispatch message.",
-                                                  "author": {"id": "tewaro@theorem.dev", "kind": "user"}, "target": f"session:{LEAD}"},
-                  actor="tewaro@theorem.dev", issue=None),
-            event(303, at(38), "comment.created", {"id": "8dbb79ac-7e38-47e5-8913-e5f673adaa8b", "body": "Why are we relitigating it?",
-                                                   "ask_question": "Does Lean start on each edge when its two ends agree?"}),
-            event(304, at(39), "ask.answered", {"id": "d3a51496-e7ed-4044-864a-0205e8d61e88", "question": "Where does state live?",
-                                                "answer": {"selected": ["English in git, state in Postgres"], "text": None},
-                                                "author": {"kind": "session", "id": LEAD, "origin": {"session_title": "ORCH"}}}),
-            event(305, at(40), "user_state.updated", {"login": "sami@theorem.dev"}),
-            event(306, at(41), "comment.created", {"id": "c-other", "body": "not Sami's"}, actor="tewaro@theorem.dev"),
-            event(307, at(42), "message.created", {"id": "m-lane", "body": "/rename gateway", "target": f"session:{LANE}",
-                                                   "author": {"id": "sami@theorem.dev", "kind": "user"}}, issue=None),
-            event(308, at(42.1), "message.delivery", {"message_id": "m-lane", "title": "⛩️ GATE: gateway"}, actor="system", issue=None),
-            event(309, at(50), "artifact.approved", {"name": "spec.md", "reason": "Ship it", "version": 9}),
-            event(310, at(130), "comment.created", {"id": "c-late", "body": "after the window"}),
-        ]
-        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeDispatch)
-        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
-        config = base / "envoy.json"
-        config.write_text(json.dumps({"dispatch": {"enabled": True, "serverUrl": f"http://127.0.0.1:{cls.server.server_port}",
-                                                   "token": "test-token"}}))
-        env = {"ENVOY_CONFIG_FILE": str(config), "DISPATCH_URL": "", "DISPATCH_TOKEN": "", "DISPATCH_TOKEN_FILE": ""}
+        cls.server, env = start_dispatch(base)
         cls.rows = rows(cls.root, "--dispatch", env=env)
 
     @classmethod
@@ -567,12 +602,7 @@ class DispatchOption(unittest.TestCase):
 
     def test_dispatch_rows_are_labelled_and_windowed(self):
         found = [(r["source"], r["text"]) for r in self.rows if r["source"].startswith("DISPATCH")]
-        self.assertEqual(found, [
-            ("DISPATCH comment", "Why are we relitigating it?"),
-            ("DISPATCH answer", "[English in git, state in Postgres]"),
-            ("DISPATCH message", "/rename gateway"),
-            ("DISPATCH approval", "Ship it"),
-        ])
+        self.assertEqual(found, DISPATCH_ROWS)
 
     def test_dispatch_rows_carry_refs_and_context(self):
         comment = next(r for r in self.rows if r["source"] == "DISPATCH comment")
@@ -593,6 +623,53 @@ class DispatchOption(unittest.TestCase):
     def test_bearer_comes_from_envoy_json(self):
         self.assertTrue(FakeDispatch.seen)
         self.assertEqual(set(FakeDispatch.seen), {"Bearer test-token"})
+
+
+class DispatchStreamFaults(unittest.TestCase):
+    """The event stream as it failed on 2026-10-28 15:55Z, when a --dispatch run printed no Dispatch
+    rows and exited 0: a stream that goes silent or ends partway is resumed, and one that never
+    delivers fails the run loudly."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        base = Path(cls.tmp.name)
+        cls.root = base / "agent"
+        Store(cls.root)
+        cls.server, cls.env = start_dispatch(base)
+
+    @classmethod
+    def tearDownClass(cls):
+        FakeDispatch.mode = None
+        cls.server.shutdown()
+        cls.tmp.cleanup()
+
+    def run_with(self, mode: str) -> tuple[subprocess.CompletedProcess, list[dict]]:
+        FakeDispatch.mode = mode
+        done = run(self.root, "--json", "--dispatch", env=self.env)
+        return done, [json.loads(line) for line in done.stdout.splitlines()]
+
+    def dispatch_rows(self, found: list[dict]) -> list[tuple[str, str]]:
+        return [(r["source"], r["text"]) for r in found if r["source"].startswith("DISPATCH")]
+
+    def test_a_stream_silent_partway_is_resumed(self):
+        done, found = self.run_with("pause")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
+
+    def test_a_stream_the_server_ends_partway_is_resumed(self):
+        done, found = self.run_with("close")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
+
+    def test_a_stream_that_never_delivers_fails_loudly(self):
+        done, found = self.run_with("dead")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(self.dispatch_rows(found), [])
+        self.assertIn(TYPED, [r["text"] for r in found])  # the transcript rows still print
+        self.assertIn("--dispatch FAILED, so no Dispatch rows are listed", done.stderr)
+        self.assertIn("never reached the newest event known at the start, 310", done.stderr)
+        self.assertTrue(done.stderr.rstrip().endswith("exit status 1"), done.stderr)
 
 
 if __name__ == "__main__":
