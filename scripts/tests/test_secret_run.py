@@ -268,6 +268,40 @@ class SecretRun(unittest.TestCase):
             result.stdout.splitlines(), ['SECRETSD AIRTABLE_TOKEN -- sh -c echo "via=$VIA"', "via=secretsd"]
         )
 
+    GITHUB_ARGS = (
+        "--github-owner",
+        "sjawhar",
+        "--github-repo",
+        "proofs",
+        "--github-repo=lean",
+        "--github-read-only",
+    )
+
+    def test_github_narrowing_reaches_the_broker(self) -> None:
+        self.with_client()
+        result = self.run_secret_run(*self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines()[0],
+            "BROKER GITHUB_APP_SJAWHAR --github-owner sjawhar --github-repo proofs --github-repo lean "
+            f'--github-read-only -- sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
+        )
+
+    def test_github_narrowing_is_refused_without_the_broker(self) -> None:
+        # secretsd cannot narrow a GitHub App token: dropping the flags, as --ttl is dropped,
+        # would hand the command a token for every repository of the account.
+        for name, with_client in (("no client", False), ("no broker identity", True)):
+            with self.subTest(case=name):
+                if with_client:
+                    self.with_client()
+                result = self.run_secret_run(
+                    "--github-owner=sjawhar", "--github-read-only", "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1"
+                )
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertNotIn("SECRETSD", result.stdout)
+                self.assertNotIn("via=", result.stdout)
+                self.assertIn("secrets-broker identity", result.stderr)
+
     def test_request_on_secretsd_asks_for_each_key(self) -> None:
         self.with_client()
         result = self.run_secret_run(
@@ -306,6 +340,10 @@ class SecretRun(unittest.TestCase):
             "request takes no wait": ("request", "--wait", "0", "AIRTABLE_TOKEN"),
             "request takes no wait=": ("request", "--wait=0", "AIRTABLE_TOKEN"),
             "ttl without a value": ("AIRTABLE_TOKEN", "--ttl"),
+            "github-owner without a value": ("AIRTABLE_TOKEN", "--github-owner"),
+            "request takes no github-owner": ("request", "--github-owner", "sjawhar", "AIRTABLE_TOKEN"),
+            "request takes no github-repo=": ("request", "--github-repo=proofs", "AIRTABLE_TOKEN"),
+            "request takes no github-read-only": ("request", "--github-read-only", "AIRTABLE_TOKEN"),
             "unknown option": ("--bogus", "AIRTABLE_TOKEN", "--", "true"),
         }
         for name, args in cases.items():
