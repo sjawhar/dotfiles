@@ -18,9 +18,14 @@
 // time, so an edit to the map takes effect at the next compaction with no
 // restart; a missing, unreadable or malformed map, or no entry, gives no
 // reminder and never throws. Then after every compaction and shake of the
-// top-level session, the first thing in context is an instruction to read that
-// document before acting. Subagents never get it: they inherit the lead's
-// environment but not its role.
+// top-level session, the first thing in context is the document. When it names
+// a readable regular file of at most 16 KB (an absolute path, or one under `~/`),
+// the reminder carries the file's full text, read at that compaction, in a
+// `<STREAM_GOALS_DOCUMENT path="…" mtime="…">` wrapper: told only to read it, a
+// lead worked from the summary's paraphrase and drifted (2026-10-28). A
+// dispatch:// URL, free text, a larger file or one that cannot be read keeps
+// the instruction to read the document before acting. Subagents never get it:
+// they inherit the lead's environment but not its role.
 //
 // A compaction summary paraphrases the conversation; a workflow contract the
 // session was following (the sdd skill's agent mapping and gates) rarely
@@ -147,15 +152,17 @@
 // clone showed up in a 14-day sample, so it is accepted rather than special-
 // cased.
 //
-// The restatement is wrapped in `<ORIGINAL_ASSIGNMENT>` and `<LATEST_FOLLOW_UP>`
-// rather than lowercase tags: shake reads a lowercase tag alone on its line as
-// one top-level XML span, and would elide a whole 400+ token restatement as a
-// single region the next time it ran. Its opening grammar is lowercase-only, so
-// an uppercase name never matches. A large fenced or lowercase-XML block
-// *inside* the restated text is still a region of its own.
-import { readFileSync } from "node:fs";
+// The restatement is wrapped in `<ORIGINAL_ASSIGNMENT>` and `<LATEST_FOLLOW_UP>`,
+// and an inlined goals document in `<STREAM_GOALS_DOCUMENT>`, rather than
+// lowercase tags: shake reads a lowercase tag alone on its line as one
+// top-level XML span, and would elide a whole 400+ token block as a single
+// region the next time it ran. Its opening grammar is lowercase-only (still so
+// in pi-agent-core 18.13.1's `shake.ts`), so an uppercase name never matches. A
+// large fenced or lowercase-XML block *inside* the restated text or the goals
+// document is still a region of its own.
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import sddReminder from "./compaction-reminder.md" with { type: "text" };
 import subagentReminder from "./compaction-reminder-subagent.md" with { type: "text" };
@@ -176,13 +183,37 @@ const PARENT_STEER_BODY = /^<irc from="parent" agent="[^"]*">\n([\s\S]*)\n<\/irc
 /** The fork's `buildBudgetNotice` (task/executor.ts): a runtime steer, not an instruction. */
 const BUDGET_NOTICE_PREFIX = "[budget notice] ";
 
-/** The stream-goals reminder: read the one document that holds the stream's goals before the next action. */
+/** The largest goals file the reminder inlines; a larger one, or a URL, is only named. */
+const GOALS_INLINE_MAX_BYTES = 16 * 1024;
+
+/** The stream-goals reminder: the goals document itself when it is a small local file, else where to read it. */
 function streamGoalsReminder(goals: string): string {
-	return (
-		`Your context was just compacted. Before your next action, read your stream's goals document in full: ${goals}\n` +
+	const rules =
 		"It holds this stream's goals and Sami's standing rules. The summary may have dropped or reworded them; " +
-		"where the summary and the document differ, the document wins."
+		"where the summary and the document differ, the document wins.";
+	const file = goalsFile(goals);
+	if (!file) {
+		return `Your context was just compacted. Before your next action, read your stream's goals document in full: ${goals}\n${rules}`;
+	}
+	return (
+		"Your context was just compacted. Your stream's goals document is below in full, as it stood on disk at this compaction. " +
+		`Work from its text, not from a paraphrase of it. ${rules}\n\n` +
+		`<STREAM_GOALS_DOCUMENT path="${file.path}" mtime="${file.mtime}">\n` +
+		`${file.text.endsWith("\n") ? file.text : `${file.text}\n`}</STREAM_GOALS_DOCUMENT>`
 	);
+}
+
+/** The goals target as a readable regular file of at most GOALS_INLINE_MAX_BYTES; undefined for a URL, free text or any failure. */
+function goalsFile(goals: string): { path: string; mtime: string; text: string } | undefined {
+	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(goals)) return undefined;
+	const path = resolve(goals === "~" || goals.startsWith("~/") ? join(process.env.HOME || homedir(), goals.slice(1)) : goals);
+	try {
+		const stat = statSync(path);
+		if (!stat.isFile() || stat.size > GOALS_INLINE_MAX_BYTES) return undefined;
+		return { path, mtime: stat.mtime.toISOString(), text: readFileSync(path, "utf8") };
+	} catch {
+		return undefined;
+	}
 }
 
 /** The session's goals document: `STREAM_GOALS`, else its entry in the map file; undefined on any failure. */
