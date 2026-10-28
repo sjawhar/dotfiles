@@ -3,8 +3,16 @@
 
 The choice is made by `agent-secrets identity` (exit 0: this process has a broker identity),
 never by failure: once the broker path is taken, its exit is secret-run's exit and secretsd is
-never tried. Everything else (identity exits non-zero, an old client without `identity`, no
-agent-secrets at all) runs `secrets` exactly as before, without touching the broker.
+never tried. A client that answers "no identity" (identity exits 1) and no agent-secrets at all
+run `secrets` exactly as before, without touching the broker. A client on PATH that cannot run
+(mise's shim unresolvable, a resolved path that is not an executable file, any identity exit
+other than 0 or 1, 2 included: every installable client has `identity`, so 2 is a usage error or
+a Go panic) is an error, and neither store is touched.
+
+mise's shim is resolved with `mise which` under MISE_DATA_DIR, else $HOME/.mise, reading only its
+stdout, so a warning mise prints on stderr with exit 0 changes nothing: in an `env -i`
+scope the shim itself looks in mise's default data dir, which on 2026-10-28 held a broken install,
+and the old secret-run read that failure as "no identity" and silently used secretsd.
 
 On the broker path the client gets the URL agent-secrets/broker-url.sh gives every consumer of
 agent-secrets/broker.env: broker.env's, or env.local's over it, exported with its record
@@ -13,7 +21,10 @@ stale default); a URL the caller chose itself stays.
 
 Technique: stub `agent-secrets` and `secrets` first on PATH; each prints the argv it got and,
 for the exec forms, execs the command after `--` with a marker variable set. The `secrets` stub
-refuses `get` with more than one key, as the real CLI does.
+refuses `get` with more than one key, as the real CLI does. The `mise` stub does what mise does
+for a symlinked shim: run as `agent-secrets` it execs the install under MISE_DATA_DIR, or under
+mise's default data dir ($HOME/.local/share/mise) when that is unset, and fails when there is
+none there; run as `mise which -C / agent-secrets --tool agent-secrets` it prints that path.
 """
 
 from __future__ import annotations
@@ -98,6 +109,19 @@ shift
 VIA=secretsd exec "$@"
 """
 
+MISE_STUB = r"""
+data="${MISE_DATA_DIR:-$HOME/.local/share/mise}"
+bin="$data/installs/agent-secrets/1.0.0/bin/agent-secrets"
+if [[ "${0##*/}" == agent-secrets ]]; then
+    [[ -e "$bin" ]] || { echo "mise ERROR No executable found for configured tool: agent-secrets" >&2; exit 1; }
+    exec "$bin" "$@"
+fi
+[[ "$*" == "which -C / agent-secrets --tool agent-secrets" ]] || { echo "unexpected mise $*" >&2; exit 99; }
+[[ -z "${STUB_MISE_WARN:-}" ]] || echo "mise WARN unknown field in ~/.config/mise/config.toml: settings.bogus" >&2
+[[ -e "$bin" ]] || { echo "mise ERROR agent-secrets is not installed in $data" >&2; exit 1; }
+echo "$bin"
+"""
+
 
 class SecretRun(unittest.TestCase):
     def setUp(self) -> None:
@@ -115,6 +139,24 @@ class SecretRun(unittest.TestCase):
 
     def with_client(self) -> None:
         write_stub(self.stub_dir, "agent-secrets", AGENT_SECRETS_STUB)
+
+    def with_mise_client(self, *, executable: bool = True, data_dir: str = ".mise") -> Path:
+        """mise's shim dir on PATH ahead of the stubs, its shim a symlink to mise, and the client
+        installed only under $HOME/<data_dir> ($HOME/.mise by default, as on sami-rocqperf)."""
+        home = Path(self.temp_dir.name)
+        mise_dir = home / "mise-bin"
+        mise_dir.mkdir()
+        write_stub(mise_dir, "mise", MISE_STUB)
+        shims = home / ".mise" / "shims"
+        shims.mkdir(parents=True)
+        (shims / "agent-secrets").symlink_to(mise_dir / "mise")
+        install = home / data_dir / "installs" / "agent-secrets" / "1.0.0" / "bin"
+        install.mkdir(parents=True)
+        write_stub(install, "agent-secrets", AGENT_SECRETS_STUB)
+        if not executable:
+            (install / "agent-secrets").chmod(0o644)
+        self.env["PATH"] = f"{shims}:{self.env['PATH']}"
+        return install / "agent-secrets"
 
     def run_secret_run(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -194,19 +236,7 @@ class SecretRun(unittest.TestCase):
         )
         self.assertNotIn("BROKER", result.stdout)
         self.assertIn("identity: no key dir", result.stderr)
-
-    def test_old_client_without_identity_runs_secretsd_quietly(self) -> None:
-        """A client older than `identity` exits 2 with its usage; that text is not shown."""
-        self.with_client()
-        result = self.run_secret_run(
-            "AIRTABLE_TOKEN",
-            *self.CMD,
-            STUB_IDENTITY="2",
-            STUB_IDENTITY_MSG="usage: agent-secrets …",
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines()[-1], "via=secretsd")
-        self.assertNotIn("usage: agent-secrets", result.stderr)
+        self.assertNotIn("cannot run", result.stderr)
 
     def test_no_client_runs_secretsd(self) -> None:
         result = self.run_secret_run(*self.EXEC_ARGS, *self.CMD)
@@ -215,6 +245,94 @@ class SecretRun(unittest.TestCase):
             result.stdout.splitlines(),
             ['SECRETSD AIRTABLE_TOKEN DD_API_KEY -- sh -c echo "via=$VIA"', "via=secretsd"],
         )
+        self.assertEqual(result.stderr, "")
+
+    def test_mise_shim_in_a_bare_environment_reaches_the_broker(self) -> None:
+        """The 2026-10-28 outage: no MISE_DATA_DIR, so the shim itself fails; secret-run asks mise
+        for the binary under $HOME/.mise and runs that, for identity and for the broker call."""
+        self.with_mise_client()
+        self.assertNotIn("MISE_DATA_DIR", self.env)
+        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                f'BROKER AIRTABLE_TOKEN -- sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
+                "via=broker",
+            ],
+        )
+
+    def test_mise_warning_on_stderr_with_exit_0_still_reaches_the_broker(self) -> None:
+        """mise prints a WARN for an unknown config key (or MISE_VERBOSE/MISE_DEBUG output) on
+        stderr and still exits 0: only its stdout is the path, and the warning reaches stderr."""
+        self.with_mise_client()
+        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", STUB_MISE_WARN="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
+        self.assertIn("mise WARN unknown field", result.stderr)
+        self.assertNotIn("cannot run", result.stderr)
+
+    def test_caller_mise_data_dir_is_used(self) -> None:
+        """A caller's own MISE_DATA_DIR wins over $HOME/.mise: the client is installed only there."""
+        self.with_mise_client(data_dir="other-mise")
+        result = self.run_secret_run(
+            "AIRTABLE_TOKEN",
+            *self.CMD,
+            STUB_IDENTITY="0",
+            MISE_DATA_DIR=str(Path(self.temp_dir.name) / "other-mise"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
+
+    def test_mise_shim_with_no_identity_still_runs_secretsd(self) -> None:
+        """The resolved client answering "no identity" keeps the secretsd path the lanes use."""
+        self.with_mise_client()
+        result = self.run_secret_run("GH_AGENT_APP_PRIVATE_KEY_B64", *self.CMD, STUB_IDENTITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ['SECRETSD GH_AGENT_APP_PRIVATE_KEY_B64 -- sh -c echo "via=$VIA"', "via=secretsd"],
+        )
+        self.assertNotIn("cannot run", result.stderr)
+
+    def assert_cannot_run(self, result: subprocess.CompletedProcess[str], detail: str) -> None:
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn("SECRETSD", result.stdout)
+        self.assertNotIn("BROKER", result.stdout)
+        self.assertNotIn("via=", result.stdout)
+        self.assertIn("secret-run: the agent-secrets client cannot run (", result.stderr)
+        self.assertIn(detail, result.stderr)
+        self.assertIn("take agent-secrets off PATH to use secretsd", result.stderr)
+
+    def test_mise_shim_mise_cannot_resolve_is_an_error(self) -> None:
+        client = self.with_mise_client()
+        client.unlink()
+        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0")
+        self.assert_cannot_run(result, "mise could not resolve it; its error is above")
+        self.assertIn("mise ERROR agent-secrets is not installed", result.stderr)
+
+    def test_resolved_client_not_executable_is_an_error(self) -> None:
+        client = self.with_mise_client(executable=False)
+        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0")
+        self.assert_cannot_run(result, f"{client} is not an executable file")
+
+    def test_client_whose_exec_fails_is_an_error(self) -> None:
+        """A client on PATH whose exec fails (here a missing interpreter) gets the shell's 126 or
+        127, which is no answer from identity."""
+        path = self.stub_dir / "agent-secrets"
+        path.write_text("#!/nonexistent/interpreter\n", encoding="utf-8")
+        path.chmod(0o755)
+        result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD)
+        self.assert_cannot_run(result, f"`{path} identity` exited 12")
+
+    def test_identity_exit_other_than_0_or_1_is_an_error(self) -> None:
+        """2 included: every client mise.toml can install has `identity`, so 2 is the client's
+        usage error or a Go panic, not an old client."""
+        self.with_client()
+        for code in ("2", "3", "139"):
+            with self.subTest(exit=code):
+                result = self.run_secret_run("AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY=code)
+                self.assert_cannot_run(result, f"identity` exited {code}: ")
 
     def test_broker_failure_is_final(self) -> None:
         self.with_client()
