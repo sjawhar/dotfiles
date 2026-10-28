@@ -48,6 +48,11 @@ omp runs there again or the pane goes away. The session is resolved from what th
 running in the pane, else the transcript in the pane's directory whose own title the pane title
 carries, else the `omp --resume` command tmux-resurrect saved for that pane's place.
 
+The watcher does not execute that command. It cannot distinguish a failed session from one that
+was deliberately `/pause`d before the process left its pane: omp keeps that state in process
+memory and writes no durable session marker. It must only alert until omp persists a marker the
+watch can check.
+
 Scope: role holders, and panes. A session that holds no role and has no pane is not watched.
 """
 
@@ -639,6 +644,10 @@ def pane_alert_text(incident: dict, now: float) -> str:
         lines.append(
             f"Do: `tmux send-keys -t {incident['pane_id']} {shlex.quote(incident['restart'])} Enter`"
             f" (that is `{incident['restart']}` typed in that pane), then {brief}."
+        )
+        lines.append(
+            "Automatic restart: NOT RUN. omp does not persist `/pause` state after its process"
+            " exits, so this watch cannot safely tell a failed session from a deliberately paused one."
         )
     else:
         lines.append(f"Do: start the lane again in that pane, and {brief}.")
