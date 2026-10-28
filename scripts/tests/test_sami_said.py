@@ -97,6 +97,10 @@ KICKOFF = (f'<file name="/mnt/nvme/sami/frac-verify/peers/S1-kickoff.md">\nYou l
            f"Set your title first: `tmux send-keys -t \"$TMUX_PANE\" -l '{KICK_RENAME}' && tmux send-keys -t \"$TMUX_PANE\" Enter`. "
            "Then plan S1 under SDD and implement it, and report to the lead over Envoy.\n</file>\n")
 ASKED = "https://dispatch.example/issues/INFRA-228/asks/c8943356 please help investigate and fix this."
+COACH = "01a16a9e-a90d-7148-95ed-0e9e7839dbd2"
+RESUME_NOTE = "From TASKCOACH: you are resumed on Sami's word. Wrap up only, then stop and wait."
+PAUSE = "PAUSE-TOGGLE (person or scripted Escape; history.db records the resume time)"
+NUDGE = "From TASKCOACH: check your Envoy inbox when you are resumed, nothing else."
 
 
 class Store:
@@ -129,6 +133,7 @@ class Store:
              "message": {"role": "developer", "attribution": "agent", "synthetic": True,
                          "content": [{"type": "text", "text": "`/guided-goal`: goal mode\n<rough-goal>\nGet the pilot running"}]}},
             assistant(at(17), "I will do it."),
+            user(at(49.97), NUDGE),  # an agent typed into LEAD's pane, but pressed no Escape there
         ])
         shake = lead_dir / f"2026-10-21T17-57-29-198Z_{LEAD}" / "7.shake.log"
         shake.parent.mkdir(parents=True)
@@ -171,8 +176,11 @@ class Store:
             (AFTER_FORK, at(36), FORK),
             (KICK_RENAME, at(45.2), KICKED),
             (ASKED, at(44), KICKED),
-            # omp writes /pause when the pause screen closes: here an agent's script pressed Escape.
+            # omp writes /pause when the pause screen closes. Here an agent's script pressed Escape and
+            # typed into another session's pane, so nothing ties that Escape to LEAD: the row stays.
             ("/pause", at(50), LEAD),
+            (RESUME_NOTE, at(49.95), KICKED),
+            (NUDGE, at(49.97), LEAD),
         ])
         # A session an agent started with `omp @kickoff.md`: the kickoff is in no history row, but holds
         # the /rename line the session then typed into its own pane. Then a person re-sends a prompt
@@ -182,6 +190,13 @@ class Store:
             user(at(45), KICKOFF),
             tool_call(at(45.1), "bash", {"command": f"tmux send-keys -t \"$TMUX_PANE\" -l '{KICK_RENAME}' && tmux send-keys -t \"$TMUX_PANE\" Enter"}),
             user(at(46), f"/skill:systematic-debugging {ASKED}"),
+            user(at(49.95), RESUME_NOTE),
+        ])
+        write_session(sessions / "-src-binary-equivalence-taiga" / f"2026-10-23T21-15-45-293Z_{COACH}.jsonl", COACH,
+                      "/home/sami/src/binary-equivalence-taiga", "🏋️ TASKCOACH", [
+            tool_call(at(49.9), "bash", {"command": f"tmux send-keys -t %29 Escape; sleep 3; tmux send-keys -t %29 -l "
+                                                    f"{json.dumps(RESUME_NOTE)}; tmux send-keys -t %29 Enter"}),
+            tool_call(at(49.92), "bash", {"command": f"tmux send-keys -t %31 -l {json.dumps(NUDGE)}; tmux send-keys -t %31 Enter"}),
         ])
 
 
@@ -233,6 +248,7 @@ class TranscriptRules(unittest.TestCase):
             (AFTER_FORK, "terminal"),
             ("/btw what are you working on?", "terminal-history"),
             (f"/skill:systematic-debugging {ASKED}", "terminal"),  # found by containment: ASKED is not shown again
+            ("/pause", PAUSE),
         ])
 
     def test_injected_user_role_text_is_left_out(self):
@@ -277,8 +293,11 @@ class TranscriptRules(unittest.TestCase):
         self.assertNotIn(KICKOFF, self.texts)
         self.assertNotIn(KICK_RENAME, self.texts)  # the session typed it into its own pane
 
-    def test_pause_row_carries_the_resume_time_and_is_left_out(self):
-        self.assertNotIn("/pause", self.texts)
+    def test_pause_row_stays_labelled_when_no_script_resumed_this_pane(self):
+        pause = next(r for r in self.rows if r["text"] == "/pause")
+        self.assertEqual((pause["source"], pause["session"], pause["time"]), (PAUSE, LEAD, "2026-10-28T02:50:00Z"))
+        self.assertNotIn(RESUME_NOTE, self.texts)  # the Escape call typed into KICKED, not LEAD
+        self.assertNotIn(NUDGE, self.texts)  # a call typed into LEAD, but it pressed no Escape
 
     def test_a_fork_does_not_repeat_its_parents_messages(self):
         self.assertEqual(self.texts.count(TYPED), 1)
@@ -346,14 +365,24 @@ T() {{ timeout 20 tmux -L iwrlane -f /dev/null "$@"; }}
 PROMPT="{PROMPT}"
 T send-keys -t "$S" -l "$PROMPT"; sleep 1; T send-keys -t "$S" Enter
 """
+RESUMED = "From TASKCOACH (task-making lead): you are resumed on Sami's word at 15:10Z. Wrap up only, then stop."
+# The 2026-10-28 shape: a script, written by a write call and since deleted, presses Escape on a
+# pane that shows the pause screen, then types the wrap-up prompt into it.
+RESUME_PY = f'''import subprocess, time
+for target in ("%23", "%24"):
+    subprocess.run(["tmux", "send-keys", "-t", target, "Escape"])
+    time.sleep(3)
+    subprocess.run(["tmux", "send-keys", "-t", target, "-l", {RESUMED!r}])
+    subprocess.run(["tmux", "send-keys", "-t", target, "Enter"])
+'''
 FORK2 = "01a17147-0000-7000-8000-000000000002"
 
 
 class AgentsTypingIntoPanes(unittest.TestCase):
-    """Rule 9 on the shapes found on 2026-10-23/24/25: an eval cell that types through a helper and
-    never says "tmux", a script that fills in a template, a brief sent from a file, a script deleted
-    after it ran (seen only in the write call that made it), and an agent sending /rename into its
-    own pane."""
+    """Rules 9 and 10 on the shapes found on 2026-10-23/24/25/28: an eval cell that types through a
+    helper and never says "tmux", a script that fills in a template, a brief sent from a file, a
+    script deleted after it ran (seen only in the write call that made it), an agent sending /rename
+    into its own pane, and a script that presses Escape on a paused pane and types a wrap-up prompt."""
 
     @classmethod
     def setUpClass(cls):
@@ -379,6 +408,8 @@ class AgentsTypingIntoPanes(unittest.TestCase):
             tool_call(at(3), "bash", {"command": f"echo {json.dumps(KEPT)} >> /tmp/quotes.md"}),  # quotes, never types
             tool_call(at(6), "write", {"path": str(base / "gone" / "drive.sh"), "content": DRIVER}),  # deleted since
             tool_call(at(6.2), "bash", {"command": f"bash {base / 'gone' / 'drive.sh'} main"}),
+            tool_call(at(7), "write", {"path": str(base / "gone" / "resume.py"), "content": RESUME_PY}),
+            tool_call(at(7.1), "bash", {"command": f"python3 {base / 'gone' / 'resume.py'}"}),
         ])
         link = root / "sessions" / "-src" / moved.name
         link.parent.mkdir(parents=True)
@@ -396,6 +427,7 @@ class AgentsTypingIntoPanes(unittest.TestCase):
             tool_call(at(5) + timedelta(milliseconds=500), "bash",
                       {"command": f"tmux send-keys -t \"$TMUX_PANE\" -l '{RENAME}' && tmux send-keys -t \"$TMUX_PANE\" Enter"}),
             user(at(6.5), PROMPT),
+            user(at(7.3), RESUMED),
         ]
         receiver_dir = root / "sessions" / "-src-speed-r2-b"
         write_session(receiver_dir / f"2026-10-24T05-34-00-000Z_{RECEIVER}.jsonl", RECEIVER, "/home/sami/src/speed-r2-b",
@@ -408,7 +440,7 @@ class AgentsTypingIntoPanes(unittest.TestCase):
                       "🪓 R2B", receiver)
         write_history(root, [(WIND, at(0.5), RECEIVER), (brief, at(1.5), RECEIVER), (FILED, at(2.5), RECEIVER),
                              (KEPT, at(3.5), RECEIVER), (OWN, at(4.5), RECEIVER), (RENAME, at(5), RECEIVER),
-                             (PROMPT, at(6.5), RECEIVER)])
+                             (PROMPT, at(6.5), RECEIVER), ("/pause", at(7.25), RECEIVER), (RESUMED, at(7.3), RECEIVER)])
         cls.done = run(root, "--json")
         cls.texts = [json.loads(r)["text"] for r in cls.done.stdout.splitlines()]
 
@@ -429,10 +461,15 @@ class AgentsTypingIntoPanes(unittest.TestCase):
     def test_slash_command_typed_into_its_own_pane(self):
         self.assertNotIn(RENAME, self.texts)
 
+    def test_pause_toggle_a_script_pressed_is_left_out(self):
+        self.assertNotIn(RESUMED, self.texts)
+        self.assertNotIn("/pause", self.texts)  # the call that pressed Escape also typed into this session
+        self.assertIn("and 1 pause toggles agents pressed", self.done.stderr)
+
     def test_typed_text_stays(self):
         self.assertEqual(self.done.returncode, 0, self.done.stderr)
         self.assertEqual(self.texts, [KEPT, OWN])  # OWN once: the fork's copies are not read, nor its copied call
-        self.assertIn("5 texts agents typed", self.done.stderr)
+        self.assertIn("6 texts agents typed", self.done.stderr)
 
 
 class LargeFile(unittest.TestCase):

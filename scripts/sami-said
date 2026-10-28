@@ -19,6 +19,8 @@ working directory, and the text. Sources:
                     back before it was sent). Its time is the last time that exact text was sent.
                     A prompt whose transcript copy lands up to 30 minutes after --until counts as
                     sent, and shows in the window that holds that copy.
+  PAUSE-TOGGLE ...  a /pause row of the prompt history (rule 10). Its time is when the pause screen
+                    closed, by a person's key or a script's Escape, not when /pause was typed.
   dispatch-turn     a person typed it on Dispatch's Agents page and it reached the session as the
                     user's own turn. With --dispatch its author is checked against Dispatch.
   DISPATCH ...      with --dispatch: an answer, comment, message, approval or change request that
@@ -72,10 +74,14 @@ How a typed message is told apart from text injected into the user role. Structu
      session id counts only up to 1 second after the text (history.db keeps whole seconds): a later
      one forwards what the session was sent. A fork's copies of its parent's calls are skipped, as
      in rule 1. The transcript store (tq) is not used: it cuts a call's arguments at 4000 characters.
- 10. A /pause prompt-history row is dropped. omp writes /pause to history.db only when the pause
-     screen closes, since the command runs until then, so the row's time is the resume: a key that
-     a person or a script pressed (an agent resuming paused lanes with send-keys Escape), never
-     when /pause was typed.
+ 10. omp runs /pause until the pause screen closes and only then writes it to history.db, so the
+     row's time is the resume: a key a person pressed, or an Escape an agent's script sent with
+     tmux. The row prints with source "PAUSE-TOGGLE (person or scripted Escape; history.db records
+     the resume time)", so a lead can ask who paused the session. It is dropped only when it can be
+     put on a script: a typing call of another session, in rule 9's window around the row, sends
+     Escape with send-keys (in its arguments, a file it names, or a script a write call wrote), and
+     the same call typed a text into this row's session that rule 9 dropped, which ties its pane to
+     this session. An Escape-only call (no typed text) cannot be tied to a pane, so its row stays.
 
 Text rules, used only where no structural mark exists:
 
@@ -95,7 +101,8 @@ Known limits: omp files text typed into a focused subagent view under the parent
 such text prints as terminal-history of the parent session. Rule 9 misses an agent that types
 through a helper defined in an earlier call when the later call never says send-keys, and a script
 that was changed or deleted after it sent its text, unless a write tool call within the window
-wrote it.
+wrote it. history.db keeps one row per distinct text, so only the latest /pause toggle on this
+machine survives; earlier ones print nowhere.
 
 Speed: a session file whose mtime is before --since is never opened; in a file over 1 MB a
 binary search on byte offsets (probing only "message" entries, which omp stamps as it writes
@@ -141,6 +148,9 @@ TYPED_CHUNK = 32  # rule 9, templates: pieces of this many letters and digits, e
 TYPED_CHUNKS_MIN = 4  # a text this many pieces long or more may match as a filled-in template
 NAMED_FILE_MAX = 256 << 10  # rule 9 reads a file a typing call names only up to this size
 TYPING_VERBS = re.compile(r"send-keys|paste-buffer|load-buffer")
+# Rule 10: send-keys pressing Escape, as a shell word or a quoted list item (["send-keys", "-t", p, "Escape"]).
+TYPED_ESCAPE = re.compile(r"send-keys[^\n]{0,200}?[\s\"',](?:Escape|Esc|C-\[)(?=[\s\"',)\];\\]|$)")
+PAUSE_SOURCE = "PAUSE-TOGGLE (person or scripted Escape; history.db records the resume time)"
 TYPING_VERB_BYTES = (b"send-keys", b"paste-buffer", b"load-buffer")
 NAMED_PATH = re.compile(r"(?<![\w.~/-])(?:~/|/)[\w.@%+~/-]*\w")
 # A script a call runs: a .sh, .bash or .py file, or any file in a bin/ or scripts/ directory.
@@ -512,6 +522,7 @@ class TypingCall:
     raw: str  # the call's arguments as recorded: JSON text
     key: str  # typing_key of the arguments and of the files they name
     sid: str  # the session id of the agent that made the call
+    escapes: bool = False  # it sends Escape with send-keys (rule 10)
 
 
 def typing_key(text: str) -> str:
@@ -583,7 +594,8 @@ def typing_call(part: dict, t: datetime, sid: str, files: dict[str, str | None])
         if text is not None:
             texts.append(text)
             types = types or (SCRIPT_PATH.search(token) is not None and types_into_pane(text))
-    return TypingCall(t, raw, typing_key("\n".join(texts)), sid) if types else None
+    text = "\n".join(texts)
+    return TypingCall(t, raw, typing_key(text), sid, TYPED_ESCAPE.search(text) is not None) if types else None
 
 
 def agent_typing_calls(roots: list[Path], start: datetime, end: datetime) -> list[TypingCall]:
@@ -630,17 +642,19 @@ def agent_typing_calls(roots: list[Path], start: datetime, end: datetime) -> lis
     return calls
 
 
-def typed_by_agent(m: Message, calls: list[TypingCall]) -> bool:
-    """Rule 9: another session's typing call held this text shortly before it arrived."""
+def typing_calls_for(m: Message, calls: list[TypingCall]) -> list[TypingCall]:
+    """Rule 9: the typing calls of another session (or of this one, before it) that held this text
+    shortly before it arrived; empty when no agent typed it."""
     key = typing_key(m.text)
     pattern = None
     if len(key) < TYPED_KEY_MIN:
         text = norm(m.text)
         if not text:
-            return False
+            return []
         quoted = re.escape(text)
         pattern = re.compile(rf"(?<=['\"]){quoted}(?=['\"\\])|(?<=-l ){quoted}(?=\s|\\|$)")
     chunks = [key[i:i + TYPED_CHUNK] for i in range(0, len(key) - TYPED_CHUNK + 1, TYPED_CHUNK // 2)]
+    found = []
     for c in calls:
         if not (m.time - TYPED_BEFORE <= c.time <= m.time + TYPED_AFTER):
             continue
@@ -648,12 +662,20 @@ def typed_by_agent(m: Message, calls: list[TypingCall]) -> bool:
             continue  # the session forwarding what it was sent; what it typed into its own pane came before
         if pattern is not None:
             if pattern.search(c.raw):
-                return True
+                found.append(c)
         elif key[:TYPED_KEY] in c.key:
-            return True  # the start of the text, as typed
+            found.append(c)  # the start of the text, as typed
         elif len(chunks) >= TYPED_CHUNKS_MIN and sum(ch in c.key for ch in chunks) * 2 >= len(chunks):
-            return True  # half of it, as a template with its variables filled in
-    return False
+            found.append(c)  # half of it, as a template with its variables filled in
+    return found
+
+
+def resumed_by_agent(m: Message, calls: list[TypingCall], typed_into: set[tuple[str, int]]) -> bool:
+    """Rule 10: a typing call of another session that sends Escape, in rule 9's window around this
+    PAUSE-TOGGLE row, also typed a text into this row's session, so it addressed this pane."""
+    sid = m.session.sid if m.session else None
+    return any(c.escapes and c.sid != sid and (sid, id(c)) in typed_into
+               and m.time - TYPED_BEFORE <= c.time <= m.time + TYPED_AFTER for c in calls)
 
 
 # ---------------------------------------------------------------- Dispatch
@@ -970,7 +992,7 @@ def main() -> int:
     typed: list[Message] = []
     sessions: dict[str, Session] = {}
     paths: dict[str, Path] = {}
-    stats = {"files": 0, "read": 0, "launch": 0, "agent": 0}
+    stats = {"files": 0, "read": 0, "launch": 0, "agent": 0, "resumed": 0}
     consumed: set[tuple[Path, int]] = set()  # history rows a transcript message in the window was sent as
     dirs = [load_history(d) for d in agent_dirs(args.agent_dir)]
     shakes: dict = {}
@@ -1018,28 +1040,38 @@ def main() -> int:
             if agent_typed(row.prompt):
                 stats["agent"] += 1
                 continue
-            if row.prompt.split()[:1] == ["/pause"]:
-                continue  # rule 10: its time is the resume, not the typing
+            pause = row.prompt.split()[:1] == ["/pause"]  # rule 10
             draft = norm(row.prompt)
-            if any(m.session and m.session.sid == row.sid and m.source == "terminal" and abs(m.time - row.created) <= DRAFT_WINDOW
-                   and (norm(m.text).startswith(draft[:DRAFT_PREFIX]) or (len(draft) >= FALLBACK_MIN and draft in norm(m.text)))
-                   for m in typed):
+            if not pause and any(
+                    m.session and m.session.sid == row.sid and m.source == "terminal" and abs(m.time - row.created) <= DRAFT_WINDOW
+                    and (norm(m.text).startswith(draft[:DRAFT_PREFIX]) or (len(draft) >= FALLBACK_MIN and draft in norm(m.text)))
+                    for m in typed):
                 continue
             session = sessions.get(row.sid)
             if session is None:
                 session = read_header(paths[row.sid], row.sid) if row.sid in paths else Session(sid=row.sid or "?", cwd=row.cwd)
                 sessions[session.sid] = session
-            typed.append(Message(time=row.created, source="terminal-history", text=row.prompt, session=session,
-                                 agent_dir=ad.root, history_ids=[row.hid]))
+            typed.append(Message(time=row.created, source=PAUSE_SOURCE if pause else "terminal-history", text=row.prompt,
+                                 session=session, agent_dir=ad.root, history_ids=[row.hid]))
 
-    # Rule 9: text an agent typed into the pane with tmux send-keys.
+    # Rule 9: text an agent typed into the pane with tmux send-keys. Rule 10: a resume it pressed.
     suspects = [m for m in typed if m.source in ("terminal", "terminal-history") and not m.beyond]
-    if suspects:
-        calls = agent_typing_calls([ad.root for ad in dirs], min(m.time for m in suspects) - TYPED_BEFORE,
-                                   max(m.time for m in suspects) + TYPED_AFTER)
-        dropped = {id(m) for m in suspects if typed_by_agent(m, calls)}
+    pauses = [m for m in typed if m.source == PAUSE_SOURCE]
+    if suspects:  # a resume is attributed only through a text the same call typed into that session
+        times = [m.time for m in suspects + pauses]
+        calls = agent_typing_calls([ad.root for ad in dirs], min(times) - TYPED_BEFORE, max(times) + TYPED_AFTER)
+        dropped: set[int] = set()
+        typed_into: set[tuple[str, int]] = set()  # (session id, id of a call that typed into it)
+        for m in suspects:
+            found = typing_calls_for(m, calls)
+            if found:
+                dropped.add(id(m))
+                typed_into.update((m.session.sid if m.session else None, id(c)) for c in found)
         stats["agent"] += len(dropped)
-        typed = [m for m in typed if id(m) not in dropped]
+        resumed = {id(m) for m in pauses if resumed_by_agent(m, calls, typed_into)}
+        stats["resumed"] = len(resumed)
+        gone = dropped | resumed
+        typed = [m for m in typed if id(m) not in gone]
 
     status = 0
     if args.dispatch:
@@ -1093,8 +1125,8 @@ def main() -> int:
         counts[m.source] = counts.get(m.source, 0) + 1
     summary = ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) or "none"
     warn(f"{len(typed)} messages ({summary}) from {iso(since)} to {iso(until)}; read {stats['read']} of {stats['files']} session "
-         f"files in {time.monotonic() - started:.1f}s; left out {stats['launch']} prompts never typed in a terminal and "
-         f"{stats['agent']} texts agents typed")
+         f"files in {time.monotonic() - started:.1f}s; left out {stats['launch']} prompts never typed in a terminal, "
+         f"{stats['agent']} texts agents typed and {stats['resumed']} pause toggles agents pressed")
     return status
 
 
