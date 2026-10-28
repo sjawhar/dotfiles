@@ -213,11 +213,11 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v17.5.0"  # from v14.0.4: names the broker host and its store in every answer and refusal, so no answer is read as secretsd's about the same name (#2232); proven through the running v14.0.2 helper (self, an inject) before the bump, and the helper itself moves only at a restart the installer makes with no host session registered
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:167e21482aeb2b21e865d946b0582fc33165694be669bf8af524b23a34755328" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:0f5231f2b3258b1449da308713a0aec17464d1c1f81c2ab28c25e5dc4c58785c" }
-platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:63f389581a67d628f2b2de918083f1f3837e368274bfe35aaec5f90ca891eb77" }
-platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:dd7fe87732aed87947b8a63a256cf86f8b3952755d75aa386a5a8d50fa4fceb7" }
+version = "legion-envoy-v18.1.0"  # from v17.5.0: the only agent-secrets change between the two is #2224, which adds --github-owner/--github-repo/--github-read-only, so a GitHub App token can be narrowed to named repositories and to read access (INFRA-132). Nothing else in the client or helper changed; without those flags the client behaves as v17.5.0 did. The helper itself moves only at a restart the installer makes with no host session registered
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:f4e373c97c0677fdce1db8dc0cc75422b21938efbaab098de224a06cf0d9a268" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:ef242927ee83f094a7ef020391855c7392052cb1ef5530720e124a9f9ca1d4b2" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:3d5574f6b5ae668cd886e851951dee7a9e607ca524fdd7babaa49fdb11cfe513" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:7d1d88b0d98684aea907b6d2846943cadef085144af75b6960659987e7cef7fc" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
