@@ -12,6 +12,7 @@ modelRoles:
   oracle: openai-codex/gpt-5.5:high
   deep: openai-codex/gpt-5.6-terra:xhigh
   advisor: anthropic/claude-sonnet-5-5:medium
+  # pi-envoy's AskGate asks this role (else `default`) before each Dispatch write.
   askgate: anthropic/claude-fable-5-1:high
   proactiveMemory: anthropic/claude-sonnet-5-5
   judgeLog: anthropic/claude-sonnet-5-5
@@ -26,11 +27,11 @@ modelRoles:
 disabledProviders:
   - openai
 extensionHandlers:
-  # AskGate (omp/extensions/askgate.ts) answers a Dispatch write with a model
-  # call bounded at 90 s inside the handler; the runner's own ceiling must sit
-  # above it, because a handler that outruns the ceiling is fail-closed (the
-  # call is refused). Global: any tool_call handler in any extension may now
-  # hold a tool call for up to 120 s before the runner refuses it (was 30 s).
+  # pi-envoy's AskGate (@sjawhar/pi-envoy, README "The time limit") holds its
+  # 90 s review 5 s under this ceiling: at omp's 30 s default it would get
+  # 25 s, and a review of a long session that times out lets the write post
+  # unreviewed. A handler that outruns the ceiling is refused. Global: any
+  # tool_call handler in any extension may hold a tool call for up to 120 s.
   toolCallTimeoutMs: 120000
 retry:
   modelFallback: true

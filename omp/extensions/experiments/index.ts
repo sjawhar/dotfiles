@@ -11,9 +11,9 @@
 //                     rating to ~/.omp/judge/ratings.jsonl, routing on nothing (judge-log-core.ts)
 //   rules_refresh     before each prompt, quotes context-file paragraphs that changed on disk since
 //                     the session loaded its system prompt (rules-refresh.ts)
-//   askgate_block     AskGate (../askgate.ts) refuses a revised Dispatch write instead of letting it
-//                     run with a warning, when OMP_ASKGATE is unset; AskGate reads the arm itself
-//                     through this resolution, so nothing registers here and the record still names it
+//   askgate_block     pi-envoy's AskGate refuses a revised Dispatch write instead of letting it run
+//                     with a warning, when OMP_ASKGATE is unset; AskGate reads the arm from this
+//                     extension's latest `experiments` entry, so nothing registers here
 //   bash_gate_leading omp's bash interceptor, run from here in both arms: on, a read, grep or glob
 //                     rule blocks only the command's leading segment; off, every segment, as omp
 //                     does (bash-gate-core.ts). Its handler is not gated: the arm is read per call

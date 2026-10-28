@@ -1,7 +1,7 @@
 // Binding of the proactive memory agent; the behaviour is described and implemented in
 // proactive-memory-core.ts. This file binds the fork's objects the core needs — the completion
-// (through completeSimple/retryTransientCompletion and the model registry's key resolver, the
-// askgate.ts pattern), the injected TypeBox builder for tool schemas, and the clock/id/environment
+// (through completeSimple/retryTransientCompletion and the model registry's key resolver), the
+// injected TypeBox builder for tool schemas, and the clock/id/environment
 // primitives — so the core imports nothing from the fork and runs under `bun test` with fakes.
 // The experiments extension (index.ts) registers it under its `proactive_memory` gate.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";

@@ -1,4 +1,4 @@
-// Entry-level tests for proactive-memory.ts, in the shape askgate.test.ts:815-932 uses: mock the
+// Entry-level tests for proactive-memory.ts: mock the
 // fork's @oh-my-pi/pi-ai module, import the REAL entry file (not a fake), drive it through one
 // "context" step, and inspect what it wrote. These tests exist to pin the entry's own contract —
 // how a model reply's stopReason maps to Completion.error, and how content blocks become

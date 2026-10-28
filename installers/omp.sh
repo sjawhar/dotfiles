@@ -24,7 +24,6 @@ if [ -L "${OMP_AGENT_DIR}/config.yml" ]; then
     cp --remove-destination "$(readlink -f "${OMP_AGENT_DIR}/config.yml")" "${OMP_AGENT_DIR}/config.yml"
 fi
 [ -e "${OMP_AGENT_DIR}/config.yml" ] || echo '{}' > "${OMP_AGENT_DIR}/config.yml"
-[ -e "${OMP_AGENT_DIR}/local-overrides.yml" ] || echo '{}' > "${OMP_AGENT_DIR}/local-overrides.yml"
 # models.yml is universal catalog patches; a machine's own provider routing
 # (gateway baseUrl, `!command` apiKey) goes in the gitignored
 # omp/models.local.yml and is merged over it here, straight into the file omp
@@ -72,7 +71,8 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/viewport.ts" "${OMP_AGENT_DIR}/exten
 # Machines set up before the rename hold a now-dangling link under the old name.
 rm -f "${OMP_AGENT_DIR}/extensions/fullscreen.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/attention-queue.ts" "${OMP_AGENT_DIR}/extensions/attention-queue.ts"
-ensure_link "${DOTFILES_DIR}/omp/extensions/askgate.ts" "${OMP_AGENT_DIR}/extensions/askgate.ts"
+# AskGate moved into @sjawhar/pi-envoy; machines set up before that hold a dangling link to it.
+rm -f "${OMP_AGENT_DIR}/extensions/askgate.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/refusal-cooldown.ts" "${OMP_AGENT_DIR}/extensions/refusal-cooldown.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/served-model-notice.ts" "${OMP_AGENT_DIR}/extensions/served-model-notice.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/running-script-guard.ts" "${OMP_AGENT_DIR}/extensions/running-script-guard.ts"
