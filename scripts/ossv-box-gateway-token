@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# ossv-box-gateway-token writes a short-lived shared developer-box identity token
+# for Oh My Pi's model-gateway provider. The timer runs every ten minutes, so the
+# token file is always newer than the one-hour Google token lifetime.
+set -euo pipefail
+
+# The systemd user unit has no login PATH. The gcloud shim preserves the account
+# selection that this box already uses for Google Cloud commands.
+export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$PATH"
+
+d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ossv-box"
+f="$d/gateway-token"
+install -d -m 700 "$d"
+# Force the token-only format: a gcloud core/format=json setting also prints an
+# impersonated access token, which cannot authenticate to the model gateway.
+token="$(gcloud auth print-identity-token \
+    --impersonate-service-account=dev-box@theorem-agent-infra.iam.gserviceaccount.com \
+    --audiences=model-gateway-gce \
+    --include-email \
+    --format='value(id_token)' | tr -d '\r\n')" || token=""
+
+case "$token" in
+    *.*.*)
+        umask 077
+        printf %s "$token" > "$f.new"
+        mv -f "$f.new" "$f"
+        logger -t ossv-box-gateway-token -- "identity token written to $f"
+        ;;
+    *)
+        rm -f "$f.new"
+        logger -t ossv-box-gateway-token -- "no identity token from gcloud"
+        echo "ossv-box-gateway-token: no identity token from gcloud" >&2
+        exit 1
+        ;;
+esac
