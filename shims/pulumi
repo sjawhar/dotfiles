@@ -1,0 +1,102 @@
+#!/bin/bash
+# pulumi with a state backend named only when the CLI would otherwise find none.
+#
+# Pulumi CLI 3.268.0 that reaches no state backend at all, and recognizes a coding agent around
+# it (it reads CLAUDECODE, CURSOR_AGENT, CODEX_*, GEMINI_CLI, OPENCODE, AI_AGENT and others),
+# creates an ephemeral Pulumi Cloud account of its own, writes the claim in
+# /tmp/.pulumi/agent-claim.json and prints a claim URL. One such account was created on this box
+# on 2026-10-28 by an agent that only ran `pulumi package add`.
+#
+# PULUMI_BACKEND_URL outranks a `pulumi login` and a project file's own `backend.url` rather than
+# falling back to either, and this box hosts programs on more than one real backend, so a shim
+# that set it unconditionally would silently redirect real state. This one sets it only when the
+# CLI would find no backend at all: PULUMI_BACKEND_URL unset or empty, PULUMI_ACCESS_TOKEN unset
+# or empty (it names Pulumi Cloud), no non-empty `current` in the credentials file a `pulumi
+# login` writes, and no `backend.url` in the Pulumi.yaml or Pulumi.yml the command would read
+# (searched upward from the working directory, which `--cwd`/`-C` moves). In every other case it
+# changes nothing about the backend.
+#
+# PULUMI_SKIP_UPDATE_CHECK is set either way: no caller here acts on the CLI's own update notice.
+#
+# Otherwise the shim is transparent: same argv, same stdin and stdout, same exit code, and no
+# output of its own on the success path.
+set -euo pipefail
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+self_dir="$(dirname "$self")"
+
+# The first pulumi past this shim's own PATH entry; from the top, skipping this file, when the
+# shim was run by path from outside PATH (shims/ssh-keygen's lookup).
+real=""
+past_self=false
+IFS=: read -ra path_dirs <<< "${PATH:-}"
+for pass in after-self from-top; do
+    for d in "${path_dirs[@]}"; do
+        [ -n "$d" ] || continue
+        if [ "$(readlink -f "$d" 2>/dev/null)" = "$self_dir" ]; then
+            past_self=true
+            continue
+        fi
+        [ "$pass" = from-top ] || $past_self || continue
+        if [ -x "$d/pulumi" ] && [ "$(readlink -f "$d/pulumi")" != "$self" ]; then
+            real="$d/pulumi"
+            break 2
+        fi
+    done
+    $past_self && break
+done
+[ -n "$real" ] || { echo "shims/pulumi: no real pulumi on PATH" >&2; exit 127; }
+
+export PULUMI_SKIP_UPDATE_CHECK=true
+
+# The directory the command reads its project file from: --cwd/-C, else this one.
+project_dir="$PWD"
+take_next=false
+for arg in "$@"; do
+    if $take_next; then
+        project_dir="$arg"
+        take_next=false
+        continue
+    fi
+    case "$arg" in
+        --cwd|-C) take_next=true ;;
+        --cwd=*) project_dir="${arg#--cwd=}" ;;
+        -C=*) project_dir="${arg#-C=}" ;;
+    esac
+done
+
+# Whether a Pulumi.yaml or Pulumi.yml at or above dir declares backend.url. Pulumi reads the
+# first project file it finds walking up; a `backend:` mapping with a `url:` under it names the
+# backend. The scan stops at the first project file, as Pulumi does.
+project_names_backend() {
+    local dir file
+    dir="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+    while :; do
+        for file in "$dir/Pulumi.yaml" "$dir/Pulumi.yml"; do
+            [ -f "$file" ] || continue
+            awk '
+                /^[^[:space:]#]/ { in_backend = ($0 ~ /^backend:[[:space:]]*$/) ; next }
+                in_backend && /^[[:space:]]+url:[[:space:]]*[^[:space:]]/ { found = 1 }
+                END { exit found ? 0 : 1 }
+            ' "$file" && return 0
+            return 1
+        done
+        [ "$dir" != "/" ] || return 1
+        dir="$(dirname "$dir")"
+    done
+}
+
+# Whether a `pulumi login` left a current backend in the credentials file.
+login_names_backend() {
+    local creds
+    creds="${PULUMI_HOME:-$HOME/.pulumi}/credentials.json"
+    [ -f "$creds" ] || return 1
+    [ -n "$(jq -r '.current // empty' "$creds" 2>/dev/null)" ]
+}
+
+if [ -z "${PULUMI_BACKEND_URL:-}" ] && [ -z "${PULUMI_ACCESS_TOKEN:-}" ] \
+    && ! login_names_backend && ! project_names_backend "$project_dir"; then
+    export PULUMI_BACKEND_URL='file://~'
+fi
+
+exec "$real" "$@"
