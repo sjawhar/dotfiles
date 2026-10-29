@@ -20,7 +20,16 @@ if command -v systemctl &>/dev/null && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
         || echo "WARNING: no reachable systemd --user manager; MISE_DATA_DIR applies at next login" >&2
 fi
 
-ensure_command mise "curl -fsSL https://mise.run | MISE_INSTALL_PATH=\"${DOTFILES_DIR}/bin/mise\" sh"
+# mise itself is pinned here, since mise.toml cannot pin the tool that reads it. An install
+# that finds another release at bin/mise (an older machine, a self-update) replaces it with
+# this one; mise.run checks the download against the release's SHASUMS256.txt on GitHub.
+MISE_PIN=2026.10.8
+mise_found=$("${DOTFILES_DIR}/bin/mise" --version 2>/dev/null | cut -d' ' -f1) || true
+if [ "$mise_found" != "$MISE_PIN" ]; then
+    echo "Installing mise ${MISE_PIN} (found: ${mise_found:-none})..."
+    curl -fsSL https://mise.run | MISE_VERSION="v${MISE_PIN}" MISE_INSTALL_PATH="${DOTFILES_DIR}/bin/mise" sh
+    hash -r
+fi
 
 if [ "$SKIP_MISE" = true ]; then
     echo "Skipping mise install (--skip-mise)"
