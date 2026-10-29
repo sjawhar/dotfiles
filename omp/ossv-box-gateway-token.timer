@@ -1,0 +1,11 @@
+[Unit]
+Description=sami-rocqperf: refresh the model-gateway identity token after a reboot and every 10 minutes
+
+[Timer]
+# At boot, because the identity token lives in tmpfs and is valid for one hour.
+OnBootSec=30s
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

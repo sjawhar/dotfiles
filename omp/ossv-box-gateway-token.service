@@ -1,0 +1,7 @@
+[Unit]
+Description=sami-rocqperf: this box's shared model-gateway identity token in tmpfs (dispatch://INFRA-481)
+Documentation=https://dispatch.tail12ec1c.ts.net/issues/INFRA-481
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/scripts/ossv-box-gateway-token
