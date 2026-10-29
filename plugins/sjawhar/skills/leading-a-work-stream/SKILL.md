@@ -91,6 +91,16 @@ From records you read yourself (GitHub, Dispatch, the numbers), answer: what is 
 
 **Ask a fresh reviewer, for each claimed cause, to name the command or record that would show it FALSE, and to run it.** A reviewer that reads only the prose confirms a confident wrong cause. The causes that cost most are the ones nobody could falsify, because nobody looked for what would disprove them.
 
+## Incidents on shared resources
+
+A shared resource (a box disk, the model quota, cloud billing) has one owner, named in the stream table's `## Shared resources` section of dispatch://INFRA-202. An incident is a failure or a shortage of a shared resource, or an event that two or more streams would act on.
+
+- **Your stream owns the resource:** you lead the incident on one Dispatch issue with the label `incident`. Keep its top current: the state, and one owner for each action. Ask another lead for help, and that lead names the agent. Do not do the action work yourself. At the close, remove each temporary change (a guard, a cut, a limit) or name its owner.
+- **Another stream owns it:** send your findings, with their source, to that stream's `incident` issue, and leave the fix to the owner it names.
+- **No stream owns it:** you lead it, and propose an owner for the stream table.
+
+Why: every coordination failure from 2026-10-15 to 2026-10-28 was at a resource no stream owned or at work two streams both took on (dispatch://INFRA-716).
+
 ## Delegation and tooling
 
 - Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you: when a delegated result lands, read the number it was meant to move yourself.
