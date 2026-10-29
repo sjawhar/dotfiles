@@ -21,20 +21,19 @@ What one run does, with `statvfs` and /proc reads only, no model call:
   1. Record free space on every watched mount (`--mount`, default / and /mnt/nvme). Every run
      appends a sample, whether or not anything is wrong: a silent log cannot be told from a
      dead watch.
-  2. Compute the fill rate over the last hour from its own samples, and from it the
-     TIME TO FULL at that rate.
-  3. A mount is CROSSING when its free space is under its hard floor, or when the time to full
-     is under the horizon (default 2 h) while it sits at a new low for the hour. The low test
-     is what keeps a sawtooth quiet: /mnt/nvme on this box swings 100 GB up and down every
-     hour as grade jobs land and are cleaned, and only a fall to a new low with an hour of
-     negative slope behind it is a fall towards zero.
+  2. Compute the df free-space fill rate over the last hour from its own samples, and from it
+     TIME TO FULL. /proc write traffic never enters either calculation.
+  3. A mount is CROSSING when its free space is under its hard floor, or after three consecutive
+     scheduled five-minute samples each put time to full under the horizon (default 2 h), with a
+     new low for the hour. The low test keeps a sawtooth quiet: /mnt/nvme swings 100 GB up and
+     down every hour as grade jobs land and are cleaned, and only a fall to a new low with an
+     hour of negative slope behind it is a fall towards zero.
   4. A crossing must hold for the grace window before it alerts, so one `rm` and one build do
      not fire.
-  5. The alert names the TOP WRITERS NOW -- `write_bytes` from /proc/<pid>/io read twice, 15 s
-     apart, as skill://disk-hygiene references/finding-space.md says -- with each writer's
-     owning agent session, its working directory, what it holds open on the alerting mount,
-     and its age. A size walk cannot name those: it sees what is already written, not what is
-     being written now.
+  5. The alert names TOP WRITERS NOW as one 15 s interval of `/proc/<pid>/io` `write_bytes`
+     traffic, not disk growth. It gives each writer's owning agent session, working directory,
+     what it holds open on the alerting mount and age. A size walk cannot name those: it sees
+     what is already written, not what is being written now.
 
 It also keeps the /tmp rule of the script it replaces: a top-level /tmp entry born in the last
 6 hours and now at or over 500 MB is named once, with its owning session. /tmp is on / here, and
@@ -139,6 +138,16 @@ def human_time(seconds: float) -> str:
         return f"{minutes} min {rest} s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} h {minutes} min"
+
+
+def short_time(seconds: float) -> str:
+    """A whole-minute or whole-hour duration without a distracting zero unit."""
+    rounded = int(seconds)
+    if rounded > 0 and rounded % 3600 == 0:
+        return f"{rounded // 3600} h"
+    if rounded > 0 and rounded % 60 == 0:
+        return f"{rounded // 60} min"
+    return human_time(seconds)
 
 
 def gib(value: float) -> str:
@@ -458,7 +467,7 @@ def describe_writers(rows: list[dict], device: int, seconds: float, top: int) ->
             {
                 "pid": pid,
                 "written": row["written"],
-                "rate": row["written"] / max(seconds, 1),
+                "write_traffic_rate": row["written"] / max(seconds, 1),
                 "command": cmdline_of(pid)[:200] or comm_of(pid),
                 "session": session_of(pid),
                 "scope": scope_of(pid),
@@ -478,19 +487,24 @@ def writers_text(described: list[dict], denied: int, seconds: float, mount: str,
         " writers -- rsyslogd on /var/log/syslog, dockerd, containerd -- are not in it."
     )
     if not described:
-        return f"Top writers now: nothing wrote during the {int(seconds)} s sample.{missing}"
+        return (
+            f"Top writers now: no write traffic during one {int(seconds)} s sample"
+            f" (not a disk-growth estimate).{missing}"
+        )
     lines = [
-        f"Top writers now ({int(seconds)} s sample of write_bytes in /proc/<pid>/io, which counts"
-        f" every filesystem, not only {mount}; the cwd and the open file below are what ties a"
-        f" writer to this mount).{missing}"
+        f"Top writers now (single {int(seconds)} s write-traffic sample: two /proc/<pid>/io"
+        f" snapshots {int(seconds)} s apart. write_bytes counts rewrites and deleted output on every"
+        f" filesystem, not only {mount}; this is current write traffic, not a disk-growth estimate."
+        f" The df free-space fill rate above produces time-to-full).{missing}"
     ]
     for row in described:
         who = f"session {row['session']}" if row["session"] else f"no session id; scope {row['scope'] or 'none'}"
         where = row["cwd"] or f"(cwd is not on {mount})"
         holds = f", holds {row['holds']}" if row["holds"] else ""
         lines.append(
-            f"  {size(row['written'])} in {int(seconds)} s ({gb(row['rate'] * 3600)}/h) -- pid {row['pid']},"
-            f" up {human_time(row['age'])}, {who}, cwd {where}{holds}: {row['command']}"
+            f"  write traffic: {size(row['written'])} in one {int(seconds)} s sample"
+            f" ({gb(row['write_traffic_rate'] * 3600)}/h over that {int(seconds)} s sample) -- pid"
+            f" {row['pid']}, up {human_time(row['age'])}, {who}, cwd {where}{holds}: {row['command']}"
         )
     return "\n".join(lines)
 
@@ -537,13 +551,14 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
 # ------------------------------------------------------------------------------ the /tmp rule
 
 
-def tmp_entries(tmp: str, age: float, big: int, walk_dirs: bool, budget: float) -> list[tuple[int, str]]:
+def tmp_entries(
+    tmp: str, age: float, big: int, walk_dirs: bool, budget: float
+) -> list[tuple[int, str, float]]:
     """Top-level /tmp entries born within `age` seconds and now at or over `big` bytes.
 
-    A file is sized by its own stat. A directory is sized only when `walk_dirs` (a crossing is
-    open on the mount holding /tmp), under a wall-clock budget, because /tmp here holds ~20k
-    entries and the hand-run script this replaces never sized a directory at all -- which is
-    how a 17 GB tree could sit there unnamed.
+    Each result also carries the newest file or directory modification time seen while sizing it.
+    That costs no extra walk: directory sizing already stats every file. It distinguishes a
+    directory no process holds open at this instant from one whose contents were just modified.
     """
     now = time.time()
     found = []
@@ -562,6 +577,7 @@ def tmp_entries(tmp: str, age: float, big: int, walk_dirs: bool, budget: float) 
             continue
         if entry.is_symlink():
             continue
+        newest_mtime = stat.st_mtime
         if entry.is_dir(follow_symlinks=False):
             if not walk_dirs or time.time() > deadline:
                 continue
@@ -569,16 +585,18 @@ def tmp_entries(tmp: str, age: float, big: int, walk_dirs: bool, budget: float) 
             for root, _dirs, files in os.walk(entry.path, onerror=None):
                 for name in files:
                     try:
-                        total += os.lstat(os.path.join(root, name)).st_size
+                        child = os.lstat(os.path.join(root, name))
                     except OSError:
                         continue
+                    total += child.st_size
+                    newest_mtime = max(newest_mtime, child.st_mtime)
                 if time.time() > deadline:
                     break
             if total >= big:
-                found.append((total, entry.path))
+                found.append((total, entry.path, newest_mtime))
         elif stat.st_size >= big:
-            found.append((stat.st_size, entry.path))
-    found.sort(reverse=True)
+            found.append((stat.st_size, entry.path, newest_mtime))
+    found.sort(key=lambda row: row[0], reverse=True)
     return found
 
 
@@ -609,6 +627,19 @@ def owner_of_path(path: str) -> str:
         if inside:
             return session_of(pid) or f"pid {pid} ({comm_of(pid)})"
     return ""
+
+
+def tmp_owner_text(owner: str, newest_mtime: float, sampled_at: float) -> str:
+    """Describe the narrow ownership test and the cheap activity signal without overclaiming."""
+    if owner:
+        return owner
+    if newest_mtime <= 0:
+        return "no open descriptor or cwd was observed at the sample; no modification time was readable"
+    age = max(0.0, sampled_at - newest_mtime)
+    return (
+        "no open descriptor or cwd was observed at the sample; newest observed file or directory"
+        f" mtime was {iso(newest_mtime)} ({human_time(age)} before the sample)"
+    )
 
 
 # -------------------------------------------------------------------------------- the state
@@ -659,12 +690,8 @@ class State:
 # ------------------------------------------------------------------------------- the decision
 
 
-def fall_rate(samples: list[list[float]], window: float) -> tuple[float | None, float]:
-    """(bytes per second of FALL over the last `window` seconds, the span actually measured).
-
-    Positive means free space is falling. The oldest sample inside the window is the anchor, so
-    the rate always describes the last hour and never the whole history.
-    """
+def df_fill_rate(samples: list[list[float]], window: float) -> tuple[float | None, float]:
+    """(bytes per second of free-space fall from df/statvfs, actual measurement window)."""
     if len(samples) < 2:
         return None, 0.0
     now = samples[-1][0]
@@ -689,44 +716,85 @@ def blocked_kinds(free: float) -> list[str]:
     return [name for name, floor in NVME_KIND_FLOORS if free < floor]
 
 
-def verdict(mount: str, free: int, total: int, samples: list[list[float]], options: argparse.Namespace) -> dict:
+def number_word(value: int) -> str:
+    return {
+        0: "zero",
+        1: "one",
+        2: "two",
+        3: "three",
+        4: "four",
+        5: "five",
+    }.get(value, str(value))
+
+
+def update_horizon_confirmations(
+    record: dict, now: dict, sampled_at: float, options: argparse.Namespace
+) -> int:
+    """Persist only spaced, consecutive df time-to-full candidates for this mount."""
+    confirmations: list[list[float]] = record.setdefault("horizon_confirmations", [])
+    if not now["rate_candidate"]:
+        confirmations.clear()
+        return 0
+    if confirmations:
+        elapsed = sampled_at - confirmations[-1][0]
+        if elapsed < options.confirmation_spacing:
+            return len(confirmations)
+        if elapsed > options.confirmation_spacing * 2:
+            confirmations.clear()
+    confirmations.append([sampled_at, now["time_to_full"]])
+    del confirmations[: max(0, len(confirmations) - options.confirmations)]
+    return len(confirmations)
+
+
+def verdict(
+    mount: str,
+    free: int,
+    total: int,
+    samples: list[list[float]],
+    options: argparse.Namespace,
+    confirmations: int = 0,
+) -> dict:
     """Everything one run knows about one mount, and whether it is crossing."""
     floor = FLOORS.get(mount, options.default_floor * GIB)
-    rate, span = fall_rate(samples, options.rate_window)
+    df_rate, df_window = df_fill_rate(samples, options.rate_window)
     low = low_of(samples, options.rate_window)
     time_to_full = None
-    if rate is not None and rate > 0:
-        time_to_full = free / rate
+    if df_rate is not None and df_rate > 0:
+        time_to_full = free / df_rate
     # A sawtooth is not a leak. /mnt/nvme swings ~100 GB an hour here as grade jobs land and are
     # cleaned, so an hour of negative slope alone fires on the downstroke of a disk that is not
     # going anywhere. At a NEW LOW for the hour the downstrokes are no longer cancelling out.
     at_new_low = low is None or free <= low + options.low_slack * GIB
     below_floor = free < floor
-    fast = (
+    rate_candidate = (
         time_to_full is not None
         and time_to_full < options.horizon
-        and span >= options.min_span
+        and df_window >= options.min_span
         and at_new_low
     )
+    fast = rate_candidate and confirmations >= options.confirmations
     reasons = []
     if below_floor:
         reasons.append(f"free {gib(free)} is under the {gib(floor)} floor")
     if fast:
         reasons.append(
-            f"at {gb(rate * 3600)}/h over the last {human_time(span)} it is {human_time(time_to_full)}"
-            f" from full, under the {human_time(options.horizon)} horizon, and it is at a new low"
-            " for that hour"
+            f"{number_word(confirmations)} scheduled {short_time(options.confirmation_spacing)} samples"
+            f" in a row, each under the {short_time(options.horizon)} horizon; the current df"
+            f" free-space fill rate is {gb(df_rate * 3600)}/h over the last {human_time(df_window)},"
+            f" leaving {human_time(time_to_full)} to full at a new low for that window"
         )
     return {
         "mount": mount,
         "free": free,
         "total": total,
         "floor": floor,
-        "rate": rate,
-        "span": span,
+        "df_fill_rate": df_rate,
+        "df_rate_window": df_window,
         "low": low,
         "time_to_full": time_to_full,
         "below_floor": below_floor,
+        "rate_candidate": rate_candidate,
+        "horizon_confirmations": confirmations,
         "fast": fast,
         "crossing": below_floor or fast,
         "reasons": reasons,
@@ -745,15 +813,18 @@ def clears(state_now: dict, options: argparse.Namespace) -> bool:
 def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], kind: str, when: float) -> str:
     mount = now["mount"]
     used = 100 * (1 - now["free"] / max(now["total"], 1))
-    rate = now["rate"]
-    trend = "unknown (too few samples yet)"
-    if rate is not None:
-        direction = "falling" if rate > 0 else "rising"
-        trend = f"{direction} {gb(abs(rate) * 3600)}/h over the last {human_time(now['span'])}"
+    df_rate = now["df_fill_rate"]
+    trend = "df free-space fill rate: unknown (too few samples yet)"
+    if df_rate is not None:
+        direction = "falling" if df_rate > 0 else "rising"
+        trend = (
+            f"df free-space fill rate: {direction} {gb(abs(df_rate) * 3600)}/h over the last"
+            f" {human_time(now['df_rate_window'])}"
+        )
     horizon = (
-        f"At that rate it is {human_time(now['time_to_full'])} from full."
+        f"At that df free-space fill rate it is {human_time(now['time_to_full'])} from full."
         if now["time_to_full"] is not None
-        else "It is not falling, so there is no time-to-full."
+        else "It is not falling, so there is no df time-to-full."
     )
     kinds = blocked_kinds(now["free"]) if mount == "/mnt/nvme" else []
     blocked = (
@@ -837,12 +908,20 @@ def run_once(options: argparse.Namespace) -> int:
         samples.append([started, free])
         del samples[: max(0, len(samples) - options.samples)]
         samples[:] = [s for s in samples if started - s[0] <= options.history]
-        now = verdict(mount, free, total, samples, options)
+        candidate = verdict(mount, free, total, samples, options)
+        confirmations = update_horizon_confirmations(record, candidate, started, options)
+        now = verdict(mount, free, total, samples, options, confirmations)
         verdicts.append(now)
+        confirmation_text = (
+            f", horizon samples {confirmations}/{options.confirmations}"
+            if now["rate_candidate"]
+            else ""
+        )
         log(
             f"{mount}: free {gib(free)} of {gib(total)}, floor {gib(now['floor'])},"
-            f" rate {gb((now['rate'] or 0) * 3600)}/h over {human_time(now['span'])},"
-            f" time-to-full {human_time(now['time_to_full']) if now['time_to_full'] else 'n/a'}"
+            f" df fill rate {gb((now['df_fill_rate'] or 0) * 3600)}/h over"
+            f" {human_time(now['df_rate_window'])}, df time-to-full"
+            f" {human_time(now['time_to_full']) if now['time_to_full'] else 'n/a'}{confirmation_text}"
             f" -> {'CROSSING' if now['crossing'] else 'ok'}"
         )
 
@@ -903,10 +982,10 @@ def run_once(options: argparse.Namespace) -> int:
         writers = writers_now(options, device_of(mount) or -1, mount)
         tmp_lines: list[str] = []
         if tmp_device is not None and tmp_device == device_of(mount):
-            for bytes_there, path in tmp_entries(
+            for bytes_there, path, newest_mtime in tmp_entries(
                 options.tmp, options.tmp_age, options.tmp_big, True, options.tmp_walk_budget
             )[: options.top_writers]:
-                owner = owner_of_path(path) or "no live process holds it: its session has ended"
+                owner = tmp_owner_text(owner_of_path(path), newest_mtime, started)
                 tmp_lines.append(f"{size(bytes_there)}  {path}  (owner: {owner})")
 
         if first:
@@ -954,14 +1033,14 @@ def run_once(options: argparse.Namespace) -> int:
     if tmp_device is not None and any(tmp_device == device_of(v["mount"]) for v in verdicts):
         seen = set(named_tmp)
         fresh = [
-            (bytes_there, path)
-            for bytes_there, path in tmp_entries(
+            (bytes_there, path, newest_mtime)
+            for bytes_there, path, newest_mtime in tmp_entries(
                 options.tmp, options.tmp_age, options.tmp_big, True, options.tmp_idle_walk_budget
             )
             if path not in seen
         ]
-        for bytes_there, path in fresh[: options.top_writers]:
-            owner = owner_of_path(path) or "no live process holds it: its session has ended"
+        for bytes_there, path, newest_mtime in fresh[: options.top_writers]:
+            owner = tmp_owner_text(owner_of_path(path), newest_mtime, started)
             named_tmp.append(path)
             state.commit(options)
             message = (
@@ -1057,6 +1136,18 @@ def main() -> int:
     )
     parser.add_argument("--history", type=float, default=10800.0, help="seconds of samples kept per mount")
     parser.add_argument("--samples", type=int, default=400, help="samples kept per mount")
+    parser.add_argument(
+        "--confirmations",
+        type=int,
+        default=3,
+        help="consecutive df time-to-full samples required for a rate alert (default 3)",
+    )
+    parser.add_argument(
+        "--confirmation-spacing",
+        type=float,
+        default=300.0,
+        help="minimum seconds between consecutive rate-confirmation samples (default 5 min)",
+    )
     parser.add_argument("--writer-sample", type=float, default=15.0, help="seconds between the two /proc/*/io reads")
     parser.add_argument("--top-writers", type=int, default=8, help="writers and /tmp entries named in an alert")
     parser.add_argument(

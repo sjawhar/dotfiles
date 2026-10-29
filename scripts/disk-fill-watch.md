@@ -1,9 +1,9 @@
 # disk-fill-watch
 
-Every 5 minutes, records free space on each watched filesystem of **this** machine, computes the
-fill rate over the last hour, and alerts over Envoy when the disk is about to land — either
-because free space is under a hard floor, or because the time to full at the current rate is
-under the horizon.
+Every 5 minutes, records free space on each watched filesystem of **this** machine and computes
+the fill rate from those `df`/`statvfs` samples. It alerts over Envoy when the disk is about to
+land — either because free space is under a hard floor, or because **three consecutive scheduled
+five-minute samples** each put time to full at the df free-space fill rate under the horizon.
 
 ## Why it exists
 
@@ -36,19 +36,25 @@ Per mount, per run:
 
 | | |
 |---|---|
-| Sample | `statvfs(mount).f_bavail × f_frsize` — what an unprivileged writer can still use, which is where ENOSPC arrives. Appended every run, whether or not anything is wrong: a silent log cannot be told from a dead watch |
-| Rate | bytes/s of **fall** between the oldest sample inside `--rate-window` (1 h) and now |
-| Time to full | free ÷ rate, when falling |
-| **Crossing** | free < the mount's hard floor, **or** time-to-full < `--horizon` (2 h) with at least `--min-span` (25 min) of samples behind the rate **and** free at a new low for the hour |
+| Sample | `statvfs(mount).f_bavail × f_frsize` — the same free-space value `df` reports to an unprivileged writer, which is where ENOSPC arrives. Appended every run, whether or not anything is wrong: a silent log cannot be told from a dead watch |
+| **df free-space fill rate** | bytes/s of **fall** between the oldest sample inside `--rate-window` (1 h) and now; this is the only rate used for time to full |
+| Time to full | free ÷ df free-space fill rate, when falling |
+| Rate candidate | time to full < `--horizon` (2 h), with at least `--min-span` (25 min) of df samples behind the rate and free at a new low for the hour |
+| **Crossing** | free < the mount's hard floor, **or** three consecutive rate candidates at least `--confirmation-spacing` (5 min) apart |
 | Alert | after `--grace` (240 s, so a second consecutive run confirms it) |
 | Escalate | 30 minutes after the alert, if free is lower than it was then |
-| Clear | free ≥ floor × 1.5 **and** no fall that reaches full inside twice the horizon |
+| Clear | free ≥ floor × 1.5 **and** no df free-space fall that reaches full inside twice the horizon |
 
 **A sawtooth is not a leak.** `/mnt/nvme` on this box swings about 100 GB up and down every hour
 as grade jobs land and are cleaned (its 10-minute log on 2026-10-26 reads 295 GB → 479 → 378 →
 340 → 232 free), so an hour of negative slope on its own fires on every downstroke. The new-low
 test is what keeps it quiet: only a fall to a level the last hour has not seen is a fall towards
 zero.
+
+A one-minute fall is recorded, not sent. Three scheduled five-minute confirmations span at least
+ten minutes, so a one-off writer burst that has already recovered cannot claim that the disk is
+landing. The hard floor remains independent of this confirmation: below it the watch alerts
+regardless of rate.
 
 ### The floors
 
@@ -69,10 +75,10 @@ machine whose disks are not these.
 ## Who is writing, and whose session it is
 
 A size walk sees what is already written. It cannot name what is being written **now**, which is
-what an alert needs, so each alert carries a two-sample writer attribution
-(skill://disk-hygiene `references/finding-space.md`): `write_bytes` from `/proc/<pid>/io` read
-twice, 15 s apart, sorted by the difference. For each of the top writers the alert gives the
-bytes and the rate, the pid and its age, the **owning agent session**, the working directory when
+what an alert needs, so each alert carries a **single write-traffic interval**: `write_bytes` from
+`/proc/<pid>/io` at two endpoints, `--writer-sample` (15 s) apart, sorted by the difference. For
+each of the top writers the alert gives the bytes and the hourly equivalent **over that one
+15-second sample**, the pid and its age, the **owning agent session**, the working directory when
 it is on the alerting mount, and the largest file it holds open there.
 
 - The session is read from the process, never guessed: `OMP_SESSION_ID` in its environment, else
@@ -81,9 +87,10 @@ it is on the alerting mount, and the largest file it holds open there.
   tool subprocess carries its session's environment, so the first test usually answers; an `omp`
   process itself is the case the other two are for. When none answers, the systemd scope is given
   instead and the alert says there is no session id.
-- `/proc/<pid>/io` counts writes to **every** filesystem, not only the one that is filling. The
-  cwd and the open file are what tie a writer to the mount, and the alert says so rather than
-  implying the bytes landed there.
+- `/proc/<pid>/io` counts writes to **every** filesystem, not only the one that is filling; it
+  also counts rewrites and deleted output. Its displayed number is explicitly labelled
+  **write traffic** and a single 15-second sample — not disk growth and never the number used for
+  time to full. The cwd and open file only tie a writer to the mount at the sample instant.
 - Another user's `/proc/<pid>/io` is refused to an unprivileged reader, and root owns the writers
   that failed first on 2026-10-27 (rsyslogd on `/var/log/syslog`, dockerd's `/tmp` exec scratch).
   So where `sudo -n` is allowed the whole sample — both `/proc` passes and the cwd and fd reads —
@@ -98,9 +105,10 @@ bounded `/tmp` scan: **0.3–0.4 s** measured on this box at load 43.
 ## The /tmp rule
 
 `/tmp` is on `/` here and agents' scratch there was the repeated root cause on 2026-10-26. A
-top-level `/tmp` entry born in the last 6 hours and now at or over 500 MB is named **once**, to
-the INFRA lead, with the session that owns it (a process whose cwd or an open fd is inside it,
-else "its session has ended").
+top-level `/tmp` entry born in the last 6 hours and now at or over 500 MB is named **once**, with
+the session of a process whose cwd or open descriptor is inside it. If none is observed, the
+alert says exactly that and gives the newest file or directory modification time it saw; it never
+infers that a session has ended.
 
 Unlike the hand-run script this replaces, a young **directory** is sized too, under a few seconds
 of budget per run (`--tmp-idle-walk-budget`, 5 s; `--tmp-walk-budget`, 20 s while building an
@@ -131,8 +139,8 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 - held under an exclusive `flock` for the whole run, so a hand run and the timer can never both
   open the same crossing; the loser logs `another run holds …` and skips its period;
 - `alerted_at` is written and `fsync`ed **before** the first message is sent;
-- it also holds the samples each rate is computed from (3 h, trimmed every run) and the `/tmp`
-  entries already named;
+- it also holds the df free-space samples, each mount's in-progress consecutive rate
+  confirmations, and the `/tmp` entries already named;
 - `--state <other path>` is for tests only: a run on any other file forces `--dry-run`.
 
 ## Inputs
@@ -140,13 +148,13 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 | Input | Source |
 |---|---|
 | Free and total space | `os.statvfs(mount)` — `f_bavail`, `f_blocks`, `f_frsize` |
-| Fill rate | this watch's own samples in its state file |
-| Writers | `/proc/<pid>/io` `write_bytes`, twice, `--writer-sample` apart, through `sudo -n` where allowed |
+| df free-space fill rate and time to full | this watch's own free-space samples in its state file |
+| Writers | `/proc/<pid>/io` `write_bytes`, twice, `--writer-sample` apart, through `sudo -n` where allowed; reported as single-window write traffic |
 | A writer's session | `/proc/<pid>/environ`, `/proc/<pid>/cmdline`, `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl`, then its ancestors |
-| A writer's mount | `/proc/<pid>/cwd` and `/proc/<pid>/fd`, compared with the mount's `st_dev` |
-| Young `/tmp` entries | `os.scandir('/tmp')` with `st_birthtime`, and a budgeted `os.walk` for directories |
+| A writer's mount | `/proc/<pid>/cwd` and `/proc/<pid>/fd`, compared with the mount's `st_dev` at the sample instant |
+| Young `/tmp` entries | `os.scandir('/tmp')`, a budgeted `os.walk` for directories, and the newest file or directory mtime seen while sizing |
 | Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
-| Samples, crossings, named `/tmp` entries | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |
+| Samples, confirmations, crossings, named `/tmp` entries | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |
 
 ## Running it by hand
 
@@ -167,6 +175,6 @@ journalctl --user -u disk-fill-watch.service -n 50     # what the last runs deci
 ```
 
 `installers/disk-fill-watch.sh` arms it (links `omp/disk-fill-watch.{service,timer}` into
-`~/.config/systemd/user`). Deleting the state file forgets every open crossing and every rate: the
-next run starts sampling again and re-alerts on a floor that is still crossed, and needs
-`--min-span` of samples before it can alert on a rate.
+`~/.config/systemd/user`). Deleting the state file forgets every open crossing and every df rate:
+the next run starts sampling again, re-alerts on a floor that is still crossed, and needs both
+`--min-span` of samples and three spaced rate confirmations before it can alert on time to full.
