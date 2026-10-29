@@ -1,6 +1,6 @@
 ---
 name: speaking-as-sami
-description: "Use when you write to other people as Sami or on his behalf. That covers Slack messages, emails, customer docs, Google Docs/Sheets content, PR descriptions, issue comments, outreach and announcements. Also use when you edit text Sami wrote. Not for reports, asks or messages to Sami himself."
+description: "Use when you write to other people as Sami or on his behalf. That covers Slack messages, emails, customer docs, Google Docs/Sheets content, PR descriptions, issue comments, outreach and announcements. Also use before any message to a person outside the company goes out, before a program starts to post to such people, and when you edit text Sami wrote. Not for reports, asks or messages to Sami himself."
 ---
 
 # Speaking as Sami
@@ -11,13 +11,22 @@ Write plain, factual and understated. Use none of the forms in "Never write" bel
 
 ## Before you write
 
-- Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise. He did for upstream PRs: write their body, comments and replies in his first person, because the maintainer reads the PR as his (dispatch://BET-64/ask/7f10d8e8). Add no line about who or what wrote the text: a Claude-assisted line claimed a review he had not done (dispatch://BET-64/ask/d4144e26). Which of those texts he approves first is in `opening-a-pr`'s fork-and-upstream reference.
+- Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise. He did for upstream PRs: write their body, comments and replies in his first person, because the maintainer reads the PR as his (dispatch://BET-64/ask/7f10d8e8). Add no line about who or what wrote the text: a Claude-assisted line claimed a review he had not done (dispatch://BET-64/ask/d4144e26). Which of those texts he approves first: see "Before a message leaves the company" below.
 - Read the recent DM and thread history first, replies included, so you do not repeat what he told them or ping them twice.
 - In Slack, post in the project's channel or a shared channel, in a thread, so the people who need the answer see it. Send a DM only when the content must stay confidential.
 - Check a shared surface's audience first. Customer-facing docs get zero internal ops detail (internal tooling names, pipeline caveats, internal-only tabs).
 - Build the draft from what Sami already said on the topic (transcript, Slack thread, meeting notes, earlier tracker answers). Reuse any answer he gave.
 - Use his facts and tone, in your own sentences. Do not join copied fragments of his messages.
 - If he said nothing on the topic, say so to Sami and keep the draft to facts: no angle he did not give.
+
+## Before a message leaves the company
+
+- **He approves every outside message first.** His answer of 2026-10-27T17:55Z (dispatch://OSSV-142/ask/9a66d8e5), after a maintainer told us to stop sending low-value reports: "Until we get this under control, I need to approve every message, except for messages to Oh My Pie". So the default is that nothing goes to a person outside the company until he has approved that exact text, and the only exemption he named is Oh My Pi. Ask in one Dispatch ask holding the exact text, the recipient, the channel and the sending account, and send only what he approved. His words on that occasion, not a rule he declared (CLAUDE.md:9), and they carry "until we get this under control": before relying on a narrower reading, check whether he has since lifted it rather than assuming a project document can. Where a project's goals document or AGENTS.md records a narrower decision of his, it names the ask that made it; `opening-a-pr` covers upstream pull requests.
+- Prepare every outside message in his three steps, whether or not it needs his approval, except for an audience his decision exempts (dispatch://OSSV-142/ask/9a66d8e5):
+  1. Read the audience and how they write. For a project, that is its contributing guide, its issue and PR templates, and how its maintainers write. Shape the message to match.
+  2. Write it with `skill://asd-ste100`, `skill://ce-noslop` and the rules of this skill.
+  3. Give a fresh reviewer the draft, the recipient's last message and the "Never write" list below, and nothing else. He named "Astra or Opus"; use Opus when the OpenAI route is paused. It removes each sentence that the reader does not need to understand the core message, and rewrites each "Never write" form. Use its version.
+- A program that posts to people outside the company (a CI review comment, a merge reply, a bot answer) needs Sami's review of what it can post before it posts: its fixed text, and the prompt behind any text a model writes. Check both first for a promise that nobody decided to make, such as a promise to publish proofs.
 
 ## Never write
 
