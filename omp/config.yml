@@ -1,9 +1,14 @@
 modelRoles:
-  default: anthropic/claude-opus-5-5:xhigh
+  # Sami, 2026-10-29 ~03:15Z: "we should be load balancing across both HDO accounts and agents
+  # that aren't working on OSS Verify. It should be on OPUS 5 instead of 5.5." OSS Verify's lanes
+  # run on their own VMs under omp-vm.yml and are not affected by this file. Every lead answered
+  # (03:46Z) that nothing of its stream needs 5.5 except the gates below. A brief cannot pin a
+  # model (the task tool takes one only for seance agents), so these roles are the lever.
+  default: anthropic/claude-opus-5
   plan: anthropic/claude-fable-5-1:max
   smol: anthropic/claude-sonnet-5-5
   slow: openai-codex/gpt-5.6-terra:xhigh
-  task: anthropic/claude-opus-5-5
+  task: anthropic/claude-opus-5
   vision: google/gemini-3.7-flash:medium
   review: openai-codex/gpt-5.6-terra:xhigh
   # The Legion plugin's agents name these two roles: oracle for oracle and
@@ -120,6 +125,12 @@ retry:
 task:
   maxRecursionDepth: 3
   agentModelOverrides:
+    # The roles above moved to Opus 5 on 2026-10-29. These types stay on 5.5 because a lead
+    # measured that a weaker verdict changes the result: reviewer and the review-role types gate
+    # merges (Rocq speed's gates caught #1950's stale-cache key and #1958's box cap that night;
+    # task making's caught 4 defects in #1967 that tests missed), and a wrong pass there merges
+    # a defect. Every other agent type takes `task`, now Opus 5.
+    reviewer: anthropic/claude-opus-5-5
     bug-finder: "@review"
     code-architect: anthropic/claude-opus-5-5
     code-reviewer: "@review"
