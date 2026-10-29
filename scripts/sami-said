@@ -25,11 +25,12 @@ working directory, and the text. Sources:
                     user's own turn. With --dispatch its author is checked against Dispatch.
   DISPATCH ...      with --dispatch: an answer, comment, message, approval or change request that
                     --dispatch-user (default sami@theorem.dev) wrote in Dispatch, read from the
-                    Dispatch event log. These are not in any transcript as typed text. The log is
-                    read until it reaches the newest event known at the start; a stream that goes
-                    silent or ends first is resumed from its last event. When it cannot be read
-                    whole, no Dispatch row prints, stderr says --dispatch FAILED (also on the last
-                    line), and the exit status is 1: zero Dispatch rows with status 0 means none.
+                    Dispatch event feed on its live socket (GET /ws/live). These are not in any
+                    transcript as typed text. The feed is read until it reaches the newest event
+                    known at the start; a subscription that goes silent or ends first is resumed
+                    from its last event. When it cannot be read whole, no Dispatch row prints,
+                    stderr says --dispatch FAILED (also on the last line), and the exit status is
+                    1: zero Dispatch rows with status 0 means none.
 
 How a typed message is told apart from text injected into the user role. Structural rules first:
 
@@ -116,10 +117,15 @@ them) skips to 30 minutes before --since, and reading stops 30 minutes after --u
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
+import socket
 import sqlite3
+import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -139,10 +145,13 @@ SEEK_MIN_BYTES = 1 << 20  # files smaller than this are read whole
 DRAFT_WINDOW = timedelta(minutes=15)  # rule T2
 DRAFT_PREFIX = 60
 FALLBACK_MIN = 20  # rule 6, containment match: the shorter text's least length
-SSE_IDLE_S = 3.0  # the Dispatch event stream sends nothing more once it has caught up
-SSE_TAIL_S = 1.0  # the same wait once the stream has passed the newest event known at the start
-SSE_STALL_S = (3.0, 10.0, 30.0)  # how long a connection may stay silent, after 0, 1, 2 that brought nothing
-SSE_ATTEMPTS = 3  # connections in a row that bring nothing before the read is called failed
+LIVE_IDLE_S = 3.0  # Dispatch's event feed sends no event once it has caught up, and nothing that says so
+LIVE_TAIL_S = 1.0  # the same wait once the feed has passed the newest event known at the start
+LIVE_STALL_S = (3.0, 10.0, 30.0)  # how long a subscription may go without an event, after 0, 1, 2 that brought none
+LIVE_ATTEMPTS = 3  # subscriptions in a row that bring nothing before the read is called failed
+LIVE_SUB = "sami-said"  # the subscription's name on its socket
+LIVE_FRAME_MAX = 64 << 20  # a larger frame from the server is a fault, not an event
+WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455's handshake constant
 DISPATCH_MARGIN = timedelta(minutes=10)
 TYPED_BEFORE = timedelta(minutes=30)  # rule 9: how long before a message an agent's send-keys call can be
 TYPED_AFTER = timedelta(seconds=30)  # ... and after it, for clock and write skew
@@ -750,60 +759,221 @@ def message_author(cfg: DispatchConfig, mid: str | None, sid: str) -> str | None
     return str(author) if author else None
 
 
-def open_stream(cfg: DispatchConfig, after: int, idle: float = SSE_IDLE_S):
-    req = urllib.request.Request(
-        f"{cfg.url}/api/v1/events?since={after}",
-        headers={"Authorization": f"Bearer {cfg.token}", "Accept": "text/event-stream"},
-    )
-    return urllib.request.urlopen(req, timeout=idle)
+class LiveSocketError(OSError):
+    """The live socket failed: its connection, its handshake or a frame. A new socket may not."""
+
+
+class LiveSocketHTTPError(LiveSocketError):
+    """The server answered the upgrade with an HTTP status other than 101."""
+
+    def __init__(self, code: int, reason: str):
+        super().__init__(f"HTTP {code} {reason}".rstrip())
+        self.code, self.reason = code, reason
+
+
+def ws_mask(data: bytes, key: bytes) -> bytes:
+    """data XORed with the 4-byte key repeated, which masks a frame's payload and unmasks it."""
+    n = len(data)
+    if not n:
+        return data
+    return (int.from_bytes(data, "big") ^ int.from_bytes((key * (n // 4 + 1))[:n], "big")).to_bytes(n, "big")
+
+
+class LiveSocket:
+    """A WebSocket client (RFC 6455) of Dispatch's GET /ws/live, as much of one as the event feed
+    needs: text frames out, masked as a client's must be; text messages in, put together from their
+    continuation frames, with every ping answered by its pong. It asks for no extension, so no frame
+    is compressed. A wait for the server takes a monotonic deadline and raises TimeoutError past it."""
+
+    def __init__(self, cfg: DispatchConfig, timeout: float):
+        url = urllib.parse.urlsplit(cfg.url)
+        if url.scheme not in ("http", "https") or not url.hostname:
+            raise RuntimeError(f"Dispatch's URL {cfg.url} is not an http or https URL")
+        self.timeout, self.closed, self.buf = timeout, "", bytearray()
+        self.sock = socket.create_connection((url.hostname, url.port or (443 if url.scheme == "https" else 80)), timeout=timeout)
+        try:
+            if url.scheme == "https":
+                self.sock = ssl.create_default_context().wrap_socket(self.sock, server_hostname=url.hostname)
+            self.handshake(url, cfg.token, time.monotonic() + timeout)
+        except BaseException:
+            self.sock.close()
+            raise
+
+    def handshake(self, url: urllib.parse.SplitResult, token: str, deadline: float) -> None:
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall((f"GET {url.path.rstrip('/')}/ws/live HTTP/1.1\r\nHost: {url.netloc.rpartition('@')[2]}\r\n"
+                           "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
+                           f"Sec-WebSocket-Key: {key}\r\nAuthorization: Bearer {token}\r\n\r\n").encode())
+        while b"\r\n\r\n" not in self.buf:
+            if len(self.buf) > 1 << 16:
+                raise LiveSocketError("the server's answer to the upgrade has no end of headers")
+            self.fill(deadline)
+        head, _, rest = bytes(self.buf).partition(b"\r\n\r\n")
+        self.buf = bytearray(rest)
+        status, *lines = head.decode("latin-1").split("\r\n")
+        parts = status.split(" ", 2)
+        code = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        if code != 101:
+            raise LiveSocketHTTPError(code, parts[2] if len(parts) > 2 else "")
+        headers = {name.strip().lower(): value.strip() for name, _, value in (h.partition(":") for h in lines)}
+        accept = base64.b64encode(hashlib.sha1(key.encode() + WS_GUID).digest()).decode()
+        if headers.get("upgrade", "").lower() != "websocket" or headers.get("sec-websocket-accept") != accept:
+            raise LiveSocketError("the server's 101 answer is not a WebSocket upgrade of this request")
+
+    def fill(self, deadline: float) -> None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("timed out")
+        self.sock.settimeout(left)
+        chunk = self.sock.recv(1 << 16)
+        if not chunk:
+            raise LiveSocketError("the connection ended without a close frame")
+        self.buf += chunk
+
+    def read(self, n: int, deadline: float) -> bytes:
+        while len(self.buf) < n:
+            self.fill(deadline)
+        data = bytes(self.buf[:n])
+        del self.buf[:n]
+        return data
+
+    def send(self, opcode: int, payload: bytes) -> None:
+        """One frame, final, masked with a fresh key; the mask bit is 0x80 of the length byte."""
+        n, key = len(payload), os.urandom(4)
+        if n < 126:
+            size = bytes([0x80 | n])
+        elif n < 1 << 16:
+            size = bytes([0x80 | 126]) + struct.pack("!H", n)
+        else:
+            size = bytes([0x80 | 127]) + struct.pack("!Q", n)
+        self.sock.settimeout(self.timeout)
+        self.sock.sendall(bytes([0x80 | opcode]) + size + key + ws_mask(payload, key))
+
+    def send_json(self, frame: dict) -> None:
+        self.send(0x1, json.dumps(frame).encode())
+
+    def frame(self, deadline: float) -> tuple[bool, int, bytes]:
+        """The next frame: whether it is a message's last, its opcode and its payload, unmasked."""
+        b0, b1 = self.read(2, deadline)
+        if b0 & 0x70:
+            raise LiveSocketError("a frame sets a reserved bit, though no extension was asked for")
+        n = b1 & 0x7F
+        if n == 126:
+            (n,) = struct.unpack("!H", self.read(2, deadline))
+        elif n == 127:
+            (n,) = struct.unpack("!Q", self.read(8, deadline))
+        if n > LIVE_FRAME_MAX:
+            raise LiveSocketError(f"a frame of {n} bytes")
+        key = self.read(4, deadline) if b1 & 0x80 else b""
+        payload = self.read(n, deadline)
+        return bool(b0 & 0x80), b0 & 0x0F, ws_mask(payload, key) if key else payload
+
+    def receive(self, deadline: float) -> str | None:
+        """The next text message; None once the server has closed the socket, which `closed` then
+        says ("closed 4001 max age"). Pings are answered; pongs and binary messages are skipped."""
+        opcode, parts = None, []
+        while True:
+            fin, op, payload = self.frame(deadline)
+            if op == 0x9:
+                self.send(0xA, payload)
+            elif op == 0x8:
+                code = struct.unpack("!H", payload[:2])[0] if len(payload) >= 2 else 1005
+                self.closed = f"closed {code} {payload[2:].decode('utf-8', 'replace')}".rstrip()
+                try:
+                    self.send(0x8, payload[:2])
+                except OSError:
+                    pass
+                return None
+            elif op in (0x0, 0x1, 0x2):
+                if (op == 0x0) != (opcode is not None):
+                    raise LiveSocketError("a continuation frame out of place")
+                opcode = opcode if op == 0x0 else op
+                parts.append(payload)
+                if fin:
+                    if opcode == 0x1:
+                        return b"".join(parts).decode("utf-8")
+                    opcode, parts = None, []
+            elif op != 0xA:
+                raise LiveSocketError(f"a frame of unknown opcode {op}")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if not self.closed:
+            try:
+                self.sock.settimeout(1.0)
+                self.send(0x8, struct.pack("!H", 1000))
+            except OSError:
+                pass
+        self.sock.close()
 
 
 def stream_once(cfg: DispatchConfig, after: int, idle: float, head: int | None):
-    """One connection's events with id > after. Its return value says how it ended: "heartbeat"
-    (the server sends one only once its catch-up is done), "head" (an event at or past `head`, the
-    newest event known at the start, arrived, and then SSE_TAIL_S of silence or the end), "idle"
-    (`idle` seconds of silence first) or "closed" (the server ended the stream first). Comment
-    lines other than the heartbeat (`: open`) are skipped."""
-    resp = open_stream(cfg, after, idle)
+    """One events subscription's events with id > after, on a live socket of its own. Its return
+    value says how it ended: "head" (an event at or past `head`, the newest event known at the
+    start, arrived, and then LIVE_TAIL_S went by without another, or the subscription ended), "idle"
+    (`idle` seconds without an event first), or, before either, what ended it: an ended frame
+    ("ended (behind)"), the server's close ("closed 4001 max age", "closed 1012") or a failed
+    connection (raised). Pings and heartbeat frames are no event, so they put off neither wait;
+    frame types the read does not use are skipped. A refusal raises RuntimeError: the upgrade
+    answered with any status below 500 but 101 (no /ws/live there), or an error frame."""
+    try:
+        ws = LiveSocket(cfg, idle)
+    except LiveSocketHTTPError as e:
+        if e.code < 500:
+            raise RuntimeError(f"Dispatch's live socket (GET /ws/live) answered {e}, not a WebSocket upgrade") from e
+        raise
     reached = False
-    with resp:
-        data: list[bytes] = []
+    with ws:
         try:
-            for raw in resp:
-                line = raw.rstrip(b"\r\n")
-                if line.startswith(b":"):
-                    if line[1:].strip() == b"heartbeat":
-                        return "heartbeat"
+            ws.send_json({"type": "subscribe", "sub": LIVE_SUB, "view": {"kind": "events"}, "resume": {"since": str(after)}})
+            deadline = time.monotonic() + idle
+            while True:
+                text = ws.receive(deadline)
+                if text is None:
+                    return "head" if reached else ws.closed
+                frame = json.loads(text)
+                kind = frame.get("type")
+                if kind == "error":
+                    raise RuntimeError(f"Dispatch refused the events subscription on its live socket: {frame.get('code')}: {frame.get('message')}")
+                if frame.get("sub") != LIVE_SUB:
                     continue
-                if line.startswith(b"data:"):
-                    data.append(line[5:].lstrip())
-                elif not line and data:
-                    event = json.loads(b"\n".join(data))
-                    data = []
-                    if not reached and head is not None and isinstance(event.get("id"), int) and event["id"] >= head:
-                        sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
-                        if sock is not None:
-                            sock.settimeout(SSE_TAIL_S)
+                if kind == "ended":
+                    return "head" if reached else f"ended ({frame.get('reason')})"
+                event = frame.get("event")
+                if kind != "event" or not isinstance(event, dict):
+                    continue
+                if isinstance(event.get("id"), int):
+                    if event["id"] <= after:
+                        continue  # a resume above the head of a log reset under it starts at its head
+                    if head is not None and event["id"] >= head:
                         reached = True
-                    yield event
+                deadline = time.monotonic() + (LIVE_TAIL_S if reached else idle)
+                yield event
         except TimeoutError:
             return "head" if reached else "idle"
-    return "head" if reached else "closed"
+        except OSError:
+            if reached:
+                return "head"
+            raise
 
 
 def stream_events(cfg: DispatchConfig, after: int, head: int | None = None):
-    """Events with id > after from the server-sent event log, until it has caught up: a heartbeat,
-    or `head` reached. The server reads its backlog from Postgres before it sends it, and it can end
-    a stream (a restart), so a connection that goes silent or ends before then is resumed from the
-    last event it gave, with a longer silence allowed after each one that brought nothing; after
-    SSE_ATTEMPTS of those in a row this raises RuntimeError, and the run fails loudly instead of
-    listing a part of the log as all of it. With no `head` (no recent event to aim at), SSE_IDLE_S of
-    silence counts as caught up, as nothing else can be measured."""
+    """Events with id > after from Dispatch's event feed, an events subscription on its live socket
+    (GET /ws/live), until it has caught up: `head` reached. The feed pages its whole backlog from
+    Postgres on one subscription, but a subscription can go without an event for a while (a slow
+    page) or end before then (an ended frame when it falls behind, the socket's close at its age or
+    at a restart), so one that does is resumed from the last event it gave, with a longer wait
+    allowed after each one that brought nothing; after LIVE_ATTEMPTS of those in a row this raises
+    RuntimeError, and the run fails loudly instead of listing a part of the log as all of it. With no
+    `head` (no recent event to aim at), LIVE_IDLE_S without an event counts as caught up: the feed
+    sends nothing that says it has caught up, so nothing else can be measured."""
     cursor, failures = after, 0
     while True:
         progressed, reason = False, ""
         try:
-            it = stream_once(cfg, cursor, SSE_STALL_S[min(failures, len(SSE_STALL_S) - 1)], head)
+            it = stream_once(cfg, cursor, LIVE_STALL_S[min(failures, len(LIVE_STALL_S) - 1)], head)
             try:
                 while True:
                     try:
@@ -817,27 +987,23 @@ def stream_events(cfg: DispatchConfig, after: int, head: int | None = None):
                     yield event
             finally:
                 it.close()
-        except urllib.error.HTTPError as e:
-            if e.code < 500:
-                raise RuntimeError(f"the Dispatch event stream answered HTTP {e.code} {e.reason}") from e
-            reason = f"HTTP {e.code}"
-        except (urllib.error.URLError, OSError) as e:
-            reason = str(getattr(e, "reason", None) or e)
-        if reason in ("heartbeat", "head") or (reason == "idle" and head is None):
+        except OSError as e:
+            reason = str(e) or type(e).__name__
+        if reason == "head" or (reason == "idle" and head is None):
             return
         failures = 0 if progressed else failures + 1
-        if failures >= SSE_ATTEMPTS:
+        if failures >= LIVE_ATTEMPTS:
             aim = f"the newest event known at the start, {head}" if head is not None else "its end"
-            raise RuntimeError(f"the Dispatch event stream never reached {aim}: it stopped after event {cursor} "
-                               f"({reason}) on {SSE_ATTEMPTS} connections in a row, so its Dispatch rows would be incomplete")
+            raise RuntimeError(f"the Dispatch event feed never reached {aim}: it stopped after event {cursor} "
+                               f"({reason}) on {LIVE_ATTEMPTS} subscriptions in a row, so its Dispatch rows would be incomplete")
         if not progressed:
             time.sleep(failures)
 
 
 def first_event_after(cfg: DispatchConfig, after: int) -> dict | None:
-    """The first event with id > after, on one connection; None when none comes within SSE_IDLE_S.
+    """The first event with id > after, on one subscription; None when none comes within LIVE_IDLE_S.
     start_id reads a None as "at or past the target", which only starts the read earlier."""
-    it = stream_once(cfg, after, SSE_IDLE_S, None)
+    it = stream_once(cfg, after, LIVE_IDLE_S, None)
     try:
         return next(it, None)
     finally:
@@ -866,7 +1032,7 @@ def start_id(cfg: DispatchConfig, target: datetime, now: datetime) -> tuple[int,
     head = int(anchor["id"])
     if (parse_ts(anchor.get("created_at")) or now) < target:
         return head, None  # an old anchor: its id says nothing about how much comes after it
-    lo, lo_t = 0, None  # the first event after lo is before target
+    lo, lo_t = 0, None  # the first event after lo is before target, once a probe moves lo off 0
     hi, hi_t = int(anchor["id"]) - 1, parse_ts(anchor.get("created_at"))  # the first event after hi is at or after target
     step = 0
     while hi - lo > 1:
@@ -882,7 +1048,8 @@ def start_id(cfg: DispatchConfig, target: datetime, now: datetime) -> tuple[int,
             hi, hi_t = mid, t
         else:
             lo, lo_t = max(mid, int(event["id"]) - 1), t
-    return hi, head
+    # lo still 0 was never probed: the log's first event may be at or after target, so read it too.
+    return (0 if lo == 0 else hi), head
 
 
 def dispatch_rows(cfg: DispatchConfig, user: str, since: datetime, until: datetime, now: datetime):
