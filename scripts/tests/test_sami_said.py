@@ -5,15 +5,19 @@ into the user role. Fixtures are an omp agent directory shaped as omp writes it:
 entries with a top-level ISO timestamp), the terminal's prompt history (history.db, the `history`
 table omp creates), a subagent file below a session, and a shake log. Entry shapes are copied from
 real sessions of 2026-10-27/28; ids and texts are invented. --dispatch runs against a local fake of
-Dispatch's routes: /api/v1/issues, /api/v1/issues/<key>/events and the /api/v1/events SSE log.
+Dispatch's routes: /api/v1/issues, /api/v1/issues/<key>/events and the event feed on the GET
+/ws/live socket, served by a small WebSocket server of the fake's own.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.server
 import json
 import os
 import sqlite3
+import struct
 import subprocess
 import tempfile
 import threading
@@ -484,12 +488,22 @@ class LargeFile(unittest.TestCase):
             self.assertEqual([r["text"] for r in rows(root)], [TYPED])
 
 
+WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
 class FakeDispatch(http.server.BaseHTTPRequestHandler):
     events: list[dict] = []
     seen: list[str] = []
-    # How the event stream fails, as Dispatch's does: None; "pause" (silent for PAUSE_S after every
-    # CHUNK events while more remain, as a slow catch-up query is); "close" (the server ends the
-    # stream there, as a restart does); "dead" (it ends every stream right after `: open`).
+    subscribes: list[dict] = []  # every frame a live socket read first, a subscribe
+    pongs: list[bytes] = []  # every pong's payload
+    faults: list[str] = []  # what the client sent against RFC 6455 or the live socket's frames
+    # How the live socket's event feed behaves, as Dispatch's can: None; "pause" (no event for
+    # PAUSE_S after every CHUNK events while more remain, only pings and heartbeat frames, as a slow
+    # catch-up page is); "ended" (an ended frame (behind) there, as when the feed falls behind);
+    # "close" (close 4001 there, as at the socket's age); "dead" (close 1012 right after every
+    # events_start, as a restart loop does); "missing" (GET /ws/live answers 404, as a Dispatch
+    # before the live socket does); "refuse" (an error frame answers the subscribe); "no-head"
+    # (no issue was updated recently, so the read has no head to aim at).
     mode: str | None = None
     CHUNK = 4
     PAUSE_S = 4.0
@@ -501,34 +515,111 @@ class FakeDispatch(http.server.BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         self.seen.append(self.headers.get("Authorization", ""))
         if url.path == "/api/v1/issues":
-            self.reply([{"key": "LINUX-1157", "updated_at": "2026-10-28T02:59:00Z"}])
+            self.reply([] if self.mode == "no-head" else [{"key": "LINUX-1157", "updated_at": "2026-10-28T02:59:00Z"}])
         elif url.path == "/api/v1/issues/LINUX-1157/events":
             self.reply([max(self.events, key=lambda e: e["id"])])
-        elif url.path == "/api/v1/events":
-            since = int(urllib.parse.parse_qs(url.query).get("since", ["0"])[0])
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.end_headers()
-            try:
-                self.stream([e for e in self.events if e["id"] > since])
-            except (BrokenPipeError, ConnectionResetError):
-                pass  # the client gave up on a silent stream and reconnected
+        elif url.path == "/ws/live" and self.mode != "missing":
+            self.upgrade()
         else:
             self.send_error(404)
 
-    def stream(self, backlog: list[dict]):
-        self.wfile.write(b": open\n\n")
-        if self.mode == "dead":
+    def upgrade(self):
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if self.headers.get("Upgrade", "").lower() != "websocket" or self.headers.get("Sec-WebSocket-Version") != "13" or not key:
+            self.faults.append(f"not a WebSocket upgrade: {dict(self.headers)}")
+            self.send_error(400)
             return
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", base64.b64encode(hashlib.sha1(key.encode() + WS_GUID).digest()).decode())
+        self.end_headers()
+        self.close_connection = True
+        try:
+            self.feed()
+        except (BrokenPipeError, ConnectionResetError, EOFError):
+            pass  # the client gave up on a silent subscription and subscribed again
+
+    def ws_read(self) -> tuple[int, bytes]:
+        """One frame from the client: its opcode and its payload, unmasked."""
+        head = self.rfile.read(2)
+        if len(head) < 2:
+            raise EOFError
+        n = head[1] & 0x7F
+        if n == 126:
+            (n,) = struct.unpack("!H", self.rfile.read(2))
+        elif n == 127:
+            (n,) = struct.unpack("!Q", self.rfile.read(8))
+        if not head[1] & 0x80:
+            self.faults.append("an unmasked client frame")
+            return head[0] & 0x0F, self.rfile.read(n)
+        key = self.rfile.read(4)
+        return head[0] & 0x0F, bytes(b ^ key[i % 4] for i, b in enumerate(self.rfile.read(n)))
+
+    def ws_send(self, opcode: int, payload: bytes, fin: bool = True):
+        n = len(payload)
+        size = bytes([n]) if n < 126 else bytes([126]) + struct.pack("!H", n) if n < 1 << 16 else bytes([127]) + struct.pack("!Q", n)
+        self.wfile.write(bytes([(0x80 if fin else 0) | opcode]) + size + payload)
+
+    def send_frame(self, frame: dict):
+        self.ws_send(0x1, json.dumps(frame).encode())
+
+    def drain(self):
+        """Hold the socket open, as Dispatch's feed stays live, until the client closes it."""
+        while True:
+            op, data = self.ws_read()
+            if op == 0xA:
+                self.pongs.append(data)
+            elif op == 0x8:
+                self.ws_send(0x8, data[:2])
+                return
+            else:
+                self.faults.append(f"a frame of opcode {op} after the subscribe: {data[:80]!r}")
+
+    def ws_close(self, code: int, reason: str = ""):
+        self.ws_send(0x8, struct.pack("!H", code) + reason.encode())
+        self.drain()
+
+    def feed(self):
+        op, data = self.ws_read()
+        sub = json.loads(data)
+        self.subscribes.append(sub)
+        if op != 0x1 or set(sub) != {"type", "sub", "view", "resume"} or sub["type"] != "subscribe" \
+                or sub["view"] != {"kind": "events"} or not str(sub["resume"].get("since", "")).isdecimal():
+            self.faults.append(f"not an events subscribe frame: {sub}")
+        if self.mode == "refuse":
+            self.send_frame({"type": "error", "sub": sub["sub"], "code": "INVALID_FRAME", "message": "resume.since must be a decimal event id"})
+            return self.drain()
+        since, head = int(sub["resume"]["since"]), max(e["id"] for e in self.events)
+        start = since if since <= head else head  # a resume above the head starts at the head
+        self.ws_send(0x9, b"are you there")
+        self.send_frame({"type": "heartbeat"})
+        self.send_frame({"type": "snapshot", "sub": "pipeline", "body": {}})  # another subscription's frame
+        self.send_frame({"type": "events_start", "sub": sub["sub"], "since": str(start), "replay_complete": since <= head})
+        if self.mode == "dead":
+            return self.ws_close(1012)
+        backlog = [e for e in self.events if e["id"] > start]
         for n, e in enumerate(backlog, 1):
-            self.wfile.write(f"id: {e['id']}\nevent: {e['type']}\ndata: {json.dumps(e)}\n\n".encode())
+            frame = json.dumps({"type": "event", "sub": sub["sub"], "id": str(e["id"]), "event": e}).encode()
+            if n == 2:  # one message in three frames, with a ping between two of them
+                self.ws_send(0x1, frame[:10], fin=False)
+                self.ws_send(0x9, b"mid-message")
+                self.ws_send(0x0, frame[10:20], fin=False)
+                self.ws_send(0x0, frame[20:])
+            else:
+                self.ws_send(0x1, frame)
             if n % self.CHUNK == 0 and n < len(backlog):
+                if self.mode == "ended":
+                    self.send_frame({"type": "ended", "sub": sub["sub"], "reason": "behind"})
+                    return self.drain()
                 if self.mode == "close":
-                    return
+                    return self.ws_close(4001, "max age")
                 if self.mode == "pause":
-                    self.wfile.flush()
-                    time.sleep(self.PAUSE_S)
-        self.wfile.write(b": heartbeat\n\n")
+                    for _ in range(int(self.PAUSE_S / 0.5)):
+                        time.sleep(0.5)
+                        self.ws_send(0x9, b"")
+                        self.send_frame({"type": "heartbeat"})
+        self.drain()
 
     def reply(self, body):
         data = json.dumps(body).encode()
@@ -548,6 +639,7 @@ def start_dispatch(base: Path) -> tuple[http.server.ThreadingHTTPServer, dict]:
     """The fake Dispatch with its events, serving; and the environment that points sami-said at it."""
     older = [event(i, at(-300 + i), "artifact.version", {"name": "spec.md"}) for i in range(1, 200)]
     FakeDispatch.mode = None
+    FakeDispatch.seen, FakeDispatch.subscribes, FakeDispatch.pongs, FakeDispatch.faults = [], [], [], []
     FakeDispatch.events = older + [
         event(300, at(-65), "comment.created", {"id": "c-early", "body": "before the window"}),
         event(301, at(5), "message.created", {"id": "407cb29c-fcc3-406e-8fd8-ecc6d9076ba4", "body": "I'm getting super excited.",
@@ -561,7 +653,7 @@ def start_dispatch(base: Path) -> tuple[http.server.ThreadingHTTPServer, dict]:
         event(304, at(39), "ask.answered", {"id": "d3a51496-e7ed-4044-864a-0205e8d61e88", "question": "Where does state live?",
                                             "answer": {"selected": ["English in git, state in Postgres"], "text": None},
                                             "author": {"kind": "session", "id": LEAD, "origin": {"session_title": "ORCH"}}}),
-        event(305, at(40), "user_state.updated", {"login": "sami@theorem.dev"}),
+        event(305, at(40), "user_state.updated", {"login": "sami@theorem.dev", "pins": ["x" * 70_000]}),  # a frame over 64 KiB
         event(306, at(41), "comment.created", {"id": "c-other", "body": "not Sami's"}, actor="tewaro@theorem.dev"),
         event(307, at(42), "message.created", {"id": "m-lane", "body": "/rename gateway", "target": f"session:{LANE}",
                                                "author": {"id": "sami@theorem.dev", "kind": "user"}}, issue=None),
@@ -624,11 +716,19 @@ class DispatchOption(unittest.TestCase):
         self.assertTrue(FakeDispatch.seen)
         self.assertEqual(set(FakeDispatch.seen), {"Bearer test-token"})
 
+    def test_the_live_socket_is_spoken_as_rfc_6455_asks(self):
+        self.assertTrue(FakeDispatch.subscribes)
+        self.assertEqual(FakeDispatch.faults, [])  # masked frames, and one events subscribe per socket
+        self.assertEqual({s["sub"] for s in FakeDispatch.subscribes}, {"sami-said"})
+        self.assertIn(b"are you there", FakeDispatch.pongs)  # a ping before the feed starts
+        self.assertIn(b"mid-message", FakeDispatch.pongs)  # a ping between two frames of one message
 
-class DispatchStreamFaults(unittest.TestCase):
-    """The event stream as it failed on 2026-10-28 15:55Z, when a --dispatch run printed no Dispatch
-    rows and exited 0: a stream that goes silent or ends partway is resumed, and one that never
-    delivers fails the run loudly."""
+
+class DispatchFeedFaults(unittest.TestCase):
+    """The event feed as it can fail, first seen on the SSE log it replaced on 2026-10-28 15:55Z,
+    when a --dispatch run printed no Dispatch rows and exited 0: a subscription that goes without
+    an event or ends partway is resumed from its last event, and one that never delivers fails the
+    run loudly, as does a Dispatch that refuses the socket or the subscription."""
 
     @classmethod
     def setUpClass(cls):
@@ -644,31 +744,88 @@ class DispatchStreamFaults(unittest.TestCase):
         cls.server.shutdown()
         cls.tmp.cleanup()
 
-    def run_with(self, mode: str) -> tuple[subprocess.CompletedProcess, list[dict]]:
-        FakeDispatch.mode = mode
-        done = run(self.root, "--json", "--dispatch", env=self.env)
+    def run_with(self, mode: str | None, events: list[dict] | None = None) -> tuple[subprocess.CompletedProcess, list[dict]]:
+        FakeDispatch.mode, FakeDispatch.subscribes, kept = mode, [], FakeDispatch.events
+        FakeDispatch.events = events or kept
+        try:
+            done = run(self.root, "--json", "--dispatch", env=self.env)
+        finally:
+            FakeDispatch.events = kept
         return done, [json.loads(line) for line in done.stdout.splitlines()]
 
     def dispatch_rows(self, found: list[dict]) -> list[tuple[str, str]]:
         return [(r["source"], r["text"]) for r in found if r["source"].startswith("DISPATCH")]
 
-    def test_a_stream_silent_partway_is_resumed(self):
+    def resumes(self) -> list[str]:
+        """The `since` of every subscribe, the binary search's probes first, then the read's."""
+        return [s["resume"]["since"] for s in FakeDispatch.subscribes]
+
+    def test_a_subscription_silent_partway_is_resumed(self):
         done, found = self.run_with("pause")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
+        # Each pause, though it sends pings and heartbeat frames, outlasts the wait for an event.
+        self.assertEqual(self.resumes()[-2:], ["303", "307"])
 
-    def test_a_stream_the_server_ends_partway_is_resumed(self):
+    def test_a_subscription_dispatch_ends_partway_is_resumed(self):
+        done, found = self.run_with("ended")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
+        self.assertEqual(self.resumes()[-2:], ["303", "307"])
+
+    def test_a_socket_the_server_closes_partway_is_resumed(self):
         done, found = self.run_with("close")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
+        self.assertEqual(self.resumes()[-2:], ["303", "307"])
 
-    def test_a_stream_that_never_delivers_fails_loudly(self):
+    def test_reaching_the_head_ends_the_read(self):
+        # The head, 310, inside the window: nothing after it stops the read, and the live feed stays
+        # open and silent, so only reaching it ends the read (a silence would be retried, then fail).
+        last = event(310, at(55), "comment.created", {"id": "c-head", "body": "the head"}, actor="tewaro@theorem.dev")
+        done, found = self.run_with(None, FakeDispatch.events[:-1] + [last])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
+        self.assertEqual(self.resumes()[-1], "199")  # one subscription read it all
+
+    def test_with_no_head_silence_ends_the_read(self):
+        # No issue updated recently: no head to search below, so the read starts at the log's start,
+        # and with no event past the window to stop it, LIVE_IDLE_S of silence ends it.
+        done, found = self.run_with("no-head", FakeDispatch.events[:-1])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
+        self.assertEqual(self.resumes(), ["0"])
+
+    def test_the_log_first_event_is_read_when_it_is_in_the_window(self):
+        events = [event(1, at(10), "comment.created", {"id": "c-first", "body": "the log's first event"}),
+                  event(2, at(20), "comment.created", {"id": "c-second", "body": "not Sami's"}, actor="tewaro@theorem.dev"),
+                  event(3, at(130), "comment.created", {"id": "c-late", "body": "after the window"})]
+        done, found = self.run_with(None, events)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.dispatch_rows(found), [("DISPATCH comment", "the log's first event")])
+
+    def test_a_feed_that_never_delivers_fails_loudly(self):
         done, found = self.run_with("dead")
         self.assertEqual(done.returncode, 1)
         self.assertEqual(self.dispatch_rows(found), [])
         self.assertIn(TYPED, [r["text"] for r in found])  # the transcript rows still print
         self.assertIn("--dispatch FAILED, so no Dispatch rows are listed", done.stderr)
         self.assertIn("never reached the newest event known at the start, 310", done.stderr)
+        self.assertIn("(closed 1012) on 3 subscriptions in a row", done.stderr)
+        self.assertTrue(done.stderr.rstrip().endswith("exit status 1"), done.stderr)
+
+    def test_a_dispatch_without_the_live_socket_fails_loudly(self):
+        done, found = self.run_with("missing")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(self.dispatch_rows(found), [])
+        self.assertIn("Dispatch's live socket (GET /ws/live) answered HTTP 404", done.stderr)
+        self.assertTrue(done.stderr.rstrip().endswith("exit status 1"), done.stderr)
+
+    def test_a_refused_subscription_fails_loudly(self):
+        done, found = self.run_with("refuse")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(self.dispatch_rows(found), [])
+        self.assertIn("Dispatch refused the events subscription on its live socket: INVALID_FRAME", done.stderr)
         self.assertTrue(done.stderr.rstrip().endswith("exit status 1"), done.stderr)
 
 
