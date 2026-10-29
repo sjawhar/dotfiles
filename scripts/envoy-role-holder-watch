@@ -10,24 +10,32 @@ no exit record, and nothing noticed. Its Envoy role claim stayed registered, so 
 notifications.role.lead-verified-linux looked deliverable; about 40 in-session subagent lanes
 were lost, and a peer first learnt of it 11 minutes later from a "no live session" send error.
 
-What one run does, mechanically, with no transcript reading and no model call:
+What one run does, mechanically, with no model call:
 
-  1. GET /v1/sessions  -- every session Envoy lists as live, with its roles, host and dir.
+  1. GET /v1/sessions  -- every session Envoy lists as live, with its roles, host, dir and the
+     timestamp of its last heartbeat.
   2. For each role whose holder session is on THIS machine (now, or remembered from an earlier
-     run in the state file), GET /v1/roles/<role> -- the durable claim, which outlives the
-     holder's 5-minute session registration.
-  3. Resolve the holder to a process on this machine: an `omp` process whose /proc/<pid>/cmdline
-     names the session id, or whose open file descriptors hold that session's transcript
-     (~/.omp/agent/sessions/**/<stamp>_<session id>.jsonl). Never a pid remembered from an
-     earlier run: pids on this box wrap inside a day, so a remembered pid can come back as an
-     unrelated process.
-  4. A role is BAD while its claim is registered to that holder and no process holds the session.
-     The process is the only liveness test. Envoy's registry is not: under load it drops sessions
-     that are running -- envoy_sessions omits them and envoy_send answers "no live session" for a
-     live session (Rocq speed recorded that on 2026-10-25 15:10-15:16Z) -- so a registry answer
-     alone never alerts and never asks anyone to restart. The opposite disagreement (a live pid
-     that Envoy does not list) is logged as a registry fault. A role must stay BAD for the grace
-     window (default 60 s) before it alerts, so a restart in flight never fires.
+     run in the state file), establish what can be established about that holder from four
+     sources: an `omp` process that names the session on its command line, in the file name of
+     an open transcript, or in that transcript's own header; any process at all holding the
+     session's transcript open; how long ago that transcript was last written; and Envoy's own
+     registry entry and heartbeat (GET /v1/sessions, confirmed by GET /v1/registry/<id>, both
+     of which only read).
+  3. The watch calls no role route at all. GET /v1/roles/<role> is how Envoy releases a claim
+     whose holder has left the session bucket (role_holder.go resolveLiveRoleHolder, still so on
+     origin/main at d157fc868, checked 2026-10-29 09:50Z), and that holder is exactly the one
+     this watch would ever ask about: a read that is a write. On 2026-10-29 the alert text named
+     it, a reader ran it, and a live lane lost its claim two minutes after a false alert. Even
+     once it is pure it buys little -- the claim says only that it is registered to the session
+     the watch already cannot find -- so what the watch gives up with it is in `alert_text`.
+  4. A holder is only ever UNSEEN, never dead. From a watcher's position "I cannot find it" is
+     the strongest thing establishable: a loaded box stops heartbeating inside Envoy's 300 s TTL
+     (a root session and 18 subagents measured silent for 17 minutes at load 233), and omp writes
+     no exit record, so nothing here can prove a session ended. Every alert says which of the two
+     it established, and `guard_verdict` refuses to send one that claims the holder is dead.
+     A role alerts only when EVERY source is silent for the grace window (default 60 s); one
+     silent source -- most often Envoy's registry, which drops live sessions under load -- is
+     logged and never alerts, never opens an incident and never asks anyone to restart anything.
 
 Alerts go over Envoy to agent sessions only, never to a person: the chief of staff, the INFRA
 lead, the dead role's stream lead (the live `lead-*`/`stream-lead-*` holder in the same working
@@ -82,7 +90,6 @@ DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 SESSION_ROOT = Path.home() / ".omp/agent/sessions"
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-ROLE_TOPIC = "notifications.role."
 TEAM_TOPIC = "notifications.team."
 # A lane's stream lead holds one of these roles in the lane's working directory.
 LEAD_ROLE_RE = re.compile(r"^(stream-)?lead-")
@@ -90,6 +97,58 @@ LEAD_ROLE_RE = re.compile(r"^(stream-)?lead-")
 # session's own transcript names, and on the well-known names in its lane directories.
 HANDOVER_NAME_RE = re.compile(r"(?i)(wake|handover|hand-off|handoff|state|brief|dod)")
 HANDOVER_WELL_KNOWN = ("WAKE.md", "HANDOVER.md", "HANDOFF.md", "STATE.md")
+
+# The two things this watch may say about a holder, and they are not symmetric.
+#
+# CANNOT_SEE_HOLDER is the strongest verdict any check here reaches: every source answered "not
+# found", and not-found is not death.
+#
+# HOLDER_DEAD would need positive proof that the session ended -- an exit record, a reaped pid
+# with a status, anything the session wrote on its way out. omp writes none: the 2026-10-27T05:52Z
+# loss this watch exists for left no error and no exit record. So nothing in this file constructs
+# it, `guard_verdict` refuses to send a message carrying it, and it is here only so that every
+# alert can name which of the two it established.
+HOLDER_DEAD = "the holder is dead"
+CANNOT_SEE_HOLDER = "I cannot see this session"
+
+# A transcript written this recently is a live session writing it. 120 s covers a model call and
+# a long tool run; past it the file says nothing either way, which is why it is one silent source
+# among four and not a verdict.
+DEFAULT_WRITE_GRACE = 120.0
+# A role whose holder has been unseen this long is dropped from the state file. Bookkeeping, not
+# a judgement: the incident has already alerted and escalated, and nothing here re-reads it.
+FORGET_AFTER = 86400.0
+
+# THE MARKED PLACE FOR THE RELEASE CALL. Agent infra is adding an explicit release that records
+# who released the claim, and the same change makes GET /v1/roles/<role> pure. Neither exists
+# yet. Checked 2026-10-29 09:50Z, both ways:
+#   - POST /v1/roles/release on the live listener answers 405.
+#   - sjawhar/legion origin/main at d157fc868 has no roles/release handler anywhere, and
+#     packages/envoy/cmd/listener/role_holder.go resolveLiveRoleHolder still calls
+#     releaseExpiredRoleClaim for a holder that has left the session bucket -- which is the only
+#     holder anyone reads this claim for. The lookup is still a write.
+# When the route lands, this constant becomes the two sentences below and nothing else in
+# `alert_text` moves. `{role}` and `{holder}` are filled in there, so a curl body's braces are
+# doubled:
+#   RELEASE_CALL = (
+#       "RELEASE THE CLAIM, only once step 2 or 3 has established that no live lane holds it:"
+#       " `curl -sS -X POST \"${{ENVOY_URL:-http://127.0.0.1:9020}}/v1/roles/release\""
+#       " -H 'Content-Type: application/json'"
+#       " -d '{{\"role\": \"{role}\", \"holder\": \"{holder}\","
+#       " \"released_by\": \"<your session id or name>\"}}'`."
+#       " Reading the claim changes nothing then:"
+#       " `curl -sS \"${{ENVOY_URL:-http://127.0.0.1:9020}}/v1/roles/{role}\"`."
+#   )
+RELEASE_CALL = (
+    "RELEASE THE CLAIM: there is no call for this yet, so this watch names none. Do NOT reach"
+    " for the two that look like one. `curl ${{ENVOY_URL}}/v1/roles/{role}` releases a lapsed"
+    " holder's claim as a side effect of answering (resolveLiveRoleHolder), and"
+    " `curl -X DELETE ${{ENVOY_URL}}/v1/sessions/{holder}` unregisters a session that may be"
+    " alive; together they are what cost role bet64-eta-arity its claim at 2026-10-29 09:22:31Z,"
+    " two minutes after a false alert on a live lane. Tell the INFRA lead the role and holder"
+    " and let the claim lapse on its own, or wait for agent infra's explicit release route,"
+    " which this text will name as soon as it is deployed."
+)
 
 
 def log(message: str) -> None:
@@ -177,18 +236,26 @@ class Envoy:
             raise RuntimeError(f"GET /v1/sessions: {status} {body}")
         return body
 
-    def role(self, role: str) -> dict:
-        """The claim on `role`.
+    # There is deliberately no role() here, for two reasons, and the first still holds today.
+    # GET /v1/roles/<role> releases a claim whose holder has left the session bucket
+    # (cmd/listener/role_holder.go resolveLiveRoleHolder -> releaseExpiredRoleClaim; still so on
+    # sjawhar/legion origin/main at d157fc868, and the live listener answers 405 to the
+    # POST /v1/roles/release that will replace it -- both checked 2026-10-29 09:50Z). That
+    # holder is the only one this watch would ask about, so the read is a write. And even once
+    # it is pure, its answer adds nothing this watch judges on: the claim's holder is the
+    # session it has already failed to find.
 
-        A lookup is also how Envoy releases a claim whose holder has left the session bucket
-        (cmd/listener/api.go resolveLiveRoleHolder), so the answer says whether this read
-        released it: reason=holder_lapsed with claim_released true or false.
+    def registry(self, session_id: str) -> tuple[int, dict]:
+        """Envoy's own registry entry for one session: a point read that writes nothing.
+
+        `sessionEntryHandler` reads the session bucket and answers it (cmd/listener/api.go on
+        sjawhar/legion origin/main at d157fc868, checked 2026-10-29 09:50Z). It shares that read
+        with the role lookup but not the release the role lookup makes around it, so unlike the
+        role lookup it is safe against a holder that has lapsed. 404 is Envoy saying it cannot
+        see the session either; 200 says the /v1/sessions list this run read was stale.
         """
-        status, body = self.request("GET", f"/v1/roles/{role}")
-        if not isinstance(body, dict):
-            body = {"error": str(body)}
-        body["_status"] = status
-        return body
+        status, body = self.request("GET", f"/v1/registry/{session_id}")
+        return status, body if isinstance(body, dict) else {"error": str(body)}
 
     def send(self, session_id: str, message: str) -> bool:
         status, body = self.request(
@@ -212,11 +279,68 @@ class Envoy:
 # --------------------------------------------------------------- this machine's omp processes
 
 
+_HEADER_IDS: dict[tuple[int, int], str | None] = {}
+_TRANSCRIPT_INDEX: tuple[dict[str, Path], list[Path]] | None = None
+
+
+def session_id_in_header(path: str | Path) -> str | None:
+    """The session id a transcript names in its own header, or None.
+
+    A transcript's file name is not its identity, and neither is the command line that opened
+    it. `omp --resume` takes a PATH as well as an id, and a lane that began as a subagent is
+    resumed from a path named after the subagent (.../<stamp>_<parent id>/ArityLane.jsonl): no
+    id on the command line, none in the file name, and a watch that reads only those two says a
+    live session is gone. That is what happened at 2026-10-29 09:20:30Z on role bet64-eta-arity,
+    whose holder was pid 724296, up 17,353 s, working with three subagents, and holding exactly
+    such a file open.
+
+    omp writes the id in a `{"type": "session", "id": ...}` record, which is not the first line:
+    the first is the `title` record. So the first few records are read, not just one. Memoised on
+    (device, inode), because a run reads the same transcript once per holding process.
+    """
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    key = (info.st_dev, info.st_ino)
+    if key in _HEADER_IDS:
+        return _HEADER_IDS[key]
+    found = None
+    try:
+        with open(path, "rb") as handle:
+            for _ in range(8):
+                line = handle.readline(65536)
+                if not line:
+                    break
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "session":
+                    continue
+                match = UUID_RE.search(str(record.get("id") or ""))
+                if match:
+                    found = match.group(0)
+                break
+    except OSError:
+        # A read that failed is not a file with no id in it. Caching it would make one transient
+        # EMFILE or EACCES the answer for every later caller in this run.
+        return None
+    _HEADER_IDS[key] = found
+    return found
+
+
 def omp_sessions_by_pid() -> dict[str, int]:
     """Every session id an `omp` process on this machine holds, mapped to that pid.
 
-    A session is held by the process whose command line names it (`omp --resume <id>`) or whose
-    open descriptors hold its transcript (a session launched from a brief file names no id).
+    Three sources, in widening order: the command line (`omp --resume <id>`), the file name of
+    an open transcript, and that transcript's own header. The header is what makes a resumed
+    subagent lane visible; without it the process holds the session and nothing can tell.
+
+    A pid here is positive evidence of life and nothing else. Its absence is not evidence of
+    death: this reads only processes whose comm is `omp`, so a lane under a differently named
+    parent is invisible to it, which is why `transcript_holders` reads the transcript's own
+    openers before anything alerts.
     """
     held: dict[str, int] = {}
     for entry in os.listdir("/proc"):
@@ -241,27 +365,288 @@ def omp_sessions_by_pid() -> dict[str, int]:
                 continue
             if "/.omp/agent/sessions/" in target and target.endswith(".jsonl"):
                 found.update(UUID_RE.findall(os.path.basename(target)))
+                from_header = session_id_in_header(target)
+                if from_header:
+                    found.add(from_header)
         for session_id in found:
             held.setdefault(session_id, pid)
     return held
 
 
-def transcript_of(session_id: str) -> Path | None:
-    """The session's own transcript file, the newest one when a session was resumed."""
-    best: tuple[float, Path] | None = None
+def transcript_holders(path: str | Path) -> list[int]:
+    """Every pid on this machine with `path` open, whatever the process is called.
+
+    `omp_sessions_by_pid` reads only processes whose comm is `omp`. This reads the file's own
+    openers instead, by device and inode, so a lane running under a wrapper, a renamed binary or
+    a box's init still counts as a holder. Run once per incident, not once per role per period:
+    it stats every descriptor of every process this user can read.
+    """
     try:
-        directories = [d for d in SESSION_ROOT.iterdir() if d.is_dir()]
+        info = os.stat(path)
     except OSError:
-        return None
-    for directory in directories:
+        return []
+    want = (info.st_dev, info.st_ino)
+    holders: list[int] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        directory = f"/proc/{entry}/fd"
         try:
-            for candidate in directory.glob(f"*_{session_id}.jsonl"):
-                stamp = candidate.stat().st_mtime
-                if best is None or stamp > best[0]:
-                    best = (stamp, candidate)
+            descriptors = os.listdir(directory)
         except OSError:
             continue
-    return best[1] if best else None
+        for descriptor in descriptors:
+            try:
+                seen = os.stat(f"{directory}/{descriptor}")
+            except OSError:
+                continue
+            if (seen.st_dev, seen.st_ino) == want:
+                holders.append(int(entry))
+                break
+    return holders
+
+
+def transcript_index() -> tuple[dict[str, Path], list[Path]]:
+    """One walk of the session root per run: the id index, and the headers left to read.
+
+    Returns ({session id taken from a file NAME: its newest transcript}, [transcripts whose
+    name carries no id, newest first]).
+
+    One walk, not one per role. `SESSION_ROOT.glob("**/*_<id>.jsonl")` costs 0.65 s over this
+    box's 34,238 transcripts, and a run that called it once per role spent 19 s of its 25 s
+    TimeoutStartSec on it (measured 2026-10-29 at load 77); a run systemd SIGTERMs is a watch
+    that has stopped watching while its timer still looks healthy.
+    """
+    global _TRANSCRIPT_INDEX
+    if _TRANSCRIPT_INDEX is not None:
+        return _TRANSCRIPT_INDEX
+    cutoff = time.time() - 7 * 86400
+    by_id: dict[str, tuple[float, Path]] = {}
+    unnamed: list[tuple[float, Path]] = []
+    for root, _, names in os.walk(SESSION_ROOT, onerror=lambda _error: None):
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            candidate = os.path.join(root, name)
+            try:
+                stamp = os.stat(candidate).st_mtime
+            except OSError:
+                continue
+            match = UUID_RE.search(name)
+            if match:
+                best = by_id.get(match.group(0))
+                if best is None or stamp > best[0]:
+                    by_id[match.group(0)] = (stamp, Path(candidate))
+            elif stamp >= cutoff:
+                # Only these need their headers read, and only when the index misses.
+                unnamed.append((stamp, Path(candidate)))
+    unnamed.sort(key=lambda item: -item[0])
+    _TRANSCRIPT_INDEX = (
+        {session: path for session, (_, path) in by_id.items()},
+        [path for _, path in unnamed],
+    )
+    return _TRANSCRIPT_INDEX
+
+
+def transcript_of(session_id: str) -> Path | None:
+    """The session's own transcript file, the newest one when a session was resumed.
+
+    Two passes, for the same reason `session_id_in_header` exists: a file named `<stamp>_<id>`
+    is found anywhere under the session root, including the subagent directories that
+    `SESSION_ROOT.iterdir()` alone never descended into, and a file whose name carries no id at
+    all (ArityLane.jsonl) is found by reading headers, newest first. That second pass is not
+    cheap and not rare: 25,936 of this box's 34,272 transcripts carry no id in their name (every
+    subagent's does not), and reading their headers costs about 1.5 s warm for the first miss in
+    a run and ~0.3 s for each later one, from the memo. It runs only on a miss, and the walk
+    behind it runs once per run, which is what keeps a whole period inside its 25 s budget.
+    """
+    if not UUID_RE.fullmatch(session_id or ""):
+        return None
+    by_id, unnamed = transcript_index()
+    found = by_id.get(session_id)
+    if found:
+        return found
+    for candidate in unnamed:
+        if session_id_in_header(candidate) == session_id:
+            return candidate
+    return None
+
+
+# --------------------------------------------------- what this run could establish about a holder
+
+
+def holder_evidence(
+    envoy: Envoy,
+    holder: str,
+    held: dict[str, int],
+    live: dict[str, dict],
+    write_grace: float,
+    now: float,
+) -> dict:
+    """Every source this watch has on one holder, and what each one answered.
+
+    Four sources, each of which can say "found" and none of which can say "gone":
+
+      process    an `omp` process naming the session on its command line, in an open
+                 transcript's file name, or in that transcript's header
+      transcript how long ago the session's transcript was last written
+      registry   Envoy's own entry and heartbeat, read with GET /v1/sessions and confirmed for
+                 an absent holder with GET /v1/registry/<id>; never with GET /v1/roles/<role>,
+                 which releases the claim of exactly the holder this watch cannot find
+      openers    any process at all holding the session's transcript open. This one stats every
+                 descriptor of every readable process (0.17 s here, 2,584 processes), so it is
+                 read ONLY when the first three came back silent -- which is also exactly when
+                 it can change the answer. A healthy role never pays for it, and an open
+                 incident still pays for it every period, because it is the one source that can
+                 see a lane running under a name this watch does not know and so the one that
+                 can clear such an incident.
+
+    `alive` is true when ANY source found it. The verdict when none did is CANNOT_SEE_HOLDER,
+    and there is no path to HOLDER_DEAD: see that constant.
+    """
+    sources: list[tuple[str, bool, str]] = []
+
+    pid = held.get(holder)
+    sources.append(
+        ("process", pid is not None,
+         f"an omp process holds this session: pid {pid}" if pid
+         else f"{CANNOT_SEE_HOLDER} in any omp process on this machine (no command line names it,"
+              " and no open transcript's name or header does)")
+    )
+
+    entry = live.get(holder)
+    heartbeat = (entry or {}).get("last_seen")
+    heartbeat = heartbeat / 1000 if isinstance(heartbeat, (int, float)) and heartbeat else None
+    if entry is not None:
+        # A registration is not a sighting; a recent HEARTBEAT is, because a process that has
+        # stopped cannot send one. Envoy keeps an entry for its whole 300 s TTL after the last
+        # beat, and that stale window is exactly the one the 2026-10-27T05:52Z loss hid in: the
+        # role looked deliverable for five minutes after the session stopped. Measured on this
+        # box, 610 live sessions beat at a median age of 43 s and p90 86 s, so the same
+        # --write-grace window (120 s) separates a beating session from a stale entry, and a
+        # session that beats more slowly than that is covered by the other three sources.
+        fresh = heartbeat is not None and now - heartbeat <= write_grace
+        registry_state = "live" if fresh else "stale"
+        sources.append(
+            ("registry", fresh,
+             f"Envoy heard from this session {human(now - heartbeat)} ago"
+             if fresh else
+             (f"Envoy still lists this session, but its last heartbeat was"
+              f" {human(now - heartbeat)} ago, outside the {int(write_grace)} s window: a"
+              " registration outlives its holder by up to the 300 s TTL, so the entry alone is"
+              " not a sighting"
+              if heartbeat else
+              "Envoy lists this session but records no heartbeat time, so the entry is not a"
+              " sighting"))
+        )
+    else:
+        status, body = envoy.registry(holder)
+        if status == 404:
+            registry_state = "absent"
+            sources.append(
+                ("registry", False,
+                 f"{CANNOT_SEE_HOLDER} in Envoy's registry: absent from GET /v1/sessions, and"
+                 " GET /v1/registry/<holder> answered 404. Envoy drops a live session that stops"
+                 " heartbeating inside its 300 s TTL, which a loaded box does, so this says"
+                 " nothing about the process")
+            )
+        elif status == 200:
+            beat = body.get("last_seen")
+            beat = beat / 1000 if isinstance(beat, (int, float)) and beat else None
+            heartbeat = beat
+            fresh = beat is not None and now - beat <= write_grace
+            registry_state = "live" if fresh else "stale"
+            sources.append(
+                ("registry", fresh,
+                 "Envoy's registry holds this session and heard from it"
+                 f" {human(now - beat)} ago (GET /v1/registry/<holder> answered 200); the"
+                 " /v1/sessions list this run read did not hold it"
+                 if fresh else
+                 "Envoy's registry holds this session (GET /v1/registry/<holder> answered 200)"
+                 f" but its last heartbeat was {human(now - beat) if beat else 'never recorded'},"
+                 " which is not a sighting")
+            )
+        else:
+            registry_state = "unreadable"
+            sources.append(
+                ("registry", False,
+                 f"Envoy's registry could not be read: GET /v1/registry/<holder> answered"
+                 f" {status} {body.get('error') or ''}".strip())
+            )
+
+    transcript = transcript_of(holder)
+    last_write = None
+    if transcript:
+        try:
+            last_write = transcript.stat().st_mtime
+        except OSError:
+            last_write = None
+    if last_write and now - last_write <= write_grace:
+        sources.append(
+            ("transcript", True,
+             f"its transcript was written {human(now - last_write)} ago, inside the"
+             f" {int(write_grace)} s window: something is still writing this session")
+        )
+    elif last_write:
+        sources.append(
+            ("transcript", False,
+             f"its transcript was last written {human(now - last_write)} ago ({iso(last_write)}),"
+             f" outside the {int(write_grace)} s window -- which a session waiting on a model or"
+             " a long tool call also looks like")
+        )
+    else:
+        sources.append(
+            ("transcript", False,
+             f"{CANNOT_SEE_HOLDER} in any transcript under {SESSION_ROOT}, by file name or header")
+        )
+
+    openers: list[int] = []
+    if not any(seen for _, seen, _ in sources):
+        if transcript:
+            openers = transcript_holders(transcript)
+            sources.append(
+                ("openers", bool(openers),
+                 f"its transcript is open in pid(s) {', '.join(str(p) for p in openers)}"
+                 if openers
+                 else "no process THIS USER CAN READ holds its transcript open, whatever the"
+                      " process is called -- a lane inside an agent box has a uid-shifted"
+                      " /proc and is invisible here"
+                 )
+            )
+        else:
+            # Said out loud rather than left out: three rows and four sources would read as a
+            # source that answered nothing, when in fact there was no file to look at.
+            sources.append(
+                ("openers", False,
+                 "not looked at: there is no transcript to find openers of")
+            )
+
+    found = next((sentence for _, seen, sentence in sources if seen), "")
+    return {
+        "alive": bool(found),
+        "found": found,
+        "pid": pid or (openers[0] if openers else None),
+        "sources": sources,
+        "registry": registry_state,
+        "heartbeat": heartbeat,
+        "transcript": str(transcript or ""),
+        "last_write": last_write,
+        "verdict": found or CANNOT_SEE_HOLDER,
+    }
+
+
+def guard_verdict(text: str) -> str:
+    """Refuse to send a message that claims a holder is dead.
+
+    Nothing in this file establishes that, so a message that says it is a defect, not a finding.
+    Cheap, and it is the one rule the 2026-10-29 incident turned on.
+    """
+    if HOLDER_DEAD in text:
+        raise RuntimeError(
+            f"refusing to send a message that claims {HOLDER_DEAD!r}: this watch cannot"
+            " establish that"
+        )
+    return text
 
 
 def handover_files(session_id: str, directory: str) -> list[str]:
@@ -394,70 +779,82 @@ def recipients(role: str, record: dict, sessions: list[dict], holder: str) -> tu
         )
     else:
         notes.append(
-            "Envoy keeps no record of who recently messaged this role, and the dead session "
+            "Envoy keeps no record of who recently messaged this role, and the unseen session "
             "shared no team topic, so its peers could not be named: only the sessions above were told."
         )
     return targets + peers[:6], sorted(team_bases), notes
 
 
 def alert_text(role: str, incident: dict, holder: str, now: float, kind: str) -> str:
-    """The alert for one incident. Every value it names was fixed when the incident opened."""
+    """The alert for one incident. Every value it names was fixed when the incident opened.
+
+    Two rules this text exists to keep. It establishes that the watch cannot see the holder, and
+    says so in those words; it never says the holder is dead, which no check here can show. And
+    it names no call that changes anything: not `omp --resume <id>` in a new pane, which puts a
+    second process on a transcript the first may still hold (INFRA-681), and not the role lookup
+    or the session delete, each of which acts on a session that may be alive. What it asks for
+    instead is what caught the 2026-10-29 false alert in two minutes: look at the pane, and ask
+    the session.
+    """
     record = incident
-    dead_for = human(now - (record.get("opened_at") or now))
-    last_seen = record.get("last_seen_alive")
+    unseen_for = human(now - (record.get("opened_at") or now))
     transcript = record.get("transcript") or "(no transcript file found)"
     files = record.get("handover") or []
     handover = (
         "brief it from " + ", ".join(files)
         if files
-        else "no handover file found: read the tail of its transcript instead"
+        else "no handover file found: brief it from the tail of its transcript"
     )
-    registration = record.get("registration") or "unknown"
-    pid = record.get("last_proc_pid")
-    checked = (
-        f"pid {pid}, the process that held it, is gone"
-        if pid
-        else "no pid holds it, and this watch never saw one (its state is younger than the holder)"
+    pane = record.get("pane") or ""
+    look = (
+        f"Look at pane {pane} -- this watch last saw this session running there."
+        if pane
+        else "Find its pane: `tmux list-panes -a -F '#{pane_id} #{pane_title} #{pane_current_path}'`"
+        f" and look for its title or its directory, {record.get('dir') or '(no dir recorded)'}."
     )
-    seen = (
-        f" Last seen alive: {iso(last_seen)} ({human(now - last_seen)} ago) -- the modification"
-        " time of its session transcript, read once when the incident opened."
-        if last_seen
-        else " No last-seen time recorded: its session transcript could not be read."
-    )
-    process = (
-        f"Process (this is the test, not the registry): {checked}; no omp process on this machine"
-        f" has that session on its command line or holds its transcript open.{seen}"
-    )
-    listener = record.get("listener") or "$ENVOY"
     lines = [
-        f"ENVOY ROLE DEAD HOLDER ({kind}): role {role} has pointed at a dead holder for {dead_for},"
-        f" first detected at {iso(record.get('opened_at'))}.",
-        f"Holder: {holder} \"{record.get('title') or '-'}\" in {record.get('dir') or '-'} on {record.get('host') or '-'}.",
-        process,
-        f"Envoy (context only): {registration}. Its in-session subagent lanes are gone, and a message to"
-        f" notifications.role.{role} reaches nobody.",
-        f"Do: read the tail of {transcript}, restart with `omp --resume {holder}` in a new tmux pane"
-        f" in window agents:3, {handover}.",
-        f"Clear the stale claim if the restart does not: `curl -X DELETE {listener}/v1/sessions/{holder}`"
-        f" then `curl {listener}/v1/roles/{role}` (that lookup releases a lapsed claim and answers"
-        " claim_released); the restarted session re-takes it with envoy_role_set soft=true."
-        " Envoy has no route that deletes a role claim directly.",
+        f"ENVOY ROLE HOLDER UNSEEN ({kind}): nothing this watch can read has seen the holder of"
+        f" role {role} for {unseen_for}, since {iso(record.get('opened_at'))}.",
+        f"Holder: {holder} \"{record.get('title') or '-'}\" in {record.get('dir') or '-'} on"
+        f" {record.get('host') or '-'}.",
+        f"ESTABLISHED: {CANNOT_SEE_HOLDER}. NOT established: that the holder has stopped. No check"
+        " this watch makes can show that, so treat every line below as a search, not a verdict.",
+        "What each source answered when the incident opened:",
+    ]
+    lines += [f"  - {name}: {sentence}" for name, _, sentence in record.get("sources") or []]
+    lines.append(
+        f"While this holds, a message to notifications.role.{role} may reach nobody, and the"
+        " claim may still be registered to this holder. This watch does not read the claim, and"
+        " nor should you while the lane may be alive: GET /v1/roles/<role> releases a lapsed"
+        " holder's claim as it answers (checked against the deployed listener on"
+        " 2026-10-29). Steps 1 and 2 below settle the same question without touching anything."
+    )
+    lines += [
+        "Do, in this order, and stop as soon as one answers:",
+        f"  1. {look}",
+        "  2. Ask the session. Type a question into that pane, or `envoy send"
+        f" {holder} \"are you alive?\"`. A session that answers is alive and this alert is wrong:"
+        " say so on the incident and nothing else needs doing. That is how the 2026-10-29"
+        " 09:20:30Z false alert on bet64-eta-arity was caught, two minutes in.",
+        f"  3. Only once a person has looked and found no live lane: read the tail of {transcript},"
+        f" and restart the lane IN ITS OWN PANE, never a new one -- two omp processes on one"
+        f" transcript is the INFRA-681 double loop. {handover}.",
+        f"  4. {RELEASE_CALL.format(role=role, holder=holder)}",
     ]
     lines += record.get("notes") or []
     lines.append(
         "From envoy-role-holder-watch (~/.dotfiles/scripts/envoy-role-holder-watch) on "
         f"{socket.gethostname()}, a systemd --user timer every 30 s."
     )
-    return "\n".join(lines)
+    return guard_verdict("\n".join(lines))
 
 
 def clear_text(role: str, incident: dict, holder: str, cause: str, now: float) -> str:
     opened = incident.get("opened_at") or now
-    return (
-        f"ENVOY ROLE DEAD HOLDER CLEARED: role {role} has a live holder again. "
+    return guard_verdict(
+        f"ENVOY ROLE HOLDER UNSEEN, CLEARED: role {role} has a holder this watch can see again. "
         f"What cleared it: {cause}. "
-        f"The dead holder was {holder}; the incident opened at {iso(opened)}, cleared at "
+        f"The unseen holder was {holder}; the incident opened at {iso(opened)}, cleared at "
         f"{iso(now)}, and lasted {human(now - opened)}. "
         "No action is needed. From envoy-role-holder-watch on " + socket.gethostname() + "."
     )
@@ -607,6 +1004,38 @@ def resurrect_command(pane: dict, text: str, limit: int = 60) -> tuple[str, str]
     return None
 
 
+def resume_target(command: str) -> tuple[str | None, str | None]:
+    """The session and transcript an `omp … --resume <value>` command actually resumes.
+
+    `--resume` takes an id OR a path, and a path is where the 2026-10-29 blind spot lives a
+    second time: `omp --resume .../<stamp>_<parent id>/ArityLane.jsonl` carries the PARENT's
+    uuid in its directory name and none of its own, so taking the last uuid anywhere in the
+    command names a different, possibly live session. The pane alert then checks the wrong
+    transcript for holders, finds none, and tells a reader to start a second omp on a lane that
+    is running. Read the path's header instead; fall back to a bare uuid argument.
+    """
+    words = command.split()
+    value = ""
+    for index, word in enumerate(words):
+        if word == "--resume" and index + 1 < len(words):
+            value = words[index + 1]
+            break
+        if word.startswith("--resume="):
+            value = word.split("=", 1)[1]
+            break
+    value = value.strip("'\"")
+    if not value:
+        return None, None
+    if UUID_RE.fullmatch(value):
+        return value, None
+    # Anything else is a path. Its header is the ONLY thing that names its session: the uuids
+    # in the path itself are its parent's and its grandparent's, and naming one of those is how
+    # the pane alert ends up checking a live lane's sibling for holders. A header this watch
+    # cannot read leaves the session unresolved, which the alert says out loud, rather than
+    # guessed from the path.
+    return session_id_in_header(value), value
+
+
 def pane_alert_text(incident: dict, now: float) -> str:
     where = incident["where"]
     session = incident.get("session")
@@ -625,8 +1054,9 @@ def pane_alert_text(incident: dict, now: float) -> str:
         f"LAST TRANSCRIPT WRITE: {iso(last_write)}"
         + (f" ({human(now - last_write)} before this alert)." if last_write
            else " -- no transcript resolved, so there is no last write to compare.")
-        + " A write at the moment the lane was wound down means a planned stop; one that stops"
-        " mid-work means it died."
+        + " A write at the moment the lane was wound down reads as a planned stop. One that"
+        " stops mid-work does NOT establish that it died -- a session can stop writing while it"
+        " waits on a model or a long tool call, and this watch cannot tell the two apart."
     )
     if session:
         lines.append(f"Last session: {session} ({incident['session_source']}).")
@@ -640,17 +1070,30 @@ def pane_alert_text(incident: dict, now: float) -> str:
         )
     files = incident.get("handover") or []
     brief = "brief it from " + ", ".join(files) if files else "no handover file found: brief it from the tail of its transcript"
+    lines.append(
+        f"ESTABLISHED: this pane is at a shell. NOT established: that its session has stopped --"
+        " the session may be running in another pane, in a box, or under another process."
+    )
     if incident.get("restart"):
+        target = incident.get("transcript") or ""
+        check = (
+            f"check first that no process holds its transcript"
+            f" (`ls -l /proc/*/fd 2>/dev/null | grep -F {shlex.quote(target)}`)"
+            if target
+            else "this watch resolved no transcript for it, so there is nothing to check for"
+            " holders: find the lane before you start a second one"
+        )
         lines.append(
-            f"Do: `tmux send-keys -t {incident['pane_id']} {shlex.quote(incident['restart'])} Enter`"
-            f" (that is `{incident['restart']}` typed in that pane), then {brief}."
+            f"Do: {check}, and only then restart it IN THAT PANE, never a new one:"
+            f" `tmux send-keys -t {incident['pane_id']} {shlex.quote(incident['restart'])} Enter`."
+            f" Then {brief}."
         )
         lines.append(
             "Automatic restart: NOT RUN. omp does not persist `/pause` state after its process"
             " exits, so this watch cannot safely tell a failed session from a deliberately paused one."
         )
     else:
-        lines.append(f"Do: start the lane again in that pane, and {brief}.")
+        lines.append(f"Do: start the lane again in that pane, never a new one, and {brief}.")
     lines += incident.get("notes") or []
     told = incident.get("told_why") or []
     if told:
@@ -659,7 +1102,7 @@ def pane_alert_text(incident: dict, now: float) -> str:
         "One alert per pane per incident, one clear when omp runs there again. From"
         f" envoy-role-holder-watch (~/.dotfiles/scripts/envoy-role-holder-watch) on {socket.gethostname()}."
     )
-    return "\n".join(lines)
+    return guard_verdict("\n".join(lines))
 
 
 def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -685,6 +1128,19 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         return 0, 0, 0, 0
     memory: dict = state.data.setdefault("panes", {})
     incidents: dict = state.data.setdefault("pane_incidents", {})
+    if not panes and (memory or incidents):
+        # An empty pane list is the other absence that is not evidence. `tmux list-panes`
+        # answers "no server running" both when the server really went away and when this
+        # process cannot reach its socket -- a wrong TMUX_TMPDIR, a mise/system tmux version
+        # mismatch. Clearing on it would send "the pane no longer exists" for every open
+        # incident and forget every pane this watch has learnt, on a run that read nothing.
+        # A run that saw panes before and sees none now holds instead, and says so.
+        log(
+            f"panes: no pane at all, but this watch remembers {len(memory)} and holds"
+            f" {len(incidents)} open incident(s); holding rather than clearing on an empty read"
+            f" (TMUX_TMPDIR={os.environ.get('TMUX_TMPDIR', '(unset)')})"
+        )
+        return 0, 0, 0, 0
     children, info = process_table()
     pid_session = {pid: session for session, pid in held.items()}
     seen_keys = set()
@@ -695,7 +1151,7 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         if incident.get("alerted_at") and not incident.get("cleared_at"):
             incident["cleared_at"] = now
             state.commit(options)
-            text = (
+            text = guard_verdict(
                 f"AGENT PANE AT SHELL CLEARED: tmux pane {incident['pane_id']} ({incident['where']})."
                 f" What cleared it: {cause}. The incident opened at {iso(incident['opened_at'])} and"
                 f" lasted {human(now - incident['opened_at'])}. No action is needed. From"
@@ -759,15 +1215,20 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
                     saved = resurrect_command(pane, text)
                     if saved:
                         restart = saved[0]
-                        ids = UUID_RE.findall(saved[0])
-                        session = ids[-1] if ids else saved[0].split("--resume", 1)[1].split()[0]
-                        source = f"the resume command tmux-resurrect saved for {where} in {saved[1]}"
-            if session and session in held:
-                log(f"pane {pane['pane_id']} {where}: at a shell, but its session {session} runs in pid {held[session]} elsewhere; not an incident")
-                incidents.pop(key, None)
-                continue
+                        session, transcript = resume_target(saved[0])
+                        source = (
+                            f"the resume command tmux-resurrect saved for {where} in {saved[1]}"
+                            + ("" if session else
+                               " -- which names a path whose header this watch could not read,"
+                               " so the session is NOT resolved")
+                        )
             incident = incidents.setdefault(key, {"opened_at": now})
             transcript = transcript or (str(transcript_of(session) or "") if session and UUID_RE.fullmatch(session) else "")
+            if transcript and not os.path.exists(transcript):
+                # A path a resume command named that is not there is not a transcript; keeping
+                # it would put a `grep -F <path>` in the alert that can never match and reads
+                # to a person as "nothing holds it".
+                transcript = ""
             incident.update({
                 "pane_id": pane["pane_id"], "where": where, "window_name": pane["window_name"],
                 "title": pane["pane_title"], "cwd": pane["pane_current_path"], "shell": comm,
@@ -779,6 +1240,22 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
                 incident["last_write"] = os.path.getmtime(transcript) if transcript else None
             except OSError:
                 incident["last_write"] = None
+        # EVERY period, not only the one that opened the incident. The pane being at a shell is
+        # a fact about the pane; whether its session is running somewhere else is a fact about
+        # the session, and that one can change between the open and the 180 s alert. Checking it
+        # once meant an alert could name a session that was live at the moment it was sent, and
+        # hand a reader the send-keys that starts a second omp on its transcript -- the
+        # INFRA-681 double loop the same alert warns about.
+        session = incident.get("session")
+        if session and session in held:
+            log(
+                f"pane {pane['pane_id']} {where}: at a shell, but its session {session} runs in"
+                f" pid {held[session]} elsewhere; not an incident"
+            )
+            clear(key, incident, f"its session {session} runs in pid {held[session]} elsewhere")
+            incidents.pop(key, None)
+            state.commit(options)
+            continue
         open_for = now - incident["opened_at"]
         if open_for < options.pane_grace:
             log(f"pane {pane['pane_id']} {where}: at a shell for {int(open_for)} s (< {int(options.pane_grace)} s grace), holding")
@@ -847,22 +1324,35 @@ def run_once(options: argparse.Namespace) -> int:
     except RuntimeError as error:
         log(f"envoy unreachable: {error}")
         return 2
-    live_ids = {session.get("session_id") for session in sessions}
+    live = {
+        session["session_id"]: session for session in sessions if session.get("session_id")
+    }
     local = [
         session
         for session in sessions
         if (session.get("host") or session.get("machine_id")) == host and session.get("roles")
     ]
     held = omp_sessions_by_pid()
+    # Where this watch last saw each session running, for the alert's "look at the pane" step.
+    pane_of: dict[str, str] = {}
+    for pane_key, remembered in (state.data.get("panes") or {}).items():
+        if isinstance(remembered, dict) and remembered.get("session"):
+            pane_of[remembered["session"]] = (
+                f"{pane_key.rsplit(':', 1)[-1]} ({remembered.get('where') or '?'},"
+                f" {remembered.get('cwd') or '?'})"
+            )
 
     # Learn the roles this machine holds, and keep what an earlier run learnt: a holder whose
     # session registration has already aged out is exactly the case this watch must still see.
     for session in local:
         for role in session.get("roles") or []:
             record = roles_state.setdefault(role, {})
-            if record.get("holder") != session["session_id"]:
+            previous = record.get("holder")
+            if previous != session["session_id"]:
                 record.clear()
                 record["holder"] = session["session_id"]
+                # The old holder's incident, if any, is over: the role has moved.
+                incidents.pop(f"{role}|{previous}", None)
             record.update(
                 {
                     "dir": session.get("dir") or "",
@@ -880,101 +1370,76 @@ def run_once(options: argparse.Namespace) -> int:
             continue
         key = f"{role}|{holder}"
         incident = incidents.get(key)
-        pid = held.get(holder)
-        envoy_live = holder in live_ids
-        # The claim lookup is only needed for a holder with no process: a role whose holder is
-        # running is never an incident, whatever the claim says, and one GET per role per 30 s
-        # would be the run's whole cost.
-        claim: dict = {}
-        status = None
-        registered = True
-        claim_holder = holder
-        if pid is None:
-            claim = envoy.role(role)
-            claim_holder = claim.get("holder") or ""
-            status = claim.get("_status")
-            registered = bool(claim_holder) or status == 200
-            envoy_live = envoy_live and status == 200
+        evidence = holder_evidence(envoy, holder, held, live, options.write_grace, started)
+        pid = evidence["pid"]
 
-        # The holder's PROCESS is the only liveness test. Envoy's registry is not: under load it
-        # drops sessions that are running (envoy_sessions omits them, envoy_send answers "no live
-        # session"), which the Rocq speed lane recorded on 2026-10-25 15:10-15:16Z. A registry
-        # answer alone therefore never alerts and never asks anyone to restart a session.
-        if pid and not envoy_live:
+        # A role whose holder another live session has taken is not this holder's incident.
+        taken_by = next(
+            (
+                session["session_id"]
+                for session in sessions
+                if session.get("session_id") != holder and role in (session.get("roles") or [])
+            ),
+            None,
+        )
+
+        # Disagreement between the process and the registry is a registry fault, never an alert:
+        # under load Envoy drops sessions that are running (envoy_sessions omits them,
+        # envoy_send answers "no live session"), which the Rocq speed lane recorded on
+        # 2026-10-25 15:10-15:16Z and agent infra measured again at load 233 on 2026-10-29.
+        if pid and evidence["registry"] != "live":
             log(
-                f"{role}: Envoy does not list holder {holder} live, but pid {pid} holds it"
-                " -- registry fault, not an incident; no alert"
+                f"{role}: {CANNOT_SEE_HOLDER} {holder} in Envoy's registry, but pid {pid} holds"
+                " it -- registry fault, not an incident; no role lookup and no alert"
             )
 
-        # Three ways an incident ends, and a reader needs a different follow-up for each.
         cause = ""
-        if pid:
-            record["last_proc_pid"] = pid
-            record["last_proc_seen"] = started
-            cause = f"pid {pid} holds the session again: the same session {holder} is running"
-        elif claim_holder and claim_holder != holder:
-            cause = f"a new holder took the role: session {claim_holder} claimed {role}"
-        elif not registered:
-            cause = (
-                f"the stale claim was released: {role} has no holder now, and no process holds"
-                f" {holder}. The lane is still down -- restart it and let it re-claim the role"
-            )
+        if evidence["alive"]:
+            if pid:
+                record["last_proc_pid"] = pid
+                record["last_proc_seen"] = started
+            cause = f"this watch can see the holder again -- {evidence['found'] or 'a source'}"
+        elif taken_by:
+            cause = f"a new holder took the role: session {taken_by} now lists {role}"
 
         if cause:
             if incident and send_clear(envoy, options, role, incident, holder, cause, started):
                 clears += 1
                 state.commit(options)
             incidents.pop(key, None)
-            if pid:
-                log(f"{role}: ok (holder {holder}, pid {pid}, envoy_live={envoy_live})")
+            if evidence["alive"]:
+                log(f"{role}: ok (holder {holder}, {evidence['found']})")
             else:
-                # Nothing of this role is left to watch here: it has no claim on this holder and
-                # no process. The next run re-learns it from /v1/sessions if it comes back.
                 log(f"{role}: forgetting {holder} ({cause})")
                 roles_state.pop(role, None)
             continue
 
         incident = incidents.setdefault(key, {})
         incident.setdefault("opened_at", started)
+        incident["sources"] = [list(source) for source in evidence["sources"]]
+        incident["verdict"] = evidence["verdict"]
         if "last_seen_alive" not in incident:
             # One deterministic value, read once when the incident opens: st_mtime of the
-            # holder's session transcript, ~/.omp/agent/sessions/**/<stamp>_<session id>.jsonl.
-            # Never the run's own clock -- two runs that open the same incident at different
-            # seconds would then disagree about when the session was last alive.
-            last_seen = None
-            transcript = transcript_of(holder)
-            if transcript:
-                try:
-                    last_seen = transcript.stat().st_mtime
-                except OSError:
-                    last_seen = None
-            incident["last_seen_alive"] = last_seen
+            # holder's transcript. Never the run's own clock -- two runs that open the same
+            # incident at different seconds would disagree about when it was last written.
+            incident["last_seen_alive"] = evidence["last_write"]
             incident["last_proc_pid"] = record.get("last_proc_pid")
             incident["last_pid_seen_at"] = record.get("last_proc_seen")
-        dead_for = started - incident["opened_at"]
-        if claim.get("reason") == "holder_lapsed":
-            released = claim.get("claim_released")
-            incident["registration"] = (
-                f"the claim had lapsed and this lookup {'released' if released else 'did not release'} it"
-                f" (Envoy's last_seen {iso((claim.get('last_seen') or 0) / 1000 or None)})"
-            )
-        elif status == 200:
-            incident["registration"] = (
-                "the role is STILL REGISTERED to that holder and Envoy still lists the session live,"
-                " so every peer's message to it looks deliverable"
-            )
-        else:
-            incident["registration"] = f"role lookup answered {status} {claim.get('error') or ''}".strip()
+        unseen_for = started - incident["opened_at"]
 
-        if dead_for < options.grace:
-            log(f"{role}: BAD for {int(dead_for)} s (< {options.grace} s grace), holding")
+        if unseen_for < options.grace:
+            log(
+                f"{role}: {CANNOT_SEE_HOLDER} {holder} for {int(unseen_for)} s"
+                f" (< {options.grace} s grace), holding"
+            )
             state.commit(options)
             continue
 
         if not incident.get("alerted_at"):
-            incident["transcript"] = str(transcript_of(holder) or "")
+            incident["transcript"] = evidence["transcript"]
             incident["handover"] = handover_files(holder, record.get("dir") or "")
             incident["listener"] = envoy.url
+            incident["pane"] = pane_of.get(holder, "")
             targets, topics, notes = recipients(role, record, sessions, holder)
             incident["notes"] = notes
             for field in ("dir", "title", "host"):
@@ -990,8 +1455,11 @@ def run_once(options: argparse.Namespace) -> int:
                     told.append(target)
                     log(f"  -> {target} ({why})")
             for topic in topics:
+                headline = text.splitlines()[0] + (
+                    f" Peers on {topic}: a message to this role may reach nobody."
+                )
                 if not options.dry_run:
-                    envoy.publish(topic, text.splitlines()[0] + f" Peers on {topic}: a message to this role reaches nobody.")
+                    envoy.publish(topic, guard_verdict(headline))
                 log(f"  -> topic {topic}")
             incident["told"] = told or incident["told"]
             alerts += 1
@@ -1002,18 +1470,28 @@ def run_once(options: argparse.Namespace) -> int:
             started - incident["alerted_at"] >= options.escalate
             and not incident.get("escalated_at")
         ):
-            text = alert_text(role, incident, holder, started, "STILL DEAD after 10 minutes")
+            text = alert_text(role, incident, holder, started, "STILL UNSEEN after 10 minutes")
             text += (
                 f"\nNobody has cleared this since the first alert at {iso(incident['alerted_at'])}."
-                " You own the restart."
+                " You own looking at the pane."
             )
             incident["escalated_at"] = started
             state.commit(options)
             if not options.dry_run:
-                envoy.send(CHIEF_OF_STAFF, text)
+                envoy.send(CHIEF_OF_STAFF, guard_verdict(text))
             log(f"{role}: ESCALATED to the chief of staff")
+        elif unseen_for > FORGET_AFTER:
+            log(
+                f"{role}: dropping {holder} from the state file after {human(unseen_for)} unseen;"
+                " it was alerted and escalated, and nothing re-reads it"
+            )
+            incidents.pop(key, None)
+            roles_state.pop(role, None)
         else:
-            log(f"{role}: BAD for {human(dead_for)}, already alerted at {iso(incident.get('alerted_at'))}")
+            log(
+                f"{role}: {CANNOT_SEE_HOLDER} {holder} for {human(unseen_for)}, already alerted"
+                f" at {iso(incident.get('alerted_at'))}"
+            )
         state.commit(options)
 
     agents, at_shell, pane_alerts, pane_clears = check_panes(
@@ -1031,7 +1509,13 @@ def run_once(options: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--grace", type=float, default=60.0, help="seconds a role must stay bad before it alerts")
+    parser.add_argument("--grace", type=float, default=60.0, help="seconds every source must stay silent before a role alerts")
+    parser.add_argument(
+        "--write-grace",
+        type=float,
+        default=DEFAULT_WRITE_GRACE,
+        help="seconds within which a write to a session's transcript counts as seeing it alive",
+    )
     parser.add_argument("--escalate", type=float, default=600.0, help="seconds after an alert before the chief of staff is told again")
     parser.add_argument(
         "--pane-grace",

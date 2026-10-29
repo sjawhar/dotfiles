@@ -8,8 +8,11 @@ Type=oneshot
 # competes with the proof lanes it watches is worse than one that answers a second later.
 Nice=15
 IOSchedulingClass=idle
-# A run that cannot finish is killed, so runs can never pile up on the 30 s period. One pass
-# costs ~0.5 s with every holder alive and ~10 s when every role needs a claim lookup.
+# A run that cannot finish is killed, so runs can never pile up on the 30 s period. Measured at
+# this Nice and IO class, 23 roles and 56 panes: 2.6-3.6 s with every holder seen, and 12 s with
+# every holder unseen -- one walk of the ~34k transcripts under ~/.omp/agent/sessions (1.2 s),
+# one /v1/sessions read, the pane check, and for each unseen holder a header pass and a scan of
+# every process's descriptors. 25 s leaves room for that worst case at twice this box's load.
 TimeoutStartSec=25
 # The pane check talks to the default tmux server. Two things a shell gives it and a systemd
 # service does not: the socket directory .bashrc sets, and the mise-managed tmux the server was
