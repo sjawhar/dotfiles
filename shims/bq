@@ -1,0 +1,38 @@
+#!/bin/bash
+# bq wrapper: put BigQuery's CLI on PATH, with the same file-logging protection the gcloud shim
+# gives gcloud. The Cloud SDK installs bq beside gcloud in its own bin directory, and that
+# directory is on nobody's PATH here, so every caller hard-coded the SDK's full path instead
+# (agent-infra's spend loaders, 2026-10-29). A command is called by name; a path is for data.
+#
+# Resolution matches shims/gcloud: the first bq past this shim's own PATH entry, else the SDK's
+# documented install location under the home gcloud itself uses. It never execs itself.
+#
+# bq shares gcloud's config directory and its per-call log files, which gcloud never prunes
+# (8,356 files in one day on sami-rocqperf, dispatch://INFRA-6), so file logging is off unless
+# the caller set it either way.
+set -u
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+real=""
+while IFS= read -r candidate; do
+	[[ "$(readlink -f "$candidate")" == "$self" ]] && continue
+	real="$candidate"
+	break
+done < <(type -ap bq)
+
+if [[ -z "$real" ]]; then
+	home="${HOME:-}"
+	[[ -n "$home" ]] || home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+	candidate="${home}/.gcloud/google-cloud-sdk/bin/bq"
+	if [[ -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
+		real="$candidate"
+	fi
+fi
+
+if [[ -z "$real" ]]; then
+	echo "bq shim: real bq binary not found on PATH or at the default SDK install location" >&2
+	exit 127
+fi
+
+export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-1}"
+exec "$real" "$@"
