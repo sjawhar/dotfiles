@@ -66,6 +66,11 @@ before handing the call to the real one.
 - **`ssh-keygen`** drops `SSH_AUTH_SOCK` for `-Y`, the operations git and jj sign and verify commits
   with: the signing key is a file, and ssh-keygen asks the agent first, so a stuck agent socket
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
+- **`bq`** puts BigQuery's CLI on PATH at all. The Cloud SDK installs it beside gcloud in the
+  SDK's own bin dir, which is on nobody's PATH here, so every caller named the SDK's full path
+  instead (agent-infra's spend loaders, 2026-10-29). It resolves like `gcloud` — the first `bq`
+  past its own PATH entry, else the SDK's install location under the home gcloud uses — and
+  turns gcloud's per-call file logging off, since bq shares that config dir and those logs.
 - `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
