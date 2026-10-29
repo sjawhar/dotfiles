@@ -20,26 +20,86 @@ the holder's registration in `envoy_sessions` with a 5-minute TTL
 (`packages/envoy/internal/store/kv.go`, `internal/session/registry.go`). Between the holder's
 death and the claim's release, the role points at nobody and nothing says so.
 
+## The second incident, 2026-10-29
+
+At 09:20:30Z this watch alerted that role `bet64-eta-arity` pointed at a dead holder, session
+`01a176d3-4178-7593-bfe8-eadd6dd54f54`. The holder was **alive**: pid 724296, up 17,353 s, pane
+`%49`, three subagents, its transcript open. At 09:22:31Z the role lost its claim and the session
+became unreachable by Envoy. The watch issued no write; the damage came from its own remedy text,
+which told the reader to run `DELETE /v1/sessions/<holder>` and then `GET /v1/roles/<role>`, and
+the reader did, two minutes later.
+
+Three defects, all fixed here:
+
+1. **The liveness test read the wrong two places.** It looked for the session id on an `omp`
+   command line or in a transcript's **file name**. `omp --resume` takes a path as well as an id,
+   and a lane that began as a subagent is resumed from a path named after the subagent
+   (`…/<stamp>_<parent id>/ArityLane.jsonl`): no id on the command line, none in the file name,
+   only in the file's own header. `transcript_of` had the same blind spot and never descended
+   into the subagent directories at all.
+2. **The message could not tell "this session is dead" from "I cannot see this session"**, and
+   reported the first. Only the second is ever establishable from here.
+3. **The remedy text was unsafe twice**: `omp --resume <id>` in a new pane puts a second process
+   on a transcript the first still holds (INFRA-681), and `GET /v1/roles/<role>` releases a
+   lapsed holder's claim as a side effect of reading it, which is what took this claim. It still
+   does: `resolveLiveRoleHolder` calls `releaseExpiredRoleClaim` on sjawhar/legion `origin/main`
+   at `d157fc868`, and the live listener answers **405** to the `POST /v1/roles/release` that
+   will replace it (both checked 2026-10-29 09:50Z). The remedy therefore names no release call
+   at all yet, and says why.
+
 ## What it checks
 
-One run, with no transcript reading in the decision and no model call:
+One run, with no model call:
 
-1. `GET /v1/sessions` — every session Envoy lists live, with its roles, host and dir. Roles whose
-   holder is on this machine go into the state file, so a holder that later drops out of the
-   registry is still watched.
-2. For a holder with **no** process, `GET /v1/roles/<role>` — the durable claim, which says
-   whether the role is still registered and, for a lapsed claim, whether that read released it.
-3. The holder's process: an `omp` process whose `/proc/<pid>/cmdline` names the session id, or
-   whose open descriptors hold `~/.omp/agent/sessions/**/<stamp>_<session id>.jsonl`. A pid is
-   never remembered between runs — pids on this box wrap within a day, so a remembered pid comes
-   back as an unrelated process.
-4. **The process is the only liveness test.** A role alerts when its claim is registered and no
-   process holds the session, for longer than the 60 s grace. Envoy's registry never raises an
-   alert on its own: under load it drops sessions that are running (Rocq speed recorded
-   `no live session` for live sessions on 2026-10-25 15:10-15:16Z). The opposite disagreement — a
-   live pid Envoy does not list — is logged as a registry fault and alerts nobody.
+1. `GET /v1/sessions` — every session Envoy lists live, with its roles, host, dir and the
+   timestamp of its last heartbeat. Roles whose holder is on this machine go into the state file,
+   so a holder that later drops out of the registry is still watched.
+2. Four sources on each holder, each of which can say *found* and none of which can say *gone*:
 
-Timing: death + 60 s grace + at most one 30 s period, so about a minute.
+   | Source | What it reads |
+   |---|---|
+   | `process` | an `omp` process naming the session on its command line, in an open transcript's **file name**, or in that transcript's **header** (`{"type":"session","id":…}`, which is the second record, not the first) |
+   | `openers` | any process **this user can read** holding the session's transcript open, matched by device and inode, so a lane under a wrapper or a renamed binary still counts and one inside an agent box (uid-shifted `/proc`) does not. Read **only** when the first three came back silent — which is also the only time it can change the answer — so a healthy role never pays its cost, and an open incident keeps paying it every period, since it is the one source that can see a lane running under a name this watch does not know, and so the one that can clear such an incident |
+   | `transcript` | how long ago the session's transcript was written. Inside `--write-grace` (120 s) something is writing it |
+   | `registry` | Envoy's own entry and heartbeat: `GET /v1/sessions`, confirmed for an absent holder with `GET /v1/registry/<id>`. Both only read |
+
+3. **It calls no role route.** `GET /v1/roles/<role>` is how Envoy releases a claim whose holder
+   has left the session bucket (`cmd/listener/role_holder.go` `resolveLiveRoleHolder` →
+   `releaseExpiredRoleClaim`), and that holder is exactly the one anyone would read this claim
+   for: the read is a write. Agent infra is making it pure and adding an explicit
+   `POST /v1/roles/release`; neither is deployed (checked 2026-10-29 09:50Z, above). Even once
+   it is pure the watch will leave it out, because its answer adds nothing to the verdict — the
+   holder of a claim is the session the watch has already failed to find — and what that costs
+   is below.
+4. **A holder is only ever UNSEEN, never dead.** A role alerts when **every** source has been
+   silent for the 60 s grace. One silent source — most often the registry, which drops live
+   sessions on a loaded box inside its 300 s TTL — is logged and never alerts, never opens an
+   incident and never asks anyone to restart anything. Every message says which of the two it
+   established, and `guard_verdict` refuses to send one that claims the holder is dead.
+
+Timing: last sighting + 60 s grace + at most one 30 s period, so about a minute.
+
+Cost of a run: every transcript is resolved through a **single** walk of the session root
+(34,272 files, 1.2 s here), not one glob per role. Measured at the unit's `Nice=15` and idle IO,
+23 roles and 56 panes: **2.6-3.6 s** with every holder seen, and **12 s** with every holder
+unseen — the degenerate case, where each one costs a header pass and a scan of every process's
+descriptors. `TimeoutStartSec` is 25 s; a run systemd kills is a watch that has stopped watching
+while its timer still looks healthy.
+
+## What not reading the claim costs
+
+Not calling `GET /v1/roles/<role>` gives up three things:
+
+- **the claim's holder**, so the watch no longer learns from Envoy that a role moved to a session
+  it cannot see. It reads that from `/v1/sessions` instead — a live session that now lists the
+  role — which covers every case except a new holder that has also lapsed out of the registry;
+- **whether the claim is still registered at all.** An alert therefore says the claim *may* still
+  point at the holder, rather than that it does;
+- **`reason=holder_lapsed` and Envoy's final `last_seen`** for a holder already out of the
+  registry, which was the one diagnostic the lookup added.
+
+None of the three changes who is alerted or when. All three become one safe read for whoever
+acts on an alert the day the lookup stops releasing the claim.
 
 ## What it does not check
 
@@ -53,6 +113,12 @@ Timing: death + 60 s grace + at most one 30 s period, so about a minute.
   hang.
 - Whether anyone acts. It alerts, repeats once as an escalation after 10 minutes, and alerts once
   more when the role is live again. It restarts nothing and kills nothing.
+- **A lane whose process this user cannot read.** Inside an agent box `/proc/<pid>/fd` is
+  uid-shifted, so neither the process source nor `openers` can see it; both answer "not found"
+  and say so in those words. That is one more reason an alert may say only that it cannot see
+  the holder.
+- **A transcript whose `{"type":"session"}` record is past its 8th line, or behind a line longer
+  than 64 KB.** `session_id_in_header` stops there.
 
 ## Agent panes left at a shell
 
@@ -82,7 +148,13 @@ The session the pane last ran is resolved in this order, and the alert says whic
    (`~/.omp/agent/sessions/<encoded cwd>/*.jsonl`) whose own title — the `title` of its first line
    — appears in the pane title, and whose session no process holds;
 3. the newest `tmux_resurrect_*.txt` save (last 60) whose line for this pane's place
-   (session, window index, pane index) under the same title holds an `omp … --resume …` command.
+   (session, window index, pane index) under the same title holds an `omp … --resume …`
+   command. The session is taken from that command's `--resume` **argument**: a uuid as itself,
+   a `.jsonl` path by reading that file's own header. Not from the last uuid anywhere in the
+   command — on 8 of this box's panes the resume argument is a path whose directory carries the
+   *parent's* uuid, so that reading named a different, live session, and the alert's own
+   "is anything holding this transcript?" check then looked at the wrong file and cleared a
+   restart that would have put a second omp on a running lane.
 
 The alert names the pane and its place, how long it has been at a shell, and the evidence (shell
 pid and its foreground group, the pane title). It then carries one named line of its own,
@@ -138,7 +210,8 @@ check then covers it however its pane ends. The repo lane is being re-dispatched
 | Input | Source |
 |---|---|
 | Live sessions, their roles, host, dir, topics | `GET $ENVOY/v1/sessions` |
-| Role claim and its release | `GET $ENVOY/v1/roles/<role>` (only for a holder with no process) |
+| Role claim | **not read** by the watch, and named in no remedy: `GET /v1/roles/<role>` releases a lapsed holder's claim as it answers; see "What not reading the claim costs" |
+| Envoy registry entry and heartbeat | `GET $ENVOY/v1/sessions`, and `GET $ENVOY/v1/registry/<id>` for a holder absent from that list (`sessionEntryHandler` reads the session bucket and answers it; it makes no release) |
 | Holder process | `/proc/*/comm`, `/proc/*/cmdline`, `/proc/*/fd` |
 | Last seen alive | `st_mtime` of the holder's `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl`, read once when the incident opens and carried unchanged through every message about it |
 | Handover files (alert text only) | absolute `.md` paths the holder's transcript names whose basename reads like a handover, plus `WAKE.md`/`HANDOVER.md`/`HANDOFF.md`/`STATE.md` in its working directory, `/mnt/nvme/sami/<lane>` and `/mnt/nvme/sami/tmp/<lane>` |
@@ -170,8 +243,8 @@ That state file is the only memory, and the service owns it:
   nothing. Two state files are what sent two "first alert" messages for one holder on
   2026-10-27 at 07:53:20Z and 07:55:18Z.
 
-A clear is sent once, and names what ended the incident: a pid holds the session again (with the
-pid), a new holder claimed the role, or the stale claim was released while the lane is still down.
+A clear is sent once, and names what ended the incident: a source can see the holder again (with
+the source and what it found), or a new live session now lists the role.
 
 ## Who hears about it
 
@@ -186,25 +259,36 @@ Agent sessions only, never a person:
   recently messaged a role, so this is the closest cheap substitute; when the dead session had no
   team topic, the alert says that the peers could not be named.
 
-Each alert names the role, the holder, the pid that is gone, when it was last seen alive, how
-long the role has pointed at a dead holder, that the claim is still registered, the restart
-command (`omp --resume <id>` in a tmux pane in window `agents:3`), the handover file to brief it
-from (or "no handover file found"), and how to clear the claim by hand:
+Each alert names the role, the holder, how long nothing has seen it, and one line per source
+saying what that source answered. Then a line that reads, in these words:
 
-```sh
-curl -X DELETE $ENVOY/v1/sessions/<holder>   # drop the dead registration
-curl $ENVOY/v1/roles/<role>                  # this lookup releases the lapsed claim
-```
+> ESTABLISHED: I cannot see this session. NOT established: that the holder has stopped.
 
-Envoy has no route that deletes a role claim directly; the replacement session takes it with
-`envoy_role_set` (`soft: true`), and the listener's own reaper clears it within ~5 minutes of the
-holder's registration expiring.
+and then the remedy, in order, stopping as soon as one answers:
+
+1. **Look at the pane** this watch last saw the session running in, or the `tmux list-panes`
+   command that finds it by title or directory.
+2. **Ask the session** — type into that pane, or `envoy send <holder> "are you alive?"`. A
+   session that answers is alive and the alert is wrong. This is how the 2026-10-29 09:20:30Z
+   false alert was caught two minutes in, and it is first because it costs nothing and cannot
+   hurt a live lane.
+3. Only once a person has looked and found no live lane: read the tail of the transcript and
+   restart the lane **in its own pane, never a new one** — two omp processes on one transcript is
+   the INFRA-681 double loop — with the handover files the alert names.
+4. Release the claim. The alert names **no call** for this today, and says why: `GET
+   /v1/roles/<role>` releases a lapsed holder's claim as it answers, and
+   `DELETE /v1/sessions/<holder>` unregisters a session that may be alive. Those two, run in
+   that order two minutes after a false alert, are what took `bet64-eta-arity`'s claim. Tell the
+   INFRA lead the role and the holder and let the claim lapse on its own. Agent infra is adding
+   an explicit `POST /v1/roles/release` that records who released it; when it is deployed, the
+   one constant `RELEASE_CALL` in the script becomes that call — its wording is already in the
+   comment above it — and nothing else in the text moves.
 
 ## Running it by hand
 
 ```sh
 scripts/envoy-role-holder-watch --dry-run --print-alert   # decide and print, send nothing
-scripts/envoy-role-holder-watch --grace 60 --escalate 600 --pane-grace 180  # the unit's defaults
+scripts/envoy-role-holder-watch --grace 60 --write-grace 120 --escalate 600 --pane-grace 180  # the unit's defaults
 ```
 
 ## Turning it off
