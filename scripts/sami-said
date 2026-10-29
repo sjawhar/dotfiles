@@ -1350,6 +1350,10 @@ def main() -> int:
     warn(f"{len(typed)} messages ({summary}) from {iso(since)} to {iso(until)}; read {stats['read']} of {stats['files']} session "
          f"files in {time.monotonic() - started:.1f}s; left out {stats['launch']} prompts never typed in a terminal, "
          f"{stats['agent']} texts agents typed and {stats['resumed']} pause toggles agents pressed")
+    if not args.dispatch:
+        warn("Dispatch answers, comments, messages and approvals were NOT read (no --dispatch), so a sentence Sami typed on "
+             "Dispatch is missing from this output, not absent from the record; re-run with --dispatch before you say he did "
+             "not say something")
     if status:
         warn("--dispatch FAILED: Dispatch was not read, so its rows are missing, not absent; exit status 1")
     return status
