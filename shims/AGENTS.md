@@ -95,7 +95,9 @@ pass-through wrapper that hands the call straight back to the shim. A shim that 
 real binary takes the first match past its own PATH entry, never the first from the top, and
 a pass-through wrapper hands the next binary the PATH tail past its own entry, so nothing
 below it can find the wrapper again. `shims/gh` still searches from the top, which is safe
-only while nothing puts a gh wrapper above it. `shims/jj` and `shims/tmux` also search from the
+only while nothing puts a gh wrapper above it. `shims/gcloud` does too, under the same
+condition, and its routing tests depend on it: they put a stub `gcloud` above this dir and
+expect the shim to hand the call to the stub. `shims/jj` and `shims/tmux` also search from the
 top, and hand the binary they find the whole PATH: jj's own `git` calls must still reach
 `shims/git`, and a tmux server started through the shim gives its PATH to every pane. The first
 jj or tmux they find is usually mise's shim, which hands the call back to the first one on PATH
