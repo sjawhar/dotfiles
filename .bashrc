@@ -119,6 +119,23 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     export UV_CACHE_DIR="${UV_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/uv}"
     export GOMODCACHE="${GOMODCACHE:-/mnt/nvme/${USER:-$(id -un)}/gomodcache}"
     export GOCACHE="${GOCACHE:-/mnt/nvme/${USER:-$(id -un)}/gocache}"
+    # Scratch too. Anything honouring TMPDIR (Go's build tree, cargo, mktemp) otherwise writes
+    # into /tmp or /var/tmp on the root disk, which every session shares: 31 GB of build trees
+    # were sitting in /var/tmp with root at 95% on 2026-10-29 (dispatch://INFRA-6). Go reads
+    # GOTMPDIR first and TMPDIR only as its fallback, so both are set. The directory is made and
+    # tested for writability before anything points at it, and a value the caller already has
+    # wins: an agent session's own per-session scratch (scripts/agent-session) and an explicitly
+    # exported TMPDIR both keep their value. Empty tmp* dirs left here are pruned daily
+    # (devbox/tmp-empty-prune.timer).
+    _nvme_tmp="/mnt/nvme/${USER:-$(id -un)}/tmp"
+    if [ -z "${TMPDIR:-}" ] && mkdir -p "$_nvme_tmp" 2>/dev/null && [ -w "$_nvme_tmp" ]; then
+        export TMPDIR="$_nvme_tmp"
+    fi
+    _nvme_gotmp="/mnt/nvme/${USER:-$(id -un)}/gotmp"
+    if [ -z "${GOTMPDIR:-}" ] && mkdir -p "$_nvme_gotmp" 2>/dev/null && [ -w "$_nvme_gotmp" ]; then
+        export GOTMPDIR="$_nvme_gotmp"
+    fi
+    unset _nvme_tmp _nvme_gotmp
 fi
 
 # YubiKey PC/SC: forward serve owns ~/.pcscd/pcscd.comm on machines with the marker dir (devbox: forward's pcsc channel to the laptop; oryx: SSH-forwarded socat bridge).
