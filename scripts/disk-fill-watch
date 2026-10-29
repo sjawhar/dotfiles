@@ -43,8 +43,9 @@ agents' scratch there was the repeated root cause on 2026-10-26. Unlike that scr
 and under a bounded walk, because /tmp holds ~20k entries and walking it on every run would
 itself be the load.
 
-Alerts go over Envoy to agent sessions only, never to a person: the INFRA lead, and the chief
-of staff when a crossing is still open and still descending 30 minutes after its alert. This
+Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
+falling back to the INFRA lead's session when nobody holds that role, and the chief of staff
+when a crossing is still open and still descending 30 minutes after its alert. This
 watch only detects. It deletes nothing and kills nothing.
 """
 
@@ -66,6 +67,10 @@ from pathlib import Path
 # The two sessions that own this detector's findings, as in omp-memory-watch.
 CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
 INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
+
+# The box-health lead owns the box disks (dispatch://INFRA-716) and holds this Envoy role, so a
+# crossing goes to the role, not to a session id that moves when the lane changes hands.
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
 
 DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 GIB = 1073741824
@@ -213,6 +218,16 @@ class Envoy:
         )
         if status != 200:
             log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+    def publish(self, topic: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/publish",
+            {"topic": topic, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  publish to {topic} failed: {status} {body}")
         return status == 200
 
 
@@ -787,6 +802,18 @@ def clear_text(now: dict, incident: dict, when: float) -> str:
     )
 
 
+def tell_box_health(envoy: Envoy, text: str) -> str:
+    """Tell the box-health lead, and say who heard it.
+
+    The role is the address while somebody holds it; an unheld role answers non-200, and then
+    the INFRA lead's session hears it instead.
+    """
+    if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        return BOX_HEALTH_ROLE_TOPIC
+    envoy.send(INFRA_LEAD, text)
+    return INFRA_LEAD
+
+
 def run_once(options: argparse.Namespace) -> int:
     started = time.time()
     envoy = Envoy(timeout=options.http_timeout)
@@ -830,8 +857,12 @@ def run_once(options: argparse.Namespace) -> int:
                     text = clear_text(now, incident, started)
                     state.data["incidents"].pop(mount, None)
                     state.commit(options)
-                    for target in incident.get("told") or [INFRA_LEAD]:
-                        if not options.dry_run:
+                    for target in incident.get("told") or [BOX_HEALTH_ROLE_TOPIC]:
+                        if options.dry_run:
+                            continue
+                        if target == BOX_HEALTH_ROLE_TOPIC:
+                            tell_box_health(envoy, text)
+                        else:
                             envoy.send(target, text)
                     if options.print_alert:
                         print(text)
@@ -881,14 +912,14 @@ def run_once(options: argparse.Namespace) -> int:
         if first:
             incident["alerted_at"] = started
             incident["alert_free"] = now["free"]
-            incident["told"] = [INFRA_LEAD]
+            incident["told"] = [BOX_HEALTH_ROLE_TOPIC]
             kind = "first alert"
-            targets = [(INFRA_LEAD, "INFRA lead")]
+            targets = []
         else:
             incident["escalated_at"] = started
             # The clear goes to everyone who heard a crossing, the chief included: a lead told
             # that a disk was landing must be told that it is not.
-            incident["told"] = sorted(set((incident.get("told") or [INFRA_LEAD]) + [CHIEF_OF_STAFF]))
+            incident["told"] = sorted(set((incident.get("told") or [BOX_HEALTH_ROLE_TOPIC]) + [CHIEF_OF_STAFF]))
             kind = f"STILL DESCENDING after {human_time(started - incident['alerted_at'])}"
             targets = [(CHIEF_OF_STAFF, "chief of staff: still descending")]
         text = alert_text(now, incident, writers, tmp_lines, kind, started)
@@ -899,6 +930,13 @@ def run_once(options: argparse.Namespace) -> int:
             )
         # On disk before a single message leaves: a resent first alert is worse than a late one.
         state.commit(options)
+        if first and not options.dry_run:
+            # Whoever heard the crossing must hear the clear, so the fallback is recorded.
+            heard = tell_box_health(envoy, text)
+            if heard != BOX_HEALTH_ROLE_TOPIC:
+                incident["told"] = [heard]
+                state.commit(options)
+            log(f"  -> {heard} (box-health lead)")
         for target, why in targets:
             if options.dry_run or envoy.send(target, text):
                 log(f"  -> {target} ({why})")
@@ -934,7 +972,7 @@ def run_once(options: argparse.Namespace) -> int:
                 " From disk-fill-watch; said once per entry."
             )
             if not options.dry_run:
-                envoy.send(INFRA_LEAD, message)
+                tell_box_health(envoy, message)
             log(f"/tmp: named {path} ({size(bytes_there)}), owner {owner}")
             if options.print_alert:
                 print(message)
