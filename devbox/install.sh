@@ -53,4 +53,21 @@ arm_user_timer devbox session-scratch-reap
 # (devbox/nvme-cache-cap.md).
 arm_user_timer devbox nvme-cache-cap
 
+# Scratch on the big disk for the box's systemd --user services, which read environment.d and
+# not .bashrc (devbox/nvme-tmp.conf). Installed only where /mnt/nvme/<user> exists and is
+# writable, and only once both directories are there, since environment.d has no conditionals.
+# A running unit keeps the environment it started with; each picks this up at its next start.
+nvme_home="/mnt/nvme/$(id -un)"
+if [ -d "$nvme_home" ] && mkdir -p "$nvme_home/tmp" "$nvme_home/gotmp" 2>/dev/null \
+    && [ -w "$nvme_home/tmp" ] && [ -w "$nvme_home/gotmp" ]; then
+    mkdir -p ~/.config/environment.d
+    ensure_link "${DEVBOX_DIR}/nvme-tmp.conf" ~/.config/environment.d/nvme-tmp.conf
+    if command -v systemctl &>/dev/null && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        systemctl --user set-environment TMPDIR="$nvme_home/tmp" GOTMPDIR="$nvme_home/gotmp" \
+            || echo "WARNING: no reachable systemd --user manager; TMPDIR applies at next login" >&2
+    fi
+else
+    echo "No writable $nvme_home: leaving the user manager's TMPDIR alone"
+fi
+
 echo "--- Devbox setup complete ---"
