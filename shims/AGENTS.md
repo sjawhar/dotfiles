@@ -71,6 +71,20 @@ before handing the call to the real one.
   instead (agent-infra's spend loaders, 2026-10-29). It takes the first `bq` past its own PATH
   entry (`shims/ssh-keygen`'s lookup), else the SDK's install location under the home gcloud uses, and
   turns gcloud's per-call file logging off, since bq shares that config dir and those logs.
+- **`pulumi`** names a state backend only when the CLI would otherwise find none. Pulumi CLI
+  3.268.0 that reaches no backend at all, and recognizes a coding agent around it (it reads
+  `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_*`, `GEMINI_CLI`, `OPENCODE`, `AI_AGENT` and others),
+  creates an ephemeral Pulumi Cloud account of its own, writes the claim in
+  `/tmp/.pulumi/agent-claim.json` and prints a claim URL; one was created on this box on
+  2026-10-28 by an agent that only ran `pulumi package add`. `PULUMI_BACKEND_URL` outranks a
+  `pulumi login` and a project file's own `backend.url` rather than falling back to either, and
+  this box hosts programs on more than one real backend, so the shim sets it (to `file://~`)
+  only with all four true: `PULUMI_BACKEND_URL` unset or empty, `PULUMI_ACCESS_TOKEN` unset or
+  empty, no non-empty `current` in the credentials file a `pulumi login` writes, and no
+  `backend.url` in the `Pulumi.yaml`/`Pulumi.yml` the command would read (searched upward from
+  the working directory, which `--cwd`/`-C` moves). It sets `PULUMI_SKIP_UPDATE_CHECK=true`
+  either way, and is otherwise transparent: same argv, stdin, stdout and exit code, and no output
+  of its own. It takes the first `pulumi` past its own PATH entry (`shims/ssh-keygen`'s lookup).
 - `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
