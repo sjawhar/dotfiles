@@ -481,3 +481,25 @@ if [ -d /var/run/secrets/kubernetes.io/serviceaccount ]; then
         disown 2>/dev/null || true
     fi
 fi
+
+# ------------------------------------------------------------------------------
+# PATH: shims first, after every other prompt hook
+# ------------------------------------------------------------------------------
+
+# `starship init bash` ASSIGNS PROMPT_COMMAND rather than appending to it, so it
+# discards both mise's hook and the _ensure_dotfiles_shims_first registered above
+# it. Measured 2026-10-29: `PROMPT_COMMAND=_mine; eval "$(starship init bash)"`
+# leaves PROMPT_COMMAND="starship_precmd", and a live agent pane read
+# "starship_precmd;__zoxide_hook" with neither hook in it. The symptom is a
+# session started from such a pane whose PATH finds mise's omp install dir before
+# ~/.dotfiles/shims: it then runs omp with no config overlay (no model roles, so
+# AskGate refuses its Dispatch writes) and no GIT_CONFIG_* (so a push goes as the
+# user instead of the repo's GitHub App). Two agent sessions were in that state on
+# 2026-10-29. Re-register the hook here, last, so nothing after it can drop it.
+if [[ $- == *i* ]] && declare -F _ensure_dotfiles_shims_first >/dev/null; then
+    case "${PROMPT_COMMAND:-}" in
+    *_ensure_dotfiles_shims_first*) ;;
+    *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}_ensure_dotfiles_shims_first" ;;
+    esac
+    _ensure_dotfiles_shims_first
+fi
