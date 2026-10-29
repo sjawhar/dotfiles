@@ -7,7 +7,7 @@ description: |
   Opus on failure or quota, so it is not a cross-family reviewer when the Codex quota is spent; for
   a review that must be cross-family, use astra, which fails instead of falling back.
 model:
-  - "openai-codex/gpt-5.5:high"
+  - "openai-codex/gpt-5.6-terra:high"
 tools: read, glob, grep, bash, todo
 color: cyan
 ---
