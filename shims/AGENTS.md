@@ -68,8 +68,8 @@ before handing the call to the real one.
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
 - **`bq`** puts BigQuery's CLI on PATH at all. The Cloud SDK installs it beside gcloud in the
   SDK's own bin dir, which is on nobody's PATH here, so every caller named the SDK's full path
-  instead (agent-infra's spend loaders, 2026-10-29). It resolves like `gcloud` — the first `bq`
-  past its own PATH entry, else the SDK's install location under the home gcloud uses — and
+  instead (agent-infra's spend loaders, 2026-10-29). It takes the first `bq` past its own PATH
+  entry (`shims/ssh-keygen`'s lookup), else the SDK's install location under the home gcloud uses, and
   turns gcloud's per-call file logging off, since bq shares that config dir and those logs.
 - `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
