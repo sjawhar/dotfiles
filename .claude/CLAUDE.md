@@ -14,7 +14,7 @@ Get my approval in this session before any destructive or high-blast-radius acti
 
 - overwriting credentials or auth state
 - deleting branches, workspaces, files or data that a human created, or that you can't trace
-- force-pushing or rewriting git history
+- force-pushing a branch someone else works on, or rewriting history that is already merged or published. Your own unmerged branch is yours: rewrite and force-push it without asking (Sami, 2026-10-29, dispatch://INFRA-6/ask/6ae8e7d5-fcc6-44f4-ba49-6f1c041ca858)
 - disabling a plugin or safety system to get unstuck
 - changing shared config in a way that can break other work, or an upgrade that forces running sessions to restart
 - killing broadly (`pkill omp`, `tmux kill-server`)
