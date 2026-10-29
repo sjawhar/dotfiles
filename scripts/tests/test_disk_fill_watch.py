@@ -271,14 +271,26 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             self.envoy.published[0][1],
         )
 
-    def test_one_minute_spike_resets_before_a_second_confirmation(self) -> None:
+    def test_today_one_minute_swings_never_reach_three_confirmations(self) -> None:
         options = self.options()
         options.rate_window = 60.0
         options.min_span = 60.0
         free_before = int(144.8 * WATCH.GIB)
+        gain = int(130 * WATCH.GB / 3600 * 60)
         spike = int(508 * WATCH.GB / 3600 * 60)
         recovery = int(43.6 * WATCH.GB / 3600 * 60)
         record = {}
+
+        gaining = WATCH.verdict(
+            MOUNT,
+            free_before,
+            1000 * WATCH.GIB,
+            [[-60.0, free_before - gain], [0.0, free_before]],
+            options,
+        )
+        self.assertFalse(gaining["rate_candidate"])
+        self.assertEqual(0, WATCH.update_horizon_confirmations(record, gaining, 0.0, options))
+
         alarming = WATCH.verdict(
             MOUNT,
             free_before - spike,
