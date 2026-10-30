@@ -3,8 +3,10 @@ name: astra
 description: |
   General-purpose subagent on OpenAI GPT-6 Astra. Use when a task benefits from a
   non-Anthropic model: independent verification, cross-model second opinions, adversarial
-  review of Claude-authored work, or bounded implementation and debugging. Full tool access;
-  finishes the task it is handed and reports with evidence.
+  review of Claude-authored work, or bounded implementation and debugging. It never answers
+  from Anthropic: when the Codex window is spent it degrades to Gemini on Vertex, so a
+  cross-family verdict stays cross-family. Full tool access; finishes the task it is handed
+  and reports with evidence.
 model:
   - "openai-codex/gpt-6-astra:xhigh"
 color: green
