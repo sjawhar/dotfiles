@@ -53,6 +53,11 @@ arm_user_timer devbox gocache-cap
 # removed once no live process holds it (devbox/session-scratch-reap.md).
 arm_user_timer devbox session-scratch-reap
 
+# The /tmp/<name> paths tools and agents write by hand, which no TMPDIR redirect reaches and
+# which systemd-tmpfiles' 30d rule never catches, removed once no process holds them and
+# nothing in them has been written for 48 h (devbox/tmp-stale-reap.md).
+arm_user_timer devbox tmp-stale-reap
+
 # The shared uv, cargo and Go module caches on /mnt/nvme/<user>, each held under its own cap
 # (devbox/nvme-cache-cap.md).
 arm_user_timer devbox nvme-cache-cap

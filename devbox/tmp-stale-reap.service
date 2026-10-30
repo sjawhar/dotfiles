@@ -1,0 +1,20 @@
+[Unit]
+Description=Remove the stale top-level entries of the root-resident /tmp
+# /tmp is on the root filesystem and held 26,457 MB when root reached 0 bytes free on
+# 2026-10-30 (dispatch://INFRA-6). TMPDIR is already redirected to /mnt/nvme/<user>, so none of
+# that arrived through the environment: it is the /tmp/<name> paths tools and agents write by
+# hand. The box's own cleaner, systemd-tmpfiles-clean.timer, ages /tmp at 30 days
+# (/usr/lib/tmpfiles.d/tmp.conf) and nothing in there reaches five, so it never fires.
+# The decision is process liveness first and age only as a backstop: devbox/tmp-stale-reap.md.
+ConditionPathIsDirectory=/tmp
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# --apply, because a hand run of this script reports and removes nothing.
+ExecStart=%h/.dotfiles/devbox/tmp-stale-reap --apply
+# One walk of /tmp took 4m on 2026-10-30; a run that is still going after half an hour is stuck
+# on something, and the next hourly run is the retry.
+TimeoutStartSec=30min
