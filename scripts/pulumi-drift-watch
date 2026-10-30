@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Report Pulumi programs that are merged, declared and never applied.
+
+Why this exists: agent-infra 904aecc3 ("bootstrap, legion: a worker pod reads its Google
+project and no secret's value through that role") merged at 2026-10-30T00:34Z and declared a
+custom IAM role and its binding. Nobody applied it. It surfaced two hours later only because a
+Legion worker pod ran its own check and got 403 on nine of twelve assertions, and the INFRA
+lead applied it by hand at 02:29Z. The same preview showed six further creates from
+agent-infra #151, merged 2026-10-29T19:06Z, still unapplied.
+
+Nothing measured that gap. `main` is the declared state and the cloud is the live state, and
+between a merge and an apply they differ with no instrument on the difference. The cost is not
+only the missing resource: the next person's targeted preview carries a stranger's creates, so
+an applier who was told "stop if the plan is not exactly N" stops on a correct apply, and an
+applier who is not told that applies a change they never read.
+
+What one run does:
+
+  1. Put a private checkout on origin/main. It is this script's own, under STATE_ROOT, so no
+     worktree a person or an agent is working in is touched, fetched or reset.
+  2. For each configured stack, run `pulumi preview --non-interactive` and read the plan's
+     counts. A preview takes no state lock, so a run never blocks an apply, and it is the only
+     operation here: this script applies nothing and can refuse nothing.
+  3. Append one sample per stack per run to the log, whether or not anything is pending. A
+     silent log cannot be told from a dead watch.
+  4. Alert over Envoy only when a stack has a pending plan, or when a preview fails. A clean
+     stack says nothing, because a daily "nothing to report" trains its reader to ignore it.
+  5. Name every resource in the plan, with its URN, so the reader can tell whose change it is
+     without running the preview again.
+
+What it does not do: it does not apply, does not refresh (a refresh takes a lock and rewrites
+state), does not read or print any secret, and does not judge whether a pending plan is good.
+An unapplied merge may be deliberate -- a change whose apply waits for a key move, or for a
+person. The report says what is pending; a human or the stack's owner decides.
+
+The credential is the box's own gcloud login, minted per run. TAILSCALE_API_KEY is set to a
+value that authenticates nowhere, which is what bootstrap/README.md's targeted runs use: the
+Tailscale provider must be configurable for the program to compile, and a preview that does not
+refresh never calls Tailscale. If a stack is ever added whose preview does reach Tailscale, that
+stack needs the real key and does not belong in this watch.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+REPO_URL = "https://github.com/theorem-labs/agent-infra"
+STATE_ROOT = pathlib.Path(
+    os.environ.get("PULUMI_DRIFT_WATCH_STATE", "/mnt/nvme/sami/pulumi-drift-watch")
+)
+CHECKOUT = STATE_ROOT / "agent-infra"
+LOG = STATE_ROOT / "samples.jsonl"
+
+# Each entry: the directory under the checkout, and the stack name. Only stacks whose preview
+# reaches no provider that needs a credential this box does not hold.
+STACKS = [("bootstrap", "prod")]
+
+# Who hears a pending plan. The INFRA lead and the Legion controller asked for it
+# (2026-10-30T02:28Z); both are session ids, so delivery is direct and not a topic fan-out.
+TARGETS = [
+    "01a13c57-d826-7242-80fe-5f0670188b11",  # INFRA stream lead
+    "01a17552-e0de-7007-aa66-3a2088e7dbc6",  # Legion controller, INFRA
+]
+
+ENVOY = pathlib.Path(__file__).with_name("envoy")
+GCLOUD_CONFIG = "theorem"
+PREVIEW_TIMEOUT_S = 900
+
+
+def run(cmd: list[str], cwd: pathlib.Path | None = None, env: dict | None = None,
+        timeout: int = 300) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd, cwd=cwd, env=env, timeout=timeout,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+
+
+def ensure_checkout() -> str:
+    """Put this watch's own checkout on origin/main. Returns the commit it sits on."""
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    if not (CHECKOUT / ".git").exists():
+        if CHECKOUT.exists():
+            shutil.rmtree(CHECKOUT)
+        r = run(["git", "clone", "--filter=blob:none", REPO_URL, str(CHECKOUT)], timeout=900)
+        if r.returncode != 0:
+            raise RuntimeError(f"clone failed: {r.stdout[-2000:]}")
+    for cmd in (["git", "fetch", "origin", "main", "--quiet"],
+                ["git", "reset", "--hard", "origin/main", "--quiet"],
+                ["git", "clean", "-qfd"]):
+        r = run(cmd, cwd=CHECKOUT, timeout=900)
+        if r.returncode != 0:
+            raise RuntimeError(f"{' '.join(cmd)} failed: {r.stdout[-2000:]}")
+    return run(["git", "rev-parse", "HEAD"], cwd=CHECKOUT).stdout.strip()
+
+
+def preview_env() -> dict:
+    token = run(
+        ["gcloud", f"--configuration={GCLOUD_CONFIG}", "auth", "print-access-token"], timeout=120
+    )
+    if token.returncode != 0:
+        raise RuntimeError(f"no Google token: {token.stdout.strip()[:400]}")
+    env = dict(os.environ)
+    env["CLOUDSDK_ACTIVE_CONFIG_NAME"] = GCLOUD_CONFIG
+    env["GOOGLE_OAUTH_ACCESS_TOKEN"] = token.stdout.strip()
+    # Authenticates nowhere; a preview that does not refresh never calls Tailscale.
+    env["TAILSCALE_API_KEY"] = "unused"
+    env["PULUMI_SKIP_UPDATE_CHECK"] = "true"
+    return env
+
+
+STEP_RE = re.compile(r"^\s*([+~\-]|\+-)\s+(\S+)\s+(\S+)\s+(create|update|delete|replace)\b")
+
+
+def preview(directory: str, stack: str, env: dict) -> dict:
+    """Run one preview. Returns the plan: counts, the steps, and the raw tail."""
+    cwd = CHECKOUT / directory
+    r = run(
+        ["pulumi", "preview", "--stack", stack, "--non-interactive", "--diff"],
+        cwd=cwd, env=env, timeout=PREVIEW_TIMEOUT_S,
+    )
+    out = r.stdout
+    steps, counts = [], {}
+    for line in out.splitlines():
+        m = re.search(r"^\s*([+~]|\+-|-)\s+(\S+):\s*\((create|update|delete|replace)\)", line)
+        if m:
+            continue  # the --diff body; the URN follows on the next line
+        m = re.search(r"\[urn=(\S+?)\]", line)
+        if m:
+            steps.append(m.group(1))
+    for kind in ("create", "update", "delete", "replace"):
+        m = re.search(rf"^\s*[+~\-]*\s*(\d+)\s+to {kind}", out, re.MULTILINE)
+        if m:
+            counts[kind] = int(m.group(1))
+    m = re.search(r"^\s*(\d+)\s+unchanged", out, re.MULTILINE)
+    unchanged = int(m.group(1)) if m else None
+    pending = sum(counts.values())
+    # The stack resource's own URN is always printed; it is not a step.
+    steps = [u for u in steps if "::pulumi:pulumi:Stack::" not in u]
+    return {
+        "dir": directory, "stack": stack, "rc": r.returncode, "counts": counts,
+        "pending": pending, "unchanged": unchanged, "steps": steps, "tail": out[-4000:],
+    }
+
+
+def alert_text(commit: str, plan: dict) -> str:
+    where = f"{plan['dir']}/ stack {plan['stack']}"
+    if plan["rc"] != 0:
+        return (
+            f"PULUMI PREVIEW FAILED: {where} on theorem-labs/agent-infra main at {commit[:9]}, "
+            f"exit {plan['rc']}. This watch previews only; it applied nothing and refused "
+            f"nothing. The preview's last lines:\n\n{plan['tail'][-1500:]}\n\n"
+            "A failed preview hides whatever is pending behind it, so treat this as unknown "
+            "drift, not as a clean stack. From pulumi-drift-watch "
+            "(~/.dotfiles/scripts/pulumi-drift-watch) on sami-rocqperf, a systemd --user timer."
+        )
+    parts = ", ".join(f"{n} to {k}" for k, n in sorted(plan["counts"].items()))
+    body = [
+        f"PULUMI PLAN PENDING ON MAIN: {where} at theorem-labs/agent-infra {commit[:9]} plans "
+        f"{parts} ({plan['unchanged']} unchanged). Every one of these is merged and declared "
+        "and not live: the code says it exists and the cloud does not.",
+        "",
+        "What is pending, by URN:",
+    ]
+    body += [f"  {u}" for u in plan["steps"][:40]]
+    if len(plan["steps"]) > 40:
+        body.append(f"  … and {len(plan['steps']) - 40} more")
+    body += [
+        "",
+        "Why this matters beyond the missing resources: the next person's preview of this stack "
+        "carries these steps too. An applier told to stop unless the plan is exactly their own "
+        "N will stop on a correct apply, and one not told that will apply a change they never "
+        "read.",
+        "",
+        "What to do: find who merged each one (`git log --oneline -S<name> -- " + plan["dir"] +
+        "/`), and have that author preview and apply it with their own acceptance. An apply "
+        "that is deliberately waiting -- on a key move, a person, or another stack -- needs no "
+        "action here; say so on its issue so the next report is read rather than skipped.",
+        "",
+        "This watch previews only. It applies nothing, refreshes nothing (a refresh takes the "
+        "state lock), reads no secret, and judges nothing. A preview takes no lock, so this run "
+        "blocked no apply. From pulumi-drift-watch (~/.dotfiles/scripts/pulumi-drift-watch) on "
+        "sami-rocqperf, a systemd --user timer.",
+    ]
+    return "\n".join(body)
+
+
+def send(target: str, text: str) -> bool:
+    r = run([str(ENVOY), "send", target, text], timeout=120)
+    ok = r.returncode == 0
+    if not ok:
+        print(f"envoy send to {target} failed: {r.stdout.strip()[:400]}", file=sys.stderr)
+    return ok
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="run the previews and print what would be sent; send nothing")
+    ap.add_argument("--print-alert", action="store_true",
+                    help="print each alert to stdout as well as sending it")
+    ap.add_argument("--always", action="store_true",
+                    help="report even a stack with nothing pending (for proving the path)")
+    args = ap.parse_args()
+
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        commit = ensure_checkout()
+        env = preview_env()
+    except Exception as exc:  # the run itself could not start
+        text = (
+            f"PULUMI DRIFT WATCH COULD NOT RUN: {exc}. No preview was taken, so nothing is known "
+            "about pending plans this cycle. From pulumi-drift-watch on sami-rocqperf."
+        )
+        print(text, file=sys.stderr)
+        if not args.dry_run:
+            for t in TARGETS:
+                send(t, text)
+        return 1
+
+    rc = 0
+    for directory, stack in STACKS:
+        plan = preview(directory, stack, env)
+        sample = {"t": time.time(), "commit": commit, **{
+            k: plan[k] for k in ("dir", "stack", "rc", "counts", "pending", "unchanged")}}
+        with LOG.open("a") as fh:
+            fh.write(json.dumps(sample) + "\n")
+        noisy = plan["rc"] != 0 or plan["pending"] > 0 or args.always
+        if not noisy:
+            print(f"{directory}/{stack}: clean ({plan['unchanged']} unchanged)")
+            continue
+        text = alert_text(commit, plan)
+        if plan["rc"] != 0:
+            rc = 1
+        if args.print_alert or args.dry_run:
+            print(text)
+        if not args.dry_run:
+            delivered = [t for t in TARGETS if send(t, text)]
+            # Claiming delivery without checking it is how a watch becomes decorative.
+            if not delivered:
+                print("no recipient took the alert", file=sys.stderr)
+                rc = 1
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

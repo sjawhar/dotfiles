@@ -1,0 +1,17 @@
+[Unit]
+Description=Preview the declared Pulumi stacks on main once a day and report what is pending
+
+[Timer]
+# Daily, as the INFRA lead and the Legion controller agreed on 2026-10-30. The gap this
+# measures is hours to days wide -- 904aecc3 sat unapplied for two hours before a worker pod's
+# failing assertions found it, and agent-infra #151's six resources had sat for seven -- so a
+# shorter period adds runs without adding information, and this watch sends nothing when a
+# stack is clean.
+OnCalendar=*-*-* 09:00:00 UTC
+# A run missed because the machine was down runs at the next boot: the point is the report, not
+# the hour it arrives.
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

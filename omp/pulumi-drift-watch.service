@@ -1,0 +1,26 @@
+[Unit]
+Description=Report Pulumi stacks whose main is declared and not applied
+Documentation=file:%h/.dotfiles/scripts/pulumi-drift-watch.md
+# A preview needs GitHub and Google. Without the network the run reports that it could not run,
+# which is the right answer, but there is no point starting it before the machine is up.
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Below everything. This is a once-a-day report, never an incident detector: a run that takes
+# ten minutes because the box is busy costs nothing, and a run that preempts a lane does.
+Nice=15
+IOSchedulingClass=idle
+# One `git fetch` of a blobless clone plus one preview per stack. bootstrap/prod's preview is
+# 13 s measured on sami-rocqperf at load 200; the ceiling is for a stack whose program is slow
+# to compile and for a fetch over a cold network, and a run that cannot finish is killed rather
+# than left to overlap tomorrow's.
+TimeoutStartSec=1800
+# A systemd --user service starts on systemd's own minimal PATH, and git's credential helper
+# here is `gh auth git-credential`: without gh on PATH the fetch fails with
+# "gh: not found … could not read Username", which is what the first armed run reported at
+# 2026-10-30T02:32Z. The shims directory must come first for the same reason an interactive
+# shell puts it first — gh, git, pulumi and gcloud are all shims, and the real binaries behave
+# differently (gh-app routing, the gcloud flag guard). mise's shims carry the pinned tools.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.dotfiles/scripts/pulumi-drift-watch
