@@ -192,6 +192,40 @@ def alert_text(commit: str, plan: dict) -> str:
     return "\n".join(body)
 
 
+def plan_fingerprint(plan: dict) -> str:
+    """What makes one report different news from the last: the step set, or a failed preview.
+
+    The counts and the unchanged total are deliberately left out. The same six URNs with a
+    different unchanged total is the same news; one more URN is not.
+    """
+    if plan["rc"] != 0:
+        return "failed"
+    return "\n".join(sorted(plan["steps"]))
+
+
+def sent_path(directory: str, stack: str) -> Path:
+    return STATE_ROOT / f"sent.{directory.replace('/', '_')}.{stack}"
+
+
+def last_sent(directory: str, stack: str) -> str | None:
+    try:
+        return sent_path(directory, stack).read_text()
+    except OSError:
+        return None
+
+
+def remember_sent(directory: str, stack: str, fingerprint: str) -> None:
+    try:
+        sent_path(directory, stack).write_text(fingerprint)
+    except OSError as exc:
+        # Failing to remember costs a repeated report, never a missed one.
+        print(f"could not record the sent set for {directory}/{stack}: {exc}", file=sys.stderr)
+
+
+def forget_sent(directory: str, stack: str) -> None:
+    sent_path(directory, stack).unlink(missing_ok=True)
+
+
 def send(target: str, text: str) -> bool:
     r = run([str(ENVOY), "send", target, text], timeout=120)
     ok = r.returncode == 0
@@ -235,6 +269,18 @@ def main() -> int:
         noisy = plan["rc"] != 0 or plan["pending"] > 0 or args.always
         if not noisy:
             print(f"{directory}/{stack}: clean ({plan['unchanged']} unchanged)")
+            forget_sent(directory, stack)
+            continue
+        # A report a reader has already acted on is not news, and a watch that repeats itself
+        # trains its reader to skip it. The INFRA controller got this stack's same six URNs twice
+        # in seven minutes on 2026-10-30 and asked for exactly this (dispatch://INFRA-430, comment
+        # c78927c8 records that set as deliberately waiting on dispatch://INFRA-773). So a pending
+        # set is sent once and then only when the set itself changes -- a URN added or removed, or
+        # a preview that failed where it used to succeed. A clean run forgets the set, so the next
+        # time it comes back it is news again. The daily --always run still reports everything.
+        fingerprint = plan_fingerprint(plan)
+        if not args.always and fingerprint == last_sent(directory, stack):
+            print(f"{directory}/{stack}: unchanged pending set, not resent ({plan['pending']} pending)")
             continue
         text = alert_text(commit, plan)
         if plan["rc"] != 0:
@@ -247,6 +293,8 @@ def main() -> int:
             if not delivered:
                 print("no recipient took the alert", file=sys.stderr)
                 rc = 1
+            else:
+                remember_sent(directory, stack, fingerprint)
     return rc
 
 
