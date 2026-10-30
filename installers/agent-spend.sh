@@ -12,7 +12,8 @@ set -euo pipefail
 # CLAUDE_CONFIG_DIR: .bashrc points that at the tracked .claude/ here, which is shared by every machine and must hold
 # no machine's path or token (the setup refuses a folder in a git work tree anyway); that settings.json carries the
 # same telemetry keys by hand, and a helper command that runs $HOME/.config/agent-spend/otel-headers-helper, which the
-# setup writes on each machine, and prints {} where it is missing. Sourced by install.sh, so it never exits.
+# setup writes on each machine; where the setup never ran it exits 1, so Claude Code sends nothing. Sourced by
+# install.sh, so it never exits.
 AGENT_SPEND_SETUP_REF=88bd7e0de87842632c4691cc5ed4e3869cd9414c
 
 agent_spend_setup() {
