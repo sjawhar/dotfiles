@@ -185,6 +185,33 @@ the pane costs one `tmux kill-pane` and removes the lane from this check entirel
 One alert per pane per incident, and one clear — when omp runs in the pane again (naming the
 pid), or when the pane is gone.
 
+### A pane whose tmux session is `mv-*` is a move, not a death
+
+`ossv-agent move` relocates a worker in a tmux session of its own, named `mv-<worker>`. It stops
+the worker on this box — its pane prints `[Stopped by SIGTERM]` and the mover's recovery lines —
+pushes the tree, and resumes **the same session id** on another box. That is exactly the shape
+this check fires on, and the restart it would hand a reader would put a second omp on a session
+the mover is about to resume elsewhere. Three such alerts went out on `ossv-agent-open` between
+20:14Z and 20:35Z on 2026-10-30.
+
+So a mover pane is **held, not alerted**, for `--move-grace` (default 30 minutes). It is held
+rather than dropped because a move that never finishes is a real failure: past that window the
+alert says `WORKER MOVE NOT FINISHED`, names the mover session and the worker, says where the
+worker runs now — `<home>/work/workers/<worker>/MOVED.md` first, else the `vm` column of
+`<home>/work/cold/workers.tsv` — and names **no restart command at all**. A move with no record
+says the worker's new box is not recorded yet rather than guessing one.
+
+### The owner of a lane worker is not a role
+
+A lane-worker pane has no `lead-*` holder in its own directory, so its alert used to fall
+through to the INFRA lead and the lane-box operator. `ossv-worker` records the real owner in
+`<home>/work/.ossv-workers/<lane>/lead`, and the lane name is in the pane's own working
+directory. That id is a **dated claim** — the lead it names can itself have been restarted
+under a new id — so it is checked against Envoy's live sessions before it is used. Live, it is
+told and the alert says the owner came from ossv-worker's record and not from a role; not live,
+it is named in the alert and not told. The operator still gets the alert as well: it holds the
+tmux socket the restart command needs.
+
 ## The two checks, and what neither covers
 
 This watcher now holds two independent checks for two different deaths:
