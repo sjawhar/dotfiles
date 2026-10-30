@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
-# ossv-box-gateway-token writes an OIDC ID token of the shared developer-box account
-# dev-box@theorem-agent-infra for Oh My Pi's model-gateway provider. The timer runs it every ten
-# minutes, so the token file stays newer than the token's one-hour lifetime.
+# ossv-box-gateway-token writes an OIDC ID token of the box's own identity for Oh My Pi's
+# model-gateway provider. The timer runs it every ten minutes, so the token file stays newer than
+# the token's one-hour lifetime.
 #
-# The box holds OpenID Token Creator on dev-box and nothing broader (agent-infra box-identity/), so
-# it calls IAM Credentials' generateIdToken directly with its own access token:
-#   - an Azure box, whose ADC is an external_account credential through the azure/entra pool:
-#     the federated access token, exchanged at Google STS from the VM's managed-identity token.
-#     The credential's service_account_impersonation_url is not used: the federated principal
-#     itself holds the grant, and the account it impersonates holds none.
-#   - a box in Google Cloud: the VM's own service account token from the metadata server.
+# No box mints as another account:
+#   - a box in Google Cloud reads the ID token of the account its VM runs as from the metadata
+#     server, which issues one for any audience and needs no IAM role.
+#   - an Azure box, whose ADC is an external_account credential through the azure/entra pool,
+#     mints the ID token of the account that credential names in service_account_impersonation_url,
+#     with the federated access token its own managed-identity token buys at Google STS. That
+#     principal already holds roles/iam.workloadIdentityUser on the account (agent-infra
+#     box-identity/), which carries iam.serviceAccounts.getOpenIdToken, the permission
+#     generateIdToken checks.
 set -euo pipefail
 
 # The systemd user unit has no login PATH; jq and curl come from the system or mise.
 export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$PATH"
 
-target=dev-box@theorem-agent-infra.iam.gserviceaccount.com
 audience=model-gateway-gce
 cred=${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/application_default_credentials.json}
 metadata=${OSSV_GCE_METADATA_HOST:-metadata.google.internal}
 d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ossv-box"
 f="$d/gateway-token"
+
 
 fail() {
     rm -f "$f.new"
@@ -52,23 +54,34 @@ federated_token() {
         --data-urlencode 'subject_token@-' | jq -er '.access_token'
 }
 
-# gce_token prints the VM's own service account access token.
-gce_token() {
+# gce_identity_token prints the ID token of the account the VM runs as, straight from the metadata
+# server: it issues one for any audience, and the VM needs no IAM role for its own identity.
+gce_identity_token() {
     curl -fsS -m 10 -H 'Metadata-Flavor: Google' \
-        "http://$metadata/computeMetadata/v1/instance/service-accounts/default/token" | jq -er '.access_token'
+        "http://$metadata/computeMetadata/v1/instance/service-accounts/default/identity?audience=$audience&format=full"
+}
+
+# federated_identity_token prints the ID token of the account an external_account credential names,
+# minted with the box's own federated access token.
+federated_identity_token() {
+    local target access
+    target=$(jq -er '.service_account_impersonation_url' "$cred" |
+        sed -n 's#.*/serviceAccounts/\([^:]*\):.*#\1#p') ||
+        fail "$cred names no service account"
+    [[ -n $target ]] || fail "$cred names no service account"
+    access=$(federated_token) || fail "no federated access token from $cred"
+    curl -fsS -m 20 -K <(bearer "$access") -H 'Content-Type: application/json' \
+        -d "{\"audience\":\"$audience\",\"includeEmail\":true}" \
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$target:generateIdToken" |
+        jq -er '.token'
 }
 
 install -d -m 700 "$d"
 if [[ -r $cred ]] && [[ $(jq -r '.type' "$cred") == external_account ]]; then
-    access=$(federated_token) || fail "no federated access token from $cred"
+    token=$(federated_identity_token | tr -d '\r\n') || token=""
 else
-    access=$(gce_token) || fail "no access token from the metadata server"
+    token=$(gce_identity_token | tr -d '\r\n') || token=""
 fi
-
-token=$(curl -fsS -m 20 -K <(bearer "$access") -H 'Content-Type: application/json' \
-    -d "{\"audience\":\"$audience\",\"includeEmail\":true}" \
-    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$target:generateIdToken" |
-    jq -er '.token' | tr -d '\r\n') || token=""
 
 case "$token" in
     *.*.*)
@@ -78,6 +91,6 @@ case "$token" in
         logger -t ossv-box-gateway-token -- "identity token written to $f"
         ;;
     *)
-        fail "no identity token from generateIdToken for $target"
+        fail "no identity token for this box's own account"
         ;;
 esac
