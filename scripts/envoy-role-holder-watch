@@ -18,9 +18,14 @@ What one run does, mechanically, with no model call:
      run in the state file), establish what can be established about that holder from four
      sources: an `omp` process that names the session on its command line, in the file name of
      an open transcript, or in that transcript's own header; any process at all holding the
-     session's transcript open; how long ago that transcript was last written; and Envoy's own
-     registry entry and heartbeat (GET /v1/sessions, confirmed by GET /v1/registry/<id>, both
-     of which only read).
+     session's transcript open; how long ago that transcript was last written, in the session
+     root or in the holder's own working directory; and Envoy's own registry entry and
+     heartbeat (GET /v1/sessions, confirmed by GET /v1/registry/<id>, both of which only read).
+     When all four are silent, a fifth reads the holder's WORKING DIRECTORY: the newest regular
+     file under it, named, with an absolute mtime. That one is never a sighting and never says
+     the lane works -- see DEFAULT_DIR_GRACE -- but it is the only thing that can end an alert
+     about a holder none of the four can ever see, which on 2026-10-30 was four alerts in 33
+     minutes on a role claimed by a process that is not an omp session.
   3. The watch calls no role route at all. GET /v1/roles/<role> is how Envoy releases a claim
      whose holder has left the session bucket (role_holder.go resolveLiveRoleHolder, still so on
      origin/main at d157fc868, checked 2026-10-29 09:50Z), and that holder is exactly the one
@@ -40,8 +45,11 @@ What one run does, mechanically, with no model call:
 Alerts go over Envoy to agent sessions only, never to a person: the chief of staff, the INFRA
 lead, the dead role's stream lead (the live `lead-*`/`stream-lead-*` holder in the same working
 directory), and the lane's peers (the live holders of the team topics the dead session shared).
-One alert per incident, one more when it clears, and one escalation to the chief of staff when
-an incident is still open 10 minutes after its alert.
+One alert per incident, one more when it ends -- seen again, quieted on the directory rule, or
+closed because its class is suppressed -- and one escalation to the chief of staff when an
+incident is still open 10 minutes after its alert. A suppression (SUPPRESSIONS) is named, dated
+and counted in every alert of every other class while it holds, and says EXPIRED in the same
+places once its date passes.
 
 Part two, the tmux pane check (`check_panes`). After the 2026-10-27T13:56Z reboot, five of six
 Verified Linux panes came back as a bash prompt: tmux-resurrect restored the layout but their omp
@@ -67,6 +75,7 @@ Scope: role holders, and panes. A session that holds no role and has no pane is 
 from __future__ import annotations
 
 import argparse
+import calendar
 import fcntl
 import json
 import os
@@ -133,6 +142,79 @@ DEFAULT_WRITE_GRACE = 120.0
 # a judgement: the incident has already alerted and escalated, and nothing here re-reads it.
 FORGET_AFTER = 86400.0
 
+# ---------------------------------------------------------- the holder's working directory
+#
+# The fifth source, and the only one that is not about the session at all. The four above ask
+# "where is this holder"; this one asks "is anything still writing where it worked". That is a
+# weaker question with a weaker answer, and it is here because on 2026-10-30 it was the only
+# question anything could answer.
+#
+# At 22:21:26Z and 22:53:14Z that night roles node-envprobe-d10302216-2 and
+# node-envprobe-d10302249-2 alerted, and all four sources above were CORRECTLY silent: no omp
+# process named the holder, no transcript under ~/.omp/agent/sessions carried it,
+# GET /v1/sessions omitted it and GET /v1/registry/<holder> answered 404. The Verified Linux
+# scheduler's envprobe claims a role named node-<deployment>-<number> from a process that is not
+# an omp agent -- Envoy's registry takes any registered session id string
+# (store.Registry.SetRole, packages/envoy/internal/store/kv.go:602; registration is an HTTP
+# call) -- and the lane writes its transcripts into the run directory, not the session root. So
+# nothing those four sources read could ever see that holder and the alert could never clear: at
+# 30 s a cycle it escalated until the lane ended, and every repeat taught a reader to skip the
+# one real alert.
+#
+# What an mtime does and does not say -- the chief of staff's qualifier of 2026-10-30, which he
+# proved on the first incident: ps.log in that run directory grew from 11,178 to 27,939 bytes
+# between 22:22Z and 22:31:41Z while the probe's own outputs had stopped at 22:18:55Z. A
+# heartbeat written by a watcher is not a heartbeat of the thing watched. So this source NEVER
+# says the holder is alive and NEVER says the lane is working. It says that one named file was
+# written at one absolute time, and a reader judges whether that file is the work or a log
+# beside it. Every sentence it produces names the file.
+DEFAULT_DIR_GRACE = 300.0
+# The walk is bounded three ways, because a run has a 30 s period and a 25 s TimeoutStartSec:
+# entries stat'ed, depth, and wall clock. A truncated walk is reported as truncated and is never
+# used to quiet anything -- "I did not finish looking" is not "nothing was written here".
+DIR_SCAN_ENTRIES = 20000
+DIR_SCAN_DEPTH = 8
+DIR_SCAN_SECONDS = 1.0
+# A suppressed role is dropped from the state file this long after it was first suppressed.
+# Nothing will ever be sent for it, so keeping it is pure bookkeeping, and the suppressed class
+# claims a new role every few minutes -- up to a thousand in the stepped capacity test -- in a
+# file this watch rewrites and fsyncs every 30 s.
+SUPPRESSED_FORGET = 600.0
+
+# ------------------------------------------------------------------ named class suppressions
+#
+# A suppression here is an exception with a name, a scope, a date and a reason, and the watch
+# says it out loud in every alert of every other class while it holds. The alternative is not
+# silence: it is every reader on this box learning that role-holder alerts are noise, which is a
+# suppression with no name, no expiry, no scope and no record (chief of staff, 2026-10-30
+# 22:59Z).
+#
+# WHEN IT EXPIRES NOTHING SILENTLY CHANGES BACK. Past `until` the class alerts again under the
+# ordinary rules, and the watch logs and prints `EXPIRED` in the same places it printed the
+# suppression, every run, until somebody deletes the entry. If the clearing rule below turns out
+# to be enough on its own, deleting this tuple is the whole removal.
+SUPPRESSIONS = (
+    {
+        "name": "verified-linux envprobe node roles",
+        # Narrow on purpose: it matches the scheduler's own role shape and nothing else. The
+        # roles live on this box at the same time (bet-owner-*, lead-*, stream-lead-*, node-*
+        # claimed by hand) do not match, and a real role-holder alert for any of them still
+        # fires tonight.
+        "pattern": re.compile(r"^node-envprobe-[0-9a-z]+-[0-9]+$"),
+        "shown": "^node-envprobe-[0-9a-z]+-[0-9]+$",
+        "until": "2026-11-06T00:00:00Z",
+        "why": (
+            "envprobe claims this role from a process that is not an omp session and releases it"
+            " at the end of each run (Verified Linux lead, 2026-10-30 22:55Z), so the holder is"
+            " gone by design minutes after it appears and all four session-level sources are"
+            " correctly silent. Four alerts came this way between 22:21Z and 22:57Z on"
+            " 2026-10-30, the last three inside 33 minutes, and none of them could clear. The"
+            " directory rule in this file is meant to make the class harmless on its own; this"
+            " suppression covers the days it takes to watch that rule against real runs"
+        ),
+    },
+)
+
 # THE MARKED PLACE FOR THE RELEASE CALL. Agent infra is adding an explicit release that records
 # who released the claim, and the same change makes GET /v1/roles/<role> pure. Neither exists
 # yet. Checked 2026-10-29 09:50Z, both ways:
@@ -185,6 +267,65 @@ def human(seconds: float) -> str:
         return f"{minutes} min {rest} s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} h {minutes} min"
+
+
+def epoch_of(stamp: str) -> float:
+    """`2026-11-06T00:00:00Z` as a UTC epoch. Absolute, never relative: a date in the file is a
+    date a reader can check against `date -u`, and `find -newermt '-3 minutes'` returning
+    nothing for a file written one second ago (measured 2026-10-30 22:31Z) is what relative
+    times are worth."""
+    return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def suppression_for(role: str, now: float) -> dict | None:
+    """The suppression that silences `role` right now, or None once it has expired."""
+    for rule in SUPPRESSIONS:
+        if rule["pattern"].match(role or "") and now < epoch_of(rule["until"]):
+            return rule
+    return None
+
+
+def suppression_lines(now: float, counts: dict | None = None, short: bool = False) -> list[str]:
+    """What every alert of every other class, and every run's log, says about the suppressions.
+
+    A suppression nobody can see is the same silent training with a different author, so this
+    goes out with the alerts a reader already reads, naming the pattern, the date, the reason
+    and how many roles it has actually swallowed. Past the date it says EXPIRED in the same
+    place, every run, until the entry is deleted.
+
+    `short` is the journal's form: the same facts without the reason, because the long one is
+    700 characters and the timer writes it every 30 s. The reason belongs in the alerts, which
+    a person reads once.
+    """
+    lines: list[str] = []
+    for rule in SUPPRESSIONS:
+        seen = (counts or {}).get(rule["shown"]) or {}
+        tally = (
+            f" It has suppressed {seen.get('count', 0)} role(s) so far, last"
+            f" {seen.get('role') or '-'} at {iso(seen.get('at'))}."
+            if seen else " It has suppressed no role yet."
+        )
+        if short:
+            state = "ACTIVE" if now < epoch_of(rule["until"]) else "EXPIRED, DELETE THE ENTRY"
+            lines.append(
+                f"SUPPRESSION {state}: {rule['shown']} until {rule['until']}.{tally}"
+            )
+            continue
+        if now < epoch_of(rule["until"]):
+            lines.append(
+                f"ACTIVE SUPPRESSION ({rule['name']}): role-holder alerts for roles matching"
+                f" {rule['shown']} are not sent until {rule['until']}. Why: {rule['why']}."
+                f"{tally} Every other role alerts normally."
+            )
+        else:
+            lines.append(
+                f"EXPIRED SUPPRESSION ({rule['name']}): roles matching {rule['shown']} were"
+                f" suppressed until {rule['until']}, which has passed, so the class alerts again"
+                f" under the ordinary rules from this run on.{tally} This line repeats in every"
+                " alert and every run's log until the entry is deleted from SUPPRESSIONS in"
+                " ~/.dotfiles/scripts/envoy-role-holder-watch."
+            )
+    return lines
 
 
 # --------------------------------------------------------------------------- Envoy transport
@@ -489,6 +630,77 @@ def transcript_of(session_id: str) -> Path | None:
 # --------------------------------------------------- what this run could establish about a holder
 
 
+def newest_write(directory: str, holder: str = "", now: float | None = None) -> dict:
+    """The newest regular file under a holder's working directory, named and dated.
+
+    Returns {"dir", "file", "mtime", "age", "scanned", "truncated", "error", "transcript",
+    "transcript_mtime"}. `file` is always the path of the file whose mtime `mtime` is, because
+    "something is writing in there" is not a finding a reader can judge and "ps.log was written
+    1 s ago while R-output.txt has not moved since 22:18:55Z" is.
+
+    `transcript` is a .jsonl under this directory whose NAME carries the holder's id. A lane
+    whose harness redirects the session directory (PI_CODING_AGENT_SESSION_DIR) writes the
+    holder's own transcript there and nothing under ~/.omp/agent/sessions, which is why the
+    transcript source saw nothing for both 2026-10-30 incidents while the file sat in
+    <run>/R/<stamp>_<holder>.jsonl. That file IS the session's own transcript, so its freshness
+    is a sighting in the same sense as the session root's -- unlike every other file here.
+
+    Bounded by DIR_SCAN_ENTRIES, DIR_SCAN_DEPTH and DIR_SCAN_SECONDS, and it never follows a
+    symlinked directory. A walk that hit a bound sets `truncated`, and a truncated walk is
+    never read as "nothing recent": the newest file may be the one it did not reach.
+    """
+    now = time.time() if now is None else now
+    found: dict = {
+        "dir": directory, "file": "", "mtime": None, "age": None, "scanned": 0,
+        "truncated": False, "error": "", "transcript": "", "transcript_mtime": None,
+    }
+    if not directory:
+        found["error"] = "no working directory is recorded for this holder"
+        return found
+    # The budget runs from NOW, not from `now`: `now` is the run's start clock, shared by every
+    # measurement in a period so that two roles cannot date the same file differently, and a
+    # run that has already spent six seconds on Envoy and /proc would otherwise hand this walk
+    # a deadline in the past. It did, on the first live run of this step at 2026-10-30 23:06Z:
+    # the walk stopped after ONE entry and reported the lane's directory as unreadable.
+    deadline = time.time() + DIR_SCAN_SECONDS
+    stack = [(directory, 0)]
+    while stack and not found["truncated"]:
+        path, depth = stack.pop()
+        try:
+            entries = list(os.scandir(path))
+        except OSError as error:
+            if path == directory:
+                found["error"] = f"{directory}: {error.strerror or error}"
+            continue
+        for entry in entries:
+            found["scanned"] += 1
+            if found["scanned"] > DIR_SCAN_ENTRIES or time.time() > deadline:
+                found["truncated"] = True
+                break
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if depth < DIR_SCAN_DEPTH:
+                        stack.append((entry.path, depth + 1))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                stamp = entry.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                continue
+            if found["mtime"] is None or stamp > found["mtime"]:
+                found["mtime"], found["file"] = stamp, entry.path
+            if (
+                holder
+                and entry.name.endswith(".jsonl")
+                and holder in entry.name
+                and (found["transcript_mtime"] is None or stamp > found["transcript_mtime"])
+            ):
+                found["transcript_mtime"], found["transcript"] = stamp, entry.path
+    if found["mtime"] is not None:
+        found["age"] = now - found["mtime"]
+    return found
+
+
 def holder_evidence(
     envoy: Envoy,
     holder: str,
@@ -496,6 +708,8 @@ def holder_evidence(
     live: dict[str, dict],
     write_grace: float,
     now: float,
+    directory: str = "",
+    dir_grace: float = DEFAULT_DIR_GRACE,
 ) -> dict:
     """Every source this watch has on one holder, and what each one answered.
 
@@ -514,6 +728,11 @@ def holder_evidence(
                  incident still pays for it every period, because it is the one source that can
                  see a lane running under a name this watch does not know and so the one that
                  can clear such an incident.
+      directory  the newest regular file under the holder's WORKING DIRECTORY, named and
+                 dated. It is never a sighting -- `seen` is False on this row whatever it
+                 finds -- and it never licenses a sentence about the lane working. It is read
+                 on the same gate as `openers`, and it carries `dir_fresh`, which is what
+                 quiets an incident nothing else can ever clear. See DEFAULT_DIR_GRACE.
 
     `alive` is true when ANY source found it. The verdict when none did is CANNOT_SEE_HOLDER,
     and there is no path to HOLDER_DEAD: see that constant.
@@ -595,23 +814,47 @@ def holder_evidence(
             last_write = transcript.stat().st_mtime
         except OSError:
             last_write = None
+
+    # The working-directory walk, on the same gate as `openers`: the first two sources are
+    # silent and the session root holds nothing fresh for this holder. A healthy role never
+    # pays for it, and a role whose transcript is being written right now does not either.
+    scan = {"dir": directory, "file": "", "mtime": None, "age": None, "scanned": 0,
+            "truncated": False, "error": "not read: a source above already found the holder",
+            "transcript": "", "transcript_mtime": None}
+    if not any(seen for _, seen, _ in sources) and not (
+        last_write and now - last_write <= write_grace
+    ):
+        scan = newest_write(directory, holder, now)
+        if transcript is None and scan["transcript"]:
+            # The holder's own transcript, written where its harness put it instead of the
+            # session root. Same file, same meaning: see newest_write.
+            transcript = Path(scan["transcript"])
+            last_write = scan["transcript_mtime"]
+
+    where = (
+        f"{transcript} (in the holder's own working directory, not the session root)"
+        if transcript and scan["transcript"] and str(transcript) == scan["transcript"]
+        else str(transcript)
+    )
     if last_write and now - last_write <= write_grace:
         sources.append(
             ("transcript", True,
-             f"its transcript was written {human(now - last_write)} ago, inside the"
+             f"its transcript {where} was written {human(now - last_write)} ago, inside the"
              f" {int(write_grace)} s window: something is still writing this session")
         )
     elif last_write:
         sources.append(
             ("transcript", False,
-             f"its transcript was last written {human(now - last_write)} ago ({iso(last_write)}),"
-             f" outside the {int(write_grace)} s window -- which a session waiting on a model or"
-             " a long tool call also looks like")
+             f"its transcript {where} was last written {human(now - last_write)} ago"
+             f" ({iso(last_write)}), outside the {int(write_grace)} s window -- which a session"
+             " waiting on a model or a long tool call also looks like")
         )
     else:
         sources.append(
             ("transcript", False,
-             f"{CANNOT_SEE_HOLDER} in any transcript under {SESSION_ROOT}, by file name or header")
+             f"{CANNOT_SEE_HOLDER} in any transcript under {SESSION_ROOT}, by file name or"
+             " header, nor in any .jsonl named after it under "
+             + (directory or "(no working directory recorded)"))
         )
 
     openers: list[int] = []
@@ -635,6 +878,30 @@ def holder_evidence(
                  "not looked at: there is no transcript to find openers of")
             )
 
+    # The fifth row. `seen` is False on it however recent the file is: this says what was
+    # written in the lane's directory, never that the lane works or that the holder lives.
+    dir_fresh = (
+        scan["age"] is not None and scan["age"] <= dir_grace and not scan["truncated"]
+    )
+    if scan["error"] and scan["mtime"] is None:
+        dir_sentence = f"{scan['error']}, so there is no write to date"
+    elif scan["mtime"] is None:
+        dir_sentence = (
+            f"nothing under {directory} was readable as a file"
+            + (f" (the walk stopped early after {scan['scanned']} entries)" if scan["truncated"]
+               else f" ({scan['scanned']} entries walked)")
+        )
+    else:
+        dir_sentence = (
+            f"the newest file under {directory} is {scan['file']}, written {iso(scan['mtime'])}"
+            f" ({human(scan['age'])} ago; {scan['scanned']} entries walked"
+            + (", WALK TRUNCATED so a newer file may exist beyond it" if scan["truncated"] else "")
+            + "). This says that file was written. It does NOT say the lane is working: on"
+            " 2026-10-30 ps.log in such a directory grew about a kilobyte a second while the"
+            " probe's own outputs had stopped 3 minutes earlier"
+        )
+    sources.append(("directory", False, dir_sentence))
+
     found = next((sentence for _, seen, sentence in sources if seen), "")
     return {
         "alive": bool(found),
@@ -646,6 +913,11 @@ def holder_evidence(
         "transcript": str(transcript or ""),
         "last_write": last_write,
         "verdict": found or CANNOT_SEE_HOLDER,
+        "dir_fresh": dir_fresh,
+        "dir_file": scan["file"],
+        "dir_write": scan["mtime"],
+        "dir_sentence": dir_sentence,
+        "dir_truncated": scan["truncated"],
     }
 
 
@@ -799,20 +1071,30 @@ def recipients(role: str, record: dict, sessions: list[dict], holder: str) -> tu
     return targets + peers[:6], sorted(team_bases), notes
 
 
-def alert_text(role: str, incident: dict, holder: str, now: float, kind: str) -> str:
+def alert_text(
+    role: str, incident: dict, holder: str, now: float, kind: str, banner: list[str] | None = None
+) -> str:
     """The alert for one incident. Every value it names was fixed when the incident opened.
 
-    Two rules this text exists to keep. It establishes that the watch cannot see the holder, and
-    says so in those words; it never says the holder is dead, which no check here can show. And
-    it names no call that changes anything: not `omp --resume <id>` in a new pane, which puts a
+    Three rules this text exists to keep. It establishes that the watch cannot see the holder,
+    and says so in those words; it never says the holder is dead, which no check here can show.
+    It names no call that changes anything: not `omp --resume <id>` in a new pane, which puts a
     second process on a transcript the first may still hold (INFRA-681), and not the role lookup
     or the session delete, each of which acts on a session that may be alive. What it asks for
     instead is what caught the 2026-10-29 false alert in two minutes: look at the pane, and ask
     the session.
+
+    And since 2026-10-30 it says that the holder may not be an omp session at all. Envoy's
+    registry takes any registered session id, and the Verified Linux scheduler's envprobe claims
+    roles from a process that is not an agent, so "no pane, no transcript, no process, no
+    registry entry" is exactly what a non-omp holder looks like, and also what a holder whose
+    harness writes its transcript outside the session root looks like. Sending a reader to find
+    a pane that never existed and read a transcript that does not exist is how an alert trains
+    its reader to skip the next one; steps 1 and 3 now say when they do not apply.
     """
     record = incident
     unseen_for = human(now - (record.get("opened_at") or now))
-    transcript = record.get("transcript") or "(no transcript file found)"
+    transcript = record.get("transcript") or ""
     files = record.get("handover") or []
     handover = (
         "brief it from " + ", ".join(files)
@@ -825,6 +1107,20 @@ def alert_text(role: str, incident: dict, holder: str, now: float, kind: str) ->
         if pane
         else "Find its pane: `tmux list-panes -a -F '#{pane_id} #{pane_title} #{pane_current_path}'`"
         f" and look for its title or its directory, {record.get('dir') or '(no dir recorded)'}."
+        " THIS STEP MAY NOT APPLY: this watch has never seen this session in a pane, and a"
+        " holder that no omp process, no transcript and no registry entry knows may never have"
+        " had one."
+    )
+    step_three = (
+        f"  3. Only once a person has looked and found no live lane: read the tail of"
+        f" {transcript}, and restart the lane IN ITS OWN PANE, never a new one -- two omp"
+        f" processes on one transcript is the INFRA-681 double loop. {handover}."
+        if transcript
+        else "  3. THIS STEP MAY NOT APPLY: no transcript for this holder exists, under"
+        f" {SESSION_ROOT} or under its own working directory, so there is nothing to read and"
+        " nothing to resume in place. A holder that leaves no transcript here was started by"
+        " something other than a person at a pane, and only that thing can start it again."
+        + (" Its lane's handover files: " + ", ".join(files) + "." if files else "")
     )
     lines = [
         f"ENVOY ROLE HOLDER UNSEEN ({kind}): nothing this watch can read has seen the holder of"
@@ -836,6 +1132,17 @@ def alert_text(role: str, incident: dict, holder: str, now: float, kind: str) ->
         "What each source answered when the incident opened:",
     ]
     lines += [f"  - {name}: {sentence}" for name, _, sentence in record.get("sources") or []]
+    lines.append(
+        "THE HOLDER MAY NOT BE AN omp SESSION AT ALL. Envoy's registry takes any registered"
+        " session id (store.Registry.SetRole; registration is an HTTP call), and the Verified"
+        " Linux scheduler's envprobe claims roles named node-<deployment>-<number> from a"
+        " process that is no agent. Every source above answering \"cannot see\" is as consistent"
+        " with a holder this machine's omp-shaped searches can never find -- a non-omp claimer,"
+        " or a lane whose harness writes its transcript outside the session root, or a lane"
+        " inside an agent box with a uid-shifted /proc -- as it is with a session that stopped."
+        " Check the directory line above before you spend a minute on the pane and the"
+        " transcript."
+    )
     lines.append(
         f"While this holds, a message to notifications.role.{role} may reach nobody, and the"
         " claim may still be registered to this holder. This watch does not read the claim, and"
@@ -850,12 +1157,11 @@ def alert_text(role: str, incident: dict, holder: str, now: float, kind: str) ->
         f" {holder} \"are you alive?\"`. A session that answers is alive and this alert is wrong:"
         " say so on the incident and nothing else needs doing. That is how the 2026-10-29"
         " 09:20:30Z false alert on bet64-eta-arity was caught, two minutes in.",
-        f"  3. Only once a person has looked and found no live lane: read the tail of {transcript},"
-        f" and restart the lane IN ITS OWN PANE, never a new one -- two omp processes on one"
-        f" transcript is the INFRA-681 double loop. {handover}.",
+        step_three,
         f"  4. {RELEASE_CALL.format(role=role, holder=holder)}",
     ]
     lines += record.get("notes") or []
+    lines += banner or []
     lines.append(
         "From envoy-role-holder-watch (~/.dotfiles/scripts/envoy-role-holder-watch) on "
         f"{socket.gethostname()}, a systemd --user timer every 30 s."
@@ -863,30 +1169,81 @@ def alert_text(role: str, incident: dict, holder: str, now: float, kind: str) ->
     return guard_verdict("\n".join(lines))
 
 
-def clear_text(role: str, incident: dict, holder: str, cause: str, now: float) -> str:
+def clear_text(
+    role: str, incident: dict, holder: str, cause: str, now: float, kind: str = "seen",
+    banner: list[str] | None = None,
+) -> str:
+    """The one message that ends an incident. Two kinds, and they claim different things.
+
+    `seen`: a source found the holder, so the role has a holder this watch can see again.
+
+    `quiet`: NOTHING found the holder and nothing ever will, and the only reason to stop is the
+    fifth source -- a named file in the holder's working directory, written at a named time.
+    That text must not say the lane is working, because an mtime cannot say it: it says which
+    file was written and when, says what it does not establish, and says that the watch will
+    not repeat this alert. See DEFAULT_DIR_GRACE for why that is the right trade.
+    """
     opened = incident.get("opened_at") or now
-    return guard_verdict(
-        f"ENVOY ROLE HOLDER UNSEEN, CLEARED: role {role} has a holder this watch can see again. "
-        f"What cleared it: {cause}. "
-        f"The unseen holder was {holder}; the incident opened at {iso(opened)}, cleared at "
-        f"{iso(now)}, and lasted {human(now - opened)}. "
-        "No action is needed. From envoy-role-holder-watch on " + socket.gethostname() + "."
+    tail = (
+        f" The unseen holder was {holder}; the incident opened at {iso(opened)}, cleared at"
+        f" {iso(now)}, and lasted {human(now - opened)}."
     )
+    if kind == "quiet":
+        lines = [
+            f"ENVOY ROLE HOLDER UNSEEN, NOT ALERTING AGAIN: role {role}'s holder is still unseen"
+            " and this watch has no source that will ever see it, so it stops here rather than"
+            " repeat an alert nobody can answer.",
+            f"The only thing that moved: {cause}.",
+            "WHAT THAT DOES NOT SAY: it does not say the lane is working, and it does not say"
+            " the holder is alive. A file's mtime says that file was written. On 2026-10-30"
+            " ps.log in such a directory grew about a kilobyte a second while the probe's own"
+            " outputs had stopped three minutes earlier, so judge the named file yourself:"
+            " work, or a log beside it.",
+            "WHAT IT DOES SAY: something in that lane's directory has been written inside the"
+            " last few minutes, while no omp process, no transcript, no Envoy registry entry"
+            " and no open file descriptor on this machine can name the holder. That is the"
+            " shape of a holder this watch cannot see by construction -- a claimer that is not"
+            " an omp session, or a lane whose transcript lives outside the session root -- not"
+            " of a lane that died with nobody noticing.",
+            f"{role} is left in the watch's state file as quieted, so no further alert and no"
+            " escalation goes out for this holder. If the holder shows up on any source again,"
+            " the role goes back to being watched normally from that moment."
+            + tail,
+        ]
+    elif kind == "suppressed":
+        lines = [
+            f"ENVOY ROLE HOLDER UNSEEN, CLOSED BY A SUPPRESSION: the open alert on role {role}"
+            " is closed because its whole class is now suppressed, not because anything was"
+            " learnt about the holder. It is still unseen.",
+            f"The suppression: {cause}. It is named, dated and counted in every alert of every"
+            " other class this watch sends, and the alerts come back by themselves when it"
+            " expires." + tail,
+        ]
+    else:
+        lines = [
+            f"ENVOY ROLE HOLDER UNSEEN, CLEARED: role {role} has a holder this watch can see"
+            f" again. What cleared it: {cause}." + tail + " No action is needed.",
+        ]
+    lines += banner or []
+    lines.append("From envoy-role-holder-watch on " + socket.gethostname() + ".")
+    return guard_verdict("\n".join(lines))
 
 
 def send_clear(
-    envoy: Envoy, options: argparse.Namespace, role: str, incident: dict, holder: str, cause: str, now: float
+    envoy: Envoy, options: argparse.Namespace, role: str, incident: dict, holder: str, cause: str,
+    now: float, kind: str = "seen", banner: list[str] | None = None,
 ) -> bool:
-    """Tell everyone who heard the alert that the role has a holder again. One per incident."""
+    """Tell everyone who heard the alert how the incident ended. One per incident."""
     if not incident.get("alerted_at") or incident.get("cleared_at"):
         return False
     incident["cleared_at"] = now
     targets = incident.get("told") or [CHIEF_OF_STAFF, INFRA_LEAD]
-    text = clear_text(role, incident, holder, cause, now)
+    text = clear_text(role, incident, holder, cause, now, kind, banner)
     for target in targets:
         if not options.dry_run:
             envoy.send(target, text)
-    log(f"{role}: CLEARED ({cause}); told {len(targets)} sessions")
+    named = {"quiet": "QUIETED ON THE DIRECTORY RULE", "suppressed": "CLOSED BY A SUPPRESSION"}
+    log(f"{role}: {named.get(kind, 'CLEARED')} ({cause}); told {len(targets)} sessions")
     if options.print_alert:
         print(text)
     return True
@@ -1480,6 +1837,9 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         # Named in the alert, so a reader knows who else saw it and under which role.
         incident["told_why"] = [f"{why} {target}" for target, why in targets]
         text = move_alert_text(incident, now) if incident.get("move") else pane_alert_text(incident, now)
+        # Where a reader already looks: a suppression of another class is named in this one, so
+        # nobody has to read the source of the watch to learn that a class has been silenced.
+        text = "\n".join([text] + suppression_lines(now, state.data.get("suppressed") or {}))
         incident["alerted_at"] = now
         incident["told"] = [target for target, _ in targets]
         state.commit(options)
@@ -1561,6 +1921,9 @@ def run_once(options: argparse.Namespace) -> int:
             )
 
     alerts = clears = 0
+    # The tally every alert of every other class carries: how much this suppression has
+    # actually swallowed, so a reader can see the size of what they are not being told.
+    suppressed: dict = state.data.setdefault("suppressed", {})
     for role in sorted(roles_state):
         record = roles_state[role]
         holder = record.get("holder")
@@ -1568,7 +1931,44 @@ def run_once(options: argparse.Namespace) -> int:
             continue
         key = f"{role}|{holder}"
         incident = incidents.get(key)
-        evidence = holder_evidence(envoy, holder, held, live, options.write_grace, started)
+
+        # A named class suppression, checked before any work is done for the role: see
+        # SUPPRESSIONS. It sends nothing for this role, counts itself, and closes an incident
+        # the class had already alerted on, so a reader is not left holding an open alert that
+        # will never be mentioned again.
+        rule = suppression_for(role, started)
+        if rule:
+            counted = suppressed.setdefault(rule["shown"], {"count": 0})
+            if not record.get("suppressed_at"):
+                record["suppressed_at"] = started
+                counted["count"] = counted.get("count", 0) + 1
+                counted["role"] = role
+                counted["at"] = started
+                log(
+                    f"{role}: SUPPRESSED by \"{rule['name']}\" ({rule['shown']}) until"
+                    f" {rule['until']}; nothing is sent for this holder, and the suppression is"
+                    f" named in every other alert ({counted['count']} role(s) so far)"
+                )
+            if incident and send_clear(
+                envoy, options, role, incident, holder,
+                f"the suppression \"{rule['name']}\" covers {rule['shown']} until"
+                f" {rule['until']}",
+                started, "suppressed", suppression_lines(started, suppressed),
+            ):
+                clears += 1
+            if started - (record.get("suppressed_at") or started) > SUPPRESSED_FORGET:
+                # Pure bookkeeping, and it has to happen: this class claims a new role every
+                # couple of minutes and up to a thousand in one capacity test, and the state
+                # file is rewritten and fsynced every 30 s.
+                incidents.pop(key, None)
+                roles_state.pop(role, None)
+            state.commit(options)
+            continue
+
+        evidence = holder_evidence(
+            envoy, holder, held, live, options.write_grace, started,
+            record.get("dir") or "", options.dir_grace,
+        )
         pid = evidence["pid"]
 
         # A role whose holder another live session has taken is not this holder's incident.
@@ -1633,6 +2033,49 @@ def run_once(options: argparse.Namespace) -> int:
             state.commit(options)
             continue
 
+        # THE DIRECTORY RULE. An incident this watch has no source for can repeat until the
+        # lane ends, and nothing it reads will ever clear it. One thing can: a named file in
+        # the holder's own working directory, written inside --dir-grace, dated absolutely.
+        #
+        # What it is allowed to conclude, and nothing more: a reader cannot answer this alert.
+        # Looking for a pane, a transcript and a process has already failed on all four
+        # sources, and the lane's directory is being written by something that is not any of
+        # them. It does NOT conclude that the lane works -- see clear_text("quiet").
+        #
+        # It never holds back a FIRST alert for a role whose directory went quiet with its
+        # holder: that is the 2026-10-27T05:52Z shape this watch exists for. The cost it does
+        # accept is the other way round -- a real loss in a directory other lanes write gets
+        # its first alert and then one quieting message instead of an escalation. That trade is
+        # deliberate and it is the only part of this rule that could hide a real failure.
+        if incident.get("quieted_at"):
+            log(
+                f"{role}: {CANNOT_SEE_HOLDER} {holder}, quieted at"
+                f" {iso(incident['quieted_at'])} on the directory rule; {evidence['dir_sentence']}"
+            )
+            if unseen_for > FORGET_AFTER:
+                incidents.pop(key, None)
+                roles_state.pop(role, None)
+            state.commit(options)
+            continue
+
+        if evidence["dir_fresh"]:
+            incident["quieted_at"] = started
+            incident["quiet_file"] = evidence["dir_file"]
+            incident["quiet_write"] = evidence["dir_write"]
+            state.commit(options)
+            if send_clear(
+                envoy, options, role, incident, holder, evidence["dir_sentence"], started,
+                "quiet", suppression_lines(started, suppressed),
+            ):
+                clears += 1
+            else:
+                log(
+                    f"{role}: NOT ALERTING on {holder}: no source can see the holder, and"
+                    f" {evidence['dir_sentence']}"
+                )
+            state.commit(options)
+            continue
+
         if not incident.get("alerted_at"):
             incident["transcript"] = evidence["transcript"]
             incident["handover"] = handover_files(holder, record.get("dir") or "")
@@ -1642,7 +2085,10 @@ def run_once(options: argparse.Namespace) -> int:
             incident["notes"] = notes
             for field in ("dir", "title", "host"):
                 incident[field] = record.get(field)
-            text = alert_text(role, incident, holder, started, "first alert")
+            text = alert_text(
+                role, incident, holder, started, "first alert",
+                suppression_lines(started, suppressed),
+            )
             # On disk before a single message leaves: a resent first alert is worse than a late one.
             incident["alerted_at"] = started
             incident["told"] = [target for target, _ in targets]
@@ -1668,7 +2114,10 @@ def run_once(options: argparse.Namespace) -> int:
             started - incident["alerted_at"] >= options.escalate
             and not incident.get("escalated_at")
         ):
-            text = alert_text(role, incident, holder, started, "STILL UNSEEN after 10 minutes")
+            text = alert_text(
+                role, incident, holder, started, "STILL UNSEEN after 10 minutes",
+                suppression_lines(started, suppressed),
+            )
             text += (
                 f"\nNobody has cleared this since the first alert at {iso(incident['alerted_at'])}."
                 " You own looking at the pane."
@@ -1702,6 +2151,8 @@ def run_once(options: argparse.Namespace) -> int:
         f" in {time.time() - started:.2f}s; {alerts + pane_alerts} alert(s),"
         f" {clears + pane_clears} clear(s)"
     )
+    for line in suppression_lines(started, suppressed, short=True):
+        log(line)
     return 0
 
 
@@ -1732,6 +2183,15 @@ def main() -> int:
         type=Path,
         default=DEFAULT_STATE,
         help="the owned state file; another path is for tests and never sends",
+    )
+    parser.add_argument(
+        "--dir-grace",
+        type=float,
+        default=DEFAULT_DIR_GRACE,
+        help=(
+            "seconds within which a write under the holder's working directory quiets an"
+            " alert no source can clear; it never says the holder is alive"
+        ),
     )
     parser.add_argument("--http-timeout", type=float, default=8.0)
     parser.add_argument("--dry-run", action="store_true", help="decide and log, send nothing")
