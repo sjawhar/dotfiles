@@ -10,11 +10,28 @@ modelRoles:
   slow: openai-codex/gpt-5.6-terra:xhigh
   task: anthropic/claude-opus-5
   vision: google/gemini-3.7-flash:medium
-  review: openai-codex/gpt-5.6-terra:xhigh
+  # The review gates and the oracle advisors run on the OpenAI API lane rather
+  # than the Codex subscription, because the subscription's window is spent
+  # until 2026-11-04T06:35Z and a gate that answers from Claude is a
+  # same-family read wearing a cross-family label. `openai/gpt-5.6-terra` has
+  # its own chain below (6.1-terra, 6.1-sol, then the subscription when it
+  # reopens) and no Anthropic link, so a gate with nothing reachable refuses
+  # instead of answering. Measured 2026-10-30: astra-api served
+  # openai/gpt-6-astra and gpt-api served openai/gpt-5.6-terra, each read back
+  # from the subagent's own transcript.
+  review: openai/gpt-5.6-terra:xhigh
   # The Legion plugin's agents name these two roles: oracle for oracle and
   # plan-gap-analyst, deep for deep-worker. Unmapped, those agents fail with
   # "No model selected". Same models as omp/agents/oracle.md and deep.md (@slow).
-  oracle: openai-codex/gpt-5.6-terra:high
+  #
+  # `oracle` is read-only advice, so it moves to the API lane with the gates.
+  # `slow` and `deep` stay on the subscription deliberately: they carry the
+  # fleet's implementation volume, and moving that to per-token billing is a
+  # spend decision rather than a routing one. While the window is spent they
+  # fall to Anthropic and are therefore same-family -- which their own agent
+  # descriptions say, and which a caller who needs a cross-family read answers
+  # by dispatching astra-api or gpt-api by name.
+  oracle: openai/gpt-5.6-terra:high
   deep: openai-codex/gpt-5.6-terra:xhigh
   advisor: anthropic/claude-sonnet-5-5:medium
   # pi-envoy's AskGate asks this role (else `default`) before each Dispatch write.
