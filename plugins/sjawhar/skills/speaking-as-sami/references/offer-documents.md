@@ -131,7 +131,8 @@ Write the concrete action in place of a banned verb, because each one is a metap
 | name, names, naming (as a verb) | states, lists, is called |
 | pay, pays, paying for | the price, or what the buyer receives |
 | show, shows, showing | proves, measures, reports, or the number itself |
-| land, lands, landing | is delivered, is merged, is released, arrives |
+| land, lands, landing | is delivered, is merged, is released |
+| arrive, arrives, arriving | is delivered, the recipient receives it |
 | ride, rides, riding | the dependency itself |
 
 ## 9. Delivery
