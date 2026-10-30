@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+"""worktree-clone-check: find a worktree that is really a clone, and say how many bytes that cost.
+
+Under a worktrees root, every child is supposed to be a git **worktree**: its `.git` is a small
+pointer FILE (`gitdir: …`) and the objects live once, in the repository it points at. A child
+whose `.git` is a DIRECTORY has an object store of its own — a clone — and a repository with a
+5 GB pack costs 5 GB every time one is made. That is the whole rule, and it is one `stat` per
+child to check (`--quick` does only that, in well under a second, for use as a gate).
+
+The report gives, per clone: total size, `.git` size, branch or detached HEAD, the `Omp-Session`
+trailer of the HEAD commit when it has one, and the first line of its reflog, which says how the
+directory was made (`clone: from …`, `export from jj`, …).
+
+Then the number that makes the case: how many of those bytes are a second or later copy of an
+object that already exists in another store under the same root. Measured over the objects
+themselves, because the two cheap shortcuts both get it wrong here:
+
+  - a **pack id** is not an identity. Two clones of one history that have each repacked hold the
+    same objects in packs with different ids, and comparing pack ids calls them unrelated. So
+    this reads each `.idx`: every object id, and its packed size from the gap to the next object.
+  - a copy that shares an **inode** costs nothing. `git clone` from a local path hardlinks the
+    packs, so two directories can each name 5 GB and occupy 5 GB once. A pack whose inode was
+    already counted contributes its objects to what exists, and zero bytes to what it cost.
+
+Stores are taken largest first, so the largest copy of a history is the original and every later
+one is the duplicate. Objects are matched on the first 8 bytes of their id (one chance in some
+millions of a false match across the millions of objects on this box, and a false match can only
+make the duplication number smaller by moving a byte into the "already there" column).
+
+It deletes nothing, moves nothing and repacks nothing. The only git it runs is `show -s` with
+optional locks off. Exit 1 when it finds a clone, so it can be used as a gate; 0 on a clean root.
+
+Why scripts/ and not devbox/: devbox/ holds the box's systemd units and the files its install.sh
+links into place; this has no unit and no state. scripts/ is on PATH (.bashrc), so the check runs
+by name in any session, by hand or in a gate, the way scripts/pr-gate and scripts/docs-pr-gate do.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import numpy as np
+except ImportError:  # the listing and the gate still work; the duplication number needs it
+    np = None
+
+GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+GIT_TIMEOUT = 30
+IDX_V2_MAGIC = b"\xfftOc"
+
+
+def gb(n: int) -> str:
+    if n >= 1e8:
+        return f"{n / 1e9:.2f} GB"
+    if n >= 1e6:
+        return f"{n / 1e6:.1f} MB"
+    return f"{n} bytes"
+
+
+def tree_bytes(path: Path, seen: set[tuple[int, int]], skip: Path | None = None) -> tuple[int, int]:
+    """(allocated bytes under path, how many of them a shared inode already counted elsewhere).
+
+    Allocated, like `du`: st_blocks × 512, directories included, symlinks never followed. `seen`
+    is shared across every tree of one run, so a hardlinked file is charged to the first tree that
+    met it and reported as shared in the next, and no byte of the disk is counted twice. `skip` is
+    a directory not descended into, so a child can be sized without its .git and the two added.
+    """
+    total = shared = 0
+    try:
+        total += os.lstat(path).st_blocks * 512
+    except OSError:
+        return 0, 0
+    stack = [str(path)]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            size = st.st_blocks * 512
+            if entry.is_dir(follow_symlinks=False):
+                if skip is not None and entry.path == str(skip):
+                    continue
+                total += size
+                stack.append(entry.path)
+                continue
+            total += size
+            if st.st_nlink > 1:
+                key = (st.st_dev, st.st_ino)
+                if key in seen:
+                    shared += size
+                else:
+                    seen.add(key)
+    return total, shared
+
+
+def head_name(gitdir: Path) -> str:
+    try:
+        head = (gitdir / "HEAD").read_text().strip()
+    except OSError as exc:
+        return f"HEAD unreadable ({exc.strerror})"
+    if head.startswith("ref: refs/heads/"):
+        return "branch " + head[len("ref: refs/heads/") :]
+    if head.startswith("ref: "):
+        return head[len("ref: ") :]
+    return "detached " + head[:12]
+
+
+def reflog_first(gitdir: Path) -> str:
+    """The oldest reflog entry of HEAD: when this directory was made, and by what."""
+    try:
+        with open(gitdir / "logs" / "HEAD", "rb") as handle:
+            line = handle.readline().decode("utf-8", "replace").rstrip("\n")
+    except OSError:
+        return "no reflog"
+    before, tab, message = line.partition("\t")
+    if not tab:
+        return line[:200]
+    fields = before.split()
+    when = ""
+    if len(fields) >= 2 and fields[-2].isdigit():
+        when = datetime.fromtimestamp(int(fields[-2]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "  "
+    return when + message[:200]
+
+
+def head_commit(child: Path) -> tuple[str, str]:
+    """(short HEAD sha, the `session` line) from one read-only `git show -s`.
+
+    The session line is the HEAD commit's Omp-Session trailer when it has one, else why there is
+    none — never a trailer this check invented.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(child), "show", "-s",
+             "--format=%h%n%(trailers:key=Omp-Session,valueonly)", "HEAD"],
+            capture_output=True, text=True, env=GIT_ENV, timeout=GIT_TIMEOUT, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", f"git could not be run ({exc})"
+    if done.returncode != 0:
+        first = done.stderr.strip().splitlines()
+        return "", f"git refused: {first[0] if first else 'no HEAD'}"
+    lines = done.stdout.splitlines()
+    sha = lines[0] if lines else ""
+    trailer = next((line.strip() for line in lines[1:] if line.strip()), "")
+    return sha, f"Omp-Session: {trailer}" if trailer else "no Omp-Session trailer on HEAD"
+
+
+def pack_contents(idx: Path, pack_bytes: int):
+    """(object ids as uint64 prefixes, packed size of each) for one pack, or None.
+
+    The .idx table is sorted by object id, and an object's packed size is the gap from its offset
+    to the next one in the pack (the last reaches the pack's 20-byte trailer). Nothing is
+    decompressed and nothing is written.
+    """
+    if np is None:
+        return None
+    try:
+        data = idx.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 1064:
+        return None
+    if data[:4] == IDX_V2_MAGIC:
+        if int.from_bytes(data[4:8], "big") != 2:
+            return None
+        base = 8 + 1024
+        count = int.from_bytes(data[base - 4 : base], "big")
+        if count == 0:
+            return None
+        names = np.frombuffer(data, dtype=np.uint8, count=count * 20, offset=base)
+        small = np.frombuffer(data, dtype=">u4", count=count, offset=base + count * 24)
+        offsets = small.astype(np.uint64)
+        huge = small >= 0x80000000
+        if huge.any():
+            start = base + count * 28
+            table = np.frombuffer(data, dtype=">u8", count=(len(data) - 40 - start) // 8, offset=start)
+            offsets[huge] = table[(small[huge] & 0x7FFFFFFF).astype(np.int64)]
+    else:
+        count = int.from_bytes(data[1020:1024], "big")
+        if count == 0:
+            return None
+        records = np.frombuffer(data, dtype=np.uint8, count=count * 24, offset=1024).reshape(count, 24)
+        names = records[:, 4:].reshape(-1)
+        offsets = records[:, :4].copy().view(">u4").ravel().astype(np.uint64)
+    ids = names.reshape(count, 20)[:, :8].copy().view(">u8").ravel()
+    order = np.argsort(offsets, kind="stable")
+    ordered = offsets[order]
+    sizes = np.empty(count, dtype=np.uint64)
+    end = np.uint64(max(pack_bytes - 20, 0))
+    sizes[order[:-1]] = ordered[1:] - ordered[:-1]
+    sizes[order[-1]] = end - ordered[-1] if end > ordered[-1] else np.uint64(0)
+    return ids, sizes
+
+
+class Clone:
+    def __init__(self, child: Path, root: Path) -> None:
+        self.path = child
+        self.label = str(child.relative_to(root))
+        self.gitdir = child / ".git"
+        self.total = self.git = self.git_shared = 0
+        self.duplicated = 0
+        self.packs: list[tuple[Path, int, tuple[int, int]]] = []  # path, bytes, (dev, inode)
+
+    def measure(self, seen: set[tuple[int, int]]) -> None:
+        self.git, self.git_shared = tree_bytes(self.gitdir, seen)
+        rest, _ = tree_bytes(self.path, seen, skip=self.gitdir)
+        self.total = rest + self.git
+        for pack in sorted((self.gitdir / "objects" / "pack").glob("*.pack")):
+            try:
+                st = pack.stat()
+            except OSError:
+                continue
+            self.packs.append((pack, st.st_size, (st.st_dev, st.st_ino)))
+
+    def packed_bytes(self) -> int:
+        return sum(size for _, size, _ in self.packs)
+
+    def hosts(self) -> int:
+        """Worktrees that point INTO this store: removing it would take them with it."""
+        try:
+            return sum(1 for _ in (self.gitdir / "worktrees").iterdir())
+        except OSError:
+            return 0
+
+
+def walk(root: Path, depth: int, follow: bool) -> tuple[list[Clone], int, int]:
+    """Every directory within `depth` levels of root whose .git is a directory."""
+    clones: list[Clone] = []
+    worktrees = skipped = 0
+    frontier = [root]
+    for _ in range(depth):
+        nxt: list[Path] = []
+        for parent in frontier:
+            try:
+                entries = sorted(os.scandir(parent), key=lambda e: e.name)
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.name.startswith(".") or not entry.is_dir():
+                    continue
+                child = Path(entry.path)
+                if entry.is_symlink() and not follow:
+                    skipped += 1
+                    continue
+                dot = child / ".git"
+                if dot.is_dir() and not dot.is_symlink():
+                    clones.append(Clone(child, root))
+                elif dot.is_file():
+                    worktrees += 1
+                else:
+                    nxt.append(child)
+        frontier = nxt
+    return clones, worktrees, skipped
+
+
+def duplication(ordered: list[Clone]) -> tuple[int, int]:
+    """Charge each store, largest first, for the objects an earlier store already holds.
+
+    Returns (duplicated bytes, stores whose .idx could not be read).
+    """
+    union = np.empty(0, dtype=np.uint64)
+    inodes: set[tuple[int, int]] = set()
+    total = unreadable = 0
+    for clone in ordered:
+        ids_parts: list[np.ndarray] = []
+        size_parts: list[np.ndarray] = []
+        for pack, size, inode in clone.packs:
+            parsed = pack_contents(pack.with_suffix(".idx"), size)
+            if parsed is None:
+                unreadable += 1
+                continue
+            ids, sizes = parsed
+            ids_parts.append(ids)
+            # A pack reached through a second hardlink is the same bytes on disk, and the store
+            # that met it first is charged for them: here its objects exist and cost nothing.
+            size_parts.append(np.zeros_like(sizes) if inode in inodes else sizes)
+            inodes.add(inode)
+        if not ids_parts:
+            continue
+        ids = np.concatenate(ids_parts)
+        sizes = np.concatenate(size_parts)
+        order = np.argsort(ids, kind="stable")
+        ids, sizes = ids[order], sizes[order]
+        keep = np.ones(len(ids), dtype=bool)
+        keep[1:] = ids[1:] != ids[:-1]  # one object counted once, even if two packs hold it
+        ids, sizes = ids[keep], sizes[keep]
+        if union.size:
+            at = np.searchsorted(union, ids)
+            at[at >= union.size] = union.size - 1
+            already = union[at] == ids
+            clone.duplicated = int(sizes[already].sum())
+            total += clone.duplicated
+            union = np.union1d(union, ids)
+        else:
+            union = ids
+    return total, unreadable
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("root", nargs="?", default=str(Path.home() / ".worktrees"),
+                        help="worktrees root to walk (default ~/.worktrees)")
+    parser.add_argument("--depth", type=int, default=2,
+                        help="levels below the root to look at (default 2: root/<project>/<child>)")
+    parser.add_argument("--follow-symlinks", action="store_true",
+                        help="also walk symlinked children (they usually live on another disk)")
+    parser.add_argument("--quick", action="store_true",
+                        help="apply the rule and nothing else: no sizes, no duplication")
+    args = parser.parse_args()
+
+    root = Path(args.root).expanduser()
+    started = time.monotonic()
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not root.is_dir():
+        print(f"worktree-clone-check {stamp}: {root} is absent; nothing to check")
+        return 0
+
+    clones, worktrees, skipped = walk(root, args.depth, args.follow_symlinks)
+    print(f"worktree-clone-check {stamp}  root {root}  depth {args.depth}")
+    print(f"{len(clones)} clone(s), {worktrees} real worktree(s), {skipped} symlinked child(ren) not followed")
+    print()
+
+    if args.quick:
+        for clone in clones:
+            print(f"clone  {clone.label}")
+        print(f"checked in {time.monotonic() - started:.1f}s (--quick: the rule only). "
+              f"This check changes nothing.")
+        return 1 if clones else 0
+
+    seen: set[tuple[int, int]] = set()
+    for clone in clones:
+        clone.measure(seen)
+
+    ordered = sorted(clones, key=lambda c: (c.packed_bytes(), c.git), reverse=True)
+    unreadable = 0
+    if clones:
+        if np is None:
+            print("duplication not measured: this python has no numpy\n")
+        else:
+            _, unreadable = duplication(ordered)
+
+    for clone in ordered:
+        sha, session = head_commit(clone.path)
+        share = f", {gb(clone.git_shared)} of it hardlinked to another store" if clone.git_shared else ""
+        print(f"clone  {clone.label}")
+        print(f"       size    total {gb(clone.total)}, .git {gb(clone.git)}{share}")
+        print(f"       head    {head_name(clone.gitdir)}" + (f" @ {sha}" if sha else ""))
+        print(f"       session {session}")
+        print(f"       reflog  {reflog_first(clone.gitdir)}")
+        print(f"       packs   {len(clone.packs)}, {gb(clone.packed_bytes())}"
+              + (f"; {gb(clone.duplicated)} of them objects an earlier store already holds"
+                 if clone.duplicated else ""))
+        hosts = clone.hosts()
+        if hosts:
+            print(f"       holds   {hosts} worktree(s) point INTO this store")
+        print()
+
+    store_bytes = sum(c.git for c in clones)
+    on_disk = store_bytes - sum(c.git_shared for c in clones)
+    print(f"object stores: {gb(store_bytes)} named, {gb(on_disk)} on disk after hardlink dedup")
+    duplicated = sum(c.duplicated for c in clones)
+    print(f"duplication: {gb(duplicated)} is a second or later copy of an object another store "
+          f"under this root already holds")
+    if unreadable:
+        print(f"             ({unreadable} pack index(es) could not be read; their objects are not in that number)")
+    print(f"checked in {time.monotonic() - started:.1f}s. This check changes nothing.")
+    return 1 if clones else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
