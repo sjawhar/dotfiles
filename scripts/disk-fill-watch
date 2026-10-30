@@ -18,8 +18,7 @@ at 22:09:56Z, 110 minutes before the fill, so the floor said "low" for hours and
 
 What one run does, with `statvfs` and /proc reads only, no model call:
 
-  1. Record free space on every watched mount (`--mount`, default / and /mnt/nvme), one mount
-     per filesystem: two names of one device are watched once, under the first name. Every run
+  1. Record free space on every watched mount (`--mount`, default / and /mnt/nvme). Every run
      appends a sample, whether or not anything is wrong: a silent log cannot be told from a
      dead watch.
   2. Compute the df free-space fill rate over the last hour from its own samples, and from it
@@ -29,17 +28,9 @@ What one run does, with `statvfs` and /proc reads only, no model call:
      new low for the hour. The low test keeps a sawtooth quiet: /mnt/nvme swings 100 GB up and
      down every hour as grade jobs land and are cleaned, and only a fall to a new low with an
      hour of negative slope behind it is a fall towards zero.
-  4. The floor is checked against the device it names, and held to --max-floor-fraction of it
-     (10%) where it is larger, with the substitution logged once and never alerted. A floor a
-     machine can never be above is not a floor, and a guard that fires forever is ignored as
-     surely as one that never fires.
-  5. The two crossings are different states and are said in different words: DISK LOW for free
-     space under the floor with no measurable fall, DISK FILLING for a fall that reaches zero
-     inside the horizon, which is the one with a deadline. A static disk is never given a
-     time-to-full, however happily the arithmetic produces one.
-  6. A crossing must hold for the grace window before it alerts, so one `rm` and one build do
+  4. A crossing must hold for the grace window before it alerts, so one `rm` and one build do
      not fire.
-  7. The alert names TOP WRITERS NOW as one 15 s interval of `/proc/<pid>/io` `write_bytes`
+  5. The alert names TOP WRITERS NOW as one 15 s interval of `/proc/<pid>/io` `write_bytes`
      traffic, not disk growth. It gives each writer's owning agent session, working directory,
      what it holds open on the alerting mount and age. A size walk cannot name those: it sees
      what is already written, not what is being written now.
@@ -87,15 +78,11 @@ GB = 1000000000
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 # Where the state file goes. /mnt/nvme is the big disk on the agent boxes; a machine without it
-# (a laptop, and every ossv lane box, where /mnt/nvme is a root-owned directory on the root
-# filesystem) keeps the state under ~/.local/state, which every XDG machine has. The test is
-# writability rather than existence: measured 2026-10-30, /mnt/nvme/sami on those boxes is a
-# root-owned 755 directory, so a watch that only asks whether the path is a directory crashes
-# on its first run there.
+# (a laptop) keeps the state under ~/.local/state, which every XDG machine has.
 _NVME_STATE = Path("/mnt/nvme/sami/tmp/disk-fill-watch/state.json")
 DEFAULT_STATE = (
     _NVME_STATE
-    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    if Path("/mnt/nvme/sami/tmp").is_dir()
     else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "disk-fill-watch/state.json"
 )
 
@@ -129,22 +116,6 @@ NVME_KIND_FLOORS = [
     ("build-stage", 21600000000),
     ("grade-record", 20800000000),
 ]
-
-# A floor is a number about a device, so it must be checked against the device it names. The
-# 84 GB build-cache floor is the grade farm's, sized for its 3.7 TB array; on sami-leanperf,
-# where /mnt/nvme is not an array at all but the same 247 GB /dev/root as /, it is 31.7% of the
-# filesystem, so the watch alerted at 82% used and 0.0 GB/h and would have alerted for as long
-# as that machine existed. A floor over this fraction of its filesystem is held to the fraction
-# and the substitution is logged once, never alerted: a guard that cannot be satisfied is the
-# mirror image of a guard that never fires, and both end up ignored. Measured 2026-10-30, the
-# configured floors on sami-rocqperf are 3.6% (/) and 2.3% (/mnt/nvme) of their devices, so
-# nothing there is held and its alerts are unchanged.
-MAX_FLOOR_FRACTION = 0.10
-
-# Under this rate the free space is flat, not falling, and an alert says so rather than printing
-# "falling 0.0 GB/h ... 3558 h from full", which is what the first sami-leanperf alert said.
-# 1 GB/h on a disk with any useful headroom is days from full, well outside any horizon.
-FLAT_RATE = GB / 3600
 
 
 def log(message: str) -> None:
@@ -784,10 +755,7 @@ def verdict(
     confirmations: int = 0,
 ) -> dict:
     """Everything one run knows about one mount, and whether it is crossing."""
-    configured = FLOORS.get(mount, options.default_floor * GIB)
-    ceiling = int(total * options.max_floor_fraction)
-    floor = min(configured, ceiling) if total else configured
-    floor_held = floor < configured
+    floor = FLOORS.get(mount, options.default_floor * GIB)
     df_rate, df_window = df_fill_rate(samples, options.rate_window)
     low = low_of(samples, options.rate_window)
     time_to_full = None
@@ -820,8 +788,6 @@ def verdict(
         "free": free,
         "total": total,
         "floor": floor,
-        "configured_floor": configured,
-        "floor_held": floor_held,
         "df_fill_rate": df_rate,
         "df_rate_window": df_window,
         "low": low,
@@ -844,64 +810,30 @@ def clears(state_now: dict, options: argparse.Namespace) -> bool:
     return True
 
 
-def is_falling(now: dict) -> bool:
-    """Is this disk moving towards full in a way worth a number?
-
-    Above FLAT_RATE it is falling. Under it, only if this run's own horizon test says so: a disk
-    with little free space left can reach zero inside the horizon at a rate too small to print,
-    and that case must keep its deadline rather than be called flat.
-
-    Keep both halves, in this order. A flat-rate test alone would call a disk with 1 GiB left
-    falling at 0.5 GB/h "flat" and drop its deadline -- small rate, not a healthy disk. Ask the
-    rate first and the horizon second;
-    `test_a_slow_fall_on_a_nearly_full_disk_keeps_its_deadline` holds exactly that case.
-    """
-    rate = now.get("df_fill_rate")
-    if rate is None or rate <= 0:
-        return False
-    return rate > FLAT_RATE or bool(now.get("rate_candidate")) or bool(now.get("fast"))
-
-
 def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], kind: str, when: float) -> str:
     mount = now["mount"]
     used = 100 * (1 - now["free"] / max(now["total"], 1))
     df_rate = now["df_fill_rate"]
-    falling = is_falling(now)
     trend = "df free-space fill rate: unknown (too few samples yet)"
     if df_rate is not None:
-        if not falling and abs(df_rate) <= FLAT_RATE:
-            trend = (
-                f"free space is flat: no measurable change over the last"
-                f" {human_time(now['df_rate_window'])}"
-            )
-        else:
-            direction = "falling" if df_rate > 0 else "rising"
-            trend = (
-                f"df free-space fill rate: {direction} {gb(abs(df_rate) * 3600)}/h over the last"
-                f" {human_time(now['df_rate_window'])}"
-            )
-    # Time-to-full is a sentence about a disk that is moving. On a static disk the arithmetic
-    # still produces a number -- the first sami-leanperf alert said "0.0 GB/h ... 3558 h 42 min
-    # from full" -- and printing it dresses a standing condition as a trend.
+        direction = "falling" if df_rate > 0 else "rising"
+        trend = (
+            f"df free-space fill rate: {direction} {gb(abs(df_rate) * 3600)}/h over the last"
+            f" {human_time(now['df_rate_window'])}"
+        )
     horizon = (
         f"At that df free-space fill rate it is {human_time(now['time_to_full'])} from full."
-        if falling and now["time_to_full"] is not None
-        else "It is not falling measurably, so it has no df time-to-full."
+        if now["time_to_full"] is not None
+        else "It is not falling, so there is no df time-to-full."
     )
-    # The grade farm's per-kind floors mean something only where the farm's array is. On a
-    # machine whose floor had to be held to its device, they describe no work that exists.
-    kinds = blocked_kinds(now["free"]) if mount == "/mnt/nvme" and not now["floor_held"] else []
+    kinds = blocked_kinds(now["free"]) if mount == "/mnt/nvme" else []
     blocked = (
         "Work already refused by the grade farm's own floors at this level: " + ", ".join(kinds) + "."
         if kinds
         else ""
     )
-    # Two different states, two different words. Under a floor with no fall is a standing low
-    # that someone should reclaim; falling toward full inside the horizon is a deadline. One
-    # headline for both teaches the reader to skip the headline.
-    headline = "DISK FILLING" if now["fast"] else "DISK LOW"
     lines = [
-        f"{headline} ({kind}): {mount} on {socket.gethostname()} has {gib(now['free'])} free of"
+        f"DISK FILLING ({kind}): {mount} on {socket.gethostname()} has {gib(now['free'])} free of"
         f" {gib(now['total'])} ({used:.0f}% used), {trend}. {horizon}",
         "Why this alerts: " + "; ".join(now["reasons"]) + ".",
         f"The crossing opened at {iso(incident.get('opened_at'))}, {human_time(when - (incident.get('opened_at') or when))} ago;"
@@ -913,24 +845,14 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
     if tmp_lines:
         lines.append("Young /tmp entries at or over the size rule (these are on /):")
         lines.extend("  " + line for line in tmp_lines)
-    if now["fast"]:
-        lines.append(
-            "DO, and there is a deadline: read the writers above before you delete anything."
-            " Stop or finish the lane that is writing; move its output to the other disk"
-            " (/mnt/nvme for work started on /, and off the box for work on /mnt/nvme); then"
-            " reclaim with skill://disk-hygiene -- its check-in comes first, and a directory a"
-            " live session stands in is never deleted. A full root stops every session on the"
-            " box at once: on 2026-10-27T00:00:31Z it took rsyslog, journald and dockerd's exec"
-            " down together."
-        )
-    else:
-        lines.append(
-            "There is no deadline here: the disk is under its floor and is not filling, so this"
-            " is a standing low rather than a fall. Reclaim it before something starts to write,"
-            " with skill://disk-hygiene and its check-in, and read the writers above first. If"
-            " this level is normal for this machine, the floor is wrong for it and the number"
-            " belongs in FLOORS or --default-floor, not in a silenced alert."
-        )
+    lines.append(
+        "DO: read the writers above before you delete anything. Stop or finish the lane that is"
+        " writing; move its output to the other disk (/mnt/nvme for work started on /, and off"
+        " the box for work on /mnt/nvme); then reclaim with skill://disk-hygiene -- its check-in"
+        " comes first, and a directory a live session stands in is never deleted. A full root"
+        " stops every session on the box at once: on 2026-10-27T00:00:31Z it took rsyslog,"
+        " journald and dockerd's exec down together."
+    )
     lines.append(
         "This watch only detects. It deletes nothing, kills nothing and moves nothing."
         f" From disk-fill-watch (~/.dotfiles/scripts/disk-fill-watch) on {socket.gethostname()},"
@@ -942,7 +864,7 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
 def clear_text(now: dict, incident: dict, when: float) -> str:
     opened = incident.get("opened_at") or when
     return (
-        f"DISK CROSSING CLEARED: {now['mount']} on {socket.gethostname()} is back to"
+        f"DISK FILLING CLEARED: {now['mount']} on {socket.gethostname()} is back to"
         f" {gib(now['free'])} free, over its {gib(now['floor'])} floor and with no fall that"
         f" reaches full inside the horizon. The crossing opened at {iso(opened)}, cleared at"
         f" {iso(when)}, lasted {human_time(when - opened)}, and its lowest point was"
@@ -963,61 +885,6 @@ def tell_box_health(envoy: Envoy, text: str) -> str:
     return INFRA_LEAD
 
 
-def say_once(notes: dict, key: str, signature: str, message: str) -> None:
-    """Log a fact about this machine's shape once, and again only when the fact changes.
-
-    A configuration note is not an incident: repeating it every period is how a watch teaches
-    its reader to skip what it says.
-    """
-    if notes.get(key) == signature:
-        return
-    notes[key] = signature
-    log(message)
-
-
-def distinct_devices(mounts: list[str], notes: dict) -> list[str]:
-    """The watched mounts, one per filesystem, keeping the first name of each.
-
-    / and /mnt/nvme are two devices on sami-rocqperf and one on sami-leanperf, where /mnt/nvme
-    is a directory on /dev/root. Checking both there sampled one filesystem twice, counted its
-    free space twice, and applied the grade farm's array floor to the root disk.
-    """
-    kept: list[str] = []
-    seen: dict[int, str] = {}
-    for mount in mounts:
-        device = device_of(mount)
-        if device is None:
-            kept.append(mount)
-            continue
-        first = seen.get(device)
-        if first is None:
-            seen[device] = mount
-            kept.append(mount)
-            continue
-        say_once(
-            notes,
-            f"same-device:{mount}",
-            first,
-            f"{mount} is the same filesystem as {first} on this machine; it is watched once, as {first}",
-        )
-    return kept
-
-
-def note_held_floor(now: dict, notes: dict) -> None:
-    """Say once that a configured floor was too large for the device it names."""
-    if not now["floor_held"]:
-        return
-    say_once(
-        notes,
-        f"held-floor:{now['mount']}",
-        f"{now['configured_floor']}:{now['total']}",
-        f"{now['mount']}: the configured {gib(now['configured_floor'])} floor is"
-        f" {100 * now['configured_floor'] / max(now['total'], 1):.0f}% of this {gib(now['total'])}"
-        f" filesystem, which no machine can stay above; held to {gib(now['floor'])}"
-        f" (--max-floor-fraction). This is a note, not an alert.",
-    )
-
-
 def run_once(options: argparse.Namespace) -> int:
     started = time.time()
     envoy = Envoy(timeout=options.http_timeout)
@@ -1030,8 +897,7 @@ def run_once(options: argparse.Namespace) -> int:
     named_tmp: list = state.data.setdefault("named_tmp", [])
 
     verdicts = []
-    notes: dict = state.data.setdefault("notes", {})
-    for mount in distinct_devices(options.mount, notes):
+    for mount in options.mount:
         measured = free_bytes(mount)
         if measured is None:
             log(f"{mount}: not readable on this machine; skipped")
@@ -1055,10 +921,9 @@ def run_once(options: argparse.Namespace) -> int:
             f"{mount}: free {gib(free)} of {gib(total)}, floor {gib(now['floor'])},"
             f" df fill rate {gb((now['df_fill_rate'] or 0) * 3600)}/h over"
             f" {human_time(now['df_rate_window'])}, df time-to-full"
-            f" {human_time(now['time_to_full']) if is_falling(now) else 'n/a (flat)'}{confirmation_text}"
+            f" {human_time(now['time_to_full']) if now['time_to_full'] else 'n/a'}{confirmation_text}"
             f" -> {'CROSSING' if now['crossing'] else 'ok'}"
         )
-        note_held_floor(now, notes)
 
     alerts = cleared = 0
     tmp_device = device_of(options.tmp)
@@ -1192,39 +1057,9 @@ def run_once(options: argparse.Namespace) -> int:
                 print(message)
         del named_tmp[: max(0, len(named_tmp) - 500)]
 
-    # A mount this run no longer watches takes its incident with it -- but whoever heard its
-    # alert is told why it ends, or the last thing they have on that disk is an alarm that never
-    # closed. This is the path a same-device mount takes the first time it is deduplicated.
     for mount in list(incidents):
-        if mount in {v["mount"] for v in verdicts}:
-            continue
-        incident = incidents.pop(mount)
-        if not incident.get("alerted_at"):
-            continue
-        instead = state.data.get("notes", {}).get(f"same-device:{mount}")
-        why = (
-            f"it is the same filesystem as {instead}, which is watched under that name"
-            if instead
-            else "it is no longer a watched mount on this machine"
-        )
-        text = (
-            f"DISK CROSSING CLEARED: {mount} on {socket.gethostname()} is no longer watched"
-            f" separately, because {why}. The crossing opened at {iso(incident.get('opened_at'))}"
-            f" and is withdrawn, not resolved: read the alert for the filesystem's own mount."
-            f" From disk-fill-watch on {socket.gethostname()}."
-        )
-        state.commit(options)
-        for target in incident.get("told") or [BOX_HEALTH_ROLE_TOPIC]:
-            if options.dry_run:
-                continue
-            if target == BOX_HEALTH_ROLE_TOPIC:
-                tell_box_health(envoy, text)
-            else:
-                envoy.send(target, text)
-        cleared += 1
-        log(f"{mount}: WITHDRAWN ({why})")
-        if options.print_alert:
-            print(text)
+        if mount not in {v["mount"] for v in verdicts}:
+            incidents.pop(mount, None)
     state.commit(options)
     state.close()
     log(
@@ -1288,12 +1123,6 @@ def main() -> int:
     )
     parser.add_argument(
         "--default-floor", type=float, default=20.0, help="GiB floor for a mount with no floor of its own"
-    )
-    parser.add_argument(
-        "--max-floor-fraction",
-        type=float,
-        default=MAX_FLOOR_FRACTION,
-        help="a mount's floor is held to this fraction of its own filesystem (default 0.10)",
     )
     parser.add_argument(
         "--clear-factor", type=float, default=1.5, help="a crossing clears above floor x this (hysteresis)"
