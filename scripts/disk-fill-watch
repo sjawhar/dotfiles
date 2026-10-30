@@ -862,13 +862,20 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
 
 
 def clear_text(now: dict, incident: dict, when: float) -> str:
+    # "lowest sampled", never "lowest". low_free is the smallest value a sample saw, and a
+    # sample is taken on the timer's interval. On 2026-10-30 this summary said root's "lowest
+    # point was 7.2 GiB" for a crossing in which root actually reached 14 MiB and Dispatch
+    # writes failed fleet-wide with ENOSPC: the trough lasted about two minutes and the
+    # sampler stepped over it. The clearance summary is what a person reads afterwards, so it
+    # says which number it is holding.
     opened = incident.get("opened_at") or when
     return (
-        f"DISK FILLING CLEARED: {now['mount']} on {socket.gethostname()} is back to"
+        f"DISK CROSSING CLEARED: {now['mount']} on {socket.gethostname()} is back to"
         f" {gib(now['free'])} free, over its {gib(now['floor'])} floor and with no fall that"
         f" reaches full inside the horizon. The crossing opened at {iso(opened)}, cleared at"
-        f" {iso(when)}, lasted {human_time(when - opened)}, and its lowest point was"
-        f" {gib(incident.get('low_free') or now['free'])}. No action is needed."
+        f" {iso(when)}, lasted {human_time(when - opened)}, and its lowest SAMPLED free space was"
+        f" {gib(incident.get('low_free') or now['free'])} - the sampler cannot see a trough"
+        f" shorter than its interval, so the disk may have gone lower. No action is needed."
         f" From disk-fill-watch on {socket.gethostname()}."
     )
 
