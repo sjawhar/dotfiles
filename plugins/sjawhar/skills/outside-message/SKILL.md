@@ -7,9 +7,15 @@ description: "Use before any text reaches a person outside Theorem: a GitHub iss
 
 Sami approves every outside message, and four steps come before you ask him. He set the process on 2026-10-27 in [OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53) and added the fourth step on 2026-10-30 in [OSSV-142 ask 93a2811e](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/93a2811e-56ab-456e-8c0c-cedfd4ee822b). Read both before you write.
 
-## The one exclusion
+## The exclusions
 
-Messages to Oh My Pie go out without his approval. That is the only one he named. Everything else waits, including a reply to a maintainer who wrote to us first, and including a project that has already enrolled.
+Two, and he set them in two different answers. Read both before you decide that something is excluded.
+
+**Oh My Pie.** Messages there go out without his approval ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27).
+
+**A pull request to a project that has ALREADY ENROLLED, with its description and comments to that project's maintainers.** On 2026-10-29 at 17:22Z he wrote that he wants to stop being asked for approval every single time for enrolled projects, and that ceremony around a pull request must not stop proof work ([OSSV-146 ask 81a892b6](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/81a892b6-0f63-4424-b48e-51d27d8f1a9c)). **The four steps still apply. The approval ask does not.** Proof work does not wait for a pull request either: prepare and sign changes locally, and send them when the program's verification ends.
+
+Everything else waits for him: a first contact with a project that has not enrolled, a bug report, a disclosure, and a reply to a maintainer who wrote to us first.
 
 ## The four steps
 
