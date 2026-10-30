@@ -32,27 +32,44 @@ No instrument on the box watched either number. `disk-fill-watch` watches filesy
 `omp-memory-watch` watches one session against its own memcg ceiling and says nothing about a
 box carrying a hundred of them. This watch is the missing one.
 
+## Each condition on its own
+
+CPU, swap and memory are judged apart and said apart: each has its own crossing, grace, alert,
+escalation and clear, and one message never names two of them. On 2026-10-30T01:32Z an
+escalation from `ossv-agent-open` read **"STILL OUT OF CPU+SWAP"** while that box carried
+**load 27 on 32 cores with `cpu some avg60` at 7%** — a working box. The swap half was true; the
+CPU half had recovered half an hour earlier, and the old code named the union of everything the
+crossing had ever been. A headline that overstates one half makes the next true alert cheaper
+to dismiss, which is what six lanes on that same machine had already paid for the night before.
+
 ## The rules, and why each number
 
-- **`cpu some avg60 ≥ 50%`** (`--cpu-stall`). PSI, not load average: load counts uninterruptible
-  sleep, so the same figure can mean a box short of CPU or one waiting on a disk, and the two
-  have different fixes. `cpu some` counts only time a task was runnable and waiting for a CPU,
-  which is the lane's lost minutes exactly. 50% means over half the last minute had something
-  waiting. The incident sat at 80% for over an hour; a quiet hour on the same box reads under
-  10%, and the box at 00:06Z after the heaviest job stopped read 6%.
+- **`cpu some avg60 ≥ 35%` AND load over the core count** (`--cpu-stall`). Both, because either
+  alone is wrong here. PSI alone called a box at 7% starved; load alone counts uninterruptible
+  sleep, so load 221 may be a box waiting on a disk. The bar comes from the readings of
+  2026-10-29/30, not from a round number: **healthy** — `ossv-agent-open` 7% at load 27/32,
+  answering normally; `sami-leanperf` 0% at load 1/160. **Starved** — `ossv-agent-open` 80% at
+  load 251/32 during the six-lane incident; `sami-rocqperf` 42–65% at load 204–310/64, its lanes
+  visibly slow at the low end; `ossv-agent-open2` 55% at load 76/32. The lowest starved reading
+  is 42% and the highest healthy one is 7%, so 35% sits in that empty band, below every starved
+  reading with margin and five times the highest healthy one.
 - **Run queue per core ≥ 3** (`--queue-per-core`), only on a kernel without PSI. Coarser: it
   says how many tasks want a CPU, not how long any waited.
-- **Swap ≥ 85% used** (`--swap-used`). Past that the kernel has little left to page out, so the
-  next pressure lands on the OOM killer. The incident was at 99.75%.
+- **Swap ≥ 85% used** (`--swap-used`), with **no CPU condition at all**. Zero free swap is worth
+  saying on an idle box: it is a statement about the next memory squeeze, not about now, since
+  from there the kernel's reclaim has nowhere to go but the OOM killer, and it does not choose
+  the idle lane. `ossv-agent-open2` at 01:32Z had **0.0 GiB free with 144 GiB of RAM available**
+  and 122 `omp` processes holding 179 GiB between them.
 - **Swap draining to zero inside 2 h** (`--horizon`, rate over `--rate-window`, 1 h of this
   watch's own samples). The same shape as `disk-fill-watch`'s time-to-full: a floor alone says
   "low" for hours without ever saying "about to land".
 - **`MemAvailable` under 8 GiB** (`--mem-floor`). The kill zone a box reaches after swap is
   gone. It was not what fired on 2026-10-29 — 127 GiB was available, and `memory full avg60`
-  was 0.2% — which is why memory alone is a poor detector here and CPU is the primary.
+  was 0.2% — which is why memory alone is a poor detector here.
 - **Grace 600 s** (`--grace`), period 2 min: an alert about 12 minutes after onset. A build
-  burst does not hold 50% for ten minutes; the incident held 80% for seventy.
-- **Clear at 0.7 of each rule** (`--clear-factor`), so a crossing never flaps on its threshold.
+  burst does not hold the bar for ten minutes; the incident held 80% for seventy.
+- **Clear at 0.7 of each rule** (`--clear-factor`), per condition, so a crossing never flaps on
+  its threshold — and CPU also clears the moment the load fits on the cores again.
 
 ## What an alert says
 
