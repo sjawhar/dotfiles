@@ -1,14 +1,14 @@
 ---
 name: oracle
 description: |
-  Strategic technical advisor, primarily on a non-Anthropic model. Read-only. Use for architecture
+  Strategic technical advisor on a non-Anthropic model. Read-only. Use for architecture
   decisions, hard tradeoffs, and complex debugging where correctness matters more than
-  speed. Consulted by the sdd workflow for strategy questions. Its model falls back to Anthropic
-  Opus on failure or quota, so it is not a cross-family reviewer when the Codex quota is spent; for
-  a review that must be cross-family, use astra, whose chain degrades to Gemini on Vertex and never
-  to Anthropic.
+  speed. Consulted by the sdd workflow for strategy questions. Billed to the OpenAI API:
+  its chain degrades to GPT-6.1 Terra, then GPT-6.1 Sol, then the Codex subscription when
+  its window reopens, and never to Anthropic -- so a refusal means no non-Anthropic model
+  was reachable, and the caller should run a Claude reader and label that read same-family.
 model:
-  - "openai-codex/gpt-5.6-terra:high"
+  - "openai/gpt-5.6-terra:high"
 tools: read, glob, grep, bash, todo
 color: cyan
 ---

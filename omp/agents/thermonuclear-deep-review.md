@@ -1,6 +1,6 @@
 ---
 name: thermonuclear-deep-review
-description: Diff-scoped security and correctness audit for bugs, breakages, developer-experience regressions, and feature-gate leaks. Runs on the @review role (Codex), which falls back to Anthropic Opus on failure or quota, so a review of attack or sandbox-escape behaviour can be refused there; send that one to astra, whose chain degrades to Gemini on Vertex and never to Anthropic.
+description: Diff-scoped security and correctness audit for bugs, breakages, developer-experience regressions, and feature-gate leaks. Runs on the @review role, billed to the OpenAI API (GPT-5.6 Terra, degrading to GPT-6.1 Terra, GPT-6.1 Sol, then the Codex subscription when its window reopens) and never to Anthropic, so a refusal means no non-Anthropic model was reachable rather than a same-family read wearing a cross-family label.
 model: ["@review"]
 ---
 
