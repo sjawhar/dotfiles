@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""scripts/ossv-box-gateway-token: mint dev-box's ID token with generateIdToken, and nothing else.
+"""scripts/ossv-box-gateway-token: write the box's own identity token, and nothing else.
 
 Technique: `curl` and `logger` are stubs first on PATH. The curl stub (Python) parses the options
 the script uses, records each request (URL, headers including those from a `-K` config, form and
 JSON bodies, stdin) as one JSON line, and answers by URL: an Azure-style token endpoint, Google
-STS, the GCE metadata server, and IAM Credentials' generateIdToken. HOME, XDG_RUNTIME_DIR and the
-credential file are scratch paths, so the test never reads the box's own login or writes its token.
+STS, the GCE metadata server's identity and token paths, and IAM Credentials' generateIdToken.
+HOME, XDG_RUNTIME_DIR and the credential file are scratch paths, so the test never reads the box's
+own login or writes its token.
 """
 
 from __future__ import annotations
@@ -18,8 +19,12 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "ossv-box-gateway-token"
-TARGET = "dev-box@theorem-agent-infra.iam.gserviceaccount.com"
-GENERATE = f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{TARGET}:generateIdToken"
+AZURE_ACCOUNT = "dev-x@p.iam.gserviceaccount.com"
+GENERATE = f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{AZURE_ACCOUNT}:generateIdToken"
+IDENTITY = (
+    "http://metadata.test/computeMetadata/v1/instance/service-accounts/default/identity"
+    "?audience=model-gateway-gce&format=full"
+)
 
 CURL_STUB = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -54,6 +59,10 @@ if url == "http://imds.test/token":
     print(json.dumps({"access_token": "azure-subject"}))
 elif url == "https://sts.test/v1/token":
     print(json.dumps({"access_token": "federated-token"}))
+elif "/service-accounts/default/identity" in url:
+    if os.environ.get("STUB_ID_FAIL"):
+        sys.exit(22)
+    print(os.environ.get("STUB_ID_TOKEN", "header.payload.signature"))
 elif "/computeMetadata/v1/instance/service-accounts/default/token" in url:
     print(json.dumps({"access_token": "gce-token"}))
 elif url.endswith(":generateIdToken"):
@@ -97,7 +106,7 @@ class GatewayTokenWriter(unittest.TestCase):
             "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/azure/providers/entra",
             "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
             "token_url": "https://sts.test/v1/token",
-            "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/dev-x@p.iam.gserviceaccount.com:generateAccessToken",
+            "service_account_impersonation_url": f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{AZURE_ACCOUNT}:generateAccessToken",
             "credential_source": {
                 "url": "http://imds.test/token",
                 "headers": {"Metadata": "True"},
@@ -112,7 +121,7 @@ class GatewayTokenWriter(unittest.TestCase):
     def requests(self) -> list[dict]:
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
-    def test_azure_box_mints_with_its_federated_token_and_never_impersonates(self) -> None:
+    def test_azure_box_mints_the_account_its_own_credential_names(self) -> None:
         self.azure_credential()
         result = self.run_writer()
 
@@ -130,15 +139,21 @@ class GatewayTokenWriter(unittest.TestCase):
         self.assertEqual(json.loads(generate["data"]), {"audience": "model-gateway-gce", "includeEmail": True})
         self.assertFalse(any("generateAccessToken" in (r["url"] or "") for r in self.requests()))
 
-    def test_google_box_mints_with_its_metadata_token(self) -> None:
+    def test_no_box_mints_as_a_shared_account(self) -> None:
+        self.azure_credential()
+        self.run_writer()
+        self.cred.unlink()
+        self.run_writer()
+
+        for r in self.requests():
+            self.assertNotIn("dev-box@", r["url"] or "")
+
+    def test_google_box_reads_its_own_identity_token_from_the_metadata_server(self) -> None:
         result = self.run_writer()  # no credential file: a box in Google Cloud
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        metadata, generate = self.requests()
-        self.assertEqual(metadata["url"], "http://metadata.test/computeMetadata/v1/instance/service-accounts/default/token")
-        self.assertIn("Metadata-Flavor: Google", metadata["headers"])
-        self.assertEqual(generate["url"], GENERATE)
-        self.assertIn("Authorization: Bearer gce-token", generate["headers"])
+        self.assertEqual([r["url"] for r in self.requests()], [IDENTITY])
+        self.assertIn("Metadata-Flavor: Google", self.requests()[0]["headers"])
         self.assertEqual(self.token.read_text(encoding="utf-8"), "header.payload.signature")
 
     def test_no_token_reaches_a_command_line(self) -> None:
@@ -149,11 +164,19 @@ class GatewayTokenWriter(unittest.TestCase):
             self.assertNotIn("azure-subject", " ".join(r["form"]))
 
     def test_a_refused_mint_writes_no_token(self) -> None:
+        self.azure_credential()
         result = self.run_writer(STUB_ID_FAIL="1")
 
         self.assertEqual(result.returncode, 1)
         self.assertFalse(self.token.exists())
-        self.assertIn("no identity token from generateIdToken", result.stderr)
+        self.assertIn("no identity token", result.stderr)
+
+    def test_a_refused_metadata_read_writes_no_token(self) -> None:
+        result = self.run_writer(STUB_ID_FAIL="1")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.token.exists())
+        self.assertIn("no identity token", result.stderr)
 
     def test_output_that_is_not_a_jwt_writes_no_token(self) -> None:
         result = self.run_writer(STUB_ID_TOKEN="not-a-jwt")
