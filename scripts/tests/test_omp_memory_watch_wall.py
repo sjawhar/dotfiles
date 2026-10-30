@@ -291,6 +291,87 @@ class WallReportTest(unittest.TestCase):
         self.assertIn("memory.swap.max is 0", WATCH.alert_text("run-r1.scope", incident, 1200.0, "first alert"))
 
 
+class WallAdviceTest(unittest.TestCase):
+    """The owner's DO line chooses by where the memory actually is.
+
+    In the open4 and open6 digests of 2026-10-30 the three largest processes held 10-29% of a
+    scope sitting at its ceiling, so "find the process" was the wrong instruction for them.
+    """
+
+    def touch(self, **overrides) -> dict:
+        base = dict(
+            at=1000.0, scope="run-r1.scope", key="run-r1.scope", session="s", worker="c-asan",
+            limit=CEILING, limit_from="memory.max", peak=CEILING, current=20 * GIB,
+            usage=2 * GIB, swap_max="max", events_max=5, events_delta=5, events_oom=0,
+            events_oom_kill=0, peak_touch=True, task_count=12, rss_sum=4 * GIB,
+            stats={"anon": 2 * GIB, "file": 17 * GIB, "shmem": GIB, "kernel": 0, "sock": 0, "slab": 0},
+            top=[(11, GIB, "omp --resume x"), (12, GIB, "python3 a"), (13, GIB, "python3 b")],
+            suppressed=0, cooldown=900.0,
+        )
+        base.update(overrides)
+        return base
+
+    def test_one_runaway_when_the_named_processes_hold_most_of_the_peak(self) -> None:
+        touch = self.touch(
+            rss_sum=16 * GIB,
+            top=[(11, 15 * GIB, "omp --resume x"), (12, GIB, "python3 a")],
+        )
+        advice = WATCH.wall_advice(touch)
+        self.assertIn("ONE RUNAWAY", advice)
+        self.assertIn("67% of the peak", advice)
+        self.assertIn("DO:", WATCH.wall_text(touch))
+        self.assertIn("ONE RUNAWAY", WATCH.wall_text(touch))
+
+    def test_many_processes_when_the_whole_scope_holds_the_peak_but_no_one_process_does(self) -> None:
+        touch = self.touch(
+            task_count=40,
+            rss_sum=19 * GIB,
+            top=[(pid, GIB, f"python3 lane-{pid}") for pid in (11, 12, 13)],
+        )
+        advice = WATCH.wall_advice(touch)
+        self.assertIn("MANY PROCESSES", advice)
+        self.assertIn("all 40 together", advice)
+        self.assertIn("reduce the fan-out", advice.lower())
+
+    def test_no_process_holds_it_names_the_dominant_memory_stat_field(self) -> None:
+        advice = WATCH.wall_advice(self.touch())
+        self.assertIn("NOT IN ANY PROCESS", advice)
+        self.assertIn("file", advice)
+        self.assertIn("page cache", advice)
+        self.assertNotIn("ONE RUNAWAY", advice)
+
+    def test_shmem_is_named_when_it_is_the_dominant_field(self) -> None:
+        advice = WATCH.wall_advice(
+            self.touch(stats={"anon": GIB, "file": 2 * GIB, "shmem": 18 * GIB, "kernel": 0, "sock": 0})
+        )
+        self.assertIn("shmem", advice)
+        self.assertIn("tmpfs", advice)
+
+    def test_a_scope_that_fell_back_says_the_peak_was_a_burst(self) -> None:
+        advice = WATCH.wall_advice(self.touch(current=2 * GIB))
+        self.assertIn("fallen back", advice)
+
+    def test_unreadable_memory_stat_claims_nothing(self) -> None:
+        advice = WATCH.wall_advice(self.touch(stats={}))
+        self.assertIn("could not be read", advice)
+        self.assertEqual(WATCH.stat_split({}), "memory.stat unreadable")
+
+    def test_the_report_carries_the_count_the_rss_sum_and_the_split(self) -> None:
+        text = WATCH.wall_text(self.touch())
+        self.assertIn("12 processes holding 4.00 GiB of RSS between them, 17% of the peak", text)
+        self.assertIn("file 17.00 GiB", text)
+        self.assertIn("anon 2.00 GiB", text)
+        # Largest first, and `slab` is left out: it is already inside `kernel`.
+        self.assertLess(text.index("file 17.00 GiB"), text.index("anon 2.00 GiB"))
+        self.assertNotIn("slab", text)
+
+    def test_the_digest_line_carries_the_same_three_numbers(self) -> None:
+        digest = WATCH.wall_digest_text([self.touch()], 900.0)
+        self.assertIn("12 processes holding 4.00 GiB of RSS (17% of peak)", digest)
+        self.assertIn("memory.stat: file 17.00 GiB", digest)
+        self.assertIn("NOT IN ANY PROCESS", digest)
+
+
 class RunOnceTest(unittest.TestCase):
     """One whole pass over synthetic scopes: who is sent what, and what the state file keeps."""
 

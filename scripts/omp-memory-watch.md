@@ -114,8 +114,24 @@ So a capped scope is also reported when, since the last poll, either
 No hold, no grace, no rate. One report per scope per `--wall-cooldown` (default 15 min); touches
 inside the cooldown are counted and the next report says how many it covers. The report names
 the scope, the session, the `ossv-worker` name, `memory.peak`, `memory.current`, the
-unreclaimable number, the `oom`/`oom_kill` counters, and the **three largest processes in the
-scope by RSS with their command lines**.
+unreclaimable number, the `oom`/`oom_kill` counters, the **`memory.stat` split** (`anon`,
+`file`, `shmem`, `kernel`, `sock`, largest first), the **process count and the RSS sum of every
+process in the scope**, and the **three largest by RSS with their command lines**.
+
+### What the owner is told to do
+
+The three largest processes explained only 10–29% of a scope at its ceiling in the open4 and
+open6 digests of 2026-10-30, so "find the process" was the wrong instruction for those scopes.
+The advice line is chosen from the numbers:
+
+| Condition | Advice |
+|---|---|
+| the named processes hold ≥ 60% of the peak | **one runaway**: find that process and stop or bound it; shedding lanes will not help |
+| every process together holds ≥ 70% of the peak | **many processes**: reduce the fan-out — fewer lanes, fewer tool subprocesses at once |
+| neither | **not in any process**: name the dominant `memory.stat` field and what it is (page cache, shmem/tmpfs, kernel slab), and point at the file traffic rather than the lane count |
+
+In the third case, when `memory.current` has already fallen under half the peak, the advice
+also says the peak was a burst and nothing on the scope now holds that memory.
 
 The worker name and its session come from the scope's own command lines: `ossv-worker` starts
 `omp` with `@<root>/.ossv-workers/<name>/message-*.md`, and `<root>/.ossv-workers/<name>/session`
@@ -164,9 +180,10 @@ whole report. The INFRA lead gets **one batched digest per `--wall-digest` windo
 tens of scopes at the ceiling at once (31 of 95 on ossv-agent-open on 2026-10-30), and a message
 each would bury the lead's session rather than inform it. Touches accumulate in the state file
 across runs, so a quiet digest window loses none. Each scope's line in the digest carries the
-**same three largest processes with their command lines** under it: the lead reads the digest
-without the owner's report beside it, and which lane is eating the scope is in those command
-lines (the INFRA lead, 2026-10-30).
+**process count, the RSS sum, the `memory.stat` split, the chosen advice and the same three
+largest processes with their command lines** under it: the lead reads the digest without the
+owner's report beside it, and a top-3 list alone sent it hunting a process that did not exist
+(the INFRA lead, 2026-10-30).
 
 Each alert names the session, the pid and its RSS, the scope, the unreclaimable memory, the
 ceiling and where it comes from, the percentage and the headroom left, the measured rise rate
