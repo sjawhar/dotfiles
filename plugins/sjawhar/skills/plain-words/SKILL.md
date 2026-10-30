@@ -36,6 +36,17 @@ These hide the same emptiness and go the same way:
 - **A promise with no object.** "We will follow up." On what, with whom, by when?
 - **A hedge that costs the reader a second read.** "It may be worth considering whether we should." Either recommend it or do not raise it.
 
+
+## Do not shout
+
+Sami, 2026-10-30, on an ask of mine: "Why do you keep writing your asks in this obnoxious format with all caps headers and stuff?" ([INFRA-202 ask 716f1aaa](https://dispatch.tail12ec1c.ts.net/issues/INFRA-202/asks/716f1aaa-9c3f-4f9f-8661-0d92754bbc41)).
+
+No capitalised headers. No capitalised phrases for emphasis. Bold only where a number, a name or a choice needs to be found again.
+
+The reason it appears: an agent writes a long passage, cannot find its point, and puts a handle on it so a reader can. **The handle is a symptom. Cut the passage instead.** A paragraph that needs a shouted header to be skimmable is a paragraph nobody should have to skim.
+
+The same goes for a message to another agent. A capitalised line in a brief reads as an instruction shouted twice, and a reader who sees three of them stops seeing any.
+
 ## What stays
 
 Plain verbs that describe a real action stay: merge, delete, send, read, measure, kill a process by pid, repoint a link. The rule is against phrases that SOUND like an action and name none.
