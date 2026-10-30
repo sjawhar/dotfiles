@@ -40,8 +40,13 @@ process's RSS is not:
 | 20 `python3` tool subprocesses in the same scope | 13.1 GiB resident between them |
 
 So the signal is the scope's **unreclaimable** memory, `anon + shmem + kernel + sock` from
-`memory.stat`. Swap is off (`MemorySwapMax=0`, `SwapTotal 0`), so file cache is the only part of
-`memory.current` the kernel can give back, and counting it would alert on a scope in no danger.
+`memory.stat`. In a scope `shims/omp` starts, swap is off (`MemorySwapMax=0`), so file cache is
+the only part of `memory.current` the kernel can give back, and counting it would alert on a
+scope in no danger. A scope `ossv-worker` starts sets `MemoryMax` alone, so its
+`memory.swap.max` is `max` and its anonymous memory **can** page out: there the unreclaimable
+number can stay low while the scope still reaches its ceiling, which is what the wall trigger
+below exists for. Every alert reads `memory.swap.max` per scope and says which shape it is; it
+used to assert `MemorySwapMax=0` for all of them, which was false for every worker scope.
 
 A session with **no scope of its own** (started outside `shims/omp`, so it lives in the login
 session's scope — `session-c45.scope` here, 744 processes and 51 GiB of other sessions' work)
@@ -82,6 +87,48 @@ found and never implies there is none when it cannot tell.
 An uncapped session alerts at a flat `--unlimited-warn` (16.8 GiB of its own RSS): the level a
 capped session is warned at. A fraction of 251 GiB of RAM is a number no single session reaches.
 
+## The second trigger: a scope that REACHES its wall
+
+The 70%-for-60 s crossing is a *forecast*, and it needs the pressure to be both unreclaimable
+and held. A scope can spend its whole budget and meet neither test. Measured on
+**ossv-agent-open on 2026-10-30 at 19:37Z**: of 95 worker scopes, **31 had touched their 24 GiB
+wall** (`memory.events` `max` above zero, up to 42 422 times for one scope), while the watch
+logged `0 close enough to sample` — not one of them was even above the 45% sampling level on
+unreclaimable memory. Four had ever been reported.
+
+Two reasons, both real on these VMs:
+
+- **The pressure is reclaimable.** `ossv-worker` starts each worker with `systemd-run --user
+  --scope -p MemoryMax=24G` and **no** `MemorySwapMax` (`bin/ossv-worker:577-578`), so
+  `memory.swap.max` reads `max`: anonymous memory pages out, page cache fills the scope, and
+  `anon+shmem+kernel+sock` stays low while `memory.current` sits on the ceiling.
+- **The touch is shorter than the grace.** A scope that reaches the ceiling and falls back
+  inside one 30 s period leaves no trace in any level-and-hold test.
+
+So a capped scope is also reported when, since the last poll, either
+
+- the **`max` counter of its `memory.events`** rises — the kernel refused an allocation at
+  `memory.max` and had to reclaim to satisfy it — or
+- its **`memory.peak`** rises to `--wall-fraction` (default 0.98) of the ceiling.
+
+No hold, no grace, no rate. One report per scope per `--wall-cooldown` (default 15 min); touches
+inside the cooldown are counted and the next report says how many it covers. The report names
+the scope, the session, the `ossv-worker` name, `memory.peak`, `memory.current`, the
+unreclaimable number, the `oom`/`oom_kill` counters, and the **three largest processes in the
+scope by RSS with their command lines**.
+
+The worker name and its session come from the scope's own command lines: `ossv-worker` starts
+`omp` with `@<root>/.ossv-workers/<name>/message-*.md`, and `<root>/.ossv-workers/<name>/session`
+holds the session id — used only when `session_unconfirmed` is absent beside it, because the
+worker's own rule is that the file still names the *previous* session until then. Failing that,
+the session is resolved from the process as before.
+
+**The first run after this trigger arrives seeds and reports nothing.** A counter already above
+zero dates from an unknown moment in the past, often before the trigger existed, and reporting
+31 scopes' history at once would bury their owners. A scope that appears while the state file
+already holds wall memory is genuinely new, so its baseline is zero and its first real touch is
+reported.
+
 ## What one run does
 
 /proc and /sys reads only, no transcript reading in the decision, no model call, ~0.4 s:
@@ -92,6 +139,8 @@ capped session is warned at. A fraction of 251 GiB of RAM is a number no single 
 3. The pressure: `memory.stat` for a capped scope, `/proc/<pid>/statm` for an uncapped session.
 4. A crossing opens at 70% of the ceiling, alerts after the 60 s grace, and clears under 62%
    (hysteresis) or when the process ends.
+5. Independently, a capped scope's `memory.events` and `memory.peak` are compared with the last
+   poll's: a rise is a wall touch and is reported at once, with no hold.
 
 The session id is read **from the process** — a session id on its command line, else the
 `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl` it holds open — and is resolved only when an alert
@@ -109,6 +158,13 @@ Agent sessions only, never a person:
 
 Duplicates are dropped, so a session that is also one of those two gets one message.
 
+A **wall touch** goes to the scope's own session — the owner, who does the shedding — with the
+whole report. The INFRA lead gets **one batched digest per `--wall-digest` window** (default
+15 min) naming every scope that touched in it, instead of one message per scope: a box can have
+tens of scopes at the ceiling at once (31 of 95 on ossv-agent-open on 2026-10-30), and a message
+each would bury the lead's session rather than inform it. Touches accumulate in the state file
+across runs, so a quiet digest window loses none.
+
 Each alert names the session, the pid and its RSS, the scope, the unreclaimable memory, the
 ceiling and where it comes from, the percentage and the headroom left, the measured rise rate
 and the minutes that headroom buys, how much of the pressure is omp and how much is its tool
@@ -124,6 +180,12 @@ spawning lanes, shed or finish the lanes you can, restart on your own terms.
 - keyed by the scope (a capped session) or scope + pid (an uncapped one), with the pid and its
   `/proc/<pid>/stat` start time, so a recycled pid starts a new crossing;
 - `alerted_at` is written and `fsync`ed **before** the first message is sent;
+- the **wall memory** (`walls`) is keyed by the scope name alone and never by pid: one scope
+  holds several `omp` processes (the session and its js-eval helper), and a flip between them
+  must not look like a new scope and report the whole backlog again. A key is dropped when its
+  scope is gone, and `systemd-run --scope` never reuses a name;
+- `wall_pending` holds the touches waiting for the INFRA lead's next digest, newest last, at
+  most `--wall-pending-max` (400);
 - `--state <other path>` is for tests only: a run on any other file forces `--dry-run`.
 
 ## Inputs
@@ -133,16 +195,23 @@ spawning lanes, shed or finish the lanes you can, restart on your own terms.
 | omp processes and their cgroups | `/proc/*/comm`, `/proc/*/cgroup` |
 | The ceiling | `memory.max` from the scope up to `/sys/fs/cgroup`, else `MemTotal` |
 | The pressure | `memory.stat` (`anon`, `shmem`, `kernel`, `sock`), `memory.current`, `/proc/<pid>/statm` |
+| The wall | `memory.events` (`max`, `oom`, `oom_kill`), `memory.peak`, `memory.swap.max` |
 | Session id (alert only) | `/proc/<pid>/cmdline`, else `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl` |
+| Worker name and session (wall report only) | `.ossv-workers/<name>/` on a scope process's command line, and `<that dir>/session` unless `session_unconfirmed` is beside it |
+| Top processes (wall report only) | `cgroup.procs`, `/proc/<pid>/statm`, `/proc/<pid>/cmdline` |
 | Self-watch (alert only) | the command lines of the other processes in the scope, or of a process naming this pid |
 | Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
-| Samples and open crossings | `/mnt/nvme/sami/tmp/omp-memory-watch/state.json` |
+| Samples, open crossings, wall memory | `/mnt/nvme/sami/tmp/omp-memory-watch/state.json` |
 
 ## Running it by hand
 
 ```sh
 scripts/omp-memory-watch --dry-run --print-alert          # decide and print, send nothing
-scripts/omp-memory-watch --fraction 0.70 --grace 60       # the unit's defaults
+scripts/omp-memory-watch --fraction 0.70 --grace 60       # the unit's crossing defaults
+scripts/omp-memory-watch --wall-fraction 0.98 --wall-cooldown 900 --wall-top 3   # wall defaults
+
+# The tests: synthetic cgroup trees, no real /sys read, python3 only.
+python3 -m unittest discover -s scripts/tests -p 'test_omp_memory_watch_wall.py'
 ```
 
 ## Turning it off
