@@ -3,9 +3,10 @@
 
 A claude a script or a session's bash tool starts by name inherits its omp parent's collector and
 OTEL_LOGS_EXPORTER=none; through the shim it gets Claude Code's telemetry switches and the project the parent
-session's file names, and the token in its logs header only (its settings on these machines are the tracked
-.claude/settings.json, which holds no helper); it loses a generic, metrics or traces header it inherited, and Codex
-gets none (its token is in its config.toml; Codex's built-in metrics exporter would send a generic or metrics
+session's file names, and no header: its token comes from the otelHeadersHelper in its settings (the tracked
+.claude/settings.json names $HOME/.config/agent-spend/otel-headers-helper). It loses a generic, metrics, traces or
+logs header it inherited, and so does Codex (its token is in its config.toml; Codex's built-in metrics exporter would
+send a generic or metrics
 header to OpenAI). A caller on a different collector keeps everything. The shim takes the first real binary past
 its own PATH entry, never mise's shims dir (which hands the call back to PATH) or another shims/ copy, and hands it
 its arguments and PATH unchanged.
@@ -121,7 +122,7 @@ class AgentSpendShimTest(unittest.TestCase):
         self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], ENDPOINT)
         self.assertEqual(out["OTEL_EXPORTER_OTLP_HEADERS"], "<unset>")
         self.assertEqual(out["OTEL_EXPORTER_OTLP_TRACES_HEADERS"], "<unset>")
-        self.assertEqual(out["OTEL_EXPORTER_OTLP_LOGS_HEADERS"], "Authorization=Bearer t0ken")
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_LOGS_HEADERS"], "<unset>")
         self.assertEqual(out["OTEL_EXPORTER_OTLP_PROTOCOL"], "http/protobuf")
         self.assertEqual(out["THEOREM_PROJECT"], "oss-verify")
         self.assertEqual(out["OTEL_RESOURCE_ATTRIBUTES"], "theorem.project=oss-verify,theorem.person=sami@theorem.dev")
@@ -176,6 +177,41 @@ class AgentSpendShimTest(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(result.returncode, 127, result.stderr)
+
+
+class TrackedClaudeSettingsTest(unittest.TestCase):
+    """The tracked .claude/settings.json (every machine's CLAUDE_CONFIG_DIR, .bashrc) makes a claude started by its
+    path record its spend: telemetry on, logs only, content capture off, the four header variables emptied, and a
+    helper named by a $HOME-relative path, so the file holds no token and no machine's path. Claude Code runs the
+    helper through /bin/sh, which expands $HOME (measured with 2.1.309; a helper that fails exports nothing)."""
+
+    def test_the_tracked_settings(self) -> None:
+        import json
+
+        text = (DOTFILES / ".claude" / "settings.json").read_text()
+        settings = json.loads(text)
+        env = settings["env"]
+        self.assertEqual(settings["otelHeadersHelper"], "$HOME/.config/agent-spend/otel-headers-helper")
+        self.assertEqual(env["CLAUDE_CODE_ENABLE_TELEMETRY"], "1")
+        self.assertEqual((env["OTEL_LOGS_EXPORTER"], env["OTEL_TRACES_EXPORTER"], env["OTEL_METRICS_EXPORTER"]),
+                         ("otlp", "none", "none"))
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"], env["OTEL_EXPORTER_OTLP_ENDPOINT"] + "/v1/logs")
+        for k in ("OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+                  "OTEL_EXPORTER_OTLP_METRICS_HEADERS", "OTEL_LOG_RAW_API_BODIES", "BETA_TRACING_ENDPOINT"):
+            self.assertEqual(env[k], "", k)
+        for k in ("OTEL_LOG_USER_PROMPTS", "OTEL_LOG_ASSISTANT_RESPONSES", "OTEL_LOG_TOOL_DETAILS", "OTEL_LOG_TOOL_CONTENT"):
+            self.assertEqual(env[k], "0", k)
+        self.assertNotIn("OTEL_RESOURCE_ATTRIBUTES", env)  # a settings env would override every launcher's tags
+        self.assertNotIn("Bearer", text)
+        self.assertNotRegex(text, r"/home/|/Users/|/tmp/")
+        home = Path(tempfile.mkdtemp(prefix="tracked-claude-"))
+        self.addCleanup(shutil.rmtree, home)
+        helper = home / ".config" / "agent-spend" / "otel-headers-helper"
+        helper.parent.mkdir(parents=True)
+        executable(helper, 'printf \'{"Authorization": "Bearer t0ken"}\\n\'')
+        out = subprocess.run(["/bin/sh", "-c", settings["otelHeadersHelper"]], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                             capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(out.stdout), {"Authorization": "Bearer t0ken"})
 
 
 if __name__ == "__main__":
