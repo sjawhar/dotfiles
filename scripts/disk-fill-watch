@@ -78,11 +78,15 @@ GB = 1000000000
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 # Where the state file goes. /mnt/nvme is the big disk on the agent boxes; a machine without it
-# (a laptop) keeps the state under ~/.local/state, which every XDG machine has.
+# (a laptop, and every ossv lane box, where /mnt/nvme is a root-owned directory on the root
+# filesystem) keeps the state under ~/.local/state, which every XDG machine has. The test is
+# writability rather than existence: measured 2026-10-30, /mnt/nvme/sami on those boxes is a
+# root-owned 755 directory, so a watch that only asks whether the path is a directory crashes
+# on its first run there.
 _NVME_STATE = Path("/mnt/nvme/sami/tmp/disk-fill-watch/state.json")
 DEFAULT_STATE = (
     _NVME_STATE
-    if Path("/mnt/nvme/sami/tmp").is_dir()
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
     else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "disk-fill-watch/state.json"
 )
 
