@@ -110,10 +110,68 @@ mirror_links() { # mirror_links SRC DST
         fi
     done
 }
+# A profile whose agent/ holds models.overlay.yml is the default profile with other provider keys,
+# not a separate install (dispatch://BET-59, 2026-10-30: the verified-grader sessions bill Anthropic
+# to another account). It shares every piece of state with the default: each entry of ~/.omp (but
+# agent/, profiles/ and run/) and of ~/.omp/agent (but models.yml, models.overlay.yml and SQLite's
+# -wal/-shm, which SQLite places beside the link's target) is a link to the default's, re-made on
+# every launch, so an entry a newer omp adds is shared too; dotfiles included, since omp reads an
+# agent/.env. An entry omp created in the profile first, with no default counterpart, is moved into
+# the default and linked. One that exists on both sides as a real entry stops the launch: it means
+# divergent state, and a human decides which copy is real. models.yml alone is the profile's: the
+# default's merged with the overlay, rebuilt on every launch, so it cannot drift from the default.
+# The merge deep-merges maps but replaces arrays, so an overlay that carries a `models:` list
+# replaces the default's list instead of adding to it. Measured by the omp maintainer on a scratch
+# home (2026-10-30): one SQLite WAL set, one session store, and sessions resume through either root.
+share_links() { # share_links SRC DST KEEP_NAME...
+    local src="$1" dst="$2" entry name keep dotglob_was=""
+    shift 2
+    shopt -q dotglob && dotglob_was=1
+    shopt -s dotglob
+    mkdir -p "$dst"
+    for entry in "$dst"/*; do
+        [[ -e "$entry" && ! -L "$entry" ]] || continue
+        name="${entry##*/}"
+        for keep in "$@"; do [[ "$name" == $keep ]] && continue 2; done
+        if [[ -e "$src/$name" || -L "$src/$name" ]]; then
+            echo "omp: $dst/$name and $src/$name are both real; this profile shares all state with the default, so remove the copy that is not real and launch again" >&2
+            exit 1
+        fi
+        mv "$entry" "$src/$name"
+        ln -s "$src/$name" "$entry"
+    done
+    for entry in "$src"/*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        name="${entry##*/}"
+        for keep in "$@"; do [[ "$name" == $keep ]] && continue 2; done
+        [[ "$(readlink "$dst/$name" 2>/dev/null)" == "$entry" ]] || ln -sfn "$entry" "$dst/$name"
+    done
+    [[ -n "$dotglob_was" ]] || shopt -u dotglob
+}
 if [[ -n "$profile" ]]; then
     root="$HOME/${PI_CONFIG_DIR:-.omp}"
-    mirror_links "$root" "$root/profiles/$profile"
-    mirror_links "$root/agent" "$root/profiles/$profile/agent"
+    overlay_models="$root/profiles/$profile/agent/models.overlay.yml"
+    if [[ -f "$overlay_models" ]]; then
+        # Several sessions launch at once: one link pass at a time, so two shims never both move
+        # the same new entry into the default. Bounded, so a stuck holder fails launches loudly
+        # instead of hanging them, and never lets one start half-linked.
+        exec 9>"$root/profiles/$profile/.share.lock"
+        if ! flock -w 30 9; then
+            echo "omp: waited 30 s for $root/profiles/$profile/.share.lock; profile $profile not started" >&2
+            exit 1
+        fi
+        share_links "$root" "$root/profiles/$profile" agent profiles run .share.lock
+        share_links "$root/agent" "$root/profiles/$profile/agent" \
+            models.yml models.overlay.yml 'models.yml.new.*' '*-wal' '*-shm'
+        exec 9>&-
+        models_out="$root/profiles/$profile/agent/models.yml"
+        yq eval-all '. as $item ireduce ({}; . * $item)' "$root/agent/models.yml" "$overlay_models" \
+            > "$models_out.new.$$"
+        if cmp -s "$models_out.new.$$" "$models_out"; then rm -f "$models_out.new.$$"; else mv "$models_out.new.$$" "$models_out"; fi
+    else
+        mirror_links "$root" "$root/profiles/$profile"
+        mirror_links "$root/agent" "$root/profiles/$profile/agent"
+    fi
 fi
 
 # OMP_MEMORY_MAX=<systemd size, e.g. 32G> runs this session in a transient systemd user scope with
