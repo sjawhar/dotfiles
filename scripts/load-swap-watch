@@ -84,7 +84,7 @@ WORKER_RE = re.compile(r"/workers/([A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.md|\.jsonl|/
 _NVME_STATE = Path("/mnt/nvme/sami/tmp/load-swap-watch/state.json")
 DEFAULT_STATE = (
     _NVME_STATE
-    if Path("/mnt/nvme/sami/tmp").is_dir()
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
     else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "load-swap-watch/state.json"
 )
 

@@ -58,7 +58,20 @@ from pathlib import Path
 CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
 INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
 
-DEFAULT_STATE = Path("/mnt/nvme/sami/tmp/omp-memory-watch/state.json")
+# Where the state file goes. /mnt/nvme/sami/tmp is the agent devboxes' scratch on the big disk;
+# an agent box without it keeps the state under ~/.local/state, which every XDG machine has.
+# Measured 2026-10-30 on ossv-agent-open..open6, ossv-agent-git and ossv-agent-repo: /mnt/nvme
+# there is a root-owned 755 directory on the root filesystem with no sami/tmp under it, so this
+# watch crashed on its first run of every one of them with PermissionError. The test is
+# writability, not existence: the path can be a directory this user still cannot write into, and
+# `--state` cannot be the answer, since a non-default state file forces --dry-run and the watch
+# would then be armed and permanently silent.
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/omp-memory-watch/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "omp-memory-watch/state.json"
+)
 DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 SESSION_ROOT = Path.home() / ".omp/agent/sessions"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
