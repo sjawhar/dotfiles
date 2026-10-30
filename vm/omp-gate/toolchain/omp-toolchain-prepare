@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Drop the prepared pi_natives addon into an oh-my-pi worktree so `bun install`
+# does not have to build the Rust crate. Part of /data/toolchain on the gate VM.
+#
+# Usage: omp-toolchain-prepare <worktree> [--force]
+#   <worktree>  path of the oh-my-pi checkout (must contain packages/natives)
+#   --force     overwrite addon files that are already there
+#               (default: leave an existing file alone, e.g. one the lane built)
+set -euo pipefail
+
+TOOLCHAIN=${TOOLCHAIN:-/data/toolchain}
+ADDON="$TOOLCHAIN/natives/pi_natives.node"
+
+usage() { echo "usage: $(basename "$0") <worktree> [--force]" >&2; exit 2; }
+
+[ $# -ge 1 ] || usage
+WT=$1; shift
+FORCE=0
+while [ $# -gt 0 ]; do
+	case $1 in
+	--force) FORCE=1 ;;
+	*) usage ;;
+	esac
+	shift
+done
+
+[ -d "$WT/packages/natives" ] || { echo "not an oh-my-pi worktree: $WT" >&2; exit 1; }
+[ -f "$ADDON" ] || { echo "addon missing: $ADDON" >&2; exit 1; }
+
+DEST="$WT/packages/natives/native"
+mkdir -p "$DEST"
+for n in pi_natives.linux-x64.node pi_natives.linux-x64-baseline.node pi_natives.linux-x64-modern.node; do
+	if [ -f "$DEST/$n" ] && [ "$FORCE" -eq 0 ]; then
+		echo "kept    $DEST/$n"
+	else
+		cp -f "$ADDON" "$DEST/$n"
+		echo "copied  $DEST/$n"
+	fi
+done
+
+echo
+echo "bun:     $("$TOOLCHAIN/bin/bun" --version) ($TOOLCHAIN/bin/bun)"
+echo "addon:   $(readlink -f "$ADDON")"
+echo "now run: export PATH=$TOOLCHAIN/bin:\$PATH"
