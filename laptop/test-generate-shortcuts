@@ -11,6 +11,7 @@ LAPTOP_ONLY_MONITORS="${FIXTURES}/laptop-only.monitors"
 DISABLED_LAPTOP_MONITORS="${FIXTURES}/disabled-laptop.monitors"
 HYBRID_MONITORS="${FIXTURES}/hybrid.monitors"
 DESK_DELL_LEFT_MONITORS="${FIXTURES}/desk-dell-left.monitors"
+OFFICE_WQHD_TWINS_MONITORS="${FIXTURES}/office-wqhd-twins.monitors"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
@@ -237,6 +238,25 @@ grep -Fq '(modifiers: [Alt], key: "0", description: Some("WS10 — MB16AC (2)"))
     || fail 'desk workspace 10 must resolve to the right ASUS portrait'
 grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — DP-1 (1)")): WorkspaceOnOutput("DP-1", 1),' "${desk_output}" \
     || fail 'desk workspace 11 must resolve to the bottom-row InnoView'
+
+# Permanent office desk: LG WQHD ultrawide, twin U3225QE portraits by serial, and the
+# ASUS. The ultrawide keeps 1-3 only; the ASUS takes 4-6 ahead of it.
+office_output="${TMPDIR}/office-wqhd-twins-custom"
+"${GENERATOR}" --check --monitors "${OFFICE_WQHD_TWINS_MONITORS}" > "${office_output}"
+grep -Fq '(modifiers: [Alt], key: "3", description: Some("WS3 — WQHD (3)")): WorkspaceOnOutput("WQHD", 3),' "${office_output}" \
+    || fail 'office workspace 3 must resolve to the LG WQHD ultrawide'
+grep -Fq '(modifiers: [Alt], key: "4", description: Some("WS4 — MB16AC (1)")): WorkspaceOnOutput("MB16AC", 1),' "${office_output}" \
+    || fail 'office workspace 4 must start the ASUS local sequence, not extend the ultrawide'
+grep -Fq '(modifiers: [Alt], key: "6", description: Some("WS6 — MB16AC (3)")): WorkspaceOnOutput("MB16AC", 3),' "${office_output}" \
+    || fail 'office workspace 6 must finish the ASUS local sequence'
+! grep -q 'WorkspaceOnOutput("WQHD", 4),' "${office_output}" \
+    || fail 'the office ultrawide must not hold a fourth local workspace'
+grep -Fq '(modifiers: [Alt], key: "7", description: Some("WS7 — DP-10 (1)")): WorkspaceOnOutput("DP-10", 1),' "${office_output}" \
+    || fail 'office workspace 7 must resolve to the left U3225QE by serial'
+grep -Fq '(modifiers: [Alt], key: "9", description: Some("WS9 — DP-4 (1)")): WorkspaceOnOutput("DP-4", 1),' "${office_output}" \
+    || fail 'office workspace 9 must resolve to the right U3225QE by serial'
+grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — eDP-1 (1)")): WorkspaceOnOutput("eDP-1", 1),' "${office_output}" \
+    || fail 'office workspace 11 must fall through to the laptop'
 
 disabled_laptop_output="${TMPDIR}/disabled-laptop-custom"
 "${GENERATOR}" --check --monitors "${DISABLED_LAPTOP_MONITORS}" > "${disabled_laptop_output}"
