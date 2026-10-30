@@ -130,6 +130,8 @@ install_marketplace_plugin() {
 }
 # theorem-labs/verification-skills: Theorem's verification skills, which repos that copied them dropped.
 install_marketplace_plugin theorem-labs/verification-skills verification-skills@verification-skills
+# theorem-labs/core-ops: the company's operations skills, for the documents a customer reads.
+install_marketplace_plugin theorem-labs/core-ops core-ops@core-ops
 # slack@claude-plugins-official brings the Slack skills (slack-messaging, slack-search, ...) written
 # for the tools of the slack server in omp/mcp.json. Claude Code installs it from .claude/settings.json,
 # but omp reads Claude's plugin registry only when enabledProviders lists claude-plugins, so omp holds
