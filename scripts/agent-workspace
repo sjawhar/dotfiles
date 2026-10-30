@@ -1,0 +1,556 @@
+#!/usr/bin/env python3
+"""agent-workspace: give a session a tree of one repository without a second object store.
+
+One clone per repository on this machine — the canonical checkout `~/src/<repo>` — and every
+further tree of that repository is cut from it, so its objects exist once. `new` makes one,
+`list` says what each existing child under the worktrees root really is, `rm` takes one away
+the way the thing it is requires.
+
+Why this exists, measured on sami-rocqperf on 2026-10-30. Under
+`~/.worktrees/binary-equivalence-taiga`, eight children held an object store of their own:
+census 4.8 GB, craft-a 4.9 GB, craft-b 8.6 GB, lanes-main 221 MB, per-lemma-bridge 196 MB,
+lane-candidate 162 MB, speed-loop-weekly 142 MB, design10x 17 MB — 19.0 GB of `.git` for ONE
+repository whose history is about 4.8 GB. Seven children of the same directory were worktrees
+and cost nothing beyond their files. The root filesystem reached 14 MiB free that afternoon.
+
+The three shapes, and when each is right:
+
+  worktree (the default)   `git worktree add` / `jj workspace add` from the canonical checkout.
+                           One object store, shared. The source knows about it, so the source's
+                           `git gc` keeps what it needs. This is what almost every caller wants:
+                           another branch of the same repository, checked out somewhere else.
+
+  --separate-repo          `git clone --shared` from the canonical checkout: a repository of its
+                           own — its own refs, its own config, its own index — reading the
+                           source's objects through `objects/info/alternates`. The shape
+                           `legion`'s `workspace-init provision` uses for an issue pod. Ask for
+                           it when the tree needs refs the source must not see.
+
+  --independent            a full `git clone`. Its own copy of every object. The flag exists for
+                           the caller who genuinely needs the source to be irrelevant; it prints
+                           what the copy cost.
+
+THE HAZARD. A worktree and a `--shared` clone both die with their source.
+
+  - Remove or move `~/src/<repo>` and every worktree of it, and every `--shared` clone of it,
+    loses its objects. `list` names such a tree as BROKEN and says what to do.
+  - A `--shared` clone is NOT registered with the source: the source's `git gc` can prune an
+    object the borrower alone still needs. So `--separate-repo` turns automatic maintenance off
+    in the source (`gc.auto 0`, `maintenance.auto false`) before it clones, records the borrower
+    in `<source>/.git/agent-workspace-borrowers`, and refuses when it cannot do either. `rm`
+    takes the line out again. A worktree needs none of this: git counts a worktree's HEAD and
+    index as reachable.
+
+REMOVING. A directory deletion is not enough for a worktree: the source keeps a registration in
+`.git/worktrees/<name>` until it is cleared, and jj keeps the workspace in its op log until
+`jj workspace forget`. `rm` does the right one for the shape it finds. It refuses a tree holding
+work no remote has unless `--force` says otherwise; it clears a registration an earlier plain
+deletion left behind, by removing that one entry rather than running a prune (shims/git refuses
+a bare `git worktree prune` in an agent session, because from inside a box every other box's
+worktree looks missing and a prune deletes live registrations); and it deletes the workspace's
+branch from the shared source when a remote already holds every commit on it, which loses
+nothing, keeping anything `git branch -d` refuses. `--keep-branch` leaves the branch alone.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+BORROWERS = "agent-workspace-borrowers"
+
+
+def run(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args, cwd=cwd, env=GIT_ENV, capture_output=True, text=True, check=check, timeout=1800
+    )
+
+
+def out(args: list[str], cwd: Path | None = None) -> str:
+    return run(args, cwd=cwd).stdout.strip()
+
+
+def die(msg: str) -> "None":
+    print(f"agent-workspace: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def human(n: int) -> str:
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.2f} GiB"
+    if n >= 1 << 20:
+        return f"{n / (1 << 20):.1f} MiB"
+    if n >= 1 << 10:
+        return f"{n / (1 << 10):.1f} KiB"
+    return f"{n} B"
+
+
+def tree_size(path: Path) -> int:
+    """Bytes the tree occupies, each inode counted once (as `du` counts it)."""
+    seen: set[tuple[int, int]] = set()
+    total = 0
+    for root, dirs, files in os.walk(path, onerror=lambda e: None):
+        for name in dirs + files:
+            try:
+                st = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            if st.st_nlink > 1:
+                key = (st.st_dev, st.st_ino)
+                if key in seen:
+                    continue
+                seen.add(key)
+            total += st.st_blocks * 512
+    return total
+
+
+def src_root() -> Path:
+    return Path(os.environ.get("AGENT_WORKSPACE_SRC", str(Path.home() / "src")))
+
+
+def ws_root() -> Path:
+    return Path(os.environ.get("AGENT_WORKSPACE_ROOT", str(Path.home() / ".worktrees")))
+
+
+def resolve_source(repo: str) -> Path:
+    """The canonical checkout of <repo>: a path if it looks like one, else ~/src/<repo>."""
+    p = Path(repo).expanduser() if ("/" in repo or repo.startswith("~")) else src_root() / repo
+    p = p.resolve() if p.exists() else p
+    if not p.exists():
+        die(
+            f"no canonical checkout at {p}.\n"
+            f"  Make it once, and every workspace of this repository comes from it:\n"
+            f"    git clone <url> {p}"
+        )
+    if not (p / ".git").exists():
+        die(f"{p} is not a git checkout (no .git). Name the repository's canonical checkout.")
+    if (p / ".git").is_file():
+        die(
+            f"{p} is itself a worktree of another repository.\n"
+            f"  Cut workspaces from the canonical checkout, not from a worktree of it."
+        )
+    try:
+        if ws_root() in p.parents:
+            die(
+                f"{p} is under the workspaces root {ws_root()}, so it is a workspace, not a source.\n"
+                f"  Cut from the canonical checkout under {src_root()} instead."
+            )
+    except Exception:
+        pass
+    return p
+
+
+def is_jj(source: Path) -> bool:
+    return (source / ".jj").is_dir()
+
+
+def git_dir(source: Path) -> Path:
+    return source / ".git"
+
+
+def unpushed_work(ws: Path) -> str:
+    """What THIS tree holds that no remote has, as one line; empty when nothing.
+
+    Scoped to the tree's own HEAD on purpose. A worktree shares the source's refs, and the
+    canonical checkout of binary-equivalence-taiga carries 1,448 local branches, so one
+    `git rev-list` per branch took this check past five minutes on 2026-10-30. The other
+    branches are not this workspace's work and nothing here removes them.
+    """
+    if run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=ws, check=False).returncode != 0:
+        return ""
+    status = run(["git", "status", "--porcelain"], cwd=ws, check=False)
+    if status.returncode != 0:
+        return f"a checkout git cannot read: {status.stderr.splitlines()[0] if status.stderr else '?'}"
+    found: list[str] = []
+    if status.stdout.strip():
+        found.append(f"{len(status.stdout.strip().splitlines())} uncommitted paths")
+    if run(["git", "rev-list", "-1", "HEAD", "--not", "--remotes"], cwd=ws, check=False).stdout.strip():
+        branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=ws, check=False).stdout.strip()
+        found.append(f"commits on {branch}" if branch else "commits on a detached HEAD")
+    return ", ".join(found)
+
+
+# ---------------------------------------------------------------- borrower record
+
+
+def borrowers_file(source: Path) -> Path:
+    gd = git_dir(source)
+    return gd / BORROWERS
+
+
+def read_borrowers(source: Path) -> list[str]:
+    f = borrowers_file(source)
+    if not f.is_file():
+        return []
+    return [line.strip() for line in f.read_text().splitlines() if line.strip()]
+
+
+def write_borrowers(source: Path, paths: list[str]) -> None:
+    f = borrowers_file(source)
+    text = "".join(f"{p}\n" for p in sorted(set(paths)))
+    if text:
+        f.write_text(text)
+    elif f.exists():
+        f.unlink()
+
+
+# ---------------------------------------------------------------- classification
+
+
+def classify(child: Path) -> dict:
+    """What this child of the workspaces root really is, and whether its source is reachable.
+
+    `source` is the canonical CHECKOUT the tree depends on, not the internal directory its
+    pointer names: a reader has to know which checkout to put back, and `<src>/.git/worktrees/<id>`
+    does not say that in a way anyone can act on.
+    """
+    info: dict = {"path": child, "kind": "unknown", "source": None, "broken": None}
+    dot = child / ".git"
+    # A colocated jj workspace has BOTH a .jj directory and a .git worktree pointer file. It is a
+    # jj workspace: `git worktree remove` would take the git side away and leave the workspace in
+    # the jj store, which only `jj workspace forget` removes.
+    if (child / ".jj").is_dir():
+        repo_file = child / ".jj" / "repo"
+        if repo_file.is_file():
+            info["kind"] = "jj-workspace"
+            # jj writes this pointer RELATIVE to the .jj directory it sits in.
+            raw = Path(repo_file.read_text().strip())
+            target = raw if raw.is_absolute() else (child / ".jj" / raw)
+            target = Path(os.path.normpath(target))  # <src>/.jj/repo
+            info["store"] = target
+            info["source"] = target.parents[1] if len(target.parents) > 1 else target
+            if not target.exists():
+                info["broken"] = f"its jj store in {info['source']} is gone"
+            return info
+        # `.jj/repo` is a DIRECTORY: this tree owns its store rather than sharing one. Its
+        # backing git objects are its own too, and they are the bytes that matter.
+        info["kind"] = "jj-clone"
+        info["git_bytes"] = tree_size(child / ".jj") + (tree_size(dot) if dot.is_dir() else 0)
+        return info
+    if dot.is_file():
+        info["kind"] = "worktree"
+        text = dot.read_text().strip()
+        gitdir = Path(text.split(":", 1)[1].strip()) if text.startswith("gitdir:") else None
+        info["store"] = gitdir
+        # <src>/.git/worktrees/<id> -> <src>
+        info["source"] = gitdir.parents[2] if gitdir and len(gitdir.parents) > 2 else gitdir
+        if gitdir is None or not gitdir.exists():
+            info["broken"] = f"its source checkout {info['source']} is gone"
+        return info
+    if dot.is_dir():
+        alt = dot / "objects" / "info" / "alternates"
+        info["kind"] = "shared-clone" if alt.is_file() else "clone"
+        if alt.is_file():
+            targets = [Path(line.strip()) for line in alt.read_text().splitlines() if line.strip()]
+            first = targets[0] if targets else None
+            info["store"] = first
+            # <src>/.git/objects -> <src>
+            info["source"] = first.parents[1] if first and len(first.parents) > 1 else first
+            missing = [t for t in targets if not t.exists()]
+            if missing:
+                info["broken"] = f"the objects it borrows from {info['source']} are gone"
+        info["git_bytes"] = tree_size(dot)
+        return info
+    info["kind"] = "not-a-repository"
+    return info
+
+
+def broken_advice(info: dict) -> str:
+    return (
+        f"    This tree cannot be used: {info['broken']}.\n"
+        f"    Either put the source back where it was, or take this tree away\n"
+        f"    (`agent-workspace rm --force {info['path']}`) and make a new one from the\n"
+        f"    canonical checkout. Commits that exist only here are unrecoverable once the\n"
+        f"    objects are gone, so check `git -C {info['path']} log` first if you can."
+    )
+
+
+# ---------------------------------------------------------------- new
+
+
+def default_base(source: Path, jj: bool) -> str:
+    head = run(
+        ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=source, check=False
+    ).stdout.strip()
+    if head:
+        return head
+    for cand in ("origin/main", "origin/master", "HEAD"):
+        if run(["git", "rev-parse", "--verify", "--quiet", cand], cwd=source, check=False).returncode == 0:
+            return cand
+    return "HEAD"
+
+
+def cmd_new(args: argparse.Namespace) -> int:
+    source = resolve_source(args.repo)
+    name = args.name
+    dest = Path(args.path).expanduser() if args.path else ws_root() / Path(args.repo).name / name
+    if dest.exists() and any(dest.iterdir()):
+        die(f"{dest} already exists and is not empty")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    jj = is_jj(source)
+    before_source = tree_size(git_dir(source))
+
+    if args.independent:
+        url = out(["git", "remote", "get-url", "origin"], cwd=source)
+        print(f"agent-workspace: full clone of {url} (its own object store, by request)")
+        run(["git", "clone", url, str(dest)])
+        made = "independent clone"
+    elif args.separate_repo:
+        # git gc in the source does not know a --shared clone exists, so stop it first.
+        run(["git", "config", "gc.auto", "0"], cwd=source)
+        run(["git", "config", "maintenance.auto", "false"], cwd=source)
+        run(["git", "clone", "--shared", str(source), str(dest)])
+        write_borrowers(source, read_borrowers(source) + [str(dest)])
+        print(
+            f"agent-workspace: automatic gc is now off in {source} and {dest} is recorded in\n"
+            f"  {borrowers_file(source)}; this clone's objects live in {git_dir(source)} and it\n"
+            f"  breaks if that is removed."
+        )
+        made = "shared clone (own refs, borrowed objects)"
+    elif jj:
+        run(["jj", "-R", str(source), "workspace", "add", str(dest), "--name", name])
+        made = "jj workspace"
+    else:
+        base = args.base or default_base(source, jj)
+        branch = args.branch or name
+        exists = (
+            run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=source, check=False).returncode
+            == 0
+        )
+        add = ["git", "worktree", "add"]
+        add += [str(dest), branch] if exists else ["-b", branch, str(dest), base]
+        res = run(add, cwd=source, check=False)
+        if res.returncode != 0:
+            die(f"git worktree add failed:\n{res.stderr.strip()}")
+        made = f"worktree on branch {branch}"
+
+    files = tree_size(dest)
+    after_source = tree_size(git_dir(source))
+    grew = after_source - before_source
+    print(f"agent-workspace: {dest}")
+    print(f"  {made}, from {source}")
+    print(f"  this tree: {human(files)}   source grew by: {human(max(grew, 0))}")
+    if args.independent:
+        print("  its objects are its own: nothing is shared, and nothing breaks if the source goes.")
+    else:
+        print(
+            f"  objects stay in {git_dir(source)} ({human(after_source)}); this tree holds none of them.\n"
+            f"  Remove or move that checkout and this tree stops working — `agent-workspace list` says so.\n"
+            f"  When the work ends: agent-workspace rm {Path(args.repo).name} {name}"
+        )
+    print(str(dest))
+    return 0
+
+
+# ---------------------------------------------------------------- list
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    root = ws_root()
+    repos = [root / args.repo] if args.repo else sorted(p for p in root.glob("*") if p.is_dir())
+    bad = 0
+    for repo_dir in repos:
+        if not repo_dir.is_dir():
+            continue
+        children = sorted(p for p in repo_dir.iterdir() if p.is_dir() and not p.is_symlink())
+        if not children:
+            continue
+        print(f"{repo_dir}")
+        for child in children:
+            info = classify(child)
+            extra = ""
+            if info["kind"] in ("clone", "jj-clone"):
+                extra = f"  own object store {human(info.get('git_bytes', 0))}"
+                bad += 1
+            elif info["kind"] == "shared-clone":
+                extra = f"  own refs, objects borrowed from {info['source']}"
+            elif info["source"]:
+                extra = f"  objects in {info['source']}"
+            print(f"  {info['kind']:<17} {child.name}{extra}")
+            if info["broken"]:
+                print(broken_advice(info))
+                bad += 1
+    if bad:
+        print(
+            f"\n{bad} tree(s) above hold their own copy of a history (only `new --independent`\n"
+            f"should) or have lost the checkout their objects live in. A second tree of one\n"
+            f"repository is `agent-workspace new <repo> <name>`, which shares that checkout."
+        )
+    return 1 if bad else 0
+
+
+# ---------------------------------------------------------------- rm
+
+
+def registered_worktrees(source: Path) -> set[str]:
+    listing = run(["git", "worktree", "list", "--porcelain"], cwd=source, check=False).stdout
+    return {line.removeprefix("worktree ").strip() for line in listing.splitlines() if line.startswith("worktree ")}
+
+
+def forget_registration(source: Path, dest: Path) -> bool:
+    """Remove the source's registration of THIS worktree, and no other.
+
+    `git worktree prune` is what git offers here, and it is refused in an agent session
+    (shims/git, AGENTC-431) because from inside a box every other box's worktree looks missing
+    and a prune deletes live registrations — it did so 17 times on 2026-09-26. One registration
+    is one directory under `.git/worktrees/` whose `gitdir` file names this tree, so removing
+    that directory clears this entry and touches nobody else's.
+    """
+    root = git_dir(source) / "worktrees"
+    if not root.is_dir():
+        return False
+    gone = False
+    for entry in root.iterdir():
+        f = entry / "gitdir"
+        if not f.is_file():
+            continue
+        if Path(f.read_text().strip()).parent == dest:
+            shutil.rmtree(entry, ignore_errors=True)
+            gone = True
+    return gone
+
+
+def clear_stale_registration(dest: Path, repo_name: str) -> int:
+    """The directory is already gone. Clear the registration it left behind, if any."""
+    source = resolve_source(repo_name) if (src_root() / repo_name).exists() else None
+    if source is not None and forget_registration(source, dest):
+        print(
+            f"agent-workspace: {dest} was already deleted, and {source} still registered it.\n"
+            f"  That registration is now gone; no other worktree of that checkout was touched."
+        )
+        return 0
+    die(f"no such workspace: {dest}")
+    return 1
+
+
+def cmd_rm(args: argparse.Namespace) -> int:
+    # Absolute, always: every git below runs with -C the source checkout, where a relative
+    # path would name something else entirely.
+    if args.name is None:
+        dest = Path(args.repo).expanduser().absolute()
+        repo_name = dest.parent.name
+    else:
+        dest = (ws_root() / Path(args.repo).name / args.name).absolute()
+        repo_name = Path(args.repo).name
+    if not dest.exists():
+        return clear_stale_registration(dest, repo_name)
+    info = classify(dest)
+
+    if not args.force:
+        work = unpushed_work(dest) if info["kind"] != "not-a-repository" else ""
+        if work:
+            die(
+                f"{dest} holds work its remote does not have ({work}).\n"
+                f"  Push it, or pass --force to remove it anyway."
+            )
+
+    # `git worktree prune` is refused in an agent session (shims/git, AGENTC-431): from inside a
+    # box every other box's worktree looks missing, so a prune deletes live registrations. So a
+    # worktree is taken away by `git worktree remove`, which removes its own registration, and
+    # the result is read back rather than assumed.
+    if info["kind"] == "worktree" and info["source"] and info["source"].exists():
+        source = info["source"]
+        branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=dest, check=False).stdout.strip()
+        res = run(["git", "worktree", "remove", "--force", str(dest)], cwd=source, check=False)
+        if res.returncode != 0:
+            die(
+                f"git worktree remove failed in {source}:\n"
+                f"  {res.stderr.strip() or res.stdout.strip()}\n"
+                f"  The tree is still there. Do not just delete the directory: the registration in\n"
+                f"  {source}/.git/worktrees would stay behind. Fix the reason above and run this again."
+            )
+        if str(dest) in registered_worktrees(source):
+            forget_registration(source, dest)
+        if str(dest) in registered_worktrees(source):
+            die(f"{source} still registers {dest} after the remove; look in {git_dir(source)}/worktrees")
+        print(f"agent-workspace: removed the worktree and its registration in {source}")
+        # The branch this workspace carried is litter in a checkout every session shares. Delete
+        # it only when a remote already holds every commit on it, which loses nothing; `git
+        # branch -d` is the check as well as the delete, and anything it refuses is left alone.
+        if branch and not args.keep_branch:
+            gone = run(["git", "branch", "-d", branch], cwd=source, check=False)
+            if gone.returncode == 0:
+                print(f"agent-workspace: deleted branch {branch} in {source} (a remote has all of it)")
+            else:
+                print(f"agent-workspace: branch {branch} is kept in {source}: {gone.stderr.strip().splitlines()[0]}")
+        return 0
+
+    if info["kind"] == "jj-workspace" and info["source"] and info["source"].exists():
+        source = info["source"]
+        res = run(["jj", "-R", str(source), "workspace", "forget", dest.name], check=False)
+        if res.returncode != 0:
+            die(
+                f"jj workspace forget {dest.name} failed in {source}:\n"
+                f"  {res.stderr.strip()}\n"
+                f"  The directory is left in place; a plain deletion would leave the workspace in\n"
+                f"  that store's op log and its git worktree registered."
+            )
+        shutil.rmtree(dest, ignore_errors=True)
+        print(f"agent-workspace: forgot the jj workspace in {source} and removed {dest}")
+        return 0
+
+    source = resolve_source(repo_name) if (src_root() / repo_name).exists() else None
+    if info["kind"] == "shared-clone" and source is not None:
+        write_borrowers(source, [p for p in read_borrowers(source) if p != str(dest)])
+        print(f"agent-workspace: dropped {dest} from {borrowers_file(source)}")
+    if info["broken"] and info["kind"] == "worktree":
+        print(
+            f"agent-workspace: {dest} is a worktree whose source checkout is gone, so no source\n"
+            f"  holds a registration to clear; removing the directory is the whole job."
+        )
+    shutil.rmtree(dest, ignore_errors=True)
+    print(f"agent-workspace: removed {dest}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="agent-workspace", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    n = sub.add_parser("new", help="make a workspace of one repository (a worktree by default)")
+    n.add_argument("repo", help="repository name under ~/src, or a path to its canonical checkout")
+    n.add_argument("name", help="workspace name; also the branch name unless --branch says otherwise")
+    n.add_argument("--path", help="put it here instead of ~/.worktrees/<repo>/<name>")
+    n.add_argument("--branch", help="branch to check out or create (default: the workspace name)")
+    n.add_argument("--base", help="start the new branch here (default: origin's default branch)")
+    n.add_argument(
+        "--separate-repo",
+        action="store_true",
+        help="its own refs and config, objects borrowed from the source (git clone --shared)",
+    )
+    n.add_argument(
+        "--independent",
+        action="store_true",
+        help="a full clone with its own copy of every object; costs the whole history on disk",
+    )
+    n.set_defaults(func=cmd_new)
+
+    ls = sub.add_parser("list", help="what each child of the workspaces root really is")
+    ls.add_argument("repo", nargs="?", help="only this repository's children")
+    ls.set_defaults(func=cmd_list)
+
+    r = sub.add_parser("rm", help="remove a workspace, and its registration in the source")
+    r.add_argument("repo", help="repository name, or the workspace path when name is omitted")
+    r.add_argument("name", nargs="?", help="workspace name")
+    r.add_argument("--force", action="store_true", help="remove it even when it holds unpushed work")
+    r.add_argument(
+        "--keep-branch",
+        action="store_true",
+        help="leave the workspace's branch in the source checkout (default: delete it when a remote has it all)",
+    )
+    r.set_defaults(func=cmd_rm)
+
+    args = p.parse_args(argv)
+    if args.cmd == "new" and args.separate_repo and args.independent:
+        die("--separate-repo and --independent ask for different things; pass one")
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

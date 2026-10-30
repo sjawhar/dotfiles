@@ -24,17 +24,36 @@ approved, so repeating them here would let the two drift apart.
 
 You keep your starting workspace. Each worker uses the one its task names, normally the same tree
 for sequential steps. Make a second one only when two workers edit different files at the same
-time: a full clone (`git clone <url> ~/.worktrees/<repo>/<name>`, not `git worktree add`) outside an
-agent box (`scripts/agentbox`), `~/boxes/<box>/<name>` inside one. Never `/tmp`: it is cleared between
-sessions and an agent box does not share it, so a resumed worker finds no tree.
+time.
 
-**Clone with `--reference <canonical checkout>` when the canonical checkout is on the same disk.**
-A plain clone materialises its own object store. On 2026-10-30 five exports of one repository put
-31 GB under `~/.worktrees`, 26 GB of it the same objects three and four times over, and the root
-disk reached zero with 221 GiB free on another volume. `--reference` borrows those objects instead.
+**One clone per repository, worktrees from it.** Outside an agent box (`scripts/agentbox`), make
+every further tree with `agent-workspace`, which cuts it from the canonical checkout
+`~/src/<repo>` so the repository's objects exist once on the machine:
 
-**The hazard, and the condition that removes it:** a borrowing clone breaks if the canonical
-checkout prunes an object it is using, which `git gc` can do without knowing the borrower exists.
-So borrow only from a checkout whose automatic maintenance is off (`git config gc.auto 0`,
-`git config maintenance.auto false`), and never from a throwaway tree. Where neither holds, take
-the plain clone and the disk cost.
+```sh
+agent-workspace new <repo> <name>          # ~/.worktrees/<repo>/<name>, prints the path
+agent-workspace list <repo>                # what each existing tree is, and which are broken
+agent-workspace rm <repo> <name>           # when the work ends
+```
+
+Inside an agent box, use `~/boxes/<box>/<name>`, which the box already clones from its template
+with the objects hardlinked. Never `/tmp`: it is cleared between sessions and an agent box does
+not share it, so a resumed worker finds no tree.
+
+**Never `git clone` a repository a checkout of which is already on the machine.** A plain clone
+materialises its own object store. On 2026-10-30 nine children of
+`~/.worktrees/binary-equivalence-taiga` each held one — 19.0 GiB for a repository whose canonical
+checkout is 2.0 GiB — and the root disk reached 14 MiB free with 221 GiB free on another volume.
+Through `agent-workspace`, a second tree of that repository costs 202 MiB of files and 2.1 MiB in
+the source. Where a tree genuinely needs refs of its own, `agent-workspace new --separate-repo`
+makes a `git clone --shared`, which borrows the source's objects; `--independent` is the flag
+that pays for a private copy, and it says what that cost.
+
+**The hazard, and what handles it:** a worktree and a `--shared` clone both stop working if the
+canonical checkout is removed or moved, and a `--shared` clone can also lose an object the
+source's `git gc` pruned without knowing a borrower existed. `agent-workspace new --separate-repo`
+turns that maintenance off in the source and records the borrower; `agent-workspace list` names
+every tree whose source has gone and says what to do about it. Removing a worktree is
+`agent-workspace rm`, not `rm -rf`: the source keeps a registration until it is cleared (699 of
+them had accumulated in that checkout), and a jj workspace stays in its store's op log until
+`jj workspace forget`.
