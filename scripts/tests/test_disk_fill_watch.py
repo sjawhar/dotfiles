@@ -553,6 +553,21 @@ class DiskFillWatchHeadlineTest(unittest.TestCase):
     def test_a_held_floor_drops_the_farm_kind_list(self) -> None:
         self.assertNotIn("grade farm's own floors", self.render(self.verdict_like()))
 
+    def test_a_slow_fall_on_a_nearly_full_disk_keeps_its_deadline(self) -> None:
+        """Under the flat rate, but reaching zero inside the horizon: not flat, and not quiet."""
+        text = self.render(
+            self.verdict_like(
+                free=1 * WATCH.GIB,
+                df_fill_rate=0.5 * WATCH.GB / 3600,
+                time_to_full=7000.0,
+                rate_candidate=True,
+                fast=True,
+            )
+        )
+        self.assertIn("DISK FILLING", text)
+        self.assertNotIn("free space is flat", text)
+        self.assertIn("from full", text)
+
 
 if __name__ == "__main__":
     unittest.main()
