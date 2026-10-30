@@ -9,11 +9,13 @@ Sami approves every outside message, and four steps come before you ask him. He 
 
 ## The exclusions
 
-Two, and he set them in two different answers. Read both before you decide that something is excluded.
+Two, and he set them in two different answers. Read both before you decide that something is excluded; neither is a rule you can infer from the shape of a message.
 
-**Oh My Pie.** Messages there go out without his approval ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27).
+**One named project** goes out without his approval ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27). That answer names it.
 
-**A pull request to a project that has ALREADY ENROLLED, with its description and comments to that project's maintainers.** On 2026-10-29 at 17:22Z he wrote that he wants to stop being asked for approval every single time for enrolled projects, and that ceremony around a pull request must not stop proof work ([OSSV-146 ask 81a892b6](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/81a892b6-0f63-4424-b48e-51d27d8f1a9c)). **The four steps still apply. The approval ask does not.** Proof work does not wait for a pull request either: prepare and sign changes locally, and send them when the program's verification ends.
+**A pull request to a project that has already enrolled**, with its description and comments to that project's maintainers. On 2026-10-29 at 17:22Z he wrote that he wants to stop being asked for approval every single time for enrolled projects, and that ceremony around a pull request must not stop the work ([OSSV-146 ask 81a892b6](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/81a892b6-0f63-4424-b48e-51d27d8f1a9c)). The four steps still apply. The approval ask does not. The work does not wait for the pull request either: prepare and sign changes locally, and send them when the work they belong to ends.
+
+What counts as enrolled is the enrolling project's own record, and its stream's brief says where that record is. Do not decide enrollment from a message's tone or from a maintainer having replied to us before.
 
 Everything else waits for him: a first contact with a project that has not enrolled, a bug report, a disclosure, and a reply to a maintainer who wrote to us first.
 
@@ -26,9 +28,9 @@ Everything else waits for him: a first contact with a project that has not enrol
 
 **Step 4 ends with a list of what it removed, and that list goes in the ask.** Measured on 2026-10-30 over 18 drafts of three real messages ([OSSV-142 outside-message-skill-test](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/artifacts/outside-message-skill-test-md)): drafts written with this skill met the bar 9 times in 9, drafts with no guidance 8 times in 9, so the first three steps changed almost nothing - the research teaches them. The step that changed the message was the cut, and it is the step agents skip: 2 of 9 with the skill and 3 of 9 without had no cut at all. Only the cut drafts lost a promise about the next release, and they lost half their length. An instruction alone did not make it happen, so the list is what proves it did: three lines naming what came out, or the sentence "the reviewer removed nothing", which is itself an answer.
 
-The form of a message to a maintainer is not in this skill. `theorem-labs/oss-verify` holds `.claude/skills/write-to-maintainer/`, owned by `@theorem-labs/engineering` - people, in that repository's `CODEOWNERS`. It sets the shape of the text: one comment per decision, the decision in the first sentence, at most five blocking items each with its file and line, nothing that restates what the diff already shows, no thanks and no promises, under 1,500 visible characters with the rest in one collapsed block, a reply under 80 words, and only facts you checked. Use it for every comment, reply, issue and pull-request text a maintainer reads.
+The form of the text is not in this skill. Where the stream that owns the relationship keeps its own rules for writing to maintainers - in its project's `AGENTS.md`, its `.claude/skills/`, or its brief - those rules decide how the message reads, and some are owned by people through that repository's code owners. Read them before you draft, and send a change to the form there rather than into this file.
 
-This skill covers when his approval is needed and what comes before the ask. That skill covers how the text reads. A change to the form goes there, in a pull request a code owner approves, never into this file.
+This skill covers when his approval is needed and what comes before the ask. The project's own rules cover how the text reads.
 
 ## Then the ask
 
