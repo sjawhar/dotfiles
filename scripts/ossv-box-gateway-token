@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# ossv-box-gateway-token writes an OIDC ID token of the box's own identity for Oh My Pi's
-# model-gateway provider. The timer runs it every ten minutes, so the token file stays newer than
-# the token's one-hour lifetime.
+# ossv-box-gateway-token writes the OIDC ID token of dev-box@theorem-agent-infra, the one identity
+# every developer box carries at the model gateway, for Oh My Pi's model-gateway provider. The
+# timer runs it every ten minutes, so the token file stays newer than the token's one-hour
+# lifetime.
 #
-# No box mints as another account:
-#   - a box in Google Cloud reads the ID token of the account its VM runs as from the metadata
-#     server, which issues one for any audience and needs no IAM role.
-#   - an Azure box, whose ADC is an external_account credential through the azure/entra pool,
-#     mints the ID token of the account that credential names in service_account_impersonation_url,
-#     with the federated access token its own managed-identity token buys at Google STS. That
-#     principal already holds roles/iam.workloadIdentityUser on the account (agent-infra
-#     box-identity/), which carries iam.serviceAccounts.getOpenIdToken, the permission
-#     generateIdToken checks.
+# No box impersonates another box's identity:
+#   - a box in Google Cloud runs as dev-box itself (agent-infra box-identity/ attaches it), so it
+#     reads the token from its own metadata server, which issues one for any audience and needs no
+#     IAM role.
+#   - an Azure box, whose ADC is an external_account credential through the azure/entra pool, acts
+#     as dev-box through that pool: its federated principal holds roles/iam.workloadIdentityUser on
+#     dev-box, which carries iam.serviceAccounts.getOpenIdToken, the permission generateIdToken
+#     checks. The credential's own service_account_impersonation_url, its dev-<name> account, is
+#     not used here.
 set -euo pipefail
 
 # The systemd user unit has no login PATH; jq and curl come from the system or mise.
 export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$PATH"
 
+target=dev-box@theorem-agent-infra.iam.gserviceaccount.com
 audience=model-gateway-gce
 cred=${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/application_default_credentials.json}
 metadata=${OSSV_GCE_METADATA_HOST:-metadata.google.internal}
@@ -61,14 +63,10 @@ gce_identity_token() {
         "http://$metadata/computeMetadata/v1/instance/service-accounts/default/identity?audience=$audience&format=full"
 }
 
-# federated_identity_token prints the ID token of the account an external_account credential names,
-# minted with the box's own federated access token.
+# federated_identity_token prints dev-box's ID token, minted with the box's own federated access
+# token through the workload identity pool.
 federated_identity_token() {
-    local target access
-    target=$(jq -er '.service_account_impersonation_url' "$cred" |
-        sed -n 's#.*/serviceAccounts/\([^:]*\):.*#\1#p') ||
-        fail "$cred names no service account"
-    [[ -n $target ]] || fail "$cred names no service account"
+    local access
     access=$(federated_token) || fail "no federated access token from $cred"
     curl -fsS -m 20 -K <(bearer "$access") -H 'Content-Type: application/json' \
         -d "{\"audience\":\"$audience\",\"includeEmail\":true}" \
