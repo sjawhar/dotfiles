@@ -24,6 +24,10 @@ Everything else waits for him: a first contact with a project that has not enrol
 3. **Follow their conventions in form as well as words.** A pull request on their repository uses their pull-request template. An issue uses their issue template. A thread reply matches the thread.
 4. **A fresh reviewer reads it and cuts.** Astra, or Opus where Astra is not available, reads the message and removes everything that is not needed to understand the core message. A reviewer that only approves has not done step 4.
 
+**The FORM of a message to a maintainer is not in this skill.** `theorem-labs/oss-verify` holds `.claude/skills/write-to-maintainer/`, owned by `@theorem-labs/engineering` - people, in that repository's `CODEOWNERS`. It sets the shape of the text: one comment per decision, the decision in the first sentence, at most five blocking items each with its file and line, nothing that restates what the diff already shows, no thanks and no promises, under 1,500 visible characters with the rest in one collapsed block, a reply under 80 words, and only facts you checked. Use it for every comment, reply, issue and pull-request text a maintainer reads.
+
+This skill covers WHEN his approval is needed and WHAT comes before the ask. That skill covers HOW the text reads. A change to the form goes there, in a pull request a code owner approves, never into this file.
+
 ## Then the ask
 
 **Put the full message text in the ask itself.** Not a link to a document holding it, not a summary of it, not "the draft is at …". Sami, 2026-10-30: he has to open another document to read the message in almost every one of these asks, and he cannot judge the message from the ask.
