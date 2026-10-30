@@ -24,9 +24,11 @@ Everything else waits for him: a first contact with a project that has not enrol
 3. **Follow their conventions in form as well as words.** A pull request on their repository uses their pull-request template. An issue uses their issue template. A thread reply matches the thread.
 4. **A fresh reviewer reads it and cuts.** Astra, or Opus where Astra is not available, reads the message and removes everything that is not needed to understand the core message. A reviewer that only approves has not done step 4.
 
-**The FORM of a message to a maintainer is not in this skill.** `theorem-labs/oss-verify` holds `.claude/skills/write-to-maintainer/`, owned by `@theorem-labs/engineering` - people, in that repository's `CODEOWNERS`. It sets the shape of the text: one comment per decision, the decision in the first sentence, at most five blocking items each with its file and line, nothing that restates what the diff already shows, no thanks and no promises, under 1,500 visible characters with the rest in one collapsed block, a reply under 80 words, and only facts you checked. Use it for every comment, reply, issue and pull-request text a maintainer reads.
+**Step 4 ends with a list of what it removed, and that list goes in the ask.** Measured on 2026-10-30 over 18 drafts of three real messages ([OSSV-142 outside-message-skill-test](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/artifacts/outside-message-skill-test-md)): drafts written with this skill met the bar 9 times in 9, drafts with no guidance 8 times in 9, so the first three steps changed almost nothing - the research teaches them. The step that changed the message was the cut, and it is the step agents skip: 2 of 9 with the skill and 3 of 9 without had no cut at all. Only the cut drafts lost a promise about the next release, and they lost half their length. An instruction alone did not make it happen, so the list is what proves it did: three lines naming what came out, or the sentence "the reviewer removed nothing", which is itself an answer.
 
-This skill covers WHEN his approval is needed and WHAT comes before the ask. That skill covers HOW the text reads. A change to the form goes there, in a pull request a code owner approves, never into this file.
+The form of a message to a maintainer is not in this skill. `theorem-labs/oss-verify` holds `.claude/skills/write-to-maintainer/`, owned by `@theorem-labs/engineering` - people, in that repository's `CODEOWNERS`. It sets the shape of the text: one comment per decision, the decision in the first sentence, at most five blocking items each with its file and line, nothing that restates what the diff already shows, no thanks and no promises, under 1,500 visible characters with the rest in one collapsed block, a reply under 80 words, and only facts you checked. Use it for every comment, reply, issue and pull-request text a maintainer reads.
+
+This skill covers when his approval is needed and what comes before the ask. That skill covers how the text reads. A change to the form goes there, in a pull request a code owner approves, never into this file.
 
 ## Then the ask
 
@@ -36,9 +38,10 @@ An ask for an outside message has, in this order:
 
 - who the reader is, and one line on what they already know about this;
 - **the message, in full, as it would be sent**;
+- **what the reviewer removed in step 4**, in three lines or fewer, or "the reviewer removed nothing";
 - what changes if he says no.
 
-Link the research, not the message.
+Link the research, not the message. An ask with no removal line has not had step 4, whatever it says.
 
 ## Never write these
 
