@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# gcloud-token-fast: print an OAuth access token for this machine's active gcloud
+# identity, from a tmpfs cache, so omp's `!command` budget (10 s) never races
+# gcloud's own start-up against this box's load -- the same reason
+# scripts/hawk-token-fast exists (load average was 228 when this was written,
+# 2026-10-30, and a cold `gcloud auth print-access-token` costs ~2.5 s unloaded).
+#
+# It backs the `google-vertex` provider in omp/models.local.yml: Vertex AI takes a
+# bearer token of the box's keyless identity (Azure WIF -> impersonation of
+# dev-sjawhar@theorem-agent-infra), so nothing here is key material and the cache
+# holds only a token that expires by itself.
+#
+# Google's access tokens are opaque, not JWTs, so freshness comes from the cache
+# file's age and not from a claim inside it: a mint lives 3600 s and the cache is
+# refused at MAX_AGE_SECONDS, which leaves 20 minutes of margin. omp also re-runs
+# the `!command` on a 401, so an unexpectedly short-lived token costs one retry.
+set -euo pipefail
+
+cache_dir="${XDG_RUNTIME_DIR:-/tmp}/gcloud-token"
+cache="$cache_dir/access-token"
+MAX_AGE_SECONDS=2400
+
+log() { echo "gcloud-token-fast: $*" >&2; }
+
+if [ -s "$cache" ]; then
+    now=$(printf '%(%s)T' -1)
+    mtime=$(stat -c %Y "$cache" 2>/dev/null || echo 0)
+    if (( now - mtime < MAX_AGE_SECONDS )); then
+        cat "$cache"
+        exit 0
+    fi
+fi
+
+token=$(gcloud auth print-access-token 2>/dev/null) || {
+    log "gcloud auth print-access-token failed; is this box's ADC present?"
+    exit 1
+}
+[ -n "$token" ] || { log "gcloud printed no token"; exit 1; }
+
+mkdir -p -m 700 "$cache_dir"
+tmp=$(mktemp "$cache.XXXXXX")
+chmod 600 "$tmp"
+printf '%s\n' "$token" >"$tmp"
+mv -f "$tmp" "$cache"
+printf '%s\n' "$token"
