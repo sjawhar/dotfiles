@@ -21,28 +21,33 @@ modelRoles:
   askgate: anthropic/claude-fable-5-1:high
   proactiveMemory: anthropic/claude-sonnet-5-5
   judgeLog: anthropic/claude-sonnet-5-5
-# Sami paused the per-token OpenAI API at 02:47Z on 2026-10-26, with no scope
-# limit (dispatch://OSSV-201/comment/1a304d1c-c8cf-4796-8e89-105cbef3357c:
-# "let's pause on using OpenAI API and just continue using Claude for
-# everything instead"). While this holds, no session reaches the `openai`
-# provider: not as the startup or resume pick when the Anthropic login is down
-# (omp then takes the first provider with a key, which was openai/gpt-5.5 on
-# 2026-10-25), not through a subagent inheriting that pick, not for
-# skill-description compression, and not by name (astra-api, gpt-api, a review
-# gate on openai/gpt-6-astra). The provider and its key stay in models.yml;
-# delete this block to lift the pause. openai-codex (the Codex subscription)
-# is a separate provider and is not affected.
+# What Sami's pause on the OpenAI API means, in his words, 2026-10-30 ~01:30Z
+# (goals-md v43): "I keep saying, 'Let's pause using the OpenAI API,' and you
+# guys turn this into, 'Let's disable the OpenAI API everywhere.' Can you
+# please just stop doing that?" So the pause is a default, not a prohibition:
+# agents default to Claude, and the provider stays reachable for the agents
+# that are named on it. His original words, 2026-10-26 02:47Z
+# (dispatch://OSSV-201/comment/1a304d1c-c8cf-4796-8e89-105cbef3357c): "let's
+# pause on using OpenAI API and just continue using Claude for everything
+# instead".
 #
-# The entry is also why astra-api and gpt-api refuse to start, with
-# `Provider "openai" is disabled.` — not because their model ids are wrong.
-# Measured 2026-10-30: the live OpenAI API serves gpt-6-astra, gpt-5.6-terra,
-# gpt-6.1-sol and gpt-6.1-terra, omp's own catalog carries all four, and each
-# answered through this box's key under a throwaway `disabledProviders: []`
-# overlay. Cross-family review therefore does not run on the OpenAI API while
-# the pause holds; it runs on Vertex Gemini through the chains below, which
-# cost GCP and not OpenAI.
-disabledProviders:
-  - openai
+# `disabledProviders: [openai]` was this file reading that as a prohibition,
+# and it, not a wrong model id, was the whole reason astra-api and gpt-api
+# could not start. Measured 2026-10-30 01:00-01:12Z: both ids those two agents
+# name exist in omp's catalog and on the live API under this box's key (among
+# the 142 the key reaches), and with the provider reachable astra-api served
+# openai/gpt-6-astra and gpt-api served openai/gpt-5.6-terra, read back from
+# each subagent's own transcript.
+#
+# The boundary that comes with it: no OpenAI model is any other agent's
+# default, and no role or wildcard chain routes anything to one. `modelRoles`
+# names Anthropic, Codex and Gemini only; `task.agentModelOverrides` names no
+# `openai/` id; and `openai/*: []` below stops every OpenAI model that is not
+# one of the named reviewers from inheriting the Anthropic `default` chain, so
+# a session never starts spending on the API unasked. Measured in the same run:
+# a plain `task` subagent with no model still served anthropic/claude-opus-5.
+# omp-billing-watch reports the spend. openai-codex (the Codex subscription) is
+# a separate provider and was never paused.
 extensionHandlers:
   # pi-envoy's AskGate (@sjawhar/pi-envoy, README "The time limit") holds its
   # 90 s review 5 s under this ceiling: at omp's 30 s default it would get
@@ -85,40 +90,52 @@ retry:
     # Codex (ChatGPT Pro subscription) falls to the Anthropic tier that matches
     # the failing model; exact keys beat the wildcard. Model keys beat every
     # role chain, a subagent's own included, and an effort-suffixed key matches
-    # only that effort, so gpt-6-astra at high (the sami-proxy agent alone)
-    # falls to Opus 5.5. No other agent may run gpt-6-astra at high.
+    # only that effort, so gpt-6-astra at high (the sami-proxy agent alone, and
+    # that agent is a stand-in for Sami, not a cross-family reviewer) falls to
+    # Opus 5.5. No other agent may run gpt-6-astra at high.
     #
-    # The three cross-family keys below are the exception: they never end on an
-    # Anthropic model, because a cross-family review answered by Claude is a
-    # same-family review wearing the wrong label, and it reads as a pass. They
-    # used to be `[]`, which fails loudly — better than that, but it is why no
-    # cross-family review ran at all from the Codex usage limit of 2026-10-29
-    # to 2026-11-04. They now degrade to Vertex Gemini, which is non-Anthropic,
-    # keyless (GCP, not the paused OpenAI API) and the only cross-family route
-    # this box can take today. Measured 2026-10-30: with this chain,
-    # openai-codex/gpt-6-astra:xhigh against the spent Codex window answered on
-    # gemini-4-argon. The `vertex/google/*` ids come from the `vertex` provider
-    # in the machine-local omp/models.local.yml; a machine without it resolves
-    # none of them and the chain ends as the old `[]` did.
-    # No chain ends on a per-token `openai/*` model while Sami's pause on the
-    # OpenAI API (2026-10-26) holds: an outage of every Anthropic model would
-    # otherwise walk Codex sessions onto it. The two `openai/*` keys below name
-    # one per-token model each so astra-api and gpt-api degrade within their own
-    # family first once the pause lifts; while it holds, the disabled provider
-    # drops those entries and the chain goes straight to Gemini.
+    # The three cross-family keys below are the exception, and none of them
+    # names an Anthropic model: a cross-family review answered by Claude is a
+    # same-family review wearing the wrong label, and it reads as a pass. Each
+    # degrades inside non-Anthropic models only — the OpenAI API ids this box's
+    # key reaches, then the Codex subscription when its window is open — and
+    # when no link is usable the spawn refuses, naming the chain key and every
+    # link it tried, instead of answering. The caller then runs a Claude reader
+    # that did not write the change, and labels that review same-family.
+    #
+    # They were `[]` until 2026-10-29, which is why no cross-family review ran
+    # between the Codex usage limit of 2026-10-29 and its 2026-11-04 reset, and
+    # for one commit (b9cef6d) they ended on `vertex/google/*` Gemini. Those
+    # Gemini entries are gone: no key owns a `vertex/*` model, so a walk that
+    # lands on one and then fails resolves `default` and answers from Claude —
+    # the single outcome these three keys exist to prevent. Re-adding Gemini
+    # needs a `vertex/*` (or per-id) key of its own, and that also changes what
+    # the Verified Linux Gemini sessions fall back to, so it is theirs to call.
+    #
+    # `openai/*: []` is the boundary for every other OpenAI model: no chain, so
+    # no silent Anthropic answer and no unasked per-token spend. Exact keys beat
+    # it — measured 2026-10-30, astra-api on a typo'd id refused with
+    # `retry.fallbackChains["openai/*"] is empty`, and on its real id with both
+    # OpenAI providers disabled it refused naming all three of its own links.
+    # openai-codex/gpt-6-astra and openai/gpt-6-astra name each other; omp
+    # resolves that by alternating models, one retry attempt per hop, until the
+    # retry budget ends the turn ("Two keys is the whole walk per attempt",
+    # packages/coding-agent/src/session/turn-recovery.ts).
     openai-codex/gpt-6-astra:high:
       - anthropic/claude-opus-5-5:xhigh
     openai-codex/gpt-6-astra:
-      - vertex/google/gemini-4-argon
-      - vertex/google/gemini-3.1-pro-preview
+      - openai/gpt-6-astra
+      - openai/gpt-6.1-sol
+      - openai/gpt-6-sol
+    openai/*: []
     openai/gpt-6-astra:
-      - openai/gpt-6.1-sol:xhigh
-      - vertex/google/gemini-4-argon
-      - vertex/google/gemini-3.1-pro-preview
+      - openai/gpt-6.1-sol
+      - openai/gpt-6-sol
+      - openai-codex/gpt-6-astra
     openai/gpt-5.6-terra:
-      - openai/gpt-6.1-terra:xhigh
-      - vertex/google/gemini-4-argon
-      - vertex/google/gemini-3.1-pro-preview
+      - openai/gpt-6.1-terra
+      - openai/gpt-6.1-sol
+      - openai-codex/gpt-6-astra
     # openai-codex/gpt-5.5 was retired from the catalog; the resolver already
     # matched it to gpt-5.6-terra, which has its own chain below.
     openai-codex/gpt-5.6-sol:
