@@ -26,13 +26,13 @@
 # (linux-verify, binary-equivalence, xv6, agent-infra), so no old name is written again. The result is exported as
 # THEOREM_PROJECT and THEOREM_SUBPROJECT, so whatever the session starts inherits it.
 # Each harness reads its own variables: omp sends its per-call record as a span, with the token in its traces header
-# (never the generic OTEL_EXPORTER_OTLP_HEADERS, which Codex's built-in metrics exporter sends to OpenAI); Claude Code
-# as a log record, with the token in its logs header (its settings here are the tracked
-# $DOTFILES_DIR/.claude/settings.json, which .bashrc names as CLAUDE_CONFIG_DIR and the setup leaves alone, so the
-# launch gives Claude Code what the setup's otelHeadersHelper gives it elsewhere); Codex as a log record through the
-# setup's exporter in ~/.codex/config.toml (it takes only OTEL_RESOURCE_ATTRIBUTES from the environment). Codex gets
-# no header; Claude Code and Codex lose a generic, metrics or traces header they inherited. The exporter switches are
-# set for every harness.
+# (never the generic OTEL_EXPORTER_OTLP_HEADERS, which Codex's OTLP library adds to its built-in metrics exporter, which
+# sends to OpenAI); Claude Code as a log record, its token from the otelHeadersHelper in its settings (here the tracked
+# $DOTFILES_DIR/.claude/settings.json, which .bashrc names as CLAUDE_CONFIG_DIR and whose helper is
+# $HOME/.config/agent-spend/otel-headers-helper, so a claude started by its path records too; elsewhere the setup's
+# ~/.claude/settings.json); Codex as a log record through the setup's exporter in ~/.codex/config.toml (it takes only
+# OTEL_RESOURCE_ATTRIBUTES from the environment). Claude Code and Codex get no header from here and lose a generic,
+# metrics, traces or logs header they inherited. The exporter switches are set for every harness.
 # When the token file is missing or empty, the launch first runs the setup again, as installers/agent-spend.sh last
 # ran it, at most once in 10 minutes (agent_spend_retry).
 agent_spend_retry() {
@@ -149,9 +149,7 @@ agent_spend_env() {
     # omp's other logs carry local paths the collector would only drop.
     case "$agent" in
         claude)
-            unset OTEL_EXPORTER_OTLP_TRACES_HEADERS
-            OTEL_EXPORTER_OTLP_LOGS_HEADERS="Authorization=Bearer $(< "$token")"
-            export OTEL_EXPORTER_OTLP_LOGS_HEADERS
+            unset OTEL_EXPORTER_OTLP_TRACES_HEADERS OTEL_EXPORTER_OTLP_LOGS_HEADERS
             export CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=otlp OTEL_TRACES_EXPORTER=none
             ;;
         codex) unset OTEL_EXPORTER_OTLP_TRACES_HEADERS OTEL_EXPORTER_OTLP_LOGS_HEADERS OTEL_LOGS_EXPORTER \

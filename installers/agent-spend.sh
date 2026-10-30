@@ -9,10 +9,11 @@ set -euo pipefail
 # set (devbox/install.sh sets the host name), becomes theorem.lane. The fetched program and these arguments stay in
 # ~/.cache/agent-spend, so scripts/agent-spend-env.sh can run the same setup again at a session's start when the token
 # is missing (gcloud could not read it at install time). A rotation is a rerun of this file. The setup runs without
-# CLAUDE_CONFIG_DIR: .bashrc points that at the tracked .claude/ here, whose settings.json is shared by every machine
-# and must not hold this machine's helper path; scripts/agent-spend-env.sh gives Claude Code its token instead.
-# Sourced by install.sh, so it never exits.
-AGENT_SPEND_SETUP_REF=c62450fc2adb8847c9cd13758eed4de120e301cc
+# CLAUDE_CONFIG_DIR: .bashrc points that at the tracked .claude/ here, which is shared by every machine and must hold
+# no machine's path or token (the setup refuses a folder in a git work tree anyway); that settings.json carries the
+# same telemetry keys by hand, with the helper named $HOME/.config/agent-spend/otel-headers-helper, which the setup
+# writes on each machine. Sourced by install.sh, so it never exits.
+AGENT_SPEND_SETUP_REF=6c2a26b4df5475e8015c38d5281f8b696235b12c
 
 agent_spend_setup() {
     local dotfiles="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
