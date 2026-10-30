@@ -850,6 +850,11 @@ def is_falling(now: dict) -> bool:
     Above FLAT_RATE it is falling. Under it, only if this run's own horizon test says so: a disk
     with little free space left can reach zero inside the horizon at a rate too small to print,
     and that case must keep its deadline rather than be called flat.
+
+    Keep both halves, in this order. A flat-rate test alone would call a disk with 1 GiB left
+    falling at 0.5 GB/h "flat" and drop its deadline -- small rate, not a healthy disk. Ask the
+    rate first and the horizon second;
+    `test_a_slow_fall_on_a_nearly_full_disk_keeps_its_deadline` holds exactly that case.
     """
     rate = now.get("df_fill_rate")
     if rate is None or rate <= 0:
