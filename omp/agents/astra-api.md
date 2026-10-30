@@ -2,8 +2,10 @@
 name: astra-api
 description: |
   OpenAI GPT-6 Astra billed to the OpenAI API: the `astra` agent for when the Codex
-  subscription's usage window is exhausted. Full tool access; finishes the task it is
-  handed and reports with evidence.
+  subscription's usage window is exhausted. Spends per-token API money, so it refuses to
+  start while Sami's OpenAI API pause holds (`disabledProviders: [openai]`); when the pause
+  is lifted it degrades to GPT-6.1 Sol, then to Gemini on Vertex, and never to Anthropic.
+  Full tool access; finishes the task it is handed and reports with evidence.
 model:
   - "openai/gpt-6-astra:xhigh"
 color: green
