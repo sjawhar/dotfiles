@@ -42,8 +42,14 @@ BANNED_VERBS = {
     "riding": "the dependency itself",
 }
 
-# "the name of the file" is a noun, not the banned verb.
-NOUN_BEFORE = re.compile(r"\b(the|its|their|our|your|a|an|his|her|that|this|each|no|by)\s+$", re.I)
+# "the name of the file" and "under new names" are nouns, not the banned verb.
+NOUN_BEFORE = re.compile(
+    r"\b(the|its|their|our|your|a|an|his|her|that|this|each|no|both|these|those"
+    r"|new|same|other|different|exact|full|short|long|correct)\s+$",
+    re.I,
+)
+# A preposition one or two words back makes a noun phrase. "to" is left out: it also marks an infinitive.
+PREP_NEAR = re.compile(r"\b(by|under|with|for|in|on|of|from|as|at|into|over|without|through)\s+(?:[a-z]+\s+)?$", re.I)
 NOUN_AFTER = re.compile(r"^\s+(of|for|in|on)\b", re.I)
 NOUN_ONLY = {"name", "names", "pay", "show", "shows", "ride", "rides"}
 
@@ -114,7 +120,7 @@ def banned_verb_hits(line: str):
         if word in NOUN_ONLY:
             before = line[: match.start()]
             after = line[match.end() :]
-            if NOUN_BEFORE.search(before) or NOUN_AFTER.match(after):
+            if NOUN_BEFORE.search(before) or PREP_NEAR.search(before) or NOUN_AFTER.match(after):
                 continue
         yield word, BANNED_VERBS[word]
 
