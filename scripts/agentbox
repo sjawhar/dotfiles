@@ -447,6 +447,10 @@ session_env() {
     # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
     # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
+    # The team memory graph's server, which `ctx` (mise.toml) sends every command to, as host
+    # shells get it from .bashrc. A box reaches the tailnet through the host, so the server names
+    # a box's caller by the host's Tailscale login. The launcher's own value wins.
+    e+=(-e "CTX_SERVER=${CTX_SERVER:-http://ctx-memory.tail12ec1c.ts.net}")
     # ECR: the box's instance role is already allowed, but docker only asks for it when the
     # config names a helper for that registry host — without the entry it sends nothing at all
     # ("no basic auth credentials", measured 2026-09-26). Pass the host's OWN ecr-login hosts so a

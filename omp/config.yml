@@ -321,6 +321,10 @@ skills:
     - sentry-setup-ai-monitoring
     - sentry-svelte-sdk
     - sentry-workflow
+    # The ctx-memory plugin (omp/plugins/package.json) ships the ingest cycle's
+    # procedure beside the reading skill. Only the scheduled cycle runs it, in
+    # its own image; a session here reads the graph with ctx-memory.
+    - ctx-memory-ingest
 providers:
   anthropic:
     serverSideFallback: true

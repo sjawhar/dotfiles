@@ -22,6 +22,7 @@ minimum_release_age = "14d"
 # Alias short names sit beside their backend ids because either form can be
 # requested (`mise exec -- forward`, `[tools.tt]`).
 minimum_release_age_excludes = [
+  "github:sjawhar/ctx-memory",
   "github:sjawhar/forward",
   "github:sjawhar/jj",
   "github:sjawhar/knives",
@@ -228,6 +229,15 @@ platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", c
 version = "2.3.2"
 platforms.linux-x64   = { asset_pattern = "mailbox-linux-amd64.tar.gz" }
 platforms.macos-arm64 = { asset_pattern = "mailbox-darwin-arm64.tar.gz" }
+
+# ctx, the team memory graph's client (sjawhar/ctx-memory). It runs every command on the server
+# CTX_SERVER names (.bashrc, scripts/agentbox, shims/ctx). Static musl builds, so one archive
+# serves every Linux machine; a bump is the version line alone.
+[tools."github:sjawhar/ctx-memory"]
+version = "0.2.0"
+platforms.linux-x64   = { asset_pattern = "ctx-x86_64-unknown-linux-musl.tar.gz" }
+platforms.linux-arm64 = { asset_pattern = "ctx-aarch64-unknown-linux-musl.tar.gz" }
+platforms.macos-arm64 = { asset_pattern = "ctx-aarch64-apple-darwin.tar.gz" }
 
 # Device management CLI (osquery/MDM). Each fleetdm/fleet release bundles two
 # binaries — fleet (server) + fleetctl — so asset_pattern selects the fleetctl

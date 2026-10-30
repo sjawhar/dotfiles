@@ -6,6 +6,7 @@
     "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.1.17",
     "@sjawhar/pi-envoy": "11.5.3",
     "@sjawhar/pi-legion": "11.5.3",
+    "ctx-memory": "github:sjawhar/ctx-memory#v0.2.0",
     "gws-accounts": "github:sjawhar/gws-accounts#v0.1.9",
     "secretsd": "github:sjawhar/forward#v3.7.1",
     "superpowers": "github:obra/superpowers#v7.0.1"

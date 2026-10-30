@@ -77,6 +77,11 @@ before handing the call to the real one.
   instead (agent-infra's spend loaders, 2026-10-29). It takes the first `bq` past its own PATH
   entry (`shims/ssh-keygen`'s lookup), else the SDK's install location under the home gcloud uses, and
   turns gcloud's per-call file logging off, since bq shares that config dir and those logs.
+- **`ctx`** sets `CTX_SERVER` to the team memory graph's server when the caller has none, so a
+  session, pane or unit whose environment predates `.bashrc`'s line reaches the server too; an
+  empty `CTX_SERVER` is kept and means a local tree (`CTX_SERVER= ctx --memory <tree> …`). It execs
+  the mise pin (`"github:sjawhar/ctx-memory"` in `mise.toml`), found with `mise which -C /`, as
+  `shims/knives` finds knives, so mise's own shim never hands the call back to it.
 - **`pulumi`** names a state backend only when the CLI would otherwise find none. Pulumi CLI
   3.268.0 that reaches no backend at all, and recognizes a coding agent around it (it reads
   `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_*`, `GEMINI_CLI`, `OPENCODE`, `AI_AGENT` and others),
