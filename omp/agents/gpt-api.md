@@ -6,7 +6,8 @@ description: |
   to start while Sami's OpenAI API pause holds (`disabledProviders: [openai]`). Use only
   when a non-Anthropic model is genuinely needed and `astra` (the same family on the Codex
   subscription) is unavailable or unsuitable; say why in the brief. When the pause is lifted
-  it degrades to GPT-6.1 Terra, then to Gemini on Vertex, and never to Anthropic. Full tool
+  it degrades to GPT-6.1 Terra, then GPT-6.1 Sol, then the Codex subscription, and never to
+  Anthropic. Full tool
   access; finishes the task it is handed and reports with evidence.
 model:
   - "openai/gpt-5.6-terra:xhigh"
