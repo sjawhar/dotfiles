@@ -369,12 +369,85 @@ def worker_session(directory: str) -> str:
     return found[0] if found else ""
 
 
-def top_by_rss(pids: list[int], count: int) -> list[tuple[int, int, str]]:
-    """The `count` largest processes of the scope as (pid, RSS bytes, command line)."""
-    rows = [(pid, rss_of(pid), cmdline_of(pid)) for pid in pids]
-    rows = [row for row in rows if row[1] > 0]
+# What the memory.stat fields mean to the reader of an alert. `kernel` already covers `slab`,
+# so slab is named only to say how much of the kernel number it is.
+STAT_MEANING = {
+    "anon": "anonymous memory the processes allocated (heaps, stacks)",
+    "file": "page cache: files the scope read or wrote",
+    "shmem": "shared memory and tmpfs, which is charged to the scope that touches it",
+    "kernel": "kernel memory charged to the scope (slab, page tables, kernel stacks)",
+    "slab": "kernel slab, part of the kernel number",
+    "sock": "socket buffers",
+}
+# A scope is one runaway process when the named processes hold this much of its peak, and a
+# crowd when every process together does. Between and below them the memory is not in any
+# process's RSS at all, which is what the memory.stat split answers.
+RUNAWAY_SHARE = 0.60
+CROWD_SHARE = 0.70
+
+
+def stat_split(stats: dict) -> str:
+    """The memory.stat fields of the scope, largest first, as one line."""
+    rows = [(name, int(value)) for name, value in (stats or {}).items() if int(value) > 0 and name != "slab"]
+    if not rows:
+        return "memory.stat unreadable"
     rows.sort(key=lambda row: row[1], reverse=True)
-    return rows[:count]
+    return ", ".join(f"{name} {gib(value)}" for name, value in rows)
+
+
+def dominant_stat(stats: dict) -> tuple[str, int]:
+    """The largest memory.stat field and its size, ignoring `slab` (it is inside `kernel`)."""
+    rows = [(name, int(value)) for name, value in (stats or {}).items() if name != "slab"]
+    if not rows:
+        return "", 0
+    return max(rows, key=lambda row: row[1])
+
+
+def wall_advice(touch: dict) -> str:
+    """What the owner should do, decided by where the scope's memory actually is.
+
+    Telling an owner to hunt a process is wrong when no process holds the memory: in the open4
+    and open6 digests of 2026-10-30 the three largest processes held 10-29% of a scope sitting
+    at its ceiling, and the rest was page cache the owner's own file traffic had charged there.
+    """
+    peak = max(int(touch.get("peak") or 0), 1)
+    top_sum = sum(rss for _pid, rss, _command in touch.get("top") or [])
+    rss_sum = int(touch.get("rss_sum") or 0)
+    count = int(touch.get("task_count") or 0)
+    current = int(touch.get("current") or 0)
+    if top_sum >= RUNAWAY_SHARE * peak:
+        return (
+            f"ONE RUNAWAY: the {len(touch.get('top') or [])} processes named above hold"
+            f" {gib(top_sum)}, {100 * top_sum / peak:.0f}% of the peak. Find that process and"
+            " stop or bound it -- shedding lanes will not help while it runs."
+        )
+    if rss_sum >= CROWD_SHARE * peak:
+        return (
+            f"MANY PROCESSES: no single one is large, but all {count} together hold"
+            f" {gib(rss_sum)}, {100 * rss_sum / peak:.0f}% of the peak. Reduce the fan-out --"
+            " run fewer lanes or fewer tool subprocesses at a time."
+        )
+    name, size = dominant_stat(touch.get("stats") or {})
+    where = (
+        f" The largest is {name} at {gib(size)}: {STAT_MEANING.get(name, 'see memory.stat')}."
+        if name
+        else " memory.stat could not be read, so this run cannot say where it is."
+    )
+    fell_back = (
+        f" The scope has since fallen back to {gib(current)} of memory.current, so the peak was a"
+        " burst and nothing on it now holds that memory."
+        if current < peak * 0.5
+        else ""
+    )
+    return (
+        f"NOT IN ANY PROCESS: all {count} processes together hold only {gib(rss_sum)},"
+        f" {100 * rss_sum / peak:.0f}% of the peak, so hunting a process is the wrong move."
+        + where
+        + fell_back
+        + " Page cache and shmem are charged to the scope that touches them: the lever is the"
+        " file traffic (big checkouts, build trees, logs, /dev/shm) this lane does, not its"
+        " lane count."
+    )
 
 
 def omp_processes() -> list[tuple[int, str]]:
@@ -662,7 +735,11 @@ def wall_text(touch: dict) -> str:
         + swap_sentence(touch.get("swap_max") or "")
         + f" memory.events oom {touch.get('events_oom', 0)}, oom_kill"
         f" {touch.get('events_oom_kill', 0)}.",
-        f"The scope holds {touch.get('task_count') or 0} processes. The three largest by RSS:",
+        f"Where that memory is, by memory.stat: {stat_split(touch.get('stats') or {})}.",
+        f"The scope holds {touch.get('task_count') or 0} processes holding"
+        f" {gib(touch.get('rss_sum') or 0)} of RSS between them,"
+        f" {100 * int(touch.get('rss_sum') or 0) / max(peak, 1):.0f}% of the peak."
+        " The three largest by RSS:",
     ]
     for pid, rss, command in touch.get("top") or []:
         lines.append(f"  {gib(rss)}  pid {pid}  {command[:200] or '(no command line)'}")
@@ -677,8 +754,8 @@ def wall_text(touch: dict) -> str:
     )
     lines.append(
         "DO: a scope at its wall is one allocation away from a memcg OOM kill, which loses every"
-        " in-flight lane with no exit record. Write your handover files, stop spawning lanes, and"
-        " shed or finish what you can, on your own terms."
+        " in-flight lane with no exit record. Write your handover files first, whatever the"
+        " cause. Then: " + wall_advice(touch)
     )
     lines.append(
         f"This watch only detects; it kills nothing. One report per scope per"
@@ -706,23 +783,32 @@ def wall_digest_text(pending: list[dict], window: float) -> str:
     for touch in pending:
         worker = touch.get("worker") or "no worker name"
         session = touch.get("session") or "session unknown"
+        peak = int(touch.get("peak") or 0)
+        rss_sum = int(touch.get("rss_sum") or 0)
         lines.append(
             f"  {iso(touch.get('at'))}  {touch.get('scope')}  {worker}  {session}  peak"
-            f" {gib(touch.get('peak') or 0)} of {gib(touch.get('limit') or 0)}"
+            f" {gib(peak)} of {gib(touch.get('limit') or 0)}"
             f"  (+{touch.get('events_delta', 0)} memory.events max)"
         )
-        # The INFRA lead reads these without the owner's report beside it, and the question it
-        # answers -- which lane is eating the scope, the model process or one tool -- is in the
-        # command lines. Truncated harder than the owner's copy, because a digest can carry
-        # tens of scopes (the INFRA lead, 2026-10-30).
+        # Where the memory is, on the lead's own line: the three largest processes explained
+        # 10-29% of a scope at its ceiling in the open4 and open6 digests of 2026-10-30, so a
+        # top list alone sends the lead hunting a process that does not exist.
+        lines.append(
+            f"      {touch.get('task_count') or 0} processes holding {gib(rss_sum)} of RSS"
+            f" ({100 * rss_sum / max(peak, 1):.0f}% of peak);"
+            f" memory.stat: {stat_split(touch.get('stats') or {})}"
+        )
+        lines.append(f"      {wall_advice(touch)}")
+        # Truncated harder than the owner's copy, because a digest can carry tens of scopes
+        # (the INFRA lead, 2026-10-30).
         for pid, rss, command in touch.get("top") or []:
             lines.append(f"      {gib(rss)}  pid {pid}  {command[:140] or '(no command line)'}")
         if not touch.get("top"):
             lines.append("      (no process in the scope was readable when it touched)")
     lines.append(
         "Each owner has the whole report for its own scope: scope, session, worker, peak, the"
-        " memory.events and oom counters, and the same three largest processes. From"
-        " omp-memory-watch on " + socket.gethostname() + "."
+        " memory.events and oom counters, the same memory.stat split and the same three largest"
+        " processes. From omp-memory-watch on " + socket.gethostname() + "."
     )
     return "\n".join(lines)
 
@@ -768,6 +854,13 @@ def wall_touch(
     session = worker_session(directory) or session_of(target["pid"])
     memory["reported_at"] = now
     suppressed = int(memory.pop("suppressed", 0))
+    # Every process in the scope, not only the three named: the three largest explained 10-29%
+    # of a scope at its ceiling in the open4 and open6 digests of 2026-10-30, and the question
+    # that leaves -- one runaway, a crowd of small processes, or memory no process holds -- is
+    # answered by the whole RSS sum against the memory.stat split, not by a longer top list.
+    by_rss = [(pid, rss_of(pid), cmdline_of(pid)) for pid in pids]
+    by_rss = [row for row in by_rss if row[1] > 0]
+    by_rss.sort(key=lambda row: row[1], reverse=True)
     return dict(
         at=now,
         scope=target["scope"],
@@ -786,7 +879,9 @@ def wall_touch(
         events_oom_kill=int(events.get("oom_kill", 0)),
         peak_touch=peak_touch,
         task_count=len(pids),
-        top=top_by_rss(pids, options.wall_top),
+        rss_sum=sum(rss for _pid, rss, _command in by_rss),
+        stats={name: int(value) for name, value in (target.get("stats") or {}).items()},
+        top=by_rss[: options.wall_top],
         suppressed=suppressed,
         cooldown=options.wall_cooldown,
     )
@@ -875,7 +970,7 @@ def run_once(options: argparse.Namespace) -> int:
             if scope in by_scope and rss_of(by_scope[scope]) >= rss_of(pid):
                 continue
             by_scope[scope] = pid
-            usage, current, _fields = scope_pressure(cgroup)
+            usage, current, fields = scope_pressure(cgroup)
             events = memory_events(cgroup)
             # memory.peak is the high-water mark of memory.current. It exists from Linux 5.19;
             # where it does not, memory.current is the best this run has and the peak test is
@@ -886,7 +981,7 @@ def run_once(options: argparse.Namespace) -> int:
                     key=scope, scope=scope, cgroup=cgroup, pid=pid, limit=limit, limit_from=limit_from,
                     limited=True, usage=usage, current=current,
                     events=events, peak_bytes=peak if peak is not None else current,
-                    swap_max=swap_setting(cgroup),
+                    swap_max=swap_setting(cgroup), stats=fields,
                     measured="the scope's unreclaimable memory (anon+shmem+kernel+sock), which is what"
                     " the kernel's memcg OOM killer compares with the ceiling",
                 )
@@ -921,7 +1016,13 @@ def run_once(options: argparse.Namespace) -> int:
                         f" last {human(options.wall_cooldown)}, which this one report covers."
                     )
                 pending_wall.append(
-                    {name: touch[name] for name in ("at", "scope", "session", "worker", "peak", "limit", "events_delta", "top")}
+                    {
+                        name: touch[name]
+                        for name in (
+                            "at", "scope", "session", "worker", "peak", "limit", "events_delta",
+                            "top", "task_count", "rss_sum", "stats", "current",
+                        )
+                    }
                 )
                 del pending_wall[: max(0, len(pending_wall) - options.wall_pending_max)]
                 state.commit(options)
