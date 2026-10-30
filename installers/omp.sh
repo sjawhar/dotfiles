@@ -161,6 +161,11 @@ if [ -d "${DOTFILES_DIR}/vendor/compound-engineering/.git" ]; then
     git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote get-url upstream &>/dev/null || \
         git -C "${DOTFILES_DIR}/vendor/compound-engineering" remote add upstream https://github.com/EveryInc/compound-engineering-plugin.git
 fi
+# Every's Compound Writing: 33 cw-* writing skills, entry skill cw-scribe.
+# Pinned to upstream HEAD at adoption (8fd0ec88, 2026-10-30). Bump: re-pin
+# here and diff the skill set for new arrivals and name collisions with the
+# ce-* and plugins/sjawhar skills.
+ensure_vendor https://github.com/EveryInc/compound-writing.git compound-writing 8fd0ec88c00976cf0274cb76552dc7ad9405ca92
 ensure_vendor https://github.com/github/gh-stack.git gh-stack
 ensure_vendor https://github.com/DataDog/pup.git pup
 # pup ships ~11 dd-* skills (plus 50 agents, pruned from omp/agents); only

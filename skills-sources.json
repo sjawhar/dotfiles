@@ -36,6 +36,9 @@
       "root": "vendor/compound-engineering"
     },
     {
+      "root": "vendor/compound-writing"
+    },
+    {
       "root": "vendor/typesafe-ai"
     },
     {
