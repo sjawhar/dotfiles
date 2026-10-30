@@ -182,11 +182,13 @@ class AgentSpendShimTest(unittest.TestCase):
 class TrackedClaudeSettingsTest(unittest.TestCase):
     """The tracked .claude/settings.json (every machine's CLAUDE_CONFIG_DIR, .bashrc) makes a claude started by its
     path record its spend: telemetry on, logs only, content capture off, the four header variables emptied, and a
-    helper command that runs $HOME/.config/agent-spend/otel-headers-helper (the setup's) when it is there, else prints
-    {} and exits 0, so the file holds no token and no machine's path, and a machine without the setup prints nothing.
-    Claude Code runs the helper through /bin/sh, which expands $HOME. Measured with 2.1.309 against a local collector:
-    with the setup's helper every request carries the token; without it Claude Code prints nothing and sends its
-    records without a token, which the collector refuses (401)."""
+    helper command, so the file holds no token and no machine's path. The command runs the setup's helper
+    ($HOME/.config/agent-spend/otel-headers-helper) when it is there. Without it: where the setup ran (its env.sh is
+    there; the folder alone is not enough, since omp's session-project extension also writes sessions/ in it) it prints
+    {} and exits 0; where it never ran it exits 1. Claude Code runs the command through /bin/sh, which expands $HOME.
+    Measured with 2.1.309 against a local collector: the setup's helper gives every request the token; {} is silent
+    and sends records without a token, which the collector refuses (401); exit 1 prints Claude Code's helper error and
+    sends nothing, so a machine whose gcloud never reads the token stays off the wire."""
 
     def test_the_tracked_settings(self) -> None:
         import json
@@ -194,7 +196,7 @@ class TrackedClaudeSettingsTest(unittest.TestCase):
         text = (DOTFILES / ".claude" / "settings.json").read_text()
         settings = json.loads(text)
         env = settings["env"]
-        self.assertIn('$HOME/.config/agent-spend/otel-headers-helper', settings["otelHeadersHelper"])
+        self.assertIn('"$HOME/.config/agent-spend"', settings["otelHeadersHelper"])  # $HOME-relative, no machine path
         self.assertEqual(env["CLAUDE_CODE_ENABLE_TELEMETRY"], "1")
         self.assertEqual((env["OTEL_LOGS_EXPORTER"], env["OTEL_TRACES_EXPORTER"], env["OTEL_METRICS_EXPORTER"]),
                          ("otlp", "none", "none"))
@@ -209,17 +211,26 @@ class TrackedClaudeSettingsTest(unittest.TestCase):
         self.assertNotRegex(text, r"/home/|/Users/|/tmp/")
         home = Path(tempfile.mkdtemp(prefix="tracked-claude-"))
         self.addCleanup(shutil.rmtree, home)
-        helper = home / ".config" / "agent-spend" / "otel-headers-helper"
-        helper.parent.mkdir(parents=True)
+        conf = home / ".config" / "agent-spend"
+        helper = conf / "otel-headers-helper"
         bare = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
-        # No setup on this machine: the command prints {} and nothing on stderr, and exits 0.
-        out = subprocess.run(["/bin/sh", "-c", settings["otelHeadersHelper"]], env=bare, capture_output=True, text=True)
+
+        def run() -> subprocess.CompletedProcess:
+            return subprocess.run(["/bin/sh", "-c", settings["otelHeadersHelper"]], env=bare, capture_output=True,
+                                  text=True)
+
+        # The setup never ran (no folder, or only another program's sessions/): exit 1, nothing on stdout.
+        self.assertEqual((run().returncode, run().stdout), (1, ""))
+        (conf / "sessions").mkdir(parents=True)
+        self.assertEqual((run().returncode, run().stdout), (1, ""))
+        # The setup ran but its helper is gone: {} and nothing on stderr.
+        (conf / "env.sh").write_text("")
+        out = run()
         self.assertEqual((out.returncode, out.stderr, json.loads(out.stdout)), (0, "", {}))
         # The setup's helper there: its header.
         executable(helper, 'printf \'{"Authorization": "Bearer t0ken"}\\n\'')
-        out = subprocess.run(["/bin/sh", "-c", settings["otelHeadersHelper"]], env=bare, capture_output=True, text=True,
-                             check=True)
-        self.assertEqual(json.loads(out.stdout), {"Authorization": "Bearer t0ken"})
+        out = run()
+        self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"Authorization": "Bearer t0ken"}))
 
 
 if __name__ == "__main__":
