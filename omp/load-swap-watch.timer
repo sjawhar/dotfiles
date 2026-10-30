@@ -1,0 +1,15 @@
+[Unit]
+Description=Check every 2 min that this box has CPU and swap left for the agents on it
+
+[Timer]
+OnActiveSec=30s
+# Two minutes, with a 600 s grace, so an alert reaches the box-health lead about 12 minutes
+# after the box starts starving. The 2026-10-29 episode on ossv-agent-open ran from about
+# 22:46Z to about 23:58Z with nothing alerting at all; 12 minutes would have left roughly an
+# hour of six lanes' time. The period is short because CPU starvation has no slow phase: the
+# box went from load 135 to load 256 in the 15 minutes before it was noticed.
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

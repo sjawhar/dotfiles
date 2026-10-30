@@ -1,0 +1,18 @@
+[Unit]
+Description=Alert over Envoy when this box runs out of CPU or swap
+Documentation=file:%h/.dotfiles/scripts/load-swap-watch.md
+
+[Service]
+Type=oneshot
+# Above the lanes it watches, unlike disk-fill-watch's Nice=15. This watch exists for the case
+# where the box has no CPU to give: a detector scheduled behind the processes causing the
+# starvation reports it late, which is the failure it is built to prevent. Its quiet path is a
+# handful of /proc reads (~30 ms of CPU), so the priority costs the lanes nothing.
+Nice=5
+IOSchedulingClass=idle
+# A run that cannot finish is killed, so runs can never pile up on the 2-minute period. A quiet
+# pass is under a second. A pass that alerts sleeps --sample-seconds (10 s) between two walks of
+# /proc for per-process CPU time and reads VmSwap for every process: 16 s measured on
+# sami-rocqperf at load 321 with 2,900 processes.
+TimeoutStartSec=120
+ExecStart=%h/.dotfiles/scripts/load-swap-watch

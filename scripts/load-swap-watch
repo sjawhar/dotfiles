@@ -1,0 +1,948 @@
+#!/usr/bin/env python3
+"""Alert while an agent box is still able to act, when its CPU or its swap runs out.
+
+Why this exists: on 2026-10-29 between about 22:46Z and 23:58Z, six agent lanes on
+ossv-agent-open (c-asan-rt, c-libc-str, g-ph-hreply, c-omx-writer, c-asanb, h-cmd-b2) were
+reported frozen and the box was read as hung. It was not hung. Measured at 23:55-23:58Z: 32
+cores carrying load 251/185/135, `cpu some avg60` at 80%, 126 `omp` processes holding 108 GiB
+of RSS and 180 GiB of swap, and `/swapfile` at 200,820,180 of 201,326,588 KB used -- 99.75%,
+515 MB free. `ossv-worker list` showed 115 workers in `running` state. Nothing alerted. Every
+liveness check a person could run said the box was healthy: omp was running in every pane,
+`tmux capture-pane` answered in 0.01 s, no process was stuck in a syscall, and the transcripts
+kept being written. The lanes were simply being served a fraction of a core each, with their
+working sets in a swapfile that had no room left.
+
+That failure mode is invisible to the two watches already on these boxes. `disk-fill-watch`
+watches bytes on a filesystem. `omp-memory-watch` watches one session's own memcg against the
+ceiling `shims/omp` gave it, which is a per-session limit and says nothing about a box carrying
+a hundred of them. The box-wide resource that ran out here -- CPU time, and swap -- had no
+instrument at all.
+
+What one run does, from /proc only, with no model call and no subprocess on the quiet path:
+
+  1. Record one sample of CPU pressure, swap, memory and the run queue. Every run appends,
+     whether or not anything is wrong: a silent log cannot be told from a dead watch.
+  2. Decide on PSI, not on load average. Load counts uninterruptible sleep, so load 221 may be
+     a box waiting on a disk rather than one short of CPU, and the two have different fixes.
+     `/proc/pressure/cpu` `some` counts only time tasks spent runnable and waiting for a CPU,
+     which is exactly the lane's lost minutes. The alert carries `io some` and `memory full`
+     beside it so the reader can see which of the three it is. On the night above they were
+     80% cpu, 23% io, 0.2% memory: a CPU shortage, not an I/O stall.
+  3. Compute swap time-to-exhaustion from its own samples, the way disk-fill-watch computes
+     time to full, and treat a swapfile with nothing left as a crossing in its own right: at
+     that point the kernel can no longer page anything out, so the next pressure lands on the
+     OOM killer.
+  4. Hold a crossing for the grace window before alerting, so a build burst does not fire it.
+  5. Name the consumers. CPU is attributed by a short delta of per-process CPU time, never by
+     one `ps` reading, because the processes eating this box are thousands of short-lived
+     children. Swap is attributed by `VmSwap` per process. Both are grouped by command and by
+     the agent session or lane worker that owns them, so the alert says "115 workers, 181 GiB
+     of swap in omp" rather than naming a pid nobody can act on.
+
+It also counts the box's agents, because on these boxes the dial that causes this is the number
+of concurrent workers, not any one of them.
+
+Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
+falling back to the INFRA lead's session when nobody holds that role, and the chief of staff
+when a crossing is still open 30 minutes after its alert. This watch only detects. It kills
+nothing, stops no worker and changes no limit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# The two sessions that own this detector's findings, as in disk-fill-watch and omp-memory-watch.
+CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
+
+# The box-health lead owns box resources (dispatch://INFRA-716) and holds this Envoy role, so a
+# crossing goes to the role, not to a session id that moves when the lane changes hands.
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
+
+DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
+GIB = 1073741824
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# An ossv lane worker's name, from the path its process stands in or its brief:
+# /home/sami/work/cold/workers/c-libc-str.md, /home/sami/work/workers/c-libc-str/...
+WORKER_RE = re.compile(r"/workers/([A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.md|\.jsonl|/|\s|\Z)")
+
+# Where the state file goes, as disk-fill-watch places its own: the big disk on an agent box,
+# ~/.local/state on a machine without one.
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/load-swap-watch/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if Path("/mnt/nvme/sami/tmp").is_dir()
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "load-swap-watch/state.json"
+)
+
+CLOCK_TICK = os.sysconf("SC_CLK_TCK")
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"{stamp} {message}", flush=True)
+
+
+def iso(epoch: float | None) -> str:
+    if not epoch:
+        return "unknown"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def human_time(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} min"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f} h"
+    return f"{seconds / 86400:.1f} days"
+
+
+def gib(value: float) -> str:
+    return f"{value / GIB:.1f} GiB"
+
+
+# ------------------------------------------------------------------------------- Envoy
+
+
+class Envoy:
+    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
+            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "legion/envoy.json"
+        )
+        try:
+            config = json.loads(Path(path).read_text()).get("envoy") or {}
+        except (OSError, ValueError):
+            config = {}
+        if config.get("enabled") is False:
+            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
+        self.url = (os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL).rstrip("/")
+        self.timeout = timeout
+        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
+        if token.startswith("!"):
+            try:
+                done = subprocess.run(
+                    ["/bin/sh", "-c", token[1:]],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    stdin=subprocess.DEVNULL,
+                )
+                token = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                token = ""
+        self.token = token
+
+    def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | list]:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(self.url + path, data=data, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
+                raw = answer.read().decode() or "{}"
+                return answer.status, json.loads(raw)
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode() or "{}"
+            try:
+                return error.code, json.loads(raw)
+            except ValueError:
+                return error.code, {"error": raw.strip()}
+        except (urllib.error.URLError, socket.timeout, ValueError, OSError) as error:
+            return 0, {"error": str(error)}
+
+    def send(self, session_id: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/send",
+            {"target_session": session_id, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+    def publish(self, topic: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/publish",
+            {"topic": topic, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  publish to {topic} failed: {status} {body}")
+        return status == 200
+
+
+# ------------------------------------------------------------------------------- the box
+
+
+def read_text(path: str) -> str:
+    try:
+        return Path(path).read_text()
+    except OSError:
+        return ""
+
+
+def pressure(resource: str) -> dict[str, float]:
+    """`some` and `full` averages from /proc/pressure/<resource>, as percentages of wall time.
+
+    `some avg60` is the number this watch decides on for CPU: the share of the last minute in
+    which at least one runnable task was waiting for a CPU. A box with no PSI (a kernel without
+    CONFIG_PSI) returns {}, and the CPU rule then falls back to the run queue per core.
+    """
+    found: dict[str, float] = {}
+    for line in read_text(f"/proc/pressure/{resource}").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        for item in parts[1:]:
+            key, sep, value = item.partition("=")
+            if sep and key.startswith("avg"):
+                try:
+                    found[f"{parts[0]}_{key}"] = float(value)
+                except ValueError:
+                    pass
+    return found
+
+
+def meminfo() -> dict[str, int]:
+    found = {}
+    for line in read_text("/proc/meminfo").splitlines():
+        key, _, rest = line.partition(":")
+        parts = rest.split()
+        if parts:
+            try:
+                found[key] = int(parts[0]) * 1024
+            except ValueError:
+                pass
+    return found
+
+
+def vmstat() -> dict[str, int]:
+    found = {}
+    for line in read_text("/proc/vmstat").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            try:
+                found[parts[0]] = int(parts[1])
+            except ValueError:
+                pass
+    return found
+
+
+def run_queue() -> tuple[int, int]:
+    """(procs_running, procs_blocked) from /proc/stat: the runnable and the uninterruptible.
+
+    Load average is the sum of both over time, so it cannot tell a box short of CPU from a box
+    waiting on a disk. These two can, and the alert prints them.
+    """
+    running = blocked = 0
+    for line in read_text("/proc/stat").splitlines():
+        if line.startswith("procs_running "):
+            running = int(line.split()[1])
+        elif line.startswith("procs_blocked "):
+            blocked = int(line.split()[1])
+    return running, blocked
+
+
+def sample_box() -> dict:
+    memory = meminfo()
+    swap_total = memory.get("SwapTotal", 0)
+    swap_free = memory.get("SwapFree", 0)
+    running, blocked = run_queue()
+    load = read_text("/proc/loadavg").split()
+    cores = os.cpu_count() or 1
+    return {
+        "at": time.time(),
+        "cores": cores,
+        "cpu": pressure("cpu"),
+        "io": pressure("io"),
+        "memory_pressure": pressure("memory"),
+        "load1": float(load[0]) if load else 0.0,
+        "load5": float(load[1]) if len(load) > 1 else 0.0,
+        "load15": float(load[2]) if len(load) > 2 else 0.0,
+        "procs_running": running,
+        "procs_blocked": blocked,
+        "swap_total": swap_total,
+        "swap_free": swap_free,
+        "swap_used_fraction": (1 - swap_free / swap_total) if swap_total else 0.0,
+        "mem_available": memory.get("MemAvailable", 0),
+        "mem_total": memory.get("MemTotal", 0),
+        "pswpin": vmstat().get("pswpin", 0),
+    }
+
+
+# ------------------------------------------------------------------------------- the consumers
+
+
+def cmdline_of(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf8", "replace").replace("\0", " ").strip()
+    except OSError:
+        return ""
+
+
+def comm_of(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return ""
+
+
+def ppid_of(pid: int) -> int:
+    try:
+        data = Path(f"/proc/{pid}/stat").read_text()
+        return int(data[data.rfind(")") + 2 :].split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def age_of(pid: int) -> float:
+    try:
+        data = Path(f"/proc/{pid}/stat").read_text()
+        ticks = int(data[data.rfind(")") + 2 :].split()[19])
+        uptime = float(read_text("/proc/uptime").split()[0])
+        return max(0.0, uptime - ticks / CLOCK_TICK)
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def cpu_ticks_of(pid: int) -> int | None:
+    """utime + stime of a process, in clock ticks, or None when it is gone."""
+    try:
+        data = Path(f"/proc/{pid}/stat").read_text()
+        fields = data[data.rfind(")") + 2 :].split()
+        return int(fields[11]) + int(fields[12])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def environ_of(pid: int) -> dict[str, str]:
+    found = {}
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes().decode("utf8", "replace")
+    except OSError:
+        return found
+    for item in raw.split("\0"):
+        key, sep, value = item.partition("=")
+        if sep and key in ("OMP_SESSION_ID", "CLAUDE_SESSION_ID"):
+            found[key] = value
+    return found
+
+
+def session_from_fds(pid: int, limit: int = 128) -> str:
+    """The session id of the transcript this process holds open, or "".
+
+    An `omp` started as `omp --resume <path>` carries no session id in its environment, and its
+    command line is truncated in `ps`; the transcript it holds open names the session in full.
+    """
+    try:
+        descriptors = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return ""
+    for descriptor in descriptors[:limit]:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{descriptor}")
+        except OSError:
+            continue
+        if "/.omp/agent/sessions/" in target and target.endswith(".jsonl"):
+            found = UUID_RE.findall(os.path.basename(target))
+            if found:
+                return found[0]
+    return ""
+
+
+def session_of(pid: int, depth: int = 12) -> str:
+    """The agent session a process belongs to, read from the process and never guessed."""
+    here = pid
+    for _ in range(depth):
+        if here <= 1:
+            break
+        environment = environ_of(here)
+        for key in ("OMP_SESSION_ID", "CLAUDE_SESSION_ID"):
+            if environment.get(key):
+                return environment[key]
+        if comm_of(here) in ("omp", "claude", "node", "bun"):
+            found = UUID_RE.findall(cmdline_of(here))
+            if found:
+                return found[0]
+            found_fd = session_from_fds(here)
+            if found_fd:
+                return found_fd
+        here = ppid_of(here)
+    return ""
+
+
+def worker_of(pid: int, depth: int = 6) -> str:
+    """The lane worker a process belongs to: its brief's name, its working directory, or "".
+
+    A lane box runs one `omp` per worker under `w-<name>` of its tmux server, and the worker's
+    name is in the brief path on its command line and in the directory it stands in. Both are
+    read from the process; a box that is not a lane box simply has no match.
+    """
+    here = pid
+    for _ in range(depth):
+        if here <= 1:
+            break
+        found = WORKER_RE.search(cmdline_of(here))
+        if found:
+            return found.group(1)
+        try:
+            found = WORKER_RE.search(os.readlink(f"/proc/{here}/cwd") + "/")
+            if found:
+                return found.group(1)
+        except OSError:
+            pass
+        here = ppid_of(here)
+    return ""
+
+
+def swap_of(pid: int) -> int:
+    """VmSwap of a process, in bytes. /proc/<pid>/status is world-readable, so no sudo."""
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmSwap:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def rss_of(pid: int) -> int:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def pids() -> list[int]:
+    return [int(name) for name in os.listdir("/proc") if name.isdigit()]
+
+
+def sample_cpu(seconds: float) -> tuple[list[dict], float]:
+    """Per-process CPU over one short interval: (rows sorted by cores used, actual interval).
+
+    A single `ps` column is useless here. The processes that filled this box's run queue were
+    thousands of short-lived git, python and gzip children: every pid in a `ps` snapshot taken
+    at 23:52Z was already gone at 23:53Z. A delta over an interval counts the work they did,
+    and attributes what is left to the long-lived `omp` processes correctly.
+    """
+    before = {}
+    for pid in pids():
+        ticks = cpu_ticks_of(pid)
+        if ticks is not None:
+            before[pid] = ticks
+    started = time.time()
+    time.sleep(seconds)
+    span = max(time.time() - started, 0.001)
+    rows = []
+    for pid, was in before.items():
+        now = cpu_ticks_of(pid)
+        if now is None or now <= was:
+            continue
+        rows.append({"pid": pid, "cores": (now - was) / CLOCK_TICK / span, "comm": comm_of(pid)})
+    rows.sort(key=lambda row: -row["cores"])
+    return rows, span
+
+
+def sample_swap() -> list[dict]:
+    rows = []
+    for pid in pids():
+        used = swap_of(pid)
+        if used > 0:
+            rows.append({"pid": pid, "swap": used, "comm": comm_of(pid)})
+    rows.sort(key=lambda row: -row["swap"])
+    return rows
+
+
+def by_command(rows: list[dict], field: str) -> list[tuple[str, float, int]]:
+    totals: dict[str, list[float]] = {}
+    for row in rows:
+        entry = totals.setdefault(row["comm"] or "?", [0.0, 0])
+        entry[0] += row[field]
+        entry[1] += 1
+    ranked = [(name, total, int(count)) for name, (total, count) in totals.items()]
+    ranked.sort(key=lambda item: -item[1])
+    return ranked
+
+
+def describe(pid: int) -> str:
+    """One process, named the way a reader can act on it: lane worker, session, age."""
+    parts = []
+    worker = worker_of(pid)
+    if worker:
+        parts.append(f"lane {worker}")
+    session = session_of(pid)
+    if session:
+        parts.append(f"session {session}")
+    if not parts:
+        command = cmdline_of(pid) or comm_of(pid)
+        parts.append(command[:70] if command else "unknown")
+    age = age_of(pid)
+    if age:
+        parts.append(f"up {human_time(age)}")
+    return ", ".join(parts)
+
+
+def agent_census() -> dict:
+    """How many agents this box is carrying, and what they hold. The dial, on a lane box."""
+    count = 0
+    rss = swap = 0
+    for pid in pids():
+        if comm_of(pid) != "omp":
+            continue
+        count += 1
+        rss += rss_of(pid)
+        swap += swap_of(pid)
+    return {"omp": count, "rss": rss, "swap": swap}
+
+
+def consumers_text(options: argparse.Namespace) -> str:
+    """The body of an alert: who is using the CPU now, and who holds the swap."""
+    cpu_rows, span = sample_cpu(options.sample_seconds)
+    swap_rows = sample_swap()
+    cores = os.cpu_count() or 1
+    census = agent_census()
+
+    lines = [
+        f"The box is carrying {census['omp']} omp processes holding {gib(census['rss'])} of RSS"
+        f" and {gib(census['swap'])} of swap."
+    ]
+    ranked = by_command(cpu_rows, "cores")
+    if ranked:
+        share = ", ".join(
+            f"{name} {total:.1f} cores ({100 * total / cores:.0f}% of the box, {count} processes)"
+            for name, total, count in ranked[:5]
+        )
+        lines.append(f"CPU over a {span:.0f}s interval, by command: {share}.")
+    if cpu_rows:
+        lines.append(f"Top CPU processes over that interval (of {cores} cores):")
+        for row in cpu_rows[: options.top]:
+            lines.append(f"  pid {row['pid']} {row['comm']} {row['cores']:.2f} cores -- {describe(row['pid'])}")
+    ranked_swap = by_command(swap_rows, "swap")
+    if ranked_swap:
+        share = ", ".join(f"{name} {gib(total)} ({count} processes)" for name, total, count in ranked_swap[:5])
+        lines.append(f"Swap held, by command: {share}.")
+    if swap_rows:
+        lines.append("Top swap holders:")
+        for row in swap_rows[: options.top]:
+            lines.append(f"  pid {row['pid']} {row['comm']} {gib(row['swap'])} -- {describe(row['pid'])}")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------------------- state
+
+
+class State:
+    """The one file this watch owns: its samples and its open crossings.
+
+    Opened under an exclusive, non-blocking flock for the whole run, so a hand run and the timer
+    can never both decide that a crossing is new; the loser skips its period.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = open(path, "a+")
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.locked = True
+        except OSError:
+            self.locked = False
+            self.data = {}
+            return
+        self.handle.seek(0)
+        try:
+            self.data = json.loads(self.handle.read() or "{}")
+        except ValueError:
+            self.data = {}
+
+    def commit(self, options: argparse.Namespace) -> None:
+        if options.dry_run and not options.write_state:
+            return
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.data, self.handle, indent=1, sort_keys=True)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+    def close(self) -> None:
+        try:
+            self.handle.close()
+        except OSError:
+            pass
+
+
+def swap_drain_rate(samples: list[list[float]], window: float) -> tuple[float | None, float]:
+    """(bytes per second of swap free-space fall, actual measurement window)."""
+    if len(samples) < 2:
+        return None, 0.0
+    now = samples[-1][0]
+    anchor = samples[0]
+    for sample in samples:
+        if now - sample[0] <= window:
+            anchor = sample
+            break
+    span = now - anchor[0]
+    if span <= 0:
+        return None, 0.0
+    return (anchor[1] - samples[-1][1]) / span, span
+
+
+# ------------------------------------------------------------------------------- the decision
+
+
+def verdict(now: dict, samples: list[list[float]], options: argparse.Namespace) -> dict:
+    """Is this box short of CPU, or out of swap, or short of memory? With the reasons."""
+    cores = now["cores"]
+    cpu_some = now["cpu"].get("some_avg60")
+    reasons = []
+    kinds = []
+
+    if cpu_some is not None:
+        if cpu_some >= options.cpu_stall:
+            reasons.append(
+                f"cpu pressure some avg60 is {cpu_some:.0f}%, at or over the {options.cpu_stall:.0f}% rule:"
+                f" that share of the last minute had a task runnable and waiting for a CPU"
+            )
+            kinds.append("cpu")
+    elif now["procs_running"] >= options.queue_per_core * cores:
+        # A kernel without PSI. The run queue alone is a coarser instrument, so it is the
+        # fallback and never the primary: it says how many want a CPU, not how long they waited.
+        reasons.append(
+            f"no PSI on this kernel; {now['procs_running']} runnable processes on {cores} cores,"
+            f" at or over the {options.queue_per_core:.1f} per core fallback rule"
+        )
+        kinds.append("cpu")
+
+    drain, drain_window = swap_drain_rate(samples, options.rate_window)
+    time_to_exhaustion = None
+    if drain and drain > 0 and now["swap_free"] > 0:
+        time_to_exhaustion = now["swap_free"] / drain
+    if now["swap_total"]:
+        if now["swap_used_fraction"] >= options.swap_used:
+            reasons.append(
+                f"swap is {100 * now['swap_used_fraction']:.1f}% used ({gib(now['swap_free'])} free of"
+                f" {gib(now['swap_total'])}), at or over the {100 * options.swap_used:.0f}% rule"
+            )
+            kinds.append("swap")
+        elif time_to_exhaustion is not None and time_to_exhaustion < options.horizon:
+            reasons.append(
+                f"swap is draining at {gib(drain * 3600)}/h over the last {human_time(drain_window)},"
+                f" {human_time(time_to_exhaustion)} from exhaustion"
+            )
+            kinds.append("swap")
+
+    if now["mem_available"] and now["mem_available"] < options.mem_floor:
+        reasons.append(
+            f"MemAvailable is {gib(now['mem_available'])}, under the {gib(options.mem_floor)} floor"
+        )
+        kinds.append("memory")
+
+    return {
+        "crossing": bool(kinds),
+        "kinds": kinds,
+        "reasons": reasons,
+        "time_to_exhaustion": time_to_exhaustion,
+        "swap_drain": drain,
+        "swap_drain_window": drain_window,
+    }
+
+
+def clears(now: dict, options: argparse.Namespace) -> bool:
+    """Hysteresis: a crossing clears well clear of what opened it, never on the threshold."""
+    cpu_some = now["cpu"].get("some_avg60")
+    if cpu_some is not None and cpu_some >= options.cpu_stall * options.clear_factor:
+        return False
+    if now["swap_total"] and now["swap_used_fraction"] >= options.swap_used * options.clear_factor:
+        return False
+    if now["mem_available"] and now["mem_available"] < options.mem_floor / options.clear_factor:
+        return False
+    return True
+
+
+def state_line(now: dict) -> str:
+    cpu = now["cpu"].get("some_avg60")
+    io = now["io"].get("some_avg60")
+    memory = now["memory_pressure"].get("full_avg60")
+    pieces = [
+        f"load {now['load1']:.0f}/{now['load5']:.0f}/{now['load15']:.0f} on {now['cores']} cores",
+        f"{now['procs_running']} runnable, {now['procs_blocked']} blocked",
+    ]
+    if cpu is not None:
+        pieces.append(f"cpu some avg60 {cpu:.0f}%")
+    if io is not None:
+        pieces.append(f"io some avg60 {io:.0f}%")
+    if memory is not None:
+        pieces.append(f"memory full avg60 {memory:.1f}%")
+    if now["swap_total"]:
+        pieces.append(
+            f"swap {100 * now['swap_used_fraction']:.1f}% used ({gib(now['swap_free'])} free)"
+        )
+    pieces.append(f"MemAvailable {gib(now['mem_available'])}")
+    return ", ".join(pieces)
+
+
+def alert_text(now: dict, found: dict, incident: dict, consumers: str, when: float) -> str:
+    kinds = "+".join(found["kinds"]).upper()
+    cpu = now["cpu"].get("some_avg60")
+    io = now["io"].get("some_avg60")
+    memory = now["memory_pressure"].get("full_avg60")
+    which = ""
+    if cpu is not None and io is not None and memory is not None:
+        which = (
+            f" Of the three pressures, cpu is {cpu:.0f}%, io {io:.0f}% and memory {memory:.1f}%:"
+            f" {'a CPU shortage' if cpu >= max(io, memory) else 'not primarily a CPU shortage'}."
+        )
+    lines = [
+        f"BOX OUT OF {kinds}: {socket.gethostname()} has {state_line(now)}.{which}",
+        "Why this alerts: " + "; ".join(found["reasons"]) + ".",
+        f"The crossing opened at {iso(incident.get('opened_at'))},"
+        f" {human_time(when - (incident.get('opened_at') or when))} ago.",
+        consumers,
+        "What this looks like from a pane: every agent still runs and answers, its transcript is"
+        " still written, and tmux still paints -- but a turn that takes seconds takes tens of"
+        " minutes, so the lane reads as frozen. Do not restart an agent on this signal: a"
+        " restart costs its turn and adds another working set to the same box.",
+        "DO: reduce the number of concurrent agents on this box (on a lane box, `ossv-worker"
+        " list` and stop or pause the lanes that are idle or duplicated), then let the swapped"
+        " working sets fault back in. Move new work to a box with free cores rather than"
+        " raising the limit here.",
+        "This watch only detects. It kills nothing, stops no worker, and changes no limit."
+        f" From load-swap-watch (~/.dotfiles/scripts/load-swap-watch) on {socket.gethostname()},"
+        " a systemd --user timer.",
+    ]
+    return "\n".join(lines)
+
+
+def clear_text(now: dict, incident: dict, when: float) -> str:
+    opened = incident.get("opened_at") or when
+    return (
+        f"BOX RESOURCE CROSSING CLEARED: {socket.gethostname()} is back to {state_line(now)}."
+        f" The crossing opened at {iso(opened)}, cleared at {iso(when)}, and lasted"
+        f" {human_time(when - opened)}. No action is needed. From load-swap-watch on"
+        f" {socket.gethostname()}."
+    )
+
+
+def tell_box_health(envoy: Envoy, text: str) -> str:
+    """Tell the box-health lead, and say who heard it.
+
+    The role is the address while somebody holds it; an unheld role answers non-200, and the
+    INFRA lead's session hears it instead.
+    """
+    if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        return BOX_HEALTH_ROLE_TOPIC
+    envoy.send(INFRA_LEAD, text)
+    return INFRA_LEAD
+
+
+# ------------------------------------------------------------------------------- one run
+
+
+def run_once(options: argparse.Namespace) -> int:
+    when = time.time()
+    envoy = Envoy(timeout=options.http_timeout)
+    state = State(options.state)
+    if not state.locked:
+        log(f"another run holds {options.state}; skipping this period")
+        return 0
+
+    now = sample_box()
+    samples: list = state.data.setdefault("samples", [])
+    samples.append([now["at"], now["swap_free"]])
+    cutoff = now["at"] - max(options.rate_window * 3, 7200)
+    state.data["samples"] = [sample for sample in samples if sample[0] >= cutoff][-512:]
+    state.data["last_run"] = now["at"]
+    state.data["last_state"] = state_line(now)
+
+    found = verdict(now, state.data["samples"], options)
+    log(state_line(now))
+
+    incident: dict = state.data.get("incident") or {}
+    heard = ""
+    sent = ""
+
+    if found["crossing"]:
+        if not incident:
+            incident = {"opened_at": when, "kinds": found["kinds"], "alerted_at": None, "escalated_at": None}
+            log(f"crossing opened: {'; '.join(found['reasons'])}")
+        incident["kinds"] = sorted(set(incident.get("kinds", [])) | set(found["kinds"]))
+        incident["last_seen"] = when
+        held = when - (incident.get("opened_at") or when)
+        if incident.get("alerted_at") is None and held >= options.grace:
+            consumers = consumers_text(options)
+            sent = alert_text(now, found, incident, consumers, when)
+            incident["alerted_at"] = when
+            state.data["incident"] = incident
+            state.commit(options)
+            if not options.dry_run:
+                heard = tell_box_health(envoy, sent)
+        elif (
+            incident.get("alerted_at")
+            and incident.get("escalated_at") is None
+            and when - incident["alerted_at"] >= options.escalate
+        ):
+            sent = (
+                f"STILL OUT OF {'+'.join(incident['kinds']).upper()} {human_time(when - incident['alerted_at'])}"
+                f" after the first alert: {socket.gethostname()} has {state_line(now)}."
+                " Nobody has brought the box back. The agents on it are still being served a"
+                " fraction of a core each, and their lanes read as frozen.\n"
+                + consumers_text(options)
+            )
+            incident["escalated_at"] = when
+            state.data["incident"] = incident
+            state.commit(options)
+            if not options.dry_run:
+                envoy.send(CHIEF_OF_STAFF, sent)
+                heard = CHIEF_OF_STAFF
+        else:
+            log(f"crossing open for {human_time(held)}; grace {human_time(options.grace)}")
+        state.data["incident"] = incident
+    elif incident:
+        if clears(now, options):
+            if incident.get("alerted_at"):
+                sent = clear_text(now, incident, when)
+                if not options.dry_run:
+                    heard = tell_box_health(envoy, sent)
+            log(f"crossing cleared after {human_time(when - (incident.get('opened_at') or when))}")
+            state.data["incident"] = {}
+        else:
+            log("under the rules but not yet clear of them; the crossing stays open")
+            incident["last_seen"] = when
+            state.data["incident"] = incident
+
+    state.commit(options)
+    state.close()
+    if sent and (options.print_alert or options.dry_run):
+        print(sent)
+    if heard:
+        log(f"told {heard}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--cpu-stall",
+        type=float,
+        default=50.0,
+        help="alert when /proc/pressure/cpu some avg60 is at or over this percentage (default 50)",
+    )
+    parser.add_argument(
+        "--queue-per-core",
+        type=float,
+        default=3.0,
+        help="fallback rule on a kernel without PSI: runnable processes per core (default 3)",
+    )
+    parser.add_argument(
+        "--swap-used",
+        type=float,
+        default=0.85,
+        help="alert when this fraction of swap is in use (default 0.85)",
+    )
+    parser.add_argument(
+        "--mem-floor",
+        type=float,
+        default=8 * GIB,
+        help="alert when MemAvailable falls under this many bytes (default 8 GiB)",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=float,
+        default=7200.0,
+        help="alert when swap is draining and reaches zero inside this many seconds (default 2 h)",
+    )
+    parser.add_argument(
+        "--rate-window",
+        type=float,
+        default=3600.0,
+        help="window of this watch's own samples the swap drain rate is measured over (default 1 h)",
+    )
+    parser.add_argument(
+        "--grace",
+        type=float,
+        default=600.0,
+        help="a crossing must hold this long before it alerts (default 600 s)",
+    )
+    parser.add_argument(
+        "--escalate",
+        type=float,
+        default=1800.0,
+        help="tell the chief of staff when a crossing is still open this long after its alert (default 30 min)",
+    )
+    parser.add_argument(
+        "--clear-factor",
+        type=float,
+        default=0.7,
+        help="hysteresis: a crossing clears at this fraction of the rule that opened it (default 0.7)",
+    )
+    parser.add_argument(
+        "--sample-seconds",
+        type=float,
+        default=10.0,
+        help="interval the per-process CPU delta in an alert is measured over (default 10 s)",
+    )
+    parser.add_argument("--top", type=int, default=8, help="processes named per list in an alert (default 8)")
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help=f"state file (default {DEFAULT_STATE})")
+    parser.add_argument("--http-timeout", type=float, default=8.0, help="Envoy request timeout (default 8 s)")
+    parser.add_argument("--dry-run", action="store_true", help="decide and print, send nothing, write no state")
+    parser.add_argument("--write-state", action="store_true", help="with --dry-run, still write the state file")
+    parser.add_argument("--print-alert", action="store_true", help="print an alert to stdout as well as sending it")
+    parser.add_argument(
+        "--consumers",
+        action="store_true",
+        help="print who is using the CPU and holding the swap now, and exit; decides nothing",
+    )
+    parser.add_argument("--json", action="store_true", help="with --consumers, print one JSON object")
+    options = parser.parse_args()
+
+    if options.consumers:
+        if options.json:
+            cpu_rows, span = sample_cpu(options.sample_seconds)
+            print(
+                json.dumps(
+                    {
+                        "box": sample_box(),
+                        "census": agent_census(),
+                        "cpu_interval": span,
+                        "cpu": [
+                            dict(row, who=describe(row["pid"])) for row in cpu_rows[: options.top]
+                        ],
+                        "swap": [
+                            dict(row, who=describe(row["pid"])) for row in sample_swap()[: options.top]
+                        ],
+                    },
+                    indent=1,
+                )
+            )
+        else:
+            print(state_line(sample_box()))
+            print(consumers_text(options))
+        return 0
+    return run_once(options)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
