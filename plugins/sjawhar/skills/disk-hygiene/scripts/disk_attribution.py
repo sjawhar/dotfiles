@@ -13,8 +13,12 @@ code, and nothing waits for one walk of everything.
 
 Sizes are allocated blocks (what df counts), each du stays on the argument's
 filesystem, and du counts a hardlinked inode once within one invocation. A
-file hardlinked into two different batches is counted in both, so compare the
-roll-up with df for the exact total.
+file hardlinked into two different batches is counted in both, so this
+roll-up is an upper bound: compare it with df for the exact total, and
+measure what two trees share with `disk_hygiene.py sizes --hardlinks`.
+The roll-up is a tree, so a parent already holds its children and no row of
+it may be added to another; the flat ranking that can be added up is
+`disk_hygiene.py sizes`.
 
 Output lines on stdout, flushed as they happen:
   SIZE   <bytes>  <path>              finished, at or above --min-size

@@ -26,11 +26,29 @@ Subcommands (all read-only except `apply`, and `tmp --apply`):
                                  identity (HEAD hash + worktree admin id + dir mtime);
                                  --releases appends it to the releases file (locked)
   tmp --dir D --older-than-hours H [--families REGEX] [--protected P] [--apply --ledger L]
-                                 stale temp-dir families by directory mtime
+                                 stale temp-dir families by the newest mtime in each directory
   containers                     every container with family (platform-e2e, local-stack, ryuk,
                                  tc-fixture, agentbox, other), owner attribution, liveness verdict
   images [--older-than-hours H]  tagged images no container uses, neither built nor pulled in the
                                  last H (cheap; avoids `docker system df -v`, which stalls under IO load)
+
+Instruments — measure the box now; each prints what its number does NOT measure:
+
+  writers [--seconds S] [--top N] [--argv]
+                                 processes by write rate over S seconds (default 5), each with
+                                 its working directory, beside its whole-life average
+  cpu [--seconds S] [--top N]    CPU over S seconds grouped by COMMAND NAME, not by process
+  fdwrites [--seconds S] [--pid P] [--top N] [--all-modes]
+                                 open files whose position or size moved, which names the file
+                                 `writers` cannot
+  dangling ROOT... [--list] [--top N] [--max-entries N]
+                                 symlinks whose target is gone (`find -xtype l`), by directory
+  sizes ROOT... [--max-depth D] [--top N] [--hardlinks]
+                                 directories by the bytes that are theirs alone, from ONE du over
+                                 every root, so the rows can be added up and a hardlinked inode is
+                                 counted once; --hardlinks measures what separate runs double-count
+  recent ROOT... [--since 2h] [--group-depth N] [--use-mtime]
+                                 files whose ctime is inside the window, counted whatever their size
 
 Protected file format: {"protected": ["/abs/path", ...], "anchors": ["/abs/path", ...]}.
 "protected" has prefix semantics both ways: an item is protected if it is under a
@@ -65,7 +83,7 @@ import time
 import tomllib
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 JJ = ["jj", "--ignore-working-copy", "--config", "fsmonitor.backend=none"]
 RM = ["sudo", "ionice", "-c3", "nice", "-n19", "rm", "-rf", "--one-file-system"]
@@ -329,30 +347,53 @@ def observable_root(box_dir: str) -> str | None:
     return str(Path(box_dir).resolve())
 
 
-def holds_working_copy(path: Path, depth: int = 3, dir_cap: int = 5000) -> bool | None:
-    """Does a `.jj` or `.git` exist at or below <path>, down to <depth> levels? None when the
-    scan could not finish (over <dir_cap> directories, or an unreadable one): unverifiable, so
-    never scratch. A depth-1 check planned ~/.worktrees/<repo>/ containers of other repos'
-    worktrees as scratch rm (8 of them, SRE, 2026-09-26). Raises OSError only for <path> itself."""
-    frontier, seen = [(path, 0)], 0
+class TreeScan(NamedTuple):
+    holds_working_copy: bool | None  # None = the scan could not finish
+    newest_mtime: float | None  # None = not established (scan unfinished, or stopped at a working copy)
+    dirs: int
+
+
+def scan_tree(path: Path, depth: int = 3, dir_cap: int = 5000) -> TreeScan:
+    """One bounded walk of <path>: does a `.jj` or `.git` exist at or below it, down to <depth>
+    levels, and what is the newest mtime in that same bounded set?
+
+    `holds_working_copy` is None when the walk could not finish (over <dir_cap> directories, or
+    an unreadable one): unverifiable, so never scratch. A depth-1 check planned
+    ~/.worktrees/<repo>/ containers of other repos' worktrees as scratch rm (8 of them, SRE,
+    2026-09-26). Raises OSError only for <path> itself.
+
+    `newest_mtime` is set only when the whole bounded set was read, so no caller dates a tree
+    from a part of it. A directory's own mtime moves only when an entry is added or removed, so
+    the top-level stat this replaces called a tree stale while its files were being written: on
+    2026-09-26 a knives container read idle 160-280 h with live branches under it. What the walk
+    sees is the top <depth> levels, so a file written deeper does not move the reading, and the
+    idle time derived from it is an UPPER bound on how stale the tree is. It is an age, never
+    proof that nothing writes there: the live-process check and `writers` prove that."""
+    frontier: list[tuple[Path, int]] = [(path, 0)]
+    seen = 0
+    newest = os.lstat(path).st_mtime
     while frontier:
         d, level = frontier.pop()
         seen += 1
         if seen > dir_cap:
-            return None
+            return TreeScan(None, None, seen)
         try:
             with os.scandir(d) as it:
                 entries = list(it)
         except OSError:
             if d == path:
                 raise
-            return None
+            return TreeScan(None, None, seen)
         for e in entries:
             if e.name in (".jj", ".git"):
-                return True
+                return TreeScan(True, None, seen)
+            try:
+                newest = max(newest, e.stat(follow_symlinks=False).st_mtime)
+            except OSError:
+                continue
             if level < depth and e.is_dir(follow_symlinks=False):
                 frontier.append((Path(e.path), level + 1))
-    return False
+    return TreeScan(False, newest, seen)
 
 
 def cmd_inventory(args: argparse.Namespace) -> None:
@@ -449,15 +490,20 @@ def cmd_inventory(args: argparse.Namespace) -> None:
             if any(path == d or path.startswith(d + "/") or d.startswith(path + "/") for d in known):
                 continue  # a workspace lives here (or under here): its own row owns it
             try:
-                held = holds_working_copy(entry)
-                idle_h = round((time.time() - entry.stat().st_mtime) / 3600, 1)
+                scan = scan_tree(entry)
             except OSError:
                 continue  # unreadable (another user's dir, EACCES): no evidence, so no row (D1)
+            held = scan.holds_working_copy
+            # Idle is the newest mtime the bounded walk saw, not this directory's own: a
+            # directory's mtime moves only when an entry is added or removed, so the top-level
+            # stat this replaces read 160-280 h of idleness off trees being written to.
+            idle_h = round((time.time() - scan.newest_mtime) / 3600, 1) if scan.newest_mtime else None
             live_procs = sorted({c for c in live if c == path or c.startswith(path + "/")})[:3]
             cls = ("LIVE" if live_procs else "HOLDS_WORKING_COPY" if held
                    else "SCRATCH_UNVERIFIED" if held is None else "SCRATCH")
             rows.append({"path": path, "name": None, "exists": True, "is_git_worktree": False,
                          "live_procs": live_procs, "jj_idle_hours": idle_h, "registered": False,
+                         "idle_source": f"newest mtime in the top 3 levels ({scan.dirs} directories read)",
                          "class": cls})
     # registrations with no directory found
     found_names = {r["name"] for r in rows if r["name"]}
@@ -1057,21 +1103,21 @@ def _apply_path_item(
     if item["kind"] == "scratch":
         # A plain directory's evidence is age + liveness + "not a working copy", and all three
         # are re-derived HERE because the plan can be an hour old: a directory written to since
-        # the plan, or one that has become a workspace, must survive.
+        # the plan, or one that has become a workspace, must survive. One walk gives all of it.
         try:
-            held = holds_working_copy(Path(path))
+            scan = scan_tree(Path(path))
         except OSError as error:
             skip(f"re-verification failed: contents unreadable ({error})")
             return
-        if held is not False:
-            skip("re-verification failed: " + ("holds a jj/git working copy, not scratch" if held
-                                                else "working copy scan could not finish: unverifiable"))
+        if scan.holds_working_copy is not False:
+            skip("re-verification failed: " + ("holds a jj/git working copy, not scratch"
+                                               if scan.holds_working_copy
+                                               else "working copy scan could not finish: unverifiable"))
             return
-        try:
-            idle_h = (time.time() - os.stat(path).st_mtime) / 3600
-        except OSError as error:
-            skip(f"re-verification failed: freshness unreadable ({error})")
+        if scan.newest_mtime is None:
+            skip("re-verification failed: freshness unreadable (the walk did not finish)")
             return
+        idle_h = (time.time() - scan.newest_mtime) / 3600
         if idle_h < fresh_hours:
             skip(f"re-verification failed: written to {idle_h:.2f}h ago (< {fresh_hours}h)")
             return
@@ -1213,7 +1259,15 @@ def cmd_tmp(args: argparse.Namespace) -> None:
         p = os.path.join(tmp_dir, name)
         if not os.path.isdir(p) or os.path.islink(p) or not fam.match(name):
             continue
-        if now - os.lstat(p).st_mtime < args.older_than_hours * 3600:
+        # The directory's own mtime moves only when an entry is added or removed, so a tree
+        # whose files are being rewritten reads as untouched; date it by the newest mtime a
+        # bounded walk of it finds, and keep one the walk could not date (it did not finish, or
+        # it holds a jj/git working copy, which is not throwaway scratch).
+        try:
+            scan = scan_tree(Path(p))
+        except OSError:
+            continue
+        if scan.newest_mtime is None or now - scan.newest_mtime < args.older_than_hours * 3600:
             continue
         if is_protected(p, protected, anchors) or any(c == p or c.startswith(p + "/") for c in live):
             continue
@@ -1500,6 +1554,389 @@ def cmd_images(args: argparse.Namespace) -> None:
     print(f"\n{len(rows)} unused tagged images neither built nor pulled in the last {args.older_than_hours}h; remove with plain `docker rmi <ref>` (a refusal means a container uses it)", file=sys.stderr)
 
 
+# ---------------------------------------------------------------- instruments
+# What is happening now, and where the space is. Each instrument prints what its number does
+# NOT measure, because the failure these replace is a true number of the wrong thing: on
+# 2026-10-30 two disks on sami-rocqperf filled while nine readings taken that afternoon each
+# answered a question nobody had asked (a du roll-up at 210% of its own total, 26 GB of
+# "duplication" that was 10.87 GB of hardlinks, a 15 s burst read as a rate).
+
+CLK_TCK = os.sysconf("SC_CLK_TCK")
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1e9:.2f}"
+
+
+def parse_duration(text: str) -> float:
+    """Seconds from 90, 90s, 15m, 2h or 3d."""
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    suffix = text[-1].lower()
+    return float(text[:-1]) * units[suffix] if suffix in units else float(text)
+
+
+def boot_time() -> float:
+    for line in Path("/proc/stat").read_text().splitlines():
+        if line.startswith("btime"):
+            return float(line.split()[1])
+    raise RuntimeError("/proc/stat has no btime line")
+
+
+def _proc_io(pid: str) -> dict[str, int] | None:
+    """/proc/<pid>/io as a dict, or None when this uid may not read it."""
+    try:
+        text = Path(f"/proc/{pid}/io").read_text()
+    except OSError:
+        return None
+    out: dict[str, int] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(": ")
+        if value.strip().isdigit():
+            out[key] = int(value)
+    return out
+
+
+def _proc_stat_fields(pid: str) -> list[str] | None:
+    """Fields of /proc/<pid>/stat after comm: state [0], utime [11], stime [12], starttime [19]."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return None
+
+
+def _proc_comm(pid: int | str) -> str:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return "?"
+
+
+def proc_sample(want_io: bool) -> tuple[dict[int, dict[str, Any]], int]:
+    """One pass over /proc: (pid -> counters, processes whose counters this uid may not read).
+
+    Each sample carries starttime, so a pid reused between two samples is dropped instead of
+    producing a nonsense delta."""
+    sample: dict[int, dict[str, Any]] = {}
+    denied = 0
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        fields = _proc_stat_fields(name)
+        if fields is None:
+            continue
+        row: dict[str, Any] = {"start": fields[19], "ticks": int(fields[11]) + int(fields[12]),
+                               "comm": _proc_comm(name)}
+        if want_io:
+            io = _proc_io(name)
+            if io is None:
+                denied += 1
+                continue
+            row["io"] = io
+        sample[int(name)] = row
+    return sample, denied
+
+
+WRITERS_CAVEAT = """\
+write_bytes is what the kernel charged this process at the block layer, less the pages a truncate or a
+delete cancelled. It names no filesystem and no file, and a rewrite of the same bytes is charged again,
+so the column is an upper bound on what any disk gained: `fdwrites` names the file, and `df` before and
+after measures what a filesystem gained. Each rate is this interval's average, so a burst inside the
+interval is invisible and a process that started or stopped inside it has no row. The lifetime column is
+the same counter over the whole age of the process; where the two disagree, the interval caught a burst."""
+
+
+def cmd_writers(args: argparse.Namespace) -> None:
+    """Processes by write rate over an interval, each with its working directory."""
+    boot = boot_time()
+    first, denied = proc_sample(want_io=True)
+    time.sleep(args.seconds)
+    second, _ = proc_sample(want_io=True)
+    rows: list[tuple[float, float, float, float, int, str, str, str]] = []
+    for pid, b in second.items():
+        a = first.get(pid)
+        if a is None or a["start"] != b["start"]:
+            continue
+        delta = {k: max(0, b["io"].get(k, 0) - a["io"].get(k, 0)) for k in
+                 ("write_bytes", "cancelled_write_bytes", "read_bytes", "syscw")}
+        wrote = max(0, delta["write_bytes"] - delta["cancelled_write_bytes"])
+        if wrote == 0 and delta["read_bytes"] == 0:
+            continue
+        age = max(1e-9, time.time() - (boot + int(b["start"]) / CLK_TCK))
+        life = max(0, b["io"].get("write_bytes", 0) - b["io"].get("cancelled_write_bytes", 0)) / age
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            cwd = "?"
+        cmd = " ".join(a.decode(errors="replace") for a in
+                       Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a)[:100] \
+            if os.path.exists(f"/proc/{pid}/cmdline") else "?"
+        rows.append((wrote / args.seconds, delta["read_bytes"] / args.seconds,
+                     delta["syscw"] / args.seconds, life, pid, b["comm"], cwd, cmd))
+    rows.sort(reverse=True)
+    print(f"{'MB/s wr':>9} {'MB/s rd':>8} {'wsys/s':>8} {'MB/s life':>10}  {'pid':>7}  {'comm':<16} cwd")
+    for wrote, read, syscw, life, pid, comm, cwd, cmd in rows[:args.top]:
+        print(f"{wrote / 1e6:9.2f} {read / 1e6:8.2f} {syscw:8.0f} {life / 1e6:10.3f}  {pid:>7}  {comm:<16} {cwd}")
+        if args.argv:
+            print(f"{'':57}{cmd}")
+    print(f"\n{len(rows)} processes did IO over {args.seconds:g} s, {sum(r[0] for r in rows) / 1e6:.1f} MB/s "
+          f"written in all; {denied} processes' counters are unreadable by this uid (run it under sudo for "
+          f"every process).", file=sys.stderr)
+    print(WRITERS_CAVEAT, file=sys.stderr)
+
+
+def cmd_cpu(args: argparse.Namespace) -> None:
+    """CPU over an interval, grouped by command name: what a per-process list hides when one
+    name runs as a fan-out (46 python3 processes held 53% of a 32-core box, 2026-10-30)."""
+    cores = os.cpu_count() or 1
+    first, _ = proc_sample(want_io=False)
+    time.sleep(args.seconds)
+    second, _ = proc_sample(want_io=False)
+    by_comm: dict[str, dict[str, Any]] = {}
+    for pid, b in second.items():
+        a = first.get(pid)
+        if a is None or a["start"] != b["start"] or b["ticks"] - a["ticks"] <= 0:
+            continue
+        group = by_comm.setdefault(b["comm"], {"ticks": 0, "pids": []})
+        group["ticks"] += b["ticks"] - a["ticks"]
+        group["pids"].append(pid)
+    rows = sorted(by_comm.items(), key=lambda kv: kv[1]["ticks"], reverse=True)
+    print(f"{'cores':>7} {'%box':>6} {'procs':>6}  {'comm':<16} busiest pids")
+    for comm, group in rows[:args.top]:
+        used = group["ticks"] / CLK_TCK / args.seconds
+        pids = " ".join(str(p) for p in sorted(group["pids"])[:6])
+        print(f"{used:7.2f} {100 * used / cores:6.1f} {len(group['pids']):6}  {comm:<16} {pids}")
+    busy = sum(g["ticks"] for _, g in rows) / CLK_TCK / args.seconds
+    print(f"\n{len(rows)} command names ran on CPU over {args.seconds:g} s: {busy:.1f} of {cores} cores "
+          f"({100 * busy / cores:.0f}% of the box).", file=sys.stderr)
+    print("CPU time inside the interval only: a process that stopped inside it has no row, and a burst "
+          "shorter than the interval is averaged away. This is CPU and not IO: a process in D state, "
+          "waiting on the disk, burns none of it and still holds the box.", file=sys.stderr)
+
+
+ACCMODE = {0: "r", 1: "w", 2: "rw"}
+
+
+def _fd_positions(pid: int) -> dict[str, tuple[int, str, int]]:
+    """fd -> (file position, path, open flags) for every file on disk the process holds open."""
+    out: dict[str, tuple[int, str, int]] = {}
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return out
+    for fd in fds:
+        try:
+            path = os.readlink(f"/proc/{pid}/fd/{fd}")
+            if not path.startswith("/") or path.startswith(("/proc/", "/sys/", "/dev/")):
+                continue
+            pos = flags = 0
+            for line in Path(f"/proc/{pid}/fdinfo/{fd}").read_text().splitlines():
+                if line.startswith("pos:"):
+                    pos = int(line.split()[1])
+                elif line.startswith("flags:"):
+                    flags = int(line.split()[1], 8)
+            out[fd] = (pos, path, flags)
+        except (OSError, ValueError, IndexError):
+            continue
+    return out
+
+
+def _fd_size(pid: int, fd: str) -> int:
+    try:
+        return os.stat(f"/proc/{pid}/fd/{fd}").st_size
+    except OSError:
+        return -1
+
+
+def cmd_fdwrites(args: argparse.Namespace) -> None:
+    """Which FILE grows, when `writers` says a process writes but not where."""
+    pids = [int(p) for p in args.pid] if args.pid else [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    first = {pid: _fd_positions(pid) for pid in pids}
+    sizes = {(pid, fd): _fd_size(pid, fd) for pid, fds in first.items() for fd in fds}
+    time.sleep(args.seconds)
+    rows: list[tuple[float, float, int, str, str, str]] = []
+    for pid in pids:
+        for fd, (pos, path, flags) in _fd_positions(pid).items():
+            before = first.get(pid, {}).get(fd)
+            if before is None or before[1] != path:
+                continue
+            mode = ACCMODE.get(flags & 3, "?") + ("a" if flags & 0o2000 else "")
+            if not args.all_modes and "w" not in mode:
+                continue
+            size_now, size_before = _fd_size(pid, fd), sizes.get((pid, fd), -1)
+            grew = size_now - size_before if size_now >= 0 and size_before >= 0 else 0
+            if pos - before[0] <= 0 and grew <= 0:
+                continue
+            rows.append(((pos - before[0]) / args.seconds, grew / args.seconds, pid, mode,
+                         _proc_comm(pid), path))
+    rows.sort(reverse=True)
+    print(f"{'MB/s pos':>9} {'MB/s size':>10} {'pid':>7} {'mode':>5}  {'comm':<16} path")
+    for moved, grew, pid, mode, comm, path in rows[:args.top]:
+        print(f"{moved / 1e6:9.2f} {grew / 1e6:10.2f} {pid:>7} {mode:>5}  {comm:<16} {path}")
+    print(f"\n{len(rows)} open files moved over {args.seconds:g} s, across {len(pids)} processes.",
+          file=sys.stderr)
+    print("A file position moves on a read and on a seek as well as on a write, so the size column is the "
+          "one that says a file grew; a rewrite in place grows nothing while it writes, and shows here as "
+          "position without size. A path that ends `(deleted)` still holds its blocks until the last "
+          "descriptor closes. Only descriptors open at both samples get a row: a file written and closed "
+          "inside the interval leaves none.", file=sys.stderr)
+
+
+def cmd_dangling(args: argparse.Namespace) -> None:
+    """Symlinks whose target is gone (`find -xtype l`): each one is a tree that was deleted under
+    a user of it. One sweep of this box found 32,659 of them on 2026-10-30."""
+    per_dir: dict[str, int] = {}
+    samples: list[str] = []
+    total = examined = 0
+    truncated = False
+    for root in args.roots:
+        root = str(Path(root).resolve())
+        try:
+            dev = os.lstat(root).st_dev
+        except OSError as error:
+            print(f"{root}: {error}", file=sys.stderr)
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            try:
+                if os.lstat(dirpath).st_dev != dev:  # one filesystem, as `du -x` and `find -xdev`
+                    dirnames[:] = []
+                    continue
+            except OSError:
+                continue
+            for name in dirnames + filenames:
+                p = os.path.join(dirpath, name)
+                examined += 1
+                if examined > args.max_entries:
+                    truncated = True
+                    break
+                try:
+                    if not os.path.islink(p) or os.path.exists(p):
+                        continue
+                except OSError:
+                    continue
+                total += 1
+                per_dir[dirpath] = per_dir.get(dirpath, 0) + 1
+                if len(samples) < args.top:
+                    samples.append(f"{p} -> {os.readlink(p)}")
+            if truncated:
+                break
+        if truncated:
+            break
+    for d, n in sorted(per_dir.items(), key=lambda kv: kv[1], reverse=True)[:args.top]:
+        print(f"{n:9} {d}")
+    if args.list:
+        print("\n".join(samples))
+    print(f"\n{total} dangling symlinks in {len(per_dir)} directories, {examined} entries examined"
+          f"{' (stopped at --max-entries)' if truncated else ''}.", file=sys.stderr)
+    print("A dangling symlink holds no data: this is a count of broken references, never bytes to "
+          "reclaim. A link whose target this uid cannot stat reads as dangling too.", file=sys.stderr)
+
+
+def du_tree(roots: list[str], max_depth: int) -> dict[str, int]:
+    """path -> bytes, from ONE du over every root, so an inode hardlinked into two of them is
+    counted once. du remembers an inode only within one run, so a run per root counts it again."""
+    r = subprocess.run(["ionice", "-c3", "nice", "-n19", "du", "-xB1", f"--max-depth={max_depth}",
+                        "--null", "--", *roots], capture_output=True)
+    sizes: dict[str, int] = {}
+    for rec in r.stdout.split(b"\0"):
+        size, _, path = rec.decode("utf-8", "surrogateescape").partition("\t")
+        if size.isdigit() and path:
+            sizes[path] = int(size)
+    return sizes
+
+
+def exclusive_sizes(sizes: dict[str, int]) -> dict[str, int]:
+    """Each listed directory less the listed directories under it, so a set of rows can be added
+    up. du's own output cannot be: it prints a parent and its children both, and a `sort -rn |
+    head` over it mixes levels — one such list made the top fifteen rows 210% of the total."""
+    children: dict[str, int] = dict.fromkeys(sizes, 0)
+    for path in sizes:
+        parent = os.path.dirname(path)
+        while parent and parent != "/" and parent not in sizes:
+            parent = os.path.dirname(parent)
+        if parent != path and parent in sizes:
+            children[parent] += sizes[path]
+    return {p: sizes[p] - children[p] for p in sizes}
+
+
+def cmd_sizes(args: argparse.Namespace) -> None:
+    """Directories ranked by bytes that are theirs alone, from one du over every root."""
+    roots = [str(Path(r).resolve()) for r in args.roots]
+    started = time.time()
+    sizes = du_tree(roots, args.max_depth)
+    if not sizes:
+        sys.exit("du produced nothing: unreadable roots?")
+    union = sum(sizes[r] for r in roots if r in sizes)
+    rows = sorted(exclusive_sizes(sizes).items(), key=lambda kv: kv[1], reverse=True)[:args.top]
+    print(f"{'own GB':>9} {'tree GB':>9}  path")
+    for path, own in rows:
+        print(f"{_gb(own):>9} {_gb(sizes[path]):>9}  {path}")
+    shown = sum(own for _, own in rows)
+    print(f"\n{len(sizes)} directories to depth {args.max_depth} in {time.time() - started:.0f} s. The rows "
+          f"shown sum to {_gb(shown)} GB, {100 * shown / union:.0f}% of the {_gb(union)} GB total: 'own GB' "
+          f"holds no bytes of the listed directories below it, so these rows add up and their sum can never "
+          f"pass the total.", file=sys.stderr)
+    if args.hardlinks:
+        separate = 0
+        for root in roots:
+            r = subprocess.run(["ionice", "-c3", "nice", "-n19", "du", "-sxB1", "--", root], capture_output=True)
+            separate += int(r.stdout.split(b"\t")[0] or 0)
+        print(f"one du over every root: {_gb(union)} GB. One du per root, added up: {_gb(separate)} GB. The "
+              f"{_gb(separate - union)} GB between them is hardlinked into more than one root and counted "
+              f"once per root by separate runs. In the one-run column those shared bytes sit under the root "
+              f"du reached first, so a copy that shares every file with an earlier root reads as nearly "
+              f"empty, which is what sharing means and not what the copy would free.", file=sys.stderr)
+
+
+def cmd_recent(args: argparse.Namespace) -> None:
+    """Files that appeared or changed inside a window, counted whatever their size."""
+    cutoff = time.time() - parse_duration(args.since)
+    per_dir: dict[str, list[int]] = {}
+    biggest = (0, "none")
+    files = total = 0
+    for root in args.roots:
+        root = str(Path(root).resolve())
+        try:
+            dev = os.lstat(root).st_dev
+        except OSError as error:
+            print(f"{root}: {error}", file=sys.stderr)
+            continue
+        depth0 = root.count("/")
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            try:
+                if os.lstat(dirpath).st_dev != dev:
+                    dirnames[:] = []
+                    continue
+            except OSError:
+                continue
+            key = "/".join(dirpath.split("/")[:depth0 + args.group_depth + 1])
+            for name in filenames:
+                try:
+                    st = os.lstat(os.path.join(dirpath, name))
+                except OSError:
+                    continue
+                if (st.st_mtime if args.use_mtime else st.st_ctime) < cutoff:
+                    continue
+                size = st.st_blocks * 512
+                files += 1
+                total += size
+                row = per_dir.setdefault(key, [0, 0])
+                row[0] += 1
+                row[1] += size
+                biggest = max(biggest, (size, os.path.join(dirpath, name)))
+    print(f"{'GB':>9} {'files':>9}  directory")
+    for key, (n, size) in sorted(per_dir.items(), key=lambda kv: kv[1][1], reverse=True)[:args.top]:
+        print(f"{_gb(size):>9} {n:9}  {key}")
+    print(f"\n{files} files, {_gb(total)} GB, {'mtime' if args.use_mtime else 'ctime'} inside {args.since}; "
+          f"the biggest is {_gb(biggest[0])} GB ({biggest[1]}). Every file counts, whatever its size: a flood "
+          f"of small files is invisible to `find -size +500M` and fills a disk as well as one large file.",
+          file=sys.stderr)
+    if not args.use_mtime:
+        print("ctime is when the inode last changed HERE: a create, a rename into place, a chmod, a change of "
+              "link count. No copy can carry it in, which is why mtime cannot date an arrival — gzip, cp -p, "
+              "tar -p and rsync -a all copy mtime from the source. ctime cannot tell a file created now from "
+              "one chmod'ed now, and a file rewritten in place moves neither of them.", file=sys.stderr)
+
+
 # ---------------------------------------------------------------- main
 
 def main() -> None:
@@ -1549,6 +1986,36 @@ def main() -> None:
     sub.add_parser("containers")
     p = sub.add_parser("images")
     p.add_argument("--older-than-hours", type=float, default=48.0)
+    p = sub.add_parser("writers", help="processes by write rate over an interval, with their cwd")
+    p.add_argument("--seconds", type=float, default=5.0)
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--argv", action="store_true", help="print each process's command line too")
+    p = sub.add_parser("cpu", help="CPU over an interval, grouped by command name")
+    p.add_argument("--seconds", type=float, default=5.0)
+    p.add_argument("--top", type=int, default=15)
+    p = sub.add_parser("fdwrites", help="open files that grow, by file-position and size deltas")
+    p.add_argument("--seconds", type=float, default=5.0)
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--pid", action="append", help="limit to these pids (default: every process)")
+    p.add_argument("--all-modes", action="store_true", help="include read-only descriptors")
+    p = sub.add_parser("dangling", help="symlinks whose target is gone (`find -xtype l`)")
+    p.add_argument("roots", nargs="+")
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--list", action="store_true", help="print the first --top links with their targets")
+    p.add_argument("--max-entries", type=int, default=2_000_000)
+    p = sub.add_parser("sizes", help="directories by bytes that are theirs alone, from one du")
+    p.add_argument("roots", nargs="+")
+    p.add_argument("--max-depth", type=int, default=2)
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--hardlinks", action="store_true",
+                   help="also size each root on its own, to measure the bytes they share (a second walk)")
+    p = sub.add_parser("recent", help="files that appeared inside a window, counted whatever their size")
+    p.add_argument("roots", nargs="+")
+    p.add_argument("--since", default="2h", help="window: 90s, 15m, 2h, 3d (default 2h)")
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--group-depth", type=int, default=1, help="levels below each root to group by")
+    p.add_argument("--use-mtime", action="store_true",
+                   help="date files by mtime, which a copy carries in from the source, instead of ctime")
     args = ap.parse_args()
     if args.cmd == "procs":
         json.dump(sorted(proc_cwds()), sys.stdout, indent=1)
@@ -1572,6 +2039,8 @@ def main() -> None:
         cmd_containers(args)
     elif args.cmd == "images":
         cmd_images(args)
+    else:
+        globals()[f"cmd_{args.cmd}"](args)  # the instruments: writers, cpu, fdwrites, dangling, sizes, recent
 
 
 if __name__ == "__main__":
