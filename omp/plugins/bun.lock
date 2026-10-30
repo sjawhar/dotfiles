@@ -9,6 +9,7 @@
         "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.1.17",
         "@sjawhar/pi-envoy": "11.5.3",
         "@sjawhar/pi-legion": "11.5.3",
+        "ctx-memory": "github:sjawhar/ctx-memory#v0.2.0",
         "gws-accounts": "github:sjawhar/gws-accounts#v0.1.9",
         "secretsd": "github:sjawhar/forward#v3.7.1",
         "superpowers": "github:obra/superpowers#v7.0.1",
@@ -198,6 +199,8 @@
     "chalk": ["chalk@5.6.2", "", {}, "sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA=="],
 
     "cross-spawn": ["cross-spawn@7.0.6", "", { "dependencies": { "path-key": "^3.1.0", "shebang-command": "^2.0.0", "which": "^2.0.1" } }, "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA=="],
+
+    "ctx-memory": ["ctx-memory@github:sjawhar/ctx-memory#44fcd0e", {}, "sjawhar-ctx-memory-44fcd0e", "sha512-Nk+kj2ZDFoQsM4Ih8GGkyHE37GCP6oh9NmEkoN1sJ/tqKgPvKbcMUQympHvfnUQM9qJ4ARvqsPpKd8APZXs+Qw=="],
 
     "data-uri-to-buffer": ["data-uri-to-buffer@4.0.1", "", {}, "sha512-0R9ikRb668HB7QDxT1vkpuUBtqc53YyAwMwGeUFKRojY/NWKvdZ+9UYtRfGmhqNbRkTSVpMbmyhXipFFv2cb/A=="],
 

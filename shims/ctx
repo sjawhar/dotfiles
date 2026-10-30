@@ -1,0 +1,21 @@
+#!/bin/bash
+# ctx wrapper: names the team memory graph's server for every ctx call, as .bashrc's CTX_SERVER
+# does for a new shell, so a session, pane or unit whose environment predates that line reaches
+# the server too. A CTX_SERVER the caller set wins, and an empty one means a local tree
+# (`CTX_SERVER= ctx --memory <tree> …`), which ctx reads as unset.
+#
+# Resolution: the mise pin ("github:sjawhar/ctx-memory" in mise.toml), looked up with
+# `mise which -C /` so a project's own mise configuration does not move it and mise's own shim,
+# which hands an unresolved call back to PATH, is never in the loop. It never execs itself.
+set -u
+
+mise="$(command -v mise 2>/dev/null || true)"
+[[ -n "$mise" ]] || mise="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+real="$(MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}" "$mise" which -C / ctx --tool github:sjawhar/ctx-memory 2>/dev/null)" || real=""
+if [[ -z "$real" || ! -x "$real" ]]; then
+	echo "ctx shim: mise did not resolve the pinned github:sjawhar/ctx-memory; run \`mise install\`" >&2
+	exit 127
+fi
+
+export CTX_SERVER="${CTX_SERVER-http://ctx-memory.tail12ec1c.ts.net}"
+exec "$real" "$@"

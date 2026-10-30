@@ -165,6 +165,12 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -e "${HOME}/.config/systemd/user/agent-sec
     export AGENT_SECRETS_HELPER_SOCK="${AGENT_SECRETS_HELPER_SOCK:-${XDG_RUNTIME_DIR}/agent-secrets/helper.sock}"
 fi
 
+# The team memory graph (sjawhar/ctx-memory). `ctx`, pinned in mise.toml, runs every command on
+# the graph's server over the tailnet, which names the caller by its Tailscale login, so a shell
+# needs no clone and no credential. A value the caller already has wins; agent boxes get the same
+# from scripts/agentbox's session_env.
+export CTX_SERVER="${CTX_SERVER:-http://ctx-memory.tail12ec1c.ts.net}"
+
 
 # ==============================================================================
 # INTERACTIVE GUARD

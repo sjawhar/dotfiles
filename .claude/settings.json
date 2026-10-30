@@ -36,7 +36,8 @@
     "gws-accounts@gws-accounts": true,
     "sjawhar@sjawhar": true,
     "claude-envoy@legion-plugins": true,
-    "slack@claude-plugins-official": true
+    "slack@claude-plugins-official": true,
+    "ctx-memory@ctx-memory": true
   },
   "extraKnownMarketplaces": {
     "sjawhar": {
@@ -61,6 +62,13 @@
       "source": {
         "source": "github",
         "repo": "sjawhar/legion"
+      }
+    },
+    "ctx-memory": {
+      "source": {
+        "source": "github",
+        "repo": "sjawhar/ctx-memory",
+        "ref": "v0.2.0"
       }
     }
   },
