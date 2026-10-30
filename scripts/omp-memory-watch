@@ -191,6 +191,82 @@ class Envoy:
         return status == 200
 
 
+# The sessions Envoy has live on THIS box, filled at most once per run and only when a wall
+# report is about to name one. Empty with LIVE_READ False means "not looked up", which reads as
+# "cannot verify" and never as "nothing is live".
+#
+# Why this watch needs it: a session id taken from an `omp --resume <path>` command line is the
+# id the session directory was CREATED with, and a resume gets a new one. On ossv-agent-repo on
+# 2026-10-30 that stale id was 01a14b36 (VERIFY, which runs on sami-rocqperf) while the live
+# owner was 01a14b84 -- and load-swap-watch sent its 20:17:23Z alert to the wrong box's session
+# for exactly that reason. A worker's own `.ossv-workers/<name>/session` file, which this watch
+# prefers, follows a resume and does not have the defect; the fallback does.
+LIVE_SESSIONS: dict[str, dict] = {}
+LIVE_READ = False
+
+
+def this_box(host: str) -> bool:
+    """Whether an Envoy session row's host is this machine, by its first label."""
+    if not host:
+        return False
+    mine = socket.gethostname()
+    return host == mine or host.split(".")[0] == mine.split(".")[0]
+
+
+def refresh_live_sessions(envoy: Envoy) -> None:
+    """Ask Envoy which sessions are live on this box. One GET, at most once per run."""
+    global LIVE_READ
+    status, body = envoy.request("GET", "/v1/sessions")
+    if status != 200 or not isinstance(body, list):
+        log(f"  live sessions unavailable: GET /v1/sessions answered {status}; attribution unverified")
+        return
+    LIVE_SESSIONS.clear()
+    for row in body:
+        if isinstance(row, dict) and row.get("session_id") and this_box(str(row.get("host") or "")):
+            LIVE_SESSIONS[str(row["session_id"])] = row
+    LIVE_READ = True
+    log(f"  {len(LIVE_SESSIONS)} session(s) live on this box, of {len(body)} Envoy knows")
+
+
+def verify_touch_session(envoy: Envoy, touch: dict) -> None:
+    """Check the touch's session id against what is live here, and retarget when it is wrong.
+
+    A report sent to a session id that is not live on this box does not reach a silent owner:
+    it reaches whoever holds that id somewhere else. So a claim that cannot be verified here is
+    replaced by the live owner when one can be named, and the report says what happened.
+    """
+    if not LIVE_READ:
+        refresh_live_sessions(envoy)
+    claim = touch.get("session") or ""
+    if not LIVE_READ:
+        touch["session_note"] = ""
+        return
+    if claim and claim in LIVE_SESSIONS:
+        touch["session_note"] = ""
+        return
+    owner = ""
+    if touch.get("worker_session") and touch["worker_session"] in LIVE_SESSIONS:
+        owner = touch["worker_session"]
+    elif len(LIVE_SESSIONS) == 1:
+        owner = next(iter(LIVE_SESSIONS))
+    touch["session_claim"] = claim
+    touch["session"] = owner
+    if claim and owner:
+        touch["session_note"] = (
+            f" The id {claim} on this scope's processes is not live on this box -- an"
+            " `omp --resume` keeps the session directory's original id, and an inherited"
+            f" OMP_SESSION_ID names whoever started the box -- so this went to {owner}, the live"
+            " owner here."
+        )
+    elif claim:
+        touch["session_note"] = (
+            f" The id {claim} on this scope's processes is not live on this box and no live"
+            " session here could be matched to it, so nobody was told directly."
+        )
+    else:
+        touch["session_note"] = ""
+
+
 # ------------------------------------------------------------------ this machine's omp scopes
 
 
@@ -721,11 +797,17 @@ def wall_text(touch: dict) -> str:
     limit = touch["limit"]
     peak = touch["peak"]
     session = touch.get("session") or ""
+    claim = touch.get("session_claim") or ""
     who = (
         f"session {session}"
         if session
-        else "session UNKNOWN (no session id on any command line in the scope, no transcript open,"
-        " and the worker directory records none yet)"
+        else (
+            f"session UNKNOWN: the id {claim} on its processes is not live on this box and no"
+            " live session here matches it"
+            if claim
+            else "session UNKNOWN (no session id on any command line in the scope, no transcript"
+            " open, and the worker directory records none yet)"
+        )
     )
     worker = touch.get("worker")
     reasons = []
@@ -866,7 +948,8 @@ def wall_touch(
         return None
     pids = scope_tasks(target["cgroup"])
     worker, directory = worker_of(pids)
-    session = worker_session(directory) or session_of(target["pid"])
+    from_worker = worker_session(directory)
+    session = from_worker or session_of(target["pid"])
     memory["reported_at"] = now
     suppressed = int(memory.pop("suppressed", 0))
     # Every process in the scope, not only the three named: the three largest explained 10-29%
@@ -881,6 +964,9 @@ def wall_touch(
         scope=target["scope"],
         key=key,
         session=session,
+        worker_session=from_worker,
+        session_note="",
+        session_claim="",
         worker=worker,
         limit=limit,
         limit_from=target["limit_from"],
@@ -1024,7 +1110,10 @@ def run_once(options: argparse.Namespace) -> int:
             touch = wall_touch(target, walls, options, started, cold_start)
             if touch:
                 walls_hit += 1
-                text = wall_text(touch)
+                # Before the text exists: a report sent to an id that is not live here reaches
+                # whoever holds it elsewhere, not a silent owner.
+                verify_touch_session(envoy, touch)
+                text = wall_text(touch) + (touch.get("session_note") or "")
                 if touch["suppressed"]:
                     text += (
                         f"\nIt also touched the wall {touch['suppressed']} more time(s) inside the"
@@ -1034,8 +1123,8 @@ def run_once(options: argparse.Namespace) -> int:
                     {
                         name: touch[name]
                         for name in (
-                            "at", "scope", "session", "worker", "peak", "limit", "events_delta",
-                            "top", "task_count", "rss_sum", "stats", "current",
+                            "at", "scope", "session", "session_claim", "worker", "peak", "limit",
+                            "events_delta", "top", "task_count", "rss_sum", "stats", "current",
                         )
                     }
                 )
@@ -1046,7 +1135,12 @@ def run_once(options: argparse.Namespace) -> int:
                 log(
                     f"{key}: WALL ({gib(touch['peak'])} peak of {gib(limit)}, memory.events max"
                     f" +{touch['events_delta']}) -> "
-                    + (f"session {touch['session']}" if touch["session"] else "no session id resolved")
+                    + (
+                        f"session {touch['session']}"
+                        + (f" (claim {touch['session_claim']} is not live here)" if touch.get("session_claim") else "")
+                        if touch["session"]
+                        else "no live session on this box could be matched"
+                    )
                 )
                 if options.print_alert:
                     print(text)

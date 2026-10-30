@@ -69,6 +69,31 @@ free space is under (`generic-unmeasured` 150 GB, `build-cache` 84, `registratio
 `nightly-grade` 52, `frozen-drop` 44, `restore` 36, `prepare-staging` 28, `build-stage` 21.6,
 `grade-record` 20.8): that list is the work the farm is already refusing.
 
+**A floor is held to the device it names.** `--max-floor-fraction` (10%) caps every floor at a
+tenth of its own filesystem, and the substitution is logged once, never alerted. On
+sami-leanperf, `/mnt/nvme` is not an array at all — it is the same 247 GB `/dev/root` as `/` —
+so the farm's 84 GB floor was 31.7% of it and the watch alerted at 82% used, flat, on its first
+run, and would have alerted forever. Measured 2026-10-30, the two floors on sami-rocqperf are
+3.6% (`/`, 531 GB) and 2.3% (`/mnt/nvme`, 3.72 TB) of their devices, so neither is held and
+nothing there changed. The farm's per-kind list above is printed only where the floor was not
+held: where it was, the farm's array is not on that machine and the list describes no work.
+
+**Two mounts on one filesystem are watched once**, under the first name given, so a box where
+`/mnt/nvme` is a directory on `/` no longer samples one disk twice and reports it twice.
+
+### Two states, two headlines
+
+| Headline | When | Urgency |
+|---|---|---|
+| `DISK LOW` | free under the floor, with no measurable fall | No deadline. Reclaim it before something starts to write, or fix the floor if that level is normal for the machine |
+| `DISK FILLING` | three confirmations of a fall that reaches zero inside the horizon | A deadline, with the time to full and the writers |
+
+A disk that is not moving is never given a time to full. The first sami-leanperf alert said
+"DISK FILLING … falling 0.0 GB/h over the last 5 min 20 s. At that rate it is 3558 h 42 min from
+full", which is a standing condition dressed as a trend; the same headline for that and for
+sami-rocqperf's real one that night (41.7 GB/h, 41 minutes to full) teaches the reader to skip
+the headline.
+
 `--floor /=400` overrides a floor, for a deliberate test against a scratch threshold or for a
 machine whose disks are not these.
 
@@ -81,12 +106,20 @@ each of the top writers the alert gives the bytes and the hourly equivalent **ov
 15-second sample**, the pid and its age, the **owning agent session**, the working directory when
 it is on the alerting mount, and the largest file it holds open there.
 
-- The session is read from the process, never guessed: `OMP_SESSION_ID` in its environment, else
-  a session id on its command line, else the transcript it holds open
-  (`~/.omp/agent/sessions/**/<stamp>_<session id>.jsonl`), else the same three for an ancestor. A
-  tool subprocess carries its session's environment, so the first test usually answers; an `omp`
-  process itself is the case the other two are for. When none answers, the systemd scope is given
-  instead and the alert says there is no session id.
+- The session is read from the process, never guessed, strongest source first: the lane
+  worker's own `.ossv-workers/<name>/session` (ignored while `session_unconfirmed` sits beside
+  it), else a session id on the nearest ancestor `omp`'s command line, else the transcript it
+  holds open (`~/.omp/agent/sessions/**/<stamp>_<session id>.jsonl`), and `OMP_SESSION_ID`
+  **last**. That variable is inherited: a session that starts a lane box's supervisor over ssh
+  stamps its own id on every process below it for the life of the box, which is how
+  load-swap-watch named 39 `python3` processes on `ossv-agent-repo` as a session running on
+  sami-rocqperf at 2026-10-30T20:17:23Z. The id is then checked against `GET /v1/sessions` on
+  Envoy, filtered to this box's host: one that is not live here says so and names the live
+  owner when the worker's file or a box with exactly one live session can give one. An Envoy
+  that does not answer leaves it unverified and named as before. When nothing names a session,
+  the systemd scope is given instead and the alert says there is no session id.
+- Each writer also carries its **tmux pane**, read once per alert from `tmux list-panes`;
+  neither the pane nor the working directory can be inherited from another machine's session.
 - `/proc/<pid>/io` counts writes to **every** filesystem, not only the one that is filling; it
   also counts rewrites and deleted output. Its displayed number is explicitly labelled
   **write traffic** and a single 15-second sample — not disk growth and never the number used for

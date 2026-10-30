@@ -218,7 +218,7 @@ class RoutingTest(unittest.TestCase):
         original_consumers = WATCH.consumers_text
         WATCH.Envoy = lambda timeout=8.0: self.envoy
         WATCH.sample_box = lambda: dict(self.sample, at=time.time())
-        WATCH.consumers_text = lambda options: "consumers: (none in this test)"
+        WATCH.consumers_text = lambda options, envoy=None: "consumers: (none in this test)"
 
         def restore() -> None:
             WATCH.Envoy = original_envoy

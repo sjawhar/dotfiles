@@ -83,6 +83,9 @@ UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 # An ossv lane worker's name, from the path its process stands in or its brief:
 # /home/sami/work/cold/workers/c-libc-str.md, /home/sami/work/workers/c-libc-str/...
 WORKER_RE = re.compile(r"/workers/([A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.md|\.jsonl|/|\s|\Z)")
+# The lane worker's STATE directory, which holds its live session id. `\S*` would swallow omp's
+# `@` prompt-file prefix into the path, so the directory starts at a `/` and holds no `@`.
+OSSV_WORKER_RE = re.compile(r"(?P<dir>/[^\s@]*?/\.ossv-workers/(?P<name>[^/\s]+))(?:/|\s|$)")
 
 # Where the state file goes, as disk-fill-watch places its own: the big disk on an agent box,
 # ~/.local/state on a machine without one.
@@ -350,6 +353,55 @@ def cpu_ticks_of(pid: int) -> int | None:
         return None
 
 
+def _cwd_of(pid: int) -> str:
+    """The directory a process stands in, or "". The disk-writer watch names this for the same
+    reason: on a lane box the working directory says which lane's tree the work is in, which
+    survives every inherited environment variable."""
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return ""
+
+
+# pane pid -> "<tmux session>:<window>.<pane>", read once per run. A lane box runs one tmux
+# window per worker, so the pane is the address a person uses to look at the work.
+PANES: dict[int, str] = {}
+PANES_READ = False
+
+
+def refresh_panes() -> None:
+    global PANES_READ
+    PANES_READ = True
+    try:
+        done = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}:#{window_name}.#{pane_index}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if done.returncode != 0:
+        return
+    for line in done.stdout.splitlines():
+        pane_pid, _, label = line.partition(" ")
+        if pane_pid.isdigit() and label:
+            PANES[int(pane_pid)] = label
+
+
+def pane_of(pid: int, depth: int = 12) -> str:
+    """The tmux pane a process runs under, found by walking up to a known pane pid."""
+    here = pid
+    for _ in range(depth):
+        if here <= 1:
+            break
+        if here in PANES:
+            return PANES[here]
+        here = ppid_of(here)
+    return ""
+
+
 def environ_of(pid: int) -> dict[str, str]:
     found = {}
     try:
@@ -385,8 +437,108 @@ def session_from_fds(pid: int, limit: int = 128) -> str:
     return ""
 
 
-def session_of(pid: int, depth: int = 12) -> str:
-    """The agent session a process belongs to, read from the process and never guessed."""
+# The sessions Envoy has live on THIS box, filled at most once per run and only when an alert
+# is about to name processes. Empty with LIVE_READ False means "not looked up", which must read
+# as "cannot verify" and never as "nothing is live": an Envoy that is down would otherwise make
+# every process on the box look misattributed.
+LIVE_SESSIONS: dict[str, dict] = {}
+LIVE_READ = False
+
+# How a session id reached this process. The environment is the weakest: it is INHERITED, so a
+# session that started the box's supervisor over ssh stamps its own id on every descendant for
+# the life of the box. On 2026-10-30 at 20:17:23Z that made this watch name 39 python3
+# processes on ossv-agent-repo as 01a14b36 (VERIFY, which runs on sami-rocqperf) when the live
+# owner was the repo lane 01a14b84.
+SOURCE_PHRASE = {
+    "worker": "the lane worker's own session file",
+    "cmdline": "the session file it was resumed from",
+    "fd": "the transcript it holds open",
+    "environ": "the process environment (started it)",
+}
+
+
+def this_box(host: str) -> bool:
+    """Whether an Envoy session row's host is this machine.
+
+    A lane VM registers through the hub under its FQDN while `socket.gethostname()` can be
+    either form, so the first label decides.
+    """
+    if not host:
+        return False
+    mine = socket.gethostname()
+    return host == mine or host.split(".")[0] == mine.split(".")[0]
+
+
+def refresh_live_sessions(envoy: "Envoy") -> None:
+    """Ask Envoy which sessions are live on this box. One GET, at most once per run."""
+    global LIVE_READ
+    status, body = envoy.request("GET", "/v1/sessions")
+    if status != 200 or not isinstance(body, list):
+        log(f"  live sessions unavailable: GET /v1/sessions answered {status}; attribution unverified")
+        return
+    LIVE_SESSIONS.clear()
+    for row in body:
+        if isinstance(row, dict) and row.get("session_id") and this_box(str(row.get("host") or "")):
+            LIVE_SESSIONS[str(row["session_id"])] = row
+    LIVE_READ = True
+    log(f"  {len(LIVE_SESSIONS)} session(s) live on this box, of {len(body)} Envoy knows")
+
+
+def worker_dir_of(pid: int, depth: int = 8) -> str:
+    """The `.ossv-workers/<name>` directory a process belongs to, from its ancestry, or "".
+
+    `ossv-worker` starts each worker with `@<root>/.ossv-workers/<name>/message-*.md` and keeps
+    the worker's live session id in `<that dir>/session`, which is the only lane-local record
+    that follows a resume.
+    """
+    here = pid
+    for _ in range(depth):
+        if here <= 1:
+            break
+        for text in (cmdline_of(here), _cwd_of(here) + "/"):
+            found = OSSV_WORKER_RE.search(text)
+            if found:
+                return found.group("dir")
+        here = ppid_of(here)
+    return ""
+
+
+def worker_dir_session(directory: str) -> str:
+    """The session id `ossv-worker` recorded for that worker, unless it is still unconfirmed."""
+    if not directory:
+        return ""
+    try:
+        if (Path(directory) / "session_unconfirmed").exists():
+            return ""
+        found = UUID_RE.findall((Path(directory) / "session").read_text())
+    except OSError:
+        return ""
+    return found[0] if found else ""
+
+
+def session_claim(pid: int, depth: int = 12) -> tuple[str, str]:
+    """(the session id this process claims, where it came from), strongest source first.
+
+    The environment comes LAST and never first. It is inherited across ssh, tmux and every
+    exec, so it names whoever started the ancestor, which on a lane box is a session on another
+    machine entirely. A process's own `omp` -- its resume path or the transcript it holds open
+    -- and the lane worker's session file are about the process, not about its history.
+    """
+    worker_session = worker_dir_session(worker_dir_of(pid))
+    if worker_session:
+        return worker_session, "worker"
+    here = pid
+    for _ in range(depth):
+        if here <= 1:
+            break
+        if comm_of(here) in ("omp", "claude", "node", "bun"):
+            found = UUID_RE.findall(cmdline_of(here))
+            if found:
+                return found[0], "cmdline"
+            found_fd = session_from_fds(here)
+            if found_fd:
+                return found_fd, "fd"
+        here = ppid_of(here)
     here = pid
     for _ in range(depth):
         if here <= 1:
@@ -394,16 +546,46 @@ def session_of(pid: int, depth: int = 12) -> str:
         environment = environ_of(here)
         for key in ("OMP_SESSION_ID", "CLAUDE_SESSION_ID"):
             if environment.get(key):
-                return environment[key]
-        if comm_of(here) in ("omp", "claude", "node", "bun"):
-            found = UUID_RE.findall(cmdline_of(here))
-            if found:
-                return found[0]
-            found_fd = session_from_fds(here)
-            if found_fd:
-                return found_fd
+                return environment[key], "environ"
         here = ppid_of(here)
+    return "", ""
+
+
+def session_of(pid: int, depth: int = 12) -> str:
+    """The agent session a process belongs to, read from the process and never guessed."""
+    return session_claim(pid, depth)[0]
+
+
+def live_owner(pid: int) -> str:
+    """The live session on this box that actually owns this process, or "".
+
+    Its lane worker's session file first. Failing that, a box running exactly one live session
+    has only one possible owner, which is the shape of ossv-agent-repo and ossv-agent-git; a box
+    running several lanes has no such answer and this says so rather than picking one.
+    """
+    from_worker = worker_dir_session(worker_dir_of(pid))
+    if from_worker and from_worker in LIVE_SESSIONS:
+        return from_worker
+    if LIVE_READ and len(LIVE_SESSIONS) == 1:
+        return next(iter(LIVE_SESSIONS))
     return ""
+
+
+def session_phrase(pid: int) -> str:
+    """How one process's session is named in an alert, verified against what is live here."""
+    claim, source = session_claim(pid)
+    if claim and (not LIVE_READ or claim in LIVE_SESSIONS):
+        return f"session {claim}"
+    owner = live_owner(pid)
+    if claim:
+        text = f"session {claim} from {SOURCE_PHRASE.get(source, source)} (not live on this box)"
+    else:
+        text = "session unknown (no process in its ancestry names one)"
+    if owner and owner != claim:
+        text += f"; the live owner on this box is {owner}"
+    elif not owner:
+        text += "; no live session on this box could be matched to it"
+    return text
 
 
 def worker_of(pid: int, depth: int = 6) -> str:
@@ -503,17 +685,29 @@ def by_command(rows: list[dict], field: str) -> list[tuple[str, float, int]]:
 
 
 def describe(pid: int) -> str:
-    """One process, named the way a reader can act on it: lane worker, session, age."""
+    """One process, named the way a reader can act on it.
+
+    Lane, verified session, working directory, tmux pane and age. The directory and the pane
+    are here because they are properties of the process itself: an inherited environment
+    variable can name the wrong session, but the tree a process stands in and the pane it runs
+    under cannot be inherited from a session on another machine.
+    """
     parts = []
     worker = worker_of(pid)
     if worker:
         parts.append(f"lane {worker}")
-    session = session_of(pid)
-    if session:
-        parts.append(f"session {session}")
-    if not parts:
-        command = cmdline_of(pid) or comm_of(pid)
-        parts.append(command[:70] if command else "unknown")
+    parts.append(session_phrase(pid))
+    cwd = _cwd_of(pid)
+    if cwd:
+        parts.append(f"cwd {cwd}")
+    pane = pane_of(pid)
+    if pane:
+        parts.append(f"pane {pane}")
+    elif PANES_READ:
+        parts.append("no tmux pane")
+    command = cmdline_of(pid) or comm_of(pid)
+    if command:
+        parts.append(command[:70])
     age = age_of(pid)
     if age:
         parts.append(f"up {human_time(age)}")
@@ -533,8 +727,13 @@ def agent_census() -> dict:
     return {"omp": count, "rss": rss, "swap": swap}
 
 
-def consumers_text(options: argparse.Namespace) -> str:
+def consumers_text(options: argparse.Namespace, envoy: "Envoy | None" = None) -> str:
     """The body of an alert: who is using the CPU now, and who holds the swap."""
+    # Both lookups happen here and not every period: this function runs only when an alert is
+    # about to name processes. One `tmux list-panes`, one Envoy GET.
+    refresh_panes()
+    if envoy is not None:
+        refresh_live_sessions(envoy)
     cpu_rows, span = sample_cpu(options.sample_seconds)
     swap_rows = sample_swap()
     cores = os.cpu_count() or 1
@@ -878,7 +1077,7 @@ def run_once(options: argparse.Namespace) -> int:
         # conditions speak in it.
         nonlocal consumers
         if not consumers:
-            consumers = consumers_text(options)
+            consumers = consumers_text(options, envoy)
         return consumers
 
     for kind in ("cpu", "swap", "memory"):
@@ -1057,6 +1256,12 @@ def main() -> int:
     options = parser.parse_args()
 
     if options.consumers:
+        # The hand-run path names processes too, so it needs the same two lookups.
+        refresh_panes()
+        try:
+            refresh_live_sessions(Envoy(timeout=options.http_timeout))
+        except SystemExit as error:
+            log(f"  live sessions unavailable: {error}; attribution unverified")
         if options.json:
             cpu_rows, span = sample_cpu(options.sample_seconds)
             print(
