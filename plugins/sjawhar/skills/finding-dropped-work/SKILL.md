@@ -20,7 +20,7 @@ An agent under load forgets what it was asked, closes a todo before the work shi
 ## How
 
 1. Start one fresh read-only subagent per transcript (on Oh My Pi: `task` with the default agent; it needs a shell for `tq` and `dispatch read`). Give it the brief in [audit-brief.md](audit-brief.md) word for word, with the session id, the window and a report path filled in. The brief carries the `tq` recipe that finds the transcript and the user's messages.
-2. Read the report yourself. Open the FILE:LINE behind each DROPPED, WAITING-UNREPORTED and LOCAL-ONLY row before you act on it.
+2. Read the report yourself. Open the FILE:LINE behind each DROPPED, UNSURFACED, WAITING-UNREPORTED and LOCAL-ONLY row before you act on it.
 
 The report lists:
 
@@ -41,6 +41,7 @@ Each row that is not DONE leaves the audit with one of these, the same hour:
 | It takes longer, or someone else does it | Put it on a Dispatch issue that a session claims. The spec says what done means (deployed, merged, measured) and a date. |
 | It waits on the user | Open a Dispatch ask on its issue (`skill://dispatch`). A chat question, a note, a peer message, a comment on an answered ask or a review request is not an ask. |
 | A Dispatch record names a local file | Upload the file as an artifact on that issue and link it. |
+| The result sits in a document, artifact or chat line with no ask | Open an ask that links the result and asks the user's next step with it: an ask block at the end of that document, else a `dispatch ask`. An artifact notifies nobody. |
 | Dropped on purpose | Say so to the requester, with the reason, on the issue. |
 
 Then report done, with the audit's counts: rows found, rows closed by each action.
