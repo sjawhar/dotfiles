@@ -14,7 +14,7 @@ set -euo pipefail
 # same telemetry keys by hand, and a helper command that runs $HOME/.config/agent-spend/otel-headers-helper, which the
 # setup writes on each machine; where the setup never ran it exits 1, so Claude Code sends nothing. Sourced by
 # install.sh, so it never exits.
-AGENT_SPEND_SETUP_REF=88bd7e0de87842632c4691cc5ed4e3869cd9414c
+AGENT_SPEND_SETUP_REF=6003857661b7148998363852ae3e4e2f77da2fce
 
 agent_spend_setup() {
     local dotfiles="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
