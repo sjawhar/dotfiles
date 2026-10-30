@@ -12,15 +12,20 @@
 # than trimmed: none of these tools can trim to a size, and everything removed is re-downloadable
 # or rebuildable. Nothing here is a working copy.
 #
-# NVME_CACHE_ROOT, UV_CACHE_CAP_BYTES, CARGO_CACHE_CAP_BYTES and GOMODCACHE_CAP_BYTES override the
-# defaults, so a test can run the unit against scratch directories. --dry-run reports and cleans
-# nothing.
+# NVME_CACHE_ROOT and each <NAME>_CACHE_CAP_BYTES below override the defaults, so a test can run
+# the unit against scratch directories. --dry-run reports and cleans nothing.
 set -euo pipefail
 
 root="${NVME_CACHE_ROOT:-/mnt/nvme/$(id -un)}"
 uv_cap="${UV_CACHE_CAP_BYTES:-40000000000}"
 cargo_cap="${CARGO_CACHE_CAP_BYTES:-20000000000}"
 modcache_cap="${GOMODCACHE_CAP_BYTES:-40000000000}"
+hf_cap="${HF_CACHE_CAP_BYTES:-20000000000}"
+playwright_cap="${PLAYWRIGHT_CACHE_CAP_BYTES:-10000000000}"
+mise_cap="${MISE_CACHE_CAP_BYTES:-5000000000}"
+puppeteer_cap="${PUPPETEER_CACHE_CAP_BYTES:-10000000000}"
+pip_cap="${PIP_CACHE_CAP_BYTES:-10000000000}"
+bun_cap="${BUN_CACHE_CAP_BYTES:-20000000000}"
 dry=""
 [[ "${1:-}" == --dry-run ]] && dry=1
 
@@ -99,5 +104,53 @@ if [[ -d "$modcache_dir" && "$modcache_dir" == "$root"/* ]]; then
         echo "nvme-cache-cap: gomodcache $modcache_dir was $size bytes, over the cap of $modcache_cap; cleaned; now $(size_of "$modcache_dir") bytes"
     fi
 fi
+
+# The six caches landed on 2026-10-30 (dispatch://INFRA-6: 20 GB of them on a root disk that hit
+# 0 bytes free) are each a single directory one tool fills and refills from the network, so one
+# pass fits them all: under the cap, report; over it, run the tool's own cleaner, or remove the
+# directory when the tool has none. The cleaner is given the directory in the variable the tool
+# reads, which is how every one of them was proved before it was landed.
+cap_cache() { # cap_cache NAME VAR DIR CAP [CLEANER...]
+    local name="$1" var="$2" dir="$3" cap="$4"
+    shift 4
+    [[ -d "$dir" && "$dir" == "$root"/* ]] || return 0
+    local size
+    size="$(size_of "$dir")"
+    if ((size <= cap)); then
+        report "$name" "$dir" "$size" "$cap"
+    elif (($# == 0)); then
+        if [[ -n "$dry" ]]; then
+            echo "nvme-cache-cap: $name $dir is $size bytes, over the cap of $cap; $name has no cleaner of its own, would remove the directory"
+        else
+            rm -rf -- "$dir"
+            echo "nvme-cache-cap: $name $dir was $size bytes, over the cap of $cap, and has no cleaner of its own; removed the directory"
+        fi
+    elif [[ -n "$dry" ]]; then
+        echo "nvme-cache-cap: $name $dir is $size bytes, over the cap of $cap; would run $var=$dir $*"
+    elif ! command -v "$1" >/dev/null 2>&1; then
+        echo "nvme-cache-cap: $name $dir is $size bytes, over the cap of $cap, and $1 is not on PATH" >&2
+        status=1
+    else
+        env "$var=$dir" "$@" >/dev/null
+        echo "nvme-cache-cap: $name $dir was $size bytes, over the cap of $cap; ran $*; now $(size_of "$dir" 2>/dev/null || echo 0) bytes"
+    fi
+}
+
+# huggingface_hub has no non-interactive cleaner: `hf cache delete` (huggingface-cli delete-cache)
+# asks which revisions to drop, so the pass removes the directory. Models come back from the hub.
+cap_cache huggingface HF_HOME "${HF_HOME:-$root/cache/huggingface}" "$hf_cap"
+# Playwright's `uninstall` lives in the per-project package, not on PATH here, and this shell sets
+# PLAYWRIGHT_SKIP_BROWSER_GC=1 (.bashrc) so nothing else trims it either: the pass removes the
+# directory and the next `playwright install` re-downloads the browsers a checkout asks for.
+cap_cache ms-playwright PLAYWRIGHT_BROWSERS_PATH "${PLAYWRIGHT_BROWSERS_PATH:-$root/cache/ms-playwright}" "$playwright_cap"
+# `mise cache clear` removes the directory; it holds version lists and release metadata only.
+cap_cache mise MISE_CACHE_DIR "${MISE_CACHE_DIR:-$root/cache/mise}" "$mise_cap" mise cache clear
+# @puppeteer/browsers has no size or age cleaner, only `uninstall` of a named build, so the pass
+# removes the directory; puppeteer re-downloads the build its package pins on the next run.
+cap_cache puppeteer PUPPETEER_CACHE_DIR "${PUPPETEER_CACHE_DIR:-$root/cache/puppeteer}" "$puppeteer_cap"
+# `pip cache purge` empties the wheel and http caches, which is the whole directory.
+cap_cache pip PIP_CACHE_DIR "${PIP_CACHE_DIR:-$root/cache/pip}" "$pip_cap" pip cache purge
+# `bun pm cache rm` removes the install cache directory, bunx packages included.
+cap_cache bun BUN_INSTALL_CACHE_DIR "${BUN_INSTALL_CACHE_DIR:-$root/cache/bun}" "$bun_cap" bun pm cache rm
 
 exit "$status"
