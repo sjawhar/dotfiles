@@ -38,7 +38,7 @@
 //     rejected the session, and restoring it would fail again every hour. A fallback off a model omp
 //     started the session on in place of the configured one is armed like any other and restores
 //     that replacement: omp's own restore toward the configured model is often pinned or absent, and
-//     the replacement ranks above the model the fallback reached (served-model-notice announces it).
+//     the replacement ranks above the model the fallback reached.
 //   * It asks the auth store for the configured model's usage health before restoring. The same
 //     event fires when omp's usage preflight moves a session off a provider whose quota window is
 //     spent (the Codex 7-day window, for one). Restoring then sent one request to a model that
