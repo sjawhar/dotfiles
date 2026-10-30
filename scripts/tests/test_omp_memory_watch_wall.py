@@ -340,6 +340,25 @@ class WallAdviceTest(unittest.TestCase):
         self.assertIn("page cache", advice)
         self.assertNotIn("ONE RUNAWAY", advice)
 
+    def test_the_lever_follows_the_dominant_field(self) -> None:
+        """A scope whose memory is anonymous must not be told to cut its file traffic."""
+        page_cache = WATCH.wall_advice(self.touch())
+        self.assertIn("this lane's file traffic", page_cache)
+        anonymous = WATCH.wall_advice(
+            self.touch(stats={"anon": 18 * GIB, "file": GIB, "shmem": 0, "kernel": 0, "sock": 0})
+        )
+        self.assertIn("already ended", anonymous)
+        self.assertNotIn("file traffic", anonymous)
+        shared = WATCH.wall_advice(
+            self.touch(stats={"anon": GIB, "file": GIB, "shmem": 18 * GIB, "kernel": 0, "sock": 0})
+        )
+        self.assertIn("/dev/shm", shared)
+        self.assertNotIn("file traffic", shared)
+
+    def test_a_fallen_back_scope_says_the_split_describes_it_now(self) -> None:
+        advice = WATCH.wall_advice(self.touch(current=2 * GIB))
+        self.assertIn("not as it was at the ceiling", advice)
+
     def test_shmem_is_named_when_it_is_the_dominant_field(self) -> None:
         advice = WATCH.wall_advice(
             self.touch(stats={"anon": GIB, "file": 2 * GIB, "shmem": 18 * GIB, "kernel": 0, "sock": 0})

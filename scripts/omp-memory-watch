@@ -379,6 +379,21 @@ STAT_MEANING = {
     "slab": "kernel slab, part of the kernel number",
     "sock": "socket buffers",
 }
+# The lever that field answers to. A generic "reduce your file traffic" under a scope whose
+# memory is anonymous is advice for a different scope, so each field names its own.
+STAT_LEVER = {
+    "anon": " Anonymous memory IS process memory, so a low RSS sum with a high anon number means"
+    " the processes that held it have already ended: look at what this lane ran, not at what it"
+    " runs now.",
+    "file": " Page cache is charged to the scope that reads or writes the file. The lever is this"
+    " lane's file traffic -- big checkouts, build trees, logs, archives -- not its lane count.",
+    "shmem": " tmpfs and shared memory stay charged until they are deleted. Look for what this"
+    " lane wrote under /dev/shm or another tmpfs and never removed.",
+    "kernel": " Kernel memory grows with the number of processes, mappings and open files, so the"
+    " lever is how many of those this lane keeps at once, not how large any one of them is.",
+    "sock": " Socket buffers this large mean a stalled or very fast stream: look at what this"
+    " lane is downloading or piping.",
+}
 # A scope is one runaway process when the named processes hold this much of its peak, and a
 # crowd when every process together does. Between and below them the memory is not in any
 # process's RSS at all, which is what the memory.stat split answers.
@@ -428,25 +443,25 @@ def wall_advice(touch: dict) -> str:
             " run fewer lanes or fewer tool subprocesses at a time."
         )
     name, size = dominant_stat(touch.get("stats") or {})
-    where = (
-        f" The largest is {name} at {gib(size)}: {STAT_MEANING.get(name, 'see memory.stat')}."
-        if name
-        else " memory.stat could not be read, so this run cannot say where it is."
-    )
-    fell_back = (
-        f" The scope has since fallen back to {gib(current)} of memory.current, so the peak was a"
-        " burst and nothing on it now holds that memory."
-        if current < peak * 0.5
-        else ""
-    )
+    fell_back = current < peak * 0.5
+    if not name:
+        where = " memory.stat could not be read, so this run cannot say where it is."
+    else:
+        where = (
+            f" The largest field of its memory.stat {'now' if fell_back else ''} is {name} at"
+            f" {gib(size)}: {STAT_MEANING.get(name, 'see memory.stat')}.{STAT_LEVER.get(name, '')}"
+        )
+    if fell_back:
+        where += (
+            f" The scope has since fallen back to {gib(current)} of memory.current, so the peak"
+            " was a burst: nothing on it now holds that memory, and the split above describes"
+            " the scope as it is now, not as it was at the ceiling. Look at what this lane had"
+            f" just started when it touched the wall at {iso(touch.get('at'))}."
+        )
     return (
         f"NOT IN ANY PROCESS: all {count} processes together hold only {gib(rss_sum)},"
         f" {100 * rss_sum / peak:.0f}% of the peak, so hunting a process is the wrong move."
         + where
-        + fell_back
-        + " Page cache and shmem are charged to the scope that touches them: the lever is the"
-        " file traffic (big checkouts, build trees, logs, /dev/shm) this lane does, not its"
-        " lane count."
     )
 
 
