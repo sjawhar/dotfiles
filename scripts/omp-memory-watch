@@ -86,6 +86,9 @@ DEFAULT_STATE = (
 )
 DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 SESSION_ROOT = Path.home() / ".omp/agent/sessions"
+# Where this copy runs from. A VM runs it from a versioned path under /opt, never from the
+# dotfiles checkout, and an alert that named the checkout sent its reader to the wrong file.
+SELF_PATH = os.path.realpath(__file__)
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 GIB = 1073741824
 
@@ -615,7 +618,7 @@ def alert_text(scope: str, incident: dict, now: float, kind: str) -> str:
         " exit record -- about 40 of them on 2026-10-27T05:55:14Z.",
         "This watch only detects. It kills nothing, sheds nothing and restarts nothing: the"
         " shedding is yours, on your own terms.",
-        "From omp-memory-watch (~/.dotfiles/scripts/omp-memory-watch) on "
+        f"From omp-memory-watch ({SELF_PATH}) on "
         f"{socket.gethostname()}, a systemd --user timer every 30 s.",
     ]
     return "\n".join(lines)
@@ -680,7 +683,7 @@ def wall_text(touch: dict) -> str:
     lines.append(
         f"This watch only detects; it kills nothing. One report per scope per"
         f" {human(touch.get('cooldown') or 900)}. From omp-memory-watch"
-        f" (~/.dotfiles/scripts/omp-memory-watch) on {socket.gethostname()}, a systemd --user"
+        f" ({SELF_PATH}) on {socket.gethostname()}, a systemd --user"
         " timer every 30 s."
     )
     return "\n".join(lines)
