@@ -45,6 +45,10 @@ before handing the call to the real one.
   killer took two unrelated pods with it; inside a scope only that session dies. `MemoryHigh` is
   deliberately not set: it throttles a session into reclaim instead of killing it, which looks
   like a lane that is thinking.
+  A named profile whose `agent/models.overlay.yml` exists is a shared profile: the shim links
+  all of the default's state into it and rebuilds its `models.yml` as the default's merged with the
+  overlay, on every launch, under a 30 s lock; a real entry on both sides stops the launch
+  (`omp/AGENTS.md`, "A shared profile").
 - **`claude`** and **`codex`** (a link to `claude`) export the model-spend environment of
   `scripts/agent-spend-env.sh` (dispatch://INFRA-165), then exec the first real binary of that name
   past this dir on PATH, skipping mise's shims dir and any file whose real path is in a `shims/` dir,
