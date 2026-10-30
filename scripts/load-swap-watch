@@ -22,18 +22,23 @@ What one run does, from /proc only, with no model call and no subprocess on the 
 
   1. Record one sample of CPU pressure, swap, memory and the run queue. Every run appends,
      whether or not anything is wrong: a silent log cannot be told from a dead watch.
-  2. Decide on PSI, not on load average. Load counts uninterruptible sleep, so load 221 may be
-     a box waiting on a disk rather than one short of CPU, and the two have different fixes.
-     `/proc/pressure/cpu` `some` counts only time tasks spent runnable and waiting for a CPU,
-     which is exactly the lane's lost minutes. The alert carries `io some` and `memory full`
-     beside it so the reader can see which of the three it is. On the night above they were
-     80% cpu, 23% io, 0.2% memory: a CPU shortage, not an I/O stall.
-  3. Compute swap time-to-exhaustion from its own samples, the way disk-fill-watch computes
-     time to full, and treat a swapfile with nothing left as a crossing in its own right: at
-     that point the kernel can no longer page anything out, so the next pressure lands on the
-     OOM killer.
-  4. Hold a crossing for the grace window before alerting, so a build burst does not fire it.
-  5. Name the consumers. CPU is attributed by a short delta of per-process CPU time, never by
+  2. Judge each condition on its own, and say each on its own. CPU and swap are different
+     states with different actions, and one headline for both overstates whichever half has
+     recovered: on 2026-10-30T01:32Z an escalation said "STILL OUT OF CPU+SWAP" about a box
+     carrying load 27 on 32 cores at 7% CPU pressure, because the CPU half had been true half
+     an hour earlier. Each condition now has its own crossing, grace, alert, escalation and
+     clear.
+  3. The CPU rule asks two things, because either alone is wrong. PSI (`cpu some avg60`, time
+     tasks spent runnable and waiting for a CPU) must be at or over CPU_STALL, AND the load
+     must be over the core count. Load alone counts uninterruptible sleep, so load 221 may be a
+     box waiting on a disk; PSI alone called that 7% box starved. The alert carries `io some`
+     and `memory full` beside it so the reader can see which of the three it is.
+  4. The swap rule asks nothing about CPU. A swapfile with nothing left is worth saying on an
+     idle box: it is a statement about the next memory squeeze, not about now, since from there
+     the kernel's reclaim has nowhere to go but the OOM killer. Time to exhaustion comes from
+     this watch's own samples, the way disk-fill-watch computes time to full.
+  5. Hold a crossing for the grace window before alerting, so a build burst does not fire it.
+  6. Name the consumers. CPU is attributed by a short delta of per-process CPU time, never by
      one `ps` reading, because the processes eating this box are thousands of short-lived
      children. Swap is attributed by `VmSwap` per process. Both are grouped by command and by
      the agent session or lane worker that owns them, so the alert says "115 workers, 181 GiB
@@ -87,6 +92,16 @@ DEFAULT_STATE = (
     if os.access("/mnt/nvme/sami/tmp", os.W_OK)
     else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "load-swap-watch/state.json"
 )
+
+# The CPU bar, taken from the readings of 2026-10-29/30 rather than from a round number, and
+# paired with a load over the core count (see verdict). Healthy boxes measured: ossv-agent-open
+# at 01:32Z, cpu some avg60 7% at load 27 on 32 cores, answering normally; sami-leanperf idle,
+# 0% at load 1 on 160. Starved boxes measured: ossv-agent-open during the six-lane incident,
+# 80% at load 251 on 32; sami-rocqperf through the night, 42% to 65% at load 204-310 on 64, its
+# own lanes visibly slow at the low end; ossv-agent-open2 at 01:32Z, 55% at load 76 on 32. The
+# lowest starved reading is 42% and the highest healthy one is 7%, so the bar goes in that
+# empty band, below every starved reading with margin and five times the highest healthy one.
+CPU_STALL = 35.0
 
 CLOCK_TICK = os.sysconf("SC_CLK_TCK")
 
@@ -613,72 +628,109 @@ def swap_drain_rate(samples: list[list[float]], window: float) -> tuple[float | 
 # ------------------------------------------------------------------------------- the decision
 
 
+# Each condition is judged apart and said apart. On 2026-10-30T01:32Z an escalation from
+# ossv-agent-open read "STILL OUT OF CPU+SWAP" while that box carried load 27 on 32 cores with
+# cpu some avg60 at 7%: a working box. The swap half was true and the CPU half had recovered
+# half an hour before, because the headline named the union of everything the crossing had ever
+# been rather than what was true at the time it spoke. A headline that overstates one half
+# makes the next true alert cheaper to dismiss, which on these boxes is expensive: six lanes on
+# that same machine lost an hour the night before by reading a working box as frozen.
+HEADLINE = {
+    "cpu": "BOX SHORT OF CPU",
+    "swap": "BOX OUT OF SWAP",
+    "memory": "BOX SHORT OF MEMORY",
+}
+STILL = {
+    "cpu": "STILL SHORT OF CPU",
+    "swap": "STILL OUT OF SWAP",
+    "memory": "STILL SHORT OF MEMORY",
+}
+
+
 def verdict(now: dict, samples: list[list[float]], options: argparse.Namespace) -> dict:
-    """Is this box short of CPU, or out of swap, or short of memory? With the reasons."""
+    """What this box is short of, condition by condition, each with its own reasons."""
     cores = now["cores"]
     cpu_some = now["cpu"].get("some_avg60")
-    reasons = []
-    kinds = []
+    findings: dict[str, dict] = {}
 
+    # Two gates, because either on its own is wrong here. PSI alone called ossv-agent-open
+    # starved at 7%; the run queue alone counts uninterruptible sleep and so cannot tell a box
+    # short of CPU from one waiting on a disk. A load at or under the core count is a box whose
+    # work fits on its cores, whatever its pressure reads.
     if cpu_some is not None:
-        if cpu_some >= options.cpu_stall:
-            reasons.append(
-                f"cpu pressure some avg60 is {cpu_some:.0f}%, at or over the {options.cpu_stall:.0f}% rule:"
-                f" that share of the last minute had a task runnable and waiting for a CPU"
-            )
-            kinds.append("cpu")
+        if cpu_some >= options.cpu_stall and now["load1"] > cores:
+            findings["cpu"] = {
+                "reasons": [
+                    f"cpu pressure some avg60 is {cpu_some:.0f}%, at or over the"
+                    f" {options.cpu_stall:.0f}% rule, with load {now['load1']:.0f} over"
+                    f" {cores} cores: that share of the last minute had a task runnable and"
+                    f" waiting for a CPU, on a box carrying more than it has cores"
+                ]
+            }
     elif now["procs_running"] >= options.queue_per_core * cores:
         # A kernel without PSI. The run queue alone is a coarser instrument, so it is the
         # fallback and never the primary: it says how many want a CPU, not how long they waited.
-        reasons.append(
-            f"no PSI on this kernel; {now['procs_running']} runnable processes on {cores} cores,"
-            f" at or over the {options.queue_per_core:.1f} per core fallback rule"
-        )
-        kinds.append("cpu")
+        findings["cpu"] = {
+            "reasons": [
+                f"no PSI on this kernel; {now['procs_running']} runnable processes on {cores}"
+                f" cores, at or over the {options.queue_per_core:.1f} per core fallback rule"
+            ]
+        }
 
     drain, drain_window = swap_drain_rate(samples, options.rate_window)
     time_to_exhaustion = None
     if drain and drain > 0 and now["swap_free"] > 0:
         time_to_exhaustion = now["swap_free"] / drain
+    # The swap rule asks nothing about CPU. Swap with nothing left is a statement about the next
+    # memory squeeze, not about this minute, and it is worth saying on a box that is otherwise
+    # idle: from there the kernel's next reclaim has nowhere to go but the OOM killer.
     if now["swap_total"]:
         if now["swap_used_fraction"] >= options.swap_used:
-            reasons.append(
-                f"swap is {100 * now['swap_used_fraction']:.1f}% used ({gib(now['swap_free'])} free of"
-                f" {gib(now['swap_total'])}), at or over the {100 * options.swap_used:.0f}% rule"
-            )
-            kinds.append("swap")
+            findings["swap"] = {
+                "reasons": [
+                    f"swap is {100 * now['swap_used_fraction']:.1f}% used ({gib(now['swap_free'])}"
+                    f" free of {gib(now['swap_total'])}), at or over the"
+                    f" {100 * options.swap_used:.0f}% rule"
+                ]
+            }
         elif time_to_exhaustion is not None and time_to_exhaustion < options.horizon:
-            reasons.append(
-                f"swap is draining at {gib(drain * 3600)}/h over the last {human_time(drain_window)},"
-                f" {human_time(time_to_exhaustion)} from exhaustion"
-            )
-            kinds.append("swap")
+            findings["swap"] = {
+                "reasons": [
+                    f"swap is draining at {gib(drain * 3600)}/h over the last"
+                    f" {human_time(drain_window)}, {human_time(time_to_exhaustion)} from exhaustion"
+                ]
+            }
 
     if now["mem_available"] and now["mem_available"] < options.mem_floor:
-        reasons.append(
-            f"MemAvailable is {gib(now['mem_available'])}, under the {gib(options.mem_floor)} floor"
-        )
-        kinds.append("memory")
+        findings["memory"] = {
+            "reasons": [
+                f"MemAvailable is {gib(now['mem_available'])}, under the"
+                f" {gib(options.mem_floor)} floor"
+            ]
+        }
 
     return {
-        "crossing": bool(kinds),
-        "kinds": kinds,
-        "reasons": reasons,
+        "crossing": bool(findings),
+        "findings": findings,
+        "kinds": sorted(findings),
+        "reasons": [reason for found in findings.values() for reason in found["reasons"]],
         "time_to_exhaustion": time_to_exhaustion,
         "swap_drain": drain,
         "swap_drain_window": drain_window,
     }
 
 
-def clears(now: dict, options: argparse.Namespace) -> bool:
-    """Hysteresis: a crossing clears well clear of what opened it, never on the threshold."""
-    cpu_some = now["cpu"].get("some_avg60")
-    if cpu_some is not None and cpu_some >= options.cpu_stall * options.clear_factor:
-        return False
-    if now["swap_total"] and now["swap_used_fraction"] >= options.swap_used * options.clear_factor:
-        return False
-    if now["mem_available"] and now["mem_available"] < options.mem_floor / options.clear_factor:
-        return False
+def clears(kind: str, now: dict, options: argparse.Namespace) -> bool:
+    """Hysteresis, per condition: it clears well clear of what opened it, never on the rule."""
+    if kind == "cpu":
+        cpu_some = now["cpu"].get("some_avg60")
+        if cpu_some is None:
+            return now["procs_running"] < options.queue_per_core * now["cores"] * options.clear_factor
+        return cpu_some < options.cpu_stall * options.clear_factor or now["load1"] <= now["cores"]
+    if kind == "swap":
+        return not now["swap_total"] or now["swap_used_fraction"] < options.swap_used * options.clear_factor
+    if kind == "memory":
+        return not now["mem_available"] or now["mem_available"] >= options.mem_floor / options.clear_factor
     return True
 
 
@@ -704,31 +756,57 @@ def state_line(now: dict) -> str:
     return ", ".join(pieces)
 
 
-def alert_text(now: dict, found: dict, incident: dict, consumers: str, when: float) -> str:
-    kinds = "+".join(found["kinds"]).upper()
+def what_it_means(kind: str) -> list[str]:
+    """What this condition is, and what to do about it. One condition, one action."""
+    if kind == "cpu":
+        return [
+            "What this looks like from a pane: every agent still runs and answers, its"
+            " transcript is still written, and tmux still paints -- but a turn that takes"
+            " seconds takes tens of minutes, so the lane reads as frozen. Do not restart an"
+            " agent on this signal: a restart costs its turn and adds another working set to"
+            " the same box.",
+            "DO: reduce the number of concurrent agents on this box (on a lane box,"
+            " `ossv-worker list` and stop or pause the lanes that are idle or duplicated), then"
+            " let the swapped working sets fault back in. Move new work to a box with free"
+            " cores rather than raising the limit here.",
+        ]
+    if kind == "swap":
+        return [
+            "What this is: a statement about the NEXT memory squeeze, not about this minute."
+            " The box may be answering perfectly while this is true. With no swap left the"
+            " kernel's next reclaim has nowhere to put anything, so the OOM killer chooses"
+            " which lane dies, and it does not choose the idle one.",
+            "DO: stop the sessions on this box that have finished, by exact pid and with their"
+            " owner asked first; each one hands back the swap it holds. Nothing here needs a"
+            " restart of the box or of a live lane.",
+        ]
+    return [
+        "What this is: the box is close to having no memory to give, which is the step after"
+        " swap is gone. An OOM kill takes a whole session and every lane inside it.",
+        "DO: stop finished sessions by exact pid, owner asked first, and move new work"
+        " elsewhere until MemAvailable recovers.",
+    ]
+
+
+def alert_text(now: dict, kind: str, found: dict, incident: dict, consumers: str, when: float) -> str:
     cpu = now["cpu"].get("some_avg60")
     io = now["io"].get("some_avg60")
     memory = now["memory_pressure"].get("full_avg60")
     which = ""
-    if cpu is not None and io is not None and memory is not None:
+    if kind == "cpu" and cpu is not None and io is not None and memory is not None:
         which = (
             f" Of the three pressures, cpu is {cpu:.0f}%, io {io:.0f}% and memory {memory:.1f}%:"
             f" {'a CPU shortage' if cpu >= max(io, memory) else 'not primarily a CPU shortage'}."
         )
     lines = [
-        f"BOX OUT OF {kinds}: {socket.gethostname()} has {state_line(now)}.{which}",
+        f"{HEADLINE[kind]}: {socket.gethostname()} has {state_line(now)}.{which}",
         "Why this alerts: " + "; ".join(found["reasons"]) + ".",
-        f"The crossing opened at {iso(incident.get('opened_at'))},"
-        f" {human_time(when - (incident.get('opened_at') or when))} ago.",
+        f"This {kind} crossing opened at {iso(incident.get('opened_at'))},"
+        f" {human_time(when - (incident.get('opened_at') or when))} ago."
+        " Every other condition on this box is reported on its own, so this message says"
+        " nothing about them.",
         consumers,
-        "What this looks like from a pane: every agent still runs and answers, its transcript is"
-        " still written, and tmux still paints -- but a turn that takes seconds takes tens of"
-        " minutes, so the lane reads as frozen. Do not restart an agent on this signal: a"
-        " restart costs its turn and adds another working set to the same box.",
-        "DO: reduce the number of concurrent agents on this box (on a lane box, `ossv-worker"
-        " list` and stop or pause the lanes that are idle or duplicated), then let the swapped"
-        " working sets fault back in. Move new work to a box with free cores rather than"
-        " raising the limit here.",
+        *what_it_means(kind),
         "This watch only detects. It kills nothing, stops no worker, and changes no limit."
         f" From load-swap-watch (~/.dotfiles/scripts/load-swap-watch) on {socket.gethostname()},"
         " a systemd --user timer.",
@@ -736,13 +814,13 @@ def alert_text(now: dict, found: dict, incident: dict, consumers: str, when: flo
     return "\n".join(lines)
 
 
-def clear_text(now: dict, incident: dict, when: float) -> str:
+def clear_text(now: dict, kind: str, incident: dict, when: float) -> str:
     opened = incident.get("opened_at") or when
     return (
-        f"BOX RESOURCE CROSSING CLEARED: {socket.gethostname()} is back to {state_line(now)}."
-        f" The crossing opened at {iso(opened)}, cleared at {iso(when)}, and lasted"
-        f" {human_time(when - opened)}. No action is needed. From load-swap-watch on"
-        f" {socket.gethostname()}."
+        f"{HEADLINE[kind]} CLEARED: {socket.gethostname()} is back to {state_line(now)}."
+        f" That {kind} crossing opened at {iso(opened)}, cleared at {iso(when)}, and lasted"
+        f" {human_time(when - opened)}. No action is needed, and any other condition on this box"
+        f" stands or clears on its own. From load-swap-watch on {socket.gethostname()}."
     )
 
 
@@ -781,84 +859,121 @@ def run_once(options: argparse.Namespace) -> int:
     found = verdict(now, state.data["samples"], options)
     log(state_line(now))
 
-    incident: dict = state.data.get("incident") or {}
-    heard = ""
-    sent = ""
+    # One incident per condition. They open, alert, escalate and clear on their own clocks, so
+    # a CPU shortage that recovered can never be carried into a swap message half an hour later.
+    incidents: dict = state.data.setdefault("incidents", {})
+    # The single-incident state of the first version: keep nothing from it but its timestamps,
+    # so an upgrade neither re-alerts what was already said nor loses an open crossing.
+    legacy = state.data.pop("incident", None)
+    if legacy and legacy.get("opened_at"):
+        for kind in legacy.get("kinds") or []:
+            incidents.setdefault(kind, dict(legacy, kinds=[kind]))
+    heard: list[str] = []
+    unheard = 0
+    messages: list[str] = []
+    consumers = ""
 
-    if found["crossing"]:
-        if not incident:
-            incident = {"opened_at": when, "kinds": found["kinds"], "alerted_at": None, "escalated_at": None}
-            log(f"crossing opened: {'; '.join(found['reasons'])}")
-        incident["kinds"] = sorted(set(incident.get("kinds", [])) | set(found["kinds"]))
-        incident["last_seen"] = when
-        held = when - (incident.get("opened_at") or when)
-        if incident.get("alerted_at") is None and held >= options.grace:
+    def consumers_once() -> str:
+        # The 10 s CPU sample and the VmSwap walk happen at most once per run, however many
+        # conditions speak in it.
+        nonlocal consumers
+        if not consumers:
             consumers = consumers_text(options)
-            sent = alert_text(now, found, incident, consumers, when)
-            incident["alerted_at"] = when
-            state.data["incident"] = incident
-            state.commit(options)
-            if not options.dry_run:
-                heard = tell_box_health(envoy, sent)
-        elif (
-            incident.get("alerted_at")
-            and incident.get("escalated_at") is None
-            and when - incident["alerted_at"] >= options.escalate
-        ):
-            sent = (
-                f"STILL OUT OF {'+'.join(incident['kinds']).upper()} {human_time(when - incident['alerted_at'])}"
-                f" after the first alert: {socket.gethostname()} has {state_line(now)}."
-                " Nobody has brought the box back. The agents on it are still being served a"
-                " fraction of a core each, and their lanes read as frozen.\n"
-                + consumers_text(options)
-            )
-            incident["escalated_at"] = when
-            state.data["incident"] = incident
-            state.commit(options)
-            if not options.dry_run:
-                # The send's own answer decides, not the attempt. An escalation that says it was
-                # told while the listener refused it is the silent failure this watch exists to
-                # stop seeing elsewhere.
-                heard = CHIEF_OF_STAFF if envoy.send(CHIEF_OF_STAFF, sent) else ""
-        else:
-            # Say what this run is waiting for, which is not the grace window once the alert has
-            # gone: a reader of the journal should be able to tell "not yet alerted" from
-            # "alerted, waiting on the escalation" from "said everything it has to say".
-            if incident.get("escalated_at"):
-                waiting = f"alerted at {iso(incident['alerted_at'])}, escalated at {iso(incident['escalated_at'])}"
-            elif incident.get("alerted_at"):
-                waiting = (
-                    f"alerted at {iso(incident['alerted_at'])}; escalation at"
-                    f" {iso(incident['alerted_at'] + options.escalate)}"
-                )
-            else:
-                waiting = f"alert at {iso((incident.get('opened_at') or when) + options.grace)}"
-            log(f"crossing open for {human_time(held)}; {waiting}")
-        state.data["incident"] = incident
-    elif incident:
-        if clears(now, options):
-            if incident.get("alerted_at"):
-                sent = clear_text(now, incident, when)
-                if not options.dry_run:
-                    heard = tell_box_health(envoy, sent)
-            log(f"crossing cleared after {human_time(when - (incident.get('opened_at') or when))}")
-            state.data["incident"] = {}
-        else:
-            log("under the rules but not yet clear of them; the crossing stays open")
+        return consumers
+
+    for kind in ("cpu", "swap", "memory"):
+        finding = found["findings"].get(kind)
+        incident = incidents.get(kind) or {}
+        if finding:
+            if not incident:
+                incident = {"opened_at": when, "alerted_at": None, "escalated_at": None}
+                log(f"{kind} crossing opened: {'; '.join(finding['reasons'])}")
             incident["last_seen"] = when
-            state.data["incident"] = incident
+            held = when - (incident.get("opened_at") or when)
+            if incident.get("alerted_at") is None and held >= options.grace:
+                text = alert_text(now, kind, finding, incident, consumers_once(), when)
+                incident["alerted_at"] = when
+                incidents[kind] = incident
+                state.commit(options)
+                messages.append(text)
+                if not options.dry_run:
+                    target = tell_box_health(envoy, text)
+                    if target:
+                        heard.append(target)
+                    else:
+                        unheard += 1
+            elif (
+                incident.get("alerted_at")
+                and incident.get("escalated_at") is None
+                and when - incident["alerted_at"] >= options.escalate
+            ):
+                text = (
+                    f"{STILL[kind]} {human_time(when - incident['alerted_at'])} after the first"
+                    f" alert: {socket.gethostname()} has {state_line(now)}."
+                    f" Why it still holds: {'; '.join(finding['reasons'])}."
+                    " Nobody has brought the box back. This message is about that one condition"
+                    " as it reads now, and about nothing else on the box.\n"
+                    + consumers_once()
+                )
+                incident["escalated_at"] = when
+                incidents[kind] = incident
+                state.commit(options)
+                messages.append(text)
+                if not options.dry_run:
+                    # The send's own answer decides, not the attempt. An escalation that says it
+                    # was told while the listener refused it is the silent failure this watch
+                    # exists to stop seeing elsewhere.
+                    if envoy.send(CHIEF_OF_STAFF, text):
+                        heard.append(CHIEF_OF_STAFF)
+                    else:
+                        unheard += 1
+            else:
+                # Say what this run is waiting for, which is not the grace window once the alert
+                # has gone: a reader should be able to tell "not yet alerted" from "alerted,
+                # waiting on the escalation" from "said everything it has to say".
+                if incident.get("escalated_at"):
+                    waiting = (
+                        f"alerted at {iso(incident['alerted_at'])},"
+                        f" escalated at {iso(incident['escalated_at'])}"
+                    )
+                elif incident.get("alerted_at"):
+                    waiting = (
+                        f"alerted at {iso(incident['alerted_at'])}; escalation at"
+                        f" {iso(incident['alerted_at'] + options.escalate)}"
+                    )
+                else:
+                    waiting = f"alert at {iso((incident.get('opened_at') or when) + options.grace)}"
+                log(f"{kind} crossing open for {human_time(held)}; {waiting}")
+            incidents[kind] = incident
+        elif incident:
+            if clears(kind, now, options):
+                if incident.get("alerted_at"):
+                    text = clear_text(now, kind, incident, when)
+                    messages.append(text)
+                    if not options.dry_run:
+                        target = tell_box_health(envoy, text)
+                        if target:
+                            heard.append(target)
+                        else:
+                            unheard += 1
+                log(f"{kind} crossing cleared after {human_time(when - (incident.get('opened_at') or when))}")
+                incidents.pop(kind, None)
+            else:
+                log(f"{kind} is under its rule but not yet clear of it; the crossing stays open")
+                incident["last_seen"] = when
+                incidents[kind] = incident
 
     state.commit(options)
     state.close()
-    if sent and (options.print_alert or options.dry_run):
-        print(sent)
-    if heard:
-        log(f"told {heard}")
-    elif sent and not options.dry_run:
+    if messages and (options.print_alert or options.dry_run):
+        print("\n\n".join(messages))
+    for target in heard:
+        log(f"told {target}")
+    if unheard:
         # Every route refused it. The state already records the alert as made, so this line is
         # the only trace that it reached nobody: a detector whose delivery fails quietly is
         # worse than no detector, because the record says someone was told.
-        log("NOBODY HEARD IT: every Envoy route refused this message; see the failures above")
+        log(f"NOBODY HEARD IT: {unheard} message(s) refused by every Envoy route; see above")
     return 0
 
 
@@ -867,8 +982,11 @@ def main() -> int:
     parser.add_argument(
         "--cpu-stall",
         type=float,
-        default=50.0,
-        help="alert when /proc/pressure/cpu some avg60 is at or over this percentage (default 50)",
+        default=CPU_STALL,
+        help=(
+            "alert when /proc/pressure/cpu some avg60 is at or over this percentage AND load is"
+            f" over the core count (default {CPU_STALL:.0f})"
+        ),
     )
     parser.add_argument(
         "--queue-per-core",

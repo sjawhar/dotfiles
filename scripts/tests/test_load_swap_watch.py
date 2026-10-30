@@ -45,7 +45,7 @@ class FakeEnvoy:
 
 def options(state: Path, **overrides) -> argparse.Namespace:
     values = {
-        "cpu_stall": 50.0,
+        "cpu_stall": WATCH.CPU_STALL,
         "queue_per_core": 3.0,
         "swap_used": 0.85,
         "mem_floor": 8 * GIB,
@@ -120,12 +120,35 @@ class VerdictTest(unittest.TestCase):
         self.assertFalse(found["crossing"])
         self.assertEqual(found["reasons"], [])
 
-    def test_the_incident_fires_on_cpu_and_swap(self) -> None:
+    def test_the_incident_fires_on_cpu_and_swap_as_two_findings(self) -> None:
         found = WATCH.verdict(starved(), [], options(self.state))
-        self.assertTrue(found["crossing"])
         self.assertEqual(found["kinds"], ["cpu", "swap"])
-        self.assertIn("cpu pressure some avg60 is 80%", found["reasons"][0])
-        self.assertIn("99.7% used", found["reasons"][1])
+        self.assertIn("cpu pressure some avg60 is 80%", found["findings"]["cpu"]["reasons"][0])
+        self.assertIn("99.7% used", found["findings"]["swap"]["reasons"][0])
+
+    def test_the_false_positive_of_01_32z_is_swap_only(self) -> None:
+        """ossv-agent-open, 01:32Z: load 27 on 32 cores at 7% CPU pressure, swap gone."""
+        working = box(
+            load1=27.0,
+            load5=30.0,
+            load15=35.0,
+            cpu={"some_avg60": 7.0},
+            swap_free=0,
+            swap_used_fraction=1.0,
+        )
+        found = WATCH.verdict(working, [], options(self.state))
+        self.assertEqual(found["kinds"], ["swap"])
+
+    def test_a_saturated_lane_box_fires_on_cpu(self) -> None:
+        """ossv-agent-open2 at the same minute: load 76 on 32 cores at 55%."""
+        found = WATCH.verdict(
+            box(load1=76.0, cpu={"some_avg60": 55.0}), [], options(self.state)
+        )
+        self.assertIn("cpu", found["kinds"])
+
+    def test_pressure_without_a_load_over_the_cores_is_not_a_cpu_shortage(self) -> None:
+        found = WATCH.verdict(box(load1=20.0, cpu={"some_avg60": 60.0}), [], options(self.state))
+        self.assertNotIn("cpu", found["kinds"])
 
     def test_load_alone_does_not_fire(self) -> None:
         """Load 221 of uninterruptible sleep is a disk problem, and this watch is not it."""
@@ -136,11 +159,17 @@ class VerdictTest(unittest.TestCase):
     def test_run_queue_is_the_fallback_without_psi(self) -> None:
         found = WATCH.verdict(box(cpu={}, procs_running=120), [], options(self.state))
         self.assertTrue(found["crossing"])
-        self.assertIn("no PSI on this kernel", found["reasons"][0])
+        self.assertIn("no PSI on this kernel", found["findings"]["cpu"]["reasons"][0])
 
     def test_psi_present_means_the_run_queue_never_decides(self) -> None:
         found = WATCH.verdict(box(procs_running=120), [], options(self.state))
         self.assertFalse(found["crossing"])
+
+    def test_swap_needs_no_cpu_condition_at_all(self) -> None:
+        """Zero free swap is worth saying on an idle box: it is about the next squeeze."""
+        idle = box(load1=0.2, cpu={"some_avg60": 0.0}, swap_free=0, swap_used_fraction=1.0)
+        found = WATCH.verdict(idle, [], options(self.state))
+        self.assertEqual(found["kinds"], ["swap"])
 
     def test_draining_swap_fires_before_it_is_full(self) -> None:
         now = time.time()
@@ -148,7 +177,6 @@ class VerdictTest(unittest.TestCase):
         sample["at"] = now
         samples = [[now - 3600, 60 * GIB], [now, 20 * GIB]]
         found = WATCH.verdict(sample, samples, options(self.state))
-        self.assertTrue(found["crossing"])
         self.assertEqual(found["kinds"], ["swap"])
         self.assertLess(found["time_to_exhaustion"], 7200)
 
@@ -164,11 +192,17 @@ class VerdictTest(unittest.TestCase):
         found = WATCH.verdict(box(mem_available=2 * GIB), [], options(self.state))
         self.assertEqual(found["kinds"], ["memory"])
 
-    def test_clear_needs_hysteresis(self) -> None:
-        """Just under each rule is not clear; 0.7 of it is."""
-        edge = box(cpu={"some_avg60": 49.0}, swap_free=30 * GIB, swap_used_fraction=1 - 30 / 192)
-        self.assertFalse(WATCH.clears(edge, options(self.state)))
-        self.assertTrue(WATCH.clears(box(), options(self.state)))
+    def test_each_condition_clears_on_its_own_rule(self) -> None:
+        """Just under a rule is not clear; 0.7 of it is, and a load back under the cores is."""
+        edge = box(load1=40.0, cpu={"some_avg60": 30.0}, swap_free=30 * GIB, swap_used_fraction=1 - 30 / 192)
+        self.assertFalse(WATCH.clears("cpu", edge, options(self.state)))
+        self.assertFalse(WATCH.clears("swap", edge, options(self.state)))
+        self.assertTrue(WATCH.clears("cpu", box(), options(self.state)))
+        self.assertTrue(WATCH.clears("swap", box(), options(self.state)))
+
+    def test_cpu_clears_when_the_load_fits_on_the_cores(self) -> None:
+        fits = box(load1=20.0, cpu={"some_avg60": 60.0})
+        self.assertTrue(WATCH.clears("cpu", fits, options(self.state)))
 
 
 class RoutingTest(unittest.TestCase):
@@ -193,43 +227,58 @@ class RoutingTest(unittest.TestCase):
 
         self.addCleanup(restore)
 
+    def published(self, needle: str) -> list[str]:
+        return [text for _, text in self.envoy.published if needle in text]
+
     def test_grace_holds_the_first_run_quiet(self) -> None:
         WATCH.run_once(options(self.state))
         self.assertEqual(self.envoy.published, [])
         self.assertEqual(self.envoy.sent, [])
 
-    def test_alert_goes_to_the_box_health_role_once_grace_passes(self) -> None:
+    def test_each_condition_gets_its_own_message(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
-        self.assertEqual(len(self.envoy.published), 1)
-        topic, text = self.envoy.published[0]
-        self.assertEqual(topic, WATCH.BOX_HEALTH_ROLE_TOPIC)
-        self.assertIn("BOX OUT OF CPU+SWAP", text)
-        self.assertIn("a CPU shortage", text)
-        self.assertIn("Do not restart an agent on this signal", text)
-        self.assertIn("kills nothing", text)
+        self.assertEqual(len(self.envoy.published), 2)
+        topics = {topic for topic, _ in self.envoy.published}
+        self.assertEqual({WATCH.BOX_HEALTH_ROLE_TOPIC}, topics)
+        cpu = self.published("BOX SHORT OF CPU")
+        swap = self.published("BOX OUT OF SWAP")
+        self.assertEqual(1, len(cpu))
+        self.assertEqual(1, len(swap))
+        self.assertNotIn("SWAP", cpu[0].splitlines()[0])
+        self.assertNotIn("CPU", swap[0].splitlines()[0])
+        self.assertIn("Do not restart an agent on this signal", cpu[0])
+        self.assertIn("about the NEXT memory squeeze", swap[0])
+        self.assertIn("kills nothing", swap[0])
 
-    def test_one_alert_per_crossing(self) -> None:
+    def test_one_alert_per_condition_per_crossing(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
         WATCH.run_once(options(self.state, grace=0.0))
-        self.assertEqual(len(self.envoy.published), 1)
+        self.assertEqual(len(self.envoy.published), 2)
 
     def test_an_unheld_role_falls_back_to_the_infra_lead(self) -> None:
         self.envoy.publish_ok = False
         WATCH.run_once(options(self.state, grace=0.0))
-        self.assertEqual([session for session, _ in self.envoy.sent], [WATCH.INFRA_LEAD])
+        self.assertEqual(
+            [WATCH.INFRA_LEAD, WATCH.INFRA_LEAD], [session for session, _ in self.envoy.sent]
+        )
 
-    def test_a_crossing_still_open_escalates_to_the_chief_of_staff(self) -> None:
+    def test_a_recovered_condition_is_never_carried_into_an_escalation(self) -> None:
+        """The 01:32Z defect: CPU recovered, swap did not, and the headline said both."""
         WATCH.run_once(options(self.state, grace=0.0))
+        self.sample = box(swap_free=0, swap_used_fraction=1.0)
         WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
-        self.assertEqual([session for session, _ in self.envoy.sent], [WATCH.CHIEF_OF_STAFF])
-        self.assertIn("STILL OUT OF", self.envoy.sent[0][1])
+        escalations = [text for _, text in self.envoy.sent]
+        self.assertEqual(1, len(escalations))
+        self.assertIn("STILL OUT OF SWAP", escalations[0])
+        self.assertNotIn("CPU", escalations[0].splitlines()[0])
+        self.assertEqual(1, len(self.published("BOX SHORT OF CPU CLEARED")))
 
-    def test_recovery_clears_and_says_so(self) -> None:
+    def test_recovery_clears_each_condition_and_says_so(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
         self.sample = box()
         WATCH.run_once(options(self.state, grace=0.0))
-        self.assertEqual(len(self.envoy.published), 2)
-        self.assertIn("CLEARED", self.envoy.published[1][1])
+        self.assertEqual(1, len(self.published("BOX SHORT OF CPU CLEARED")))
+        self.assertEqual(1, len(self.published("BOX OUT OF SWAP CLEARED")))
 
     def test_dry_run_sends_nothing(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0, dry_run=True))
@@ -247,7 +296,10 @@ class RoutingTest(unittest.TestCase):
             WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
         finally:
             WATCH.log = original_log
-        self.assertEqual([WATCH.CHIEF_OF_STAFF], [session for session, _ in self.envoy.sent])
+        self.assertEqual(
+            [WATCH.CHIEF_OF_STAFF, WATCH.CHIEF_OF_STAFF],
+            [session for session, _ in self.envoy.sent],
+        )
         self.assertFalse([line for line in said if line.startswith("told ")])
         self.assertTrue([line for line in said if "NOBODY HEARD IT" in line])
 
