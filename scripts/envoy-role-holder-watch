@@ -902,6 +902,16 @@ RESURRECT_DIR = Path.home() / ".local/share/tmux/resurrect"
 PANE_FIELDS = (
     "pid", "start_time", "pane_id", "session_name", "window_index", "window_name",
     "pane_index", "pane_current_command", "pane_pid", "pane_current_path", "pane_title",
+    # A pane that runs a ONE-SHOT omp and is meant to outlive it sets this pane option:
+    #   tmux set -p @agent_oneshot 1
+    # Why it exists: the grading lane's review.sh opens a tmux session per gate, runs a one-shot
+    # `omp -p` reviewer that exits after it posts its verdict, then runs the merge script and a
+    # `sleep` to keep the pane. That pane is at a shell with no omp in it BY DESIGN, and on
+    # 2026-10-30 between 03:46Z and 03:53Z it produced three alerts in seven minutes for three
+    # healthy gates. The watch cannot tell that pane from a lane whose omp died -- both are a
+    # shell with an agent's title -- so the pane says so itself, and the lane that opens it is
+    # the only party that knows.
+    "@agent_oneshot",
 )
 
 
@@ -1209,6 +1219,14 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         comm, tpgid = info.get(pane_pid, ("", 0))
         if not (comm in SHELLS and tpgid == pane_pid):
             log(f"pane {pane['pane_id']} {where}: agent pane runs {pane['pane_current_command']}, not omp and not a bare shell; holding")
+            continue
+        if pane.get("@agent_oneshot", "").strip() not in ("", "0", "false", "off"):
+            # Its owner says this pane runs a one-shot omp and outlives it, so a shell here is the
+            # end of the work, not the death of a lane. An incident already open is cleared rather
+            # than left to sit: the option may have been set after the first alert.
+            log(f"pane {pane['pane_id']} {where}: at a shell, @agent_oneshot set by its owner; not an incident")
+            if incident:
+                clear(key, incident, "its owner marks this pane @agent_oneshot: a one-shot omp that exits by design")
             continue
         at_shell += 1
         text = title_text(pane["pane_title"])
