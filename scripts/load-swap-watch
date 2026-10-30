@@ -821,7 +821,19 @@ def run_once(options: argparse.Namespace) -> int:
                 # stop seeing elsewhere.
                 heard = CHIEF_OF_STAFF if envoy.send(CHIEF_OF_STAFF, sent) else ""
         else:
-            log(f"crossing open for {human_time(held)}; grace {human_time(options.grace)}")
+            # Say what this run is waiting for, which is not the grace window once the alert has
+            # gone: a reader of the journal should be able to tell "not yet alerted" from
+            # "alerted, waiting on the escalation" from "said everything it has to say".
+            if incident.get("escalated_at"):
+                waiting = f"alerted at {iso(incident['alerted_at'])}, escalated at {iso(incident['escalated_at'])}"
+            elif incident.get("alerted_at"):
+                waiting = (
+                    f"alerted at {iso(incident['alerted_at'])}; escalation at"
+                    f" {iso(incident['alerted_at'] + options.escalate)}"
+                )
+            else:
+                waiting = f"alert at {iso((incident.get('opened_at') or when) + options.grace)}"
+            log(f"crossing open for {human_time(held)}; {waiting}")
         state.data["incident"] = incident
     elif incident:
         if clears(now, options):
