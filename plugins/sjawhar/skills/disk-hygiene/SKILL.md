@@ -17,7 +17,7 @@ Tool: `S=$SKILL/scripts/disk_hygiene.py`, with `SKILL=~/.dotfiles/plugins/sjawha
 
 | Phase | Do | Gate |
 |---|---|---|
-| 1 | Baseline: `df`, `/proc/pressure/io`; pick a ledger path under `~/.local/state/` | — |
+| 1 | Baseline: `df`, `/proc/pressure/io`, `$S writers` and `$S cpu` while the disk still fills; pick a ledger path under `~/.local/state/` | — |
 | 2 | Check in with every live session | Each replied or 20 min passed; protected set written |
 | 3 | Inventory and classify working copies | Every non-live row has a class |
 | 4 | Apply, one item at a time | Ledger shows 0 errors |
@@ -25,7 +25,7 @@ Tool: `S=$SKILL/scripts/disk_hygiene.py`, with `SKILL=~/.dotfiles/plugins/sjawha
 | 6 | Caches, temp, jj op store: [references/caches.md](references/caches.md) | Only temp-dir families `$S tmp` lists (directories whose names match its `--families` regex), idle >24 h |
 | 7 | Report | Summary next to the ledger |
 
-Where the space usually is, largest first: dangling images, buildkit cache with leaked leases, unused tagged images, orphaned sandboxes, `/tmp` families, workspaces. Workspaces free less than they look, because `uv` venvs hardlink into `~/.cache/uv`.
+Where the space usually is, largest first: dangling images, buildkit cache with leaked leases, unused tagged images, orphaned sandboxes, `/tmp` families, workspaces. Workspaces free less than they look, because `uv` venvs hardlink into `~/.cache/uv` where the cache shares their filesystem. `$S sizes --hardlinks <tree> <cache>` measures the shared bytes: sizing the two trees in two commands counts them in both.
 
 ## Cleaning up after yourself
 
@@ -71,7 +71,7 @@ python3 $S plan --inventory inv.json --protected protected.json [--releases rele
 
 - Inside a box you see only that box's `~/boxes/<box>`, so a missing directory there proves nothing: judge absence from a host session (`inventory --box-dir none` there); `systemd-run --user` does not escape the box. Box `ps` ages (`etimes`, `lstart`) read 0 for every process, so read a process's age from the host.
 - `jj workspace list` "(empty)" says nothing about unmerged ancestors. Use the classes.
-- The freshness gate is the `.jj/working_copy/tree_state` mtime (`--fresh-hours`, default 24). The plan lists every refusal in `refused`.
+- The freshness gate is the `.jj/working_copy/tree_state` mtime for a jj slot (`--fresh-hours`, default 24). For a plain directory it is the newest mtime in the top 3 levels, which one bounded walk finds. A directory's own mtime changes only when an entry appears in it or goes. The top-level stat this replaced read 160-280 h of idleness off trees with live work in them. A file deeper than 3 levels does not move the reading. So the idle hours are an upper bound on how stale a tree is. They are never proof that nothing writes in it: `$S procs` and `$S writers` give that proof. The plan lists every refusal in `refused`.
 - A stale checkout's diff shows later merges as changes. Run `jj log -r '::@ ~ ::trunk()'` before you call it a revert.
 - Leave alone: knives fork checkouts (use `knives finish`, never `rm`), Legion daemon state (`~/.local/state/legion/`, which holds the daemons' registry `legions.json`), and holds (paths a human said to keep, from the check-in).
 - Never run a repo-wide `git worktree prune`: from a box, it deletes every other box's worktree entry. Before you forget a jj workspace, remove a git worktree, repair a worktree entry, or run `jj new` in a workspace you did not create, read [references/shared-git-store.md](references/shared-git-store.md).
@@ -94,4 +94,4 @@ nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger 
 
 ## Phase 7: Report
 
-Write a summary next to the ledger (apply writes one JSONL line per action with `df` after it; add a line for each manual action). The summary gives space freed, what you kept and why (unpushed, holds, fresh), undescribed WIP in shared checkouts with the session `skill://session-attribution` finds for it (or "unknown"), and what you could not reclaim (locks, live owners).
+Write a summary next to the ledger (apply writes one JSONL line per action with `df` after it; add a line for each manual action). The summary gives space freed, what you kept and why (unpushed, holds, fresh), undescribed WIP in shared checkouts with the session `skill://session-attribution` finds for it (or "unknown"), and what you could not reclaim (locks, live owners). Give every sampled number its interval, because a watcher reports the extreme of its samples and not the extreme.

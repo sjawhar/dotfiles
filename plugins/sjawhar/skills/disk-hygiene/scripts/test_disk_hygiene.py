@@ -781,7 +781,11 @@ class ReaperScenarioTest(unittest.TestCase):
     # ------------------------------------------------------------- scratch (2026-09-18)
 
     def age(self, path: Path, hours: float) -> None:
+        """Age the whole tree, not its top directory: freshness is the newest mtime anywhere
+        in it, so a directory stamped old over files written a second ago is still fresh."""
         old = time.time() - hours * 3600
+        for child in sorted(path.rglob("*"), reverse=True):
+            os.utime(child, (old, old), follow_symlinks=False)
         os.utime(path, (old, old))
 
     def test_s21_stale_scratch_directory_is_planned_and_removed(self) -> None:
@@ -856,7 +860,9 @@ class ReaperScenarioTest(unittest.TestCase):
         scratch = self.base / "live-scratch"
         scratch.mkdir()
         self.age(scratch, 48)
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=scratch)
+        # 900 s, not 60: a paced apply on a loaded box took 64 s on 2026-10-30, and a holder
+        # that stops first turns a liveness test into a removal.
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(900)"], cwd=scratch)
         try:
             doc, _ = self.plan("--protected", self.protected_file(), inventory=self.inventory(repo))
             self.assertEqual([i for i in doc["plan"] if i["kind"] == "scratch"], [],
@@ -918,7 +924,7 @@ class ReaperScenarioTest(unittest.TestCase):
         """A live process whose cwd is ELSEWHERE and which depends on <target> only through PATH,
         like the orphan test loop whose fake kubectl lived in /tmp/tmp.X/bin (SRE, 2026-09-26)."""
         env = dict(os.environ, PATH=f"{target}/bin:{os.environ.get('PATH', '')}")
-        return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd="/", env=env)
+        return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(900)"], cwd="/", env=env)
 
     def test_s29_scratch_referenced_only_by_a_process_path_is_never_planned(self) -> None:
         repo = self.make_jj_repo()
@@ -1102,6 +1108,141 @@ class ImageCensusTest(unittest.TestCase):
         r = self.run_images(time.time() - 5 * 86400)
         self.assertIn("reg/harness:v6", r.stdout)
         self.assertIn("reg/old:v1", r.stdout)
+
+
+class TreeFreshnessTest(unittest.TestCase):
+    """A tree is as fresh as its newest file, not as its top directory's mtime.
+
+    A directory's own mtime changes only when an entry appears in it or goes, so a stat of
+    the top level called trees with live work in them idle for 160-280 h (SRE, 2026-09-26)."""
+
+    def setUp(self) -> None:
+        self.base = Path(tempfile.mkdtemp(prefix="dh-fresh-", dir="/tmp"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_fresh_file_under_an_old_directory_reads_fresh(self) -> None:
+        tree = self.base / "scratch"
+        (tree / "deep").mkdir(parents=True)
+        (tree / "deep" / "live.log").write_text("written now")
+        old = time.time() - 200 * 3600
+        os.utime(tree, (old, old))
+        os.utime(tree / "deep", (old, old))
+
+        self.assertLess(time.time() - os.stat(tree).st_mtime, 201 * 3600)
+        self.assertGreater((time.time() - os.stat(tree).st_mtime) / 3600, 199,
+                           "the top-level stat must still read ~200 h: that is the reading being replaced")
+        scan = disk_hygiene.scan_tree(tree)
+        self.assertIs(scan.holds_working_copy, False)
+        self.assertIsNotNone(scan.newest_mtime)
+        self.assertLess((time.time() - float(scan.newest_mtime)) / 3600, 0.1,
+                        "scan_tree dated a tree written seconds ago as old")
+
+    def test_working_copy_stops_the_walk_and_leaves_no_date(self) -> None:
+        tree = self.base / "checkout"
+        (tree / ".jj").mkdir(parents=True)
+        scan = disk_hygiene.scan_tree(tree)
+        self.assertIs(scan.holds_working_copy, True)
+        self.assertIsNone(scan.newest_mtime, "a half-walked tree must not be dated")
+
+    def test_unfinished_walk_has_no_verdict_and_no_date(self) -> None:
+        tree = self.base / "wide"
+        tree.mkdir()
+        for i in range(6):
+            (tree / f"d{i}").mkdir()
+        scan = disk_hygiene.scan_tree(tree, dir_cap=3)
+        self.assertIsNone(scan.holds_working_copy)
+        self.assertIsNone(scan.newest_mtime)
+
+
+class InstrumentTest(unittest.TestCase):
+    """The instruments added after 2026-10-30, when nine readings on this box were each true
+    of something other than the question asked."""
+
+    def setUp(self) -> None:
+        self.base = Path(tempfile.mkdtemp(prefix="dh-instr-", dir="/tmp"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_exclusive_sizes_never_count_a_child_inside_its_parent(self) -> None:
+        """`du --max-depth=N | sort -rn | head` sums to more than the total because it holds a
+        parent and its children both. The same input, made addable, sums to the total."""
+        sizes = {"/a": 100, "/a/b": 60, "/a/b/c": 50, "/a/d": 10}
+        self.assertEqual(sum(sizes.values()), 220, "du's own lines sum to twice the tree")
+        excl = disk_hygiene.exclusive_sizes(sizes)
+        self.assertEqual(excl, {"/a": 30, "/a/b": 10, "/a/b/c": 50, "/a/d": 10})
+        self.assertEqual(sum(excl.values()), sizes["/a"], "the rows must sum to the root's own total")
+
+    def test_exclusive_sizes_attach_a_child_to_its_nearest_listed_parent(self) -> None:
+        """du at --max-depth prints no intermediate level, so a row's parent can be any
+        ancestor; a child must be subtracted from the nearest listed one, once."""
+        excl = disk_hygiene.exclusive_sizes({"/a": 100, "/a/b/c/d": 40})
+        self.assertEqual(excl, {"/a": 60, "/a/b/c/d": 40})
+
+    def test_sizes_over_two_hardlinked_trees_counts_the_shared_bytes_once(self) -> None:
+        """du remembers an inode only within one run, so a run per tree counts a hardlink in
+        each. One run over both counts it once, which is what deleting one tree would free."""
+        one, two = self.base / "one", self.base / "two"
+        one.mkdir()
+        (one / "blob").write_bytes(b"x" * (1 << 20))
+        two.mkdir()
+        os.link(one / "blob", two / "blob")
+        separate = sum(disk_hygiene.du_tree([str(t)], 0)[str(t)] for t in (one, two))
+        together = disk_hygiene.du_tree([str(one), str(two)], 0)
+        union = together[str(one)] + together[str(two)]
+        self.assertGreater(separate - union, 1 << 19,
+                           f"the shared megabyte was not double-counted by separate runs: {separate} vs {union}")
+
+    def test_recent_counts_small_files_and_dates_them_by_ctime(self) -> None:
+        """A flood of small files fills a disk and `find -size +500M` never sees it. mtime is
+        no use for dating an arrival: a copy carries the source's mtime in."""
+        tree = self.base / "flood"
+        tree.mkdir()
+        for i in range(50):
+            (tree / f"f{i}").write_text("small")
+        old = time.time() - 400 * 86400
+        for f in tree.iterdir():  # mtime of an old source, ctime of now, as gzip and cp -p leave it
+            os.utime(f, (old, old))
+        out = script("recent", str(tree), "--since", "1h")
+        self.assertIn("50", out.stderr, f"ctime pass missed the flood: {out.stderr}")
+        out = script("recent", str(tree), "--since", "1h", "--use-mtime")
+        self.assertIn("0 files", out.stderr, f"mtime pass counted files the source's clock dates: {out.stderr}")
+
+    def test_dangling_finds_a_broken_link_and_calls_it_no_space(self) -> None:
+        tree = self.base / "links"
+        tree.mkdir()
+        (tree / "good").write_text("x")
+        os.symlink(tree / "good", tree / "ok")
+        os.symlink(tree / "gone", tree / "broken")
+        out = script("dangling", str(tree))
+        self.assertIn("1 dangling symlinks", out.stderr)
+        self.assertIn("holds no data", out.stderr)
+
+    def test_writers_and_cpu_report_their_interval_and_what_they_miss(self) -> None:
+        out = script("writers", "--seconds", "1", "--top", "3")
+        self.assertIn("MB/s wr", out.stdout)
+        self.assertIn("upper bound on what any disk gained", out.stderr)
+        out = script("cpu", "--seconds", "1", "--top", "3")
+        self.assertIn("cores", out.stdout)
+        self.assertIn("burst shorter than the interval", out.stderr)
+
+    def test_fdwrites_names_the_file_a_process_is_appending_to(self) -> None:
+        target = self.base / "growing.log"
+        code = ("import sys, time\n"
+                "f = open(sys.argv[1], 'a')\n"
+                "end = time.time() + 20\n"
+                "while time.time() < end:\n"
+                "    f.write('x' * 65536); f.flush()\n"
+                "    time.sleep(0.01)\n")
+        proc = subprocess.Popen([sys.executable, "-c", code, str(target)])
+        try:
+            out = script("fdwrites", "--seconds", "2", "--pid", str(proc.pid), "--top", "5")
+            self.assertIn(str(target), out.stdout, f"the growing file has no row: {out.stdout}")
+        finally:
+            proc.kill()
+            proc.wait()
 
 
 if __name__ == "__main__":
