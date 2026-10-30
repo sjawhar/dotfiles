@@ -78,6 +78,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             "min_span": 1500.0,
             "low_slack": 2.0,
             "default_floor": 20.0,
+            "max_floor_fraction": WATCH.MAX_FLOOR_FRACTION,
             "clear_factor": 1.5,
             "grace": 0.0,
             "escalate": 1800.0,
@@ -121,7 +122,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertEqual(1, len(self.envoy.published))
         topic, text = self.envoy.published[0]
         self.assertEqual("notifications.role.lead-box-health", topic)
-        self.assertIn("DISK FILLING", text)
+        self.assertIn("DISK LOW", text)
         self.assertEqual([], self.envoy.sent)
         self.assertEqual([WATCH.BOX_HEALTH_ROLE_TOPIC], self.incident()["told"])
 
@@ -134,7 +135,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             ["notifications.role.lead-box-health"], [topic for topic, _ in self.envoy.published]
         )
         self.assertEqual([WATCH.INFRA_LEAD], [target for target, _ in self.envoy.sent])
-        self.assertIn("DISK FILLING", self.envoy.sent[0][1])
+        self.assertIn("DISK LOW", self.envoy.sent[0][1])
         self.assertEqual([WATCH.INFRA_LEAD], self.incident()["told"])
 
     def test_still_descending_escalates_to_the_chief_of_staff(self) -> None:
@@ -177,6 +178,19 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertEqual([WATCH.INFRA_LEAD], [target for target, _ in self.envoy.sent])
         self.assertIn("CLEARED", self.envoy.sent[0][1])
 
+    def test_a_mount_the_run_stops_watching_is_withdrawn_not_dropped(self) -> None:
+        """The deduplication path: whoever heard the alert is told why it ends."""
+        self.run_once()
+        self.envoy.published.clear()
+
+        self.run_once(mount=["/other"])
+
+        withdrawn = [text for _, text in self.envoy.published if "no longer watched separately" in text]
+        self.assertEqual(1, len(withdrawn))
+        self.assertIn("CLEARED", withdrawn[0])
+        self.assertIn("withdrawn, not resolved", withdrawn[0])
+        self.assertNotIn(MOUNT, json.loads(self.state.read_text())["incidents"])
+
 
 class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -215,6 +229,7 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             min_span=300.0,
             low_slack=2.0,
             default_floor=20.0,
+            max_floor_fraction=WATCH.MAX_FLOOR_FRACTION,
             clear_factor=1.5,
             grace=0.0,
             escalate=1800.0,
@@ -320,6 +335,9 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             "df_fill_rate": 14_000_000_000 / 3600,
             "df_rate_window": 3480.0,
             "time_to_full": 163_700_000_000 / (14_000_000_000 / 3600),
+            "fast": True,
+            "floor_held": False,
+            "configured_floor": 78_200_000_000,
             "reasons": ["three scheduled 5 min samples in a row, each under the 2 h horizon"],
         }
         writers = WATCH.writers_text(
@@ -394,6 +412,146 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
         finally:
             writer.terminate()
             writer.wait()
+
+
+class DiskFillWatchFloorAgainstDeviceTest(unittest.TestCase):
+    """A floor is a number about a device, so it is checked against the device it names.
+
+    The first sami-leanperf alert, 2026-10-30T00:30Z, said "DISK FILLING ... falling 0.0 GB/h
+    over the last 5 min 20 s. At that rate it is 3558 h 42 min from full" for a disk at 82% used
+    and not moving, because /mnt/nvme there is the same 247 GB /dev/root as / and the farm's
+    84 GB array floor is 31.7% of it.
+    """
+
+    def options(self, **overrides) -> argparse.Namespace:
+        values = {
+            "horizon": 7200.0,
+            "rate_window": 3600.0,
+            "min_span": 1500.0,
+            "low_slack": 2.0,
+            "default_floor": 20.0,
+            "max_floor_fraction": WATCH.MAX_FLOOR_FRACTION,
+            "confirmations": 3,
+            "confirmation_spacing": 300.0,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def test_the_leanperf_floor_is_held_to_its_device_and_does_not_cross(self) -> None:
+        found = WATCH.verdict(
+            "/mnt/nvme", int(45.7 * WATCH.GIB), int(246.9 * WATCH.GIB), [], self.options()
+        )
+        self.assertTrue(found["floor_held"])
+        self.assertEqual(84 * WATCH.GB, found["configured_floor"])
+        self.assertAlmostEqual(0.10, found["floor"] / found["total"], places=3)
+        self.assertFalse(found["below_floor"])
+        self.assertFalse(found["crossing"])
+
+    def test_the_rocqperf_floors_are_untouched(self) -> None:
+        """Measured 2026-10-30: / is 531 GB and /mnt/nvme is 3.72 TB there."""
+        root = WATCH.verdict("/", 40 * WATCH.GIB, 531_415_142_400, [], self.options())
+        array = WATCH.verdict("/mnt/nvme", 170 * WATCH.GIB, 3_718_546_333_696, [], self.options())
+        self.assertFalse(root["floor_held"])
+        self.assertEqual(18 * WATCH.GIB, root["floor"])
+        self.assertFalse(array["floor_held"])
+        self.assertEqual(84 * WATCH.GB, array["floor"])
+
+    def test_a_held_floor_is_said_once_and_again_only_when_it_changes(self) -> None:
+        notes: dict = {}
+        found = WATCH.verdict(
+            "/mnt/nvme", int(45.7 * WATCH.GIB), int(246.9 * WATCH.GIB), [], self.options()
+        )
+        said = []
+        original_log = WATCH.log
+        WATCH.log = said.append
+        try:
+            WATCH.note_held_floor(found, notes)
+            WATCH.note_held_floor(found, notes)
+        finally:
+            WATCH.log = original_log
+        self.assertEqual(1, len(said))
+        self.assertIn("32% of this", said[0])
+        self.assertIn("This is a note, not an alert", said[0])
+
+    def test_two_mounts_on_one_filesystem_are_watched_once(self) -> None:
+        devices = {"/": 2049, "/mnt/nvme": 2049, "/other": 77}
+        original = WATCH.device_of
+        WATCH.device_of = devices.get
+        try:
+            kept = WATCH.distinct_devices(["/", "/mnt/nvme", "/other"], {})
+        finally:
+            WATCH.device_of = original
+        self.assertEqual(["/", "/other"], kept)
+
+    def test_two_devices_are_both_watched(self) -> None:
+        devices = {"/": 2049, "/mnt/nvme": 9000}
+        original = WATCH.device_of
+        WATCH.device_of = devices.get
+        try:
+            kept = WATCH.distinct_devices(["/", "/mnt/nvme"], {})
+        finally:
+            WATCH.device_of = original
+        self.assertEqual(["/", "/mnt/nvme"], kept)
+
+
+class DiskFillWatchHeadlineTest(unittest.TestCase):
+    """Under a floor and falling toward full are different states and get different words."""
+
+    def verdict_like(self, **overrides) -> dict:
+        now = {
+            "mount": "/mnt/nvme",
+            "free": int(45.7 * WATCH.GIB),
+            "total": int(246.9 * WATCH.GIB),
+            "floor": int(24.6 * WATCH.GIB),
+            "configured_floor": 84 * WATCH.GB,
+            "floor_held": True,
+            "df_fill_rate": 0.0,
+            "df_rate_window": 320.0,
+            "time_to_full": None,
+            "fast": False,
+            "reasons": ["free 45.7 GiB is under the 24.6 GiB floor"],
+        }
+        now.update(overrides)
+        return now
+
+    def render(self, now: dict) -> str:
+        return WATCH.alert_text(now, {"opened_at": 0.0, "opened_free": now["free"]}, "writers: none", [], "first alert", 600.0)
+
+    def test_a_standing_low_is_not_called_filling(self) -> None:
+        text = self.render(self.verdict_like())
+        self.assertIn("DISK LOW", text)
+        self.assertNotIn("DISK FILLING", text)
+        self.assertIn("free space is flat", text)
+        self.assertNotIn("from full", text)
+        self.assertIn("There is no deadline here", text)
+
+    def test_a_zero_rate_never_prints_a_time_to_full(self) -> None:
+        text = self.render(self.verdict_like(time_to_full=12_811_000.0))
+        self.assertNotIn("3558", text)
+        self.assertIn("It is not falling measurably", text)
+
+    def test_a_real_fall_keeps_the_filling_headline_and_its_deadline(self) -> None:
+        """sami-rocqperf tonight: 41.7 GB/h with 41 minutes to full. Nothing here quietens it."""
+        text = self.render(
+            self.verdict_like(
+                mount="/",
+                floor=18 * WATCH.GIB,
+                configured_floor=18 * WATCH.GIB,
+                floor_held=False,
+                df_fill_rate=41.7 * WATCH.GB / 3600,
+                df_rate_window=3600.0,
+                time_to_full=2460.0,
+                fast=True,
+                reasons=["three scheduled 5 min samples in a row, each under the 2 h horizon"],
+            )
+        )
+        self.assertIn("DISK FILLING", text)
+        self.assertIn("falling 41.7 GB/h", text)
+        self.assertIn("41 min 0 s from full", text)
+        self.assertIn("DO, and there is a deadline", text)
+
+    def test_a_held_floor_drops_the_farm_kind_list(self) -> None:
+        self.assertNotIn("grade farm's own floors", self.render(self.verdict_like()))
 
 
 if __name__ == "__main__":
