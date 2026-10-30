@@ -754,8 +754,9 @@ def tell_box_health(envoy: Envoy, text: str) -> str:
     """
     if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
         return BOX_HEALTH_ROLE_TOPIC
-    envoy.send(INFRA_LEAD, text)
-    return INFRA_LEAD
+    if envoy.send(INFRA_LEAD, text):
+        return INFRA_LEAD
+    return ""
 
 
 # ------------------------------------------------------------------------------- one run
@@ -815,8 +816,10 @@ def run_once(options: argparse.Namespace) -> int:
             state.data["incident"] = incident
             state.commit(options)
             if not options.dry_run:
-                envoy.send(CHIEF_OF_STAFF, sent)
-                heard = CHIEF_OF_STAFF
+                # The send's own answer decides, not the attempt. An escalation that says it was
+                # told while the listener refused it is the silent failure this watch exists to
+                # stop seeing elsewhere.
+                heard = CHIEF_OF_STAFF if envoy.send(CHIEF_OF_STAFF, sent) else ""
         else:
             log(f"crossing open for {human_time(held)}; grace {human_time(options.grace)}")
         state.data["incident"] = incident
@@ -839,6 +842,11 @@ def run_once(options: argparse.Namespace) -> int:
         print(sent)
     if heard:
         log(f"told {heard}")
+    elif sent and not options.dry_run:
+        # Every route refused it. The state already records the alert as made, so this line is
+        # the only trace that it reached nobody: a detector whose delivery fails quietly is
+        # worse than no detector, because the record says someone was told.
+        log("NOBODY HEARD IT: every Envoy route refused this message; see the failures above")
     return 0
 
 

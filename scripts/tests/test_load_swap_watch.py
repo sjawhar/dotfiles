@@ -25,9 +25,10 @@ GIB = WATCH.GIB
 
 
 class FakeEnvoy:
-    """Records what left, and can answer non-200 for an unheld role."""
+    """Records what left, and can answer non-200 for an unheld role or a refused send."""
 
     publish_ok = True
+    send_ok = True
 
     def __init__(self, timeout: float = 8.0) -> None:
         self.published: list[tuple[str, str]] = []
@@ -39,7 +40,7 @@ class FakeEnvoy:
 
     def send(self, session_id: str, message: str) -> bool:
         self.sent.append((session_id, message))
-        return True
+        return self.send_ok
 
 
 def options(state: Path, **overrides) -> argparse.Namespace:
@@ -234,6 +235,32 @@ class RoutingTest(unittest.TestCase):
         WATCH.run_once(options(self.state, grace=0.0, dry_run=True))
         self.assertEqual(self.envoy.published, [])
         self.assertEqual(self.envoy.sent, [])
+
+    def test_a_refused_escalation_is_never_reported_as_told(self) -> None:
+        """An escalation that says it was told while the listener refused it is a silent failure."""
+        WATCH.run_once(options(self.state, grace=0.0))
+        self.envoy.send_ok = False
+        said = []
+        original_log = WATCH.log
+        WATCH.log = said.append
+        try:
+            WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        finally:
+            WATCH.log = original_log
+        self.assertEqual([WATCH.CHIEF_OF_STAFF], [session for session, _ in self.envoy.sent])
+        self.assertFalse([line for line in said if line.startswith("told ")])
+        self.assertTrue([line for line in said if "NOBODY HEARD IT" in line])
+
+    def test_a_delivered_escalation_says_who_heard_it(self) -> None:
+        WATCH.run_once(options(self.state, grace=0.0))
+        said = []
+        original_log = WATCH.log
+        WATCH.log = said.append
+        try:
+            WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        finally:
+            WATCH.log = original_log
+        self.assertIn(f"told {WATCH.CHIEF_OF_STAFF}", said)
 
 
 class ConsumerAttributionTest(unittest.TestCase):
