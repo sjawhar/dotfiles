@@ -3,13 +3,16 @@
 
 The project is the first of: an explicit THEOREM_PROJECT; the resumed session's own file under
 ~/.config/agent-spend/sessions; the parent session's file (OMP_SESSION_ID); the inherited
-theorem.project; agent-spend/projects; the machine default; `shared`. Old project names become
-their COS stream. A caller already on this machine's collector is re-tagged, its inherited tags
-replaced; a caller on a different collector keeps everything.
+theorem.project, unless it is the machine default every shell gets; agent-spend/projects; the
+machine default; `shared`. Old project names become their COS stream. A caller already on this
+machine's collector is re-tagged, its inherited tags replaced; a caller on a different collector
+keeps everything. omp gets the token in its traces header only, and the machine's lane. With no
+token, the launch reruns the cached setup first, at most once in 10 minutes.
 
-Technique: a scratch DOTFILES_DIR holding the real agent-spend/projects, a test endpoint and
-person, and an agent-secrets-session stub that execs its argv; a scratch XDG_CONFIG_HOME holding
-the token and session files; the agent is a script that prints its environment.
+Technique: a scratch DOTFILES_DIR holding the real agent-spend/projects and a test person, and an
+agent-secrets-session stub that execs its argv; a scratch XDG_CONFIG_HOME holding the endpoint, the
+token and session files (as agent-infra's agent-spend-setup writes them); the agent is a script
+that prints its environment.
 """
 
 from __future__ import annotations
@@ -43,12 +46,12 @@ class AgentSessionSpendTest(unittest.TestCase):
         (dotfiles / "scripts").mkdir()
         (dotfiles / "shims").mkdir()
         shutil.copy(DOTFILES / "agent-spend" / "projects", dotfiles / "agent-spend" / "projects")
-        (dotfiles / "agent-spend" / "endpoint").write_text(f"{ENDPOINT}\n")
         (dotfiles / "agent-spend" / "person").write_text("sami@theorem.dev\n")
         executable(dotfiles / "scripts" / "agent-secrets-session", 'exec "$@"')
         shutil.copy(DOTFILES / "scripts" / "agent-spend-env.sh", dotfiles / "scripts" / "agent-spend-env.sh")
         self.config = self.root / "config"
         (self.config / "agent-spend").mkdir(parents=True)
+        (self.config / "agent-spend" / "endpoint").write_text(f"{ENDPOINT}\n")
         (self.config / "agent-spend" / "token").write_text("t0ken\n")
         self.sessions = self.config / "agent-spend" / "sessions"
         self.agent = self.root / "omp"
@@ -58,7 +61,9 @@ class AgentSessionSpendTest(unittest.TestCase):
             '"OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT-}" '
             '"OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES-}" '
             '"OTEL_LOGS_EXPORTER=${OTEL_LOGS_EXPORTER-<unset>}" "OTEL_TRACES_EXPORTER=${OTEL_TRACES_EXPORTER-<unset>}" '
-            '"CLAUDE_CODE_ENABLE_TELEMETRY=${CLAUDE_CODE_ENABLE_TELEMETRY-<unset>}"',
+            '"CLAUDE_CODE_ENABLE_TELEMETRY=${CLAUDE_CODE_ENABLE_TELEMETRY-<unset>}" '
+            '"OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS-<unset>}" '
+            '"OTEL_EXPORTER_OTLP_TRACES_HEADERS=${OTEL_EXPORTER_OTLP_TRACES_HEADERS-<unset>}"',
         )
         self.cwd = self.root / "work"
         self.cwd.mkdir()
@@ -67,6 +72,7 @@ class AgentSessionSpendTest(unittest.TestCase):
             "HOME": str(self.root),
             "DOTFILES_DIR": str(dotfiles),
             "XDG_CONFIG_HOME": str(self.config),
+            "XDG_CACHE_HOME": str(self.root / "cache"),
         }
 
     def session_file(self, session: str, line: str) -> None:
@@ -177,6 +183,55 @@ class AgentSessionSpendTest(unittest.TestCase):
         taiga.mkdir(parents=True)
         self.assertEqual(self.run_agent({}, cwd=taiga)["THEOREM_PROJECT"], "task-making")
         self.assertEqual(self.run_agent({})["THEOREM_PROJECT"], "shared")
+
+    def test_omp_gets_the_token_in_its_traces_header_only(self) -> None:
+        # The generic header reaches every exporter of every program omp starts; Codex's metrics exporter sends it to
+        # OpenAI. An inherited one is dropped.
+        out = self.run_agent({"OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer old"})
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_TRACES_HEADERS"], "Authorization=Bearer t0ken")
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_HEADERS"], "<unset>")
+
+    def test_the_machine_default_in_every_shell_is_not_an_inherited_project(self) -> None:
+        # The setup's env.sh puts the machine's default project in every shell; the working directory still decides.
+        (self.config / "agent-spend" / "default-project").write_text("legion\n")
+        taiga = self.root / "src" / "binary-equivalence-taiga"
+        taiga.mkdir(parents=True)
+        shell = {"OTEL_RESOURCE_ATTRIBUTES": "theorem.project=legion,theorem.person=sami@theorem.dev"}
+        self.assertEqual(self.run_agent(shell, cwd=taiga)["THEOREM_PROJECT"], "task-making")
+        self.assertEqual(self.run_agent(shell)["THEOREM_PROJECT"], "legion")
+        other = {"OTEL_RESOURCE_ATTRIBUTES": "theorem.project=rocq-speed"}
+        self.assertEqual(self.run_agent(other, cwd=taiga)["THEOREM_PROJECT"], "rocq-speed")
+
+    def test_the_machines_lane_unless_one_is_inherited(self) -> None:
+        (self.config / "agent-spend" / "lane").write_text("box-1\n")
+        out = self.run_agent({"THEOREM_PROJECT": "rocq-speed"})
+        self.assertEqual(
+            out["OTEL_RESOURCE_ATTRIBUTES"], "theorem.project=rocq-speed,theorem.person=sami@theorem.dev,theorem.lane=box-1"
+        )
+        out = self.run_agent({"OTEL_EXPORTER_OTLP_ENDPOINT": ENDPOINT, "OTEL_RESOURCE_ATTRIBUTES": "theorem.lane=l2,theorem.project=omp"})
+        self.assertEqual(out["OTEL_RESOURCE_ATTRIBUTES"], "theorem.lane=l2,theorem.project=omp,theorem.person=sami@theorem.dev")
+
+    def test_no_token_reruns_the_cached_setup_at_most_once_in_ten_minutes(self) -> None:
+        (self.config / "agent-spend" / "token").unlink()
+        cache = self.root / "cache" / "agent-spend"
+        cache.mkdir(parents=True)
+        (cache / "args").write_text("--person\nsami@theorem.dev\n--lane\nbox 1\n")
+        (cache / "agent-spend-setup").write_text(
+            "import os, sys\n"
+            "d = os.path.join(os.environ['XDG_CONFIG_HOME'], 'agent-spend')\n"
+            "open(os.path.join(os.environ['XDG_CACHE_HOME'], 'agent-spend', 'ran'), 'a').write("
+            "repr(sys.argv[1:] + [os.environ.get('CLAUDE_CONFIG_DIR')]) + '\\n')\n"
+            "open(os.path.join(d, 'token'), 'w').write('t0ken\\n')\n"
+        )
+        out = self.run_agent({"CLAUDE_CONFIG_DIR": str(self.root / "tracked-claude")})
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], ENDPOINT)
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_TRACES_HEADERS"], "Authorization=Bearer t0ken")
+        # The setup never sees CLAUDE_CONFIG_DIR, so it cannot write a tracked settings.json.
+        self.assertEqual((cache / "ran").read_text(), "['--person', 'sami@theorem.dev', '--lane', 'box 1', '--no-test', None]\n")
+        (self.config / "agent-spend" / "token").unlink()
+        out = self.run_agent({})
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], "")  # no token, no export, and no second run yet
+        self.assertEqual(len((cache / "ran").read_text().splitlines()), 1)
 
 
 if __name__ == "__main__":

@@ -56,11 +56,13 @@ before handing the call to the real one.
   that a script or a session's bash tool starts by name (`claude -p` workers): those inherit their
   omp parent's collector and `OTEL_LOGS_EXPORTER=none`, and Claude Code sent nothing. Through the shim
   Claude Code gets `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, traces and metrics off,
-  and the project of its parent session's file (`OMP_SESSION_ID`); a different collector is kept as is.
-  Codex takes only the tags from the environment: its exporter is the block `installers/agent-spend.sh`
-  writes into `~/.codex/config.toml`. They do not exec `scripts/agent-session`, which `scripts/cld`
-  still uses: that would also register every scripted worker as its own secrets-broker host session
-  (a helper call and up to 10 s wait per launch) in place of the identity it inherits from its parent.
+  the token in its logs header only, and the project of its parent session's file (`OMP_SESSION_ID`);
+  a different collector is kept as is. Codex takes only the tags from the environment and loses any
+  inherited header: its exporter is the block agent-infra's `agent-spend-setup` (run by
+  `installers/agent-spend.sh`) writes into `~/.codex/config.toml`. They do not exec
+  `scripts/agent-session`, which `scripts/cld` still uses: that would also register every scripted
+  worker as its own secrets-broker host session (a helper call and up to 10 s wait per launch) in
+  place of the identity it inherits from its parent.
 - **`knives`** execs the pinned knives (`"github:sjawhar/knives"` in `mise.toml`, looked up with
   `mise which -C / knives --tool github:sjawhar/knives`), or a local build on PATH past it,
   never a knives in a mise dir: a session keeps the PATH it started with, and that PATH names

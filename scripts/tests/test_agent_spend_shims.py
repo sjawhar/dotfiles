@@ -3,13 +3,17 @@
 
 A claude a script or a session's bash tool starts by name inherits its omp parent's collector and
 OTEL_LOGS_EXPORTER=none; through the shim it gets Claude Code's telemetry switches and the project the parent
-session's file names. A caller on a different collector keeps everything. The shim takes the first real binary past
+session's file names, and the token in its logs header only (its settings on these machines are the tracked
+.claude/settings.json, which holds no helper); it loses a generic, metrics or traces header it inherited, and Codex
+gets none (its token is in its config.toml; Codex's built-in metrics exporter would send a generic or metrics
+header to OpenAI). A caller on a different collector keeps everything. The shim takes the first real binary past
 its own PATH entry, never mise's shims dir (which hands the call back to PATH) or another shims/ copy, and hands it
 its arguments and PATH unchanged.
 
-Technique: the real shims, run with DOTFILES_DIR at a scratch copy holding scripts/agent-spend-env.sh, a test
-endpoint, person and token; PATH is the shims dir, a scratch mise shims dir whose claude and codex would loop back
-to PATH, and a dir of stand-in binaries that print their argv, PATH and spend environment.
+Technique: the real shims, run with DOTFILES_DIR at a scratch copy holding scripts/agent-spend-env.sh and a test
+person, XDG_CONFIG_HOME holding the endpoint and token as agent-infra's agent-spend-setup writes them; PATH is the
+shims dir, a scratch mise shims dir whose claude and codex would loop back to PATH, and a dir of stand-in binaries
+that print their argv, PATH and spend environment.
 """
 
 from __future__ import annotations
@@ -30,6 +34,9 @@ KEYS = (
     "THEOREM_PROJECT",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+    "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
     "OTEL_EXPORTER_OTLP_PROTOCOL",
     "OTEL_RESOURCE_ATTRIBUTES",
     "OTEL_LOGS_EXPORTER",
@@ -52,11 +59,11 @@ class AgentSpendShimTest(unittest.TestCase):
         (dotfiles / "agent-spend").mkdir(parents=True)
         (dotfiles / "scripts").mkdir()
         shutil.copy(DOTFILES / "scripts" / "agent-spend-env.sh", dotfiles / "scripts" / "agent-spend-env.sh")
-        (dotfiles / "agent-spend" / "endpoint").write_text(f"{ENDPOINT}\n")
         (dotfiles / "agent-spend" / "person").write_text("sami@theorem.dev\n")
         self.config = self.root / "config"
         (self.config / "agent-spend" / "sessions").mkdir(parents=True)
         (self.config / "agent-spend" / "token").write_text("t0ken\n")
+        (self.config / "agent-spend" / "endpoint").write_text(f"{ENDPOINT}\n")
         (self.config / "agent-spend" / "sessions" / PARENT).write_text("oss-verify\n")
         mise = self.root / "mise"
         (mise / "shims").mkdir(parents=True)
@@ -95,6 +102,7 @@ class AgentSpendShimTest(unittest.TestCase):
             {
                 "OTEL_EXPORTER_OTLP_ENDPOINT": ENDPOINT,
                 "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer t0ken",
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS": "Authorization=Bearer t0ken",
                 "OTEL_RESOURCE_ATTRIBUTES": "theorem.project=binary-equivalence,theorem.person=sami@theorem.dev",
                 "OTEL_LOGS_EXPORTER": "none",
                 "THEOREM_PROJECT": "binary-equivalence",
@@ -111,7 +119,9 @@ class AgentSpendShimTest(unittest.TestCase):
         self.assertEqual(out["OTEL_TRACES_EXPORTER"], "none")
         self.assertEqual(out["OTEL_METRICS_EXPORTER"], "none")
         self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], ENDPOINT)
-        self.assertEqual(out["OTEL_EXPORTER_OTLP_HEADERS"], "Authorization=Bearer t0ken")
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_HEADERS"], "<unset>")
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_TRACES_HEADERS"], "<unset>")
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_LOGS_HEADERS"], "Authorization=Bearer t0ken")
         self.assertEqual(out["OTEL_EXPORTER_OTLP_PROTOCOL"], "http/protobuf")
         self.assertEqual(out["THEOREM_PROJECT"], "oss-verify")
         self.assertEqual(out["OTEL_RESOURCE_ATTRIBUTES"], "theorem.project=oss-verify,theorem.person=sami@theorem.dev")
@@ -136,11 +146,18 @@ class AgentSpendShimTest(unittest.TestCase):
         self.assertEqual(out["CLAUDE_CODE_ENABLE_TELEMETRY"], "<unset>")
 
     def test_codex_skips_mises_shims_dir_and_gets_the_tags(self) -> None:
-        out = self.run_shim("codex", {"OMP_SESSION_ID": PARENT, "OTEL_LOGS_EXPORTER": "none"}, "exec", "hi")
+        out = self.run_shim(
+            "codex",
+            {"OMP_SESSION_ID": PARENT, "OTEL_LOGS_EXPORTER": "none", "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer x",
+             "OTEL_EXPORTER_OTLP_METRICS_HEADERS": "Authorization=Bearer x"},
+            "exec",
+            "hi",
+        )
         self.assertEqual((out["NAME"], out["ARGS"]), ("codex", "exec hi"))
         self.assertEqual(out["OTEL_RESOURCE_ATTRIBUTES"], "theorem.project=oss-verify,theorem.person=sami@theorem.dev")
         self.assertEqual(out["OTEL_LOGS_EXPORTER"], "<unset>")
         self.assertEqual(out["CLAUDE_CODE_ENABLE_TELEMETRY"], "<unset>")
+        self.assertEqual((out["OTEL_EXPORTER_OTLP_HEADERS"], out["OTEL_EXPORTER_OTLP_METRICS_HEADERS"]), ("<unset>", "<unset>"))
 
     def test_a_machine_without_the_token_runs_claude_untouched(self) -> None:
         (self.config / "agent-spend" / "token").unlink()
