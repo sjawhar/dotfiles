@@ -9,8 +9,6 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 
 Write plain, factual and understated. Use none of the forms in "Never write" below.
 
-For an offer, spec sheet, catalog or price page a buyer reads, follow `references/offer-documents.md`: its structure, claim check and editing passes.
-
 ## Before you write
 
 - Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise. He did for upstream PRs: write their body, comments and replies in his first person, because the maintainer reads the PR as his (dispatch://BET-64/ask/7f10d8e8). Add no line about who or what wrote the text: a Claude-assisted line claimed a review he had not done (dispatch://BET-64/ask/d4144e26). Which of those texts he approves first: see "Before a message leaves the company" below.

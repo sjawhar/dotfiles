@@ -39,6 +39,11 @@
       "version": "1.4.1",
       "enabledFeatures": null,
       "enabled": true
+    },
+    "core-ops": {
+      "version": "0.1.0",
+      "enabledFeatures": null,
+      "enabled": true
     }
   },
   "settings": {}
