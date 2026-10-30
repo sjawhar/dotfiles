@@ -1129,6 +1129,15 @@ def pane_alert_text(incident: dict, now: float) -> str:
     return guard_verdict("\n".join(lines))
 
 
+# The lane boxes' operator. A worker pane under /home/sami/work/workers/** on an ossv-agent-* box
+# has no lead-* holder in its own directory, so every one of its alerts fell through to the INFRA
+# lead, who holds neither that pane's tmux socket nor the lane. The operator holds both. Measured
+# 2026-10-30: five such alerts in thirteen minutes, all from one sshfs restart pass, none of them
+# actionable by the recipient. The operator asked for them in writing at 08:55:41Z.
+LANE_BOX_OPERATOR = "01a14c3d-9d7f-7079-97aa-f810a884c050"
+LANE_WORKER_DIR_RE = re.compile(r"^/home/sami/work/(?:cold/)?workers/")
+
+
 def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -> tuple[list[tuple[str, str]], list[str]]:
     targets = [(INFRA_LEAD, "INFRA lead")]
     leads = [
@@ -1142,6 +1151,20 @@ def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -
         role = next(iter(sorted(leads[0].get("roles") or [])), "?")
         targets.append((leads[0]["session_id"], f"stream lead ({role})"))
         return targets, []
+    # No lead in the pane's own directory. A lane-worker pane still has an owner who can act on it:
+    # the operator of the box it runs on, who holds the tmux socket the restart command needs.
+    if LANE_WORKER_DIR_RE.match(directory or "") and LANE_BOX_OPERATOR != session:
+        live = {s.get("session_id") for s in sessions}
+        if LANE_BOX_OPERATOR in live:
+            targets.append((LANE_BOX_OPERATOR, "lane-box operator"))
+            return targets, [
+                "No lead-* holder works in this pane's directory, so this went to the lane-box"
+                " operator, which holds the tmux socket the restart command needs."
+            ]
+        return targets, [
+            f"No stream lead resolved for {directory}, and the lane-box operator"
+            f" ({LANE_BOX_OPERATOR}) is not live, so only the INFRA lead was told."
+        ]
     return targets, [f"No stream lead resolved: no live lead-* or stream-lead-* role holder works in {directory}."]
 
 
