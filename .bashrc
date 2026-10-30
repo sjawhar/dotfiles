@@ -102,8 +102,9 @@ export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-${DOTFILES_DIR}/.claude}"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export ANTHROPIC_1M_CONTEXT=true
 
-# Playwright's `install` deletes every browser in ~/.cache/ms-playwright whose .links target it cannot
-# read, and the cache is shared with every agent box, whose checkouts this shell cannot see (agentbox/AGENTS.md).
+# Playwright's `install` deletes every browser in its browsers directory (~/.cache/ms-playwright, or
+# PLAYWRIGHT_BROWSERS_PATH below on a machine with the big disk) whose .links target it cannot read,
+# and the cache is shared with every agent box, whose checkouts this shell cannot see (agentbox/AGENTS.md).
 # Boxes get the same setting from scripts/agentbox's session_env.
 export PLAYWRIGHT_SKIP_BROWSER_GC=1
 
@@ -119,6 +120,18 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     export UV_CACHE_DIR="${UV_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/uv}"
     export GOMODCACHE="${GOMODCACHE:-/mnt/nvme/${USER:-$(id -un)}/gomodcache}"
     export GOCACHE="${GOCACHE:-/mnt/nvme/${USER:-$(id -un)}/gocache}"
+    # The rest of the big caches, in the same shape: a model hub (4.5 GB), Playwright's and
+    # Puppeteer's browser downloads (2.2 GB and 0.7 GB), mise's version lists (1 GB), pip's wheels
+    # (0.5 GB) and bun's install cache (11 GB) all sat on the root disk when it ran out on
+    # 2026-10-30. Each tool creates its own directory, and a value the caller already has wins.
+    # devbox/nvme-cache-cap.md records how each variable was proved and what caps them.
+    export HF_HOME="${HF_HOME:-/mnt/nvme/${USER:-$(id -un)}/cache/huggingface}"
+    export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/mnt/nvme/${USER:-$(id -un)}/cache/ms-playwright}"
+    export MISE_CACHE_DIR="${MISE_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/mise}"
+    export PUPPETEER_CACHE_DIR="${PUPPETEER_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/puppeteer}"
+    export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/pip}"
+    # Only bun's install cache moves; its binaries and global link store stay in ~/.bun.
+    export BUN_INSTALL_CACHE_DIR="${BUN_INSTALL_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/bun}"
     # Scratch too. Anything honouring TMPDIR (Go's build tree, cargo, mktemp) otherwise writes
     # into /tmp or /var/tmp on the root disk, which every session shares: 31 GB of build trees
     # were sitting in /var/tmp with root at 95% on 2026-10-29 (dispatch://INFRA-6). Go reads
