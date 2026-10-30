@@ -1,57 +1,48 @@
 #!/bin/bash
 set -euo pipefail
 
-# --- agent-spend: the model-spend collector's token (theorem-labs/agent-infra spend/SETUP.md) ---------------------
-# scripts/agent-spend-env.sh (run by scripts/agent-session, shims/claude and shims/codex) exports each omp, Claude Code
-# and Codex run's per-call usage records once agent-spend/endpoint exists and ~/.config/agent-spend/token holds the
-# collector's bearer token. The token is the Secret Manager secret
-# agent-spend-otel-token in theorem-agent-infra, readable by every theorem.dev account and by the box identity; it
-# is fetched once and again only when absent, so a rotation is `rm ~/.config/agent-spend/token` and a rerun. A
-# machine whose gcloud cannot read it gets no token and its sessions export nothing. Sourced by install.sh, so it
-# never exits.
-agent_spend_token() {
-    local dir="${XDG_CONFIG_HOME:-$HOME/.config}/agent-spend" tmp
-    [ ! -s "$dir/token" ] || return 0
-    if ! command -v gcloud > /dev/null 2>&1; then
-        echo "NOTE: no gcloud here; skipping the agent-spend token (sessions on this machine export no spend records)."
-        return 0
-    fi
-    mkdir -p "$dir"
-    chmod 700 "$dir"
-    tmp="$(mktemp "$dir/token.XXXXXX")"
-    # CLOUDSDK_CONFIG is honoured, so the box identity's config works where a person's login does not.
-    if gcloud secrets versions access latest --secret=agent-spend-otel-token --project=theorem-agent-infra > "$tmp" 2> /dev/null \
-        && [ -s "$tmp" ]; then
-        chmod 600 "$tmp"
-        mv "$tmp" "$dir/token"
-        echo "agent-spend: token installed at $dir/token."
-    else
-        rm -f "$tmp"
-        echo "NOTE: gcloud could not read secret agent-spend-otel-token in theorem-agent-infra; sessions here export no spend records."
-    fi
-}
-agent_spend_token
+# --- agent-spend: model-spend records from every harness (theorem-labs/agent-infra spend/SETUP.md, INFRA-165) ---------
+# Runs agent-infra's spend/client/agent-spend-setup at AGENT_SPEND_SETUP_REF, fetched from GitHub (the company's
+# installer, not a copy of it here), in user mode: it reads the collector's token with this machine's gcloud, and makes
+# omp, Claude Code and Codex send one record per model call, however each is started. The person is agent-spend/person;
+# the project defaults to `shared` (scripts/agent-spend-env.sh tags each session with its own); AGENT_SPEND_LANE, when
+# set (devbox/install.sh sets the host name), becomes theorem.lane. The fetched program and these arguments stay in
+# ~/.cache/agent-spend, so scripts/agent-spend-env.sh can run the same setup again at a session's start when the token
+# is missing (gcloud could not read it at install time). A rotation is a rerun of this file. The setup runs without
+# CLAUDE_CONFIG_DIR: .bashrc points that at the tracked .claude/ here, whose settings.json is shared by every machine
+# and must not hold this machine's helper path; scripts/agent-spend-env.sh gives Claude Code its token instead.
+# Sourced by install.sh, so it never exits.
+AGENT_SPEND_SETUP_REF=c62450fc2adb8847c9cd13758eed4de120e301cc
 
-# Codex CLI takes only OTEL_RESOURCE_ATTRIBUTES from the environment (shims/codex sets it through
-# scripts/agent-spend-env.sh); its exporter must be in ~/.codex/config.toml with the token's text written out, since
-# it expands no variable there (spend/SETUP.md step 2). This writes that block between marker comments, replacing
-# what it wrote last time, so a rerun after a token rotation updates it. An [otel] section of the user's own is left
-# alone, with a note. The token goes from its file into the config file, never onto a command line.
-agent_spend_codex() {
-    local token="${XDG_CONFIG_HOME:-$HOME/.config}/agent-spend/token" endpoint="${DOTFILES_DIR}/agent-spend/endpoint"
-    local config="$HOME/.codex/config.toml" kept
-    [ -s "$token" ] && [ -s "$endpoint" ] && command -v codex > /dev/null 2>&1 || return 0
-    (umask 077 && mkdir -p "$HOME/.codex" && touch "$config")
-    chmod 600 "$config"
-    kept="$(awk '/^# agent-spend begin$/ { cut = 1 } !cut { print } /^# agent-spend end$/ { cut = 0 }' "$config")"
-    if grep -q '^\[otel\]' <<< "$kept"; then
-        echo "NOTE: $config has an [otel] section of its own; add the agent-spend exporter to it by hand (spend/SETUP.md step 2)."
+agent_spend_setup() {
+    local dotfiles="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    local cache="${XDG_CACHE_HOME:-$HOME/.cache}/agent-spend" person_file setup args=()
+    person_file="$dotfiles/agent-spend/person" setup="$cache/agent-spend-setup"
+    if [[ ! -s "$person_file" ]]; then
+        echo "NOTE: no $person_file; skipping agent-spend (sessions on this machine export no spend records)."
         return 0
     fi
-    (umask 077 && {
-        [ -z "$kept" ] || printf '%s\n' "$kept"
-        printf '# agent-spend begin\n[otel]\nexporter = { otlp-http = { endpoint = "%s/v1/logs", protocol = "binary", headers = { Authorization = "Bearer %s" } } }\n# agent-spend end\n' \
-            "$(< "$endpoint")" "$(< "$token")"
-    } > "$config.new") && mv "$config.new" "$config" && echo "agent-spend: Codex exporter written to $config."
+    if ! command -v python3 > /dev/null 2>&1; then
+        echo "NOTE: no python3 here; skipping agent-spend (sessions on this machine export no spend records)."
+        return 0
+    fi
+    mkdir -p "$cache"
+    if [[ ! -s "$setup" || "$(cat "$cache/ref" 2> /dev/null)" != "$AGENT_SPEND_SETUP_REF" ]]; then
+        if ! gh api "repos/theorem-labs/agent-infra/contents/spend/client/agent-spend-setup?ref=$AGENT_SPEND_SETUP_REF" \
+            -H 'Accept: application/vnd.github.raw' > "$setup.new" 2> /dev/null || [[ ! -s "$setup.new" ]]; then
+            rm -f "$setup.new"
+            echo "NOTE: could not fetch agent-infra's agent-spend-setup at $AGENT_SPEND_SETUP_REF (gh); skipping agent-spend."
+            return 0
+        fi
+        mv "$setup.new" "$setup"
+        printf '%s\n' "$AGENT_SPEND_SETUP_REF" > "$cache/ref"
+    fi
+    args=(--person "$(< "$person_file")")
+    [[ -s "${HOME}/.config/agent-spend/default-project" ]] || args+=(--project shared)
+    [[ -z "${AGENT_SPEND_LANE:-}" ]] || args+=(--lane "$AGENT_SPEND_LANE")
+    printf '%s\n' "${args[@]}" > "$cache/args"
+    if ! env -u CLAUDE_CONFIG_DIR python3 "$setup" "${args[@]}" < /dev/null; then
+        echo "NOTE: agent-spend-setup did not finish (above); sessions here retry it when they start."
+    fi
 }
-agent_spend_codex
+agent_spend_setup

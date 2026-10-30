@@ -33,6 +33,10 @@ bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 # sign-in; Sami's login stays in configuration `theorem` (see installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
+# Model-spend records from every harness, now that gcloud acts as the box identity, which reads the collector's token,
+# with the host name as theorem.lane (see installers/agent-spend.sh).
+AGENT_SPEND_LANE="$(hostname -s)" bash "${DOTFILES_DIR}/installers/agent-spend.sh"
+
 # Swap, reclaim settings, a ceiling on this user's slice and the session shed daemon, so one
 # runaway session can no longer wedge the box (see installers/omp-box-memory-guard.sh).
 bash "${DOTFILES_DIR}/installers/omp-box-memory-guard.sh"
