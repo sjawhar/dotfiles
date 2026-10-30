@@ -22,7 +22,7 @@
     "OTEL_EXPORTER_OTLP_LOGS_HEADERS": "",
     "OTEL_EXPORTER_OTLP_METRICS_HEADERS": ""
   },
-  "otelHeadersHelper": "h=\"$HOME/.config/agent-spend/otel-headers-helper\"; if [ -x \"$h\" ]; then exec \"$h\"; fi; echo '{}'",
+  "otelHeadersHelper": "d=\"$HOME/.config/agent-spend\"; if [ -x \"$d/otel-headers-helper\" ]; then exec \"$d/otel-headers-helper\"; fi; if [ -e \"$d/env.sh\" ]; then echo '{}'; else exit 1; fi",
   "permissions": {
     "defaultMode": "auto"
   },
