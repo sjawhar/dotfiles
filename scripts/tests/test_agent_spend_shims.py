@@ -182,8 +182,11 @@ class AgentSpendShimTest(unittest.TestCase):
 class TrackedClaudeSettingsTest(unittest.TestCase):
     """The tracked .claude/settings.json (every machine's CLAUDE_CONFIG_DIR, .bashrc) makes a claude started by its
     path record its spend: telemetry on, logs only, content capture off, the four header variables emptied, and a
-    helper named by a $HOME-relative path, so the file holds no token and no machine's path. Claude Code runs the
-    helper through /bin/sh, which expands $HOME (measured with 2.1.309; a helper that fails exports nothing)."""
+    helper command that runs $HOME/.config/agent-spend/otel-headers-helper (the setup's) when it is there, else prints
+    {} and exits 0, so the file holds no token and no machine's path, and a machine without the setup prints nothing.
+    Claude Code runs the helper through /bin/sh, which expands $HOME. Measured with 2.1.309 against a local collector:
+    with the setup's helper every request carries the token; without it Claude Code prints nothing and sends its
+    records without a token, which the collector refuses (401)."""
 
     def test_the_tracked_settings(self) -> None:
         import json
@@ -191,7 +194,7 @@ class TrackedClaudeSettingsTest(unittest.TestCase):
         text = (DOTFILES / ".claude" / "settings.json").read_text()
         settings = json.loads(text)
         env = settings["env"]
-        self.assertEqual(settings["otelHeadersHelper"], "$HOME/.config/agent-spend/otel-headers-helper")
+        self.assertIn('$HOME/.config/agent-spend/otel-headers-helper', settings["otelHeadersHelper"])
         self.assertEqual(env["CLAUDE_CODE_ENABLE_TELEMETRY"], "1")
         self.assertEqual((env["OTEL_LOGS_EXPORTER"], env["OTEL_TRACES_EXPORTER"], env["OTEL_METRICS_EXPORTER"]),
                          ("otlp", "none", "none"))
@@ -208,9 +211,14 @@ class TrackedClaudeSettingsTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, home)
         helper = home / ".config" / "agent-spend" / "otel-headers-helper"
         helper.parent.mkdir(parents=True)
+        bare = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
+        # No setup on this machine: the command prints {} and nothing on stderr, and exits 0.
+        out = subprocess.run(["/bin/sh", "-c", settings["otelHeadersHelper"]], env=bare, capture_output=True, text=True)
+        self.assertEqual((out.returncode, out.stderr, json.loads(out.stdout)), (0, "", {}))
+        # The setup's helper there: its header.
         executable(helper, 'printf \'{"Authorization": "Bearer t0ken"}\\n\'')
-        out = subprocess.run(["/bin/sh", "-c", settings["otelHeadersHelper"]], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
-                             capture_output=True, text=True, check=True)
+        out = subprocess.run(["/bin/sh", "-c", settings["otelHeadersHelper"]], env=bare, capture_output=True, text=True,
+                             check=True)
         self.assertEqual(json.loads(out.stdout), {"Authorization": "Bearer t0ken"})
 
 

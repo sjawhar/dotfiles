@@ -11,9 +11,9 @@ set -euo pipefail
 # is missing (gcloud could not read it at install time). A rotation is a rerun of this file. The setup runs without
 # CLAUDE_CONFIG_DIR: .bashrc points that at the tracked .claude/ here, which is shared by every machine and must hold
 # no machine's path or token (the setup refuses a folder in a git work tree anyway); that settings.json carries the
-# same telemetry keys by hand, with the helper named $HOME/.config/agent-spend/otel-headers-helper, which the setup
-# writes on each machine. Sourced by install.sh, so it never exits.
-AGENT_SPEND_SETUP_REF=0192064690b7f14ed5747bd3a092072ecaecf3c5
+# same telemetry keys by hand, and a helper command that runs $HOME/.config/agent-spend/otel-headers-helper, which the
+# setup writes on each machine, and prints {} where it is missing. Sourced by install.sh, so it never exits.
+AGENT_SPEND_SETUP_REF=2b9c020a6a71e9227d27f1188c2a156de5be42e3
 
 agent_spend_setup() {
     local dotfiles="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
