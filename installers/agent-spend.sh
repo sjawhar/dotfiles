@@ -13,7 +13,7 @@ set -euo pipefail
 # no machine's path or token (the setup refuses a folder in a git work tree anyway); that settings.json carries the
 # same telemetry keys by hand, and a helper command that runs $HOME/.config/agent-spend/otel-headers-helper, which the
 # setup writes on each machine, and prints {} where it is missing. Sourced by install.sh, so it never exits.
-AGENT_SPEND_SETUP_REF=2b9c020a6a71e9227d27f1188c2a156de5be42e3
+AGENT_SPEND_SETUP_REF=88bd7e0de87842632c4691cc5ed4e3869cd9414c
 
 agent_spend_setup() {
     local dotfiles="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
