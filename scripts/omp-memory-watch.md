@@ -139,6 +139,21 @@ holds the session id — used only when `session_unconfirmed` is absent beside i
 worker's own rule is that the file still names the *previous* session until then. Failing that,
 the session is resolved from the process as before.
 
+### The session a wall report goes to is verified
+
+A session id taken from an `omp --resume <path>` is the id its session *directory* was created
+with, and a resume replaces it; `OMP_SESSION_ID` is inherited and names whoever started the
+box. Either one sent to Envoy reaches whoever holds that id somewhere else, not a silent owner:
+on `ossv-agent-repo` on 2026-10-30 that stale id was VERIFY, which runs on sami-rocqperf.
+
+So before a wall report is written the claimed id is checked against `GET /v1/sessions`,
+filtered to this box's host. One that is not live here is replaced by the live owner — the
+worker's `session` file, else the box's one live session — and the report says the swap
+happened. When no live owner can be named, nobody is told directly and the lead's digest says
+`session unknown`. An Envoy that does not answer leaves the id unverified and the report goes
+where it would have gone: a lookup failure must never read as "nobody is live". The lookup
+happens only when a touch exists, never on a quiet period.
+
 **The first run after this trigger arrives seeds and reports nothing.** A counter already above
 zero dates from an unknown moment in the past, often before the trigger existed, and reporting
 31 scopes' history at once would bury their owners. A scope that appears while the state file

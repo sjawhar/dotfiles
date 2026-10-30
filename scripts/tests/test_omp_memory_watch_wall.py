@@ -32,13 +32,23 @@ CEILING = 24 * GIB
 
 
 class FakeEnvoy:
-    """Records what left. Constructed by run_once exactly as the real one is."""
+    """Records what left, and answers the live-sessions lookup the watch makes before a report.
+
+    `live` is what GET /v1/sessions returns; None makes it fail, which must leave attribution
+    unverified rather than calling every session dead.
+    """
 
     instances: list = []
+    live: list | None = None
 
     def __init__(self, timeout: float = 8.0) -> None:
         self.sent: list[tuple[str, str]] = []
         FakeEnvoy.instances.append(self)
+
+    def request(self, method: str, path: str, body=None):
+        if (method, path) == ("GET", "/v1/sessions") and FakeEnvoy.live is not None:
+            return 200, FakeEnvoy.live
+        return 500, {"error": "no answer in this test"}
 
     def send(self, session_id: str, message: str) -> bool:
         self.sent.append((session_id, message))
@@ -399,6 +409,9 @@ class RunOnceTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
         FakeEnvoy.instances = []
+        FakeEnvoy.live = None
+        self.addCleanup(self.reset_live)
+        self.reset_live()
         for name, replacement in (
             ("CGROUP_ROOT", self.root),
             ("Envoy", FakeEnvoy),
@@ -412,6 +425,11 @@ class RunOnceTest(unittest.TestCase):
             self.addCleanup(lambda n=name, o=original: setattr(WATCH, n, o))
         self.state = self.root / "state.json"
 
+    def reset_live(self) -> None:
+        """The live-session lookup is per RUN, so each pass must look it up again."""
+        WATCH.LIVE_SESSIONS.clear()
+        WATCH.LIVE_READ = False
+
     def scopes(self, events: dict[str, int]) -> None:
         self.cgroups = {}
         for name, counter in events.items():
@@ -424,6 +442,7 @@ class RunOnceTest(unittest.TestCase):
 
     def run_pass(self, **overrides) -> FakeEnvoy:
         WATCH.omp_processes = lambda: self.processes()
+        self.reset_live()
         WATCH.run_once(options(self.state, **overrides))
         return FakeEnvoy.instances[-1]
 
@@ -535,6 +554,60 @@ class RunOnceTest(unittest.TestCase):
         digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
         self.assertIn("pid 2", digest)
         self.assertIn(".ossv-workers/w2/message.md", digest)
+
+    def test_a_stale_session_id_is_not_sent_to_and_the_live_owner_gets_it(self) -> None:
+        """A session id from an `omp --resume` path is the id the directory was CREATED with.
+
+        On ossv-agent-repo that stale id was VERIFY, which runs on sami-rocqperf; sending there
+        reaches that session, not a silent owner.
+        """
+        live = "01a14b84-6cd3-71af-918c-db534cd8d762"
+        FakeEnvoy.live = [
+            {"session_id": live, "host": WATCH.socket.gethostname()},
+            # Not this box, whatever box the tests run on.
+            {"session_id": "00000001-0000-0000-0000-000000000001", "host": "some-other-box.example"},
+        ]
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass()
+        self.scopes({"run-ra1.scope": 4})
+        envoy = self.run_pass()
+        owners = [session for session, _ in envoy.sent if session != WATCH.INFRA_LEAD]
+        self.assertEqual(owners, [live])
+        report = [text for session, text in envoy.sent if session == live][0]
+        self.assertIn("is not live on this box", report)
+        self.assertIn(f"so this went to {live}", report)
+
+    def test_a_stale_id_with_no_live_owner_here_is_sent_to_nobody(self) -> None:
+        FakeEnvoy.live = [
+            {"session_id": "01a14b84-6cd3-71af-918c-db534cd8d762", "host": WATCH.socket.gethostname()},
+            {"session_id": "01a18c6a-ffcd-719e-92a0-31ace0ee6b81", "host": WATCH.socket.gethostname()},
+        ]
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass()
+        self.scopes({"run-ra1.scope": 4})
+        envoy = self.run_pass()
+        self.assertEqual([session for session, _ in envoy.sent], [WATCH.INFRA_LEAD])
+        digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
+        self.assertIn("session unknown", digest)
+
+    def test_a_live_id_is_sent_to_unchanged_and_says_nothing_extra(self) -> None:
+        claim = "00000001-0000-0000-0000-000000000001"
+        FakeEnvoy.live = [{"session_id": claim, "host": WATCH.socket.gethostname()}]
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass()
+        self.scopes({"run-ra1.scope": 4})
+        envoy = self.run_pass()
+        report = [text for session, text in envoy.sent if session == claim][0]
+        self.assertNotIn("not live on this box", report)
+
+    def test_an_envoy_that_cannot_list_sessions_still_tells_the_owner(self) -> None:
+        """Unverified must never become 'nobody is live': the report would reach no one."""
+        FakeEnvoy.live = None
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass()
+        self.scopes({"run-ra1.scope": 4})
+        envoy = self.run_pass()
+        self.assertIn("00000001-0000-0000-0000-000000000001", [session for session, _ in envoy.sent])
 
 
 if __name__ == "__main__":

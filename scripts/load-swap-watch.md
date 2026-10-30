@@ -82,9 +82,35 @@ then why it fired, then the consumers:
   pid in a snapshot taken at 23:52Z on the incident box was already gone a minute later, because
   the load was thousands of short-lived `git`, `python3` and `gzip` children;
 - swap held, by command and by process;
-- each process named by its lane worker and agent session, read from the process (its
-  `OMP_SESSION_ID`, a session id on its command line, or the transcript it holds open — and for
-  a lane, the worker name in its brief path or working directory), never guessed.
+- each process named by its lane worker, its agent session, its **working directory** and its
+  **tmux pane**, all read from the process and never guessed.
+
+### Which session, and how it is checked
+
+`OMP_SESSION_ID` is **inherited**. A session that starts a lane box's supervisor over ssh
+stamps its own id on the tmux server and on every process below it for the life of the box, and
+a session id in an `omp --resume <path>` is the id its session *directory* was created with,
+which a resume replaces. On 2026-10-30 at 20:17:23Z this watch named 39 `python3` processes on
+`ossv-agent-repo` as `01a14b36` — VERIFY, which runs on sami-rocqperf — when the live owner was
+the repo lane `01a14b84`.
+
+So a session id is now taken in this order, strongest first, and then **verified**:
+
+1. the lane worker's own `.ossv-workers/<name>/session`, which `ossv-worker` rewrites on every
+   resume (and which is ignored while `session_unconfirmed` sits beside it, because until then
+   it still names the previous session);
+2. the nearest ancestor `omp`'s own resume path or the transcript it holds open;
+3. the environment, last and never first.
+
+The id is then checked against `GET /v1/sessions` on Envoy, filtered to this box's host. One
+that is not live here reads as `session X from the process environment (started it) (not live
+on this box); the live owner on this box is Y`, where Y comes from the worker's session file,
+or from the box having exactly one live session. An Envoy that does not answer leaves every
+id unverified and named as before: a lookup failure must never read as "nobody is live".
+
+The working directory and the pane are there for the same reason: neither can be inherited from
+a session on another machine. Both are read once per alert — one `tmux list-panes`, one Envoy
+GET — and never on a quiet period.
 
 It also says what the condition looks like from a pane, because the wrong reaction is the
 expensive one: every agent still runs, still answers and still writes its transcript, so a lane
