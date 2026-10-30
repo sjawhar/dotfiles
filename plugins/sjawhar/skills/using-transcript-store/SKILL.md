@@ -7,7 +7,7 @@ description: "Use before you read, grep, jq or script over agent session transcr
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-Every omp session, subagent transcript and session artifact on sami-rocqperf and sami-leanperf is in one ClickHouse store, about 10 minutes behind the live files. `tq` answers in under a second what a hand-written script answers in minutes over 25 GB, so query `tq` first. Open a raw file only at the `FILE:LINE` that `tq` gives you.
+Every omp session, subagent transcript and session artifact on sami-rocqperf and sami-leanperf is in one ClickHouse store, about 10 minutes behind the live files, **and so are the Claude Code and Codex logs copied from seven of Nickolai's hosts** (`machcsl-gcp-1` to `-3`, `share1014-desktop`, `share1014-vm1` to `-vm3`), merged into the same `transcripts` database on 2026-10-30 and readable with the default reader (agent-infra#996, on dispatch://LINUX-31/ask/ecd0eab6: "it's just one big pool of data"). **So `tq time` and `tq top` with no `--host` count his sessions beside ours**; pass `--host` when you mean one machine. `tq` answers in under a second what a hand-written script answers in minutes over 25 GB, so query `tq` first. Open a raw file only at the `FILE:LINE` that `tq` gives you.
 
 | Question | Command | Default window |
 |---|---|---|
@@ -47,7 +47,7 @@ To list every instruction a person gave one session since a time, and what the s
 
 ## When the store does not have it
 
-- **Not in the store:** Claude Code logs, other machines, and the last ~10 minutes. sami-leanperf lags more while a timed benchmark runs there. `tq` warns on stderr when a host's last load is over 30 minutes old.
+- **Not in the store:** the last ~10 minutes, and any machine outside the list above. sami-leanperf lags more while a timed benchmark runs there, and a copied host loads on its own 30-minute timer. `tq` warns on stderr when a host's last load is over 30 minutes old.
 - **`history://<id>` is a condensed view:** `read` and `grep` on it see only the dialogue still in the agent's context: turns a compaction removed are a one-line summary, peer messages and job results are one-line previews or labels, each tool call is one line without its output, and thinking is left out. A miss there does not mean something never happened; for data from the last ~10 minutes, grep the agent's session `.jsonl` file (a subagent's is `<id>.jsonl`).
 - **`tq` not found:** the host is not a store client. Run the query on sami-rocqperf or sami-leanperf.
 - Read raw files by hand only for data the store does not have (the first bullet), and never scan the whole sessions tree on sami-rocqperf: other work shares its CPU and disk.
