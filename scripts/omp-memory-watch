@@ -24,14 +24,26 @@ What one run does, with /proc and /sys reads only, no transcript reading and no 
   3. Read what the kernel cannot reclaim: `anon + shmem + kernel + sock` from the scope's
      memory.stat. A scope `shims/omp` starts carries MemorySwapMax=0, so its anonymous memory
      cannot be paged out even though the box now has a 64 GiB swap file: file cache is the only
-     reclaimable part of its memory.current and must not count towards the ceiling. This is a
-     better predictor than the omp process's RSS: at the 05:55:14Z kill the omp process held
+     reclaimable part of its memory.current and must not count towards the ceiling. (A scope
+     that `ossv-worker` starts sets MemoryMax alone and leaves memory.swap.max at `max`, so its
+     anonymous memory CAN be paged out; the watch reads memory.swap.max per scope and says which
+     shape it is, rather than claiming MemorySwapMax=0 for every scope.) This is a better
+     predictor than the omp process's RSS: at the 05:55:14Z kill the omp process held
      14.9 GiB of the 24 GiB that hit the ceiling and 20 python3 tool subprocesses in the same
      scope held the rest, so an RSS threshold alone would have been watching 62% of the number
      the kernel was about to compare.
   4. A scope is CROSSING while that number is at or above `--fraction` of its limit. It must
      stay so for the grace window (default 60 s) before it alerts, so one transient compile
      does not fire. It clears below `--clear-fraction` of the limit, or when the process ends.
+  5. Separately, and with no hold at all, a scope that REACHES its wall is reported: the `max`
+     counter of its memory.events rises (the kernel refused an allocation at memory.max and had
+     to reclaim), or memory.peak crosses `--wall-fraction` of the ceiling. Steps 3 and 4 miss
+     this whenever the pressure is reclaimable: on ossv-agent-open on 2026-10-30, 31 of 95
+     worker scopes had touched their 24 GiB wall while every one of them sat under the 45%
+     sampling level on unreclaimable memory, and only 4 were ever reported. A touch is rate
+     limited to one report per scope per `--wall-cooldown` (default 15 min); the session owning
+     the scope gets the whole report, and the INFRA lead gets one batched digest of every touch
+     per `--wall-digest` window, so no touch is lost and no lane storms the lead.
 
 Alerts go over Envoy to agent sessions only, never to a person: the session itself (so it can
 checkpoint and shed on its own terms) and the INFRA lead. The chief of staff hears about it
@@ -58,7 +70,20 @@ from pathlib import Path
 CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
 INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
 
-DEFAULT_STATE = Path("/mnt/nvme/sami/tmp/omp-memory-watch/state.json")
+# Where the state file goes. /mnt/nvme/sami/tmp is the agent devboxes' scratch on the big disk;
+# an agent box without it keeps the state under ~/.local/state, which every XDG machine has.
+# Measured 2026-10-30 on ossv-agent-open..open6, ossv-agent-git and ossv-agent-repo: /mnt/nvme
+# there is a root-owned 755 directory on the root filesystem with no sami/tmp under it, so this
+# watch crashed on its first run of every one of them with PermissionError. The test is
+# writability, not existence: the path can be a directory this user still cannot write into, and
+# `--state` cannot be the answer, since a non-default state file forces --dry-run and the watch
+# would then be armed and permanently silent.
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/omp-memory-watch/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "omp-memory-watch/state.json"
+)
 DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 SESSION_ROOT = Path.home() / ".omp/agent/sessions"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -253,6 +278,100 @@ def scope_pressure(cgroup: str) -> tuple[int, int, dict[str, int]]:
         return current, current, fields
     unreclaimable = fields.get("anon", 0) + fields.get("shmem", 0) + fields.get("kernel", 0) + fields.get("sock", 0)
     return min(unreclaimable, current), current, fields
+
+
+def memory_events(cgroup: str) -> dict[str, int]:
+    """The scope's memory.events counters, keyed by name ("max", "oom", "oom_kill", ...).
+
+    `max` counts the times the kernel refused an allocation at memory.max and had to reclaim to
+    satisfy it: a scope whose `max` rises has REACHED its wall, whatever its unreclaimable
+    memory reads. It is the only signal that does not need the pressure to be held: a worker
+    that goes from comfortable to the ceiling and back inside one 30 s period leaves no other
+    trace short of an OOM kill.
+    """
+    counters: dict[str, int] = {}
+    try:
+        for line in (CGROUP_ROOT / cgroup.strip("/") / "memory.events").read_text().splitlines():
+            key, _, value = line.partition(" ")
+            try:
+                counters[key] = int(value)
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    return counters
+
+
+def swap_setting(cgroup: str) -> str:
+    """The scope's memory.swap.max as written ("0", "max", a byte count), or "" when unreadable.
+
+    The alert says a scope's anonymous memory cannot be paged out only when this reads 0. A
+    scope `shims/omp` starts carries MemorySwapMax=0 and a scope `ossv-worker` starts does not,
+    and the alert used to claim the first of both.
+    """
+    try:
+        return (CGROUP_ROOT / cgroup.strip("/") / "memory.swap.max").read_text().strip()
+    except OSError:
+        return ""
+
+
+def swap_sentence(swap_max: str) -> str:
+    """What this run can truthfully say about the scope's swap, from memory.swap.max alone."""
+    if swap_max == "0":
+        return " This scope's memory.swap.max is 0, so the rest it cannot page out."
+    if swap_max == "max":
+        return (
+            " This scope's memory.swap.max is `max`, so its anonymous memory CAN be paged out to"
+            " the box's swap -- which is why its unreclaimable number can sit low while the scope"
+            " still reaches its wall."
+        )
+    if swap_max:
+        return f" This scope's memory.swap.max is {swap_max}, so some of the rest can be paged out."
+    return " This scope's memory.swap.max could not be read, so nothing is claimed about its swap."
+
+
+# A worker's name, as `ossv-worker` writes it into every path under its state root: the omp
+# process of worker `c-asan` is started with `@<root>/.ossv-workers/c-asan/message-resume-0.md`
+# and works under `<home>/work/workers/c-asan/`. Taking it from the command line means no path
+# is hard-coded here and the directory it names can be read for the worker's session id.
+# `\S*` would swallow omp's `@` prompt-file prefix into the path, so the directory starts at a
+# `/` and holds no `@`.
+WORKER_RE = re.compile(r"(?P<dir>(?P<root>/[^\s@]*?/\.ossv-workers)/(?P<name>[^/\s]+))(?:/|\s|$)")
+
+
+def worker_of(pids: list[int]) -> tuple[str, str]:
+    """(worker name, its state directory) for the first process in the scope that names one."""
+    for pid in pids:
+        found = WORKER_RE.search(cmdline_of(pid))
+        if found:
+            return found.group("name"), found.group("dir")
+    return "", ""
+
+
+def worker_session(directory: str) -> str:
+    """The session id `ossv-worker` recorded for this worker, when it has confirmed one.
+
+    `session_unconfirmed` beside it means `$d/session` still names the PREVIOUS session (the
+    worker's own rule), so it is not used then: a wrong session id sends an owner to checkpoint
+    a session that is not theirs.
+    """
+    if not directory:
+        return ""
+    try:
+        if (Path(directory) / "session_unconfirmed").exists():
+            return ""
+        found = UUID_RE.findall((Path(directory) / "session").read_text())
+    except OSError:
+        return ""
+    return found[0] if found else ""
+
+
+def top_by_rss(pids: list[int], count: int) -> list[tuple[int, int, str]]:
+    """The `count` largest processes of the scope as (pid, RSS bytes, command line)."""
+    rows = [(pid, rss_of(pid), cmdline_of(pid)) for pid in pids]
+    rows = [row for row in rows if row[1] > 0]
+    rows.sort(key=lambda row: row[1], reverse=True)
+    return rows[:count]
 
 
 def omp_processes() -> list[tuple[int, str]]:
@@ -460,7 +579,7 @@ def alert_text(scope: str, incident: dict, now: float, kind: str) -> str:
         f" {gib(limit)} ceiling -- {100 * usage / limit:.0f}%, {gib(headroom)} left. The ceiling"
         f" is {incident.get('limit_from')}. The scope's memory.current is"
         f" {gib(incident.get('current') or 0)}; the difference is file cache, which the kernel can"
-        f" reclaim. This scope runs with MemorySwapMax=0, so the rest it cannot.{eta}"
+        f" reclaim.{swap_sentence(incident.get('swap_max') or '')}{eta}"
         if limited
         else f"Memory: this omp process holds {gib(usage)} RSS. {gib(limit)} is the ceiling --"
         f" {incident.get('limit_from')} -- and {gib(warn_at)} is the level a CAPPED session is"
@@ -500,6 +619,168 @@ def alert_text(scope: str, incident: dict, now: float, kind: str) -> str:
         f"{socket.gethostname()}, a systemd --user timer every 30 s.",
     ]
     return "\n".join(lines)
+
+
+def wall_text(touch: dict) -> str:
+    """What one scope's owner is told when its scope reaches memory.max.
+
+    No hold, no rate of rise and no forecast: the scope is AT its ceiling now, and every number
+    here is read from that one moment.
+    """
+    limit = touch["limit"]
+    peak = touch["peak"]
+    session = touch.get("session") or ""
+    who = (
+        f"session {session}"
+        if session
+        else "session UNKNOWN (no session id on any command line in the scope, no transcript open,"
+        " and the worker directory records none yet)"
+    )
+    worker = touch.get("worker")
+    reasons = []
+    if touch.get("events_delta"):
+        reasons.append(
+            f"the `max` counter of its memory.events rose by {touch['events_delta']} since the"
+            f" last poll (now {touch.get('events_max')}): the kernel refused an allocation at"
+            " memory.max that many times and had to reclaim to satisfy it"
+        )
+    if touch.get("peak_touch"):
+        reasons.append(
+            f"its memory.peak reached {gib(peak)}, {100 * peak / max(limit, 1):.1f}% of the ceiling"
+        )
+    lines = [
+        f"OMP SCOPE REACHED ITS MEMORY WALL: scope {touch['scope']} on {socket.gethostname()}"
+        f" ({who}" + (f", ossv-worker {worker}" if worker else ", no ossv-worker name on its command lines") + ")"
+        f" is at its {gib(limit)} memory.max.",
+        "What says so: " + "; and ".join(reasons) + ".",
+        f"Numbers now: memory.peak {gib(peak)}, memory.current {gib(touch.get('current') or 0)},"
+        f" unreclaimable (anon+shmem+kernel+sock) {gib(touch.get('usage') or 0)}, ceiling"
+        f" {gib(limit)} ({touch.get('limit_from')})."
+        + swap_sentence(touch.get("swap_max") or "")
+        + f" memory.events oom {touch.get('events_oom', 0)}, oom_kill"
+        f" {touch.get('events_oom_kill', 0)}.",
+        f"The scope holds {touch.get('task_count') or 0} processes. The three largest by RSS:",
+    ]
+    for pid, rss, command in touch.get("top") or []:
+        lines.append(f"  {gib(rss)}  pid {pid}  {command[:200] or '(no command line)'}")
+    if not touch.get("top"):
+        lines.append("  (none readable: every process in the scope ended before it could be read)")
+    lines.append(
+        "Why you are hearing this and did not before: the crossing alert needs the scope's"
+        " UNRECLAIMABLE memory to sit above 70% of the ceiling for 60 s. A scope whose pressure"
+        " is page cache, or one that reaches the ceiling and falls back inside one 30 s period,"
+        " never meets that and still spends its whole budget. On ossv-agent-open on 2026-10-30,"
+        " 31 of 95 worker scopes had touched their 24 GiB wall and 4 were reported."
+    )
+    lines.append(
+        "DO: a scope at its wall is one allocation away from a memcg OOM kill, which loses every"
+        " in-flight lane with no exit record. Write your handover files, stop spawning lanes, and"
+        " shed or finish what you can, on your own terms."
+    )
+    lines.append(
+        f"This watch only detects; it kills nothing. One report per scope per"
+        f" {human(touch.get('cooldown') or 900)}. From omp-memory-watch"
+        f" (~/.dotfiles/scripts/omp-memory-watch) on {socket.gethostname()}, a systemd --user"
+        " timer every 30 s."
+    )
+    return "\n".join(lines)
+
+
+def wall_digest_text(pending: list[dict], window: float) -> str:
+    """The INFRA lead's batched view: every scope that reached its wall since the last digest.
+
+    One report per scope goes to the scope's own owner, which is where the shedding happens. The
+    lead gets them batched instead of one message each, because a box can have tens of scopes at
+    the wall at once -- 31 of 95 on ossv-agent-open on 2026-10-30 -- and a message per scope per
+    cooldown would bury the lead's session rather than inform it.
+    """
+    lines = [
+        f"SCOPES AT THEIR MEMORY WALL on {socket.gethostname()}: {len(pending)} touch(es) in the"
+        f" last {human(window)}. Each is a scope whose memory.events `max` counter rose or whose"
+        " memory.peak reached its ceiling -- no hold required, so these are the touches the 70%"
+        " for 60 s crossing alert cannot see.",
+    ]
+    for touch in pending:
+        worker = touch.get("worker") or "no worker name"
+        session = touch.get("session") or "session unknown"
+        lines.append(
+            f"  {iso(touch.get('at'))}  {touch.get('scope')}  {worker}  {session}  peak"
+            f" {gib(touch.get('peak') or 0)} of {gib(touch.get('limit') or 0)}"
+            f"  (+{touch.get('events_delta', 0)} memory.events max)"
+        )
+    lines.append(
+        "Each owner has the whole report for its own scope: scope, session, worker, peak and the"
+        " three largest processes with their command lines. From omp-memory-watch on "
+        + socket.gethostname()
+        + "."
+    )
+    return "\n".join(lines)
+
+
+def wall_touch(
+    target: dict, walls: dict, options: argparse.Namespace, now: float, cold_start: bool
+) -> dict | None:
+    """Decide whether this capped scope has REACHED its wall since the last poll, and report it.
+
+    Returns the touch to report, or None. The wall memory is keyed by scope and never by pid:
+    one scope holds several `omp` processes (the session, its js-eval helper), the crossing
+    logic follows whichever is largest, and a flip between them must not look like a new scope
+    and report the same backlog again.
+    """
+    key = target["key"]
+    limit = target["limit"]
+    events = target.get("events") or {}
+    events_max = int(events.get("max", 0))
+    peak = int(target.get("peak_bytes") or 0)
+    memory = walls.setdefault(key, {})
+    known = "events_max" in memory
+    previous_max = int(memory.get("events_max", 0))
+    previous_peak = int(memory.get("peak", 0))
+    memory["events_max"] = events_max
+    memory["peak"] = max(previous_peak, peak)
+    if cold_start and not known:
+        # Seeded, not reported: see run_once. A counter already above zero dates from before
+        # this state file existed.
+        return None
+    delta = events_max - previous_max if known else events_max
+    peak_floor = limit * options.wall_fraction
+    peak_touch = peak >= peak_floor and peak > previous_peak
+    if delta <= 0 and not peak_touch:
+        return None
+    last = memory.get("reported_at")
+    if last and now - last < options.wall_cooldown:
+        # Inside the cooldown the touch is real and already reported; count it so the next
+        # report can say how many times it happened rather than dropping the fact.
+        memory["suppressed"] = int(memory.get("suppressed", 0)) + 1
+        return None
+    pids = scope_tasks(target["cgroup"])
+    worker, directory = worker_of(pids)
+    session = worker_session(directory) or session_of(target["pid"])
+    memory["reported_at"] = now
+    suppressed = int(memory.pop("suppressed", 0))
+    return dict(
+        at=now,
+        scope=target["scope"],
+        key=key,
+        session=session,
+        worker=worker,
+        limit=limit,
+        limit_from=target["limit_from"],
+        peak=peak,
+        current=target["current"],
+        usage=target["usage"],
+        swap_max=target.get("swap_max") or "",
+        events_max=events_max,
+        events_delta=delta,
+        events_oom=int(events.get("oom", 0)),
+        events_oom_kill=int(events.get("oom_kill", 0)),
+        peak_touch=peak_touch,
+        task_count=len(pids),
+        top=top_by_rss(pids, options.wall_top),
+        suppressed=suppressed,
+        cooldown=options.wall_cooldown,
+    )
+
 
 
 def clear_text(scope: str, incident: dict, cause: str, now: float) -> str:
@@ -544,6 +825,22 @@ def run_once(options: argparse.Namespace) -> int:
     # How many separate crossings each SESSION has had. The second one goes to the chief of
     # staff: one session that keeps coming back is a lane problem, not a spike.
     crossings: dict = state.data.setdefault("crossings", {})
+    # Whether this state file has no WALL memory at all. On such a run -- the first after this
+    # trigger was added, or the first after the state file was lost -- every scope's counters
+    # are SEEDED and nothing is reported: a counter already above zero says a touch happened at
+    # an unknown time in the past, often before this trigger existed, and reporting the whole
+    # backlog at once (31 scopes on ossv-agent-open on 2026-10-30) would bury the owners in
+    # history. The crossing state is no part of this test: a state file written by the version
+    # before this trigger has every scope in `scopes` and no wall memory at all, and must still
+    # seed. A scope that appears while the file already knows others is genuinely new, so its
+    # baseline is zero and its first real touch IS reported.
+    cold_start = not state.data.get("walls")
+    # The wall memory, keyed by scope name and NOT reset with the pid: `systemd-run --scope`
+    # never reuses a name, so a key lives exactly as long as the scope does.
+    walls: dict = state.data.setdefault("walls", {})
+    # Touches waiting for the INFRA lead's next digest. They accumulate across runs, so a quiet
+    # digest window never loses one.
+    pending_wall: list = state.data.setdefault("wall_pending", [])
 
     # What each omp process is measured against. Two shapes exist on this box:
     #
@@ -569,10 +866,17 @@ def run_once(options: argparse.Namespace) -> int:
                 continue
             by_scope[scope] = pid
             usage, current, _fields = scope_pressure(cgroup)
+            events = memory_events(cgroup)
+            # memory.peak is the high-water mark of memory.current. It exists from Linux 5.19;
+            # where it does not, memory.current is the best this run has and the peak test is
+            # simply weaker, while the memory.events test is unaffected.
+            peak = read_int(CGROUP_ROOT / cgroup.strip("/") / "memory.peak")
             targets.append(
                 dict(
                     key=scope, scope=scope, cgroup=cgroup, pid=pid, limit=limit, limit_from=limit_from,
                     limited=True, usage=usage, current=current,
+                    events=events, peak_bytes=peak if peak is not None else current,
+                    swap_max=swap_setting(cgroup),
                     measured="the scope's unreclaimable memory (anon+shmem+kernel+sock), which is what"
                     " the kernel's memcg OOM killer compares with the ceiling",
                 )
@@ -589,10 +893,37 @@ def run_once(options: argparse.Namespace) -> int:
                 )
             )
 
-    alerts = clears = watched = 0
+    alerts = clears = watched = walls_hit = 0
     for target in sorted(targets, key=lambda t: t["key"]):
         key, scope, cgroup, pid = target["key"], target["scope"], target["cgroup"], target["pid"]
         limit, limit_from, usage, current = target["limit"], target["limit_from"], target["usage"], target["current"]
+        # The wall test first, and independent of everything below it: a scope AT memory.max is
+        # reported whether or not its unreclaimable memory ever sits above the warn level, and
+        # whether or not a crossing is open for it.
+        if target["limited"]:
+            touch = wall_touch(target, walls, options, started, cold_start)
+            if touch:
+                walls_hit += 1
+                text = wall_text(touch)
+                if touch["suppressed"]:
+                    text += (
+                        f"\nIt also touched the wall {touch['suppressed']} more time(s) inside the"
+                        f" last {human(options.wall_cooldown)}, which this one report covers."
+                    )
+                pending_wall.append(
+                    {name: touch[name] for name in ("at", "scope", "session", "worker", "peak", "limit", "events_delta")}
+                )
+                del pending_wall[: max(0, len(pending_wall) - options.wall_pending_max)]
+                state.commit(options)
+                if touch["session"] and not options.dry_run:
+                    envoy.send(touch["session"], text)
+                log(
+                    f"{key}: WALL ({gib(touch['peak'])} peak of {gib(limit)}, memory.events max"
+                    f" +{touch['events_delta']}) -> "
+                    + (f"session {touch['session']}" if touch["session"] else "no session id resolved")
+                )
+                if options.print_alert:
+                    print(text)
         warn_at = limit * options.fraction
         if not target["limited"]:
             # Nothing caps this session, so "a fraction of the ceiling" would be a number no
@@ -648,6 +979,7 @@ def run_once(options: argparse.Namespace) -> int:
         incident["measured"] = target["measured"]
         incident["warn_at"] = warn_at
         incident["current"] = current
+        incident["swap_max"] = target.get("swap_max") or ""
         incident["usage"] = usage
         incident["peak"] = max(incident.get("peak") or 0, usage)
         incident["omp_rss"] = rss_of(pid)
@@ -733,12 +1065,33 @@ def run_once(options: argparse.Namespace) -> int:
             if send_clear(envoy, options, key, incident, "the omp process ended: the session is no longer running", started):
                 clears += 1
             incidents.pop(key, None)
+    for key in list(walls):
+        if key not in live_keys:
+            walls.pop(key, None)
+
+    # The INFRA lead's batched view. The per-scope reports have already gone to their owners;
+    # this is one message per window however many scopes touched their wall in it, so a box
+    # with tens of scopes at the ceiling informs the lead instead of flooding it.
+    digests = 0
+    if pending_wall and started - (state.data.get("wall_digest_at") or 0) >= options.wall_digest:
+        text = wall_digest_text(pending_wall, options.wall_digest)
+        state.data["wall_digest_at"] = started
+        sent = pending_wall[:]
+        del pending_wall[:]
+        state.commit(options)
+        if not options.dry_run:
+            envoy.send(INFRA_LEAD, text)
+        digests = len(sent)
+        log(f"wall digest: {digests} touch(es) -> INFRA lead {INFRA_LEAD}")
+        if options.print_alert:
+            print(text)
 
     state.commit(options)
     state.close()
     log(
         f"checked {len(targets)} omp session(s), {watched} close enough to sample, in "
-        f"{time.time() - started:.2f}s; {alerts} alert(s), {clears} clear(s)"
+        f"{time.time() - started:.2f}s; {alerts} alert(s), {clears} clear(s),"
+        f" {walls_hit} wall touch(es), {len(pending_wall)} waiting for the next digest"
     )
     return 0
 
@@ -757,6 +1110,22 @@ def main() -> int:
     parser.add_argument("--unlimited-warn", type=float, default=16.8, help="GiB at which an UNCAPPED scope alerts")
     parser.add_argument("--grace", type=float, default=60.0, help="seconds over the threshold before it alerts")
     parser.add_argument("--escalate", type=float, default=600.0, help="seconds after an alert before the chief of staff is told")
+    parser.add_argument(
+        "--wall-fraction",
+        type=float,
+        default=0.98,
+        help="memory.peak at or above this fraction of the ceiling counts as reaching the wall",
+    )
+    parser.add_argument(
+        "--wall-cooldown", type=float, default=900.0, help="seconds between wall reports for one scope"
+    )
+    parser.add_argument(
+        "--wall-digest", type=float, default=900.0, help="seconds between the INFRA lead's batched wall digests"
+    )
+    parser.add_argument("--wall-top", type=int, default=3, help="processes by RSS named in a wall report")
+    parser.add_argument(
+        "--wall-pending-max", type=int, default=400, help="touches kept waiting for a digest before the oldest are dropped"
+    )
     parser.add_argument(
         "--state",
         type=Path,
