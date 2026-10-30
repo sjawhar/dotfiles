@@ -844,14 +844,27 @@ def clears(state_now: dict, options: argparse.Namespace) -> bool:
     return True
 
 
+def is_falling(now: dict) -> bool:
+    """Is this disk moving towards full in a way worth a number?
+
+    Above FLAT_RATE it is falling. Under it, only if this run's own horizon test says so: a disk
+    with little free space left can reach zero inside the horizon at a rate too small to print,
+    and that case must keep its deadline rather than be called flat.
+    """
+    rate = now.get("df_fill_rate")
+    if rate is None or rate <= 0:
+        return False
+    return rate > FLAT_RATE or bool(now.get("rate_candidate")) or bool(now.get("fast"))
+
+
 def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], kind: str, when: float) -> str:
     mount = now["mount"]
     used = 100 * (1 - now["free"] / max(now["total"], 1))
     df_rate = now["df_fill_rate"]
-    falling = df_rate is not None and df_rate > FLAT_RATE
+    falling = is_falling(now)
     trend = "df free-space fill rate: unknown (too few samples yet)"
     if df_rate is not None:
-        if abs(df_rate) <= FLAT_RATE:
+        if not falling and abs(df_rate) <= FLAT_RATE:
             trend = (
                 f"free space is flat: no measurable change over the last"
                 f" {human_time(now['df_rate_window'])}"
@@ -1037,7 +1050,7 @@ def run_once(options: argparse.Namespace) -> int:
             f"{mount}: free {gib(free)} of {gib(total)}, floor {gib(now['floor'])},"
             f" df fill rate {gb((now['df_fill_rate'] or 0) * 3600)}/h over"
             f" {human_time(now['df_rate_window'])}, df time-to-full"
-            f" {human_time(now['time_to_full']) if now['time_to_full'] else 'n/a'}{confirmation_text}"
+            f" {human_time(now['time_to_full']) if is_falling(now) else 'n/a (flat)'}{confirmation_text}"
             f" -> {'CROSSING' if now['crossing'] else 'ok'}"
         )
         note_held_floor(now, notes)
