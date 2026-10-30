@@ -163,6 +163,9 @@ if [[ -n "$profile" ]]; then
         share_links "$root" "$root/profiles/$profile" agent profiles run .share.lock
         share_links "$root/agent" "$root/profiles/$profile/agent" \
             models.yml models.overlay.yml 'models.yml.new.*' '*-wal' '*-shm'
+        # pi-envoy reads a named profile's agent/envoy.json instead of ~/.config/legion/envoy.json.
+        [[ -e "$root/profiles/$profile/agent/envoy.json" ]] ||
+            ln -s "${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json" "$root/profiles/$profile/agent/envoy.json"
         exec 9>&-
         models_out="$root/profiles/$profile/agent/models.yml"
         yq eval-all '. as $item ireduce ({}; . * $item)' "$root/agent/models.yml" "$overlay_models" \
