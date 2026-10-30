@@ -1,5 +1,5 @@
 // Tells omp's own fallback of a session's model apart from an advisor's, for the extensions that
-// act on `retry_fallback_applied` (refusal-cooldown.ts, served-model-notice-core.ts).
+// act on `retry_fallback_applied` (refusal-cooldown.ts).
 //
 // omp emits that event from two places (omp 18.13.3): its turn recovery, when it moves the
 // session's own model down `retry.fallbackChains`, and its advisor runtime, when an advisor's own

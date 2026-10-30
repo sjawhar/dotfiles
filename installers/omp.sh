@@ -74,7 +74,9 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/attention-queue.ts" "${OMP_AGENT_DIR
 # AskGate moved into @sjawhar/pi-envoy; machines set up before that hold a dangling link to it.
 rm -f "${OMP_AGENT_DIR}/extensions/askgate.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/refusal-cooldown.ts" "${OMP_AGENT_DIR}/extensions/refusal-cooldown.ts"
-ensure_link "${DOTFILES_DIR}/omp/extensions/served-model-notice.ts" "${OMP_AGENT_DIR}/extensions/served-model-notice.ts"
+# served-model-notice was removed on 2026-10-29 (Sami: "just delete this notice entirely");
+# machines set up before that hold a dangling link to it.
+rm -f "${OMP_AGENT_DIR}/extensions/served-model-notice.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/running-script-guard.ts" "${OMP_AGENT_DIR}/extensions/running-script-guard.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/decision-review-gate.ts" "${OMP_AGENT_DIR}/extensions/decision-review-gate.ts"
 ensure_link "${DOTFILES_DIR}/omp/extensions/path-guard.ts" "${OMP_AGENT_DIR}/extensions/path-guard.ts"
