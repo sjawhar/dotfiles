@@ -1,0 +1,268 @@
+#!/bin/bash
+# tmp-stale-reap: remove the stale top-level entries of the root-resident /tmp.
+#
+# TMPDIR already points every agent session and interactive shell at
+# /mnt/nvme/<user>/session-tmp/<id> (scripts/agent-session, .bashrc), and session-scratch-reap
+# removes those when the session ends. /tmp still held 26,457 MB on 2026-10-30, so what fills it
+# never read TMPDIR: an explicit /tmp/<name> path a tool or an agent typed, a container, a
+# daemon, or a process started before the rc ran. No environment variable moves any of it, and
+# the one cleaner on the box, systemd-tmpfiles-clean.timer, ages /tmp at 30d
+# (/usr/lib/tmpfiles.d/tmp.conf) while nothing in there reaches 5 days. This unit is the cleaner
+# for that gap, and devbox/tmp-stale-reap.md holds the measurement it is built on.
+#
+# An entry is removed only when EVERY one of these holds. Each is a separate veto, and the entry
+# survives whenever one of them is merely unsure:
+#   - it is owned by the uid running this script, so never another user's and never root's;
+#   - it is a plain file or a plain directory, so never a socket, fifo, device or symlink;
+#   - its name matches none of the keep patterns below (the X11, ICE, font and Test socket
+#     directories, systemd's private directories, snap's private tmp, the tmux server sockets,
+#     the ssh-agent and gpg-agent directories, and whatever TMP_REAP_KEEP adds);
+#   - no process this script can see holds it: not as cwd, exe or root, not an open fd, not a
+#     mapped file, and not named in TMPDIR or AGENT_SESSION_SCRATCH. One pass over /proc answers
+#     that for every candidate at once - never an lsof per candidate, which walks the whole tree
+#     (skill://disk-hygiene);
+#   - nothing in it, at any depth, is a unix socket, because a daemon may still be serving it;
+#   - nothing in it, at any depth, belongs to another user. A container that runs as root writes
+#     root-owned files into a directory this user made (/tmp/r22651/.coq-native on 2026-10-30),
+#     and this script can neither read that user's /proc to see whether it is still using them
+#     nor unlink them;
+#   - nothing in it, at any depth, has an mtime or a ctime inside the age window.
+#
+# Age is the last gate and never the first: it can only keep an entry longer, never mark one dead
+# (skill://disk-hygiene). atime is deliberately ignored - du, find, trivy or any other scanner
+# rewrites it (this box's own audit did, on 2026-10-30), so it reports a 60-hour-old tree as
+# fresh and makes the window mean nothing.
+#
+# A hand run reports and removes nothing; --apply removes, and is what the service passes.
+# TMP_REAP_ROOT, TMP_REAP_AGE_HOURS, TMP_REAP_KEEP, TMP_REAP_PROBE_SECONDS and
+# TMP_REAP_IO_PRESSURE_MAX override the defaults, so a test can run it against a scratch root.
+set -euo pipefail
+
+root="${TMP_REAP_ROOT:-/tmp}"
+age_hours="${TMP_REAP_AGE_HOURS:-48}"
+probe_timeout="${TMP_REAP_PROBE_SECONDS:-120}"
+pressure_max="${TMP_REAP_IO_PRESSURE_MAX:-20}"
+
+# Never removed, whatever their age and whoever owns them. The socket directories of X11, the ICE
+# session bus, the font server and the toolkit self-test; systemd's per-service private trees;
+# snap's private tmp; the tmux server sockets and the ssh-agent and gpg-agent directories, which
+# are this user's own and would otherwise look like ordinary stale directories between two uses
+# of a socket.
+keep_patterns=(
+    '.X11-unix' '.XIM-unix' '.ICE-unix' '.font-unix' '.Test-unix' '.XDG-*'
+    'systemd-private-*' 'snap-private-tmp'
+    'tmux-*' 'ssh-*' 'dbus-*' 'gpg-*' '.gnupg*'
+)
+read -r -a extra_keep <<<"${TMP_REAP_KEEP:-}"
+((${#extra_keep[@]})) && keep_patterns+=("${extra_keep[@]}")
+
+apply=""
+case "${1:-}" in
+    --apply) apply=1 ;;
+    --dry-run | '') ;;
+    *)
+        echo "usage: tmp-stale-reap [--dry-run|--apply]" >&2
+        exit 2
+        ;;
+esac
+
+if [[ ! -d "$root" ]]; then
+    echo "tmp-stale-reap: $root is absent; nothing to reap"
+    exit 0
+fi
+root="${root%/}"
+
+# Deleting under IO pressure hangs every shell on the box (skill://disk-hygiene). The next run is
+# an hour away, so skipping a period costs nothing.
+pressure=0
+if [[ -r /proc/pressure/io ]]; then
+    pressure="$(sed -n 's/^full .*avg10=\([0-9.]*\).*/\1/p' /proc/pressure/io)"
+    pressure="${pressure:-0}"
+fi
+if [[ -n "$apply" ]] && awk -v p="$pressure" -v m="$pressure_max" 'BEGIN{exit !(p+0 > m+0)}'; then
+    echo "tmp-stale-reap: io pressure full avg10=$pressure is over $pressure_max; nothing removed this run"
+    exit 0
+fi
+
+uid="$(id -u)"
+now="$(date +%s)"
+# awk, not $((…)): TMP_REAP_AGE_HOURS takes a fraction, which is how the test in
+# devbox/tmp-stale-reap.md gets a window of seconds instead of waiting two days for one.
+cutoff="$(awk -v n="$now" -v h="$age_hours" 'BEGIN{printf "%d", n - h*3600}')"
+
+kept_other_owner=0 kept_pattern=0 kept_type=0 kept_young=0 kept_live=0 kept_unsure=0 kept_foreign=0
+removed=0 failed=0 removed_bytes=0
+
+# Integer arithmetic, not awk: a hand run calls this once per entry, 17,458 times on this box.
+hours() { printf '%d.%d' $(($1 / 3600)) $((($1 % 3600) * 10 / 3600)); }
+size() { # the line a complaint is answered from, so the small entries stay readable too
+    awk -v b="$1" 'BEGIN{
+        split("B KB MB GB TB", u, " ")
+        i = 1
+        while (b >= 1024 && i < 5) { b /= 1024; i++ }
+        printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i]
+    }'
+}
+
+# rm -rf does not chmod, so a directory whose owner left it read-only keeps its own children.
+# The retry is bounded to an entry this run has already proved dead by every rule above, and
+# without it the service fails on that entry every hour and hides the next real failure. It
+# cannot save a directory another user owns - that is the veto in pass 3, not a case for here.
+remove() {
+    # Quiet on the first try: a read-only directory is expected here, and only the second
+    # attempt's message means the entry really is stuck.
+    rm -rf -- "$1" 2>/dev/null && return 0
+    chmod -R u+rwX -- "$1" 2>/dev/null || true
+    rm -rf -- "$1"
+}
+
+# Pass 1: one stat of the directory itself - owner, type, name and the entry's own timestamps.
+# Only what survives this costs a /proc pass or a tree walk. One find, not one stat per entry:
+# /tmp held 17,458 entries on 2026-10-30. A hand run (no --apply) names every entry it keeps and
+# why; the service, which would write 14,000 of those lines an hour into the journal, names only
+# the keeps a complaint is ever about - the live ones and the keep list.
+declare -A candidate=()
+while IFS=$'\t' read -r type owner mtime ctime name; do
+    [[ -n "$name" ]] || continue
+    skip=""
+    for pattern in "${keep_patterns[@]}"; do
+        # shellcheck disable=SC2053  # the keep pattern is meant to glob
+        if [[ "$name" == $pattern ]]; then
+            echo "tmp-stale-reap: keep $root/$name (name matches the keep pattern '$pattern')"
+            kept_pattern=$((kept_pattern + 1))
+            skip=1
+            break
+        fi
+    done
+    [[ -n "$skip" ]] && continue
+    if [[ "$type" != f && "$type" != d ]]; then
+        [[ -n "$apply" ]] || echo "tmp-stale-reap: keep $root/$name (a '$type', not a plain file or directory)"
+        kept_type=$((kept_type + 1))
+        continue
+    fi
+    if [[ "$owner" != "$uid" ]]; then
+        [[ -n "$apply" ]] || echo "tmp-stale-reap: keep $root/$name (owned by uid $owner, not by uid $uid)"
+        kept_other_owner=$((kept_other_owner + 1))
+        continue
+    fi
+    if ((mtime > cutoff || ctime > cutoff)); then
+        [[ -n "$apply" ]] || echo "tmp-stale-reap: keep $root/$name (changed $(hours $((now - (mtime > ctime ? mtime : ctime))))h ago, inside the ${age_hours}h window)"
+        kept_young=$((kept_young + 1))
+        continue
+    fi
+    candidate["$root/$name"]=1
+done < <(find "$root" -mindepth 1 -maxdepth 1 -ignore_readdir_race \
+    -printf '%y\t%U\t%Ts\t%Cs\t%f\n' 2>/dev/null)
+
+if ((${#candidate[@]} == 0)); then
+    echo "tmp-stale-reap: $root: nothing is both this user's and older than ${age_hours}h; ${kept_young} too young, ${kept_pattern} on the keep list, ${kept_other_owner} another user's, ${kept_type} not a plain file or directory"
+    exit 0
+fi
+
+# Pass 2: the processes. Three reads of /proc for the whole candidate set, never one per
+# candidate: every symlink under /proc/<pid>/ (fd, cwd, exe, root) in one find, then the mapped
+# files, then TMPDIR and AGENT_SESSION_SCRATCH. Only this user's /proc entries are readable from
+# here, so another user's process holding one of these is invisible; the owner gate in pass 1 and
+# the age window are what cover that (devbox/tmp-stale-reap.md).
+declare -A held=()
+mark() { # mark PID HOW PATH
+    local path="$3" top
+    [[ "$path" == "$root"/* ]] || return 0
+    top="${path#"$root"/}"
+    top="$root/${top%%/*}"
+    [[ -n "${candidate["$top"]:-}" ]] || return 0
+    held["$top"]="pid $1 via $2"
+}
+
+while IFS=$'\t' read -r link target; do
+    pid="${link#/proc/}"
+    pid="${pid%%/*}"
+    kind="${link##*/}"
+    [[ "$kind" =~ ^[0-9]+$ ]] && kind="an open file"
+    mark "$pid" "$kind" "$target"
+done < <(find /proc/[0-9]*/fd /proc/[0-9]*/cwd /proc/[0-9]*/exe /proc/[0-9]*/root \
+    -maxdepth 1 -ignore_readdir_race -type l -printf '%p\t%l\n' 2>/dev/null)
+
+while IFS= read -r line; do
+    pid="${line#/proc/}"
+    pid="${pid%%/*}"
+    mark "$pid" "a mapped file" "${line#*:}"
+done < <(grep -Ho -- "${root}/[^[:space:]]*" /proc/[0-9]*/maps 2>/dev/null || true)
+
+while IFS= read -r -d '' line; do
+    pid="${line#/proc/}"
+    pid="${pid%%/*}"
+    value="${line#*:}"
+    mark "$pid" "${value%%=*}" "${value#*=}"
+done < <(grep -zaoH -E "(TMPDIR|AGENT_SESSION_SCRATCH)=${root}/[^[:space:]]*" \
+    /proc/[0-9]*/environ 2>/dev/null || true)
+
+# Pass 3: the tree. One walk per candidate that stops at the first thing vetoing it, so a live
+# tree costs almost nothing and only a tree that is really going is walked in full. A walk that
+# runs past TMP_REAP_PROBE_SECONDS, or that fails, keeps the entry: neither is proof of death.
+for entry in "${!candidate[@]}"; do
+    if [[ -n "${held["$entry"]:-}" ]]; then
+        echo "tmp-stale-reap: keep $entry (live: ${held["$entry"]})"
+        kept_live=$((kept_live + 1))
+        continue
+    fi
+
+    # `|| status=$?`, not `if ! …`: after a negated condition $? is the negation's 0, not the
+    # walk's own status, and the keep line has to name what actually went wrong.
+    status=0
+    probe="$(timeout "$probe_timeout" find "$entry" -xdev -ignore_readdir_race \
+        \( \( -type s -printf 'socket\t%p\n' \) -o \
+        \( ! -uid "$uid" -printf 'foreign\t%p, uid %U\n' \) -o \
+        \( \( -newermt "@$cutoff" -o -newerct "@$cutoff" \) -printf 'fresh\t%p\n' \) \) \
+        -quit 2>/dev/null)" || status=$?
+    if ((status != 0)); then
+        if ((status == 124)); then
+            echo "tmp-stale-reap: keep $entry (the walk of it ran past ${probe_timeout}s)"
+        else
+            echo "tmp-stale-reap: keep $entry (the walk of it failed, exit $status)"
+        fi
+        kept_unsure=$((kept_unsure + 1))
+        continue
+    fi
+    if [[ -n "$probe" ]]; then
+        case "${probe%%$'\t'*}" in
+            socket)
+                echo "tmp-stale-reap: keep $entry (it holds a unix socket: ${probe#*$'\t'})"
+                kept_live=$((kept_live + 1))
+                ;;
+            foreign)
+                echo "tmp-stale-reap: keep $entry (it holds another user's file: ${probe#*$'\t'})"
+                kept_foreign=$((kept_foreign + 1))
+                ;;
+            *)
+                echo "tmp-stale-reap: keep $entry (written inside the ${age_hours}h window: ${probe#*$'\t'})"
+                kept_young=$((kept_young + 1))
+                ;;
+        esac
+        continue
+    fi
+
+    # The line this entry's removal is answered from. One walk for both numbers, and no
+    # `sort | head`: head quitting SIGPIPEs the writer, which under pipefail ends the run at
+    # the first entry it reports (seen 2026-10-30, exit 141, 87 entries in).
+    newest=0 bytes=0
+    read -r newest bytes < <(find "$entry" -xdev -ignore_readdir_race -printf '%Ts\t%Cs\t%s\n' \
+        2>/dev/null | awk -F'\t' '{ if ($1 > m) m = $1; if ($2 > m) m = $2; s += $3 }
+            END { printf "%d %d\n", m + 0, s + 0 }')
+    age="$(hours $((now - (newest > 0 ? newest : now))))"
+    if [[ -z "$apply" ]]; then
+        echo "tmp-stale-reap: would remove $entry ($(size "$bytes"), ${age}h since the newest file in it, no live process)"
+        removed=$((removed + 1))
+        removed_bytes=$((removed_bytes + bytes))
+    elif remove "$entry"; then
+        echo "tmp-stale-reap: removed $entry ($(size "$bytes"), ${age}h since the newest file in it, no live process)"
+        removed=$((removed + 1))
+        removed_bytes=$((removed_bytes + bytes))
+    else
+        echo "tmp-stale-reap: FAILED to remove $entry" >&2
+        failed=$((failed + 1))
+    fi
+done
+
+echo "tmp-stale-reap: $root: ${removed} $([[ -z "$apply" ]] && echo "would be removed" || echo "removed") ($(size "$removed_bytes")), ${kept_live} live, ${kept_young} written inside the ${age_hours}h window, ${kept_pattern} on the keep list, ${kept_other_owner} another user's, ${kept_foreign} holding another user's files, ${kept_type} not a plain file or directory, ${kept_unsure} unreadable; ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free on $root"
+((failed == 0))

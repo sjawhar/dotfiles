@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly: remove the stale top-level entries of the root-resident /tmp (tmp-stale-reap.service)
+
+[Timer]
+# 25min after boot and hourly after that, offset from nvme-cache-cap.timer (10min, hourly) so
+# the two do not walk their trees in the same minute.
+OnBootSec=25min
+OnUnitActiveSec=1h
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
