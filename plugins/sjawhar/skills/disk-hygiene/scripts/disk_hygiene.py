@@ -166,21 +166,50 @@ def io_full_avg10() -> float:
     return 0.0
 
 
-def df_used_gb() -> float:
-    st = os.statvfs("/")
+def living_ancestor(path: str) -> str:
+    """The nearest path that exists, so a filesystem reading survives the removal it measures."""
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            return "/"
+        path = parent
+    return path
+
+
+def df_used_gb(path: str = "/") -> float:
+    """Used GB of the filesystem that holds <path>. A reading of `/` is true of `/` alone: a
+    removal under another mount frees nothing there, and the ledger then shows no change."""
+    st = os.statvfs(living_ancestor(path))
     return round((st.f_blocks - st.f_bfree) * st.f_frsize / 1e9, 1)
 
 
-def df_free_gb() -> float:
-    """Space available to an unprivileged writer, which is what a reclaim threshold decides
-    on: f_bavail excludes the reserved blocks that f_bfree counts and nobody here can use."""
-    st = os.statvfs("/")
+def df_free_gb(path: str = "/") -> float:
+    """Space available to an unprivileged writer on the filesystem that holds <path>, which is
+    what a reclaim threshold decides on: f_bavail excludes the reserved blocks that f_bfree
+    counts and nobody here can use."""
+    st = os.statvfs(living_ancestor(path))
     return round(st.f_bavail * st.f_frsize / 1e9, 1)
 
 
+def mount_point(path: str) -> str:
+    """The mount point of the filesystem that holds <path>, so a space reading names the disk
+    it is true of: a removal under another mount frees nothing on `/`."""
+    path = living_ancestor(os.path.abspath(path))
+    dev = os.lstat(path).st_dev
+    while path != "/":
+        parent = os.path.dirname(path)
+        if os.lstat(parent).st_dev != dev:
+            return path
+        path = parent
+    return "/"
+
+
 def ledger_write(path: Path, entry: dict[str, Any]) -> None:
+    """One JSONL line, with the used space of the filesystem the entry's own path lives on."""
+    target = str(entry.get("path") or "/")
     entry["t"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    entry["df_used_gb"] = df_used_gb()
+    entry["df_used_gb"] = df_used_gb(target)
+    entry["df_mount"] = mount_point(target)
     with path.open("a") as f:
         f.write(json.dumps(entry) + "\n")
     print(json.dumps(entry), flush=True)

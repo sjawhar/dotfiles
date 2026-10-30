@@ -1166,6 +1166,17 @@ class InstrumentTest(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)
 
+    def test_ledger_space_reading_names_the_filesystem_it_measured(self) -> None:
+        """`df` of `/` is true of `/` alone. A removal under another mount frees nothing there,
+        so each ledger line carries the used space of its own path's filesystem, and names it."""
+        ledger = self.base / "ledger.jsonl"
+        disk_hygiene.ledger_write(ledger, {"op": "removed", "path": str(self.base / "already-gone")})
+        entry = json.loads(ledger.read_text().splitlines()[-1])
+        self.assertEqual(entry["df_mount"], disk_hygiene.mount_point(str(self.base)))
+        self.assertGreater(entry["df_used_gb"], 0)
+        self.assertEqual(disk_hygiene.mount_point("/proc/self"), "/proc",
+                         "mount_point must stop at the mount, not walk to /")
+
     def test_exclusive_sizes_never_count_a_child_inside_its_parent(self) -> None:
         """`du --max-depth=N | sort -rn | head` sums to more than the total because it holds a
         parent and its children both. The same input, made addable, sums to the total."""

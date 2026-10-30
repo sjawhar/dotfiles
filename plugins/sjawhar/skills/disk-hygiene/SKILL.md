@@ -43,7 +43,7 @@ Here you delete only paths that you prove are yours. A name proves nothing eithe
 - Run one `rm` or ad-hoc `du` at a time, under `sudo ionice -c3 nice -n19`. Parallel walkers plus an `rm` can hang every shell on the box.
 - Delete only while `/proc/pressure/io` `full avg10 < 20`. The script gates on this.
 - Never `lsof +D` or `fuser` a tree per candidate: each walks the whole tree. Before each item, run `$S procs` once and check that no cwd is inside it.
-- Do not size a candidate to decide its deletion: under IO load sizing is slow, and `df` before and after measures the result.
+- Do not size a candidate to decide its deletion: under IO load sizing is slow, and `df` before and after measures the result. Read the `df` of the filesystem the path is on, which `df <path>` gives: a removal under another mount leaves `/` unchanged.
 - Never run one `du` of everything: it can run for hours. To find where the space went, what writes now, or what appeared in the last hours, use [references/finding-space.md](references/finding-space.md). Each instrument there is a named subcommand of `$S`, and each prints what its number does not measure.
 - When a leaked test or process causes the space or load, read [references/test-leaks.md](references/test-leaks.md).
 
@@ -94,4 +94,4 @@ nice -n19 python3 $S apply --plan plan.json --protected protected.json --ledger 
 
 ## Phase 7: Report
 
-Write a summary next to the ledger (apply writes one JSONL line per action with `df` after it; add a line for each manual action). The summary gives space freed, what you kept and why (unpushed, holds, fresh), undescribed WIP in shared checkouts with the session `skill://session-attribution` finds for it (or "unknown"), and what you could not reclaim (locks, live owners). Give every sampled number its interval, because a watcher reports the extreme of its samples and not the extreme.
+Write a summary next to the ledger (apply writes one JSONL line per action; add a line for each manual action). Each apply line carries the used space of that path's own filesystem, and names its mount point. The summary gives space freed, what you kept and why (unpushed, holds, fresh), undescribed WIP in shared checkouts with the session `skill://session-attribution` finds for it (or "unknown"), and what you could not reclaim (locks, live owners). Give every sampled number its interval, because a watcher reports the extreme of its samples and not the extreme.
