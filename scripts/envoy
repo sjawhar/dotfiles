@@ -5,12 +5,15 @@
 #   envoy ps         — list live sessions registered with Envoy (subagent sessions hidden)
 #   envoy ps --sub-agents — include subagent sessions
 #   envoy ps --json  — JSON output
-#   envoy ps --local — filter to local machine only
+#   envoy ps --local — filter to this machine (its host, or a listener id)
 #   envoy send [--source envoy] <t> <msg> — send message (session UUID = direct, else publish to topic)
 #   envoy notify <topic> <msg> — publish as envoy: `send --source envoy <topic> <msg>`
 #   envoy broadcast <msg> — direct-send <msg> to every live titled session
-#                          `envoy ps` lists for this machine (`--all-machines`
-#                          widens, `--machine <id>` picks one); `--dir <substr>`
+#                          `envoy ps` lists for this machine, by host
+#                          (`--all-machines` widens, `--machine <id>` picks a
+#                          host or a listener such as envoy-hub or gke), and
+#                          says how many of the live sessions it matched;
+#                          `--dir <substr>`
 #                          narrows by working directory; `--dry-run` lists
 #                          recipients only. `--untitled` adds untitled rows: an
 #                          OMP session before its first turn, but also — until
@@ -65,8 +68,13 @@ set -euo pipefail
 # caller (a timer's run, a session's tool call) for good.
 ENVOY_MAX_TIME="${ENVOY_MAX_TIME:-30}"
 HOSTNAME="${HOSTNAME:-$(hostname)}"
-# --local matches the listener's configured machine_id, which may differ from
-# hostname (it comes from Pulumi's ENVOY_MACHINE_ID). Override when they diverge.
+# A registry entry's machine_id is the LISTENER the session registered through (its owner), and
+# host is where the session runs: envoy-client's machineID(), ENVOY_MACHINE_ID falling back to the
+# kernel hostname (sjawhar/legion packages/envoy/cmd/listener/claim_wiring.go:24-25; owner
+# delivery keys on host, else MachineID, api.go:698-703). Every dev box registers through the hub,
+# so its sessions read machine_id "envoy-hub". So a machine filter matches host OR machine_id (a
+# box's hostname, or a listener such as envoy-hub or gke), and MACHINE shows (.host // .machine_id),
+# host first. Override MACHINE_ID when ENVOY_MACHINE_ID and hostname diverge.
 MACHINE_ID="${ENVOY_MACHINE_ID:-$HOSTNAME}"
 # The listener when neither ENVOY_URL nor envoy.url names one (envoy-client's
 # DEFAULT_ENVOY_URL), and how long a `!` envoy.token may run (its limit too).
@@ -306,7 +314,7 @@ _envoy_ps() {
         raw=$(echo "$raw" | jq '[.[] | select((.title // "") | test("\\(@[^)]+ subagent\\)$") | not)]')
     fi
     if [ "$local_only" = true ]; then
-        raw=$(echo "$raw" | jq --arg m "$MACHINE_ID" '[.[] | select(.machine_id == $m)]')
+        raw=$(echo "$raw" | jq --arg m "$MACHINE_ID" '[.[] | select(.host == $m or .machine_id == $m)]')
     fi
     if [ "$json" = true ]; then
         echo "$raw" | jq .
@@ -321,7 +329,7 @@ _envoy_ps() {
     # would shift TOPICS/UPDATED left; `//` does not catch "", so test for it.
     {
         printf 'SESSION\tPORT\tMACHINE\tDIR\tTITLE\tTOPICS\tUPDATED\n'
-        echo "$raw" | jq -r '.[] | [.session_id, .port, .machine_id, .dir, (if (.title // "") == "" then "-" else .title end), (.topics | length | tostring), ((.updated_at / 1000) | strftime("%Y-%m-%d %H:%M"))] | @tsv'
+        echo "$raw" | jq -r '.[] | [.session_id, .port, (.host // .machine_id), .dir, (if (.title // "") == "" then "-" else .title end), (.topics | length | tostring), ((.updated_at / 1000) | strftime("%Y-%m-%d %H:%M"))] | @tsv'
     } | column -t -s $'\t'
 }
 
@@ -401,18 +409,31 @@ _envoy_broadcast() {
 
     # Here, not in _envoy_ps's subshell below, so a `!` envoy.token runs once.
     resolve_listener
-    local rows
-    rows=$(_envoy_ps --json | jq -r \
+    local all rows total
+    all=$(_envoy_ps --json) || return 1
+    total=$(echo "$all" | jq length)
+    rows=$(echo "$all" | jq -r \
         --arg m "$machine" --arg d "$dir_filter" --arg self "${OMP_SESSION_ID:-}" --argjson untitled "$untitled" '
         .[]
-        | select($m == "" or .machine_id == $m)
+        | select($m == "" or .host == $m or .machine_id == $m)
         | select($d == "" or (.dir | contains($d)))
         | select($untitled or (.title // "") != "")
         | select(.session_id != $self)
-        | [.session_id, .machine_id, .dir, (if (.title // "") == "" then "-" else .title end)]
+        | [.session_id, (.host // .machine_id), .dir, (if (.title // "") == "" then "-" else .title end)]
         | @tsv') || return 1
-    if [ -z "$rows" ]; then
-        echo "No matching sessions" >&2
+    local matched=0
+    [ -n "$rows" ] && matched=$(printf '%s\n' "$rows" | wc -l)
+    echo "matched $matched of $total live sessions, subagents excluded (machine=${machine:-any}, dir=${dir_filter:-any}, untitled=$untitled)" >&2
+    if [ "$matched" -eq 0 ]; then
+        # Say which filter emptied the set, so a zero reads as a filter, not as nobody to tell.
+        local counts
+        counts=$(echo "$all" | jq -r --arg m "$machine" --arg d "$dir_filter" --arg self "${OMP_SESSION_ID:-}" --argjson untitled "$untitled" '
+            [.[] | select($m == "" or .host == $m or .machine_id == $m)] as $a
+            | [$a[] | select($d == "" or (.dir | contains($d)))] as $b
+            | [$b[] | select($untitled or (.title // "") != "")] as $c
+            | [$c[] | select(.session_id != $self)] as $e
+            | "\($a | length) on the machine, \($b | length) after --dir, \($c | length) titled, \($e | length) not this session"')
+        echo "No matching sessions: $counts. Widen with --all-machines, --machine <id> (a host, or a listener such as envoy-hub or gke), or --untitled." >&2
         return 1
     fi
 
