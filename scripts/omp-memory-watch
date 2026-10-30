@@ -711,11 +711,18 @@ def wall_digest_text(pending: list[dict], window: float) -> str:
             f" {gib(touch.get('peak') or 0)} of {gib(touch.get('limit') or 0)}"
             f"  (+{touch.get('events_delta', 0)} memory.events max)"
         )
+        # The INFRA lead reads these without the owner's report beside it, and the question it
+        # answers -- which lane is eating the scope, the model process or one tool -- is in the
+        # command lines. Truncated harder than the owner's copy, because a digest can carry
+        # tens of scopes (the INFRA lead, 2026-10-30).
+        for pid, rss, command in touch.get("top") or []:
+            lines.append(f"      {gib(rss)}  pid {pid}  {command[:140] or '(no command line)'}")
+        if not touch.get("top"):
+            lines.append("      (no process in the scope was readable when it touched)")
     lines.append(
-        "Each owner has the whole report for its own scope: scope, session, worker, peak and the"
-        " three largest processes with their command lines. From omp-memory-watch on "
-        + socket.gethostname()
-        + "."
+        "Each owner has the whole report for its own scope: scope, session, worker, peak, the"
+        " memory.events and oom counters, and the same three largest processes. From"
+        " omp-memory-watch on " + socket.gethostname() + "."
     )
     return "\n".join(lines)
 
@@ -914,7 +921,7 @@ def run_once(options: argparse.Namespace) -> int:
                         f" last {human(options.wall_cooldown)}, which this one report covers."
                     )
                 pending_wall.append(
-                    {name: touch[name] for name in ("at", "scope", "session", "worker", "peak", "limit", "events_delta")}
+                    {name: touch[name] for name in ("at", "scope", "session", "worker", "peak", "limit", "events_delta", "top")}
                 )
                 del pending_wall[: max(0, len(pending_wall) - options.wall_pending_max)]
                 state.commit(options)

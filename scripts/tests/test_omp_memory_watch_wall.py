@@ -405,6 +405,37 @@ class RunOnceTest(unittest.TestCase):
             ["00000001-0000-0000-0000-000000000001", WATCH.INFRA_LEAD],
         )
 
+    def test_the_digest_carries_each_scopes_top_three_with_command_lines(self) -> None:
+        """The INFRA lead reads the digest without the owner's report beside it."""
+        WATCH.rss_of = lambda pid: {1: 9 * GIB}.get(pid, 2 * GIB)
+        WATCH.cmdline_of = lambda pid: f"omp @/home/sami/work/.ossv-workers/w{pid}/message.md --lane {pid}"
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass()
+        self.scopes({"run-ra1.scope": 6})
+        envoy = self.run_pass()
+        digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
+        self.assertIn("run-ra1.scope", digest)
+        self.assertIn("9.00 GiB  pid 1", digest)
+        self.assertIn(".ossv-workers/w1/message.md --lane 1", digest)
+
+    def test_a_digest_restored_from_the_state_file_still_has_the_command_lines(self) -> None:
+        """A touch waits on disk through JSON, where its tuples come back as lists."""
+        import json
+
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass()
+        self.scopes({"run-ra1.scope": 2})
+        self.run_pass()
+        self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
+        self.run_pass()
+        kept = json.loads(self.state.read_text())
+        self.assertTrue(kept["wall_pending"][0]["top"])
+        self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
+        envoy = self.run_pass(wall_digest=0.0)
+        digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
+        self.assertIn("pid 2", digest)
+        self.assertIn(".ossv-workers/w2/message.md", digest)
+
 
 if __name__ == "__main__":
     unittest.main()

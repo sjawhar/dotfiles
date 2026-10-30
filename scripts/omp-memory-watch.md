@@ -163,7 +163,10 @@ whole report. The INFRA lead gets **one batched digest per `--wall-digest` windo
 15 min) naming every scope that touched in it, instead of one message per scope: a box can have
 tens of scopes at the ceiling at once (31 of 95 on ossv-agent-open on 2026-10-30), and a message
 each would bury the lead's session rather than inform it. Touches accumulate in the state file
-across runs, so a quiet digest window loses none.
+across runs, so a quiet digest window loses none. Each scope's line in the digest carries the
+**same three largest processes with their command lines** under it: the lead reads the digest
+without the owner's report beside it, and which lane is eating the scope is in those command
+lines (the INFRA lead, 2026-10-30).
 
 Each alert names the session, the pid and its RSS, the scope, the unreclaimable memory, the
 ceiling and where it comes from, the percentage and the headroom left, the measured rise rate
