@@ -38,12 +38,15 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 TQ = "tq"
 DISPATCH_USER = "\n  dispatch:\n(?:    [^\n]*\n)*?    actor:\n(?:      [^\n]*\n)*?      kind: user(?:\n|$)"
 WORD_FIELDS = re.compile(r"\n(?:    (?:answer|reply)|      (?:body|reason)): ([^\n]*)")
 NEEDLE_LEN = 48
+BATCH = 200          # needles per search; the whole query is one argv word, which has a size limit
+WORKERS = 4          # searches in flight; the store is shared, so keep it small
 
 
 def sql_str(s: str) -> str:
@@ -81,7 +84,7 @@ def typed_rows(start: str, end: str) -> list[dict]:
         "m.raw_line AS raw_line, m.text AS text, s.parent_session AS parent_session, s.cwd AS cwd, s.title AS title "
         "FROM messages m LEFT JOIN sessions_latest s ON s.session_id = m.session_id "
         f"WHERE m.kind = 'user' AND m.role = 'user' AND m.ts >= {sql_str(start)} AND m.ts < {sql_str(end)} "
-        "ORDER BY m.ts, m.session_id"
+        "ORDER BY m.ts, m.session_id, m.raw_line"
     )
 
 
@@ -93,7 +96,7 @@ def dispatch_rows(start: str, end: str, actor: str) -> list[dict]:
         "WHERE m.kind = 'system' AND m.role = 'custom:envoy-message' "
         f"AND m.ts >= {sql_str(start)} AND m.ts < {sql_str(end)} AND match(m.text, {sql_str(DISPATCH_USER)}) "
         f"AND match(extract(m.text, '\\n      id: ([^\\n]*)'), {sql_str(actor)}) "
-        "ORDER BY m.ts, m.session_id"
+        "ORDER BY m.ts, m.session_id, m.raw_line"
     )
 
 
@@ -115,27 +118,69 @@ def needle(text: str) -> str:
     return line[:NEEDLE_LEN]
 
 
+def index_tokens(needle: str) -> list[str]:
+    """Whole words of the needle that any text containing it also holds as whole words.
+
+    `tool_calls` carries a text index on `lower(command)` (tokens split on non-alphabetic
+    characters), and `hasAllTokens` over it skips the granules that cannot match, which is what
+    makes the search cheap. A word counts only when it is purely alphabetic and has a
+    non-alphanumeric character on each side INSIDE the needle, so it is one whole token under
+    either split rule, and the needle's cut-off last word is never used.
+    """
+    out = []
+    for m in re.finditer(r"[A-Za-z]+", needle):
+        a, b = m.span()
+        if a > 0 and b < len(needle) and not needle[a - 1].isalnum() and not needle[b].isalnum():
+            out.append(m.group(0).lower())
+    return sorted(set(out))
+
+
+def search_calls(needles: list[str], lo: str, end: str, prefilter: bool) -> dict[int, list[str]]:
+    """Per needle index: the start times of the tool calls whose command holds it."""
+    arr = "[" + ",".join(sql_str(n) for n in needles) + "]"
+    where = ""
+    if prefilter:
+        groups = " OR ".join(
+            f"hasAllTokens(lower(ifNull(command, '')), [{','.join(sql_str(t) for t in index_tokens(n))}])" for n in needles
+        )
+        where = f"({groups}) AND "
+    res = tq(
+        f"SELECT arrayJoin(arrayFilter(x -> x > 0, arrayMap((p, k) -> if(p > 0, k, 0), "
+        f"multiSearchAllPositions(command, {arr}), arrayEnumerate({arr})))) AS k, "
+        "groupUniqArray(toString(started_at)) AS at FROM tool_calls "
+        f"WHERE started_at >= {sql_str(lo)} AND started_at < {sql_str(end)} AND command IS NOT NULL "
+        f"AND {where}multiSearchAny(command, {arr}) GROUP BY k"
+    )
+    return {int(r["k"]) - 1: r["at"] for r in res}
+
+
 def agent_sent(rows: list[dict], start: str, end: str) -> set[int]:
-    """Indexes of rows whose opening text appears in an agent tool call in the day before them."""
+    """Indexes of rows whose opening text appears in an agent tool call in the day before them.
+
+    The search runs once per distinct needle (scripted launches repeat one first line thousands
+    of times) over `tool_calls` rather than the `calls` view, whose FINAL merges every revision of
+    every call to answer a question one revision already answers, and the text index on
+    `lower(command)` skips the granules that cannot hold the batch's needles.
+    """
     lo = (datetime.fromisoformat(start) - timedelta(days=1)).isoformat(sep=" ")
     hits: set[int] = set()
-    todo = [(i, needle(r["text"])) for i, r in enumerate(rows)]
-    todo = [(i, n) for i, n in todo if len(n) >= 16]
-    for b in range(0, len(todo), 200):
-        batch = todo[b : b + 200]
-        arr = "[" + ",".join(sql_str(n) for _, n in batch) + "]"
-        res = tq(
-            f"SELECT arrayJoin(arrayFilter(x -> x > 0, arrayMap((p, k) -> if(p > 0, k, 0), "
-            f"multiSearchAllPositions(command, {arr}), arrayEnumerate({arr})))) AS k, "
-            "groupArray(toString(started_at)) AS at FROM calls "
-            f"WHERE started_at >= {sql_str(lo)} AND started_at < {sql_str(end)} AND command IS NOT NULL "
-            f"AND multiSearchAny(command, {arr}) GROUP BY k"
-        )
-        for r in res:
-            i, _ = batch[int(r["k"]) - 1]
-            ts = rows[i]["ts"]
-            if any(a <= ts and a >= (datetime.fromisoformat(ts) - timedelta(days=1)).isoformat(sep=" ") for a in r["at"]):
-                hits.add(i)
+    same: dict[str, list[int]] = defaultdict(list)
+    for i, r in enumerate(rows):
+        n = needle(r["text"])
+        if len(n) >= 16:
+            same[n].append(i)
+    indexed = sorted(n for n in same if len(index_tokens(n)) >= 2)
+    plain = sorted(n for n in same if len(index_tokens(n)) < 2)
+    jobs = [(indexed[b : b + BATCH], True) for b in range(0, len(indexed), BATCH)]
+    jobs += [(plain[b : b + BATCH], False) for b in range(0, len(plain), BATCH)]
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for batch, found in zip([j[0] for j in jobs], pool.map(lambda j: search_calls(j[0], lo, end, j[1]), jobs)):
+            for k, at in found.items():
+                for i in same[batch[k]]:
+                    ts = rows[i]["ts"]
+                    day = (datetime.fromisoformat(ts) - timedelta(days=1)).isoformat(sep=" ")
+                    if any(day <= a <= ts for a in at):
+                        hits.add(i)
     return hits
 
 
@@ -211,7 +256,7 @@ def main() -> None:
                 merged += 1
                 continue
             rows.append(row)
-    rows.sort(key=lambda r: (r["ts"], r["session_id"]))
+    rows.sort(key=lambda r: (r["ts"], r["session_id"], r.get("raw_line") or 0))
     with open(a.out, "w") as f:
         for n, r in enumerate(rows, 1):
             r["id"] = f"M{n:04d}"
