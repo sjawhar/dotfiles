@@ -10,8 +10,12 @@ Then follow their conventions in form as well as in words: a pull request on the
 
 Off a repository — an email, a Slack message to another company, a release note, a disclosure — read instead:
 
-- Every earlier message between us and this reader, and what we have already told them about this subject.
+- Every earlier message between Theorem and this reader, and what they have already been told about this subject.
 - The page where they say how they want to be contacted: a security policy, a `SECURITY.md`, a contact page, the project's own disclosure rules.
 - How that reader writes: their own release notes, their blog, their messages in the thread you are answering.
 
-Then match the channel: an email answers the email it replies to, and a first contact says who we are in one line.
+Then match the channel: an email answers the email it replies to, and a first contact says in one line who is writing and why.
+
+## A stream's own form rules win
+
+Where the stream that owns the relationship keeps its own form rules — in the project's `AGENTS.md`, its `.claude/skills/` or its brief — those rules decide how the message reads and win over `asd-ste100`, `ce-noslop` and `plain-words`, and some are owned by people through that repository's code owners. Read them before you draft, and send a change to the form there rather than into the skill.
