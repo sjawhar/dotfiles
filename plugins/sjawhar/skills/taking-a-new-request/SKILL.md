@@ -18,7 +18,7 @@ A request folded into running work gets done only where it overlaps, and the res
 
 ## When the person folds work into this session
 
-Do steps 1 to 3 anyway, then name what this session cannot cover and offer a fresh agent for it, with the command or the one line that starts it. Reasons a session cannot cover a requirement: it needs a different repository or branch, it blocks on something this session waits for, or it would push the running work past what it can finish. Do not accept the whole request silently and deliver the overlap.
+Do steps 1 to 3 anyway, then name what this session cannot cover and offer a fresh agent for it, with the command that starts it: `agent-new <ISSUE-KEY>` for a request that has a Dispatch issue, `agent-new @brief.md` or `agent-new "<request>"` otherwise, adding `--repo <repo> --name <name>` for work in its own worktree and `--window <stream window>` to start it beside that stream's lead (`agent-new --help`). Reasons a session cannot cover a requirement: it needs a different repository or branch, it blocks on something this session waits for, or it would push the running work past what it can finish. Do not accept the whole request silently and deliver the overlap.
 
 ## Common mistakes
 

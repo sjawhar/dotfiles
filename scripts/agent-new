@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# agent-new: start a fresh omp agent for one request, in a new tmux pane, in one command.
+#
+#   agent-new [--window W] [--repo R --name N [--base REF]] [--dry-run] REQUEST
+#
+# REQUEST is a Dispatch issue key (INFRA-897), a brief file (@brief.md or a path to one), or the
+# request as text. A key becomes a first message that tells the agent to read, claim and finish
+# the issue; a file is attached to the first message as omp's @file; text is sent as it is.
+#
+# --window  the tmux window to open the pane in (default: the caller's window). Each stream has one
+#           window on sami-rocqperf (dispatch://INFRA-202, "Windows on sami-rocqperf").
+# --repo    start in a new worktree of ~/src/R at ~/src/R-N on branch N, cut by agent-workspace
+#           (from origin's default branch, or --base). Without --repo the pane starts in the
+#           caller's current directory, as typing `omp` there would.
+#
+# The pane runs `omp` through the user's interactive bash, so shims/omp and scripts/agent-session
+# give the session its usual environment (gh-app routing, shims-first PATH, secrets-broker
+# identity). When omp exits, the pane keeps a shell. Why this exists: a request folded into a
+# running session is done only where it overlaps (dispatch://INFRA-897), and the
+# taking-a-new-request skill offers a fresh agent "with the command that starts it".
+set -euo pipefail
+
+usage() {
+    sed -n '4,5p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+
+window="" repo="" name="" base="" dry=0
+while (($#)); do
+    case "$1" in
+        --window) window="${2:?--window needs a value}"; shift 2 ;;
+        --repo) repo="${2:?--repo needs a value}"; shift 2 ;;
+        --name) name="${2:?--name needs a value}"; shift 2 ;;
+        --base) base="${2:?--base needs a value}"; shift 2 ;;
+        --dry-run) dry=1; shift ;;
+        -h | --help) usage ;;
+        --) shift; break ;;
+        -*) echo "agent-new: unknown flag $1" >&2; usage ;;
+        *) break ;;
+    esac
+done
+(($#)) || usage
+request="$*"
+
+if [[ "$request" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]]; then
+    msg="Your task is dispatch://$request. Read it with \`dispatch read --issue $request\`, claim it, and finish it to the goal and acceptance its spec states."
+    : "${name:=$(tr '[:upper:]' '[:lower:]' <<<"$request")}"
+elif [[ "$request" == @* || -f "$request" ]]; then
+    file="${request#@}"
+    [[ -f "$file" ]] || { echo "agent-new: no brief file at $file" >&2; exit 1; }
+    msg="@$(realpath -- "$file")"
+else
+    msg="$request"
+fi
+
+if [[ -n "$repo" ]]; then
+    [[ -n "$name" ]] || { echo "agent-new: --repo needs --name (or an issue key as REQUEST)" >&2; exit 2; }
+    dir="$HOME/src/$(basename -- "$repo")-$name"
+    ws=(agent-workspace new --path "$dir")
+    [[ -z "$base" ]] || ws+=(--base "$base")
+    ws+=("$repo" "$name")
+else
+    dir="$PWD"
+    ws=()
+fi
+
+if [[ -z "$window" ]]; then
+    [[ -n "${TMUX_PANE:-}" ]] || { echo "agent-new: not in tmux; name a window with --window" >&2; exit 1; }
+    window="$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_index}')"
+fi
+
+pane_cmd="omp $(printf '%q' "$msg"); exec bash"
+split=(tmux split-window -d -P -F '#{pane_id}' -t "$window" -c "$dir" bash -ic "$pane_cmd")
+
+if ((dry)); then
+    ((${#ws[@]})) && printf 'would run: %s\n' "${ws[*]@Q}"
+    printf 'would run: %s\n' "${split[*]@Q}"
+    exit 0
+fi
+
+if ((${#ws[@]})); then
+    "${ws[@]}" >&2
+    [[ -d "$dir" ]] || { echo "agent-new: agent-workspace made no directory at $dir" >&2; exit 1; }
+fi
+
+if ! pane="$("${split[@]}" 2>/tmp/agent-new.$$.err)"; then
+    if grep -q 'no space for new pane' /tmp/agent-new.$$.err; then
+        tmux select-layout -t "$window" tiled >/dev/null
+        pane="$("${split[@]}")"
+    else
+        cat /tmp/agent-new.$$.err >&2
+        rm -f /tmp/agent-new.$$.err
+        exit 1
+    fi
+fi
+rm -f /tmp/agent-new.$$.err
+
+echo "pane $pane in window $window, directory $dir"
+((${#ws[@]})) && echo "when done: agent-workspace rm $dir"
+exit 0
