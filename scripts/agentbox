@@ -2,12 +2,13 @@
 # agentbox: one disposable Sysbox container per agent session, working in a
 # checkout made for it.
 #
-#   agentbox new [-e NAME[=VALUE]]… <repo>… -- <cmd> [args…]
+#   agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] <repo>… -- <cmd> [args…]
 #                                       run a command in a fresh box holding a
 #                                       checkout of each repo, working in the
 #                                       first; each -e sets a variable in the box
 #                                       (docker run -e: a bare NAME passes the
-#                                       caller's value)
+#                                       caller's value); --memory/--cpus raise or
+#                                       lower this box's limits (defaults below)
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
 #   agentbox ls                         running boxes
 #   agentbox doctor                     health checks, host side and box side
@@ -66,6 +67,26 @@ declare -A CLONE_SPARSE=([agent-c]='/* !/tasks/ /tasks/*/basic_info.json')
 APP_GIT=(env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig" git)
 RUNTIME=sysbox-runc
 NETWORK=agentbox
+# Resource limits per box (dispatch://INFRA-702): a box that runs away is stopped by its own
+# cgroup, and no other box is touched. Measured on sami-rocqperf 2026-10-31 over 44 live agent
+# sessions (RSS+swap of each session's process tree; RSS overcounts shared pages): memory p50
+# 2.3 GiB, p95 14.1 GiB, max 17.8 GiB; CPU over 10 s p50 0.15 cores, p95 1.74, max 3.09. So
+# 24 GiB of memory with 8 GiB of swap beyond it, and 8 cores, hold every session measured with
+# room to spare. `agentbox new --memory SIZE --cpus N`, or AGENTBOX_MEMORY / AGENTBOX_CPUS,
+# changes one box.
+BOX_MEMORY="${AGENTBOX_MEMORY:-24g}"
+BOX_CPUS="${AGENTBOX_CPUS:-8}"
+# Swap a box may use beyond its memory limit; docker takes the two added together (--memory-swap).
+BOX_SWAP=8g
+# A box above these starves the machine instead of its own session, so the launcher refuses it.
+BOX_MEMORY_CAP=96g
+BOX_CPUS_CAP=32
+# Processes per box: a fork bomb inside one otherwise takes the host's pid space.
+BOX_PIDS=8192
+# No disk limit: docker's --storage-opt size= needs the overlay2 driver on xfs with project
+# quotas, and this host's docker data root (/var/lib/docker, measured 2026-10-31) is ext4 under
+# the overlayfs snapshotter, where docker refuses the option. A box's disk stays bound by the
+# shared-disk tools — scripts/disk-fill-watch and the tmp reapers in devbox/ — as before.
 EMBED_NAME=omp-embed
 EMBED_PORT="${OMP_EMBED_PORT:-8087}"
 IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
@@ -100,6 +121,46 @@ MOUNTS_FILE="$DOTFILES_DIR/agentbox/mounts"
 mounts_of() { awk -v m="$1" '$1 == m { print $2 }' "$MOUNTS_FILE"; }
 
 die() { echo "agentbox: $*" >&2; exit 1; }
+
+# A limit the launcher will not set: exit 2, apart from every other refusal, so a caller can tell
+# "your value is out of range" from "this host cannot start a box".
+refuse() { echo "agentbox: $*" >&2; exit 2; }
+
+# A docker size (b/k/m/g, 1024-based; no suffix means bytes) in bytes; non-zero on anything else.
+size_bytes() {
+    local value="${1,,}"
+    [[ "$value" =~ ^([0-9]+(\.[0-9]+)?)([bkmg])?$ ]] || return 1
+    awk -v n="${BASH_REMATCH[1]}" -v u="${BASH_REMATCH[3]:-b}" \
+        'BEGIN { f = (u == "g" ? 1073741824 : (u == "m" ? 1048576 : (u == "k" ? 1024 : 1))); printf "%d", n * f }'
+}
+
+# Bytes as the shortest exact docker size, so a derived limit reads like the one it came from.
+size_text() {
+    local bytes="$1"
+    if (( bytes % 1073741824 == 0 )); then echo "$((bytes / 1073741824))g"
+    elif (( bytes % 1048576 == 0 )); then echo "$((bytes / 1048576))m"
+    else echo "${bytes}b"; fi
+}
+
+# RESOURCE_ARGS: the docker run limits for one box, from BOX_MEMORY and BOX_CPUS. $1 and $2 name
+# where each value came from, for the refusal message. It runs in the launcher itself and sets a
+# global rather than printing, because a $(…) would swallow its exit.
+RESOURCE_ARGS=()
+set_resource_args() {
+    local mem_from="${1:---memory}" cpu_from="${2:---cpus}" bytes cap swap
+    bytes="$(size_bytes "$BOX_MEMORY")" || refuse "$mem_from '$BOX_MEMORY' is not a size (24g, 512m, or bytes)"
+    cap="$(size_bytes "$BOX_MEMORY_CAP")"
+    (( bytes > 0 )) || refuse "$mem_from '$BOX_MEMORY' is not a usable memory limit"
+    (( bytes <= cap )) || refuse "$mem_from '$BOX_MEMORY' is above the $BOX_MEMORY_CAP limit per box"
+    [[ "$BOX_CPUS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || refuse "$cpu_from '$BOX_CPUS' is not a number of cores"
+    awk -v c="$BOX_CPUS" -v cap="$BOX_CPUS_CAP" 'BEGIN { exit !(c > 0 && c <= cap) }' \
+        || refuse "$cpu_from '$BOX_CPUS' is above the $BOX_CPUS_CAP cores limit per box"
+    swap="$(size_bytes "$BOX_SWAP")"
+    RESOURCE_ARGS=(
+        --memory "$BOX_MEMORY" --memory-swap "$(size_text $((bytes + swap)))"
+        --cpus "$BOX_CPUS" --pids-limit "$BOX_PIDS"
+    )
+}
 
 # Whether a new box can get a broker identity: the client installed and the helper holding a live
 # launcher credential (which also means the helper answers and an operator logged in). Until then
@@ -656,8 +717,12 @@ close_box() {
 }
 
 cmd_new() {
-    local usage="usage: agentbox new [-e NAME[=VALUE]]… <repo>… -- <cmd> [args…]"
+    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] <repo>… -- <cmd> [args…]"
     local user_env=() box_repos=() repo
+    # Where each limit came from, so a refusal names what the caller actually set.
+    local mem_from="AGENTBOX_MEMORY" cpu_from="AGENTBOX_CPUS"
+    [[ -n "${AGENTBOX_MEMORY:-}" ]] || mem_from="the default memory limit"
+    [[ -n "${AGENTBOX_CPUS:-}" ]] || cpu_from="the default cpu limit"
     while (( $# )) && [[ "$1" != -- ]]; do
         case "$1" in
             -e)
@@ -665,10 +730,21 @@ cmd_new() {
                 user_env+=(-e "$2")
                 shift 2
                 ;;
+            --memory)
+                [[ -n "${2:-}" ]] || die "--memory takes a size, e.g. --memory 32g  ($usage)"
+                BOX_MEMORY="$2" mem_from="--memory"
+                shift 2
+                ;;
+            --cpus)
+                [[ -n "${2:-}" ]] || die "--cpus takes a number of cores, e.g. --cpus 4  ($usage)"
+                BOX_CPUS="$2" cpu_from="--cpus"
+                shift 2
+                ;;
             -*) die "unknown option '$1'; the command goes after \`--\`  ($usage)" ;;
             *) box_repos+=("$1"); shift ;;
         esac
     done
+    set_resource_args "$mem_from" "$cpu_from"
     [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} )) || die "$usage  (repos: $(repos | tr '\n' ' '))"
     shift
     (( $# )) || die "$usage"
@@ -754,6 +830,7 @@ cmd_new() {
     # per box that nothing reads (the transcript is in ~/.omp; attach is live).
     docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
+        "${RESOURCE_ARGS[@]}" \
         -w "$BOXES/$box/${box_repos[0]}" "${tty[@]}" \
         "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
     child=$!
@@ -1052,8 +1129,11 @@ cmd_doctor() {
     mapfile -t env < <(session_env "$box")
     # The doctor box runs detached so it can be enrolled like a real box (enroll_box needs the
     # container up) before the checks run inside it; `sleep` is its session command, and the
-    # entrypoint has finished — inner dockerd up, ghcr login done — once that sleep exists.
+    # entrypoint has finished — inner dockerd up, ghcr login done — once that sleep exists. It
+    # carries the same limits a session's box does, so doctor tests what `new` actually starts.
+    set_resource_args
     if docker run -d --init --runtime "$RUNTIME" --name "$box" --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
+        "${RESOURCE_ARGS[@]}" \
         -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" sleep 900 >/dev/null; then
         until docker exec "$box" pgrep -x sleep >/dev/null 2>&1 || (( --tries == 0 )); do sleep 1; done
         if (( tries )); then
@@ -1106,5 +1186,5 @@ case "${1:-}" in
     doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
-    *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

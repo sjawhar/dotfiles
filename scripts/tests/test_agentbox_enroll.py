@@ -342,9 +342,16 @@ class EnrollWhenUp(EnrollFixture):
         self.assertEqual(self.calls_matching("enroll "), [])
 
     def test_a_box_slow_to_reach_running_still_enrolls_with_its_session_id(self) -> None:
-        """A box still starting after hundreds of checks is waited for while its launcher lives."""
+        """A box still starting after hundreds of checks is waited for while its launcher lives.
+
+        The launcher stands in for one that lives longer than the wait: 400 passes of the loop
+        fork a stub `docker` each, which on a loaded host takes longer than 30 s, and a child
+        that ends first makes the launcher give up instead (the test below that one)."""
         result = self.when_up(
-            "omp", STUB_RUNNING_AFTER="400", STUB_SID="0192f3a4-5b6c-7d8e-9f01-23456789abcd"
+            "omp",
+            child="/bin/sleep 300 &",
+            STUB_RUNNING_AFTER="400",
+            STUB_SID="0192f3a4-5b6c-7d8e-9f01-23456789abcd",
         )
         self.assertIn("rc=0", result.stdout, result.stderr)
         self.assertEqual(self.files(), {"key.pem", "enrollment"})
