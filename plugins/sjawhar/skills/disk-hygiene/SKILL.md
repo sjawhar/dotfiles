@@ -32,12 +32,12 @@ Where the space usually is, largest first: dangling images, buildkit cache with 
 Here you delete only paths that you prove are yours. A name proves nothing either way, so never assume an unknown workspace has no user.
 
 - Make each working directory that must outlive your session's `TMPDIR` with `work-dir <name>`. It makes `/mnt/nvme/<user>/tmp/<name>` with an `OWNER` file that names your session, so the tmp reaper and the box-health lead can tell it is yours (`devbox/session-scratch-reap.md`). A directory with no `OWNER` is never reaped and has no known owner after a loss (dispatch://INFRA-893).
-- In an agent box, `~/boxes/<your box>/` (except the bind-mount sources below) and the box's `/tmp` are yours or your subagents'. On the host, every path needs the transcript test below.
+- In an agent box, your box's own tree (the parent of your workspace: `/mnt/nvme/<user>/agentbox/boxes/<your box>/` here, `~/boxes/<your box>/` on a machine without that disk — except the bind-mount sources below) and the box's `/tmp` are yours or your subagents'. On the host, every path needs the transcript test below.
 - Any other path is yours only if your transcripts or your subagents' show the command that made it (`jj workspace add`, a clone, `mktemp`, a write). `skill://session-attribution` gives the transcript paths. If no transcript of yours names it, leave it and list it in your report.
 - Your own paths must still pass the safety rules: no live process in it (`$S procs`), no content only on disk.
 - In your own box, also run `$S containers` and `$S images`, and treat a `registry` container in that output as yours: your subagents may have started it without your seeing it.
 - Before you delete a core file, read [references/core-dumps.md](references/core-dumps.md): it can be the only crash evidence.
-- Never glob `~/boxes/<box>/*`; name each entry you delete. `jj-user-repos` and `omp-run` there are live bind-mount sources, and losing them breaks `jj` or omp for the whole box. Symptom and repair: [references/box-mounts.md](references/box-mounts.md).
+- Never glob the box tree (`<boxes>/<box>/*`); name each entry you delete. `jj-user-repos` and `omp-run` there are live bind-mount sources, and losing them breaks `jj` or omp for the whole box. Symptom and repair: [references/box-mounts.md](references/box-mounts.md).
 - Give every `find ... -delete` or `find ... -exec rm` a `-mindepth 1`. Without it, `find` tests the starting directory too: on 2026-10-31, `find /mnt/nvme/sami/tmp -maxdepth 1 -name 'tmp*' -exec rm -rf {} +` matched `/mnt/nvme/sami/tmp` itself and deleted session scratch there for five minutes (dispatch://INFRA-893).
 
 ## Pacing (every phase)
@@ -71,7 +71,7 @@ python3 $S plan --inventory inv.json --protected protected.json [--releases rele
 | UNOBSERVABLE | outside what this process sees | keep, never planned |
 | GIT_HEAD_PUSHED | plain git worktree, HEAD on a remote | keep unless the owner releases it |
 
-- Inside a box you see only that box's `~/boxes/<box>`, so a missing directory there proves nothing: judge absence from a host session (`inventory --box-dir none` there); `systemd-run --user` does not escape the box. Box `ps` ages (`etimes`, `lstart`) read 0 for every process, so read a process's age from the host.
+- Inside a box you see only that box's own tree (`inventory --box-dir auto` finds it under `/mnt/nvme/<user>/agentbox/boxes/` or `~/boxes/`), so a missing directory there proves nothing: judge absence from a host session (`inventory --box-dir none` there); `systemd-run --user` does not escape the box. Box `ps` ages (`etimes`, `lstart`) read 0 for every process, so read a process's age from the host.
 - `jj workspace list` "(empty)" says nothing about unmerged ancestors. Use the classes.
 - The freshness gate is the `.jj/working_copy/tree_state` mtime for a jj slot (`--fresh-hours`, default 24). For a plain directory it is the newest mtime in the top 3 levels, which one bounded walk finds. A directory's own mtime changes only when an entry appears in it or goes. The top-level stat this replaced read 160-280 h of idleness off trees with live work in them. A file deeper than 3 levels does not move the reading. So the idle hours are an upper bound on how stale a tree is. They are never proof that nothing writes in it: `$S procs` and `$S writers` give that proof. The plan lists every refusal in `refused`.
 - A stale checkout's diff shows later merges as changes. Run `jj log -r '::@ ~ ::trunk()'` before you call it a revert.

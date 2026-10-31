@@ -3,7 +3,7 @@
 ## Where and how to add
 
 - `scripts/agent-workspace new <repo> <name>` does the whole add for you, on a colocated store or a plain git one, and `agent-workspace rm <repo> <name>` forgets it again; the rest of this section is what it does and what to check when you add one by hand.
-- Work in a named workspace, not the shared checkout. The store is normally `~/src/<repo>`. Outside an agent box (the Sysbox container `scripts/agentbox` runs one agent session in), put the workspace at `~/.worktrees/<repo>/<name>`. Inside a box, use its host-backed `~/boxes/<box>/<name>`. Read the box's mount contract: a path outside the mount list exists only in that box and dies with it.
+- Work in a named workspace, not the shared checkout. The store is normally `~/src/<repo>`. Outside an agent box (the Sysbox container `scripts/agentbox` runs one agent session in), put the workspace at `~/.worktrees/<repo>/<name>`. Inside a box, use its host-backed box tree, a sibling of your workspace (`/mnt/nvme/<user>/agentbox/boxes/<box>/<name>` on a machine with that disk, `~/boxes/<box>/<name>` on one without). Read the box's mount contract: a path outside the mount list exists only in that box and dies with it.
 - Pass the store explicitly. Without `-R` the add uses whatever store the current directory resolves to, which can be retired:
   `jj -R "$HOME/src/<repo>" workspace add "$HOME/.worktrees/<repo>/<name>" --name <name>`
 - Then check the files are populated and inspect the new `.jj/repo` and `.git` pointers.

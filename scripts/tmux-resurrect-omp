@@ -198,8 +198,11 @@ def host_session_for(pane_pid: int, full_command: str) -> str | None:
     return named_session(full_command)
 
 
-# The bucket a boxed session lives in: `-boxes-agentbox-<12 hex>-<repo>`.
-BOX_BUCKET = re.compile(r"^-boxes-agentbox-[0-9a-f]{12}-(?P<repo>.+)$")
+# The bucket a boxed session lives in. omp names it after the working directory, so where the
+# box tree is decides its shape: `-boxes-agentbox-<12 hex>-<repo>` under $HOME,
+# `--mnt-nvme-<user>-agentbox-boxes-agentbox-<12 hex>-<repo>--` on a machine whose boxes live on
+# the big disk (agentbox's BOXES). The box name is the anchor; the repo is what follows it.
+BOX_BUCKET = re.compile(r"-agentbox-[0-9a-f]{12}-(?P<repo>.+?)-*$")
 
 
 def box_sessions() -> dict[str, tuple[str | None, str]]:
@@ -236,7 +239,7 @@ def box_sessions() -> dict[str, tuple[str | None, str]]:
                 if not m:
                     continue
                 sid = m.group("sid")
-                bucket = BOX_BUCKET.match(m.group("bucket"))
+                bucket = BOX_BUCKET.search(m.group("bucket"))
                 # A session started outside a box (resumed into one from a
                 # mounted directory) has no repo in its bucket.
                 repo = bucket.group("repo") if bucket else None

@@ -171,10 +171,12 @@ export function relaunchArgv(argv: string[], sid: string): string[] {
 // The session to resume: the file omp holds open (omp exports OMP_SESSION_ID
 // to its children, not itself), else the newest session file of this box's
 // working directory - an idle session holds no writer after a resume or a
-// full-file rewrite. Every session started or resumed in the box lives under
-// ~/.omp/agent/sessions/-boxes-<box>-<repo…>/ (omp keys the directory by cwd
-// and relocates a resumed session's file into it), and a box name is never
-// reused, so the newest file there is this box's current session.
+// full-file rewrite. Every session started or resumed in the box lives under a
+// ~/.omp/agent/sessions/ directory omp names after the working directory, so the
+// name holds `-<box>-<repo…>` wherever the box tree is (`-boxes-<box>-<repo>` under
+// $HOME, `--mnt-nvme-<user>-agentbox-boxes-<box>-<repo>--` on the big disk, agentbox's
+// BOXES). A box name is never reused, so the newest file in a directory naming this
+// box is its current session.
 function sessionId(pid: number): string | undefined {
 	try {
 		for (const name of fs.readdirSync(`/proc/${pid}/fd`)) {
@@ -187,10 +189,10 @@ function sessionId(pid: number): string | undefined {
 		return undefined; // omp is gone
 	}
 	const root = `${process.env.HOME}/.omp/agent/sessions`;
-	const prefix = `-boxes-${process.env.AGENTBOX_BOX}-`;
+	const marker = `-${process.env.AGENTBOX_BOX}-`;
 	let newest: { path: string; mtimeMs: number } | undefined;
 	for (const dir of fs.readdirSync(root)) {
-		if (!dir.startsWith(prefix)) continue;
+		if (!dir.includes(marker)) continue;
 		for (const file of fs.readdirSync(`${root}/${dir}`)) {
 			if (!file.endsWith(".jsonl")) continue;
 			const p = `${root}/${dir}/${file}`;

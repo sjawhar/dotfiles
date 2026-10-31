@@ -20,10 +20,11 @@
 #                                       now) when safe; --now hangs it up at once
 #
 # Each <repo> is a canonical checkout under ~/src. The box holds a git clone of
-# its own of each, from the canonical checkout's origin, at
-# ~/boxes/<box>/<repo>, and works in the first. At exit a clone holding nothing
-# its remote lacks is removed with the box; a clone with uncommitted changes or
-# commits no remote has keeps ~/boxes/<box> in place, named on the pane, for its
+# its own of each, from the canonical checkout's origin, at <boxes>/<box>/<repo>
+# — /mnt/nvme/<user>/agentbox/boxes on a machine with that disk, else ~/boxes
+# (BOXES below) — and works in the first. At exit a clone holding nothing its
+# remote lacks is removed with the box; a clone with uncommitted changes or
+# commits no remote has keeps <boxes>/<box> in place, named on the pane, for its
 # owner to push or remove. omp flags pass straight through after `--`.
 #
 # The box mounts an allow-list of $HOME (below). Host services arrive two ways:
@@ -50,10 +51,21 @@ set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 SRC="${AGENTBOX_SRC:-$HOME/src}"
-BOXES="$HOME/boxes"
-# One template clone per repo that every box's clone of that repo is copied from (clone_checkout),
-# outside every box mount so no box can change it.
-CLONE_TEMPLATES="${XDG_CACHE_HOME:-$HOME/.cache}/agentbox-clones"
+# A box's checkouts, and the template clone per repo every one of them is copied from
+# (clone_checkout; outside every box mount, so no box can change it). Both go on the machine's big
+# disk where it has one, /mnt/nvme/<user>, tested as `.bashrc` tests it for the language caches:
+# a clone per box per repo does not fit on the root disk of sami-rocqperf, which held 11 GiB free
+# of 495 GiB on 2026-10-31 against an 18 GiB floor, while /mnt/nvme had 94 GiB. They move
+# together because a box's clone hardlinks its objects from the template (`cp -al`), which works
+# only within one filesystem. A machine without that disk keeps the old paths under $HOME, so
+# nothing else changes; AGENTBOX_BOXES and AGENTBOX_CLONE_TEMPLATES override either.
+if [[ -d "/mnt/nvme/$(id -un)" ]]; then
+    BOXES="${AGENTBOX_BOXES:-/mnt/nvme/$(id -un)/agentbox/boxes}"
+    CLONE_TEMPLATES="${AGENTBOX_CLONE_TEMPLATES:-/mnt/nvme/$(id -un)/agentbox/clones}"
+else
+    BOXES="${AGENTBOX_BOXES:-$HOME/boxes}"
+    CLONE_TEMPLATES="${AGENTBOX_CLONE_TEMPLATES:-${XDG_CACHE_HOME:-$HOME/.cache}/agentbox-clones}"
+fi
 # Every repo is a git clone of the box's own (AGENTC-1420, Sami, 2026-10-02: "Let's just switch to
 # Git everywhere"). On the shared jj store of agent-c, 298 workspaces and 135,748 refs/jj/keep refs,
 # every jj command took about 11 s against 0.1 s for git. A repo listed here also gets a sparse
@@ -409,6 +421,13 @@ wait_for() {
 
 ensure_tcp_forwarder() {
     local unit="$1" port="$2" target="$3"
+    # A forwarder already running toward another address is stopped first: forward's channels
+    # move between this host's two loopback addresses when its config changes, and a unit
+    # started before that would relay every box to an address nothing listens on.
+    if systemctl --user is-active --quiet "$unit" \
+        && ! systemctl --user show -p ExecStart --value "$unit" 2>/dev/null | grep -qF "TCP4:$target"; then
+        systemctl --user stop "$unit" 2>/dev/null || true
+    fi
     start_unit "$unit" socat "TCP4-LISTEN:$port,bind=$NETWORK_GATEWAY,range=$NETWORK_SUBNET,fork,reuseaddr" "TCP4:$target"
     wait_for bash -c "ss -ltn 'sport = :$port' | grep -q '$NETWORK_GATEWAY:$port'" \
         || die "forwarder $unit did not bind $NETWORK_GATEWAY:$port (journalctl --user -u $unit)"
@@ -421,10 +440,36 @@ ensure_unix_forwarder() {
     wait_for test -S "$sock" || die "forwarder $unit did not open $sock (journalctl --user -u $unit)"
 }
 
+# forward's channels are TCP listeners on this host's loopback (forward/AGENTS.md gives each
+# machine a listen/peer pair; here 127.0.0.2 and 127.0.0.1), and a box has a loopback of its
+# own, so inside one every channel refused the connection while forward's mounted unix
+# sockets (arm.sock, pcscd.comm) worked: a box could hold a port for the laptop but could
+# not open a URL on it or ask for a browser grant. Each listener gets what the Envoy API
+# gets - a forwarder on the box network's gateway here, and a relay in the box that puts it
+# back on its own address and port (agentbox/entrypoint.sh). The ports are read from the
+# host, never listed, because they come from forward's per-machine config: its reserved
+# 128xx range, which the using-forward skill says forward refuses to forward for anything
+# else. FORWARD_CHANNELS is what the box is told about (session_env).
+FORWARD_CHANNELS=()
+forward_channels() {
+    mapfile -t FORWARD_CHANNELS < <(
+        ss -Hltn | awk '{ print $4 }' | grep -E '^127\.0\.0\.[0-9]+:128[0-9][0-9]$' | sort -u
+    )
+}
+
+ensure_forward_channels() {
+    local channel
+    forward_channels
+    for channel in "${FORWARD_CHANNELS[@]}"; do
+        ensure_tcp_forwarder "agentbox-fwd-${channel##*:}" "${channel##*:}" "$channel"
+    done
+}
+
 ensure_forwarders() {
     ensure_tcp_forwarder agentbox-imds "$IMDS_PORT" 169.254.169.254:80
     ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
     ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
+    ensure_forward_channels
 }
 
 # The allow-list, as docker -v arguments. rw dirs are created on the host
@@ -540,6 +585,11 @@ session_env() {
     # its profile's envoy.json as a host session does (agentbox/mounts has the
     # neutral file's directory), and a variable here would override that file.
     e+=(-e "AGENTBOX_ENVOY_FORWARDER=$NETWORK_GATEWAY:$ENVOY_PORT")
+    # Each forward channel this host serves, "addr:port,…", for the box's own relays
+    # (entrypoint.sh). Read here rather than in the box, which cannot see the host's
+    # loopback; a host with no forward running passes none and the box starts without them.
+    forward_channels
+    e+=(-e "AGENTBOX_FORWARD_CHANNELS=$(IFS=,; echo "${FORWARD_CHANNELS[*]}")")
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
     e+=(-e "AGENTBOX_BOX=$box" -e AGENTBOX_USER=ubuntu)
     # The box's broker identity: its key dir (mount_args) and the broker. The launcher enrolls
@@ -976,6 +1026,77 @@ FAILS=0
 ok() { echo "ok   $*"; }
 fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
 
+# The checks whose answer is a property of THIS MACHINE's logins and not of the box: the
+# agent-tier store, the Docker Hub helper that reads it, the instance role, Hawk and Google.
+# One definition, run on both sides, because a box can only be as logged in as the host under
+# it: doctor calls a difference a box defect and says so, and where neither side answers it
+# names the missing host login instead of a FAIL a session would read as its own box being
+# broken (sami-rocqperf, 2026-10-31: no GHCR_PULL_TOKEN or DOCKER_HUB_OAT in any agent-tier
+# file, no EC2 instance role, and no route to the Hawk gateway - every one of them a fact
+# about the machine). Each probe prints its own detail and exits non-zero when it cannot
+# answer. The single quotes are the point: everything expands where it runs.
+# shellcheck disable=SC2016
+PROBE_FUNCS='
+probe_secrets() {
+    n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>&1 | tail -1)"
+    case "${n:-x}" in *[!0-9]*) echo "$n"; return 1;; esac
+    [ "$n" -gt 0 ] || { echo "GHCR_PULL_TOKEN is empty"; return 1; }
+    echo "GHCR_PULL_TOKEN, $n bytes"
+}
+probe_dockerhub() {
+    d="$(printf "%s" https://index.docker.io/v1/ | timeout 20 docker-credential-secretsd get 2>&1)"
+    jq -e ".Secret | length > 0" >/dev/null 2>&1 <<<"$d" || { echo "$d"; return 1; }
+    echo "the helper answers with the org pull token"
+}
+probe_aws() {
+    arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"
+    case "$arn" in arn:aws:*) echo "default profile: ${arn##*/}"; return 0;; esac
+    echo "$arn"; return 1
+}
+probe_hawk() {
+    # The token is the only thing on stdout; the reason a mint failed is the last of what it
+    # said on stderr, after any progress line, and one run has to answer both.
+    f="$(mktemp)"; e="$(timeout 90 hawk-token 2>&1 >"$f")"; t="$(tr -d "[:space:]" <"$f")"; rm -f "$f"
+    case "$t" in *.*.*) echo "mints (${#t} bytes)"; return 0;; esac
+    printf "%s" "$e" | grep -v "^[[:space:]]*$" | tail -1
+    return 1
+}
+probe_google() {
+    g="$(timeout 40 google-user-token 2>&1 >/dev/null)" && { echo "mints"; return 0; }
+    echo "$g"; return 1
+}
+probe_run() {
+    for p in "$@"; do
+        if d="$(probe_$p 2>&1)"; then s=ok; else s=fail; fi
+        # The last line that holds something: a failing tool prints its reason after whatever
+        # it said on the way there, and aws opens its report with an empty line.
+        printf "@probe %s %s %s\n" "$p" "$s" "$(printf "%s" "$d" | grep -v "^[[:space:]]*$" | tail -1 | cut -c1-200)"
+    done
+}
+'
+
+# A probe's name for a person, and the command that shows the same answer on the host.
+probe_label() {
+    case "$1" in
+        secrets)     echo "secrets agent-tier" ;;
+        dockerhub)   echo "docker-credential-secretsd for Docker Hub" ;;
+        aws)         echo "aws" ;;
+        hawk)        echo "hawk-token" ;;
+        google)      echo "google-user-token" ;;
+        dockerauths) echo ".docker holds the box ghcr login" ;;
+    esac
+}
+probe_command() {
+    case "$1" in
+        secrets)     echo "secrets GHCR_PULL_TOKEN -- sh -c 'echo \${#GHCR_PULL_TOKEN}'" ;;
+        dockerhub)   echo "printf %s https://index.docker.io/v1/ | docker-credential-secretsd get" ;;
+        aws)         echo "aws sts get-caller-identity" ;;
+        hawk)        echo "hawk-token" ;;
+        google)      echo "google-user-token" ;;
+        dockerauths) echo "secrets GHCR_PULL_TOKEN -- sh -c 'echo \${#GHCR_PULL_TOKEN}'" ;;
+    esac
+}
+PROBE_NAMES=(secrets dockerhub aws hawk google)
 # The box side of doctor, run under bash inside a throwaway box. The single
 # quotes are the point: everything expands inside the box.
 # shellcheck disable=SC2016
@@ -1020,14 +1141,17 @@ while read -r m p; do
 done <"$DOTFILES_DIR/agentbox/mounts"
 r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os.environ[\"DBUS_SESSION_BUS_ADDRESS\"].split(\"=\",1)[1]); s.sendall(b\"\\0AUTH EXTERNAL 31303030\\r\\n\"); print(s.recv(64).split()[0].decode())" 2>&1)"; [ "$r" = OK ] && ok "session bus (keyring) reachable through the relay" || fail "session bus: $r"
 [ "$(ls -A "$HOME/.ssh" | sort | tr "\n" " ")" = "jj-signing jj-signing.pub " ] && ok ".ssh holds exactly the jj-signing pair" || fail ".ssh contents: $(ls -A "$HOME/.ssh" | tr "\n" " ")"
-auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && ok ".docker holds only the box ghcr login" || fail ".docker auths: ${auths:-none}"
+# The ghcr login the entrypoint makes needs the machine to hold GHCR_PULL_TOKEN, so the host
+# decides whether its absence is a defect or this machine (see PROBE_FUNCS).
+auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && echo "@probe dockerauths ok only the box ghcr login" || echo "@probe dockerauths fail auths: ${auths:-none}"
 [ "$(stat -c %U /run/user/$(id -u))" = ubuntu ] && ok "runtime dir owned by ubuntu" || fail "runtime dir owner $(stat -c %U /run/user/$(id -u))"
 if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git clone of its own"; else fail "cwd is not a git clone of its own (cwd-dependent: run doctor from your checkout, not /tmp)"; fi
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
-gh auth status 2>&1 | grep -q "not logged" && ok "gh auth: no user login" || fail "gh auth status shows a login"
-n="$(secrets GHCR_PULL_TOKEN -- sh -c "echo \${#GHCR_PULL_TOKEN}" 2>/dev/null)"; [ "${n:-0}" -gt 0 ] && ok "secrets agent-tier" || fail "secrets agent-tier"
+# `gh auth status` is answered by shims/gh, which reports the App routing instead of a user
+# login; a bare gh with no login says "not logged into any GitHub hosts". Either answer is
+# this check passing - what it refuses is a user login inside the box.
+gs="$(gh auth status 2>&1)"; case "$gs" in *"own login is not used"*|*"not logged"*) ok "gh auth: no user login";; *) fail "gh auth status shows a login: $(head -1 <<<"$gs")";; esac
 jq -e ".credHelpers[\"https://index.docker.io/v1/\"] == \"secretsd\"" "$HOME/.docker/config.json" >/dev/null 2>&1 && ok "docker config names the secretsd helper for Docker Hub" || fail "docker config: no secretsd credHelper for Docker Hub"
-printf "%s" https://index.docker.io/v1/ | timeout 20 docker-credential-secretsd get 2>/dev/null | jq -e ".Secret | length > 0" >/dev/null && ok "docker-credential-secretsd answers for Docker Hub" || fail "docker-credential-secretsd get"
 [ -z "${AGENT_SECRETS_HELPER_SOCK:-}" ] && [ ! -S "/run/user/$(id -u)/agent-secrets/helper.sock" ] && ok "no helper socket in the box (a box is not a host session)" || fail "helper socket reachable from the box"
 # A box with no broker identity is a supported state, not a defect: one started before the key
 # dir existed, or while the host could not enroll boxes (no key, no enrollment.error). Its agents
@@ -1046,9 +1170,10 @@ else
     [ -s "$kd/enrollment" ] && ok "box enrolled ($(cat "$kd/enrollment"))" || fail "box not enrolled: $(cat "$kd/enrollment.error" 2>/dev/null || echo no enrollment.error either)"
     w="$(timeout 20 agent-secrets whoami 2>&1)"; jq -e ".kind == \"session\"" <<<"$w" >/dev/null 2>&1 && ok "broker knows this box as kind $(jq -r .kind <<<"$w"), operator $(jq -r .operator <<<"$w")" || fail "agent-secrets whoami: $(head -1 <<<"$w")"
 fi
-arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"; case "$arn" in arn:aws:*) ok "aws default profile: ${arn##*/}";; *) fail "aws: $arn";; esac
-t="$(timeout 60 hawk-token 2>&1 | head -1)"; case "$t" in *.*.*) ok "hawk-token mints (${#t} bytes)";; *) fail "hawk-token: $t";; esac
-timeout 40 google-user-token >/dev/null 2>&1 && ok "google-user-token mints" || fail "google-user-token"
+# The host-dependent credentials: the box answers, the host answers the same probes, and
+# cmd_doctor compares the two (PROBE_FUNCS). Nothing is judged here, where the answer of the
+# host is not known.
+probe_run secrets dockerhub aws hawk google
 # Envoy and Dispatch as a box session reads them: the envoy.json `envoy config-path` names (for a
 # session without a profile of its own, the neutral file of the host, agentbox/mounts), the switch
 # of each section, the listener through `envoy` itself (the URL in the file or the default, through
@@ -1091,6 +1216,34 @@ remove_doctor_box() {
     docker rm -f "$box" >/dev/null 2>&1 || true
     unenroll_box "$box"
     rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+}
+
+# The box's host-dependent answers against this host's own (PROBE_FUNCS, @probe lines). Only a
+# box that cannot do what the host can is a defect; where neither can, the line names the host
+# login that is missing and the command that shows it, so a session reading doctor is not sent
+# hunting its box for a credential this machine never had.
+report_probes() {
+    local box_out="$1" host_out name box_line host_line box_state box_detail host_state host_detail label
+    host_out="$(bash -c "$PROBE_FUNCS probe_run ${PROBE_NAMES[*]}" 2>/dev/null)"
+    for name in "${PROBE_NAMES[@]}" dockerauths; do
+        box_line="$(sed -n "s/^@probe $name //p" <<<"$box_out" | head -1)"
+        # The box's ghcr login is made from GHCR_PULL_TOKEN, so the secrets probe is its host side.
+        host_line="$(sed -n "s/^@probe ${name/dockerauths/secrets} //p" <<<"$host_out" | head -1)"
+        label="$(probe_label "$name")"
+        if [[ -z "$box_line" ]]; then fail "box: $label: the box reported no answer"; continue; fi
+        box_state="${box_line%% *}"; box_detail="${box_line#* }"
+        host_state="${host_line%% *}"; host_detail="${host_line#* }"
+        if [[ "$box_state" == ok ]]; then
+            ok "box: $label: $box_detail"
+        elif [[ "$host_state" == ok ]]; then
+            fail "box: $label: $box_detail (the host answers: $host_detail - a box defect)"
+        elif [[ "$box_detail" == "$host_detail" ]]; then
+            # The usual shape: both sides say the same thing, so say it once.
+            echo "note box: $label: host state, not the box - this machine cannot either: $box_detail. Show it with: $(probe_command "$name")"
+        else
+            echo "note box: $label: $box_detail; host state, not the box: this machine cannot either (${host_detail:-no host answer}). Show it with: $(probe_command "$name")"
+        fi
+    done
 }
 
 cmd_doctor() {
@@ -1143,7 +1296,11 @@ cmd_doctor() {
     trap 'exit 130' INT TERM HUP
     mkdir -p "$BOXES/$box"
     clone_checkout "$repo" "$ws" >/dev/null 2>&1 || die "doctor: could not clone $repo into $box"
-    local mounts=() env=() box_out="" tries=90
+    # 300 s for the box to reach its sleep: the first container of a freshly built image pays for
+    # the runtime unpacking it, and the entrypoint waits up to 60 s for the inner dockerd on top.
+    # A doctor run right after a rebuild hit the old 90 s ceiling on 2026-10-31 and reported a box
+    # that was simply still starting as one that failed to start.
+    local mounts=() env=() box_out="" tries=300
     mapfile -t mounts < <(mount_args "$box")
     mapfile -t env < <(session_env "$box")
     # The doctor box runs detached so it can be enrolled like a real box (enroll_box needs the
@@ -1153,7 +1310,7 @@ cmd_doctor() {
     set_resource_args
     if docker run -d --init --runtime "$RUNTIME" --name "$box" --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
         "${RESOURCE_ARGS[@]}" \
-        -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" sleep 900 >/dev/null; then
+        -w "$ws" "${mounts[@]}" "${env[@]}" "$tag" sleep 1800 >/dev/null; then
         until docker exec "$box" pgrep -x sleep >/dev/null 2>&1 || (( --tries == 0 )); do sleep 1; done
         if (( tries )); then
             # Enrolled like a box from `new` when the host can enroll one; the host rows above say
@@ -1161,7 +1318,7 @@ cmd_doctor() {
             if broker_ready; then
                 enroll_box "$box" "" || fail "host: enroll $box: $(cat "$(box_keydir "$box")/enrollment.error" 2>/dev/null)"
             fi
-            box_out="$(docker exec --user ubuntu -w "$ws" "$box" bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+            box_out="$(docker exec --user ubuntu -w "$ws" "$box" bash -c "$PROBE_FUNCS$DOCTOR_BOX_SCRIPT" 2>&1)" || true
         else
             fail "host: doctor box did not reach sleep-running state"
         fi
@@ -1172,8 +1329,9 @@ cmd_doctor() {
     remove_doctor_box "$box"
     grep -vE '^@' <<<"$box_out"
     FAILS=$((FAILS + $(grep -c '^FAIL ' <<<"$box_out" || true)))
+    report_probes "$box_out"
     local box_forward; box_forward="$(sed -n 's/^@forward-ok //p' <<<"$box_out")"
-    if [[ "$box_forward" == "$host_forward" ]]; then ok "forward: $box_forward channel rows ok in box, same as host"; else fail "forward: $box_forward rows ok in box vs $host_forward on host"; fi
+    if [[ "$box_forward" == "$host_forward" ]]; then ok "forward: $box_forward channel rows ok in box, same as host"; else fail "forward: $box_forward rows ok in box vs $host_forward on host (the box relays every channel the launcher found; journalctl --user -u 'agentbox-fwd-*' and /var/log/forward-relay.log in the box)"; fi
     (( FAILS == 0 )) && { echo "agentbox doctor: all checks passed"; exit 0; }
     echo "agentbox doctor: $FAILS check(s) failed" >&2
     exit 1
@@ -1187,9 +1345,19 @@ cmd_doctor() {
 # 2026-09-26 while hunting a docker-credential defect this block reports directly.
 cmd_doctor_here() {
     [[ -n "${AGENTBOX_BOX:-}" ]] || die "doctor --here runs INSIDE a box; on the host run 'agentbox doctor'"
-    local out fails
-    out="$(bash -c "$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+    local out fails name line
+    out="$(bash -c "$PROBE_FUNCS$DOCTOR_BOX_SCRIPT" 2>&1)" || true
     grep -vE '^@' <<<"$out"
+    # Inside a box there is no host answer to compare with, so a credential the machine itself
+    # may not hold is reported and never counted: `agentbox doctor` on the host is what tells a
+    # box defect from a login this machine is missing.
+    for name in "${PROBE_NAMES[@]}" dockerauths; do
+        line="$(sed -n "s/^@probe $name //p" <<<"$out" | head -1)"
+        case "$line" in
+            ok\ *) ok "box: $(probe_label "$name"): ${line#ok }" ;;
+            *) echo "note box: $(probe_label "$name"): ${line#fail }; host-dependent - run 'agentbox doctor' on the host to tell a box defect from a login this machine is missing" ;;
+        esac
+    done
     fails="$(grep -c '^FAIL ' <<<"$out" || true)"
     (( fails == 0 )) && { echo "agentbox doctor ($AGENTBOX_BOX): all box checks passed"; exit 0; }
     echo "agentbox doctor ($AGENTBOX_BOX): $fails check(s) failed" >&2

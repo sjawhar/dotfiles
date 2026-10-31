@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import getpass
 import hashlib
 import json
 import os
@@ -358,6 +359,14 @@ def cmd_protected(args: argparse.Namespace) -> None:
 
 # ---------------------------------------------------------------- inventory
 
+def _nvme_boxes_root() -> Path:
+    """Where agentbox puts box trees on a machine with the big disk (scripts/agentbox, BOXES).
+
+    It is `/mnt/nvme/<user>/agentbox/boxes` there and `~/boxes` elsewhere, so both are looked at
+    everywhere: the one that does not exist on this machine simply holds nothing."""
+    return Path("/mnt/nvme") / getpass.getuser() / "agentbox" / "boxes"
+
+
 def observable_root(box_dir: str) -> str | None:
     """The only tree under which this process can judge a path ABSENT, or None for everywhere.
 
@@ -365,13 +374,20 @@ def observable_root(box_dir: str) -> str | None:
     invisible, so every one of their registrations looks exactly like a stale one. Measured
     2026-09-25 09:15Z: a prune from inside a box took 13 registrations of the shared agent-c
     store, four of them live worktrees in other boxes and on the host. `auto` = the box's own
-    directory (~/boxes/<hostname>) when /etc/agentbox-identity exists, else None (the host sees
-    everything); `none` forces host semantics; any other value is taken as the directory."""
+    directory when /etc/agentbox-identity exists, else None (the host sees everything); `none`
+    forces host semantics; any other value is taken as the directory."""
     if box_dir == "none":
         return None
     if box_dir == "auto":
         if not Path("/etc/agentbox-identity").exists():
             return None
+        # Where agentbox puts a box tree depends on the machine: /mnt/nvme/<user>/agentbox/boxes
+        # where that disk exists, else ~/boxes (scripts/agentbox, BOXES). The box is mounted at
+        # the host path it has, so take whichever one is here.
+        for root in (_nvme_boxes_root(), Path.home() / "boxes"):
+            tree = root / os.uname().nodename
+            if tree.is_dir():
+                return str(tree)
         return str(Path.home() / "boxes" / os.uname().nodename)
     return str(Path(box_dir).resolve())
 
@@ -889,7 +905,7 @@ def borrower_scope(roots: list[str]) -> tuple[list[str], list[str], list[str]]:
     home = Path.home()
     named = [os.environ.get("AGENT_WORKSPACE_SRC", str(home / "src")),
              os.environ.get("AGENT_WORKSPACE_ROOT", str(home / ".worktrees")),
-             str(home / "boxes"), str(home / ".omp" / "wt"), str(home / "Code")]
+             str(home / "boxes"), str(_nvme_boxes_root()), str(home / ".omp" / "wt"), str(home / "Code")]
     # `$HOME` as an inventory root means the inventory looked everywhere under it. The walk
     # still does not, and `home_not_walked` in the ledger says which children it left out.
     given = [p for p in roots if str(Path(p).resolve()) != str(home.resolve())]
@@ -1453,7 +1469,7 @@ def _local_stack_workspaces() -> dict[str, str]:
     roots: list[Path] = [home, home / "src", home / ".worktrees"]
     roots += [p for p in (home / ".worktrees").glob("*") if p.is_dir()]
     roots += [p for p in (home / ".worktrees").glob("*/*") if p.is_dir()]
-    roots += [p for p in (home / "boxes").glob("*") if p.is_dir()]
+    roots += [p for q in (home / "boxes", _nvme_boxes_root()) for p in q.glob("*") if p.is_dir()]
     roots += [p for p in Path("/tmp").glob("*") if p.is_dir() and not p.is_symlink()]
     out: dict[str, str] = {}
     for root in roots:
