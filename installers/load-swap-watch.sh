@@ -32,4 +32,5 @@ fi
 mkdir -p /mnt/nvme/sami/tmp/load-swap-watch 2>/dev/null \
     || echo "NOTE: /mnt/nvme/sami/tmp is absent here; the watch keeps its state under \$XDG_STATE_HOME."
 
+ensure_box_health_owner load-swap-watch || exit 1
 arm_user_timer omp load-swap-watch

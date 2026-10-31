@@ -12,8 +12,10 @@ Every cgroup here is a synthetic directory tree, so the tests read no real cgrou
 import argparse
 import importlib.machinery
 import importlib.util
+import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "omp-memory-watch"
@@ -181,6 +183,43 @@ class CrossingRecipientsTest(unittest.TestCase):
         self.assertTrue(addressed)
         self.assertNotIn(INFRA_LEAD, addressed)
         self.assertNotIn(CHIEF_OF_STAFF, addressed)
+
+
+class BoxHealthOwnerTest(unittest.TestCase):
+    """A machine whose box health belongs to one session: the lane VMs' fleet monitoring owner."""
+
+    OWNER = "01a14c3d-9d7f-7079-97aa-f810a884c050"
+    SCOPE = CrossingRecipientsTest.SCOPE
+
+    # The crossing harness, without its tests: those assert on the role publish, and under
+    # BOX_HEALTH_OWNER there is none.
+    write_scope = CrossingRecipientsTest.write_scope
+    run_pass = CrossingRecipientsTest.run_pass
+    everything = CrossingRecipientsTest.everything
+
+    def setUp(self) -> None:
+        CrossingRecipientsTest.setUp(self)
+        patch = unittest.mock.patch.dict(os.environ, {"BOX_HEALTH_OWNER": self.OWNER})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_alert_escalation_and_clear_all_go_to_the_owner_and_nothing_is_published(self) -> None:
+        self.run_pass(20 * GIB)
+        self.run_pass(21 * GIB)
+        self.run_pass(2 * GIB)
+        sent, published = self.everything()
+        self.assertEqual([], published)
+        self.assertEqual({SESSION, self.OWNER}, {who for who, _ in sent})
+        owned = [text for who, text in sent if who == self.OWNER]
+        self.assertTrue([text for text in owned if "STILL RISING" not in text and "CLEARED" not in text])
+        self.assertTrue([text for text in owned if "STILL RISING" in text])
+        self.assertTrue([text for text in owned if "CLEARED" in text])
+
+    def test_an_unusable_owner_is_refused_at_start(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"BOX_HEALTH_OWNER": "lead-box-health"}):
+            with self.assertRaises(SystemExit) as refused:
+                WATCH.box_health_owner()
+        self.assertIn("BOX_HEALTH_OWNER", str(refused.exception))
 
 
 if __name__ == "__main__":

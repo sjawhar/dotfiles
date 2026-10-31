@@ -1024,12 +1024,37 @@ def clear_text(now: dict, kind: str, incident: dict, when: float) -> str:
     )
 
 
-def tell_box_health(envoy: Envoy, text: str) -> str:
-    """Tell the box-health lead, and say who heard it.
+# A machine whose box health belongs to one session, not to this box's role holder, sets
+# BOX_HEALTH_OWNER to that session id: the OSS Verify lane VMs run these watches from their own
+# dotfiles and their alerts go to the fleet monitoring owner.
+OWNER_RE = re.compile(r"01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 
-    The role is the address while somebody holds it; an unheld role answers non-200, and the
-    SRE session hears it instead.
+
+def box_health_owner() -> str:
+    """The session id BOX_HEALTH_OWNER names, or "" for the role-then-SRE default.
+
+    An unusable value is refused at start, not at the first crossing: a watch that drops its
+    alerts quietly is worse than one that does not run.
     """
+    owner = (os.environ.get("BOX_HEALTH_OWNER") or "").strip()
+    if owner and not OWNER_RE.fullmatch(owner):
+        raise SystemExit(
+            f"BOX_HEALTH_OWNER={owner!r} is not an omp session id"
+            " (01xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); unset it for the box-health role"
+        )
+    return owner
+
+
+def tell_box_health(envoy: Envoy, text: str) -> str:
+    """Tell this box's health owner, and say who heard it.
+
+    With BOX_HEALTH_OWNER set, that session is the only recipient and nothing is published to
+    the role. Otherwise the role is the address while somebody holds it; an unheld role answers
+    non-200, and the SRE session hears it instead.
+    """
+    owner = box_health_owner()
+    if owner:
+        return owner if envoy.send(owner, text) else ""
     if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
         return BOX_HEALTH_ROLE_TOPIC
     if envoy.send(SRE, text):
@@ -1256,6 +1281,7 @@ def main() -> int:
     )
     parser.add_argument("--json", action="store_true", help="with --consumers, print one JSON object")
     options = parser.parse_args()
+    box_health_owner()  # refuse an unusable BOX_HEALTH_OWNER before any work
 
     if options.consumers:
         # The hand-run path names processes too, so it needs the same two lookups.

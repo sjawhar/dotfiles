@@ -191,6 +191,12 @@ Agent sessions only, never a person:
 Neither the chief of staff nor the INFRA lead hears a box alert (Sami, 2026-10-31): the INFRA
 lead owned this detector and handed box health to the SRE.
 
+A machine whose box health belongs to one session sets `BOX_HEALTH_OWNER` to that session id in
+the service's environment: every message for the box-health owner then goes to that session
+alone, with no role publish, while the session's own messages are unchanged — this is how the
+OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring owner instead of
+to this box's role holder. An invalid value stops the watch at start.
+
 Duplicates are dropped, so a session that is also one of those recipients gets one message.
 
 A **wall touch** goes to the scope's own session — the owner, who does the shedding — with the
