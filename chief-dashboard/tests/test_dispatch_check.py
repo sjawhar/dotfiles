@@ -486,10 +486,25 @@ def test_a_parked_legion_claim_is_not_unowned_and_prints_one_line():
         "BET-43 [in_progress] title of BET-43 (no claim)"]
     parked = found(lines, "LEGION-PARKED")
     assert len(parked) == 1
-    assert parked[0].startswith("2 legion-labelled issues hold a claim whose session is not running")
+    assert parked[0].startswith("2 legion-labelled issues are held by a Legion claim whose session is not running")
     assert "legion/v1/state" in parked[0]
     # The summary counts LINES, as it does for every kind: one line here, naming two issues.
     assert "1 LEGION-PARKED" in lines[-1]
+
+
+def test_a_child_of_a_suspended_legion_architect_is_parked_not_unowned():
+    # INFRA Legion controller, 2026-10-31 21:24Z: during a restart of the Legion pods, INFRA-514's architect claim was
+    # suspended and five of its children (no claim of their own) read as unowned, though their implementers worked.
+    api = FakeDispatch([
+        issue("BET-60", labels=["legion"], claim=session(DEAD, "Legion architect · BET-60")),
+        issue("BET-61", parent="BET-60"),
+        issue("BET-62", parent="BET-60", claim=session(DEAD, "Legion implementer · BET-62")),
+        issue("BET-63", labels=["legion"]),
+    ])
+    lines = check(api, dc.Scope("BET"))
+    # The child of the suspended architect is Legion's; an unclaimed legion issue with no architect above it is not.
+    assert found(lines, "UNOWNED") == ["BET-63 [in_progress] title of BET-63 (no claim)"]
+    assert found(lines, "LEGION-PARKED")[0].startswith("3 legion-labelled issues")
 
 def test_a_legion_issue_is_not_asked_for_a_plan_document():
     # Verified Linux lead, 2026-10-27 07:29Z: of 129 LINUX NO-PLAN lines, 125 were `Linux proof part` issues Legion

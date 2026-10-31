@@ -652,18 +652,21 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
         a = c["actor"]
         return actor(a, live), a.get("kind") != "session" or a["id"] in live
 
-    def under_live_architect(key: str) -> bool:
-        """Whether a running Legion architect claims one of KEY's ancestors. Legion runs a tree's children under its
-        architect's claim: it releases them from triage and its phase workers carry no claim of their own (LINUX lead
-        and the INFRA Legion controller, 2026-10-26 11:2xZ). Under any other claim the child stays unowned."""
+    def under_architect(key: str, live_only: bool = True) -> bool:
+        """Whether a Legion architect claims one of KEY's ancestors (a running one, unless LIVE_ONLY is false). Legion
+        runs a tree's children under its architect's claim: it releases them from triage and its phase workers carry
+        no claim of their own (LINUX lead and the INFRA Legion controller, 2026-10-26 11:2xZ). Under any other claim
+        the child stays unowned. An architect suspended by a restart still holds its tree (INFRA Legion controller,
+        2026-10-31 21:24Z: five INFRA children read as unowned while INFRA-514's architect was suspended)."""
         seen: set[str] = set()
         k = data["meta"].get(key, {}).get("parent")
         while k and k not in seen:
             seen.add(k)
             c = (data["meta"].get(k) or {}).get("claim")
             a = (c or {}).get("actor") or {}
-            if a.get("kind") == "session" and a.get("id") in live:
-                titles = (live[a["id"]] or "", (a.get("origin") or {}).get("session_title") or "")
+            if a.get("kind") == "session" and (a.get("id") in live or not live_only):
+                titles = (live.get(a.get("id")) or "", (a.get("origin") or {}).get("session_title") or "",
+                          actor(a, live) or "")
                 if any(t.startswith(LEGION_ARCHITECT) for t in titles):
                     return True
             k = (data["meta"].get(k) or {}).get("parent")
@@ -688,11 +691,11 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
         holder, is_live = claim(r)
         others = (r.get("assignee") or OPERATOR) != OPERATOR  # another person's issue: theirs, not ours to own
         if (key in scope.issues or r["status"] in ("triage", "in_progress")) and r["status"] != "done" and not is_live \
-                and not others and not waits_for_release(r) and not under_live_architect(key):
+                and not others and not waits_for_release(r) and not under_architect(key):
             # A Legion claim outlives its process by design, so "not running" says nothing about whether the tree
             # stalled; only the daemon's state does. Count these, print one line per project, and never ask a lead to
             # own an issue Legion still holds.
-            if holder is not None and in_legion_tree(key):
+            if in_legion_tree(key) and (holder is not None or under_architect(key, live_only=False)):
                 legion_parked.append(key)
             else:
                 why = "no claim" if holder is None else f"claim by {holder} since {r['claim']['at'][:16]}Z: not running"
@@ -788,8 +791,9 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
             out["NO-PLAN"].append((key, f"{key} [{reads[key]['status']}] {reads[key]['title'][:80]} ({what}; "
                                         f"claimed by {claim(reads[key])[0]})"))
     if legion_parked:
-        out["LEGION-PARKED"].append((legion_parked[0], f"{len(legion_parked)} legion-labelled issues hold a claim "
-                                     f"whose session is not running ({short(sorted(legion_parked)[:5])}...). A Legion "
+        out["LEGION-PARKED"].append((legion_parked[0], f"{len(legion_parked)} legion-labelled issues are held by a "
+                                     f"Legion claim whose session is not running, their own or their architect's "
+                                     f"({short(sorted(legion_parked)[:5])}...). A Legion "
                                      "claim is the tree's identity and outlives its process, so this is parking until "
                                      "the daemon says otherwise: read GET $LEGION_DAEMON_URL/legion/v1/state, "
                                      "issues.<KEY>.phase and workers.<role>.claim.state (held or a failed claim is a "
