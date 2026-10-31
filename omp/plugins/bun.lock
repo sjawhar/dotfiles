@@ -10,7 +10,7 @@
         "@sjawhar/pi-envoy": "13.5.1",
         "@sjawhar/pi-legion": "15.0.0",
         "ctx-memory": "github:sjawhar/ctx-memory#v0.2.1",
-        "gws-accounts": "github:sjawhar/gws-accounts#v0.1.9",
+        "gws-accounts": "github:sjawhar/gws-accounts#v0.1.10",
         "secretsd": "github:sjawhar/forward#v3.7.1",
         "superpowers": "github:obra/superpowers#v7.0.1",
       },
@@ -240,7 +240,7 @@
 
     "grok-mermaid": ["grok-mermaid@0.2.2", "", {}, "sha512-XcJEP5dDC8liHBh52mlLjU18fNvu1ckFsu0QpIG3+APZ270fsj9wxpiA6cOURmbUEuoMVgjbC2+UYgTdCqqgzA=="],
 
-    "gws-accounts": ["gws-accounts@github:sjawhar/gws-accounts#4e3e620", {}, "sjawhar-gws-accounts-4e3e620", "sha512-dJIYNt4+jU9u3sw9kmiszlzLABYWEncKp1VNOa7FYFIhGeX/oKo+UnfBweWG/IuSIOsatnEEK8tKnCxku1ya0A=="],
+    "gws-accounts": ["gws-accounts@github:sjawhar/gws-accounts#50502f6", {}, "sjawhar-gws-accounts-50502f6", "sha512-/sxbHc+a0slJGE/+DdvS3tzAqEA6Ra72OdNsFe8/Ebc+zNCmSG22nKkmILmvTu53eOamp4+alO02sfZU5fBJPA=="],
 
     "highlight.js": ["highlight.js@10.7.3", "", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
 
