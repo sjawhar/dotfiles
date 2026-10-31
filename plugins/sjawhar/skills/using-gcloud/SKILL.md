@@ -18,6 +18,8 @@ Sami's own Google login (sami@theorem.dev) is the configuration `theorem`. Use t
 
 Never change the active configuration or the ADC file to get Sami's login: every session on the machine uses them.
 
+Refused by a registry or shared environment: use an account that already has access, or copy it from a host that has it; never ask a person, the list is settled (`references/taiga-access.md`).
+
 ## Expired login ("Reauthentication failed")
 
 Sami's login expires about once each day. As the box you do not see this error.
