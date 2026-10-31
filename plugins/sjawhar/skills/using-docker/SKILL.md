@@ -1,6 +1,6 @@
 ---
 name: using-docker
-description: Use when running any docker, docker compose, buildx or depot command, or when one fails or hangs. Also use when editing a Dockerfile or compose file, or when a container won't start or an image may be stale. Also use on registry or auth errors, and before claiming Docker is unavailable.
+description: Use when running any docker, docker compose, buildx or depot command, or when one fails or hangs. Also use when editing a Dockerfile or compose file, when publishing a container port with -p, or when a container won't start or an image may be stale. Also use on registry or auth errors, and before claiming Docker is unavailable.
 ---
 
 # Using Docker
@@ -50,6 +50,7 @@ Docker, depot and registry access work on this machine. Before you say one of th
 - `docker stop` returns before `--rm` removal finishes, so a reused `--name` collides. Name each container for your own session (`<task>-$$`); `docker rm -f` an old one only if this session started it.
 - Start any `docker run` you may interrupt with `--init`: killing the client (`timeout`, Ctrl-C) leaves the container running when its PID 1 is a shell or script with no signal handler. Stop your own with `docker rm -f <name>`.
 - Port unreachable: the app must bind `0.0.0.0` in the container, not `127.0.0.1`. Then check `docker port <c>` against your `-p host:container` argument.
+- `-p 8080:8080` publishes the port on every address the host has, its public one included, and Docker's rules run before the host firewall, so a `ufw deny` does not close it. Publish to the loopback (`-p 127.0.0.1:8080:8080`) and give your own people and machines the service over the VPN (`tailscale serve`), because they already reach each other there. Publish on a public address only for a named caller outside the organization that cannot join the VPN, and name that caller in the repo's docs.
 - Container fails or answers wrongly: read `docker logs <c>`, then look inside with `docker exec <c> sh -c 'ps; curl -s localhost:<port>'` (no `-it`: an agent session has no TTY) before you propose a cause.
 - Copy files out of an image with no CMD: `docker create --name <n> <img> true`, `docker cp <n>:<path> <dest>`, `docker rm <n>`. Without the `true`, `docker create` fails with "no command specified".
 
