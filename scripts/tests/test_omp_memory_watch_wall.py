@@ -74,6 +74,9 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "wall_digest": 900.0,
         "wall_top": 3,
         "wall_pending_max": 400,
+        "wall_digest_mode": "send",
+        "wall_urgent_anon": 0.50,
+        "wall_pending_json": False,
         "state": state,
         "http_timeout": 8.0,
         "dry_run": False,
@@ -399,11 +402,31 @@ class WallAdviceTest(unittest.TestCase):
         self.assertLess(text.index("file 17.00 GiB"), text.index("anon 2.00 GiB"))
         self.assertNotIn("slab", text)
 
-    def test_the_digest_line_carries_the_same_three_numbers(self) -> None:
-        digest = WATCH.wall_digest_text([self.touch()], 900.0)
-        self.assertIn("12 processes holding 4.00 GiB of RSS (17% of peak)", digest)
-        self.assertIn("memory.stat: file 17.00 GiB", digest)
-        self.assertIn("NOT IN ANY PROCESS", digest)
+    def test_the_digest_row_is_box_worker_peak_and_the_file_anon_split(self) -> None:
+        row = WATCH.digest_row(self.touch())
+        self.assertIn("c-asan", row)
+        self.assertIn("peak 24.00 GiB of 24.00 GiB", row)
+        self.assertIn("file 17.00 GiB (71%)", row)
+        self.assertIn("anon 2.00 GiB (8%)", row)
+        # The detail stays in the owner's own report.
+        self.assertNotIn("processes holding", row)
+        self.assertNotIn("NOT IN ANY PROCESS", row)
+
+    def test_an_oom_kill_shows_on_the_row(self) -> None:
+        self.assertIn("oom_kill 2", WATCH.digest_row(self.touch(events_oom_kill=2)))
+
+    def test_a_touch_is_urgent_on_anon_or_an_oom_kill(self) -> None:
+        """The two shapes that end in a kill do not wait for the hourly digest."""
+        import argparse
+
+        options = argparse.Namespace(wall_urgent_anon=0.50)
+        self.assertEqual(WATCH.urgent_reason(self.touch(), options), "")
+        anon = self.touch(stats={"anon": 20 * GIB, "file": GIB, "shmem": 0, "kernel": 0, "sock": 0})
+        self.assertIn("cannot reclaim", WATCH.urgent_reason(anon, options))
+        self.assertIn("83%", WATCH.urgent_reason(anon, options))
+        killed = self.touch(events_oom_kill=1)
+        self.assertIn("already killed", WATCH.urgent_reason(killed, options))
+        self.assertIn("NOT WAITING FOR THE DIGEST", WATCH.urgent_text(killed, "x"))
 
 
 class RunOnceTest(unittest.TestCase):
@@ -435,11 +458,12 @@ class RunOnceTest(unittest.TestCase):
         WATCH.LIVE_SESSIONS.clear()
         WATCH.LIVE_READ = False
 
-    def scopes(self, events: dict[str, int]) -> None:
+    def scopes(self, events: dict[str, int], **fields) -> None:
         self.cgroups = {}
         for name, counter in events.items():
             self.cgroups[name] = write_scope(
-                self.root, name, events_max=counter, peak=2 * GIB, current=2 * GIB, procs=(int(name[-7:-6]),)
+                self.root, name, events_max=counter, peak=2 * GIB, current=2 * GIB,
+                procs=(int(name[-7:-6]),), **fields
             )
 
     def processes(self) -> list[tuple[int, str]]:
@@ -475,9 +499,12 @@ class RunOnceTest(unittest.TestCase):
             ],
         )
         digest = self.digest(envoy)
-        self.assertIn("2 touch(es)", digest)
-        self.assertIn("run-ra1.scope", digest)
-        self.assertIn("run-rb2.scope", digest)
+        self.assertIn("2 touch(es) on 1 box(es)", digest)
+        # One line per scope: box, worker, peak, page cache, anonymous, session. Not the scope
+        # name, not the process list -- the scope's own owner has those.
+        self.assertIn("w1", digest)
+        self.assertIn("w2", digest)
+        self.assertNotIn("run-ra1.scope", digest)
 
     def test_the_lead_digest_waits_but_loses_no_touch(self) -> None:
         self.scopes({"run-ra1.scope": 1})
@@ -496,7 +523,8 @@ class RunOnceTest(unittest.TestCase):
         self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
         envoy = self.run_pass(wall_digest=0.0)
         digest = self.digest(envoy)
-        self.assertIn("run-rb2.scope", digest)
+        self.assertIn("w2", digest)
+        self.assertNotIn("w1", digest)
 
     def test_dry_run_sends_nothing(self) -> None:
         self.scopes({"run-ra1.scope": 1})
@@ -537,8 +565,11 @@ class RunOnceTest(unittest.TestCase):
         )
         self.assertTrue(self.digest(envoy))
 
-    def test_the_digest_carries_each_scopes_top_three_with_command_lines(self) -> None:
-        """The box-health owner reads the digest without the scope owner's report beside it."""
+    def test_the_digest_is_one_line_a_scope_and_not_the_owners_report(self) -> None:
+        """A per-box digest every 15 min was eight messages an hour saying the same thing.
+
+        The reader wants the shape of the fleet; each scope's own owner keeps the detail.
+        """
         WATCH.rss_of = lambda pid: {1: 9 * GIB}.get(pid, 2 * GIB)
         WATCH.cmdline_of = lambda pid: f"omp @/home/sami/work/.ossv-workers/w{pid}/message.md --lane {pid}"
         self.scopes({"run-ra1.scope": 1})
@@ -546,12 +577,20 @@ class RunOnceTest(unittest.TestCase):
         self.scopes({"run-ra1.scope": 6})
         envoy = self.run_pass()
         digest = self.digest(envoy)
-        self.assertIn("run-ra1.scope", digest)
-        self.assertIn("9.00 GiB  pid 1", digest)
-        self.assertIn(".ossv-workers/w1/message.md --lane 1", digest)
+        rows = [line for line in digest.splitlines() if line.startswith("  2026")]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("w1", rows[0])
+        self.assertIn("peak 2.00 GiB of 24.00 GiB", rows[0])
+        self.assertIn("file ", rows[0])
+        self.assertIn("anon ", rows[0])
+        self.assertNotIn("pid 1", digest)
+        self.assertNotIn(".ossv-workers/w1/message.md", digest)
+        # The owner's own report still has everything.
+        report = [text for session, text in envoy.sent if session.startswith("00000001")][0]
+        self.assertIn("9.00 GiB  pid 1", report)
 
-    def test_a_digest_restored_from_the_state_file_still_has_the_command_lines(self) -> None:
-        """A touch waits on disk through JSON, where its tuples come back as lists."""
+    def test_a_touch_that_waits_on_disk_keeps_the_split_the_row_needs(self) -> None:
+        """A touch waits in the state file through JSON before its digest window comes."""
         import json
 
         self.scopes({"run-ra1.scope": 1})
@@ -561,12 +600,14 @@ class RunOnceTest(unittest.TestCase):
         self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
         self.run_pass()
         kept = json.loads(self.state.read_text())
-        self.assertTrue(kept["wall_pending"][0]["top"])
+        waiting = kept["wall_pending"][0]
+        self.assertTrue(waiting["stats"]["file"])
+        self.assertEqual(waiting["worker"], "w2")
         self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
         envoy = self.run_pass(wall_digest=0.0)
         digest = self.digest(envoy)
-        self.assertIn("pid 2", digest)
-        self.assertIn(".ossv-workers/w2/message.md", digest)
+        self.assertIn("w2", digest)
+        self.assertIn("file 1.50 GiB", digest)
 
     def test_a_stale_session_id_is_not_sent_to_and_the_live_owner_gets_it(self) -> None:
         """A session id from an `omp --resume` path is the id the directory was CREATED with.
@@ -621,6 +662,69 @@ class RunOnceTest(unittest.TestCase):
         self.scopes({"run-ra1.scope": 4})
         envoy = self.run_pass()
         self.assertIn("00000001-0000-0000-0000-000000000001", [session for session, _ in envoy.sent])
+
+    def test_collect_mode_sends_no_digest_and_keeps_the_touches(self) -> None:
+        """Eight boxes each sending a digest every 15 minutes was 32 messages an hour."""
+        import json
+
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass(wall_digest_mode="collect")
+        self.scopes({"run-ra1.scope": 4})
+        envoy = self.run_pass(wall_digest_mode="collect")
+        # The scope's own owner still hears; nobody sends a digest.
+        self.assertEqual([session for session, _ in envoy.sent], ["00000001-0000-0000-0000-000000000001"])
+        kept = json.loads(self.state.read_text())
+        self.assertEqual(len(kept["wall_pending"]), 1)
+
+    def test_the_drain_prints_the_touches_with_the_box_and_clears_them(self) -> None:
+        import json
+
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass(wall_digest_mode="collect")
+        self.scopes({"run-ra1.scope": 4})
+        self.run_pass(wall_digest_mode="collect")
+        import io
+        import contextlib
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            WATCH.drain_pending(options(self.state, wall_pending_json=True))
+        answer = json.loads(out.getvalue())
+        self.assertEqual(len(answer["touches"]), 1)
+        self.assertEqual(answer["touches"][0]["box"], answer["box"])
+        self.assertTrue(answer["touches"][0]["stats"]["file"])
+        self.assertFalse(answer["locked_out"])
+        # Drained once: a second drain has nothing, so no touch is ever counted twice.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            WATCH.drain_pending(options(self.state, wall_pending_json=True))
+        self.assertEqual(json.loads(out.getvalue())["touches"], [])
+
+    def test_an_anon_dominated_touch_is_sent_at_once_even_in_collect_mode(self) -> None:
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass(wall_digest_mode="collect")
+        # anon above half the peak: the kernel has nothing left to reclaim.
+        self.scopes({"run-ra1.scope": 4}, anon=int(1.8 * GIB))
+        envoy = self.run_pass(wall_digest_mode="collect")
+        urgent = [text for _topic, text in envoy.published if "NOT WAITING FOR THE DIGEST" in text]
+        self.assertEqual(len(urgent), 1)
+        self.assertIn("cannot reclaim", urgent[0])
+
+    def test_an_oom_kill_is_sent_at_once_even_in_collect_mode(self) -> None:
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass(wall_digest_mode="collect")
+        self.scopes({"run-ra1.scope": 4}, oom_kill=3)
+        envoy = self.run_pass(wall_digest_mode="collect")
+        urgent = [text for _topic, text in envoy.published if "NOT WAITING FOR THE DIGEST" in text]
+        self.assertEqual(len(urgent), 1)
+        self.assertIn("already killed", urgent[0])
+
+    def test_a_reclaimable_touch_is_not_urgent(self) -> None:
+        self.scopes({"run-ra1.scope": 1})
+        self.run_pass(wall_digest_mode="collect")
+        self.scopes({"run-ra1.scope": 4})
+        envoy = self.run_pass(wall_digest_mode="collect")
+        self.assertEqual([text for _t, text in envoy.published if "NOT WAITING" in text], [])
 
 
 if __name__ == "__main__":
