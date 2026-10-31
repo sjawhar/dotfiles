@@ -13,7 +13,7 @@ A request folded into running work gets done only where it overlaps, and the res
 
 1. Say in one line whether the request is new work or part of the work already running. Same files is not the same goal; share a goal or it is new work.
 2. Write one line per requirement of the request: the requirement, and covered by the running work or not covered. Keep the person's requirement, not a smaller version of it that the running work happens to meet.
-3. Each uncovered requirement gets, before the session continues: its own task, best a fresh agent with the requirement as its goal, or a question to the person when you cannot tell what it needs or who should do it. Nothing uncovered stays only in this session's head.
+3. Each uncovered requirement gets, before the session continues: its own task, best a fresh agent with the requirement as its goal, or a question to the person when you cannot tell what it needs or who should do it. Nothing uncovered stays only in this session's head. A requirement drops only on the person's own answer, comment or approved change of the request; silence, a reaction, or your own reading of it drops nothing.
 4. Report the split back in the same reply: what this session now covers, what went to a fresh agent or a task with its id, and what is waiting on an answer.
 
 ## When the person folds work into this session
