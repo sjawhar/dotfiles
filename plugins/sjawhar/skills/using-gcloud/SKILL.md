@@ -1,6 +1,6 @@
 ---
 name: using-gcloud
-description: Use when running gcloud compute ssh or scp against several VMs, or where other sessions also use gcloud. Use on the ssh error "No ED25519 host key is known for compute.<id> and you have requested strict checking" or "Host key verification failed". Use when gcloud fails with "Reauthentication failed. cannot prompt during non-interactive execution." Use when you need a new build or measurement VM.
+description: Use when running gcloud compute ssh or scp against several VMs, or where other sessions also use gcloud. Use on the ssh error "No ED25519 host key is known for compute.<id> and you have requested strict checking" or "Host key verification failed". Use when gcloud fails with "Reauthentication failed. cannot prompt during non-interactive execution." Use when you need a new build or measurement VM, give a VM a public IP, or deploy a service that people or machines will reach.
 ---
 
 # Using gcloud
@@ -29,6 +29,14 @@ Sami's login expires about once each day. As the box you do not see this error.
    - Do not run `gcloud auth application-default login` or `revoke` for this: the shim refuses both while the box's ADC is an `external_account` credential.
    - Find the open re-login ask (`dispatch search --query 'gcloud re-login'`) and post each printed link and the box error there. Open a new ask only if none is open: two asks split his answers. If it already holds another session's link, post no link; add one line naming the step you need.
    - Type the code from Sami's answer into the waiting command.
+
+## A new VM or service stays off the internet
+
+People, dev boxes, VMs, CI jobs and managed services all reach each other over the VPN, so a public address gives a service no access it needs and exposes it to everyone.
+
+- Create a VM with no external address (`gcloud compute instances create … --no-address`, `az vm create … --public-ip-address ""`) and reach it over IAP (`--tunnel-through-iap`) or the VPN. A VM that already has one keeps working after `gcloud compute instances delete-access-config`.
+- Deploy a service that only your own people and machines call onto the VPN. Never `gcloud run deploy --allow-unauthenticated`, an `allUsers` IAM binding, an internet-facing load balancer, or a firewall rule that opens its port to `0.0.0.0/0`; a shared bearer token is not a substitute, because the port is still reachable by everyone.
+- Open a service to the internet only for a named caller outside the organization that cannot join the VPN, such as a webhook sender. Name that caller and the reason where the service is documented, so the next reader can check it.
 
 ## Host keys: one gcloud ssh call at a time
 
