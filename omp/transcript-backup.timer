@@ -1,0 +1,10 @@
+[Unit]
+Description=Copy the transcript store's Parquet parts and manifest to Azure Blob each night
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

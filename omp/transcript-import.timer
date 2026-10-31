@@ -1,0 +1,9 @@
+[Unit]
+Description=Import new agent session bytes into the transcript store every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

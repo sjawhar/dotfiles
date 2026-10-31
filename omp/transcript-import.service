@@ -1,0 +1,15 @@
+[Unit]
+Description=Import new agent session bytes into the transcript store
+Documentation=https://github.com/theorem-labs/agent-infra/tree/main/transcript-store
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/transcript-store import
+# The host runs other work: the importer takes idle CPU and disk time, at most 4 CPUs and 8 GB.
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=400%
+MemoryMax=8G
+TimeoutStartSec=50min
+# 75: a lock stayed busy (a timed benchmark run, or the previous import); the next run tries again.
+SuccessExitStatus=75

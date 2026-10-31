@@ -1,0 +1,10 @@
+[Unit]
+Description=Copy the transcript store's Parquet parts and manifest to Azure Blob
+Documentation=https://github.com/theorem-labs/agent-infra/tree/main/transcript-store
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/transcript-store backup
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=4h
