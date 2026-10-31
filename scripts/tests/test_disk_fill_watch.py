@@ -38,6 +38,10 @@ class FakeEnvoy:
 
     publish_ok = True
 
+    def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+        """A listener that answers nothing, so no session is ever verified as live here."""
+        return 0, {}
+
     def publish(self, topic: str, message: str) -> bool:
         self.published.append((topic, message))
         return self.publish_ok
@@ -94,6 +98,8 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             "writers_json": None,
             "tmp": "/tmp",
             "tmp_mount": "/",
+            "src": "/nonexistent-src",
+            "src_mount": "/",
             "tmp_age": 21600.0,
             "tmp_big": 500000000,
             "tmp_walk_budget": 20.0,
@@ -427,6 +433,8 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             writers_json=None,
             tmp=self.tmp.name,
             tmp_mount=MOUNT,
+            src="/nonexistent-src",
+            src_mount=MOUNT,
             tmp_age=21600.0,
             tmp_big=500000000,
             tmp_walk_budget=20.0,
@@ -584,7 +592,7 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             assert writer.stdout is not None
             self.assertEqual("closed\n", writer.stdout.readline())
             self.assertEqual("", WATCH.owner_of_path(str(entry)))
-            found = WATCH.tmp_entries(
+            found = WATCH.young_entries(
                 self.tmp.name, age=60.0, big=0, walk_dirs=True, budget=5.0
             )
             bytes_there, path, newest_mtime = next(row for row in found if row[1] == str(entry))
@@ -615,10 +623,96 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             return result
 
         with unittest.mock.patch.object(WATCH.os, "lstat", side_effect=lstat_on_another_device):
-            found = WATCH.tmp_entries(self.tmp.name, age=60.0, big=1, walk_dirs=True, budget=5.0)
+            found = WATCH.young_entries(self.tmp.name, age=60.0, big=1, walk_dirs=True, budget=5.0)
         self.assertNotIn(str(entry), [row[1] for row in found])
-        found = WATCH.tmp_entries(self.tmp.name, age=60.0, big=1, walk_dirs=True, budget=5.0)
+        found = WATCH.young_entries(self.tmp.name, age=60.0, big=1, walk_dirs=True, budget=5.0)
         self.assertIn(str(entry), [row[1] for row in found])
+
+
+class DiskFillWatchSrcEntryTest(unittest.TestCase):
+    """A new, big top-level checkout under ~/src is named like a new, big /tmp entry.
+
+    ~/src is on / here, a checkout cut there fills the disk every session shares, and the tree
+    belongs on /mnt/nvme. A tree already moved leaves a SYMLINK at its old path, which is
+    measured only as itself and must never alert: that is what the LPSREV trees became on
+    2026-10-31.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state.json"
+        self.src = Path(self.tmp.name) / "src"
+        self.src.mkdir()
+        self.envoy = FakeEnvoy()
+
+        original_envoy = WATCH.Envoy
+        original_free = WATCH.free_bytes
+        original_device = WATCH.device_of
+        original_writers = WATCH.writers_now
+        WATCH.Envoy = lambda timeout=8.0: self.envoy
+        WATCH.free_bytes = lambda mount: (500 * WATCH.GIB, 1000 * WATCH.GIB)
+        WATCH.device_of = lambda path: 1  # src, /tmp and the watched mount on one filesystem
+        WATCH.writers_now = lambda options, device, mount: "writers: (none in this test)"
+
+        def restore() -> None:
+            WATCH.Envoy = original_envoy
+            WATCH.free_bytes = original_free
+            WATCH.device_of = original_device
+            WATCH.writers_now = original_writers
+
+        self.addCleanup(restore)
+
+    def options(self) -> argparse.Namespace:
+        values = dict(
+            DiskFillWatchAlertRoutingTest.options(self).__dict__,
+            state=self.state,
+            tmp=str(Path(self.tmp.name) / "no-such-tmp"),
+            src=str(self.src),
+            src_mount=MOUNT,
+            tmp_big=1,
+            tmp_digest_max=1000,
+            tmp_pending_max=200,
+            tmp_digest=3600.0,
+        )
+        return argparse.Namespace(**values)
+
+    def run_once(self) -> None:
+        self.assertEqual(0, WATCH.run_once(self.options()))
+
+    def messages(self) -> list[str]:
+        return [text for _, text in self.envoy.published + self.envoy.sent if "NEW BIG" in text]
+
+    def test_a_new_big_checkout_under_src_is_named_once(self) -> None:
+        checkout = self.src / "agent-infra-task9"
+        checkout.mkdir()
+        (checkout / "pack.bin").write_bytes(b"x" * 4096)
+
+        self.run_once()
+
+        self.assertEqual(1, len(self.messages()))
+        message = self.messages()[0]
+        self.assertIn("NEW BIG ~/src ENTRY", message)
+        self.assertIn(str(checkout), message)
+        self.assertIn("agent-workspace", message)
+        self.assertIn("/mnt/nvme", message)
+        self.assertEqual(
+            [WATCH.BOX_HEALTH_ROLE_TOPIC], [topic for topic, _ in self.envoy.published]
+        )
+
+        self.envoy.published.clear()
+        self.run_once()
+        self.assertEqual([], self.messages())
+
+    def test_a_symlink_left_by_a_moved_tree_never_alerts(self) -> None:
+        moved = Path(self.tmp.name) / "moved-to-nvme"
+        moved.mkdir()
+        (moved / "pack.bin").write_bytes(b"x" * 8192)
+        (self.src / "lpsrev-9.2").symlink_to(moved)
+
+        self.run_once()
+
+        self.assertEqual([], self.messages())
 
 
 class DiskFillWatchFloorAgainstDeviceTest(unittest.TestCase):

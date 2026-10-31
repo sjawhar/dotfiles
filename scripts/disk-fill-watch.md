@@ -182,19 +182,29 @@ logged.
 The expensive reads happen only on a run that actually sends. An ordinary run is `statvfs` plus a
 bounded `/tmp` scan: **0.3–0.4 s** measured on this box at load 43.
 
-## The /tmp rule
+## The scratch rule: `/tmp` and `~/src`
 
-`/tmp` is on `/` here and agents' scratch there was the repeated root cause on 2026-10-26. A
-top-level `/tmp` entry born in the last 6 hours and now at or over 500 MB is named **once**, with
-the session of a process whose cwd or open descriptor is inside it. If none is observed, the
-alert says exactly that and gives the newest file or directory modification time it saw; it never
-infers that a session has ended.
+Both are on `/` here and both are shared by every session: agents' scratch in `/tmp` was the
+repeated root cause on 2026-10-26, and a checkout cut under `~/src` instead of on `/mnt/nvme`
+fills the same disk. A top-level entry of either root (`--tmp`, `--src`, default `~/src`) born
+in the last 6 hours and now at or over 500 MB is named **once**, with the session of a process
+whose cwd or open descriptor is inside it. If none is observed, the notice says exactly that and
+gives the newest file or directory modification time it saw; it never infers that a session has
+ended.
+
+The two differ only in what the message tells the reader to do. A `/tmp` entry: remove it when
+the work is done, move it to `/mnt/nvme` while it runs. A `~/src` entry: a checkout belongs on
+`/mnt/nvme` — cut it with `agent-workspace new` or `work-dir` — and a tree moved there can leave
+a **symlink** at its old path. **A symlink is measured as itself and never followed**, so the
+trees moved out of `~/src` on 2026-10-31 with links left behind (61 of them) say nothing; only
+a real new tree does.
 
 Unlike the hand-run script this replaces, a young **directory** is sized too, under a few seconds
 of budget per run (`--tmp-idle-walk-budget`, 5 s; `--tmp-walk-budget`, 20 s while building an
 alert). That script sized only non-directories, which is how `/tmp/rev1` was named at 17 GB while
 the directories beside it never were. What a run's budget does not reach, the next run reaches:
-an entry already named is never looked at again.
+an entry already named is never looked at again. A mount point under either root (containerd's
+and buildkit's overlays) holds another filesystem's bytes and is not counted.
 
 **A per-entry notice goes to the entry's own live owner**, not to the box-health owner. The
 entry belongs to one session's work and that session is the only reader who can remove it: on
@@ -277,9 +287,9 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 | Disk growth kept, by session | `sudo -n journalctl -u guard-disk-writers.service --since -60min -o cat`, the guard's `growth session:` rows for the crossing mount; best-effort |
 | A writer's session | `/proc/<pid>/environ`, `/proc/<pid>/cmdline`, `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl`, then its ancestors |
 | A writer's mount | `/proc/<pid>/cwd` and `/proc/<pid>/fd`, compared with the mount's `st_dev` at the sample instant |
-| Young `/tmp` entries | `os.scandir('/tmp')`, a budgeted `os.walk` for directories, and the newest file or directory mtime seen while sizing |
+| Young `/tmp` and `~/src` entries | `os.scandir` of each root, a budgeted `os.walk` for directories (symlinks measured as themselves, never followed), and the newest file or directory mtime seen while sizing |
 | Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
-| Samples, confirmations, crossings, named `/tmp` entries | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |
+| Samples, confirmations, crossings, named `/tmp` and `~/src` entries | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |
 
 ## Running it by hand
 
