@@ -44,12 +44,14 @@ What one run does, with `statvfs` and /proc reads only, no model call:
      what it holds open on the alerting mount and age. A size walk cannot name those: it sees
      what is already written, not what is being written now.
 
-It also keeps the /tmp rule of the script it replaces: a top-level /tmp entry born in the last
-6 hours and now at or over 500 MB is named once, with its owning session. /tmp is on / here, and
-agents' scratch there was the repeated root cause on 2026-10-26. Unlike that script, a young
-/tmp DIRECTORY is sized too -- but only while a crossing is open on the mount that holds /tmp,
-and under a bounded walk, because /tmp holds ~20k entries and walking it on every run would
-itself be the load.
+It also keeps the /tmp rule of the script it replaces, and applies it to the checkout root
+(~/src) too: a top-level entry of either, born in the last 6 hours and now at or over 500 MB,
+is named once with its owning session. Both are on / here, agents' scratch in /tmp was the
+repeated root cause on 2026-10-26, and a checkout cut under ~/src instead of on /mnt/nvme fills
+the same disk. Unlike that script, a young DIRECTORY is sized too -- but only while a crossing
+is open on the mount that holds the root, and under a bounded walk, because /tmp holds ~20k
+entries and walking it on every run would itself be the load. A symlink is measured as itself
+and never followed, so a tree already moved to /mnt/nvme says nothing.
 
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
 for the first alert, for the escalation 30 minutes later when a crossing is still open and
@@ -831,13 +833,20 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
     return growth + writers_text(described, denied, options.writer_sample, mount, privileged=False)
 
 
-# ------------------------------------------------------------------------------ the /tmp rule
+# ------------------------------------------------- the scratch rule: /tmp and the src root
 
 
-def tmp_entries(
-    tmp: str, age: float, big: int, walk_dirs: bool, budget: float
+def young_entries(
+    root: str, age: float, big: int, walk_dirs: bool, budget: float
 ) -> list[tuple[int, str, float]]:
-    """Top-level /tmp entries born within `age` seconds and now at or over `big` bytes.
+    """Top-level entries of `root` born within `age` seconds and now at or over `big` bytes.
+
+    `root` is /tmp or the checkout root (~/src): both are shared, both are on / here, and a
+    young, big entry in either is the same fact about the same disk.
+
+    A SYMLINK is never followed and never sized beyond itself, so a tree moved to /mnt/nvme
+    with a link left at its old path costs this filesystem nothing and says nothing: that is
+    exactly what the LPSREV trees became on 2026-10-31.
 
     Each result also carries the newest file or directory modification time seen while sizing it.
     That costs no extra walk: directory sizing already stats every file. It distinguishes a
@@ -847,8 +856,8 @@ def tmp_entries(
     found = []
     deadline = now + budget
     try:
-        entries = list(os.scandir(tmp))
-        tmp_dev = os.stat(tmp).st_dev
+        entries = list(os.scandir(root))
+        tmp_dev = os.stat(root).st_dev
     except OSError:
         return found
     for entry in entries:
@@ -856,8 +865,8 @@ def tmp_entries(
             stat = entry.stat(follow_symlinks=False)
         except OSError:
             continue
-        # A mount point under /tmp (containerd's and buildkit's overlay mounts are the common
-        # case) holds bytes of another filesystem: they cost /tmp's disk nothing.
+        # A mount point under the root (containerd's and buildkit's overlay mounts under /tmp
+        # are the common case) holds bytes of another filesystem: they cost this disk nothing.
         if stat.st_dev != tmp_dev:
             continue
         birth = getattr(stat, "st_birthtime", 0) or stat.st_ctime
@@ -964,7 +973,7 @@ def disk_is_short(free: float, total: float) -> bool:
 
 
 def tmp_digest_text(pending: list[dict], window: float) -> str:
-    """Every small unowned /tmp entry since the last digest, one line each.
+    """Every small unowned scratch entry since the last digest, one line each.
 
     Nobody can be sent these one at a time: no live session on this box holds them, and each is
     under the size that makes an entry worth a message of its own. As a list they are still
@@ -973,11 +982,13 @@ def tmp_digest_text(pending: list[dict], window: float) -> str:
     """
     total = sum(int(entry.get("bytes") or 0) for entry in pending)
     mounts = sorted({str(entry.get("mount") or "?") for entry in pending})
+    roots = sorted({str(entry.get("root") or "/tmp") for entry in pending})
     lines = [
-        f"SMALL UNOWNED /tmp ENTRIES on {socket.gethostname()}: {len(pending)} born in the last"
-        f" {human_time(window)} on {', '.join(mounts)}, {size(total)} between them. No live"
-        " session on this box could be matched to any of them, and each is under the size that"
-        " earns a message of its own. Nothing here is urgent; a long list is the signal."
+        f"SMALL UNOWNED {' AND '.join(roots)} ENTRIES on {socket.gethostname()}: {len(pending)}"
+        f" born in the last {human_time(window)} on {', '.join(mounts)}, {size(total)} between"
+        " them. No live session on this box could be matched to any of them, and each is under"
+        " the size that earns a message of its own. Nothing here is urgent; a long list is the"
+        " signal."
     ]
     for entry in sorted(pending, key=lambda e: -int(e.get("bytes") or 0)):
         lines.append(
@@ -990,6 +1001,30 @@ def tmp_digest_text(pending: list[dict], window: float) -> str:
         + socket.gethostname() + "."
     )
     return "\n".join(lines)
+
+
+# What a reader is told to do with a big young entry, per root. /tmp holds a session's scratch;
+# ~/src holds checkouts, and a checkout belongs on the big disk (agent-workspace cuts a worktree
+# there, work-dir a scratch directory), with a symlink left at the old path where something
+# still looks for it. This watch never follows such a link, so a moved tree is silent.
+TMP_ADVICE = (
+    "If it is yours and the work is done, remove it; if it is still running, move it to"
+    " /mnt/nvme."
+)
+SRC_ADVICE = (
+    "A checkout belongs on /mnt/nvme, not here: cut the tree with `agent-workspace new` or"
+    " `work-dir`, and leave a symlink at the old path where something still looks for it (a"
+    " symlink is measured only as itself and never alerts). If it is yours and the work is"
+    " done, remove it."
+)
+
+
+def scratch_roots(options: argparse.Namespace) -> list[dict]:
+    """The shared directories whose new, big top-level entries are named once each."""
+    return [
+        {"path": options.tmp, "mount": options.tmp_mount, "label": "/tmp", "advice": TMP_ADVICE},
+        {"path": options.src, "mount": options.src_mount, "label": "~/src", "advice": SRC_ADVICE},
+    ]
 
 
 def live_owner_id(owner_answer: str) -> str:
@@ -1583,7 +1618,7 @@ def run_once(options: argparse.Namespace) -> int:
         writers = writers_now(options, device_of(mount) or -1, mount)
         tmp_lines: list[str] = []
         if tmp_device is not None and tmp_device == device_of(mount):
-            for bytes_there, path, newest_mtime in tmp_entries(
+            for bytes_there, path, newest_mtime in young_entries(
                 options.tmp, options.tmp_age, options.tmp_big, True, options.tmp_walk_budget
             )[: options.top_writers]:
                 owner = tmp_owner_text(owner_of_path(path), newest_mtime, started)
@@ -1622,18 +1657,25 @@ def run_once(options: argparse.Namespace) -> int:
         if options.print_alert:
             print(text)
 
-    # The /tmp rule: name each young, big entry ONCE, whether or not a mount is crossing. It is
-    # the measurement step before any gate -- a 17 GB tree in /tmp belongs to a session, and the
-    # session is findable while it still runs. A young DIRECTORY is sized here too, under a few
-    # seconds of budget: the script this replaces sized only files, which is why /tmp/rev1 was
-    # named at 17 GB and the directories beside it never were. What the budget does not reach
-    # this run, the next run reaches, since a named entry is never looked at again.
-    if tmp_device is not None and any(tmp_device == device_of(v["mount"]) for v in verdicts):
+    # The scratch rule: name each young, big top-level entry of /tmp and of the checkout root
+    # (~/src) ONCE, whether or not a mount is crossing. It is the measurement step before any
+    # gate -- a 17 GB tree in /tmp, or a checkout cut on / instead of /mnt/nvme, belongs to a
+    # session, and the session is findable while it still runs. A young DIRECTORY is sized here
+    # too, under a few seconds of budget: the script this replaces sized only files, which is
+    # why /tmp/rev1 was named at 17 GB and the directories beside it never were. What the budget
+    # does not reach this run, the next run reaches, since a named entry is never looked at
+    # again. A symlink is measured only as itself, so a tree already moved to /mnt/nvme with a
+    # link left behind says nothing.
+    for root in scratch_roots(options):
+        label = root["label"]
+        root_device = device_of(root["path"])
+        if root_device is None or not any(root_device == device_of(v["mount"]) for v in verdicts):
+            continue
         seen = set(named_tmp)
         fresh = [
             (bytes_there, path, newest_mtime)
-            for bytes_there, path, newest_mtime in tmp_entries(
-                options.tmp, options.tmp_age, options.tmp_big, True, options.tmp_idle_walk_budget
+            for bytes_there, path, newest_mtime in young_entries(
+                root["path"], options.tmp_age, options.tmp_big, True, options.tmp_idle_walk_budget
             )
             if path not in seen
         ]
@@ -1643,11 +1685,11 @@ def run_once(options: argparse.Namespace) -> int:
             try:
                 refresh_live_sessions(Envoy())
             except SystemExit as error:
-                log(f"  live sessions unavailable: {error}; /tmp notices go to the box-health owner")
+                log(f"  live sessions unavailable: {error}; {label} notices go to the box-health owner")
         # The disk this entry sits on: short, and the box's health owner hears it whoever made
         # the entry.
-        tmp_verdict = next((v for v in verdicts if device_of(v["mount"]) == tmp_device), None)
-        short = bool(tmp_verdict) and disk_is_short(tmp_verdict["free"], tmp_verdict.get("total") or 0)
+        root_verdict = next((v for v in verdicts if device_of(v["mount"]) == root_device), None)
+        short = bool(root_verdict) and disk_is_short(root_verdict["free"], root_verdict.get("total") or 0)
         for bytes_there, path, newest_mtime in fresh[: options.top_writers]:
             found = owner_of_path(path)
             owner = tmp_owner_text(found, newest_mtime, started)
@@ -1659,20 +1701,20 @@ def run_once(options: argparse.Namespace) -> int:
             if not lane and not short and bytes_there < options.tmp_digest_max:
                 tmp_pending.append(
                     {"at": started, "path": path, "bytes": bytes_there, "owner": owner,
-                     "mount": options.tmp_mount}
+                     "mount": root["mount"], "root": label}
                 )
                 del tmp_pending[: max(0, len(tmp_pending) - options.tmp_pending_max)]
                 state.commit(options)
-                log(f"/tmp: named {path} ({size(bytes_there)}), unowned and small; held for the digest")
+                log(f"{label}: named {path} ({size(bytes_there)}), unowned and small; held for the digest")
                 continue
             state.commit(options)
             why = (
                 "This entry is yours: it was reached through a process of your session."
                 if lane
                 else (
-                    f"This goes to the box-health owner because {options.tmp_mount} has"
-                    f" {size(tmp_verdict['free'] if tmp_verdict else 0)} free, under the"
-                    f" {size(max(ENTRY_SHORT_FRACTION * ((tmp_verdict or {}).get('total') or 0), ENTRY_SHORT_FLOOR))}"
+                    f"This goes to the box-health owner because {root['mount']} has"
+                    f" {size(root_verdict['free'] if root_verdict else 0)} free, under the"
+                    f" {size(max(ENTRY_SHORT_FRACTION * ((root_verdict or {}).get('total') or 0), ENTRY_SHORT_FLOOR))}"
                     f" that is short for a disk this size"
                     if short
                     else "This goes to the box-health owner because no live session on this box"
@@ -1681,10 +1723,9 @@ def run_once(options: argparse.Namespace) -> int:
                 )
             )
             message = (
-                f"NEW BIG /tmp ENTRY on {socket.gethostname()}: {size(bytes_there)} at {path}, born"
-                f" in the last {human_time(options.tmp_age)} (owner: {owner}). /tmp is on"
-                f" {options.tmp_mount}, which every session on this box shares. If it is yours and"
-                " the work is done, remove it; if it is still running, move it to /mnt/nvme."
+                f"NEW BIG {label} ENTRY on {socket.gethostname()}: {size(bytes_there)} at {path},"
+                f" born in the last {human_time(options.tmp_age)} (owner: {owner}). {label} is on"
+                f" {root['mount']}, which every session on this box shares. {root['advice']}"
                 f" {why} From disk-fill-watch; said once per entry."
             )
             if not options.dry_run:
@@ -1694,7 +1735,7 @@ def run_once(options: argparse.Namespace) -> int:
                     heard = tell_box_health(envoy, message)
             else:
                 heard = lane or "(box-health owner)"
-            log(f"/tmp: named {path} ({size(bytes_there)}), owner {owner} -> {heard}")
+            log(f"{label}: named {path} ({size(bytes_there)}), owner {owner} -> {heard}")
             if options.print_alert:
                 print(message)
         del named_tmp[: max(0, len(named_tmp) - 500)]
@@ -1862,6 +1903,12 @@ def main() -> int:
     )
     parser.add_argument("--tmp", default="/tmp", help="the shared scratch directory watched for big young entries")
     parser.add_argument("--tmp-mount", default="/", help="the mount --tmp lives on, named in its message")
+    parser.add_argument(
+        "--src",
+        default=str(Path.home() / "src"),
+        help="the checkout root watched for big young top-level entries (default ~/src)",
+    )
+    parser.add_argument("--src-mount", default="/", help="the mount --src lives on, named in its message")
     parser.add_argument("--tmp-age", type=float, default=21600.0, help="seconds: a /tmp entry is young for this long")
     parser.add_argument("--tmp-big", type=float, default=500000000, help="bytes at which a young /tmp entry is named")
     parser.add_argument(
