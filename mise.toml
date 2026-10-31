@@ -107,8 +107,9 @@ zoxide = "0.10.0"
 # the mautrix-instagram alias in [tool_alias] gives the second its own install.
 "github:mautrix/meta" = { version = "0.2609.0", asset_pattern = "mautrix-meta-amd64", bin = "mautrix-meta" }
 mautrix-instagram = { version = "0.2609.0", asset_pattern = "mautrix-instagram-amd64", bin = "mautrix-instagram" }
+"github:mautrix/linkedin" = { version = "0.2609.0", asset_pattern = "mautrix-linkedin-amd64", bin = "mautrix-linkedin" }
 "pipx:matrix-mcp" = "0.8.1"
-# mautrix-manager signs bridges in to websites (Google, Facebook, Instagram) in its own
+# mautrix-manager signs bridges in to websites (Google, Facebook, Instagram, LinkedIn) in its own
 # window; chathub/login-screen runs it on the hub and shows it in Sami's browser.
 "github:mautrix/manager" = { version = "0.2.1", asset_pattern = "mautrix-manager-linux-x64-*.zip", bin_path = "mautrix-manager-linux-x64", bin = "mautrix-manager" }
 # Browser CLI the compound-engineering ce-dogfood and ce-polish skills drive. Its

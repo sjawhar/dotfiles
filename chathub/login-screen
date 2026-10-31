@@ -1,6 +1,6 @@
 #!/bin/bash
 # Show mautrix-manager on Sami's browser, for bridge logins that need a website
-# sign-in (Google Messages, Messenger, Instagram). Runs on the hub machine until
+# sign-in (Google Messages, Messenger, Instagram, LinkedIn). Runs on the hub machine until
 # stopped: a virtual display with the manager on it, VNC and noVNC on loopback only,
 # and `forward port` so http://localhost:6080/vnc.html?autoconnect=1&resize=scale on
 # Sami's machine reaches it. Everything stops together.

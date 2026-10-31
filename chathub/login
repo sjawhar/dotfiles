@@ -22,6 +22,7 @@ import urllib.request
 BOTS = {
     "gmessages": "gmessagesbot", "whatsapp": "whatsappbot", "signal": "signalbot",
     "meta": "metabot", "instagram": "instagrambot", "discord": "discordbot",
+    "linkedin": "linkedinbot",
 }
 SUCCESS = re.compile(r"successfully logged in|logged in as|login successful", re.I)
 FAILURE = re.compile(r"login failed|failed to log in|timed out|cancell?ed|error", re.I)

@@ -222,7 +222,7 @@ class ChathubInstaller(unittest.TestCase):
         self.assertEqual(reg["namespaces"]["users"], [{"regex": "@.*:chathub", "exclusive": False}])
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         secret = {"chathub": f"as_token:{reg['as_token']}"}
-        for bridge in ("gmessages", "whatsapp", "signal", "meta", "instagram"):
+        for bridge in ("gmessages", "whatsapp", "signal", "meta", "instagram", "linkedin"):
             self.assertEqual(self.config(bridge)["double_puppet"]["secrets"], secret, bridge)
         self.assertEqual(self.config("discord")["bridge"]["login_shared_secret_map"], secret)
 
@@ -239,7 +239,7 @@ class ChathubInstaller(unittest.TestCase):
     def test_every_bridge_listens_on_its_own_port(self) -> None:
         self.install()
 
-        bridges = ("gmessages", "whatsapp", "signal", "meta", "instagram", "discord")
+        bridges = ("gmessages", "whatsapp", "signal", "meta", "instagram", "discord", "linkedin")
         ports = [self.config(b)["appservice"]["port"] for b in bridges]
         self.assertEqual(len(set(ports)), len(bridges), ports)
 

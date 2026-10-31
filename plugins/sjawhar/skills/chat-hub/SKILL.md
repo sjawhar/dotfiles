@@ -19,6 +19,7 @@ The chat hub bridges Sami's chat networks into one private Matrix server on oryx
 | Messenger | `@facebook_…:chathub` | `@metabot:chathub` |
 | Instagram | `@instagram_…:chathub` | `@instagrambot:chathub` |
 | Discord | `@discord_…:chathub` | `@discordbot:chathub` |
+| LinkedIn (messages only) | `@linkedin_…:chathub` | `@linkedinbot:chathub` |
 
 A room name is the contact or group name from the network. The DM with a bridge bot is the control room of that network.
 
@@ -46,11 +47,11 @@ When a bot posts that a login expired or ended, tell Sami which network and re-l
 | Network | Re-link |
 |---|---|
 | WhatsApp, Signal, Discord (QR code) | `secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/chathub/login <net> <cmd>`: `whatsapp login qr`, `signal login qr`, `discord login-qr`. It opens the QR in Sami's browser through `forward open`. A rotated code overwrites the same file: refresh the tab. Exit 0 means linked. |
-| Google Messages, Messenger, Instagram (website sign-in) | Run `~/.dotfiles/chathub/login-screen` (it runs `forward port 6080`) and keep it running. Send Sami `http://localhost:6080/vnc.html?autoconnect=1&resize=scale` (mautrix-manager, signed in to the hub). He picks the network and signs in. Google Messages ends with an emoji tap on his phone. Stop the script when he finishes. |
+| Google Messages, Messenger, Instagram, LinkedIn (website sign-in) | Run `~/.dotfiles/chathub/login-screen` (it runs `forward port 6080`) and keep it running. Send Sami `http://localhost:6080/vnc.html?autoconnect=1&resize=scale` (mautrix-manager, signed in to the hub). He picks the network and signs in. Google Messages ends with an emoji tap on his phone. Stop the script when he finishes. |
 
 ## Running the hub (on oryx)
 
-- Status: `systemctl --user status tuwunel 'mautrix@*'`. Logs: `journalctl --user -u mautrix@<network>` (gmessages, whatsapp, signal, meta for Messenger, instagram, discord).
+- Status: `systemctl --user status tuwunel 'mautrix@*'`. Logs: `journalctl --user -u mautrix@<network>` (gmessages, whatsapp, signal, meta for Messenger, instagram, discord, linkedin).
 - A restart of `tuwunel` restarts all bridges.
 - State: `~/.local/share/chathub/`. Re-run `~/.dotfiles/installers/chathub.sh` to restore every bridge config to what the hub needs; it overwrites hand edits and keeps the bridge tokens.
 - Design: `~/.dotfiles/docs/plans/2026-10-03-chat-hub-design.md`.
