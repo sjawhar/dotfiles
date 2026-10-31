@@ -28,9 +28,21 @@ the secrets-broker secret holding the App's key; a fallback secret is optional:
       app-id          = ...
       broker-secret   = GITHUB_APP_<PERSON>  ; a github-app secret of the secrets broker
       fallback-secret = NAME_OF_SECRET       ; a personal access token, from `secrets get`
+      key-secret      = NAME_OF_SECRET       ; this machine only: mint from secretsd (below)
 
-The helper never holds the App's key. On a cache miss it asks the secrets broker through
-secret-run, which mints the installation tokens:
+A machine with no agent-secrets helper has no broker identity, so the broker refuses every
+session there (only devboxes run the helper: agent-secrets/AGENTS.md). Such a machine opts in
+to minting here by setting key-secret in its own git config, `~/.config/git/config`, which no
+other machine reads, to the secretsd secret holding the App's private key (base64-encoded
+PEM), kept in that machine's gitignored secrets.local.env:
+  git config --file ~/.config/git/config gh-app.<profile>.key-secret <NAME>
+With key-secret set, a cache miss reads that key, signs an App JWT with openssl (the key goes
+to it through a pipe, never argv or a file), lists the App's installations and mints the
+owner's token, narrowed as asked; the broker is never asked. Every rule below holds the same
+way, with the App's installation list in place of the broker's release.
+
+Without key-secret the helper never holds the App's key. On a cache miss it asks the secrets
+broker through secret-run, which mints the installation tokens:
   secret-run --register --reason "gh-app-token <owner>" GITHUB_APP_<PERSON> -- printenv GITHUB_APP_<PERSON>
 and reads the release from its stdout:
   {"installations": {"<owner>": {"installation_id": <int>, "token": "...",
@@ -75,6 +87,8 @@ request:
 """
 
 import argparse
+import base64
+import binascii
 import fcntl
 import json
 import os
@@ -83,11 +97,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
 CACHE_DIR = Path.home() / ".cache" / "gh-app-token"
+GITHUB_API = "https://api.github.com"
 TOKEN_REFRESH_MARGIN = 300  # Refresh five minutes before expiry.
 MIN_LIFETIME_ENV = "GH_APP_TOKEN_MIN_LIFETIME"
 
@@ -343,8 +361,8 @@ def secret_run_command() -> tuple[str, dict[str, str]]:
 
 
 def resolve_secret(name: str) -> str:
-    """Read the upstream personal-access-token fallback from secretsd. The App's key is the
-    broker's alone, and never read here."""
+    """Read a secret from secretsd: the upstream personal-access-token fallback, and on a machine
+    that set key-secret, the App's key."""
     try:
         result = subprocess.run(
             [secrets_executable(), "get", name, "--value"],
@@ -376,7 +394,7 @@ def fallback_token(profile: str, owner: str) -> str:
         # and this path handed out the personal token without a word.
         raise AppTokenError(
             f"owner {owner} was installed for App {app_id} (installation {known}) and is now "
-            "missing from the broker's release; refusing to fall back to the personal token. If "
+            "missing from the App's installations; refusing to fall back to the personal token. If "
             f"the App really was uninstalled there, delete {covered_owners_file(app_id)} to "
             "re-enable the fallback for it"
         )
@@ -483,6 +501,93 @@ def request_broker_installations(
     return parse_broker_installations(result.stdout)
 
 
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def app_jwt(app_id: str, private_key: bytes) -> str:
+    """A ten-minute App JWT, RS256-signed by openssl, which reads the key from a pipe."""
+    now = int(time.time())
+    header = b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+    claims = b64url(json.dumps({"iat": now - 60, "exp": now + 540, "iss": app_id}).encode())
+    signing_input = f"{header}.{claims}"
+    read_fd, write_fd = os.pipe()
+    try:
+        # A PEM key is a few KB, well under a pipe's buffer, so this write never blocks.
+        os.write(write_fd, private_key)
+        os.close(write_fd)
+        write_fd = -1
+        result = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", f"/dev/fd/{read_fd}"],
+            input=signing_input.encode(),
+            capture_output=True,
+            pass_fds=(read_fd,),
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise AppTokenError("openssl is not installed; it signs the App JWT") from error
+    finally:
+        os.close(read_fd)
+        if write_fd != -1:
+            os.close(write_fd)
+    if result.returncode:
+        cause = result.stderr.decode(errors="replace").strip().splitlines()[:1] or ["no message"]
+        raise AppTokenError(f"openssl could not sign the App JWT: {cause[0]}")
+    return f"{signing_input}.{b64url(result.stdout)}"
+
+
+def github_api(method: str, path: str, bearer: str, body: dict[str, Any] | None = None) -> Any:
+    request = urllib.request.Request(
+        GITHUB_API + path,
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        raise AppTokenError(f"GitHub {method} {path.split('?')[0]} returned {error.code}") from error
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as error:
+        raise AppTokenError(f"GitHub {method} {path.split('?')[0]} failed: {error}") from error
+
+
+def mint_from_secretsd(
+    key_secret: str, app_id: str, owner: str, scope: dict[str, Any] | None
+) -> tuple[dict[str, int], dict[str, BrokerInstallation]]:
+    """Mint with the App key this machine keeps in secretsd (key-secret). Returns every owner the
+    App is installed on, for the covered-owner file, and owner's token alone in a broker
+    release's shape: empty when the App is not installed there."""
+    try:
+        private_key = base64.b64decode(resolve_secret(key_secret), validate=True)
+    except binascii.Error as error:
+        raise AppTokenError(f"secret {key_secret} is not base64") from error
+    bearer = app_jwt(app_id, private_key)
+    covered: dict[str, int] = {}
+    page = 1
+    while True:
+        items = github_api("GET", f"/app/installations?per_page=100&page={page}", bearer)
+        try:
+            for item in items:
+                covered[item["account"]["login"].casefold()] = int(item["id"])
+        except (TypeError, KeyError, AttributeError, ValueError) as error:
+            raise AppTokenError("GitHub returned an invalid installations list") from error
+        if len(items) < 100:
+            break
+        page += 1
+    installation_id = covered.get(owner)
+    if installation_id is None:
+        return covered, {}
+    minted = github_api("POST", f"/app/installations/{installation_id}/access_tokens", bearer, scope or {})
+    if not isinstance(minted, dict) or not isinstance(minted.get("token"), str) or not isinstance(minted.get("expires_at"), str):
+        raise AppTokenError("GitHub returned an invalid installation token")
+    return covered, {owner: {"installation_id": installation_id, "token": minted["token"], "expires_at": minted["expires_at"]}}
+
+
 def select_owner(explicit_owner: str | None, request: dict[str, str]) -> str | None:
     """Apply --owner > GH_APP_OWNER > credential-request-path precedence."""
     path_owner = request.get("path", "").lstrip("/").split("/", 1)[0]
@@ -501,16 +606,18 @@ def get_token(
         return cached_token
 
     app_id = git_config(f"gh-app.{profile}.app-id")
-    broker_secret = git_config(f"gh-app.{profile}.broker-secret")
+    key_secret = git_config_optional(f"gh-app.{profile}.key-secret")
     print(
-        f"gh-app-token: minting token for profile {profile} (owner={owner}{', ' + key if key else ''}) through the broker...",
+        f"gh-app-token: minting token for profile {profile} (owner={owner}{', ' + key if key else ''}) "
+        f"{'with ' + key_secret + ' from secretsd' if key_secret else 'through the broker'}...",
         file=sys.stderr,
     )
-    installations = request_broker_installations(broker_secret, owner, scope)
-    remember_covered_owners(
-        app_id,
-        {name: installation["installation_id"] for name, installation in installations.items()},
-    )
+    if key_secret:
+        covered, installations = mint_from_secretsd(key_secret, app_id, owner, scope)
+    else:
+        installations = request_broker_installations(git_config(f"gh-app.{profile}.broker-secret"), owner, scope)
+        covered = {name: installation["installation_id"] for name, installation in installations.items()}
+    remember_covered_owners(app_id, covered)
     if not scope:
         # An owner-wide release holds every covered owner's token: cache them all. A narrowed
         # one is cached under its scope alone, never in an owner-wide entry.
@@ -544,7 +651,7 @@ def read_credential_request() -> dict[str, str]:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Return a target-owner GitHub App installation token from the secrets broker."
+        description="Return a target-owner GitHub App installation token."
     )
     parser.add_argument("profile")
     parser.add_argument("action", choices=("get", "store", "erase"), nargs="?")
