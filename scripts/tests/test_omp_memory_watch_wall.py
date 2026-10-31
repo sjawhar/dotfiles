@@ -451,6 +451,14 @@ class RunOnceTest(unittest.TestCase):
         WATCH.run_once(options(self.state, **overrides))
         return FakeEnvoy.instances[-1]
 
+    def digest(self, envoy: "FakeEnvoy") -> str:
+        """The wall digest, which goes to the box-health role rather than to any session."""
+        texts = [
+            text for topic, text in envoy.published if topic == WATCH.BOX_HEALTH_ROLE_TOPIC
+        ]
+        self.assertTrue(texts, "no digest was published")
+        return texts[0]
+
     def test_cold_start_is_silent_then_every_new_touch_reaches_its_owner(self) -> None:
         self.scopes({"run-ra1.scope": 4, "run-rb2.scope": 0})
         envoy = self.run_pass()
@@ -464,10 +472,9 @@ class RunOnceTest(unittest.TestCase):
             [
                 "00000001-0000-0000-0000-000000000001",
                 "00000002-0000-0000-0000-000000000002",
-                WATCH.INFRA_LEAD,
             ],
         )
-        digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
+        digest = self.digest(envoy)
         self.assertIn("2 touch(es)", digest)
         self.assertIn("run-ra1.scope", digest)
         self.assertIn("run-rb2.scope", digest)
@@ -488,7 +495,7 @@ class RunOnceTest(unittest.TestCase):
 
         self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
         envoy = self.run_pass(wall_digest=0.0)
-        digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
+        digest = self.digest(envoy)
         self.assertIn("run-rb2.scope", digest)
 
     def test_dry_run_sends_nothing(self) -> None:
@@ -526,18 +533,19 @@ class RunOnceTest(unittest.TestCase):
         envoy = self.run_pass()
         self.assertEqual(
             sorted(session for session, _ in envoy.sent),
-            ["00000001-0000-0000-0000-000000000001", WATCH.INFRA_LEAD],
+            ["00000001-0000-0000-0000-000000000001"],
         )
+        self.assertTrue(self.digest(envoy))
 
     def test_the_digest_carries_each_scopes_top_three_with_command_lines(self) -> None:
-        """The INFRA lead reads the digest without the owner's report beside it."""
+        """The box-health owner reads the digest without the scope owner's report beside it."""
         WATCH.rss_of = lambda pid: {1: 9 * GIB}.get(pid, 2 * GIB)
         WATCH.cmdline_of = lambda pid: f"omp @/home/sami/work/.ossv-workers/w{pid}/message.md --lane {pid}"
         self.scopes({"run-ra1.scope": 1})
         self.run_pass()
         self.scopes({"run-ra1.scope": 6})
         envoy = self.run_pass()
-        digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
+        digest = self.digest(envoy)
         self.assertIn("run-ra1.scope", digest)
         self.assertIn("9.00 GiB  pid 1", digest)
         self.assertIn(".ossv-workers/w1/message.md --lane 1", digest)
@@ -556,7 +564,7 @@ class RunOnceTest(unittest.TestCase):
         self.assertTrue(kept["wall_pending"][0]["top"])
         self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
         envoy = self.run_pass(wall_digest=0.0)
-        digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
+        digest = self.digest(envoy)
         self.assertIn("pid 2", digest)
         self.assertIn(".ossv-workers/w2/message.md", digest)
 
@@ -576,7 +584,7 @@ class RunOnceTest(unittest.TestCase):
         self.run_pass()
         self.scopes({"run-ra1.scope": 4})
         envoy = self.run_pass()
-        owners = [session for session, _ in envoy.sent if session != WATCH.INFRA_LEAD]
+        owners = [session for session, _ in envoy.sent]
         self.assertEqual(owners, [live])
         report = [text for session, text in envoy.sent if session == live][0]
         self.assertIn("is not live on this box", report)
@@ -591,8 +599,8 @@ class RunOnceTest(unittest.TestCase):
         self.run_pass()
         self.scopes({"run-ra1.scope": 4})
         envoy = self.run_pass()
-        self.assertEqual([session for session, _ in envoy.sent], [WATCH.INFRA_LEAD])
-        digest = [text for session, text in envoy.sent if session == WATCH.INFRA_LEAD][0]
+        self.assertEqual([session for session, _ in envoy.sent], [])
+        digest = self.digest(envoy)
         self.assertIn("session unknown", digest)
 
     def test_a_live_id_is_sent_to_unchanged_and_says_nothing_extra(self) -> None:

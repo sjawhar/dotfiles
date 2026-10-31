@@ -176,32 +176,33 @@ reported.
 The session id is read **from the process** — a session id on its command line, else the
 `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl` it holds open — and is resolved only when an alert
 is about to be sent, which is what keeps a run to a handful of file reads. When it cannot be
-established the alert says "session unknown" and goes to the INFRA lead alone; it never guesses.
+established the alert says "session unknown" and goes to the box-health owner alone; it never guesses.
 
 ## Who hears about it
 
 Agent sessions only, never a person:
 
 - **the session itself**, because it owns the shedding;
-- the **INFRA lead** (`01a13c57-d826-7242-80fe-5f0670188b11`), who owns this detector;
 - the **box-health owner** — the holder of the `lead-box-health` Envoy role
   (`notifications.role.lead-box-health`), and the SRE session
-  (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) when nobody holds it — only on a session's **second**
-  crossing, or when one crossing is still open **and still rising** 10 minutes after its alert.
-  The chief of staff hears no box alert (Sami, 2026-10-31).
+  (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) when nobody holds it — on every alert, and again on
+  the escalation, when a crossing is still open **and still rising** 10 minutes after its alert.
+
+Neither the chief of staff nor the INFRA lead hears a box alert (Sami, 2026-10-31): the INFRA
+lead owned this detector and handed box health to the SRE.
 
 Duplicates are dropped, so a session that is also one of those recipients gets one message.
 
 A **wall touch** goes to the scope's own session — the owner, who does the shedding — with the
-whole report. The INFRA lead gets **one batched digest per `--wall-digest` window** (default
-15 min) naming every scope that touched in it, instead of one message per scope: a box can have
-tens of scopes at the ceiling at once (31 of 95 on ossv-agent-open on 2026-10-30), and a message
-each would bury the lead's session rather than inform it. Touches accumulate in the state file
-across runs, so a quiet digest window loses none. Each scope's line in the digest carries the
-**process count, the RSS sum, the `memory.stat` split, the chosen advice and the same three
-largest processes with their command lines** under it: the lead reads the digest without the
-owner's report beside it, and a top-3 list alone sent it hunting a process that did not exist
-(the INFRA lead, 2026-10-30).
+whole report. The box-health owner gets **one batched digest per `--wall-digest` window**
+(default 15 min) naming every scope that touched in it, instead of one message per scope: a box
+can have tens of scopes at the ceiling at once (31 of 95 on ossv-agent-open on 2026-10-30), and
+a message each would bury that session rather than inform it. Touches accumulate in the state
+file across runs, so a quiet digest window loses none. Each scope's line in the digest carries
+the **process count, the RSS sum, the `memory.stat` split, the chosen advice and the same three
+largest processes with their command lines** under it: the owner reads the digest without the
+scope owner's report beside it, and a top-3 list alone sent it hunting a process that did not
+exist (the INFRA lead, 2026-10-30, when it owned this detector).
 
 Each alert names the session, the pid and its RSS, the scope, the unreclaimable memory, the
 ceiling and where it comes from, the percentage and the headroom left, the measured rise rate

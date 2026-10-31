@@ -23,8 +23,10 @@ LOADER.exec_module(WATCH)
 
 GIB = WATCH.GIB
 
-# The chief of staff's session: no box alert may reach it (Sami, 2026-10-31).
+# Neither of these may hear a box alert any more (Sami, 2026-10-31): the chief of staff's
+# session, and the INFRA lead's, which owned this detector and handed box health to the SRE.
 CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
 
 
 class FakeEnvoy:
@@ -258,11 +260,11 @@ class RoutingTest(unittest.TestCase):
         WATCH.run_once(options(self.state, grace=0.0))
         self.assertEqual(len(self.envoy.published), 2)
 
-    def test_an_unheld_role_falls_back_to_the_infra_lead(self) -> None:
+    def test_an_unheld_role_falls_back_to_the_sre_session(self) -> None:
         self.envoy.publish_ok = False
         WATCH.run_once(options(self.state, grace=0.0))
         self.assertEqual(
-            [WATCH.INFRA_LEAD, WATCH.INFRA_LEAD], [session for session, _ in self.envoy.sent]
+            [WATCH.SRE, WATCH.SRE], [session for session, _ in self.envoy.sent]
         )
 
     def test_a_recovered_condition_is_never_carried_into_an_escalation(self) -> None:
@@ -294,8 +296,8 @@ class RoutingTest(unittest.TestCase):
         ]
         self.assertEqual([WATCH.SRE], escalations)
 
-    def test_no_message_of_a_whole_cycle_reaches_the_chief_of_staff(self) -> None:
-        """Box health is the SRE session's, not the chief of staff's (Sami, 2026-10-31)."""
+    def test_no_message_of_a_whole_cycle_reaches_the_chief_or_the_infra_lead(self) -> None:
+        """Box health is the SRE session's (Sami, 2026-10-31), and nobody else's."""
         WATCH.run_once(options(self.state, grace=0.0))
         self.sample = box(swap_free=0, swap_used_fraction=1.0)
         WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
@@ -305,11 +307,12 @@ class RoutingTest(unittest.TestCase):
         self.sample = starved()
         WATCH.run_once(options(self.state, grace=0.0))
         WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
-        self.assertNotIn(
-            CHIEF_OF_STAFF, [session for session, _ in self.envoy.sent] + [
-                topic for topic, _ in self.envoy.published
-            ],
-        )
+        addressed = [session for session, _ in self.envoy.sent] + [
+            topic for topic, _ in self.envoy.published
+        ]
+        self.assertTrue(addressed)
+        self.assertNotIn(CHIEF_OF_STAFF, addressed)
+        self.assertNotIn(INFRA_LEAD, addressed)
 
     def test_recovery_clears_each_condition_and_says_so(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))

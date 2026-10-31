@@ -118,11 +118,11 @@ reads as frozen, and restarting it costs its turn and adds another working set t
 
 ## Where alerts go
 
-The box-health lead's Envoy role (`notifications.role.lead-box-health`), falling back to the
-INFRA lead's session when nobody holds the role. An escalation — a crossing still open 30
-minutes after its alert (`--escalate`) — goes to the same role, falling back to the SRE session
-(`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) when nobody holds it. Agent sessions only, never a
-person; the chief of staff hears no box alert (Sami, 2026-10-31).
+The box-health lead's Envoy role (`notifications.role.lead-box-health`): the first alert, the
+escalation when a crossing is still open 30 minutes after it (`--escalate`), and the clear.
+Nobody holds the role? The SRE session (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) hears it
+instead. Agent sessions only, never a person; neither the chief of staff nor the INFRA lead
+hears a box alert (Sami, 2026-10-31).
 
 ## What it will not catch
 

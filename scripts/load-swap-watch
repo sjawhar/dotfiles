@@ -47,11 +47,10 @@ What one run does, from /proc only, with no model call and no subprocess on the 
 It also counts the box's agents, because on these boxes the dial that causes this is the number
 of concurrent workers, not any one of them.
 
-Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
-falling back to the INFRA lead's session when nobody holds that role. An escalation -- a
-crossing still open 30 minutes after its alert -- goes to the same box-health owner, falling
-back to the SRE session when nobody holds the role. This watch only detects. It kills
-nothing, stops no worker and changes no limit.
+Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role for
+the first alert, for the escalation 30 minutes later when a crossing is still open, and for the
+clear, falling back to the SRE session when nobody holds that role. This watch only detects. It
+kills nothing, stops no worker and changes no limit.
 """
 
 from __future__ import annotations
@@ -69,11 +68,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The sessions that own this detector's findings, as in disk-fill-watch and omp-memory-watch.
-INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
-
-# Box health on this machine belongs to the SRE session, not to the chief of staff (Sami,
-# 2026-10-31: "There's an SRE. They can handle it."), so the chief of staff hears no box alert.
+# Box health on this machine belongs to the SRE session: not to the chief of staff (Sami,
+# 2026-10-31: "There's an SRE. They can handle it."), and no longer to the INFRA lead, who
+# owned this detector and handed the lane over. Neither hears a box alert.
 SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 
 # The box-health lead owns box resources (dispatch://INFRA-716) and holds this Envoy role, so a
@@ -1027,17 +1024,16 @@ def clear_text(now: dict, kind: str, incident: dict, when: float) -> str:
     )
 
 
-def tell_box_health(envoy: Envoy, text: str, fallback: str = INFRA_LEAD) -> str:
+def tell_box_health(envoy: Envoy, text: str) -> str:
     """Tell the box-health lead, and say who heard it.
 
     The role is the address while somebody holds it; an unheld role answers non-200, and the
-    fallback session hears it instead: the INFRA lead for a crossing, the SRE session for an
-    escalation.
+    SRE session hears it instead.
     """
     if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
         return BOX_HEALTH_ROLE_TOPIC
-    if envoy.send(fallback, text):
-        return fallback
+    if envoy.send(SRE, text):
+        return SRE
     return ""
 
 
@@ -1127,7 +1123,7 @@ def run_once(options: argparse.Namespace) -> int:
                     # The send's own answer decides, not the attempt. An escalation that says it
                     # was told while the listener refused it is the silent failure this watch
                     # exists to stop seeing elsewhere.
-                    target = tell_box_health(envoy, text, SRE)
+                    target = tell_box_health(envoy, text)
                     if target:
                         heard.append(target)
                     else:
