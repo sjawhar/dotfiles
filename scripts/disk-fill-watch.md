@@ -192,6 +192,15 @@ whose cwd or open descriptor is inside it. If none is observed, the notice says 
 gives the newest file or directory modification time it saw; it never infers that a session has
 ended.
 
+**"Born" is the entry's birth, not its ctime.** On 2026-10-31T21:51:59Z this watch named
+`~/src/example-task-repo` — the shared canonical checkout, created 2026-10-14T01:48:07Z
+(`stat -c %w`) — as "born in the last 6 h", because a session had restored its HEAD at
+18:01:03Z and a Linux ctime moves with the directory's mtime. The birth now comes from
+**statx(2)** (`os.stat` grew `st_birthtime` on Linux only in Python 3.13; this box runs 3.12.3,
+so the syscall is made directly, with `stat -c %W` as the fallback). A filesystem that records
+no birth answers 0, and **an entry whose birth is unknown is not young**: a rule that cannot
+tell an hour-old tree from a three-week-old one stays quiet.
+
 The two differ only in what the message tells the reader to do. A `/tmp` entry: remove it when
 the work is done, move it to `/mnt/nvme` while it runs. A `~/src` entry: a checkout belongs on
 `/mnt/nvme` — cut it with `agent-workspace new` or `work-dir` — and a tree moved there can leave

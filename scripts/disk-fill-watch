@@ -63,6 +63,7 @@ detects. It deletes nothing and kills nothing.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import fcntl
 import json
 import os
@@ -835,6 +836,85 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
 
 # ------------------------------------------------- the scratch rule: /tmp and the src root
 
+# The entry's BIRTH, not its ctime. On 2026-10-31T21:51:59Z this watch said "NEW BIG ~/src
+# ENTRY ... /home/sami/src/example-task-repo, born in the last 6 h" for the shared
+# canonical checkout, which was created on 2026-10-14T01:48:07Z (`stat -c %w`); what changed
+# at 18:01:03Z was its directory mtime, when a session restored its HEAD, and a Linux ctime
+# moves with it. Only statx's btime answers the question the rule asks.
+#
+# os.stat grew st_birthtime on Linux in Python 3.13; this box runs 3.12.3, so the number comes
+# from a direct statx(2) call. A filesystem that does not record a birth answers 0, and an
+# entry whose birth is unknown is NOT young: a rule that cannot tell an hour-old tree from a
+# three-week-old one must stay quiet.
+AT_FDCWD = -100
+AT_SYMLINK_NOFOLLOW = 0x100
+STATX_BTIME = 0x800
+# struct statx on every Linux ABI: stx_mask at 0, and the four timestamps at 64 (atime), 80
+# (btime), 96 (ctime), 112 (mtime), each an s64 second followed by a u32 nanosecond.
+STATX_BTIME_SECONDS_AT = 80
+_STATX: object = None  # the libc entry point, resolved once; False where there is none
+
+
+def statx_birth(path: str) -> float | None:
+    """The birth time statx(2) reports for `path`, 0.0 if it records none, None if unusable."""
+    global _STATX
+    if _STATX is None:
+        try:
+            _STATX = ctypes.CDLL(None, use_errno=True).statx
+        except (OSError, AttributeError):
+            _STATX = False
+    if _STATX is False:
+        return None
+    buffer = ctypes.create_string_buffer(256)
+    try:
+        failed = _STATX(  # type: ignore[operator]
+            ctypes.c_int(AT_FDCWD),
+            path.encode(),
+            ctypes.c_int(AT_SYMLINK_NOFOLLOW),
+            ctypes.c_uint(STATX_BTIME),
+            buffer,
+        )
+    except (OSError, ValueError, TypeError):
+        return None
+    if failed:
+        return 0.0
+    mask = int.from_bytes(buffer.raw[0:4], sys.byteorder)
+    if not mask & STATX_BTIME:
+        return 0.0
+    return float(
+        int.from_bytes(
+            buffer.raw[STATX_BTIME_SECONDS_AT : STATX_BTIME_SECONDS_AT + 8],
+            sys.byteorder,
+            signed=True,
+        )
+    )
+
+
+def birth_time(path: str, stat_result: os.stat_result | None = None) -> float:
+    """When this entry was created, or 0.0 when nothing on this machine can say.
+
+    Python 3.13's st_birthtime first, then statx(2) directly, then `stat -c %W`, which is the
+    same syscall through coreutils for a machine whose libc has no statx symbol.
+    """
+    native = getattr(stat_result, "st_birthtime", 0.0) if stat_result is not None else 0.0
+    if native:
+        return float(native)
+    through_statx = statx_birth(path)
+    if through_statx is not None:
+        return through_statx
+    try:
+        done = subprocess.run(
+            ["stat", "-c", "%W", path], capture_output=True, text=True, timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0.0
+    try:
+        return float(done.stdout.strip() or 0)
+    except ValueError:
+        return 0.0
+
+
 
 def young_entries(
     root: str, age: float, big: int, walk_dirs: bool, budget: float
@@ -869,10 +949,11 @@ def young_entries(
         # are the common case) holds bytes of another filesystem: they cost this disk nothing.
         if stat.st_dev != tmp_dev:
             continue
-        birth = getattr(stat, "st_birthtime", 0) or stat.st_ctime
-        if now - birth > age:
-            continue
         if entry.is_symlink():
+            continue
+        birth = birth_time(entry.path, stat)
+        # An unknown birth (0) is not young: see birth_time.
+        if not birth or now - birth > age:
             continue
         newest_mtime = stat.st_mtime
         if entry.is_dir(follow_symlinks=False):

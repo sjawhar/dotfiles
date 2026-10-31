@@ -629,6 +629,59 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
         self.assertIn(str(entry), [row[1] for row in found])
 
 
+class DiskFillWatchBirthTimeTest(unittest.TestCase):
+    """An entry is young by its birth time, never by its ctime or its mtime.
+
+    On 2026-10-31T21:51:59Z the watch named `/home/sami/src/example-task-repo` — the
+    shared canonical checkout, created 2026-10-14T01:48:07Z — as "born in the last 6 h",
+    because a session had restored its HEAD at 18:01:03Z and a Linux ctime moves with the
+    directory's mtime. The birth comes from statx(2); `os.stat` has no `st_birthtime` on Linux
+    before Python 3.13 and this box runs 3.12.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_birth_time_is_the_number_stat_reports(self) -> None:
+        entry = Path(self.tmp.name) / "tree"
+        entry.mkdir()
+        reported = subprocess.run(
+            ["stat", "-c", "%W", str(entry)], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        self.assertEqual(float(reported), WATCH.birth_time(str(entry)))
+        self.assertEqual(float(reported), WATCH.statx_birth(str(entry)))
+        self.assertLess(abs(time.time() - WATCH.birth_time(str(entry))), 120)
+
+    def test_an_old_directory_touched_today_is_not_young(self) -> None:
+        entry = Path(self.tmp.name) / "example-task-repo"
+        entry.mkdir()
+        (entry / "pack.bin").write_bytes(b"x" * 4096)
+        os.utime(entry, None)  # the HEAD restore: fresh mtime, and a ctime that moved with it
+        born_three_weeks_ago = time.time() - 21 * 86400
+
+        with unittest.mock.patch.object(
+            WATCH, "birth_time", lambda path, stat_result=None: born_three_weeks_ago
+        ):
+            found = WATCH.young_entries(self.tmp.name, age=21600.0, big=1, walk_dirs=True, budget=5.0)
+        self.assertEqual([], [row[1] for row in found])
+
+        # The same tree, born now: the rule still names what is genuinely new.
+        found = WATCH.young_entries(self.tmp.name, age=21600.0, big=1, walk_dirs=True, budget=5.0)
+        self.assertEqual([str(entry)], [row[1] for row in found])
+
+    def test_an_unknown_birth_is_not_young(self) -> None:
+        entry = Path(self.tmp.name) / "tree"
+        entry.mkdir()
+        (entry / "pack.bin").write_bytes(b"x" * 4096)
+
+        with unittest.mock.patch.object(WATCH, "birth_time", lambda path, stat_result=None: 0.0):
+            found = WATCH.young_entries(self.tmp.name, age=21600.0, big=1, walk_dirs=True, budget=5.0)
+
+        self.assertEqual([], [row[1] for row in found])
+
+
 class DiskFillWatchSrcEntryTest(unittest.TestCase):
     """A new, big top-level checkout under ~/src is named like a new, big /tmp entry.
 
