@@ -1,9 +1,9 @@
 ---
 name: gpt-api
 description: |
-  General-purpose subagent on OpenAI GPT-5.6 Terra billed to the OpenAI API — with
-  `astra-api`, one of the only two subagents that spend per-token API money, so it refuses
-  to start while Sami's OpenAI API pause holds (`disabledProviders: [openai]`). Use only
+  General-purpose subagent on OpenAI GPT-5.6 Terra billed to the OpenAI API. It spends
+  per-token API money, as `astra-api` and `oracle` do, and as `astra` does once the Codex
+  window is spent; so it refuses to start while Sami's OpenAI API pause holds (`disabledProviders: [openai]`). Use only
   when a non-Anthropic model is genuinely needed and `astra` (the same family on the Codex
   subscription) is unavailable or unsuitable; say why in the brief. When the pause is lifted
   it degrades to GPT-6.1 Terra, then GPT-6.1 Sol, then the Codex subscription, and never to
