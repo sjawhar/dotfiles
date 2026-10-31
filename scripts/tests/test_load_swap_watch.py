@@ -8,9 +8,11 @@ role, and to the INFRA lead's session only when the role is held by nobody.
 import argparse
 import importlib.machinery
 import importlib.util
+import os
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -354,6 +356,39 @@ class RoutingTest(unittest.TestCase):
         finally:
             WATCH.log = original_log
         self.assertIn(f"told {WATCH.BOX_HEALTH_ROLE_TOPIC}", said)
+
+
+class BoxHealthOwnerTest(unittest.TestCase):
+    """A machine whose box health belongs to one session: the lane VMs' fleet monitoring owner."""
+
+    OWNER = "01a14c3d-9d7f-7079-97aa-f810a884c050"
+
+    # The same fakes as RoutingTest, which this class is deliberately not a subclass of: its
+    # tests assert on the role publish, and under BOX_HEALTH_OWNER there is none.
+    def setUp(self) -> None:
+        RoutingTest.setUp(self)
+        patch = unittest.mock.patch.dict(os.environ, {"BOX_HEALTH_OWNER": self.OWNER})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_alert_escalation_and_clear_all_go_to_the_owner_and_nothing_is_published(self) -> None:
+        WATCH.run_once(options(self.state, grace=0.0))
+        self.sample = box(swap_free=0, swap_used_fraction=1.0)
+        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        self.sample = box()
+        WATCH.run_once(options(self.state, grace=0.0))
+        self.assertEqual(self.envoy.published, [])
+        self.assertEqual({self.OWNER}, {session for session, _ in self.envoy.sent})
+        texts = [text for _, text in self.envoy.sent]
+        self.assertTrue([text for text in texts if "BOX OUT OF SWAP" in text])
+        self.assertTrue([text for text in texts if "STILL" in text.upper()])
+        self.assertTrue([text for text in texts if "CLEARED" in text])
+
+    def test_an_unusable_owner_is_refused_at_start(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"BOX_HEALTH_OWNER": "lead-box-health"}):
+            with self.assertRaises(SystemExit) as refused:
+                WATCH.box_health_owner()
+        self.assertIn("BOX_HEALTH_OWNER", str(refused.exception))
 
 
 class ConsumerAttributionTest(unittest.TestCase):

@@ -186,6 +186,11 @@ Nobody holds the role? The publish answers non-200 and the **box-health SRE**
 (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) hears it instead — every message, first alert,
 escalation and clear alike.
 
+A machine whose box health belongs to one session sets `BOX_HEALTH_OWNER` to that session id in
+the service's environment: every message then goes to that session alone, with no role publish —
+this is how the OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring
+owner instead of to this box's role holder. An invalid value stops the watch at start.
+
 One alert per crossing, one clear. The clear goes to everyone who heard the crossing.
 
 Every alert ends with what to DO: read the writers first, stop or finish the lane that is writing,

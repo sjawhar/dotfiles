@@ -124,6 +124,11 @@ Nobody holds the role? The SRE session (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) 
 instead. Agent sessions only, never a person; neither the chief of staff nor the INFRA lead
 hears a box alert (Sami, 2026-10-31).
 
+A machine whose box health belongs to one session sets `BOX_HEALTH_OWNER` to that session id in
+the service's environment: every message then goes to that session alone, with no role publish —
+this is how the OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring
+owner instead of to this box's role holder. An invalid value stops the watch at start.
+
 ## What it will not catch
 
 - **A box that is slow for another reason.** A hung mount, a saturated disk or a network stall

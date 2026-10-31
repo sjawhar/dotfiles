@@ -79,6 +79,28 @@ ensure_json() {
     jq "$transform" "$file" > "$tmp" && mv "$tmp" "$real"
 }
 
+# Give a box watch's service the session that owns THIS machine's box health, from
+# BOX_HEALTH_OWNER in the installer's environment. The service units are committed and
+# symlinked, so the per-machine value goes in a drop-in beside the link, never in the unit
+# file. With the variable unset the drop-in is not written; an existing one is left alone and
+# printed, because removing it would silently move a lane VM's alerts back to this box's role
+# holder. Returns 1 on an unusable value.
+ensure_box_health_owner() {
+    local name="$1" dropin="$HOME/.config/systemd/user/$name.service.d/box-health-owner.conf"
+    local owner="${BOX_HEALTH_OWNER:-}"
+    if [ -z "$owner" ]; then
+        [ -f "$dropin" ] && echo "$name: keeping $(grep -h BOX_HEALTH_OWNER "$dropin"); BOX_HEALTH_OWNER is unset here"
+        return 0
+    fi
+    if ! [[ "$owner" =~ ^01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        echo "$name: BOX_HEALTH_OWNER=$owner is not an omp session id (01xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)" >&2
+        return 1
+    fi
+    mkdir -p "$(dirname "$dropin")" || return 1
+    printf '[Service]\nEnvironment=BOX_HEALTH_OWNER=%s\n' "$owner" > "$dropin" || return 1
+    echo "$name: alerts go to session $owner"
+}
+
 # Arm the systemd user timer <name> whose units are <unit-dir>/<name>.service and
 # <unit-dir>/<name>.timer in ~/.dotfiles: link both into ~/.config/systemd/user,
 # enable and start the timer, and prove systemd scheduled it. The links come from

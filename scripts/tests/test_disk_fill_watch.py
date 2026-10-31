@@ -9,11 +9,13 @@ import argparse
 import importlib.machinery
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -261,6 +263,45 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertIn("CLEARED", withdrawn[0])
         self.assertIn("withdrawn, not resolved", withdrawn[0])
         self.assertNotIn(MOUNT, json.loads(self.state.read_text())["incidents"])
+
+
+class DiskFillWatchBoxHealthOwnerTest(unittest.TestCase):
+    """A machine whose box health belongs to one session: the lane VMs' fleet monitoring owner."""
+
+    OWNER = "01a14c3d-9d7f-7079-97aa-f810a884c050"
+
+    # The routing harness, without its tests: those assert on the role publish, and under
+    # BOX_HEALTH_OWNER there is none.
+    options = DiskFillWatchAlertRoutingTest.options
+    run_once = DiskFillWatchAlertRoutingTest.run_once
+    incident = DiskFillWatchAlertRoutingTest.incident
+    rewrite_incident = DiskFillWatchAlertRoutingTest.rewrite_incident
+    escalate = DiskFillWatchAlertRoutingTest.escalate
+
+    def setUp(self) -> None:
+        DiskFillWatchAlertRoutingTest.setUp(self)
+        patch = unittest.mock.patch.dict(os.environ, {"BOX_HEALTH_OWNER": self.OWNER})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_alert_escalation_and_clear_all_go_to_the_owner_and_nothing_is_published(self) -> None:
+        self.run_once()
+        self.escalate()
+        self.free = 90 * WATCH.GIB
+        self.run_once()
+
+        self.assertEqual([], self.envoy.published)
+        self.assertEqual({self.OWNER}, {target for target, _ in self.envoy.sent})
+        texts = [text for _, text in self.envoy.sent]
+        self.assertTrue([text for text in texts if "DISK LOW" in text])
+        self.assertTrue([text for text in texts if "STILL DESCENDING" in text])
+        self.assertTrue([text for text in texts if "CLEARED" in text])
+
+    def test_an_unusable_owner_is_refused_at_start(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"BOX_HEALTH_OWNER": "lead-box-health"}):
+            with self.assertRaises(SystemExit) as refused:
+                WATCH.box_health_owner()
+        self.assertIn("BOX_HEALTH_OWNER", str(refused.exception))
 
 
 class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):

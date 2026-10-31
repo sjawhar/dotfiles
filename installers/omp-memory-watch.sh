@@ -26,4 +26,5 @@ command -v python3 >/dev/null || {
 mkdir -p /mnt/nvme/sami/tmp/omp-memory-watch 2>/dev/null \
     || echo "NOTE: /mnt/nvme/sami/tmp is absent here; pass --state to put the watch's state elsewhere."
 
+ensure_box_health_owner omp-memory-watch || exit 1
 arm_user_timer omp omp-memory-watch

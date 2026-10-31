@@ -31,4 +31,5 @@ if ! sudo -n true 2>/dev/null; then
     echo "NOTE: sudo -n is not allowed here, so an alert names only this user's writers."
 fi
 
+ensure_box_health_owner disk-fill-watch || exit 1
 arm_user_timer omp disk-fill-watch
