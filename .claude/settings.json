@@ -6,9 +6,9 @@
     "OTEL_LOGS_EXPORTER": "otlp",
     "OTEL_METRICS_EXPORTER": "none",
     "OTEL_TRACES_EXPORTER": "none",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://agent-otel-public-6acxmql5za-uw.a.run.app",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://100.116.58.240",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "https://agent-otel-public-6acxmql5za-uw.a.run.app/v1/logs",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://100.116.58.240/v1/logs",
     "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/protobuf",
     "ENABLE_BETA_TRACING_DETAILED": "",
     "BETA_TRACING_ENDPOINT": "",
@@ -22,7 +22,6 @@
     "OTEL_EXPORTER_OTLP_LOGS_HEADERS": "",
     "OTEL_EXPORTER_OTLP_METRICS_HEADERS": ""
   },
-  "otelHeadersHelper": "d=\"$HOME/.config/agent-spend\"; if [ -x \"$d/otel-headers-helper\" ]; then exec \"$d/otel-headers-helper\"; fi; if [ -e \"$d/env.sh\" ]; then echo '{}'; else exit 1; fi",
   "permissions": {
     "defaultMode": "auto"
   },

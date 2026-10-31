@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""scripts/agent-session's model-spend tags (dispatch://INFRA-165).
+"""scripts/agent-session's model-spend tags (dispatch://INFRA-165, dispatch://INFRA-832).
 
 The project is the first of: an explicit THEOREM_PROJECT; the resumed session's own file under
 ~/.config/agent-spend/sessions; the parent session's file (OMP_SESSION_ID); the inherited
 theorem.project, unless it is the machine default every shell gets; agent-spend/projects; the
 machine default; `shared`. Old project names become their COS stream. A caller already on this
 machine's collector is re-tagged, its inherited tags replaced; a caller on a different collector
-keeps everything. omp gets the token in its traces header only, and the machine's lane. With no
-token, the launch reruns the cached setup first, at most once in 10 minutes.
+keeps everything. The collector is the tailnet endpoint, which takes no token: no harness gets a
+header, and an inherited one is dropped; omp gets the machine's lane. With no endpoint file, the
+launch reruns the cached setup first, at most once in 10 minutes.
 
 Technique: a scratch DOTFILES_DIR holding the real agent-spend/projects and a test person, and an
-agent-secrets-session stub that execs its argv; a scratch XDG_CONFIG_HOME holding the endpoint, the
-token and session files (as agent-infra's agent-spend-setup writes them); the agent is a script
-that prints its environment.
+agent-secrets-session stub that execs its argv; a scratch XDG_CONFIG_HOME holding the endpoint and
+session files (as agent-infra's agent-spend-setup writes them); the agent is a script that prints
+its environment.
 """
 
 from __future__ import annotations
@@ -27,7 +28,9 @@ from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SCRIPT = DOTFILES / "scripts" / "agent-session"
-ENDPOINT = "https://collector.example/otlp"
+ENDPOINT = "http://100.64.0.1"  # as agent-spend-setup writes it: svc:spend's tailnet address
+HEADERS = ("OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+           "OTEL_EXPORTER_OTLP_METRICS_HEADERS")
 PARENT = "01a13dca-e979-7264-af32-f654ef57a6f5"
 CHILD = "01a179b6-0b94-75ec-ac3b-2a5b132018c0"
 
@@ -52,7 +55,7 @@ class AgentSessionSpendTest(unittest.TestCase):
         self.config = self.root / "config"
         (self.config / "agent-spend").mkdir(parents=True)
         (self.config / "agent-spend" / "endpoint").write_text(f"{ENDPOINT}\n")
-        (self.config / "agent-spend" / "token").write_text("t0ken\n")
+        self.token = self.config / "agent-spend" / "token"  # what a setup before the tailnet endpoint left; never read
         self.sessions = self.config / "agent-spend" / "sessions"
         self.agent = self.root / "omp"
         executable(
@@ -62,8 +65,7 @@ class AgentSessionSpendTest(unittest.TestCase):
             '"OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES-}" '
             '"OTEL_LOGS_EXPORTER=${OTEL_LOGS_EXPORTER-<unset>}" "OTEL_TRACES_EXPORTER=${OTEL_TRACES_EXPORTER-<unset>}" '
             '"CLAUDE_CODE_ENABLE_TELEMETRY=${CLAUDE_CODE_ENABLE_TELEMETRY-<unset>}" '
-            '"OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS-<unset>}" '
-            '"OTEL_EXPORTER_OTLP_TRACES_HEADERS=${OTEL_EXPORTER_OTLP_TRACES_HEADERS-<unset>}"',
+            + "".join(f' "{h}=${{{h}-<unset>}}"' for h in HEADERS),
         )
         self.cwd = self.root / "work"
         self.cwd.mkdir()
@@ -184,12 +186,31 @@ class AgentSessionSpendTest(unittest.TestCase):
         self.assertEqual(self.run_agent({}, cwd=taiga)["THEOREM_PROJECT"], "task-making")
         self.assertEqual(self.run_agent({})["THEOREM_PROJECT"], "shared")
 
-    def test_omp_gets_the_token_in_its_traces_header_only(self) -> None:
-        # The generic header reaches every exporter of every program omp starts; Codex's metrics exporter sends it to
-        # OpenAI. An inherited one is dropped.
-        out = self.run_agent({"OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer old"})
-        self.assertEqual(out["OTEL_EXPORTER_OTLP_TRACES_HEADERS"], "Authorization=Bearer t0ken")
-        self.assertEqual(out["OTEL_EXPORTER_OTLP_HEADERS"], "<unset>")
+    def test_tailnet_endpoint_without_token_exports_and_sets_no_header(self) -> None:
+        # An endpoint file and no token file: omp gets the endpoint, the tags and no header; an inherited header (an
+        # earlier setup's token in omp's traces header, a generic one Codex's metrics exporter would send to OpenAI) is
+        # dropped; Claude Code gets its logs exporter.
+        inherited = {h: "Authorization=Bearer old" for h in HEADERS}
+        out = self.run_agent({"THEOREM_PROJECT": "rocq-speed", **inherited})
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], ENDPOINT)
+        self.assertEqual(out["OTEL_RESOURCE_ATTRIBUTES"], "theorem.project=rocq-speed,theorem.person=sami@theorem.dev")
+        self.assertEqual(out["OTEL_LOGS_EXPORTER"], "none")
+        for h in HEADERS:
+            self.assertEqual(out[h], "<unset>", h)
+        claude = self.root / "claude"
+        shutil.copy(self.agent, claude)
+        self.agent = claude
+        out = self.run_agent(inherited)
+        self.assertEqual((out["CLAUDE_CODE_ENABLE_TELEMETRY"], out["OTEL_LOGS_EXPORTER"], out["OTEL_TRACES_EXPORTER"]),
+                         ("1", "otlp", "none"))
+        for h in HEADERS:
+            self.assertEqual(out[h], "<unset>", h)
+
+    def test_a_token_file_an_earlier_setup_left_is_never_read(self) -> None:
+        self.token.write_text("t0ken\n")
+        out = self.run_agent({})
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], ENDPOINT)
+        self.assertNotIn("t0ken", "".join(out.values()))
 
     def test_the_machine_default_in_every_shell_is_not_an_inherited_project(self) -> None:
         # The setup's env.sh puts the machine's default project in every shell; the working directory still decides.
@@ -211,8 +232,8 @@ class AgentSessionSpendTest(unittest.TestCase):
         out = self.run_agent({"OTEL_EXPORTER_OTLP_ENDPOINT": ENDPOINT, "OTEL_RESOURCE_ATTRIBUTES": "theorem.lane=l2,theorem.project=omp"})
         self.assertEqual(out["OTEL_RESOURCE_ATTRIBUTES"], "theorem.lane=l2,theorem.project=omp,theorem.person=sami@theorem.dev")
 
-    def test_no_token_reruns_the_cached_setup_at_most_once_in_ten_minutes(self) -> None:
-        (self.config / "agent-spend" / "token").unlink()
+    def test_no_endpoint_file_reruns_the_cached_setup_at_most_once_in_ten_minutes(self) -> None:
+        (self.config / "agent-spend" / "endpoint").unlink()
         cache = self.root / "cache" / "agent-spend"
         cache.mkdir(parents=True)
         (cache / "args").write_text("--person\nsami@theorem.dev\n--lane\nbox 1\n")
@@ -221,16 +242,16 @@ class AgentSessionSpendTest(unittest.TestCase):
             "d = os.path.join(os.environ['XDG_CONFIG_HOME'], 'agent-spend')\n"
             "open(os.path.join(os.environ['XDG_CACHE_HOME'], 'agent-spend', 'ran'), 'a').write("
             "repr(sys.argv[1:] + [os.environ.get('CLAUDE_CONFIG_DIR')]) + '\\n')\n"
-            "open(os.path.join(d, 'token'), 'w').write('t0ken\\n')\n"
+            f"open(os.path.join(d, 'endpoint'), 'w').write({ENDPOINT!r} + '\\n')\n"
         )
         out = self.run_agent({"CLAUDE_CONFIG_DIR": str(self.root / "tracked-claude")})
         self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], ENDPOINT)
-        self.assertEqual(out["OTEL_EXPORTER_OTLP_TRACES_HEADERS"], "Authorization=Bearer t0ken")
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_TRACES_HEADERS"], "<unset>")
         # The setup never sees CLAUDE_CONFIG_DIR, so it cannot write a tracked settings.json.
         self.assertEqual((cache / "ran").read_text(), "['--person', 'sami@theorem.dev', '--lane', 'box 1', '--no-test', None]\n")
-        (self.config / "agent-spend" / "token").unlink()
+        (self.config / "agent-spend" / "endpoint").unlink()
         out = self.run_agent({})
-        self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], "")  # no token, no export, and no second run yet
+        self.assertEqual(out["OTEL_EXPORTER_OTLP_ENDPOINT"], "")  # no endpoint, no export, and no second run yet
         self.assertEqual(len((cache / "ran").read_text().splitlines()), 1)
 
 
