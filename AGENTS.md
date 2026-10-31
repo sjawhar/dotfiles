@@ -21,6 +21,7 @@ installers/          # Per-tool install scripts (shell.sh, mise.sh, docker.sh, j
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 forward/             # Browser-forwarding policy plus devbox serve and laptop daemon user units
 whatsapp/            # WhatsApp MCP daemon: wrapper + laptop user unit (holds the paired session)
+chief-dashboard/     # Sami's streams dashboard (chief-dashboard.service) and the dispatch-check / lead-times commands
 gws/                 # gws-accounts account registry (accounts.json), linked to ~/.config/gws/
 bin/                 # Standalone binaries (mise, bun, kubectl)
 shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, git, jj, knives, omp, claude, codex, tmux, xdg-open, pyright, basedpyright)
@@ -48,6 +49,7 @@ Each major subdirectory has its own AGENTS.md with details and conventions:
 | `shims/` | PATH-priority wrappers: what each adds, and the rules for adding to one |
 | `agentbox/` | Opt-in agent box: the Sysbox image `scripts/agentbox` runs a session in, and the home allow-list (`mounts`) |
 | `agent-secrets/` | The secrets broker's host helper (AGENTC-393): its unit, wrapper and `broker.env`; how host sessions and boxes get a broker identity |
+| `chief-dashboard/` | Sami's streams dashboard and its two commands; its guide is its own `README.md` |
 | `devpod/` | Bare-VM cloud-init (dormant) |
 
 ## How Install Works

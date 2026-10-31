@@ -1,0 +1,20 @@
+# Sami's streams dashboard on the unix socket /run/user/1000/chief-dashboard.sock (%t/chief-dashboard.sock),
+# published tailnet-only by `sudo tailscale serve --bg --https=8446 unix:/run/user/1000/chief-dashboard.sock`.
+# It listens on no TCP port. Install, restart and remove: see README.md.
+[Unit]
+Description=Streams dashboard for Sami (chief-dashboard)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.dotfiles/chief-dashboard
+Environment=ENVOY_CONFIG_FILE=%h/.config/legion/envoy.json
+Environment=PYTHONUNBUFFERED=1
+# The pull request states come from `gh`: the dotfiles shim, which needs mise and mise's shims to find the real gh.
+Environment=PATH=%h/.dotfiles/shims:%h/.mise/shims:%h/.dotfiles/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -m chief_dashboard serve --socket %t/chief-dashboard.sock
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

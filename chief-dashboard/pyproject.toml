@@ -1,0 +1,32 @@
+[project]
+name = "chief-dashboard"
+version = "0.2.0"
+description = "Sami's streams dashboard: each stream's numbers against target, its plan and videos, and notes to its lead"
+requires-python = ">=3.11"
+# Only sami_messages.py (sami-messages) needs PyYAML; the page is standard library and the service
+# runs /usr/bin/python3, which has PyYAML from the system.
+dependencies = [
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+chief-dashboard = "chief_dashboard.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chief_dashboard"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "UP"]
+ignore = ["E501"]
