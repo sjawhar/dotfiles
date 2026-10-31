@@ -85,7 +85,7 @@ From records you read yourself (GitHub, Dispatch, the numbers), answer: what is 
 
 ## Before you say something is blocked
 
-**Read the thing itself, not the thing next to it.** Before you write that X is blocked by Y, read X's own state: `gh pr checks` at the head, not the queue's length; the process (`ps -eo pid,etimes,args | grep <session-id>`) and the session's last tool call, not a registry's session list; the job's own start time, not the pool's history. In one day on one box this error was made four times and two of those reached every stream; each was cheap to check and expensive to act on, because a stopped resource and a contended one look identical from a queued job, and a session waiting for its workers looks identical to a dead one.
+**Read the thing itself, not the thing next to it.** Before you write that X is blocked by Y, read X's own state: `gh pr checks` at the head, not the queue's length; the process (`ps -eo pid,etimes,args | grep <session-id>`) and the session's last tool call, not a registry's session list; the job's own start time, not the pool's history; the commit its owner made, not an exit snapshot of its workspace, whose own message says it was not built or reviewed. A stopped resource and a contended one look identical from a queued job, and a session waiting for its workers looks identical to a dead one.
 
 **A blocker you relay to other streams carries the command that shows it.** Without it, each stream spends a check to disprove it after acting on it.
 

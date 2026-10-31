@@ -21,7 +21,6 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 - Judgment work — reviewing code, owning a PR (fork or not), planning, simplifying code, writing or rewriting something a human will read, reading transcripts for what went wrong — goes to a strong model; retrieval and mechanical fan-out may go cheap (`references/models-and-refusals.md`).
 - The environment, named per invocation: the venv, the cwd, the config path, and any `*_PROJECT_ENVIRONMENT`, `PYTHONPATH`, `VIRTUAL_ENV` or `DOCKER_CONFIG` the work depends on, since an inherited pointer silently retargets the command (`references/shared-state.md`).
 - A clone path of its own, and the branch it may push, for any lane that will commit or push: a subagent's `git commit`, `git rebase` or `git push` in your checkout changes the files under the tests or checks you are running there. A read-only lane gets neither — `git show <rev>:<path>` or `gh api` contents at the ref read fine from what already exists.
-- A real filesystem path for any file you ask for, since a dispatched agent's write tool refuses `/tmp/omp-local/session` URIs.
 
 ## The five rules, verbatim in every brief
 
@@ -39,14 +38,14 @@ Rule 1 binds your own tool calls whenever your session's cwd is not the tree you
 
 Run `envoy_whoami` once. If it returns a session ID, every brief carries your session ID with the instruction to `envoy_send(session_id="<your-id>", …)` on finish, blocker or a decision it cannot make, including its own id so you can reply; and the line that asking a clarification beats guessing, since a wrong guess burns the whole run and a question costs a minute. Replies arrive as turns in your session with a reply-to id, and you answer on the channel a message arrived on (`references/waiting.md`).
 
-Message a lane that looks stalled before you kill it, and give it about 10 minutes to answer: killing it burns everything it learned.
+- Address every message to one session id; a broadcast (`agent://all`) interrupts each working lane, and lanes given different broadcasts act on contradictory instructions.
+- Take the time from `date -u`; a message's `at` stamp is when it was sent, and delivery lags, so it is a receipt and not the clock.
 
 Push a branch after every reviewed task, and keep no subagent's work unpushed past its own task: a branch that exists only in a working copy is one bad command from gone.
 
 ## When a lane reports
 
 - A subagent report is a claim, not evidence. Check it file by file against what you asked. When you relay one, attribute it ("my tester reports X"), and do not attach your own causal clause to someone else's measurement — say what was measured and who measured it, and measure the cause yourself if it matters.
-- Read structured output field by field (`agent://<id>/findings/0/title`): reading `agent://<id>` whole cuts long lines at 768 characters, so parsing it as JSON fails.
 - An empty, malformed or schema-valid-but-all-empty result is an unexecuted task, not a clean verdict; so is a provider refusal or a quota failure — only a parsed verdict is a verdict. Read the completion status and the values; a verdict citing no file, line or command is unexecuted. The trigger is zero content or a failure status, not brevity: a terse report that shows its work is a report. Re-dispatch carrying what is known.
 - Recheck a claimed blocker before repeating it: name the exact command that still fails and the record you checked. If the command now succeeds, or the record shows the blocker is gone, drop the blocker and continue the task.
 - Continue the session (`task(task_id="ses_…")`) for a follow-up, fix or "also do X" — it keeps everything it learned. The one exception is a wedged subagent — one that stayed silent through the status-message wait in `references/waiting.md`, or answered that it is stuck — where a fresh dispatch carrying a summary beats continuation.
@@ -56,5 +55,5 @@ Push a branch after every reviewed task, and keep no subagent's work unpushed pa
 - `references/lane-briefs.md` — before writing a tester, reviewer, proof, survey or measurement brief, or relaying a rule.
 - `references/models-and-refusals.md` — before picking a lane's model, when a brief names one for independence, or when a provider refuses.
 - `references/shared-state.md` — the kernel, shell and environment your subagents share with you; when siblings clobber each other or a lane's bash breaks.
-- `references/waiting.md` — a lane is silent, before waiting on an event, or a report came back truncated.
+- `references/waiting.md` — a lane is silent, before you kill it or wait on an event, a report came back truncated, or a reply answers an instruction you changed.
 - `references/workspaces.md` — before giving a lane a clone, an `isolated: true` task, or a heredoc of prose.
