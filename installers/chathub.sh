@@ -17,11 +17,12 @@ BRIDGES=(
     "meta 29319 metabot bridgev2"
     "instagram 29320 instagrambot bridgev2"
     "discord 29334 discordbot legacy"
+    "linkedin 29341 linkedinbot bridgev2"
 )
 
 for tool in github:matrix-construct/tuwunel github:mautrix/gmessages github:mautrix/whatsapp \
     github:mautrix/signal github:mautrix/discord github:mautrix/meta mautrix-instagram \
-    github:mautrix/manager; do
+    github:mautrix/linkedin github:mautrix/manager; do
     "$MISE" install "$tool" >/dev/null
 done
 # chathub/login-screen shows mautrix-manager through VNC and noVNC (Xvfb ships with

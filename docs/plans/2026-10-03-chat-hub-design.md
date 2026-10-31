@@ -30,6 +30,7 @@ MCP for agents.
 | mautrix-discord | Discord user login | loopback |
 | mautrix-instagram | Instagram DMs; a separate binary from the same mautrix/meta release since 26.08 | loopback |
 | mautrix-meta | Messenger | loopback |
+| mautrix-linkedin | LinkedIn messages (not connections, profiles or the feed); cookie login through mautrix-manager. LinkedIn may restrict an account it sees using an unofficial client | loopback |
 | matrix-mcp | Agent tools: list chats, read, read thread, send text/file, members, user search | stdio, spawned per agent session |
 
 All binaries are pinned in `mise.toml` (Tuwunel and the bridges ship linux amd64 release
