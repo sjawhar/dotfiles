@@ -46,7 +46,8 @@ What one run does, with /proc and /sys reads only, no transcript reading and no 
      per `--wall-digest` window, so no touch is lost and no lane storms the lead.
 
 Alerts go over Envoy to agent sessions only, never to a person: the session itself (so it can
-checkpoint and shed on its own terms) and the INFRA lead. The chief of staff hears about it
+checkpoint and shed on its own terms) and the INFRA lead. The box-health owner -- the holder of
+the `lead-box-health` Envoy role, and the SRE session when nobody holds it -- hears about it
 only on a session's second crossing, or when one crossing is still open and still rising
 10 minutes later.
 """
@@ -66,9 +67,18 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The two sessions that own this detector's findings, as in envoy-role-holder-watch.
-CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+# The sessions that own this detector's findings, as in envoy-role-holder-watch.
 INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
+
+# Kept ONLY for omp-box-memory-guard's --protect list, which imports it as watch.CHIEF_OF_STAFF:
+# this watch tells the chief of staff nothing. Box health is the SRE session's (Sami,
+# 2026-10-31: "There's an SRE. They can handle it.").
+CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+
+# Box health belongs to the box-health lead's Envoy role (dispatch://INFRA-716), and to the SRE
+# session when nobody holds that role.
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
+SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 
 # Where the state file goes. /mnt/nvme/sami/tmp is the agent devboxes' scratch on the big disk;
 # an agent box without it keeps the state under ~/.local/state, which every XDG machine has.
@@ -188,6 +198,16 @@ class Envoy:
         )
         if status != 200:
             log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+    def publish(self, topic: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/publish",
+            {"topic": topic, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  publish to {topic} failed: {status} {body}")
         return status == 200
 
 
@@ -1001,6 +1021,26 @@ def clear_text(scope: str, incident: dict, cause: str, now: float) -> str:
     )
 
 
+def tell_box_health(envoy: Envoy, text: str) -> str:
+    """Tell the box-health owner, and say who heard it.
+
+    The role is the address while somebody holds it; an unheld role answers non-200, and then
+    the SRE session hears it instead.
+    """
+    if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        return BOX_HEALTH_ROLE_TOPIC
+    if envoy.send(SRE, text):
+        return SRE
+    return ""
+
+
+def tell(envoy: Envoy, target: str, text: str) -> bool:
+    """Send to a session id, or publish to the box-health role when that is the recipient."""
+    if target == BOX_HEALTH_ROLE_TOPIC:
+        return bool(tell_box_health(envoy, text))
+    return envoy.send(target, text)
+
+
 def send_clear(envoy: Envoy, options: argparse.Namespace, scope: str, incident: dict, cause: str, now: float) -> bool:
     if not incident.get("alerted_at") or incident.get("cleared_at"):
         return False
@@ -1009,8 +1049,8 @@ def send_clear(envoy: Envoy, options: argparse.Namespace, scope: str, incident: 
     text = clear_text(scope, incident, cause, now)
     for target in targets:
         if not options.dry_run:
-            envoy.send(target, text)
-    log(f"{scope}: CLEARED ({cause}); told {len(targets)} sessions")
+            tell(envoy, target, text)
+    log(f"{scope}: CLEARED ({cause}); told {len(targets)} recipients")
     if options.print_alert:
         print(text)
     return True
@@ -1222,12 +1262,16 @@ def run_once(options: argparse.Namespace) -> int:
             crossings[session or key] = count
             incident["crossing_number"] = count
             # The session hears first: it owns the shedding. One session can be two of these
-            # (the INFRA lead's own session, say), and nobody needs the same alert twice.
+            # (the INFRA lead's own session, say), and nobody needs the same alert twice. The
+            # box-health role is a recipient like any other here, so its holder is told once.
             recipients: list[tuple[str, str]] = []
             for who, why in (
                 (session, "the session itself"),
                 (INFRA_LEAD, "INFRA lead"),
-                (CHIEF_OF_STAFF if count >= 2 else "", "chief of staff: second crossing for this session"),
+                (
+                    BOX_HEALTH_ROLE_TOPIC if count >= 2 else "",
+                    "box-health owner: second crossing for this session",
+                ),
             ):
                 if who and who not in {already for already, _ in recipients}:
                     recipients.append((who, why))
@@ -1246,12 +1290,12 @@ def run_once(options: argparse.Namespace) -> int:
             state.commit(options)
             told = []
             for who, why in recipients:
-                if options.dry_run or envoy.send(who, text):
+                if options.dry_run or tell(envoy, who, text):
                     told.append(who)
                     log(f"  -> {who} ({why})")
             incident["told"] = told or incident["told"]
             alerts += 1
-            log(f"{key}: ALERT ({gib(usage)} of {gib(limit)}) sent to {len(told)} sessions")
+            log(f"{key}: ALERT ({gib(usage)} of {gib(limit)}) sent to {len(told)} recipients")
             if options.print_alert:
                 print(text)
         elif (
@@ -1267,8 +1311,12 @@ def run_once(options: argparse.Namespace) -> int:
             incident["escalated_at"] = started
             state.commit(options)
             if not options.dry_run:
-                envoy.send(CHIEF_OF_STAFF, text)
-            log(f"{key}: ESCALATED to the chief of staff")
+                # Whoever hears a crossing must hear its clear, and only once per message: the
+                # role is added to "told" when it is not already a recipient of the alert.
+                heard = tell_box_health(envoy, text)
+                if heard and heard not in (incident.get("told") or []):
+                    incident["told"] = (incident.get("told") or []) + [heard]
+            log(f"{key}: ESCALATED to the box-health owner")
         else:
             log(f"{key}: over for {human(over_for)}, already alerted at {iso(incident.get('alerted_at'))}")
         state.commit(options)
@@ -1329,7 +1377,7 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=24, help="samples kept per scope (24 x 30 s = 12 min of rise)")
     parser.add_argument("--unlimited-warn", type=float, default=16.8, help="GiB at which an UNCAPPED scope alerts")
     parser.add_argument("--grace", type=float, default=60.0, help="seconds over the threshold before it alerts")
-    parser.add_argument("--escalate", type=float, default=600.0, help="seconds after an alert before the chief of staff is told")
+    parser.add_argument("--escalate", type=float, default=600.0, help="seconds after an alert before the box-health owner is told")
     parser.add_argument(
         "--wall-fraction",
         type=float,

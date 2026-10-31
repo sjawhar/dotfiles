@@ -184,10 +184,13 @@ Agent sessions only, never a person:
 
 - **the session itself**, because it owns the shedding;
 - the **INFRA lead** (`01a13c57-d826-7242-80fe-5f0670188b11`), who owns this detector;
-- the **chief of staff** (`01a13dca-e979-7264-af32-f654ef57a6f5`) only on a session's **second**
+- the **box-health owner** — the holder of the `lead-box-health` Envoy role
+  (`notifications.role.lead-box-health`), and the SRE session
+  (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) when nobody holds it — only on a session's **second**
   crossing, or when one crossing is still open **and still rising** 10 minutes after its alert.
+  The chief of staff hears no box alert (Sami, 2026-10-31).
 
-Duplicates are dropped, so a session that is also one of those two gets one message.
+Duplicates are dropped, so a session that is also one of those recipients gets one message.
 
 A **wall touch** goes to the scope's own session — the owner, who does the shedding — with the
 whole report. The INFRA lead gets **one batched digest per `--wall-digest` window** (default
