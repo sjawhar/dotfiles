@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""running-script-guard-restore: give back every write bit that omp's running-script guard took.
+
+  running-script-guard-restore [--dry-run]
+
+omp/extensions/running-script-guard.ts takes the write bits of a script that an agent's shell runs,
+and gives them back when the run ends or the last omp session ends. If every omp process on the
+machine is killed first, the bits stay off until an omp session starts again. This command gives
+them back now, with no omp session.
+
+For each record under ${XDG_STATE_HOME:-~/.local/state}/omp-running-script-guard/*/held/, it sets
+the recorded mode on the recorded path when the file there still has exactly the mode the guard
+left: the same file, or a copy that a rename writer such as `sed -i` made after the guard took the
+bits. It leaves any other file alone. It removes each record, writes a line to guard.log beside the
+records, and prints one line per file. --dry-run prints the same lines and changes nothing.
+
+While an omp session lives, a script that an agent's shell still runs loses its write bits again at
+that session's next pass.
+"""
+
+import datetime
+import json
+import os
+import pathlib
+import signal
+import sys
+
+USAGE = "usage: running-script-guard-restore [--dry-run]"
+
+
+def state_root() -> pathlib.Path:
+    base = os.environ.get("XDG_STATE_HOME") or str(pathlib.Path.home() / ".local" / "state")
+    return pathlib.Path(base) / "omp-running-script-guard"
+
+
+def settle(record: dict, uid: int, dry_run: bool) -> str:
+    """What to do with one record's file, done unless dry_run; returns the line to print."""
+    path, mode, reduced = record["path"], record["mode"], record["reduced"]
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return f"{path}: gone, nothing to give back"
+    same = st.st_dev == record["dev"] and st.st_ino == record["ino"]
+    current = st.st_mode & 0o7777
+    if st.st_uid != uid:
+        return f"{path}: left alone, another user owns it"
+    if current != reduced:
+        return f"{path}: left at {current:04o}, which is not the mode the guard left ({reduced:04o})"
+    if not same and st.st_ctime_ns / 1e6 < record["at"]:
+        return f"{path}: left alone, another file that is older than the guard's record"
+    if not dry_run:
+        os.chmod(path, mode)
+    copy = "" if same else " (a copy a rename writer made after the guard took them)"
+    return f"{path}: gave back the write bits{copy}: {reduced:04o} -> {mode:04o}"
+
+
+def main(argv: list[str]) -> int:
+    if any(arg != "--dry-run" for arg in argv):
+        print(USAGE, file=sys.stderr)
+        return 2
+    dry_run = "--dry-run" in argv
+    root = state_root()
+    records = sorted(root.glob("*/held/*.json"))
+    if not records:
+        print(f"running-script-guard-restore: no records under {root}")
+        return 0
+    uid = os.getuid()
+    for record_path in records:
+        try:
+            record = json.loads(record_path.read_text())
+        except (OSError, ValueError) as error:
+            print(f"{record_path}: unreadable record, left in place ({error})", file=sys.stderr)
+            continue
+        line = settle(record, uid, dry_run)
+        print(line)
+        if dry_run:
+            continue
+        record_path.unlink(missing_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        with open(record_path.parent.parent / "guard.log", "a", encoding="utf-8") as log:
+            log.write(f"{stamp} running-script-guard-restore: {line}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # `| head` ends it quietly
+    sys.exit(main(sys.argv[1:]))
