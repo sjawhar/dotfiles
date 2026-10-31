@@ -3,18 +3,19 @@ set -euo pipefail
 
 # --- agent-spend: model-spend records from every harness (theorem-labs/agent-infra spend/SETUP.md, INFRA-165) ---------
 # Runs agent-infra's spend/client/agent-spend-setup at AGENT_SPEND_SETUP_REF, fetched from GitHub (the company's
-# installer, not a copy of it here), in user mode: it reads the collector's token with this machine's gcloud, and makes
-# omp, Claude Code and Codex send one record per model call, however each is started. The person is agent-spend/person;
-# the project defaults to `shared` (scripts/agent-spend-env.sh tags each session with its own); AGENT_SPEND_LANE, when
-# set (devbox/install.sh sets the host name), becomes theorem.lane. The fetched program and these arguments stay in
-# ~/.cache/agent-spend, so scripts/agent-spend-env.sh can run the same setup again at a session's start when the token
-# is missing (gcloud could not read it at install time). A rotation is a rerun of this file. The setup runs without
-# CLAUDE_CONFIG_DIR: .bashrc points that at the tracked .claude/ here, which is shared by every machine and must hold
-# no machine's path or token (the setup refuses a folder in a git work tree anyway); that settings.json carries the
-# same telemetry keys by hand, and a helper command that runs $HOME/.config/agent-spend/otel-headers-helper, which the
-# setup writes on each machine; where the setup never ran it exits 1, so Claude Code sends nothing. Sourced by
-# install.sh, so it never exits.
-AGENT_SPEND_SETUP_REF=89600d4f9476ab77c55968caa3d313bbc9e798fd
+# installer, not a copy of it here), in user mode: it makes omp, Claude Code and Codex send one record per model call,
+# however each is started, to the collector's tailnet endpoint, svc:spend's tailnet address (INFRA-832), which this
+# machine reaches as a device of Theorem's tailnet with no token; it reads no secret. On a machine an earlier setup
+# wrote, it removes the public endpoint's token, the header helper and the header in each harness's settings. The
+# person is agent-spend/person; the project defaults to `shared` (scripts/agent-spend-env.sh tags each session with its
+# own); AGENT_SPEND_LANE, when set (devbox/install.sh sets the host name), becomes theorem.lane. The fetched program and
+# these arguments stay in ~/.cache/agent-spend, so scripts/agent-spend-env.sh can run the same setup again at a
+# session's start when the endpoint file is missing. The setup runs without CLAUDE_CONFIG_DIR: .bashrc points that at
+# the tracked .claude/ here, which is shared by every machine and must hold no machine's path (the setup refuses a
+# folder in a git work tree anyway); that settings.json carries the same telemetry keys and endpoint by hand, so a
+# Claude Code on a tailnet machine where the setup never ran still exports, with no theorem.project or theorem.person
+# tag (off the tailnet its exports fail and say nothing). Sourced by install.sh, so it never exits.
+AGENT_SPEND_SETUP_REF=13a5fbc86fbebe27cbf99449f72ebb7933e56b92
 
 agent_spend_setup() {
     local dotfiles="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"

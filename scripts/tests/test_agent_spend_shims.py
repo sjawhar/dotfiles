@@ -3,18 +3,16 @@
 
 A claude a script or a session's bash tool starts by name inherits its omp parent's collector and
 OTEL_LOGS_EXPORTER=none; through the shim it gets Claude Code's telemetry switches and the project the parent
-session's file names, and no header: its token comes from the otelHeadersHelper in its settings (the tracked
-.claude/settings.json names $HOME/.config/agent-spend/otel-headers-helper). It loses a generic, metrics, traces or
-logs header it inherited, and so does Codex (its token is in its config.toml; Codex's built-in metrics exporter would
-send a generic or metrics
-header to OpenAI). A caller on a different collector keeps everything. The shim takes the first real binary past
-its own PATH entry, never mise's shims dir (which hands the call back to PATH) or another shims/ copy, and hands it
-its arguments and PATH unchanged.
+session's file names, and no header: the collector's tailnet endpoint takes no token (dispatch://INFRA-832). It loses a
+generic, metrics, traces or logs header it inherited, and so does Codex (Codex's built-in metrics exporter would send a
+generic or metrics header to OpenAI). A caller on a different collector keeps everything. The shim takes the first
+real binary past its own PATH entry, never mise's shims dir (which hands the call back to PATH) or another shims/ copy,
+and hands it its arguments and PATH unchanged.
 
 Technique: the real shims, run with DOTFILES_DIR at a scratch copy holding scripts/agent-spend-env.sh and a test
-person, XDG_CONFIG_HOME holding the endpoint and token as agent-infra's agent-spend-setup writes them; PATH is the
-shims dir, a scratch mise shims dir whose claude and codex would loop back to PATH, and a dir of stand-in binaries
-that print their argv, PATH and spend environment.
+person, XDG_CONFIG_HOME holding the endpoint as agent-infra's agent-spend-setup writes it; PATH is the shims dir, a
+scratch mise shims dir whose claude and codex would loop back to PATH, and a dir of stand-in binaries that print their
+argv, PATH and spend environment.
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SHIMS = DOTFILES / "shims"
-ENDPOINT = "https://collector.example/otlp"
+ENDPOINT = "http://100.64.0.1"  # as agent-spend-setup writes it: svc:spend's tailnet address
 PARENT = "01a14b36-227b-7141-acdb-b5397251a0b1"
 KEYS = (
     "THEOREM_PROJECT",
@@ -63,7 +61,6 @@ class AgentSpendShimTest(unittest.TestCase):
         (dotfiles / "agent-spend" / "person").write_text("sami@theorem.dev\n")
         self.config = self.root / "config"
         (self.config / "agent-spend" / "sessions").mkdir(parents=True)
-        (self.config / "agent-spend" / "token").write_text("t0ken\n")
         (self.config / "agent-spend" / "endpoint").write_text(f"{ENDPOINT}\n")
         (self.config / "agent-spend" / "sessions" / PARENT).write_text("oss-verify\n")
         mise = self.root / "mise"
@@ -160,8 +157,8 @@ class AgentSpendShimTest(unittest.TestCase):
         self.assertEqual(out["CLAUDE_CODE_ENABLE_TELEMETRY"], "<unset>")
         self.assertEqual((out["OTEL_EXPORTER_OTLP_HEADERS"], out["OTEL_EXPORTER_OTLP_METRICS_HEADERS"]), ("<unset>", "<unset>"))
 
-    def test_a_machine_without_the_token_runs_claude_untouched(self) -> None:
-        (self.config / "agent-spend" / "token").unlink()
+    def test_a_machine_the_setup_never_ran_on_runs_claude_untouched(self) -> None:
+        (self.config / "agent-spend" / "endpoint").unlink()
         out = self.run_shim("claude", {"OTEL_LOGS_EXPORTER": "none"}, "--version")
         self.assertEqual(out["ARGS"], "--version")
         self.assertEqual(out["OTEL_LOGS_EXPORTER"], "none")
@@ -181,14 +178,11 @@ class AgentSpendShimTest(unittest.TestCase):
 
 class TrackedClaudeSettingsTest(unittest.TestCase):
     """The tracked .claude/settings.json (every machine's CLAUDE_CONFIG_DIR, .bashrc) makes a claude started by its
-    path record its spend: telemetry on, logs only, content capture off, the four header variables emptied, and a
-    helper command, so the file holds no token and no machine's path. The command runs the setup's helper
-    ($HOME/.config/agent-spend/otel-headers-helper) when it is there. Without it: where the setup ran (its env.sh is
-    there; the folder alone is not enough, since omp's session-project extension also writes sessions/ in it) it prints
-    {} and exits 0; where it never ran it exits 1. Claude Code runs the command through /bin/sh, which expands $HOME.
-    Measured with 2.1.309 against a local collector: the setup's helper gives every request the token; {} is silent
-    and sends records without a token, which the collector refuses (401); exit 1 prints Claude Code's helper error and
-    sends nothing, so a machine whose gcloud never reads the token stays off the wire."""
+    path record its spend: telemetry on, logs only, to the collector's tailnet endpoint (svc:spend's tailnet address,
+    http:// and an IPv4 address in 100.64.0.0/10, agent-infra bootstrap's output spendCollectorTailnetUrl), content
+    capture off, the four header variables emptied, and no otelHeadersHelper, so the file holds no token and no
+    machine's path. The tailnet endpoint takes no token (dispatch://INFRA-832); a machine off the tailnet cannot reach
+    it. The address is svc:spend's, bootstrap's output spendCollectorTailnetUrl of the 2026-10-31 06:48Z apply."""
 
     def test_the_tracked_settings(self) -> None:
         import json
@@ -196,10 +190,12 @@ class TrackedClaudeSettingsTest(unittest.TestCase):
         text = (DOTFILES / ".claude" / "settings.json").read_text()
         settings = json.loads(text)
         env = settings["env"]
-        self.assertIn('"$HOME/.config/agent-spend"', settings["otelHeadersHelper"])  # $HOME-relative, no machine path
+        self.assertNotIn("otelHeadersHelper", settings)
         self.assertEqual(env["CLAUDE_CODE_ENABLE_TELEMETRY"], "1")
         self.assertEqual((env["OTEL_LOGS_EXPORTER"], env["OTEL_TRACES_EXPORTER"], env["OTEL_METRICS_EXPORTER"]),
                          ("otlp", "none", "none"))
+        self.assertRegex(env["OTEL_EXPORTER_OTLP_ENDPOINT"],
+                         r"^http://100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])(\.[0-9]{1,3}){2}$")
         self.assertEqual(env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"], env["OTEL_EXPORTER_OTLP_ENDPOINT"] + "/v1/logs")
         for k in ("OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
                   "OTEL_EXPORTER_OTLP_METRICS_HEADERS", "OTEL_LOG_RAW_API_BODIES", "BETA_TRACING_ENDPOINT"):
@@ -208,29 +204,8 @@ class TrackedClaudeSettingsTest(unittest.TestCase):
             self.assertEqual(env[k], "0", k)
         self.assertNotIn("OTEL_RESOURCE_ATTRIBUTES", env)  # a settings env would override every launcher's tags
         self.assertNotIn("Bearer", text)
+        self.assertNotIn("agent-spend", text)
         self.assertNotRegex(text, r"/home/|/Users/|/tmp/")
-        home = Path(tempfile.mkdtemp(prefix="tracked-claude-"))
-        self.addCleanup(shutil.rmtree, home)
-        conf = home / ".config" / "agent-spend"
-        helper = conf / "otel-headers-helper"
-        bare = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
-
-        def run() -> subprocess.CompletedProcess:
-            return subprocess.run(["/bin/sh", "-c", settings["otelHeadersHelper"]], env=bare, capture_output=True,
-                                  text=True)
-
-        # The setup never ran (no folder, or only another program's sessions/): exit 1, nothing on stdout.
-        self.assertEqual((run().returncode, run().stdout), (1, ""))
-        (conf / "sessions").mkdir(parents=True)
-        self.assertEqual((run().returncode, run().stdout), (1, ""))
-        # The setup ran but its helper is gone: {} and nothing on stderr.
-        (conf / "env.sh").write_text("")
-        out = run()
-        self.assertEqual((out.returncode, out.stderr, json.loads(out.stdout)), (0, "", {}))
-        # The setup's helper there: its header.
-        executable(helper, 'printf \'{"Authorization": "Bearer t0ken"}\\n\'')
-        out = run()
-        self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"Authorization": "Bearer t0ken"}))
 
 
 if __name__ == "__main__":
