@@ -51,7 +51,8 @@ def settle(record: dict, uid: int, dry_run: bool) -> str:
     if not dry_run:
         os.chmod(path, mode)
     copy = "" if same else " (a copy a rename writer made after the guard took them)"
-    return f"{path}: gave back the write bits{copy}: {reduced:04o} -> {mode:04o}"
+    verb = "would give back" if dry_run else "gave back"
+    return f"{path}: {verb} the write bits{copy}: {reduced:04o} -> {mode:04o}"
 
 
 def main(argv: list[str]) -> int:
