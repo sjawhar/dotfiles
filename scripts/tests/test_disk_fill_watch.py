@@ -264,6 +264,78 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertIn("withdrawn, not resolved", withdrawn[0])
         self.assertNotIn(MOUNT, json.loads(self.state.read_text())["incidents"])
 
+    def fall_to(self, free_gib: float) -> None:
+        self.free = int(free_gib * WATCH.GIB)
+        self.run_once()
+
+    def escalations(self) -> list[str]:
+        return [
+            text
+            for _, text in self.envoy.published + self.envoy.sent
+            if "STILL DESCENDING" in text
+        ]
+
+    def big_filesystem(self, free_gib: float) -> None:
+        """A 1 TB filesystem, so the 20 GiB default floor is not held to a tenth of it."""
+        WATCH.free_bytes = lambda mount: (self.free, 1000 * WATCH.GIB)
+        self.free = int(free_gib * WATCH.GIB)
+
+    # The `/` crossing of 2026-10-31 opened at 11:04Z, alerted at 11:09Z, escalated once at
+    # 11:39Z and then said nothing while free space fell from 22.6 GiB to 3.9 GiB. A fall of
+    # FLOOR_STEP below the lowest level already reported is a new fact and is said again.
+    def test_a_crossing_that_keeps_falling_escalates_on_each_floor_step(self) -> None:
+        self.big_filesystem(19)
+        self.run_once()
+        self.envoy.published.clear()
+        self.envoy.sent.clear()
+
+        for free_gib in (17, 15, 13, 11, 9, 7):  # a 12 GiB fall, in 2 GiB samples
+            self.fall_to(free_gib)
+
+        self.assertEqual(2, len(self.escalations()))
+        self.assertEqual(2, self.incident()["escalations"])
+        self.assertEqual(7 * WATCH.GIB, self.incident()["reported_free"])
+
+    def test_a_flat_crossing_escalates_no_further(self) -> None:
+        self.big_filesystem(19)
+        self.run_once()
+        self.envoy.published.clear()
+        self.envoy.sent.clear()
+
+        for _ in range(6):
+            self.fall_to(19)
+
+        self.assertEqual([], self.escalations())
+        self.assertEqual(19 * WATCH.GIB, self.incident()["reported_free"])
+
+
+class DiskFillWatchWritersJsonChildTest(unittest.TestCase):
+    """`--writers-json` is parsed by its parent, so its stdout must be JSON and only JSON.
+
+    On 2026-10-31 every privileged sample of the day was lost to `JSONDecodeError: Extra data:
+    line 1 column 5 (char 4)` -- the four digits of the year in a log line log() had printed on
+    that stdout before the document. The child is run here exactly as `writers_now` runs it.
+    """
+
+    def test_the_child_prints_one_json_document_and_logs_to_stderr(self) -> None:
+        payload = json.dumps({"seconds": 0.2, "device": os.stat("/").st_dev, "top": 2})
+        environment = dict(os.environ)
+        # A listener that answers nothing, so the child certainly logs its live-session line.
+        environment["ENVOY_URL"] = "http://127.0.0.1:1"
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "--writers-json", payload],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=environment,
+        )
+
+        self.assertEqual(0, done.returncode, done.stderr)
+        answer = json.loads(done.stdout)
+        self.assertIsInstance(answer["writers"], list)
+        self.assertIsInstance(answer["denied"], int)
+        self.assertIn("live sessions unavailable", done.stderr)
+
 
 class DiskFillWatchBoxHealthOwnerTest(unittest.TestCase):
     """A machine whose box health belongs to one session: the lane VMs' fleet monitoring owner."""
