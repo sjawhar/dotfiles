@@ -122,6 +122,16 @@ find_holders() { # find_holders ROOT
 
 gb() { awk -v b="$1" 'BEGIN{ printf "%.1f GB", b / 1000000000 }'; }
 
+# remove_tree DIR: rm -rf, and when that fails because a test left read-only directories in the
+# tree (rm cannot unlink inside a directory without write permission), give the user write
+# permission on what it owns and try once more. Measured 2026-10-31: three dead sessions' pytest
+# trees failed with "Permission denied" until then.
+remove_tree() {
+    rm -rf -- "$1" 2>/dev/null && return 0
+    chmod -R u+rwX -- "$1" 2>/dev/null
+    rm -rf -- "$1"
+}
+
 # io_pressure_over MAX: deleting under IO pressure hangs every shell on the box
 # (skill://disk-hygiene), and the next run costs nothing to wait for.
 io_pressure_over() {
@@ -347,7 +357,7 @@ reap_tmp_root() {
             echo "session-scratch-reap: would remove $entry ($(gb "$size"), owner $owner is not live here, nothing written for $(((now - m) / 86400))d, no process holds it)"
             going=$((going + 1))
             going_bytes=$((going_bytes + size))
-        elif rm -rf -- "$entry"; then
+        elif remove_tree "$entry"; then
             echo "session-scratch-reap: removed $entry ($(gb "$size"), owner $owner is not live here, nothing written for $(((now - m) / 86400))d, no process holds it)"
             going=$((going + 1))
             going_bytes=$((going_bytes + size))
@@ -457,7 +467,7 @@ if ((${#CANDIDATE[@]})); then
         if [[ -n "$dry" ]]; then
             echo "session-scratch-reap: would remove $dir (no live process, ${age}s old)"
             removed=$((removed + 1))
-        elif rm -rf -- "$dir"; then
+        elif remove_tree "$dir"; then
             echo "session-scratch-reap: removed $dir (no live process, ${age}s old)"
             removed=$((removed + 1))
         else
