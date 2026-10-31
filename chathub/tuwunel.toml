@@ -13,3 +13,9 @@ trusted_servers = []
 # encryption off too.
 allow_encryption = false
 new_user_displayname_suffix = ""
+# Version 12 (Tuwunel's default since 1.9.2) derives a room's ID from a hash of its
+# create event, so two bridge portals created in the same instant got one room:
+# on 2026-10-03 Signal's "Tam" chat was merged into Daniel Ziegler's. Version 11
+# rooms get random IDs. Its one loss, v12's undemotable room creator, is moot on a
+# single-user hub.
+default_room_version = "11"
