@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Who hears a crossing of omp-memory-watch: the session, the INFRA lead, the box-health owner.
+"""Who hears a crossing of omp-memory-watch: the session itself and the box-health owner.
 
 Box health on these boxes belongs to the SRE session, not to the chief of staff (Sami,
 2026-10-31: "There's an SRE. They can handle it."), so the box-health owner is addressed by the
@@ -26,8 +26,10 @@ LOADER.exec_module(WATCH)
 GIB = WATCH.GIB
 CEILING = 24 * GIB
 SESSION = "00000001-0000-0000-0000-000000000001"
-# The chief of staff's session: no box alert may reach it (Sami, 2026-10-31).
+# Neither of these may hear a box alert any more (Sami, 2026-10-31): the chief of staff's
+# session, and the INFRA lead's, which owned this detector and handed box health to the SRE.
 CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
 
 
 class FakeEnvoy:
@@ -130,21 +132,21 @@ class CrossingRecipientsTest(unittest.TestCase):
         published = [row for envoy in FakeEnvoy.instances for row in envoy.published]
         return sent, published
 
-    def test_the_first_alert_goes_to_the_session_and_the_infra_lead(self) -> None:
+    def test_the_first_alert_goes_to_the_session_and_the_box_health_role(self) -> None:
         self.run_pass(20 * GIB)
         sent, published = self.everything()
-        self.assertEqual([SESSION, WATCH.INFRA_LEAD], [who for who, _ in sent])
-        self.assertEqual([], published)
+        self.assertEqual([SESSION], [who for who, _ in sent])
+        self.assertEqual([WATCH.BOX_HEALTH_ROLE_TOPIC], [topic for topic, _ in published])
 
     def test_the_escalation_goes_to_the_box_health_role(self) -> None:
         self.run_pass(20 * GIB)
         self.run_pass(21 * GIB)
         sent, published = self.everything()
         self.assertEqual(
-            [(WATCH.BOX_HEALTH_ROLE_TOPIC, True)],
-            [(topic, "STILL RISING" in text) for topic, text in published],
+            [False, True], [("STILL RISING" in text) for _, text in published]
         )
-        self.assertEqual([SESSION, WATCH.INFRA_LEAD], [who for who, _ in sent])
+        self.assertEqual({WATCH.BOX_HEALTH_ROLE_TOPIC}, {topic for topic, _ in published})
+        self.assertEqual([SESSION], [who for who, _ in sent])
 
     def test_an_unheld_role_sends_the_escalation_to_the_sre_session(self) -> None:
         self.run_pass(20 * GIB)
@@ -162,10 +164,10 @@ class CrossingRecipientsTest(unittest.TestCase):
         sent, published = self.everything()
         clears_sent = [who for who, text in sent if "CLEARED" in text]
         clears_published = [topic for topic, text in published if "CLEARED" in text]
-        self.assertEqual([SESSION, WATCH.INFRA_LEAD], clears_sent)
+        self.assertEqual([SESSION], clears_sent)
         self.assertEqual([WATCH.BOX_HEALTH_ROLE_TOPIC], clears_published)
 
-    def test_no_message_of_a_whole_cycle_reaches_the_chief_of_staff(self) -> None:
+    def test_no_message_of_a_whole_cycle_reaches_the_chief_or_the_infra_lead(self) -> None:
         """Alert, escalation and clear, with the role held and then unheld."""
         self.run_pass(20 * GIB)
         self.run_pass(21 * GIB)
@@ -175,8 +177,10 @@ class CrossingRecipientsTest(unittest.TestCase):
         self.run_pass(21 * GIB)
         self.run_pass(2 * GIB)
         sent, published = self.everything()
-        self.assertNotIn(CHIEF_OF_STAFF, [who for who, _ in sent])
-        self.assertNotIn(CHIEF_OF_STAFF, [topic for topic, _ in published])
+        addressed = [who for who, _ in sent] + [topic for topic, _ in published]
+        self.assertTrue(addressed)
+        self.assertNotIn(INFRA_LEAD, addressed)
+        self.assertNotIn(CHIEF_OF_STAFF, addressed)
 
 
 if __name__ == "__main__":

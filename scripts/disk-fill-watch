@@ -52,10 +52,9 @@ and under a bounded walk, because /tmp holds ~20k entries and walking it on ever
 itself be the load.
 
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
-for the first alert and for the escalation 30 minutes later when a crossing is still open and
-still descending. An unheld role falls back to a session: the INFRA lead's for a first alert,
-the box-health SRE's for an escalation. This watch only detects. It deletes nothing and kills
-nothing.
+for the first alert, for the escalation 30 minutes later when a crossing is still open and
+still descending, and for the clear. An unheld role falls back to the box-health SRE's
+session. This watch only detects. It deletes nothing and kills nothing.
 """
 
 from __future__ import annotations
@@ -73,11 +72,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Where a crossing goes when nobody holds the box-health role below. The INFRA lead hears a
-# first alert; the box-health SRE hears an escalation, because a disk still descending half an
-# hour after its alert is that lane's own work. The chief of staff was on the escalation until
-# 2026-10-31T02:37:50Z and is on nothing here now: disk is not the chief's work.
-INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
+# Where a crossing goes when nobody holds the box-health role below. Box health is the SRE's
+# work, decided 2026-10-31T02:37:50Z: the chief of staff was on the escalation until then, and
+# the INFRA lead, which owned this detector, handed the lane over and stood down. Neither is on
+# anything here now.
 BOX_HEALTH_SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 
 # The box-health lead owns the box disks (dispatch://INFRA-716) and holds this Envoy role, so a
@@ -1217,18 +1215,16 @@ def clear_text(now: dict, incident: dict, when: float) -> str:
     )
 
 
-def tell_box_health(envoy: Envoy, text: str, fallback: str = INFRA_LEAD) -> str:
+def tell_box_health(envoy: Envoy, text: str) -> str:
     """Tell the box-health lead, and say who heard it.
 
     The role is the address while somebody holds it; an unheld role answers non-200, and then
-    one named session hears it instead. The caller chooses that session, because who should be
-    woken by an unheard message depends on which message it is: the INFRA lead for a first
-    alert and a clear, the box-health SRE for a disk that is still descending.
+    the box-health SRE's session hears it instead.
     """
     if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
         return BOX_HEALTH_ROLE_TOPIC
-    envoy.send(fallback, text)
-    return fallback
+    envoy.send(BOX_HEALTH_SRE, text)
+    return BOX_HEALTH_SRE
 
 
 def say_once(notes: dict, key: str, signature: str, message: str) -> None:
@@ -1407,13 +1403,12 @@ def run_once(options: argparse.Namespace) -> int:
             )
         # On disk before a single message leaves: a resent first alert is worse than a late one.
         state.commit(options)
-        # Both the first alert and the escalation go to the box-health role: disk is that lane's
-        # work, decided 2026-10-31T02:37:50Z, and the chief of staff is no longer on either.
-        # They differ only in who hears it when nobody holds the role -- the INFRA lead for a
-        # first alert, the box-health SRE for a disk that is still descending half an hour on.
+        # The first alert, the escalation and the clear all go to the box-health role: box
+        # health is that lane's work, decided 2026-10-31T02:37:50Z, and neither the chief of
+        # staff nor the INFRA lead is on any of them. An unheard message wakes the SRE.
         if not options.dry_run:
             # Whoever heard the crossing must hear the clear, so the fallback is recorded.
-            heard = tell_box_health(envoy, text, INFRA_LEAD if first else BOX_HEALTH_SRE)
+            heard = tell_box_health(envoy, text)
             told = [] if first else (incident.get("told") or [BOX_HEALTH_ROLE_TOPIC])
             incident["told"] = sorted(set(told + [heard]))
             state.commit(options)
@@ -1567,7 +1562,7 @@ def main() -> int:
         "--escalate",
         type=float,
         default=1800.0,
-        help="seconds after the alert, still descending, before the chief of staff is told (default 30 min)",
+        help="seconds after the alert, still descending, before the box-health owner is told again (default 30 min)",
     )
     parser.add_argument("--history", type=float, default=10800.0, help="seconds of samples kept per mount")
     parser.add_argument("--samples", type=int, default=400, help="samples kept per mount")

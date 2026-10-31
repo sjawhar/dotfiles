@@ -178,15 +178,13 @@ an entry already named is never looked at again.
 Agent sessions only, never a person. Every message goes to the Envoy role
 **`notifications.role.lead-box-health`**: the first alert, the escalation 30 minutes later when
 a crossing is still open and free space is still **lower than at the alert**, and the clear.
-Disk is the box-health lane's work, decided 2026-10-31T02:37:50Z; the chief of staff was on the
-escalation until then and is on nothing here now.
+Box health is the box-health lane's work, decided 2026-10-31T02:37:50Z; the chief of staff was
+on the escalation until then, the INFRA lead owned this detector and handed the lane over, and
+neither is on anything here now.
 
-Nobody holds the role? The publish answers non-200 and one session hears it instead:
-
-- a first alert or a clear goes to the **INFRA lead** (`01a13c57-d826-7242-80fe-5f0670188b11`),
-  who owns this detector;
-- an escalation goes to the **box-health SRE** (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`), because
-  a disk still descending half an hour after its alert is that lane's own work.
+Nobody holds the role? The publish answers non-200 and the **box-health SRE**
+(`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) hears it instead — every message, first alert,
+escalation and clear alike.
 
 One alert per crossing, one clear. The clear goes to everyone who heard the crossing.
 

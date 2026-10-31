@@ -126,7 +126,15 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertEqual([], self.envoy.sent)
         self.assertEqual([WATCH.BOX_HEALTH_ROLE_TOPIC], self.incident()["told"])
 
-    def test_unheld_role_falls_back_to_the_infra_session(self) -> None:
+    # Box health is the SRE's work, not the chief of staff's and no longer the INFRA lead's
+    # (2026-10-31T02:37:50Z), so neither id may appear where a message is addressed. Both are
+    # written out rather than read from the module: a constant the script no longer has cannot
+    # prove its holder is off the list.
+    CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+    INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
+    BOX_HEALTH_SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+
+    def test_unheld_role_falls_back_to_the_box_health_sre(self) -> None:
         self.envoy.publish_ok = False
 
         self.run_once()
@@ -134,15 +142,9 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertEqual(
             ["notifications.role.lead-box-health"], [topic for topic, _ in self.envoy.published]
         )
-        self.assertEqual([WATCH.INFRA_LEAD], [target for target, _ in self.envoy.sent])
+        self.assertEqual([WATCH.BOX_HEALTH_SRE], [target for target, _ in self.envoy.sent])
         self.assertIn("DISK LOW", self.envoy.sent[0][1])
-        self.assertEqual([WATCH.INFRA_LEAD], self.incident()["told"])
-
-    # Disk is the box-health lane's work, not the chief of staff's (2026-10-31T02:37:50Z), so
-    # this id must appear nowhere a message is addressed. It is written out rather than read
-    # from the module: a constant the script no longer has cannot prove the chief is off it.
-    CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
-    BOX_HEALTH_SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+        self.assertEqual([WATCH.BOX_HEALTH_SRE], self.incident()["told"])
 
     def escalate(self) -> None:
         """Put the crossing half an hour past its alert, with free space lower than it was."""
@@ -180,9 +182,9 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertEqual(WATCH.BOX_HEALTH_SRE, self.BOX_HEALTH_SRE)
         self.assertIn("STILL DESCENDING", self.envoy.sent[0][1])
         self.assertIn(self.BOX_HEALTH_SRE, self.incident()["told"])
-        self.assertNotIn(WATCH.INFRA_LEAD, self.incident()["told"])
+        self.assertNotIn(self.INFRA_LEAD, self.incident()["told"])
 
-    def assert_cycle_never_reaches_the_chief(self, role_held: bool) -> None:
+    def assert_cycle_never_reaches_the_chief_or_the_infra_lead(self, role_held: bool) -> None:
         self.envoy.publish_ok = role_held
         stages: dict[str, list[tuple[str, str]]] = {}
 
@@ -205,19 +207,22 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
                 # A negative assertion over an empty list proves nothing, so every stage is
                 # first shown to have said something of its own.
                 self.assertTrue(messages, f"{stage} sent nothing")
-                self.assertNotIn(self.CHIEF_OF_STAFF, [target for target, _ in messages])
-                self.assertNotIn(self.CHIEF_OF_STAFF, "\n".join(text for _, text in messages))
+                for who in (self.CHIEF_OF_STAFF, self.INFRA_LEAD):
+                    self.assertNotIn(who, [target for target, _ in messages])
+                    self.assertNotIn(who, "\n".join(text for _, text in messages))
         self.assertIn("DISK LOW", stages["first alert"][0][1])
         self.assertTrue(any("STILL DESCENDING" in text for _, text in stages["escalation"]))
         self.assertTrue(any("CLEARED" in text for _, text in stages["clear"]))
         self.assertNotIn(MOUNT, json.loads(self.state.read_text())["incidents"])
-        self.assertEqual([], [t for t, _ in everything if t == self.CHIEF_OF_STAFF])
+        self.assertEqual(
+            [], [t for t, _ in everything if t in (self.CHIEF_OF_STAFF, self.INFRA_LEAD)]
+        )
 
-    def test_a_whole_cycle_never_reaches_the_chief_of_staff(self) -> None:
-        self.assert_cycle_never_reaches_the_chief(role_held=True)
+    def test_a_whole_cycle_never_reaches_the_chief_of_staff_or_the_infra_lead(self) -> None:
+        self.assert_cycle_never_reaches_the_chief_or_the_infra_lead(role_held=True)
 
-    def test_a_whole_cycle_with_an_unheld_role_never_reaches_the_chief_of_staff(self) -> None:
-        self.assert_cycle_never_reaches_the_chief(role_held=False)
+    def test_a_whole_cycle_with_an_unheld_role_reaches_neither_of_them(self) -> None:
+        self.assert_cycle_never_reaches_the_chief_or_the_infra_lead(role_held=False)
 
     def test_clear_reaches_the_role_that_heard_the_crossing(self) -> None:
         self.run_once()
@@ -241,7 +246,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
 
         self.run_once()
 
-        self.assertEqual([WATCH.INFRA_LEAD], [target for target, _ in self.envoy.sent])
+        self.assertEqual([WATCH.BOX_HEALTH_SRE], [target for target, _ in self.envoy.sent])
         self.assertIn("CLEARED", self.envoy.sent[0][1])
 
     def test_a_mount_the_run_stops_watching_is_withdrawn_not_dropped(self) -> None:

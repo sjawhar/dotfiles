@@ -42,14 +42,13 @@ What one run does, with /proc and /sys reads only, no transcript reading and no 
      worker scopes had touched their 24 GiB wall while every one of them sat under the 45%
      sampling level on unreclaimable memory, and only 4 were ever reported. A touch is rate
      limited to one report per scope per `--wall-cooldown` (default 15 min); the session owning
-     the scope gets the whole report, and the INFRA lead gets one batched digest of every touch
-     per `--wall-digest` window, so no touch is lost and no lane storms the lead.
+     the scope gets the whole report, and the box-health owner gets one batched digest of every
+     touch per `--wall-digest` window, so no touch is lost and no lane storms the owner.
 
 Alerts go over Envoy to agent sessions only, never to a person: the session itself (so it can
-checkpoint and shed on its own terms) and the INFRA lead. The box-health owner -- the holder of
-the `lead-box-health` Envoy role, and the SRE session when nobody holds it -- hears about it
-only on a session's second crossing, or when one crossing is still open and still rising
-10 minutes later.
+checkpoint and shed on its own terms) and the box-health owner -- the holder of the
+`lead-box-health` Envoy role, and the SRE session when nobody holds it. The escalation, when a
+crossing is still open and still rising 10 minutes later, goes to the same owner.
 """
 
 from __future__ import annotations
@@ -67,7 +66,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The sessions that own this detector's findings, as in envoy-role-holder-watch.
+# Kept ONLY for omp-box-memory-guard's --protect list and its own alerts, which import it as
+# watch.INFRA_LEAD: this watch tells the INFRA lead nothing. It owned this detector and handed
+# box health to the SRE on 2026-10-31.
 INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
 
 # Kept ONLY for omp-box-memory-guard's --protect list, which imports it as watch.CHIEF_OF_STAFF:
@@ -884,7 +885,7 @@ def wall_text(touch: dict) -> str:
 
 
 def wall_digest_text(pending: list[dict], window: float) -> str:
-    """The INFRA lead's batched view: every scope that reached its wall since the last digest.
+    """The box-health owner's batched view: every scope that reached its wall since the last digest.
 
     One report per scope goes to the scope's own owner, which is where the shedding happens. The
     lead gets them batched instead of one message each, because a box can have tens of scopes at
@@ -917,7 +918,7 @@ def wall_digest_text(pending: list[dict], window: float) -> str:
         )
         lines.append(f"      {wall_advice(touch)}")
         # Truncated harder than the owner's copy, because a digest can carry tens of scopes
-        # (the INFRA lead, 2026-10-30).
+        # (the INFRA lead, 2026-10-30, when it owned this detector).
         for pid, rss, command in touch.get("top") or []:
             lines.append(f"      {gib(rss)}  pid {pid}  {command[:140] or '(no command line)'}")
         if not touch.get("top"):
@@ -1045,7 +1046,7 @@ def send_clear(envoy: Envoy, options: argparse.Namespace, scope: str, incident: 
     if not incident.get("alerted_at") or incident.get("cleared_at"):
         return False
     incident["cleared_at"] = now
-    targets = incident.get("told") or [INFRA_LEAD]
+    targets = incident.get("told") or [BOX_HEALTH_ROLE_TOPIC]
     text = clear_text(scope, incident, cause, now)
     for target in targets:
         if not options.dry_run:
@@ -1084,7 +1085,7 @@ def run_once(options: argparse.Namespace) -> int:
     # The wall memory, keyed by scope name and NOT reset with the pid: `systemd-run --scope`
     # never reuses a name, so a key lives exactly as long as the scope does.
     walls: dict = state.data.setdefault("walls", {})
-    # Touches waiting for the INFRA lead's next digest. They accumulate across runs, so a quiet
+    # Touches waiting for the box-health owner's next digest. They accumulate across runs, so a
     # digest window never loses one.
     pending_wall: list = state.data.setdefault("wall_pending", [])
 
@@ -1262,16 +1263,12 @@ def run_once(options: argparse.Namespace) -> int:
             crossings[session or key] = count
             incident["crossing_number"] = count
             # The session hears first: it owns the shedding. One session can be two of these
-            # (the INFRA lead's own session, say), and nobody needs the same alert twice. The
-            # box-health role is a recipient like any other here, so its holder is told once.
+            # (the box-health owner's own session, say), and nobody needs the same alert twice.
+            # The box-health role is a recipient like any other here, so its holder is told once.
             recipients: list[tuple[str, str]] = []
             for who, why in (
                 (session, "the session itself"),
-                (INFRA_LEAD, "INFRA lead"),
-                (
-                    BOX_HEALTH_ROLE_TOPIC if count >= 2 else "",
-                    "box-health owner: second crossing for this session",
-                ),
+                (BOX_HEALTH_ROLE_TOPIC, "box-health owner"),
             ):
                 if who and who not in {already for already, _ in recipients}:
                     recipients.append((who, why))
@@ -1281,7 +1278,7 @@ def run_once(options: argparse.Namespace) -> int:
             if not session:
                 text += (
                     "\nThe session id could not be resolved from /proc, so the session itself could"
-                    " not be told: only the INFRA lead has this."
+                    " not be told: only the box-health owner has this."
                 )
             # On disk before a single message leaves: a resent first alert is worse than a late one.
             incident["alerted_at"] = started
@@ -1337,9 +1334,9 @@ def run_once(options: argparse.Namespace) -> int:
         if key not in live_keys:
             walls.pop(key, None)
 
-    # The INFRA lead's batched view. The per-scope reports have already gone to their owners;
-    # this is one message per window however many scopes touched their wall in it, so a box
-    # with tens of scopes at the ceiling informs the lead instead of flooding it.
+    # The box-health owner's batched view. The per-scope reports have already gone to their
+    # owners; this is one message per window however many scopes touched their wall in it, so a
+    # box with tens of scopes at the ceiling informs the owner instead of flooding it.
     digests = 0
     if pending_wall and started - (state.data.get("wall_digest_at") or 0) >= options.wall_digest:
         text = wall_digest_text(pending_wall, options.wall_digest)
@@ -1347,10 +1344,11 @@ def run_once(options: argparse.Namespace) -> int:
         sent = pending_wall[:]
         del pending_wall[:]
         state.commit(options)
+        heard = BOX_HEALTH_ROLE_TOPIC
         if not options.dry_run:
-            envoy.send(INFRA_LEAD, text)
+            heard = tell_box_health(envoy, text)
         digests = len(sent)
-        log(f"wall digest: {digests} touch(es) -> INFRA lead {INFRA_LEAD}")
+        log(f"wall digest: {digests} touch(es) -> {heard or 'nobody: every route refused it'}")
         if options.print_alert:
             print(text)
 
@@ -1388,7 +1386,7 @@ def main() -> int:
         "--wall-cooldown", type=float, default=900.0, help="seconds between wall reports for one scope"
     )
     parser.add_argument(
-        "--wall-digest", type=float, default=900.0, help="seconds between the INFRA lead's batched wall digests"
+        "--wall-digest", type=float, default=900.0, help="seconds between the box-health owner's batched wall digests"
     )
     parser.add_argument("--wall-top", type=int, default=3, help="processes by RSS named in a wall report")
     parser.add_argument(
