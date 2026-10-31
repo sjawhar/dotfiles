@@ -1,6 +1,6 @@
 ---
 name: using-gcloud
-description: Use when running gcloud compute ssh or scp against several VMs, or where other sessions also use gcloud. Use on the ssh error "No ED25519 host key is known for compute.<id> and you have requested strict checking" or "Host key verification failed". Use when gcloud fails with "Reauthentication failed. cannot prompt during non-interactive execution." Use when you need a new build or measurement VM, give a VM a public IP, or deploy a service that people or machines will reach.
+description: Use when running gcloud compute ssh or scp against several VMs, or where other sessions also use gcloud. Use on the ssh error "No ED25519 host key is known for compute.<id> and you have requested strict checking" or "Host key verification failed". Use when gcloud fails with "Reauthentication failed. cannot prompt during non-interactive execution." Use when you need a new build or measurement VM, give a VM a public IP, or deploy a service that people or machines will reach. Use when a docker pull or push, a gcloud call or a client library is refused with PERMISSION_DENIED, "denied", 403, or a missing artifactregistry, storage or iam permission, and before asking any person for a grant or role. Use before you run docker login, set a git credential helper, or copy, mint or reuse any token or credential that belongs to another account.
 ---
 
 # Using gcloud
@@ -18,7 +18,9 @@ Sami's own Google login (sami@theorem.dev) is the configuration `theorem`. Use t
 
 Never change the active configuration or the ADC file to get Sami's login: every session on the machine uses them.
 
-Refused by a registry or shared environment: use an account that already has access, or copy it from a host that has it; never ask a person, the list is settled (`references/taiga-access.md`).
+**A refusal is a stop, not a prompt to borrow an identity.** Never move a person's credential to where a machine keeps it: minting a token from his login (`gcloud auth print-access-token` under `theorem`) and feeding it to `docker login`, a git credential helper or a kubectl context writes his identity into a file every process on a shared host can read, and logs every later action as him. Instead find the account that is meant to hold the access and run as it, or impersonate it (`--impersonate-service-account`). On 2026-10-31 an agent did exactly this on `linux28-agents-7` to get past a registry denial, and it had to be withdrawn.
+
+Refused by a registry or shared environment: use an account that already has access, or copy it from a host that has it; never ask a person, the list is settled (`references/taiga-access.md`). For `gcp-taiga` no one at Theorem can grant access at all, so there is no one to ask.
 
 ## Expired login ("Reauthentication failed")
 
