@@ -353,6 +353,12 @@ alog() {
 # stop first, and a failed run needs that skill's recovery, not a bare retry.
 unlock-keyring() {
     local pw locked
+    # A machine without gnome-keyring has no login keyring to unlock (sami-rocqperf has never had
+    # the package): say so instead of failing on units that do not exist.
+    if ! command -v gnome-keyring-daemon >/dev/null 2>&1; then
+        echo 'unlock-keyring: gnome-keyring is not installed on this machine, so there is no keyring to unlock' >&2
+        return 1
+    fi
     systemctl --user stop gnome-keyring-daemon.service gnome-keyring-daemon.socket || return
     read -rsp 'Keyring password: ' pw; echo
     printf '%s' "$pw" | gnome-keyring-daemon --unlock --components=pkcs11,secrets --daemonize >/dev/null

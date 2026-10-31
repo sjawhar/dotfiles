@@ -9,6 +9,8 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 
 Every reboot locks the `login` keyring. SSH login cannot unlock it: `ubuntu` has no Unix password, and only `/etc/pam.d/common-password` loads `pam_gnome_keyring.so`.
 
+This applies only to a machine with the `gnome-keyring` package. sami-rocqperf has never had it, so it has no keyring to unlock and `unlock-keyring` says so; there, a tool that keeps its login in a keyring (pup, for one) falls back to the kernel keyring, which a reboot clears, and needs its own login again (`pup auth login`).
+
 ## Unlock
 
 - Only Sami has the password. Ask him to run `unlock-keyring` in a terminal on the box and type it at the prompt. The function is in `~/.dotfiles/.bashrc`: it stops the units Ubuntu ships (`gnome-keyring-daemon.service` and `gnome-keyring-daemon.socket`), starts a daemon with the password, and prints `keyring unlocked` or the failure.
