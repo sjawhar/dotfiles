@@ -4,9 +4,9 @@
 # comment says why each bound is what it is.
 #
 # It acts only when the filesystem of Docker's data root is more than DOCKER_CAP_HIGH_PCT
-# (default 85) per cent used. Then it runs three prunes:
+# (default 80) per cent used. Then it runs three prunes:
 #   - build cache: the least recently used records go until the cache is at most
-#     DOCKER_CAP_BUILD_CACHE (default 80GB);
+#     DOCKER_CAP_BUILD_CACHE (default 50GB);
 #   - untagged (dangling) images created more than 24 h ago: no tag names them;
 #   - anonymous volumes that no container, running or stopped, uses. Docker 23 and later prune
 #     only anonymous volumes, so named volumes stay.
@@ -16,8 +16,8 @@
 # DOCKER_CAP_HIGH_PCT and DOCKER_CAP_BUILD_CACHE can be set to override the defaults.
 set -euo pipefail
 
-high="${DOCKER_CAP_HIGH_PCT:-85}"
-cache_cap="${DOCKER_CAP_BUILD_CACHE:-80GB}"
+high="${DOCKER_CAP_HIGH_PCT:-80}"
+cache_cap="${DOCKER_CAP_BUILD_CACHE:-50GB}"
 
 if ! root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || [[ -z "$root" ]]; then
     echo "docker-cap: the Docker daemon does not answer; nothing to do"
