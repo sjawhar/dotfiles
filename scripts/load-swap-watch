@@ -847,6 +847,41 @@ STILL = {
 }
 
 
+def mem_floor(now: dict, options: argparse.Namespace) -> tuple[float, str]:
+    """(the MemAvailable floor for THIS box, how it was arrived at).
+
+    A single absolute number cannot serve every box this watch runs on. `--mem-floor` 8 GiB is
+    12.5% of a 64 GB lane VM, 3.2% of the 251 GB devbox and 0.5% of a 1.5 TB builder: on the
+    big boxes it is reached only once the box is already dying. So the floor is at least
+    `--mem-floor-fraction` of MemTotal.
+
+    And it is never more than `--mem-floor-cap` of MemTotal. A floor above a quarter of the box
+    is not a floor, it is a permanent alert: on 2026-10-31 at 03:49:22Z a hand run with
+    `--mem-floor 200000000000` fired on ossv-agent-repo, a 64 GB box, saying "MemAvailable is
+    58.6 GiB, under the 186.3 GiB floor". The cap makes a mis-set floor harmless instead of a
+    false alarm every period.
+
+    A box whose MemTotal cannot be read keeps the absolute floor: the fraction has nothing to
+    be a fraction of, and the cap must not then clamp the floor to zero and silence the rule.
+    """
+    total = now.get("mem_total") or 0
+    if not total:
+        return options.mem_floor, f"{gib(options.mem_floor)} absolute; MemTotal unreadable"
+    scaled = options.mem_floor_fraction * total
+    floor = max(options.mem_floor, scaled)
+    source = (
+        f"{gib(options.mem_floor)} absolute"
+        if options.mem_floor >= scaled
+        else f"{100 * options.mem_floor_fraction:.0f}% of this box's {gib(total)}"
+    )
+    cap = options.mem_floor_cap * total
+    if floor > cap:
+        return cap, (
+            f"{source} capped at {100 * options.mem_floor_cap:.0f}% of this box's {gib(total)}"
+        )
+    return floor, source
+
+
 def verdict(now: dict, samples: list[list[float]], options: argparse.Namespace) -> dict:
     """What this box is short of, condition by condition, each with its own reasons."""
     cores = now["cores"]
@@ -901,11 +936,12 @@ def verdict(now: dict, samples: list[list[float]], options: argparse.Namespace) 
                 ]
             }
 
-    if now["mem_available"] and now["mem_available"] < options.mem_floor:
+    floor, how = mem_floor(now, options)
+    if now["mem_available"] and now["mem_available"] < floor:
         findings["memory"] = {
             "reasons": [
                 f"MemAvailable is {gib(now['mem_available'])}, under the"
-                f" {gib(options.mem_floor)} floor"
+                f" {gib(floor)} floor ({how})"
             ]
         }
 
@@ -930,7 +966,7 @@ def clears(kind: str, now: dict, options: argparse.Namespace) -> bool:
     if kind == "swap":
         return not now["swap_total"] or now["swap_used_fraction"] < options.swap_used * options.clear_factor
     if kind == "memory":
-        return not now["mem_available"] or now["mem_available"] >= options.mem_floor / options.clear_factor
+        return not now["mem_available"] or now["mem_available"] >= mem_floor(now, options)[0] / options.clear_factor
     return True
 
 
@@ -1230,7 +1266,19 @@ def main() -> int:
         "--mem-floor",
         type=float,
         default=8 * GIB,
-        help="alert when MemAvailable falls under this many bytes (default 8 GiB)",
+        help="the absolute MemAvailable floor in bytes (default 8 GiB); see --mem-floor-fraction",
+    )
+    parser.add_argument(
+        "--mem-floor-fraction",
+        type=float,
+        default=0.10,
+        help="the floor is at least this fraction of MemTotal (default 0.10)",
+    )
+    parser.add_argument(
+        "--mem-floor-cap",
+        type=float,
+        default=0.25,
+        help="and never more than this fraction of MemTotal (default 0.25)",
     )
     parser.add_argument(
         "--horizon",
