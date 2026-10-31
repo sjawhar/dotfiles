@@ -767,12 +767,17 @@ def tmp_entries(
     deadline = now + budget
     try:
         entries = list(os.scandir(tmp))
+        tmp_dev = os.stat(tmp).st_dev
     except OSError:
         return found
     for entry in entries:
         try:
             stat = entry.stat(follow_symlinks=False)
         except OSError:
+            continue
+        # A mount point under /tmp (containerd's and buildkit's overlay mounts are the common
+        # case) holds bytes of another filesystem: they cost /tmp's disk nothing.
+        if stat.st_dev != tmp_dev:
             continue
         birth = getattr(stat, "st_birthtime", 0) or stat.st_ctime
         if now - birth > age:
@@ -784,11 +789,21 @@ def tmp_entries(
             if not walk_dirs or time.time() > deadline:
                 continue
             total = 0
-            for root, _dirs, files in os.walk(entry.path, onerror=None):
+            for root, dirs, files in os.walk(entry.path, onerror=None):
+                kept = []
+                for name in dirs:
+                    try:
+                        if os.lstat(os.path.join(root, name)).st_dev == tmp_dev:
+                            kept.append(name)
+                    except OSError:
+                        continue
+                dirs[:] = kept
                 for name in files:
                     try:
                         child = os.lstat(os.path.join(root, name))
                     except OSError:
+                        continue
+                    if child.st_dev != tmp_dev:
                         continue
                     total += child.st_size
                     newest_mtime = max(newest_mtime, child.st_mtime)
