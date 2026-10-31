@@ -36,9 +36,10 @@ agent-workspace list <repo>                # what each existing tree is, and whi
 agent-workspace rm <repo> <name>           # when the work ends
 ```
 
-Inside an agent box, use `~/boxes/<box>/<name>`, which the box already clones from its template
-with the objects hardlinked. Never `/tmp`: it is cleared between sessions and an agent box does
-not share it, so a resumed worker finds no tree.
+Inside an agent box, use a sibling of your workspace in the box's own tree (`<boxes>/<box>/<name>`:
+`/mnt/nvme/<user>/agentbox/boxes` on a machine with that disk, else `~/boxes`), which the box
+already clones from its template with the objects hardlinked. Never `/tmp`: it is cleared between
+sessions and an agent box does not share it, so a resumed worker finds no tree.
 
 **Never `git clone` a repository a checkout of which is already on the machine.** A plain clone
 materialises its own object store. On 2026-10-30 nine children of

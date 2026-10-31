@@ -39,9 +39,10 @@ There is no per-session end hook on this box to hang the removal on:
   scope units support no `Exec*` at all.
 - **`agent-session` cannot wait for the agent.** It `exec`s it, and must: the pid the broker
   registered has to stay the agent's.
-- **The agentbox exit path is box-only.** It removes `~/boxes/<box>`, and a box mounts an
-  allow-list of `$HOME` with no `/mnt` in it, so a box session has no scratch directory here at
-  all.
+- **The agentbox exit path is box-only.** It removes the box's own tree (`<boxes>/<box>`:
+  `/mnt/nvme/<user>/agentbox/boxes` here, `~/boxes` on a machine without that disk), and a box
+  mounts an allow-list of `$HOME` plus that tree and nothing else of `/mnt`, so a box session
+  has no scratch directory under `/mnt/nvme/<user>/tmp` at all.
 - **`envoy-role-holder-watch` sees role holders and tmux panes**, not every session, and it
   alerts rather than deleting.
 
