@@ -1,5 +1,6 @@
 // Export the OMP session identity into the process environment so child
-// processes (bash tool, PTY) inherit it:
+// processes (bash tool, PTY, and the Python eval kernel, which drops other
+// variables unless omp/config.yml's eval.envPassthrough names them) inherit it:
 //
 //   OMP_SESSION_ID — the resumable session id (`omp --resume <id>`), derived
 //     from the session transcript filename, which is what resume matching

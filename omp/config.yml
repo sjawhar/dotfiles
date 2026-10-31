@@ -365,8 +365,18 @@ codexResets:
 # from an eval cell failed with "DISPATCH_HOST is not set". This admits them.
 # Read by omp v18.12.2-sami.20261025-065250 and later; older builds load the
 # file and leave the key unread.
+# extensions/session-env.ts exports the session's identity for child processes:
+# OMP_SESSION_ID (agent-secrets, scripts/envoy, nested omp, shims/git's
+# Omp-Session trailer) and JJ_CONFIG (jj's Omp-Session trailer and the
+# cross-session immutable_heads() guard); PI_COMMIT_TRAILERS passes already as
+# a PI_ variable. Admitting both names gives a command run from an eval cell
+# the identity it gets from bash. omp sets neither variable itself, so this
+# belongs here, not in omp's built-in allowlist.
 eval:
   envPassthrough:
+    names:
+      - OMP_SESSION_ID
+      - JJ_CONFIG
     prefixes:
       - DISPATCH_
       - ENVOY_
