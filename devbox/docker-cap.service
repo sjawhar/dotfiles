@@ -1,0 +1,23 @@
+[Unit]
+Description=Hold Docker's build cache under 80 GB and remove unusable Docker data when Docker's disk is over 85% used
+# INFRA-586 R3: Docker storage has a size bound. On sami-rocqperf, Docker's data root
+# (/var/lib/docker) is on /mnt/nvme, which every lane shares. Its build cache held 61 GB on
+# 2026-10-30 and 15.6 GB again at 12:33Z on 2026-10-31, when /mnt/nvme was under its floor and a
+# person pruned it by hand. 48 anonymous volumes of removed containers (4.6 GB) had piled up by
+# 14:20Z the same day. Nothing removed either.
+#
+# Why 85%: it is the kubelet's default image garbage-collection threshold
+# (imageGCHighThresholdPercent). /mnt/nvme on sami-rocqperf is always over it, so there the
+# unit acts every hour; on a box with room it does nothing.
+# Why 80 GB: it is over the largest cache seen (61 GB), so a lane's warm cache stays and only a
+# pile of old records goes. BuildKit counts only the cache's own bytes, not the layers it shares
+# with images, so the cap rarely binds on a box where images hold most layers.
+# Tagged images and containers are never removed: an eval image can take hours to rebuild.
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.dotfiles/devbox/docker-cap
