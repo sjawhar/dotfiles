@@ -108,10 +108,10 @@ DEFAULT_STATE = (
 #              band root sat in on 2026-10-26 was 25-28 GiB, so a floor at 25 GiB would have
 #              paged all afternoon; 18 GiB warns with room to act and did not fire in the quiet
 #              hours of that log.
-#   /mnt/nvme  84 GB (decimal, the farm's own unit). It is the grade farm's build-cache floor
-#              (binary-equivalence-taiga farm e1417ce, disk_floor.sh FETCH_KIND_BOUND and
-#              farm_build.py PREPARE_FLOOR_BYTES): the level at which a registration build
-#              refuses to start, so it is where real work stops.
+#   /mnt/nvme  84 GB (decimal, the farm's own unit). It was the grade farm's build-cache floor
+#              (binary-equivalence-taiga farm e1417ce) until grading-tools #1238 (2026-10-31) raised
+#              that floor to 100 GB; the alert floor stays at 84 GB, and every alert names the farm
+#              kinds already waiting (NVME_KIND_FLOORS below), build-cache among them under 100 GB.
 FLOORS = {
     "/": 18 * GIB,
     "/mnt/nvme": 84 * GB,

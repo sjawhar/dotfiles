@@ -61,7 +61,7 @@ regardless of rate.
 | Mount | Floor | Why |
 |---|---|---|
 | `/` | 18 GiB | Root holds every session's transcript, the journal, apt/dpkg state and `/tmp`, so a full root stops the whole box, not one lane. Root's band on 2026-10-26 afternoon was 25–28 GiB, so 25 would have paged all day; 18 leaves room to act |
-| `/mnt/nvme` | 84 GB (decimal) | The grade farm's build-cache floor — binary-equivalence-taiga farm `e1417ce`, `disk_floor.sh` `FETCH_KIND_BOUND` and `farm_build.py` `PREPARE_FLOOR_BYTES` — the level at which a registration build refuses to start, so it is where real work stops |
+| `/mnt/nvme` | 84 GB (decimal) | The grade farm's build-cache floor before grading-tools #1238 (binary-equivalence-taiga farm `e1417ce`). #1238 (2026-10-31) raised the farm's own build-cache floor to 100 GB; the alert floor stays at 84 GB (the script's `FLOORS` comment), and an alert between 100 and 84 GB is not sent, but every alert names the farm kinds already waiting (below), `build-cache` among them under 100 GB |
 | anything else | `--default-floor`, 20 GiB | |
 
 An alert on `/mnt/nvme` also names every grade-farm transfer kind whose own floor the current
