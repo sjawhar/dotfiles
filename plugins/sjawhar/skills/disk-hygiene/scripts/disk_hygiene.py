@@ -863,14 +863,110 @@ def _store_git_dirs(dp: Path) -> list[Path]:
     return found
 
 
+def is_checkout_root(dp: Path, git_dirs: list[Path]) -> bool:
+    """Is <dp> the top of a checkout or a bare repository? Its working tree holds no clone of
+    its own in any shape this box makes, so the walk below stops here."""
+    return (dp / ".git").exists() or (dp / ".jj").exists() or dp in git_dirs
+
+
+def borrower_scope(roots: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """(what the walk covers, the $HOME children it leaves to the records, the ones it covers in part).
+
+    A clone that borrows objects is a checkout, and the walk goes where this box keeps one:
+    the canonical-checkout root (`~/src`, or `AGENT_WORKSPACE_SRC`), the worktrees root
+    (`~/.worktrees`, or `AGENT_WORKSPACE_ROOT`), a box's own tree (`~/boxes`), omp's worktree
+    root (`~/.omp/wt`), the jj checkouts under `~/Code`, and the roots this inventory was
+    taken over. The last three are there because a sweep of every other `$HOME` child on
+    2026-10-31 found a borrower in exactly two of them and nowhere else:
+    `~/Code/personal/pivot-disc` and `pivot-disc-484` borrow `~/src/pivot`, and two
+    `~/.omp/wt/t*/m` borrow repositories on /mnt/nvme. The rest of `$HOME` is caches, state
+    and session data, and the ledger names it.
+
+    Measured on sami-rocqperf on 2026-10-31: the walk of all of `$HOME` this replaces read
+    843,318 directories in 1050 s at load 162 and found 10 borrowed object stores. This
+    scope, stopping at each checkout root, read 11,632 directories in 21 s at load 108 and
+    found the same 10."""
+    home = Path.home()
+    named = [os.environ.get("AGENT_WORKSPACE_SRC", str(home / "src")),
+             os.environ.get("AGENT_WORKSPACE_ROOT", str(home / ".worktrees")),
+             str(home / "boxes"), str(home / ".omp" / "wt"), str(home / "Code")]
+    # `$HOME` as an inventory root means the inventory looked everywhere under it. The walk
+    # still does not, and `home_not_walked` in the ledger says which children it left out.
+    given = [p for p in roots if str(Path(p).resolve()) != str(home.resolve())]
+    scope = sorted({str(Path(p).resolve()) for p in [*named, *given] if os.path.isdir(p)})
+    scope = [p for p in scope if not any(p != q and p.startswith(q + "/") for q in scope)]
+    children = [str(c) for c in home.iterdir() if c.is_dir() and not c.is_symlink()] if home.is_dir() else []
+    covered = [c for c in children if any(c == p or c.startswith(p + "/") for p in scope)]
+    partly = sorted(c for c in children if c not in covered and any(p.startswith(c + "/") for p in scope))
+    skipped = sorted(c for c in children if c not in covered and c not in partly)
+    return scope, skipped, partly
+
+
+BORROWER_RECORD = "agent-workspace-borrowers"
+
+
 def borrowed_object_dirs(roots: list[str], ledger: Path) -> dict[str, set[str]]:
-    """realpath of every object dir some clone under <roots> borrows from through
-    objects/info/alternates -> the clones (checkout or bare repo paths) that borrow it.
-    Walks once per apply, with the inventory walk's pruning. An alternates file that
-    exists but cannot be read is ledgered: its borrows are unknown."""
+    """realpath of every object dir a clone borrows through objects/info/alternates -> the
+    clones (checkout or bare repo paths) that borrow it. Two readings, because neither alone
+    is the answer, and the ledger says which found what:
+
+    - The RECORD each source keeps. `~/.dotfiles/scripts/agent-workspace --separate-repo`
+      makes a `git clone --shared` and writes the borrower's path into
+      `<source>/.git/agent-workspace-borrowers` (it takes the line out again on `rm`), so a
+      borrower it made is found wherever it lives, including inside another checkout's
+      working tree, on another filesystem or in a box. A recorded path that no longer exists
+      is counted and dropped, so a deletion by hand cannot refuse a removal for ever.
+    - A WALK of `borrower_scope`, for a clone the tool did not make: a hand-made
+      `git clone --shared`, or anything older than that tool. It stops at each checkout root,
+      since a checkout's working tree holds no clone of its own in any shape this box makes.
+
+    What neither reads: a clone nested inside a checkout's working tree that no record names,
+    and a clone outside the scope that no record names. An alternates file that exists but
+    cannot be read is ledgered: its borrows are unknown."""
     borrowed: dict[str, set[str]] = {}
-    for root in roots:
+    scope, skipped, partly = borrower_scope(roots)
+    started = time.time()
+    dirs = sources = recorded = stale = 0
+
+    def read_alternates(gd: Path, clone: str) -> None:
+        try:
+            lines = (gd / "objects" / "info" / "alternates").read_text().splitlines()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            ledger_write(ledger, {"op": "error", "path": str(gd / "objects" / "info" / "alternates"),
+                                  "stage": "alternates-scan", "out": repr(exc)[-400:]})
+            return
+        for line in lines:
+            entry = line.strip()
+            if entry and not entry.startswith("#"):
+                borrowed.setdefault(os.path.realpath(gd / "objects" / entry), set()).add(clone)
+
+    def read_record(gd: Path) -> None:
+        nonlocal sources, recorded, stale
+        try:
+            lines = (gd / BORROWER_RECORD).read_text().splitlines()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            ledger_write(ledger, {"op": "error", "path": str(gd / BORROWER_RECORD),
+                                  "stage": "borrower-record", "out": repr(exc)[-400:]})
+            return
+        sources += 1
+        target = os.path.realpath(gd / "objects")
+        for line in lines:
+            clone = line.strip()
+            if not clone:
+                continue
+            if not os.path.exists(clone):
+                stale += 1
+                continue
+            recorded += 1
+            borrowed.setdefault(target, set()).add(clone)
+
+    for root in scope:
         for dp, dn, _fn in os.walk(root):
+            dirs += 1
             here = Path(dp)
             try:
                 git_dirs = _store_git_dirs(here)
@@ -878,25 +974,21 @@ def borrowed_object_dirs(roots: list[str], ledger: Path) -> dict[str, set[str]]:
                 ledger_write(ledger, {"op": "error", "path": dp, "stage": "alternates-scan", "out": repr(exc)[-400:]})
                 git_dirs = []
             for gd in git_dirs:
-                alternates = gd / "objects" / "info" / "alternates"
-                try:
-                    lines = alternates.read_text().splitlines()
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    ledger_write(ledger, {"op": "error", "path": str(alternates), "stage": "alternates-scan", "out": repr(exc)[-400:]})
-                    continue
-                for line in lines:
-                    entry = line.strip()
-                    if entry and not entry.startswith("#"):
-                        target = os.path.realpath(gd / "objects" / entry)
-                        borrowed.setdefault(target, set()).add(dp)
-            if here in git_dirs:
-                dn[:] = []  # a bare repo's internals hold no clones
+                read_alternates(gd, dp)
+                read_record(gd)
+            if is_checkout_root(here, git_dirs):
+                dn[:] = []  # its working tree holds no clone, and a bare repo's internals hold none
                 continue
             dn[:] = [d for d in dn if not d.startswith(".") or d in WALK_HIDDEN]
             if dp.count("/") - root.count("/") >= WALK_DEPTH:
                 dn[:] = []
+    ledger_write(ledger, {
+        "op": "borrower-scan", "walked": scope, "dirs": dirs, "seconds": round(time.time() - started, 1),
+        "records_read": sources, "recorded_borrowers": recorded, "stale_records_dropped": stale,
+        "object_dirs_borrowed": len(borrowed), "home_not_walked": skipped, "home_walked_in_part": partly,
+        "not_measured": "a clone inside a checkout's working tree, or outside the walked paths, "
+                        "that no agent-workspace-borrowers record names",
+    })
     return borrowed
 
 
@@ -1237,8 +1329,10 @@ def cmd_apply(args: argparse.Namespace) -> None:
     try:
         ledger_write(ledger, {"op": "apply-start", "items": len(plan), "plan": args.plan})
         # Every removal below is refused while a clone borrows objects from inside it. The
-        # inventory's roots plus $HOME (its default root) bound where such a clone can be seen.
-        borrowed = borrowed_object_dirs(sorted({str(Path.home()), *doc["roots"]}), ledger)
+        # borrower records name what `agent-workspace --separate-repo` made, wherever it put
+        # it, and the walk covers the places a hand-made one can be (`borrower_scope`); the
+        # `borrower-scan` ledger line says which found what, and what neither looked at.
+        borrowed = borrowed_object_dirs(sorted(set(doc["roots"])), ledger)
         for item in plan:
             if item["kind"] == "forget":
                 _apply_forget(item, trunk, fresh_hours, ledger)

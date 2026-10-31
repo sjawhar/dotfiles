@@ -1019,6 +1019,98 @@ class ReaperScenarioTest(unittest.TestCase):
         self.assert_refused_for(donor, wt, plan_path)
 
 
+class BorrowerScanTest(unittest.TestCase):
+    """Where `borrowed_object_dirs` looks, and what it says it did not look at.
+
+    `~/.dotfiles/scripts/agent-workspace --separate-repo` makes a `git clone --shared` on
+    purpose and records it in `<source>/.git/agent-workspace-borrowers`, so this condition is
+    now something the box does by design, not only an accident to be walked for."""
+
+    def setUp(self) -> None:
+        self.base = Path(tempfile.mkdtemp(prefix="dh-borrow-", dir="/tmp"))
+        self.ledger = self.base / "ledger.jsonl"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def source_repo(self, name: str = "source") -> Path:
+        repo = self.base / name
+        repo.mkdir()
+        sh("git", "init", "-q", repo)
+        (repo / "a.txt").write_text("a\n")
+        sh("git", *GIT_ID, "-C", repo, "add", "a.txt")
+        sh("git", *GIT_ID, "-C", repo, "commit", "-qm", "one")
+        return repo
+
+    def record(self, source: Path, *borrowers: Path) -> None:
+        (source / ".git" / disk_hygiene.BORROWER_RECORD).write_text(
+            "".join(f"{b}\n" for b in borrowers))
+
+    def scan(self, *roots: Path) -> dict[str, set[str]]:
+        return disk_hygiene.borrowed_object_dirs([str(r) for r in roots], self.ledger)
+
+    def ledger_line(self) -> dict[str, Any]:
+        lines = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        return [entry for entry in lines if entry["op"] == "borrower-scan"][-1]
+
+    def test_recorded_borrower_outside_the_walk_is_found(self) -> None:
+        """The record is what makes a borrower the walk cannot reach visible at all."""
+        source = self.source_repo()
+        far = Path(tempfile.mkdtemp(prefix="dh-far-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, far, True)
+        sh("git", "clone", "-q", "--shared", source, far / "clone")
+        self.record(source, far / "clone")
+
+        borrowed = self.scan(self.base)
+        self.assertEqual(disk_hygiene.borrowers_of(str(source), borrowed), [str(far / "clone")])
+        self.assertEqual(self.ledger_line()["recorded_borrowers"], 1)
+
+    def test_a_record_of_a_borrower_that_is_gone_refuses_nothing(self) -> None:
+        source = self.source_repo()
+        self.record(source, self.base / "deleted-by-hand")
+
+        borrowed = self.scan(self.base)
+        self.assertEqual(disk_hygiene.borrowers_of(str(source), borrowed), [])
+        self.assertEqual(self.ledger_line()["stale_records_dropped"], 1)
+
+    def test_hand_made_shared_clone_in_the_scope_is_still_walked_up(self) -> None:
+        """No tool made this one, so no record names it. The walk is why it is found."""
+        source = self.source_repo()
+        sh("git", "clone", "-q", "--shared", source, self.base / "hand-made")
+
+        borrowed = self.scan(self.base)
+        self.assertEqual(disk_hygiene.borrowers_of(str(source), borrowed), [str(self.base / "hand-made")])
+
+    def test_the_walk_stops_at_a_checkout_root_and_the_ledger_says_so(self) -> None:
+        """A clone inside another checkout's working tree is the documented miss: the walk
+        stops at the outer checkout, and only a record finds it."""
+        source = self.source_repo()
+        host = self.source_repo("host")
+        nested = host / "vendor" / "clone"
+        nested.parent.mkdir()
+        sh("git", "clone", "-q", "--shared", source, nested)
+
+        borrowed = self.scan(self.base)
+        self.assertEqual(disk_hygiene.borrowers_of(str(source), borrowed), [],
+                         "the walk descended into a checkout's working tree")
+        line = self.ledger_line()
+        self.assertIn("working tree", line["not_measured"])
+        self.assertIn(str(self.base), line["walked"])
+
+        self.record(source, nested)
+        self.assertEqual(disk_hygiene.borrowers_of(str(source), self.scan(self.base)), [str(nested)])
+
+    def test_home_is_not_walked_whole_and_the_ledger_lists_what_it_left(self) -> None:
+        """`$HOME` as an inventory root once meant a walk of all of it: 843,318 directories in
+        477 s on this box. The walk takes the checkout roots instead and names the rest."""
+        borrowed = self.scan(Path.home())
+        self.assertIsInstance(borrowed, dict)
+        line = self.ledger_line()
+        self.assertNotIn(str(Path.home()), line["walked"])
+        self.assertTrue(line["home_not_walked"], "nothing reported as left out of the walk")
+
+
+
 class ContainerCensusOtherFamilyTest(unittest.TestCase):
     """cmd_containers' box-local-daemon discriminator for family="other" rows (AGENTC-751):
     four lanes (e2e, env typing, Reaper, agent-c#20033) independently found the same leaked
