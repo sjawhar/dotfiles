@@ -32,9 +32,10 @@ Sami's login expires about once each day. As the box you do not see this error.
 
 ## A new VM or service stays off the internet
 
-People, dev boxes, VMs, CI jobs and managed services all reach each other over the VPN, so a public address gives a service no access it needs and exposes it to everyone.
+People, dev boxes, VMs, CI jobs and managed services reach each other over the VPN once they are enrolled in it, so a public address gives such a service no access it needs and exposes it to everyone.
 
-- Create a VM with no external address (`gcloud compute instances create … --no-address`, `az vm create … --public-ip-address ""`) and reach it over IAP (`--tunnel-through-iap`) or the VPN. A VM that already has one keeps working after `gcloud compute instances delete-access-config`.
+- Create a VM with no external address (`gcloud compute instances create … --no-address`, `az vm create … --public-ip-address ""`) and reach it over IAP (`--tunnel-through-iap`) or the VPN. The VM then needs Cloud NAT or Private Google Access for its own outbound traffic; check that the subnet has one before you create it, because a no-address VM with neither cannot reach apt, pip or a registry.
+- Taking the address off a VM that has one (`gcloud compute instances delete-access-config`) cuts every connection to that address, egress included. Do it in this order: prove IAP or VPN access to the VM, prove its outbound path, then delete the access config, then check access again.
 - Deploy a service that only your own people and machines call onto the VPN. Never `gcloud run deploy --allow-unauthenticated`, an `allUsers` IAM binding, an internet-facing load balancer, or a firewall rule that opens its port to `0.0.0.0/0`; a shared bearer token is not a substitute, because the port is still reachable by everyone.
 - Open a service to the internet only for a named caller outside the organization that cannot join the VPN, such as a webhook sender. Name that caller and the reason where the service is documented, so the next reader can check it.
 
