@@ -38,10 +38,13 @@ before handing the call to the real one.
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named
   profile's links, then execs omp through `scripts/agent-session` (below). It sets no
   Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys
-  come from the profile's `models.yml` (`omp/AGENTS.md`). `OMP_MEMORY_MAX=<size>` (unset by
-  default, so nothing changes without it) runs the session in a transient systemd user scope with
-  that hard memory cap and swap off, waits for it instead of exec'ing, and says on the pane when
-  the cap was what killed it. One session reached 138.0 GiB on 2026-10-26 and the box-wide OOM
+  come from the profile's `models.yml` (`omp/AGENTS.md`). Each session runs in a transient
+  systemd user scope with a hard memory cap and swap off: `OMP_MEMORY_MAX=<size>`, 24G by default
+  (dispatch://INFRA-898; the largest of 44 sessions measured on 2026-10-31 held 17.8 GiB), a
+  caller's value clamped at 96G. The shim waits for the session instead of exec'ing, and says on
+  the pane when the cap was what killed it. A session inside such a scope exports
+  `OMP_MEMORY_SCOPE`, so an omp it starts takes no default and shares the parent's scope. One
+  session reached 138.0 GiB on 2026-10-26 and the box-wide OOM
   killer took two unrelated pods with it; inside a scope only that session dies. `MemoryHigh` is
   deliberately not set: it throttles a session into reclaim instead of killing it, which looks
   like a lane that is thinking.
@@ -56,7 +59,7 @@ before handing the call to the real one.
   that a script or a session's bash tool starts by name (`claude -p` workers): those inherit their
   omp parent's collector and `OTEL_LOGS_EXPORTER=none`, and Claude Code sent nothing. Through the shim
   Claude Code gets `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, traces and metrics off,
-  the token in its logs header only, and the project of its parent session's file (`OMP_SESSION_ID`);
+  no header (the collector's tailnet endpoint takes no token), and the project of its parent session's file (`OMP_SESSION_ID`);
   a different collector is kept as is. Codex takes only the tags from the environment and loses any
   inherited header: its exporter is the block agent-infra's `agent-spend-setup` (run by
   `installers/agent-spend.sh`) writes into `~/.codex/config.toml`. They do not exec
