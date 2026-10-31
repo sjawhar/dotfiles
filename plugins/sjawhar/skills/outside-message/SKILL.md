@@ -5,64 +5,32 @@ description: "Use before any text reaches a person outside Theorem: a GitHub iss
 
 # A message to someone outside Theorem
 
-Sami approves every outside message, and four steps come before you ask him. He set the process on 2026-10-27 in [OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53) and added the fourth step on 2026-10-30 in [OSSV-142 ask 93a2811e](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/93a2811e-56ab-456e-8c0c-cedfd4ee822b). Read both before you write.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-## The exclusions
+Sami approves every outside message ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27), except in the two cases below.
 
-Two, and he set them in two different answers. Read both before you decide that something is excluded; neither is a rule you can infer from the shape of a message.
+## The two exclusions
 
-**One named project** goes out without his approval ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27). That answer names it.
+Read both answers before you decide a message is excluded. Neither follows from the shape of a message.
 
-**A pull request to a project that has already enrolled**, with its description and comments to that project's maintainers. On 2026-10-29 at 17:22Z he wrote that he wants to stop being asked for approval every single time for enrolled projects, and that ceremony around a pull request must not stop the work ([OSSV-146 ask 81a892b6](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/81a892b6-0f63-4424-b48e-51d27d8f1a9c)). The four steps still apply. The approval ask does not. The work does not wait for the pull request either: prepare and sign changes locally, and send them when the work they belong to ends.
-
-What counts as enrolled is the enrolling project's own record, and its stream's brief says where that record is. Do not decide enrollment from a message's tone or from a maintainer having replied to us before.
+- **One named project** goes out without his approval; the answer above names it.
+- **A pull request to a project that has already enrolled**, with its description and its comments to that project's maintainers, needs no approval ask ([OSSV-146 ask 81a892b6](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/81a892b6-0f63-4424-b48e-51d27d8f1a9c), 2026-10-29): he asked to stop being asked for approval every single time for enrolled projects. Say so when you are told to write one, and write the message itself instead. Both steps below still apply; only the ask does not. The work does not wait for the pull request either: prepare and sign the changes locally, and send them when the work they belong to ends. Enrolled means the enrolling project's own record, and its stream's brief says where that record is; do not decide it from a message's tone or from a maintainer having replied to us before.
 
 Everything else waits for him: a first contact with a project that has not enrolled, a bug report, a disclosure, and a reply to a maintainer who wrote to us first.
 
-## The four steps
+## The two steps
 
-1. **Research the audience.** Read the repository's contributing guide, its issue and pull-request templates, its code of conduct, and the last ten issues or pull requests. Read how the maintainers write to each other. Search for what has already been discussed about your subject; a question they answered last month, asked again, costs you the reader.
-2. **Write for that audience, in their conventions.** Use their template where they have one, their terms, their level of detail. Use `/asd-ste100` and `/ce-noslop`.
-3. **Follow their conventions in form as well as words.** A pull request on their repository uses their pull-request template. An issue uses their issue template. A thread reply matches the thread.
-4. **A fresh reviewer reads it and cuts.** Astra, or Opus where Astra is not available, reads the message and removes everything that is not needed to understand the core message. A reviewer that only approves has not done step 4.
-
-**Step 4 ends with a list of what it removed, and that list goes in the ask.** Measured on 2026-10-30 over 18 drafts of three real messages ([OSSV-142 outside-message-skill-test](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/artifacts/outside-message-skill-test-md)): drafts written with this skill met the bar 9 times in 9, drafts with no guidance 8 times in 9, so the first three steps changed almost nothing - the research teaches them. The step that changed the message was the cut, and it is the step agents skip: 2 of 9 with the skill and 3 of 9 without had no cut at all. Only the cut drafts lost a promise about the next release, and they lost half their length. An instruction alone did not make it happen, so the list is what proves it did: three lines naming what came out, or the sentence "the reviewer removed nothing", which is itself an answer.
-
-The form of the text is not in this skill. Where the stream that owns the relationship keeps its own rules for writing to maintainers - in its project's `AGENTS.md`, its `.claude/skills/`, or its brief - those rules decide how the message reads, and some are owned by people through that repository's code owners. Read them before you draft, and send a change to the form there rather than into this file.
-
-This skill covers when his approval is needed and what comes before the ask. The project's own rules cover how the text reads.
+1. **Research the audience, and write in their conventions** — their template, their terms, their level of detail, their thread. `references/research.md` lists what to read before you draft. Run `skill://asd-ste100`, `skill://ce-noslop` and `skill://plain-words` over the text. Where the stream that owns the relationship keeps its own form rules, in the project's `AGENTS.md`, its `.claude/skills/` or its brief, those rules decide how the message reads and win over the three skills above, and some are owned by people through that repository's code owners. Read them before you draft, and send a change to the form there rather than into this skill.
+2. **A fresh reviewer reads it and cuts** ([OSSV-142 ask 93a2811e](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/93a2811e-56ab-456e-8c0c-cedfd4ee822b), 2026-10-30). Astra, or Opus where Astra is not available, reads the message in a session that did not write it and removes everything a reader does not need to understand the core message. A reviewer that reads only to approve has not done this step. **Write in the ask what it removed**, in three lines or fewer, or "the reviewer removed nothing". Agents skipped this step in 5 of 18 drafts, and an instruction alone did not make it happen, so the list is what shows it ran.
 
 ## Then the ask
 
-**Put the full message text in the ask itself.** Not a link to a document holding it, not a summary of it, not "the draft is at …". Sami, 2026-10-30: he has to open another document to read the message in almost every one of these asks, and he cannot judge the message from the ask.
+**Put the full message text in the ask itself.** Not a link to a document holding it, not a summary, not "the draft is at …": Sami cannot judge a message he has to open another document to read.
 
-An ask for an outside message has, in this order:
-
-- who the reader is, and one line on what they already know about this;
-- **the message, in full, as it would be sent**;
-- **what the reviewer removed in step 4**, in three lines or fewer, or "the reviewer removed nothing";
-- what changes if he says no.
-
-Link the research, not the message. An ask with no removal line has not had step 4, whatever it says.
-
-## Never write these
-
-Sami, 2026-10-30, as a new rule: delete the empty verb phrases agents keep using, and say the literal thing instead. He named these shapes:
-
-| Never | Write instead |
-|---|---|
-| "to name the problem" | say the problem |
-| "land the change" | merge it, release it, deploy it — whichever it is |
-| "carry the finding to X" | tell X, send X, put it on the issue |
-| "this shows the gap" | the gap is … |
-| "that pays for itself" | it costs $X and returns $Y |
-
-The test: delete the verb phrase and ask what literally happens. If you cannot say what happens, you did not know, and the phrase hid that from both of you. Write what happens.
-
-The same rule runs over asks, specs, messages, commit bodies and pull-request descriptions, not only outside messages. `skill://plain-words` has the full list and the rewrites.
+An ask for an outside message has, in this order: who the reader is, and one line on what they already know; the message, in full, as it would be sent; what the reviewer removed; what changes if he says no. Link the research, not the message.
 
 ## What this skill does not cover
 
-- Text written in Sami's own name: `skill://speaking-as-sami`.
+- How the text reads: `skill://plain-words` for empty verb phrases, `skill://speaking-as-sami` for text in Sami's own name.
 - A message to another agent or to Sami: write it plainly and send it; no approval step.
-- Posting a release the pipeline publishes from approved template text: the template was approved once; the release does not need a new ask unless its text changes.
+- A release the pipeline publishes from approved template text: the template was approved once, so the release needs no new ask unless its text changes.
