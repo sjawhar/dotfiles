@@ -10,7 +10,7 @@
 
   ```bash
   git checkout -b <name> && git push -u origin <name>
-  gh pr create --head <name>   # closing keywords for the issues it resolves
+  gh pr create --head <name>   # always --head; closing keywords for the issues it resolves
   gh pr list --head <name>     # read the URL here, not from the create output
   ```
 
@@ -41,7 +41,7 @@ env -i HOME="$HOME" USER="$USER" PATH="$PATH" \
 
 ## Labels
 
-- A label at creation fires `opened` and `labeled` together and doubles each `labeled` workflow.
+- Never pass `--label` to `gh pr create`: a label at creation fires `opened` and `labeled` together and doubles each `labeled` workflow.
 - Do not add labels that CI applies itself. Add a needed label only after the head's checks settle.
 
 ## From a jj workspace
