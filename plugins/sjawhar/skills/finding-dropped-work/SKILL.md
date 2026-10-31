@@ -42,6 +42,7 @@ Each row that is not DONE leaves the audit with one of these, the same hour:
 | It waits on the user | Open a Dispatch ask on its issue (`skill://dispatch`). A chat question, a note, a peer message, a comment on an answered ask or a review request is not an ask. |
 | A Dispatch record names a local file | Upload the file as an artifact on that issue and link it. |
 | The result sits in a document, artifact or chat line with no ask | Open an ask that links the result and asks the user's next step with it: an ask block at the end of that document, else a `dispatch ask`. An artifact notifies nobody. |
+| The work was delivered smaller or different than its goal | Count it open, not done. Finish the missing part now, or open an ask on its issue naming each unmet requirement and asking whether it is dropped. A new issue for the missing part does not close this row. |
 | Dropped on purpose | Say so to the requester, with the reason, on the issue. |
 
 Then report done, with the audit's counts: rows found, rows closed by each action.

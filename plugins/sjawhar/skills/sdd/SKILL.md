@@ -46,7 +46,7 @@ Write the plan's first draft from what you know: after step 1's reading, open no
 - **Slices.** Each slice merges as one PR and ends in something the requester can try: a command that runs, a page that renders, a real record that moves. Cut each slice as a thin end-to-end path, never a layer, and order them so the one the requester can use ships first. A slice is a merge and acceptance boundary, not a work assignment: its tasks still split into parallel ownership units, and independent slices run at once. Later slices extend the contracts named up front, never replace them. A slice that only works with scaffolding you would delete later does not ship alone: fold it into the next slice's PR.
 - Complete cutovers: migrate every caller and remove obsolete paths, shims, aliases, compatibility exports and dead code, unless Sami requires compatibility.
 - The five sections every plan carries, the rule for a second workspace, and how to run a major design change with him: `references/plan-sections.md`.
-- A `reviewer` gates every new or materially changed plan before implementation.
+- A `reviewer` gates every new or materially changed plan before implementation, and checks that the plan meets the issue's goal and every requirement of it, not only that it is buildable. A requirement the plan leaves out fails the review unless the requester recorded that it is out of scope here.
 
 ## Step 5. Dispatch the work
 
@@ -61,6 +61,8 @@ Dispatch `deep` acceptance for the slice's outcome once its tasks are merged int
 ## Step 7. Review, then merge
 
 After acceptance, run each step on the branch tip the step before it left: the final `reviewer`, then `ce-simplify-code` once for a runtime change, then you dispatch `thermonuclear-deep-review` and `thermonuclear-code-quality` once at that commit. Then fill the gate ledger from the artifacts at that commit and send the merge packet (`running-the-merge-queue` says what it holds): `references/review-and-merge.md`.
+
+Judge the result against the issue's goal and its requirements, not only the plan's scenarios, and say so in each review brief. A requirement the result does not meet fails the review whether or not the branch, the PR body or a report declares it; it passes only when the requester recorded, before the review, that it would not be done in this piece of work. Moving a missing part to a new issue is not acceptance. The `reviewer` dispatches one subagent whose only job is to red-team the result against the goal and the requirements, and reads its findings before deciding; its verdict names each finding and what it did with it.
 
 ## Step 8. Keep the issue status current
 
