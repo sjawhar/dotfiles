@@ -525,6 +525,29 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             writer.terminate()
             writer.wait()
 
+    def test_tmp_entry_on_another_filesystem_costs_tmp_nothing(self) -> None:
+        # A containerd or buildkit overlay mounted under /tmp was named at 3.0 GB on 2026-10-31,
+        # but its bytes live on the data disk, not on /. Files on another device must not count.
+        entry = Path(self.tmp.name) / "containerd-mount123"
+        entry.mkdir()
+        (entry / "layer.bin").write_bytes(b"x" * 4096)
+        real_lstat = os.lstat
+        tmp_dev = os.stat(self.tmp.name).st_dev
+
+        def lstat_on_another_device(path, *args, **kwargs):
+            result = real_lstat(path, *args, **kwargs)
+            if str(path).startswith(str(entry) + "/"):
+                fields = list(result)
+                fields[2] = tmp_dev + 1  # st_dev
+                return os.stat_result(fields)
+            return result
+
+        with unittest.mock.patch.object(WATCH.os, "lstat", side_effect=lstat_on_another_device):
+            found = WATCH.tmp_entries(self.tmp.name, age=60.0, big=1, walk_dirs=True, budget=5.0)
+        self.assertNotIn(str(entry), [row[1] for row in found])
+        found = WATCH.tmp_entries(self.tmp.name, age=60.0, big=1, walk_dirs=True, budget=5.0)
+        self.assertIn(str(entry), [row[1] for row in found])
+
 
 class DiskFillWatchFloorAgainstDeviceTest(unittest.TestCase):
     """A floor is a number about a device, so it is checked against the device it names.
