@@ -29,6 +29,9 @@ none there; run as `mise which -C / agent-secrets --tool agent-secrets` it print
 
 from __future__ import annotations
 
+import json
+import re
+import socket
 import stat
 import subprocess
 import tempfile
@@ -78,14 +81,27 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 
 
 # identity exits $STUB_IDENTITY (printing to both streams, as a client may); every other call
-# prints its argv and URL, then either exits $STUB_BROKER_EXIT or execs the command after `--`.
+# prints its argv less `--reason R` and its URL, then either exits $STUB_BROKER_EXIT or execs the
+# command after `--`. R goes to stderr as `REASON R`, beside `SESSION_ID S`, the session id the
+# real client sends (OMP_SESSION_ID, else ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID).
 AGENT_SECRETS_STUB = r"""
 if [[ "$1" == identity ]]; then
     echo "identity-stdout"
     echo "identity: ${STUB_IDENTITY_MSG:-no broker identity}" >&2
     exit "${STUB_IDENTITY:-1}"
 fi
-echo "BROKER $* URL=${AGENT_SECRETS_URL:-unset} MARK=${DOTFILES_AGENT_SECRETS_URL:-unset}"
+printed=()
+for (( i = 1; i <= $#; i++ )); do
+    if [[ "${!i}" == -- ]]; then printed+=("${@:i}"); break; fi
+    if [[ "${!i}" == --reason ]]; then
+        (( i++ ))
+        echo "REASON ${!i}" >&2
+        continue
+    fi
+    printed+=("${!i}")
+done
+echo "SESSION_ID ${OMP_SESSION_ID:-${ENVOY_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-none}}}" >&2
+echo "BROKER ${printed[*]} URL=${AGENT_SECRETS_URL:-unset} MARK=${DOTFILES_AGENT_SECRETS_URL:-unset}"
 [[ -n "${STUB_BROKER_EXIT:-}" ]] && exit "$STUB_BROKER_EXIT"
 while (( $# )) && [[ "$1" != -- ]]; do shift; done
 (( $# )) || exit 0
@@ -179,13 +195,14 @@ class SecretRun(unittest.TestCase):
             result.stdout.splitlines(),
             [
                 (
-                    "BROKER AIRTABLE_TOKEN DD_API_KEY --reason skill: smoke --wait 0 -- "
+                    "BROKER AIRTABLE_TOKEN DD_API_KEY --wait 0 -- "
                     f'sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}'
                 ),
                 "via=broker",
             ],
         )
         self.assertNotIn("identity-stdout", result.stdout)
+        self.assertRegex(result.stderr, r"(?m)^REASON skill: smoke \| session: no omp session; pid \d+, cwd ")
 
     def test_equals_forms_and_a_duration_wait_reach_the_broker(self) -> None:
         self.with_client()
@@ -195,9 +212,10 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[0],
-            "BROKER AIRTABLE_TOKEN --reason skill: smoke --wait 30s -- "
+            "BROKER AIRTABLE_TOKEN --wait 30s -- "
             f'sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
         )
+        self.assertRegex(result.stderr, r"(?m)^REASON skill: smoke \| session: ")
 
     def test_caller_url_is_kept(self) -> None:
         self.with_client()
@@ -358,9 +376,13 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(
             result.stdout.splitlines(),
             [
-                "BROKER request DEEL_API_KEY GH_PUBLIC_REPO_PAT --reason task: start "
-                f"URL={BROKER_URL} MARK={BROKER_URL}"
+                f"BROKER request DEEL_API_KEY GH_PUBLIC_REPO_PAT URL={BROKER_URL} MARK={BROKER_URL}"
             ],
+        )
+        self.assertRegex(
+            result.stderr,
+            r"(?m)^REASON task: start \| session: no omp session; pid \d+, cwd .+ \| runs: request only, no command "
+            r"\| host: \S+$",
         )
 
     def test_ttl_reaches_the_broker_for_exec_and_request(self) -> None:
@@ -433,6 +455,158 @@ class SecretRun(unittest.TestCase):
                 self.assertIn("usage: secret-run", result.stderr)
                 self.assertNotIn("BROKER", result.stdout)
                 self.assertNotIn("SECRETSD", result.stdout)
+
+    # The approval card shows the secret names, the reason and the request's session id, and
+    # nothing else (TASKCOACH's gws call, 2026-10-30: "gws theorem modify", "No session named").
+    SESSION = "01a16a9e-a90d-7148-95ed-0e9e7839dbd2"
+    GWS = (
+        "--",
+        "gws",
+        "docs",
+        "documents",
+        "batchUpdate",
+        "--params",
+        '{"documentId":"1PTCUrEOLmYbHUx9Zf-ruQ5P5GhDAnpsEptQWOvRcKZk"}',
+        "--json",
+        '{"requests":[{"insertText":{"text":"a private paragraph ya29.not-a-real-token"}}]}',
+    )
+
+    def with_session(self, title: str = "TASKCOACH: RL task difficulty coach") -> Path:
+        """An omp session's transcript, with omp's title slot first, and its subagent CarryCensus's
+        transcript in the directory of the same name; returns the subagent's."""
+        sessions = Path(self.temp_dir.name) / ".omp" / "agent" / "sessions" / "-src-taiga"
+        root = sessions / f"2026-10-23T21-15-45-293Z_{self.SESSION}.jsonl"
+        root.parent.mkdir(parents=True)
+        slot = json.dumps({"type": "title", "v": 1, "title": title, "source": "user"})
+        root.write_text(f"{slot}\n" + json.dumps({"type": "session", "id": self.SESSION}) + "\n", encoding="utf-8")
+        subagent = sessions / root.stem / "CarryCensus.jsonl"
+        subagent.parent.mkdir()
+        subagent.write_text(json.dumps({"type": "title", "v": 1, "title": ""}) + "\n", encoding="utf-8")
+        write_stub(self.stub_dir, "gws", 'echo "via=$VIA"')
+        return subagent
+
+    def reason_of(self, result: subprocess.CompletedProcess[str]) -> str:
+        lines = [line for line in result.stderr.splitlines() if line.startswith("REASON ")]
+        self.assertEqual(len(lines), 1, result.stderr)
+        return lines[0].removeprefix("REASON ")
+
+    def test_a_broker_request_names_why_its_session_its_command_and_its_host(self) -> None:
+        self.with_client()
+        subagent = self.with_session()
+        result = self.run_secret_run(
+            "--reason",
+            "gws theorem modify",
+            "--wait",
+            "4m",
+            "GWS_THEOREM_MODIFY_OAUTH",
+            *self.GWS,
+            STUB_IDENTITY="0",
+            OMP_SESSION_ID=self.SESSION,
+            PI_SESSION_FILE=str(subagent),
+            SECRET_RUN_REASON="retitle the environment tabs",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                f"BROKER GWS_THEOREM_MODIFY_OAUTH --wait 4m {' '.join(self.GWS)} URL={BROKER_URL} MARK={BROKER_URL}",
+                "via=broker",
+            ],
+        )
+        reason = self.reason_of(result)
+        self.assertRegex(
+            reason,
+            "^"
+            + re.escape(
+                f'gws theorem modify; retitle the environment tabs | session: omp {self.SESSION} "TASKCOACH: RL task '
+                'difficulty coach" subagent CarryCensus | runs: gws docs documents batchUpdate '
+                f"documentId=1PTCUrEOLmYbHUx9Zf-ruQ5P5GhDAnpsEptQWOvRcKZk +4 args | host: {socket.gethostname()} pid "
+            )
+            + r"\d+$",
+        )
+        self.assertNotIn("ya29", reason)
+        self.assertNotIn("private", reason)
+        self.assertIn(f"SESSION_ID {self.SESSION}", result.stderr.splitlines())
+
+    def test_a_session_file_alone_names_the_session_to_the_client(self) -> None:
+        """omp's eval kernel runs with PI_SESSION_FILE and no OMP_SESSION_ID: secret-run exports
+        the session id the file names, so the request body names its session."""
+        self.with_client()
+        subagent = self.with_session()
+        result = self.run_secret_run(
+            "--reason", "gws theorem modify", "GWS_THEOREM_MODIFY_OAUTH", *self.GWS,
+            STUB_IDENTITY="0", PI_SESSION_FILE=str(subagent),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"SESSION_ID {self.SESSION}", result.stderr.splitlines())
+        self.assertIn(f'| session: omp {self.SESSION} "TASKCOACH: RL task difficulty coach" subagent CarryCensus |',
+                      self.reason_of(result))
+
+    def test_a_session_the_client_already_sends_is_not_replaced(self) -> None:
+        self.with_client()
+        subagent = self.with_session()
+        result = self.run_secret_run(
+            "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="0", PI_SESSION_FILE=str(subagent),
+            CLAUDE_CODE_SESSION_ID="claude-session-1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SESSION_ID claude-session-1", result.stderr.splitlines())
+        self.assertIn("| session: claude claude-session-1 |", self.reason_of(result))
+
+    def test_dry_run_prints_the_request_and_requests_nothing(self) -> None:
+        self.with_client()
+        subagent = self.with_session()
+        result = self.run_secret_run(
+            "request", "--dry-run", "--reason", "test: card text check", "--ttl", "1m", "GWS_THEOREM_MODIFY_OAUTH",
+            STUB_IDENTITY="0", PI_SESSION_FILE=str(subagent),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(
+            lines[:5],
+            [
+                "secret-run --dry-run: nothing requested",
+                "store: broker",
+                "keys: GWS_THEOREM_MODIFY_OAUTH",
+                "ttl: 1m",
+                f"session_id: {self.SESSION}",
+            ],
+        )
+        self.assertRegex(
+            lines[5],
+            "^"
+            + re.escape(f'reason: test: card text check | session: omp {self.SESSION} "TASKCOACH: RL task difficulty '
+                        "coach\" subagent CarryCensus | runs: request only, no command | host: ")
+            + r"\S+ pid \d+$",
+        )
+        self.assertEqual(len(lines), 6, result.stdout)
+        self.assertNotIn("REASON", result.stderr)
+
+    def test_dry_run_on_secretsd_runs_nothing(self) -> None:
+        self.with_client()
+        result = self.run_secret_run("--dry-run", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("store: secretsd (no broker identity)", result.stdout)
+        self.assertIn("session_id: none", result.stdout)
+        for absent in ("BROKER", "SECRETSD", "via="):
+            self.assertNotIn(absent, result.stdout)
+
+    def test_a_failed_reason_builder_still_says_who_asks(self) -> None:
+        """The broker path never stops on the reason: a builder that fails (here python3 itself)
+        leaves the caller's reason, in printable ASCII, with the host and the pid."""
+        self.with_client()
+        write_stub(self.stub_dir, "python3", "exit 1")
+        result = self.run_secret_run(
+            "--reason", "gws theorem modify", "AIRTABLE_TOKEN", *self.CMD,
+            STUB_IDENTITY="0", SECRET_RUN_REASON="line one\nline\u202etwo",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
+        self.assertRegex(
+            self.reason_of(result),
+            r"^gws theorem modify; line one line two \| session: unknown, secret-run-reason failed "
+            rf"\| host: {re.escape(socket.gethostname())} pid \d+$",
+        )
 
 
 if __name__ == "__main__":

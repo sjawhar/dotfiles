@@ -1,6 +1,6 @@
 {
   "personal": {
-    "description": "sami.n.jawhar@gmail.com, Sami's personal Google account",
+    "description": "sami.n.jawhar@gmail.com, Sami's personal Google account. A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='archive the triaged threads' gws ...)",
     "tiers": {
       "read": {
         "command": ["secrets", "GWS_PERSONAL_READ_OAUTH", "--"],
@@ -17,7 +17,7 @@
     }
   },
   "theorem": {
-    "description": "sami@theorem.dev, Theorem's Workspace. OAuth client: the Internal Desktop client \"gws CLI\" in Theorem's theorem-gws-cli project",
+    "description": "sami@theorem.dev, Theorem's Workspace. OAuth client: the Internal Desktop client \"gws CLI\" in Theorem's theorem-gws-cli project. A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='fix the headings in the Q3 plan' gws ...)",
     "tiers": {
       "read": {
         "command": ["secret-run", "--reason", "gws theorem read", "GWS_THEOREM_READ_OAUTH", "--"],

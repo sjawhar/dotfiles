@@ -20,10 +20,10 @@ paths = [
   "installers/agent-secrets.sh", "installers/secretsd.sh",
   "scripts/agentbox", "scripts/agentbox-run.ts", "scripts/agentbox-run.test.ts",
   "scripts/agent-secrets-login", "scripts/agent-secrets-session", "scripts/agent-session",
-  "scripts/secret-run",
+  "scripts/secret-run", "scripts/secret-run-reason",
   "scripts/hawk-token", "scripts/agent-access", "scripts/browser-slot",
   "scripts/tests/test_agent_secrets_launchers.py", "scripts/tests/test_agentbox_enroll.py",
-  "scripts/tests/test_secret_run.py", "scripts/tests/test_browser_capture.py",
+  "scripts/tests/test_secret_run.py", "scripts/tests/test_secret_run_reason.py", "scripts/tests/test_browser_capture.py",
   "scripts/tests/test_agent_access.py", "scripts/tests/test_agentbox_envoy.py",
   "shims/", "docs/devbox-lane-rules.md",
 ]

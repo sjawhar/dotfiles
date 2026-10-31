@@ -1,0 +1,134 @@
+#!/usr/bin/python3
+"""Post a pull-request review as the Legion review App, refusing if the head moved.
+
+This lived in /mnt/nvme/sami/tmp/infra-wake and was deleted, with every verdict file beside
+it, by something sweeping /mnt/nvme/sami/tmp on 2026-10-31 between 02:57Z and 03:20Z; the
+gateway lane lost a script in the same window. It lives in ~/.dotfiles now, because a lane's
+working tools do not belong on a path every session treats as scratch.
+
+The head check is the point. A verdict names one head, and GitHub will happily attach it to
+whatever the branch holds now, so a review posted after a force-push describes a tree nobody
+has. If the head has moved, this refuses and the caller re-gates.
+
+GH_TOKEN is never exported. The installation token is passed to one `gh` call through its own
+environment, so no later command in the caller's shell speaks as the App.
+
+The review App's key is human-tier (Sami, 2026-10-26: "move the Legion reviewer App private
+key back to the human tier; he grants it to dev-box agents that need it"), so it comes from
+the secrets broker through secret-run and is never written to disk.
+
+Usage:
+  post-review <pr> <40-char head sha> APPROVE|REQUEST_CHANGES|COMMENT <body-file> <owner/repo>
+"""
+
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+APP_ID = "5341243"  # git config gh-app.review.app-id
+KEY_SECRET = "GH_REVIEW_APP_PRIVATE_KEY_B64"  # git config gh-app.review.key-secret
+EVENTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
+
+
+def die(message: str, code: int = 2) -> None:
+    print(f"post-review: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def installation_token(owner: str, repo: str) -> str:
+    """Mint an installation token for the review App, through the broker."""
+    script = (
+        "import base64,json,os,subprocess,sys,time,urllib.request\n"
+        "import jwt\n"
+        "key = base64.b64decode(os.environ['" + KEY_SECRET + "'])\n"
+        "now = int(time.time())\n"
+        "assertion = jwt.encode({'iat': now - 60, 'exp': now + 540, 'iss': '" + APP_ID + "'},"
+        " key, algorithm='RS256')\n"
+        "def api(path, method='GET'):\n"
+        "    req = urllib.request.Request('https://api.github.com' + path, method=method)\n"
+        "    req.add_header('Authorization', 'Bearer ' + assertion)\n"
+        "    req.add_header('Accept', 'application/vnd.github+json')\n"
+        "    return json.load(urllib.request.urlopen(req))\n"
+        "inst = api('/repos/' + sys.argv[1] + '/' + sys.argv[2] + '/installation')\n"
+        "out = api('/app/installations/%d/access_tokens' % inst['id'], 'POST')\n"
+        "print(out['token'])\n"
+    )
+    run = subprocess.run(
+        [
+            "secret-run",
+            "--register",
+            "--reason",
+            f"post-review {owner}/{repo}",
+            KEY_SECRET,
+            "--",
+            "python3",
+            "-c",
+            script,
+            owner,
+            repo,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if run.returncode != 0:
+        die(f"could not mint a review App token:\n{run.stderr.strip()}", 1)
+    token = run.stdout.strip().splitlines()[-1]
+    if not token.startswith("ghs_"):
+        die(f"the broker returned no installation token: {run.stdout.strip()[:200]}", 1)
+    return token
+
+
+def gh(token: str, *args: str, stdin: str | None = None) -> str:
+    run = subprocess.run(
+        ["gh", *args],
+        capture_output=True,
+        text=True,
+        input=stdin,
+        env={**__import__("os").environ, "GH_TOKEN": token},
+    )
+    if run.returncode != 0:
+        die(f"gh {' '.join(args)} failed:\n{run.stderr.strip()}", 1)
+    return run.stdout.strip()
+
+
+def main() -> None:
+    if len(sys.argv) < 6:
+        die(
+            "usage: post-review <pr> <head-sha> APPROVE|REQUEST_CHANGES|COMMENT"
+            " <body-file> <owner/repo>"
+        )
+    pr, head, event, body_file, slug = sys.argv[1:6]
+
+    if event not in EVENTS:
+        die(f"event must be one of {', '.join(EVENTS)}, not {event}")
+    if len(head) != 40:
+        die(f"the head must be the full 40-character sha, not {head}")
+    body = pathlib.Path(body_file)
+    if not body.is_file():
+        die(f"cannot read {body_file}")
+    owner, _, repo = slug.partition("/")
+    if not repo:
+        die(f"the repository must be owner/repo, not {slug}")
+
+    token = installation_token(owner, repo)
+
+    live = gh(token, "api", f"repos/{slug}/pulls/{pr}", "--jq", ".head.sha")
+    if live != head:
+        die(
+            f"refusing, the head moved: {slug}#{pr} is at {live}, the verdict names {head}",
+            1,
+        )
+
+    payload = json.dumps(
+        {"commit_id": head, "event": event, "body": body.read_text()}
+    )
+    gh(token, "api", "--method", "POST", f"repos/{slug}/pulls/{pr}/reviews", "--input", "-", stdin=payload)
+
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"post-review: posted {event} on {slug}#{pr} at {head} ({stamp})")
+
+
+if __name__ == "__main__":
+    main()
