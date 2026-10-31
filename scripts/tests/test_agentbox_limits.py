@@ -15,6 +15,7 @@ a real host replaced by no-ops. The docker stub records `docker run`'s arguments
 
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
 import tempfile
@@ -98,6 +99,8 @@ class AgentboxLimits(unittest.TestCase):
             ("--memory-swap", swap),
             ("--cpus", cpus),
             ("--pids-limit", "8192"),
+            # Every box shares the user slice's ceiling with the host's sessions.
+            ("--cgroup-parent", f"user-{os.getuid()}-agentbox.slice"),
         ):
             self.assertIn(flag, args, args)
             self.assertEqual(args[args.index(flag) + 1], value, args)
