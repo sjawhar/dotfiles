@@ -31,10 +31,21 @@ verdict. Then the unit is rebuilt and its acceptance check of record is run.
   files: near-copies of the restated file under another name (one unit held a near-copy of each restated file,
   differing in 154 to 1113 lines; another's copies differed by 37% to 78%), and files that define a single
   marked name. One writer printed a definition body through a plain grep of a sibling and had to be thrown away.
-- Quarantine by text, not by name: a marked name alone over-quarantines and closes nothing, because one unit
-  had a marked name that named a different, unrelated item in 480 of its files. Quarantine a sibling when its
-  definition of a marked name is byte-equal after normalising, or shares at least 20% of the item's lines, or
-  when the file shares at least 30% of the file's lines.
+- Quarantine by text, not by name, and apply the test to the ITEM as well as to the file. A marked name alone
+  over-quarantines and closes nothing: one unit had a marked name that named a different, unrelated item in
+  480 of its files. Quarantine a sibling whose definition of a marked name is byte-equal after normalising, or
+  which shares at least 20% of a marked item's lines, or at least 30% of the file's lines. The item test is
+  what catches the dangerous case: one voided writer's sibling held 19% of the file's lines and 64% of the
+  lines of the item being restated.
+- Look for the same item under a DIFFERENT name. The siblings that leaked were not the same-name files: they
+  declared the same items with a changed suffix or a changed prefix. A quarantine built from names lets every
+  one of them through.
+- A CONSUMER of an item is not a sibling: it shares the text because it restates the statement in its own
+  lemmas, and that contract is what the writer needs. Quarantine a heavy consumer and hand the writer a
+  generated list instead, holding every line of every consumer that mentions one of its names, with file, line
+  and a little context, and tell it that context may carry proof text it must not follow.
+- A writer may not keep its own copy of the sources. One writer had archived them into its workspace before
+  the quarantine existed, where no quarantine on the shared machine reaches.
 - Move the compiled artefact with the source. In Rocq, `Print` of a transparent constant prints its body and
   `Print` of an opaque proof read from a `.vo` prints the old proof term; every compiled or cached form of a
   quarantined file leaks the same way.
@@ -42,8 +53,11 @@ verdict. Then the unit is rebuilt and its acceptance check of record is run.
   environment the work is developed against, and the defect appears only at the central build. Mark the item as
   duplicating a required file, let the writer use that file as the library it is, and let the reviewer call the
   item statement-forced, naming the file.
-- Write a unit in dependency order, so a downstream writer compiles against the new upstream text and no print
-  of a dependency can show an old term.
+- Write a unit in dependency order, and start a wave when its upstream COMPILES rather than when its reviewer
+  passes: a send-back changes a proof, and a statement is byte-equal by construction, so downstream work
+  survives it. The exception is a send-back on a definition, notation, record or inductive, which changes a
+  body and so every downstream digest; review a wave's definition-like items before its lemmas, so the
+  expensive send-back is found first. One unit held 168 definitions among 515 items.
 - A quarantined worktree can no longer build the whole unit, and that is expected. The writer builds its own
   file and the consumers of its items; the whole-unit build and the acceptance check run centrally.
 
