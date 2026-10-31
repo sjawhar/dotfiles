@@ -42,8 +42,15 @@ Per mount, per run:
 | Rate candidate | time to full < `--horizon` (2 h), with at least `--min-span` (25 min) of df samples behind the rate and free at a new low for the hour |
 | **Crossing** | free < the mount's hard floor, **or** three consecutive rate candidates at least `--confirmation-spacing` (5 min) apart |
 | Alert | after `--grace` (240 s, so a second consecutive run confirms it) |
-| Escalate | 30 minutes after the alert, if free is lower than it was then |
+| Escalate | 30 minutes after the alert, if free is lower than it was then, **and again on each further fall of 5 GiB (`FLOOR_STEP`) below the lowest level already reported**, while the crossing stays open |
 | Clear | free ≥ floor × 1.5 **and** no df free-space fall that reaches full inside twice the horizon |
+
+**A crossing that keeps falling keeps saying so.** The `/` crossing of 2026-10-31 opened about
+11:04Z, alerted at 11:09Z and escalated at 11:39Z, then said nothing while free space fell from
+22.6 GiB to 3.9 GiB: after the first escalation the only remaining test was the clock, and the
+clock fires once. Each further fall of `FLOOR_STEP` (5 GiB, the step the guard
+`guard-disk-writers` uses for the same purpose) below the lowest level this watch has already
+reported is a new fact, so it escalates again, with the current writers and the current number.
 
 **A sawtooth is not a leak.** `/mnt/nvme` on this box swings about 100 GB up and down every hour
 as grade jobs land and are cleaned (its 10-minute log on 2026-10-26 reads 295 GB → 479 → 378 →
@@ -156,6 +163,21 @@ it is on the alerting mount, and the largest file it holds open there.
   it sends nothing and writes nothing). Where it is not, the unprivileged sample is used and the
   alert says how many processes refused the read, so root's writers are never reported as absent.
   `--sudo never` turns the privileged half off.
+- **The child's stdout is the JSON document and nothing else**; every diagnostic it prints goes
+  to stderr, which the parent logs with a `[privileged]` prefix. On 2026-10-31 all ten
+  privileged samples of the day were lost to `JSONDecodeError: Extra data: line 1 column 5
+  (char 4)` — a timestamped log line on that stdout, whose four-digit year parsed as the whole
+  document. The `sudo -n true` probe in front of it gets **30 s**, not 5: the 06:04Z sample that
+  day was lost to that deadline on a box at load 200+, where a call costing ~1.5 s idle has been
+  measured at 10.1 s.
+
+Above the `/proc` traffic list, an alert carries the **guard's kept-growth rows** for the
+crossing mount from the last 60 minutes — `disk-writers: growth session:<id> on <mount>: kept X
+GB of Y GB written`, read with `sudo -n journalctl -u guard-disk-writers.service --since -60min
+-o cat`, newest last, at most six. That is the one thing a 15-second traffic sample cannot say:
+which session's writes actually **stayed** on the disk over an hour. The read is best-effort — a
+journal this run cannot read costs the alert only those lines, which are left out and the reason
+logged.
 
 The expensive reads happen only on a run that actually sends. An ordinary run is `statvfs` plus a
 bounded `/tmp` scan: **0.3–0.4 s** measured on this box at load 43.
@@ -207,7 +229,8 @@ unchanged: they always go to the box-health owner.
 
 Agent sessions only, never a person. Every message goes to the Envoy role
 **`notifications.role.lead-box-health`**: the first alert, the escalation 30 minutes later when
-a crossing is still open and free space is still **lower than at the alert**, and the clear.
+a crossing is still open and free space is still **lower than at the alert**, each further
+escalation 5 GiB below the lowest level already reported, and the clear.
 Box health is the box-health lane's work, decided 2026-10-31T02:37:50Z; the chief of staff was
 on the escalation until then, the INFRA lead owned this detector and handed the lane over, and
 neither is on anything here now.
@@ -221,7 +244,9 @@ the service's environment: every message then goes to that session alone, with n
 this is how the OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring
 owner instead of to this box's role holder. An invalid value stops the watch at start.
 
-One alert per crossing, one clear. The clear goes to everyone who heard the crossing.
+One first alert per crossing, one clear, and an escalation for each 5 GiB the disk falls below
+the last level reported while that crossing stays open. The clear goes to everyone who heard the
+crossing.
 
 Every alert ends with what to DO: read the writers first, stop or finish the lane that is writing,
 move its output to the other disk, then reclaim with skill://disk-hygiene — whose check-in comes
@@ -237,7 +262,9 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
   open the same crossing; the loser logs `another run holds …` and skips its period;
 - `alerted_at` is written and `fsync`ed **before** the first message is sent;
 - it also holds the df free-space samples, each mount's in-progress consecutive rate
-  confirmations, and the `/tmp` entries already named;
+  confirmations, the lowest free space each open crossing has already been reported at
+  (`reported_free`, what the 5 GiB escalation step is measured from), and the `/tmp` entries
+  already named;
 - `--state <other path>` is for tests only: a run on any other file forces `--dry-run`.
 
 ## Inputs
@@ -247,6 +274,7 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 | Free and total space | `os.statvfs(mount)` — `f_bavail`, `f_blocks`, `f_frsize` |
 | df free-space fill rate and time to full | this watch's own free-space samples in its state file |
 | Writers | `/proc/<pid>/io` `write_bytes`, twice, `--writer-sample` apart, through `sudo -n` where allowed; reported as single-window write traffic |
+| Disk growth kept, by session | `sudo -n journalctl -u guard-disk-writers.service --since -60min -o cat`, the guard's `growth session:` rows for the crossing mount; best-effort |
 | A writer's session | `/proc/<pid>/environ`, `/proc/<pid>/cmdline`, `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl`, then its ancestors |
 | A writer's mount | `/proc/<pid>/cwd` and `/proc/<pid>/fd`, compared with the mount's `st_dev` at the sample instant |
 | Young `/tmp` entries | `os.scandir('/tmp')`, a budgeted `os.walk` for directories, and the newest file or directory mtime seen while sizing |

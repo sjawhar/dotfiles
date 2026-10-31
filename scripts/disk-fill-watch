@@ -53,8 +53,9 @@ itself be the load.
 
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
 for the first alert, for the escalation 30 minutes later when a crossing is still open and
-still descending, and for the clear. An unheld role falls back to the box-health SRE's
-session. This watch only detects. It deletes nothing and kills nothing.
+still descending, for each further fall of FLOOR_STEP below the lowest level already reported,
+and for the clear. An unheld role falls back to the box-health SRE's session. This watch only
+detects. It deletes nothing and kills nothing.
 """
 
 from __future__ import annotations
@@ -87,6 +88,9 @@ GIB = 1073741824
 GB = 1000000000
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+# A log() stamp at the start of a line, stripped when the privileged child's stderr is relayed.
+STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\s*")
 
 # Where the state file goes. /mnt/nvme is the big disk on the agent boxes; a machine without it
 # (a laptop, and every ossv lane box, where /mnt/nvme is a root-owned directory on the root
@@ -151,10 +155,28 @@ MAX_FLOOR_FRACTION = 0.10
 # 1 GB/h on a disk with any useful headroom is days from full, well outside any horizon.
 FLAT_RATE = GB / 3600
 
+# How much further free space must fall, below the lowest level this watch has already
+# reported, before an open crossing is said again. The `/` crossing of 2026-10-31 opened at
+# 11:04Z, was alerted at 11:09Z and escalated once at 11:39Z, and then said nothing while free
+# space fell from 22.6 GiB to 3.9 GiB: after the first escalation the only test was the clock,
+# and it fires once. A fall of this much is a new fact, so it is said. The guard that sheds
+# writers uses the same step for the same purpose (agent-infra monitoring/host guard.sh
+# `FLOOR_STEP`, 5 GB decimal there).
+FLOOR_STEP = 5 * GIB
+
+
+# Where log() writes. stdout for an ordinary run, whose stdout is the journal; stderr in the
+# `--writers-json` child, whose stdout is a JSON document its parent parses. A timestamped log
+# line on that stdout broke every privileged writer sample taken on 2026-10-31 (ten
+# `JSONDecodeError: Extra data: line 1 column 5 (char 4)` -- the four digits of the year, then
+# the rest of the stamp), so the child's diagnostics go to stderr, which the parent already
+# reads and logs.
+LOG_STREAM = sys.stdout
+
 
 def log(message: str) -> None:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    print(f"{stamp} {message}", flush=True)
+    print(f"{stamp} {message}", flush=True, file=LOG_STREAM)
 
 
 def iso(epoch: float | None) -> str:
@@ -711,6 +733,57 @@ def writers_text(described: list[dict], denied: int, seconds: float, mount: str,
     return "\n".join(lines)
 
 
+# How long the `sudo -n true` probe may take. It was 5 s, and on 2026-10-31T06:04Z a run on a
+# loaded box lost its whole privileged sample to that deadline (`TimeoutExpired`). The probe
+# itself does no work; what it waits for is the box, which sits at load 200+ and where a call
+# that costs ~1.5 s idle has been measured at 10.1 s (scripts/AGENTS.md, hawk-token). 30 s is
+# well past that and still bounded: it is spent only on a run that is already sending.
+SUDO_PROBE_TIMEOUT = 30.0
+
+# How many of the guard's growth rows an alert carries, and how far back it looks for them.
+GROWTH_ROWS = 6
+GROWTH_WINDOW = "-60min"
+
+
+def growth_text(mount: str) -> str:
+    """The guard's recent kept-growth rows for this mount, newest last, or "".
+
+    `guard-disk-writers` already attributes DISK GROWTH to a session over an hour --
+    `disk-writers: growth session:<id> on <mount>: kept X GB of Y GB written` -- which is the
+    one thing the 15 s /proc traffic sample below cannot say. It is read best-effort: a journal
+    this run cannot read costs the alert nothing but these lines.
+    """
+    try:
+        done = subprocess.run(
+            ["sudo", "-n", "journalctl", "-u", "guard-disk-writers.service", "--since", GROWTH_WINDOW, "-o", "cat"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"  guard growth rows unavailable: {type(error).__name__}: {error}")
+        return ""
+    if done.returncode != 0:
+        log(f"  guard growth rows unavailable: journalctl exited {done.returncode}")
+        return ""
+    marker = f" on {mount}: "
+    rows = [
+        line.strip()
+        for line in done.stdout.splitlines()
+        if "disk-writers: growth session:" in line and marker in line
+    ]
+    if not rows:
+        return ""
+    kept = rows[-GROWTH_ROWS:]
+    return (
+        f"Disk growth kept on {mount} in the last 60 min, by session"
+        f" (guard-disk-writers, newest last):\n"
+        + "\n".join(f"  {row}" for row in kept)
+        + "\n\n"
+    )
+
+
 def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
     """The top writers paragraph of an alert, privileged where this machine allows it.
 
@@ -718,14 +791,19 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
     writers that took the box down on 2026-10-27 (rsyslogd on /var/log/syslog, dockerd's exec
     scratch in /tmp). So where `sudo -n` works, the whole sample runs as root in a child of this
     script -- both /proc passes and the cwd and fd reads, which are refused to us too -- and the
-    child prints the rows as JSON. Where it does not, the unprivileged sample is used and the
-    alert says how many processes refused the read, rather than implying there were none.
+    child prints the rows as JSON on stdout and every diagnostic on stderr. Where it does not,
+    the unprivileged sample is used and the alert says how many processes refused the read,
+    rather than implying there were none.
     """
     payload = json.dumps({"seconds": options.writer_sample, "device": device, "top": options.top_writers})
+    growth = growth_text(mount) if options.sudo != "never" else ""
     if options.sudo != "never":
         try:
             probe = subprocess.run(
-                ["sudo", "-n", "true"], capture_output=True, timeout=5, stdin=subprocess.DEVNULL
+                ["sudo", "-n", "true"],
+                capture_output=True,
+                timeout=SUDO_PROBE_TIMEOUT,
+                stdin=subprocess.DEVNULL,
             )
             if probe.returncode == 0:
                 done = subprocess.run(
@@ -737,7 +815,10 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
                 )
                 if done.returncode == 0:
                     answer = json.loads(done.stdout)
-                    return writers_text(
+                    for line in done.stderr.splitlines():
+                        # The child stamps its own lines; one stamp per journal line is enough.
+                        log(f"  [privileged] {STAMP_RE.sub('', line.strip())[:200]}")
+                    return growth + writers_text(
                         answer["writers"], answer["denied"], options.writer_sample, mount, privileged=True
                     )
                 log(f"  privileged writer sample failed ({done.returncode}): {done.stderr.strip()[:200]}")
@@ -747,7 +828,7 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
             log(f"  privileged writer sample unavailable: {type(error).__name__}: {error}")
     rows, denied = sample_writers(options.writer_sample)
     described = describe_writers(rows, device, options.writer_sample, options.top_writers)
-    return writers_text(described, denied, options.writer_sample, mount, privileged=False)
+    return growth + writers_text(described, denied, options.writer_sample, mount, privileged=False)
 
 
 # ------------------------------------------------------------------------------ the /tmp rule
@@ -1476,13 +1557,21 @@ def run_once(options: argparse.Namespace) -> int:
             continue
 
         first = not incident.get("alerted_at")
+        # The lowest free space this crossing has already been reported at: the first alert's
+        # level, then each escalation's. A crossing that keeps falling has to keep saying so --
+        # the `/` crossing of 2026-10-31 said nothing between 11:39Z and 3.9 GiB free -- so the
+        # clock escalates once and each further FLOOR_STEP below that level escalates again.
+        reported_free = incident.get("reported_free")
+        if reported_free is None:
+            reported_free = incident.get("alert_free")
         still_falling = now["free"] < (incident.get("alert_free") or now["free"])
-        escalating = (
-            not first
-            and not incident.get("escalated_at")
-            and started - incident["alerted_at"] >= options.escalate
+        timed_out = (
+            not incident.get("escalated_at")
+            and started - (incident.get("alerted_at") or started) >= options.escalate
             and still_falling
         )
+        stepped = reported_free is not None and now["free"] <= reported_free - FLOOR_STEP
+        escalating = not first and (timed_out or stepped)
         if not first and not escalating:
             log(f"{mount}: crossing for {human_time(open_for)}, already alerted at {iso(incident.get('alerted_at'))}")
             state.commit(options)
@@ -1507,7 +1596,9 @@ def run_once(options: argparse.Namespace) -> int:
             kind = "first alert"
         else:
             incident["escalated_at"] = started
+            incident["escalations"] = int(incident.get("escalations") or 0) + 1
             kind = f"STILL DESCENDING after {human_time(started - incident['alerted_at'])}"
+        incident["reported_free"] = now["free"]
         text = alert_text(now, incident, writers, tmp_lines, kind, started)
         if not first:
             text += (
@@ -1670,9 +1761,12 @@ def run_once(options: argparse.Namespace) -> int:
 def writers_json(raw: str) -> int:
     """The privileged half of the writer sample, run as `sudo -n <this script> --writers-json`.
 
-    It prints the described rows as JSON and nothing else: it reads /proc, sends no message,
-    writes no state and touches no file, so the only thing root does here is read.
+    Its stdout is one JSON document and nothing else, because its parent parses it; every
+    diagnostic goes to stderr, which the parent logs. It reads /proc, sends no message, writes
+    no state and touches no file, so the only thing root does here is read.
     """
+    global LOG_STREAM
+    LOG_STREAM = sys.stderr
     request = json.loads(raw)
     rows, denied = sample_writers(float(request["seconds"]))
     described = describe_writers(
