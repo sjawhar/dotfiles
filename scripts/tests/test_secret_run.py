@@ -80,15 +80,27 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-# identity exits $STUB_IDENTITY (printing to both streams, as a client may); every other call
-# prints its argv less `--reason R` and its URL, then either exits $STUB_BROKER_EXIT or execs the
-# command after `--`. R goes to stderr as `REASON R`, beside `SESSION_ID S`, the session id the
-# real client sends (OMP_SESSION_ID, else ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID).
+# identity exits $STUB_IDENTITY (printing to both streams, as a client may); `machine login-status`
+# prints $STUB_LOGIN (default issued); `register [--wait N] --exec -- CMD` prints its argv and execs
+# CMD as a registered session, whose identity is then $STUB_REGISTERED_IDENTITY (default 0); every
+# other call prints its argv less `--reason R` and its URL, then either exits $STUB_BROKER_EXIT or
+# execs the command after `--`. R goes to stderr as `REASON R`, beside `SESSION_ID S`, the session
+# id the real client sends (OMP_SESSION_ID, else ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID).
 AGENT_SECRETS_STUB = r"""
 if [[ "$1" == identity ]]; then
     echo "identity-stdout"
     echo "identity: ${STUB_IDENTITY_MSG:-no broker identity}" >&2
     exit "${STUB_IDENTITY:-1}"
+fi
+if [[ "$1 ${2:-}" == "machine login-status" ]]; then
+    echo "${STUB_LOGIN-issued}"
+    exit 0
+fi
+if [[ "$1" == register ]]; then
+    echo "REGISTER ${*:2}"
+    while (( $# )) && [[ "$1" != -- ]]; do shift; done
+    shift
+    STUB_IDENTITY="${STUB_REGISTERED_IDENTITY:-0}" exec "$@"
 fi
 printed=()
 for (( i = 1; i <= $#; i++ )); do
@@ -408,6 +420,209 @@ class SecretRun(unittest.TestCase):
             result.stdout.splitlines(), ['SECRETSD AIRTABLE_TOKEN -- sh -c echo "via=$VIA"', "via=secretsd"]
         )
 
+    GITHUB_ARGS = (
+        "--github-owner",
+        "sjawhar",
+        "--github-repo",
+        "proofs",
+        "--github-repo=lean",
+        "--github-read-only",
+    )
+
+    def test_github_narrowing_reaches_the_broker(self) -> None:
+        self.with_client()
+        result = self.run_secret_run(*self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines()[0],
+            "BROKER GITHUB_APP_SJAWHAR --github-owner sjawhar --github-repo proofs --github-repo lean "
+            f'--github-read-only -- sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
+        )
+
+    def test_github_narrowing_reaches_the_resolved_client_in_a_bare_environment(self) -> None:
+        """gh-app-token's narrowed call in an `env -i` unit (ossv-mcsl-ghtoken): the flags go to
+        the client `mise which` resolved under $HOME/.mise, never to mise's shim, which looks in
+        mise's default data dir and fails there."""
+        self.with_mise_client()
+        self.assertNotIn("MISE_DATA_DIR", self.env)
+        result = self.run_secret_run(*self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "BROKER GITHUB_APP_SJAWHAR --github-owner sjawhar --github-repo proofs --github-repo lean "
+                f'--github-read-only -- sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
+                "via=broker",
+            ],
+        )
+
+    def test_github_narrowing_is_refused_without_the_broker(self) -> None:
+        # secretsd cannot narrow a GitHub App token: dropping the flags, as --ttl is dropped,
+        # would hand the command a token for every repository of the account.
+        for name, with_client in (("no client", False), ("no broker identity", True)):
+            with self.subTest(case=name):
+                if with_client:
+                    self.with_client()
+                result = self.run_secret_run(
+                    "--github-owner=sjawhar", "--github-read-only", "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1"
+                )
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertNotIn("SECRETSD", result.stdout)
+                self.assertNotIn("via=", result.stdout)
+                self.assertIn("secrets-broker identity", result.stderr)
+
+    def with_stale_install(self, *, pinned: bool = True) -> Path:
+        """An old mise install of the client first on PATH directly, not through a shim, the way a
+        long-lived `mise exec` process holds one; `mise` on PATH names the pin (1.0.0, installed only
+        when pinned) under $HOME/.mise. The stale client prints STALE and exits 2 for any flag it
+        does not know, as v17.5.0 did for --github-owner."""
+        home = Path(self.temp_dir.name)
+        mise_dir = home / "mise-bin"
+        mise_dir.mkdir(exist_ok=True)
+        write_stub(mise_dir, "mise", MISE_STUB)
+        stale = home / ".mise" / "installs" / "agent-secrets" / "0.9.0" / "bin"
+        stale.mkdir(parents=True)
+        write_stub(stale, "agent-secrets", 'echo "STALE $*"; [[ "$*" != *--github-* ]] || exit 2; exit 0')
+        if pinned:
+            install = home / ".mise" / "installs" / "agent-secrets" / "1.0.0" / "bin"
+            install.mkdir(parents=True)
+            write_stub(install, "agent-secrets", AGENT_SECRETS_STUB)
+        self.env["PATH"] = f"{stale}:{mise_dir}:{self.env['PATH']}"
+        return stale / "agent-secrets"
+
+    def test_a_stale_install_on_path_is_resolved_to_the_pin(self) -> None:
+        """agent-open's relay, 2026-10-29: PATH held v17.5.0 directly; a narrowed call must reach the
+        pinned client, never the old one."""
+        self.with_stale_install()
+        result = self.run_secret_run(*self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("STALE", result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "BROKER GITHUB_APP_SJAWHAR --github-owner sjawhar --github-repo proofs --github-repo lean "
+                f'--github-read-only -- sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
+                "via=broker",
+            ],
+        )
+
+    def test_a_stale_install_whose_pin_mise_cannot_name_is_an_error_naming_it(self) -> None:
+        stale = self.with_stale_install(pinned=False)
+        result = self.run_secret_run("GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        self.assert_cannot_run(result, f"PATH holds mise's agent-secrets 0.9.0 directly ({stale})")
+        self.assertNotIn("STALE", result.stdout + result.stderr)
+
+    def test_register_with_a_stale_install_registers_through_the_pin(self) -> None:
+        self.with_stale_install()
+        self.with_helper_unit()
+        result = self.run_secret_run(
+            "--register", *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("STALE", result.stdout + result.stderr)
+        self.assertEqual(len(self.register_lines(result)), 1, result.stdout)
+        self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
+
+    def with_helper_unit(self) -> None:
+        """The file agent-secrets-session reads as "this machine has the helper"."""
+        unit = Path(self.temp_dir.name) / ".config" / "systemd" / "user" / "agent-secrets-helper.service"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("[Service]\n", encoding="utf-8")
+
+    def register_lines(self, result: subprocess.CompletedProcess[str]) -> list[str]:
+        return [line for line in result.stdout.splitlines() if line.startswith("REGISTER ")]
+
+    def test_register_with_no_identity_registers_then_reaches_the_broker(self) -> None:
+        """gh-app-token's call: the client answers no identity, so secret-run runs itself again under
+        agent-secrets-session, which registers it (`register --wait 10 --exec`, the helper holding a
+        launcher credential), and the second pass, now a session, takes the broker. The second pass
+        carries no --register, so nothing can loop."""
+        self.with_client()
+        self.with_helper_unit()
+        result = self.run_secret_run(
+            "--register", *self.GITHUB_ARGS, "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(self.register_lines(result)), 1, result.stdout)
+        self.assertEqual(
+            lines[0],
+            f"REGISTER --wait 10 --exec -- {SECRET_RUN} --github-owner sjawhar --github-repo proofs "
+            '--github-repo=lean --github-read-only GITHUB_APP_SJAWHAR -- sh -c echo "via=$VIA"',
+        )
+        self.assertEqual(
+            lines[1],
+            "BROKER GITHUB_APP_SJAWHAR --github-owner sjawhar --github-repo proofs --github-repo lean "
+            f'--github-read-only -- sh -c echo "via=$VIA" URL={BROKER_URL} MARK={BROKER_URL}',
+        )
+        self.assertEqual(lines[2], "via=broker")
+        self.assertNotIn("SECRETSD", result.stdout)
+
+    def test_register_runs_the_resolved_client_in_a_bare_environment(self) -> None:
+        """In an `env -i` scope mise's shim cannot resolve; registration runs the client secret-run
+        resolved under $HOME/.mise, so the call still ends at the broker."""
+        self.with_mise_client()
+        self.with_helper_unit()
+        self.assertNotIn("MISE_DATA_DIR", self.env)
+        result = self.run_secret_run("--register", "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.register_lines(result)), 1, result.stdout)
+        self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
+
+    def test_register_never_hides_a_client_that_cannot_run(self) -> None:
+        """8a21676's hard error stands: a client that cannot run is checked before --register."""
+        self.with_client()
+        self.with_helper_unit()
+        for code in ("2", "127"):
+            with self.subTest(exit=code):
+                result = self.run_secret_run("--register", "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY=code)
+                self.assert_cannot_run(result, f"identity` exited {code}: ")
+                self.assertEqual(self.register_lines(result), [])
+        client = self.with_mise_client()
+        client.unlink()
+        result = self.run_secret_run("--register", "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="1")
+        self.assert_cannot_run(result, "mise could not resolve it; its error is above")
+        self.assertEqual(self.register_lines(result), [])
+
+    def test_register_with_an_identity_goes_straight_to_the_broker(self) -> None:
+        self.with_client()
+        self.with_helper_unit()
+        result = self.run_secret_run("--register", "GITHUB_APP_SJAWHAR", *self.CMD, STUB_IDENTITY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.register_lines(result), [])
+        self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
+
+    def test_register_without_a_client_is_secretsd_as_before(self) -> None:
+        result = self.run_secret_run("--register", "AIRTABLE_TOKEN", *self.CMD)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(), ['SECRETSD AIRTABLE_TOKEN -- sh -c echo "via=$VIA"', "via=secretsd"]
+        )
+
+    def test_register_that_gives_no_identity_ends_where_it_would_have_once(self) -> None:
+        """A helper with no launcher credential registers the session without enrolling it, so the
+        second pass still has no identity: secretsd for a plain key, the narrowing refusal for a
+        GitHub one, and exactly one registration either way."""
+        self.with_client()
+        self.with_helper_unit()
+        extra = {"STUB_IDENTITY": "1", "STUB_LOGIN": "none", "STUB_REGISTERED_IDENTITY": "1"}
+        result = self.run_secret_run("--register", "AIRTABLE_TOKEN", *self.CMD, **extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.register_lines(result), [f'REGISTER --exec -- {SECRET_RUN} AIRTABLE_TOKEN -- sh -c echo "via=$VIA"'])
+        self.assertEqual(result.stdout.splitlines()[-1], "via=secretsd")
+        result = self.run_secret_run("--register", "--github-owner=sjawhar", "GITHUB_APP_SJAWHAR", *self.CMD, **extra)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(len(self.register_lines(result)), 1)
+        self.assertFalse([line for line in result.stdout.splitlines() if line.startswith("via=")], result.stdout)
+        self.assertIn("secrets-broker identity", result.stderr)
+
+    def test_register_on_a_machine_without_the_helper_runs_unregistered(self) -> None:
+        self.with_client()
+        result = self.run_secret_run("--register", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.register_lines(result), [])
+        self.assertEqual(result.stdout.splitlines()[-1], "via=secretsd")
+
     def test_request_on_secretsd_asks_for_each_key(self) -> None:
         self.with_client()
         result = self.run_secret_run(
@@ -446,6 +661,11 @@ class SecretRun(unittest.TestCase):
             "request takes no wait": ("request", "--wait", "0", "AIRTABLE_TOKEN"),
             "request takes no wait=": ("request", "--wait=0", "AIRTABLE_TOKEN"),
             "ttl without a value": ("AIRTABLE_TOKEN", "--ttl"),
+            "github-owner without a value": ("AIRTABLE_TOKEN", "--github-owner"),
+            "request takes no github-owner": ("request", "--github-owner", "sjawhar", "AIRTABLE_TOKEN"),
+            "request takes no github-repo=": ("request", "--github-repo=proofs", "AIRTABLE_TOKEN"),
+            "request takes no github-read-only": ("request", "--github-read-only", "AIRTABLE_TOKEN"),
+            "request takes no register": ("request", "--register", "AIRTABLE_TOKEN"),
             "unknown option": ("--bogus", "AIRTABLE_TOKEN", "--", "true"),
         }
         for name, args in cases.items():
@@ -589,6 +809,15 @@ class SecretRun(unittest.TestCase):
         self.assertIn("store: secretsd (no broker identity)", result.stdout)
         self.assertIn("session_id: none", result.stdout)
         for absent in ("BROKER", "SECRETSD", "via="):
+            self.assertNotIn(absent, result.stdout)
+
+    def test_dry_run_never_registers_or_runs_the_command(self) -> None:
+        self.with_client()
+        result = self.run_secret_run("--dry-run", "--register", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("store: the broker once --register enrolls this process, else secretsd", result.stdout)
+        self.assertIn("session_id: none", result.stdout)
+        for absent in ("REGISTER", "BROKER", "SECRETSD", "via="):
             self.assertNotIn(absent, result.stdout)
 
     def test_a_failed_reason_builder_still_says_who_asks(self) -> None:

@@ -2,8 +2,8 @@
 # This file is included into git config only by agent launchers (cld/oc/omp),
 # never by interactive shells. gh-app-token derives the owner from each
 # credential request path (useHttpPath) and answers or quits for every
-# owner-bearing github.com request: an owner with an App installation gets a
-# token minted for that installation; an owner with no App installation gets
+# owner-bearing github.com request: an owner with an App installation gets the
+# installation token the secrets broker mints for it; an owner with no App installation gets
 # the profile's fallback secret (the user's personal access token for upstream
 # repositories); any failure emits quit=1 so git stops instead of silently
 # using the user's identity. Nothing is configured behind this helper.
