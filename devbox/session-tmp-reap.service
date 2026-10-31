@@ -1,0 +1,15 @@
+[Unit]
+Description=Report what /mnt/nvme/<user>/tmp would lose: entries whose OWNER session is gone, unheld and idle for 7 days
+# The working directories agents make by hand there are owned by nothing, and the root held
+# 1,095 GB on 2026-10-31 (dispatch://INFRA-675). This is the same script as
+# session-scratch-reap.service with a second root and a rule of its own, and it ships
+# REPORT-ONLY: it removes nothing until TMP_REAP_LIVE=1 is added here, which the review of a
+# week of its decisions is the gate for (devbox/session-scratch-reap.md).
+ConditionPathIsDirectory=/mnt/nvme/%u/tmp
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.dotfiles/devbox/session-scratch-reap --tmp

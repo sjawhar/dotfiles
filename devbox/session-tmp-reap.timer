@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily: what /mnt/nvme/<user>/tmp would lose, and the unowned entries over 1 GB on Mondays (session-tmp-reap.service)
+
+[Timer]
+# Daily, not every two minutes like session-scratch-reap.timer: one run walks the metadata of
+# the whole root (13,657 entries, 1,095 GB on 2026-10-31) to find the newest write in each
+# entry, and nothing there appears or disappears in two minutes.
+OnBootSec=40min
+OnUnitActiveSec=1d
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

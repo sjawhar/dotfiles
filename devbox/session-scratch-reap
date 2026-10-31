@@ -1,6 +1,16 @@
 #!/bin/bash
-# session-scratch-reap: remove the per-session scratch directories under
-# /mnt/nvme/<user>/session-tmp whose session is gone.
+# session-scratch-reap: remove the scratch directories on /mnt/nvme/<user> whose owner is gone.
+#
+# Two roots, two rules, one script:
+#
+#   session-tmp/   the default run, every 2 minutes (session-scratch-reap.service). A directory
+#                  there is one agent session's TMPDIR, made and named by scripts/agent-session.
+#   tmp/           --tmp, daily (session-tmp-reap.service). The working directories agents make
+#                  by hand. REPORT-ONLY: it removes nothing until TMP_REAP_LIVE=1 is set in the
+#                  unit (dispatch://INFRA-675).
+#
+# ---------------------------------------------------------------------------------------------
+# The session-tmp root
 #
 # scripts/agent-session gives every agent session a TMPDIR of its own there, exported as
 # AGENT_SESSION_SCRATCH and named for the session's own pid (every hop from agent-session to the
@@ -13,10 +23,10 @@
 # Liveness, never age (skill://disk-hygiene). A directory is live while:
 #   - the process it is named for still names it in AGENT_SESSION_SCRATCH or TMPDIR (the cheap
 #     test, one read per directory, and the answer for a session that is simply still running);
-#   - or, for a directory that fails that test, any process of this user names it in those
-#     variables or stands in it (the second pass, which costs one walk of /proc and runs only
-#     when there is something to remove): a tool subprocess or a detached job outliving its
-#     session still owns its scratch.
+#   - or, for a directory that fails that test, any process of this user stands in it, holds a
+#     file open in it, or names it in those variables (the second pass, which costs one walk of
+#     /proc and runs only when there is something to remove): a tool subprocess or a detached job
+#     outliving its session still owns its scratch.
 # A pid that exists and whose environment cannot be read is not proof of death, so its directory
 # stays. Age only KEEPS a directory longer, never marks one dead: one younger than the grace
 # window stays whatever /proc says, which covers the moment between agent-session's mkdir and the
@@ -25,33 +35,370 @@
 # SESSION_SCRATCH_ROOT (default /mnt/nvme/<user>/session-tmp), SESSION_SCRATCH_GRACE_SECONDS
 # (default 600) and SESSION_SCRATCH_IO_PRESSURE_MAX (default 20) override the defaults, so a test
 # can run the unit against a scratch root. --dry-run decides and prints, removing nothing.
+#
+# ---------------------------------------------------------------------------------------------
+# The tmp root (--tmp)
+#
+# /mnt/nvme/<user>/tmp held 1,095 GB in 13,657 entries on 2026-10-31 and nothing reaped it. Its
+# entries are working directories agents make by hand, so nothing allocates them and there is no
+# pid in the name to read. The rule the SRE decided (dispatch://INFRA-675, "Decision,
+# 2026-10-31"):
+#
+#   - An entry may hold a file OWNER at its top with ONE full 36-character session id. Nothing
+#     requires it; a lane that wants its data kept writes it.
+#   - No OWNER, or an OWNER holding anything else (a prefix, two ids, a comment), is UNOWNED:
+#     never removed, whatever its age, and listed in the weekly report. A quiet owner is not
+#     consent.
+#   - An entry with a valid OWNER is removed only when ALL THREE hold:
+#       (a) no process of this user holds it (the same /proc pass the session-tmp root uses);
+#       (b) its owner session is not live on this box (GET $ENVOY_URL/v1/sessions, kept to the
+#           rows whose host is this box). A request that fails makes EVERY owner live: a reaper
+#           that cannot ask must not conclude the asker is gone, and a paused agent Envoy still
+#           lists keeps its work;
+#       (c) nothing inside it was written for TMP_REAP_IDLE_DAYS (7) - the newest mtime of any
+#           file or directory inside. A walk that cannot finish keeps the entry.
+#   - Symlinks are never followed, a mount is never crossed or acted on, and the root itself is
+#     never a candidate.
+#
+# It is delete-capable, so it ships report-only: with TMP_REAP_LIVE unset it decides and prints
+# and removes nothing, whatever --dry-run says. devbox/session-scratch-reap.md says how to make
+# it live after the review of a week of its decisions passes.
+#
+# TMP_REAP_ROOT (default /mnt/nvme/<user>/tmp), TMP_REAP_IDLE_DAYS, TMP_REAP_WALK_SECONDS,
+# TMP_REAP_ENVOY_SECONDS, TMP_REAP_REPORT_MIN_BYTES, ENVOY_URL and TMP_REAP_LIVE override the
+# defaults, so a test can run it against a scratch root and a fake Envoy.
 set -euo pipefail
 
+mode=session
+dry=""
+report=""
+while (($#)); do
+    case "$1" in
+        --dry-run) dry=1 ;;
+        --tmp) mode=tmp ;;
+        --report) report=1 ;;
+        *)
+            echo "usage: session-scratch-reap [--dry-run] | --tmp [--report] [--dry-run]" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+# CANDIDATE holds, by absolute path, what a root's first pass would remove; find_holders fills
+# HELD for the ones a process still holds. One walk of /proc for the whole set, never one per
+# candidate, and a hash lookup per path rather than a loop over the candidates: /mnt/nvme/<user>
+# carries tens of thousands of entries (skill://disk-hygiene).
+declare -A CANDIDATE=() HELD=()
+
+mark() { # mark PID HOW PATH ROOT
+    local path="$3" root="$4" top
+    [[ "$path" == "$root"/* ]] || return 0
+    top="${path#"$root"/}"
+    top="$root/${top%%/*}"
+    [[ -n "${CANDIDATE["$top"]:-}" ]] || return 0
+    HELD["$top"]="pid $1 via $2"
+}
+
+find_holders() { # find_holders ROOT
+    local root="$1" link target pid kind line value
+    ((${#CANDIDATE[@]})) || return 0
+    while IFS=$'\t' read -r link target; do
+        pid="${link#/proc/}"
+        pid="${pid%%/*}"
+        kind="${link##*/}"
+        [[ "$kind" =~ ^[0-9]+$ ]] && kind="an open file"
+        mark "$pid" "$kind" "$target" "$root"
+    done < <(find /proc/[0-9]*/fd /proc/[0-9]*/cwd -maxdepth 1 -ignore_readdir_race \
+        -type l -printf '%p\t%l\n' 2>/dev/null)
+    while IFS= read -r -d '' line; do
+        pid="${line#/proc/}"
+        pid="${pid%%/*}"
+        value="${line#*:}"
+        mark "$pid" "${value%%=*}" "${value#*=}" "$root"
+    done < <(grep -zaoH -E "(TMPDIR|AGENT_SESSION_SCRATCH)=${root}/[^[:space:]]*" \
+        /proc/[0-9]*/environ 2>/dev/null || true)
+}
+
+gb() { awk -v b="$1" 'BEGIN{ printf "%.1f GB", b / 1000000000 }'; }
+
+# io_pressure_over MAX: deleting under IO pressure hangs every shell on the box
+# (skill://disk-hygiene), and the next run costs nothing to wait for.
+io_pressure_over() {
+    local pressure=0
+    [[ -r /proc/pressure/io ]] || return 1
+    pressure="$(sed -n 's/^full .*avg10=\([0-9.]*\).*/\1/p' /proc/pressure/io)"
+    pressure="${pressure:-0}"
+    awk -v p="$pressure" -v m="$1" 'BEGIN{exit !(p+0 > m+0)}' || return 1
+    echo "session-scratch-reap: io pressure full avg10=$pressure is over $1; nothing removed this run"
+}
+
+# ---------------------------------------------------------------------------------------------
+# The tmp root
+# ---------------------------------------------------------------------------------------------
+
+# entry_owner DIR: the session id in DIR/OWNER, or nothing at all. Nothing is what a missing
+# file, a symlink, a prefix, two ids or any other content all read as, and an entry with no
+# owner is never a removal candidate (dispatch://INFRA-675).
+entry_owner() {
+    local file="$1/OWNER" text
+    [[ ! -L "$file" && -f "$file" ]] || return 0
+    text="$(head -c 4096 -- "$file" 2>/dev/null)" || return 0
+    text="${text#"${text%%[![:space:]]*}"}"
+    text="${text%"${text##*[![:space:]]}"}"
+    [[ "$text" =~ ^01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 0
+    printf '%s' "$text"
+}
+
+# live_session_ids HOST: the ids Envoy lists live on this box, one per line. A non-zero exit is
+# the caller's signal to treat every owner as live.
+live_session_ids() {
+    local url="${ENVOY_URL:-http://envoy-hub.tail12ec1c.ts.net:9020}"
+    curl -sS --fail --max-time "${TMP_REAP_ENVOY_SECONDS:-20}" "${url%/}/v1/sessions" 2>/dev/null |
+        python3 -c '
+import json, sys
+
+host = sys.argv[1].split(".")[0]
+rows = json.load(sys.stdin)
+if not isinstance(rows, list):
+    raise SystemExit(1)
+for row in rows:
+    if not isinstance(row, dict):
+        continue
+    session = str(row.get("session_id") or "")
+    if session and str(row.get("host") or "").split(".")[0] == host:
+        print(session)
+' "$1"
+}
+
+# weekly_report_due: Mondays, once. A daily timer prints the list once a week on its own; the
+# stamp also covers a hand run and a box that catches up on two Monday runs.
+weekly_report_due() {
+    local state="${XDG_STATE_HOME:-$HOME/.local/state}/session-scratch-reap"
+    local stamp="$state/tmp-report-week" week
+    [[ "$(date +%u)" == 1 ]] || return 1
+    week="$(date +%G-%V)"
+    [[ -r "$stamp" && "$(cat "$stamp")" == "$week" ]] && return 1
+    mkdir -p "$state" 2>/dev/null && printf '%s\n' "$week" > "$stamp" 2>/dev/null || true
+    return 0
+}
+
+reap_tmp_root() {
+    local root="${TMP_REAP_ROOT:-/mnt/nvme/$(id -un)/tmp}"
+    root="${root%/}"
+    local idle_days="${TMP_REAP_IDLE_DAYS:-7}"
+    # 1,491 GB in 13,774 entries and over 5.8M files took 50 minutes to walk on 2026-10-31 (and
+    # ran past a 30-minute bound), so the bound is two hours: a daily run at idle IO priority
+    # can afford it, and anything past that is a disk in trouble, where keeping every entry is
+    # the right answer anyway.
+    local walk_timeout="${TMP_REAP_WALK_SECONDS:-7200}"
+    local report_min="${TMP_REAP_REPORT_MIN_BYTES:-1000000000}"
+    local pressure_max="${SESSION_SCRATCH_IO_PRESSURE_MAX:-20}"
+    local removing="" stance="report-only (TMP_REAP_LIVE unset)"
+    if [[ "${TMP_REAP_LIVE:-}" == 1 ]]; then
+        if [[ -n "$dry" ]]; then
+            stance="report-only (--dry-run)"
+        else
+            removing=1
+            stance=live
+        fi
+    fi
+
+    if [[ ! -d "$root" ]]; then
+        echo "session-scratch-reap: $root is absent; nothing to reap"
+        return 0
+    fi
+    if [[ -n "$removing" ]] && io_pressure_over "$pressure_max"; then
+        return 0
+    fi
+
+    local now cutoff root_dev
+    now="$(date +%s)"
+    cutoff="$(awk -v n="$now" -v d="$idle_days" 'BEGIN{printf "%d", n - d*86400}')"
+    root_dev="$(stat -c %d "$root")"
+
+    # (b) The owners that are live on this box.
+    local -A live_sessions=()
+    local ids="" live_known=1 status=0 id
+    ids="$(live_session_ids "$(hostname -s)")" || status=$?
+    if ((status != 0)); then
+        live_known=0
+        echo "session-scratch-reap: $root: Envoy did not answer GET /v1/sessions; every OWNER counts as live this run"
+    else
+        while read -r id; do
+            [[ -n "$id" ]] && live_sessions["$id"]=1
+        done <<<"$ids"
+    fi
+
+    # (c) One bounded metadata walk of the whole tree gives every top-level entry both its size
+    # and the newest mtime anywhere inside it. -xdev stops at a mount, nothing is dereferenced,
+    # and -mindepth 1 keeps the root itself out of it.
+    #
+    # A walk that times out leaves EVERY entry kept, and a path the walk could not read leaves
+    # ITS OWN top-level entry kept: a subtree that was not read can only understate how recently
+    # something was written. Per entry and not per root, because a root this size always holds
+    # something unreadable - a container that ran as root left files of its own in it - and a
+    # single refusal must not stop the other 13,000 entries from ever being decided.
+    local -A bytes=() newest=() unsure=()
+    local walk="" name b m walked=1 errors line path mapped=0
+    errors="$(mktemp)"
+    status=0
+    walk="$(timeout "$walk_timeout" env LC_ALL=C find "$root" -mindepth 1 -xdev \
+        -ignore_readdir_race -printf '%P\t%s\t%Ts\n' 2>"$errors" |
+        LC_ALL=C awk -F'\t' '{ i = index($1, "/"); n = (i ? substr($1, 1, i - 1) : $1)
+            b[n] += $2; if ($3 + 0 > m[n]) m[n] = $3 + 0 }
+            END { for (n in b) printf "%s\t%d\t%d\n", n, b[n], m[n] }')" || status=$?
+    if ((status == 124)); then
+        walked=0
+        echo "session-scratch-reap: $root: the walk of it ran past ${walk_timeout}s; nothing is a removal candidate this run, and the sizes below are partial"
+    fi
+    while IFS= read -r line; do
+        # find's own message in the C locale: find: '/path/that/failed': Permission denied
+        path="${line#*\'}"
+        path="${path%%\'*}"
+        if [[ "$path" != "$root"/* ]]; then
+            walked=0
+            echo "session-scratch-reap: $root: the walk of it failed ($line); nothing is a removal candidate this run"
+            continue
+        fi
+        name="${path#"$root"/}"
+        unsure["${name%%/*}"]="$line"
+        mapped=$((mapped + 1))
+    done < <(LC_ALL=C sort -u "$errors")
+    rm -f -- "$errors"
+    # A failure the error lines do not account for - awk died, the shell could not write the
+    # temporary file - leaves no evidence of what was missed, so it keeps the whole root.
+    if ((status != 0 && status != 124 && mapped == 0 && walked == 1)); then
+        walked=0
+        echo "session-scratch-reap: $root: the walk of it exited $status with nothing to show for it; nothing is a removal candidate this run"
+    fi
+    while IFS=$'\t' read -r name b m; do
+        [[ -n "$name" ]] || continue
+        bytes["$name"]="$b"
+        newest["$name"]="$m"
+    done <<<"$walk"
+
+    local kept_live=0 kept_held=0 kept_recent=0 unowned=0 going=0 failed=0
+    local live_bytes=0 held_bytes=0 recent_bytes=0 unowned_bytes=0 going_bytes=0
+    local -a unowned_list=()
+    local type dev entry owner size
+    local -A owner_of=()
+    CANDIDATE=()
+    HELD=()
+    while IFS=$'\t' read -r type dev name; do
+        [[ -n "$name" ]] || continue
+        entry="$root/$name"
+        size="${bytes["$name"]:-0}"
+        owner=""
+        # A symlink, a plain file, a socket, and an entry that is itself a mount point all read
+        # as unowned: none of them can carry an OWNER this script will read.
+        if [[ "$type" == d && "$dev" == "$root_dev" ]]; then
+            owner="$(entry_owner "$entry")"
+        fi
+        if [[ -z "$owner" ]]; then
+            unowned=$((unowned + 1))
+            unowned_bytes=$((unowned_bytes + size))
+            unowned_list+=("$size	$entry")
+            continue
+        fi
+        if ((live_known == 0)) || [[ -n "${live_sessions["$owner"]:-}" ]]; then
+            echo "session-scratch-reap: keep $entry (its owner $owner is live on this box)"
+            kept_live=$((kept_live + 1))
+            live_bytes=$((live_bytes + size))
+            continue
+        fi
+        if ((walked == 0)); then
+            echo "session-scratch-reap: keep $entry (owner $owner is gone, but the walk of $root did not finish)"
+            kept_recent=$((kept_recent + 1))
+            recent_bytes=$((recent_bytes + size))
+            continue
+        fi
+        if [[ -n "${unsure["$name"]:-}" ]]; then
+            echo "session-scratch-reap: keep $entry (owner $owner is gone, but the walk of it could not be finished: ${unsure["$name"]})"
+            kept_recent=$((kept_recent + 1))
+            recent_bytes=$((recent_bytes + size))
+            continue
+        fi
+        owner_of["$entry"]="$owner"
+        CANDIDATE["$entry"]=1
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -xdev -ignore_readdir_race \
+        -printf '%y\t%D\t%f\n' 2>/dev/null)
+
+    # (a) The processes, for the candidates only.
+    find_holders "$root"
+    for entry in "${!CANDIDATE[@]}"; do
+        name="${entry#"$root"/}"
+        size="${bytes["$name"]:-0}"
+        owner="${owner_of["$entry"]}"
+        if [[ -n "${HELD["$entry"]:-}" ]]; then
+            echo "session-scratch-reap: keep $entry (live: ${HELD["$entry"]})"
+            kept_held=$((kept_held + 1))
+            held_bytes=$((held_bytes + size))
+            continue
+        fi
+        m="${newest["$name"]:-$now}"
+        if ((m > cutoff)); then
+            echo "session-scratch-reap: keep $entry (written $(((now - m) / 86400))d ago, inside the ${idle_days}d window)"
+            kept_recent=$((kept_recent + 1))
+            recent_bytes=$((recent_bytes + size))
+            continue
+        fi
+        if [[ -z "$removing" ]]; then
+            echo "session-scratch-reap: would remove $entry ($(gb "$size"), owner $owner is not live here, nothing written for $(((now - m) / 86400))d, no process holds it)"
+            going=$((going + 1))
+            going_bytes=$((going_bytes + size))
+        elif rm -rf -- "$entry"; then
+            echo "session-scratch-reap: removed $entry ($(gb "$size"), owner $owner is not live here, nothing written for $(((now - m) / 86400))d, no process holds it)"
+            going=$((going + 1))
+            going_bytes=$((going_bytes + size))
+        else
+            echo "session-scratch-reap: FAILED to remove $entry" >&2
+            failed=$((failed + 1))
+        fi
+    done
+
+    echo "session-scratch-reap: $root: ${stance}: ${going} $([[ -n "$removing" ]] && echo removed || echo "would be removed") ($(gb "$going_bytes")), ${kept_live} with a live owner ($(gb "$live_bytes")), ${kept_held} held by a process ($(gb "$held_bytes")), ${kept_recent} written inside the ${idle_days}d window ($(gb "$recent_bytes")), ${unowned} unowned ($(gb "$unowned_bytes")); ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
+
+    # The unowned entries are the whole of what this root can never reclaim on its own, so once a
+    # week the big ones are named for the box-health owner to take to their lanes.
+    if [[ -n "$report" ]] || weekly_report_due; then
+        echo "session-scratch-reap: $root: unowned entries over $(gb "$report_min"), largest first - each needs an OWNER file or its own lane's removal:"
+        if ((${#unowned_list[@]})); then
+            while IFS=$'\t' read -r size entry; do
+                [[ -n "$entry" ]] || continue
+                ((size >= report_min)) || break
+                echo "session-scratch-reap:   $(gb "$size")	$entry"
+            done < <(printf '%s\n' "${unowned_list[@]}" | sort -rn)
+        fi
+    fi
+
+    ((failed == 0))
+}
+
+if [[ "$mode" == tmp ]]; then
+    reap_tmp_root
+    exit
+fi
+
+# ---------------------------------------------------------------------------------------------
+# The session-tmp root
+# ---------------------------------------------------------------------------------------------
+
 root="${SESSION_SCRATCH_ROOT:-/mnt/nvme/$(id -un)/session-tmp}"
+root="${root%/}"
 grace="${SESSION_SCRATCH_GRACE_SECONDS:-600}"
 pressure_max="${SESSION_SCRATCH_IO_PRESSURE_MAX:-20}"
-dry=""
-[[ "${1:-}" == --dry-run ]] && dry=1
 
 if [[ ! -d "$root" ]]; then
     echo "session-scratch-reap: $root is absent; nothing to reap"
     exit 0
 fi
 
-# Deleting under IO pressure hangs every shell on the box (skill://disk-hygiene). The next run is
-# two minutes away, so skipping a period costs nothing.
-pressure=0
-if [[ -r /proc/pressure/io ]]; then
-    pressure="$(sed -n 's/^full .*avg10=\([0-9.]*\).*/\1/p' /proc/pressure/io)"
-    pressure="${pressure:-0}"
-fi
-if [[ -z "$dry" ]] && awk -v p="$pressure" -v m="$pressure_max" 'BEGIN{exit !(p+0 > m+0)}'; then
-    echo "session-scratch-reap: io pressure full avg10=$pressure is over $pressure_max; nothing removed this run"
+if [[ -z "$dry" ]] && io_pressure_over "$pressure_max"; then
     exit 0
 fi
 
 kept_live=0 kept_young=0 removed=0 failed=0
-candidates=()
 
 # holds DIR PID: does this pid's environment name DIR? 0 yes, 1 no, 2 cannot tell (the pid is
 # this user's and exists, but its environment could not be read).
@@ -92,35 +439,17 @@ for dir in "$root"/*; do
         kept_young=$((kept_young + 1))
         continue
     fi
-    candidates+=("$dir")
+    CANDIDATE["$dir"]=1
 done
 
 # Second pass, only for what the first pass would remove: one walk of /proc for any other process
 # of this user that holds one of these directories.
-if ((${#candidates[@]})); then
-    declare -A held=()
-    for proc in /proc/[0-9]*; do
-        pid="${proc#/proc/}"
-        [[ -O "$proc" ]] || continue
-        { mapfile -d '' -t environ < "$proc/environ"; } 2>/dev/null || continue
-        for value in "${environ[@]}"; do
-            case "$value" in
-                AGENT_SESSION_SCRATCH=* | TMPDIR=*) value="${value#*=}" ;;
-                *) continue ;;
-            esac
-            for dir in "${candidates[@]}"; do
-                [[ "$value" == "$dir" || "$value" == "$dir"/* ]] && held["$dir"]="$pid"
-            done
-        done
-        cwd="$(readlink "$proc/cwd" 2>/dev/null)" || continue
-        for dir in "${candidates[@]}"; do
-            [[ "$cwd" == "$dir" || "$cwd" == "$dir"/* ]] && held["$dir"]="$pid"
-        done
-    done
+if ((${#CANDIDATE[@]})); then
+    find_holders "$root"
 
-    for dir in "${candidates[@]}"; do
-        if [[ -n "${held["$dir"]:-}" ]]; then
-            echo "session-scratch-reap: keep $dir (live: pid ${held["$dir"]} is still in it)"
+    for dir in "${!CANDIDATE[@]}"; do
+        if [[ -n "${HELD["$dir"]:-}" ]]; then
+            echo "session-scratch-reap: keep $dir (live: ${HELD["$dir"]})"
             kept_live=$((kept_live + 1))
             continue
         fi

@@ -53,6 +53,10 @@ arm_user_timer devbox gocache-cap
 # removed once no live process holds it (devbox/session-scratch-reap.md).
 arm_user_timer devbox session-scratch-reap
 
+# The working directories agents make by hand under /mnt/nvme/<user>/tmp, which nothing owns:
+# report-only until a review of a week of its decisions passes (devbox/session-scratch-reap.md).
+arm_user_timer devbox session-tmp-reap
+
 # The /tmp/<name> paths tools and agents write by hand, which no TMPDIR redirect reaches and
 # which systemd-tmpfiles' 30d rule never catches, removed once no process holds them and
 # nothing in them has been written for 48 h (devbox/tmp-stale-reap.md).
