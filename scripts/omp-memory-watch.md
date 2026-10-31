@@ -200,15 +200,37 @@ to this box's role holder. An invalid value stops the watch at start.
 Duplicates are dropped, so a session that is also one of those recipients gets one message.
 
 A **wall touch** goes to the scope's own session — the owner, who does the shedding — with the
-whole report. The box-health owner gets **one batched digest per `--wall-digest` window**
-(default 15 min) naming every scope that touched in it, instead of one message per scope: a box
-can have tens of scopes at the ceiling at once (31 of 95 on ossv-agent-open on 2026-10-30), and
-a message each would bury that session rather than inform it. Touches accumulate in the state
-file across runs, so a quiet digest window loses none. Each scope's line in the digest carries
-the **process count, the RSS sum, the `memory.stat` split, the chosen advice and the same three
-largest processes with their command lines** under it: the owner reads the digest without the
-scope owner's report beside it, and a top-3 list alone sent it hunting a process that did not
-exist (the INFRA lead, 2026-10-30, when it owned this detector).
+whole report. The box-health owner gets a **digest**: one line a scope, not one message a
+scope. A box can have tens of scopes at the ceiling at once (31 of 95 on ossv-agent-open on
+2026-10-30), and a message each would bury that session rather than inform it.
+
+Each line is **time, box, worker, peak, page cache, anonymous, session** — nothing else. The
+process count, the RSS sum, the whole `memory.stat` split, the advice and the three largest
+processes stay in the scope owner's own report, which is where someone acts on them.
+
+### One digest an hour for the fleet, and the two touches that do not wait
+
+`--wall-digest-mode` decides who sends it:
+
+- **`send`** (default): this box sends its own digest every `--wall-digest` window. The devbox
+  and any box with no collector run this way.
+- **`collect`**: this box sends **no** digest. Its touches wait in the state file until a
+  collector drains them with `--wall-pending-json`, which prints them as JSON and clears them
+  under the watch's own lock, and sends **one** message for the whole fleet. Every lane VM runs
+  this way: eight boxes each sending their own every 15 minutes was 32 messages an hour into
+  one session (Sami, 2026-10-31). The collector is
+  `oss-verifier/agents/agentvm/wall-digest-collect.sh` on sami-rocqperf, hourly.
+
+Two shapes never wait for either, in both modes. They are sent to the box-health owner the
+moment they are seen, as one message about one scope:
+
+- **anon at or above `--wall-urgent-anon` of the peak** (default 0.50). Anonymous memory is
+  what the kernel cannot give back, so a scope at its wall holding mostly anon has nothing left
+  to reclaim: the next allocation is the OOM killer's.
+- **`memory.events` `oom_kill` above zero.** That is not a forecast at all.
+
+A scope at its wall on page cache — the common case, which the kernel drops and carries on —
+rides the digest. So collect mode loses no danger, only its share of a list.
 
 Each alert names the session, the pid and its RSS, the scope, the unreclaimable memory, the
 ceiling and where it comes from, the percentage and the headroom left, the measured rise rate

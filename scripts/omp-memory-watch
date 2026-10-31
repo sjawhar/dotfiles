@@ -884,49 +884,82 @@ def wall_text(touch: dict) -> str:
     return "\n".join(lines)
 
 
-def wall_digest_text(pending: list[dict], window: float) -> str:
-    """The box-health owner's batched view: every scope that reached its wall since the last digest.
 
-    One report per scope goes to the scope's own owner, which is where the shedding happens. The
-    lead gets them batched instead of one message each, because a box can have tens of scopes at
-    the wall at once -- 31 of 95 on ossv-agent-open on 2026-10-30 -- and a message per scope per
-    cooldown would bury the lead's session rather than inform it.
+def urgent_reason(touch: dict, options: argparse.Namespace) -> str:
+    """Why this touch cannot wait for the hourly digest, or "".
+
+    Two shapes end in a kill rather than in reclaim. Anonymous memory is the memory the kernel
+    cannot give back, so a scope at its wall holding mostly anon has nothing left to reclaim:
+    the next allocation is the OOM killer's. And an oom_kill that has already happened is not a
+    forecast at all. Everything else -- a scope at its wall on page cache, which the kernel
+    drops and carries on -- rides the digest.
     """
+    if int((touch.get("stats") or {}).get("anon", 0)) >= options.wall_urgent_anon * max(int(touch.get("peak") or 0), 1):
+        return (
+            f"anon {gib((touch.get('stats') or {}).get('anon', 0))} is"
+            f" {100 * int((touch.get('stats') or {}).get('anon', 0)) / max(int(touch.get('peak') or 1), 1):.0f}%"
+            f" of the {gib(touch.get('peak') or 0)} peak, which the kernel cannot reclaim"
+        )
+    if int(touch.get("events_oom_kill") or 0):
+        return f"memory.events oom_kill is {touch['events_oom_kill']}: the kernel has already killed in this scope"
+    return ""
+
+
+def urgent_text(touch: dict, reason: str) -> str:
+    """The one touch that is sent the moment it is seen, to the box-health owner."""
+    worker = touch.get("worker") or "no worker name"
+    session = touch.get("session") or "session unknown"
+    return (
+        f"SCOPE AT ITS MEMORY WALL, NOT WAITING FOR THE DIGEST, on {socket.gethostname()}:"
+        f" {touch.get('scope')} ({worker}, {session}) reached {gib(touch.get('peak') or 0)} of"
+        f" {gib(touch.get('limit') or 0)}. Why this one is immediate: {reason}.\n"
+        + digest_row(touch)
+        + "\nIts owner has the whole report: the memory.stat split, the process count and RSS"
+        " sum, and the three largest processes with their command lines. From omp-memory-watch"
+        f" on {socket.gethostname()}."
+    )
+
+
+def digest_row(touch: dict) -> str:
+    """One scope on one line: box, worker, peak, and the file/anon split."""
+    stats = touch.get("stats") or {}
+    peak = max(int(touch.get("peak") or 0), 1)
+    return (
+        f"  {iso(touch.get('at'))}  {touch.get('box') or socket.gethostname().split('.')[0]}"
+        f"  {touch.get('worker') or 'no worker name'}"
+        f"  peak {gib(touch.get('peak') or 0)} of {gib(touch.get('limit') or 0)}"
+        f"  file {gib(stats.get('file', 0))} ({100 * int(stats.get('file', 0)) / peak:.0f}%)"
+        f"  anon {gib(stats.get('anon', 0))} ({100 * int(stats.get('anon', 0)) / peak:.0f}%)"
+        + (f"  oom_kill {touch['events_oom_kill']}" if int(touch.get("events_oom_kill") or 0) else "")
+        + f"  {touch.get('session') or 'session unknown'}"
+    )
+
+
+def wall_digest_text(pending: list[dict], window: float, scope_of_text: str = "") -> str:
+    """The box-health owner's batched view: one line per scope that reached its wall.
+
+    Every scope's own owner already has the whole report -- the memory.stat split, the process
+    count and RSS sum, and the three largest processes with their command lines -- which is
+    where the shedding happens. This reader wants the shape of the fleet, not each scope's
+    detail: a per-box digest every 15 minutes was eight messages an hour saying the same thing
+    (Sami, 2026-10-31). So one line each, and the two shapes that end in a kill -- anon above
+    half the peak, and an oom_kill that already happened -- do not wait for it at all.
+    """
+    where = scope_of_text or socket.gethostname()
+    boxes = sorted({str(touch.get("box") or socket.gethostname().split(".")[0]) for touch in pending})
     lines = [
-        f"SCOPES AT THEIR MEMORY WALL on {socket.gethostname()}: {len(pending)} touch(es) in the"
-        f" last {human(window)}. Each is a scope whose memory.events `max` counter rose or whose"
-        " memory.peak reached its ceiling -- no hold required, so these are the touches the 70%"
-        " for 60 s crossing alert cannot see.",
+        f"SCOPES AT THEIR MEMORY WALL ({where}): {len(pending)} touch(es) on"
+        f" {len(boxes)} box(es) in the last {human(window)} -- {', '.join(boxes)}. Each is a"
+        " scope whose memory.events `max` counter rose or whose memory.peak reached its"
+        " ceiling, with no hold, so these are the touches the 70%-for-60 s crossing alert"
+        " cannot see. Columns: time, box, worker, peak, page cache, anonymous, session.",
     ]
-    for touch in pending:
-        worker = touch.get("worker") or "no worker name"
-        session = touch.get("session") or "session unknown"
-        peak = int(touch.get("peak") or 0)
-        rss_sum = int(touch.get("rss_sum") or 0)
-        lines.append(
-            f"  {iso(touch.get('at'))}  {touch.get('scope')}  {worker}  {session}  peak"
-            f" {gib(peak)} of {gib(touch.get('limit') or 0)}"
-            f"  (+{touch.get('events_delta', 0)} memory.events max)"
-        )
-        # Where the memory is, on the lead's own line: the three largest processes explained
-        # 10-29% of a scope at its ceiling in the open4 and open6 digests of 2026-10-30, so a
-        # top list alone sends the lead hunting a process that does not exist.
-        lines.append(
-            f"      {touch.get('task_count') or 0} processes holding {gib(rss_sum)} of RSS"
-            f" ({100 * rss_sum / max(peak, 1):.0f}% of peak);"
-            f" memory.stat: {stat_split(touch.get('stats') or {})}"
-        )
-        lines.append(f"      {wall_advice(touch)}")
-        # Truncated harder than the owner's copy, because a digest can carry tens of scopes
-        # (the INFRA lead, 2026-10-30, when it owned this detector).
-        for pid, rss, command in touch.get("top") or []:
-            lines.append(f"      {gib(rss)}  pid {pid}  {command[:140] or '(no command line)'}")
-        if not touch.get("top"):
-            lines.append("      (no process in the scope was readable when it touched)")
+    lines.extend(digest_row(touch) for touch in sorted(pending, key=lambda t: t.get("at") or 0))
     lines.append(
-        "Each owner has the whole report for its own scope: scope, session, worker, peak, the"
-        " memory.events and oom counters, the same memory.stat split and the same three largest"
-        " processes. From omp-memory-watch on " + socket.gethostname() + "."
+        "Anything here is reclaimable pressure: a scope whose anon passed half its peak, or one"
+        " the kernel has already killed in, was sent the moment it was seen and is not in this"
+        " list for the first time. Each scope's own owner has the whole report. From"
+        " omp-memory-watch."
     )
     return "\n".join(lines)
 
@@ -1165,7 +1198,7 @@ def run_once(options: argparse.Namespace) -> int:
                 )
             )
 
-    alerts = clears = watched = walls_hit = 0
+    alerts = clears = watched = walls_hit = urgent = 0
     for target in sorted(targets, key=lambda t: t["key"]):
         key, scope, cgroup, pid = target["key"], target["scope"], target["cgroup"], target["pid"]
         limit, limit_from, usage, current = target["limit"], target["limit_from"], target["usage"], target["current"]
@@ -1185,19 +1218,32 @@ def run_once(options: argparse.Namespace) -> int:
                         f"\nIt also touched the wall {touch['suppressed']} more time(s) inside the"
                         f" last {human(options.wall_cooldown)}, which this one report covers."
                     )
-                pending_wall.append(
-                    {
-                        name: touch[name]
-                        for name in (
-                            "at", "scope", "session", "session_claim", "worker", "peak", "limit",
-                            "events_delta", "top", "task_count", "rss_sum", "stats", "current",
-                        )
-                    }
-                )
+                entry = {
+                    name: touch[name]
+                    for name in (
+                        "at", "scope", "session", "session_claim", "worker", "peak", "limit",
+                        "events_delta", "top", "task_count", "rss_sum", "stats", "current",
+                        "events_oom_kill",
+                    )
+                }
+                pending_wall.append(entry)
                 del pending_wall[: max(0, len(pending_wall) - options.wall_pending_max)]
                 state.commit(options)
                 if touch["session"] and not options.dry_run:
                     envoy.send(touch["session"], text)
+                # A touch the hourly digest must not wait for. Everything else rides the
+                # digest; these two are the shapes that end in a kill.
+                reason = urgent_reason(touch, options)
+                if reason:
+                    urgent += 1
+                    note = urgent_text(touch, reason)
+                    if not options.dry_run:
+                        heard = tell_box_health(envoy, note)
+                    else:
+                        heard = "(dry run)"
+                    log(f"{key}: URGENT ({reason}) -> {heard or 'nobody: every route refused it'}")
+                    if options.print_alert:
+                        print(note)
                 log(
                     f"{key}: WALL ({gib(touch['peak'])} peak of {gib(limit)}, memory.events max"
                     f" +{touch['events_delta']}) -> "
@@ -1360,10 +1406,18 @@ def run_once(options: argparse.Namespace) -> int:
             walls.pop(key, None)
 
     # The box-health owner's batched view. The per-scope reports have already gone to their
-    # owners; this is one message per window however many scopes touched their wall in it, so a
-    # box with tens of scopes at the ceiling informs the owner instead of flooding it.
+    # owners; this is one message per window however many scopes touched their wall in it.
+    #
+    # In `collect` mode this box sends NO digest: its touches wait in the state file until a
+    # collector drains them with --wall-pending-json and sends ONE message for the whole fleet.
+    # Eight lane VMs each sending their own every 15 minutes was 32 messages an hour into one
+    # session (Sami, 2026-10-31). Urgent touches never wait for either, so collect mode loses
+    # no danger, only its share of a list.
     digests = 0
-    if pending_wall and started - (state.data.get("wall_digest_at") or 0) >= options.wall_digest:
+    if options.wall_digest_mode == "collect":
+        if pending_wall:
+            log(f"wall digest: collect mode, {len(pending_wall)} touch(es) held for the collector")
+    elif pending_wall and started - (state.data.get("wall_digest_at") or 0) >= options.wall_digest:
         text = wall_digest_text(pending_wall, options.wall_digest)
         state.data["wall_digest_at"] = started
         sent = pending_wall[:]
@@ -1382,8 +1436,31 @@ def run_once(options: argparse.Namespace) -> int:
     log(
         f"checked {len(targets)} omp session(s), {watched} close enough to sample, in "
         f"{time.time() - started:.2f}s; {alerts} alert(s), {clears} clear(s),"
-        f" {walls_hit} wall touch(es), {len(pending_wall)} waiting for the next digest"
+        f" {walls_hit} wall touch(es) ({urgent} urgent), {len(pending_wall)} waiting for the digest"
     )
+    return 0
+
+
+def drain_pending(options: argparse.Namespace) -> int:
+    """Print this box's waiting wall touches as JSON and clear them. For the fleet collector.
+
+    Under the same exclusive lock as a run, so a touch is never printed twice and never lost
+    between the print and the clear: the state is written before this process prints a byte.
+    Each touch is stamped with this box's short name, which is the collector's only way to say
+    which box a line came from. It sends nothing and decides nothing.
+    """
+    state = State(options.state)
+    if not state.locked:
+        log(f"another run holds {options.state}; nothing drained")
+        print(json.dumps({"box": socket.gethostname().split(".")[0], "locked_out": True, "touches": []}))
+        return 0
+    box = socket.gethostname().split(".")[0]
+    pending: list = state.data.setdefault("wall_pending", [])
+    touches = [dict(touch, box=touch.get("box") or box) for touch in pending]
+    del pending[:]
+    state.commit(options)
+    state.close()
+    print(json.dumps({"box": box, "locked_out": False, "touches": touches}))
     return 0
 
 
@@ -1418,6 +1495,26 @@ def main() -> int:
         "--wall-pending-max", type=int, default=400, help="touches kept waiting for a digest before the oldest are dropped"
     )
     parser.add_argument(
+        "--wall-digest-mode",
+        choices=("send", "collect"),
+        default="send",
+        help="send: this box sends its own digest. collect: it holds its touches for a"
+        " fleet collector to drain with --wall-pending-json and send as one message",
+    )
+    parser.add_argument(
+        "--wall-urgent-anon",
+        type=float,
+        default=0.50,
+        help="a touch whose anon is at least this fraction of the peak is sent at once, not"
+        " held for the digest (an oom_kill always is)",
+    )
+    parser.add_argument(
+        "--wall-pending-json",
+        action="store_true",
+        help="print this box's waiting touches as JSON and clear them, then exit; for the"
+        " fleet collector. It decides nothing and sends nothing",
+    )
+    parser.add_argument(
         "--state",
         type=Path,
         default=DEFAULT_STATE,
@@ -1435,6 +1532,8 @@ def main() -> int:
     if options.state != DEFAULT_STATE and not options.dry_run:
         options.dry_run = True
         log(f"--state is not {DEFAULT_STATE}: running as --dry-run, sending nothing")
+    if options.wall_pending_json:
+        return drain_pending(options)
     try:
         return run_once(options)
     except Exception as error:  # a crashing watch must say so in the journal, not vanish
