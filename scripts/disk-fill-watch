@@ -52,9 +52,10 @@ and under a bounded walk, because /tmp holds ~20k entries and walking it on ever
 itself be the load.
 
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
-falling back to the INFRA lead's session when nobody holds that role, and the chief of staff
-when a crossing is still open and still descending 30 minutes after its alert. This
-watch only detects. It deletes nothing and kills nothing.
+for the first alert and for the escalation 30 minutes later when a crossing is still open and
+still descending. An unheld role falls back to a session: the INFRA lead's for a first alert,
+the box-health SRE's for an escalation. This watch only detects. It deletes nothing and kills
+nothing.
 """
 
 from __future__ import annotations
@@ -72,9 +73,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The two sessions that own this detector's findings, as in omp-memory-watch.
-CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+# Where a crossing goes when nobody holds the box-health role below. The INFRA lead hears a
+# first alert; the box-health SRE hears an escalation, because a disk still descending half an
+# hour after its alert is that lane's own work. The chief of staff was on the escalation until
+# 2026-10-31T02:37:50Z and is on nothing here now: disk is not the chief's work.
 INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
+BOX_HEALTH_SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 
 # The box-health lead owns the box disks (dispatch://INFRA-716) and holds this Envoy role, so a
 # crossing goes to the role, not to a session id that moves when the lane changes hands.
@@ -909,6 +913,38 @@ def low_of(samples: list[list[float]], window: float) -> float | None:
     return min(inside) if inside else None
 
 
+def rate_shape(samples: list[list[float]], window: float) -> dict:
+    """What the rate above rests on: how many samples, and whether the curve moved both ways.
+
+    df_fill_rate is the difference between two endpoints and nothing else, however many samples
+    lie between them. On a sawtoothing disk those two endpoints are not a trend: on
+    sami-rocqperf on 2026-10-31 /mnt/nvme read 60 GiB free at 02:02Z, 102 at 02:11:50Z, 85.5 at
+    02:17:37Z, 95 at 02:27Z and 68.8 at 02:31:49Z, and three people took three different pairs
+    off that one curve and derived three different deadlines, none of them real.
+
+    This measures the same samples the rate already used; it is not a second estimator and it
+    changes no decision. It exists so the message can say what the number is worth: the sample
+    count, the high and low the window actually held, and whether free space both rose and fell
+    inside it. A window is VARYING when one rise inside it is at least as large as the whole
+    move between its two ends -- at that point the rate is measuring one stroke of a sawtooth,
+    not a slope. A steady fall with a little jitter is not varying: its jitter is small beside
+    the fall it is extrapolating.
+    """
+    now = samples[-1][0] if samples else 0.0
+    inside = [value for stamp, value in samples if now - stamp <= window]
+    if len(inside) < 2:
+        return {"count": len(inside), "varying": False, "low": None, "high": None}
+    steps = list(zip(inside, inside[1:]))
+    largest_rise = max((later - earlier for earlier, later in steps), default=0.0)
+    end_to_end = abs(inside[0] - inside[-1])
+    return {
+        "count": len(inside),
+        "varying": largest_rise > 0 and largest_rise >= end_to_end,
+        "low": min(inside),
+        "high": max(inside),
+    }
+
+
 def blocked_kinds(free: float) -> list[str]:
     return [name for name, floor in NVME_KIND_FLOORS if free < floor]
 
@@ -957,6 +993,7 @@ def verdict(
     floor = min(configured, ceiling) if total else configured
     floor_held = floor < configured
     df_rate, df_window = df_fill_rate(samples, options.rate_window)
+    shape = rate_shape(samples, options.rate_window)
     low = low_of(samples, options.rate_window)
     time_to_full = None
     if df_rate is not None and df_rate > 0:
@@ -992,6 +1029,10 @@ def verdict(
         "floor_held": floor_held,
         "df_fill_rate": df_rate,
         "df_rate_window": df_window,
+        "df_rate_samples": shape["count"],
+        "df_rate_varying": shape["varying"],
+        "df_rate_low": shape["low"],
+        "df_rate_high": shape["high"],
         "low": low,
         "time_to_full": time_to_full,
         "below_floor": below_floor,
@@ -1035,25 +1076,50 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
     used = 100 * (1 - now["free"] / max(now["total"], 1))
     df_rate = now["df_fill_rate"]
     falling = is_falling(now)
+    below_floor = bool(now.get("below_floor", now["free"] < now["floor"]))
+    # What the rate rests on, said in the sentence that prints the rate. df_fill_rate is the
+    # difference between the first and last sample in the window, so two samples and twenty
+    # samples produce the same kind of number and read the same -- and on 2026-10-31 three
+    # readings of one /mnt/nvme curve gave three different rates. The count lets a reader tell
+    # a pair of readings from a trend without opening the state file.
+    samples_seen = now.get("df_rate_samples")
+    rests_on = f", from the first and last of {samples_seen} samples" if samples_seen else ""
+    varying = bool(now.get("df_rate_varying"))
     trend = "df free-space fill rate: unknown (too few samples yet)"
     if df_rate is not None:
         if not falling and abs(df_rate) <= FLAT_RATE:
             trend = (
                 f"free space is flat: no measurable change over the last"
-                f" {human_time(now['df_rate_window'])}"
+                f" {human_time(now['df_rate_window'])}{rests_on}"
             )
         else:
             direction = "falling" if df_rate > 0 else "rising"
             trend = (
                 f"df free-space fill rate: {direction} {gb(abs(df_rate) * 3600)}/h over the last"
-                f" {human_time(now['df_rate_window'])}"
+                f" {human_time(now['df_rate_window'])}{rests_on}"
             )
     # Time-to-full is a sentence about a disk that is moving. On a static disk the arithmetic
     # still produces a number -- the first sami-leanperf alert said "0.0 GB/h ... 3558 h 42 min
     # from full" -- and printing it dresses a standing condition as a trend.
+    #
+    # A moving disk can still be a swinging one. Where free space both rose and fell inside the
+    # window, the time to full is the distance between two endpoints of a sawtooth, and the
+    # alert says so instead of handing the reader a deadline the samples do not support.
+    deadline = falling and now["time_to_full"] is not None
+    time_left = human_time(now["time_to_full"]) if now["time_to_full"] is not None else "unknown"
+    swing = ""
+    if varying and now.get("df_rate_low") is not None:
+        swing = (
+            f" Free space both rose and fell inside that window, between"
+            f" {gib(now['df_rate_low'])} and {gib(now['df_rate_high'])}, so that figure is the"
+            " gap between two ends of a swinging curve rather than a trend: the disk may reach"
+            " full sooner than it says, or not at all."
+        )
+    elif deadline and samples_seen == 2:
+        swing = " Two samples stand behind that rate, so it is a first reading, not yet a trend."
     horizon = (
-        f"At that df free-space fill rate it is {human_time(now['time_to_full'])} from full."
-        if falling and now["time_to_full"] is not None
+        f"At that df free-space fill rate it is {time_left} from full.{swing}"
+        if deadline
         else "It is not falling measurably, so it has no df time-to-full."
     )
     # The grade farm's per-kind floors mean something only where the farm's array is. On a
@@ -1081,23 +1147,48 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
     if tmp_lines:
         lines.append("Young /tmp entries at or over the size rule (these are on /):")
         lines.extend("  " + line for line in tmp_lines)
-    if now["fast"]:
+    # The closing paragraph is the one a tired reader keeps, so it is decided by the same
+    # time-to-full the first line printed, never by the floor on its own. It said "there is no
+    # deadline here: the disk is under its floor and is not filling" whenever the confirmation
+    # count was short, including on a disk whose own header one line above said 36 minutes from
+    # full (sami-rocqperf, 2026-10-31T02:33Z). Two branches on one sample, each blind to the
+    # other, and the reader who stopped at the last paragraph waited until morning.
+    #
+    # Three states, three endings: under the floor and flat or rising is a standing low; under
+    # the floor and falling is a standing low WITH a clock, and the clock leads; above the floor
+    # and falling is the ordinary fill alert.
+    act = (
+        " Read the writers above before you delete anything. Stop or finish the lane that is"
+        " writing; move its output to the other disk (/mnt/nvme for work started on /, and off"
+        " the box for work on /mnt/nvme); then reclaim with skill://disk-hygiene -- its check-in"
+        " comes first, and a directory a live session stands in is never deleted."
+    )
+    full_root = (
+        " A full root stops every session on the box at once: on 2026-10-27T00:00:31Z it took"
+        " rsyslog, journald and dockerd's exec down together."
+    )
+    hedged = " on a rate that is swinging, so it may land sooner than that, or not at all" if varying else ""
+    if deadline and below_floor:
         lines.append(
-            "DO, and there is a deadline: read the writers above before you delete anything."
-            " Stop or finish the lane that is writing; move its output to the other disk"
-            " (/mnt/nvme for work started on /, and off the box for work on /mnt/nvme); then"
-            " reclaim with skill://disk-hygiene -- its check-in comes first, and a directory a"
-            " live session stands in is never deleted. A full root stops every session on the"
-            " box at once: on 2026-10-27T00:00:31Z it took rsyslog, journald and dockerd's exec"
-            " down together."
+            f"This is both, and the clock is the half to act on: free {gib(now['free'])} is under"
+            f" the {gib(now['floor'])} floor AND still falling, {time_left} from full{hedged}."
+            " Do not leave it to the morning on the grounds that it is only a standing low."
+            + act
+            + " If this level is normal for this machine, the floor belongs in FLOORS or"
+            " --default-floor -- but the fall does not, and it is why this is urgent."
+            + full_root
+        )
+    elif deadline:
+        lines.append(
+            f"DO, and there is a deadline, {time_left} from full{hedged}." + act + full_root
         )
     else:
         lines.append(
-            "There is no deadline here: the disk is under its floor and is not filling, so this"
-            " is a standing low rather than a fall. Reclaim it before something starts to write,"
-            " with skill://disk-hygiene and its check-in, and read the writers above first. If"
-            " this level is normal for this machine, the floor is wrong for it and the number"
-            " belongs in FLOORS or --default-floor, not in a silenced alert."
+            "There is no deadline here: free space is flat or rising, so this is a standing low"
+            " rather than a fall. Reclaim it before something starts to write, with"
+            " skill://disk-hygiene and its check-in, and read the writers above first. If this"
+            " level is normal for this machine, the floor is wrong for it and the number belongs"
+            " in FLOORS or --default-floor, not in a silenced alert."
         )
     lines.append(
         "This watch only detects. It deletes nothing, kills nothing and moves nothing."
@@ -1126,16 +1217,18 @@ def clear_text(now: dict, incident: dict, when: float) -> str:
     )
 
 
-def tell_box_health(envoy: Envoy, text: str) -> str:
+def tell_box_health(envoy: Envoy, text: str, fallback: str = INFRA_LEAD) -> str:
     """Tell the box-health lead, and say who heard it.
 
     The role is the address while somebody holds it; an unheld role answers non-200, and then
-    the INFRA lead's session hears it instead.
+    one named session hears it instead. The caller chooses that session, because who should be
+    woken by an unheard message depends on which message it is: the INFRA lead for a first
+    alert and a clear, the box-health SRE for a disk that is still descending.
     """
     if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
         return BOX_HEALTH_ROLE_TOPIC
-    envoy.send(INFRA_LEAD, text)
-    return INFRA_LEAD
+    envoy.send(fallback, text)
+    return fallback
 
 
 def say_once(notes: dict, key: str, signature: str, message: str) -> None:
@@ -1303,14 +1396,9 @@ def run_once(options: argparse.Namespace) -> int:
             incident["alert_free"] = now["free"]
             incident["told"] = [BOX_HEALTH_ROLE_TOPIC]
             kind = "first alert"
-            targets = []
         else:
             incident["escalated_at"] = started
-            # The clear goes to everyone who heard a crossing, the chief included: a lead told
-            # that a disk was landing must be told that it is not.
-            incident["told"] = sorted(set((incident.get("told") or [BOX_HEALTH_ROLE_TOPIC]) + [CHIEF_OF_STAFF]))
             kind = f"STILL DESCENDING after {human_time(started - incident['alerted_at'])}"
-            targets = [(CHIEF_OF_STAFF, "chief of staff: still descending")]
         text = alert_text(now, incident, writers, tmp_lines, kind, started)
         if not first:
             text += (
@@ -1319,16 +1407,17 @@ def run_once(options: argparse.Namespace) -> int:
             )
         # On disk before a single message leaves: a resent first alert is worse than a late one.
         state.commit(options)
-        if first and not options.dry_run:
+        # Both the first alert and the escalation go to the box-health role: disk is that lane's
+        # work, decided 2026-10-31T02:37:50Z, and the chief of staff is no longer on either.
+        # They differ only in who hears it when nobody holds the role -- the INFRA lead for a
+        # first alert, the box-health SRE for a disk that is still descending half an hour on.
+        if not options.dry_run:
             # Whoever heard the crossing must hear the clear, so the fallback is recorded.
-            heard = tell_box_health(envoy, text)
-            if heard != BOX_HEALTH_ROLE_TOPIC:
-                incident["told"] = [heard]
-                state.commit(options)
-            log(f"  -> {heard} (box-health lead)")
-        for target, why in targets:
-            if options.dry_run or envoy.send(target, text):
-                log(f"  -> {target} ({why})")
+            heard = tell_box_health(envoy, text, INFRA_LEAD if first else BOX_HEALTH_SRE)
+            told = [] if first else (incident.get("told") or [BOX_HEALTH_ROLE_TOPIC])
+            incident["told"] = sorted(set(told + [heard]))
+            state.commit(options)
+            log(f"  -> {heard} ({'box-health lead' if first else 'box-health lead: still descending'})")
         alerts += 1
         log(f"{mount}: {'ALERT' if first else 'ESCALATED'} ({gib(now['free'])} free)")
         if options.print_alert:

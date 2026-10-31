@@ -81,11 +81,11 @@ held: where it was, the farm's array is not on that machine and the list describ
 **Two mounts on one filesystem are watched once**, under the first name given, so a box where
 `/mnt/nvme` is a directory on `/` no longer samples one disk twice and reports it twice.
 
-### Two states, two headlines
+### Two headlines, three endings
 
 | Headline | When | Urgency |
 |---|---|---|
-| `DISK LOW` | free under the floor, with no measurable fall | No deadline. Reclaim it before something starts to write, or fix the floor if that level is normal for the machine |
+| `DISK LOW` | free under the floor | No deadline **only when free space is flat or rising**; a disk under its floor and falling keeps the time to full |
 | `DISK FILLING` | three confirmations of a fall that reaches zero inside the horizon | A deadline, with the time to full and the writers |
 
 A disk that is not moving is never given a time to full. The first sami-leanperf alert said
@@ -93,6 +93,30 @@ A disk that is not moving is never given a time to full. The first sami-leanperf
 full", which is a standing condition dressed as a trend; the same headline for that and for
 sami-rocqperf's real one that night (41.7 GB/h, 41 minutes to full) teaches the reader to skip
 the headline.
+
+**The closing paragraph is decided by the same time to full the first line prints**, never by
+the floor alone. It used to key on the floor by itself, and on 2026-10-31T02:33Z one message
+said "2 h 16 min from full" at the top and "there is no deadline here: the disk is under its
+floor and is not filling" at the bottom. The ending a tired reader keeps was the wrong one.
+The three states read differently:
+
+| State | Ending |
+|---|---|
+| Under the floor, flat or rising | "There is no deadline here … a standing low rather than a fall" |
+| Under the floor **and** falling | "This is both, and the clock is the half to act on … under the floor AND still falling, *N* from full" |
+| Above the floor and falling | "DO, and there is a deadline, *N* from full" |
+
+**What the rate rests on is said in the sentence that prints it.** The fill rate is the
+difference between two samples — the oldest inside the window and now — however many lie
+between, so every alert names the count: "falling 104.8 GB/h over the last 50 min, from the
+first and last of 3 samples". Two samples are called out as "a first reading, not yet a trend".
+Where free space both **rose and fell** inside the window, the alert reports the swing and its
+high and low instead of handing over a deadline: on 2026-10-31 `/mnt/nvme` read 60 GiB free at
+02:02Z, 102 at 02:11:50Z, 85.5 at 02:17:37Z, 95 at 02:27Z and 68.8 at 02:31:49Z, and three
+people took three different pairs off that one curve and got three different, false, deadlines.
+A window is varying when one rise inside it is at least as large as the move between its two
+ends. This changes no decision — the crossing tests are untouched — only what the message
+claims.
 
 `--floor /=400` overrides a floor, for a deliberate test against a scratch threshold or for a
 machine whose disks are not these.
@@ -151,11 +175,18 @@ an entry already named is never looked at again.
 
 ## Who hears about it
 
-Agent sessions only, never a person:
+Agent sessions only, never a person. Every message goes to the Envoy role
+**`notifications.role.lead-box-health`**: the first alert, the escalation 30 minutes later when
+a crossing is still open and free space is still **lower than at the alert**, and the clear.
+Disk is the box-health lane's work, decided 2026-10-31T02:37:50Z; the chief of staff was on the
+escalation until then and is on nothing here now.
 
-- the **INFRA lead** (`01a13c57-d826-7242-80fe-5f0670188b11`), who owns this detector;
-- the **chief of staff** (`01a13dca-e979-7264-af32-f654ef57a6f5`) when a crossing is still open
-  and free space is still **lower than at the alert** 30 minutes later.
+Nobody holds the role? The publish answers non-200 and one session hears it instead:
+
+- a first alert or a clear goes to the **INFRA lead** (`01a13c57-d826-7242-80fe-5f0670188b11`),
+  who owns this detector;
+- an escalation goes to the **box-health SRE** (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`), because
+  a disk still descending half an hour after its alert is that lane's own work.
 
 One alert per crossing, one clear. The clear goes to everyone who heard the crossing.
 
