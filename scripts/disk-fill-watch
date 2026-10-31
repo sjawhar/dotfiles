@@ -841,6 +841,26 @@ def tmp_owner_text(owner: str, newest_mtime: float, sampled_at: float) -> str:
     )
 
 
+# A per-entry notice is about one session's own tree, so it goes to that session and not to the
+# box's health owner, who can do nothing with it. The exception is a disk that is itself short:
+# below this much free, the entry is the box's problem and the box's owner hears it.
+ENTRY_OWNER_SHORT = 0.15
+
+
+def live_owner_id(owner_answer: str) -> str:
+    """The LIVE session id in what `owner_of_path` answered, or "".
+
+    That answer is either a session id or `pid N (comm)`, and a session id in it is a claim
+    about a process, not about who is running -- the same claim this watch verifies for a
+    writer. Only an id Envoy lists as live on THIS box is used as an address; an unverified
+    one would send a lane's notice to whoever holds that id somewhere else.
+    """
+    found = UUID_RE.findall(owner_answer or "")
+    if not found:
+        return ""
+    return found[0] if (LIVE_READ and found[0] in LIVE_SESSIONS) else ""
+
+
 # -------------------------------------------------------------------------------- the state
 
 
@@ -1459,20 +1479,52 @@ def run_once(options: argparse.Namespace) -> int:
             )
             if path not in seen
         ]
+        if fresh and not LIVE_READ:
+            # Only now, and only once: a notice is about to name a session, and an address is
+            # not a claim read off a process but an id Envoy lists as live on this box.
+            try:
+                refresh_live_sessions(Envoy())
+            except SystemExit as error:
+                log(f"  live sessions unavailable: {error}; /tmp notices go to the box-health owner")
+        # The disk this entry sits on. Below ENTRY_OWNER_SHORT free it is the box's problem,
+        # whoever made the entry, so the box-health owner hears it instead of the lane.
+        tmp_verdict = next((v for v in verdicts if device_of(v["mount"]) == tmp_device), None)
+        short = bool(
+            tmp_verdict and tmp_verdict.get("total") and
+            tmp_verdict["free"] / tmp_verdict["total"] < ENTRY_OWNER_SHORT
+        )
         for bytes_there, path, newest_mtime in fresh[: options.top_writers]:
-            owner = tmp_owner_text(owner_of_path(path), newest_mtime, started)
+            found = owner_of_path(path)
+            owner = tmp_owner_text(found, newest_mtime, started)
+            lane = "" if short else live_owner_id(found)
             named_tmp.append(path)
             state.commit(options)
+            why = (
+                "This entry is yours: it was reached through a process of your session."
+                if lane
+                else (
+                    f"This goes to the box-health owner because {options.tmp_mount} is under"
+                    f" {100 * ENTRY_OWNER_SHORT:.0f}% free"
+                    if short
+                    else "This goes to the box-health owner because no live session on this box"
+                    " could be matched to the entry."
+                )
+            )
             message = (
                 f"NEW BIG /tmp ENTRY on {socket.gethostname()}: {size(bytes_there)} at {path}, born"
                 f" in the last {human_time(options.tmp_age)} (owner: {owner}). /tmp is on"
                 f" {options.tmp_mount}, which every session on this box shares. If it is yours and"
                 " the work is done, remove it; if it is still running, move it to /mnt/nvme."
-                " From disk-fill-watch; said once per entry."
+                f" {why} From disk-fill-watch; said once per entry."
             )
             if not options.dry_run:
-                tell_box_health(envoy, message)
-            log(f"/tmp: named {path} ({size(bytes_there)}), owner {owner}")
+                heard = envoy.send(lane, message) and lane if lane else tell_box_health(envoy, message)
+                if lane and not heard:
+                    # Its owner refused the send, so the notice is not simply dropped.
+                    heard = tell_box_health(envoy, message)
+            else:
+                heard = lane or "(box-health owner)"
+            log(f"/tmp: named {path} ({size(bytes_there)}), owner {owner} -> {heard}")
             if options.print_alert:
                 print(message)
         del named_tmp[: max(0, len(named_tmp) - 500)]
