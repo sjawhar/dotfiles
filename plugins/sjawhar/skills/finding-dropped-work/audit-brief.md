@@ -36,14 +36,15 @@ F. Each long project (several slices, or more than a day) the session ran withou
 - UNSURFACED: the result exists, but only a chat reply, a transcript line, a peer message or an artifact upload carries it, with no open ask. Count these rows with the dropped ones.
 - TRACKED: on a Dispatch issue that someone claims, or an open Dispatch ask. Name it.
 - DROPPED: no action after it, work abandoned with no record, the request answered as a different question, or a todo closed without the work.
+- MISSED-GOAL: work was delivered, but smaller or different than the request: a requirement unmet, a stand-in measured instead of the question asked, or the overlap with other running work done and the rest left. A list of what was not done, in a report or a pull request, does not make it DONE. Count these rows with the dropped ones.
 - WAITING-UNREPORTED: the session waits on a person with no open Dispatch ask for it. A question in chat, a note, a compaction summary, a peer message, a comment on an ask that is already answered, or a review request is not an ask.
 - For D rows: LOCAL-ONLY (the reader on another machine cannot open it) or OK.
 
-For each DROPPED, UNSURFACED and WAITING-UNREPORTED row, give the mechanism and quote the line that shows it: misread the request; asked in chat instead of an ask; artifact or chat line with no ask; held in notes or a compaction summary; told a peer only; comment on an answered ask; review request instead of an ask; "follow-up" never returned to; subagent or relayed result never checked; "done" meant written down or approval requested, not delivered; lost to a restart or compaction; other (say what).
+For each DROPPED, MISSED-GOAL, UNSURFACED and WAITING-UNREPORTED row, give the mechanism and quote the line that shows it: misread the request; folded into work already running and only the overlap done; narrowed after a blocker; a countable stand-in replaced the question; scope settled alone; asked in chat instead of an ask; artifact or chat line with no ask; held in notes or a compaction summary; told a peer only; comment on an answered ask; review request instead of an ask; "follow-up" never returned to; subagent or relayed result never checked; "done" meant written down or approval requested, not delivered; lost to a restart or compaction; other (say what).
 
 ## Report
 
-One table per list (A to F): time UTC, the words (verbatim, at most 40), outcome, evidence or mechanism with FILE:LINE. Then the totals per outcome and per mechanism. End with every DROPPED, UNSURFACED, WAITING-UNREPORTED and LOCAL-ONLY row again, and every E and F row, one line each, with the action that closes it: deliver it; open the ask that links the result and asks the next step; put it on a claimed Dispatch issue with what done means and a date; or open the ask.
+One table per list (A to F): time UTC, the words (verbatim, at most 40), outcome, evidence or mechanism with FILE:LINE. Then the totals per outcome and per mechanism. End with every DROPPED, MISSED-GOAL, UNSURFACED, WAITING-UNREPORTED and LOCAL-ONLY row again, and every E and F row, one line each, with the action that closes it: deliver the missing part; open the ask that links the result and asks the next step; put it on a claimed Dispatch issue with what done means and a date; or open the ask.
 ```
 
 ## tq recipe
