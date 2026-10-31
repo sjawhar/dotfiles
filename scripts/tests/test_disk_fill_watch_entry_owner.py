@@ -88,7 +88,10 @@ class EntryOwnerTest(unittest.TestCase):
         self.addCleanup(self.reset_live)
         self.reset_live()
         # One young, big entry for the rule to find.
+        # Over --tmp-digest-max, so an unowned one is still a message of its own unless a
+        # test lowers that. The digest path has tests of its own below.
         (self.scratch / "rev1").write_bytes(b"x" * 1_000_000)
+        self.big = 3 * WATCH.GB
 
     def reset_live(self) -> None:
         WATCH.LIVE_SESSIONS.clear()
@@ -111,6 +114,7 @@ class EntryOwnerTest(unittest.TestCase):
             "top_writers": 8, "sudo": "never", "writers_json": None,
             "tmp": str(self.scratch), "tmp_mount": MOUNT, "tmp_age": 21600.0, "tmp_big": 0,
             "tmp_walk_budget": 20.0, "tmp_idle_walk_budget": 5.0, "state": self.state,
+            "tmp_digest": 3600.0, "tmp_digest_max": WATCH.ENTRY_DIGEST_MAX, "tmp_pending_max": 500,
             "http_timeout": 8.0, "dry_run": False, "write_state": False, "print_alert": False,
         }
         values.update(overrides)
@@ -129,23 +133,64 @@ class EntryOwnerTest(unittest.TestCase):
         self.assertIn("This entry is yours", self.notices()[0][1])
 
     def test_an_owner_that_is_not_live_here_falls_back_to_the_box_health_owner(self) -> None:
+        """A big unowned entry is still a message of its own."""
         self.owner_answer = ELSEWHERE
-        self.run_once()
+        self.run_once(tmp_digest_max=0)
         self.assertEqual([who for who, _ in self.notices()], [OWNER])
         self.assertIn("no live session on this box could be matched", self.notices()[0][1])
 
     def test_a_pid_only_owner_falls_back_to_the_box_health_owner(self) -> None:
         self.owner_answer = "pid 1234 (python3)"
-        self.run_once()
+        self.run_once(tmp_digest_max=0)
         self.assertEqual([who for who, _ in self.notices()], [OWNER])
 
     def test_a_short_disk_keeps_the_notice_with_the_box_health_owner(self) -> None:
-        """Below 15% free the entry is the box's problem, whoever made it."""
+        """A disk with little left is the box's problem, whoever made the entry."""
         self.owner_answer = LANE
-        self.free = 100 * WATCH.GIB  # 10% of the 1000 GiB total
+        self.free = 10 * WATCH.GIB  # 1% of the 1000 GiB total, and under the 100 GB floor
         self.run_once()
         self.assertEqual([who for who, _ in self.notices()], [OWNER])
-        self.assertIn("under 15% free", self.notices()[0][1])
+        self.assertIn("that is short for a disk this size", self.notices()[0][1])
+
+    def test_a_big_disk_with_room_is_not_short(self) -> None:
+        """ossv-agent-open2: 412 GB free of 3.9 TB read as short under the old flat 15%."""
+        self.owner_answer = LANE
+        self.free = 412 * WATCH.GB
+        self.run_once(tmp_digest_max=0)
+        self.assertEqual([who for who, _ in self.notices()], [LANE])
+
+    def test_a_small_unowned_entry_waits_for_the_digest(self) -> None:
+        import json
+
+        self.owner_answer = ""
+        self.run_once()
+        self.assertEqual(self.notices(), [])
+        kept = json.loads(self.state.read_text())
+        self.assertEqual(len(kept["tmp_pending"]), 1)
+        self.assertEqual(kept["tmp_pending"][0]["bytes"], 1_000_000)
+
+    def test_the_digest_goes_out_as_one_message_with_a_line_each(self) -> None:
+        self.owner_answer = ""
+        (self.scratch / "rev2").write_bytes(b"y" * 2_000_000)
+        self.run_once(tmp_digest=0.0)
+        digests = [text for _who, text in self.envoy.sent if "SMALL UNOWNED /tmp ENTRIES" in text]
+        self.assertEqual(len(digests), 1)
+        self.assertEqual([who for who, text in self.envoy.sent if "SMALL UNOWNED" in text], [OWNER])
+        self.assertIn("rev1", digests[0])
+        self.assertIn("rev2", digests[0])
+        self.assertIn("2 born in the last", digests[0])
+
+    def test_a_small_entry_with_a_live_owner_is_not_held_back(self) -> None:
+        """Only the entries nobody can be sent to wait; an owner hears about its own at once."""
+        self.owner_answer = LANE
+        self.run_once()
+        self.assertEqual([who for who, _ in self.notices()], [LANE])
+
+    def test_a_small_unowned_entry_on_a_short_disk_is_not_held_back(self) -> None:
+        self.owner_answer = ""
+        self.free = 10 * WATCH.GIB
+        self.run_once()
+        self.assertEqual([who for who, _ in self.notices()], [OWNER])
 
     def test_an_owner_that_refuses_the_send_is_not_a_dropped_notice(self) -> None:
         self.owner_answer = LANE
