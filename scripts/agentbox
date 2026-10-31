@@ -67,13 +67,19 @@ declare -A CLONE_SPARSE=([agent-c]='/* !/tasks/ /tasks/*/basic_info.json')
 APP_GIT=(env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig" git)
 RUNTIME=sysbox-runc
 NETWORK=agentbox
-# Resource limits per box (dispatch://INFRA-702): a box that runs away is stopped by its own
+# Resource limits per box (dispatch://INFRA-702). A box that runs away is stopped by its own
 # cgroup, and no other box is touched. Measured on sami-rocqperf 2026-10-31 over 44 live agent
 # sessions (RSS+swap of each session's process tree; RSS overcounts shared pages): memory p50
 # 2.3 GiB, p95 14.1 GiB, max 17.8 GiB; CPU over 10 s p50 0.15 cores, p95 1.74, max 3.09. So
 # 24 GiB of memory with 8 GiB of swap beyond it, and 8 cores, hold every session measured with
-# room to spare. `agentbox new --memory SIZE --cpus N`, or AGENTBOX_MEMORY / AGENTBOX_CPUS,
-# changes one box.
+# room to spare. `agentbox new --memory SIZE --cpus N` changes one box; AGENTBOX_MEMORY and
+# AGENTBOX_CPUS do too, but a session's environment reaches every box it later starts, so prefer
+# the flag.
+# The per-box limit does not bound the sum: 44 boxes at 24 GiB may claim 1,056 GiB on a 251 GiB
+# host. So every box runs under one parent slice, user-<uid>-agentbox.slice, which systemd nests in
+# user-<uid>.slice by its name. Boxes and host sessions then share that slice's one ceiling
+# (MemoryMax=92% from /etc/systemd/system/user-.slice.d/60-omp-memory-guard.conf), as host
+# sessions alone did before; docker's default parent, system.slice, has no such ceiling.
 BOX_MEMORY="${AGENTBOX_MEMORY:-24g}"
 BOX_CPUS="${AGENTBOX_CPUS:-8}"
 # Swap a box may use beyond its memory limit; docker takes the two added together (--memory-swap).
@@ -85,8 +91,10 @@ BOX_CPUS_CAP=32
 BOX_PIDS=8192
 # No disk limit: docker's --storage-opt size= needs the overlay2 driver on xfs with project
 # quotas, and this host's docker data root (/var/lib/docker, measured 2026-10-31) is ext4 under
-# the overlayfs snapshotter, where docker refuses the option. A box's disk stays bound by the
-# shared-disk tools — scripts/disk-fill-watch and the tmp reapers in devbox/ — as before.
+# the overlayfs snapshotter, where docker refuses the option. Nor would it help: the paths that
+# fill (/mnt/nvme/<user>, the checkouts) are bind mounts into the box, outside its own layer. A
+# box's disk stays bound by the shared-disk tools — scripts/disk-fill-watch and the tmp reapers
+# in devbox/ — as before.
 EMBED_NAME=omp-embed
 EMBED_PORT="${OMP_EMBED_PORT:-8087}"
 IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
@@ -159,6 +167,7 @@ set_resource_args() {
     RESOURCE_ARGS=(
         --memory "$BOX_MEMORY" --memory-swap "$(size_text $((bytes + swap)))"
         --cpus "$BOX_CPUS" --pids-limit "$BOX_PIDS"
+        --cgroup-parent "user-${UID_}-agentbox.slice"
     )
 }
 
@@ -338,8 +347,14 @@ fresh_process() {
         -- "$@"
 }
 
-# The canonical checkouts, one name per line.
-repos() { find "$SRC" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -printf '%f\n' 2>/dev/null | sort; }
+# The canonical checkouts, one name per line: each entry of $SRC that holds a .git. Hidden entries
+# and plain directories there (~/src/.cloudflare, ~/src/.hawk-token) are not checkouts.
+repos() {
+    local d
+    for d in "$SRC"/*; do
+        [[ -d "$d" && -e "$d/.git" ]] && printf '%s\n' "${d##*/}"
+    done | sort
+}
 
 # Image tag is the content hash of what builds it, so an edit to any image
 # input yields a new tag built on the next launch; running boxes on the old
@@ -1110,10 +1125,14 @@ cmd_doctor() {
         fi
     fi
     build_image "$tag"
-    # A throwaway box on a throwaway clone of the first repo in $SRC.
-    local repo box ws
-    repo="$(repos | head -1)"
-    [[ -n "$repo" ]] || die "no repo under $SRC to test with"
+    # A throwaway box on a throwaway clone of a small checkout: AGENTBOX_DOCTOR_REPO (default knives,
+    # 12 MB of git), else the first checkout in $SRC with an origin. The first checkout by name can
+    # be a fork of a large repository, whose template clone lands in ~/.cache on the root disk.
+    local repo="" r box ws
+    for r in "${AGENTBOX_DOCTOR_REPO:-knives}" $(repos); do
+        [[ -e "$SRC/$r/.git" ]] && git -C "$SRC/$r" remote get-url origin >/dev/null 2>&1 && { repo="$r"; break; }
+    done
+    [[ -n "$repo" ]] || die "no checkout with an origin remote under $SRC to test with"
     box="agentbox-doctor$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-6)"
     ws="$BOXES/$box/$repo"
     # Whatever ends doctor from here (a failed step under set -e, ^C, a hangup), the box goes with
