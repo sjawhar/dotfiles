@@ -131,11 +131,12 @@ entries on 2026-10-31** (dispatch://INFRA-675). Keying on the session id in the 
 freed 11 GB of it: only 23 entries carried one.
 
 So ownership is declared, not guessed. **An entry may hold a file `OWNER` at its top with one
-full 36-character session id.** Nothing requires it; a lane that wants its data kept writes it:
+full 36-character session id.** Nothing requires it; a lane that wants its data kept makes its
+working directory with `scripts/work-dir`, which writes `OWNER` from `$OMP_SESSION_ID` (omp gives
+each tool process its session's id) and prints the path:
 
 ```sh
-mkdir -p /mnt/nvme/$USER/tmp/my-work
-echo "$OMP_SESSION_ID" > /mnt/nvme/$USER/tmp/my-work/OWNER   # the session's own id, in full
+dir=$(work-dir my-work)   # /mnt/nvme/$USER/tmp/my-work, OWNER = this session's id in full
 ```
 
 | The entry | What happens to it |

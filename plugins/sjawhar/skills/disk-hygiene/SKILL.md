@@ -31,6 +31,7 @@ Where the space usually is, largest first: dangling images, buildkit cache with 
 
 Here you delete only paths that you prove are yours. A name proves nothing either way, so never assume an unknown workspace has no user.
 
+- Make each working directory that must outlive your session's `TMPDIR` with `work-dir <name>`. It makes `/mnt/nvme/<user>/tmp/<name>` with an `OWNER` file that names your session, so the tmp reaper and the box-health lead can tell it is yours (`devbox/session-scratch-reap.md`). A directory with no `OWNER` is never reaped and has no known owner after a loss (dispatch://INFRA-893).
 - In an agent box, `~/boxes/<your box>/` (except the bind-mount sources below) and the box's `/tmp` are yours or your subagents'. On the host, every path needs the transcript test below.
 - Any other path is yours only if your transcripts or your subagents' show the command that made it (`jj workspace add`, a clone, `mktemp`, a write). `skill://session-attribution` gives the transcript paths. If no transcript of yours names it, leave it and list it in your report.
 - Your own paths must still pass the safety rules: no live process in it (`$S procs`), no content only on disk.

@@ -1,0 +1,41 @@
+#!/bin/bash
+# work-dir NAME: make a working directory that outlives this session's TMPDIR, owned by this
+# session. It creates /mnt/nvme/<user>/tmp/NAME with a file OWNER that holds the full id of the
+# omp session that runs it ($OMP_SESSION_ID, which omp gives each tool process), and prints the
+# path. devbox/session-scratch-reap reads OWNER: an owned entry is removed only when no process
+# holds it, its owner is no longer live and nothing in it was written for 7 days; an entry with
+# no OWNER is never removed and is listed for the box-health lead to chase (dispatch://INFRA-675).
+#
+# Run again with the same NAME in the same session, it prints the same path. It refuses a NAME
+# that exists with no OWNER or with another session's OWNER: pick another name.
+#
+# WORK_DIR_ROOT overrides the root, so that a test can run against a scratch directory.
+set -euo pipefail
+
+usage() { echo "usage: work-dir NAME   (one path component: letters, digits, . _ -)" >&2; exit 2; }
+[[ $# -eq 1 ]] || usage
+name="$1"
+[[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || usage
+
+owner="${OMP_SESSION_ID:-${PI_SESSION_ID:-}}"
+if [[ ! "$owner" =~ ^01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    echo "work-dir: OMP_SESSION_ID is not a full session id (${owner:-unset}); run this from an omp session" >&2
+    exit 1
+fi
+
+root="${WORK_DIR_ROOT:-/mnt/nvme/$(id -un)/tmp}"
+dir="$root/$name"
+
+if [[ -e "$dir" || -L "$dir" ]]; then
+    if [[ -d "$dir" && ! -L "$dir" && -f "$dir/OWNER" && ! -L "$dir/OWNER" ]] \
+        && [[ "$(tr -d '[:space:]' <"$dir/OWNER")" == "$owner" ]]; then
+        echo "$dir"
+        exit 0
+    fi
+    echo "work-dir: $dir exists and is not owned by this session; pick another name" >&2
+    exit 1
+fi
+
+mkdir -- "$dir"
+printf '%s\n' "$owner" >"$dir/OWNER"
+echo "$dir"
