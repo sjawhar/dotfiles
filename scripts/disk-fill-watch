@@ -842,9 +842,55 @@ def tmp_owner_text(owner: str, newest_mtime: float, sampled_at: float) -> str:
 
 
 # A per-entry notice is about one session's own tree, so it goes to that session and not to the
-# box's health owner, who can do nothing with it. The exception is a disk that is itself short:
-# below this much free, the entry is the box's problem and the box's owner hears it.
-ENTRY_OWNER_SHORT = 0.15
+# box's health owner, who can do nothing with it. Two things change that.
+#
+# SHORT: a disk with little left is the box's problem whoever made the entry. "Little" cannot be
+# a flat fraction. At 15% of a 3.9 TB disk, ossv-agent-open2 with 412 GB free counted as short
+# and every entry on it went to the box-health owner (Sami, 2026-10-31), though 412 GB is more
+# headroom than most of these boxes ever have. So it is a fraction with a floor under it: the
+# fraction catches a small disk, the floor stops a big one reading as short while it still holds
+# more free space than a whole lane VM's root.
+ENTRY_SHORT_FRACTION = 0.05
+ENTRY_SHORT_FLOOR = 100 * GB
+# SMALL AND UNOWNED: an entry nobody can be sent to, and small enough to be a line in a list
+# rather than a thing to act on. These wait for the digest instead of sending a message each.
+ENTRY_DIGEST_MAX = 2 * GB
+
+
+def disk_is_short(free: float, total: float) -> bool:
+    """Whether a filesystem has so little left that an entry on it is the box's problem."""
+    if not total:
+        return False
+    return free < max(ENTRY_SHORT_FRACTION * total, ENTRY_SHORT_FLOOR)
+
+
+def tmp_digest_text(pending: list[dict], window: float) -> str:
+    """Every small unowned /tmp entry since the last digest, one line each.
+
+    Nobody can be sent these one at a time: no live session on this box holds them, and each is
+    under the size that makes an entry worth a message of its own. As a list they are still
+    worth reading -- a hundred small unowned trees is a pattern -- so they are batched rather
+    than dropped.
+    """
+    total = sum(int(entry.get("bytes") or 0) for entry in pending)
+    mounts = sorted({str(entry.get("mount") or "?") for entry in pending})
+    lines = [
+        f"SMALL UNOWNED /tmp ENTRIES on {socket.gethostname()}: {len(pending)} born in the last"
+        f" {human_time(window)} on {', '.join(mounts)}, {size(total)} between them. No live"
+        " session on this box could be matched to any of them, and each is under the size that"
+        " earns a message of its own. Nothing here is urgent; a long list is the signal."
+    ]
+    for entry in sorted(pending, key=lambda e: -int(e.get("bytes") or 0)):
+        lines.append(
+            f"  {size(entry.get('bytes') or 0)}  {entry.get('path')}  (first seen"
+            f" {iso(entry.get('at'))}; {entry.get('owner')})"
+        )
+    lines.append(
+        "An entry with a live owner, one at or over the digest size, or any entry on a disk"
+        " that is short was sent on its own and is not in this list. From disk-fill-watch on "
+        + socket.gethostname() + "."
+    )
+    return "\n".join(lines)
 
 
 def live_owner_id(owner_answer: str) -> str:
@@ -1338,6 +1384,9 @@ def run_once(options: argparse.Namespace) -> int:
     mounts_state: dict = state.data.setdefault("mounts", {})
     incidents: dict = state.data.setdefault("incidents", {})
     named_tmp: list = state.data.setdefault("named_tmp", [])
+    # Small unowned /tmp entries waiting for the digest. They accumulate across runs, so a
+    # quiet digest window loses none.
+    tmp_pending: list = state.data.setdefault("tmp_pending", [])
 
     verdicts = []
     notes: dict = state.data.setdefault("notes", {})
@@ -1486,28 +1535,40 @@ def run_once(options: argparse.Namespace) -> int:
                 refresh_live_sessions(Envoy())
             except SystemExit as error:
                 log(f"  live sessions unavailable: {error}; /tmp notices go to the box-health owner")
-        # The disk this entry sits on. Below ENTRY_OWNER_SHORT free it is the box's problem,
-        # whoever made the entry, so the box-health owner hears it instead of the lane.
+        # The disk this entry sits on: short, and the box's health owner hears it whoever made
+        # the entry.
         tmp_verdict = next((v for v in verdicts if device_of(v["mount"]) == tmp_device), None)
-        short = bool(
-            tmp_verdict and tmp_verdict.get("total") and
-            tmp_verdict["free"] / tmp_verdict["total"] < ENTRY_OWNER_SHORT
-        )
+        short = bool(tmp_verdict) and disk_is_short(tmp_verdict["free"], tmp_verdict.get("total") or 0)
         for bytes_there, path, newest_mtime in fresh[: options.top_writers]:
             found = owner_of_path(path)
             owner = tmp_owner_text(found, newest_mtime, started)
             lane = "" if short else live_owner_id(found)
             named_tmp.append(path)
+            # An entry nobody can be sent to, small, on a disk with room: one line in the next
+            # digest. A message each for these was the whole of what the box-health owner got
+            # from open2 (Sami, 2026-10-31).
+            if not lane and not short and bytes_there < options.tmp_digest_max:
+                tmp_pending.append(
+                    {"at": started, "path": path, "bytes": bytes_there, "owner": owner,
+                     "mount": options.tmp_mount}
+                )
+                del tmp_pending[: max(0, len(tmp_pending) - options.tmp_pending_max)]
+                state.commit(options)
+                log(f"/tmp: named {path} ({size(bytes_there)}), unowned and small; held for the digest")
+                continue
             state.commit(options)
             why = (
                 "This entry is yours: it was reached through a process of your session."
                 if lane
                 else (
-                    f"This goes to the box-health owner because {options.tmp_mount} is under"
-                    f" {100 * ENTRY_OWNER_SHORT:.0f}% free"
+                    f"This goes to the box-health owner because {options.tmp_mount} has"
+                    f" {size(tmp_verdict['free'] if tmp_verdict else 0)} free, under the"
+                    f" {size(max(ENTRY_SHORT_FRACTION * ((tmp_verdict or {}).get('total') or 0), ENTRY_SHORT_FLOOR))}"
+                    f" that is short for a disk this size"
                     if short
                     else "This goes to the box-health owner because no live session on this box"
-                    " could be matched to the entry."
+                    f" could be matched to it, and at {size(bytes_there)} it is over the"
+                    f" {size(options.tmp_digest_max)} that would have made it a digest line."
                 )
             )
             message = (
@@ -1528,6 +1589,23 @@ def run_once(options: argparse.Namespace) -> int:
             if options.print_alert:
                 print(message)
         del named_tmp[: max(0, len(named_tmp) - 500)]
+
+    # The small unowned entries, as one message however many there are. The window opens at the
+    # first entry, not at the epoch: an unset mark would make the very first entry its own
+    # digest, which is the message-per-entry this replaces.
+    if tmp_pending and not state.data.get("tmp_digest_at"):
+        state.data["tmp_digest_at"] = started
+        state.commit(options)
+    if tmp_pending and started - (state.data.get("tmp_digest_at") or started) >= options.tmp_digest:
+        text = tmp_digest_text(tmp_pending, options.tmp_digest)
+        state.data["tmp_digest_at"] = started
+        count = len(tmp_pending)
+        del tmp_pending[:]
+        state.commit(options)
+        heard = "(dry run)" if options.dry_run else tell_box_health(envoy, text)
+        log(f"/tmp digest: {count} small unowned entry(ies) -> {heard or 'nobody: every route refused it'}")
+        if options.print_alert:
+            print(text)
 
     # A mount this run no longer watches takes its incident with it -- but whoever heard its
     # alert is told why it ends, or the last thing they have on that disk is an alarm that never
@@ -1685,6 +1763,24 @@ def main() -> int:
         type=float,
         default=5.0,
         help="seconds an ordinary run may spend sizing young /tmp directories for the once-per-entry rule",
+    )
+    parser.add_argument(
+        "--tmp-digest",
+        type=float,
+        default=3600.0,
+        help="seconds between digests of the small unowned /tmp entries (default 1 h)",
+    )
+    parser.add_argument(
+        "--tmp-digest-max",
+        type=float,
+        default=ENTRY_DIGEST_MAX,
+        help="bytes: an UNOWNED entry under this is a digest line, not a message of its own",
+    )
+    parser.add_argument(
+        "--tmp-pending-max",
+        type=int,
+        default=500,
+        help="entries kept waiting for a digest before the oldest are dropped",
     )
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help="the owned state file")
     parser.add_argument("--http-timeout", type=float, default=8.0)

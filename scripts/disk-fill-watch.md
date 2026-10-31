@@ -180,11 +180,23 @@ ossv-agent-open, `01a18c07` on open5) that it could do nothing with. The session
 process is a claim, so it is used as an address only when Envoy lists it as live on **this**
 box, the same check this watch makes for a writer.
 
-Two cases keep a notice with the box-health owner, and each says which it is:
+Three cases take a notice away from the lane, and each says which it is:
 
-- no live session on this box matches the entry (no owner observed, a `pid N (comm)` answer, or
-  an id that is live somewhere else);
-- the disk is **under 15% free**, where the entry is the box's problem whoever made it.
+- **the disk is short.** Not a flat fraction: free under `max(5% of the filesystem, 100 GB)`.
+  At a flat 15%, ossv-agent-open2 with 412 GB free of 3.9 TB counted as short and every entry
+  on it went to the box-health owner (Sami, 2026-10-31) — 412 GB is more headroom than most of
+  these boxes ever have. The fraction catches a small disk; the floor stops a big one reading
+  as short while it still holds more free space than a whole lane VM's root. A short disk's
+  entry goes to the box-health owner at once, whatever its size and whoever owns it.
+- **no live session on this box matches the entry** (none observed, a `pid N (comm)` answer, or
+  an id live somewhere else) **and it is at or over `--tmp-digest-max`** (2 GB): a message of
+  its own to the box-health owner.
+- **unowned and under `--tmp-digest-max`**: one line in the **hourly digest**
+  (`--tmp-digest`, 3600 s), never a message of its own. Nobody can act on these one at a time,
+  and a message each was all the box-health owner got from open2; as a list they still say
+  something, so they are batched rather than dropped. The window opens at the first entry, not
+  at the epoch, so the first one is not its own digest. Entries accumulate in the state file
+  (`tmp_pending`, capped at `--tmp-pending-max`), so a quiet window loses none.
 
 An owner that refuses the send gets the notice resent to the box-health owner rather than
 dropped. Box-level crossings — the floor, the fill rate, the clear — are about the box and are
