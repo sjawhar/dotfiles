@@ -12,4 +12,6 @@ Nice=19
 IOSchedulingClass=idle
 # -ignore_readdir_race: other processes remove their own entries during the walk, and find
 # would otherwise fail the run on each one it listed and then could not stat.
-ExecStart=/usr/bin/find /mnt/nvme/%u/tmp -ignore_readdir_race -maxdepth 1 -name tmp* -empty -mtime +1 -delete
+# -mindepth 1: without it find tests the starting directory too, and it is named tmp
+# (dispatch://INFRA-893).
+ExecStart=/usr/bin/find /mnt/nvme/%u/tmp -mindepth 1 -ignore_readdir_race -maxdepth 1 -name tmp* -empty -mtime +1 -delete
