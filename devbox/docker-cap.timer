@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly: bound Docker's build cache and remove unusable Docker data (docker-cap.service)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,43 @@
+#!/bin/bash
+# docker-cap: hold Docker's build cache under a size cap, and remove the Docker data that no
+# build or run can ask for again. devbox/docker-cap.service runs it every hour; the unit's
+# comment says why each bound is what it is.
+#
+# It acts only when the filesystem of Docker's data root is more than DOCKER_CAP_HIGH_PCT
+# (default 85) per cent used. Then it runs three prunes:
+#   - build cache: the least recently used records go until the cache is at most
+#     DOCKER_CAP_BUILD_CACHE (default 80GB);
+#   - untagged (dangling) images created more than 24 h ago: no tag names them;
+#   - anonymous volumes that no container, running or stopped, uses. Docker 23 and later prune
+#     only anonymous volumes, so named volumes stay.
+# It never removes a tagged image or a container. A tagged image can be an eval image that takes
+# hours to rebuild, so its owner decides when it goes.
+#
+# DOCKER_CAP_HIGH_PCT and DOCKER_CAP_BUILD_CACHE can be set to override the defaults.
+set -euo pipefail
+
+high="${DOCKER_CAP_HIGH_PCT:-85}"
+cache_cap="${DOCKER_CAP_BUILD_CACHE:-80GB}"
+
+if ! root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || [[ -z "$root" ]]; then
+    echo "docker-cap: the Docker daemon does not answer; nothing to do"
+    exit 0
+fi
+
+used_pct() { df --output=pcent "$root" | tail -1 | tr -dc '0-9'; }
+free_bytes() { df -B1 --output=avail "$root" | tail -1 | tr -dc '0-9'; }
+
+pct="$(used_pct)"
+if ((pct <= high)); then
+    echo "docker-cap: $root is ${pct}% used, at or under ${high}%; nothing to do"
+    exit 0
+fi
+
+before="$(free_bytes)"
+echo "docker-cap: $root is ${pct}% used, over ${high}%"
+echo "build cache over $cache_cap: $(docker builder prune --force --max-used-space "$cache_cap" | tail -1)"
+echo "untagged images older than 24 h: $(docker image prune --force --filter until=24h | tail -1)"
+echo "unused anonymous volumes: $(docker volume prune --force | tail -1)"
+after="$(free_bytes)"
+# Other writers share this filesystem, so the change in free space is not only these prunes.
+echo "docker-cap: free space on $root went from $((before / 1000000000)) GB to $((after / 1000000000)) GB; now $(used_pct)% used"

@@ -66,6 +66,10 @@ arm_user_timer devbox tmp-stale-reap
 # (devbox/nvme-cache-cap.md).
 arm_user_timer devbox nvme-cache-cap
 
+# Docker's build cache held under 80 GB, and untagged images and the anonymous volumes of removed
+# containers removed, hourly, while Docker's disk is over 85% used (devbox/docker-cap.service).
+arm_user_timer devbox docker-cap
+
 # Scratch on the big disk for the box's systemd --user services, which read environment.d and
 # not .bashrc (devbox/nvme-tmp.conf). Installed only where /mnt/nvme/<user> exists and is
 # writable, and only once both directories are there, since environment.d has no conditionals.
