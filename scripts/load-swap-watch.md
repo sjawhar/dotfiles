@@ -63,9 +63,19 @@ to dismiss, which is what six lanes on that same machine had already paid for th
 - **Swap draining to zero inside 2 h** (`--horizon`, rate over `--rate-window`, 1 h of this
   watch's own samples). The same shape as `disk-fill-watch`'s time-to-full: a floor alone says
   "low" for hours without ever saying "about to land".
-- **`MemAvailable` under 8 GiB** (`--mem-floor`). The kill zone a box reaches after swap is
-  gone. It was not what fired on 2026-10-29 — 127 GiB was available, and `memory full avg60`
-  was 0.2% — which is why memory alone is a poor detector here.
+- **`MemAvailable` under the box's floor** (`--mem-floor`, `--mem-floor-fraction`,
+  `--mem-floor-cap`). The kill zone a box reaches after swap is gone. It was not what fired on
+  2026-10-29 — 127 GiB was available, and `memory full avg60` was 0.2% — which is why memory
+  alone is a poor detector here.
+
+  The floor is `max(8 GiB, 10% of MemTotal)`, never above `25% of MemTotal`. One absolute
+  number cannot serve every box: 8 GiB is 12.5% of a 64 GB lane VM, 3.2% of the 251 GB devbox
+  and 0.5% of a 1.5 TB builder, so on the big boxes it is reached only once the box is already
+  dying. The cap is the other half: a floor above a quarter of the box is not a floor but a
+  permanent alert, and on 2026-10-31 at 03:49:22Z a hand run with `--mem-floor 200000000000`
+  fired on `ossv-agent-repo`, a 64 GB box, saying "MemAvailable is 58.6 GiB, under the
+  186.3 GiB floor". Every alert says which of the three produced the number it used, and a box
+  whose MemTotal cannot be read keeps the absolute floor rather than a cap of zero.
 - **Grace 600 s** (`--grace`), period 2 min: an alert about 12 minutes after onset. A build
   burst does not hold the bar for ten minutes; the incident held 80% for seventy.
 - **Clear at 0.7 of each rule** (`--clear-factor`), per condition, so a crossing never flaps on
