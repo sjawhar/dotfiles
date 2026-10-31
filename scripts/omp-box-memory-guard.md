@@ -27,7 +27,8 @@ measuring:
 * and almost nothing is in one. Measured 2026-10-27T14:57Z, `user-1000.slice` held 193 GiB, of
   which **156 GiB was one unlimited login scope** (`session-3.scope`, 1,463 processes: tmux
   panes and everything they start) and only 36 GiB the per-session scopes under `app.slice`.
-  `shims/omp` creates a scope only when `OMP_MEMORY_MAX` is set, and nothing sets it by default.
+  `shims/omp` then created a scope only when `OMP_MEMORY_MAX` was set, and nothing set it by
+  default. Since 2026-10-31 it defaults to 24G per session (dispatch://INFRA-898).
 
 ## The four parts, in the order the kernel meets them
 

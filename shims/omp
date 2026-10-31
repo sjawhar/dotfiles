@@ -181,7 +181,7 @@ fi
 # that hard memory cap and swap off. A session that runs away is then killed inside its own cgroup
 # instead of the kernel picking a victim anywhere on the box: on 2026-10-26 at 05:47Z one omp
 # session reached 138.0 GiB and the global OOM killer took two of the box's coredns pods with it.
-# Unset, nothing changes: no scope, no cap, and omp is exec'd as before. A scope is transient, so
+# Unset, the default below applies (24G). A scope is transient, so
 # it leaves no unit file behind. OMP_MEMORY_MAX is removed from the session's own environment, so
 # subprocesses do not each ask for a scope of their own; they share this one and count against it.
 # If systemd-run is missing or refuses (a container with no user manager), the session starts
@@ -192,9 +192,28 @@ fi
 # start under a 192M cap with MemoryHigh at 144M was still in `discoverAndLoadMCPTools` after 84 s).
 # A plain MemoryMax kills promptly, and the wrapper waits for the session so it can say why: a
 # ceiling nobody can see costs a lead more time than the kill itself.
+# The default ceiling (dispatch://INFRA-898, answered on its ask on 2026-10-31): 24 GiB per session,
+# above every session measured that day (the largest of 44 held 17.8 GiB at 17:07Z). A caller's own
+# value stays, clamped at 96G. A session already inside a ceiling's scope (OMP_MEMORY_SCOPE, set
+# below) takes no default of its own: an omp it starts shares its scope and counts against it.
+if [[ -z "${OMP_MEMORY_SCOPE:-}" ]]; then
+    : "${OMP_MEMORY_MAX:=24G}"
+    if [[ "$OMP_MEMORY_MAX" =~ ^([0-9]+)([KMGT]?)$ ]]; then
+        mem_bytes=${BASH_REMATCH[1]}
+        case "${BASH_REMATCH[2]}" in
+            K) mem_bytes=$((mem_bytes << 10)) ;; M) mem_bytes=$((mem_bytes << 20)) ;;
+            G) mem_bytes=$((mem_bytes << 30)) ;; T) mem_bytes=$((mem_bytes << 40)) ;;
+        esac
+        if ((mem_bytes > 96 << 30)); then
+            echo "omp: OMP_MEMORY_MAX=$OMP_MEMORY_MAX is above the 96G ceiling for one session; using 96G." >&2
+            OMP_MEMORY_MAX=96G
+        fi
+    fi
+fi
 if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; then
     mem_max="$OMP_MEMORY_MAX"
     unset OMP_MEMORY_MAX
+    export OMP_MEMORY_SCOPE="$mem_max"
     if systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -- true \
         >/dev/null 2>&1; then
         # A non-interactive shell gives a background job /dev/null as stdin unless the job names
