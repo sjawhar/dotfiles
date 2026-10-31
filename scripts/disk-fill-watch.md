@@ -65,9 +65,10 @@ regardless of rate.
 | anything else | `--default-floor`, 20 GiB | |
 
 An alert on `/mnt/nvme` also names every grade-farm transfer kind whose own floor the current
-free space is under (`generic-unmeasured` 150 GB, `build-cache` 84, `registration` 52,
-`nightly-grade` 52, `frozen-drop` 44, `restore` 36, `prepare-staging` 28, `build-stage` 21.6,
-`grade-record` 20.8): that list is the work the farm is already refusing.
+free space is under (grading-tools `grade_farm/floors.py` as of #1238: `generic-unmeasured` 150 GB,
+`build-cache` 100, `registration` 68, `nightly-grade` 60, `frozen-drop` 44, `restore` 44,
+`prepare-staging` 28, `grade-record` 24, `build-stage` 22.4, `suite-result` 21.6): that list is the
+work the farm is already refusing.
 
 **A floor is held to the device it names.** `--max-floor-fraction` (10%) caps every floor at a
 tenth of its own filesystem, and the substitution is logged once, never alerted. On

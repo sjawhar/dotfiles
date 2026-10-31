@@ -119,17 +119,20 @@ FLOORS = {
 
 # The grade farm's per-transfer-kind floors on /mnt/nvme, highest first. These do not alert on
 # their own; the alert names every kind whose floor the current free space is under, which is
-# the list of work that is already refused. Same source as the 84 GB floor above.
+# the list of work that is already refused. Source: grading-tools grade-farm/src/grade_farm/
+# floors.py as of #1238 (2026-10-31, re-measured kind bounds; floor = 20 GB + 8 x bound, capped at
+# the 150 GB generic floor). The 84 GB alert floor above stays where it was.
 NVME_KIND_FLOORS = [
     ("generic-unmeasured", 150 * GB),
-    ("build-cache", 84 * GB),
-    ("registration", 52 * GB),
-    ("nightly-grade", 52 * GB),
+    ("build-cache", 100 * GB),
+    ("registration", 68 * GB),
+    ("nightly-grade", 60 * GB),
     ("frozen-drop", 44 * GB),
-    ("restore", 36 * GB),
+    ("restore", 44 * GB),
     ("prepare-staging", 28 * GB),
-    ("build-stage", 21600000000),
-    ("grade-record", 20800000000),
+    ("grade-record", 24 * GB),
+    ("build-stage", 22400000000),
+    ("suite-result", 21600000000),
 ]
 
 # A floor is a number about a device, so it must be checked against the device it names. The
