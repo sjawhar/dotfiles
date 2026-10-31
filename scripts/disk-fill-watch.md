@@ -173,6 +173,23 @@ alert). That script sized only non-directories, which is how `/tmp/rev1` was nam
 the directories beside it never were. What a run's budget does not reach, the next run reaches:
 an entry already named is never looked at again.
 
+**A per-entry notice goes to the entry's own live owner**, not to the box-health owner. The
+entry belongs to one session's work and that session is the only reader who can remove it: on
+2026-10-31 the box-health owner received notices naming other sessions (`01a1809b` on
+ossv-agent-open, `01a18c07` on open5) that it could do nothing with. The session id read off a
+process is a claim, so it is used as an address only when Envoy lists it as live on **this**
+box, the same check this watch makes for a writer.
+
+Two cases keep a notice with the box-health owner, and each says which it is:
+
+- no live session on this box matches the entry (no owner observed, a `pid N (comm)` answer, or
+  an id that is live somewhere else);
+- the disk is **under 15% free**, where the entry is the box's problem whoever made it.
+
+An owner that refuses the send gets the notice resent to the box-health owner rather than
+dropped. Box-level crossings — the floor, the fill rate, the clear — are about the box and are
+unchanged: they always go to the box-health owner.
+
 ## Who hears about it
 
 Agent sessions only, never a person. Every message goes to the Envoy role
