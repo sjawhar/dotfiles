@@ -1,6 +1,6 @@
 ---
 name: finding-dropped-work
-description: Use before you report a body of work done or end a session, when a lead does its daily check of each agent, when the chief of staff checks sessions every few hours, after a restart or compaction, or when the user says requests were dropped or blockers were not in Dispatch.
+description: Use before you report a body of work done or end a session, when a lead does its daily check of each agent, when the chief of staff checks sessions every few hours, after a restart or compaction, when an eval's result exists but nobody has read it, or when the user says requests were dropped or blockers were not in Dispatch.
 ---
 
 # Finding dropped work
@@ -43,6 +43,7 @@ Each row that is not DONE leaves the audit with one of these, the same hour:
 | A Dispatch record names a local file | Upload the file as an artifact on that issue and link it. |
 | The result sits in a document, artifact or chat line with no ask | Open an ask that links the result and asks the user's next step with it: an ask block at the end of that document, else a `dispatch ask`. An artifact notifies nobody. |
 | The work was delivered smaller or different than its goal | Count it open, not done. Finish the missing part now, or open an ask on its issue naming each unmet requirement and asking whether it is dropped. A new issue for the missing part does not close this row. |
+| An eval's result exists and does not answer the question it was asked | Count it open. Say in one line what the result does answer and what is missing, then either run the missing arm or cells now, or open an ask with both. A figure delivered with no answer is not done. |
 | Dropped on purpose | Say so to the requester, with the reason, on the issue. |
 
 Then report done, with the audit's counts: rows found, rows closed by each action.
