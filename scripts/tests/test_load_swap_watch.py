@@ -23,6 +23,9 @@ LOADER.exec_module(WATCH)
 
 GIB = WATCH.GIB
 
+# The chief of staff's session: no box alert may reach it (Sami, 2026-10-31).
+CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+
 
 class FakeEnvoy:
     """Records what left, and can answer non-200 for an unheld role or a refused send."""
@@ -267,11 +270,46 @@ class RoutingTest(unittest.TestCase):
         WATCH.run_once(options(self.state, grace=0.0))
         self.sample = box(swap_free=0, swap_used_fraction=1.0)
         WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
-        escalations = [text for _, text in self.envoy.sent]
+        escalations = self.published("STILL OUT OF SWAP")
         self.assertEqual(1, len(escalations))
-        self.assertIn("STILL OUT OF SWAP", escalations[0])
         self.assertNotIn("CPU", escalations[0].splitlines()[0])
+        self.assertEqual([], self.envoy.sent)
         self.assertEqual(1, len(self.published("BOX SHORT OF CPU CLEARED")))
+
+    def test_an_escalation_goes_to_the_box_health_role(self) -> None:
+        WATCH.run_once(options(self.state, grace=0.0))
+        self.sample = box(swap_free=0, swap_used_fraction=1.0)
+        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        topics = {topic for topic, text in self.envoy.published if "STILL OUT OF SWAP" in text}
+        self.assertEqual({WATCH.BOX_HEALTH_ROLE_TOPIC}, topics)
+        self.assertEqual([], self.envoy.sent)
+
+    def test_an_unheld_role_sends_an_escalation_to_the_sre_session(self) -> None:
+        WATCH.run_once(options(self.state, grace=0.0))
+        self.envoy.publish_ok = False
+        self.sample = box(swap_free=0, swap_used_fraction=1.0)
+        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        escalations = [
+            session for session, text in self.envoy.sent if "STILL OUT OF SWAP" in text
+        ]
+        self.assertEqual([WATCH.SRE], escalations)
+
+    def test_no_message_of_a_whole_cycle_reaches_the_chief_of_staff(self) -> None:
+        """Box health is the SRE session's, not the chief of staff's (Sami, 2026-10-31)."""
+        WATCH.run_once(options(self.state, grace=0.0))
+        self.sample = box(swap_free=0, swap_used_fraction=1.0)
+        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        self.sample = box()
+        WATCH.run_once(options(self.state, grace=0.0))
+        self.envoy.publish_ok = False
+        self.sample = starved()
+        WATCH.run_once(options(self.state, grace=0.0))
+        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        self.assertNotIn(
+            CHIEF_OF_STAFF, [session for session, _ in self.envoy.sent] + [
+                topic for topic, _ in self.envoy.published
+            ],
+        )
 
     def test_recovery_clears_each_condition_and_says_so(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
@@ -286,8 +324,9 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(self.envoy.sent, [])
 
     def test_a_refused_escalation_is_never_reported_as_told(self) -> None:
-        """An escalation that says it was told while the listener refused it is a silent failure."""
+        """An escalation that says it was told while every route refused it is a silent failure."""
         WATCH.run_once(options(self.state, grace=0.0))
+        self.envoy.publish_ok = False
         self.envoy.send_ok = False
         said = []
         original_log = WATCH.log
@@ -297,8 +336,7 @@ class RoutingTest(unittest.TestCase):
         finally:
             WATCH.log = original_log
         self.assertEqual(
-            [WATCH.CHIEF_OF_STAFF, WATCH.CHIEF_OF_STAFF],
-            [session for session, _ in self.envoy.sent],
+            [WATCH.SRE, WATCH.SRE], [session for session, _ in self.envoy.sent]
         )
         self.assertFalse([line for line in said if line.startswith("told ")])
         self.assertTrue([line for line in said if "NOBODY HEARD IT" in line])
@@ -312,7 +350,7 @@ class RoutingTest(unittest.TestCase):
             WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
         finally:
             WATCH.log = original_log
-        self.assertIn(f"told {WATCH.CHIEF_OF_STAFF}", said)
+        self.assertIn(f"told {WATCH.BOX_HEALTH_ROLE_TOPIC}", said)
 
 
 class ConsumerAttributionTest(unittest.TestCase):

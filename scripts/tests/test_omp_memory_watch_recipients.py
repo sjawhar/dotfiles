@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Who hears a crossing of omp-memory-watch: the session, the INFRA lead, the box-health owner.
+
+Box health on these boxes belongs to the SRE session, not to the chief of staff (Sami,
+2026-10-31: "There's an SRE. They can handle it."), so the box-health owner is addressed by the
+`lead-box-health` Envoy role, and the SRE session hears it when nobody holds the role. No
+message of a crossing may reach the chief of staff's session.
+
+Every cgroup here is a synthetic directory tree, so the tests read no real cgroup.
+"""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parents[1] / "omp-memory-watch"
+LOADER = importlib.machinery.SourceFileLoader("omp_memory_watch_recipients", str(SCRIPT))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+assert SPEC is not None
+WATCH = importlib.util.module_from_spec(SPEC)
+LOADER.exec_module(WATCH)
+
+GIB = WATCH.GIB
+CEILING = 24 * GIB
+SESSION = "00000001-0000-0000-0000-000000000001"
+# The chief of staff's session: no box alert may reach it (Sami, 2026-10-31).
+CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+
+
+class FakeEnvoy:
+    """Records what left, and can answer non-200 for an unheld role or a refused send."""
+
+    instances: list = []
+    publish_ok = True
+    send_ok = True
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        self.published: list[tuple[str, str]] = []
+        self.sent: list[tuple[str, str]] = []
+        FakeEnvoy.instances.append(self)
+
+    def request(self, method: str, path: str, body=None):
+        return 500, {"error": "no answer in this test"}
+
+    def publish(self, topic: str, message: str) -> bool:
+        self.published.append((topic, message))
+        return FakeEnvoy.publish_ok
+
+    def send(self, session_id: str, message: str) -> bool:
+        self.sent.append((session_id, message))
+        return FakeEnvoy.send_ok
+
+
+def options(state: Path, **overrides) -> argparse.Namespace:
+    values = {
+        "fraction": 0.70,
+        "clear_fraction": 0.62,
+        "sample_fraction": 0.45,
+        "samples": 24,
+        "unlimited_warn": 16.8,
+        "grace": 0.0,
+        "escalate": 0.0,
+        "wall_fraction": 0.98,
+        "wall_cooldown": 900.0,
+        "wall_digest": 900.0,
+        "wall_top": 3,
+        "wall_pending_max": 400,
+        "state": state,
+        "http_timeout": 8.0,
+        "dry_run": False,
+        "write_state": False,
+        "print_alert": False,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+class CrossingRecipientsTest(unittest.TestCase):
+    """One scope that crosses, escalates and clears, over several runs."""
+
+    SCOPE = "run-rmem1.scope"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        FakeEnvoy.instances = []
+        FakeEnvoy.publish_ok = True
+        FakeEnvoy.send_ok = True
+        for name, replacement in (
+            ("CGROUP_ROOT", self.root),
+            ("Envoy", FakeEnvoy),
+            ("cmdline_of", lambda pid: "omp --resume x"),
+            ("rss_of", lambda pid: 3 * GIB),
+            ("pid_start", lambda pid: 7),
+            ("session_of", lambda pid: SESSION),
+            ("self_watch_of", lambda cgroup, pid: ""),
+            ("self_watch_anywhere", lambda pid: ""),
+            ("omp_processes", lambda: [(11, self.cgroup)]),
+        ):
+            original = getattr(WATCH, name)
+            setattr(WATCH, name, replacement)
+            self.addCleanup(lambda n=name, o=original: setattr(WATCH, n, o))
+        self.state = self.root / "state.json"
+        self.cgroup = self.write_scope(20 * GIB)
+
+    def write_scope(self, anon: int) -> str:
+        """A synthetic cgroup v2 scope whose unreclaimable memory is `anon`."""
+        cgroup = f"/user.slice/user-1001.slice/user@1001.service/app.slice/{self.SCOPE}"
+        directory = self.root / cgroup.strip("/")
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "memory.max").write_text(f"{CEILING}\n")
+        (directory / "memory.current").write_text(f"{anon}\n")
+        (directory / "memory.peak").write_text(f"{anon}\n")
+        (directory / "memory.swap.max").write_text("max\n")
+        (directory / "memory.events").write_text("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n")
+        (directory / "memory.stat").write_text(f"anon {anon}\nfile 0\nkernel 0\nsock 0\nshmem 0\n")
+        (directory / "cgroup.procs").write_text("11\n")
+        return cgroup
+
+    def run_pass(self, anon: int, **overrides) -> None:
+        self.write_scope(anon)
+        WATCH.run_once(options(self.state, **overrides))
+
+    def everything(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        sent = [row for envoy in FakeEnvoy.instances for row in envoy.sent]
+        published = [row for envoy in FakeEnvoy.instances for row in envoy.published]
+        return sent, published
+
+    def test_the_first_alert_goes_to_the_session_and_the_infra_lead(self) -> None:
+        self.run_pass(20 * GIB)
+        sent, published = self.everything()
+        self.assertEqual([SESSION, WATCH.INFRA_LEAD], [who for who, _ in sent])
+        self.assertEqual([], published)
+
+    def test_the_escalation_goes_to_the_box_health_role(self) -> None:
+        self.run_pass(20 * GIB)
+        self.run_pass(21 * GIB)
+        sent, published = self.everything()
+        self.assertEqual(
+            [(WATCH.BOX_HEALTH_ROLE_TOPIC, True)],
+            [(topic, "STILL RISING" in text) for topic, text in published],
+        )
+        self.assertEqual([SESSION, WATCH.INFRA_LEAD], [who for who, _ in sent])
+
+    def test_an_unheld_role_sends_the_escalation_to_the_sre_session(self) -> None:
+        self.run_pass(20 * GIB)
+        FakeEnvoy.publish_ok = False
+        self.run_pass(21 * GIB)
+        sent, _published = self.everything()
+        self.assertEqual(
+            [WATCH.SRE], [who for who, text in sent if "STILL RISING" in text]
+        )
+
+    def test_the_clear_reaches_each_recipient_once(self) -> None:
+        self.run_pass(20 * GIB)
+        self.run_pass(21 * GIB)
+        self.run_pass(2 * GIB)
+        sent, published = self.everything()
+        clears_sent = [who for who, text in sent if "CLEARED" in text]
+        clears_published = [topic for topic, text in published if "CLEARED" in text]
+        self.assertEqual([SESSION, WATCH.INFRA_LEAD], clears_sent)
+        self.assertEqual([WATCH.BOX_HEALTH_ROLE_TOPIC], clears_published)
+
+    def test_no_message_of_a_whole_cycle_reaches_the_chief_of_staff(self) -> None:
+        """Alert, escalation and clear, with the role held and then unheld."""
+        self.run_pass(20 * GIB)
+        self.run_pass(21 * GIB)
+        self.run_pass(2 * GIB)
+        FakeEnvoy.publish_ok = False
+        self.run_pass(20 * GIB)
+        self.run_pass(21 * GIB)
+        self.run_pass(2 * GIB)
+        sent, published = self.everything()
+        self.assertNotIn(CHIEF_OF_STAFF, [who for who, _ in sent])
+        self.assertNotIn(CHIEF_OF_STAFF, [topic for topic, _ in published])
+
+
+if __name__ == "__main__":
+    unittest.main()

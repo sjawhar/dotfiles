@@ -43,6 +43,7 @@ class FakeEnvoy:
 
     def __init__(self, timeout: float = 8.0) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.published: list[tuple[str, str]] = []
         FakeEnvoy.instances.append(self)
 
     def request(self, method: str, path: str, body=None):
@@ -52,6 +53,10 @@ class FakeEnvoy:
 
     def send(self, session_id: str, message: str) -> bool:
         self.sent.append((session_id, message))
+        return True
+
+    def publish(self, topic: str, message: str) -> bool:
+        self.published.append((topic, message))
         return True
 
 
