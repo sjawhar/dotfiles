@@ -28,10 +28,10 @@ credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
 [accounts.trajectory]
 read_credential_cmd  = ["secrets", "GWS_TRAJECTORY_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_READ_OAUTH"]
-write_credential_cmd = ["secrets", "GWS_TRAJECTORY_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_MODIFY_OAUTH"]
-write_label          = "YubiKey touch (secretsd)"
-send_credential_cmd  = ["secrets", "GWS_TRAJECTORY_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_SEND_OAUTH"]
-send_label           = "YubiKey touch (secretsd)"
+write_credential_cmd = ["secret-run", "--reason", "mailbox trajectory write", "--wait", "4m", "GWS_TRAJECTORY_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_MODIFY_OAUTH"]
+write_label          = "broker grant on Dispatch (YubiKey touch outside the broker)"
+send_credential_cmd  = ["secret-run", "--reason", "mailbox trajectory send", "--wait", "4m", "GWS_TRAJECTORY_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_SEND_OAUTH"]
+send_label           = "broker grant on Dispatch (YubiKey touch outside the broker)"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
 
 [filters.github]
