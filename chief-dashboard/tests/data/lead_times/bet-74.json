@@ -1,0 +1,1695 @@
+{
+ "_note": "Read 2026-10-25 from Dispatch (BET-74: issue, events, plan-md version 1) and GitHub (PRs of theorem-labs merged 2026-10-21, a selection). Event payloads cut to status and claim, artifact authors dropped, the plan cut to its title and the lines that hold a date.",
+ "issue": {
+  "key": "BET-74",
+  "title": "Task skills: grader choice and the rules from the RL-environments talk and Aengus's recent task work",
+  "status": "done",
+  "labels": [],
+  "created_at": "2026-10-20T21:32:09.415377Z",
+  "updated_at": "2026-10-21T22:22:22.035444Z",
+  "last_seq": 134,
+  "artifacts": [
+   {
+    "id": "019feffa-ae43-4aea-9337-2cc832e0f9c8",
+    "slug": "plan-md",
+    "name": "plan.md",
+    "versions": [
+     {
+      "number": 1,
+      "created_at": "2026-10-21T06:21:48.757135Z"
+     },
+     {
+      "number": 2,
+      "created_at": "2026-10-21T06:38:21.79204Z"
+     },
+     {
+      "number": 3,
+      "created_at": "2026-10-21T09:47:20.225147Z"
+     },
+     {
+      "number": 4,
+      "created_at": "2026-10-21T16:39:45.565217Z"
+     }
+    ]
+   }
+  ]
+ },
+ "events": [
+  {
+   "seq": 1,
+   "type": "issue.created",
+   "created_at": "2026-10-20T21:32:09.415377Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {
+    "status": "triage",
+    "claim": null
+   }
+  },
+  {
+   "seq": 2,
+   "type": "ask.opened",
+   "created_at": "2026-10-20T21:32:11.531743Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 3,
+   "type": "ask.opened",
+   "created_at": "2026-10-20T21:32:11.531743Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 4,
+   "type": "artifact.created",
+   "created_at": "2026-10-20T21:32:16.09792Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 5,
+   "type": "comment.created",
+   "created_at": "2026-10-20T22:02:29.787774Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 6,
+   "type": "ask.edited",
+   "created_at": "2026-10-20T22:05:32.304054Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 7,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:05:34.411702Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 8,
+   "type": "comment.created",
+   "created_at": "2026-10-20T22:05:36.514138Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 9,
+   "type": "comment.created",
+   "created_at": "2026-10-20T22:08:00.807986Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 10,
+   "type": "ask.answered",
+   "created_at": "2026-10-20T22:08:08.898436Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 11,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:08:10.9923Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 12,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:31:48.7272Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 13,
+   "type": "ask.opened",
+   "created_at": "2026-10-20T22:31:50.908404Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 14,
+   "type": "comment.created",
+   "created_at": "2026-10-20T22:32:35.302947Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 15,
+   "type": "comment.created",
+   "created_at": "2026-10-20T22:33:01.322892Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 16,
+   "type": "ask.answered",
+   "created_at": "2026-10-20T22:33:12.217126Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 17,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:33:14.299954Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 18,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:34:15.101476Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 19,
+   "type": "ask.answered",
+   "created_at": "2026-10-20T22:34:16.114898Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 20,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:34:18.193732Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 21,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:34:54.397172Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 22,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:51:47.486786Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 23,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T22:51:53.512667Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 24,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T23:00:56.786041Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 25,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T23:05:54.639036Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 26,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T23:05:59.89809Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 27,
+   "type": "ask.opened",
+   "created_at": "2026-10-20T23:06:24.524611Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 28,
+   "type": "ask.edited",
+   "created_at": "2026-10-20T23:44:14.089455Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 29,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T23:44:14.089455Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 30,
+   "type": "ask.edited",
+   "created_at": "2026-10-20T23:45:47.225467Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 31,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T23:45:47.225467Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 32,
+   "type": "ask.handed_back",
+   "created_at": "2026-10-20T23:46:09.326305Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 33,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:46:23.43793Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 34,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-20T23:49:33.712794Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 35,
+   "type": "ask.edited",
+   "created_at": "2026-10-20T23:49:33.712794Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 36,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T23:49:33.712794Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 37,
+   "type": "artifact.version",
+   "created_at": "2026-10-20T23:50:10.811272Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 38,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:50:46.792694Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 39,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:51:17.855171Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 40,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:51:42.693686Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 41,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:52:28.394205Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 42,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:53:06.355731Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 43,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:53:23.476032Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 44,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:53:58.718586Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 45,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:54:10.326532Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 46,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:54:36.805293Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 47,
+   "type": "comment.edited",
+   "created_at": "2026-10-20T23:54:49.595849Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 48,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:55:26.308831Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 49,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:55:51.129514Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 50,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:56:43.268061Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 51,
+   "type": "comment.edited",
+   "created_at": "2026-10-20T23:56:59.710862Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 52,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:57:59.559945Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 53,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:58:40.711139Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 54,
+   "type": "comment.created",
+   "created_at": "2026-10-20T23:59:44.562284Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 55,
+   "type": "ask.edited",
+   "created_at": "2026-10-21T00:01:19.839312Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 56,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T00:01:19.839312Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 57,
+   "type": "ask.edited",
+   "created_at": "2026-10-21T00:01:23.238382Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 58,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T00:01:23.238382Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 59,
+   "type": "comment.created",
+   "created_at": "2026-10-21T00:02:17.237641Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 60,
+   "type": "comment.created",
+   "created_at": "2026-10-21T00:04:16.119152Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 61,
+   "type": "comment.created",
+   "created_at": "2026-10-21T00:06:15.90477Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 62,
+   "type": "ask.edited",
+   "created_at": "2026-10-21T00:06:27.307583Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 63,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T00:06:27.307583Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 64,
+   "type": "comment.created",
+   "created_at": "2026-10-21T00:09:06.096753Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 65,
+   "type": "ask.answered",
+   "created_at": "2026-10-21T00:41:58.533234Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 66,
+   "type": "artifact.changes_requested",
+   "created_at": "2026-10-21T00:41:58.533234Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 67,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 68,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 69,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 70,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 71,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 72,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 73,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 74,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 75,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 76,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 77,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 78,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 79,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 80,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 81,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 82,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 83,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 84,
+   "type": "comment.anchor_refreshed",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 85,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T01:26:34.016909Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 86,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T01:27:32.657269Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 87,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T01:27:50.289311Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 88,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T01:54:53.935342Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 89,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T01:55:18.960078Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 90,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:04.125179Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 91,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:04.510114Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 92,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:05.000241Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 93,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:05.500586Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 94,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:05.904499Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 95,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:06.435071Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 96,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:06.700572Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 97,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:07.098502Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 98,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:07.373523Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 99,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:07.874245Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 100,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:08.200199Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 101,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:09.147452Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 102,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:09.464855Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 103,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:09.726897Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 104,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:09.984958Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 105,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:10.465591Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 106,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:10.772147Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 107,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:11.237586Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 108,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:11.856286Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 109,
+   "type": "comment.created",
+   "created_at": "2026-10-21T01:56:12.130319Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 110,
+   "type": "ask.opened",
+   "created_at": "2026-10-21T01:56:44.891956Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 111,
+   "type": "ask.answered",
+   "created_at": "2026-10-21T02:40:31.928273Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 112,
+   "type": "artifact.changes_requested",
+   "created_at": "2026-10-21T02:40:31.928273Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 113,
+   "type": "comment.created",
+   "created_at": "2026-10-21T02:44:51.15123Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 114,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T02:58:39.595697Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 115,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T02:58:57.053401Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 116,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T02:59:22.511811Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 117,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T03:04:09.015759Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 118,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T03:04:17.000937Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 119,
+   "type": "comment.created",
+   "created_at": "2026-10-21T03:04:48.584051Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 120,
+   "type": "ask.opened",
+   "created_at": "2026-10-21T03:05:13.616423Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 121,
+   "type": "ask.answered",
+   "created_at": "2026-10-21T03:37:24.251195Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 122,
+   "type": "artifact.approved",
+   "created_at": "2026-10-21T03:37:24.251195Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 123,
+   "type": "issue.claimed",
+   "created_at": "2026-10-21T03:38:32.385481Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {
+    "status": "triage",
+    "claim": {
+     "at": "2026-10-21T03:38:32.391304Z",
+     "actor": {
+      "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec",
+      "kind": "session",
+      "owner": "sami@theorem.dev",
+      "origin": {
+       "cwd": "/home/sami/verification-skills",
+       "host": "omp",
+       "pane": "%222",
+       "tmux": "dev:3.6",
+       "machine": "sami-rocqperf",
+       "session_title": "\ud83c\udfaf GRADER: Incorporate transcript learnings into verification skills"
+      }
+     }
+    }
+   }
+  },
+  {
+   "seq": 124,
+   "type": "issue.updated",
+   "created_at": "2026-10-21T03:38:51.300387Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {
+    "status": "in_progress",
+    "claim": {
+     "at": "2026-10-21T03:38:32.391304Z",
+     "actor": {
+      "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec",
+      "kind": "session",
+      "owner": "sami@theorem.dev",
+      "origin": {
+       "cwd": "/home/sami/verification-skills",
+       "host": "omp",
+       "pane": "%222",
+       "tmux": "dev:3.6",
+       "machine": "sami-rocqperf",
+       "session_title": "\ud83c\udfaf GRADER: Incorporate transcript learnings into verification skills"
+      }
+     }
+    }
+   }
+  },
+  {
+   "seq": 125,
+   "type": "artifact.created",
+   "created_at": "2026-10-21T06:21:48.757135Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 126,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T06:38:21.79204Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 127,
+   "type": "comment.created",
+   "created_at": "2026-10-21T06:38:37.807898Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 128,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T09:47:20.225147Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 129,
+   "type": "artifact.version",
+   "created_at": "2026-10-21T16:39:45.565217Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 130,
+   "type": "ask.opened",
+   "created_at": "2026-10-21T21:33:19.189863Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 131,
+   "type": "ask.answered",
+   "created_at": "2026-10-21T22:04:07.083927Z",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 132,
+   "type": "message.created",
+   "created_at": "2026-10-21T22:22:21.988215Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {}
+  },
+  {
+   "seq": 133,
+   "type": "issue.closed",
+   "created_at": "2026-10-21T22:22:22.035444Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {
+    "status": "done",
+    "claim": null
+   }
+  },
+  {
+   "seq": 134,
+   "type": "issue.released",
+   "created_at": "2026-10-21T22:22:22.035444Z",
+   "actor": {
+    "kind": "session",
+    "id": "01a15af4-d535-7248-8ed0-4ac77bb19aec"
+   },
+   "payload": {
+    "status": "done",
+    "claim": null
+   }
+  }
+ ],
+ "plan_versions": {
+  "1": {
+   "markdown": "# Task skills: stage skills and the rules from the talk and Aengus's work (BET-74) Implementation Plan\n**Spec:** dispatch://BET-74, spec.md version 23, approved by Sami 2026-10-21 03:37Z. Evidence: dispatch://BET-74/artifact/evidence-md (v8).\n## Facts this plan rests on (checked 2026-10-21)\n- `omp -p --plugin-dir DIR --skills '<names>'` lists only the named skills, and a `--plugin-dir` copy wins over the installed plugin's copy of the same name (probe with a renamed skill and a marked description, 2026-10-21). Negated globs (`!task-*`) do not filter. So routing runs pass an allow-list of the plugin directory's own skill names, which hides the installed plugin's old task skills.\n- omp's eval `completion()` runs with no CLAUDE.md, no skills and no memory (asked directly, 2026-10-21). `omp -p` loads `~/.claude/CLAUDE.md` and memories even with `--system-prompt`, so scenario runs use `completion()`, not `omp -p`."
+  }
+ },
+ "prs": [
+  {
+   "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1096",
+   "title": "forced_cut: restore make_vcut's port and cut exactly a force file's lemma classes (BET-73)",
+   "body": "BET-73 rebuilds Aengus's WO3-100 tasks starting at the cut. He used make_vcut with the five patches in `wo3_cut.py` to remove exactly the lemma classes listed in each task's force file. Main had no copy of that cutter: #1071 deleted `transforms/vendor_cut.py` (make_vcut's port) with the families that used it.\n\n## What changes\n\n- **Restored** (first commit, verbatim): `tasks/src/bet_tasks/transforms/vendor_cut.py` from cc39a84a74, the last commit that has it.\n- **Forced selection** (second commit): `forced_select` keeps exactly the candidate classes whose key, the smallest member kernel name, is in the given set. Any key that is not a candidate's refuses the cut and lists every such key. This replaces the seeded dose selection (`dose_select`, `Selection`, `apply_cut`), which nothing on main calls. `apply_classes` writes make_vcut's cell record, adding `class_keys`.\n- **Tactic guard**: `ltac_guard` is off by default. `body_ltac_used_later` uses the same patterns as his `body_defs.py`. When the guard is on, it excludes a proof whose body defines an `Ltac` that the rest of the file uses. The check runs in `load_members` after the code/Common exclusion and before the kind check, which is where his patch put it.\n- **Stage** `stages/forced_cut.py`: its inputs are the bundle tree, the probe directory (`deps.json`, `suggestions.json`), the force file and the Common store. Its params are `bundle`, `tag`, `ltac_guard` and `min_body`. It refuses a missing Common store, or one with no `.v` file, and names the path. TASK fixed this input shape from its per-task records.\n\nThe record matches his cell record on every field the acceptance compares (below). Three fields differ from a make_vcut record by design. `lemmas` has the same entries in a different order: his came from a seeded shuffle over his own candidate list, and nothing reads that order. `per_program` drops `dose` and `capped`, and its `of_classes` differs as the drift section says. It adds `class_keys`, `force_file_sha256` and `ltac_guard`.\n\nNo library file changes, so no other family's cut output moves.\n\n## Library drift\n\nThe cut on main's libraries gives the same output for both tasks as the cc39a84a74 libraries did. The candidate set does move. #1082 made `rocq_text.proofs` close `Time Qed` proofs, which adds 4 members in WR46 and 6 in TA06, and none of them joins a forced class. On another bundle such a proof could join a forced twin class. That would change `n_removed`, and TASK's per-task `removal_hash` comparison would show it. #1082 also changed how a later proof's scope and Section membership are read (`ScopeWalk`). On another bundle that can change a removed lemma's `Proof using` clause. That moves `tree_sha256` but not `n_removed` or `removal_hash`, and TASK compares `tree_sha256`, so it would show too. His `per_program.of_classes` is also lower than ours. One possible cause is a different Common store: `wo3_cut.py` reads `WORK/common_store`. That difference can only make a forced cut refuse loudly. I sent TASK both findings.\n\n## Verification\n\n**Acceptance (RestoreCut, sami-rocqperf, head `d945398ffc`; `d3ac6d697a` adds only the store refusals, which these inputs pass, and docstrings). After merging origin/main (#1095), head `5654cb39e5` reran WO3-180 with the guard on: `0ff5ff17\u2026cb329461`, 1266, 1132, `803ca1f8\u202642ef3ec63`, no field unequal to his record, 43 s.** Each row is one run of `stages.forced_cut` on this branch's libraries, over TASK's recorded inputs for that task: bundle, probe, force file and the image's 35-file Common. The harness (`acceptance.py`, outside the repo; his data stays out of it) compares the cell against his record on these fields: `removal_hash`, `n_removed`, `n_classes`, `tree_sha256`, `issued_obligations`, `files_touched`, `removed_proof_lines`, `clause_sources` and `cross_program_classes`. Every row also has `class_keys` equal to the force file's keys. The values equal REPORT.md's (BET-73's offline cut test).\n\n| task | bundle | guard | removal_hash | n_removed | n_classes | tree_sha256 | fields unequal to his record | s |\n|---|---|---|---|---|---|---|---|---|\n| WO3-180 | WR46 | off | `0ff5ff17ce7d170bf8e8ea865dcdbff6f0e52b4cf0b2a779b458d113cb329461` | 1266 | 1132 | `803ca1f81ddbcfd881cc3c555e887389ac723f451b320eeef75111942ef3ec63` | none | 58 |\n| WO3-004 | TA06 | off | `f6369f394566ffc29a59591b26de7d56249f9fd1f341d0886e402e48de98515b` | 1760 | 1236 | `15529444e88859e70139ae788276fc80a0b69116f6230affe5d4cbc58c5db659` | none | 62 |\n| WO3-180 | WR46 | on | `0ff5ff17ce7d170bf8e8ea865dcdbff6f0e52b4cf0b2a779b458d113cb329461` | 1266 | 1132 | `803ca1f81ddbcfd881cc3c555e887389ac723f451b320eeef75111942ef3ec63` | none | 55 |\n| WO3-004 | TA06 | on | `f6369f394566ffc29a59591b26de7d56249f9fd1f341d0886e402e48de98515b` | 1760 | 1236 | `15529444e88859e70139ae788276fc80a0b69116f6230affe5d4cbc58c5db659` | none | 57 |\n\n**Stale locks** (`uv run --project tasks python tasks/scripts/stale_locks.py --base origin/main`). This ran on this diff before the rebase onto #1094 and before the stage's cleanup-on-failure edit, and both runs touch the same files:\n```\n772 locks, 52010 manifest keys; 354 locks stale\nbase: origin/main at merge-base 35d8d4b8f7\nno lock's checked keys went stale in this change (354 stale on the base too)\n```\nNo experiment's `pipeline.py` reaches `forced_cut` or `vendor_cut`, so no lock's wiring changed.\n\n**Suite**: `remote-suite.sh` on bet-grade-1, a clean worktree at `d945398ffc`, `-W error -n 32`, coqc required:\n```\n1936 passed, 9 skipped in 635.23s (0:10:35)\nremote-run: the command on bet-grade-1 exited 0\n```\nAlso ran locally: `uv run pytest tests/test_forced_cut.py` gives 19 passed at `d3ac6d697a` and again at `5654cb39e5` (with `test_cut_fingerprint.py`, 27 passed) (forced selection, a missing or `.v`-less Common store, refusal of a non-candidate key, the guard on and off, a failed ablation leaving no tree, the record fields, and a run under `pivot repro`); `tests/test_cut_fingerprint.py` with the stage added gives 12 passed; ruff check and format are clean.\n\n",
+   "headRefName": "sami/restore-vendor-cut",
+   "createdAt": "2026-10-21T02:40:23Z",
+   "mergedAt": "2026-10-21T04:12:16Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/binary-equivalence-taiga"
+   },
+   "keys": [
+    "BET-73"
+   ]
+  },
+  {
+   "url": "https://github.com/theorem-labs/proof-efficiency-eval/pull/268",
+   "title": "BET-40: the eval runner exports to the results store",
+   "body": "BET-40 Task 5.1 (dispatch://BET-40, plan dispatch://BET-40/artifact/plan-md). Stacked on #266 (the results store).\n\nNew sweeps used to publish their transcripts by pushing to a git data repo. This PR has `fve run` write each sample into the results store of the side its spec names instead, and removes the data-repo path.\n\n## What changes\n\n- **`export.py` has two modes.** `export.py store SIDE LOG_DIR... [--shard i/N] [--final]` writes every run given into that side's bucket and BigQuery tables, in one pass. `export.py local LOG_DIR DIR [--report]` writes the plain directory it always did.\n  - The store pass lives in `src/analysis/store_export.py`.\n  - Each sample is a C1 try: prefix `runs/<run>/<cell>/<task>/<epoch>/<try>/`, try = `t` + 12 hex of the SHA-256 of the Inspect sample's uuid, version 0, source `export`.\n  - An epoch that already has rows is decided by `migrate.decide`, the rule migrate and sync-hdo use. A rerun appends nothing. A clean sample replacing an errored one is a new try. A regrade (`regrades.jsonl`) is the next version of the try. Anything else is reported and left out, and fails the pass (exit 1).\n  - Each log directory keeps a ledger, `store-export.json`, of what this host wrote. A pass with nothing new reads no BigQuery rows.\n  - A run whose run.yaml names the other side (`output.store`) is refused.\n- **One load job per table per round.** `fve run` exports through a `StoreExporter` thread every `--export-every` seconds (default 1800, separate from the spend check's `--every`), and once more after run.py exits. Each round is one `export.py store` process for every run on the host, so one `attempts` load and at most one `runs` load. A round with nothing new makes no load. The quota arithmetic is below.\n- **A failed final export is retried.** The final pass is counted in `status.json`'s `export_failures`. When it fails, the phase is `export-failed`, which is not in `fleet.FINISHED`, so a fleet host's boot starts `fve run` again; that is a no-op for run.py and repeats the export. `fve fleet status` shows the count.\n- **Run-level state is per shard.**\n  - `runs` gains a NULLABLE `shard` column: \"i/N\" for shard i of an exported run, NULL for a whole run (migrate, sync-hdo, a 1/1 export).\n  - On an existing table, every reader that names `shard` (an export's run-state lookup, `put --legacy-hdo`, `fetch`, the runs-key lookup) first runs the same column add as `fve results init` (`Tables._shard`, once per Tables), so the column is there before the first query that names it. The side's default compute account may do this: it holds `roles/bigquery.dataEditor` on its dataset (agent-infra `pee-results/main.go:217`), which carries `bigquery.tables.update`, and the deny policies refuse `datasets.update` but not `tables.update` (`bootstrap/pee_test.go:59`). An identity that may not stops with one line: ``runs table lacks `shard`: run `fve results init --side <side>` from this release``.\n  - A shard's run files go under `run/shards/<i>of<N>/`. A host appends a `runs` row only when its own shard's run state changed since it last recorded it. Two shards over three rounds now give 2 rows, not 6.\n  - `fve results fetch` returns each shard's run-state, places the shards' files as `fve collect` does, and merges every shard's log records into one `index.logs.jsonl.gz`. `report.py` on a fetched sharded run therefore counts the spend no record holds on every host.\n- **Loads never print row values.** Every writer (`export.py store`, `put --legacy-hdo`, `put --regraded`, migrate, sync-hdo) loads through `migrate.append_rows`/`finish_rows`, with the caller's clock. A failed `attempts` or `runs` load is `LoadFailed`, named by its run, the error class and BigQuery's reason (`bq.describe`, e.g. `BadRequest, reason invalidQuery`), never the error's message.\n  - `export.py store` prints a failed pass's error class, plus the message for this repo's own errors only, and no traceback.\n  - A sample that cannot be read or written is named by its epoch and class, and the pass goes on.\n  - `fve results put` prints `LoadFailed`/`ValueError` messages, which carry identities only, and exits 1.\n- **`fve run`** reads `output.store` from every expanded run and refuses a spec where one run lacks it or names an unknown side, or where the runs name different sides. `fve fleet launch` makes the same check before it copies anything. Before images, `fve run` checks that this machine can export: the `results` extra imports, then `doctor.can_export` makes real calls that the deny policies judge:\n  - read the canary;\n  - query `attempts`;\n  - create `doctor/export-canary` with `ifGenerationMatch=0` (200 the first time, 412 afterwards);\n  - dry-run `INSERT` into `attempts` and into `runs`.\n- **`fve results put --legacy-hdo RUN_DIR`** writes one local HDO export directory through `migrate.write_files` (`--side` is refused, because it always writes to hdo). It records its run state only when that state differs from the run's latest.\n  - **Epochs the HDO data repo also holds are reported, not written.** `put --legacy-hdo` and migrate/sync-hdo name an HDO epoch's try the same way, by the record without its `export` block (`legacy.hdo_try`), but `decide` recognizes a stored copy by the SHA-256 of the summary file's whole bytes, `export` block included (`migrate.py:220`, `:304`). Two separate exports of one attempt, a local HDO export directory and the data repo's copy, therefore share a try but not a summary SHA. The stack once had a `same` outcome for that; #270 removed it (b1172c5), and #268 never had it. So whichever of the two writes second reports the epoch and writes nothing (`report`). The stored row is the first writer's, and the record differs only in `export`. A run directory that is a byte copy of the data repo's run has the same summary SHA, so it is `again`, a no-op, not this case.\n  - **Who reaches this before the HDO repo's deletion.** No automated path does: no job shape on any VM runs `fve results put` (`runner.ALLOWED` on this head and on `bet40/firstpass-hdo` has none). The only path is an operator running `fve results put --legacy-hdo RUN_DIR` by hand, with an identity the HDO deny policy admits, on a run directory exported separately from a run the data repo holds or will hold. sync-hdo carries every data-repo commit within 5 minutes, so it reaches the case in either order. If sync-hdo writes second, it reports the epoch, and its summary file gets no manifest line. `fve results verify` then lists that file (`verify.py:3-5`: every logical file needs a manifest line), which blocks the deletion gate. So a run already in the data repo should not be put with `--legacy-hdo`; that command is for HDO exports that never reached the repo, as the README says (`README.md:403-408`, c8c62aa).\n- **`fve results put --side S --regraded DIR/RUN`** writes each fetched summary that differs from the record `fetch` wrote and carries a regrade the try lacks, as that try's next version. It refuses a missing `fetched.json`, a try with no row, or a `fetched.json` from the other side.\n- **`fve results fetch --side S --run R --to DIR`** writes each epoch's latest row into the local results layout (with a `fetched.json` that carries `record_sha256`), the run files and run-states, and `index.jsonl.gz`. An epoch already fetched at the same try and version is left as it is. Names outside the run directory are refused. `layout.run_file_rel` decodes the run-file names beside `run_file_key`; the docstring states its two invariants.\n- **The git data-repo path goes.** `datarepo.py` is deleted, and its plain-directory helpers move to `resultsdir.py`. `report.py` keeps writing the README results section of a plain directory. `regrade.py` works on a results directory or a log directory. `first_pass.py` keys its cache by the sample files' bytes only. The remaining data-repo names (`data_repo` arguments, the `DATA_REPO` metavars) are now results-directory names.\n- **Structure.**\n  - `migrate.Writer.new_try_row`, `version_row` and `attempt_prefix` are public, and `put` and the store export use them.\n  - `migrate.epoch_view` and `held_try` sit beside `decide`.\n  - `gitsrc.joined` is a free function, and `write_files` takes a `migrate.Source` protocol.\n- **Recipe and docs.**\n  - README: Running it, Many machines (whose fleet example now sets `output.store`), Results store with the quota arithmetic, and maintainer steps 6\u20137.\n  - The run-experiment skill: \u00a76, and Sweep VM, which now covers `fve fleet sync`, the `.env` key, the HDO create line, the `bq query` check, and a fresh smoke run id.\n  - `experiments/presets/smoke.yaml`, `pyproject.toml`'s usage lines, `HARNESSES.md`, `results/SCHEMA.md`, and the docstrings.\n\n### Quota arithmetic\n\nBigQuery allows 1,500 load jobs per table per day, failed ones included (https://cloud.google.com/bigquery/quotas, \"Load jobs\"). Every writer of a side's `attempts` table shares that allowance:\n\n| Writer | `attempts` loads per day, at most |\n| --- | --- |\n| Each sweep host, at the default `--export-every` of 1800 s | 86,400 / 1800 = 48 |\n| `sync-hdo` (HDO side), `--every 5` (`deploy/units/pee-sync-hdo/pee-sync-hdo.service`) | 288: one per pass that brings rows, for all its runs (`sync.py`, `by_run=False`; `test_one_pass` counts one load for two runs) |\n| `pull-hdo` (HDO side, #267), `--every 30` (`pee-pull-hdo.service` on its branch) | 48, once it loads a pass's runs in one job. On its branch today, `migrate.load_attempt_rows` makes one load per run that brought rows, so it adapts to `append_rows(..., by_run=False)` when it merges this. |\n| `migrate` | one per run per pass, once |\n\nAt the default cadence the HDO side therefore carries (1,500 \u2212 288 \u2212 48) / 48 \u2248 24 hosts, and the research side 1,500 / 48 \u2248 31. A larger fleet raises `--export-every` until hosts \u00d7 86,400 / `--export-every` fits.\n\n`runs` loads happen only when a host's run state changes (a cell starts or ends) or on the final pass, and at most once per round.\n\nThe repo names no planned fleet size; the README's \"Many machines\" example uses a hosts file of any length.\n\n### Rollout of `runs.shard`\n\nThe two sync VMs run release f967f9bf061e, whose `runs` loads send the schema without `shard`. I loaded such a row, with that release's exact `LoadJobConfig` (bq.py:111-114 at f967f9bf061e), into a `theorem-research.pee_results_test` runs table that already had `shard`. BigQuery accepted it: `old-schema load: DONE errors None output_rows 1`, the row read back with `shard` None, and the column stayed (`('shard', 'NULLABLE')`). `test_live_a_release_without_shard_still_loads_runs` repeats this on the live tier. So the release order across VMs does not matter for the loads. The one thing an older release cannot do once the column exists is run its own `fve results init`: its `ensure()` refuses a table with a column it does not know (`unexpected shard`). `deploy/README.md` (\"Rolling out a new `runs` column\") says to run `init` from the new release. The reads came first, though: at 20dae5d `latest_run` named `shard` before any load, so on production's table, which predates the column, the export failed with `400 Unrecognized name: shard` (smoke acceptance, D2). Now each reader adds the column first, as above; `test_live_shard_readers_work_on_a_runs_table_from_before_shard` builds a runs table without `shard` and fails at 20dae5d with that 400.\n\n## Contract change census\n\nSearches were run on this branch at the head of this PR with the grep tool over the whole worktree, and with `git grep` over `origin/bet40/*` for the stacked branches.\n\n| Search | Consumers before | After |\n| --- | --- | --- |\n| `datarepo` | `export.py`, `report.py`, `regrade.py`, `baseline.py`, `package.py`, `slim.py`, comments in `switched.py`; tests `test_export.py`, `test_regrade.py`, `test_slim.py` | No match anywhere. The non-git helpers are in `src/analysis/resultsdir.py`. |\n| `export.py` command lines (`--store`, `--local`, `export.py \u2026`) | `runner.report`; the old `runner.export_store`; README steps 6\u20137; SKILL.md \u00a76 and regrade; `package.py` usage, readme and help; `test_package.py`; `test_fve.py` dry run; `regrade.py`, `report.py`, `resultsdir.py`, `collect.py`, `speedup_csv.py`, `teams_fit.py`, `preflight.py` and the template run.yaml (comments) | Every one moved to `export.py store SIDE LOG_DIR...` or `export.py local LOG_DIR DIR`. `deploy/` and `scripts/` have none. On the stacked branches, `runner.py:609` (`bet40/pull-hdo`, `firstpass-hdo`, `firstpass-research`, `dashboard-slice6`, `dashboard` and `dashboard-charts`) still calls `export.py run_dir results --local`; it takes the new form when that branch merges this. |\n| `runs` table rows and readers (`append_run`, `latest_run`, `runs` SQL) | `migrate.append_rows`, `put`, `export`, `fetch`; `test_results_bq` live and FakeTables. The dashboard branches read no `runs` rows (checked on `origin/bet40/dashboard`, `dashboard-slice6`). | The schema gains `shard`; `append_run` becomes the batch `append_runs`, keyed on (run_id, shard, recorded_at), so two shards recorded in one instant both land; `latest_run(run, shard)`; `latest_runs(run)`. Tested live by `test_live_roundtrip`, `test_live_runs_table_from_before_shard_gains_the_column`, `test_live_two_shards_recorded_in_one_instant_keep_both_rows` and `test_live_a_release_without_shard_still_loads_runs`. `pull.py:637-638` on the stacked branches still calls `append_run` and unpacks 3-tuples. |\n| `migrate.append_rows`/`finish_rows`/`run_states`/`Mirror.joined` | migrate, sync, put; on the stacked branches, `pull.py` (`Mirror.joined` at :214 and :691, `run_states` and `append_run` at :637-638, `migrate.load_attempt_rows` per run) | migrate, sync and put use the new signatures; sync-hdo loads a pass's runs in one job. `pull.py` takes `gitsrc.joined` and `append_rows(tables, res, HDO, SOURCE, lambda path: now, by_run=False)` when its branch merges this. |\n| `fve results put --side hdo --legacy-hdo` | README, PR body | `put --legacy-hdo RUN_DIR`; `--side` is refused (`test_put_legacy_hdo_takes_no_side`). |\n| `runner.Watch(side=\u2026)`, `runner.export_store`, `join_exports` | `runner.run`, `tests/test_results_export.py` | `StoreExporter` and `export_runs`, and `Watch(exporter=\u2026)`. `test_fve`'s spend tests build `Watch` without one. |\n| `status.json` phases | `fleet.FINISHED`, `fleet status`, the boot script | A new phase, `export-failed`, outside `FINISHED`. A failed final export after run.py exits 1 records it too, not `refused`. A sweep that has spent its budget, run again, makes the final export before it refuses to spend, and its phase follows (export-failed, then budget-stopped). `fleet status` gains an `exp-fail` column. |\n| Open PRs that edit the removed data-repo path (`gh pr list --state open --json files` and `git merge-tree` with each head) | #235 \"Keep the data repo's history add-only\" (JasonGross): `datarepo.py` +460 \u221225, `regrade.py`, `report.py`, `tests/test_datarepo.py`, README. #171 \"Add the proof assistant as a run axis\": a `regrade.py` hunk. | After #268 merges, #235's `datarepo.py` changes have no file to land in. `git merge-tree` of this head with #235 conflicts in `README.md`, `src/analysis/datarepo.py`, `regrade.py` and `report.py`. With #171 it conflicts in `results/SCHEMA.md`, and #171's `regrade.py` hunk touches no data-repo code. |\n| `run.yaml` readers | as before | `preflight.py` accepts `output.store`. `fve run` requires it on every expanded run. `export.py store` refuses a run that names the other side. |\n| `uv run fve run`, `uv sync` (the launch needs the `results` extra) | README, `cli.py`, `fleet.py`, `presets/*.yaml`, `preflight.fve_spec`, **`pyproject.toml`'s usage lines** | All now use `--extra results`. `pyproject.toml` now names `all.yaml` and `output.store` (it named a `default.yaml` that does not exist). |\n\nRollout: immediate refusal. Security: without it, a sweep whose spec (or one of its arms) names no side, or names the other side, would write its transcripts into a store its side never declared, the data-separation leak BET-40 exists to close. A sweep launched before this change keeps its own commit on its host. `runs.shard` needs no migration step: the first command that reads it adds it, as `fve results init` does; an identity that may not update the table is told to run that init. The stacked branches (`pull-hdo`, `firstpass-hdo`, `firstpass-research`) adapt the `pull.py` and `runner.py` call sites listed above when they merge.\n\n## Verification\n\n- `tests/test_results_export.py` (since split, below) covers the first round, and these tests cover the first gate round's fixes:\n  - the final export's failure in `status.json`;\n  - `fleet status`'s column;\n  - `fleet launch` refusing before copying;\n  - a load error quoting a row value (on `attempts`, on `runs`, and on a query outside the loads) printing only the class, through `export.py store` and `fve results put`;\n  - 2 shards \u00d7 3 rounds giving 2 `runs` rows;\n  - a fetched sharded run whose log records and `analyze.run` summaries equal the shards' local exports merged by `fve collect`;\n  - one load per table for two runs;\n  - no rows read when nothing is new;\n  - a reported sample failing the export;\n  - another side's `output.store` refused;\n  - `put --regraded` refusing another side's fetch;\n  - `put --legacy-hdo` recording a run state once and refusing `--side`;\n  - `can_export` dry-running both tables;\n  - the run-file decoder;\n  - `--export-every`.\n- I ran a mutant of each fix, 20 in all, against that file, and each is killed:\n  - the `export-failed` phase;\n  - the final pass's count;\n  - the fleet column;\n  - an unwrapped `runs` load;\n  - printing any exception's message;\n  - put bypassing `append_rows`;\n  - no shard name;\n  - fetch keeping one shard's logs;\n  - a load per run;\n  - a process per run;\n  - no fleet check;\n  - the ledger off;\n  - reported samples passing;\n  - no `output.store` check;\n  - no `fetched.json` side check;\n  - no `latest_run` filter;\n  - `can_export` without `runs`;\n  - the shard decoder;\n  - `--side` with `--legacy-hdo`.\n  The unmutated file passes: `52 passed, 1 skipped`.\n- Live BigQuery tier (`FVE_BQ_TEST_JOB_PROJECT=theorem-agent-infra FVE_BQ_TEST_DATASET=theorem-research.pee_results_test`): `tests/test_results_bq.py` gives `12 passed` at f1a079f.\n- Full suite at 92a574d on the grade farm (bet-grade-2, run `20261020T195254Z-1736915-run`, no live tier): `7 failed, 1650 passed, 119 skipped`. One was a test that counted `/runs/` in a farm path that holds one, fixed in f1a079f. The other six are the farm's SIGINT class (farm jobs start with SIGINT ignored): `test_fve::test_sweep_killed_from_outside` and five `test_retry_accounting` continuations, which pass locally (`1 passed`, `8 passed`).\n- The last round (bebdc45), each behaviour change with a test seen failing first:\n  - `test_live_two_shards_recorded_in_one_instant_keep_both_rows` (red: `ValueError: duplicate runs key in one batch`).\n  - `test_results_sync::test_one_pass` counts one `attempts` load for a pass over two runs (red: `assert 4 == (2 + 1)`).\n  - `test_a_refused_run_whose_final_export_failed_is_export_failed` (red: `'refused' == 'export-failed'`).\n  - `test_a_budget_stopped_sweep_exports_what_is_left_on_rerun` (red: no status.json; the already-spent branch returned before any export).\n  - `test_fetch_puts_the_whole_runs_file_in_place_over_a_shards` (red: in place held `shard 1`, not the whole run's file).\n  - `test_a_changed_config_names_pricing_only_for_the_pricing` (red: the store check said `pass --pricing`).\n  - `test_live_a_release_without_shard_still_loads_runs` is the rollout evidence and passes on correct code.\n  - Running the live tier also caught a bug in `append_runs`: its key query selected `shard` from a table made before the column, which BigQuery refuses (`Unrecognized name: shard`). The query now reads it through the row's JSON, and `test_live_runs_table_from_before_shard_gains_the_column` passes.\n  - `tests/test_results_export.py` is now three files (the export pass, `test_results_put_fetch.py`, `test_results_fve_run.py`) with shared helpers in `tests/results_export_helpers.py`. They give `22 passed`, `17 passed` and `18 passed`: the same 57 tests the single file held just before the split.\n- Targeted files at bebdc45, one at a time, the bq file with the live tier: `test_results_bq` 14 passed; `test_results_sync` 7; `test_results_migrate` 18; `test_results_epochs` 12; `test_results_export` 22; `test_results_put_fetch` 17; `test_results_fve_run` 18; `test_fve` 96; `test_export` 5; `test_package` 10. `uvx ruff check --select F` on the changed files: all checks passed. The full suite was not rerun this round.\n- Real surface: `fve run experiments/presets/smoke.yaml --dry-run --set run.id=smoke-20261020T000000` plans run `smoke-20261020T000000` (at f1a079f).\n\n## Smoke acceptance (first sweep, at 20dae5d)\n\nOp27 ran the smoke sweep on a theorem-research VM built by the recipe (`sdd-bet40/reviews/slice-5-1-acceptance.md`). It passed checks 3\u20136 only with two workarounds and a manual image stream:\n- **D1**: the preset as shipped had `protocol.effort: null`, which run.py's preflight refuses; it ran with `--set protocol.effort=high`. Fixed in 48c1240 (the preset says `high`, and `test_smoke_passes_preflight_as_shipped` runs the preset through preflight).\n- **D2**: the export failed with `BadRequest` until `fve results init` added `runs.shard` to production's table. Fixed in 63723a5 (readers add the column first; a failed export names BigQuery's reason). Two first readers racing on that column add: the second's update carries a stale etag and gets 412 PreconditionFailed, so `_shard` reads the table once more and goes on (`test_two_first_readers_adding_shard_at_once_both_go_on`).\n- **Images**: the VM's account (theorem-research's default compute account) got 403 on `gs://theorem-fve-images`, so the five image tars were streamed from the devbox. The fix is a grant on that bucket, `roles/storage.objectViewer` for `serviceAccount:417273869025-compute@developer.gserviceaccount.com`, which agent-infra's IaC applies, as it does the results store's grants (the bucket was made by hand in theorem-research; the IaC change is in agent-infra). The recipe now fetches the images from the bucket as the VM's account, and installs Docker CE with its compose plugin (Debian's `docker.io` has none, the acceptance's other recipe gap), adds the user to the `docker` group, says it runs in `~/proof-efficiency-eval`, and makes `~/images` before the copy.\n\n## Smoke acceptance (second sweep, at 8dd4155)\n\nWith the recipe as written and the preset as shipped, steps 2\u20134, 6 and 7 passed. It found two gaps:\n- **R1**: `fve fleet sync` needs git on the VM, and the fresh debian-12 image has none. The Sweep VM recipe now installs it (`sudo apt-get install -y git`).\n- **R2**: the recipe's regrade step refused every run made from a shipped preset with \"it recorded no grader image digest\". run.py recorded a grader digest only when `container.grader_image` was set, and `smoke.yaml` and `all.yaml` leave it null. **This predates #268.** main (c174275) has the same `image_problem` (`regrade.py:345-352`), `all.yaml:91` `grader_image: null`, and the same provenance loop (`run.py:230`), so main's regrade refuses a run from main's presets the same way. The regrade section of the skill is on main too (main `SKILL.md:392-420`); #268 changed only its paths and the put-back step. The fix is small, so it is here: run.py now records the digest of the grader the task grades with when the config names none. That grader is `backends.DEFAULT_GRADER`, now task.py's `grader_image` default too. `test_a_run_from_a_shipped_preset_records_the_grader_it_grades_with` (red first) checks both presets, and that `image_problem` then passes. Runs recorded before this have no digest, so the skill says to regrade them with `--force-image` and states what that trusts.\n- On the smoke preset, `--baseline default` is a no-op: its `grading.axiom_baseline` is grade.py's `DEFAULT_BASELINE`.\n\nAfter the gates at 1105b45:\n- **The Sweep VM recipe runs as written for a fresh operator** (Final268, e25fd54). It builds `FVE_SSH_CONFIG` inline from `gcloud compute ssh --dry-run`; that conversion is checked against the dry-run line both sweeps got, which `ssh -G` reads back. It installs uv with astral's installer. Every step takes side, project, account and dataset from a research/HDO table (`--set output.store=$side`, `doctor --side $side`, the side's dataset in the bq line). The regrade step uses the smoke run's baseline plus `Submission.Proof.solved`, so a version 1 row appears, and it says what the step shows: `2 regraded`, `versions=2`, `export 0 2` and `export 1 2`, then `rows-appended=0` on a rerun.\n- **One default grader tag** (Thermo268Deep). `fve/runner.py`'s missing-image check, `scorer.proof_scorer` and the solvers' `grader_image` default all use `backends.DEFAULT_GRADER`, as run.py and task.py do.\n- **A resumed sweep keeps its grader** (Thermo268Deep). On `--resume` with cells left to run, run.py compares the grader digest the sweep recorded at its start with the image those cells will grade with now: the config's `container.grader_image`, else `DEFAULT_GRADER`. When they differ it refuses and names both (`grader_changed`); no flag accepts a changed image. A finished sweep, rerun for an export retry, has nothing left to grade and is not checked, so it still ends `done` and goes on to its report and package, even after another sweep reloaded the tag. A sweep that recorded no digest (started before this was kept, or `unknown`) resumes as before. `test_resume_refuses_a_grader_image_other_than_the_sweeps` was red first for the finished-sweep case.\n- **The Sweep VM section names no machine-local path** (fd6df1f): the create and delete steps say \"your team's compute ledger\", and delete gives the full `gcloud compute instances delete \u2026 --delete-disks=all` command.\n\n## Smoke acceptance (third sweep, at fd6df1f)\n\nSKILL.md's Sweep VM section, run exactly as written for the research side on a fresh theorem-research VM (2026-10-21 06:11\u201306:22Z, deleted with its disk by the skill's own command), with the smoke preset as shipped and no workaround. Every step passed: setup (git, Docker with compose, uv, the ssh config from `--dry-run`, `fve fleet sync`, images fetched as the VM, `doctor`); `fve run` scored 2/2 with rows-appended=2; the attempts query gave `export 0 2`; a rerun of the export appended nothing; the regrade step, without `--force-image`, regraded 2 and gave `export 1 2`, and a rerun appended nothing; `fve results fetch` plus `report.py` reproduced the local report byte for byte (24 non-PNG files). Not run live: the HDO side's column of the variables table, sharded runs, and `put --legacy-hdo` / `put --regraded` against real services.\n\n",
+   "headRefName": "bet40/runner-export",
+   "createdAt": "2026-10-20T08:07:54Z",
+   "mergedAt": "2026-10-21T06:26:20Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/proof-efficiency-eval"
+   },
+   "keys": [
+    "BET-40"
+   ]
+  },
+  {
+   "url": "https://github.com/theorem-labs/proof-efficiency-eval/pull/267",
+   "title": "BET-40: verify checks the tree reached the store and lists store-only epochs",
+   "body": "BET-40 Task 5.2 (dispatch://BET-40): `fve results verify` checks that a data repo's tree made it into the store, and no longer fails on epochs only the store holds. Based on `main`.\n\nThe HDO sweeps reach the store through `sync-hdo`, which follows the HDO data repo, and new sweeps through the runner's exports (#268). This PR used to add `pull-hdo`, an SSH pull from the hosts running those sweeps. That pull is removed: no pipeline here depends on SSH into those hosts (dispatch://BET-40/ask/a8eb82a1-4ff7-45c4-ba80-d4d5fb244bce).\n\n## What it does\n\n- **`verify`** (`src/fve/results/verify.py`) fails on `not stored <run>/<cell>/<task>/<epoch>`: an epoch of the tree with no row in `attempts`. It replaces the per-run count line, which also failed on epochs the tree lacks.\n  - An epoch `attempts` holds that the tree lacks is listed as `not in the tree <key>: <sources>` and does not fail verify. That covers a deleted attempt directory, and the runner's exports (`fve results put`, #268), which keep coming once the data repo stops. At most `LIST_CAP` (200) are listed, then a count.\n  - The per-run table (tree, attempts, missing, and the extra epochs by source) comes after the lists, and the last line is `differences N`, because a job report keeps the end of stdout (C8).\n- **`bq.Tables.stored_epochs`** replaces `epoch_counts`: per run, each (cell, task, epoch) and the sources of its rows.\n- **Tests**: `PEE_TEST_DOCKER_LABEL` sets the emulator containers' label, so a lane removes only its own.\n\n## Contract change census\n\n| Contract | Change | Consumers |\n| --- | --- | --- |\n| `bq.Tables.epoch_counts` \u2192 `stored_epochs` | returns {run: {(cell, task, epoch): [sources]}} | `verify.py` only (`git grep -n \"epoch_counts\\|stored_epochs\" -- src tests`); `tests/results_repo.FakeTables`; `test_results_bq` |\n| `verify` output and exit | `not stored` fails; `not in the tree` is listed and passes; the per-run table, then `differences N` last (a job report keeps the last 64 KiB of stdout) | the verify job's report; `README.md` and `deploy/README.md` (\"Reading verify before a data repo is deleted\") |\n| agent-infra `pee-results/README.md` and `hdoHosts` (`main.go`) | #64 (721e748) granted `pee-export-hdo@` OS Login, guest-attribute read and IAP on `autoformalization-parallel2` and `pee-hdo-o55-v5-1` for the pull | rewritten by agent-infra #88 (79b377a, applied 2026-10-21 05:18Z): `pee-hdo-o55-v5-1` dropped, `autoformalization-parallel2` kept only for #270's one-off `import-hdo`, then removed by a follow-up |\n\n## Note\n\nAn earlier head of this PR carried an SSH pull from the HDO hosts; this one does not. `migrate.decide` is main's: a summary the data repo rewrites only in its export block is a change to a stored attempt, reported and not written (`test_a_summary_rewritten_only_in_its_export_block_is_reported` pins it). If #268's `put --legacy-hdo` ever writes an epoch the data repo also holds, that PR is where a rule for it belongs.\n\n\n## Tests\n\nEach file run on its own, niced. At 48cdd18 (which changes only verify and its tests): `test_results_verify.py` 21 passed, `test_results_bq.py` 10 passed and 1 skipped (live tier), `sync` 7. At 8228579: `migrate` 18, `runner` 89, `deploy` 9, `epochs` 12. `differences N` as the last line failed first (two tests) and passes now.\n",
+   "headRefName": "bet40/pull-hdo",
+   "createdAt": "2026-10-20T07:25:48Z",
+   "mergedAt": "2026-10-21T07:16:23Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/proof-efficiency-eval"
+   },
+   "keys": [
+    "BET-40"
+   ]
+  },
+  {
+   "url": "https://github.com/theorem-labs/proof-efficiency-eval/pull/266",
+   "title": "BET-40: results store in Cloud Storage and BigQuery",
+   "body": "Part of BET-40, the live results dashboard (dispatch://BET-40, plan dispatch://BET-40/artifact/plan-md). This PR covers Tasks 2.1\u20132.3 and 2.6.\n\nResults live in two git data repos today. They keep growing, and anyone holding the org storage grant can read them. This PR adds `fve results`, which moves each side's results into its own write-once Cloud Storage bucket and BigQuery dataset: `theorem-pee-results-hdo` / `autoformalization.pee_results_hdo`, and `theorem-pee-results` / `theorem-research.pee_results`. It also adds the job runner that is the only way work reaches the BET-40 VMs.\n\n- **Store (2.1).** Every upload is write-once (`ifGenerationMatch=0`). An existing object counts as already written only when its size, CRC32C and SHA-256 all match.\n  - `attempts` and `runs` tables, plus an `attempts_latest` view that keeps one row per epoch.\n  - `fve results init` creates the tables and writes the canary object that `doctor` reads.\n- **Legacy records (2.2).** HDO summaries (shapes A\u2013D), Taiga index rows and research records become the `results/SCHEMA.md` record. Three documented extensions: `legacy`, `taiga`, `replaces`.\n- **Migration (2.3):**\n  - `migrate` copies a repo whole: attempts with their source records, run files, a git bundle, and a manifest.\n  - `sync-hdo` carries each new HDO commit across, and `migrate` rerun at a later commit applies the same rule to epochs that already have rows: they are looked up, never recomputed. A record with a regrade no stored version has becomes the next version of its try. A clean record replacing an errored one becomes a new try. Any other change, a Taiga row's included, is reported, not written.\n  - An attempt that cannot be written, such as a Conflict or a malformed record, is reported by its identity and error class, and the pass goes on. `migrate` then exits 1.\n  - README \"Results store\" and deploy/README list what `verify` reports for each change the store did not take, ahead of the data repos being deleted: `differs`, `unsynced`, or a run count line.\n  - `verify` checks the store against the repo at a named revision; `doctor` checks what an identity may read.\n  - An interrupted pass, rerun, ends in the same state as an uninterrupted one (a fault-injection test).\n- **Runner (2.6).** `fve results run-jobs` is what agent-infra PR #45's release-tick calls.\n  - It runs a job only when its argv matches `runner.ALLOWED` for that VM exactly, from the release's own virtualenv. Each sync VM's shapes are bound to its own side's repo, deploy key and workdir.\n  - Every job file yields exactly one report, written once. A broken file, a bad name or a missing program is refused with a fixed reason, and the jobs after it still run. If this VM's credentials fail, nothing is written and `run-jobs` exits 1, so release-tick's oneshot shows as failed. Job state is written atomically, and a state file a crash tore fails only its own job, with a report naming the problem.\n  - `timeout_s` is an integer from 1 to 86400. At the limit, and after every job, the job's processes are frozen and then killed: those in its process group and those the runner inherits as a subreaper. A process that escapes by calling setsid every generation makes the sweep fail. That job is then reported failed and the tick ends, and release-tick's cgroup kill removes the rest.\n  - Every allowed command has an output-contract test, and a missing one fails the suite. `pee-dashboard` commands are not allowed yet: the dashboard lane adds them together with their own marker tests.\n  - `deploy/release.sh` publishes a release built from the commit alone, the web app included, from any directory. `deploy/units/pee-sync-hdo/` holds the sync service, which waits for the first migrate and shares its workdir's lock with jobs.\n\nEvery command prints counts and identifiers only. A marker string planted in every free-text field of the test records never reaches the output.\n\n## Verification\n\nSlice 2 acceptance is **BLOCKED** on Sami's IAM apply (dispatch://BET-40/ask/be6d1569-f7be-49d8-9a12-0bab246cedcb). None of the buckets, deny policies, VM accounts or sync VMs exist yet, so these have not run: verify on both sides, the `attempts_latest` counts, the negative controls, the Data Access audit, and sync lag. **Not merge-ready** until they run.\n\nWhat ran at d5acf99, and at 6979dc8 after merging main (#171, proof-assistant identity): the results tests, one file at a time with the live tier, `229 passed` (bq 11, deploy 9, epochs 12, layout 6, legacy 38, migrate 18, runner 89, store 14, sync 7, verify 18, plus #171's `test_legacy_identity.py` 1 and `test_backends.py` 21), and `tests/test_fve.py` `100 passed`:\n- `env FVE_BQ_TEST_DATASET=theorem-research.pee_results_test FVE_BQ_TEST_JOB_PROJECT=theorem-agent-infra uv run --extra results pytest tests/test_results_*.py -q` \u2192 `218 passed`, the live tier included. This devbox now runs only one targeted test file at a time, so the results tests ran file by file: runner 85, bq 11, deploy 9, epochs 12, layout 6, legacy 38, migrate 18, store 14, sync 7, verify 18.\n- The whole suite ran on the grade farm (bet-grade-4, run `20261020T110020Z-758148-run`, from a git snapshot of d5acf99): `8 failed, 1611 passed, 108 skipped, 4 warnings in 3507.02s`. All 8 failures are in files this PR does not touch (`tests/test_export.py`, `tests/test_retry_accounting.py`, `tests/test_fve.py`). Seven are `inspect eval` subprocesses timing out at 300 s on the box, and one is `test_sweep_killed_from_outside`. Run on this devbox at d5acf99, the same files pass: `8 passed`, `13 passed`, `96 passed`.\n- `shellcheck deploy/release.sh` \u2192 clean.\n- From `/tmp`, `DRY_RUN=1 .../deploy/release.sh HEAD pee-sync-hdo` built `43c7acbd8b36.tar.gz` and printed its two uploads and the pointer (release.sh is unchanged since).\n- `fve results probe-url https://pee-dashboard.tail12ec1c.ts.net/ --expect ok` \u2192 `ConnectionError unreachable`, exit 1: the host does not exist yet.\n\nThis repository has no CI, so the head shows no status checks. The local runs above are the checks.\n\n## Contract change census\n\n- **Search:** `rg -n 'fve results|fve\\.results' src tests .agents README.md`, over the whole repo at 6979dc8.\n- **Hits:** this PR's new modules and tests, `src/fve/cli.py`'s new subcommands, and README's new \"Results store\" section; nothing else. No existing caller uses them. run-experiment `SKILL.md` is not a hit: its new paragraph names the results store but no `fve results` command. It says nothing carries non-HDO pushes into the store, and that the non-HDO repo is migrated once by Task 2.5's `migrate` job, which has not run yet.\n- **Other contracts:**\n  - `results/SCHEMA.md` gains `legacy`, `taiga` and `replaces`, on migrated records only. `compute_results.py` and `export.py` records are unchanged.\n  - New optional extra `results` (google-cloud-storage, google-cloud-bigquery, google-crc32c, requests). No previously locked version changes.\n  - `uv.lock` drops five dependency-edge markers: contourpy's and scipy's `numpy` edges, and zipfile-zstd's `python_full_version < '3.14'` on zstandard. uv drops them because they are implied:\n    - `zipfile-zstd` itself installs only below 3.14;\n    - `zstandard` is installed unconditionally through another dependency;\n    - the numpy versions are already split by the packages' own fork markers.\n    - Checked: `uv export --frozen --all-groups --no-hashes --python {3.11,3.12,3.14}` gives identical requirements from origin/main's lock and from this one.\n  - `fve.results.store.put` now checks before writing: one GET per new object.\n- **Rollout:** a new surface with no existing callers, so nothing is warned first and nothing existing changes. The runner refuses any job outside `ALLOWED` from its first run. The dashboard branch (#265) reads `attempts_latest`, and it adds its `pee-dashboard` shapes, with marker tests, when it rebases on this branch.\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+   "headRefName": "bet40/results-store",
+   "createdAt": "2026-10-20T02:30:22Z",
+   "mergedAt": "2026-10-21T03:58:07Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/proof-efficiency-eval"
+   },
+   "keys": [
+    "BET-40"
+   ]
+  },
+  {
+   "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1117",
+   "title": "CI: rebuild every shipped verified-testing task with pivot repro --all; refuse external effects on GitHub Actions",
+   "body": "The CI half of [BET-3](dispatch://BET-3), \"What main holds, and how CI proves it\".\n\nSami, 2026-10-21 ([BET-74 ask c33edf8c](dispatch://BET-74/ask/c33edf8c-a24c-4a2a-a315-90cf9eb38c9b)): \"CI should make sure that all task families are still valid when changing the core library by 1) running pipeline tests, and 2) running pivot repro --all and making sure there's no diff in the outputs (important to make sure that running pivot repro --all in CI doesn't have external effects like starting jobs on Taiga).\" And: \"Main need only reproduce the tasks we actually shipped.\"\n\n## What changes\n\n- **`tasks/families/verified-testing/`**: a Pivot pipeline for the shipped family. These are the 146 versions `tasks/shipped-tasks.json` lists, all verified testing. `rebuild` runs `shipped_vt.rebuild` over `runs/shipped/verified-testing.yaml` with no network and no docker. It outputs each payload (gitignored, 146 \u00d7 ~800 KB) and a table of their sha256s (committed). `check` fails and names every version whose digest is not the recorded one. There is no launch stage. Both stages are `@no_fingerprint()`, because the generator and deploy scripts keep their config in module-level tables that pivot's code walk refuses. Every repository file the rebuild imports or reads is therefore a stage input. `tests/test_verified_testing_family.py` checks those inputs against an audit-hook trace of a real rebuild.\n- **One rebuild path.** `shipped_vt.py` gains `rebuild`, `digests` and `moved`. The pipeline's stages call them, and so does `grader/tests/test_shipped_vt.py`'s rebuild check, which no longer has its own loop. Its other tests are unchanged, and it gains a negative test of `moved`.\n- **CI job `repro-shipped`**: runs `pivot repro --all --force` in each `tasks/families/*` project, so every stage runs whatever the committed locks say: a PR cannot skip `check` by committing a re-locked `check.lock`. It then fails when the digest table differs from `runs/shipped/verified-testing.yaml`, and on any change to a tracked file anywhere in the tree. It also fails if `--all` skipped a `pipeline.py` that would not load. The runner has `contents: read`, `persist-credentials: false` and no secrets. It needs no farm, docker or `BET_TASKS_DATA`.\n- **Refusal on GitHub Actions** (`tasks/src/bet_tasks/lib/ci.py`): when `GITHUB_ACTIONS` is set, these refuse before their first Taiga, registry or docker call:\n  - the `launch` stage;\n  - `harness_image`, `image` and `derived_image`;\n  - every `register_image_source.py` run: source-record check, dry run and registration.\n- **Docs**: root `CLAUDE.md` \"What main holds\" now quotes Sami's words, states the library-or-shipped-family rule and names the two exceptions (BET-22, BET-16/BET-73). It scopes the \"never `pivot repro` a shipped task\" rules to experiments. `tasks/AGENTS.md` and `tasks/README.md` document the family, its `no_fingerprint` exception and the guard.\n\n### What CI's repro does not cover\n\nCI's `pivot repro --all` covers only the shipped family under `tasks/families/`. Sami asked for \"all task families\"; the live unshipped families under `experiments/` are covered by `test-tasks` and the advisory `stale-locks` job until each one leaves main or ships. [BET-3](dispatch://BET-3) accepts that gap, and root `CLAUDE.md` and `tasks/README.md` now state it.\n\n### Why the guard reads `GITHUB_ACTIONS` and not `CI`\n\nomp's and Claude Code's bash tools export `CI=true` into every command an agent runs. A guard on `CI` would refuse every agent-run `bet-tasks launch`, image build and registration on the boxes, so do not switch it back. The tests show that `CI=true` alone does not trigger it.\n\n**What the guard does not cover:** a run on a CI system other than GitHub Actions, or a `pivot repro --all` someone starts by hand with credentials, is not refused.\n\n### `local_grade` has no guard of its own, on purpose\n\nAdding `refuse_under_ci` to `local_grade` would rekey all 52 committed local-grade locks, 10 of them in Aengus's `track-c-full`. Those cells would then be held as \"no passing local result\". Under CI, `local_grade` is stopped by its existing refusal instead: it refuses before any farm or docker call unless `BET_TASKS_GRADE_RUNNER` or `BET_TASKS_GRADE_HERE=1` is set, and CI sets neither. A test pins this with `GITHUB_ACTIONS` set: the stage refuses, and no docker or runner call happens. `image_import` and `registered_image` only read from the registry and are not guarded; guarding them would rekey 14 `image_import` locks.\n\n## Locks and outputs added\n\n| file | size |\n| --- | --- |\n| `data/verified-testing/rebuild/digests.json` | 16,062 B |\n| `.pivot/stages/verified-testing/check.lock` | ~1.7 KB |\n| `metrics/verified-testing/check.yaml` | 23 B |\n\n`rebuild.lock` (28 KB) lists the prompt-template directory and the 146 payload files one by one. Following `tasks/AGENTS.md` \"Lock files\", it is gitignored. A fresh checkout always reruns `rebuild`, because the payloads are not committed, so a moved digest still shows in `digests.json` and in `check`. A PR that edits `pipeline.py`, `shipped_vt.py` or the record re-locks `check.lock`.\n\n## Verification\n\n- **`pivot repro --all`, no diff.** Run at efc2ba7b in a fresh worktree with `env -i HOME=<empty> CI=true GITHUB_ACTIONS=true`, both job steps verbatim. Result: `[1/2] rebuild done`, `[2/2] check cached`, `Summary: 1 ran, 1 cached, 0 blocked, 0 failed [6.59s total]`. Repo-wide changed lines afterwards: 0. A second run shows `0 ran, 2 cached`. RAN.\n- **Network isolation** (independent proof agent, at 5794d537). In an empty network namespace the cold rebuild reran and the tree stayed clean. Under strace there were zero AF_INET sockets and no docker, gcloud, gh or git process. RAN.\n- **Negative controls.**\n  - One byte changed in a shipped template: `check FAILED \u2026 main no longer rebuilds 101 shipped verified-testing versions`.\n  - A generator byte changed: 146 versions fail.\n  - One recorded digest flipped: 1 version fails.\n  - A comment-only edit to `run_yaml.py`: digests unchanged, and since `rebuild.lock` is gitignored, nothing tracked changes.\n\n  RAN.\n- **Refusal tests**, each run on its own file:\n  - `test_ci.py`: any non-empty `GITHUB_ACTIONS` refuses; unset or empty does not, whatever `CI` is. 7 passed.\n  - `test_launch_stage.py`: refused in process with no fake-Taiga call, and refused as a failed stage under a real `pivot repro` with no job created. Unset, the same call submits. 70 passed.\n  - `test_image_stage.py`: `harness_image`, `image` and `derived_image` refuse with no docker, registry, git or prepare call. Registration refuses with no script run. Each negative control acts. 79 passed.\n  - `test_local_grade_stage.py`: the runner refusal holds with `GITHUB_ACTIONS` set, and with `BET_TASKS_GRADE_HERE=1` the same repro grades. 19 passed.\n- `test_verified_testing_family.py` 1 passed; a negative control that removed `vm_shapes.py` from the inputs made it fail. `grader/tests/test_shipped_vt.py` 15 passed.\n- Full tasks suite on a farm VM (`remote-suite.sh`, bet-grade-2, at 5794d537, before the final commit): 1839 passed, 9 skipped. Lint: `ruff check` and `ruff format --check` clean in `tasks/`; grader `ruff==0.11.2 check` clean.\n- **Forged lock** (spec gate's finding, reproduced at a7a5d64d on a fresh clone): flip a shipped-template byte, `pivot commit --all`, commit. The old command (`pivot repro --all`) passed with `1 ran, 1 cached`. The new step 1 fails (`check FAILED \u2026 main no longer rebuilds 101 shipped verified-testing versions`), and step 2's record comparison alone finds 101 moved. RAN.\n- **Both job steps verbatim on a fresh clone at a7a5d64d, twice** (`env -i`, empty HOME, `CI=true GITHUB_ACTIONS=true`): step1=0, step2=0 both times (`Summary: 2 ran, 0 cached, 0 failed`, since `--force` reruns both stages). RAN.\n- This PR's own `repro-shipped` run: see the Checks tab.\n\n## Reach: `uv run python scripts/stale_locks.py --base origin/main`\n\n```\n::warning title=1 locks stale because of this change::  2026-10-16--sami--proof-update: 1 stages\n2026-10-16--sami--proof-update  (1 stages)\n  proof-update/image@machcsl: func:bet_tasks.stages.image._context_image, func:bet_tasks.stages.image._register_script\n```\n\nThat lock belongs to EFF's proof-update lane, which rebuilds it on its branch. It is not Aengus's and not a shipped task. No committed launch or `harness_image` lock exists.\n",
+   "headRefName": "sami/ci-repro-shipped",
+   "createdAt": "2026-10-21T18:04:22Z",
+   "mergedAt": "2026-10-21T19:26:38Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/binary-equivalence-taiga"
+   }
+  },
+  {
+   "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1116",
+   "title": "images.yaml: the -skip-qed-typecheck acceptance images, experimental",
+   "body": "The image ledger had no record of the images the `-skip-qed-typecheck` acceptance ran on. Without one, someone launching on them can't tell which image declares the option, which registrations load there, or what was checked. This adds four entries, all `experimental`. No current image changes.\n\n| entry | flavor | declares the option | Images run | source records (task, grader) |\n| --- | --- | --- | --- | --- |\n| `vt-qedskip-1c4c356e\u2026` | vt | yes | 39634023088 | 51305dd7, 76103deb |\n| `vt-1c4c356e\u2026` | vt | no | 39634010045 | ff3bede8, 4431a446 |\n| `vendor-qedskip-cfd06ed5\u2026` | vendor | yes | 39620796289 | 389659e0, 2b87f5f1 |\n| `vendor-cfd06ed5\u2026` | vendor | no | 39620463550 (push) | 46a3d765, 88c54c3d |\n\nThe vendor pair is built from #1106's merge. The vt pair is built from #1108's merge: `changed_images.py` over that range reports no image input changed. Each `toolchain` is `measure_toolchain` run on both tags of the entry, and they agreed. The option isn't in the fingerprint. Neither the rocq nor the coqchk binary matches vendor-v12's, so v12 registrations don't load on these images.\n\nThe acceptance this backs is BET-63 item 8 (dispatch://BET-63 spec, v15).\n\n## Verification\n\n- RAN, e2e cases vt-a1..a8 on the vt pair (agent QedE2E, GCP rocq-speed-2, 16:59\u201317:04Z, about 4 min): 8/8 harness expectations pass on both images. a7 and a8 are refused by coqc without the option. With it, a7 is refused by the main coqchk run (`Type error: ActualType` at `Proof.unchecked_false`) and a8 by the outside-closure run (library `Unused`). Record: sami-rocqperf `/mnt/nvme/sami/qede2e/RESULT.md`.\n- RAN, the same cases on the vendor pair: a1, a3 and a8 fail identically on both images while building the cases' bundled Common closure, which wants LPS v0.14.1. The entries say so.\n- RAN, ledger consumers at this head (agent ProveImg): `run_yaml.py --dry-run` on a vt manifest naming the on image resolves the image, its `-grader` twin, split grading and the grade-window fit. `missing_grader_images` returns `[]` for all four. `ledger_toolchain` and `setup_window_check` read all four entries.\n- Tests: `tasks/tests/test_image_stage.py tests/test_ci_images.py` 121 passed; `scripts/deploy/tests/test_split_grading.py` 43 passed.\n- Not observable: the mark lines that Print Assumptions prints for an unchecked `Qed`. The grade doesn't return its capture. The offline part of item 8 checks them directly.\n",
+   "headRefName": "images-qedskip-acceptance",
+   "createdAt": "2026-10-21T18:03:44Z",
+   "mergedAt": "2026-10-21T18:18:26Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/binary-equivalence-taiga"
+   }
+  },
+  {
+   "url": "https://github.com/theorem-labs/grading-tools/pull/782",
+   "title": "bet-grader: a refusal by the outside-closure coqchk run names that run and its library",
+   "body": "## Summary\n\nOn an image that declares `-skip-qed-typecheck`, the second coqchk run is the only type check of the agent objects outside every Checker closure. When that run refused and the main run had passed, the grade's reason said only that \"mandatory collective independent-kernel verification did not certify every AgentSubmission and Checker object\". It named neither the run nor the library that failed, although the metadata held both.\n\nROCQ's BET-63 acceptance run showed it on e2e case vt-a8: a file nothing imports, holding an ill-typed `Qed`. The grade scored 0, as `true_kernel_check_failed`, with `outside_closure_check.fatal_library = RocqVerifyHarness.AgentSubmission.Unused`, but the reason text didn't say which run or library refused.\n\nNow, when the main run passed and the outside-closure run refused, the reason says so. It names the run (\"the agent objects outside every Checker's closure (compiled without coqc's own Qed check, so the kernel is their only type check)\") and gives the run's stop text: its fatal error and library, through the same `_coqchk_stop_text` the main run uses. The budget branch above it already names the second run the same way. A refusal by the main run keeps today's text, whatever the second run's record says. When the second run reached no kernel verdict (its tree was refused, or `kernel_check` raised), the text quotes the record's `error` instead. bet-grader/README.md's paragraph on the kernel-failure text now says the same.\n\nThe reason kind (`true_kernel_check_failed`), the score and every verdict are unchanged; only the human-readable reason text changes.\n\n## Fractional proof\n\nThe assumptions grading soundness rests on are stated in the applicable task\nproof (`rlt-grader/rlt_fractional_proof.md` or\n`bet-grader/be_fractional_proof.md`) and pinned by\n`grading-tools/tests/trust_model/` plus the task distributions' trust tests\n(see the assumption \u2192 test map in `grading-tools/tests/trust_model/README.md`).\n\nCheck exactly one:\n\n- [x] **No core grader logic touched.** This PR does not change grading,\n  sandbox, or axiom-policy code, so the fractional proof is unaffected.\n- [ ] **Implementation fixed to match the fractional proof.** This PR changes\n  grading, sandbox, or axiom-policy code so it satisfies an existing\n  fractional-proof claim. The Summary quotes that claim, the assumption set is\n  unchanged, and the implementation guarantee is covered by a pinning test\n  listed in fractional-proof CI and the assumption \u2192 test map.\n- [ ] **Assumption added.** This change makes grading soundness rest on\n  something the fractional proof did not previously cover. I have added it to\n  the applicable fractional proof as a *general* assumption (stated in terms of what must\n  hold, not of this implementation), updated the assumption \u2192 test map in\n  `grading-tools/tests/trust_model/README.md` (with a pinning test in\n  `grading-tools/tests/trust_model/` \u2014 or the owning task distribution's\n  tests \u2014 where it is verifiable in CI), and completed the justification section below.\n- [ ] **Assumption removed or weakened.** This change removes, weakens, or\n  rewrites an assumption already in the applicable fractional proof. I have completed the\n  justification section below.\n\nThe change is to reason text only: `_true_branch_reason` returns the same reason kind on every path, and no score, subscore or verdict reads the text. Neither the fractional proof, the trust-model README nor bet-grader/README.md quotes this reason's wording.\n\n## Verification\n\nRun on sami-rocqperf, one test file at a time:\n\n```\n$ uv run --frozen pytest -q bet-grader/tests/test_be_qed_skip_seam.py      323 passed\n$ uv run --frozen pytest -q bet-grader/tests/test_be_qed_skip_check.py     27 passed\n$ uv run --frozen pytest -q bet-grader/tests/test_be_vo_reverification.py  305 passed\n```\n\nChanges to `test_be_qed_skip_seam.py`:\n- `test_an_outside_closure_refusal_zeroes` now also asserts that the reason names the second run, says the closure run passed, and quotes the stop text with the library.\n- New `test_a_main_run_refusal_under_the_flag_keeps_the_main_run_s_reason`: when both runs refuse, the main run's text is kept.\n- New `test_an_outside_closure_run_with_no_verdict_quotes_its_error`: a second run that raised gets `The run reached no verdict: \\`coqchk error: \u2026\\`.`\n\nThree mutants, each failing its test:\n- never using the second run's text: 1 failed;\n- using it without checking that the main run passed: 1 failed;\n- dropping the error quote: 1 failed.\n\nRuff check and format are clean.\n",
+   "headRefName": "sami/outside-closure-reason-text",
+   "createdAt": "2026-10-21T17:19:33Z",
+   "mergedAt": "2026-10-21T18:00:47Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/grading-tools"
+   }
+  },
+  {
+   "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1121",
+   "title": "Record VF full-redaction v2 and the image-coverage handoff on main",
+   "body": "Records two verified-fuzzing workstreams on main so any agent can pick them up. Full redaction (\"statements-only\": every lemma ships as its statement plus `Admitted`, and the grader restores the given proofs) has a built, QA-clean 76-task pool and a ready snapshot due Thu 22 Oct. Separately, the full-redaction image carries only about half the ported trees' binaries; that is now its own unowned workstream.\n\n## Platform runs\n1. Built pool: snapshot `v2-ossfuzzredaction-full-76-patched` (`371ec089`), 76/76 problem versions, QA clean (reward_hacking `7cf72304` no issues; env_linter `e101bab1` only a projected grade-timeout note).\n2. Difficulty runs `jobs_v2.json` (9 jobs, 380 runs, Opus 5.5 at 10M): 87% terminal at writing \u2014 in progress.\n\n## Top things to know\n1. Docs and records only; no code path changes. CI lints `grader/` and `tasks/` only, so the copied `clause-fix/*.py` scripts are not linted.\n2. The full-redaction-100 records existed only on the unpushed branch `full-redaction-clause-fix`; this copies `RESUME.md` and `clause-fix/` from it.\n3. Keep rule recorded (Aengus, 21 Oct): drop only mean > 0.7; a task that is too hard but known solvable (control grade key=1.0) is kept; Claude Code solving a task the single agent fails at 10M is evidence of a good task.\n4. Image coverage: the ported-tree index puts 137 trees on vendor-v5tb and 89 on vendor-v5tbp; the full-redaction image `20261018-214311-vendor-fullredact` carries only the unpatched 164-program dataset. Track B's record naming those images was removed from main by #1071 (last commit with it: `621d374352a`).\n5. Both new `ACTIVE.md` rows are Aengus's current work under CLAUDE.md \"What main holds\".\n\n## Files changed, and why\n- `experiments/2026-10-17--aengus--full-redaction-100/RESUME.md` \u2014 current state, Thursday ready-snapshot plan, decisions.\n- `experiments/2026-10-17--aengus--full-redaction-100/clause-fix/` \u2014 12 files (README, diagnosis, 6 evidence files, `final_clean_set_v2.json`, 3 scripts) copied unchanged from the branch.\n- `experiments/2026-10-21--aengus--vf-image-coverage/RESUME.md` \u2014 new handoff: problem, evidence, five next steps.\n- `experiments/ACTIVE.md` \u2014 two rows.\n- `experiments/2026-10-16--aengus--verified-fuzzing-record/README.md` \u2014 two dated pointers.\n\n## Verification\n- `ruff` scope checked: `.github/workflows/ci.yml` runs `ruff check .` only in `grader/` and `tasks/`.\n- Index counts read from `/data/review-site/raw/ported-trees/index.json` (field `image`) on 2026-10-21.\n\n## Not done / follow-ups\n- Ready snapshot cut + QA + Ready for Customer tag (needs Aengus's go) \u2014 Thu 22 Oct.\n- Image build on v5tb + v5tbp and the pinned-patch git-declaration fix \u2014 unowned; the calib-200 fork volunteered for the build.\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01RFipgpM9KmMywkeqPBH2FB\n",
+   "headRefName": "aengusl/vf-full-redaction-records",
+   "createdAt": "2026-10-21T22:49:41Z",
+   "mergedAt": "2026-10-21T22:59:42Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/binary-equivalence-taiga"
+   }
+  },
+  {
+   "url": "https://github.com/theorem-labs/theorem.dev/pull/118",
+   "title": "Balance careers page layout and heading hierarchy",
+   "body": "Balance the careers page by moving the introduction above two columns, with fit criteria on the left and team background on the right. Match the three section headings at 20px and reduce role titles to 17px to clarify the hierarchy.\n\nValidation: Hugo build, CSS spacing lint, and desktop/mobile Chrome checks for the revised introduction layout and horizontal overflow.\n",
+   "headRefName": "codex/balance-careers-layout",
+   "createdAt": "2026-10-21T22:32:28Z",
+   "mergedAt": "2026-10-21T22:38:46Z",
+   "repository": {
+    "nameWithOwner": "theorem-labs/theorem.dev"
+   }
+  }
+ ],
+ "bet_keys": [
+  "BET-1",
+  "BET-10",
+  "BET-100",
+  "BET-101",
+  "BET-102",
+  "BET-103",
+  "BET-104",
+  "BET-105",
+  "BET-106",
+  "BET-107",
+  "BET-108",
+  "BET-109",
+  "BET-11",
+  "BET-110",
+  "BET-111",
+  "BET-112",
+  "BET-113",
+  "BET-114",
+  "BET-115",
+  "BET-116",
+  "BET-117",
+  "BET-118",
+  "BET-119",
+  "BET-12",
+  "BET-120",
+  "BET-121",
+  "BET-122",
+  "BET-123",
+  "BET-124",
+  "BET-125",
+  "BET-126",
+  "BET-127",
+  "BET-128",
+  "BET-129",
+  "BET-13",
+  "BET-130",
+  "BET-131",
+  "BET-132",
+  "BET-133",
+  "BET-134",
+  "BET-135",
+  "BET-136",
+  "BET-137",
+  "BET-138",
+  "BET-139",
+  "BET-14",
+  "BET-140",
+  "BET-141",
+  "BET-142",
+  "BET-143",
+  "BET-144",
+  "BET-145",
+  "BET-146",
+  "BET-147",
+  "BET-148",
+  "BET-149",
+  "BET-15",
+  "BET-150",
+  "BET-151",
+  "BET-16",
+  "BET-17",
+  "BET-18",
+  "BET-19",
+  "BET-2",
+  "BET-20",
+  "BET-21",
+  "BET-22",
+  "BET-23",
+  "BET-24",
+  "BET-25",
+  "BET-26",
+  "BET-27",
+  "BET-28",
+  "BET-29",
+  "BET-3",
+  "BET-30",
+  "BET-31",
+  "BET-32",
+  "BET-33",
+  "BET-34",
+  "BET-35",
+  "BET-36",
+  "BET-37",
+  "BET-38",
+  "BET-39",
+  "BET-4",
+  "BET-40",
+  "BET-41",
+  "BET-42",
+  "BET-43",
+  "BET-44",
+  "BET-45",
+  "BET-46",
+  "BET-47",
+  "BET-48",
+  "BET-49",
+  "BET-5",
+  "BET-50",
+  "BET-51",
+  "BET-52",
+  "BET-53",
+  "BET-54",
+  "BET-55",
+  "BET-56",
+  "BET-57",
+  "BET-58",
+  "BET-59",
+  "BET-6",
+  "BET-60",
+  "BET-61",
+  "BET-62",
+  "BET-63",
+  "BET-64",
+  "BET-65",
+  "BET-66",
+  "BET-67",
+  "BET-68",
+  "BET-69",
+  "BET-7",
+  "BET-70",
+  "BET-71",
+  "BET-72",
+  "BET-73",
+  "BET-74",
+  "BET-75",
+  "BET-76",
+  "BET-77",
+  "BET-78",
+  "BET-79",
+  "BET-8",
+  "BET-80",
+  "BET-81",
+  "BET-82",
+  "BET-83",
+  "BET-84",
+  "BET-85",
+  "BET-86",
+  "BET-87",
+  "BET-88",
+  "BET-89",
+  "BET-9",
+  "BET-90",
+  "BET-91",
+  "BET-92",
+  "BET-93",
+  "BET-94",
+  "BET-95",
+  "BET-96",
+  "BET-97",
+  "BET-98",
+  "BET-99"
+ ]
+}

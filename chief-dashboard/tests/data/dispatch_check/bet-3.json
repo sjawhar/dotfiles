@@ -1,0 +1,1373 @@
+{
+ "issue": {
+  "key": "BET-3",
+  "project": "BET",
+  "number": 3,
+  "title": "Task pipeline: build and launch every task type from committed config",
+  "status": "in_progress",
+  "priority": 0,
+  "rank": "W",
+  "labels": [],
+  "parent": "BET-2",
+  "blocked_by": [],
+  "assignee": null,
+  "claim": {
+   "actor": {
+    "kind": "session",
+    "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/Code/personal/theorem/binary-equivalence-taiga",
+     "tmux": "dev:2.6",
+     "pane": "%2",
+     "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+    }
+   },
+   "at": "2026-10-16T17:35:38.913814Z"
+  },
+  "components": {
+   "mode": "inherit",
+   "ids": [],
+   "unknown": [],
+   "reason": null,
+   "inherited_from": null
+  },
+  "external_links": [
+   {
+    "url": "https://github.com/sjawhar/pivot/pull/480",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/issues/865",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1029",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1030",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1042",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1043",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1046",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1053",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1085",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1086",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1088",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1090",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1095",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1117",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/906",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/907",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/910",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/933",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/934",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/936",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/937",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/939",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/943",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/944",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/946",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/948",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/953",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/965",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/967",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/971",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/973",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/976",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/978",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/979",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/980",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/981",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/982",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/983",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/986",
+    "kind": "url"
+   },
+   {
+    "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/991",
+    "kind": "url"
+   }
+  ],
+  "route": null,
+  "repo": null,
+  "resolved_repo": null,
+  "created_by": {
+   "kind": "session",
+   "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+   "origin": {
+    "host": "omp",
+    "machine": "sami-rocqperf",
+    "cwd": "/home/sami/Code/personal/theorem/binary-equivalence-taiga",
+    "tmux": "dev:2.6",
+    "pane": "%2",
+    "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+   }
+  },
+  "created_at": "2026-10-16T17:35:35.588414Z",
+  "updated_at": "2026-10-25T02:51:55.769713Z",
+  "closed_at": null,
+  "primary_artifact_id": "b915611b-3f4e-4b87-9c01-87d176ce4265",
+  "last_seq": 114,
+  "route_status": null,
+  "route_holder": null,
+  "progress": {
+   "tasks": {
+    "done": 0,
+    "total": 15
+   },
+   "children": {
+    "done": 4,
+    "total": 5
+   }
+  },
+  "artifacts": [
+   {
+    "id": "b915611b-3f4e-4b87-9c01-87d176ce4265",
+    "issue_key": "BET-3",
+    "project": "BET",
+    "session_id": null,
+    "ref_key": "BET-3/spec",
+    "slug": "spec",
+    "name": "spec.md",
+    "kind": "doc",
+    "primary": true,
+    "created_by": {
+     "kind": "session",
+     "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+     "origin": {
+      "host": "omp",
+      "machine": "sami-rocqperf",
+      "cwd": "/home/sami/Code/personal/theorem/binary-equivalence-taiga",
+      "tmux": "dev:2.6",
+      "pane": "%2",
+      "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+     }
+    },
+    "created_at": "2026-10-16T17:35:35.588414Z",
+    "versions": [
+     {
+      "number": 1,
+      "named": false,
+      "summary": null,
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/Code/personal/theorem/binary-equivalence-taiga",
+         "tmux": "dev:2.6",
+         "pane": "%2",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        }
+       }
+      ],
+      "created_at": "2026-10-16T17:35:35.588414Z",
+      "size": 5055
+     },
+     {
+      "number": 2,
+      "named": true,
+      "summary": "What main holds, and how CI proves it (Sami 2026-10-21 on BET-74)",
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "tmux": "dev:2.2",
+         "pane": "%2",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-21T16:47:43.993958Z",
+      "size": 9571
+     },
+     {
+      "number": 3,
+      "named": true,
+      "summary": "Tasks merge only after they pass QA (Sami, INFRA-25, 2026-10-22)",
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "tmux": "dev:2.2",
+         "pane": "%2",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-22T16:15:00.161449Z",
+      "size": 10224
+     },
+     {
+      "number": 4,
+      "named": false,
+      "summary": null,
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "tmux": "dev:2.2",
+         "pane": "%2",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-22T16:15:22.230646Z",
+      "size": 10259
+     },
+     {
+      "number": 5,
+      "named": true,
+      "summary": "Mark the QA definition as PIPE wording; Sami: revert task code, keep the scoring fix",
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "tmux": "dev:2.2",
+         "pane": "%2",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-22T16:16:46.663716Z",
+      "size": 10461
+     },
+     {
+      "number": 6,
+      "named": true,
+      "summary": "stale-locks job fails on what an author can clear (PR #1163)",
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-23T23:57:58.417719Z",
+      "size": 10831
+     },
+     {
+      "number": 7,
+      "named": true,
+      "summary": "The merge gate: who merges to main and how to reach it",
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-24T06:33:26.817505Z",
+      "size": 11434
+     },
+     {
+      "number": 8,
+      "named": true,
+      "summary": "Author merges after review (Sami, ask cd767725); Open items checklist",
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-25T02:51:55.769713Z",
+      "size": 15632
+     }
+    ],
+    "approval": {
+     "state": "draft",
+     "latest_version": 8
+    }
+   },
+   {
+    "id": "416f149a-6c75-4149-89b9-066c4631a75d",
+    "issue_key": "BET-3",
+    "project": "BET",
+    "session_id": null,
+    "ref_key": "BET-3/merge-gate-ledger-md",
+    "slug": "merge-gate-ledger-md",
+    "name": "merge-gate-ledger.md",
+    "kind": "doc",
+    "primary": false,
+    "created_by": {
+     "kind": "session",
+     "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+     "origin": {
+      "host": "omp",
+      "machine": "sami-rocqperf",
+      "cwd": "/home/sami/src/binary-equivalence-taiga",
+      "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+     },
+     "owner": "sami@theorem.dev"
+    },
+    "created_at": "2026-10-25T02:40:51.31024Z",
+    "versions": [
+     {
+      "number": 1,
+      "named": true,
+      "summary": "Open BET PRs and who owes each next step, from GitHub",
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-25T02:40:51.31024Z",
+      "size": 9492
+     },
+     {
+      "number": 2,
+      "named": true,
+      "summary": "Ledger pass 2026-10-25T02:45:55Z",
+      "authors": [
+       {
+        "kind": "session",
+        "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+        "origin": {
+         "host": "omp",
+         "machine": "sami-rocqperf",
+         "cwd": "/home/sami/src/binary-equivalence-taiga",
+         "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+        },
+        "owner": "sami@theorem.dev"
+       }
+      ],
+      "created_at": "2026-10-25T02:45:56.504822Z",
+      "size": 9526
+     }
+    ],
+    "approval": {
+     "state": "draft",
+     "latest_version": 2
+    }
+   }
+  ],
+  "open_asks": [
+   {
+    "id": "542d4bd9-bf7a-47d1-a085-066b327b3e6b",
+    "issue_key": "BET-3",
+    "artifact_id": null,
+    "block_id": null,
+    "author": {
+     "kind": "session",
+     "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+     "origin": {
+      "host": "omp",
+      "machine": "sami-rocqperf",
+      "cwd": "/mnt/nvme/sami/scratch",
+      "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+     },
+     "owner": "sami@theorem.dev"
+    },
+    "kind": "question",
+    "question": "Problems on CI-built images cannot be marked Ready for Customer: Taiga needs a source record per image, and CI (taiga-ci@theorem-agent-infra) has no Taiga login. Your 10-20 ask (dispatch://INFRA-23/ask/f3d40c79) ended with Archana offering taiga-buildbox@autoformalization, and you said \"Ok I will use that\"; nothing was granted. No account here can sign in as it (403), and your admin role there expired 10-23. Archana, Jason or Rajashree can run:\ngcloud iam service-accounts add-iam-policy-binding taiga-buildbox@autoformalization.iam.gserviceaccount.com --project=autoformalization --member=serviceAccount:taiga-ci@theorem-agent-infra.iam.gserviceaccount.com --role=roles/iam.serviceAccountOpenIdTokenCreator\nRecommend option 1. Meanwhile I register CI images by hand.\n",
+    "options": [
+     {
+      "label": "Ask Archana, Jason or Rajashree to run the grant",
+      "description": "CI signs in as taiga-buildbox, no Google Cloud access."
+     },
+     {
+      "label": "Ask a Taiga org admin to add taiga-ci as a user",
+      "description": "no IAM change, but Anthropic approves each account."
+     },
+     {
+      "label": "Keep registering CI images by hand with your login",
+      "description": "works now; each image waits for a session with it."
+     }
+    ],
+    "multiple": false,
+    "urgency": "med",
+    "anchor": null,
+    "state": "open",
+    "answer": null,
+    "opened_event_id": 18941,
+    "created_at": "2026-10-25T00:31:06.533767Z",
+    "referenced_by_count": 1,
+    "edited_at": null,
+    "waiting_on": "human",
+    "last_reply": {
+     "author": {
+      "kind": "session",
+      "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+      "origin": {
+       "host": "omp",
+       "machine": "sami-rocqperf",
+       "cwd": "/home/sami/src/binary-equivalence-taiga",
+       "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+      },
+      "owner": "sami@theorem.dev"
+     },
+     "created_at": "2026-10-25T00:33:35.334214Z"
+    }
+   }
+  ],
+  "children": [
+   {
+    "key": "BET-4",
+    "title": "Task pipeline: launch and download as pipeline stages",
+    "status": "done",
+    "subtree_done": 1,
+    "subtree_total": 1,
+    "active_at": "2026-10-22T19:44:13.220152Z",
+    "external_links": [
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/issues/896",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1000",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1005",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1006",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1007",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1008",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1009",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1012",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1014",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1015",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1017",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1020",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1023",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1027",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1032",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1033",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1035",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1040",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1041",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1044",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1045",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1051",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1055",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1060",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1066",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1067",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1069",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1071",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/1072",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/963",
+      "kind": "url"
+     },
+     {
+      "url": "https://github.com/theorem-labs/binary-equivalence-taiga/pull/990",
+      "kind": "url"
+     }
+    ]
+   },
+   {
+    "key": "BET-45",
+    "title": "Why the task pipeline has produced few valid tasks while Aengus produced ~100: analysis",
+    "status": "done",
+    "subtree_done": 1,
+    "subtree_total": 1,
+    "active_at": "2026-10-18T04:39:08.290983Z",
+    "external_links": []
+   },
+   {
+    "key": "BET-46",
+    "title": "Why the task pipeline has produced few valid tasks while Aengus produced ~100: analysis",
+    "status": "done",
+    "subtree_done": 1,
+    "subtree_total": 1,
+    "active_at": "2026-10-17T17:11:46.426043Z",
+    "external_links": []
+   },
+   {
+    "key": "BET-47",
+    "title": "Why the task pipeline has produced few valid tasks while Aengus produced ~100: analysis",
+    "status": "done",
+    "subtree_done": 1,
+    "subtree_total": 1,
+    "active_at": "2026-10-17T17:11:46.70355Z",
+    "external_links": []
+   },
+   {
+    "key": "BET-82",
+    "title": "Bracket launches by default, and an earlier difficulty signal",
+    "status": "in_progress",
+    "subtree_done": 0,
+    "subtree_total": 1,
+    "active_at": "2026-10-24T08:15:55.948381Z",
+    "external_links": []
+   }
+  ],
+  "referenced_by_count": 19
+ },
+ "events": [
+  {
+   "id": 14651,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 105,
+   "type": "child.status",
+   "actor": {
+    "kind": "session",
+    "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/src/binary-equivalence-taiga",
+     "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "notify": true,
+   "created_at": "2026-10-24T01:27:18.73944Z",
+   "payload": {
+    "to": "in_progress",
+    "from": "triage",
+    "child_key": "BET-82"
+   }
+  },
+  {
+   "id": 15681,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 106,
+   "type": "artifact.version",
+   "actor": {
+    "kind": "session",
+    "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/src/binary-equivalence-taiga",
+     "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "notify": false,
+   "created_at": "2026-10-24T06:33:26.817505Z",
+   "payload": {
+    "diff": "(trimmed)",
+    "name": "spec.md",
+    "version": {
+     "size": 11434,
+     "named": true,
+     "number": 7,
+     "authors": [
+      {
+       "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+       "kind": "session",
+       "owner": "sami@theorem.dev",
+       "origin": {
+        "cwd": "/home/sami/src/binary-equivalence-taiga",
+        "host": "omp",
+        "machine": "sami-rocqperf",
+        "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+       }
+      }
+     ],
+     "summary": "The merge gate: who merges to main and how to reach it",
+     "created_at": "2026-10-24T06:33:26.817505Z"
+    },
+    "artifact_id": "b915611b-3f4e-4b87-9c01-87d176ce4265"
+   }
+  },
+  {
+   "id": 17158,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 107,
+   "type": "ask.opened",
+   "actor": {
+    "kind": "session",
+    "id": "01a13dca-e979-7264-af32-f654ef57a6f5",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/src/binary-equivalence-taiga",
+     "tmux": "agents:1.1",
+     "pane": "%8",
+     "session_title": "\ud83d\udc54 CHIEF: chief of staff"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "notify": false,
+   "created_at": "2026-10-24T18:49:30.971156Z",
+   "payload": {
+    "anchor": null,
+    "answer": null,
+    "artifact_id": null,
+    "author": {
+     "id": "01a13dca-e979-7264-af32-f654ef57a6f5",
+     "kind": "session",
+     "origin": {
+      "cwd": "/home/sami/src/binary-equivalence-taiga",
+      "host": "omp",
+      "machine": "sami-rocqperf",
+      "pane": "%8",
+      "session_title": "\ud83d\udc54 CHIEF: chief of staff",
+      "tmux": "agents:1.1"
+     },
+     "owner": "sami@theorem.dev"
+    },
+    "block_id": null,
+    "created_at": "2026-10-24T18:49:30.971156Z",
+    "edited_at": null,
+    "id": "cd767725-a0e3-4c07-b672-d56e99337e24",
+    "issue_key": "BET-3",
+    "kind": "question",
+    "multiple": false,
+    "opened_event_id": 17158,
+    "options": [
+     {
+      "description": "CI passes, a reviewer who is not the author approves the exact head, and the verdict is on the pull request. No queue. Each author runs its own reviewer, so review quality depends on each lane.",
+      "label": "The author merges after review"
+     },
+     {
+      "description": "Every merge passes one session's review gates, with one standard. Pull requests wait in its queue, and the queue grows with the number of agents.",
+      "label": "PIPE keeps the merge"
+     }
+    ],
+    "question": "Every pull request to binary-equivalence-taiga waits for one session, the task pipeline session (PIPE), to review and merge it. The rule is in the repository's CLAUDE.md, added on 10-24 (#1199) after four pull requests merged with no review. In the 24 hours to 18:46 UTC, 78 merged. At that time, 26 open pull requests had passing CI and were not merged: half were over 6 hours old, 8 over 24 hours. I cannot tell how many of them had reached PIPE. Who should merge? Recommendation: the author, once CI passes and a reviewer who is not the author approves the exact head, because that keeps the review and removes the single queue.",
+    "referenced_by_count": 1,
+    "state": "open",
+    "urgency": "med"
+   }
+  },
+  {
+   "id": 17467,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 108,
+   "type": "ask.answered",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "notify": true,
+   "created_at": "2026-10-24T19:48:34.316551Z",
+   "payload": {
+    "anchor": null,
+    "answer": {
+     "at": "2026-10-24T19:48:34.327859826Z",
+     "selected": [
+      "The author merges after review"
+     ],
+     "text": "Delete that rule immediately",
+     "user": "sami@theorem.dev"
+    },
+    "artifact_id": null,
+    "author": {
+     "id": "01a13dca-e979-7264-af32-f654ef57a6f5",
+     "kind": "session",
+     "origin": {
+      "cwd": "/home/sami/src/binary-equivalence-taiga",
+      "host": "omp",
+      "machine": "sami-rocqperf",
+      "pane": "%8",
+      "session_title": "\ud83d\udc54 CHIEF: chief of staff",
+      "tmux": "agents:1.1"
+     },
+     "owner": "sami@theorem.dev"
+    },
+    "block_id": null,
+    "created_at": "2026-10-24T18:49:30.971156Z",
+    "edited_at": null,
+    "id": "cd767725-a0e3-4c07-b672-d56e99337e24",
+    "issue_key": "BET-3",
+    "kind": "question",
+    "multiple": false,
+    "opened_event_id": 17158,
+    "options": [
+     {
+      "description": "CI passes, a reviewer who is not the author approves the exact head, and the verdict is on the pull request. No queue. Each author runs its own reviewer, so review quality depends on each lane.",
+      "label": "The author merges after review"
+     },
+     {
+      "description": "Every merge passes one session's review gates, with one standard. Pull requests wait in its queue, and the queue grows with the number of agents.",
+      "label": "PIPE keeps the merge"
+     }
+    ],
+    "question": "Every pull request to binary-equivalence-taiga waits for one session, the task pipeline session (PIPE), to review and merge it. The rule is in the repository's CLAUDE.md, added on 10-24 (#1199) after four pull requests merged with no review. In the 24 hours to 18:46 UTC, 78 merged. At that time, 26 open pull requests had passing CI and were not merged: half were over 6 hours old, 8 over 24 hours. I cannot tell how many of them had reached PIPE. Who should merge? Recommendation: the author, once CI passes and a reviewer who is not the author approves the exact head, because that keeps the review and removes the single queue.",
+    "referenced_by_count": 1,
+    "state": "answered",
+    "urgency": "med"
+   }
+  },
+  {
+   "id": 18941,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 109,
+   "type": "ask.opened",
+   "actor": {
+    "kind": "session",
+    "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/mnt/nvme/sami/scratch",
+     "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "notify": false,
+   "created_at": "2026-10-25T00:31:06.533767Z",
+   "payload": {
+    "anchor": null,
+    "answer": null,
+    "artifact_id": null,
+    "author": {
+     "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+     "kind": "session",
+     "origin": {
+      "cwd": "/mnt/nvme/sami/scratch",
+      "host": "omp",
+      "machine": "sami-rocqperf",
+      "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+     },
+     "owner": "sami@theorem.dev"
+    },
+    "block_id": null,
+    "created_at": "2026-10-25T00:31:06.533767Z",
+    "edited_at": null,
+    "id": "542d4bd9-bf7a-47d1-a085-066b327b3e6b",
+    "issue_key": "BET-3",
+    "kind": "question",
+    "multiple": false,
+    "opened_event_id": 18941,
+    "options": [
+     {
+      "description": "CI signs in as taiga-buildbox, no Google Cloud access.",
+      "label": "Ask Archana, Jason or Rajashree to run the grant"
+     },
+     {
+      "description": "no IAM change, but Anthropic approves each account.",
+      "label": "Ask a Taiga org admin to add taiga-ci as a user"
+     },
+     {
+      "description": "works now; each image waits for a session with it.",
+      "label": "Keep registering CI images by hand with your login"
+     }
+    ],
+    "question": "Problems on CI-built images cannot be marked Ready for Customer: Taiga needs a source record per image, and CI (taiga-ci@theorem-agent-infra) has no Taiga login. Your 10-20 ask (dispatch://INFRA-23/ask/f3d40c79) ended with Archana offering taiga-buildbox@autoformalization, and you said \"Ok I will use that\"; nothing was granted. No account here can sign in as it (403), and your admin role there expired 10-23. Archana, Jason or Rajashree can run:\ngcloud iam service-accounts add-iam-policy-binding taiga-buildbox@autoformalization.iam.gserviceaccount.com --project=autoformalization --member=serviceAccount:taiga-ci@theorem-agent-infra.iam.gserviceaccount.com --role=roles/iam.serviceAccountOpenIdTokenCreator\nRecommend option 1. Meanwhile I register CI images by hand.\n",
+    "referenced_by_count": 1,
+    "state": "open",
+    "urgency": "med"
+   }
+  },
+  {
+   "id": 18962,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 110,
+   "type": "comment.created",
+   "actor": {
+    "kind": "user",
+    "id": "sami@theorem.dev"
+   },
+   "notify": true,
+   "created_at": "2026-10-25T00:32:05.736432Z",
+   "payload": {
+    "id": "f92c937a-d694-4e35-bc1b-eadd678e43ac",
+    "body": "Don't I have permission to do this yet?",
+    "turn": "agent",
+    "anchor": null,
+    "ask_id": "542d4bd9-bf7a-47d1-a085-066b327b3e6b",
+    "author": {
+     "id": "sami@theorem.dev",
+     "kind": "user"
+    },
+    "mentions": [],
+    "reply_to": null,
+    "resolved": false,
+    "ask_state": "open",
+    "edited_at": null,
+    "issue_key": "BET-3",
+    "created_at": "2026-10-25T00:32:05.739906Z",
+    "deliveries": [],
+    "suggestion": null,
+    "artifact_id": null,
+    "resolved_at": null,
+    "resolved_by": null,
+    "ask_question": "Problems on CI-built images cannot be marked Ready for Customer: Taiga needs a source record per image, and CI (taiga-ci@theorem-agent-infra) has no Taiga login. Your 10-20 ask (dispatch://INFRA-23/ask/f3d40c79) ended with Archana offering taiga-buildbox@autoformalization, and you said \"Ok I will use that\"; nothing was granted. No account here can sign in as it (403), and your admin role there expired 10-23. Archana, Jason or Rajashree can run:\ngcloud iam service-accounts add-iam-policy-binding taiga-buildbox@autoformalization.iam.gserviceaccount.com --project=autoformalization --member=serviceAccount:taiga-ci@theorem-agent-infra.iam.gserviceaccount.com --role=roles/iam.serviceAccountOpenIdTokenCreator\nRecommend option 1. Meanwhile I register CI images by hand.\n",
+    "artifact_name": "",
+    "ask_waiting_on": "agent",
+    "suppress_route": false,
+    "suppressed_authors": []
+   }
+  },
+  {
+   "id": 18973,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 111,
+   "type": "comment.created",
+   "actor": {
+    "kind": "session",
+    "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/src/binary-equivalence-taiga",
+     "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "notify": false,
+   "created_at": "2026-10-25T00:33:35.325627Z",
+   "payload": {
+    "id": "ff473ecd-f8aa-445e-86c0-a9bfb15dd627",
+    "body": "No, not any more. I checked as your own account, sami@theorem.dev, at 00:33Z. Your roles on the autoformalization project that could grant this, iam.serviceAccountAdmin and iam.roleAdmin, were time-limited grants titled \"bet40-apply\", and both ended at 2026-10-23 14:31:54Z. Reading taiga-buildbox's own policy is now denied to you too (iam.serviceAccounts.getIamPolicy). Your untimed roles there are compute network and security admin, OS policy admin and service-usage consumer, and none of them covers service-account bindings. So the grant needs Archana, Jason or Rajashree, or a renewed time-limited serviceAccountAdmin for you. If they renew it for you, I can run the one command myself as you, and nothing else.\n",
+    "turn": "human",
+    "anchor": null,
+    "ask_id": "542d4bd9-bf7a-47d1-a085-066b327b3e6b",
+    "author": {
+     "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+     "kind": "session",
+     "owner": "sami@theorem.dev",
+     "origin": {
+      "cwd": "/home/sami/src/binary-equivalence-taiga",
+      "host": "omp",
+      "machine": "sami-rocqperf",
+      "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+     }
+    },
+    "mentions": [],
+    "reply_to": null,
+    "resolved": false,
+    "ask_state": "open",
+    "edited_at": null,
+    "issue_key": "BET-3",
+    "created_at": "2026-10-25T00:33:35.334214Z",
+    "deliveries": [],
+    "suggestion": null,
+    "artifact_id": null,
+    "resolved_at": null,
+    "resolved_by": null,
+    "ask_question": "Problems on CI-built images cannot be marked Ready for Customer: Taiga needs a source record per image, and CI (taiga-ci@theorem-agent-infra) has no Taiga login. Your 10-20 ask (dispatch://INFRA-23/ask/f3d40c79) ended with Archana offering taiga-buildbox@autoformalization, and you said \"Ok I will use that\"; nothing was granted. No account here can sign in as it (403), and your admin role there expired 10-23. Archana, Jason or Rajashree can run:\ngcloud iam service-accounts add-iam-policy-binding taiga-buildbox@autoformalization.iam.gserviceaccount.com --project=autoformalization --member=serviceAccount:taiga-ci@theorem-agent-infra.iam.gserviceaccount.com --role=roles/iam.serviceAccountOpenIdTokenCreator\nRecommend option 1. Meanwhile I register CI images by hand.\n",
+    "artifact_name": "",
+    "ask_waiting_on": "human",
+    "suppress_route": false,
+    "suppressed_authors": []
+   }
+  },
+  {
+   "id": 20630,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 112,
+   "type": "artifact.created",
+   "actor": {
+    "kind": "session",
+    "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/src/binary-equivalence-taiga",
+     "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "notify": false,
+   "created_at": "2026-10-25T02:40:51.31024Z",
+   "payload": {
+    "artifact": {
+     "id": "416f149a-6c75-4149-89b9-066c4631a75d",
+     "kind": "doc",
+     "name": "merge-gate-ledger.md",
+     "slug": "merge-gate-ledger-md",
+     "primary": false,
+     "project": "BET",
+     "ref_key": "BET-3/merge-gate-ledger-md",
+     "versions": [
+      {
+       "size": 9492,
+       "named": true,
+       "number": 1,
+       "authors": [
+        {
+         "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+         "kind": "session",
+         "owner": "sami@theorem.dev",
+         "origin": {
+          "cwd": "/home/sami/src/binary-equivalence-taiga",
+          "host": "omp",
+          "machine": "sami-rocqperf",
+          "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+         }
+        }
+       ],
+       "summary": "Open BET PRs and who owes each next step, from GitHub",
+       "created_at": "2026-10-25T02:40:51.31024Z"
+      }
+     ],
+     "issue_key": "BET-3",
+     "created_at": "2026-10-25T02:40:51.31024Z",
+     "created_by": {
+      "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+      "kind": "session",
+      "owner": "sami@theorem.dev",
+      "origin": {
+       "cwd": "/home/sami/src/binary-equivalence-taiga",
+       "host": "omp",
+       "machine": "sami-rocqperf",
+       "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+      }
+     },
+     "session_id": null
+    }
+   }
+  },
+  {
+   "id": 20849,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 113,
+   "type": "artifact.version",
+   "actor": {
+    "kind": "session",
+    "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/src/binary-equivalence-taiga",
+     "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "notify": false,
+   "created_at": "2026-10-25T02:45:56.504822Z",
+   "payload": {
+    "diff": "(trimmed)",
+    "name": "merge-gate-ledger.md",
+    "version": {
+     "size": 9526,
+     "named": true,
+     "number": 2,
+     "authors": [
+      {
+       "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+       "kind": "session",
+       "owner": "sami@theorem.dev",
+       "origin": {
+        "cwd": "/home/sami/src/binary-equivalence-taiga",
+        "host": "omp",
+        "machine": "sami-rocqperf",
+        "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+       }
+      }
+     ],
+     "summary": "Ledger pass 2026-10-25T02:45:55Z",
+     "created_at": "2026-10-25T02:45:56.504822Z"
+    },
+    "artifact_id": "416f149a-6c75-4149-89b9-066c4631a75d"
+   }
+  },
+  {
+   "id": 21029,
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "project": "BET",
+   "seq": 114,
+   "type": "artifact.version",
+   "actor": {
+    "kind": "session",
+    "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/src/binary-equivalence-taiga",
+     "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "notify": false,
+   "created_at": "2026-10-25T02:51:55.769713Z",
+   "payload": {
+    "diff": "(trimmed)",
+    "name": "spec.md",
+    "version": {
+     "size": 15632,
+     "named": true,
+     "number": 8,
+     "authors": [
+      {
+       "id": "01a13bcd-3e9f-7770-b0f4-88fa364eb58e",
+       "kind": "session",
+       "owner": "sami@theorem.dev",
+       "origin": {
+        "cwd": "/home/sami/src/binary-equivalence-taiga",
+        "host": "omp",
+        "machine": "sami-rocqperf",
+        "session_title": "\ud83d\udeb0 PIPE: task pipeline"
+       }
+      }
+     ],
+     "summary": "Author merges after review (Sami, ask cd767725); Open items checklist",
+     "created_at": "2026-10-25T02:51:55.769713Z"
+    },
+    "artifact_id": "b915611b-3f4e-4b87-9c01-87d176ce4265",
+    "references_changed": [
+     {
+      "id": "cd767725-a0e3-4c07-b672-d56e99337e24",
+      "kind": "ask",
+      "issue_key": "BET-3"
+     },
+     {
+      "id": "542d4bd9-bf7a-47d1-a085-066b327b3e6b",
+      "kind": "ask",
+      "issue_key": "BET-3"
+     },
+     {
+      "id": "BET-19",
+      "kind": "issue"
+     },
+     {
+      "id": "BET-20",
+      "kind": "issue"
+     },
+     {
+      "id": "BET-99",
+      "kind": "issue"
+     }
+    ]
+   }
+  }
+ ],
+ "references": {
+  "dispatch://BET-3/ask/cd767725-a0e3-4c07-b672-d56e99337e24": {
+   "node": {
+    "kind": "ask",
+    "id": "cd767725-a0e3-4c07-b672-d56e99337e24",
+    "issue_key": "BET-3",
+    "project": "BET",
+    "ref": "dispatch://BET-3/ask/cd767725-a0e3-4c07-b672-d56e99337e24"
+   },
+   "edges": [
+    {
+     "kind": "mentions",
+     "direction": "in",
+     "node": {
+      "kind": "artifact",
+      "id": "b915611b-3f4e-4b87-9c01-87d176ce4265",
+      "issue_key": "BET-3",
+      "project": "BET",
+      "ref": "dispatch://BET-3/spec"
+     },
+     "excerpt": {
+      "block_id": "2a098d60-08cf-4aca-9c83-ddc89f7a4b39",
+      "text": "**Who merges to main.** The author merges its own pull request after review. Sami, 2026-10-24 19:48Z ([ask cd767725](dispatch://BET-3/ask/cd767725-a0e3-4c07-b672-d56e99337e24)), chose \"The author merges after review\" and wrote \"Delete that rule immediately\" about the earlier rule that only PIPE merged. The author merges once every CI check passes and a reviewer who is not the author approves the exact head, with that verdict on the pull request; for task code, the author also"
+     },
+     "created_at": "2026-10-25T02:51:55.769713Z",
+     "source_seq": 21029
+    }
+   ]
+  }
+ },
+ "ask": {
+  "ask": {
+   "id": "cd767725-a0e3-4c07-b672-d56e99337e24",
+   "issue_key": "BET-3",
+   "artifact_id": null,
+   "block_id": null,
+   "author": {
+    "kind": "session",
+    "id": "01a13dca-e979-7264-af32-f654ef57a6f5",
+    "origin": {
+     "host": "omp",
+     "machine": "sami-rocqperf",
+     "cwd": "/home/sami/src/binary-equivalence-taiga",
+     "tmux": "agents:1.1",
+     "pane": "%8",
+     "session_title": "\ud83d\udc54 CHIEF: chief of staff"
+    },
+    "owner": "sami@theorem.dev"
+   },
+   "kind": "question",
+   "question": "Every pull request to binary-equivalence-taiga waits for one session, the task pipeline session (PIPE), to review and merge it. The rule is in the repository's CLAUDE.md, added on 10-24 (#1199) after four pull requests merged with no review. In the 24 hours to 18:46 UTC, 78 merged. At that time, 26 open pull requests had passing CI and were not merged: half were over 6 hours old, 8 over 24 hours. I cannot tell how many of them had reached PIPE. Who should merge? Recommendation: the author, once CI passes and a reviewer who is not the author approves the exact head, because that keeps the review and removes the single queue.",
+   "options": [
+    {
+     "label": "The author merges after review",
+     "description": "CI passes, a reviewer who is not the author approves the exact head, and the verdict is on the pull request. No queue. Each author runs its own reviewer, so review quality depends on each lane."
+    },
+    {
+     "label": "PIPE keeps the merge",
+     "description": "Every merge passes one session's review gates, with one standard. Pull requests wait in its queue, and the queue grows with the number of agents."
+    }
+   ],
+   "multiple": false,
+   "urgency": "med",
+   "anchor": null,
+   "state": "answered",
+   "answer": {
+    "user": "sami@theorem.dev",
+    "selected": [
+     "The author merges after review"
+    ],
+    "text": "Delete that rule immediately",
+    "at": "2026-10-24T19:48:34.327859826Z"
+   },
+   "opened_event_id": 17158,
+   "created_at": "2026-10-24T18:49:30.971156Z",
+   "referenced_by_count": 1,
+   "edited_at": null
+  },
+  "replies": [],
+  "edits": [],
+  "answers": [
+   {
+    "user": "sami@theorem.dev",
+    "selected": [
+     "The author merges after review"
+    ],
+    "text": "Delete that rule immediately",
+    "at": "2026-10-24T19:48:34.327859826Z"
+   }
+  ],
+  "followers": [
+   {
+    "session_id": "01a13dca-e979-7264-af32-f654ef57a6f5",
+    "since": "2026-10-24T18:49:30.971156Z"
+   }
+  ]
+ }
+}

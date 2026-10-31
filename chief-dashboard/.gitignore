@@ -1,0 +1,9 @@
+__pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
+state/
+
+# The dotfiles root ignores uv.lock; this package ships its lock, so `uv run --project` here
+# resolves the same dependencies on every machine.
+!uv.lock
