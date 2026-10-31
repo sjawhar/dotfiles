@@ -37,6 +37,7 @@ Here you delete only paths that you prove are yours. A name proves nothing eithe
 - In your own box, also run `$S containers` and `$S images`, and treat a `registry` container in that output as yours: your subagents may have started it without your seeing it.
 - Before you delete a core file, read [references/core-dumps.md](references/core-dumps.md): it can be the only crash evidence.
 - Never glob `~/boxes/<box>/*`; name each entry you delete. `jj-user-repos` and `omp-run` there are live bind-mount sources, and losing them breaks `jj` or omp for the whole box. Symptom and repair: [references/box-mounts.md](references/box-mounts.md).
+- Give every `find ... -delete` or `find ... -exec rm` a `-mindepth 1`. Without it, `find` tests the starting directory too: on 2026-10-31, `find /mnt/nvme/sami/tmp -maxdepth 1 -name 'tmp*' -exec rm -rf {} +` matched `/mnt/nvme/sami/tmp` itself and deleted session scratch there for five minutes (dispatch://INFRA-893).
 
 ## Pacing (every phase)
 
