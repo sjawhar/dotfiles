@@ -80,11 +80,11 @@ both alerts say which of the two rules sent them. Escalation and clear are untou
 | Mount | Floor | Why |
 |---|---|---|
 | `/` | 18 GiB | Root holds every session's transcript, the journal, apt/dpkg state and `/tmp`, so a full root stops the whole box, not one lane. Root's band on 2026-10-26 afternoon was 25–28 GiB, so 25 would have paged all day; 18 leaves room to act |
-| `/mnt/nvme` | 84 GB (decimal) | The grade farm's build-cache floor before grading-tools #1238 (example-task-repo farm `e1417ce`). #1238 (2026-10-31) raised the farm's own build-cache floor to 100 GB; the alert floor stays at 84 GB (the script's `FLOORS` comment), and an alert between 100 and 84 GB is not sent, but every alert names the farm kinds already waiting (below), `build-cache` among them under 100 GB |
+| `/mnt/nvme` | 84 GB (decimal) | The grade farm's build-cache floor until 2026-10-31, when the farm raised its own build-cache floor to 100 GB; the alert floor stays at 84 GB (the script's `FLOORS` comment), and an alert between 100 and 84 GB is not sent, but every alert names the farm kinds already waiting (below), `build-cache` among them under 100 GB |
 | anything else | `--default-floor`, 20 GiB | |
 
 An alert on `/mnt/nvme` also names every grade-farm transfer kind whose own floor the current
-free space is under (grading-tools `grade_farm/floors.py` as of #1238: `generic-unmeasured` 150 GB,
+free space is under (the farm's own floor table as of 2026-10-31: `generic-unmeasured` 150 GB,
 `build-cache` 100, `registration` 68, `nightly-grade` 60, `frozen-drop` 44, `restore` 44,
 `prepare-staging` 28, `grade-record` 24, `build-stage` 22.4, `suite-result` 21.6): that list is the
 work the farm is already refusing.

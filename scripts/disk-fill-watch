@@ -122,9 +122,9 @@ DEFAULT_STATE = (
 #              paged all afternoon; 18 GiB warns with room to act and did not fire in the quiet
 #              hours of that log.
 #   /mnt/nvme  84 GB (decimal, the farm's own unit). It was the grade farm's build-cache floor
-#              (example-task-repo farm e1417ce) until grading-tools #1238 (2026-10-31) raised
-#              that floor to 100 GB; the alert floor stays at 84 GB, and every alert names the farm
-#              kinds already waiting (NVME_KIND_FLOORS below), build-cache among them under 100 GB.
+#              until 2026-10-31, when the farm raised that floor to 100 GB; the alert floor stays
+#              at 84 GB, and every alert names the farm kinds already waiting (NVME_KIND_FLOORS
+#              below), build-cache among them under 100 GB.
 FLOORS = {
     "/": 18 * GIB,
     "/mnt/nvme": 84 * GB,
@@ -132,9 +132,9 @@ FLOORS = {
 
 # The grade farm's per-transfer-kind floors on /mnt/nvme, highest first. These do not alert on
 # their own; the alert names every kind whose floor the current free space is under, which is
-# the list of work that is already refused. Source: grading-tools grade-farm/src/grade_farm/
-# floors.py as of #1238 (2026-10-31, re-measured kind bounds; floor = 20 GB + 8 x bound, capped at
-# the 150 GB generic floor). The 84 GB alert floor above stays where it was.
+# the list of work that is already refused. Source: the farm's own floor table as of 2026-10-31
+# (re-measured kind bounds; floor = 20 GB + 8 x bound, capped at the 150 GB generic floor). The
+# 84 GB alert floor above stays where it was.
 NVME_KIND_FLOORS = [
     ("generic-unmeasured", 150 * GB),
     ("build-cache", 100 * GB),
