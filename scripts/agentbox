@@ -1283,15 +1283,17 @@ PROC="${AGENTBOX_PROC:-/proc}"
 # separator is not whitespace, so empty fields survive.
 SEP=$'\x1f'
 
-# What free space a move must leave on the disk the boxes are on: scripts/disk-fill-watch's own
-# FLOORS, 84 GB (78 GiB) for /mnt/nvme and 18 GiB for the root disk. A box's image is sparse, so
-# this bounds what the moves claim at launch, not what the sessions can later grow into.
+# What free space a move must leave on the disk the boxes are on: a hard reserve, 20 GiB on
+# /mnt/nvme and 10 GiB on the root disk. Not disk-fill-watch's alert floors (84 GB, 18 GiB): those
+# tell a person early, and a move refused at them stopped all 70 ready sessions at 17:32Z on
+# 2026-11-01 while a box claims about 0.3 GiB at launch (its sparse image). This bounds what the
+# moves claim at launch, not what the sessions can later grow into.
 move_floor_bytes() {
     local target
     target="$(df --output=target "$1" 2>/dev/null | tail -1 || true)"
     case "$target" in
-        /mnt/nvme) echo 84000000000 ;;
-        *) echo 19327352832 ;;
+        /mnt/nvme) echo 21474836480 ;;
+        *) echo 10737418240 ;;
     esac
 }
 
@@ -1323,16 +1325,11 @@ move_image_bytes() {
     echo "$MOVE_IMAGE_BYTES"
 }
 
-# Refuse a move that would take the disk under that floor. One box at a time: the check is made
+# Refuse a move that would take the disk under that reserve. One box at a time: the check is made
 # again by every session that moves, so a window that runs out of room stops itself.
 #
 # MOVE_FORCE_FLOOR (the `--force-floor` flag) says the person running the window has decided
-# otherwise and prints what it is overriding. It exists because this floor is about the whole
-# disk, not about the move: /mnt/nvme on sami-rocqperf swung between 160 and 64 GiB free during
-# one afternoon as the grade farm ran, so a window of about a hundred sessions would otherwise
-# be stopped by somebody else's build. A box claims a few hundred MiB at launch (its sparse
-# image), and 83 of them about 21 GiB, so the decision is a real one and the number is printed
-# either way.
+# otherwise and prints what it is overriding.
 MOVE_FORCE_FLOOR=false
 move_check_floor() {
     local image="$1" dir free floor
@@ -1341,10 +1338,10 @@ move_check_floor() {
     floor="$(move_floor_bytes "$dir")"
     if (( free - image < floor )); then
         if $MOVE_FORCE_FLOOR; then
-            echo "agentbox: --force-floor: a box leaves $(move_gib $((free - image))) GiB free on $dir, under its $(move_gib "$floor") GiB floor (scripts/disk-fill-watch); moving anyway" >&2
+            echo "agentbox: --force-floor: a box leaves $(move_gib $((free - image))) GiB free on $dir, under its $(move_gib "$floor") GiB reserve; moving anyway" >&2
             return 0
         fi
-        echo "a box would leave $(move_gib $((free - image))) GiB free on $dir, under its $(move_gib "$floor") GiB floor (scripts/disk-fill-watch); free space first, then move, or --force-floor to decide otherwise" >&2
+        echo "a box would leave $(move_gib $((free - image))) GiB free on $dir, under its $(move_gib "$floor") GiB reserve; free space first, then move, or --force-floor to decide otherwise" >&2
         return 1
     fi
     return 0
@@ -1641,7 +1638,7 @@ cmd_move_plan() {
     echo "not a pane (headless or unit-run, yours to decide): ${counts[no-pane]:-0}"
     echo "excluded: ${counts[boxed]:-0} already in a box, ${counts[sandbox]:-0} in a grading sandbox, ${counts[subagent]:-0} subagents of another omp"
     echo "new disk: $(move_gib "$image") GiB per box (its sparse ext4 image; a move clones nothing), $(move_gib "$total") GiB for $movable boxes"
-    echo "$dir: $(move_gib "$free") GiB free − $(move_gib "$floor") GiB floor − $(move_gib "$total") GiB = $(move_gib $((free - floor - total))) GiB left over"
+    echo "$dir: $(move_gib "$free") GiB free − $(move_gib "$floor") GiB reserve − $(move_gib "$total") GiB = $(move_gib $((free - floor - total))) GiB left over"
 }
 
 # The omp process a command runs under: the nearest ancestor whose command is omp.
@@ -1752,7 +1749,7 @@ cmd_move_self() {
     move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
 }
 
-MOVE_NOTICE_HEAD='agentbox: this session must move into an agent box (dispatch://INFRA-702). Finish the current step, start no new subagents or long jobs, write your handover into the transcript, and when `read proc://` lists none of your jobs or services still running, run `agentbox move --self` from your bash tool. It hangs this omp up gracefully and respawns this pane as'
+MOVE_NOTICE_HEAD='agentbox: this session moves into an agent box (dispatch://INFRA-702). Do not stop, delay or shorten any work for it. The next time `read proc://` lists none of your jobs or services running, write your handover into the transcript and run `agentbox move --self` from your bash tool. It hangs this omp up gracefully and respawns this pane as'
 MOVE_NOTICE_TAIL='so you come back with the same session id, the same transcript and the same working directory, in a box with a cpu, memory, pids and disk limit of its own. Your tree is the host'"'"'s own directory, bind-mounted at its own path: uncommitted work included, nothing cloned, nothing copied. If you are idle, do it now.'
 
 cmd_move_notify() {

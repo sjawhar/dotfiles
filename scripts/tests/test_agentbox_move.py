@@ -334,24 +334,25 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("cannot name its session in full", selfrun.stderr)
 
     # ── the two refusals ────────────────────────────────────────────────────────────────────
-    def test_a_box_that_would_take_the_disk_under_its_floor_is_refused(self) -> None:
+    def test_a_box_that_would_take_the_disk_under_its_reserve_is_refused(self) -> None:
         lane = self.root / "lane"
         lane.mkdir()
         self.make_proc(800, comm="bash", ppid=1, cwd=lane)
         self.make_proc(801, cwd=lane, ppid=800, session="01a19700-0000-7000-8000-00000000c001")
         self.set_pids(801)
         self.set_panes({800: ("%5", "agents:4.1")})
-        # 74.5 GiB free on /mnt/nvme, whose floor is 84 GB (78.2 GiB): the box is refused, and
-        # the refusal comes before anything is touched, so the dry run never prints its launch.
-        write_stub(self.stubs, "df", 'if [[ "$*" == *target* ]]; then echo target; echo /mnt/nvme; else echo avail; echo 80000000000; fi')
+        # 18.6 GiB free on /mnt/nvme, whose reserve is 20 GiB: the box is refused, and the refusal
+        # comes before anything is touched, so the dry run never prints its launch.
+        write_stub(self.stubs, "df", 'if [[ "$*" == *target* ]]; then echo target; echo /mnt/nvme; else echo avail; echo 20000000000; fi')
         refused = self.run_bash(
             'move_own_omp() { echo 801; }\nmove_image_bytes() { echo 280000000; }\ncmd_move_self --dry-run'
         )
         self.assertEqual(refused.returncode, 2)
-        self.assertIn("under its 78.2 GiB floor", refused.stderr)
+        self.assertIn("under its 20.0 GiB reserve", refused.stderr)
         self.assertEqual(refused.stdout, "")
-        # 200 GiB free, and the same box is allowed through to its dry run.
-        write_stub(self.stubs, "df", 'if [[ "$*" == *target* ]]; then echo target; echo /mnt/nvme; else echo avail; echo 214748364800; fi')
+        # 74.5 GiB free is under disk-fill-watch's 84 GB alert floor, but an alert floor is not a
+        # reason to refuse: the same box is allowed through to its dry run.
+        write_stub(self.stubs, "df", 'if [[ "$*" == *target* ]]; then echo target; echo /mnt/nvme; else echo avail; echo 80000000000; fi')
         allowed = self.run_bash(
             'move_own_omp() { echo 801; }\nmove_image_bytes() { echo 280000000; }\ncmd_move_self --dry-run'
         )
@@ -390,6 +391,7 @@ class AgentboxMove(unittest.TestCase):
         notice = (self.root / "STUB_ENVOY").read_text(encoding="utf-8")
         self.assertIn("01a19700-0000-7000-8000-00000000d001", notice)
         self.assertIn("agentbox move --self", notice)
+        self.assertIn("Do not stop, delay or shorten any work", notice)
         self.assertIn(
             f"agentbox new --dir {lane} -- omp --resume 01a19700-0000-7000-8000-00000000d001 .", notice
         )
@@ -450,7 +452,7 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(plan["summary"]["movable"], 1)
         self.assertEqual(plan["summary"]["new_disk_total_bytes"], 1073741824)
         self.assertEqual(
-            plan["summary"]["headroom_bytes"], 214748364800 - 84000000000 - 1073741824
+            plan["summary"]["headroom_bytes"], 214748364800 - 21474836480 - 1073741824
         )
         self.assertEqual(plan["sessions"][0]["session"], "01a19700-0000-7000-8000-000000010001")
         self.assertEqual(plan["sessions"][0]["spec"], f"--dir {lane}")
