@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""Record how much CPU each agent session on this box used, so it can be ranked afterwards.
+
+Why this exists: a speed tick on 2026-11-01 asked which omp sessions had burned the box's 64
+cores overnight and the answer was "not measurable". Nothing kept the number. sysstat runs here
+with `SADC_OPTIONS="-S DISK"`, which records disks and not processes, there is no atop, and
+`load-swap-watch` names consumers only inside an alert it sends and never writes them down. A
+box carrying ~90 sessions at load 300 therefore had no record of who used it, and the question
+can only be answered while the processes are still alive.
+
+This writes that record. Every run samples the box once and appends one JSON line per sample to
+`<records>/<UTC date>.jsonl`, keeping 7 days.
+
+Attribution is not reimplemented: `session_claim` from `scripts/load-swap-watch` is imported and
+is the only thing that turns a process into a full session id (its own `omp`'s resume path, the
+transcript it holds open, the lane worker's session file, and the environment last, because the
+environment is inherited and names whoever started the ancestor).
+
+Two sources of CPU time, because neither alone is right here:
+
+  * The session's cgroup. `shims/omp` starts a session in a transient scope, and an agentbox in
+    a docker scope; `cpu.stat usage_usec` of that scope counts every descendant including the
+    thousands of short-lived tool children that have already exited, which is exactly the number
+    wanted, for one file read. But a scope is NOT always one session: measured on sami-rocqperf,
+    121 omp processes sat in 84 cgroups, and `session-c5.scope` (an ssh login scope) held a
+    `-p` headless run in /home/sami/src/bet-grade beside a `--resume` session in
+    /home/sami/src/oss-verifier -- two different sessions, one cgroup. So the cgroup is used
+    only when exactly one session id is claimed inside it.
+  * `/proc/<pid>/stat` utime+stime+cutime+cstime of the session's own agent processes otherwise.
+    cutime/cstime carry the time of children the process has already reaped, recursively, so a
+    shared-scope session still gets its tool subprocesses -- but only once they exit, and never
+    a child reaped by someone else. Such a row is marked `source: proc`.
+
+Both sources are cumulative counters, so a sample records the DELTA since the previous sample,
+read back from the same records. A counter seen for the first time contributes its whole total
+when the thing it counts started after the previous sample (a session that began inside the
+window), and nothing when it was already running (its total is mostly older than the window).
+
+Cost, which is the reason the walk is shaped this way: only `/proc/<pid>/comm` is read for every
+pid, and the expensive attribution runs on agent processes alone (~120 of ~3,000 here).
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import resource
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# The records go on the big disk, beside the sibling watches' state (load-swap-watch keeps
+# /mnt/nvme/sami/tmp/load-swap-watch/state.json). Never on /, whose root filesystem on this box
+# reached 14 MiB free on 2026-10-30.
+_NVME_RECORDS = Path("/mnt/nvme/sami/tmp/session-cpu")
+DEFAULT_RECORDS = (
+    _NVME_RECORDS
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "session-cpu"
+)
+
+KEEP_DAYS = 7
+CLOCK_TICK = os.sysconf("SC_CLK_TCK")
+AGENT_COMMS = ("omp", "claude")
+DAY_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
+
+
+def _load_watch():
+    """`scripts/load-swap-watch` as a module: its process-to-session attribution, reused.
+
+    The file has no `.py` suffix, so it is loaded by path the way its own tests load it.
+    """
+    path = SCRIPT_DIR / "load-swap-watch"
+    loader = importlib.machinery.SourceFileLoader("load_swap_watch", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+WATCH = _load_watch()
+
+
+def iso(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+# --------------------------------------------------------------------------- reading the box
+
+
+def proc_stat_fields(pid: int) -> list[str]:
+    """The fields of /proc/<pid>/stat after the comm, or [] when the process is gone."""
+    try:
+        data = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return []
+    cut = data.rfind(")")
+    if cut < 0:
+        return []
+    return data[cut + 2 :].split()
+
+
+def cpu_seconds_of(pid: int) -> float | None:
+    """utime+stime+cutime+cstime of a process, in seconds, or None when it is gone.
+
+    The reaped children are included because an agent's CPU is almost all in its tool
+    subprocesses, and those are what `ps` misses.
+    """
+    fields = proc_stat_fields(pid)
+    if len(fields) < 15:
+        return None
+    try:
+        ticks = sum(int(fields[index]) for index in (11, 12, 13, 14))
+    except ValueError:
+        return None
+    return ticks / CLOCK_TICK
+
+
+def start_time_of(pid: int) -> float:
+    """When a process started, as an epoch, or 0.0 when it cannot be read."""
+    fields = proc_stat_fields(pid)
+    if len(fields) < 20:
+        return 0.0
+    try:
+        since_boot = int(fields[19]) / CLOCK_TICK
+    except ValueError:
+        return 0.0
+    return boot_time() + since_boot
+
+
+_BOOT: float | None = None
+
+
+def boot_time() -> float:
+    global _BOOT
+    if _BOOT is None:
+        _BOOT = 0.0
+        for line in WATCH.read_text("/proc/stat").splitlines():
+            if line.startswith("btime "):
+                _BOOT = float(line.split()[1])
+    return _BOOT
+
+
+def cgroup_of(pid: int) -> str:
+    """The cgroup v2 path of a process, or "" when it has none."""
+    for line in WATCH.read_text(f"/proc/{pid}/cgroup").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[0] == "0":
+            return parts[2]
+    return ""
+
+
+def cgroup_cpu_seconds(path: str, root: str = "/sys/fs/cgroup") -> float | None:
+    """usage_usec of a cgroup, in seconds: every descendant, exited children included."""
+    for line in WATCH.read_text(f"{root}{path}/cpu.stat").splitlines():
+        if line.startswith("usage_usec "):
+            try:
+                return int(line.split()[1]) / 1_000_000
+            except ValueError:
+                return None
+    return None
+
+
+def cgroup_memory(path: str, root: str = "/sys/fs/cgroup") -> int:
+    text = WATCH.read_text(f"{root}{path}/memory.current").strip()
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def agent_processes() -> dict[int, str]:
+    """{pid: comm} for every agent process on the box. The only full walk of /proc."""
+    found = {}
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            comm = Path(f"/proc/{name}/comm").read_text().strip()
+        except OSError:
+            continue
+        if comm in AGENT_COMMS:
+            found[int(name)] = comm
+    return found
+
+
+def session_titles() -> dict[str, dict]:
+    """{session id: Envoy's row for it}: its title and directory, best effort.
+
+    Envoy's host field is not used to filter. A machine registers under several names here
+    (`sami`, `sami-rocqperf`), and the ids are measured locally anyway, so a row is only ever a
+    label for an id this box already found.
+    """
+    try:
+        envoy = WATCH.Envoy(timeout=8.0)
+    except SystemExit:
+        return {}
+    status, body = envoy.request("GET", "/v1/sessions")
+    if status != 200 or not isinstance(body, list):
+        return {}
+    rows = {}
+    for row in body:
+        if isinstance(row, dict) and row.get("session_id"):
+            rows[str(row["session_id"])] = row
+    return rows
+
+
+# --------------------------------------------------------------------------- the sample
+
+
+def collect(previous: dict, now: float) -> tuple[list[dict], dict]:
+    """(the rows of this sample, the counters to carry to the next one).
+
+    `previous` is the counters dict of the last sample: {key: cumulative seconds}, plus
+    "__at__", the epoch it was taken at.
+    """
+    agents = agent_processes()
+    claims: dict[int, str] = {}
+    cgroups: dict[int, str] = {}
+    members: dict[str, list[int]] = {}
+    for pid in agents:
+        claims[pid] = WATCH.session_claim(pid)[0] or "unknown"
+        cgroups[pid] = cgroup_of(pid)
+        members.setdefault(cgroups[pid], []).append(pid)
+
+    before_at = float(previous.get("__at__") or 0.0)
+    counters: dict[str, float] = {"__at__": now}
+    rows: dict[str, dict] = {}
+
+    def row_for(session: str) -> dict:
+        return rows.setdefault(
+            session,
+            {"session": session, "cpu_seconds": 0.0, "rss_bytes": 0, "procs": 0, "source": "", "cwd": "", "title": ""},
+        )
+
+    def add(key: str, total: float, started: float) -> float:
+        """The counter's contribution to this sample, and remember its total for the next."""
+        counters[key] = total
+        if key in previous:
+            return max(0.0, total - float(previous[key]))
+        # First sighting. Its whole total counts only when the thing it counts is younger than
+        # the previous sample; otherwise most of that total was burned before this window.
+        if before_at and started and started >= before_at:
+            return max(0.0, total)
+        return 0.0
+
+    for cgroup, here in members.items():
+        sessions = {claims[pid] for pid in here}
+        total = cgroup_cpu_seconds(cgroup) if cgroup and len(sessions) == 1 else None
+        if total is not None:
+            session = next(iter(sessions))
+            row = row_for(session)
+            started = min((start_time_of(pid) for pid in here), default=0.0)
+            row["cpu_seconds"] += add(f"cg:{cgroup}", total, started)
+            row["rss_bytes"] += cgroup_memory(cgroup)
+            row["procs"] += len(here)
+            row["source"] = "cgroup" if row["source"] in ("", "cgroup") else "mixed"
+            continue
+        # A shared or unreadable cgroup: each agent process of each session, on its own.
+        for pid in here:
+            parent = WATCH.ppid_of(pid)
+            if parent in agents and claims.get(parent) == claims[pid]:
+                continue  # counted inside its parent's cutime once it exits
+            total = cpu_seconds_of(pid)
+            if total is None:
+                continue
+            session = claims[pid]
+            row = row_for(session)
+            started = start_time_of(pid)
+            row["cpu_seconds"] += add(f"pid:{pid}:{int(started)}", total, started)
+            row["rss_bytes"] += WATCH.rss_of(pid)
+            row["procs"] += 1
+            row["source"] = "proc" if row["source"] in ("", "proc") else "mixed"
+
+    # Labels, cheapest first: the cwd of one of the session's agent processes, then Envoy.
+    titles = session_titles()
+    for session, row in rows.items():
+        for pid in agents:
+            if claims[pid] == session:
+                row["cwd"] = WATCH._cwd_of(pid)
+                break
+        known = titles.get(session) or {}
+        row["title"] = str(known.get("title") or "")
+        row["cwd"] = row["cwd"] or str(known.get("dir") or "")
+        row["cpu_seconds"] = round(row["cpu_seconds"], 3)
+    ordered = sorted(rows.values(), key=lambda row: -row["cpu_seconds"])
+    return ordered, counters
+
+
+def records_for(directory: Path, day: str) -> Path:
+    return directory / f"{day}.jsonl"
+
+
+def last_sample(directory: Path) -> dict:
+    """The newest sample already recorded, or {}. Its counters are this run's baseline."""
+    days = sorted(path for path in directory.glob("*.jsonl") if DAY_FILE_RE.match(path.name))
+    for path in reversed(days[-2:]):
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return {}
+
+
+def prune(directory: Path, now: float, keep_days: int = KEEP_DAYS) -> list[str]:
+    """Delete day files older than keep_days. The tool that writes them deletes them."""
+    cutoff = dt.datetime.fromtimestamp(now, dt.timezone.utc).date() - dt.timedelta(days=keep_days - 1)
+    removed = []
+    for path in sorted(directory.glob("*.jsonl")):
+        found = DAY_FILE_RE.match(path.name)
+        if not found:
+            continue
+        try:
+            day = dt.date.fromisoformat(found.group(1))
+        except ValueError:
+            continue
+        if day < cutoff:
+            path.unlink(missing_ok=True)
+            removed.append(path.name)
+    return removed
+
+
+def sample(options: argparse.Namespace) -> int:
+    now = time.time()
+    directory = Path(options.records)
+    directory.mkdir(parents=True, exist_ok=True)
+    previous = last_sample(directory)
+    rows, counters = collect(previous.get("counters") or {"__at__": previous.get("epoch", 0.0)}, now)
+    interval = now - float(previous.get("epoch") or 0.0) if previous else 0.0
+    record = {
+        "at": iso(now),
+        "epoch": round(now, 3),
+        "interval_s": round(interval, 3) if previous else 0.0,
+        "host": os.uname().nodename,
+        "cores": os.cpu_count() or 1,
+        "sessions": rows,
+        "counters": counters,
+    }
+    day = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%d")
+    with records_for(directory, day).open("a") as handle:
+        handle.write(json.dumps(record) + "\n")
+    removed = prune(directory, now, options.keep_days)
+    if not options.quiet:
+        used = resource.getrusage(resource.RUSAGE_SELF)
+        cost = used.ru_utime + used.ru_stime
+        top = ", ".join(f"{row['session'][:8]} {row['cpu_seconds']:.0f}s" for row in rows[:3])
+        print(
+            f"{iso(now)} {len(rows)} session(s) over {interval / 60:.1f} min; top: {top or 'none'};"
+            f" this sample cost {cost:.2f} CPU-seconds"
+            + (f"; removed {', '.join(removed)}" if removed else "")
+        )
+    return 0
+
+
+# --------------------------------------------------------------------------- reading it back
+
+
+def parse_when(text: str, now: float) -> float:
+    """An ISO instant (`2026-11-01T12:00Z`) or an age (`15m`, `2h`, `3d`) meaning "ago"."""
+    text = text.strip()
+    found = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([smhd])", text)
+    if found:
+        scale = {"s": 1, "m": 60, "h": 3600, "d": 86400}[found.group(2)]
+        return now - float(found.group(1)) * scale
+    cleaned = text.replace("Z", "+00:00")
+    try:
+        when = dt.datetime.fromisoformat(cleaned)
+    except ValueError as error:
+        raise SystemExit(f"cannot read the time {text!r}: {error}")
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    return when.timestamp()
+
+
+def samples_in(directory: Path, since: float, until: float) -> list[dict]:
+    """Every recorded sample whose interval ends inside the window, oldest first."""
+    found = []
+    for path in sorted(directory.glob("*.jsonl")):
+        if not DAY_FILE_RE.match(path.name):
+            continue
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            epoch = float(record.get("epoch") or 0.0)
+            if since <= epoch <= until:
+                found.append(record)
+    found.sort(key=lambda record: record["epoch"])
+    return found
+
+
+def rank(records: list[dict]) -> tuple[list[dict], float]:
+    """(sessions by CPU-seconds, the wall seconds those samples cover)."""
+    totals: dict[str, dict] = {}
+    covered = 0.0
+    for record in records:
+        covered += float(record.get("interval_s") or 0.0)
+        for row in record.get("sessions") or []:
+            entry = totals.setdefault(
+                str(row.get("session") or "unknown"),
+                {"session": str(row.get("session") or "unknown"), "cpu_seconds": 0.0, "rss_bytes": 0, "title": "", "cwd": "", "samples": 0},
+            )
+            entry["cpu_seconds"] += float(row.get("cpu_seconds") or 0.0)
+            entry["rss_bytes"] = max(entry["rss_bytes"], int(row.get("rss_bytes") or 0))
+            entry["samples"] += 1
+            if row.get("title"):
+                entry["title"] = str(row["title"])
+            if row.get("cwd"):
+                entry["cwd"] = str(row["cwd"])
+    ordered = sorted(totals.values(), key=lambda entry: -entry["cpu_seconds"])
+    return ordered, covered
+
+
+def shorten(text: str, width: int) -> str:
+    text = text.replace("\n", " ")
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def top(options: argparse.Namespace) -> int:
+    now = time.time()
+    since = parse_when(options.since, now)
+    until = parse_when(options.until, now) if options.until else now
+    directory = Path(options.records)
+    records = samples_in(directory, since, until)
+    if not records:
+        print(f"no samples recorded between {iso(since)} and {iso(until)} in {directory}")
+        return 1
+    ordered, covered = rank(records)
+    if options.json:
+        print(json.dumps({"since": iso(since), "until": iso(until), "covered_s": covered, "sessions": ordered}, indent=2))
+        return 0
+    span = covered or max(1.0, until - since)
+    print(
+        f"{len(records)} samples covering {span / 60:.0f} min of {iso(records[0]['epoch'])}"
+        f" .. {iso(records[-1]['epoch'])} on {records[-1].get('host', '?')}"
+        f" ({records[-1].get('cores', '?')} cores)"
+    )
+    print(f"{'CORES':>6}  {'CPU-H':>6}  {'RSS':>7}  {'SESSION':36}  {'TITLE':34}  CWD")
+    for entry in ordered[: options.n]:
+        print(
+            f"{entry['cpu_seconds'] / span:>6.2f}  "
+            f"{entry['cpu_seconds'] / 3600:>6.2f}  "
+            f"{entry['rss_bytes'] / 1073741824:>6.1f}G  "
+            f"{entry['session']:36}  "
+            f"{shorten(entry['title'] or '-', 34):34}  "
+            f"{shorten(entry['cwd'] or '-', 48)}"
+        )
+    total = sum(entry["cpu_seconds"] for entry in ordered)
+    print(f"{total / span:>6.2f}  {total / 3600:>6.2f}  {'':>7}  all {len(ordered)} session(s)")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--records", default=str(DEFAULT_RECORDS), help="where the day files live")
+    sub = parser.add_subparsers(dest="command")
+
+    one = sub.add_parser("sample", help="record one sample (what the timer runs)")
+    one.add_argument("--keep-days", type=int, default=KEEP_DAYS)
+    one.add_argument("--quiet", action="store_true")
+    one.set_defaults(run=sample)
+
+    read = sub.add_parser("top", help="rank sessions by CPU over a window")
+    read.add_argument("--since", required=True, help="2026-11-01T12:00Z, or an age: 15m, 2h, 3d")
+    read.add_argument("--until", default="", help="same forms; now by default")
+    read.add_argument("-n", type=int, default=10, help="how many sessions to print")
+    read.add_argument("--json", action="store_true")
+    read.set_defaults(run=top)
+
+    options = parser.parse_args()
+    if not options.command:
+        options.run = sample
+        options.keep_days = KEEP_DAYS
+        options.quiet = False
+    return options.run(options)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

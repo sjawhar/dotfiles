@@ -1,0 +1,20 @@
+[Unit]
+Description=Record CPU-seconds per agent session on this box
+Documentation=file:%h/.dotfiles/scripts/session-cpu-record.md
+
+[Service]
+Type=oneshot
+# Below the lanes, like disk-fill-watch: this is a recorder, not a detector, and a sample taken
+# a minute late is still a correct sample of a 5-minute interval, since every counter it reads
+# is cumulative.
+Nice=15
+IOSchedulingClass=idle
+# One sample costs ~0.5 CPU-seconds and ~18 s of wall clock on sami-rocqperf at load 300 with
+# ~3,000 processes and ~120 agent processes; most of that wall clock is the one Envoy GET for
+# session titles. A run that cannot finish is killed, so runs never pile up on the 5-minute
+# period.
+TimeoutStartSec=240
+ExecStart=%h/.dotfiles/scripts/session-cpu-record sample
+
+[Install]
+WantedBy=default.target

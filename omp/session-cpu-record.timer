@@ -1,0 +1,15 @@
+[Unit]
+Description=Sample per-session CPU every 5 min so sessions can be ranked afterwards
+
+[Timer]
+OnActiveSec=1min
+# Five minutes: short enough that a session that lived half an hour is still several samples,
+# long enough that the sample's own ~0.5 CPU-seconds is 0.002% of a 64-core box. Every counter
+# read is cumulative, so a late or skipped run loses no CPU time -- it lands in the next
+# interval instead.
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
