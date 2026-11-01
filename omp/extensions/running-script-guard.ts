@@ -302,6 +302,14 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | "expired"> {
  */
 async function detach(holder: Holder, st: Stats, mode: number): Promise<boolean> {
 	if (st.nlink !== 1 || st.size > DETACH_MAX_BYTES) return false;
+	// The fd must still be the file at this path. A wrapper that execs another script keeps the
+	// same pid while its fd moves to the new file, so a copy taken from the fd and renamed over
+	// holder.file would write the other script's bytes here, with mode, owner and timestamps
+	// preserved, leaving a valid executable that is the wrong program and that no check short of
+	// comparing content can see. On 2026-11-01 shims/omp was left byte-identical to the
+	// scripts/agent-session it execs, and every new omp launch on the box failed for ten minutes.
+	const open = await fs.stat(`/proc/${holder.pid}/fd/${holder.fd}`).catch(() => undefined);
+	if (open?.dev !== holder.dev || open.ino !== holder.ino) return false;
 	const temp = path.join(path.dirname(holder.file), `.${path.basename(holder.file)}.omp-guard-${process.pid}-${Date.now().toString(36)}`);
 	try {
 		// From the shell's own fd, so the copy is of the file it runs, and through `cp`, so the mode,
