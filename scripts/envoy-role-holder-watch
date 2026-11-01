@@ -1540,6 +1540,13 @@ def pane_alert_text(incident: dict, now: float) -> str:
         f"ESTABLISHED: this pane is at a shell. NOT established: that its session has stopped --"
         " the session may be running in another pane, in a box, or under another process."
     )
+    lines.append(
+        f"THIS DESCRIBES {iso(now)}, NOT THE MOMENT YOU READ IT. A pane can be restarted between the"
+        " alert and its delivery, so the first step is always to re-read the pane, never to send keys:"
+        f" `tmux capture-pane -p -t {incident['pane_id']} | tail -n 15` and"
+        f" `ps -eo pid,ppid,stat,etime,args --no-headers | awk '$2=={incident['shell_pid']}'`."
+        " An omp line there means the lane is already running and nothing is owed."
+    )
     if incident.get("restart"):
         target = incident.get("transcript") or ""
         check = (
@@ -1550,7 +1557,8 @@ def pane_alert_text(incident: dict, now: float) -> str:
             " holders: find the lane before you start a second one"
         )
         lines.append(
-            f"Do: {check}, and only then restart it IN THAT PANE, never a new one:"
+            f"Do, only if the pane is still at a shell: {check}, and only then restart it IN THAT PANE,"
+            f" never a new one:"
             f" `tmux send-keys -t {incident['pane_id']} {shlex.quote(incident['restart'])} Enter`."
             f" Then {brief}."
         )
