@@ -21,6 +21,7 @@ Usage:
   post-review <pr> <40-char head sha> APPROVE|REQUEST_CHANGES|COMMENT <body-file> <owner/repo>
 """
 
+import fcntl
 import json
 import os
 import pathlib
@@ -65,10 +66,22 @@ def cached_token(path: pathlib.Path) -> str | None:
 
 
 def installation_token(owner: str, repo: str) -> str:
-    """Mint an installation token for the review App, through the broker, or reuse a live one."""
+    """Mint an installation token for the review App, through the broker, or reuse a live one.
+
+    Concurrent callers with a cold cache must not each mint: every mint is a grant prompt on
+    Sami's phone, and three verdicts posted in the same minute after the hour turned over asked
+    him three times. So the mint runs under an exclusive lock, and a caller that waited re-reads
+    the cache before minting, so only the first caller asks.
+    """
     path = cache_path(owner, repo)
     held = cached_token(path)
     if held:
+        return held
+    lock = open(path.with_suffix(".lock"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    held = cached_token(path)
+    if held:
+        lock.close()
         return held
     script = (
         "import base64,json,os,subprocess,sys,time,urllib.request\n"
@@ -117,6 +130,7 @@ def installation_token(owner: str, repo: str) -> str:
         die(f"the broker returned no installation token: {printed[:200]}", 1)
     path.write_text(json.dumps({"token": token, "expires_at": expires_at}))
     path.chmod(0o600)
+    lock.close()
     return token
 
 
