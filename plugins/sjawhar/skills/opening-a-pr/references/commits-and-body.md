@@ -4,6 +4,7 @@
 
 - Order groups by dependency: schema or generated API, core logic, wiring, UI, tests.
 - Keep groups coherent. No behavior change hidden as "cleanup", no bypassed hooks. Split an unclear scope.
+- Pass a commit message or a PR body as a FILE, never as a double-quoted shell argument: `git commit -F -`, `gh pr create --body-file`, or a single-quoted heredoc (`<<'EOF'`). In double quotes a backtick and `$(…)` are command substitution, so prose that quotes a command runs it and the output lands in the message. A lead quoting a command name this way sent that command's identity assertions into two sessions' records; a commit body is the same hazard made permanent and world-readable, and nobody watches a commit body for it. The fix is removing the shell from the path rather than quoting carefully, because careful quoting has to hold in the moment you are writing about commands, which is the moment you are least thinking about quoting.
 
 ## History-only rewrites (step 9)
 
