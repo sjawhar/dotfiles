@@ -22,6 +22,7 @@ Usage:
 """
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -37,8 +38,38 @@ def die(message: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
+def cache_path(owner: str, repo: str) -> pathlib.Path:
+    base = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    directory = pathlib.Path(base) / "post-review"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory / f"{owner}-{repo}.token"
+
+
+def cached_token(path: pathlib.Path) -> str | None:
+    """A GitHub installation token lives an hour; reuse it rather than asking again.
+
+    Each mint goes through the secrets broker to a human-tier key, so it asks Sami to approve
+    a grant. One verdict per approval made a night of gating a night of approving (Sami,
+    2026-11-01: "STOP REQUESTING THE REVIEW KEY SO MANY DAMN TIMES"). The token, not the key,
+    is what the calls need, so it is kept owner-only in the runtime directory, which is tmpfs
+    and goes at reboot, and is used while more than five minutes of its hour remain.
+    """
+    try:
+        held = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    token = held.get("token", "")
+    if not token.startswith("ghs_") or held.get("expires_at", 0) - time.time() < 300:
+        return None
+    return token
+
+
 def installation_token(owner: str, repo: str) -> str:
-    """Mint an installation token for the review App, through the broker."""
+    """Mint an installation token for the review App, through the broker, or reuse a live one."""
+    path = cache_path(owner, repo)
+    held = cached_token(path)
+    if held:
+        return held
     script = (
         "import base64,json,os,subprocess,sys,time,urllib.request\n"
         "import jwt\n"
@@ -53,7 +84,7 @@ def installation_token(owner: str, repo: str) -> str:
         "    return json.load(urllib.request.urlopen(req))\n"
         "inst = api('/repos/' + sys.argv[1] + '/' + sys.argv[2] + '/installation')\n"
         "out = api('/app/installations/%d/access_tokens' % inst['id'], 'POST')\n"
-        "print(out['token'])\n"
+        "print(json.dumps({'token': out['token'], 'expires_at': out['expires_at']}))\n"
     )
     run = subprocess.run(
         [
@@ -74,9 +105,18 @@ def installation_token(owner: str, repo: str) -> str:
     )
     if run.returncode != 0:
         die(f"could not mint a review App token:\n{run.stderr.strip()}", 1)
-    token = run.stdout.strip().splitlines()[-1]
-    if not token.startswith("ghs_"):
+    printed = run.stdout.strip().splitlines()[-1]
+    try:
+        minted = json.loads(printed)
+        token = minted["token"]
+        expires_at = time.mktime(time.strptime(minted["expires_at"], "%Y-%m-%dT%H:%M:%SZ"))
+        expires_at -= time.timezone
+    except (ValueError, KeyError):
         die(f"the broker returned no installation token: {run.stdout.strip()[:200]}", 1)
+    if not token.startswith("ghs_"):
+        die(f"the broker returned no installation token: {printed[:200]}", 1)
+    path.write_text(json.dumps({"token": token, "expires_at": expires_at}))
+    path.chmod(0o600)
     return token
 
 
@@ -91,6 +131,53 @@ def gh(token: str, *args: str, stdin: str | None = None) -> str:
     if run.returncode != 0:
         die(f"gh {' '.join(args)} failed:\n{run.stderr.strip()}", 1)
     return run.stdout.strip()
+
+
+def notify_author(token: str, slug: str, pr: str, head: str, event: str, stamp: str) -> None:
+    """Tell the session that made the head commit that its verdict is on the pull request.
+
+    A verdict that reaches a peer in conversation and not the author is a verdict that was not
+    delivered: agent infra's 2026-10-31 drop sweep put 233.3 of 240.0 delayed hours on owed gate
+    verdicts, and the measured fix (FRAC tick 46-47, dispatch://BET-59/artifact/speed-log-md) is
+    to send each verdict to its author the moment it posts.
+
+    The address is the head commit's own `Omp-Session:` trailer, which this estate's commits
+    carry. Everything here is best effort: the review is already posted, so no failure of this
+    may fail the command, and a commit with no trailer simply gets no message.
+    """
+    import os
+    import re
+
+    try:
+        message = subprocess.run(
+            ["gh", "api", f"repos/{slug}/commits/{head}", "--jq", ".commit.message"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GH_TOKEN": token},
+            timeout=60,
+        ).stdout
+        found = re.search(r"^Omp-Session:\s*([0-9a-fA-F-]{36})\s*$", message, re.MULTILINE)
+        if not found:
+            print(f"post-review: no Omp-Session trailer on {head[:8]}, nobody told")
+            return
+        session = found.group(1)
+        verdict = "APPROVED" if event == "APPROVE" else event
+        text = (
+            f"Review posted: **{verdict}** on {slug}#{pr} at `{head}`, {stamp}.\n\n"
+            f"https://github.com/{slug}/pull/{pr}\n\n"
+            "You are addressed because this is the session named by that commit's "
+            "`Omp-Session:` trailer. If the verdict asks for changes, the head moves and the "
+            "next verdict names the new head."
+        )
+        sent = subprocess.run(
+            ["envoy", "send", session, text], capture_output=True, text=True, timeout=60
+        )
+        if sent.returncode == 0:
+            print(f"post-review: told {session}")
+        else:
+            print(f"post-review: could not tell {session}: {sent.stderr.strip()[:200]}")
+    except Exception as error:  # noqa: BLE001 - the review is posted; this must never fail it
+        print(f"post-review: could not tell the author: {error}")
 
 
 def main() -> None:
@@ -128,6 +215,7 @@ def main() -> None:
 
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     print(f"post-review: posted {event} on {slug}#{pr} at {head} ({stamp})")
+    notify_author(token, slug, pr, head, event, stamp)
 
 
 if __name__ == "__main__":
