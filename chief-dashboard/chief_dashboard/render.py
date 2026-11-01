@@ -34,7 +34,8 @@ CHANGES_SHOWN = 8
 # limit that I find too low. It has cut me off twice tonight").
 MAX_NOTE = 20_000
 
-_LINK = re.compile(r"(https?://[^\s)<>\"';,]+|dispatch://[A-Z][A-Z0-9]*-\d+(?:/[a-z]+/[A-Za-z0-9._-]+)?)")
+# A backtick is never part of a URL (RFC 3986): "`https://x/y`" in a line is the URL inside inline code marks.
+_LINK = re.compile(r"(https?://[^\s)<>\"';,`]+|dispatch://[A-Z][A-Z0-9]*-\d+(?:/[a-z]+/[A-Za-z0-9._-]+)?)")
 
 
 def e(s) -> str:

@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import render
+from . import markdown, render
 from .sources import ENVOY_CONFIG, Dispatch, SourceError, envoy_send
 
 log = logging.getLogger(__name__)
@@ -494,17 +494,10 @@ def e(s) -> str:
     return html.escape("" if s is None else str(s))
 
 
-_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+", re.M)
-_BOLD = re.compile(r"\*\*([^*\n]+)\*\*")
-_CODE = re.compile(r"`([^`\n]+)`")
-
-
 def rich(text: str) -> str:
-    """The line as the page shows it: escaped, links live, line breaks kept, and the three marks a standup actually
-    uses read as what they mean — a heading as its own words, `**Blockers**` in bold, a command as a command."""
-    out = render.linkify(_HEADING.sub("", text), DISPATCH_WEB)
-    out = _CODE.sub(r"<code>\1</code>", out)
-    return _BOLD.sub(r"<b>\1</b>", out).replace("\n", "<br>")
+    """The line as the page shows it: the markdown its speaker wrote (`markdown.to_html`), every character of it
+    escaped, URLs and dispatch:// references live as links, and every element it opens closed inside it."""
+    return markdown.to_html(text, DISPATCH_WEB)
 
 
 def line_html(room: Room, ln: Line) -> str:
@@ -599,6 +592,22 @@ font-size:var(--fs-meta)}
 .ln .said{white-space:normal;overflow-wrap:anywhere}
 .ln code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:var(--fs-meta);
 background:var(--greybg);border-radius:4px;padding:1px 4px}
+.ln .said>:first-child{margin-top:0}
+.ln .said>:last-child{margin-bottom:0}
+.ln .said :is(p,ul,ol,pre,blockquote,table,hr){margin:0 0 8px}
+.ln .said :is(h1,h2,h3,h4,h5,h6){font-size:var(--fs-body);font-weight:600;margin:10px 0 4px}
+.ln .said :is(h1,h2){font-size:15px}
+.ln .said :is(ul,ol){padding-left:22px}
+.ln .said li>:is(ul,ol,p,pre,blockquote,table){margin:2px 0}
+.ln .said blockquote{padding:0 0 0 10px;border-left:3px solid var(--line);color:var(--dim)}
+.ln .said pre{background:var(--greybg);border-radius:6px;padding:8px 10px;overflow-x:auto;overflow-wrap:normal}
+.ln .said pre code{background:none;border-radius:0;padding:0;white-space:pre}
+.ln .said table{display:block;width:max-content;max-width:100%;overflow-x:auto;border-collapse:collapse;
+font-size:var(--fs-meta);overflow-wrap:normal}
+.ln .said :is(th,td){border:1px solid var(--line);padding:3px 8px;text-align:left;vertical-align:top}
+.ln .said th{background:var(--greybg);font-weight:600}
+.ln .said hr{border:0;border-top:1px solid var(--line)}
+.ln .said input{margin:0 4px 0 0;vertical-align:-2px}
 .ln.speaking{box-shadow:0 0 0 2px var(--blue)}
 .empty{color:var(--dim);font-size:var(--fs-meta)}
 .say{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);

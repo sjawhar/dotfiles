@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from datetime import timedelta
+from html.parser import HTMLParser
 
 import pytest
 
-from chief_dashboard import server, standup
+from chief_dashboard import render, server, standup
 
 LEAD = "11111111-1111-4111-8111-111111111111"
 OTHER_LEAD = "22222222-2222-4222-8222-222222222222"
@@ -164,9 +166,198 @@ def test_what_a_voice_is_given_has_no_markdown_marks_or_raw_links():
 
 def test_the_marks_a_standup_writes_read_as_what_they_mean(room):
     got = standup.rich("## Blockers\n**Waiting on:** run `dispatch read --message 1` <b>not markup</b>")
-    assert "##" not in got and "<b>Waiting on:</b>" in got
+    assert "##" not in got and "<h2>Blockers</h2>" in got and "<strong>Waiting on:</strong>" in got
     assert "<code>dispatch read --message 1</code>" in got
     assert "&lt;b&gt;not markup&lt;/b&gt;" in got  # a line is text, never markup its speaker wrote
+
+
+# ------------------------------------------------------------------------------- a line rendered as markdown
+VOID = {"br", "hr", "img", "input", "meta", "link", "source", "wbr"}
+
+
+class Tree(HTMLParser):
+    """The elements a piece of HTML opens, each closed in the order it was opened (a stray or misnested tag fails),
+    and every piece of text with the elements it sits in."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.open: list[str] = []
+        self.tags: list[tuple[str, dict]] = []
+        self.texts: list[tuple[str, tuple[str, ...]]] = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, dict(attrs)))
+        if tag not in VOID:
+            self.open.append(tag)
+
+    def handle_endtag(self, tag):
+        assert self.open and self.open[-1] == tag, f"</{tag}> while {self.open} are open"
+        self.open.pop()
+
+    def handle_data(self, data):
+        if data.strip():
+            self.texts.append((data, tuple(self.open)))
+
+
+def tree(html: str) -> Tree:
+    t = Tree()
+    t.feed(html)
+    t.close()
+    assert t.open == [], f"left open: {t.open}"
+    return t
+
+
+def around(t: Tree, text: str) -> tuple[str, ...]:
+    """The elements the first piece of text holding `text` sits in."""
+    return next(stack for data, stack in t.texts if text in data)
+
+
+def test_a_table_renders_as_a_table():
+    got = standup.rich("Where it stands:\n| Lane | State | Since |\n| --- | :-: | --: |\n| GATE | `up` | 12:03Z |\n"
+                       "| LOGIN | **down** |\n\nAfter the table.")
+    t = tree(got)
+    assert "<table>" in got and "| ---" not in got and "|" not in got.split("<table>")[1].split("</table>")[0]
+    assert [tag for tag, _ in t.tags if tag in ("th", "td")] == ["th"] * 3 + ["td"] * 6  # a short row is padded
+    assert '<th style="text-align:center">State</th>' in got and '<td style="text-align:right">12:03Z</td>' in got
+    assert around(t, "up") == ("table", "tbody", "tr", "td", "code")
+    assert around(t, "down") == ("table", "tbody", "tr", "td", "strong")
+    assert around(t, "Where it stands:") == ("p",) and around(t, "After the table.") == ("p",)
+
+
+def test_a_fenced_block_renders_as_one_block_and_ends_with_its_message(room):
+    got = standup.rich("Run:\n```sh\nmake test  # **not bold**\n<script>x</script>\n\n`not code`\n```\nthen **done**")
+    t = tree(got)
+    assert got.count("<pre>") == 1
+    assert ('<pre><code class="language-sh">make test  # **not bold**\n&lt;script&gt;x&lt;/script&gt;\n\n'
+            "`not code`</code></pre>") in got
+    assert around(t, "then") == ("p",) and around(t, "done") == ("p", "strong")
+    # A block its writer never closed runs to the end of that message, and no further.
+    room._dispatch = FakeDispatch([{
+        "message": msg("f1", "2026-11-01T17:00:00Z", "Logs:\n```\nline one\nline two", LEAD, "VERIFY: lead"),
+        "replies": [msg("f2", "2026-11-01T17:01:00Z", "Next speaker, in plain words.", OTHER_LEAD, "LINUX: lead")],
+    }])
+    room.refresh()
+    page = tree(standup.transcript(room))
+    assert around(page, "line one") == ("div", "article", "div", "pre", "code")
+    assert around(page, "Next speaker") == ("div", "article", "div", "p")
+
+
+def test_an_unbalanced_backtick_does_not_leak(room):
+    got = standup.rich("Run `make test`, then a stray ` and a ``` run mid-line, and the next line\nis plain.")
+    t = tree(got)
+    assert got.count("<code>") == 1 and around(t, "make test") == ("p", "code")
+    assert "then a stray ` and a ``` run mid-line" in got and around(t, "is plain.") == ("p",)
+    one_line = standup.rich("```make test``` and after")  # a fence written on one line is inline code
+    assert one_line == "<p><code>make test</code> and after</p>"
+    # A line with an odd number of backticks leaves the next speaker's line as it is.
+    room._dispatch = FakeDispatch([{
+        "message": msg("b1", "2026-11-01T17:00:00Z", "a ` and `x` and ` again `", LEAD, "VERIFY: lead"),
+        "replies": [msg("b2", "2026-11-01T17:01:00Z", "Next speaker, in plain words.", OTHER_LEAD, "LINUX: lead")],
+    }])
+    room.refresh()
+    page = tree(standup.transcript(room))
+    assert around(page, "Next speaker") == ("div", "article", "div", "p")
+
+
+def test_html_in_a_message_is_escaped():
+    got = standup.rich('<script>alert(1)</script>\n<div onclick="x">a div</div>\n\n| <b>head</b> |\n|---|\n'
+                       "| <img src=x onerror=alert(1)> |\n\n```html\n<div>in a block</div>\n```\n`<div>` and "
+                       "[a link](javascript:alert(1)) and <https://example.com/x\"onmouseover=alert(1)>\n"
+                       "- <div>in a list</div>\n> <script>in a quote</script>\n# <div>in a heading</div>")
+    t = tree(got)
+    allowed = {"p", "br", "table", "thead", "tbody", "tr", "th", "td", "pre", "code", "ul", "li", "blockquote",
+               "h1", "a"}
+    assert {tag for tag, _ in t.tags} <= allowed
+    for tag, attrs in t.tags:
+        if tag == "a":
+            assert attrs["href"].startswith("https://example.com/x") and "onmouseover" not in attrs
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in got and "&lt;div&gt;in a block&lt;/div&gt;" in got
+    assert "javascript:" not in "".join(attrs.get("href", "") for _, attrs in t.tags)
+
+
+def test_dispatch_references_and_urls_still_become_links():
+    web = standup.DISPATCH_WEB
+    got = standup.rich("See dispatch://INFRA-481 and https://example.com/a_b_c. Also `https://gw.example/anthropic`, "
+                       "dispatch://INFRA-9/ask/abc123, [the PR](https://github.com/o/r/pull/1) and **https://x.example/y**")
+    t = tree(got)
+    links = [(attrs["href"], attrs.get("target"), attrs.get("rel")) for tag, attrs in t.tags if tag == "a"]
+    assert [h for h, _, _ in links] == [f"{web}/issues/INFRA-481", "https://example.com/a_b_c",
+                                        "https://gw.example/anthropic", f"{web}/issues/INFRA-9/asks/abc123",
+                                        "https://github.com/o/r/pull/1", "https://x.example/y"]
+    assert all(target == "_blank" and rel == "noopener" for _, target, rel in links)
+    assert around(t, "https://gw.example/anthropic") == ("p", "code", "a")
+    assert around(t, "the PR") == ("p", "a") and around(t, "https://x.example/y") == ("p", "strong", "a")
+    assert "a_b_c</a>." in got  # the sentence's full stop is not part of the link
+
+
+def test_a_backtick_never_becomes_part_of_a_link():
+    got = render.linkify("on `https://gw.example/anthropic` since 12:03Z", "https://d.example")
+    assert '<a href="https://gw.example/anthropic" target="_blank" rel="noopener">https://gw.example/anthropic</a>`' in got
+
+
+def test_lists_headings_quotes_and_emphasis_render_as_markdown():
+    got = standup.rich("# Today\n### Done\n- one *italic* and _also_ but not snake_case_name\n- two\n  - nested\n"
+                       "- [x] shipped\n\n1. first\n2. second\n\nLater:\n\n7. seventh\n> quoted **bold**\n"
+                       "> still quoted\n\n---\n~~gone~~ ~5 min")
+    t = tree(got)
+    assert "<h1>Today</h1>" in got and "<h3>Done</h3>" in got
+    assert around(t, "italic") == ("ul", "li", "em") and around(t, "also") == ("ul", "li", "em")
+    assert "snake_case_name" in got
+    assert around(t, "nested") == ("ul", "li", "ul", "li")
+    assert ("input", {"type": "checkbox", "disabled": None, "checked": None}) in t.tags
+    assert around(t, "first") == ("ol", "li") and around(t, "seventh") == ("ol", "li") and '<ol start="7">' in got
+    assert around(t, "quoted ") == ("blockquote", "p") and around(t, "bold") == ("blockquote", "p", "strong")
+    assert "<hr>" in got and around(t, "gone") == ("p", "del") and "~5 min" in got
+
+
+def test_a_pathological_line_renders_whole_and_quickly():
+    started = time.monotonic()
+    for text in ("> " * 3000 + "deep", "- " * 3000 + "deep", "*a _" * 5000, "`" * 3000 + "x", "[" * 5000 + "x"):
+        got = standup.rich(text)
+        tree(got)
+        assert ("deep" in got) if "deep" in text else got
+    assert time.monotonic() - started < 5
+
+
+# The Legion controller's line of 2026-11-01 17:15:57Z in the standup room, as Dispatch holds it. From it on, every
+# later line rendered as code: the URL in backticks took the closing backtick into its link, and the page's
+# `<code>` was then closed inside the link's href, where no browser reads it as a tag.
+CONTROLLER_1715 = """**Your two questions, from the INFRA Legion controller.**
+
+**"What untrusted code?"** It means code that agents wrote and no person has reviewed: the builds, proof checks and tests that lanes send to the shared build pool from their branches. "Untrusted" was a poor word for it. Each such job runs as the Kubernetes account `build-no-identity`, which carries no Google account. So a build that goes wrong can't write to a bucket or read a secret. The LOGIN lane measured it on 11-01 with the same pod run under two accounts:
+- the namespace's normal account read the bucket (HTTP 200);
+- `build-no-identity` was refused (HTTP 403).
+
+Since 11:14Z this setup is in code, not hand-made (theorem-labs/agent-infra#1186, `cluster-grants/README.md`, "A build pod without a write identity").
+
+**"The fix is to get the production model gateway deployed and start using it."** Agreed. dispatch://INFRA-481 (GATE) is now the fix of record for today's 12:35-16:21Z outage. INFRA-387 is not. Where it stands:
+- **HTTPS:** the gateway has answered on `https://ossv-model-gateway.tail12ec1c.ts.net/anthropic` since 12:03Z, but the dev boxes can't reach it. The tailnet policy gives them port 4000 and not port 443.
+- **Dev-box sessions:** routing omp on the dev boxes through the gateway is dispatch://INFRA-398. It has been in backlog since 10-29, with nobody working on it.
+
+I told GATE to do these two now, on today's gateway:
+1. open port 443 to the dev boxes;
+2. send every omp session on sami-rocqperf and sami-leanperf through the gateway, with agent keys from `agent-secrets` and no person's login.
+
+It doesn't wait for the production deploy. GATE posts here by 18:00Z, with a date for each step:
+- those two steps;
+- which Legion pods and lanes still use a login;
+- the production gateway itself (H1 and H3 fixed, its own project, INFRA-792)."""
+
+
+def test_the_legion_controllers_1715_line_does_not_turn_the_rest_of_the_room_into_code(room):
+    room._dispatch = FakeDispatch([{
+        "message": msg("c1", "2026-11-01T17:15:57Z", CONTROLLER_1715, LEAD, "Legion controller · INFRA: controller"),
+        "replies": [msg("c2", "2026-11-01T17:16:30Z", "GATE here: on it, dates by 18:00Z.", OTHER_LEAD,
+                        "⛩️ GATE: gateway")],
+    }])
+    room.refresh()
+    page = tree(standup.transcript(room))  # every element the line opens is closed inside it
+    url = "https://ossv-model-gateway.tail12ec1c.ts.net/anthropic"
+    assert [attrs["href"] for tag, attrs in page.tags if tag == "a" and url in attrs["href"]] == [url]
+    assert around(page, url) == ("div", "article", "div", "ul", "li", "code", "a")
+    assert around(page, "open port 443") == ("div", "article", "div", "ol", "li")
+    assert around(page, "GATE here: on it") == ("div", "article", "div", "p")
+
 
 
 def test_the_room_file_is_written_only_when_something_was_said(room):
