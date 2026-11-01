@@ -41,7 +41,9 @@ Per mount, per run:
 | Time to full | free ÷ df free-space fill rate, when falling |
 | Rate candidate | time to full < `--horizon` (2 h), with at least `--min-span` (25 min) of df samples behind the rate and free at a new low for the hour |
 | **Crossing** | free < the mount's hard floor, **or** three consecutive rate candidates at least `--confirmation-spacing` (5 min) apart |
-| Alert | after `--grace` (240 s, so a second consecutive run confirms it) |
+| Last-two-sample rate | the same two-endpoint fall, over the last two samples only. It is read for one decision and nothing else: whether a crossing may skip the grace window |
+| Urgent | free ÷ the **faster** of those two rates is under `--urgent-horizon` (30 min) |
+| Alert | after `--grace` (240 s, so a second consecutive run confirms it) — **or at once, on the sample that opens the crossing, when it is urgent** |
 | Escalate | 30 minutes after the alert, if free is lower than it was then, **and again on each further fall of 5 GiB (`FLOOR_STEP`) below the lowest level already reported**, while the crossing stays open |
 | Clear | free ≥ floor × 1.5 **and** no df free-space fall that reaches full inside twice the horizon |
 
@@ -62,6 +64,16 @@ A one-minute fall is recorded, not sent. Three scheduled five-minute confirmatio
 ten minutes, so a one-off writer burst that has already recovered cannot claim that the disk is
 landing. The hard floor remains independent of this confirmation: below it the watch alerts
 regardless of rate.
+
+**An urgent crossing does not pay for the grace window.** The window costs a whole sampling
+period. On 2026-11-01 `/mnt/nvme` crossed its floor at 00:25:51Z with 59.5 GiB free, alerted at
+00:31:11Z and was at 7.9 GiB by 00:35:51Z: half of the ten minutes the box had went to the
+window. Nothing an `rm` does inside one period makes a 30-minute deadline false, so a crossing
+already that close to full alerts on the sample that opens it. The projection uses the faster of
+the two rates because an accelerating fall hides inside an hour-long average: at 00:25:51Z the
+hour read 91 GB/h (42 min to full, outside the mark) while the last two samples read 248 GB/h
+(15 min, inside it). A crossing further out than the mark keeps the grace window unchanged, and
+both alerts say which of the two rules sent them. Escalation and clear are untouched.
 
 ### The floors
 

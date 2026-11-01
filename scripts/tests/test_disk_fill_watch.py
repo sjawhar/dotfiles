@@ -87,6 +87,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             "max_floor_fraction": WATCH.MAX_FLOOR_FRACTION,
             "clear_factor": 1.5,
             "grace": 0.0,
+            "urgent_horizon": WATCH.URGENT_HORIZON,
             "escalate": 1800.0,
             "history": 10800.0,
             "samples": 400,
@@ -422,6 +423,7 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             max_floor_fraction=WATCH.MAX_FLOOR_FRACTION,
             clear_factor=1.5,
             grace=0.0,
+            urgent_horizon=WATCH.URGENT_HORIZON,
             escalate=1800.0,
             history=10800.0,
             samples=400,
@@ -517,6 +519,77 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
         )
         self.assertFalse(recovered["rate_candidate"])
         self.assertEqual(0, WATCH.update_horizon_confirmations(record, recovered, 120.0, options))
+
+    # 2026-11-01: /mnt/nvme crossed its floor at 00:25:51Z with 59.5 GiB free, alerted at
+    # 00:31:11Z and was at 7.9 GiB by 00:35:51Z. The grace window took half the time the box
+    # had. An hour of gentle fall hides the last five minutes: here the hour reads about
+    # 100 GB/h (38 min to full, outside the urgent mark) while the last two samples read about
+    # 360 GB/h (11 min), and it is the second number the grace decision must use.
+    def falling_hour(self) -> list[list[float]]:
+        start = int(160 * WATCH.GIB)
+        step = int(6 * WATCH.GIB)
+        return [[300.0 * index, start - step * index] for index in range(13)]
+
+    def test_a_crossing_inside_the_urgent_mark_alerts_on_its_first_sample(self) -> None:
+        self.state.write_text(json.dumps({"mounts": {MOUNT: {"samples": self.falling_hour()}}}))
+        options = self.options()
+        options.rate_window = 3600.0
+        options.min_span = 1500.0
+        options.grace = 240.0
+        options.default_floor = 78.2
+        self.now = 3900.0
+        self.free = int(60 * WATCH.GIB)
+
+        self.run_once(options)
+
+        self.assertEqual(1, len(self.envoy.published))
+        text = self.envoy.published[0][1]
+        self.assertIn("Alerted on the first sample of this crossing, with no grace window", text)
+        self.assertIn("inside the 30 min urgent mark", text)
+        incident = json.loads(self.state.read_text())["incidents"][MOUNT]
+        self.assertEqual("urgent", incident["first_rule"])
+        self.assertEqual(3900.0, incident["opened_at"])
+        self.assertEqual(3900.0, incident["alerted_at"])
+
+    def test_the_hour_rate_alone_would_have_held_that_first_sample(self) -> None:
+        """The same sample, asked of each rate: the hour says 38 min, the last two say 11."""
+        options = self.options()
+        options.rate_window = 3600.0
+        options.default_floor = 78.2
+        samples = self.falling_hour() + [[3900.0, int(60 * WATCH.GIB)]]
+        found = WATCH.verdict(MOUNT, int(60 * WATCH.GIB), 1000 * WATCH.GIB, samples, options)
+
+        self.assertGreater(found["time_to_full"], options.urgent_horizon)
+        self.assertLess(found["urgent_time_to_full"], options.urgent_horizon)
+        self.assertEqual(300.0, found["latest_rate_window"])
+        self.assertTrue(found["urgent"])
+
+    def test_a_crossing_two_hours_from_full_still_waits_for_the_grace_window(self) -> None:
+        """A slow fall under the floor keeps the old path: nothing goes out on its first
+        sample, and the alert comes on the next scheduled one."""
+        step = int(10 * WATCH.GB / 3600 * 300)
+        self.free = int(70 * WATCH.GIB)
+        self.state.write_text(
+            json.dumps({"mounts": {MOUNT: {"samples": [[0.0, self.free + step]]}}})
+        )
+        options = self.options()
+        options.rate_window = 3600.0
+        options.grace = 240.0
+        options.default_floor = 78.2
+
+        self.run_once(options)
+        self.assertEqual([], self.envoy.published)
+        found = WATCH.verdict(MOUNT, self.free, 1000 * WATCH.GIB, [[0.0, self.free + step], [300.0, self.free]], options)
+        self.assertGreater(found["urgent_time_to_full"], 2 * 3600)
+
+        self.now = 600.0
+        self.free -= step
+        self.run_once(options)
+        self.assertEqual(1, len(self.envoy.published))
+        text = self.envoy.published[0][1]
+        self.assertIn("Alerted after the crossing held the grace window", text)
+        self.assertNotIn("no grace window", text)
+        self.assertEqual("grace", json.loads(self.state.read_text())["incidents"][MOUNT]["first_rule"])
 
     def test_alert_labels_df_growth_and_single_window_write_traffic(self) -> None:
         now = {
@@ -785,6 +858,7 @@ class DiskFillWatchFloorAgainstDeviceTest(unittest.TestCase):
             "low_slack": 2.0,
             "default_floor": 20.0,
             "max_floor_fraction": WATCH.MAX_FLOOR_FRACTION,
+            "urgent_horizon": WATCH.URGENT_HORIZON,
             "confirmations": 3,
             "confirmation_spacing": 300.0,
         }

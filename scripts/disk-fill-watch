@@ -38,7 +38,13 @@ What one run does, with `statvfs` and /proc reads only, no model call:
      inside the horizon, which is the one with a deadline. A static disk is never given a
      time-to-full, however happily the arithmetic produces one.
   6. A crossing must hold for the grace window before it alerts, so one `rm` and one build do
-     not fire.
+     not fire -- unless it is already inside URGENT_HORIZON (30 min) of full, which alerts on
+     the sample that opens the crossing. The grace window costs one whole five-minute period,
+     and on 2026-11-01 /mnt/nvme had ten minutes left when it crossed. That projection takes
+     the FASTER of the hour-long rate and the fall between the last two samples: on that night
+     the hour read 148 GB/h while the last ten minutes ran at about 310 GiB/h, and it is the
+     last two samples that say how fast the disk is falling NOW. The alert says which of the
+     two rules sent it.
   7. The alert names TOP WRITERS NOW as one 15 s interval of `/proc/<pid>/io` `write_bytes`
      traffic, not disk growth. It gives each writer's owning agent session, working directory,
      what it holds open on the alerting mount and age. A size walk cannot name those: it sees
@@ -166,6 +172,14 @@ FLAT_RATE = GB / 3600
 # writers uses the same step for the same purpose (agent-infra monitoring/host guard.sh
 # `FLOOR_STEP`, 5 GB decimal there).
 FLOOR_STEP = 5 * GIB
+
+# How near to full a crossing must be for its FIRST sample to alert, with no grace window. The
+# grace window exists so that one `rm` and one build do not fire, and it costs a whole sampling
+# period: on 2026-11-01 /mnt/nvme crossed its floor at 00:25:51Z with 59.5 GiB free, alerted at
+# 00:31:11Z, and was at 7.9 GiB by 00:35:51Z, so half of the ten minutes it had went to the
+# grace window. A disk this close to full has no period to spare, and nothing an `rm` does
+# inside one period makes a 30-minute deadline false.
+URGENT_HORIZON = 1800.0
 
 
 # Where log() writes. stdout for an ordinary run, whose stdout is the journal; stderr in the
@@ -1186,6 +1200,19 @@ def df_fill_rate(samples: list[list[float]], window: float) -> tuple[float | Non
     return (anchor[1] - samples[-1][1]) / span, span
 
 
+def latest_fill_rate(samples: list[list[float]]) -> tuple[float | None, float]:
+    """The same two-endpoint rate, measured over the last two samples only.
+
+    The hour-long rate is what a trend is worth saying out loud, and it decides every crossing
+    here. It is also the slower number whenever a fall is accelerating: on 2026-11-01 the hour
+    read 148 GB/h over /mnt/nvme's last 57 minutes while its last ten minutes ran at about
+    310 GiB/h. Only the decision to skip the grace window asks this one, and only when it is
+    the faster of the two, so the question "can this disk afford another five-minute period?"
+    is answered by how fast it is falling now.
+    """
+    return df_fill_rate(samples[-2:], float("inf"))
+
+
 def low_of(samples: list[list[float]], window: float) -> float | None:
     now = samples[-1][0] if samples else 0
     inside = [value for stamp, value in samples if now - stamp <= window]
@@ -1288,6 +1315,15 @@ def verdict(
         and df_window >= options.min_span
         and at_new_low
     )
+    # How soon this disk reaches zero at the faster of the two rates it has measured, and
+    # whether that is inside the urgent mark. This decides one thing only -- whether the first
+    # sample of a crossing may skip the grace window -- and changes no crossing, no headline
+    # and no deadline the alert prints.
+    urgent_horizon = options.urgent_horizon
+    recent_rate, recent_window = latest_fill_rate(samples)
+    fastest = max([rate for rate in (df_rate, recent_rate) if rate is not None], default=None)
+    urgent_time_to_full = free / fastest if fastest is not None and fastest > 0 else None
+    urgent = urgent_time_to_full is not None and urgent_time_to_full < urgent_horizon
     fast = rate_candidate and confirmations >= options.confirmations
     reasons = []
     if below_floor:
@@ -1314,6 +1350,11 @@ def verdict(
         "df_rate_high": shape["high"],
         "low": low,
         "time_to_full": time_to_full,
+        "latest_fill_rate": recent_rate,
+        "latest_rate_window": recent_window,
+        "urgent_time_to_full": urgent_time_to_full,
+        "urgent_horizon": urgent_horizon,
+        "urgent": urgent,
         "below_floor": below_floor,
         "rate_candidate": rate_candidate,
         "horizon_confirmations": confirmations,
@@ -1413,10 +1454,32 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
     # that someone should reclaim; falling toward full inside the horizon is a deadline. One
     # headline for both teaches the reader to skip the headline.
     headline = "DISK FILLING" if now["fast"] else "DISK LOW"
+    # Which of the two first-alert rules sent this, in one clause: a reader who sees an alert
+    # on the sample that opened the crossing must be able to tell that from a late one.
+    rule = incident.get("first_rule") if kind == "first alert" else None
+    sent_because = ""
+    if rule == "urgent":
+        # Name the rate as well as the deadline: this clause can carry a shorter time to full
+        # than the line above it, and the reader must see that the two are different windows
+        # rather than two answers to one question.
+        urgent_rate = now["free"] / now["urgent_time_to_full"]
+        urgent_window = (
+            now["latest_rate_window"]
+            if now["latest_fill_rate"] is not None and now["latest_fill_rate"] >= (now["df_fill_rate"] or 0)
+            else now["df_rate_window"]
+        )
+        sent_because = (
+            f" Alerted on the first sample of this crossing, with no grace window:"
+            f" {gb(urgent_rate * 3600)}/h over the last {human_time(urgent_window)} puts it"
+            f" {human_time(now['urgent_time_to_full'])} from full, inside the"
+            f" {short_time(now['urgent_horizon'])} urgent mark."
+        )
+    elif rule == "grace":
+        sent_because = " Alerted after the crossing held the grace window, the ordinary path."
     lines = [
         f"{headline} ({kind}): {mount} on {socket.gethostname()} has {gib(now['free'])} free of"
         f" {gib(now['total'])} ({used:.0f}% used), {trend}. {horizon}",
-        "Why this alerts: " + "; ".join(now["reasons"]) + ".",
+        "Why this alerts: " + "; ".join(now["reasons"]) + "." + sent_because,
         f"The crossing opened at {iso(incident.get('opened_at'))}, {human_time(when - (incident.get('opened_at') or when))} ago;"
         f" free space was {gib(incident.get('opened_free') or now['free'])} then.",
     ]
@@ -1667,12 +1730,23 @@ def run_once(options: argparse.Namespace) -> int:
         incident["low_free"] = min(incident.get("low_free") or now["free"], now["free"])
         incident["free"] = now["free"]
         open_for = started - incident["opened_at"]
-        if open_for < options.grace:
+        first = not incident.get("alerted_at")
+        # A crossing already inside the urgent mark of full cannot pay for the grace window:
+        # the window costs a whole sampling period, and this disk may not have one. It applies
+        # to the first alert only -- an escalation has its own clock, and both are unchanged
+        # for every crossing further out than the mark.
+        urgent_first = first and now["urgent"]
+        if open_for < options.grace and not urgent_first:
             log(f"{mount}: crossing for {int(open_for)} s (< {options.grace} s grace), holding")
             state.commit(options)
             continue
+        if urgent_first and open_for < options.grace:
+            log(
+                f"{mount}: crossing for {int(open_for)} s, inside the"
+                f" {short_time(now['urgent_horizon'])} urgent mark"
+                f" ({human_time(now['urgent_time_to_full'])} to full), alerting without the grace window"
+            )
 
-        first = not incident.get("alerted_at")
         # The lowest free space this crossing has already been reported at: the first alert's
         # level, then each escalation's. A crossing that keeps falling has to keep saying so --
         # the `/` crossing of 2026-10-31 said nothing between 11:39Z and 3.9 GiB free -- so the
@@ -1709,6 +1783,8 @@ def run_once(options: argparse.Namespace) -> int:
             incident["alerted_at"] = started
             incident["alert_free"] = now["free"]
             incident["told"] = [BOX_HEALTH_ROLE_TOPIC]
+            # Which of the two first-alert rules sent it, for the alert to say out loud.
+            incident["first_rule"] = "urgent" if urgent_first else "grace"
             kind = "first alert"
         else:
             incident["escalated_at"] = started
@@ -1948,6 +2024,13 @@ def main() -> int:
         "--clear-factor", type=float, default=1.5, help="a crossing clears above floor x this (hysteresis)"
     )
     parser.add_argument("--grace", type=float, default=240.0, help="seconds crossing before it alerts")
+    parser.add_argument(
+        "--urgent-horizon",
+        type=float,
+        default=URGENT_HORIZON,
+        help="seconds to full, at the faster of the hour-long and last-two-sample rates, under"
+        " which the first sample of a crossing alerts without the grace window (default 30 min)",
+    )
     parser.add_argument(
         "--escalate",
         type=float,
