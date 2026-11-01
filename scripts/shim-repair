@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Restore a tracked executable in this repo that has been overwritten with the
+# content of a DIFFERENT tracked file. Something on this box rewrote shims/gh with
+# shims/knives six times on 2026-11-01, so every `gh` call became a knives call and
+# answered `unrecognized subcommand "api"`. A caller that treats that as an API error
+# records a wrong answer rather than a failure: a reader of `gh pr view` sees "no
+# reviews", not an error. The loop shortens the window; it does not close it.
+#
+# Two defects this shape exists to avoid, both found the hard way:
+#
+#   * `git show HEAD:<path>` prints NOTHING for a path that is not in HEAD, so a naive
+#     comparison matches EVERY empty file on disk against EVERY such path and
+#     "repairs" it. Found twice within an hour, in two people's loops, on a 0-byte
+#     guard temp file. Hence: skip an empty HEAD blob and an empty file on disk.
+#   * A repair whose failure path is silent is indistinguishable from "nothing to
+#     repair". An earlier version detected every corruption and restored nothing for
+#     four hours, because the restore sat inside an && chain that logged only on
+#     success. Hence: read the file back after the checkout and say so when it is
+#     still wrong.
+#
+# Run it as a systemd --user unit with Restart=always, not from a shell: a loop
+# started by an agent session dies with that session, and nobody learns until a shim
+# breaks.
+set -uo pipefail
+
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo" || exit 1
+log="${XDG_STATE_HOME:-$HOME/.local/state}/shim-repair.log"
+mkdir -p -- "$(dirname -- "$log")"
+interval="${SHIM_REPAIR_INTERVAL:-3}"
+
+say() { printf '%s %s\n' "$(date -u +%FT%T.%NZ)" "$*" >>"$log"; }
+
+say "start (watching shims/ scripts/ in $repo, every ${interval}s)"
+
+while :; do
+  mapfile -t paths < <(git ls-files -s shims scripts | awk '$1 ~ /^100755/ {print $4}')
+
+  declare -A head_hash=()
+  for p in "${paths[@]}"; do
+    blob=$(git show "HEAD:$p" 2>/dev/null | sha256sum)
+    # d41d8c... would be the hash of an empty blob, which is what git prints for a
+    # path absent from HEAD. Never let that into the table.
+    [ "${blob%% *}" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ] && continue
+    head_hash["$p"]="${blob%% *}"
+  done
+
+  for f in "${paths[@]}"; do
+    [ -s "$f" ] || continue
+    live=$(sha256sum "$f" | cut -d' ' -f1)
+    [ "$live" = "${head_hash[$f]:-}" ] && continue
+
+    for other in "${!head_hash[@]}"; do
+      [ "$other" = "$f" ] && continue
+      [ "$live" = "${head_hash[$other]}" ] || continue
+
+      git checkout -- "$f"
+      chmod 755 "$f"
+      if [ "$(sha256sum "$f" | cut -d' ' -f1)" = "${head_hash[$f]:-}" ]; then
+        say "REPAIRED $f held the content of $other; restored from HEAD, mode 755"
+      else
+        say "FAILED $f held the content of $other and is still wrong after checkout - NEEDS A HUMAN"
+      fi
+      break
+    done
+  done
+
+  unset head_hash
+  sleep "$interval"
+done
