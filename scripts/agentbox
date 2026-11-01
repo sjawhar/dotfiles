@@ -24,6 +24,15 @@
 #                                       pin/plugins: asks the agent over Envoy to run
 #                                       `agentbox restart` (in-box form: this session,
 #                                       now) when safe; --now hangs it up at once
+#   agentbox move --plan [--json]       the live host sessions this machine runs outside a box,
+#                                       with the box each one would get and its disk cost
+#   agentbox move --self [--dry-run]    run by a session in its own pane at a safe point: it
+#                                       relaunches that pane into its own box, resuming this
+#                                       session in the same directory
+#   agentbox move <session-id>… | --all [--now] [--dry-run]
+#                                       ask each host session over Envoy to run
+#                                       `agentbox move --self` when safe; --now relaunches
+#                                       its pane at once
 #
 # Each <repo> is a canonical checkout under ~/src. The box holds a git clone of
 # its own of each, from the canonical checkout's origin, at <boxes>/<box>/<repo>
@@ -1241,6 +1250,579 @@ cmd_restart() {
     done
 }
 
+# ── move: the sessions already running on this host (dispatch://INFRA-702) ───────────────────
+#
+# `agentbox new` starts a box for a NEW session. `move` is for the ones already running on the
+# host: it reads every live top-level omp outside a box, works out the box each one would get,
+# and relaunches its pane into that box with `omp --resume <id>`, so the session comes back with
+# its id, its transcript and the tree it works in.
+#
+# WHY A MOVE NEVER NAMES A REPO. `agentbox new <repo>` gives the box a clone of its own and
+# works in it (cmd_new: a repo wins the working directory). For a NEW session that is right. For
+# a LIVE one it is not: the session would come back in a tree that is not the one it had - no
+# uncommitted changes, no index, no branch, and, for the 17 sessions sharing
+# ~/src/example-task-repo on 2026-11-01, none of each other's work either. $SRC is
+# bind-mounted read-write into every box already (mount_args), so `--dir <cwd>` of a checkout or
+# of a worktree under it adds no mount and no clone at all, and the session resumes in exactly
+# the directory it was in. So a move's spec is --dir only, and the only new disk it claims is
+# the box's own sparse filesystem image. A session that wants a clone of its own asks for one
+# the ordinary way, after the move: `agentbox new <repo> -- omp --resume <id>`.
+#
+# A move hangs omp up (SIGHUP: the ordinary graceful teardown agentbox-run.ts uses for a
+# restart), waits for it to go, and only then respawns its pane into the launcher - from a
+# DETACHED process, because `move --self` runs in the session's own bash tool and dies with the
+# omp it hangs up.
+
+# /proc, so the census can be run against a fixture tree (scripts/tests/test_agentbox_move.py).
+# Nothing else reads it.
+PROC="${AGENTBOX_PROC:-/proc}"
+
+# The field separator of a census row. NOT a tab: a tab is an IFS whitespace character, so
+# `IFS=$'\t' read` folds two of them into one and every field after an empty one shifts left -
+# which read a session's pane id as its session id while this was being written. A unit
+# separator is not whitespace, so empty fields survive.
+SEP=$'\x1f'
+
+# What free space a move must leave on the disk the boxes are on: scripts/disk-fill-watch's own
+# FLOORS, 84 GB (78 GiB) for /mnt/nvme and 18 GiB for the root disk. A box's image is sparse, so
+# this bounds what the moves claim at launch, not what the sessions can later grow into.
+move_floor_bytes() {
+    local target
+    target="$(df --output=target "$1" 2>/dev/null | tail -1 || true)"
+    case "$target" in
+        /mnt/nvme) echo 84000000000 ;;
+        *) echo 19327352832 ;;
+    esac
+}
+
+move_free_bytes() { df -B1 --output=avail "$1" 2>/dev/null | tail -1 || echo 0; }
+
+# Bytes as GiB, for a line a person reads.
+move_gib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1073741824 }'; }
+
+# What ONE box claims on the host's disk the moment it starts: its own filesystem image
+# (open_box_disk) and, since a move clones nothing, nothing else. The image is sparse, so only
+# ext4's metadata is written and the rest of the limit is claimed as the session writes. The
+# number is measured, not guessed: one mkfs of the size this move would use, in the directory
+# the real images go in, read with du and removed (32 GiB → 261 MiB, 2 GiB → 66 MiB on this
+# host, 2026-11-01). Measured once per run.
+MOVE_IMAGE_BYTES=""
+move_image_bytes() {
+    local bytes="$1" probe used=""
+    if [[ -n "$MOVE_IMAGE_BYTES" ]]; then echo "$MOVE_IMAGE_BYTES"; return 0; fi
+    if (( ! bytes )); then MOVE_IMAGE_BYTES=0; echo 0; return 0; fi
+    mkdir -p "$BOX_DISKS" 2>/dev/null || { echo 0; return 0; }
+    probe="$BOX_DISKS/.move-probe.$$.img"
+    rm -f "$probe"
+    if truncate -s "$bytes" "$probe" 2>/dev/null \
+        && PATH="$PATH:/usr/sbin:/sbin" mkfs.ext4 -q -F -m 0 "$probe" 2>/dev/null; then
+        used="$(du -s --block-size=1 "$probe" 2>/dev/null | cut -f1 || true)"
+    fi
+    rm -f "$probe"
+    MOVE_IMAGE_BYTES="${used:-0}"
+    echo "$MOVE_IMAGE_BYTES"
+}
+
+# Refuse a move that would take the disk under that floor. One box at a time: the check is made
+# again by every session that moves, so a window that runs out of room stops itself.
+#
+# MOVE_FORCE_FLOOR (the `--force-floor` flag) says the person running the window has decided
+# otherwise and prints what it is overriding. It exists because this floor is about the whole
+# disk, not about the move: /mnt/nvme on sami-rocqperf swung between 160 and 64 GiB free during
+# one afternoon as the grade farm ran, so a window of about a hundred sessions would otherwise
+# be stopped by somebody else's build. A box claims a few hundred MiB at launch (its sparse
+# image), and 83 of them about 21 GiB, so the decision is a real one and the number is printed
+# either way.
+MOVE_FORCE_FLOOR=false
+move_check_floor() {
+    local image="$1" dir free floor
+    dir="$(dirname "$BOXES")"
+    free="$(move_free_bytes "$dir")"
+    floor="$(move_floor_bytes "$dir")"
+    if (( free - image < floor )); then
+        if $MOVE_FORCE_FLOOR; then
+            echo "agentbox: --force-floor: a box leaves $(move_gib $((free - image))) GiB free on $dir, under its $(move_gib "$floor") GiB floor (scripts/disk-fill-watch); moving anyway" >&2
+            return 0
+        fi
+        echo "a box would leave $(move_gib $((free - image))) GiB free on $dir, under its $(move_gib "$floor") GiB floor (scripts/disk-fill-watch); free space first, then move, or --force-floor to decide otherwise" >&2
+        return 1
+    fi
+    return 0
+}
+
+move_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
+
+# The directories a box must be given so a session keeps the tree it has, one per line, the
+# session's own working directory FIRST (cmd_new works in the first --dir). A session inside a
+# git working tree also needs that tree's root and the tree's git common dir where either is
+# outside $SRC: a worktree's .git is a file naming its common dir, and a session working in a
+# subdirectory of a checkout would otherwise get a box with no repository in it at all. A path
+# under $SRC is left out - every box has $SRC already, read-write, at its own path. A working
+# directory no box can be given fails here, with the reason on stderr.
+move_dirs() {
+    local cwd="$1" top="" common="" owner="" cand have dirs=() skip
+    [[ -n "$cwd" ]] || { echo "its working directory cannot be read" >&2; return 1; }
+    [[ -d "$cwd" ]] || { echo "its working directory $cwd is gone" >&2; return 1; }
+    case "$cwd" in
+        /) echo "it works in /, which a box cannot be given (that is the whole host filesystem)" >&2; return 1 ;;
+        "$HOME") echo "it works in \$HOME, which would shadow the box's own home and its allow-list" >&2; return 1 ;;
+        "$BOXES"|"$BOXES"/*) echo "it already works inside the box tree $BOXES" >&2; return 1 ;;
+    esac
+    dirs=("$cwd")
+    top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -n "$top" ]]; then
+        common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+        owner="$common"
+        if [[ "$(basename -- "${common:-/}")" == .git ]]; then owner="$(dirname -- "$common")"; fi
+        for cand in "$top" "$owner"; do
+            [[ -n "$cand" && -d "$cand" ]] || continue
+            [[ "$cand" != / && "$cand" != "$HOME" ]] || continue
+            if move_within "$cand" "$SRC"; then continue; fi
+            skip=0
+            for have in "${dirs[@]}"; do
+                if move_within "$cand" "$have"; then skip=1; break; fi
+            done
+            if (( skip )); then continue; fi
+            dirs+=("$cand")
+        done
+    fi
+    printf '%s\n' "${dirs[@]}"
+}
+
+# The `agentbox new` arguments for a working directory, one token per line.
+move_spec() {
+    local d
+    while read -r d; do printf -- '--dir\n%s\n' "$d"; done < <(move_dirs "$1")
+}
+
+# Every live top-level omp process on this machine, one TSV row each:
+#
+#   class  pid  session-id  pane-id  tmux-pane  cwd  detail
+#
+# class is one of: host (a session a move takes), no-pane (a top-level omp with no tmux pane - a
+# headless `omp -p`, a systemd unit, a scheduler step agent - which only a person can decide),
+# boxed (already in an agentbox), sandbox (an omp inside a grading sandbox: a /work working
+# directory, a bwrap ancestor, or a container that is not a box), subagent (an omp under another
+# omp, which is not a session at all). omp's own helper processes (`__omp_worker_*`) run the
+# same binary and are not listed.
+#
+# A process's command name and parent, cached: /proc/<pid>/stat read by the shell itself, since
+# one `awk` over /proc/[0-9]*/stat dies the first time a process exits between the glob and the
+# open — mawk makes an unopenable file fatal and stops, which silently cut this host's 100 omp
+# processes to the 40 awk had reached before the first vanished pid. The comm is parenthesised
+# and may hold spaces and parentheses, so it is taken up to the LAST ")".
+move_stat() {
+    local line rest
+    MOVE_COMM="" MOVE_PPID=""
+    line="$(cat "$PROC/$1/stat" 2>/dev/null)" || return 1
+    [[ -n "$line" ]] || return 1
+    rest="${line#*\(}"
+    MOVE_COMM="${rest%)*}"
+    rest="${rest##*\) }"
+    read -r _ MOVE_PPID _ <<<"$rest"
+    [[ -n "$MOVE_PPID" ]] || return 1
+    return 0
+}
+
+move_census() {
+    local -A pane_id=() pane_at=() cname=() comm=() ppid=() ctr=() unit=() cwd=() sid=()
+    local pids=() files=() pid parent key name value id class detail chain found guard line leaf
+    mapfile -t pids < <(pgrep -x omp 2>/dev/null || true)
+    (( ${#pids[@]} )) || return 0
+    # 1. the tmux panes, by the pid of each pane's own process (a login shell, normally).
+    while IFS=$'\t' read -r key id name; do
+        pane_id[$key]="$id"
+        pane_at[$key]="$name"
+    done < <(tmux list-panes -a -F "#{pane_pid}"$'\t'"#{pane_id}"$'\t'"#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null || true)
+    # 2. the container each omp sits in, and the systemd unit of one that sits in no container.
+    # A box is a container whose name starts with agentbox-; any other container is a sandbox.
+    while read -r id name; do cname[${id:0:12}]="$name"; done < <(docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null || true)
+    for pid in "${pids[@]}"; do
+        while IFS= read -r line; do
+            if [[ -z "${ctr[$pid]:-}" && "$line" =~ docker-([0-9a-f]{12}) ]]; then
+                ctr[$pid]="${BASH_REMATCH[1]}"
+            fi
+            # The DEEPEST unit of the path, not the first: every process of a user manager sits
+            # under user@1000.service, which says nothing about what runs it.
+            if [[ -z "${unit[$pid]:-}" ]]; then
+                leaf="${line%/}"
+                while [[ "$leaf" == */* ]]; do
+                    case "${leaf##*/}" in
+                        *.service|*.scope) unit[$pid]="${leaf##*/}"; break ;;
+                    esac
+                    leaf="${leaf%/*}"
+                done
+            fi
+        done < <(cat "$PROC/$pid/cgroup" 2>/dev/null || true)
+    done
+    # 3. each omp's working directory and the session file it holds open, from one `find` over
+    # the cwd links and the file-descriptor directories — `find` skips a path that goes away
+    # instead of stopping. The session file names its session in FULL; a prefix would resume
+    # another session.
+    files=()
+    for pid in "${pids[@]}"; do files+=("$PROC/$pid/cwd" "$PROC/$pid/fd"); done
+    while IFS=$'\t' read -r key name value; do
+        case "$name" in
+            cwd) cwd[$key]="$value" ;;
+            *) [[ -n "${sid[$key]:-}" ]] || sid[$key]="$value" ;;
+        esac
+    done < <(find "${files[@]}" -maxdepth 1 -type l -printf '%p\t%l\n' 2>/dev/null \
+        | sed -n -e "s#^$PROC/\([0-9]\+\)/cwd\t#\1\tcwd\t#p" \
+                 -e "s#^$PROC/\([0-9]\+\)/fd/[0-9]\+\t.*/\.omp/agent/sessions/[^/]*/[0-9T:-]*Z_\([0-9a-f-]\{36\}\)\.jsonl\$#\1\tsid\t\2#p")
+    # 4. the session id of an omp that holds no writer on its transcript, from its own `--resume`
+    # argument. A session idle after a resume is in that state (the same reason agentbox-run.ts
+    # has a second source): 10 of this host's 83 host sessions were, at 16:30Z on 2026-11-01.
+    # The argument is the id itself, or the session file, whose name carries the id in full. It
+    # is this process's OWN argument, never inherited, unlike an OMP_SESSION_ID read from a
+    # descendant (scripts/disk-fill-watch's SOURCE_PHRASE: the environment is the weakest
+    # source, and it named 39 unrelated processes as one session on 2026-10-30). Where both a
+    # held transcript and a --resume argument existed, all 83 agreed.
+    #
+    # The id must come from the FILE NAME and from nowhere else in that path, and an id two
+    # processes claim is no id at all. Two live omp processes here on 2026-11-01 were resumed
+    # from a SUBAGENT transcript, `…/<stamp>_<parent id>/<stamp>_<session id>/ArityLane.jsonl`
+    # and `…/GuardLane.jsonl`: a pattern that took the last uuid anywhere in the path would have
+    # given both the id of a THIRD, live session, and a move would then have resumed one session
+    # in three boxes, each overwriting the others' transcript. So the name must end in
+    # `_<id>.jsonl`, and an id claimed more than once goes to the process HOLDING it and to
+    # nobody else. The rest are left with no id, which every path here refuses to act on.
+    local -A claims=() claimed=()
+    for pid in "${pids[@]}"; do
+        if [[ -n "${sid[$pid]:-}" ]]; then
+            claimed[${sid[$pid]}]=held
+            continue
+        fi
+        # `cat`, not a `<` redirection: a process that exits between pgrep and here makes the
+        # shell's own redirection fail, which `set -e` turns into the end of the census (it did,
+        # at pid 780324). `|| true` keeps the pipeline's own failure from doing the same.
+        claims[$pid]="$(cat "$PROC/$pid/cmdline" 2>/dev/null | tr '\0' '\n' \
+            | sed -n -e 's#^.*/[0-9T:-]*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' \
+                     -e 's#^\([0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}\)$#\1#p' \
+            | head -1 || true)"
+        [[ -n "${claims[$pid]}" ]] || continue
+        case "${claimed[${claims[$pid]}]:-}" in
+            "") claimed[${claims[$pid]}]="$pid" ;;
+            *) claimed[${claims[$pid]}]=many ;;
+        esac
+    done
+    for pid in "${pids[@]}"; do
+        [[ -n "${claims[$pid]:-}" ]] || continue
+        if [[ "${claimed[${claims[$pid]}]}" == "$pid" ]]; then sid[$pid]="${claims[$pid]}"; fi
+    done
+    for pid in "${pids[@]}"; do
+        # omp's own helper processes (`__omp_worker_*`) run the same binary and are not sessions.
+        if grep -qa '__omp_worker' "$PROC/$pid/cmdline" 2>/dev/null; then continue; fi
+        if [[ -z "${comm[$pid]:-}" ]]; then
+            move_stat "$pid" || continue
+            comm[$pid]="$MOVE_COMM"
+            ppid[$pid]="$MOVE_PPID"
+        fi
+        class=host
+        detail=""
+        if [[ -z "${sid[$pid]:-}" && -n "${claims[$pid]:-}" ]]; then
+            detail="its --resume names session ${claims[$pid]}, which another live omp holds open or claims too; a move must never resume one session twice"
+        fi
+        chain=""
+        found=0
+        name="${ctr[$pid]:-}"
+        if [[ -n "$name" ]]; then
+            detail="${cname[$name]:-container $name}"
+            if [[ "$detail" == agentbox-* ]]; then class=boxed; else class=sandbox; fi
+        fi
+        parent="${ppid[$pid]}"
+        guard=0
+        while (( guard < 64 )); do
+            guard=$((guard + 1))
+            [[ -n "$parent" && "$parent" != 0 && "$parent" != 1 ]] || break
+            if [[ -n "${pane_id[$parent]:-}" ]]; then found="$parent"; break; fi
+            if [[ -z "${comm[$parent]:-}" ]]; then
+                move_stat "$parent" || break
+                comm[$parent]="$MOVE_COMM"
+                ppid[$parent]="$MOVE_PPID"
+            fi
+            case "${comm[$parent]}" in
+                omp)
+                    if [[ "$class" == host ]]; then class=subagent; detail="under omp $parent"; fi
+                    break
+                    ;;
+                bwrap)
+                    if [[ "$class" == host ]]; then class=sandbox; detail="a bwrap sandbox (pid $parent)"; fi
+                    break
+                    ;;
+            esac
+            chain="$chain ${parent}:${comm[$parent]}"
+            parent="${ppid[$parent]}"
+        done
+        case "${cwd[$pid]:-}" in
+            /work|/work/*)
+                class=sandbox
+                detail="${detail:-a grading sandbox (/work)}"
+                ;;
+        esac
+        if [[ "$class" == host && "$found" == 0 ]]; then
+            class=no-pane
+            detail="parent ${ppid[$pid]}:${comm[${ppid[$pid]}]:-?}${chain:+, above${chain}}${unit[$pid]:+, unit ${unit[$pid]}}"
+        fi
+        printf "%s$SEP%s$SEP%s$SEP%s$SEP%s$SEP%s$SEP%s\n" "$class" "$pid" "${sid[$pid]:-}" \
+            "${pane_id[$found]:-}" "${pane_at[$found]:-}" "${cwd[$pid]:-}" "$detail"
+    done
+}
+
+# One session's row from the census, by full session id or by a unique prefix of it.
+move_find() {
+    local target="$1" rows=()
+    mapfile -t rows < <(move_census | awk -F"$SEP" -v t="$target" '$3 != "" && index($3, t) == 1')
+    (( ${#rows[@]} == 1 )) || return 1
+    printf '%s\n' "${rows[0]}"
+}
+
+cmd_move_plan() {
+    local json=false a
+    for a in "$@"; do
+        case "$a" in
+            --json) json=true ;;
+            *) die "usage: agentbox move --plan [--json]" ;;
+        esac
+    done
+    local image dir free floor
+    image="$(move_image_bytes "$BOX_DISK_BYTES")"
+    dir="$(dirname "$BOXES")"
+    free="$(move_free_bytes "$dir")"
+    floor="$(move_floor_bytes "$dir")"
+    local class pid sid pane at cwd detail spec reason dirs=() rows=() blocked=0 movable=0
+    local -A counts=([host]=0 [no-pane]=0 [boxed]=0 [sandbox]=0 [subagent]=0)
+    while IFS="$SEP" read -r class pid sid pane at cwd detail; do
+        counts[$class]=$(( ${counts[$class]:-0} + 1 ))
+        [[ "$class" == host || "$class" == no-pane ]] || continue
+        spec=""
+        reason=""
+        dirs=()
+        mapfile -t dirs < <(move_dirs "$cwd" 2>/dev/null)
+        if (( ${#dirs[@]} )); then
+            spec="$(printf -- '--dir %s ' "${dirs[@]}")"
+            spec="${spec% }"
+        else
+            reason="$(move_dirs "$cwd" 2>&1 >/dev/null || true)"
+        fi
+        if [[ -z "$sid" ]]; then
+            reason="${reason:-${detail:-its omp holds no session file open, so a move cannot name it in full}}"
+        fi
+        if [[ "$class" == host && -z "$reason" ]]; then
+            movable=$((movable + 1))
+        elif [[ "$class" == host ]]; then
+            blocked=$((blocked + 1))
+        fi
+        rows+=("$class	$sid	$pid	$pane	$at	$cwd	${spec:--}	$(move_gib "$image")	${reason:-$detail}")
+    done < <(move_census)
+    local total=$((movable * image))
+    if $json; then
+        jq -Rn --argjson summary "$(jq -n \
+                --argjson movable "$movable" --argjson blocked "$blocked" \
+                --argjson nopane "${counts[no-pane]:-0}" --argjson boxed "${counts[boxed]:-0}" \
+                --argjson sandbox "${counts[sandbox]:-0}" --argjson subagent "${counts[subagent]:-0}" \
+                --argjson image "$image" --argjson total "$total" --argjson free "$free" --argjson floor "$floor" \
+                '{movable: $movable, blocked: $blocked, not_a_pane: $nopane, already_boxed: $boxed,
+                  sandboxes: $sandbox, subagents: $subagent, new_disk_per_box_bytes: $image,
+                  new_disk_total_bytes: $total, free_bytes: $free, floor_bytes: $floor,
+                  headroom_bytes: ($free - $floor - $total)}')" \
+            '{summary: $summary, sessions: [inputs | split("\t") |
+                {class: .[0], session: .[1], pid: (.[2] | tonumber), pane: .[3], tmux: .[4],
+                 cwd: .[5], spec: .[6], new_disk_gib: (.[7] | tonumber), note: .[8]}]}' \
+            < <(printf '%s\n' "${rows[@]}")
+        return 0
+    fi
+    echo "agentbox move --plan: $(hostname -s), $(date -u +%FT%TZ)"
+    echo
+    { echo "CLASS	SESSION	PID	PANE	TMUX	CWD	SPEC	NEW-GiB	NOTE"
+      printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1 -k6,6
+    } | column -t -s $'\t'
+    echo
+    echo "host sessions outside a box: $((movable + blocked)) ($movable with a spec, $blocked that need a decision)"
+    echo "not a pane (headless or unit-run, yours to decide): ${counts[no-pane]:-0}"
+    echo "excluded: ${counts[boxed]:-0} already in a box, ${counts[sandbox]:-0} in a grading sandbox, ${counts[subagent]:-0} subagents of another omp"
+    echo "new disk: $(move_gib "$image") GiB per box (its sparse ext4 image; a move clones nothing), $(move_gib "$total") GiB for $movable boxes"
+    echo "$dir: $(move_gib "$free") GiB free − $(move_gib "$floor") GiB floor − $(move_gib "$total") GiB = $(move_gib $((free - floor - total))) GiB left over"
+}
+
+# The omp process a command runs under: the nearest ancestor whose command is omp.
+move_own_omp() {
+    local p="${1:-$$}" guard=0
+    while (( guard < 64 )); do
+        guard=$((guard + 1))
+        [[ -r "$PROC/$p/stat" ]] || return 1
+        if [[ "$(cat "$PROC/$p/comm" 2>/dev/null || true)" == omp ]]; then echo "$p"; return 0; fi
+        p="$(awk '{ i = index($0, ") "); split(substr($0, i + 2), g, " "); print g[2] }' "$PROC/$p/stat" 2>/dev/null || true)"
+        [[ -n "$p" && "$p" != 0 && "$p" != 1 ]] || return 1
+    done
+    return 1
+}
+
+# The detached step, and the only one that touches a session: hang omp up, wait for its teardown,
+# respawn its pane into the launcher. `move --self` runs in the session's own bash tool, which
+# dies with the omp it hangs up, and `--now` must not hold the caller's terminal for a minute per
+# session, so both hand this to a process of their own.
+move_hand_off() {
+    local sid="$2" log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$2.log"
+    mkdir -p "$(dirname "$log")"
+    # This file by its absolute path, not $0: the relauncher outlives a caller that was started
+    # by a relative path from a directory the pane is about to leave.
+    setsid "$(readlink -f "${BASH_SOURCE[0]}")" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
+    echo "agentbox: session $sid handed to a detached relauncher; log: $log"
+}
+
+move_relaunch() {
+    local pid="$1" sid="$2" pane="$3" cwd="$4" waited=0 inner
+    shift 4
+    local spec=("$@")
+    echo "$(date -u +%FT%TZ) move $sid: pid $pid, pane $pane, cwd $cwd, spec ${spec[*]}"
+    # Pids are reused: never signal one that is no longer this session's omp.
+    if [[ "$(cat "$PROC/$pid/comm" 2>/dev/null || true)" == omp ]]; then
+        kill -HUP "$pid" 2>/dev/null || true
+        echo "$(date -u +%FT%TZ) move $sid: omp $pid hung up; waiting for its teardown"
+        while (( waited < 180 )) && kill -0 "$pid" 2>/dev/null; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "$(date -u +%FT%TZ) move $sid: omp $pid is still up after ${waited}s; the respawn ends it"
+    else
+        echo "$(date -u +%FT%TZ) move $sid: omp $pid exited after ${waited}s"
+    fi
+    if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+        echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $sid ."
+        return 1
+    fi
+    inner="$(printf '%q ' agentbox new "${spec[@]}" -- omp --resume "$sid" .)"
+    # An interactive bash, as scripts/agent-new starts a pane: the box launcher needs the
+    # session environment .bashrc sets up (shims first on PATH). The shell that stays behind is
+    # what makes a box that ends leave a usable pane instead of a dead one.
+    tmux respawn-pane -k -t "$pane" -c "$cwd" \
+        bash -i -c "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i"
+    echo "$(date -u +%FT%TZ) move $sid: pane $pane respawned into agentbox new ${spec[*]}"
+}
+
+cmd_move_self() {
+    local dry=false a
+    for a in "$@"; do
+        case "$a" in
+            --dry-run) dry=true ;;
+            --force-floor) MOVE_FORCE_FLOOR=true ;;
+            *) die "usage: agentbox move --self [--dry-run] [--force-floor]" ;;
+        esac
+    done
+    [[ -z "${AGENTBOX_BOX:-}" ]] || die "this session already runs in box $AGENTBOX_BOX; a move has nothing to do (agentbox restart relaunches it in place)"
+    [[ ! -e /etc/agentbox-identity ]] || die "this session already runs in a box; a move has nothing to do (agentbox restart relaunches it in place)"
+    # A SUBAGENT's bash tool reaches the same omp process as its parent's, so `--self` run there
+    # would hang up the session that started it, in the middle of the subagent's own work.
+    # omp gives a subagent its own transcript, `…/<session dir>/<name>.jsonl`, while a session's
+    # own file ends in `_<id>.jsonl`; that is what tells the two apart (measured in this
+    # session: PI_SESSION_FILE named AgentBoxMove.jsonl while OMP_SESSION_ID was the parent's).
+    if [[ -n "${PI_SESSION_FILE:-}" ]]; then
+        case "$(basename -- "$PI_SESSION_FILE")" in
+            *_[0-9a-f]*-*-*-*-*.jsonl) ;;
+            *) die "a subagent cannot move its session: $PI_SESSION_FILE is a subagent transcript, and the move would hang up the session that started you. Tell the session to run it when the subagent is done." ;;
+        esac
+    fi
+    local pid row class _pid sid pane at cwd detail
+    pid="$(move_own_omp)" || die "no omp process above this command: run 'agentbox move --self' from the session's own bash tool"
+    row="$(move_census | awk -F"$SEP" -v p="$pid" '$2 == p')"
+    [[ -n "$row" ]] || die "omp $pid is not in this host's session census; run 'agentbox move --plan' and look for it"
+    IFS="$SEP" read -r class _pid sid pane at cwd detail <<<"$row"
+    [[ "$class" == host ]] || die "this session is $class ($detail), not a host session a move can take"
+    [[ -n "$sid" ]] || die "this omp holds no session file open, so a move cannot name its session in full and --resume would take the wrong one; try again in a moment"
+    # The caller's own OMP_SESSION_ID, which omp sets for its tools, must be the session the
+    # census read from the process. A disagreement means the walk up the process tree reached
+    # another session's omp, and resuming that one in this pane would take a session nobody
+    # asked to move.
+    if [[ -n "${OMP_SESSION_ID:-}" && "$OMP_SESSION_ID" != "$sid" ]]; then
+        die "the omp above this command runs session $sid, while this tool's OMP_SESSION_ID is $OMP_SESSION_ID; a move must not resume a session it has not identified. Run 'agentbox move --plan' and move it by id."
+    fi
+    [[ -n "$pane" ]] || die "this session has no tmux pane to relaunch ($detail); it is one of the plan's not-a-pane rows and needs a person"
+    local dirs=() spec=() d
+    mapfile -t dirs < <(move_dirs "$cwd" 2>/dev/null)
+    (( ${#dirs[@]} )) || die "$(move_dirs "$cwd" 2>&1 >/dev/null || true)"
+    for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
+    move_check_floor "$(move_image_bytes "$BOX_DISK_BYTES")" || exit 2
+    if $dry; then
+        echo "agentbox: would hang omp $pid up and respawn pane $pane ($at) as:"
+        echo "  agentbox new ${spec[*]} -- omp --resume $sid ."
+        return 0
+    fi
+    move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
+}
+
+MOVE_NOTICE_HEAD='agentbox: this session must move into an agent box (dispatch://INFRA-702). Finish the current step, start no new subagents or long jobs, write your handover into the transcript, and when `read proc://` lists none of your jobs or services still running, run `agentbox move --self` from your bash tool. It hangs this omp up gracefully and respawns this pane as'
+MOVE_NOTICE_TAIL='so you come back with the same session id, the same transcript and the same working directory, in a box with a cpu, memory, pids and disk limit of its own. Your tree is the host'"'"'s own directory, bind-mounted at its own path: uncommitted work included, nothing cloned, nothing copied. If you are idle, do it now.'
+
+cmd_move_notify() {
+    local now=false dry=false all=false t targets=() rows=() row
+    for t in "$@"; do
+        case "$t" in
+            --now) now=true ;;
+            --dry-run) dry=true ;;
+            --all) all=true ;;
+            --force-floor) MOVE_FORCE_FLOOR=true ;;
+            -*) die "unknown option $t  (usage: agentbox move <session-id>… | --all [--now] [--dry-run] [--force-floor])" ;;
+            *) targets+=("$t") ;;
+        esac
+    done
+    if $all; then
+        mapfile -t rows < <(move_census | awk -F"$SEP" '$1 == "host" && $3 != "" && $4 != ""')
+    else
+        (( ${#targets[@]} )) || die "usage: agentbox move --plan [--json] | --self [--dry-run] | <session-id>… | --all [--now] [--dry-run]"
+        for t in "${targets[@]}"; do
+            row="$(move_find "$t")" || die "no live host session matches $t (agentbox move --plan lists them)"
+            rows+=("$row")
+        done
+    fi
+    (( ${#rows[@]} )) || { echo "agentbox: no host session to move"; return 0; }
+    local class pid sid pane at cwd detail dirs spec d image
+    image="$(move_image_bytes "$BOX_DISK_BYTES")"
+    for row in "${rows[@]}"; do
+        IFS="$SEP" read -r class pid sid pane at cwd detail <<<"$row"
+        if [[ "$class" != host ]]; then
+            echo "agentbox: $sid is $class ($detail); not moved" >&2
+            continue
+        fi
+        dirs=()
+        mapfile -t dirs < <(move_dirs "$cwd" 2>/dev/null)
+        if (( ! ${#dirs[@]} )); then
+            echo "agentbox: $sid cannot be moved: $(move_dirs "$cwd" 2>&1 >/dev/null || true)" >&2
+            continue
+        fi
+        spec=()
+        for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
+        if ! move_check_floor "$image"; then return 2; fi
+        if $now; then
+            if $dry; then
+                echo "agentbox: would relaunch pane $pane ($at) now: agentbox new ${spec[*]} -- omp --resume $sid ."
+                continue
+            fi
+            move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
+            continue
+        fi
+        local notice="$MOVE_NOTICE_HEAD \`agentbox new ${spec[*]} -- omp --resume $sid .\`, $MOVE_NOTICE_TAIL"
+        if $dry; then
+            echo "agentbox: would notify $sid (pane $pane, $at): $notice"
+            continue
+        fi
+        envoy send "$sid" "$notice" >/dev/null || die "envoy send to $sid failed"
+        echo "agentbox: $sid (pane $pane, $at) notified; it moves when it reaches a safe point"
+    done
+}
+
+cmd_move() {
+    set_disk_bytes "the default disk limit"
+    case "${1:-}" in
+        --plan) shift; cmd_move_plan "$@" ;;
+        --self) shift; cmd_move_self "$@" ;;
+        --relaunch) shift; move_relaunch "$@" ;;
+        "") die "usage: agentbox move --plan [--json] | --self [--dry-run] | <session-id>… | --all [--now] [--dry-run]" ;;
+        *) cmd_move_notify "$@" ;;
+    esac
+}
+
 FAILS=0
 ok() { echo "ok   $*"; }
 fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
@@ -1620,7 +2202,8 @@ case "${1:-}" in
     doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
+    move)    shift; cmd_move "$@" ;;
     # The usage block at the top of this file, which every command above is listed in: a
     # command missing from this case would otherwise print its own documentation as the usage.
-    *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
