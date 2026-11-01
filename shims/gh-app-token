@@ -63,6 +63,10 @@ answered "no identity"; a client that cannot run is still its hard error. It hap
 cache miss, so the cache below bounds enrollments at one per miss, not one per call, and each
 session ends with the secret-run that made it.
 
+In an agent box the broker identity arrives after the box does, so a request waits while the
+launcher's enrollment.pending marker in AGENT_SECRETS_KEY_DIR says one is still under way, up to
+300 s (ENROLLMENT_WAIT_SECONDS). Nowhere else is there such a marker, so nothing else waits.
+
 --repo and --read-only narrow the token of one owner (INFRA-322) to those repositories and to
 contents:read and metadata:read: secret-run passes them to the broker as --github-owner,
 --github-repo and --github-read-only, which mints the narrowed token with GitHub's
@@ -108,6 +112,23 @@ CACHE_DIR = Path.home() / ".cache" / "gh-app-token"
 GITHUB_API = "https://api.github.com"
 TOKEN_REFRESH_MARGIN = 300  # Refresh five minutes before expiry.
 MIN_LIFETIME_ENV = "GH_APP_TOKEN_MIN_LIFETIME"
+# An agent box gets its broker identity after it starts, not before: scripts/agentbox puts
+# enrollment.pending in the box's key dir ahead of `docker run` and keeps it fresh until the
+# enrollment ends, which took 116 s from box start on 2026-11-01 and 132 s on the same host an
+# hour later, both at load 400 (a keygen inside the box, then the broker call). The agent-secrets
+# client waits 20 s for that marker and then fails the call,
+# so the first GitHub command of a new box - the normal case, since `agentbox new … -- omp
+# --resume <id>` gives the agent a prompt at once - failed with "no session identity" and git was
+# told quit=1, which reads as "this box has no GitHub access" rather than "wait" (INFRA-702).
+# Wait here for that enrollment to END, but only while the marker says one is under way: nothing
+# else creates it, a host session has no key dir of this shape, and the launcher removes it on
+# success and on failure alike, so the 20 s wait of the client stays the whole story everywhere
+# else. The bound is generous because the marker is the real guard: it is renewed only while the
+# launcher is still working, so a launcher that dies or gives up ends the wait inside the
+# freshness window below, which is the client's own.
+ENROLLMENT_MARKER = "enrollment.pending"
+ENROLLMENT_MARKER_FRESH_SECONDS = 160
+ENROLLMENT_WAIT_SECONDS = 300
 
 
 class AppTokenError(Exception):
@@ -450,12 +471,40 @@ def parse_broker_installations(release: str) -> dict[str, BrokerInstallation]:
     return parsed
 
 
+def wait_for_box_enrollment() -> None:
+    """Block while this box's secrets-broker enrollment is still under way, up to
+    ENROLLMENT_WAIT_SECONDS. Returns at once - and so changes nothing - wherever there is no key
+    dir, no marker, or a marker no launcher is renewing."""
+    key_dir = os.environ.get("AGENT_SECRETS_KEY_DIR")
+    if not key_dir:
+        return
+    marker = Path(key_dir) / ENROLLMENT_MARKER
+    deadline = time.monotonic() + ENROLLMENT_WAIT_SECONDS
+    announced = False
+    while True:
+        try:
+            age = time.time() - marker.stat().st_mtime
+        except OSError:
+            return  # Enrolled, or the enrollment failed: either way the launcher is done.
+        if age > ENROLLMENT_MARKER_FRESH_SECONDS or time.monotonic() >= deadline:
+            return
+        if not announced:
+            print(
+                "gh-app-token: this box is still being enrolled with the secrets broker; "
+                f"waiting up to {ENROLLMENT_WAIT_SECONDS}s for it...",
+                file=sys.stderr,
+            )
+            announced = True
+        time.sleep(1)
+
+
 def request_broker_installations(
     secret_name: str, owner: str, scope: dict[str, Any] | None = None
 ) -> dict[str, BrokerInstallation]:
     """Ask the broker for a release of secret_name through secret-run, capturing its stdout
     without logging it. With scope, the release is narrowed to owner's installation, its
     repositories and its read-only permissions."""
+    wait_for_box_enrollment()
     executable, environment = secret_run_command()
     narrowing: list[str] = []
     if scope:

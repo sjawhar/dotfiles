@@ -243,7 +243,17 @@ if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; the
         fi
         exit "$omp_status"
     fi
-    echo "omp: systemd-run refused a $mem_max scope; starting without a memory ceiling" >&2
+    # Inside an agent box (the /etc/agentbox-identity marker agentbox/Dockerfile writes) there is
+    # no host systemd to accept a scope and none is needed: the box's own cgroup, set at
+    # `docker run --memory` by scripts/agentbox, already is this session's ceiling and kills it
+    # the same way. So the refusal is the expected path there, and printing it on every launch
+    # put a warning in front of every boxed agent that nothing could act on
+    # (dispatch://INFRA-702).
+    if [[ -e /etc/agentbox-identity ]]; then
+        echo "omp: in an agent box; this session's memory ceiling is the box's own cgroup." >&2
+    else
+        echo "omp: systemd-run refused a $mem_max scope; starting without a memory ceiling" >&2
+    fi
 fi
 
 exec "$DOTFILES_DIR/scripts/agent-session" omp "$@"

@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg git git-lfs openssh-client sudo jq iproute2 \
         python3 python3-jwt python3-cryptography build-essential pkg-config libssl-dev \
         tmux less procps xz-utils unzip zstd rsync file \
-        python3-pip postgresql-client sqlite3 socat wget bc \
+        python3-pip postgresql-client sqlite3 socat wget bc bsdextrautils \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list \
@@ -27,9 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ubuntu:24.04 ships uid/gid 1000 = ubuntu with home /home/ubuntu, matching the
 # host user whose directories are mounted in. Passwordless sudo is the whole
 # point of the box: root here is Sysbox fake-root, unprivileged on the host.
-# The marker file is what shims/omp and scripts/hawk-token check to know they
-# are inside a box. The home skeleton exists so the mounts land in
-# ubuntu-owned parents.
+# The marker file is what a tool checks to know it is inside a box: shims/omp (which says the
+# box cgroup is the memory ceiling instead of reporting the systemd scope it cannot get) and
+# the disk-hygiene skill (which then sweeps the box tree alone). The home skeleton exists so
+# the mounts land in ubuntu-owned parents.
 RUN echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu && chmod 0440 /etc/sudoers.d/ubuntu \
     && usermod -aG docker ubuntu \
     && echo agentbox > /etc/agentbox-identity \

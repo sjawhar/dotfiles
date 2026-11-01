@@ -37,6 +37,17 @@ rw .cache/hawk-token
 rw .aws
 rw .kube
 rw .pulumi
+# Google Cloud. The SDK install is read-only: gcloud writes only under its config dir, which is
+# the next entry, and ~/.local/bin/gke-gcloud-auth-plugin is a symlink into this tree, so without
+# it kubectl cannot get a GKE credential at all (dispatch://INFRA-702, a box where
+# `gcloud auth list` answered "real gcloud binary not found" and the build pool was unreachable).
+# The config dir is the machine's gcloud identity, not a user login: its active configuration is
+# `box`, whose account is the keyless external_account dev-<name>@theorem-agent-infra that gcloud
+# exchanges for a token through the metadata relay the box already has. agent-c's deploy.py also
+# requires a file in it (agent-devbox-wif-adc.json), which a box now writes where the host keeps
+# it instead of into an overlay that dies with the box.
+ro .gcloud
+rw .config/gcloud
 
 # work identities agents use
 rw .config/trajectory-labs
@@ -70,7 +81,7 @@ ro .config/secretsd
 ro .config/sops
 ro .config/ctx
 ro .config/mailbox
-# the model-spend collector's token (installers/agent-spend.sh), so box sessions export too
+# the model-spend setup's endpoint, tags and session files (installers/agent-spend.sh), so box sessions export too
 ro .config/agent-spend
 # Dispatch and Envoy: envoy.json, which a box session without a profile of its
 # own reads, and a profile's own envoy.json may link to (envoy/AGENTS.md)

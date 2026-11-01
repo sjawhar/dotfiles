@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-import base64
 import importlib.util
 import io
 import json
 import os
 import sys
 import threading
-import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -46,14 +44,12 @@ BROKER_RESPONSE = release(
 BROKER_RESPONSE_WITHOUT_TRAJECTORY = release(sjawhar=(111, "broker-token-sjawhar"))
 NARROWED_RESPONSE = release(sjawhar=(111, "broker-token-sjawhar-narrowed"))
 
-# A `secrets` stand-in serves the upstream fallback and, for a machine that set key-secret,
-# the App key, and records every request. Without key-secret the App key must never be
-# requested from this command.
+# A `secrets` stand-in serves only the upstream fallback and records every
+# request. The App key must never be requested from this command.
 SECRETS_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$SECRETS_STUB_LOG"
 case "$2" in
   GH_PUBLIC_REPO_PAT) printf '%s\\n' ghp_stub_upstream_token ;;
-  GH_AGENT_APP_PRIVATE_KEY_B64) cat "$APP_KEY_B64_FILE" ;;
   *) printf '%s\\n' "secrets: secret '$2' not found" >&2; exit 1 ;;
 esac
 """
@@ -74,31 +70,6 @@ if [ -n "${SECRET_RUN_STUB_EXIT:-}" ]; then
 fi
 printf '%s' "$SECRET_RUN_STUB_RESPONSE"
 """
-
-
-def fake_github(installations, fail=None):
-    """A urlopen stand-in for GitHub's App API: the installation list and token minting.
-    Records (method, url, body, Authorization) for every request."""
-
-    def urlopen(request, timeout=None):
-        urlopen.calls.append(
-            (request.get_method(), request.full_url, request.data, request.get_header("Authorization"))
-        )
-        if fail:
-            raise gh_app_token.urllib.error.HTTPError(request.full_url, fail, "error", {}, None)
-        if "/app/installations?" in request.full_url:
-            return io.BytesIO(
-                json.dumps([{"id": i, "account": {"login": login}} for login, i in installations.items()]).encode()
-            )
-        installation_id = request.full_url.rsplit("/", 2)[-2]
-        return io.BytesIO(json.dumps({"token": f"minted-{installation_id}", "expires_at": "2099-01-01T00:00:00Z"}).encode())
-
-    urlopen.calls = []
-    return urlopen
-
-
-def b64url_decode(part):
-    return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
 
 
 class GhAppTokenTests(unittest.TestCase):
@@ -659,70 +630,78 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn("a --repo/--read-only token has no fallback", stderr)
         self.assertEqual(self.secrets_calls(), [])
 
-    def use_secretsd_key(self):
-        """Opt this machine in to minting with an App key from secretsd (a fresh RSA key)."""
-        key = Path(self.temp_dir.name) / "app.pem"
-        subprocess.run(["openssl", "genrsa", "-out", str(key), "2048"], check=True, capture_output=True)
-        key_b64 = Path(self.temp_dir.name) / "app.pem.b64"
-        key_b64.write_text(base64.b64encode(key.read_bytes()).decode())
-        os.environ["APP_KEY_B64_FILE"] = str(key_b64)
-        self.git_config["gh-app.agent.key-secret"] = "GH_AGENT_APP_PRIVATE_KEY_B64"
-        return key
+class BoxEnrollmentWait(unittest.TestCase):
+    """A new agent box has no broker identity for its first ~100 s, so its first GitHub call
+    waits for the enrollment instead of failing it (dispatch://INFRA-702). The wait is keyed on
+    the enrollment.pending marker scripts/agentbox writes and keeps fresh, and on nothing else:
+    a host session has no key dir of that shape, so it never waits at all.
+    """
 
-    def test_a_machine_with_key_secret_mints_from_secretsd_and_never_asks_the_broker(self):
-        # 2026-10-31: the laptop runs no agent-secrets helper, so the broker refused every
-        # session there and nothing could push. key-secret in that machine's git config mints
-        # with the App key secretsd holds instead.
-        key = self.use_secretsd_key()
-        github = fake_github({"sjawhar": 111, "trajectory-labs-pbc": 222})
-        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=github):
-            rc, stdout, _ = self.run_main(["agent", "--owner", "sjawhar"])
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.key_dir = Path(self.temp_dir.name) / "agent-secrets"
+        self.key_dir.mkdir()
+        self.marker = self.key_dir / gh_app_token.ENROLLMENT_MARKER
 
-        self.assertEqual((rc, stdout), (0, "minted-111\n"))
-        self.assertEqual(self.secret_run_calls(), [])
-        self.assertEqual(self.secrets_calls(), ["get GH_AGENT_APP_PRIVATE_KEY_B64 --value"])
-        # The bearer is a JWT for this App that verifies against the key's public half.
-        jwt = github.calls[0][3].removeprefix("Bearer ")
-        header, claims, signature = jwt.split(".")
-        self.assertEqual(json.loads(b64url_decode(claims))["iss"], "3202636")
-        public = Path(self.temp_dir.name) / "app.pub"
-        subprocess.run(["openssl", "rsa", "-in", str(key), "-pubout", "-out", str(public)], check=True, capture_output=True)
-        signature_file = Path(self.temp_dir.name) / "sig"
-        signature_file.write_bytes(b64url_decode(signature))
-        verify = subprocess.run(
-            ["openssl", "dgst", "-sha256", "-verify", str(public), "-signature", str(signature_file)],
-            input=f"{header}.{claims}".encode(), capture_output=True, check=False,
-        )
-        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
-        # Every installation the App lists is remembered, so a later list that drops one refuses.
-        self.assertEqual(gh_app_token.covered_owners("3202636"), {"sjawhar": 111, "trajectory-labs-pbc": 222})
+    def wait(self, sleep, key_dir=True):
+        """wait_for_box_enrollment with `sleep` standing in for time.sleep; returns its stderr."""
+        environment = {"AGENT_SECRETS_KEY_DIR": str(self.key_dir)} if key_dir else {}
+        err = io.StringIO()
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(gh_app_token.time, "sleep", sleep),
+            redirect_stderr(err),
+        ):
+            gh_app_token.wait_for_box_enrollment()
+        return err.getvalue()
 
-    def test_key_secret_mints_exactly_the_narrowing_and_an_uninstalled_owner_gets_the_fallback(self):
-        self.use_secretsd_key()
-        github = fake_github({"sjawhar": 111})
-        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=github):
-            narrowed = self.run_main(["agent", "--owner", "sjawhar", "--repo", "proofs-internal", "--read-only"])
-            upstream = self.run_main(["agent", "--owner", "METR"])
+    def never_sleeps(self, seconds):
+        self.fail(f"waited {seconds}s where nothing says an enrollment is under way")
 
-        self.assertEqual(narrowed[:2], (0, "minted-111\n"))
-        posts = [(url, json.loads(body)) for method, url, body, _ in github.calls if method == "POST"]
-        self.assertEqual(
-            posts,
-            [(
-                "https://api.github.com/app/installations/111/access_tokens",
-                {"repositories": ["proofs-internal"], "permissions": {"contents": "read", "metadata": "read"}},
-            )],
-        )
-        self.assertEqual(upstream[:2], (0, "ghp_stub_upstream_token\n"))
-        self.assertEqual(self.secret_run_calls(), [])
+    def test_a_host_session_never_waits(self):
+        self.marker.touch()
+        self.assertEqual(self.wait(self.never_sleeps, key_dir=False), "")
 
-    def test_key_secret_github_failure_quits_and_never_reads_the_fallback(self):
-        self.use_secretsd_key()
-        with patch.object(gh_app_token.urllib.request, "urlopen", side_effect=fake_github({}, fail=500)):
-            rc, stdout, stderr = self.run_main(["agent", "get"], stdin="host=github.com\npath=sjawhar/dotfiles.git\n\n")
-        self.assertEqual((rc, stdout), (1, "quit=1\n"))
-        self.assertIn("returned 500", stderr)
-        self.assertEqual(self.secrets_calls(), ["get GH_AGENT_APP_PRIVATE_KEY_B64 --value"])
+    def test_a_box_whose_enrollment_has_ended_never_waits(self):
+        self.assertEqual(self.wait(self.never_sleeps), "")
+
+    def test_a_marker_no_launcher_is_renewing_never_waits(self):
+        """The launcher renews the marker while it works; one older than the client's own trust
+        window means the launcher is gone, and waiting for it would hang the call."""
+        self.marker.touch()
+        stale = gh_app_token.time.time() - gh_app_token.ENROLLMENT_MARKER_FRESH_SECONDS - 10
+        os.utime(self.marker, (stale, stale))
+        self.assertEqual(self.wait(self.never_sleeps), "")
+
+    def test_it_waits_until_the_enrollment_ends(self):
+        self.marker.touch()
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            if len(slept) == 3:
+                self.marker.unlink()  # The launcher enrolled the box, or gave up.
+
+        stderr = self.wait(sleep)
+        self.assertEqual(len(slept), 3)
+        # Said once, not once per second.
+        self.assertEqual(stderr.count("still being enrolled"), 1)
+
+    def test_the_wait_is_bounded_even_while_the_marker_stays_fresh(self):
+        self.marker.touch()
+        clock = [0.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+            os.utime(self.marker, None)  # A launcher that never finishes keeps it fresh.
+
+        with patch.object(gh_app_token.time, "monotonic", lambda: clock[0]):
+            self.wait(sleep)
+        self.assertEqual(clock[0], gh_app_token.ENROLLMENT_WAIT_SECONDS)
+        # Long enough for the 116 s a box took to enroll on 2026-11-01.
+        self.assertGreaterEqual(gh_app_token.ENROLLMENT_WAIT_SECONDS, 160)
+
 
 
 if __name__ == "__main__":

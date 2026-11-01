@@ -48,6 +48,10 @@ before handing the call to the real one.
   killer took two unrelated pods with it; inside a scope only that session dies. `MemoryHigh` is
   deliberately not set: it throttles a session into reclaim instead of killing it, which looks
   like a lane that is thinking.
+  Inside an agent box (`/etc/agentbox-identity`) there is no host systemd to accept a scope and
+  none is needed, since the box cgroup is already the ceiling: the shim says that in one line
+  instead of reporting a refusal the agent cannot act on, which was the first line of every
+  boxed launch until dispatch://INFRA-702.
   A named profile whose `agent/models.overlay.yml` exists is a shared profile: the shim links
   all of the default's state into it and rebuilds its `models.yml` as the default's merged with the
   overlay, on every launch, under a 30 s lock; a real entry on both sides stops the launch
