@@ -392,6 +392,25 @@ both_bodies() {
     return 2
 }
 
+# flag_after_target WHERE WORD… refuses a message whose first word is an option
+# this command parses only BEFORE the target. Parsing stops at the target, so
+# `envoy send <t> --message-file x` would otherwise send the literal words
+# "--message-file x" as the message, and the sender reads a success. Measured
+# 2026-11-01: that is exactly what reached a peer, sent by the author of the
+# flag, within an hour of it landing. A body that genuinely begins with one of
+# these words goes through --message-file, which sends bytes verbatim.
+flag_after_target() {
+    local where="$1"; shift
+    case "${1:-}" in
+        --message-file|--source)
+            echo "envoy: $where was given $1 after the target, where it is message text, not an option." >&2
+            echo "       Options come first: $where [--source envoy] [--message-file <path>] <target> [<message>]" >&2
+            echo "       To send a message that starts with \"$1\", pass it through --message-file." >&2
+            return 2 ;;
+    esac
+    return 0
+}
+
 _envoy_send() {
     local asserted_source="" message_file=""
     # Options may come in any order, and parsing stops at the first word that is
@@ -427,6 +446,7 @@ _envoy_send() {
         [ $# -eq 0 ] || both_bodies "envoy send" "$#" "$message_file" || return 2
         resolve_message_file "$message_file"
     else
+        flag_after_target "envoy send" "$@" || return 2
         message="$*"
     fi
 
