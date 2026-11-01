@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""running-script-guard-keeper: stop every older running-script guard still loaded in omp from acting.
+
+  running-script-guard-keeper
+
+From 2026-10-31 to 2026-11-01, omp/extensions/running-script-guard.ts changed files that shells
+were running: it took their write bits (dotfiles 005cb5b), then copied each one from the shell's
+fd and renamed the copy over its path (ac7706c, 8995358, 34cbf94). The guard now changes no file,
+but an omp process keeps the guard it loaded at start, so every session started before the change
+keeps acting until it ends. When a wrapper such as shims/gh execs the next script (shims/knives),
+the shell's fd moves to that script, and the copy puts the other script's bytes, mode and mtime at
+the wrapper's path: on 2026-11-01 shims/gh held shims/knives at least ten times, and shims/omp and
+scripts/agent-session held scripts/agent-secrets-session. A chmod through a moved fd takes the
+other file's write bits and leaves no record for it.
+
+Every pass of every generation first takes `pass.lock` in the guard's state directory with
+O_EXCL, and skips while that file exists and is younger than 60 s; the current guard uses the same
+lock. This keeper holds it: it creates the lock when it is free, refreshes its mtime every second,
+and never touches a lock another process holds. With the lock held no pass runs, so the keeper
+gives back the recorded write bits itself, with running-script-guard-restore, 35 s after it first
+holds the lock (a pass abandoned at its 30 s deadline may still be working until then) and once a
+minute after that.
+
+An older guard registers each session that loads it as `sessions/<pid>-<uuid>`; the current guard
+registers none. Once no live process holds such a registration, the keeper gives back what is
+recorded, removes its lock and exits 0. SIGTERM removes the lock too. It prints one line per
+action. Run it as a systemd --user unit, so it outlives the session that starts it:
+
+  systemd-run --user --unit=running-script-guard-keeper -p Restart=on-failure \\
+      "$HOME/.dotfiles/scripts/running-script-guard-keeper"
+"""
+
+import datetime
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+USAGE = "usage: running-script-guard-keeper"
+# A pass is abandoned at its 30 s deadline (PASS_DEADLINE_MS) but may keep working: no give-back
+# before it can have finished.
+FIRST_GIVE_BACK_S = 35.0
+GIVE_BACK_EVERY_S = 60.0
+# The guards take over a lock older than 60 s; refresh it well inside that.
+REFRESH_S = 1.0
+# A pass releases the lock and writes its stamp; no other pass claims for 2 s, so poll inside that.
+WAIT_S = 0.1
+RESTORE = pathlib.Path(__file__).resolve().parent / "running-script-guard-restore"
+
+
+def say(line: str) -> None:
+    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    print(f"{stamp} {line}", flush=True)
+
+
+def state_dir() -> pathlib.Path:
+    """The guard's state directory for this pid namespace, as defaultStateDir() in the guard names it."""
+    base = os.environ.get("XDG_STATE_HOME") or str(pathlib.Path.home() / ".local" / "state")
+    namespace = "pid-" + "".join(ch for ch in os.readlink("/proc/self/ns/pid") if ch.isdigit())
+    return pathlib.Path(base) / "omp-running-script-guard" / namespace
+
+
+def process_start(pid: int) -> float | None:
+    """Wall-clock start of a live, non-zombie process, or None."""
+    try:
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    fields = stat[stat.rfind(")") + 2 :].split()
+    if fields[0] == "Z":
+        return None
+    return BOOT_TIME + int(fields[19]) / CLOCK_TICKS
+
+
+def live_registrants(state: pathlib.Path) -> list[int]:
+    """Pids of live processes that loaded an older guard: each wrote `sessions/<pid>-<uuid>` after it started."""
+    pids = set()
+    try:
+        entries = list(os.scandir(state / "sessions"))
+    except FileNotFoundError:
+        return []
+    for entry in entries:
+        head = entry.name.split("-", 1)[0]
+        if not head.isdigit():
+            continue
+        try:
+            written = entry.stat().st_mtime
+        except FileNotFoundError:
+            continue  # removed by an older guard's session end
+        start = process_start(int(head))
+        # A pid reused by a later process started after the registration was written. The margin
+        # covers clock drift since boot: a guard counted that has ended costs one keeper that
+        # runs longer; a live guard missed acts again.
+        if start is not None and start <= written + 600:
+            pids.add(int(head))
+    return sorted(pids)
+
+
+class Lock:
+    """pass.lock, held by this process or not at all."""
+
+    def __init__(self, path: pathlib.Path):
+        self.path = path
+        self.mark = f"running-script-guard-keeper {os.getpid()}\n"
+        self.ours: tuple[int, int] | None = None
+
+    def _is_ours(self) -> bool:
+        try:
+            st = os.stat(self.path)
+            return (st.st_dev, st.st_ino) == self.ours and self.path.read_text() == self.mark
+        except (FileNotFoundError, UnicodeDecodeError):
+            return False
+
+    def hold(self) -> bool:
+        """Refreshes the lock if it is ours, creates it if it is free; False while another process holds it."""
+        if self.ours is not None:
+            if self._is_ours():
+                os.utime(self.path)
+                return True
+            self.ours = None
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            return False  # a pass holds it; it releases within its 30 s deadline
+        with os.fdopen(fd, "w") as file:
+            file.write(self.mark)
+        st = os.stat(self.path)
+        self.ours = (st.st_dev, st.st_ino)
+        return True
+
+    def release(self) -> None:
+        if self.ours is not None and self._is_ours():
+            self.path.unlink()
+        self.ours = None
+
+
+def give_back(state: pathlib.Path) -> None:
+    """running-script-guard-restore, when a record exists; its lines go to this log."""
+    if not any((state / "held").glob("*.json")):
+        return
+    result = subprocess.run([sys.executable, str(RESTORE)], capture_output=True, text=True, check=False)
+    for line in (result.stdout + result.stderr).splitlines():
+        say(f"restore: {line}")
+    if result.returncode != 0:
+        say(f"restore exited {result.returncode}")
+
+
+def main(argv: list[str]) -> int:
+    if argv:
+        print(USAGE, file=sys.stderr)
+        return 2
+    state = state_dir()
+    lock = Lock(state / "pass.lock")
+
+    def stop(signum: int, _frame: object) -> None:
+        lock.release()
+        say(f"stopped by signal {signum}; lock released, so passes of older guards run again")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    held_since: float | None = None
+    last_give_back: float | None = None
+    waiting_said = False
+    while True:
+        alive = live_registrants(state)
+        if not alive:
+            give_back(state)
+            lock.release()
+            say(f"no live process loaded an older guard (registrations in {state / 'sessions'}); lock released, exiting")
+            return 0
+        if lock.hold():
+            now = time.monotonic()
+            if held_since is None:
+                held_since = now
+                waiting_said = False
+                say(f"holding {lock.path}; {len(alive)} live processes loaded an older guard: {' '.join(map(str, alive))}")
+            if now - held_since >= FIRST_GIVE_BACK_S and (last_give_back is None or now - last_give_back >= GIVE_BACK_EVERY_S):
+                give_back(state)
+                last_give_back = now
+            time.sleep(REFRESH_S)
+        else:
+            if held_since is not None:
+                say(f"{lock.path} was removed or replaced by another process; taking it again when it is free")
+                held_since = None
+            elif not waiting_said:
+                say(f"waiting for the pass that holds {lock.path} to release it")
+                waiting_said = True
+            time.sleep(WAIT_S)
+
+
+with open("/proc/stat") as _stat:
+    BOOT_TIME = next(int(line.split()[1]) for line in _stat if line.startswith("btime "))
+CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    sys.exit(main(sys.argv[1:]))

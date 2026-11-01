@@ -3,21 +3,17 @@
 
   running-script-guard-restore [--dry-run]
 
-omp/extensions/running-script-guard.ts protects a script that an agent's shell runs by putting a
-copy of the script at its path, which needs nothing given back. Where it can make no copy — another
-link to the file, a file over 8 MiB, a directory this user cannot write — it takes the script's
-write bits instead, and gives them back when the run ends or the last omp session ends. If every
-omp process on the machine is killed first, the bits stay off until an omp session starts again.
-This command gives them back now, with no omp session.
+Until 2026-11-01, omp/extensions/running-script-guard.ts took the write bits of scripts that
+shells it found running, and recorded each take. The guard no longer takes any; every pass of the
+current one gives recorded bits back. omp sessions started before that change keep the older code,
+and if every omp process on the machine is killed, recorded bits stay off until an omp session
+starts again. This command gives them back now, with no omp session.
 
 For each record under ${XDG_STATE_HOME:-~/.local/state}/omp-running-script-guard/*/held/, it sets
 the recorded mode on the recorded path when the file there still has exactly the mode the guard
 left: the same file, or a copy that a rename writer such as `sed -i` made after the guard took the
 bits. It leaves any other file alone. It removes each record, writes a line to guard.log beside the
 records, and prints one line per file. --dry-run prints the same lines and changes nothing.
-
-While an omp session lives, a script that an agent's shell still runs and that the guard can only
-protect by its mode loses its write bits again at that session's next pass.
 """
 
 import datetime
