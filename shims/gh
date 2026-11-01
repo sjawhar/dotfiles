@@ -98,6 +98,8 @@ if agent_context; then
     if [[ "${1:-}" == pr && "${2:-}" == create ]]; then
         "$_dotfiles/scripts/docs-pr-gate" "${@:3}"
     fi
+    # Public repository text: refuse an internal reference before gh posts it.
+    "$_dotfiles/scripts/public-text-gate" "$@" || exit 1
 fi
 
 # Content decides what is "real", never the path: any candidate carrying the

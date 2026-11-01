@@ -1,0 +1,54 @@
+#!/bin/bash
+# public-text-gate <gh argv…>: refuse gh text that would publish an internal reference.
+#
+# shims/gh calls this in an agent session, before it hands the call on. The decision is not here:
+# this finds the shared leak check and gives it the whole command line in its `gh-guard` mode,
+# which acts only on a call that posts or changes text, and only when the target repository is
+# public. One implementation of the patterns serves the pre-push hook of every public fork and
+# this gate.
+#
+# Finding the check, in order: $PUBLIC_LEAK_CHECK, then public-leak-check.sh on PATH, then the
+# path written in ~/.config/public-leak-check/path. That file is per machine and is never
+# committed, because no committed file here may hold an absolute path.
+#
+# With no check on the machine, a read passes and a write to GitHub is refused, with a message
+# that says how to point at the check. A guard that cannot run must not let text through.
+#
+# Exit 0 lets the gh call run. Any other exit refuses it.
+set -uo pipefail
+
+[[ $# -gt 0 ]] || exit 0
+
+_check="${PUBLIC_LEAK_CHECK:-}"
+[[ -n "$_check" ]] || _check="$(command -v public-leak-check.sh 2>/dev/null || true)"
+if [[ -z "$_check" ]]; then
+    _pointer="${XDG_CONFIG_HOME:-$HOME/.config}/public-leak-check/path"
+    [[ -s "$_pointer" ]] && _check="$(< "$_pointer")"
+fi
+if [[ -x "$_check" ]]; then
+    exec "$_check" gh-guard "$@"
+fi
+
+# No check on this machine. Refuse the calls that publish text, and let every other call run.
+_writes=0
+case "${1:-} ${2:-}" in
+    'pr create' | 'pr edit' | 'pr comment' | 'pr review' | \
+    'issue create' | 'issue edit' | 'issue comment' | \
+    'release create' | 'release edit') _writes=1 ;;
+esac
+if [[ "${1:-}" == api ]]; then
+    for _a in "$@"; do
+        case "$_a" in
+            POST | PATCH | PUT | --method=POST | --method=PATCH | --method=PUT | \
+            -f | -F | --field | --raw-field | --field=* | --raw-field=*) _writes=1; break ;;
+        esac
+    done
+fi
+((_writes)) || exit 0
+cat >&2 <<EOF
+gh shim: refusing "gh ${1:-} ${2:-}": this machine has no public text check, so nothing can tell
+whether the text holds an internal reference. Point at the check with
+PUBLIC_LEAK_CHECK=<path to public-leak-check.sh>, put that file on PATH, or write its path in
+${XDG_CONFIG_HOME:-\$HOME/.config}/public-leak-check/path.
+EOF
+exit 1
