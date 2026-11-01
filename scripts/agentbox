@@ -25,10 +25,14 @@
 #                                       `agentbox restart` (in-box form: this session,
 #                                       now) when safe; --now hangs it up at once
 #   agentbox move --plan [--json]       the live host sessions this machine runs outside a box,
-#                                       with the box each one would get and its disk cost
-#   agentbox move --self [--dry-run]    run by a session in its own pane at a safe point: it
+#                                       with the box each one would get, every path that box
+#                                       gets and why it gets it, and its disk cost
+#   agentbox move --self [--dry-run] [--dir PATH]…
+#                                       run by a session in its own pane at a safe point: it
 #                                       relaunches that pane into its own box, resuming this
-#                                       session in the same directory
+#                                       session in the same directory. The box's paths are
+#                                       inferred from the session's own processes; each --dir
+#                                       adds one the inference missed, after the inferred ones
 #   agentbox move <session-id>… | --all [--now] [--dry-run]
 #                                       ask each host session over Envoy to run
 #                                       `agentbox move --self` when safe; --now relaunches
@@ -563,9 +567,56 @@ ensure_tcp_forwarder() {
 
 ensure_unix_forwarder() {
     local unit="$1" sock="$2" target="$3"
+    # A unit already relaying somewhere else is stopped first, as the TCP one is: the host's
+    # tmux socket path follows TMUX_TMPDIR, and a stale unit would relay every box to a socket
+    # nothing listens on.
+    if systemctl --user is-active --quiet "$unit" \
+        && ! systemctl --user show -p ExecStart --value "$unit" 2>/dev/null | grep -qF "UNIX-CONNECT:$target"; then
+        systemctl --user stop "$unit" 2>/dev/null || true
+    fi
     mkdir -p "$(dirname "$sock")"
     start_unit "$unit" socat "UNIX-LISTEN:$sock,fork,mode=600,unlink-early" "UNIX-CONNECT:$target"
     wait_for test -S "$sock" || die "forwarder $unit did not open $sock (journalctl --user -u $unit)"
+}
+
+# The host's tmux server, for a lead that drives other sessions' panes (`tmux new-window`,
+# `send-keys`, `capture-pane`, `list-panes`). It needs a relay, exactly as the session bus does,
+# and for the same reason: Sysbox maps the box onto a subordinate uid range, and the tmux server
+# refuses a client whose SO_PEERCRED uid is not its own. Measured 2026-11-01 in a throwaway box
+# with the host's socket bind-mounted directly: connect(2) succeeded (Sysbox id-maps the bind,
+# so the node is the box user's) and every tmux command answered `access not allowed`, exit 1.
+# Through this relay, which connects onward as the user, the server sees the user. tmux's
+# non-attaching commands survive a relay - measured on the host, `display-message -p
+# '#{version}'` through a socat UNIX-LISTEN/UNIX-CONNECT pair answered 3.8 - which is what a
+# lead uses; attaching inside a box is not a thing anyone does, since the box has no terminal of
+# the host's.
+#
+# WHAT THIS GIVES A BOX, stated plainly: control of the host's tmux server. A box can read any
+# pane (`capture-pane`), type into any pane (`send-keys`, which in a pane at a shell is a
+# command as the host user, outside the box's cgroup and disk limit), respawn or kill any pane,
+# and `kill-server`, which would end every agent pane on the machine. It is given because the
+# relayed session bus already reaches the host's systemd user manager, so a box can already
+# `systemctl --user restart` the host's services (agentbox/AGENTS.md), and because a lead that
+# cannot drive panes cannot be boxed at all - which would leave the coordination sessions, the
+# heaviest on the host, outside every limit this work exists to apply.
+#
+# The socket the host session itself uses ($TMUX's first field) is the source, so a machine
+# whose TMUX_TMPDIR is not /tmp (this one keeps its sockets in ~/.tmux/sockets) is followed
+# rather than guessed; AGENTBOX_TMUX_SOCK overrides, and a host with no tmux gets no relay and
+# no mount. Inside, it is TMUX_TMPDIR/tmux-<box uid>/default, which is where a bare `tmux`
+# looks: the box user is uid 1000 by the image (agentbox/Dockerfile), whatever the host's uid.
+BOX_UID=1000
+HOST_TMUX_SOCK=""
+host_tmux_sock() {
+    HOST_TMUX_SOCK="${AGENTBOX_TMUX_SOCK:-${TMUX%%,*}}"
+    [[ -n "$HOST_TMUX_SOCK" ]] || HOST_TMUX_SOCK="${TMUX_TMPDIR:-/tmp}/tmux-$UID_/default"
+    [[ -S "$HOST_TMUX_SOCK" ]] || HOST_TMUX_SOCK=""
+}
+BOX_TMUX_DIR="$RUN_BASE/tmux"
+ensure_tmux_forwarder() {
+    host_tmux_sock
+    [[ -n "$HOST_TMUX_SOCK" ]] || return 0
+    ensure_unix_forwarder agentbox-tmux "$BOX_TMUX_DIR/tmux-$BOX_UID/default" "$HOST_TMUX_SOCK"
 }
 
 # forward's channels are TCP listeners on this host's loopback (forward/AGENTS.md gives each
@@ -597,6 +648,7 @@ ensure_forwarders() {
     ensure_tcp_forwarder agentbox-imds "$IMDS_PORT" 169.254.169.254:80
     ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
     ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
+    ensure_tmux_forwarder
     ensure_forward_channels
 }
 
@@ -696,6 +748,12 @@ mount_args() {
     # and so an in-box fetch, when the host had none, lands in the host's cache.
     mkdir -p -m 700 "/run/user/$UID_/envoy"
     a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
+    # The relayed host tmux server (ensure_tmux_forwarder), as a directory holding
+    # tmux-<box uid>/default, so a bare `tmux` in the box under TMUX_TMPDIR (session_env) finds
+    # it and a relay restarted since the box started is seen at once. A host with no tmux has
+    # no relay and the directory is empty, where `tmux` starts a server of the box's own.
+    mkdir -p -m 700 "$BOX_TMUX_DIR/tmux-$BOX_UID"
+    a+=(-v "$BOX_TMUX_DIR:/run/user/$UID_/tmux")
     # The inner dockerd's image store: anonymous, dies with the box.
     a+=(-v /var/lib/docker)
     printf '%s\n' "${a[@]}"
@@ -705,6 +763,11 @@ session_env() {
     local box="$1" e=()
     e+=(-e "XDG_RUNTIME_DIR=/run/user/$UID_")
     e+=(-e "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_/bus/bus")
+    # The host's tmux server through its relay, so `tmux new-window`, `send-keys` and
+    # `capture-pane` in a box act on the host's panes, which is what a lead does. TMUX itself is
+    # NOT set: a box is not inside a pane, and a tool that reads TMUX would address the wrong
+    # terminal.
+    e+=(-e "TMUX_TMPDIR=/run/user/$UID_/tmux")
     e+=(-e "HOME=$HOME" -e USER=ubuntu -e "TERM=${TERM:-xterm-256color}" -e "DOTFILES_DIR=$DOTFILES_DIR")
     e+=(-e "MISE_DATA_DIR=$HOME/.mise")
     # $HOME/.dotfiles/bin holds gitignored binaries (mise, a local jj) a
@@ -753,11 +816,27 @@ session_env() {
     # passthrough - without it the bare kitty APC it emits on every reflow
     # reaches tmux, which takes any APC string as the pane title
     # ("Ga=d,d=A,q=2"); TERM_PROGRAM(_VERSION) is what its hyperlink policy
-    # reads. The socket path in TMUX is not mounted; omp never runs tmux.
+    # reads.
+    #
+    # TMUX is `<socket>,<server pid>,<session index>`, and tmux itself reads that socket before
+    # it ever looks at TMUX_TMPDIR. The host's socket path is not mounted, so a box that got the
+    # host's value verbatim had a `tmux` that answered `error connecting to
+    # /home/sami/.tmux/sockets/tmux-1000/default (No such file or directory)` while the relay
+    # sat unused beside it (measured 2026-11-01 in agentbox-9edcc822bf2b). So the socket field
+    # is replaced with the relay's path inside the box and the rest is kept: omp still knows it
+    # is under tmux, and tmux reaches the host's server.
     local v
-    for v in TMUX TMUX_PANE TERM_PROGRAM TERM_PROGRAM_VERSION; do
+    for v in TMUX_PANE TERM_PROGRAM TERM_PROGRAM_VERSION; do
         [[ -n "${!v:-}" ]] && e+=(-e "$v=${!v}")
     done
+    if [[ -n "${TMUX:-}" ]]; then
+        host_tmux_sock
+        if [[ -n "$HOST_TMUX_SOCK" ]]; then
+            e+=(-e "TMUX=/run/user/$UID_/tmux/tmux-$BOX_UID/default,${TMUX#*,}")
+        else
+            e+=(-e "TMUX=$TMUX")
+        fi
+    fi
     printf '%s\n' "${e[@]}"
 }
 
@@ -1349,15 +1428,237 @@ move_check_floor() {
 
 move_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
 
-# The directories a box must be given so a session keeps the tree it has, one per line, the
-# session's own working directory FIRST (cmd_new works in the first --dir). A session inside a
-# git working tree also needs that tree's root and the tree's git common dir where either is
-# outside $SRC: a worktree's .git is a file naming its common dir, and a session working in a
-# subdirectory of a checkout would otherwise get a box with no repository in it at all. A path
-# under $SRC is left out - every box has $SRC already, read-write, at its own path. A working
-# directory no box can be given fails here, with the reason on stderr.
-move_dirs() {
-    local cwd="$1" top="" common="" owner="" cand have dirs=() skip
+# ── the paths a box must be given ────────────────────────────────────────────────────────────
+#
+# A move's spec was the session's working directory and its git tree, and nothing else. That is
+# not the tree a lane works in. Measured over the sessions notified on 2026-11-01: a session
+# whose cwd is ~/src/oss-verifier writes in /mnt/nvme/sami/oss-verifier/..., /mnt/nvme/sami/tmp/...
+# and ~/.worktrees/...; session 01a16640's cwd is ~/Code/legion, a real checkout of legion, while
+# the worktrees it has open are ~/src/legion/.worktrees/infra-140-s5 and
+# /mnt/nvme/sami/worktrees/legion/stopped-tree - so the cwd alone would have given it a box whose
+# `git status` answers about ANOTHER checkout. A path a box is not given is not absent inside it:
+# a home path is silently writable into the box's own filesystem and lost with the box
+# (agentbox/AGENTS.md), which is the dangerous failure. So the spec is inferred from what the
+# session's own processes actually use, and `--plan` and the notice print every path with why it
+# was chosen, so a lane sees its box before it moves and adds what is missing with
+# `agentbox move --self --dir PATH`.
+
+# The roots that hold MANY sessions' trees. A path below one of these is never mounted at the
+# root: the box gets the first directory under it, which is the session's own tree. The deepest
+# matching root wins, so /mnt/nvme/<user>/tmp/<name> keeps <name> rather than tmp. A git working
+# tree is resolved by git instead (move_resolve_dir), which is the exact boundary where there is
+# one; this is the bound for everything else. AGENTBOX_MOVE_ROOTS (colon-separated) replaces the
+# list, as AGENTBOX_PROC replaces /proc: the test fixture's own temporary tree lives under one of
+# these roots on this host, which would otherwise make the suite's answers depend on TMPDIR.
+MOVE_SHARED_ROOTS=()
+move_shared_roots() {
+    if (( ${#MOVE_SHARED_ROOTS[@]} )); then return 0; fi
+    if [[ -n "${AGENTBOX_MOVE_ROOTS:-}" ]]; then
+        IFS=: read -r -a MOVE_SHARED_ROOTS <<<"$AGENTBOX_MOVE_ROOTS"
+        return 0
+    fi
+    local nvme="/mnt/nvme/$(id -un)"
+    MOVE_SHARED_ROOTS=("$HOME/Code" "$HOME/Code/personal" "$HOME/.worktrees" "$HOME/tmp")
+    # session-tmp holds one directory per session (devbox/session-scratch-reap) and tmp one per
+    # `work-dir NAME`, so both are roots and neither is ever a path a box is given.
+    MOVE_SHARED_ROOTS+=("$nvme" "$nvme/tmp" "$nvme/session-tmp" "$nvme/worktrees" "$nvme/scratch")
+}
+
+# The paths every box already has at their own path: $SRC and the targets of its symlinks, the
+# dotfiles, and every entry of the home allow-list (agentbox/mounts). An inferred path under one
+# of them is left out of the spec - naming it would change nothing. A worktree under
+# ~/src/<repo>/.worktrees/... is in this class: $SRC is bind-mounted read-write into every box,
+# so such a tree IS in the box, with no --dir at all.
+MOVE_IN_BOX=()
+move_in_box_paths() {
+    if (( ${#MOVE_IN_BOX[@]} )); then return 0; fi
+    local p
+    MOVE_IN_BOX=("$SRC" "$HOME/.dotfiles" "$DOTFILES_DIR")
+    for p in "$SRC"/*; do
+        [[ -L "$p" ]] || continue
+        MOVE_IN_BOX+=("$(readlink -f "$p")")
+    done
+    while read -r p; do [[ -n "$p" ]] && MOVE_IN_BOX+=("$HOME/$p"); done < <(mounts_of rw; mounts_of ro)
+}
+
+move_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
+
+# A path no box should be given: the host's system directories (a box has its own), /tmp (the
+# box's own, inside its disk limit), anything at or above $HOME, $SRC, the box tree or one of the
+# shared roots above. The session's own working directory is exempt - it is where the session
+# works, and a box without it is no move at all - but nothing inferred is.
+move_dir_too_broad() {
+    local path="$1" root
+    case "$path" in
+        /|/proc/*|/proc|/sys/*|/sys|/dev/*|/dev|/run/*|/run|/tmp|/tmp/*|/var|/var/*|/usr|/usr/*) return 0 ;;
+        /etc|/etc/*|/opt|/opt/*|/boot|/boot/*|/snap|/snap/*|/bin|/bin/*|/sbin|/sbin/*|/lib*) return 0 ;;
+    esac
+    move_shared_roots
+    for root in "$HOME" "$SRC" "$BOXES" "${MOVE_SHARED_ROOTS[@]}"; do
+        # at or above one of these: /, /home, /mnt, /mnt/nvme, $HOME, ~/Code, /mnt/<user>/tmp …
+        if move_within "$root" "$path"; then return 0; fi
+    done
+    return 1
+}
+
+move_dir_in_box() {
+    local path="$1" p
+    move_in_box_paths
+    for p in "${MOVE_IN_BOX[@]}"; do
+        if move_within "$path" "$p"; then return 0; fi
+    done
+    return 1
+}
+
+# One candidate directory as the box should get it: the root of its git working tree when it is
+# in one (the exact boundary, and what makes a worktree of a session's open file arrive whole),
+# else the first directory below the deepest shared root above it. Prints the path, empty when
+# there is none to keep.
+move_resolve_dir() {
+    local path="$1" top root best="" rest
+    top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -n "$top" && -d "$top" ]]; then printf '%s\n' "$top"; return 0; fi
+    move_shared_roots
+    for root in "${MOVE_SHARED_ROOTS[@]}"; do
+        if [[ "$path" == "$root"/* ]] && (( ${#root} > ${#best} )); then best="$root"; fi
+    done
+    if [[ -n "$best" ]]; then
+        rest="${path#"$best"/}"
+        path="$best/${rest%%/*}"
+    fi
+    printf '%s\n' "$path"
+}
+
+# pid -> its children, for every process on this host, read once: the plan asks this of 80+
+# sessions and one pass costs a builtin read per process. Built in the caller's shell, so the
+# subshell each move_dirs runs in inherits it (cmd_move_plan, cmd_move_self and cmd_move_notify
+# call it before their loop).
+declare -A MOVE_KIDS=()
+MOVE_KIDS_READ=false
+move_read_kids() {
+    if $MOVE_KIDS_READ; then return 0; fi
+    MOVE_KIDS_READ=true
+    local d pid line rest parent
+    for d in "$PROC"/[0-9]*; do
+        pid="${d##*/}"
+        # 2>/dev/null BEFORE the input redirection: bash applies them left to right, and a
+        # process that exits between the glob and the open otherwise prints its own error.
+        read -r line 2>/dev/null <"$d/stat" || continue
+        rest="${line#*\(}"
+        rest="${rest##*\) }"
+        read -r _ parent _ <<<"$rest"
+        [[ -n "$parent" ]] || continue
+        MOVE_KIDS[$parent]="${MOVE_KIDS[$parent]:-} $pid"
+    done
+}
+
+# A process and every live descendant of it: a session is its omp plus the tools it runs, and a
+# lane's real paths are in the children (a `git -C <tree>`, an editor, a build) far more often
+# than in omp's own cwd.
+move_descendants() {
+    local queue=("$1") pid kid guard=0
+    local -A seen=([$1]=1)
+    while (( ${#queue[@]} && guard < 4096 )); do
+        guard=$((guard + 1))
+        pid="${queue[0]}"
+        queue=("${queue[@]:1}")
+        printf '%s\n' "$pid"
+        for kid in ${MOVE_KIDS[$pid]:-}; do
+            [[ -z "${seen[$kid]:-}" ]] || continue
+            seen[$kid]=1
+            queue+=("$kid")
+        done
+    done
+}
+
+# Every directory one of a session's processes works in or writes into, as "<dir>\t<why>": the
+# cwd of each, and the directory of every file one of them holds OPEN FOR WRITING (O_WRONLY or
+# O_RDWR in /proc/<pid>/fdinfo/<fd> flags). The fd targets are read with one `find` over the
+# whole subtree - `find` skips a path that goes away instead of stopping.
+#
+# Everything after that find is a shell builtin, and each directory is answered once. The plan
+# asks this of every session on the host at once, so a fork per open file is not affordable: a
+# first version read the flags with `awk` per fd and the plan took 3 m 26 s over 66 movable
+# sessions on 2026-11-01. A directory the box has already (the home allow-list, $SRC, the
+# dotfiles) is dropped here rather than by the caller, because those are most of a session's
+# open files - the mise store, the language caches, ~/.omp - and dropping them first is what
+# makes the flags read rare.
+move_proc_dirs() {
+    local root="$1" pids=() pid args=() src target comm fd flags dir key value
+    local -A said=()
+    move_read_kids
+    mapfile -t pids < <(move_descendants "$root")
+    (( ${#pids[@]} )) || return 0
+    for pid in "${pids[@]}"; do args+=("$PROC/$pid/cwd" "$PROC/$pid/fd"); done
+    while IFS=$'\t' read -r src target; do
+        [[ "$target" == /* && "$target" != *" (deleted)" ]] || continue
+        if [[ "$src" == */cwd ]]; then dir="$target"; else dir="${target%/*}"; fi
+        # A target directly under / leaves an empty dirname, and no box is given / anyway.
+        [[ -n "$dir" && "$dir" != / ]] || continue
+        [[ -n "${said[$dir]:-}" ]] && continue
+        case "$target" in /proc/*|/sys/*|/dev/*|/run/*) continue ;; esac
+        move_dir_in_box "$dir" && continue
+        pid="${src#"$PROC"/}"
+        pid="${pid%%/*}"
+        read -r comm 2>/dev/null <"$PROC/$pid/comm" || comm="?"
+        if [[ "$src" == */cwd ]]; then
+            [[ -d "$target" ]] || continue
+            said[$dir]=1
+            printf '%s\t%s\n' "$dir" "the working directory of $comm (pid $pid)"
+            continue
+        fi
+        [[ -f "$target" ]] || continue
+        fd="${src##*/}"
+        flags=""
+        while read -r key value; do
+            [[ "$key" == flags: ]] || continue
+            flags="$value"
+            break
+        done 2>/dev/null <"$PROC/$pid/fdinfo/$fd"
+        [[ -n "$flags" ]] || continue
+        # O_WRONLY (1) or O_RDWR (2) in the low two bits of the octal open flags.
+        (( (8#$flags & 3) )) || continue
+        said[$dir]=1
+        printf '%s\t%s\n' "$dir" "$comm (pid $pid) holds ${target##*/} open for writing"
+    done < <(find "${args[@]}" -maxdepth 1 -type l -printf '%p\t%l\n' 2>/dev/null)
+}
+
+# The spec being built: the paths and, beside each, why it is there.
+MOVE_D=()
+MOVE_W=()
+# Keep one path, shallowest ancestor wins: a path inside one the spec already has adds nothing,
+# and one that CONTAINS others replaces them - except the first, the session's own working
+# directory, which stays first because `agentbox new` works in the first --dir.
+move_keep() {
+    local path="$1" why="$2" i out=() outw=()
+    for ((i = 0; i < ${#MOVE_D[@]}; i++)); do
+        if move_within "$path" "${MOVE_D[i]}"; then return 0; fi
+    done
+    for ((i = 0; i < ${#MOVE_D[@]}; i++)); do
+        if (( i > 0 )) && move_within "${MOVE_D[i]}" "$path"; then continue; fi
+        out+=("${MOVE_D[i]}")
+        outw+=("${MOVE_W[i]}")
+    done
+    MOVE_D=("${out[@]}" "$path")
+    MOVE_W=("${outw[@]}" "$why")
+}
+
+# The directories a box must be given so a session keeps the tree it works in, as
+# "<path>\t<why>", the session's own working directory FIRST (cmd_new works in the first --dir):
+#
+#   1. the working directory itself, and - when it is in a git working tree outside $SRC - that
+#      tree's root and the checkout that owns it (a worktree's .git is a file naming a common dir
+#      in another tree; without it the box has the working files and no repository);
+#   2. every directory the session's own processes use (move_proc_dirs), each resolved to its git
+#      tree root or bounded at the first directory below a shared root, and left out when a box
+#      has it already ($SRC, the dotfiles, the home allow-list) or when it is too broad;
+#   3. each path the caller named with --dir, after the inferred ones, in the order given.
+#
+# $2 is the session's omp pid (no inference without it); every argument after it is an explicit
+# --dir. A working directory no box can be given fails here, with the reason on stderr.
+move_dirs_why() {
+    local cwd="$1" pid="${2:-}" top="" common="" owner="" cand path why
+    shift $(( $# > 2 ? 2 : $# ))
     [[ -n "$cwd" ]] || { echo "its working directory cannot be read" >&2; return 1; }
     [[ -d "$cwd" ]] || { echo "its working directory $cwd is gone" >&2; return 1; }
     case "$cwd" in
@@ -1365,7 +1666,8 @@ move_dirs() {
         "$HOME") echo "it works in \$HOME, which would shadow the box's own home and its allow-list" >&2; return 1 ;;
         "$BOXES"|"$BOXES"/*) echo "it already works inside the box tree $BOXES" >&2; return 1 ;;
     esac
-    dirs=("$cwd")
+    MOVE_D=("$cwd")
+    MOVE_W=("its own working directory")
     top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)"
     if [[ -n "$top" ]]; then
         common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
@@ -1375,21 +1677,45 @@ move_dirs() {
             [[ -n "$cand" && -d "$cand" ]] || continue
             [[ "$cand" != / && "$cand" != "$HOME" ]] || continue
             if move_within "$cand" "$SRC"; then continue; fi
-            skip=0
-            for have in "${dirs[@]}"; do
-                if move_within "$cand" "$have"; then skip=1; break; fi
-            done
-            if (( skip )); then continue; fi
-            dirs+=("$cand")
+            if [[ "$cand" == "$top" ]]; then
+                move_keep "$cand" "the git tree its working directory is in"
+            else
+                move_keep "$cand" "the checkout that owns that worktree"
+            fi
         done
     fi
-    printf '%s\n' "${dirs[@]}"
+    if [[ -n "$pid" ]]; then
+        # Many processes of one session share a cwd, and a build opens dozens of files in one
+        # directory, so each distinct raw path is resolved once: move_resolve_dir forks git, and
+        # the plan asks this of every session on the host.
+        local -A raw_seen=() resolved=()
+        while IFS=$'\t' read -r path why; do
+            [[ -n "$path" ]] || continue
+            [[ -z "${raw_seen[$path]:-}" ]] || continue
+            raw_seen[$path]=1
+            if move_dir_in_box "$path"; then continue; fi
+            if [[ -z "${resolved[$path]:-}" ]]; then resolved[$path]="$(move_resolve_dir "$path")"; fi
+            path="${resolved[$path]}"
+            [[ -n "$path" && -d "$path" ]] || continue
+            if move_dir_in_box "$path" || move_dir_too_broad "$path"; then continue; fi
+            move_keep "$path" "$why"
+        done < <(move_proc_dirs "$pid")
+    fi
+    for cand in "$@"; do
+        move_keep "$cand" "you named it with --dir"
+    done
+    for ((cand = 0; cand < ${#MOVE_D[@]}; cand++)); do
+        printf '%s\t%s\n' "${MOVE_D[cand]}" "${MOVE_W[cand]}"
+    done
 }
+
+# The same, paths alone, one per line.
+move_dirs() { move_dirs_why "$@" | cut -f1; }
 
 # The `agentbox new` arguments for a working directory, one token per line.
 move_spec() {
     local d
-    while read -r d; do printf -- '--dir\n%s\n' "$d"; done < <(move_dirs "$1")
+    while read -r d; do printf -- '--dir\n%s\n' "$d"; done < <(move_dirs "$@")
 }
 
 # Every live top-level omp process on this machine, one TSV row each:
@@ -1586,20 +1912,32 @@ cmd_move_plan() {
     dir="$(dirname "$BOXES")"
     free="$(move_free_bytes "$dir")"
     floor="$(move_floor_bytes "$dir")"
-    local class pid sid pane at cwd detail spec reason dirs=() rows=() blocked=0 movable=0
+    local class pid sid pane at cwd detail spec reason line path why
+    local dirs=() whys=() rows=() why_rows=() blocked=0 movable=0
     local -A counts=([host]=0 [no-pane]=0 [boxed]=0 [sandbox]=0 [subagent]=0)
+    # One pass over /proc for every session's process tree (move_read_kids), in the plan's own
+    # shell: each move_dirs_why below runs in a subshell, which inherits what this built.
+    move_read_kids
     while IFS="$SEP" read -r class pid sid pane at cwd detail; do
         counts[$class]=$(( ${counts[$class]:-0} + 1 ))
         [[ "$class" == host || "$class" == no-pane ]] || continue
         spec=""
         reason=""
         dirs=()
-        mapfile -t dirs < <(move_dirs "$cwd" 2>/dev/null)
+        whys=()
+        while IFS=$'\t' read -r path why; do
+            [[ -n "$path" ]] || continue
+            dirs+=("$path")
+            whys+=("$path"$'\x1f'"$why")
+        done < <(move_dirs_why "$cwd" "$pid" 2>/dev/null)
         if (( ${#dirs[@]} )); then
             spec="$(printf -- '--dir %s ' "${dirs[@]}")"
             spec="${spec% }"
+            for why in "${whys[@]}"; do
+                why_rows+=("${sid:-pid $pid}	${why%%$'\x1f'*}	${why#*$'\x1f'}")
+            done
         else
-            reason="$(move_dirs "$cwd" 2>&1 >/dev/null || true)"
+            reason="$(move_dirs_why "$cwd" "$pid" 2>&1 >/dev/null || true)"
         fi
         if [[ -z "$sid" ]]; then
             reason="${reason:-${detail:-its omp holds no session file open, so a move cannot name it in full}}"
@@ -1609,7 +1947,8 @@ cmd_move_plan() {
         elif [[ "$class" == host ]]; then
             blocked=$((blocked + 1))
         fi
-        rows+=("$class	$sid	$pid	$pane	$at	$cwd	${spec:--}	$(move_gib "$image")	${reason:-$detail}")
+        line="$(printf '%s\x1e' "${whys[@]+"${whys[@]}"}")"
+        rows+=("$class	$sid	$pid	$pane	$at	$cwd	${spec:--}	$(move_gib "$image")	${reason:-$detail}	${line%$'\x1e'}")
     done < <(move_census)
     local total=$((movable * image))
     if $json; then
@@ -1624,7 +1963,9 @@ cmd_move_plan() {
                   headroom_bytes: ($free - $floor - $total)}')" \
             '{summary: $summary, sessions: [inputs | split("\t") |
                 {class: .[0], session: .[1], pid: (.[2] | tonumber), pane: .[3], tmux: .[4],
-                 cwd: .[5], spec: .[6], new_disk_gib: (.[7] | tonumber), note: .[8]}]}' \
+                 cwd: .[5], spec: .[6], new_disk_gib: (.[7] | tonumber), note: .[8],
+                 dirs: (if (.[9] // "") == "" then []
+                        else (.[9] | split("\u001e") | map(split("\u001f") | {path: .[0], why: .[1]})) end)}]}' \
             < <(printf '%s\n' "${rows[@]}")
         return 0
     fi
@@ -1634,11 +1975,20 @@ cmd_move_plan() {
       printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1 -k6,6
     } | column -t -s $'\t'
     echo
+    if (( ${#why_rows[@]} )); then
+        echo "each path and why the box gets it (a path under $SRC, the dotfiles or the home allow-list is"
+        echo "in every box already and is never listed - a worktree under $SRC/<repo>/.worktrees/... included):"
+        { echo "SESSION	PATH	WHY"
+          printf '%s\n' "${why_rows[@]}"
+        } | column -t -s $'\t'
+        echo
+    fi
     echo "host sessions outside a box: $((movable + blocked)) ($movable with a spec, $blocked that need a decision)"
     echo "not a pane (headless or unit-run, yours to decide): ${counts[no-pane]:-0}"
     echo "excluded: ${counts[boxed]:-0} already in a box, ${counts[sandbox]:-0} in a grading sandbox, ${counts[subagent]:-0} subagents of another omp"
     echo "new disk: $(move_gib "$image") GiB per box (its sparse ext4 image; a move clones nothing), $(move_gib "$total") GiB for $movable boxes"
     echo "$dir: $(move_gib "$free") GiB free − $(move_gib "$floor") GiB reserve − $(move_gib "$total") GiB = $(move_gib $((free - floor - total))) GiB left over"
+    echo "a path the inference missed is added by the session itself: agentbox move --self --dir PATH"
 }
 
 # The omp process a command runs under: the nearest ancestor whose command is omp.
@@ -1700,13 +2050,24 @@ move_relaunch() {
 }
 
 cmd_move_self() {
-    local dry=false a
-    for a in "$@"; do
+    local dry=false a usage="usage: agentbox move --self [--dry-run] [--force-floor] [--dir PATH]…"
+    # --dir is the session's own answer to an inference that missed something: a path it works in
+    # that no process of it had open when the plan ran. Each is checked exactly as
+    # `agentbox new --dir` checks it (add_box_dir), and each lands in the spec after the
+    # inferred paths, in the order given.
+    while (( $# )); do
+        a="$1"
         case "$a" in
             --dry-run) dry=true ;;
             --force-floor) MOVE_FORCE_FLOOR=true ;;
-            *) die "usage: agentbox move --self [--dry-run] [--force-floor]" ;;
+            --dir)
+                [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir /mnt/nvme/$(id -un)/my-lane  ($usage)"
+                add_box_dir "$2"
+                shift
+                ;;
+            *) die "$usage" ;;
         esac
+        shift
     done
     [[ -z "${AGENTBOX_BOX:-}" ]] || die "this session already runs in box $AGENTBOX_BOX; a move has nothing to do (agentbox restart relaunches it in place)"
     [[ ! -e /etc/agentbox-identity ]] || die "this session already runs in a box; a move has nothing to do (agentbox restart relaunches it in place)"
@@ -1736,21 +2097,35 @@ cmd_move_self() {
         die "the omp above this command runs session $sid, while this tool's OMP_SESSION_ID is $OMP_SESSION_ID; a move must not resume a session it has not identified. Run 'agentbox move --plan' and move it by id."
     fi
     [[ -n "$pane" ]] || die "this session has no tmux pane to relaunch ($detail); it is one of the plan's not-a-pane rows and needs a person"
-    local dirs=() spec=() d
-    mapfile -t dirs < <(move_dirs "$cwd" 2>/dev/null)
-    (( ${#dirs[@]} )) || die "$(move_dirs "$cwd" 2>&1 >/dev/null || true)"
+    local dirs=() whys=() spec=() d path why
+    move_read_kids
+    while IFS=$'\t' read -r path why; do
+        [[ -n "$path" ]] || continue
+        dirs+=("$path")
+        whys+=("  $path — $why")
+    done < <(move_dirs_why "$cwd" "$pid" "${BOX_DIRS[@]+"${BOX_DIRS[@]}"}" 2>/dev/null)
+    (( ${#dirs[@]} )) || die "$(move_dirs_why "$cwd" "$pid" 2>&1 >/dev/null || true)"
     for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
     move_check_floor "$(move_image_bytes "$BOX_DISK_BYTES")" || exit 2
     if $dry; then
         echo "agentbox: would hang omp $pid up and respawn pane $pane ($at) as:"
         echo "  agentbox new ${spec[*]} -- omp --resume $sid ."
+        echo "each path and why:"
+        printf '%s\n' "${whys[@]}"
+        echo "anything else you work in is NOT in that box and is lost with it: add it with --dir."
         return 0
     fi
+    printf '%s\n' "agentbox: the box gets these paths:" "${whys[@]}"
     move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
 }
 
 MOVE_NOTICE_HEAD='agentbox: this session moves into an agent box (dispatch://INFRA-702). Do not stop, delay or shorten any work for it. The next time `read proc://` lists none of your jobs or services running, write your handover into the transcript and run `agentbox move --self` from your bash tool. It hangs this omp up gracefully and respawns this pane as'
-MOVE_NOTICE_TAIL='so you come back with the same session id, the same transcript and the same working directory, in a box with a cpu, memory, pids and disk limit of its own. Your tree is the host'"'"'s own directory, bind-mounted at its own path: uncommitted work included, nothing cloned, nothing copied. If you are idle, do it now.'
+MOVE_NOTICE_TAIL='so you come back with the same session id, the same transcript and the same working directory, in a box with a cpu, memory, pids and disk limit of its own. Your tree is the host'"'"'s own directory, bind-mounted at its own path: uncommitted work included, nothing cloned, nothing copied.'
+# What the box gets, and the one thing the session must check before it runs the command. The
+# paths come from the session's own processes, so a path it has not touched is not in the list;
+# an unnamed path is not absent in the box, it is writable there and lost with the box.
+MOVE_NOTICE_DIRS='The box gets these paths of yours, and nothing else outside ~/src, the dotfiles and the home allow-list (a worktree under ~/src/<repo>/.worktrees/... is in ~/src, so it IS in the box):'
+MOVE_NOTICE_ADD='Read that list. If you work in a path it does not name, add it yourself: `agentbox move --self --dir PATH --dir PATH`. A path no box is given is still writable inside the box and is lost when the box ends. If you are idle, do it now.'
 
 cmd_move_notify() {
     local now=false dry=false all=false t targets=() rows=() row
@@ -1774,8 +2149,9 @@ cmd_move_notify() {
         done
     fi
     (( ${#rows[@]} )) || { echo "agentbox: no host session to move"; return 0; }
-    local class pid sid pane at cwd detail dirs spec d image
+    local class pid sid pane at cwd detail dir why dirs=() whys=() spec=() d image
     image="$(move_image_bytes "$BOX_DISK_BYTES")"
+    move_read_kids
     for row in "${rows[@]}"; do
         IFS="$SEP" read -r class pid sid pane at cwd detail <<<"$row"
         if [[ "$class" != host ]]; then
@@ -1783,9 +2159,14 @@ cmd_move_notify() {
             continue
         fi
         dirs=()
-        mapfile -t dirs < <(move_dirs "$cwd" 2>/dev/null)
+        whys=()
+        while IFS=$'\t' read -r dir why; do
+            [[ -n "$dir" ]] || continue
+            dirs+=("$dir")
+            whys+=("$dir ($why)")
+        done < <(move_dirs_why "$cwd" "$pid" 2>/dev/null)
         if (( ! ${#dirs[@]} )); then
-            echo "agentbox: $sid cannot be moved: $(move_dirs "$cwd" 2>&1 >/dev/null || true)" >&2
+            echo "agentbox: $sid cannot be moved: $(move_dirs_why "$cwd" "$pid" 2>&1 >/dev/null || true)" >&2
             continue
         fi
         spec=()
@@ -1799,7 +2180,7 @@ cmd_move_notify() {
             move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
             continue
         fi
-        local notice="$MOVE_NOTICE_HEAD \`agentbox new ${spec[*]} -- omp --resume $sid .\`, $MOVE_NOTICE_TAIL"
+        local notice="$MOVE_NOTICE_HEAD \`agentbox new ${spec[*]} -- omp --resume $sid .\`, $MOVE_NOTICE_TAIL $MOVE_NOTICE_DIRS $(printf '%s; ' "${whys[@]}" | sed 's/; $//'). $MOVE_NOTICE_ADD"
         if $dry; then
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue

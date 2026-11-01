@@ -94,3 +94,13 @@ ro .npmrc
 ro .gitconfig
 ro .ssh/jj-signing
 ro .ssh/jj-signing.pub
+# The Google Compute Engine ssh key gcloud makes and uses for `gcloud compute ssh`
+# (dispatch://INFRA-702). It is a GCE key, not a GitHub identity: Google's guest agent puts its
+# public half in the project or instance metadata, and sshd on a Compute Engine VM is the only
+# thing that accepts it. The box already holds the gcloud identity that may read and write that
+# metadata (`rw .config/gcloud`), so the key adds no access the box did not have - it only saves
+# gcloud from making a second key per box, which would write a new public key into the project
+# metadata on every launch. GitHub never sees it: `~/.ssh` as a whole is still not mounted, and
+# a push from a box is still the repo's GitHub App over https.
+ro .ssh/google_compute_engine
+ro .ssh/google_compute_engine.pub

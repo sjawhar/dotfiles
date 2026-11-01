@@ -70,6 +70,12 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_BOXES": str(self.boxes),
             "AGENTBOX_PROC": str(self.proc),
             "AGENTBOX_DISK": "0",
+            # The roots that hold many sessions' trees, pinned to the fixture's own home: this
+            # host's TMPDIR is itself under /mnt/nvme/<user>, one of the real ones, so without
+            # this the suite's answers would depend on where the temporary tree happens to be.
+            "AGENTBOX_MOVE_ROOTS": ":".join(
+                str(self.home / p) for p in ("Code", "Code/personal", ".worktrees", "tmp")
+            ),
             "STUB_PGREP": str(self.root / "STUB_PGREP"),
             "STUB_TMUX": str(self.root / "STUB_TMUX"),
             "STUB_DOCKER": str(self.root / "STUB_DOCKER"),
@@ -90,19 +96,35 @@ class AgentboxMove(unittest.TestCase):
         session: str | None = None,
         cgroup: str = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/omp.scope",
         cmdline: str = "omp",
+        writes: tuple[Path | str, ...] = (),
+        reads: tuple[Path | str, ...] = (),
     ) -> None:
-        """One process in the fixture /proc: stat, cmdline, cgroup, cwd and its open files."""
+        """One process in the fixture /proc: stat, comm, cmdline, cgroup, cwd and its open files.
+
+        `writes` and `reads` are files the process holds open; each gets an fd symlink and the
+        `flags:` line of /proc/<pid>/fdinfo/<fd> that says which, since only a file open for
+        WRITING names a directory the session's box must be given."""
         directory = self.proc / str(pid)
         (directory / "fd").mkdir(parents=True)
+        (directory / "fdinfo").mkdir(parents=True)
         (directory / "stat").write_text(f"{pid} ({comm}) S {ppid} {ppid} 0 0 -1 0\n", encoding="utf-8")
+        (directory / "comm").write_text(comm + "\n", encoding="utf-8")
         (directory / "cmdline").write_text(cmdline.replace(" ", "\0") + "\0", encoding="utf-8")
         (directory / "cgroup").write_text(cgroup + "\n", encoding="utf-8")
         os.symlink(str(cwd), directory / "cwd")
+        fd = 30
+        for path, flags in [(p, "0100002") for p in writes] + [(p, "0100000") for p in reads]:
+            os.symlink(str(path), directory / "fd" / str(fd))
+            (directory / "fdinfo" / str(fd)).write_text(f"pos:\t0\nflags:\t{flags}\n", encoding="utf-8")
+            fd += 1
         if session:
             transcript = self.home / ".omp/agent/sessions/-work" / f"2026-11-01T09:00:00Z_{session}.jsonl"
             transcript.parent.mkdir(parents=True, exist_ok=True)
             transcript.write_text("", encoding="utf-8")
             os.symlink(str(transcript), directory / "fd" / "21")
+            # omp holds its own transcript open for writing; ~/.omp is in the home allow-list,
+            # so the inference must leave it out of every spec.
+            (directory / "fdinfo" / "21").write_text("pos:\t0\nflags:\t0100002\n", encoding="utf-8")
 
     def set_pids(self, *pids: int) -> None:
         (self.root / "STUB_PGREP").write_text("".join(f"{pid}\n" for pid in pids), encoding="utf-8")
@@ -207,6 +229,155 @@ class AgentboxMove(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, "")
                 self.assertIn(reason, result.stderr)
+
+    # ── the paths inferred from the session's own processes ─────────────────────────────────
+    def test_a_live_child_s_working_directory_is_in_the_spec_with_its_reason(self) -> None:
+        """The cwd of the omp is not the tree a lane works in: 20 sessions whose cwd was
+        ~/src/oss-verifier worked in /mnt/nvme/sami/oss-verifier/... A path a box is not given is
+        silently writable inside it and lost with it, so every directory the session's own
+        processes use is inferred, each with why it was chosen."""
+        lane = self.home / "lane"
+        lane.mkdir()
+        work = self.home / "oss-verifier" / "run-14"
+        work.mkdir(parents=True)
+        self.make_proc(400, comm="omp", ppid=1, cwd=lane)
+        self.make_proc(401, comm="bash", ppid=400, cwd=work)
+        result = self.run_bash(f'move_dirs_why "{lane}" 400')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        self.assertEqual([row[0] for row in rows], [str(lane), str(work)])
+        self.assertEqual(rows[0][1], "its own working directory")
+        self.assertIn("working directory of bash (pid 401)", rows[1][1])
+
+    def test_a_file_a_session_holds_open_for_writing_names_its_directory(self) -> None:
+        lane = self.home / "lane"
+        lane.mkdir()
+        written = self.home / "evidence" / "lane-7"
+        written.mkdir(parents=True)
+        (written / "out.log").write_text("", encoding="utf-8")
+        only_read = self.home / "reference" / "notes"
+        only_read.mkdir(parents=True)
+        (only_read / "spec.md").write_text("", encoding="utf-8")
+        self.make_proc(410, comm="omp", ppid=1, cwd=lane)
+        self.make_proc(
+            411,
+            comm="cargo",
+            ppid=410,
+            cwd=lane,
+            writes=(written / "out.log",),
+            reads=(only_read / "spec.md",),
+        )
+        result = self.run_bash(f'move_dirs_why "{lane}" 410')
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        self.assertEqual([row[0] for row in rows], [str(lane), str(written)])
+        self.assertIn("cargo (pid 411) holds out.log open for writing", rows[1][1])
+        # A file only READ is in no spec: reading it inside the box is the box's problem, and
+        # mounting every library and config a tool opens would mount the host.
+        self.assertNotIn(str(only_read), result.stdout)
+
+    def test_a_path_every_box_has_already_is_never_named(self) -> None:
+        """$SRC and the home allow-list (agentbox/mounts) are bind-mounted into every box at
+        their own paths, so naming one would change nothing. A worktree under
+        ~/src/<repo>/.worktrees/... is in that class: it IS visible in a box with no --dir."""
+        lane = self.home / "lane"
+        lane.mkdir()
+        checkout = self.checkout("repo1")
+        inner = checkout / ".worktrees" / "feature"
+        inner.mkdir(parents=True)
+        (inner / "f.txt").write_text("", encoding="utf-8")
+        dotfiles = self.home / ".dotfiles"
+        dotfiles.mkdir()
+        (dotfiles / "notes").write_text("", encoding="utf-8")
+        self.make_proc(420, comm="omp", ppid=1, cwd=lane, session="01a19700-0000-7000-8000-0000000000aa")
+        self.make_proc(421, comm="git", ppid=420, cwd=inner, writes=(dotfiles / "notes",))
+        result = self.run_bash(f'move_dirs_why "{lane}" 420')
+        self.assertEqual(result.stdout.splitlines(), [f"{lane}\tits own working directory"])
+
+    def test_a_root_many_sessions_share_is_never_mounted_whole(self) -> None:
+        """~/Code, ~/.worktrees and /mnt/<user>{,/tmp,/worktrees,/scratch} hold many sessions'
+        trees. A box gets the first directory below the deepest such root, never the root."""
+        lane = self.home / "lane"
+        lane.mkdir()
+        deep = self.home / "Code" / "personal" / "theorem" / "gates" / "g1"
+        deep.mkdir(parents=True)
+        tree = self.home / ".worktrees" / "legion" / "infra-140"
+        tree.mkdir(parents=True)
+        self.make_proc(430, comm="omp", ppid=1, cwd=lane)
+        self.make_proc(431, comm="bash", ppid=430, cwd=deep)
+        self.make_proc(432, comm="rg", ppid=431, cwd=tree)
+        result = self.run_bash(f'move_dirs "{lane}" 430')
+        self.assertEqual(
+            result.stdout.split(),
+            [str(lane), f"{self.home}/Code/personal/theorem", f"{self.home}/.worktrees/legion"],
+        )
+
+    def test_a_worktree_of_an_open_file_is_named_even_when_a_sibling_checkout_is_the_cwd(self) -> None:
+        """Session 01a16640 on 2026-11-01: its cwd was ~/Code/legion, a real checkout of the same
+        repository, while the trees it had open were elsewhere. The cwd alone would have given it
+        a box whose `git status` answers about ANOTHER checkout."""
+        cwd = self.checkout("legion", parent=self.home / "Code")
+        owner = self.checkout("legion")
+        inside_src = owner / ".worktrees" / "infra-140-s5"
+        self.git("worktree", "add", "-q", "-b", "infra-140-s5", str(inside_src), cwd=owner)
+        outside = self.home / "worktrees" / "legion" / "stopped-tree"
+        self.git("worktree", "add", "-q", "-b", "stopped", str(outside), cwd=owner)
+        (outside / "wip.rs").write_text("", encoding="utf-8")
+        self.make_proc(440, comm="omp", ppid=1, cwd=cwd)
+        self.make_proc(441, comm="bash", ppid=440, cwd=inside_src)
+        self.make_proc(442, comm="rustc", ppid=440, cwd=self.home, writes=(outside / "wip.rs",))
+        result = self.run_bash(f'move_dirs_why "{cwd}" 440')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        # The cwd stays first (a box works in its first --dir); the worktree under $SRC is in the
+        # box already; the one outside arrives as its own tree root, not as the file's directory.
+        self.assertEqual([row[0] for row in rows], [str(cwd), str(outside)])
+        self.assertIn("rustc (pid 442) holds wip.rs open for writing", rows[1][1])
+        # $HOME itself is the writer's cwd and is never a path a box is given.
+        self.assertNotIn(f"{self.home}\t", result.stdout)
+
+    def test_a_path_the_caller_names_is_added_after_the_inferred_ones(self) -> None:
+        lane = self.home / "lane"
+        lane.mkdir()
+        child = self.home / "inferred"
+        child.mkdir()
+        named = self.home / "named-by-hand"
+        named.mkdir()
+        self.make_proc(450, comm="omp", ppid=1, cwd=lane)
+        self.make_proc(451, comm="bash", ppid=450, cwd=child)
+        result = self.run_bash(f'move_dirs_why "{lane}" 450 "{named}"')
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        self.assertEqual([row[0] for row in rows], [str(lane), str(child), str(named)])
+        self.assertEqual(rows[2][1], "you named it with --dir")
+
+    def test_move_self_dir_is_refused_by_the_same_checks_agentbox_new_applies(self) -> None:
+        lane = self.home / "lane"
+        lane.mkdir()
+        self.make_proc(460, comm="bash", ppid=1, cwd=lane)
+        self.make_proc(461, comm="omp", ppid=460, cwd=lane, session="01a19700-0000-7000-8000-0000000000bb")
+        self.set_pids(461)
+        self.set_panes({460: ("%4", "agents:9.1")})
+        write_stub(self.stubs, "df", 'if [[ "$*" == *target* ]]; then echo target; echo /; else echo avail; echo 214748364800; fi')
+        for arg, reason in (
+            (str(self.root / "absent"), "is not an existing directory"),
+            ("/", "whole host filesystem"),
+            (str(self.home), "shadow the box's own home"),
+            (str(self.boxes), "inside the box tree"),
+        ):
+            with self.subTest(arg=arg):
+                refused = self.run_bash(
+                    f'move_own_omp() {{ echo 461; }}\ncmd_move_self --dry-run --dir "{arg}"'
+                )
+                self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn(reason, refused.stderr)
+        named = self.home / "lane-evidence"
+        named.mkdir()
+        allowed = self.run_bash(
+            'move_own_omp() { echo 461; }\nmove_image_bytes() { echo 280000000; }\n'
+            f'cmd_move_self --dry-run --dir "{named}"'
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn(f"--dir {lane} --dir {named} -- omp --resume", allowed.stdout)
+        self.assertIn("you named it with --dir", allowed.stdout)
 
     # ── what each omp process is ────────────────────────────────────────────────────────────
     def test_every_class_of_omp_process_is_told_apart(self) -> None:
