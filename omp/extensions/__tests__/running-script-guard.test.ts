@@ -40,15 +40,26 @@ function workdir(): string {
 	return dir;
 }
 
-/** victim.sh, run by bash until `finish` releases it; its environment carries omp's OMPCODE=1 unless `agent` is false. */
-async function run(dir: string, opts: { agent?: boolean; mode?: number } = {}) {
+/** This file's own mark for an agent's shell, which stands in for omp's OMPCODE=1; see `run`. */
+const MARK = "OMP_GUARD_TEST";
+
+/**
+ * victim.sh, run by bash until `finish` releases it; its environment carries this test file's mark
+ * unless `agent` is false. `links` gives the file a second name, which is what makes the guard fall
+ * back to taking its write bits: a copy at the path would leave that other name on the old file.
+ */
+async function run(dir: string, opts: { agent?: boolean; mode?: number; links?: boolean } = {}) {
 	const script = path.join(dir, "victim.sh");
 	fs.writeFileSync(script, ORIGINAL);
 	fs.chmodSync(script, opts.mode ?? 0o755);
+	if (opts.links) fs.linkSync(script, path.join(dir, "victim.link"));
 	const fifo = path.join(dir, "go.fifo");
 	expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
-	const env: Record<string, string | undefined> = { ...process.env, OMPCODE: "1" };
-	if (opts.agent === false) delete env.OMPCODE;
+	// Not OMPCODE=1: this box runs omp sessions whose own guards would take these scripts in passes
+	// of their own, which is the very thing this file measures.
+	const env: Record<string, string | undefined> = { ...process.env, [MARK]: "1" };
+	delete env.OMPCODE;
+	if (opts.agent === false) delete env[MARK];
 	const proc = Bun.spawn(["bash", "victim.sh", fifo], { cwd: dir, env, stdout: "pipe", stderr: "pipe" });
 	victims.push(proc);
 	const reader = proc.stdout.getReader();
@@ -92,6 +103,7 @@ function guard(root: string, opts: { stateDir?: string; followUpMs?: number; pro
 		passWaitMs: opts.production ? 0 : 60_000,
 		followUpMs: opts.followUpMs ?? 600_000,
 		discover: async () => (await shellHeldFiles()).filter(h => h.file.startsWith(`${root}/`)),
+		agentRun: async pid => (await fs.promises.readFile(`/proc/${pid}/environ`, "utf8").catch(() => "")).split("\0").includes(`${MARK}=1`),
 	})(pi as never);
 	const toolCall = (toolName: string, input: Record<string, unknown>, cwd = root) =>
 		handlers.get("tool_call")?.({ type: "tool_call", toolName, toolCallId: "t1", input }, { cwd }) as Promise<{ block?: boolean; reason?: string } | undefined>;
@@ -148,22 +160,12 @@ const RENAMES = (
 	.map(([name, , command]): [string, string] => [name, command]);
 
 describe("a script an agent's shell is running", () => {
-	test.each(IN_PLACE)(
-		"a bash call that rewrites it in place with %s fails, and the run finishes as written",
-		async (_name, command) => {
-			const dir = workdir();
-			const g = guard(dir);
-			const victim = await run(dir);
-			const call = await g.bash(command, dir);
-			expect(call.exitCode).not.toBe(0);
-			expect(fs.readFileSync(victim.script, "utf8")).toBe(ORIGINAL);
-			expect(await victim.finish()).toBe(AS_WRITTEN);
-		},
-		60_000,
-	);
-
-	test.each(RENAMES)(
-		"a bash call that replaces it with %s works, and the run still finishes as written",
+	// Every writer of the 2026-10-31 measurement, in place or by rename, now behaves alike: the call
+	// works, what it wrote is at the path for the next run, and the shell finishes the script it
+	// opened. Until 2026-11-01 the ten rename writers worked and the nineteen in-place writers were
+	// refused with EACCES, because the guard protected the file rather than the path.
+	test.each([...IN_PLACE, ...RENAMES])(
+		"a bash call that rewrites it with %s works, and the run still finishes as written",
 		async (_name, command) => {
 			const dir = workdir();
 			const g = guard(dir);
@@ -177,16 +179,15 @@ describe("a script an agent's shell is running", () => {
 		60_000,
 	);
 
-	// ex reports the read-only file and exits 1 when its stdin is /dev/null, as in omp's bash tool. It
-	// waits for more commands instead when stdin is closed, or when its output goes to a pipe Bun's
-	// spawnSync reads, so the test sends ex's output to a file.
-	test.skipIf(Bun.which("ex") === null)("an ex edit in a bash call fails at once, and the run finishes as written", async () => {
+	// ex waits at its prompt when its output goes to a pipe Bun's spawnSync reads, so the test sends
+	// ex's output to a file.
+	test.skipIf(Bun.which("ex") === null)("an ex edit in a bash call works, and the run finishes as written", async () => {
 		const dir = workdir();
 		const g = guard(dir);
 		const victim = await run(dir);
 		const call = await g.bash("ex -u NONE -sc '%s/AFTER-ORIGINAL/AFTER-EX/|x' victim.sh > ex.out 2>&1", dir);
-		expect(call.exitCode).toBe(1); // a wait would end at the bash call's 20 s timeout, with no exit code
-		expect(fs.readFileSync(victim.script, "utf8")).toBe(ORIGINAL);
+		expect(call.exitCode).toBe(0);
+		expect(fs.readFileSync(victim.script, "utf8")).toContain("AFTER-EX");
 		expect(await victim.finish()).toBe(AS_WRITTEN);
 	}, 60_000);
 
@@ -195,34 +196,39 @@ describe("a script an agent's shell is running", () => {
 		const g = guard(dir, { production: true });
 		const victim = await run(dir);
 		const call = await g.bash("python3 -c \"open('victim.sh', 'w').write('echo AFTER-NEW\\n')\"", dir);
-		expect(call.exitCode).not.toBe(0);
+		expect(call.exitCode).toBe(0); // the write works, and reaches the copy at the path, not the run
 		expect(await victim.finish()).toBe(AS_WRITTEN);
 	}, 60_000);
 
-	test("python's write from any other tool call, such as eval, fails the same way", async () => {
+	test("a write from any other tool call, such as eval, leaves the run alone the same way", async () => {
 		const dir = workdir();
 		const g = guard(dir);
 		const victim = await run(dir);
 		await g.toolCall("eval", { cells: [{ language: "python", code: "open('victim.sh', 'w')" }] }, dir);
 		const write = Bun.spawnSync(["python3", "-c", "open('victim.sh', 'w').write('echo AFTER-NEW\\n')"], { cwd: dir });
-		expect(write.exitCode).not.toBe(0);
+		expect(write.exitCode).toBe(0);
 		expect(await victim.finish()).toBe(AS_WRITTEN);
 	}, 60_000);
 
-	test("an edit or write call that names it is still refused before it runs", async () => {
+	test("an edit or write call that names it is still refused, by inode and by path", async () => {
 		const dir = workdir();
 		const g = guard(dir);
 		const victim = await run(dir);
+		const before = fs.statSync(victim.script).ino;
 		const verdict = await g.toolCall("write", { path: "victim.sh", content: NEW }, dir);
 		expect(verdict?.block).toBe(true);
 		expect(verdict?.reason).toContain(`pid ${victim.pid}`);
+		// The call's own pass put a copy at the path first, so this refusal matched by path: without
+		// it the agent would be left thinking its new version had reached the running job.
+		expect(fs.statSync(victim.script).ino).not.toBe(before);
 		expect(await victim.finish()).toBe(AS_WRITTEN);
 	}, 60_000);
 
-	test("a call that fails on it is told why and what to do, and an unrelated failure is not", async () => {
+	// Write bits go only where no copy can be put at the path, so this run's script has a second name.
+	test("a call that fails on a file whose write bits are gone is told why and what to do", async () => {
 		const dir = workdir();
 		const g = guard(dir);
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		await g.bash("true", dir);
 		const told = await g.toolResult("bash: line 1: victim.sh: Permission denied");
 		const note = told?.content?.at(-1)?.text ?? "";
@@ -234,11 +240,66 @@ describe("a script an agent's shell is running", () => {
 	}, 60_000);
 });
 
-describe("giving the write bits back", () => {
-	test("they come back once the shell exits, and a write in place then works", async () => {
+describe("the copy a pass puts at the path", () => {
+	// The write-run-rewrite loop a test harness runs: one script per step, run, then the same path
+	// rewritten for the next step (tools/oft/tests/test_workflow_verdicts.py's run_step, reported
+	// 2026-11-01). The rewrite comes microseconds after the step's shell exits, so no pass, however
+	// prompt, gives write bits back in time: measured 2026-11-01, a give-back driven by the shell's
+	// own exit through a pidfd still left 32 of 50 rewrites refused. Protection the file carries
+	// outlives the run; protection the path carries ends with it.
+	test("a rewrite the moment the run ends works, with no pass in between", async () => {
 		const dir = workdir();
 		const g = guard(dir);
 		const victim = await run(dir);
+		await g.bash("true", dir); // the pass that protects the run
+		expect(await victim.finish()).toBe(AS_WRITTEN);
+		const write = Bun.spawnSync(["python3", "-c", "open('victim.sh', 'w').write('echo NEXT\\n')"], { cwd: dir });
+		expect(write.stderr.toString()).toBe("");
+		expect(write.exitCode).toBe(0);
+	}, 60_000);
+
+	test("it is the same file to everything but its inode", async () => {
+		const dir = workdir();
+		const g = guard(dir);
+		const victim = await run(dir);
+		const before = fs.statSync(victim.script);
+		await g.bash("true", dir);
+		const after = fs.statSync(victim.script);
+		expect(after.ino).not.toBe(before.ino);
+		expect(after.mode).toBe(before.mode);
+		expect(after.uid).toBe(before.uid);
+		expect(after.gid).toBe(before.gid);
+		expect(Math.round(after.mtimeMs)).toBe(Math.round(before.mtimeMs));
+		expect(fs.readFileSync(victim.script, "utf8")).toBe(ORIGINAL);
+		expect(await victim.finish()).toBe(AS_WRITTEN);
+	}, 60_000);
+
+	// What the records of the older guard meet when a session on this one first walks: the write bits
+	// are already gone and a record stands for them. The second name goes first, so a copy can be
+	// made; before that the file keeps the bits it has, as the fallback below does.
+	test("a record of an earlier pass is settled: the copy carries the mode back", async () => {
+		const dir = workdir();
+		const g = guard(dir);
+		const victim = await run(dir, { links: true });
+		await g.bash("true", dir);
+		expect(modeOf(victim.script)).toBe(0o555);
+		fs.rmSync(path.join(dir, "victim.link"));
+		await g.bash("true", dir);
+		expect(modeOf(victim.script)).toBe(0o755);
+		expect(fs.readdirSync(path.join(dir, "state", "held"))).toEqual([]);
+		expect((await g.bash("cat new.sh > victim.sh", dir)).exitCode).toBe(0);
+		expect(await victim.finish()).toBe(AS_WRITTEN);
+	}, 60_000);
+});
+
+// Where no copy can be put at the path — another link to the file, a file past DETACH_MAX_BYTES, a
+// directory this user cannot write — the guard takes the running script's write bits instead, and
+// gives them back once no shell runs it. Each run below gives its script a second name to get there.
+describe("a running script the guard cannot copy: its write bits", () => {
+	test("they come back once the shell exits, and a write in place then works", async () => {
+		const dir = workdir();
+		const g = guard(dir);
+		const victim = await run(dir, { links: true });
 		await g.bash("true", dir);
 		expect(modeOf(victim.script)).toBe(0o555);
 		await g.bash("true", dir);
@@ -252,7 +313,7 @@ describe("giving the write bits back", () => {
 	test("another session gives them back when the one that took them is gone", async () => {
 		const dir = workdir();
 		const state = path.join(dir, "state");
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		await guard(dir, { stateDir: state }).bash("true", dir); // this session then dies: no shutdown, no later pass
 		expect(modeOf(victim.script)).toBe(0o555);
 		expect(await victim.finish()).toBe(AS_WRITTEN);
@@ -263,7 +324,7 @@ describe("giving the write bits back", () => {
 	test("a session that makes no further call gives them back on its own", async () => {
 		const dir = workdir();
 		const g = guard(dir, { followUpMs: 50 });
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		await g.bash("true", dir);
 		expect(modeOf(victim.script)).toBe(0o555);
 		expect(await victim.finish()).toBe(AS_WRITTEN);
@@ -276,7 +337,7 @@ describe("giving the write bits back", () => {
 	test("the last omp session to end gives them back, even for a script still running", async () => {
 		const dir = workdir();
 		const g = guard(dir);
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		await g.bash("true", dir);
 		expect(modeOf(victim.script)).toBe(0o555);
 		await g.shutdown();
@@ -289,7 +350,7 @@ describe("giving the write bits back", () => {
 		const state = path.join(dir, "state");
 		const ending = guard(dir, { stateDir: state });
 		const staying = guard(dir, { stateDir: state });
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		await ending.bash("true", dir);
 		await ending.shutdown();
 		expect(modeOf(victim.script)).toBe(0o555);
@@ -301,7 +362,7 @@ describe("giving the write bits back", () => {
 	test("a copy that sed -i made with the reduced mode gets them as soon as nothing runs it, and the guard says so", async () => {
 		const dir = workdir();
 		const g = guard(dir);
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		expect((await g.bash("sed -i 's/AFTER-ORIGINAL/AFTER-RENAMED/' victim.sh", dir)).exitCode).toBe(0);
 		expect(modeOf(victim.script)).toBe(0o555); // sed copied the mode it found
 		await g.bash("true", dir);
@@ -315,7 +376,7 @@ describe("giving the write bits back", () => {
 	test("such a copy keeps its mode once the guard's record for it is gone", async () => {
 		const dir = workdir();
 		const g = guard(dir);
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		expect((await g.bash("sed -i 's/AFTER-ORIGINAL/AFTER-RENAMED/' victim.sh", dir)).exitCode).toBe(0);
 		fs.rmSync(path.join(dir, "state", "held"), { recursive: true });
 		await g.bash("true", dir);
@@ -328,7 +389,7 @@ describe("giving the write bits back", () => {
 		const dir = workdir();
 		const stateHome = path.join(dir, "xdg-state");
 		const g = guard(dir, { stateDir: path.join(stateHome, "omp-running-script-guard", "pid-test") });
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		await g.bash("true", dir); // this session then dies: its records stay
 		expect(modeOf(victim.script)).toBe(0o555);
 		const restore = path.join(import.meta.dir, "..", "..", "..", "scripts", "running-script-guard-restore");
@@ -353,7 +414,7 @@ describe("giving the write bits back", () => {
 	test("a mode someone else set meanwhile wins: the guard neither takes the bits again nor gives them back", async () => {
 		const dir = workdir();
 		const g = guard(dir);
-		const victim = await run(dir);
+		const victim = await run(dir, { links: true });
 		await g.bash("true", dir);
 		fs.chmodSync(victim.script, 0o700);
 		await g.bash("true", dir);
@@ -363,12 +424,14 @@ describe("giving the write bits back", () => {
 		expect(modeOf(victim.script)).toBe(0o700);
 	}, 60_000);
 
-	test("a script a shell outside omp runs keeps its mode", async () => {
+	test("a script a shell outside omp runs is left exactly as it is", async () => {
 		const dir = workdir();
 		const g = guard(dir);
 		const victim = await run(dir, { agent: false });
+		const before = fs.statSync(victim.script);
 		await g.bash("true", dir);
 		expect(modeOf(victim.script)).toBe(0o755);
+		expect(fs.statSync(victim.script).ino).toBe(before.ino); // no copy at the path either
 		await victim.finish();
 	}, 60_000);
 });

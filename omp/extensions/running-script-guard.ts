@@ -1,4 +1,4 @@
-// Keep tool calls from rewriting a shell script while a shell is running it.
+// Keep a script from being rewritten under the shell that is running it.
 //
 // bash (and dash, busybox sh, zsh, ksh) does not load a script into memory: it keeps the file open
 // and reads it by byte offset, re-reading after each command. Rewritten in place, on the same inode,
@@ -21,43 +21,65 @@
 // Two protections, both Linux-only (no /proc, no protection):
 //
 // 1. Refusal. An `edit`, `write` or `ast_edit` call whose target a shell is running is refused with
-//    the file, the pid, its command line and what to do instead. Edit targets come from omp's own
-//    parser (`editInspect` in pi-natives), so every edit mode's headers count; ast_edit's `paths` may
-//    name a directory or a glob, and a running script under it counts. The check fails open (the call
-//    runs, one debug line goes to omp's log) on any exception and when it takes longer than
-//    WALK_DEADLINE_MS (2 s; OMP_RUNNING_SCRIPT_GUARD_MS overrides it): omp refuses a call whose
-//    tool_call handler outlives `extensionHandlers.toolCallTimeoutMs`, and a /proc read can hang.
+//    the file, the pid, its command line and what to do instead: by inode, and by path once a pass
+//    has put a copy there (2, below), since the call would otherwise reach only the next run. Edit
+//    targets come from omp's own parser (`editInspect` in pi-natives), so every edit mode's headers
+//    count; ast_edit's `paths` may name a directory or a glob, and a running script under it counts.
+//    The check fails open (the call runs, one debug line goes to omp's log) on any exception and
+//    when it takes longer than WALK_DEADLINE_MS (2 s; OMP_RUNNING_SCRIPT_GUARD_MS overrides it):
+//    omp refuses a call whose tool_call handler outlives `extensionHandlers.toolCallTimeoutMs`, and
+//    a /proc read can hang.
 //
-// 2. Write bits. A refusal can only read a call's text, and every other tool writes without naming
-//    its target: a bash call can write through python, perl, node, a redirect, `cp`, `tee`, `dd`, or
-//    a script that writes the script, and eval writes from its own kernel. Measured on 2026-10-31, 19
-//    of 29 bash writers rewrote a running script in place and corrupted the run; the refusal, which
-//    never looked at bash, stopped none. So while an agent's shell runs a script, the guard takes the
-//    file's write bits away: every in-place open for writing then fails with EACCES, whoever makes it,
-//    and all 19 failed with the running copy untouched, as did eval's Python. The 10 rename writers
-//    (`sed -i`, `perl -i`, `mv`, `install`, `rsync`, `patch`, ...) put a new file at the path, so
-//    they were never a danger and still work. `ex` exits 1 in an omp bash call, whose stdin is
-//    /dev/null; with stdin closed it waits for input instead. An agent's shell is one whose
-//    environment carries OMPCODE=1, which omp sets for every process it starts (kept through nohup,
-//    setsid and tmux); scripts that people, cron or systemd run keep their mode. Only the file's owner
-//    can change its mode, so another user's file is left alone, and a file with no write bits needs
-//    nothing.
+// 2. The running copy. A refusal can only read a call's text, and every other tool writes without
+//    naming its target: a bash call can write through python, perl, node, a redirect, `cp`, `tee`,
+//    `dd`, or a script that writes the script, and eval writes from its own kernel. Measured on
+//    2026-10-31, 19 of 29 bash writers rewrote a running script in place and corrupted the run; the
+//    refusal, which never looked at bash, stopped none. The other 10 (`sed -i`, `perl -i`, `mv`,
+//    `install`, `rsync`, `patch`, ...) put a new file at the path, and the run, still reading the
+//    file the shell opened, finished as written.
 //
-//    A pass does the work: it walks /proc, takes the bits from each newly running script, and gives
-//    them back once no shell runs it. Before it changes anything it writes a record (the path, inode,
-//    original mode, the mode it left) in the state directory, `omp-running-script-guard/pid-<pid
-//    namespace>` under $XDG_STATE_HOME or ~/.local/state, so whichever omp session runs the next pass
-//    gives the bits back, even if the session that took them was killed. It gives them back
-//    only to the file it took them from, and only while that file still has exactly the mode it
-//    left: the same inode, or a copy that a rename writer made of it after the bits were gone (`sed
-//    -i` and five other rename writers copy the mode they find, so without this a `sed -i` would
-//    leave the script read-only for good), and only while the guard's record for that path still
-//    stands. Bits given to such a copy are the one change to a file the guard did not take them from,
-//    so omp's log gets a warning for each. A later chmod by anyone else wins, and the guard never
-//    takes the bits a second time from a file it has a record for. Each such copy, and each run of
-//    running-script-guard-restore, gets a line in guard.log in the state directory; the ordinary takes
-//    and give-backs (several a minute on a busy box) go only to omp's debug log, and the records in
-//    `held/` say what is protected now.
+//    So the guard makes that rename itself. While an agent's shell runs a script, a pass copies the
+//    file — content, mode, owner, timestamps, ACL and xattrs — and renames the copy over the path.
+//    The shell reads on from the file it opened, which no path reaches any more and nothing can
+//    rewrite, whoever it is; a writer gets the copy and may rewrite it freely, and what it writes is
+//    what the next run of that path runs. All 29 writers then leave the run finishing as written,
+//    and so does eval's Python. It is what the refusal tells an agent to do by hand ("write the new
+//    version to another name and `mv` it over"), done for it in advance.
+//
+//    Until 2026-11-01 a pass took the file's write bits instead, and an in-place open failed with
+//    EACCES. That protects a run while it lasts, but it outlives it: the bits came back only on a
+//    later pass, up to 5 s after the shell exited, so a test that writes a step script, runs it, and
+//    rewrites the same path for the next step got PermissionError on the rewrite. 4 to 6 of the 13
+//    tests of an oss-verify-proofs-internal suite failed that way under OMPCODE=1 on 2026-11-01 and
+//    passed under `env -u OMPCODE`. No give-back can be prompt enough: the rewrite comes
+//    microseconds after the exit, and measured that day a give-back driven by the shell's own exit
+//    through a pidfd still left 32 of 50 rewrites refused, because the writer's `wait` and the
+//    watcher wake on the one event. A protection the file carries outlives the run; one the path
+//    carries ends with it.
+//
+//    The write bits are still what protects a running script no copy can replace: one with a second
+//    link (the copy would leave that other name on the old file), one past DETACH_MAX_BYTES, or one
+//    whose directory this user cannot write. An agent's shell is one whose environment carries
+//    OMPCODE=1, which omp sets for every process it starts (kept through nohup, setsid and tmux);
+//    scripts that people, cron or systemd run are left exactly as they are, as are a file another
+//    user owns, which this user may neither replace nor chmod, and one with no write bits, which
+//    nothing can rewrite in place anyway.
+//
+//    Before a pass takes bits it writes a record (the path, inode, original mode, the mode it left)
+//    in the state directory, `omp-running-script-guard/pid-<pid namespace>` under $XDG_STATE_HOME or
+//    ~/.local/state, so whichever omp session runs the next pass gives the bits back, even if the
+//    session that took them was killed. It gives them back only to the file it took them from, and
+//    only while that file still has exactly the mode it left: the same inode, or a copy that a
+//    rename writer made of it after the bits were gone (`sed -i` and five other rename writers copy
+//    the mode they find, so without this a `sed -i` would leave the script read-only for good), and
+//    only while the guard's record for that path still stands. Bits given to such a copy are the one
+//    change to a file the guard did not take them from, so omp's log gets a warning for each. A
+//    later chmod by anyone else wins, and the guard never takes the bits a second time from a file
+//    it has a record for: where it can, it puts a copy at the path instead, carrying the mode the
+//    record holds, and that settles the record. Each copy a rename writer made, and each run of
+//    running-script-guard-restore, gets a line in guard.log in the state directory; the ordinary
+//    work of a pass (several a minute on a busy box) goes only to omp's debug log, and the records
+//    in `held/` say which files are protected by their mode now.
 //
 //    Session start, every turn start and every tool call start a pass, at most one per
 //    PASS_INTERVAL_MS (2 s) across all omp processes of the user (a lock and a stamp in the state
@@ -69,11 +91,11 @@
 //    At session end, the last live omp session of the user (each registers a file named for its
 //    process) gives every record back, running or not, since no agent is left to write; any other
 //    session forces one pass. So a script is protected within about one walk of the first turn start
-//    or tool call after it starts; its bits come back within about FOLLOW_UP_MS of its shell's exit,
-//    however the shell ended, or when the last omp session ends. If the last omp process is killed
-//    first, the records stay and the next omp session's first pass gives back what no shell runs;
-//    scripts/running-script-guard-restore gives them all back at once, with no omp session. A call
-//    that fails on a protected file gets lines appended that say why, what to do, and that command.
+//    or tool call after it starts. A file the write bits protect keeps them until a pass finds that
+//    no shell runs it, and if the last omp process is killed first, until the next omp session's
+//    first pass; scripts/running-script-guard-restore gives every record back at once, with no omp
+//    session. A call that fails on such a file gets lines appended that say why, what to do, and
+//    that command.
 import type { Stats } from "node:fs";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
@@ -86,7 +108,7 @@ type CallEvent = { toolName: string; input: Record<string, unknown> };
 type ResultEvent = { content: Array<{ type: string; text?: string }> };
 type Ctx = { cwd: string };
 export type Holder = { pid: number; fd: number; cmdline: string; dev: number; ino: number; file: string };
-/** One script whose write bits a pass took: `mode` is the mode before, `reduced` the mode it left, `at` when. */
+/** One script whose write bits a pass took, no copy being possible: `mode` is the mode before, `reduced` the mode it left, `at` when. */
 type Entry = { path: string; dev: number; ino: number; mode: number; reduced: number; at: number; pid: number; cmdline: string };
 
 export type GuardOptions = {
@@ -99,6 +121,11 @@ export type GuardOptions = {
 	followUpMs: number;
 	/** The running scripts a pass considers; tests narrow it to their own. */
 	discover: () => Promise<Holder[]>;
+	/**
+	 * Whether a pass protects this shell's script. Tests stand in for it and mark their own shells
+	 * another way, so their scripts carry no OMPCODE=1 and no other session's guard acts on them.
+	 */
+	agentRun: (pid: number) => Promise<boolean>;
 };
 
 const SHELLS: Record<string, true> = { bash: true, sh: true, dash: true, zsh: true, ksh: true, mksh: true, ash: true, hush: true };
@@ -107,6 +134,8 @@ const O_ACCMODE = 0o3;
 const O_CLOEXEC = 0o2000000;
 const MODE_BITS = 0o7777;
 const WRITE_BITS = 0o222;
+/** The largest running script a pass copies; the fallback below covers anything above it. */
+const DETACH_MAX_BYTES = 8 * 1024 * 1024;
 const GLOB_CHARS = /[*?[{]/;
 const WALK_DEADLINE_MS = Number(process.env.OMP_RUNNING_SCRIPT_GUARD_MS) > 0 ? Number(process.env.OMP_RUNNING_SCRIPT_GUARD_MS) : 2_000;
 const PASS_INTERVAL_MS = 2_000;
@@ -198,7 +227,7 @@ export async function shellHeldFiles(): Promise<Holder[]> {
 	return holders;
 }
 
-/** Whether omp started this process or an ancestor of it: omp sets OMPCODE=1 for every process it starts. */
+/** Whether omp started this process or an ancestor of it: omp sets OMPCODE=1 for every process it starts. The default `GuardOptions.agentRun`. */
 async function agentRun(pid: number): Promise<boolean> {
 	const environ = await fs.readFile(`/proc/${pid}/environ`, "utf8").catch(() => "");
 	return environ.split("\0").includes("OMPCODE=1");
@@ -208,7 +237,12 @@ async function agentRun(pid: number): Promise<boolean> {
 async function matchTarget(target: string, holders: Holder[], globs: boolean): Promise<Holder | undefined> {
 	// A target that does not exist is a new file, or (for ast_edit) a glob.
 	const st: Stats | undefined = await fs.stat(target).catch(() => undefined);
-	if (st?.isFile()) return holders.find(h => h.dev === st.dev && h.ino === st.ino);
+	if (st?.isFile()) {
+		const real = await fs.realpath(target).catch(() => target);
+		// By inode for a run no pass has reached yet, and by path for one whose copy a pass has
+		// already put there: in both the call's new version must not go to the file being run.
+		return holders.find(h => (h.dev === st.dev && h.ino === st.ino) || h.file === real);
+	}
 	if (!globs) return undefined;
 	if (st?.isDirectory()) {
 		const dir = await fs.realpath(target);
@@ -227,7 +261,7 @@ const RESTORE_HINT = "If a script stays read-only after its run has ended, `runn
 function refusal(holder: Holder, toolName: string): string {
 	return [
 		`Running-script guard: nothing in this ${toolName} call ran. ${holder.file} is being run by pid ${holder.pid} (${holder.cmdline}).`,
-		`${toolName} rewrites the file in place, and the running shell reads its script from that file by offset, so it would run shifted or garbled lines.`,
+		`${toolName} rewrites the file in place. The running shell reads its script from the file as it goes, so the new version would make it run shifted or garbled lines; and once a pass has put a copy of the script at this path, the shell reads the file it opened, so the call would reach only the next run.`,
 		`Wait for pid ${holder.pid} to finish, then send the call again; or write the new version to another name and \`mv\` it over ${path.basename(holder.file)} (a rename leaves the running copy reading the old file).`,
 		RESTORE_HINT,
 	].join("\n");
@@ -259,7 +293,36 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | "expired"> {
 	}
 }
 
-/** The write-bit protection: passes, their records, and the line a denied call gets. */
+/**
+ * Puts a copy of a running script at its path, which leaves the shell reading a file no path
+ * reaches: a writer gets the copy, the run finishes as written, and nothing has to be given back
+ * when it ends. `mode` is the mode the file carries without the guard. Returns false when no copy
+ * was made — another link to the inode, a file past DETACH_MAX_BYTES, a directory this user cannot
+ * write, or any other failure — so that the caller takes the write bits instead.
+ */
+async function detach(holder: Holder, st: Stats, mode: number): Promise<boolean> {
+	if (st.nlink !== 1 || st.size > DETACH_MAX_BYTES) return false;
+	const temp = path.join(path.dirname(holder.file), `.${path.basename(holder.file)}.omp-guard-${process.pid}-${Date.now().toString(36)}`);
+	try {
+		// From the shell's own fd, so the copy is of the file it runs, and through `cp`, so the mode,
+		// the owner, the timestamps, the ACL and the xattrs come with it.
+		const copy = Bun.spawn(["cp", "--preserve=mode,ownership,timestamps,xattr", "--reflink=auto", "-T", `/proc/${holder.pid}/fd/${holder.fd}`, temp], { stdout: "ignore", stderr: "ignore" });
+		if ((await copy.exited) !== 0) return false;
+		if ((st.mode & MODE_BITS) !== mode) await fs.chmod(temp, mode); // give back bits an earlier pass took
+		// Only over the file the shell runs: a rename writer that got in first has put its own file
+		// at the path, and that file is both safe and newer than this copy.
+		const now = await fs.stat(holder.file).catch(() => undefined);
+		if (now?.dev !== holder.dev || now.ino !== holder.ino) return true;
+		await fs.rename(temp, holder.file);
+		return true;
+	} catch {
+		return false; // the caller falls back to the write bits
+	} finally {
+		await fs.rm(temp, { force: true }); // nothing to remove once the rename took it
+	}
+}
+
+/** The protection of the running copy: passes, the records of what they could only chmod, and the line a denied call gets. */
 function createProtector(o: GuardOptions, log: { debug(message: string, data: Record<string, unknown>): void; warn(message: string, data: Record<string, unknown>): void }) {
 	const debug = (message: string, data: Record<string, unknown>) => log.debug(message, data);
 	const logPath = path.join(o.stateDir, "guard.log");
@@ -332,8 +395,9 @@ function createProtector(o: GuardOptions, log: { debug(message: string, data: Re
 	}
 
 	/**
-	 * Takes and gives back write bits; returns how many records remain. `release` gives back every
-	 * record and takes nothing: the last omp session is ending, so no agent is left to write.
+	 * Protects each newly running script and settles every record that no longer holds; returns how
+	 * many records remain. `release` protects nothing and gives every record back: the last omp
+	 * session is ending, so no agent is left to write.
 	 */
 	async function pass(release: boolean): Promise<number> {
 		const uid = process.getuid?.();
@@ -343,25 +407,31 @@ function createProtector(o: GuardOptions, log: { debug(message: string, data: Re
 		await Promise.all(
 			(release ? [] : await o.discover()).map(async holder => {
 				const st = await fs.stat(holder.file).catch(() => undefined);
-				if (st?.dev === holder.dev && st.ino === holder.ino && (await agentRun(holder.pid))) running.set(holder.file, { holder, st });
+				if (st?.dev === holder.dev && st.ino === holder.ino && (await o.agentRun(holder.pid))) running.set(holder.file, { holder, st });
 			}),
 		);
 		const records = await readRecords();
 		for (const [file, { holder, st }] of running) {
 			const record = records.get(file);
-			if (st.uid !== uid || (record?.dev === holder.dev && record.ino === holder.ino)) continue; // not ours to chmod, or already taken
+			if (st.uid !== uid) continue; // not ours to change
 			const mode = st.mode & MODE_BITS;
+			// A record stands for write bits a fallback take removed. Any other mode is one somebody
+			// else set meanwhile, and it wins.
+			if (record && mode !== record.reduced) continue;
+			const original = record ? record.mode : mode;
+			if ((original & WRITE_BITS) === 0) {
+				if (record) await fs.rm(recordPath(file), { force: true }); // read-only by someone's choice
+				continue;
+			}
 			try {
-				if (record && mode === record.reduced && st.ctimeMs >= record.at) {
-					// A copy a rename writer made after the bits were gone, run again: it carries the
-					// reduced mode, so the record moves to it and its run's end gives the bits back.
-					await writeRecord({ ...record, dev: holder.dev, ino: holder.ino });
+				if (await detach(holder, st, original)) {
+					// The path carries the protection now, so a record for it is settled: the copy left
+					// there has the mode the file had before the guard saw it.
+					if (record) await fs.rm(recordPath(file), { force: true });
+					debug("running-script-guard: put a copy at the path", { file, mode: octal(original), pid: holder.pid, cmdline: holder.cmdline });
 					continue;
 				}
-				if ((mode & WRITE_BITS) === 0) {
-					if (record) await fs.rm(recordPath(file), { force: true }); // read-only by someone's choice
-					continue;
-				}
+				if (record) continue; // no copy can be made, and its bits are already gone
 				const entry: Entry = { path: file, dev: holder.dev, ino: holder.ino, mode, reduced: mode & ~WRITE_BITS, at: Date.now(), pid: holder.pid, cmdline: holder.cmdline };
 				// The record first: if this process dies after the chmod, the next pass still knows
 				// what to give back. Through the shell's own fd, so the chmod lands on the inode it runs.
@@ -369,7 +439,7 @@ function createProtector(o: GuardOptions, log: { debug(message: string, data: Re
 				await fs.chmod(`/proc/${holder.pid}/fd/${holder.fd}`, entry.reduced);
 				debug("running-script-guard: took the write bits", { file, from: octal(mode), to: octal(entry.reduced), pid: holder.pid, cmdline: holder.cmdline });
 			} catch (error) {
-				debug("running-script-guard: could not take the write bits", { file, error: errorText(error) });
+				debug("running-script-guard: could not protect the running copy", { file, error: errorText(error) });
 			}
 		}
 		for (const [file, record] of records) {
@@ -538,4 +608,4 @@ function defaultStateDir(): string {
 	return path.join(base, "omp-running-script-guard", namespace);
 }
 
-export default createRunningScriptGuard({ stateDir: defaultStateDir(), passIntervalMs: PASS_INTERVAL_MS, passWaitMs: 0, followUpMs: FOLLOW_UP_MS, discover: shellHeldFiles });
+export default createRunningScriptGuard({ stateDir: defaultStateDir(), passIntervalMs: PASS_INTERVAL_MS, passWaitMs: 0, followUpMs: FOLLOW_UP_MS, discover: shellHeldFiles, agentRun });
