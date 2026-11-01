@@ -6,6 +6,10 @@ Read before you merge in a repository named below, change an enabled auto-merge,
 
 To change the sha or message auto-merge uses, disable it (`gh pr merge <N> --disable-auto`), enable it again, and check that `enabledAt` (`gh pr view <N> --json autoMergeRequest`) changed: a second `--auto` exits 0 and changes nothing. A refused `--match-head-commit` means someone else pushed, so settle who owns the branch before you retry.
 
+## Whether your token can merge here
+
+Never read `gh api repos/<owner>/<repo> -q .permissions` to decide: it reports a USER's permissions and answers all false for an app installation token whatever the installation grants, so a session that reads it concludes it is blocked and asks for a credential it already has. Check by the operation instead: a merge your identity has already made in that repository, or a dry run. A field that looks like the answer is not the field that carries it.
+
 ## Per-repository rules
 
 | Repo | Merge rule |
