@@ -10,6 +10,10 @@ To change the sha or message auto-merge uses, disable it (`gh pr merge <N> --dis
 
 Never read `gh api repos/<owner>/<repo> -q .permissions` to decide: it reports a USER's permissions and answers all false for an app installation token whatever the installation grants, so a session that reads it concludes it is blocked and asks for a credential it already has. Check by the operation instead: a merge your identity has already made in that repository, or a dry run. A field that looks like the answer is not the field that carries it.
 
+## A guard over a shared budget
+
+Where a required check measures a budget several pull requests share — a word or line count, a file or bundle size, a quota — it runs on each head and never on the merged result, so every head is green and the sum is red, and the failure lands on the base branch where no author is watching and every other lane is blocked. Measured: of four open pull requests against one 2,000-word ceiling, each passed alone at 1,999, 1,990 and 1,993, and two of them together hit exactly 2,000. Before you arm a merge, enumerate every open pull request that touches the budgeted files, not only yours, and measure the combination; a merge queue's own build is the merged result, so check whether your guard runs there or only on the pull request. Put the margin in the body, since "1,999 of 2,000" invites the next author to check and "passes" does not.
+
 ## Per-repository rules
 
 | Repo | Merge rule |
