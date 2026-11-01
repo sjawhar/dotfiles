@@ -50,12 +50,17 @@ a bare `git worktree prune` in an agent session, because from inside a box every
 worktree looks missing and a prune deletes live registrations); and it deletes the workspace's
 branch from the shared source when a remote already holds every commit on it, which loses
 nothing, keeping anything `git branch -d` refuses. `--keep-branch` leaves the branch alone.
+
+WHERE THEY GO. `/mnt/nvme/<user>/worktrees` on a machine with that disk, else `~/.worktrees`
+(`ws_roots`). Trees already under `~/.worktrees` stay there and keep working: `list`, `rm` and
+every other lookup walk both roots.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -63,6 +68,9 @@ from pathlib import Path
 
 GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 BORROWERS = "agent-workspace-borrowers"
+# The machine's big disk, where it has one. Tested exactly as `scripts/agentbox` tests it for a
+# box's checkouts; a constant so a test can point it somewhere else.
+NVME = Path("/mnt/nvme")
 
 
 def run(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -113,8 +121,36 @@ def src_root() -> Path:
     return Path(os.environ.get("AGENT_WORKSPACE_SRC", str(Path.home() / "src")))
 
 
+def ws_roots() -> list[Path]:
+    """Every root a workspace of this machine may be under, the one `new` writes to first.
+
+    The default root is on the big disk where the machine has one, `/mnt/nvme/<user>/worktrees`
+    — the test `scripts/agentbox` makes for a box's checkouts, plus writability. The root
+    filesystem of sami-rocqperf is 495 GiB shared by about a hundred sessions and it reached
+    about 1 GiB free at 05:19Z on 2026-11-01 from new checkouts alone, against an 18 GiB floor,
+    while /mnt/nvme holds 3.4 TB.
+
+    Trees made before that are under `~/.worktrees` and none of them is moved: `git worktree
+    move` across devices fails with `Invalid cross-device link`, so an old tree is removed and
+    made again, never moved. Both roots are therefore walked by every lookup. A machine without
+    the big disk has only the one root, and AGENT_WORKSPACE_ROOT overrides the whole list.
+    """
+    override = os.environ.get("AGENT_WORKSPACE_ROOT")
+    if override:
+        return [Path(override)]
+    roots: list[Path] = []
+    big = NVME / pwd.getpwuid(os.getuid()).pw_name
+    if big.is_dir() and os.access(big, os.W_OK | os.X_OK):
+        roots.append(big / "worktrees")
+    legacy = Path.home() / ".worktrees"
+    if legacy not in roots:
+        roots.append(legacy)
+    return roots
+
+
 def ws_root() -> Path:
-    return Path(os.environ.get("AGENT_WORKSPACE_ROOT", str(Path.home() / ".worktrees")))
+    """Where a new workspace goes."""
+    return ws_roots()[0]
 
 
 def resolve_source(repo: str) -> Path:
@@ -135,11 +171,12 @@ def resolve_source(repo: str) -> Path:
             f"  Cut workspaces from the canonical checkout, not from a worktree of it."
         )
     try:
-        if ws_root() in p.parents:
-            die(
-                f"{p} is under the workspaces root {ws_root()}, so it is a workspace, not a source.\n"
-                f"  Cut from the canonical checkout under {src_root()} instead."
-            )
+        for root in ws_roots():
+            if root in p.parents:
+                die(
+                    f"{p} is under the workspaces root {root}, so it is a workspace, not a source.\n"
+                    f"  Cut from the canonical checkout under {src_root()} instead."
+                )
     except Exception:
         pass
     return p
@@ -352,8 +389,11 @@ def cmd_new(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    root = ws_root()
-    repos = [root / args.repo] if args.repo else sorted(p for p in root.glob("*") if p.is_dir())
+    roots = ws_roots()
+    default = roots[0]
+    repos: list[Path] = []
+    for root in roots:
+        repos += [root / args.repo] if args.repo else sorted(p for p in root.glob("*") if p.is_dir())
     bad = 0
     for repo_dir in repos:
         if not repo_dir.is_dir():
@@ -361,7 +401,10 @@ def cmd_list(args: argparse.Namespace) -> int:
         children = sorted(p for p in repo_dir.iterdir() if p.is_dir() and not p.is_symlink())
         if not children:
             continue
-        print(f"{repo_dir}")
+        # The whole path names the root each tree is under; a tree still on the small root disk
+        # is marked, since that is the one worth moving when its work ends.
+        mark = "" if repo_dir.parent == default else f"   [legacy root; new trees go under {default}]"
+        print(f"{repo_dir}{mark}")
         for child in children:
             info = classify(child)
             extra = ""
@@ -416,16 +459,21 @@ def forget_registration(source: Path, dest: Path) -> bool:
     return gone
 
 
-def clear_stale_registration(dest: Path, repo_name: str) -> int:
-    """The directory is already gone. Clear the registration it left behind, if any."""
+def clear_stale_registration(dests: list[Path], repo_name: str) -> int:
+    """The directory is already gone. Clear the registration it left behind, if any.
+
+    `dests` is every path the workspace could be at — one per workspaces root — since a tree
+    deleted by hand under the legacy root left its registration under that path.
+    """
     source = resolve_source(repo_name) if (src_root() / repo_name).exists() else None
-    if source is not None and forget_registration(source, dest):
-        print(
-            f"agent-workspace: {dest} was already deleted, and {source} still registered it.\n"
-            f"  That registration is now gone; no other worktree of that checkout was touched."
-        )
-        return 0
-    die(f"no such workspace: {dest}")
+    for dest in dests:
+        if source is not None and forget_registration(source, dest):
+            print(
+                f"agent-workspace: {dest} was already deleted, and {source} still registered it.\n"
+                f"  That registration is now gone; no other worktree of that checkout was touched."
+            )
+            return 0
+    die(f"no such workspace: {dests[0]}")
     return 1
 
 
@@ -435,11 +483,15 @@ def cmd_rm(args: argparse.Namespace) -> int:
     if args.name is None:
         dest = Path(args.repo).expanduser().absolute()
         repo_name = dest.parent.name
+        candidates = [dest]
     else:
-        dest = (ws_root() / Path(args.repo).name / args.name).absolute()
+        # The default root first, then the legacy one: a tree made before the move is still
+        # where it was made, and nothing moves it.
         repo_name = Path(args.repo).name
+        candidates = [(root / repo_name / args.name).absolute() for root in ws_roots()]
+        dest = next((c for c in candidates if c.exists()), candidates[0])
     if not dest.exists():
-        return clear_stale_registration(dest, repo_name)
+        return clear_stale_registration(candidates, repo_name)
     info = classify(dest)
 
     if not args.force:
@@ -516,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
     n = sub.add_parser("new", help="make a workspace of one repository (a worktree by default)")
     n.add_argument("repo", help="repository name under ~/src, or a path to its canonical checkout")
     n.add_argument("name", help="workspace name; also the branch name unless --branch says otherwise")
-    n.add_argument("--path", help="put it here instead of ~/.worktrees/<repo>/<name>")
+    n.add_argument("--path", help="put it here instead of <workspaces root>/<repo>/<name>")
     n.add_argument("--branch", help="branch to check out or create (default: the workspace name)")
     n.add_argument("--base", help="start the new branch here (default: origin's default branch)")
     n.add_argument(

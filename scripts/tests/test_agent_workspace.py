@@ -14,6 +14,7 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,7 @@ GIT_ENV = {
     "GIT_CONFIG_SYSTEM": "/dev/null",
 }
 HAVE_JJ = shutil.which("jj") is not None
+USER = pwd.getpwuid(os.getuid()).pw_name
 
 
 def git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
@@ -47,7 +49,7 @@ def git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-class AgentWorkspaceTest(unittest.TestCase):
+class WorkspaceCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -83,6 +85,8 @@ class AgentWorkspaceTest(unittest.TestCase):
         """Does this tree carry an object store of its own?"""
         return (tree / ".git").is_dir() and not (tree / ".git" / "objects" / "info" / "alternates").is_file()
 
+
+class AgentWorkspaceTest(WorkspaceCase):
     # ------------------------------------------------------------------ the default
 
     def test_new_without_a_flag_makes_a_worktree_that_carries_no_objects(self) -> None:
@@ -214,6 +218,101 @@ class AgentWorkspaceTest(unittest.TestCase):
         self.assertNotIn("wsa:", workspaces)
         listing = git("worktree", "list", "--porcelain", cwd=self.source).stdout
         self.assertNotIn(str(self.wt / "proj" / "wsa"), listing)
+
+
+class WorkspaceRootTest(WorkspaceCase):
+    """Which root a new tree lands in, and that a tree in the old one keeps working.
+
+    The root filesystem of sami-rocqperf, 495 GiB shared by about a hundred sessions, reached
+    about 1 GiB free at 05:19Z on 2026-11-01 from new checkouts alone, so the default root is
+    the machine's big disk. Nothing already under ~/.worktrees is moved: `git worktree move`
+    across devices fails with `Invalid cross-device link`.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # The default rule is what is under test, so the override the other tests use is gone.
+        os.environ.pop("AGENT_WORKSPACE_ROOT", None)
+        self.home = self.base / "home"
+        self.legacy = self.home / ".worktrees"
+        self.legacy.mkdir(parents=True)
+        self.nvme = self.base / "mnt-nvme"
+        self.big_disk = self.nvme / USER
+        self.big = self.big_disk / "worktrees"
+        old_home, old_nvme = os.environ.get("HOME"), AW.NVME
+        os.environ["HOME"] = str(self.home)
+        AW.NVME = self.nvme
+
+        def restore() -> None:
+            AW.NVME = old_nvme
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+
+        self.addCleanup(restore)
+
+    def test_new_lands_on_the_big_disk_when_the_machine_has_one(self) -> None:
+        self.big_disk.mkdir(parents=True)
+        code, out = self.run_aw("new", "proj", "alpha")
+        self.assertEqual(code, 0)
+        tree = self.big / "proj" / "alpha"
+        self.assertTrue((tree / "file.txt").is_file(), "the tree was not made on the big disk")
+        self.assertEqual(out.strip().splitlines()[-1], str(tree), "new must print the path it made")
+
+    def test_new_falls_back_to_the_home_root_without_that_disk(self) -> None:
+        self.assertFalse(self.big_disk.exists())
+        code, out = self.run_aw("new", "proj", "alpha")
+        self.assertEqual(code, 0)
+        tree = self.legacy / "proj" / "alpha"
+        self.assertTrue((tree / "file.txt").is_file())
+        self.assertEqual(out.strip().splitlines()[-1], str(tree))
+
+    @unittest.skipIf(os.getuid() == 0, "root writes through a mode that denies everyone else")
+    def test_a_big_disk_this_user_cannot_write_is_not_used(self) -> None:
+        self.big_disk.mkdir(parents=True)
+        self.big_disk.chmod(0o500)
+        self.addCleanup(self.big_disk.chmod, 0o700)
+        code, _ = self.run_aw("new", "proj", "alpha")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.legacy / "proj" / "alpha" / "file.txt").is_file())
+
+    def test_the_override_still_wins_over_both(self) -> None:
+        self.big_disk.mkdir(parents=True)
+        os.environ["AGENT_WORKSPACE_ROOT"] = str(self.base / "elsewhere")
+        self.assertEqual(AW.ws_roots(), [self.base / "elsewhere"])
+        code, _ = self.run_aw("new", "proj", "alpha")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.base / "elsewhere" / "proj" / "alpha" / "file.txt").is_file())
+
+    def test_list_and_rm_find_a_tree_under_the_legacy_root(self) -> None:
+        self.run_aw("new", "proj", "alpha")  # made before the big disk existed
+        tree = self.legacy / "proj" / "alpha"
+        self.assertTrue(tree.is_dir())
+        self.big_disk.mkdir(parents=True)  # from here the big disk is the default
+        self.assertEqual(AW.ws_root(), self.big)
+
+        code, out = self.run_aw("list")
+        self.assertEqual(code, 0)
+        self.assertIn(str(self.legacy / "proj"), out)
+        self.assertIn("legacy root", out)
+
+        code, out = self.run_aw("rm", "proj", "alpha")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(tree.exists(), "rm did not find the tree under the legacy root")
+        listing = git("worktree", "list", "--porcelain", cwd=self.source).stdout
+        self.assertNotIn(str(tree), listing)
+
+    def test_rm_clears_a_legacy_registration_a_plain_deletion_left_behind(self) -> None:
+        self.run_aw("new", "proj", "alpha")
+        tree = self.legacy / "proj" / "alpha"
+        shutil.rmtree(tree)
+        self.big_disk.mkdir(parents=True)
+        code, out = self.run_aw("rm", "proj", "alpha")
+        self.assertEqual(code, 0, out)
+        self.assertIn("still registered it", out)
+        listing = git("worktree", "list", "--porcelain", cwd=self.source).stdout
+        self.assertNotIn(str(tree), listing)
 
 
 if __name__ == "__main__":
