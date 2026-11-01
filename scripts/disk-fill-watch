@@ -46,9 +46,15 @@ What one run does, with `statvfs` and /proc reads only, no model call:
      last two samples that say how fast the disk is falling NOW. The alert says which of the
      two rules sent it.
   7. The alert names TOP WRITERS NOW as one 15 s interval of `/proc/<pid>/io` `write_bytes`
-     traffic, not disk growth. It gives each writer's owning agent session, working directory,
-     what it holds open on the alerting mount and age. A size walk cannot name those: it sees
-     what is already written, not what is being written now.
+     traffic, not disk growth. It gives each writer's owning agent session, working directory
+     and age, and it puts the writers whose cwd, open directory or writable open file is ON
+     THE ALERTING FILESYSTEM first, each with one example path there, and the rest under a
+     heading of their own. That split comes from st_dev alone, never from a path, and a file
+     held there read-only does not count: on 2026-11-01T05:18Z a / alert listed pytest workers
+     whose argv named /home through a symlink, and whose only thing on / was the interpreter
+     they read, while every byte of theirs went to /mnt/nvme; they were paused while the real
+     / writer kept running. A size walk can name none of this: it sees what is already
+     written, not what is being written now.
 
 It also keeps the /tmp rule of the script it replaces, and applies it to the checkout root
 (~/src) too: a top-level entry of either, born in the last 6 hours and now at or over 500 MB,
@@ -75,6 +81,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -615,37 +622,112 @@ def scope_of(pid: int) -> str:
     return ""
 
 
-def on_mount(pid: int, device: int, limit: int = 64) -> tuple[str, str]:
-    """(the process's cwd if it is on this device, the largest open file it holds there).
+# How many of a process's open files one writer sample reads. A pytest worker holds a few
+# dozen; a server holds thousands, and reading every one of them for each of the top writers
+# is work this detector does while a disk is already full. A scan cut at this many says so in
+# the alert instead of calling the writer's traffic "elsewhere" on an unfinished read.
+FD_SCAN_LIMIT = 256
+
+
+def mount_evidence(pid: int, device: int, limit: int = FD_SCAN_LIMIT) -> dict:
+    """What ties this process to the device `device`, by device id and nothing else.
 
     /proc/<pid>/io counts every write the process made, to ANY filesystem, so a top writer is
-    not necessarily writing to the mount that is filling. This is the test that ties it to the
-    mount, and the alert says so rather than implying the bytes landed there.
+    not necessarily writing to the mount that is filling. A path cannot answer that question:
+    on 2026-11-01T05:18Z the / alert listed pytest workers whose argv named a /home path that
+    is a symlink to /mnt/nvme, and the SRE paused them while the real / consumer, a `git
+    worktree add` into ~/src, kept running. So the test is st_dev: the process's cwd, and each
+    open file or directory, stat'd THROUGH /proc/<pid>/{cwd,fd/N} so every symlink, bind mount
+    and deleted-but-open file resolves to the device the kernel actually has open.
+
+    A file open READ-ONLY on the device is not evidence that the bytes land there, and saying
+    it is would repeat the 05:18Z mistake in a new form: every one of those pytest workers
+    holds its interpreter, `/home/sami/.local/share/uv/python/.../python3.14`, open on / while
+    all of its output goes to /mnt/nvme (measured here 2026-11-01T05:34Z). So a writer is on
+    the mount when its cwd is there, when it holds a file open for writing there, or when it
+    holds a directory there -- a directory fd is how git, pytest and dune write with openat.
+    Read-only files there are reported, in the writer's own line, as what they are.
+
+    Returns {"cwd", "on_mount", "example", "read_only", "fd_error"}: the cwd whatever device
+    it is on, so the alert can still say where the process stands; whether it writes on
+    `device`; one example path there; what it holds open read-only there when that is all it
+    has; and why the open files could not be read, when they could not.
     """
-    cwd = ""
+    found = {"cwd": "", "on_mount": False, "example": "", "read_only": "", "fd_error": ""}
     try:
-        target = os.readlink(f"/proc/{pid}/cwd")
-        if device_of(target) == device:
-            cwd = target
+        found["cwd"] = os.readlink(f"/proc/{pid}/cwd")
     except OSError:
         pass
-    biggest = ("", 0)
     try:
-        for index, descriptor in enumerate(os.listdir(f"/proc/{pid}/fd")):
-            if index >= limit:
-                break
-            try:
-                target = os.readlink(f"/proc/{pid}/fd/{descriptor}")
-                if not target.startswith("/"):
-                    continue
-                stat = os.stat(target)
-            except OSError:
-                continue
-            if stat.st_dev == device and stat.st_size > biggest[1]:
-                biggest = (target, stat.st_size)
+        if os.stat(f"/proc/{pid}/cwd").st_dev == device:
+            found["on_mount"] = True
+            found["example"] = f"cwd {found['cwd'] or f'/proc/{pid}/cwd'}"
     except OSError:
         pass
-    return cwd, (f"{biggest[0]} ({size(biggest[1])})" if biggest[0] else "")
+    try:
+        descriptors = os.listdir(f"/proc/{pid}/fd")
+    except OSError as error:
+        # A process that wrote during the sample and then exited is a different fact from one
+        # whose /proc this run may not read, and the reader acts on neither the same way.
+        found["fd_error"] = (
+            "it exited during the sample, so what it wrote to is unknown"
+            if not os.path.isdir(f"/proc/{pid}")
+            else f"its open files could not be read ({error.strerror or error})"
+        )
+        return found
+    biggest = ("", -1)
+    directory = ""
+    readable = ("", 0)
+    for index, descriptor in enumerate(sorted(descriptors, key=lambda name: int(name) if name.isdigit() else 0)):
+        if index >= limit:
+            if not found["on_mount"]:
+                found["fd_error"] = f"only the first {limit} of its {len(descriptors)} open files were read"
+            break
+        try:
+            status = os.stat(f"/proc/{pid}/fd/{descriptor}")
+        except OSError:
+            continue  # closed while we read it, or an fd with no stat (an exited process)
+        if status.st_dev != device:
+            continue
+        if stat.S_ISDIR(status.st_mode):
+            directory = directory or path_of_fd(pid, descriptor)
+        elif not stat.S_ISREG(status.st_mode):
+            continue  # a pipe, a socket or a device carries no filesystem traffic
+        elif not writable_fd(pid, descriptor):
+            readable = (readable[0] or f"{path_of_fd(pid, descriptor)} ({size(status.st_size)})", readable[1] + 1)
+            continue
+        elif status.st_size > biggest[1]:
+            biggest = (path_of_fd(pid, descriptor), status.st_size)
+        found["on_mount"] = True
+    # The example is for a reader who must act on it, so a file with bytes in it comes first,
+    # then the cwd, and an empty or deleted open file only when there is nothing else: an
+    # inherited 0-byte handle names the mount but tells that reader nothing.
+    if biggest[1] > 0:
+        found["example"] = f"{biggest[0]} ({size(biggest[1])})"
+    elif not found["example"]:
+        found["example"] = directory or (f"{biggest[0]} ({size(biggest[1])})" if biggest[0] else "")
+    if not found["on_mount"] and readable[1]:
+        found["read_only"] = f"{readable[1]} file(s) open read-only there, the first {readable[0]}"
+    return found
+
+
+def writable_fd(pid: int, descriptor: str) -> bool:
+    """Whether this fd was opened for writing, from the access mode in /proc/<pid>/fdinfo."""
+    try:
+        for line in Path(f"/proc/{pid}/fdinfo/{descriptor}").read_text().splitlines():
+            if line.startswith("flags:"):
+                return int(line.split()[1], 8) & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)
+    except (OSError, ValueError, IndexError):
+        return False  # gone, or refused: a fd we cannot read is not evidence of writing
+    return False
+
+
+def path_of_fd(pid: int, descriptor: str) -> str:
+    """The path an fd points at, for the alert to name. "(deleted)" and all, as /proc says it."""
+    try:
+        return os.readlink(f"/proc/{pid}/fd/{descriptor}")
+    except OSError:
+        return f"/proc/{pid}/fd/{descriptor}"
 
 
 def sample_writers(seconds: float) -> tuple[list[dict], int]:
@@ -685,7 +767,7 @@ def sample_writers(seconds: float) -> tuple[list[dict], int]:
 
 
 def describe_writers(rows: list[dict], device: int, seconds: float, top: int) -> list[dict]:
-    """Resolve the top rows to a verified session, a command, a cwd, a pane and what they hold.
+    """Resolve the top rows to a verified session, a command, a cwd, a pane and the mount test.
 
     The two lookups happen here because this is the only place that attributes a process, and
     it runs only when an alert is about to name one -- in this process, or in the root child the
@@ -701,7 +783,7 @@ def describe_writers(rows: list[dict], device: int, seconds: float, top: int) ->
     described = []
     for row in rows[:top]:
         pid = row["pid"]
-        cwd, holds = on_mount(pid, device)
+        evidence = mount_evidence(pid, device)
         described.append(
             {
                 "pid": pid,
@@ -711,15 +793,46 @@ def describe_writers(rows: list[dict], device: int, seconds: float, top: int) ->
                 "session": session_phrase(pid, scope_of(pid)),
                 "scope": scope_of(pid),
                 "pane": pane_of(pid),
-                "cwd": cwd,
-                "holds": holds,
+                "cwd": evidence["cwd"],
+                "on_mount": evidence["on_mount"],
+                "example": evidence["example"],
+                "read_only": evidence["read_only"],
+                "fd_error": evidence["fd_error"],
                 "age": age_of(pid),
             }
         )
     return described
 
 
+def writer_line(row: dict, seconds: float, mount: str) -> str:
+    """One writer, with the filesystem evidence that decided which group it is in."""
+    who = row["session"] or f"no session id; scope {row['scope'] or 'none'}"
+    pane = f", pane {row['pane']}" if row.get("pane") else ""
+    where = row["cwd"] or "unreadable"
+    if row.get("on_mount"):
+        verdict = f", on {mount}: {row.get('example') or 'an open file'}"
+    elif row.get("fd_error"):
+        verdict = f", no cwd on {mount} and {row['fd_error']}"
+    elif row.get("read_only"):
+        verdict = f", nothing open for writing on {mount} ({row['read_only']})"
+    else:
+        verdict = f", no cwd or open file on {mount}"
+    return (
+        f"  write traffic: {size(row['written'])} in one {int(seconds)} s sample"
+        f" ({gb(row['write_traffic_rate'] * 3600)}/h over that {int(seconds)} s sample) -- pid"
+        f" {row['pid']}, up {human_time(row['age'])}, {who}, cwd {where}{pane}{verdict}:"
+        f" {row['command']}"
+    )
+
+
 def writers_text(described: list[dict], denied: int, seconds: float, mount: str, privileged: bool) -> str:
+    """The writers paragraph: the ones on this filesystem first, the rest under a heading.
+
+    The split is st_dev evidence from mount_evidence(), not the command line. A writer whose
+    argv names a path on the alerting mount, while its cwd and everything it has open for
+    writing are on another disk, belongs in the second group; stopping it frees nothing here,
+    and its line says whether it holds anything there read-only.
+    """
     missing = (
         f" Every process was read ({denied} of them exited during the sample)."
         if privileged
@@ -735,18 +848,20 @@ def writers_text(described: list[dict], denied: int, seconds: float, mount: str,
         f"Top writers now (single {int(seconds)} s write-traffic sample: two /proc/<pid>/io"
         f" snapshots {int(seconds)} s apart. write_bytes counts rewrites and deleted output on every"
         f" filesystem, not only {mount}; this is current write traffic, not a disk-growth estimate."
-        f" The df free-space fill rate above produces time-to-full).{missing}"
+        f" The df free-space fill rate above produces time-to-full). Each writer below is placed"
+        f" by the device id of its cwd and of each file or directory it has open, never by its"
+        f" command line; a file it holds there read-only does not place it on {mount}.{missing}"
     ]
-    for row in described:
-        who = row["session"] or f"no session id; scope {row['scope'] or 'none'}"
-        pane = f", pane {row['pane']}" if row.get("pane") else ""
-        where = row["cwd"] or f"(cwd is not on {mount})"
-        holds = f", holds {row['holds']}" if row["holds"] else ""
-        lines.append(
-            f"  write traffic: {size(row['written'])} in one {int(seconds)} s sample"
-            f" ({gb(row['write_traffic_rate'] * 3600)}/h over that {int(seconds)} s sample) -- pid"
-            f" {row['pid']}, up {human_time(row['age'])}, {who}, cwd {where}{pane}{holds}: {row['command']}"
-        )
+    here = [row for row in described if row.get("on_mount")]
+    elsewhere = [row for row in described if not row.get("on_mount")]
+    if here:
+        lines.append(f"On {mount} (these are the ones to stop, highest write traffic first):")
+        lines.extend(writer_line(row, seconds, mount) for row in here)
+    else:
+        lines.append(f"No sampled writer has its cwd, or anything open for writing, on {mount}.")
+    if elsewhere:
+        lines.append(f"Writing elsewhere, not on {mount} -- stopping these frees nothing here:")
+        lines.extend(writer_line(row, seconds, mount) for row in elsewhere)
     return "\n".join(lines)
 
 
@@ -1500,10 +1615,11 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
     # the floor and falling is a standing low WITH a clock, and the clock leads; above the floor
     # and falling is the ordinary fill alert.
     act = (
-        " Read the writers above before you delete anything. Stop or finish the lane that is"
-        " writing; move its output to the other disk (/mnt/nvme for work started on /, and off"
-        " the box for work on /mnt/nvme); then reclaim with skill://disk-hygiene -- its check-in"
-        " comes first, and a directory a live session stands in is never deleted."
+        " Act only on the writers listed as on this filesystem; the ones under the elsewhere"
+        " heading write to another disk, and stopping them frees nothing here. Stop or finish"
+        " that lane; move its output to the other disk (/mnt/nvme for work started on /, and"
+        " off the box for work on /mnt/nvme); then reclaim with skill://disk-hygiene -- its"
+        " check-in comes first, and a directory a live session stands in is never deleted."
     )
     full_root = (
         " A full root stops every session on the box at once: on 2026-10-27T00:00:31Z it took"

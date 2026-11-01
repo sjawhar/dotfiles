@@ -147,8 +147,32 @@ A size walk sees what is already written. It cannot name what is being written *
 what an alert needs, so each alert carries a **single write-traffic interval**: `write_bytes` from
 `/proc/<pid>/io` at two endpoints, `--writer-sample` (15 s) apart, sorted by the difference. For
 each of the top writers the alert gives the bytes and the hourly equivalent **over that one
-15-second sample**, the pid and its age, the **owning agent session**, the working directory when
-it is on the alerting mount, and the largest file it holds open there.
+15-second sample**, the pid and its age, the **owning agent session**, the working directory
+whatever disk it is on, and which filesystem the writer actually touches.
+
+**The list is in two groups.** First the writers with the alerting filesystem under them, each
+with one example path there (the largest file it has open for writing, else the cwd, else an
+open directory); then, under a heading of its own, every writer whose traffic is elsewhere,
+each saying `no cwd or open file on <mount>`. The ranking by write traffic is kept inside each
+group, and the DO paragraph names only the first group.
+
+**The test is the device id, never a path.** For each writer, `st_dev` of `/proc/<pid>/cwd` and
+of every open regular file and directory, stat'd **through** `/proc/<pid>/fd/N`, is compared with
+`st_dev` of the mount; so a symlink, a bind mount and a deleted-but-open file all resolve to the
+device the kernel has open. On 2026-11-01T05:18Z the `/` alert listed pytest workers whose argv
+named a `/home` path that is a symlink onto `/mnt/nvme`, and the SRE paused them; the real `/`
+consumer was a `git worktree add` into `~/src`, and it kept running.
+
+**A file held read-only there is not evidence.** The access mode comes from
+`/proc/<pid>/fdinfo/<N>`, and only a writable file, an open directory (how git, pytest and dune
+write, with `openat`) or the cwd puts a writer in the first group. Without that rule the same
+pytest workers come first again on the strength of the interpreter they read: measured here at
+2026-11-01T05:34Z, a worker with every output file on `/mnt/nvme` held
+`/home/sami/.local/share/uv/python/…/python3.14` open on `/`. Such a writer is listed under the
+elsewhere heading as `nothing open for writing on <mount>`, with what it does hold there.
+
+A writer whose `/proc/<pid>/fd` cannot be read says that instead of being called elsewhere, and
+so does one that exited during the sample or holds more than `FD_SCAN_LIMIT` (256) open files.
 
 - The session is read from the process, never guessed, strongest source first: the lane
   worker's own `.ossv-workers/<name>/session` (ignored while `session_unconfirmed` sits beside
@@ -167,7 +191,8 @@ it is on the alerting mount, and the largest file it holds open there.
 - `/proc/<pid>/io` counts writes to **every** filesystem, not only the one that is filling; it
   also counts rewrites and deleted output. Its displayed number is explicitly labelled
   **write traffic** and a single 15-second sample — not disk growth and never the number used for
-  time to full. The cwd and open file only tie a writer to the mount at the sample instant.
+  time to full. The group a writer is in says which filesystem its bytes land on; the number
+  beside it does not, and both hold only at the sample instant.
 - Another user's `/proc/<pid>/io` is refused to an unprivileged reader, and root owns the writers
   that failed first on 2026-10-27 (rsyslogd on `/var/log/syslog`, dockerd's `/tmp` exec scratch).
   So where `sudo -n` is allowed the whole sample — both `/proc` passes and the cwd and fd reads —
@@ -279,8 +304,9 @@ One first alert per crossing, one clear, and an escalation for each 5 GiB the di
 the last level reported while that crossing stays open. The clear goes to everyone who heard the
 crossing.
 
-Every alert ends with what to DO: read the writers first, stop or finish the lane that is writing,
-move its output to the other disk, then reclaim with skill://disk-hygiene — whose check-in comes
+Every alert ends with what to DO: act only on the writers listed as on this filesystem (stopping
+one from the elsewhere group frees nothing here), stop or finish that lane, move its output to
+the other disk, then reclaim with skill://disk-hygiene — whose check-in comes
 first and which never deletes a directory a live session stands in. **This watch only detects. It
 deletes nothing, kills nothing and moves nothing.**
 
@@ -307,7 +333,7 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 | Writers | `/proc/<pid>/io` `write_bytes`, twice, `--writer-sample` apart, through `sudo -n` where allowed; reported as single-window write traffic |
 | Disk growth kept, by session | `sudo -n journalctl -u guard-disk-writers.service --since -60min -o cat`, the guard's `growth session:` rows for the crossing mount; best-effort |
 | A writer's session | `/proc/<pid>/environ`, `/proc/<pid>/cmdline`, `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl`, then its ancestors |
-| A writer's mount | `/proc/<pid>/cwd` and `/proc/<pid>/fd`, compared with the mount's `st_dev` at the sample instant |
+| A writer's mount | `st_dev` of `/proc/<pid>/cwd` and of each regular file or directory open on `/proc/<pid>/fd/N`, stat'd through the fd, with the access mode from `/proc/<pid>/fdinfo/<N>`, compared with the mount's `st_dev` at the sample instant |
 | Young `/tmp` and `~/src` entries | `os.scandir` of each root, a budgeted `os.walk` for directories (symlinks measured as themselves, never followed), and the newest file or directory mtime seen while sizing |
 | Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
 | Samples, confirmations, crossings, named `/tmp` and `~/src` entries | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |

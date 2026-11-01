@@ -615,7 +615,9 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
                     "session": "",
                     "scope": "",
                     "cwd": self.tmp.name,
-                    "holds": "",
+                    "on_mount": True,
+                    "example": f"cwd {self.tmp.name}",
+                    "fd_error": "",
                     "age": 1.0,
                 }
             ],
@@ -1096,6 +1098,176 @@ class DiskFillWatchRateShapeTest(unittest.TestCase):
         self.assertEqual(
             {"count": 1, "varying": False, "low": None, "high": None}, self.shape([100.0])
         )
+
+
+class WriterFilesystemEvidenceTest(unittest.TestCase):
+    """Which filesystem a writer's bytes land on, decided by device id and not by a path.
+
+    On 2026-11-01T05:18Z the / alert listed pytest workers whose argv named a /home path that
+    is a symlink onto another disk, and the SRE paused them; the real / consumer was a `git
+    worktree add` into ~/src. These tests run real processes, because the evidence is their
+    /proc entries: a path in the argv proves nothing, the st_dev of the cwd and of each open
+    file proves it.
+    """
+
+    HOLD = (
+        "import sys, time\n"
+        "handle = open(sys.argv[1], 'wb')\n"
+        "handle.write(b'x' * 4096)\n"
+        "handle.flush()\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(120)\n"
+    )
+
+    def setUp(self) -> None:
+        self.here = tempfile.TemporaryDirectory()
+        self.addCleanup(self.here.cleanup)
+        # /dev/shm is a tmpfs, so it is a different device on every Linux box, which is what
+        # this needs: /mnt/nvme exists only here.
+        if not os.path.isdir("/dev/shm") or os.stat("/dev/shm").st_dev == os.stat(self.here.name).st_dev:
+            self.skipTest("no second filesystem to put the other writer on")
+        self.other = tempfile.TemporaryDirectory(dir="/dev/shm")
+        self.addCleanup(self.other.cleanup)
+        self.device = os.stat(self.here.name).st_dev
+        # The shape that misled the SRE: a path under the alerting mount that is a symlink
+        # onto the other disk, so the argv says /here and every byte goes to the other device.
+        self.through_symlink = Path(self.here.name) / "home-link"
+        self.through_symlink.symlink_to(self.other.name)
+        WATCH.PANES.clear()
+        WATCH.PANES_READ = True
+        WATCH.LIVE_SESSIONS.clear()
+        WATCH.LIVE_READ = True
+
+        def restore() -> None:
+            WATCH.PANES.clear()
+            WATCH.PANES_READ = False
+            WATCH.LIVE_SESSIONS.clear()
+            WATCH.LIVE_READ = False
+
+        self.addCleanup(restore)
+
+    def writer(self, cwd: str, target: str) -> int:
+        """A live process with `cwd` as its working directory and `target` open for writing."""
+        process = subprocess.Popen(
+            [sys.executable, "-c", self.HOLD, target],
+            cwd=cwd,
+            # pytest's capture gives this process a temporary file as stderr, which the child
+            # would inherit as an open file on whichever disk TMPDIR is on. The test is about
+            # the file the writer itself opened, so the child gets no inherited one.
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        self.assertEqual("ready\n", process.stdout.readline())
+        return process.pid
+
+    def test_an_argv_path_on_the_mount_is_not_evidence_the_bytes_land_there(self) -> None:
+        pid = self.writer(self.other.name, str(self.through_symlink / "output.log"))
+        found = WATCH.mount_evidence(pid, self.device)
+        self.assertFalse(found["on_mount"])
+        self.assertEqual("", found["fd_error"])
+        self.assertEqual(self.other.name, found["cwd"])
+
+    def test_an_open_file_on_the_mount_is_evidence_even_from_another_cwd(self) -> None:
+        target = Path(self.here.name) / "output.log"
+        pid = self.writer(self.other.name, str(target))
+        found = WATCH.mount_evidence(pid, self.device)
+        self.assertTrue(found["on_mount"])
+        self.assertIn(str(target), found["example"])
+
+    def test_a_cwd_on_the_mount_is_evidence_with_no_open_file_there(self) -> None:
+        pid = self.writer(self.here.name, str(Path(self.other.name) / "output.log"))
+        found = WATCH.mount_evidence(pid, self.device)
+        self.assertTrue(found["on_mount"])
+        self.assertIn(self.here.name, found["example"])
+
+    def test_a_writer_whose_fds_cannot_be_read_says_so(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root reads every /proc/<pid>/fd")
+        found = WATCH.mount_evidence(1, self.device)
+        self.assertFalse(found["on_mount"])
+        self.assertIn("open files could not be read", found["fd_error"])
+
+    def test_a_writer_that_exited_during_the_sample_is_not_called_unreadable(self) -> None:
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        found = WATCH.mount_evidence(gone.pid, self.device)
+        self.assertFalse(found["on_mount"])
+        self.assertIn("exited during the sample", found["fd_error"])
+
+    def test_a_file_held_read_only_does_not_put_a_writer_on_the_mount(self) -> None:
+        """The 05:18Z shape in its second form: every pytest worker holds its interpreter,
+        which is on /, open read-only while all of its output goes to the other disk."""
+        interpreter = Path(self.here.name) / "python-copy"
+        interpreter.write_bytes(b"y" * 8192)
+        hold = (
+            "import sys, time\n"
+            "read = open(sys.argv[2], 'rb')\n"
+            "handle = open(sys.argv[1], 'wb')\n"
+            "handle.write(b'x' * 4096)\n"
+            "handle.flush()\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(120)\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", hold, str(Path(self.other.name) / "output.log"), str(interpreter)],
+            cwd=self.other.name,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        self.assertEqual("ready\n", process.stdout.readline())
+
+        found = WATCH.mount_evidence(process.pid, self.device)
+        self.assertFalse(found["on_mount"])
+        self.assertIn(str(interpreter), found["read_only"])
+        text = WATCH.writers_text(
+            WATCH.describe_writers([{"pid": process.pid, "written": WATCH.GIB}], self.device, 15.0, 8),
+            denied=0,
+            seconds=15.0,
+            mount=self.here.name,
+            privileged=True,
+        )
+        self.assertIn(f"nothing open for writing on {self.here.name}", text)
+
+    def test_the_alert_lists_the_mounts_writers_first_and_the_others_under_a_heading(self) -> None:
+        elsewhere = self.writer(self.other.name, str(self.through_symlink / "output.log"))
+        target = Path(self.here.name) / "output.log"
+        on_mount = self.writer(self.other.name, str(target))
+        described = WATCH.describe_writers(
+            # The misleading order of the 05:18Z alert: the writer on another disk wrote more.
+            [{"pid": elsewhere, "written": 9 * WATCH.GIB}, {"pid": on_mount, "written": 1 * WATCH.GIB}],
+            self.device,
+            15.0,
+            8,
+        )
+        text = WATCH.writers_text(described, denied=0, seconds=15.0, mount=self.here.name, privileged=True)
+
+        heading = text.index(f"Writing elsewhere, not on {self.here.name}")
+        self.assertLess(text.index(f"pid {on_mount}"), heading)
+        self.assertGreater(text.index(f"pid {elsewhere}"), heading)
+        self.assertIn(f"on {self.here.name}: {target}", text)
+        self.assertIn(f"no cwd or open file on {self.here.name}", text)
+
+    def test_the_ranking_inside_each_group_is_the_write_traffic_order(self) -> None:
+        small = self.writer(self.here.name, str(Path(self.here.name) / "small.log"))
+        large = self.writer(self.here.name, str(Path(self.here.name) / "large.log"))
+        described = WATCH.describe_writers(
+            [{"pid": large, "written": 8 * WATCH.GIB}, {"pid": small, "written": 2 * WATCH.GIB}],
+            self.device,
+            15.0,
+            8,
+        )
+        text = WATCH.writers_text(described, denied=0, seconds=15.0, mount=self.here.name, privileged=True)
+
+        self.assertNotIn("Writing elsewhere", text)
+        self.assertLess(text.index(f"pid {large}"), text.index(f"pid {small}"))
 
 
 if __name__ == "__main__":
