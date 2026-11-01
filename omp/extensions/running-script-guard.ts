@@ -441,6 +441,13 @@ function createProtector(o: GuardOptions, log: { debug(message: string, data: Re
 				}
 				if (record) continue; // no copy can be made, and its bits are already gone
 				const entry: Entry = { path: file, dev: holder.dev, ino: holder.ino, mode, reduced: mode & ~WRITE_BITS, at: Date.now(), pid: holder.pid, cmdline: holder.cmdline };
+				// The same hazard as the copy: a wrapper that execs another script keeps its pid while
+				// the fd moves, so a chmod through the fd would take the write bits of the OTHER file
+				// while the record names this path. The give-back then never matches, the record is
+				// dropped, and that file is left read-only with nothing to restore it. On 2026-11-01
+				// scripts/agent-session was left 555 with no record that way.
+				const open = await fs.stat(`/proc/${holder.pid}/fd/${holder.fd}`).catch(() => undefined);
+				if (open?.dev !== holder.dev || open.ino !== holder.ino) continue;
 				// The record first: if this process dies after the chmod, the next pass still knows
 				// what to give back. Through the shell's own fd, so the chmod lands on the inode it runs.
 				await writeRecord(entry);
