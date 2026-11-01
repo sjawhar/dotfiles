@@ -25,7 +25,9 @@ afternoon were each true of something other than the question asked.
   which is how one of the two disks filled on 2026-10-30. mtime cannot date an arrival: gzip,
   `cp -p`, `tar -p` and `rsync -a` all copy it from the source.
 - Deleted-but-open space: count each `lsof +L1` path once, because `lsof` prints a file open in
-  several processes once for each of them.
+  several processes once for each of them. Such a file still occupies the disk and `du` cannot see
+  it, so a hunt whose numbers do not add up is usually this; one held a 3.3 GB pack until its
+  process exited. Let the process exit rather than deleting more.
 - Broken links: `python3 $S dangling <roots>` finds the symlinks whose target is gone
   (`find -xtype l`). A sweep of `~/.cache` and `~/.local` on 2026-10-30 found 3,679 of them. They
   hold no data: they show where a deleted tree left the links that point at it.
@@ -59,3 +61,8 @@ afternoon were each true of something other than the question asked.
   destroyed two files of somebody else's that shared the prefix, 12,145 and 415 bytes, with no
   process holding them and nothing to recover. Name each entry you delete, or delete a directory
   you made yourself.
+- The dangerous pattern is not only a prefix you chose, it is a prefix ANYONE would choose:
+  `base_`, `now_`, `merged_`, `v1`, `emit`, `tmp` are what every session on a shared box names a
+  scratch file. Three lanes globbed `/tmp` within one hour of each other. Where a cleanup must use
+  a pattern, list the matches and read them before you remove any: `ls` costs a second and turns a
+  guess into a decision, and `rm` prints nothing it took.
