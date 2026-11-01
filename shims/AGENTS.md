@@ -103,6 +103,20 @@ before handing the call to the real one.
   the working directory, which `--cwd`/`-C` moves). It sets `PULUMI_SKIP_UPDATE_CHECK=true`
   either way, and is otherwise transparent: same argv, stdin, stdout and exit code, and no output
   of its own. It takes the first `pulumi` past its own PATH entry (`shims/ssh-keygen`'s lookup).
+- **`az`** keeps an agent off the user's Azure login. The default config dir (`~/.azure`) holds
+  Sami's own `az login`, so every az call an agent made without `AZURE_CONFIG_DIR` acted as
+  Sami@Theorem.dev; three `az vm run-command invoke` calls did on 2026-11-01
+  (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec). In an agent session (the test
+  `shims/gh` and `shims/git` use) with `AZURE_CONFIG_DIR` unset, the shim points az at
+  `~/.azure-box-identity`, the machine's own managed identity, which holds the VM lifecycle and
+  run-command rights the work needs on resource group `sami`. A machine whose box identity was
+  never logged in gets one on that first call (`az login --identity` into that dir, no person
+  needed); where no managed identity answers either, the call goes through unchanged unless
+  `~/.azure` holds a user login, which is refused with the reason. An explicit
+  `AZURE_CONFIG_DIR`, empty included, is kept, and outside an agent session nothing changes, so
+  the user's own shell still runs as the user. It takes the first `az` past its own PATH entry
+  (`shims/ssh-keygen`'s lookup), else the mise pin (`"pipx:azure-cli"` in `mise.toml`), and is
+  otherwise transparent: same argv, stdin, stdout and exit code, no output of its own.
 - `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
   `pyright`, `basedpyright`: see each file's header.
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test

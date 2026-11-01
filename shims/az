@@ -1,0 +1,88 @@
+#!/bin/bash
+# az with this machine's own Azure identity in an agent session.
+#
+# The default az config dir (~/.azure) holds Sami's own `az login`, so every az call an agent
+# makes without AZURE_CONFIG_DIR acts as Sami@Theorem.dev: on 2026-11-01 at 16:55Z three
+# `az vm run-command invoke` calls on sami-leanperf ran under his account
+# (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec). The box has its own identity
+# logged in at ~/.azure-box-identity (the VM's system-assigned managed identity, Contributor on
+# resource group `sami`), which does the same work.
+#
+# So in an agent session with no AZURE_CONFIG_DIR of its own, the shim points az at that dir.
+# An explicit AZURE_CONFIG_DIR (empty included) is kept: a caller that named a config dir chose
+# one. Outside an agent session nothing changes, so Sami's interactive shell still runs as
+# himself. The shim prints nothing of its own and passes argv, stdin, stdout and the exit code
+# through.
+#
+# A machine whose box identity dir does not exist yet gets one on the first such call: the shim
+# runs `az login --identity` into that dir, which signs the VM's own managed identity in and
+# needs no person. Where that does not work either (no managed identity on the machine), the
+# call goes through unchanged, unless the default dir holds a user login: that is the case this
+# shim exists to stop, and it is reported instead of run.
+set -euo pipefail
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+self_dir="$(dirname "$self")"
+
+# The first az past this shim's own PATH entry; from the top, skipping this file and any other
+# shims/ copy, when the shim was run by path from outside PATH (shims/ssh-keygen's lookup).
+real=""
+past_self=false
+IFS=: read -ra path_dirs <<< "${PATH:-}"
+for pass in after-self from-top; do
+    for d in "${path_dirs[@]}"; do
+        [ -n "$d" ] || continue
+        if [ "$(readlink -f "$d" 2>/dev/null)" = "$self_dir" ]; then
+            past_self=true
+            continue
+        fi
+        [ "$pass" = from-top ] || $past_self || continue
+        if [ -x "$d/az" ]; then
+            resolved="$(readlink -f "$d/az")"
+            [ "$resolved" != "$self" ] && [ "$(basename "$(dirname "$resolved")")" != shims ] || continue
+            real="$d/az"
+            break 2
+        fi
+    done
+    $past_self && break
+done
+# mise off PATH: az is a mise-managed tool ("pipx:azure-cli" in mise.toml), and a unit's or a
+# test harness's PATH can hold this dir without mise's shims dir.
+if [ -z "$real" ]; then
+    mise="$(command -v mise 2>/dev/null || true)"
+    [ -n "$mise" ] || mise="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+    real="$(MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}" "$mise" which -C / az --tool pipx:azure-cli 2>/dev/null)" || real=""
+    [ -n "$real" ] && [ -x "$real" ] || real=""
+fi
+[ -n "$real" ] || { echo "shims/az: no real az on PATH" >&2; exit 127; }
+
+# Same test as shims/gh and shims/git: an omp session, an agentbox session, or anything launched
+# with the gh-app routing include.
+agent_context() {
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
+    local i v
+    for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
+        v="GIT_CONFIG_VALUE_$i"
+        [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
+    done
+    return 1
+}
+
+if [ -z "${AZURE_CONFIG_DIR+set}" ] && agent_context; then
+    box="${AZURE_BOX_CONFIG_DIR:-$HOME/.azure-box-identity}"
+    if [ -f "$box/azureProfile.json" ]; then
+        export AZURE_CONFIG_DIR="$box"
+    elif mkdir -p "$box" 2> /dev/null \
+        && AZURE_CONFIG_DIR="$box" timeout 60 "$real" login --identity --only-show-errors > /dev/null 2>&1 \
+        && [ -f "$box/azureProfile.json" ]; then
+        # First call on a machine whose box identity was never logged in: the VM's own
+        # managed identity, signed in to its own profile, needs no person and no human step.
+        export AZURE_CONFIG_DIR="$box"
+    elif grep -q '"type"[[:space:]]*:[[:space:]]*"user"' "$HOME/.azure/azureProfile.json" 2> /dev/null; then
+        echo "shims/az: $box holds no box identity, \`az login --identity\` there did not make one," >&2
+        echo "shims/az: and ~/.azure holds a user login an agent must not use. Name a config dir to run this." >&2
+        exit 1
+    fi
+fi
+
+exec "$real" "$@"

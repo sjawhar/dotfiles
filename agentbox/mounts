@@ -48,6 +48,10 @@ rw .pulumi
 # it instead of into an overlay that dies with the box.
 ro .gcloud
 rw .config/gcloud
+# Azure. The machine's own identity, which shims/az gives every agent session in place of the
+# user's ~/.azure login (that one is never mounted). `az login --identity` writes the profile
+# and refreshes tokens in it, so it is rw.
+rw .azure-box-identity
 
 # work identities agents use
 rw .config/trajectory-labs

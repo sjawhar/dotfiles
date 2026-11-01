@@ -22,6 +22,12 @@ Never change the active configuration or the ADC file to get Sami's login: every
 
 Refused by a registry or shared environment: use an account that already has access, or copy it from a host that has it; never ask a person, the list is settled (`references/platform-access.md`). For `customer-gcp-project` no one at Theorem can grant access at all, so there is no one to ask.
 
+## Which identity az uses
+
+In an agent session `az` runs as the machine's own Azure identity, not as Sami: `~/.dotfiles/shims/az` sets `AZURE_CONFIG_DIR=~/.azure-box-identity` when the caller set none (`shims/AGENTS.md`). That identity starts, stops, restarts and reads the VMs of resource group `sami` and runs `az vm run-command invoke` on them, so no az step needs his login.
+
+Never set `AZURE_CONFIG_DIR` to `~/.azure`, and never run `az login` there: that is Sami's own login, and a command under it is recorded as his act (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec). Directory work (`az ad`, a role assignment by user name) is the one thing the machine identity cannot do; ask for it on Dispatch instead of borrowing his account.
+
 ## Expired login ("Reauthentication failed")
 
 Sami's login expires about once each day. As the box you do not see this error.
