@@ -21,7 +21,7 @@ Everything else waits for him: a first contact with a project that has not enrol
 ## The two steps
 
 1. **Research the audience, and write in their conventions** — their template, their terms, their level of detail, their thread. `references/research.md` lists what to read before you draft, and where a stream's own form rules live and why they win over this skill. Run `skill://asd-ste100`, `skill://ce-noslop` and `skill://plain-words` over the text. **Avoid "we" in text to an outside reader**: name Theorem or the tool, or write the sentence with no actor. Sami asked for this, and gave his reason, in [OSSV-146 ask 11fc735f](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/11fc735f-7843-4c7c-bfa7-7512319f0043); his preference, not a measurement.
-2. **A fresh reviewer reads it and cuts** — run the "Before you send" step of `skill://plain-words`, with Astra, or Opus where Astra is not available. **Write in the ask what it removed and what terms it could not define**, in three lines or fewer, or "the reviewer removed nothing"; those lists are what show the step ran.
+2. **A fresh reviewer reads it and cuts** ([OSSV-142 ask 93a2811e](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/93a2811e-56ab-456e-8c0c-cedfd4ee822b), 2026-10-30). Astra, or Opus where Astra is not available, reads the message in a session that did not write it and removes everything a reader does not need to understand the core message. A reviewer that reads only to approve has not done this step. **Write in the ask what it removed**, in three lines or fewer, or "the reviewer removed nothing". Agents skipped this step in 5 of 18 drafts, and an instruction alone did not make it happen, so the list is what shows it ran.
 
 ## Then the ask
 
