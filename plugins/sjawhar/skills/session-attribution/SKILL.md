@@ -33,12 +33,14 @@ gh api repos/<owner>/<repo>/issues/comments/<id> -q .body | grep -o '<!-- legion
 Run both `gh search` lines, because `issues` skips PR comments. The `gh api` line is the deterministic sweep of one repo.
 
 ```bash
-git log --all --format='%h %s %(trailers:key=Omp-Session,valueonly)' | grep <id>
+git log --all --format='%h %s' --grep='^Omp-Session: <id>'
 jj log --no-graph -r 'description(glob:"*Omp-Session: <id>*")' -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
 gh search issues "<id> in:comments" --owner <owner>
 gh search prs    "<id> in:comments" --owner <owner>
 gh api "repos/<owner>/<repo>/issues/comments" --paginate -q '.[] | select(.body | contains("<id>")) | .html_url'
 ```
+
+Search the message with `--grep`, never `%(trailers)`: a GitHub merge-queue squash puts the `Omp-Session` lines in the body and then appends its own `Co-authored-by` paragraph, so git's trailer parser reads only that last paragraph and misses them (grading-tools main, 2026-11-01).
 
 ## Read the evidence
 
