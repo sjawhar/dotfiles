@@ -641,10 +641,19 @@ ensure_network() {
 # bind the box network's gateway and admit only that network; unix ones are
 # 0600 sockets under $RUN_BASE.
 start_unit() {
-    local unit="$1"; shift
+    local unit="$1" err; shift
     systemctl --user is-active --quiet "$unit" && return 0
     systemctl --user reset-failed "$unit" 2>/dev/null || true
-    systemd-run --user --unit "$unit" --quiet --collect --property=Restart=always --property=RestartSec=1 "$@"
+    err="$(systemd-run --user --unit "$unit" --quiet --collect --property=Restart=always --property=RestartSec=1 "$@" 2>&1)" && return 0
+    # The `is-active` above asks the user manager, and on a loaded box that answer times out
+    # ("Failed to retrieve unit state: Connection timed out", measured 2026-11-01 at load 410):
+    # a forwarder another box already started then looks absent, systemd-run refuses it as
+    # already loaded, and a launch died on a unit that was running the whole time
+    # (dispatch://INFRA-950). These units are shared between boxes, so ask once more, and leave
+    # the verdict to the socket or the port the caller waits for.
+    systemctl --user is-active --quiet "$unit" && return 0
+    [[ -n "$err" ]] && echo "agentbox: $unit: $err" >&2
+    return 1
 }
 
 wait_for() {
@@ -665,7 +674,7 @@ ensure_tcp_forwarder() {
         && ! systemctl --user show -p ExecStart --value "$unit" 2>/dev/null | grep -qF "TCP4:$target"; then
         systemctl --user stop "$unit" 2>/dev/null || true
     fi
-    start_unit "$unit" socat "TCP4-LISTEN:$port,bind=$NETWORK_GATEWAY,range=$NETWORK_SUBNET,fork,reuseaddr" "TCP4:$target"
+    start_unit "$unit" socat "TCP4-LISTEN:$port,bind=$NETWORK_GATEWAY,range=$NETWORK_SUBNET,fork,reuseaddr" "TCP4:$target" || true
     wait_for bash -c "ss -ltn 'sport = :$port' | grep -q '$NETWORK_GATEWAY:$port'" \
         || die "forwarder $unit did not bind $NETWORK_GATEWAY:$port (journalctl --user -u $unit)"
 }
@@ -682,10 +691,9 @@ ensure_unix_forwarder() {
         systemctl --user stop "$unit" 2>/dev/null || true
     fi
     mkdir -p "$(dirname "$sock")"
-    if ! start_unit "$unit" socat "UNIX-LISTEN:$sock,fork,mode=600,unlink-early" "UNIX-CONNECT:$target"; then
-        [[ -n "$optional" ]] && return 1
-        die "forwarder $unit could not be started (journalctl --user -u $unit)"
-    fi
+    # The socket is the verdict, not the unit's start: a start that failed because the unit was
+    # already there leaves a working relay behind it (start_unit).
+    start_unit "$unit" socat "UNIX-LISTEN:$sock,fork,mode=600,unlink-early" "UNIX-CONNECT:$target" || true
     if ! wait_for test -S "$sock"; then
         [[ -n "$optional" ]] && return 1
         die "forwarder $unit did not open $sock (journalctl --user -u $unit)"
@@ -2604,6 +2612,44 @@ move_hand_off() {
     echo "agentbox: session $sid handed to a detached relauncher; log: $log"
 }
 
+# How long the respawn below keeps trying, and the gap between tries. Ten minutes: what it rides
+# out is the machine's, and the relauncher is detached, so nothing waits on it.
+MOVE_RESPAWN_TRIES="${AGENTBOX_RESPAWN_TRIES:-40}"
+MOVE_RESPAWN_WAIT="${AGENTBOX_RESPAWN_WAIT:-15}"
+
+# Respawn a moved session's pane into its box launcher. The session is already hung up when this
+# runs, so a tmux that cannot fork right now destroys it: on 2026-11-01 four moves at 17:47-17:48Z
+# got `fork failed: No such device`, left their panes with no process, and ended three sessions for
+# good - a send to one of them was still refused `no live session` at 21:08Z - and the only record
+# of any of it was this move's log, which nobody reads (dispatch://INFRA-950). Moves ten minutes
+# later forked normally, so a failure here is ridden out rather than taken as final: it tries
+# again, then types the launcher into the shell the pane still runs, which needs no pty of tmux's,
+# and when the pane has no process either it says so in the pane's title, since such a pane keeps
+# showing the dead session's last screen and looks alive.
+move_respawn() {
+    local sid="$1" pane="$2" cwd="$3" inner="$4" what="$5" attempt=0 err run
+    # An interactive bash, as scripts/agent-new starts a pane: the box launcher needs the
+    # session environment .bashrc sets up (shims first on PATH). The shell that stays behind is
+    # what makes a box that ends leave a usable pane instead of a dead one.
+    run="$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i"
+    while (( attempt < MOVE_RESPAWN_TRIES )); do
+        attempt=$((attempt + 1))
+        if err="$(tmux respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$run" 2>&1)"; then
+            echo "$(date -u +%FT%TZ) move $sid: pane $pane respawned into agentbox new $what"
+            return 0
+        fi
+        echo "$(date -u +%FT%TZ) move $sid: respawn of pane $pane failed (try $attempt of $MOVE_RESPAWN_TRIES): ${err:-tmux printed nothing}"
+        if (( attempt < MOVE_RESPAWN_TRIES )); then sleep "$MOVE_RESPAWN_WAIT"; fi
+    done
+    if [[ -n "$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" ]] \
+        && tmux send-keys -t "$pane" "$inner" Enter 2>/dev/null; then
+        echo "$(date -u +%FT%TZ) move $sid: pane $pane would not respawn; the launcher was typed into the shell it still runs"
+        return 0
+    fi
+    tmux select-pane -t "$pane" -T "agentbox: session $sid is down; pane $pane would not respawn" 2>/dev/null || true
+    return 1
+}
+
 move_relaunch() {
     local pid="$1" sid="$2" pane="$3" cwd="$4" waited=0 inner
     shift 4
@@ -2628,12 +2674,10 @@ move_relaunch() {
         return 1
     fi
     inner="$(printf '%q ' agentbox new "${spec[@]}" -- omp --resume "$sid" .)"
-    # An interactive bash, as scripts/agent-new starts a pane: the box launcher needs the
-    # session environment .bashrc sets up (shims first on PATH). The shell that stays behind is
-    # what makes a box that ends leave a usable pane instead of a dead one.
-    tmux respawn-pane -k -t "$pane" -c "$cwd" \
-        bash -i -c "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i"
-    echo "$(date -u +%FT%TZ) move $sid: pane $pane respawned into agentbox new ${spec[*]}"
+    if ! move_respawn "$sid" "$pane" "$cwd" "$inner" "${spec[*]}"; then
+        echo "$(date -u +%FT%TZ) move $sid: pane $pane holds no process and would not respawn; the session is DOWN. Bring it back from a host session: tmux respawn-pane -k -t $pane -c $cwd bash -i -c '$inner; exec bash -i'"
+        return 1
+    fi
 }
 
 # A box is not a one-way door. Every box defect found so far is fixed by moving again with one
