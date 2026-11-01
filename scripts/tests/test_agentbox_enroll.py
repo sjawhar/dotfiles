@@ -155,8 +155,12 @@ class EnrollFixture(unittest.TestCase):
             "STUB_RUN_BASE": str(self.run_base),
             **stubs,
         }
+        # 300 s, not 60: the slow-box test below deliberately runs 400 passes of the wait, each
+        # forking a stub `docker`, and on this host at load 300-550 that alone takes over a
+        # minute (it timed out at 60 s on 2026-11-01, on HEAD as well as on the change under
+        # test). Every other case here finishes in seconds, so the larger cap only bites a hang.
         return subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, env=env, check=False, timeout=60
+            ["bash", "-c", script], capture_output=True, text=True, env=env, check=False, timeout=300
         )
 
     def enroll(self, **stubs: str) -> subprocess.CompletedProcess[str]:

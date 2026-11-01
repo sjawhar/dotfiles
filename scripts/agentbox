@@ -3,10 +3,14 @@
 # checkout made for it.
 #
 #   agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE]
-#                <repo>… -- <cmd> [args…]
+#                [--dir PATH]… [<repo>…] -- <cmd> [args…]
 #                                       run a command in a fresh box holding a
 #                                       checkout of each repo, working in the
-#                                       first; each -e sets a variable in the box
+#                                       first; each --dir gives the box one
+#                                       existing host directory, read-write at
+#                                       its own path, and the box works in the
+#                                       first --dir when no repo is named; each
+#                                       -e sets a variable in the box
 #                                       (docker run -e: a bare NAME passes the
 #                                       caller's value); --memory/--cpus/--disk
 #                                       raise or lower this box's limits
@@ -28,6 +32,18 @@
 # remote lacks is removed with the box; a clone with uncommitted changes or
 # commits no remote has keeps <boxes>/<box> in place, named on the pane, for its
 # owner to push or remove. omp flags pass straight through after `--`.
+#
+# A session whose work is NOT a checkout — a lane's scratch tree, a directory of
+# worktrees, a coordination root — names it with --dir instead of a repo
+# (dispatch://INFRA-702): 50 of this host's 82 live sessions on 2026-11-01 worked
+# in a directory that is not a repository, so a box could not be started for them
+# at all. A --dir is the HOST's directory, bind-mounted read-write at its own path
+# and never cloned or copied: it is shared with the host and with every other box
+# that names it, it outlives the box, and writes in it are outside the box's disk
+# image and so outside its disk limit. The cpu, memory and pids limits apply as
+# always. ~/src is already in every box, so a --dir under it adds only the working
+# directory; a path anywhere else (a lane tree under /mnt/nvme, ~/Code/...) is
+# reachable in a box only when it is named.
 #
 # The box mounts an allow-list of $HOME (below). Host services arrive two ways:
 # the session bus, the metadata service and the Envoy API through socat relays
@@ -249,6 +265,28 @@ open_box_disk() {
     # meets a permission denial in its own workspace. Nothing here is ever fscked - the image
     # dies with the box - so the session may have it.
     sudo -n chown "$UID_:$(id -g)" "$BOXES/$box/lost+found" 2>/dev/null || true
+}
+
+# BOX_DIRS: the host directories this box is given (--dir), each at its own path, read-write.
+# mount_args binds them and cmd_new works in the first when no repo is named. A path is taken
+# as the caller typed it after readlink -f, so a symlink reaches the box as the directory it
+# names, the way $SRC's symlinked checkouts already do.
+BOX_DIRS=()
+# One --dir, validated and resolved. Refused: a path that is not a directory (a box cannot be
+# given something that does not exist yet, and a typo would otherwise be a silent empty mount);
+# `/`, which is the host's whole filesystem; and $HOME or the box tree, each of which would
+# shadow a mount the box needs (the box's own $HOME holds the allow-list, and <boxes>/<box> is
+# the box's filesystem).
+add_box_dir() {
+    local raw="$1" path
+    [[ -d "$raw" ]] || die "--dir '$raw' is not an existing directory"
+    path="$(readlink -f "$raw")" || die "--dir '$raw' cannot be resolved"
+    case "$path" in
+        /) die "--dir / would give the box the whole host filesystem" ;;
+        "$HOME") die "--dir $HOME would shadow the box's own home and its allow-list ($MOUNTS_FILE); name the directory you work in" ;;
+        "$BOXES"|"$BOXES"/*) die "--dir '$path' is inside the box tree $BOXES, which every box already has" ;;
+    esac
+    BOX_DIRS+=("$path")
 }
 
 # The box's filesystem and its image, given back. Everything the box wrote goes with the image,
@@ -567,6 +605,13 @@ mount_args() {
         src="$(readlink -f "$p")"
         a+=(-v "$src:$src")
     done
+    # The host directories this box was given (--dir), each at its own path. Docker nests binds
+    # by destination, so one under $SRC or under a listed home path simply re-binds the same
+    # host directory at the same place and changes nothing; one anywhere else is the only way
+    # that path reaches the box.
+    for p in "${BOX_DIRS[@]}"; do
+        a+=(-v "$p:$p")
+    done
     a+=(-v "$BOXES/$box:$BOXES/$box")
     # $HOME and /tmp inside the box's own directory, so the box's disk limit covers the two
     # places a session writes without being told where. Without them both land in the
@@ -711,8 +756,14 @@ session_env() {
 # ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl, read from its fd table (omp
 # exports OMP_SESSION_ID to its children, not itself) - or, when none is open
 # (idle after a resume or a full-file rewrite), the newest session file of the
-# box's working directory: omp keys that directory by cwd, relocates a resumed
-# session's file into it, and a box name is never reused. Empty until a
+# box's own directory under <boxes>, which omp keys by cwd and whose box name is
+# never reused. A box working in a host directory (--dir) has no such fallback,
+# on purpose: omp keys that directory by the path, which the host and every
+# other box naming it share, so its newest file is very often another session's
+# - measured 2026-11-01, where a glob by working directory answered with a live
+# HOST session's id for both test boxes. Acting on that id would notify the
+# wrong session on `agentbox restart` and release ANOTHER session's knives
+# claims at close, so an empty answer is the right one. Empty also until a
 # session has materialized, and for a --no-session run.
 box_session_id() {
     local sid
@@ -900,7 +951,7 @@ close_box() {
 }
 
 cmd_new() {
-    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE] <repo>… -- <cmd> [args…]"
+    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE] [--dir PATH]… [<repo>…] -- <cmd> [args…]"
     local user_env=() box_repos=() repo
     # Where each limit came from, so a refusal names what the caller actually set.
     local mem_from="AGENTBOX_MEMORY" cpu_from="AGENTBOX_CPUS" disk_from="AGENTBOX_DISK"
@@ -929,13 +980,19 @@ cmd_new() {
                 BOX_DISK="$2" disk_from="--disk"
                 shift 2
                 ;;
+            --dir)
+                [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir ~/src/bet-grade  ($usage)"
+                add_box_dir "$2"
+                shift 2
+                ;;
             -*) die "unknown option '$1'; the command goes after \`--\`  ($usage)" ;;
             *) box_repos+=("$1"); shift ;;
         esac
     done
     set_resource_args "$mem_from" "$cpu_from"
     set_disk_bytes "$disk_from"
-    [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} )) || die "$usage  (repos: $(repos | tr '\n' ' '))"
+    [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} + ${#BOX_DIRS[@]} )) \
+        || die "$usage  (a box needs a repo or a --dir; repos: $(repos | tr '\n' ' '))"
     shift
     (( $# )) || die "$usage"
     for repo in "${box_repos[@]}"; do
@@ -943,8 +1000,10 @@ cmd_new() {
         git -C "$SRC/$repo" remote get-url origin >/dev/null 2>&1 || die "$SRC/$repo has no origin remote to clone from"
     done
     local dup
-    dup="$(printf '%s\n' "${box_repos[@]}" | sort | uniq -d)"
-    [[ -z "$dup" ]] || die "repo listed twice: $dup"
+    if (( ${#box_repos[@]} )); then
+        dup="$(printf '%s\n' "${box_repos[@]}" | sort | uniq -d)"
+        [[ -z "$dup" ]] || die "repo listed twice: $dup"
+    fi
     local use_broker=1
     broker_ready || use_broker=0
     local box tag
@@ -1008,6 +1067,10 @@ cmd_new() {
     # container (scripts/agentbox-run.ts); any other command runs bare.
     local cmd=("$@")
     if [[ "$1" == omp ]]; then cmd=(bun "$DOTFILES_DIR/scripts/agentbox-run.ts" "$@"); fi
+    # Where the box works: its first clone, as always, or - for a box given directories instead
+    # of repositories - the first of those.
+    local workdir="${BOX_DIRS[0]:-}"
+    if (( ${#box_repos[@]} )); then workdir="$BOXES/$box/${box_repos[0]}"; fi
     local tty=(-i)
     [[ -t 0 && -t 1 ]] && tty=(-it)
     # Not exec'd: close_box must run after the container exits, whatever the
@@ -1021,7 +1084,7 @@ cmd_new() {
     docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
         "${RESOURCE_ARGS[@]}" \
-        -w "$BOXES/$box/${box_repos[0]}" "${tty[@]}" \
+        -w "$workdir" "${tty[@]}" \
         "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
     child=$!
     # The broker identity first (enroll_when_up), when the host can give one.
@@ -1559,5 +1622,5 @@ case "${1:-}" in
     restart) shift; cmd_restart "$@" ;;
     # The usage block at the top of this file, which every command above is listed in: a
     # command missing from this case would otherwise print its own documentation as the usage.
-    *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
