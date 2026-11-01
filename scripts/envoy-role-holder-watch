@@ -627,6 +627,46 @@ def transcript_of(session_id: str) -> Path | None:
     return None
 
 
+def normal_exit_at(path: str | Path | None) -> str | None:
+    """When the transcript's LAST entry is a normal session exit, the time it records; else None.
+
+    omp ends a transcript it closes on purpose with
+    {"type":"custom","customType":"session_exit","data":{"reason":"dispose","kind":"normal",
+    "recordedAt":"2026-11-01T22:46:26.874Z"},...}. On 2026-11-01 sessions 01a1798a-9911
+    ("Scan and redact leaked API keys") and 01a1798a-995f ("SCHED") in ~/src/machcsl-riscv
+    exited that way at 22:46:26Z and 22:46:56Z still holding roles, and this watch alerted and
+    escalated on both as if they had stopped. Only the last entry counts: a session that was
+    resumed after an exit writes past it, and any other last entry -- a crash, a kill, a hang --
+    is still an incident.
+    """
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 65536))
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    last = next((line for line in reversed(lines) if line.strip()), b"")
+    try:
+        entry = json.loads(last)
+    except ValueError:
+        return None
+    if not isinstance(entry, dict):
+        return None
+    data = entry.get("data")
+    if (
+        entry.get("type") == "custom"
+        and entry.get("customType") == "session_exit"
+        and isinstance(data, dict)
+        and data.get("kind") == "normal"
+    ):
+        return str(data.get("recordedAt") or entry.get("timestamp") or "unknown time")
+    return None
+
+
 # --------------------------------------------------- what this run could establish about a holder
 
 
@@ -918,6 +958,7 @@ def holder_evidence(
         "dir_write": scan["mtime"],
         "dir_sentence": dir_sentence,
         "dir_truncated": scan["truncated"],
+        "exited_at": None if found else normal_exit_at(transcript),
     }
 
 
@@ -1219,6 +1260,13 @@ def clear_text(
             " other class this watch sends, and the alerts come back by themselves when it"
             " expires." + tail,
         ]
+    elif kind == "exited":
+        lines = [
+            f"ENVOY ROLE HOLDER EXITED NORMALLY: role {role}'s {cause}. The last entry of its"
+            " transcript is a normal session_exit, so the session ended on purpose and this"
+            " watch will not alert on this holder again. The role still names it; whoever"
+            " needs the role must claim it." + tail,
+        ]
     else:
         lines = [
             f"ENVOY ROLE HOLDER UNSEEN, CLEARED: role {role} has a holder this watch can see"
@@ -1242,7 +1290,10 @@ def send_clear(
     for target in targets:
         if not options.dry_run:
             envoy.send(target, text)
-    named = {"quiet": "QUIETED ON THE DIRECTORY RULE", "suppressed": "CLOSED BY A SUPPRESSION"}
+    named = {
+        "quiet": "QUIETED ON THE DIRECTORY RULE", "suppressed": "CLOSED BY A SUPPRESSION",
+        "exited": "CLOSED, HOLDER EXITED NORMALLY",
+    }
     log(f"{role}: {named.get(kind, 'CLEARED')} ({cause}); told {len(targets)} sessions")
     if options.print_alert:
         print(text)
@@ -2086,6 +2137,31 @@ def run_once(options: argparse.Namespace) -> int:
             incident["last_proc_pid"] = record.get("last_proc_pid")
             incident["last_pid_seen_at"] = record.get("last_proc_seen")
         unseen_for = started - incident["opened_at"]
+
+        # A holder that ended ON PURPOSE is not an incident: its transcript's last entry is a
+        # normal session_exit (see normal_exit_at). Said once -- in the journal, and to everyone
+        # an earlier alert reached -- and then never again for this holder. The marker lives
+        # on the incident, in the same state file as alerted_at, and is forgotten with it.
+        if evidence["exited_at"]:
+            if not incident.get("exited_reported_at"):
+                incident["exited_reported_at"] = started
+                incident["exited_at"] = evidence["exited_at"]
+                state.commit(options)
+                said = f"holder exited normally at {evidence['exited_at']}"
+                log(
+                    f"{role}: {said} (session {holder}, last entry of {evidence['transcript']} is"
+                    " a normal session_exit); not alerting on this holder again"
+                )
+                if send_clear(
+                    envoy, options, role, incident, holder, said, started, "exited",
+                    suppression_lines(started, suppressed),
+                ):
+                    clears += 1
+            elif unseen_for > FORGET_AFTER:
+                incidents.pop(key, None)
+                roles_state.pop(role, None)
+            state.commit(options)
+            continue
 
         if unseen_for < options.grace:
             log(

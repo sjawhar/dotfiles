@@ -24,9 +24,12 @@ every other class while it holds.
 Nothing here touches the real tree, the real Envoy or the real state file.
 """
 
+import argparse
 import importlib.machinery
 import importlib.util
+import json
 import os
+import socket
 import tempfile
 import time
 import unittest
@@ -42,6 +45,7 @@ LOADER.exec_module(WATCH)
 
 HOLDER = "01a18f00-e348-7617-8e7a-a1d0b774b455"
 ROLE = "node-envprobe-d10302249-2"
+EXIT_ROLE = "retired-owner-line-01a1798a"
 
 
 class FakeEnvoy:
@@ -257,6 +261,107 @@ class SuppressionTest(unittest.TestCase):
         self.assertIn("EXPIRED SUPPRESSION", lines[0])
         self.assertIn("alerts again", lines[0])
         self.assertIn("until the entry is deleted", lines[0])
+
+
+class RunEnvoy:
+    """Envoy with no live session and no registry entry for anyone; sends are recorded."""
+
+    url = "http://127.0.0.1:9020"
+    sent: list = []
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        pass
+
+    def sessions(self) -> list:
+        return []
+
+    def registry(self, session_id: str):
+        return 404, {"error": "not found"}
+
+    def send(self, session_id: str, message: str) -> bool:
+        RunEnvoy.sent.append((session_id, message))
+        return True
+
+    def publish(self, topic: str, message: str) -> bool:
+        return True
+
+
+class NormalExitTest(Lane):
+    """On 2026-11-01 sessions 01a1798a-9911 and 01a1798a-995f in ~/src/machcsl-riscv exited
+    normally at 22:46:26Z and 22:46:56Z holding roles; the watch alerted and escalated on both.
+    A transcript whose LAST entry is a normal session_exit is reported once, then left alone."""
+
+    EXIT = (
+        '{"type":"custom","customType":"session_exit","data":{"reason":"dispose","kind":"normal",'
+        '"recordedAt":"2026-11-01T22:46:26.874Z"},"id":"172c34e9","parentId":"6feb73ae",'
+        '"timestamp":"2026-11-01T22:46:26.879Z","runtime":{"version":"18.13.3"}}\n'
+    )
+    OTHER = (
+        '{"type":"custom","customType":"envoy-replay-state","data":{},"id":"6feb73ae",'
+        '"timestamp":"2026-11-01T22:25:11.444Z"}\n'
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.logs: list[str] = []
+        RunEnvoy.sent = []
+        for name, value in (
+            ("Envoy", RunEnvoy), ("log", self.logs.append),
+            ("omp_sessions_by_pid", lambda: {}), ("transcript_holders", lambda path: []),
+            ("handover_files", lambda session, directory: []),
+            ("check_panes", lambda *args: (0, 0, 0, 0)),
+        ):
+            original = getattr(WATCH, name)
+            setattr(WATCH, name, value)
+            self.addCleanup(setattr, WATCH, name, original)
+        self.state = self.root / "state.json"
+        # Already alerted 11 minutes ago, so the next period would escalate.
+        self.state.write_text(json.dumps({
+            "roles": {EXIT_ROLE: {"holder": HOLDER, "host": socket.gethostname(), "dir": str(self.dir)}},
+            "incidents": {f"{EXIT_ROLE}|{HOLDER}": {
+                "opened_at": self.now - 800, "alerted_at": self.now - 660, "told": ["lead"],
+            }},
+        }))
+
+    def transcript(self, last: str) -> None:
+        path = WATCH.SESSION_ROOT / "-src-machcsl-riscv" / f"2026-10-26T18-48-08-799Z_{HOLDER}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"type":"session","id":"' + HOLDER + '"}\n' + self.OTHER + last)
+        os.utime(path, (self.now - 900, self.now - 900))
+
+    def period(self) -> list[str]:
+        self.logs.clear()
+        WATCH._TRANSCRIPT_INDEX = None
+        options = argparse.Namespace(
+            state=self.state, dry_run=True, write_state=True, print_alert=False,
+            http_timeout=1.0, grace=60.0, write_grace=120.0, dir_grace=300.0, escalate=600.0,
+        )
+        WATCH.run_once(options)
+        return [line for line in self.logs if EXIT_ROLE in line]
+
+    def test_a_normal_exit_is_reported_once_and_never_escalates(self) -> None:
+        self.transcript(self.EXIT)
+
+        first = self.period()
+        second = self.period()
+
+        self.assertEqual(
+            sum("holder exited normally at 2026-11-01T22:46:26.874Z" in line for line in first), 2
+        )  # the journal line and the clear it sends to who heard the alert
+        self.assertFalse(any("ESCALATED" in line for line in first + second))
+        self.assertEqual(second, [])
+        self.assertEqual(len(RunEnvoy.sent), 0)  # dry run: logged, nothing sent
+
+    def test_any_other_last_entry_is_still_an_incident(self) -> None:
+        self.transcript(self.OTHER)
+
+        self.assertTrue(any("ESCALATED" in line for line in self.period()))
+
+    def test_an_exit_followed_by_more_entries_is_not_an_exit(self) -> None:
+        self.transcript(self.EXIT + self.OTHER)
+
+        self.assertTrue(any("ESCALATED" in line for line in self.period()))
+
 
 
 if __name__ == "__main__":

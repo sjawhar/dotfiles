@@ -276,7 +276,16 @@ That state file is the only memory, and the service owns it:
   2026-10-27 at 07:53:20Z and 07:55:18Z.
 
 A clear is sent once, and names what ended the incident: a source can see the holder again (with
-the source and what it found), or a new live session now lists the role.
+the source and what it found), a new live session now lists the role, or the holder exited
+normally.
+
+A holder exited normally when the **last** entry of its transcript is
+`{"type":"custom","customType":"session_exit","data":{"kind":"normal",…}}`. The watch logs
+`<role>: holder exited normally at <recordedAt>` once, sends the clear to whoever an earlier alert
+reached, records `exited_reported_at` on the incident, and never alerts or escalates on that holder
+again. Any other last entry is still an incident. On 2026-11-01 sessions 01a1798a-9911 and
+01a1798a-995f in `~/src/machcsl-riscv` exited this way at 22:46:26Z and 22:46:56Z and were
+escalated as if they had stopped.
 
 ## Who hears about it
 
