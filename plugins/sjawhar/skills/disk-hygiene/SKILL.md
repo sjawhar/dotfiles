@@ -38,15 +38,15 @@ Here you delete only paths that you prove are yours. A name proves nothing eithe
 - Your own paths must still pass the safety rules: no live process in it (`$S procs`), no content only on disk.
 - In your own box, also run `$S containers` and `$S images`, and treat a `registry` container in that output as yours: your subagents may have started it without your seeing it.
 - Before you delete a core file, read [references/core-dumps.md](references/core-dumps.md): it can be the only crash evidence.
-- Never glob the box tree (`<boxes>/<box>/*`); name each entry you delete. `jj-user-repos` and `omp-run` there are live bind-mount sources, and losing them breaks `jj` or omp for the whole box. Symptom and repair: [references/box-mounts.md](references/box-mounts.md).
-- Give every `find ... -delete` or `find ... -exec rm` a `-mindepth 1`. Without it, `find` tests the starting directory too: on 2026-10-31, `find /mnt/nvme/sami/tmp -maxdepth 1 -name 'tmp*' -exec rm -rf {} +` matched `/mnt/nvme/sami/tmp` itself and deleted session scratch there for five minutes (dispatch://INFRA-893).
+- Never glob a shared directory: a prefix is not ownership. Name each entry you delete, or delete a directory you made. `rm -f /tmp/mt.*`, cleaning one agent's own pid-suffixed scratch, destroyed two unrecoverable files of somebody else's that shared the prefix. The box tree needs the same rule for a second reason, its live bind-mount sources: [references/box-mounts.md](references/box-mounts.md).
+- Give every `find ... -delete` or `find ... -exec rm` a `-mindepth 1`, because `find` tests the starting directory too and has deleted the directory it was told to clean inside ([references/finding-space.md](references/finding-space.md)).
 
 ## Pacing (every phase)
 
 - Run one `rm` or ad-hoc `du` at a time, under `sudo ionice -c3 nice -n19`. Parallel walkers plus an `rm` can hang every shell on the box.
 - Delete only while `/proc/pressure/io` `full avg10 < 20`. The script gates on this.
 - Never `lsof +D` or `fuser` a tree per candidate: each walks the whole tree. Before each item, run `$S procs` once and check that no cwd is inside it.
-- Do not size a candidate to decide its deletion: under IO load sizing is slow, and `df` before and after measures the result. Read the `df` of the filesystem the path is on, which `df <path>` gives: a removal under another mount leaves `/` unchanged.
+- Do not size a candidate to decide its deletion: under IO load sizing is slow. Measure the result by the directory you removed, before and after, not by `df`: when several sessions clear at once the filesystem moves gigabytes between consecutive reads, so `df` tells you about the box and not about your cleanup. Where you do read `df`, read the filesystem the path is on, which `df <path>` gives: a removal under another mount leaves `/` unchanged.
 - Never run one `du` of everything: it can run for hours. To find where the space went, what writes now, or what appeared in the last hours, use [references/finding-space.md](references/finding-space.md). Each instrument there is a named subcommand of `$S`, and each prints what its number does not measure.
 - When a leaked test or process causes the space or load, read [references/test-leaks.md](references/test-leaks.md).
 

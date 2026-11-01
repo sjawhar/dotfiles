@@ -47,3 +47,15 @@ afternoon were each true of something other than the question asked.
   number ("the lowest of 60 one-minute samples"). For a bound that misses nothing, read a counter
   that accumulates: the `total=` field of `/proc/pressure/io`, the `df` the apply ledger writes
   after each action, or an ENOSPC in the kernel log.
+
+## Two deletions that took more than they were given
+
+- `find` tests the starting directory as well as its contents, so give every `find … -delete` or
+  `find … -exec rm` a `-mindepth 1`. On 2026-10-31
+  `find /mnt/nvme/sami/tmp -maxdepth 1 -name 'tmp*' -exec rm -rf {} +` matched
+  `/mnt/nvme/sami/tmp` itself and deleted other sessions' scratch there for five minutes
+  (dispatch://INFRA-893).
+- A prefix is not ownership. An agent clearing its own pid-suffixed scratch with `rm -f /tmp/mt.*`
+  destroyed two files of somebody else's that shared the prefix, 12,145 and 415 bytes, with no
+  process holding them and nothing to recover. Name each entry you delete, or delete a directory
+  you made yourself.
