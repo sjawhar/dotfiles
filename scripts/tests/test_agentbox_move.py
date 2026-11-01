@@ -23,6 +23,7 @@ with the host tools stubbed first on PATH, and point `AGENTBOX_PROC` at a fixtur
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -53,6 +54,9 @@ class AgentboxMove(unittest.TestCase):
         self.boxes.mkdir(parents=True)
         self.proc = self.root / "proc"
         self.proc.mkdir()
+        self.sessions = self.root / "sessions"
+        self.sessions.mkdir()
+        self.plan_dir = self.root / "plan"
         self.stubs = self.root / "bin"
         self.stubs.mkdir()
         # Nothing in these tests may reach a real host: every census input is a stub.
@@ -70,6 +74,11 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_BOXES": str(self.boxes),
             "AGENTBOX_PROC": str(self.proc),
             "AGENTBOX_DISK": "0",
+            # The session transcripts the record reader walks, the window it reads, and where
+            # `move --plan` leaves what it inferred for `move --self` to union with.
+            "AGENTBOX_SESSION_ROOTS": str(self.sessions),
+            "AGENTBOX_MOVE_SINCE": "2026-01-01T00:00:00Z",
+            "AGENTBOX_PLAN_DIR": str(self.plan_dir),
             # The roots that hold many sessions' trees, pinned to the fixture's own home: this
             # host's TMPDIR is itself under /mnt/nvme/<user>, one of the real ones, so without
             # this the suite's answers would depend on where the temporary tree happens to be.
@@ -344,7 +353,7 @@ class AgentboxMove(unittest.TestCase):
         named.mkdir()
         self.make_proc(450, comm="omp", ppid=1, cwd=lane)
         self.make_proc(451, comm="bash", ppid=450, cwd=child)
-        result = self.run_bash(f'move_dirs_why "{lane}" 450 "{named}"')
+        result = self.run_bash(f'move_dirs_why "{lane}" 450 "" "{named}"')
         rows = [line.split("\t") for line in result.stdout.splitlines()]
         self.assertEqual([row[0] for row in rows], [str(lane), str(child), str(named)])
         self.assertEqual(rows[2][1], "you named it with --dir")
@@ -378,6 +387,170 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertIn(f"--dir {lane} --dir {named} -- omp --resume", allowed.stdout)
         self.assertIn("you named it with --dir", allowed.stdout)
+
+    def test_a_checkout_whose_objects_are_a_symlink_elsewhere_keeps_them(self) -> None:
+        """`~/src/machcsl-riscv/.git/objects` on this host is a SYMLINK to
+        /mnt/nvme/sami/git-objects/machcsl-riscv. A box given the tree and not the store answers
+        `not a git repository` for every command in it, and `knives gh` fails with it (session
+        01a1798a-995f, box agentbox-676432b23e44, 2026-11-01). $SRC is in every box, so the TREE
+        is never in the spec and the store must be."""
+        checkout = self.checkout("machcsl-riscv")
+        store = self.home / "git-objects" / "machcsl-riscv"
+        store.mkdir(parents=True)
+        objects = checkout / ".git" / "objects"
+        for child in list(objects.iterdir()):
+            child.rename(store / child.name)
+        objects.rmdir()
+        objects.symlink_to(store)
+        borrowed = self.home / "git-objects" / "shared-pool"
+        borrowed.mkdir(parents=True)
+        (store / "info").mkdir(parents=True, exist_ok=True)
+        (store / "info" / "alternates").write_text(f"{borrowed}\n", encoding="utf-8")
+        self.make_proc(495, comm="omp", ppid=1, cwd=checkout)
+        result = self.run_bash(f'move_dirs_why "{checkout}" 495')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        paths = [line.split("\t")[0] for line in result.stdout.splitlines()]
+        # The store itself and the pool it borrows from, each at its own path.
+        self.assertIn(str(store), paths)
+        self.assertIn(str(borrowed), paths)
+        self.assertIn("the git object store of", result.stdout)
+        # git agrees the tree depends on that store: it is where its objects are.
+        proof = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "--git-path", "objects"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+        )
+        self.assertEqual(proof.returncode, 0, proof.stderr)
+
+    # ── the paths the session's own record names ────────────────────────────────────────────
+    def transcript(self, session: str, calls: list[tuple[str, dict]], slug: str = "-lane") -> Path:
+        """A session transcript holding those tool calls, where the record reader looks."""
+        path = self.sessions / slug / f"2026-11-01T09:00:00Z_{session}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for name, args in calls:
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "message",
+                        "timestamp": "2026-11-01T10:00:00.000Z",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "toolCall", "name": name, "arguments": args}],
+                        },
+                    }
+                )
+            )
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_a_dead_subagent_s_tree_is_found_in_the_session_s_own_record(self) -> None:
+        """A supervisor writes almost nothing itself: its subagents do, and they have exited. A
+        dead worker leaves no cwd and holds no open file, so a live scan sees none of its trees.
+        Session 01a16220 on 2026-11-01 got two directories from a live scan and missed four.
+        The record is the only source that sees them."""
+        lane = self.home / "lane"
+        lane.mkdir()
+        pool = self.home / ".worktrees" / "agent-orchestration-owner" / "s1-pool"
+        pool.mkdir(parents=True)
+        # A real tree, so its own root is the boundary and not the shared root above it.
+        (pool / ".git").mkdir()
+        verified = self.home / "tmp" / "verified-linux"
+        verified.mkdir(parents=True)
+        (verified / "state.json").write_text("{}", encoding="utf-8")
+        infra = self.home / "infra132"
+        infra.mkdir()
+        session = "01a19700-0000-7000-8000-000000000c01"
+        self.transcript(
+            session,
+            [
+                # a one-shot `cd <path> && …`: at no instant is a process there (01a16640)
+                ("bash", {"command": f"cd {pool} && git status --short"}),
+                # a file its own call named
+                ("read", {"path": f"{verified}/state.json:1-20"}),
+                # `git -C <path>`, inside a command
+                ("bash", {"command": f"git -C {infra} log --oneline -1"}),
+                # a file only mentioned in prose is not a tool call and names nothing
+            ],
+        )
+        self.make_proc(470, comm="omp", ppid=1, cwd=lane, session=session)
+        result = self.run_bash(f'move_dirs_why "{lane}" 470 "{session}"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        self.assertEqual(
+            sorted(row[0] for row in rows), sorted([str(lane), str(pool), str(verified), str(infra)])
+        )
+        # Each came from the record: directly, or through the git tree a recorded path is in.
+        whys = {row[0]: row[1] for row in rows}
+        self.assertIn("its own record today", whys[str(verified)])
+        self.assertIn("its own record today", whys[str(infra)])
+        self.assertTrue(
+            "its own record today" in whys[str(pool)] or "git object store" in whys[str(pool)],
+            whys[str(pool)],
+        )
+        # The session's own state directory is one of them, so a move keeps it.
+        self.assertIn(str(verified), result.stdout)
+
+    def test_a_session_with_no_live_child_process_is_told_so(self) -> None:
+        lane = self.home / "lane"
+        lane.mkdir()
+        session = "01a19700-0000-7000-8000-000000000c02"
+        self.make_proc(480, comm="bash", ppid=1, cwd=lane)
+        self.make_proc(481, comm="omp", ppid=480, cwd=lane, session=session)
+        self.set_pids(481)
+        self.set_panes({480: ("%2", "agents:10.1")})
+        write_stub(self.stubs, "df", 'if [[ "$*" == *target* ]]; then echo target; echo /; else echo avail; echo 214748364800; fi')
+        plan = self.run_bash("move_image_bytes() { echo 280000000; }\ncmd_move_plan")
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertIn("no live child process", plan.stdout)
+        sent = self.run_bash("move_image_bytes() { echo 280000000; }\ncmd_move --all")
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+        self.assertIn("no live child process", (self.root / "STUB_ENVOY").read_text(encoding="utf-8"))
+
+    def test_move_self_keeps_every_path_the_last_plan_gave_the_session(self) -> None:
+        """`--plan` and `--self` run minutes apart and a live scan is a snapshot: at 18:48:20Z on
+        2026-11-01 the plan gave 01a1798a /mnt/nvme/sami/tmp/verified-linux because one bash held
+        a file open there, and the move minutes later gave the cwd alone — losing the directory
+        that holds that session's own state. --self takes the union."""
+        lane = self.home / "lane"
+        lane.mkdir()
+        state = self.home / "tmp" / "verified-linux"
+        state.mkdir(parents=True)
+        session = "01a19700-0000-7000-8000-000000000c03"
+        self.make_proc(490, comm="bash", ppid=1, cwd=lane)
+        self.make_proc(491, comm="omp", ppid=490, cwd=lane, session=session)
+        self.set_pids(491)
+        self.set_panes({490: ("%2", "agents:11.1")})
+        write_stub(self.stubs, "df", 'if [[ "$*" == *target* ]]; then echo target; echo /; else echo avail; echo 214748364800; fi')
+        # The plan ran while a process of the session held a file open in the state directory.
+        self.make_proc(492, comm="cargo", ppid=491, cwd=state)
+        plan = self.run_bash("move_image_bytes() { echo 280000000; }\ncmd_move_plan")
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertIn(str(state), plan.stdout)
+        self.assertTrue((self.plan_dir / session).is_file())
+        # That process has since exited, so a live scan now sees nothing there.
+        for name in ("cwd",):
+            (self.proc / "492" / name).unlink()
+        (self.proc / "492" / "stat").unlink()
+        moved = self.run_bash(
+            'move_own_omp() { echo 491; }\nmove_image_bytes() { echo 280000000; }\ncmd_move_self --dry-run'
+        )
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn(f"--dir {state}", moved.stdout)
+        self.assertIn("the last `agentbox move --plan` gave it", moved.stdout)
+
+    # ── the usage text ──────────────────────────────────────────────────────────────────────
+    def test_move_help_prints_a_usage_that_names_every_form(self) -> None:
+        result = self.run_bash("cmd_move --help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for part in ("move --plan", "move --self", "--dir PATH", "--all"):
+            self.assertIn(part, result.stdout)
+        # A flag of another form is refused by name, not with a stale usage line.
+        wrong = self.run_bash("cmd_move --plan --self")
+        self.assertEqual(wrong.returncode, 1)
+        self.assertIn("belongs to another form", wrong.stderr)
+        self.assertIn("move --self", wrong.stderr)
 
     # ── what each omp process is ────────────────────────────────────────────────────────────
     def test_every_class_of_omp_process_is_told_apart(self) -> None:
@@ -533,11 +706,32 @@ class AgentboxMove(unittest.TestCase):
             allowed.stdout,
         )
 
-    def test_a_session_already_in_a_box_is_told_to_restart_instead_of_moving(self) -> None:
-        result = self.run_bash("cmd_move_self", {"AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa"})
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("already runs in box agentbox-aaaaaaaaaaaa", result.stderr)
-        self.assertIn("agentbox restart", result.stderr)
+    def test_a_session_inside_a_box_can_move_again_with_one_more_dir(self) -> None:
+        """A box must not be a one-way door. Every box defect found so far is fixed by moving
+        again with one more --dir, and a boxed session could do neither: the path is the HOST's,
+        so checking it in the box's own view answered `--dir '<path>' is not an existing
+        directory`, and --self then refused outright."""
+        host_only = "/mnt/nvme/sami/tmp/a-path-this-box-does-not-have"
+        self.assertFalse(Path(host_only).exists(), "the fixture needs a path this host lacks")
+        env = {
+            "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa",
+            "AGENTBOX_DIRS": f"{self.home}/lane:{self.home}/evidence",
+            "OMP_SESSION_ID": "01a19700-0000-7000-8000-000000000d09",
+            "TMUX_PANE": "%7",
+        }
+        result = self.run_bash(f'cmd_move_self --dry-run --dir "{host_only}"', env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already in box agentbox-aaaaaaaaaaaa", result.stdout)
+        # This box's own paths, then the new one, and the session resumed by its own id.
+        self.assertIn(
+            f"--dir {self.home}/lane --dir {self.home}/evidence --dir {host_only} "
+            "-- omp --resume 01a19700-0000-7000-8000-000000000d09 .",
+            result.stdout,
+        )
+        # A box started with no --dir has nothing to carry, and says so instead of guessing.
+        bare = self.run_bash("cmd_move_self --dry-run", {"AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa"})
+        self.assertEqual(bare.returncode, 1)
+        self.assertIn("no --dir", bare.stderr)
 
     # ── notifying other sessions ────────────────────────────────────────────────────────────
     def test_each_named_session_gets_the_notice_with_its_own_launch_line(self) -> None:

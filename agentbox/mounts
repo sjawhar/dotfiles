@@ -104,3 +104,10 @@ ro .ssh/jj-signing.pub
 # a push from a box is still the repo's GitHub App over https.
 ro .ssh/google_compute_engine
 ro .ssh/google_compute_engine.pub
+
+# The public-text leak check `shims/gh` demands before `gh pr edit|create|comment`. This entry is
+# the POINTER, `path`, holding the script's absolute path; the script itself lives on /mnt/nvme,
+# outside every box, so `agentbox move` adds the directory holding it to a session's spec
+# (move_config_dirs in scripts/agentbox). Without both, every public text write from a box is
+# refused and a lead cannot work in one (dispatch://INFRA-702, 2026-11-01).
+ro .config/public-leak-check
