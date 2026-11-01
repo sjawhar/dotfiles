@@ -19,6 +19,7 @@ Read before you brief `ce-babysit-pr`, start a detector, diagnose a silent watch
 - Single-quote jq programs or use a file. An empty or failed parse is a loud failure. Check partial output for every field name you expected. Keep stderr out of compared values.
 - Call `gh` fresh for each observation so the token refreshes. Never capture one token for a long loop. Check run-list limits and event filters before you conclude that all runs for a SHA finished.
 - A long watch stream can stop cleanly. When it underpins proof, reconcile its object IDs with independent reads or driver actions. Resume from the last resource version where supported.
+- One watcher per pull request across the whole fleet, and never a bare `gh run watch` or `gh pr checks --watch`: their defaults poll every 3 and every 10 seconds, so one unattended `gh run watch` spends about 1,200 calls an hour. Pass `--interval 120` or longer, or ask once every few minutes instead. The REST budget is one installation's 15,000 an hour shared by every agent on the organisation and indivisible, so a lane polling at its default spends the merge queue's calls and the failure lands on whoever makes the next one. A rate-limit error means back off, never retry sooner; watching three pull requests is one loop over three, not three loops.
 
 ## The carrying run
 
