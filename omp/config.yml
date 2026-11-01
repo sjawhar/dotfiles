@@ -1,14 +1,14 @@
 modelRoles:
-  # Sami, 2026-10-29 ~03:15Z: "we should be load balancing across both HDO accounts and agents
-  # that aren't working on OSS Verify. It should be on OPUS 5 instead of 5.5." OSS Verify's lanes
-  # run on their own VMs under omp-vm.yml and are not affected by this file. Every lead answered
-  # (03:46Z) that nothing of its stream needs 5.5 except the gates below. A brief cannot pin a
-  # model (the task tool takes one only for seance agents), so these roles are the lever.
-  default: anthropic/claude-opus-5
+  # Sami, 2026-11-01 22:30Z (dispatch://INFRA-26/ask/d42777be-b790-4abe-b540-9d77146f2ba2): "can we
+  # get all the agents that are running on the dev box switched over to Opus 5.5". This replaces
+  # his 2026-10-29 ~03:15Z direction to run on Opus 5 instead of 5.5 to balance load across the
+  # accounts. A brief cannot pin a model (the task tool takes one only for seance agents), so these
+  # roles are the lever; running sessions were moved with `/switch` the same night.
+  default: anthropic/claude-opus-5-5
   plan: anthropic/claude-fable-5-1:max
   smol: anthropic/claude-sonnet-5-5
   slow: openai-codex/gpt-5.6-terra:xhigh
-  task: anthropic/claude-opus-5
+  task: anthropic/claude-opus-5-5
   vision: google/gemini-3.7-flash:medium
   # The review gates and the oracle advisors run on the OpenAI API lane rather
   # than the Codex subscription, because the subscription's window is spent
@@ -192,11 +192,11 @@ retry:
 task:
   maxRecursionDepth: 3
   agentModelOverrides:
-    # The roles above moved to Opus 5 on 2026-10-29. These types stay on 5.5 because a lead
-    # measured that a weaker verdict changes the result: reviewer and the review-role types gate
-    # merges (Rocq speed's gates caught #1950's stale-cache key and #1958's box cap that night;
-    # task making's caught 4 defects in #1967 that tests missed), and a wrong pass there merges
-    # a defect. Every other agent type takes `task`, now Opus 5.
+    # These types named Opus 5.5 while the roles above ran on Opus 5 (2026-10-29 to 2026-11-01),
+    # because a lead measured that a weaker verdict changes the result: reviewer and the
+    # review-role types gate merges (Rocq speed's gates caught #1950's stale-cache key and #1958's
+    # box cap that night; task making's caught 4 defects in #1967 that tests missed), and a wrong
+    # pass there merges a defect. Every other agent type takes `task`, now Opus 5.5 as well.
     reviewer: anthropic/claude-opus-5-5
     bug-finder: "@review"
     code-architect: anthropic/claude-opus-5-5
