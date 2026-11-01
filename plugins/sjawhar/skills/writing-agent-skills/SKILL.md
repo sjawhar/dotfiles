@@ -17,8 +17,8 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 ## 2. Write the description
 
 - Say only when to use the skill: start with "Use" ("Use when", "Use for", "Use before"), then the situations, symptoms and words a task would contain. Never summarize the steps, because agents then follow the summary and skip the body.
-- Keep it under 500 characters (hard cap 1,024). Harnesses drop the descriptions of rarely used skills first when the listing runs over budget.
-- Name the case where the agent thinks it can do without the skill ("also when the diff is pasted inline"). One such clause took a review skill from 7 of 27 loads to 21 of 27.
+- Put the trigger words in the first 99 characters, and keep the whole under 1,024. omp shows the model a rewrite of at most 12 words, and until one is accepted only the first 99 characters (a description of 100 or fewer shows whole), so a trigger past that point never reaches it.
+- Name the case where the agent thinks it can do without the skill ("also when the diff is pasted inline"), inside those 99 characters. One such clause took a review skill from 7 of 27 loads to 21 of 27.
 - If two skills still load on the same prompts after one description rewrite, merge them or split their scope; more words will not separate them.
 
 ## 3. Write the body
