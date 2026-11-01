@@ -49,6 +49,16 @@ afternoon were each true of something other than the question asked.
   number ("the lowest of 60 one-minute samples"). For a bound that misses nothing, read a counter
   that accumulates: the `total=` field of `/proc/pressure/io`, the `df` the apply ledger writes
   after each action, or an ENOSPC in the kernel log.
+- Four readings on one limb of a cycle are not a trend. A shared volume sawtooths as lanes write
+  and delete: about 25 to 30 GB of amplitude every 5 to 8 minutes, with flat troughs. Four
+  readings over twelve minutes on one descending limb gave a 309 GB/h fill and a predicted full
+  disk fifteen minutes out, and the volume then gained 30.2 GB in 407 s and ended higher than it
+  began. A rate needs a period longer than the thing's own cycle, or it measures the phase you
+  sampled: before declaring a trend, take one reading a full cycle later, or show that the FLOOR
+  is moving. The steady floor is the number worth acting on.
+- Total write throughput far larger than any change in free space means write-then-delete churn
+  rather than accumulation, so there is no runaway writer to find: 164.5 MB/s across dozens of
+  processes, none above 61.5 MB/s, on a volume whose net was about zero.
 
 ## Two deletions that took more than they were given
 
