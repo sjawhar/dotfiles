@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import fcntl
 import random
 import re
 import shutil
@@ -53,6 +54,16 @@ import sys
 import time
 
 WINDOW_DEFAULT = 60.0
+# The polling shapes. The gate loops on this host read a pull request every 30 s
+# or every 120 s, so a 60 s window catches the fast loop and misses the slow one
+# by construction: measured over 21:36-22:21Z on 2026-11-01, 11.7% of calls were
+# an identical read inside 60 s and 19.9% inside 120 s. 120 s is still inside the
+# slower loop's own interval, so no loop sees an answer older than one of its own
+# cycles.
+WINDOW_POLLING = 120.0
+POLLING_COMMANDS = {("pr", "view"), ("pr", "checks"), ("pr", "list")}
+# How long the second of two overlapping identical reads waits for the first.
+SINGLE_FLIGHT_WAIT = 30.0
 MAX_BODY_BYTES = 8 * 1024 * 1024
 CACHE_MAX_BYTES = 256 * 1024 * 1024
 ENTRY_MAX_AGE = 6 * 3600
@@ -295,6 +306,22 @@ def classify(args: list[str]) -> str:
     return CLASS_ETAG
 
 
+def window_for(args: list[str]) -> float:
+    """The reuse window for this call. An explicit setting wins outright."""
+    env = os.environ.get("GH_READ_CACHE_WINDOW")
+    if env is not None:
+        try:
+            return float(env)
+        except ValueError:
+            return WINDOW_DEFAULT
+    words = positionals(args)
+    if tuple(words[:2]) in POLLING_COMMANDS and any(
+        a == "--json" or a.startswith("--json=") for a in args
+    ):
+        return WINDOW_POLLING
+    return WINDOW_DEFAULT
+
+
 def repo_context(args: list[str]) -> str:
     """What repository this call is about, so two worktrees of one repo share.
 
@@ -460,6 +487,42 @@ def prune(root: str) -> None:
         pass
 
 
+def take_lock(path: str, deadline: float):
+    """Hold the right to make this request. The second of two overlapping
+    identical reads waits here instead of asking GitHub the same question.
+
+    Returns the open file while this process holds the lock, or None. A holder
+    that dies releases it: the kernel drops the flock when the file closes. A
+    cache that cannot be written at all returns None at once, and then both
+    callers simply make their own request, which is the old behaviour."""
+    try:
+        make_private(os.path.dirname(path))
+        fh = open(path, "a+")
+    except OSError:
+        return None
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            pass
+        if time.time() >= deadline:
+            try:
+                fh.close()
+            except OSError:
+                pass
+            return None
+        time.sleep(0.05)
+
+
+def read_body(out_path: str) -> bytes | None:
+    try:
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
 def child_command(args: list[str]) -> list[str]:
     gh = os.environ.get("GH_READ_CACHE_GH") or shutil.which("gh") or "gh"
     return [gh] + args
@@ -560,10 +623,7 @@ def main() -> None:
         exec_passthrough(argv)
         return
 
-    try:
-        window = float(os.environ.get("GH_READ_CACHE_WINDOW", WINDOW_DEFAULT))
-    except ValueError:
-        window = WINDOW_DEFAULT
+    window = window_for(argv)
 
     try:
         key = cache_key(argv)
@@ -577,16 +637,37 @@ def main() -> None:
     meta = load_meta(meta_path)
 
     if meta is not None and (time.time() - float(meta.get("t", 0))) < window:
-        try:
-            with open(out_path, "rb") as fh:
-                body = fh.read()
-        except OSError:
-            body = None
+        body = read_body(out_path)
         if body is not None:
             age = time.time() - float(meta["t"])
             log_event(root, dict(base_record, ev="hit", age=round(age, 2)))
             debug("hit", "age %.1fs, no request made" % age)
             emit(body, int(meta.get("code", 0)), (meta.get("err") or "").encode())
+
+    # Single flight. Only one process asks GitHub this question at a time; the
+    # others wait for its answer, and take it only if it arrived after they
+    # started waiting. A failure and an uncomputed-mergeability body are never
+    # stored at all, so a waiter can only ever inherit a real answer. A wait
+    # that runs out makes its own request, so the cache can never be the reason
+    # a read does not happen.
+    waited_from = time.time()
+    try:
+        patience = float(
+            os.environ.get("GH_READ_CACHE_SINGLE_FLIGHT_WAIT", SINGLE_FLIGHT_WAIT)
+        )
+    except ValueError:
+        patience = SINGLE_FLIGHT_WAIT
+    lock = take_lock(meta_path + ".lock", waited_from + patience)
+    if time.time() - waited_from > 0.05:
+        fresh = load_meta(meta_path)
+        if fresh is not None and float(fresh.get("t", 0)) >= waited_from:
+            body = read_body(out_path)
+            if body is not None:
+                age = time.time() - float(fresh["t"])
+                log_event(root, dict(base_record, ev="hit", shared=True, age=round(age, 2)))
+                debug("hit", "shared another call's answer, no request made")
+                emit(body, int(fresh.get("code", 0)), (fresh.get("err") or "").encode())
+        meta = fresh if fresh is not None else meta
 
     if kind == CLASS_ETAG:
         args = list(argv) + ["--include"]

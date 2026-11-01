@@ -340,6 +340,129 @@ class GhReadCacheTest(unittest.TestCase):
         self.assertEqual(a.stdout, "BODY-1")
         self.assertEqual(a.returncode, 0)
 
+    # -- the polling shapes get a longer window ----------------------------
+
+    def test_polling_shapes_reuse_for_two_minutes(self):
+        # The gate loops poll every 30 s and every 120 s; 60 s catches only the
+        # fast one. These three shapes with --json reuse for 120 s instead.
+        import importlib.machinery
+        import importlib.util
+
+        loader = importlib.machinery.SourceFileLoader("ghrc2", str(CACHE))
+        spec = importlib.util.spec_from_loader("ghrc2", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        os.environ.pop("GH_READ_CACHE_WINDOW", None)
+        for line in (
+            "pr view 5 -R o/r --json state",
+            "pr checks 5 -R o/r --json state",
+            "pr list -R o/r --json number",
+        ):
+            self.assertEqual(mod.window_for(line.split()), 120.0, line)
+        for line in (
+            "pr view 5 -R o/r",
+            "pr diff 5 -R o/r",
+            "api repos/o/r",
+            "run list -R o/r",
+        ):
+            self.assertEqual(mod.window_for(line.split()), 60.0, line)
+
+    def test_an_entry_older_than_60s_still_serves_a_polling_shape(self):
+        self.run_cache("pr", "view", "5", "-R", "o/r", "--json", "state")
+        meta = next((self.cache / "v1").glob("*/*.meta"))
+        record = json.loads(meta.read_text())
+        record["t"] -= 90
+        meta.write_text(json.dumps(record))
+        self.run_cache("pr", "view", "5", "-R", "o/r", "--json", "state")
+        self.assertEqual(len(self.calls()), 1, self.calls())
+        record["t"] -= 60
+        meta.write_text(json.dumps(record))
+        self.run_cache("pr", "view", "5", "-R", "o/r", "--json", "state")
+        self.assertEqual(len(self.calls()), 2, self.calls())
+
+    # -- single flight ------------------------------------------------------
+
+    def concurrent(self, stub, n, *args, **extra):
+        procs = [
+            subprocess.Popen(
+                [str(CACHE), "--", *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(self.work),
+                env=self.env(GH_READ_CACHE_GH=str(stub), **extra),
+            )
+            for _ in range(n)
+        ]
+        return [(p, *p.communicate()) for p in procs]
+
+    def stub_named(self, name, body):
+        path = self.dir / name
+        path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def test_two_concurrent_identical_reads_make_one_request(self):
+        slow = self.stub_named(
+            "slow-gh",
+            'printf \'%s\\n\' "$*" >> "$STUB_LOG"\nsleep 2\nprintf \'%s\' "$STUB_BODY"\n',
+        )
+        for _proc, out, _err in self.concurrent(slow, 3, "pr", "view", "5", "-R", "o/r"):
+            self.assertEqual(out, "BODY-1")
+        self.assertEqual(len(self.calls()), 1, self.calls())
+
+    def test_a_waiter_never_inherits_a_failure(self):
+        failing = self.stub_named(
+            "failing-gh",
+            'printf \'%s\\n\' "$*" >> "$STUB_LOG"\nsleep 1\n'
+            "echo 'gh: Bad credentials' >&2\nexit 1\n",
+        )
+        for proc, _out, err in self.concurrent(failing, 2, "pr", "view", "5", "-R", "o/r"):
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("Bad credentials", err)
+        # Nothing was stored, so the waiter made its own request.
+        self.assertEqual(len(self.calls()), 2, self.calls())
+
+    def test_a_waiter_never_inherits_an_uncomputed_body(self):
+        slow = self.stub_named(
+            "slow-unknown-gh",
+            'printf \'%s\\n\' "$*" >> "$STUB_LOG"\nsleep 1\nprintf \'%s\' "$STUB_BODY"\n',
+        )
+        self.concurrent(
+            slow,
+            2,
+            "pr",
+            "view",
+            "5",
+            "-R",
+            "o/r",
+            STUB_BODY='{"mergeStateStatus":"UNKNOWN"}',
+        )
+        self.assertEqual(len(self.calls()), 2, self.calls())
+
+    def test_a_wait_that_runs_out_makes_its_own_request(self):
+        import fcntl
+
+        # Hold the entry's lock from outside, as a stalled holder would.
+        self.run_cache("pr", "view", "9", "-R", "o/r")
+        meta = next((self.cache / "v1").glob("*/*.meta"))
+        held = open(str(meta) + ".lock", "a+")
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.addCleanup(held.close)
+        before = len(self.calls())
+        r = self.run_cache(
+            "pr",
+            "view",
+            "9",
+            "-R",
+            "o/r",
+            GH_READ_CACHE_WINDOW=0,
+            GH_READ_CACHE_SINGLE_FLIGHT_WAIT=1,
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "BODY-1")
+        self.assertEqual(len(self.calls()) - before, 1, self.calls())
+
 
 if __name__ == "__main__":
     unittest.main()

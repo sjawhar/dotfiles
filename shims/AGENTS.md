@@ -26,8 +26,15 @@ before handing the call to the real one.
   classifier is an allow-list of read verbs and a GET-only rule for `gh api`, and anything
   else, any failure and any unexpected output shape runs the command as written. A body
   saying GitHub has not computed mergeability yet (`"mergeStateStatus":"UNKNOWN"`,
-  `"mergeable":null`) is never stored, since the answer to it is to read again.
-  `GH_READ_CACHE=0` turns the cache off, `GH_READ_CACHE_LOG=0` the log, and
+  `"mergeable":null`) is never stored, since the answer to it is to read again. Only one
+  process asks GitHub a given question at a time: the second of two overlapping identical
+  reads waits up to 30 s for the first one's answer and then makes its own, so it can
+  never inherit a failure. `pr view`, `pr checks` and `pr list` with `--json` reuse for
+  120 s rather than 60 s, since the gate loops on this host poll every 30 s and every
+  120 s and a 60 s window misses the slower one by construction (measured 2026-11-01: an
+  identical read inside 60 s was 11.7% of calls, inside 120 s 19.9%).
+  `GH_READ_CACHE=0` turns the cache off, `GH_READ_CACHE_LOG=0` the log,
+  `GH_READ_CACHE_DEBUG=1` prints one stderr line per hit, and
   `scripts/tests/test_gh_read_cache.py` is the contract.
 - **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and in a
   checkout that sets `git config omp.sessionTrailer false` (the backing git repository's config)
