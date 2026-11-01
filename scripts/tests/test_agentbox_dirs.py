@@ -171,6 +171,89 @@ class AgentboxDirs(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("inside the box tree", result.stderr)
 
+    def tree_with_store(self, name: str) -> tuple[Path, Path]:
+        """A checkout whose `.git/objects` is a SYMLINK to a store outside it, as
+        ~/src/machcsl-riscv and four other checkouts on sami-rocqperf are."""
+        tree = self.root / name
+        (tree / ".git").mkdir(parents=True)
+        store = self.root / "git-objects" / name
+        store.mkdir(parents=True)
+        (tree / ".git" / "objects").symlink_to(store)
+        return tree, store
+
+    def test_a_named_tree_carries_the_object_store_that_lives_outside_it(self) -> None:
+        """A tree is not its objects. A box given ~/src/machcsl-riscv and not
+        /mnt/nvme/<user>/git-objects/machcsl-riscv answers `not a git repository` for every
+        command in it (measured 2026-11-01 in box agentbox-a0875d5a6f7c). `agentbox move` has
+        always followed the store; `agentbox new --dir` did not."""
+        tree, store = self.tree_with_store("machcsl")
+        result = self.launch("--dir", str(tree))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        binds = self.binds_of(self.run_args.read_text(encoding="utf-8").splitlines())
+        self.assertIn(f"{tree}:{tree}", binds)
+        self.assertIn(f"{store}:{store}", binds)
+        self.assertIn(str(store), result.stderr)
+
+    def test_a_named_tree_carries_every_store_its_alternates_name(self) -> None:
+        tree, store = self.tree_with_store("borrower")
+        lender = self.root / "git-objects" / "lender"
+        lender.mkdir(parents=True)
+        (store / "info").mkdir()
+        (store / "info" / "alternates").write_text(f"{lender}\n", encoding="utf-8")
+        args = self.run_args_of("--dir", str(tree))
+        self.assertIn(f"{lender}:{lender}", self.binds_of(args))
+
+    def test_a_named_worktree_carries_the_checkout_it_borrows_from(self) -> None:
+        """A linked worktree's `.git` is a FILE naming a git dir in another tree; without that
+        tree the box has the working files and no repository."""
+        owner, _ = self.tree_with_store("owner")
+        gitdir = owner / ".git" / "worktrees" / "wt"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        worktree = self.root / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        binds = self.binds_of(self.run_args_of("--dir", str(worktree)))
+        self.assertIn(f"{worktree}:{worktree}", binds)
+        self.assertIn(f"{gitdir}:{gitdir}", binds)
+        self.assertIn(f"{self.root / 'git-objects' / 'owner'}:{self.root / 'git-objects' / 'owner'}", binds)
+
+    def test_a_directory_the_box_keeps_its_own_copy_of_is_refused_by_name(self) -> None:
+        """docker refuses two mounts at one destination, so each of these ended the launch with
+        `Duplicate mount point: <path>` once the box directory and its disk image already
+        existed, naming neither the flag nor a fix (measured 2026-11-01). The box cannot be given
+        the host's copy of any of them, so the refusal belongs at the start."""
+        (self.home / ".omp" / "run").mkdir(parents=True)
+        (self.home / ".config" / "jj" / "repos").mkdir(parents=True)
+        for path, naming in (
+            ("/tmp", "/tmp of its own"),
+            (str(self.home / ".omp" / "run"), "omp broker"),
+            (str(self.home / ".config" / "jj" / "repos"), "jj metadata"),
+        ):
+            with self.subTest(path):
+                result = self.launch("--dir", path)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"--dir '{path}' cannot be given to a box", result.stderr)
+                self.assertIn(naming, result.stderr)
+                self.assertFalse(self.run_args.exists(), "a box started despite the refusal")
+
+    def test_a_directory_every_box_has_is_bound_once_and_said_so(self) -> None:
+        """`--dir ~/src` and `--dir <an allow-list entry>` are what a session working in one of
+        them asks for, and binding the path twice is the same docker refusal. The box has the
+        directory either way, so the launch keeps it as the working directory, does not bind it
+        again, and says which mount it already comes from."""
+        (self.home / ".aws").mkdir()
+        for path, naming in ((str(self.src), f"every box has {self.src}"), (str(self.home / ".aws"), "read-write")):
+            with self.subTest(path):
+                result = self.launch("--dir", path)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                args = self.run_args.read_text(encoding="utf-8").splitlines()
+                at_path = [b for b in self.binds_of(args) if b.split(":")[1:2] == [path]]
+                self.assertEqual(at_path, [f"{path}:{path}"], at_path)
+                self.assertEqual(self.workdir_of(args), path)
+                self.assertIn("is not mounted again", result.stderr)
+                self.assertIn(naming, result.stderr)
+
     def test_a_shared_working_directory_never_lends_its_session_id_to_a_box(self) -> None:
         """omp names a session directory after the cwd, so every session working in a host
         directory - the host's and every box's - writes into the same one. box_session_id must

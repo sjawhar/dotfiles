@@ -280,18 +280,115 @@ open_box_disk() {
     sudo -n chown "$UID_:$(id -g)" "$BOXES/$box/lost+found" 2>/dev/null || true
 }
 
-# BOX_DIRS: the host directories this box is given (--dir), each at its own path, read-write.
-# mount_args binds them and cmd_new works in the first when no repo is named. A path is taken
-# as the caller typed it after readlink -f, so a symlink reaches the box as the directory it
-# names, the way $SRC's symlinked checkouts already do.
+# BOX_DIRS: the host directories this box was NAMED with (--dir), each at its own path,
+# read-write. cmd_new works in the first when no repo is named, and session_env passes them on as
+# AGENTBOX_DIRS. A path is taken as the caller typed it after readlink -f, so a symlink reaches
+# the box as the directory it names, the way $SRC's symlinked checkouts already do.
 BOX_DIRS=()
-# One --dir, validated and resolved. Refused: a path that is not a directory (a box cannot be
-# given something that does not exist yet, and a typo would otherwise be a silent empty mount);
-# `/`, which is the host's whole filesystem; and $HOME or the box tree, each of which would
-# shadow a mount the box needs (the box's own $HOME holds the allow-list, and <boxes>/<box> is
-# the box's filesystem).
+# What mount_args actually BINDS for them, which is not the same list: a named directory the box
+# already has at that path is not bound a second time (docker refuses two mounts at one
+# destination), and the git object store of a named tree is bound although nobody named it.
+BOX_MOUNTS=()
+
+# A destination every box binds from a source of its OWN, so the host's copy cannot be given to
+# it at all. Measured 2026-11-01: `--dir /tmp`, `--dir ~/.omp/run`, `--dir ~/.config/jj/repos`
+# and `--dir /run/user/<uid>` each ended the launch with `docker: Error response from daemon:
+# Duplicate mount point: <path>` - after the box directory and its disk image had been made, and
+# naming neither the flag that caused it nor anything to do about it. Each of these exists
+# because the host's copy would break the box: its own /tmp inside its disk limit, its own
+# ~/.omp/run (a shared one lets one box's omp broker delete every other box's live scope), its
+# own writable jj metadata under a read-only parent, its own runtime dir holding the relayed
+# sockets. Printed reason, empty when the path is not one of them.
+box_dir_private_why() {
+    case "$1" in
+        /tmp) echo "every box has a /tmp of its own, inside its disk limit" ;;
+        "$HOME/.omp/run") echo "every box has its own ~/.omp/run, or one box's omp broker deletes another's live scopes" ;;
+        "$HOME/.config/jj/repos") echo "every box has its own writable copy of this jj metadata" ;;
+        "/run/user/$UID_") echo "every box has a runtime dir of its own, holding the host's sockets at their usual paths" ;;
+        *) return 1 ;;
+    esac
+}
+
+# A path every box already has AT THAT SAME PATH, and how it gets it. Binding it again is the
+# docker refusal above (`--dir ~/.config/jj`, a read-only allow-list entry, died exactly that way
+# on 2026-11-01), and it would change nothing: the box has the directory either way. So such a
+# --dir is kept as the box's working directory and simply not bound again, with this reason
+# printed, since a flag that quietly does nothing is what sent a lane hunting through a build.
+box_dir_bound_why() {
+    local path="$1" p
+    [[ "$path" == "$SRC" ]] && { echo "every box has $SRC"; return 0; }
+    [[ "$path" == "$HOME/.dotfiles" || "$path" == "$DOTFILES_DIR" ]] && { echo "every box has the dotfiles"; return 0; }
+    for p in "$SRC"/*; do
+        [[ -L "$p" ]] || continue
+        [[ "$(readlink -f "$p")" == "$path" ]] && { echo "every box has it already: $p links to it and $SRC is mounted"; return 0; }
+    done
+    while read -r p; do
+        [[ "$HOME/$p" == "$path" ]] && { echo "$MOUNTS_FILE gives every box this path read-write"; return 0; }
+    done < <(mounts_of rw)
+    while read -r p; do
+        [[ "$HOME/$p" == "$path" ]] && { echo "$MOUNTS_FILE gives every box this path READ-ONLY"; return 0; }
+    done < <(mounts_of ro)
+    return 1
+}
+
+# One host path this box must bind, once.
+box_add_mount() {
+    local path="$1" p
+    for p in ${BOX_MOUNTS[@]+"${BOX_MOUNTS[@]}"}; do
+        [[ "$p" == "$path" ]] && return 0
+    done
+    BOX_MOUNTS+=("$path")
+}
+
+# Does the box get this path without being told? Either it has it by construction ($SRC, the
+# dotfiles, the home allow-list) or something already in BOX_MOUNTS contains it.
+box_dir_have() {
+    local path="$1" p
+    move_dir_in_box "$path" && return 0
+    for p in ${BOX_MOUNTS[@]+"${BOX_MOUNTS[@]}"}; do
+        move_within "$path" "$p" && return 0
+    done
+    return 1
+}
+
+# A TREE IS NOT ITS OBJECTS. `~/src/machcsl-riscv/.git/objects` on this host is a SYMLINK to
+# /mnt/nvme/sami/git-objects/machcsl-riscv, and so are example-task-repo's,
+# machcsl-riscv-experimental's, link-eval-accept29's and ossvp-ulimit's. A box given the tree and
+# not the store answers `not a git repository` for every command in it - measured 2026-11-01 in
+# box agentbox-a0875d5a6f7c, started with `--dir ~/src/machcsl-riscv`, where `git rev-parse HEAD`
+# answered `fatal: not a git repository` and the objects symlink dangled. `agentbox move` has
+# followed the store since it existed (move_take_storage) because it infers its own paths and had
+# to; `new` never did, because a --dir was treated as one directory the caller had already
+# thought about. The same reader answers for both: move_git_storage, which follows a `.git` FILE,
+# `commondir`, `objects` through any symlink, and every line of `objects/info/alternates`.
+add_box_dir_storage() {
+    local path="$1" tree store
+    move_git_root_var "$path" || return 0
+    tree="$MOVE_GIT_ROOT"
+    while IFS= read -r store; do
+        [[ -n "$store" ]] || continue
+        [[ -d "$store" ]] || store="${store%/*}"
+        [[ -n "$store" && -d "$store" ]] || continue
+        store="$(readlink -f "$store")" || continue
+        [[ -z "$store" || "$store" == / || "$store" == "$HOME" ]] && continue
+        box_dir_private_why "$store" >/dev/null && continue
+        box_dir_have "$store" && continue
+        box_add_mount "$store"
+        echo "agentbox: --dir '$path': its git tree $tree keeps objects in $store, outside the tree; the box gets that too" >&2
+    done < <(move_git_storage "$tree")
+    return 0
+}
+
+# One --dir, validated and resolved, with everything the box needs to USE it. Refused: a path
+# that is not a directory (a box cannot be given something that does not exist yet, and a typo
+# would otherwise be a silent empty mount); `/`, which is the host's whole filesystem; $HOME or
+# the box tree, each of which would shadow a mount the box needs (the box's own $HOME holds the
+# allow-list, and <boxes>/<box> is the box's filesystem); and a path the box keeps its own copy
+# of (box_dir_private_why), which docker would have refused later with a message naming neither
+# the flag nor a fix. Every refusal happens while the arguments are being read, before a box
+# directory, a disk image or a container exists.
 add_box_dir() {
-    local raw="$1" path
+    local raw="$1" path why
     [[ -d "$raw" ]] || die "--dir '$raw' is not an existing directory"
     path="$(readlink -f "$raw")" || die "--dir '$raw' cannot be resolved"
     case "$path" in
@@ -299,7 +396,15 @@ add_box_dir() {
         "$HOME") die "--dir $HOME would shadow the box's own home and its allow-list ($MOUNTS_FILE); name the directory you work in" ;;
         "$BOXES"|"$BOXES"/*) die "--dir '$path' is inside the box tree $BOXES, which every box already has" ;;
     esac
+    why="$(box_dir_private_why "$path")" \
+        && die "--dir '$path' cannot be given to a box: $why; name the directory you work in instead"
     BOX_DIRS+=("$path")
+    if why="$(box_dir_bound_why "$path")"; then
+        echo "agentbox: --dir '$path' is not mounted again: $why" >&2
+    else
+        box_add_mount "$path"
+    fi
+    add_box_dir_storage "$path"
 }
 
 # The box's filesystem and its image, given back. Everything the box wrote goes with the image,
@@ -682,11 +787,13 @@ mount_args() {
         src="$(readlink -f "$p")"
         a+=(-v "$src:$src")
     done
-    # The host directories this box was given (--dir), each at its own path. Docker nests binds
-    # by destination, so one under $SRC or under a listed home path simply re-binds the same
-    # host directory at the same place and changes nothing; one anywhere else is the only way
-    # that path reaches the box.
-    for p in "${BOX_DIRS[@]}"; do
+    # What the --dir flags come to (BOX_MOUNTS, add_box_dir): each named directory the box does
+    # not already have at that path, plus the git object store of every tree one of them is in.
+    # Docker nests binds by destination whatever their order here, so one under $SRC or under a
+    # listed home path mounts on top of it; one anywhere else is the only way that path reaches
+    # the box. A path the box already binds is NOT in this list, because docker refuses two
+    # mounts at one destination and ends the launch.
+    for p in ${BOX_MOUNTS[@]+"${BOX_MOUNTS[@]}"}; do
         a+=(-v "$p:$p")
     done
     a+=(-v "$BOXES/$box:$BOXES/$box")
@@ -1445,8 +1552,6 @@ move_check_floor() {
     return 0
 }
 
-move_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
-
 # ── the paths a box must be given ────────────────────────────────────────────────────────────
 #
 # A move's spec was the session's working directory and its git tree, and nothing else. That is
@@ -2136,7 +2241,12 @@ move_dirs_why() {
             )
         fi
     fi
+    # A named path keeps its place whatever the box has (it is the caller's correction of the
+    # inference), but its tree's object store still has to come with it: a --dir naming a
+    # checkout whose `.git/objects` is a symlink elsewhere is a box that answers `not a git
+    # repository`, exactly as `agentbox new --dir` did before add_box_dir_storage.
     for cand in "$@"; do
+        move_take_storage "$cand"
         move_keep "$cand" "you named it with --dir"
     done
     for ((cand = 0; cand < ${#MOVE_D[@]}; cand++)); do
