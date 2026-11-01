@@ -1219,6 +1219,15 @@ cmd_new() {
     while IFS=$'\t' read -r cfg_dir _why; do
         box_dir_have "$cfg_dir" || box_add_mount "$cfg_dir"
     done < <(move_config_dirs)
+    # Transcripts archived to /mnt/durable stay behind symlinks under ~/.omp/agent/sessions, which
+    # every box has; without the target the symlink dangles in the box and a resumed omp exits
+    # `Session "<id>" not found` (2026-11-01, lane box h-dgn-t1, three times). Bound read-write:
+    # omp appends to its transcript through the symlink.
+    local moved_sessions
+    moved_sessions="/mnt/durable/$(id -un)/omp-sessions-moved"
+    if [[ -d "$moved_sessions" ]] && ! box_dir_have "$moved_sessions"; then
+        box_add_mount "$moved_sessions"
+    fi
     set_resource_args "$mem_from" "$cpu_from"
     set_disk_bytes "$disk_from"
     [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} + ${#BOX_DIRS[@]} )) \
