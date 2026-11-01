@@ -128,8 +128,10 @@ install_marketplace_plugin() {
         echo "omp: ${plugin} is ${have}, but omp-plugins.lock.json records ${want}" >&2
     fi
 }
-# theorem-labs/verification-skills: Theorem's verification skills, which repos that copied them dropped.
+# theorem-labs/verification-skills: Theorem's verification skills, which repos that copied them dropped,
+# and dev-infra, whose running-heavy-jobs skill sends heavy work to the cluster (dispatch://INFRA-898).
 install_marketplace_plugin theorem-labs/verification-skills verification-skills@verification-skills
+install_marketplace_plugin theorem-labs/verification-skills dev-infra@verification-skills
 # theorem-labs/core-ops: the company's operations skills, for the documents a customer reads.
 install_marketplace_plugin theorem-labs/core-ops core-ops@core-ops
 # slack@claude-plugins-official brings the Slack skills (slack-messaging, slack-search, ...) written

@@ -44,6 +44,11 @@
       "version": "0.1.1",
       "enabledFeatures": null,
       "enabled": true
+    },
+    "dev-infra": {
+      "version": "0.1.0",
+      "enabledFeatures": null,
+      "enabled": true
     }
   },
   "settings": {}
