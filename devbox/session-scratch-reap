@@ -408,7 +408,7 @@ if [[ -z "$dry" ]] && io_pressure_over "$pressure_max"; then
     exit 0
 fi
 
-kept_live=0 kept_young=0 removed=0 failed=0
+kept_live=0 kept_young=0 kept_handmade=0 removed=0 failed=0
 
 # holds DIR PID: does this pid's environment name DIR? 0 yes, 1 no, 2 cannot tell (the pid is
 # this user's and exists, but its environment could not be read).
@@ -427,6 +427,15 @@ holds() {
 now="$(date +%s)"
 for dir in "$root"/*; do
     [[ -d "$dir" && ! -L "$dir" ]] || continue
+    # Only what scripts/agent-session allocates, `<pid>-XXXXXXXX`, is this reaper's to judge. A
+    # directory an agent made here by hand has no pid to read, and nothing marks it dead: on
+    # 2026-11-01 22:10Z this loop removed a lane's `kube/` (its private kubeconfig) and `ab/` (a
+    # 510 MB build input) as "no live process", because nothing held them open between steps.
+    if ! [[ "${dir##*/}" =~ ^[0-9]+-[A-Za-z0-9]{8}$ ]]; then
+        echo "session-scratch-reap: keep $dir (made by hand, not by agent-session; its owner removes it)"
+        kept_handmade=$((kept_handmade + 1))
+        continue
+    fi
     owner="${dir##*/}"
     owner="${owner%%-*}"
     verdict=1
@@ -477,5 +486,5 @@ if ((${#CANDIDATE[@]})); then
     done
 fi
 
-echo "session-scratch-reap: $root: ${removed} removed, ${kept_live} live, ${kept_young} inside the grace, ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
+echo "session-scratch-reap: $root: ${removed} removed, ${kept_live} live, ${kept_young} inside the grace, ${kept_handmade} made by hand, ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
 ((failed == 0))
