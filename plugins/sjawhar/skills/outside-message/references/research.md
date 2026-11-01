@@ -19,3 +19,8 @@ Then match the channel: an email answers the email it replies to, and a first co
 ## A stream's own form rules win
 
 Where the stream that owns the relationship keeps its own form rules — in the project's `AGENTS.md`, its `.claude/skills/` or its brief — those rules decide how the message reads and win over `asd-ste100`, `ce-noslop` and `plain-words`, and some are owned by people through that repository's code owners. Read them before you draft, and send a change to the form there rather than into the skill.
+
+## Where the two steps come from
+
+- **Avoid "we" to an outside reader** — name Theorem or the tool, or write with no actor. Sami asked for this and gave his reason in [OSSV-146 ask 11fc735f](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/11fc735f-7843-4c7c-bfa7-7512319f0043); his preference, not a measurement.
+- **A fresh reviewer reads and cuts** ([OSSV-142 ask 93a2811e](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/93a2811e-56ab-456e-8c0c-cedfd4ee822b), 2026-10-30). Writing what it removed into the ask is the part that shows the step ran: agents skipped it in 5 of 18 drafts, and an instruction alone did not make it happen.

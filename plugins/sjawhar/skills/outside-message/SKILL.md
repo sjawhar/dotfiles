@@ -7,21 +7,31 @@ description: "Use before any text reaches a person outside Theorem: a GitHub iss
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-Sami approves every outside message ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27), except in the two cases below.
+Sami approves every outside message by default ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27). The lockdown is on because outside messages were low quality, and it loosens as each routine is captured in a skill or template and a party's reaction is gauged ([OSSV-271 ask c75d17dd](https://dispatch.tail12ec1c.ts.net/issues/OSSV-271/asks/c75d17dd-bb18-4cb3-be3c-957da82655be), 2026-11-01). The test is not who the reader is but whether the message is a vetted routine or novel contact.
 
-## The two exclusions
+## Goes without his approval
 
-Read both answers before you decide a message is excluded. Neither follows from the shape of a message.
+All three hold:
 
-- **One named project** goes out without his approval; the answer above names it.
-- **A pull request to a project that has already enrolled**, with its description and its comments to that project's maintainers, needs no approval ask ([OSSV-146 ask 81a892b6](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/81a892b6-0f63-4424-b48e-51d27d8f1a9c), 2026-10-29): he asked to stop being asked for approval every single time for enrolled projects. Say so when you are told to write one, and write the message itself instead. Both steps below still apply; only the ask does not. Enrolled means the enrolling project's own record, and its stream's brief says where that record is; do not decide it from a message's tone or from a maintainer having replied to us before. `skill://upstream-bugfix-patch` holds the form and timing of a finding or patch to such a project.
+- **A routine with a skill or template behind it** (`references/approval.md` lists the ones there are). A formulaic message with nothing guiding it is not yet a routine, and waits.
+- **The process below ran** — the scales passed and a fresh reviewer cut it; "followed the process" means those happened, not that someone read it.
+- **It sits in a flow we control** — an enrollee who came to us, a project already enrolled — not contact we open into a space we do not run.
 
-Everything else waits for him: a first contact with a project that has not enrolled, a bug report, a disclosure, and a reply to a maintainer who wrote to us first.
+A new enrollee counts even with no prior rapport: the control is the template and the flow, not standing with the party.
+
+## Waits for him
+
+Any one:
+
+- **Novel contact into a space we do not run** — a first contact, or the early contributions, to a project that has not enrolled. Do not send 13 pull requests into a cold repository before he has gauged how its maintainers react.
+- **No skill or template yet**, or a message that is not that template sent largely unchanged.
+- **It commits him or represents his position** — a promise, a deadline, a disclosure, a claim he would have to stand behind.
+- Between the two it waits, and the ask says which way it leaned and why. A new project moves from "approve each" to "no approval" only when Sami says so (`references/approval.md`).
 
 ## The two steps
 
-1. **Research the audience, and write in their conventions** — their template, their terms, their level of detail, their thread. `references/research.md` lists what to read before you draft, and where a stream's own form rules live and why they win over this skill. Run `skill://asd-ste100`, `skill://ce-noslop` and `skill://plain-words` over the text. **Avoid "we" in text to an outside reader**: name Theorem or the tool, or write the sentence with no actor. Sami asked for this, and gave his reason, in [OSSV-146 ask 11fc735f](https://dispatch.tail12ec1c.ts.net/issues/OSSV-146/asks/11fc735f-7843-4c7c-bfa7-7512319f0043); his preference, not a measurement.
-2. **A fresh reviewer reads it and cuts** ([OSSV-142 ask 93a2811e](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/93a2811e-56ab-456e-8c0c-cedfd4ee822b), 2026-10-30). Astra, or Opus where Astra is not available, reads the message in a session that did not write it and removes everything a reader does not need to understand the core message. A reviewer that reads only to approve has not done this step. **Write in the ask what it removed**, in three lines or fewer, or "the reviewer removed nothing". Agents skipped this step in 5 of 18 drafts, and an instruction alone did not make it happen, so the list is what shows it ran.
+1. **Research the audience, and write in their conventions** — their template, their terms, their level of detail, their thread (`references/research.md`). Run `skill://asd-ste100`, `skill://ce-noslop` and `skill://plain-words` over the text. **Avoid "we" in text to an outside reader**: name Theorem or the tool, or write the sentence with no actor (`references/research.md` for his reason).
+2. **A fresh reviewer reads it and cuts.** Astra, or Opus where Astra is not available, reads the message in a session that did not write it and removes everything a reader does not need. A reviewer that reads only to approve has not done this step. **Write in the ask what it removed**, in three lines or fewer, or "the reviewer removed nothing": the list is what shows the step ran (`references/research.md`).
 
 ## Then the ask
 
@@ -33,4 +43,3 @@ An ask for an outside message has, in this order: who the reader is, and one lin
 
 - How the text reads: `skill://plain-words` for empty verb phrases, `skill://speaking-as-sami` for text in Sami's own name.
 - A message to another agent or to Sami: write it plainly and send it; no approval step.
-- A release the pipeline publishes from approved template text: the template was approved once, so the release needs no new ask unless its text changes.
