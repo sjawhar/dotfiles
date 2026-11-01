@@ -1359,6 +1359,55 @@ def transcript_by_title(cwd: str, text: str, live: dict[str, int]) -> tuple[str,
     return (best[1], best[2]) if best else None
 
 
+def directory_inventory(cwd: str, live: dict[str, int], limit: int = 3) -> str:
+    """One line saying what the pane's session directory DOES hold, for an unresolved pane.
+
+    "No transcript carries the pane's title" reads as "there is nothing there", and on
+    2026-11-01 pane %450 (/home/sami/src/eng-ops) got that line while the directory held one
+    transcript, of a LIVE session: the association was wrong, not missing, and a reader had to
+    look the directory up to learn which. So the alert names the count and, for up to `limit`
+    newest, the session id, its title, and whether an omp process holds it now.
+    """
+    directory = session_dir_of(cwd)
+    entries: list[tuple[float, str, str]] = []
+    try:
+        candidates = list(directory.glob("*.jsonl"))
+    except OSError:
+        candidates = []
+    for candidate in candidates:
+        ids = UUID_RE.findall(candidate.name)
+        try:
+            stamp = candidate.stat().st_mtime
+            with candidate.open("rb") as handle:
+                first = json.loads(handle.readline(4096) or b"{}")
+        except (OSError, ValueError):
+            continue
+        title = (first.get("title") or "").strip() if isinstance(first, dict) else ""
+        entries.append((stamp, ids[-1] if ids else candidate.name, title))
+    if not entries:
+        return (
+            f"That directory holds no transcript at all ({directory}), so no omp session has"
+            " ever written one for this working directory on this machine."
+        )
+    entries.sort(reverse=True)
+    shown = entries[:limit]
+    described = []
+    for _, session_id, title in shown:
+        pid = live.get(session_id)
+        described.append(
+            f"{session_id} ({json.dumps(title) if title else 'no title'}),"
+            + (f" live in pid {pid}" if pid else " not running")
+        )
+    word = "transcript" if len(entries) == 1 else "transcripts"
+    head = f"That directory holds {len(entries)} {word}"
+    head += f", of which the {len(shown)} newest are: " if len(entries) > len(shown) else ": "
+    return (
+        head
+        + "; ".join(described)
+        + ". A live one is not this pane's; one not running did not carry the pane's title."
+    )
+
+
 def resurrect_command(pane: dict, text: str, limit: int = 60) -> tuple[str, str] | None:
     """The newest tmux-resurrect save in which this pane's place (session, window, pane index),
     under the same title, ran `omp --resume`: (its command, the save file)."""
@@ -1484,6 +1533,7 @@ def pane_alert_text(incident: dict, now: float) -> str:
             f" {session_dir_of(incident['cwd'])} carries the pane's title, and no tmux-resurrect save"
             " records a resume command for this place. Read the newest transcripts there."
         )
+        lines.append(incident.get("directory_inventory") or directory_inventory(incident["cwd"], {}))
     files = incident.get("handover") or []
     brief = "brief it from " + ", ".join(files) if files else "no handover file found: brief it from the tail of its transcript"
     lines.append(
@@ -1834,6 +1884,10 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         incident["handover"] = handover_files(session if session and UUID_RE.fullmatch(session) else "-", directory)
         targets, notes = pane_recipients(directory, session, sessions)
         incident["notes"] = notes
+        # Read now, not when the incident opened: whether a transcript's session is running is
+        # a fact about this moment, and the alert says which of them are.
+        if not session:
+            incident["directory_inventory"] = directory_inventory(pane["pane_current_path"], held)
         # Named in the alert, so a reader knows who else saw it and under which role.
         incident["told_why"] = [f"{why} {target}" for target, why in targets]
         text = move_alert_text(incident, now) if incident.get("move") else pane_alert_text(incident, now)

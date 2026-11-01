@@ -162,7 +162,12 @@ pid and its foreground group, the pane title). It then carries one named line of
 wind-down from a crash: OSS Verify read `00:51:59Z` off the first of these alerts and recognised
 its own planned stop. After it come the session and its source, the transcript, the handover
 files, and the restart as a ready command: `tmux send-keys -t %57 'omp --resume <id>' Enter`.
-When nothing resolves the session, it says so and names the directory to read.
+When nothing resolves the session, it says so, names the directory to read, and adds one line
+saying what that directory **does** hold: the number of transcripts there and, for the three
+newest, the session id, its title, and whether an omp process holds it now (`live in pid N` or
+`not running`). On 2026-11-01 pane `%450` (`/home/sami/src/eng-ops`) was told no transcript
+carried its title while the directory held exactly one, of a live session, so a reader had to
+look the directory up to learn the association was wrong and not missing.
 
 The watcher never runs that command. `/pause` freezes omp with a process-local gate. It writes no
 paused state to the session JSONL or `$HOME/.omp/agent` state, so a later shell prompt is
