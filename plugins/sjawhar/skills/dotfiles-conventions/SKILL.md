@@ -42,6 +42,7 @@ Before you add a file, read its siblings and the AGENTS.md of its directory, and
 - Put a change all sessions need in `~/.dotfiles/scripts/agent-session` (which `shims/omp` and `cld` exec their agent through) and in `session_env()` of the agentbox script (the box's `docker run`).
 - No launcher exports an Envoy or Dispatch variable: it would override every profile's `envoy.json`, and an agentbox container already reaches the host's Envoy through `agentbox/mounts` and its entrypoint relay.
 - No launcher sets or clears a provider key. Keys are `apiKey` entries in each profile's `models.yml`.
+- A tool that copies a script to its own path can write the WRONG SOURCE there, and the result is undetectable by every ordinary check: `shims/omp` once held the byte-for-byte content of `scripts/agent-session`, same 7,043 bytes, same mtime to the nanosecond, mode intact, so it existed, was executable and looked untouched, and every new session launch on the box failed for ten minutes while running sessions were fine. The only instrument that sees it is `cmp` against the file it must NOT equal. If you write such a tool, have it verify the destination against its intended source after the copy, and restore a wrapper from `git show HEAD:<path>` rather than rewriting it by hand.
 
 ## Skills here are repo-agnostic (hard)
 
@@ -58,4 +59,4 @@ Before you add a file, read its siblings and the AGENTS.md of its directory, and
 
 - Before you push, squash the session into 1-2 commits per topic, each saying what changed and why.
 - Push only for a task about these files: a skill or config change Sami asked for, or a session whose role owns them. Leave an edit made on the way to other work in the working copy, and name it in your report.
-- Overriding that: if `git status` shows changes not yours, or Sami says he is editing, leave yours uncommitted and name them.
+- Overriding that: if `git status` shows changes not yours, commit only your own files by pathspec (`git commit -- <your paths>`), never `git commit -a` or a bare `git commit` over an index another session may have staged: a bare commit publishes their unreviewed edit under your message. If Sami says he is editing, leave yours uncommitted and name them.
