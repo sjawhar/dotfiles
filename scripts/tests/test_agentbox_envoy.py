@@ -74,6 +74,10 @@ class AgentboxEnvoy(unittest.TestCase):
             "PATH": f"{stubs}:/usr/bin:/bin",
             "DOTFILES_DIR": str(self.root / "dotfiles"),
             "AGENTBOX_SRC": str(self.root / "src"),
+            # Envoy, not the limits: the box tree goes in the temp directory and the box gets no
+            # filesystem of its own (scripts/tests/test_agentbox_limits.py covers that one).
+            "AGENTBOX_BOXES": str(self.root / "boxes"),
+            "AGENTBOX_DISK": "0",
             "AGENT_SECRETS_URL": "https://broker.example",
             "STUB_RUN_ARGS": str(self.run_args),
             "ENVOY_NATS_URL": "nats://caller.internal.example:4222",

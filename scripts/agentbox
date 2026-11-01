@@ -2,13 +2,15 @@
 # agentbox: one disposable Sysbox container per agent session, working in a
 # checkout made for it.
 #
-#   agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] <repo>… -- <cmd> [args…]
+#   agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE]
+#                <repo>… -- <cmd> [args…]
 #                                       run a command in a fresh box holding a
 #                                       checkout of each repo, working in the
 #                                       first; each -e sets a variable in the box
 #                                       (docker run -e: a bare NAME passes the
-#                                       caller's value); --memory/--cpus raise or
-#                                       lower this box's limits (defaults below)
+#                                       caller's value); --memory/--cpus/--disk
+#                                       raise or lower this box's limits
+#                                       (defaults below)
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
 #   agentbox ls                         running boxes
 #   agentbox doctor                     health checks, host side and box side
@@ -101,12 +103,31 @@ BOX_MEMORY_CAP=96g
 BOX_CPUS_CAP=32
 # Processes per box: a fork bomb inside one otherwise takes the host's pid space.
 BOX_PIDS=8192
-# No disk limit: docker's --storage-opt size= needs the overlay2 driver on xfs with project
-# quotas, and this host's docker data root (/var/lib/docker, measured 2026-10-31) is ext4 under
-# the overlayfs snapshotter, where docker refuses the option. Nor would it help: the paths that
-# fill (/mnt/nvme/<user>, the checkouts) are bind mounts into the box, outside its own layer. A
-# box's disk stays bound by the shared-disk tools — scripts/disk-fill-watch and the tmp reapers
-# in devbox/ — as before.
+# Disk per box (dispatch://INFRA-702, the third limit its title asks for). docker's
+# --storage-opt size= is not available here: it needs the overlay2 driver on xfs with project
+# quotas, and this host's docker data root (/var/lib/docker, a bind of /dev/md127[/docker],
+# measured 2026-11-01) is ext4 under the overlayfs snapshotter, where docker refuses the option.
+# ext4 project quotas are not available either: /dev/md127 carries neither the `project` nor the
+# `quota` feature (tune2fs -l, 2026-11-01), and adding them means tune2fs plus a remount of a
+# 3.4 TiB filesystem holding every session's work.
+# So a box gets a FILESYSTEM of its own instead: a sparse ext4 image under BOX_DISKS,
+# loop-mounted at <boxes>/<box> before the clones are made (open_box_disk). Everything a session
+# writes without being told where - its clones, its $HOME overlay and /tmp, all three inside that
+# directory (mount_args) - is then bounded by one limit, a write past it is ENOSPC inside the box
+# alone, and the space returns to the host when the image is removed at close. The image is
+# sparse, so a limit reserves nothing: N boxes at 32 GiB do not claim 32N GiB, exactly as the
+# memory limit above does not bound the sum.
+# The default is 32 GiB: the largest of the 117 session worktrees on this host's /mnt/nvme held
+# 4.1 GiB on 2026-11-01 (median well under 1 GiB), so 32 GiB is about eight times the largest
+# session measured. `agentbox new --disk SIZE` changes one box, AGENTBOX_DISK does too, and
+# `--disk 0` turns the limit off for a machine with no root for the loop mount.
+BOX_DISK="${AGENTBOX_DISK:-32g}"
+# A box above this takes the shared disk rather than its own session's share, so it is refused;
+# below the floor ext4 has no room for its own metadata plus a clone.
+BOX_DISK_CAP=512g
+BOX_DISK_MIN=1g
+# The box images, beside the box trees and the clone templates on the same disk.
+BOX_DISKS="${AGENTBOX_DISKS:-$(dirname "$BOXES")/disks}"
 EMBED_NAME=omp-embed
 EMBED_PORT="${OMP_EMBED_PORT:-8087}"
 IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
@@ -181,6 +202,66 @@ set_resource_args() {
         --cpus "$BOX_CPUS" --pids-limit "$BOX_PIDS"
         --cgroup-parent "user-${UID_}-agentbox.slice"
     )
+}
+
+# BOX_DISK_BYTES: this box's disk limit in bytes, 0 when the caller turned it off. $1 names where
+# the value came from, for the refusal. Set in the launcher itself, like set_resource_args.
+BOX_DISK_BYTES=0
+set_disk_bytes() {
+    local from="${1:---disk}" cap min
+    if [[ "$BOX_DISK" == 0 || "$BOX_DISK" == none ]]; then BOX_DISK_BYTES=0; return 0; fi
+    BOX_DISK_BYTES="$(size_bytes "$BOX_DISK")" || refuse "$from '$BOX_DISK' is not a size (32g, 512m, or bytes)"
+    cap="$(size_bytes "$BOX_DISK_CAP")"
+    min="$(size_bytes "$BOX_DISK_MIN")"
+    (( BOX_DISK_BYTES >= min )) || refuse "$from '$BOX_DISK' is below the $BOX_DISK_MIN minimum per box"
+    (( BOX_DISK_BYTES <= cap )) || refuse "$from '$BOX_DISK' is above the $BOX_DISK_CAP limit per box"
+}
+
+# The box's own filesystem at $BOXES/<box>: a sparse ext4 image loop-mounted there, so every
+# path the box writes through that directory - its clones, its $HOME overlay and its /tmp
+# (mount_args) - shares one limit and nothing it writes can take the host's disk or another
+# box's. Called before the clones, since they land inside it.
+#
+# ROOT: the loop mount is the only step that needs it, as `sudo mount -o loop,discard <image>
+# <dir>` here and `sudo umount <dir>` in close_box_disk. Everything else (the sparse file, mkfs,
+# the image's removal) runs as the user. mkfs gives the filesystem's root directory to the
+# launching user (-E root_owner), so the box dir has the owner it had before, and -m 0 leaves no
+# blocks reserved for root, so the session may use every byte of its limit. discard makes the
+# loop device punch holes in the image, so space a box frees goes back to the host at once
+# rather than at close.
+open_box_disk() {
+    local box="$1" img="$BOX_DISKS/$1.img"
+    mkdir -p "$BOXES/$box"
+    (( BOX_DISK_BYTES )) || return 0
+    mkdir -p "$BOX_DISKS"
+    rm -f "$img"
+    truncate -s "$BOX_DISK_BYTES" "$img" || die "could not make the box disk image $img"
+    # mkfs.ext4 lives in /usr/sbin, which a session's PATH carries and a systemd unit's or a
+    # restore script's often does not; the launcher must work from either.
+    PATH="$PATH:/usr/sbin:/sbin" mkfs.ext4 -q -F -m 0 -E "root_owner=$UID_:$(id -g)" "$img" \
+        || die "mkfs.ext4 failed on the box disk image $img"
+    sudo -n mount -o loop,noatime,discard "$img" "$BOXES/$box" || {
+        rm -f "$img"
+        die "could not mount the box disk ($BOX_DISK) at $BOXES/$box: 'sudo -n mount -o loop' failed; start the box with --disk 0 on a machine without that sudo rule"
+    }
+    # mke2fs puts a root-owned 0700 lost+found in every ext4 filesystem, and this one is the
+    # directory a session works in: without this, `du`, `find` or a sweep run from the box tree
+    # meets a permission denial in its own workspace. Nothing here is ever fscked - the image
+    # dies with the box - so the session may have it.
+    sudo -n chown "$UID_:$(id -g)" "$BOXES/$box/lost+found" 2>/dev/null || true
+}
+
+# The box's filesystem and its image, given back. Everything the box wrote goes with the image,
+# which is why close_box removes the image before it removes the (now empty) mountpoint. A box
+# started with --disk 0 has neither and this is a no-op, as it is for a box whose launcher never
+# got as far as the mount.
+close_box_disk() {
+    local box="$1" img="$BOX_DISKS/$1.img"
+    if mountpoint -q "$BOXES/$box" 2>/dev/null; then
+        sudo -n umount "$BOXES/$box" \
+            || { echo "agentbox: could not unmount $BOXES/$box; its disk image $img is left in place (sudo umount '$BOXES/$box' && rm -f '$img')" >&2; return 1; }
+    fi
+    rm -f "$img"
 }
 
 # Whether a new box can get a broker identity: the client installed and the helper holding a live
@@ -487,6 +568,17 @@ mount_args() {
         a+=(-v "$src:$src")
     done
     a+=(-v "$BOXES/$box:$BOXES/$box")
+    # $HOME and /tmp inside the box's own directory, so the box's disk limit covers the two
+    # places a session writes without being told where. Without them both land in the
+    # container's writable layer, which is docker's data root on the shared disk and has no
+    # limit of any kind here: a home path outside the allow-list is silently writable
+    # (agentbox/AGENTS.md) and /tmp is where every tool puts its scratch. Docker nests binds by
+    # destination, so every allow-listed path below still mounts on top of this $HOME, and the
+    # entrypoint's chown walks the bind rather than the overlay (it follows $HOME's own device).
+    mkdir -p "$BOXES/$box/home" "$BOXES/$box/tmp"
+    chmod 1777 "$BOXES/$box/tmp"
+    a+=(-v "$BOXES/$box/home:$HOME")
+    a+=(-v "$BOXES/$box/tmp:/tmp")
     [[ "$DOTFILES_DIR" == "$SRC"/* || "$(readlink -f "$DOTFILES_DIR")" == "$(readlink -f "$HOME/.dotfiles")" ]] \
         || a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
     a+=(-v "$HOME/.dotfiles:$HOME/.dotfiles")
@@ -592,6 +684,9 @@ session_env() {
     e+=(-e "AGENTBOX_FORWARD_CHANNELS=$(IFS=,; echo "${FORWARD_CHANNELS[*]}")")
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
     e+=(-e "AGENTBOX_BOX=$box" -e AGENTBOX_USER=ubuntu)
+    # The box's disk limit, so a session and `agentbox doctor --here` can name the ceiling their
+    # ENOSPC came from; 0 for a box started with --disk 0, which has no filesystem of its own.
+    e+=(-e "AGENTBOX_DISK=$(if (( BOX_DISK_BYTES )); then size_text "$BOX_DISK_BYTES"; else echo 0; fi)")
     # The box's broker identity: its key dir (mount_args) and the broker. The launcher enrolls
     # the key once the box is up (enroll_box). No helper socket: a box is not a host session.
     e+=(-e "AGENT_SECRETS_URL=$AGENT_SECRETS_URL" -e "AGENT_SECRETS_KEY_DIR=/run/user/$UID_/agent-secrets")
@@ -693,15 +788,30 @@ refresh_template() {
     detached "${APP_GIT[@]}" -C "$tpl" checkout --quiet -f -B "${upstream#origin/}" "$upstream" >&2
 }
 
+# A template's object store into a box's clone: hard-linked on one filesystem, copied across two.
+# `cp -al` fails with EXDEV the moment the box has a filesystem of its own, and the device of the
+# destination's parent is what decides, since the destination does not exist yet.
+copy_objects() {
+    local src="$1" dest="$2"
+    if [[ "$(stat -c %d "$src")" == "$(stat -c %d "$(dirname "$dest")")" ]]; then
+        cp -al "$src" "$dest"
+    else
+        cp -a "$src" "$dest"
+    fi
+}
+
 # The box's git clone of one repo at $ws: a copy of the repo's template, refreshed first. Its .git is
-# copied, all but the objects and the index; the objects are hard-linked, which is what a local
-# `git clone` does, and safe because git never changes an object file in place. A checkout from those
-# local objects then writes the working tree and a fresh index, needing no network. Each box's clone
-# is its own repository - refs, config and index - and stays whole if the template is rebuilt or
-# deleted. A fresh clone of agent-c took 64-78 s at load 200 (2026-10-02), almost all of it the
-# checkout fetching the kept files' contents; the copy took 1.4 s and its checkout 17.6 s. (A local
-# `git clone` of a clone without old file contents fails: `pack has 1 unresolved delta`.) The lock
-# keeps a launch from copying a template another launch is refreshing.
+# copied, all but the objects and the index; the objects are hard-linked where the template and the
+# box tree are on one filesystem, which is what a local `git clone` does and is safe because git
+# never changes an object file in place. A box with a disk limit has a filesystem of its own
+# (open_box_disk), where a hard link cannot reach the template, and the objects are copied instead:
+# a quota that bounds a box has to own the bytes it bounds, so there is nothing to share. A checkout
+# from those local objects then writes the working tree and a fresh index, needing no network. Each
+# box's clone is its own repository - refs, config and index - and stays whole if the template is
+# rebuilt or deleted. A fresh clone of agent-c took 64-78 s at load 200 (2026-10-02), almost all of
+# it the checkout fetching the kept files' contents; the copy took 1.4 s and its checkout 17.6 s. (A
+# local `git clone` of a clone without old file contents fails: `pack has 1 unresolved delta`.) The
+# lock keeps a launch from copying a template another launch is refreshing.
 clone_checkout() {
     local repo="$1" ws="$2" tpl
     tpl="$CLONE_TEMPLATES/$repo"
@@ -711,7 +821,7 @@ clone_checkout() {
             && refresh_template "$repo" \
             && mkdir -p "$ws/.git" \
             && tar -C "$tpl/.git" --exclude=./objects --exclude=./index -cf - . | tar -C "$ws/.git" -xf - \
-            && cp -al "$tpl/.git/objects" "$ws/.git/objects"
+            && copy_objects "$tpl/.git/objects" "$ws/.git/objects"
     } 9>"$CLONE_TEMPLATES/$repo.lock"; then
         echo "agentbox: could not copy $repo from its template $tpl; remove that directory to have the next launch rebuild it" >&2
         return 1
@@ -774,20 +884,29 @@ close_box() {
         work="$(unpushed_work "$ws")"
         if [[ -n "$work" ]]; then
             echo "agentbox: $ws holds work its remote does not have ($work); $BOXES/$box is left in place for its owner to push or remove" >&2
+            if mountpoint -q "$BOXES/$box" 2>/dev/null; then
+                echo "agentbox: that directory is the box's own filesystem; release it with: sudo umount '$BOXES/$box' && rm -f '$BOX_DISKS/$box.img'" >&2
+            fi
             kept=1
         fi
     done
     rm -rf "${RUN_BASE:?}/$box"
-    if (( ! kept )); then rm -rf "${BOXES:?}/$box"; fi
+    # The box's own filesystem takes everything in it (close_box_disk), leaving the mountpoint
+    # for the rm below; a box with no disk limit has no image and the rm does all of it. A
+    # filesystem that will not unmount keeps its directory, with the command that frees it.
+    if (( ! kept )) && close_box_disk "$box"; then
+        rm -rf "${BOXES:?}/$box"
+    fi
 }
 
 cmd_new() {
-    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] <repo>… -- <cmd> [args…]"
+    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE] <repo>… -- <cmd> [args…]"
     local user_env=() box_repos=() repo
     # Where each limit came from, so a refusal names what the caller actually set.
-    local mem_from="AGENTBOX_MEMORY" cpu_from="AGENTBOX_CPUS"
+    local mem_from="AGENTBOX_MEMORY" cpu_from="AGENTBOX_CPUS" disk_from="AGENTBOX_DISK"
     [[ -n "${AGENTBOX_MEMORY:-}" ]] || mem_from="the default memory limit"
     [[ -n "${AGENTBOX_CPUS:-}" ]] || cpu_from="the default cpu limit"
+    [[ -n "${AGENTBOX_DISK:-}" ]] || disk_from="the default disk limit"
     while (( $# )) && [[ "$1" != -- ]]; do
         case "$1" in
             -e)
@@ -805,11 +924,17 @@ cmd_new() {
                 BOX_CPUS="$2" cpu_from="--cpus"
                 shift 2
                 ;;
+            --disk)
+                [[ -n "${2:-}" ]] || die "--disk takes a size, e.g. --disk 64g, or 0 for no limit  ($usage)"
+                BOX_DISK="$2" disk_from="--disk"
+                shift 2
+                ;;
             -*) die "unknown option '$1'; the command goes after \`--\`  ($usage)" ;;
             *) box_repos+=("$1"); shift ;;
         esac
     done
     set_resource_args "$mem_from" "$cpu_from"
+    set_disk_bytes "$disk_from"
     [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} )) || die "$usage  (repos: $(repos | tr '\n' ' '))"
     shift
     (( $# )) || die "$usage"
@@ -851,7 +976,7 @@ cmd_new() {
     local interrupted=0
     trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
     trap 'interrupted=1; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
-    mkdir -p "$BOXES/$box"
+    open_box_disk "$box"
     # Every repo is cloned at once, each in a subshell that ignores the hangup and TERM/INT: the
     # launcher acts on those itself, once every clone has returned, and the clones' git runs detached
     # (see `detached`). A trapped signal ends `wait` early with 128+n while the clone still runs, so a
@@ -968,7 +1093,38 @@ cmd_rebuild() {
     echo "agentbox: image $tag"
 }
 
-cmd_ls() { docker ps --filter name='^agentbox-' --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'; }
+# What a path uses, for a listing: never a failure, since `set -o pipefail` would otherwise make
+# one unreadable directory inside a box tree end the whole command (it did, on the ext4 image's
+# root-owned lost+found, before open_box_disk gave that one to the user).
+dir_size() { du -sh --one-file-system "$1" 2>/dev/null | cut -f1 || true; }
+
+# Running boxes, then anything a box left on disk and nothing is using: a tree kept at close for
+# unpushed work, or one whose launcher was killed before it could close (the trap cannot run on a
+# SIGKILL, and a reboot drops the loop mount while the image keeps its contents). Nothing is
+# removed here - the tree may hold an agent's only copy of its work - so each one is named with
+# the command that frees it.
+cmd_ls() {
+    docker ps --filter name='^agentbox-' --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+    local running box dir img left=()
+    running="$(docker ps -a --filter name='^agentbox-' --format '{{.Names}}')"
+    for dir in "$BOXES"/agentbox-*; do
+        [[ -d "$dir" ]] || continue
+        box="${dir##*/}"
+        if grep -qxF "$box" <<<"$running"; then continue; fi
+        img="$BOX_DISKS/$box.img"
+        if mountpoint -q "$dir" 2>/dev/null; then
+            left+=("$box  $(dir_size "$dir") on its own filesystem; release: sudo umount '$dir' && rm -f '$img' && rmdir '$dir'")
+        elif [[ -s "$img" ]]; then
+            left+=("$box  an unmounted filesystem image ($(dir_size "$img") used); read it: sudo mount -o loop '$img' '$dir'")
+        else
+            left+=("$box  $(dir_size "$dir"); release: rm -rf '$dir'")
+        fi
+    done
+    (( ${#left[@]} )) || return 0
+    echo
+    echo "box trees with no box running:"
+    printf '  %s\n' "${left[@]}"
+}
 
 # The runner's pid in a box (agentbox-run.ts is pid 1's only child), empty for
 # a box running something else - a bare omp would take SIGUSR1 itself.
@@ -1065,6 +1221,20 @@ probe_google() {
     g="$(timeout 40 google-user-token 2>&1 >/dev/null)" && { echo "mints"; return 0; }
     echo "$g"; return 1
 }
+probe_gcloud() {
+    # The box identity the SDK is configured for (dev-<name>@theorem-agent-infra, a keyless
+    # external_account bound to this machine), not a user login.
+    a="$(timeout 60 gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>&1 | grep -v "^[[:space:]]*$" | tail -1)"
+    case "$a" in *@*) echo "active account $a"; return 0;; esac
+    echo "${a:-gcloud names no active account}"; return 1
+}
+probe_gke() {
+    # The build pool the agents submit jobs to; the plugin that gets its credential
+    # (gke-gcloud-auth-plugin) is a symlink into the SDK, so this fails wherever gcloud does.
+    k="$(timeout 60 kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs 2>&1 | grep -v "^[[:space:]]*$" | tail -1)"
+    [ "$k" = yes ] && { echo "can create jobs in the builds namespace"; return 0; }
+    echo "$k"; return 1
+}
 probe_run() {
     for p in "$@"; do
         if d="$(probe_$p 2>&1)"; then s=ok; else s=fail; fi
@@ -1083,6 +1253,8 @@ probe_label() {
         aws)         echo "aws" ;;
         hawk)        echo "hawk-token" ;;
         google)      echo "google-user-token" ;;
+        gcloud)      echo "gcloud auth list" ;;
+        gke)         echo "kubectl auth can-i create jobs (builds)" ;;
         dockerauths) echo ".docker holds the box ghcr login" ;;
     esac
 }
@@ -1093,10 +1265,12 @@ probe_command() {
         aws)         echo "aws sts get-caller-identity" ;;
         hawk)        echo "hawk-token" ;;
         google)      echo "google-user-token" ;;
+        gcloud)      echo "gcloud auth list" ;;
+        gke)         echo "kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs" ;;
         dockerauths) echo "secrets GHCR_PULL_TOKEN -- sh -c 'echo \${#GHCR_PULL_TOKEN}'" ;;
     esac
 }
-PROBE_NAMES=(secrets dockerhub aws hawk google)
+PROBE_NAMES=(secrets dockerhub aws hawk google gcloud gke)
 # The box side of doctor, run under bash inside a throwaway box. The single
 # quotes are the point: everything expands inside the box.
 # shellcheck disable=SC2016
@@ -1111,25 +1285,16 @@ done
 for d in .config/gh .ssh/id_ed25519 .gnupg .config/agent-secrets; do
     [ -e "$HOME/$d" ] && fail "$d is present in the box" || ok "$d absent"
 done
-# .config/gcloud is not simply forbidden: deploy.py (_DEVBOX_WIF_ADC, and its refusal at ~1315)
-# REQUIRES ~/.config/gcloud/agent-devbox-wif-adc.json for any devN up/destroy, and the writer is
-# agent-c meta/infra/pulumi/scripts/provision_devbox_wif_adc.py. An earlier version of this comment
-# credited verify-machine-identity.sh, which only verifies identity and writes no ADC file.
-# That file is keyless - an external_account WIF config bound
-# to the box instance role, no token and no user - so it is a machine credential, not a login.
-# Deleting it to satisfy this check breaks the next slot apply (reported by a lane that had done one).
-if [ -e "$HOME/.config/gcloud" ]; then
-    gc="$HOME/.config/gcloud/agent-devbox-wif-adc.json"
-    if [ "$(ls -A "$HOME/.config/gcloud")" = "agent-devbox-wif-adc.json" ] \
-        && [ "$(jq -r ".type" "$gc" 2>/dev/null)" = external_account ] \
-        && [ "$(jq -r ".service_account_impersonation_url // \"none\"" "$gc" 2>/dev/null)" = none ]; then
-        ok ".config/gcloud holds only the keyless devbox WIF config"
-    else
-        fail ".config/gcloud: $(ls -A "$HOME/.config/gcloud" | tr "\n" " ")"
-    fi
-else
-    ok ".config/gcloud absent"
-fi
+# .config/gcloud is a mount now (agentbox/mounts), checked entry by entry with the rest of the
+# allow-list below, and the identity it carries is the box one - a keyless external_account
+# bound to this machine, which gcloud exchanges for a dev-<name>@theorem-agent-infra token
+# through the metadata relay - answered by probe_gcloud/probe_gke against the host. What that
+# directory must hold for agent-c is the devbox WIF ADC file, which deploy.py (_DEVBOX_WIF_ADC)
+# requires for any devN up/destroy and agent-c meta/infra/pulumi/scripts/provision_devbox_wif_adc.py
+# writes; a box that writes it now writes the copy on the host, so the next slot apply keeps it.
+# The SDK itself is read-only in the box: gcloud writes only under its config dir.
+sdk="$HOME/.gcloud/google-cloud-sdk"
+[ -x "$sdk/bin/gcloud" ] && ok "the Google Cloud SDK is mounted ($sdk)" || fail "no Google Cloud SDK at $sdk: gcloud and gke-gcloud-auth-plugin cannot run in this box"
 mounted() { awk -v t="$1" "\$5 == t { f = 1 } END { exit !f }" /proc/self/mountinfo; }
 writable() { if [ -d "$1" ]; then touch "$1/.doctor.$$" 2>/dev/null && rm -f "$1/.doctor.$$"; else (: >>"$1") 2>/dev/null; fi; }
 while read -r m p; do
@@ -1145,6 +1310,19 @@ r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os
 # decides whether its absence is a defect or this machine (see PROBE_FUNCS).
 auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && echo "@probe dockerauths ok only the box ghcr login" || echo "@probe dockerauths fail auths: ${auths:-none}"
 [ "$(stat -c %U /run/user/$(id -u))" = ubuntu ] && ok "runtime dir owned by ubuntu" || fail "runtime dir owner $(stat -c %U /run/user/$(id -u))"
+# The disk limit (AGENTBOX_DISK, set by the launcher): one filesystem of the box own, holding the
+# workspace, HOME and /tmp, and not the container root overlay, which has no limit of any kind
+# here. A box started with --disk 0 has none and says so.
+if [ "${AGENTBOX_DISK:-0}" = 0 ]; then
+    echo "note box: no disk limit (this box was started with --disk 0)"
+else
+    bd="$(stat -c %d .)"; hd="$(stat -c %d "$HOME")"; td="$(stat -c %d /tmp)"; rd="$(stat -c %d /)"
+    if [ "$bd" = "$hd" ] && [ "$bd" = "$td" ] && [ "$bd" != "$rd" ]; then
+        ok "disk limit $AGENTBOX_DISK on one filesystem of this box: workspace, HOME and /tmp ($(df -h --output=size . | tail -1 | tr -d " ") usable)"
+    else
+        fail "disk limit $AGENTBOX_DISK: workspace, HOME and /tmp are not one filesystem of this box ($(df -h --output=target . "$HOME" /tmp / | tail -4 | tr "\n" " "))"
+    fi
+fi
 if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git clone of its own"; else fail "cwd is not a git clone of its own (cwd-dependent: run doctor from your checkout, not /tmp)"; fi
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
 # `gh auth status` is answered by shims/gh, which reports the App routing instead of a user
@@ -1173,7 +1351,7 @@ fi
 # The host-dependent credentials: the box answers, the host answers the same probes, and
 # cmd_doctor compares the two (PROBE_FUNCS). Nothing is judged here, where the answer of the
 # host is not known.
-probe_run secrets dockerhub aws hawk google
+probe_run secrets dockerhub aws hawk google gcloud gke
 # Envoy and Dispatch as a box session reads them: the envoy.json `envoy config-path` names (for a
 # session without a profile of its own, the neutral file of the host, agentbox/mounts), the switch
 # of each section, the listener through `envoy` itself (the URL in the file or the default, through
@@ -1210,12 +1388,14 @@ timeout 30 docker info >/dev/null 2>&1 && ok "inner docker answers" || fail "inn
 exit $fails
 '
 
-# The doctor box and everything it made: the container, its enrollment and its directories.
+# The doctor box and everything it made: the container, its enrollment, its filesystem and its
+# directories.
 remove_doctor_box() {
     local box="$1"
     docker rm -f "$box" >/dev/null 2>&1 || true
     unenroll_box "$box"
-    rm -rf "${BOXES:?}/$box" "${RUN_BASE:?}/$box"
+    rm -rf "${RUN_BASE:?}/$box"
+    if close_box_disk "$box"; then rm -rf "${BOXES:?}/$box"; fi
 }
 
 # The box's host-dependent answers against this host's own (PROBE_FUNCS, @probe lines). Only a
@@ -1294,7 +1474,10 @@ cmd_doctor() {
     # shellcheck disable=SC2064
     trap "[[ \$BASHPID == $doctor_pid ]] && remove_doctor_box '$box'" EXIT
     trap 'exit 130' INT TERM HUP
-    mkdir -p "$BOXES/$box"
+    # The doctor box carries the same limits a session's box does, disk included, so the loop
+    # mount itself - the one step that needs root - is part of what doctor tests.
+    set_disk_bytes
+    open_box_disk "$box"
     clone_checkout "$repo" "$ws" >/dev/null 2>&1 || die "doctor: could not clone $repo into $box"
     # 300 s for the box to reach its sleep: the first container of a freshly built image pays for
     # the runtime unpacking it, and the entrypoint waits up to 60 s for the inner dockerd on top.
@@ -1370,8 +1553,11 @@ cmd_doctor_here() {
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;
     sh)      shift; cmd_sh "$@" ;;
+    ls)      cmd_ls ;;
     doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
-    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    # The usage block at the top of this file, which every command above is listed in: a
+    # command missing from this case would otherwise print its own documentation as the usage.
+    *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

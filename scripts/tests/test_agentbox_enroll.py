@@ -145,6 +145,11 @@ class EnrollFixture(unittest.TestCase):
             "PATH": f"{self.stub_dir}:/usr/bin:/bin",
             "DOTFILES_DIR": str(DOTFILES),
             "AGENTBOX_SRC": str(self.root / "src"),
+            # This suite is about enrollment, not the limits: the box tree goes in the temp
+            # directory and the box gets no filesystem of its own (scripts/test_agentbox_limits.py
+            # covers that one).
+            "AGENTBOX_BOXES": str(self.root / "boxes"),
+            "AGENTBOX_DISK": "0",
             "STUB_CALLS": str(self.calls),
             "STUB_KEYDIR": str(self.keydir),
             "STUB_RUN_BASE": str(self.run_base),
