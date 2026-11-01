@@ -47,7 +47,7 @@ When an agent asks permission for an easy-to-undo step, reply "your call" and st
 
 ## Questions for Sami go through you first
 
-An agent on your team that needs a decision from Sami sends you its drafted ask before it opens it. You answer when an answer of his already settles the case. Otherwise the agent opens the ask, and you follow it, so that his answer reaches you too and you can answer the next similar question yourself. Apply each answer only to cases whose deciding facts match it; never send one answer to your team as a rule. Sami set this up on 2026-10-26, when 40 to 122 asks a day were reaching him. The steps: [questions-for-sami.md](references/questions-for-sami.md).
+An agent on your team that needs a decision from Sami sends you its drafted ask before it opens it. You answer when an answer of his already settles the case. Otherwise the agent opens the ask, and you follow it, so his answer reaches you and you answer the next such question yourself; only the session that opened it answers there, and a second stops and unfollows. Apply each answer only to cases whose deciding facts match it; never send one answer to your team as a rule. The steps: [questions-for-sami.md](references/questions-for-sami.md).
 
 ## The morning standup
 

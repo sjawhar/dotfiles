@@ -1,13 +1,21 @@
 ---
 name: plain-words
-description: "Use before you send or publish any text a person reads: an ask, a spec, a Dispatch comment, a message to a colleague, a pull-request body, a commit message, a report, a status update. It removes the empty verb phrases Sami banned on 2026-10-30 and replaces each with the literal thing. Use it after you write and before you send."
+description: "Use before you send or publish any text a person reads: an ask, a spec, a Dispatch comment, a message to a colleague, a pull-request body, a commit message, a report, a status update. Also use before you answer a question a person asked, and before a draft goes to a reviewer."
 ---
 
 # Say the literal thing
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-Sami made this a rule on 2026-10-30 ([OSSV-142 ask 93a2811e](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/93a2811e-56ab-456e-8c0c-cedfd4ee822b)): delete the empty verb phrases agents keep using, and say the literal thing instead. Run this over your text before you send it.
+## Answering a question
+
+1. Answer the exact question, only it, in the order it was asked; anything else reads as evasion and the question comes again.
+2. Start from what happens, not from a setting, a flag or a name: the reader can reach the setting from the behaviour, not the reverse.
+3. Define each term where you first use it, in literal words. No analogy: the reader cannot tell which part of one is true.
+
+## Before you send
+
+A fresh session that has only what the reader has removes what the reader does not need, and lists every term it cannot define. Fix each listed term. A reviewer that reads only to approve has not done this step, and an instruction alone did not make it happen in 5 of 18 drafts, so the two lists are what show it ran.
 
 ## The test
 
@@ -27,13 +35,6 @@ Take the verb phrase out and ask: **what literally happens?** Write that. If you
 The order is how often the fleet wrote each in one day, so look for the first row first: "land" is what you reach for when you cannot say whether the thing merged, released or deployed. If you cannot say which, that sentence is the answer — "it is approved and not merged" — and it is more useful than any verb.
 
 On the "name the X" row an instruction alone does not work, so use the test: delete "name". If the sentence then says what happens, keep it that way; if it says nothing, you had not decided the action, so decide it and write it.
-
-Four more shapes have the same fault. No measurement says that naming them changes a draft, so they are examples, not rules:
-
-- **A verb with no actor.** "The fix is being prioritised." Who is doing it, and when?
-- **A noun that should be a number.** "Significant improvement." From what to what?
-- **A promise with no object.** "We will follow up." On what, with whom, by when?
-- **A hedge that costs the reader a second read.** "It may be worth considering whether we should." Either recommend it or do not raise it.
 
 ## Do not shout
 
