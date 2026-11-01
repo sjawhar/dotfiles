@@ -57,7 +57,7 @@ Sami holds a department-heads standup with the chief of staff and every stream l
 
 Thirty minutes after each speed tick, send the chief of staff every change you made, one line each: the change, the number it should move, the value before with its time, and the value after with its time. Add the one thing that slowed your team most, as you measured it, and your answer (adopt or not, with a reason) to each change another lead sent you. The chief of staff selects what other streams should copy, has a fresh agent attack the selection, and sends each change to the leads it fits; the next round reads whether the number moved in your stream too.
 
-A change with no measured "after" is not ready to send: say when you will read it. This is our reading of Sami's message to the leads of 2026-10-26 02:53Z, in which he made the chief of staff the coach of coaches and asked for a mechanism for the leads to share what they learn.
+A change with no measured "after" is not ready to send: say when you will read it.
 
 ## Rules reach agents through what they read
 
@@ -108,8 +108,13 @@ Why: every coordination failure from 2026-10-15 to 2026-10-28 was at a resource 
 - When agents keep losing time to the same chore, start an agent to build the tool that removes it. Do not wait to be asked.
 - Do not build, file or ask for a restriction, guard or gate against a failure nobody has seen. Fix a real failure at its cause, after it happens.
 - When the user asks the stream for an explainer video, you own it: have a subagent make it with `skill://making-explainer-videos`.
-- **A brief for work on a shared machine names the identity and forbids the two things that hit everyone else.** Write in every such brief: which login the work uses (on sami-rocqperf, the box's own: `AZURE_CONFIG_DIR=/home/sami/.azure-box-identity`, `gcloud` with no `--account`, never the user's); no mount, unmount or chroot in the host's mount namespace (`unshare --mount --propagation private` or a container instead); and no tree, cache or temporary file under `~/src`, `~/.worktrees` or `/tmp`, which are the root disk every session shares. On 2026-11-01 two subagents acted as the user because their briefs did not say, and a third rbind-mounted `/dev` into a chroot and unmounted it lazily, which took `/dev/shm` and `/dev/pts` off the host and left every session on the box without POSIX semaphores or new ptys for ten minutes.
-- **A tool that acts on other sessions is tested against real sessions before any session hears about it.** Run its plan over the live machine and read what it would do to three sessions of different shapes, including one supervisor whose workers have exited. On 2026-11-01 a move tool gave each session its working directory alone: correct for a lane, and for a supervisor it silently left out every path its finished workers had used. 32 sessions had the notice before that was found.
+- **A brief for work on a shared machine names the identity and its limits, and forbids what hits everyone else.** Write in every such brief:
+  - Which login the work uses (on sami-rocqperf, the box's own: `AZURE_CONFIG_DIR=/home/sami/.azure-box-identity`, `gcloud` with no `--account`, never the user's), because an agent whose brief names a cloud action and no identity takes the ambient one.
+  - When that login lacks a permission it needs, the agent stops and tells you, the lead who briefed it. It never grants a permission or creates a cloud resource (a cluster, a bucket, a VM) under a person's login, and never uses `--configuration theorem` or acts as `sami@theorem.dev`, even when nothing else blocks and a README says to. You route the grant through declared code or the INFRA Legion controller's daily batch to Sami. Briefs without it got both done under his login (dispatch://INFRA-6).
+  - A probe cluster's credentials go in a private `KUBECONFIG`, never `~/.kube/config`: every session on the box reads it for its current cluster.
+  - No mount, unmount or chroot in the host's mount namespace (`unshare --mount --propagation private` or a container instead), because a lazy unmount there took `/dev/shm` and `/dev/pts` off the host.
+  - No tree, cache or temporary file under `~/src`, `~/.worktrees` or `/tmp`, which are the root disk every session shares.
+- **A tool that acts on other sessions is tested against real sessions before any session hears about it.** Run its plan over the live machine and read what it would do to three sessions of different shapes, including one supervisor whose workers have exited, since a plan right for a lane can drop a supervisor's finished workers' paths.
 
 ## Improving this skill
 
