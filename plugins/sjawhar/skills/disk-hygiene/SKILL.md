@@ -40,6 +40,7 @@ Here you delete only paths that you prove are yours. A name proves nothing eithe
 - Before you delete a core file, read [references/core-dumps.md](references/core-dumps.md): it can be the only crash evidence.
 - Never glob a shared directory: a prefix is not ownership. Name each entry you delete, or delete a directory you made. `rm -f /tmp/mt.*`, cleaning one agent's own pid-suffixed scratch, destroyed two unrecoverable files of somebody else's that shared the prefix. The box tree needs the same rule for a second reason, its live bind-mount sources: [references/box-mounts.md](references/box-mounts.md).
 - Give every `find ... -delete` or `find ... -exec rm` a `-mindepth 1`, because `find` tests the starting directory too and has deleted the directory it was told to clean inside ([references/finding-space.md](references/finding-space.md)).
+- A container that ran as root left root-owned files on its bind mount, and `rm -rf` as your user fails on each of them with `Permission denied`, per file, so the tree looks deleted at the top and is not. Remove such a tree with a throwaway container on the same mount (`docker run --rm -v <parent>:/w alpine:3 rm -rf /w/<tree>`), then `ls` the path to confirm it is gone. A long delete under a tool time limit can stop halfway: run it under `systemd-run --user --wait`.
 
 ## Pacing (every phase)
 
