@@ -1203,6 +1203,14 @@ cmd_new() {
             *) box_repos+=("$1"); shift ;;
         esac
     done
+    # A box has each pointer file in agentbox/mounts but not what it names (move_config_dirs).
+    # `move` adds those as --dirs; `new` must bind them as well, or every box it makes refuses
+    # `gh pr create|edit|comment` for want of the leak check, and looks healthy until the lane's
+    # first PR (measured 2026-11-01 in agentbox-d7c1bb68a0a4, made after 3c55860).
+    local cfg_dir _why
+    while IFS=$'\t' read -r cfg_dir _why; do
+        box_dir_have "$cfg_dir" || box_add_mount "$cfg_dir"
+    done < <(move_config_dirs)
     set_resource_args "$mem_from" "$cpu_from"
     set_disk_bytes "$disk_from"
     [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} + ${#BOX_DIRS[@]} )) \
