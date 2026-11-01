@@ -1,0 +1,20 @@
+[Unit]
+Description=Tell a person when this box's omp sessions have lost a provider login
+Documentation=file:%h/.dotfiles/scripts/omp-login-watch.md
+
+[Service]
+Type=oneshot
+# Last in line for CPU and disk, like omp-memory-watch: this box runs at load 100+, and a
+# watch that competes with the sessions it watches is worse than one that answers later.
+Nice=15
+IOSchedulingClass=idle
+# One pass is a read-only sqlite read, a /proc walk and the tails of the transcripts written in
+# the last five minutes: 4-15 s at load 140 with 90 omp processes. A run that cannot finish is
+# killed, so runs never pile up on the 60 s period. The dispatch CLI gets 60 s of that budget.
+TimeoutStartSec=120
+# The dispatch CLI is how this watch reaches a person, and it is the only alert path here that
+# needs an environment: bun on PATH, the host it belongs to, and a session id to act as. The id
+# is this machine's, so installers/omp-login-watch.sh writes it in a drop-in beside this unit.
+Environment=PATH=%h/.mise/shims:%h/.dotfiles/scripts:/usr/local/bin:/usr/bin:/bin
+Environment=DISPATCH_HOST=omp
+ExecStart=%h/.dotfiles/scripts/omp-login-watch

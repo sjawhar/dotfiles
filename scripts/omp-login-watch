@@ -1,0 +1,776 @@
+#!/usr/bin/env python3
+"""Tell a person when this box's omp sessions have lost model access and only a login fixes it.
+
+Why this exists: on 2026-11-01 at 12:35:17Z the one shared Anthropic OAuth credential in
+~/.omp/agent/agent.db (row 7) was disabled with `oauth refresh failed: ... invalid_grant`, and
+every omp session on sami-rocqperf that used the `anthropic` provider stopped. The session
+transcripts hold 141 "OAuth token refresh timed out" errors in 17 sessions between 12:34:42Z
+and 12:35:36Z, then 860 "No API key for provider: anthropic" in 67 sessions until 16:18:15Z.
+Nothing told anybody: the box ran with no model for 3 h 45 min, until a person noticed and
+logged in again at 16:20:42Z (row 8). The same failure took credential 6 on 2026-10-25 at
+22:15Z, so the condition recurs (dispatch://INFRA-387).
+
+No agent can fix this. The credential store is one file for the whole box and only a person
+at a terminal can log in again, so this watch is the only one here whose alert goes to a
+HUMAN: a Dispatch ask on dispatch://INFRA-387, opened within 5 minutes of the crossing, plus
+an Envoy message to the box-health role for the agents that have to stop. Both paths run from
+a systemd user unit with no model call.
+
+What one run does, with a read-only sqlite read, /proc reads and transcript tails:
+
+  1. Read the credential store read-only (`mode=ro`), ONLY the columns id, provider,
+     credential_type, identity_key, disabled_cause, created_at and updated_at. The `data`
+     column holds the tokens; no query here names it and nothing of it can reach an alert.
+  2. A model provider is DOWN when it has rows and every one of them carries a
+     disabled_cause. Providers whose name holds ':' are MCP servers (`mcp_oauth:profile:...`),
+     not model providers, and are skipped.
+  3. Count the sessions that lose that provider: the live omp processes of this box that read
+     THIS credential store. A session started with `--profile NAME` (or with
+     PI_CODING_AGENT_DIR elsewhere) reads its own store -- the pbc profile's
+     ~/.omp/profiles/pbc/agent/agent.db kept working all through the 12:35Z outage -- so it is
+     not counted and not reported as stopped.
+  4. Separately, read what the sessions themselves report: each live session's transcript
+     written inside --window is tailed (the last --tail-bytes) and its auth errors counted --
+     "No API key for provider: X", "OAuth token refresh failed for provider X", invalid_grant,
+     and 401 authentication_error. --sessions (default 3) distinct live sessions inside the
+     window is a crossing on its own, which catches a provider whose credential still looks
+     enabled while every call it makes is refused.
+  5. A crossing opens once. The ask and the Envoy message name the provider, the disabled
+     credential ids with their causes (the cause text with any token-looking run removed), how
+     many sessions are affected, and the one action: a person runs `omp login <provider>` in a
+     terminal on this box. While the crossing is open it is repeated every --repeat (default
+     30 min). It clears when the provider has an enabled credential again and the transcripts
+     are quiet; the clear resolves the ask it opened.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import socket
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# The issue this box's credential outages are tracked on: "Oh My Pi loses the shared Anthropic
+# login when many sessions refresh it at once".
+DISPATCH_ISSUE = "INFRA-387"
+# Box health belongs to the box-health lead's Envoy role (dispatch://INFRA-716), and to the SRE
+# session when nobody holds that role -- the same pair omp-memory-watch and disk-fill-watch use.
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
+SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+
+DEFAULT_DB = Path.home() / ".omp/agent/agent.db"
+SESSION_ROOT = Path.home() / ".omp/agent/sessions"
+DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
+# The dispatch CLI, as the pi-envoy plugin installs it. It needs bun on PATH, DISPATCH_HOST and
+# a DISPATCH_SESSION_ID to act as; the unit gives it all three.
+DISPATCH_CLI = Path.home() / ".dotfiles/omp/plugins/node_modules/@sjawhar/pi-envoy/bin/dispatch"
+
+# Where the state file goes, as in omp-memory-watch: the big scratch disk when this user can
+# write it, else the XDG state directory every machine has.
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/omp-login-watch/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "omp-login-watch/state.json"
+)
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+STAMP_RE = re.compile(r'"timestamp"\s*:\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})')
+# Where an auth failure is recorded: the `errorMessage` of a turn omp could not send
+# ("stopReason":"error"). Only these values are read. The same words also travel through a
+# transcript as ordinary text -- a job snapshot's `errorText`, a tool result, an agent writing
+# about the outage -- and counting those would keep an alert open for hours after the login
+# came back, and would fire on any session that merely discusses one (measured here: 18 live
+# sessions on 2026-11-01 at 16:38Z, with the anthropic login working).
+ERROR_FIELD_RE = re.compile(r'"errorMessage"\s*:\s*"((?:[^"\\]|\\.){0,400})"')
+# What omp writes there when the credential is gone. A match with no provider in it counts for
+# every provider whose credentials are all disabled.
+AUTH_ERROR_RE = re.compile(
+    r"No API key for provider:\s*(?P<nokey>[A-Za-z0-9_.-]+)"
+    r"|OAuth token refresh failed for provider (?P<refresh>[A-Za-z0-9_.-]+)"
+    r"|invalid_grant"
+    r"|authentication_error"
+)
+PROVIDER_IN_ERROR = ("nokey", "refresh")
+# Anything that looks like a token in a cause string. A disabled_cause is written by omp and
+# has carried only the provider's error body so far, but it is text from outside this box and
+# an alert goes to Dispatch, so a long opaque run never travels.
+SECRET_RE = re.compile(r"\b(?:sk-|at-|rt-|ey[A-Za-z0-9])[A-Za-z0-9_.\-]{12,}")
+
+# Only these columns are ever read. The `data` column holds the credential itself.
+CREDENTIAL_COLUMNS = ("id", "provider", "credential_type", "identity_key", "disabled_cause", "created_at", "updated_at")
+CREDENTIAL_QUERY = f"SELECT {', '.join(CREDENTIAL_COLUMNS)} FROM auth_credentials"
+
+LOG_STREAM = sys.stdout
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"{stamp} {message}", file=LOG_STREAM, flush=True)
+
+
+def iso(epoch: float | None) -> str:
+    if not epoch:
+        return "unknown"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def human(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 90:
+        return f"{seconds} s"
+    minutes, rest = divmod(seconds, 60)
+    if minutes < 90:
+        return f"{minutes} min {rest} s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min"
+
+
+def redact(text: str) -> str:
+    """A cause line with any token-looking run replaced, and collapsed to one line."""
+    clean = SECRET_RE.sub("<redacted>", (text or "").strip())
+    return " ".join(clean.split())
+
+
+# --------------------------------------------------------------------------- Envoy transport
+
+
+class Envoy:
+    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
+            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "legion/envoy.json"
+        )
+        config: dict = {}
+        try:
+            config = json.loads(Path(path).read_text()).get("envoy") or {}
+        except (OSError, ValueError):
+            config = {}
+        if config.get("enabled") is False:
+            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
+        self.url = (os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL).rstrip("/")
+        self.timeout = timeout
+        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
+        if token.startswith("!"):
+            try:
+                done = subprocess.run(
+                    ["/bin/sh", "-c", token[1:]],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    stdin=subprocess.DEVNULL,
+                )
+                token = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                token = ""
+        self.token = token
+
+    def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | list]:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(self.url + path, data=data, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
+                raw = answer.read().decode() or "{}"
+                return answer.status, json.loads(raw)
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode() or "{}"
+            try:
+                return error.code, json.loads(raw)
+            except ValueError:
+                return error.code, {"error": raw.strip()}
+        except (urllib.error.URLError, socket.timeout, ValueError, OSError) as error:
+            return 0, {"error": str(error)}
+
+    def send(self, session_id: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/send",
+            {"target_session": session_id, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+    def publish(self, topic: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/publish",
+            {"topic": topic, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  publish to {topic} failed: {status} {body}")
+        return status == 200
+
+    def live_sessions(self) -> dict[str, dict] | None:
+        """The sessions Envoy has live on THIS box, or None when it cannot be asked."""
+        status, body = self.request("GET", "/v1/sessions")
+        if status != 200 or not isinstance(body, list):
+            log(f"  live sessions unavailable: GET /v1/sessions answered {status}")
+            return None
+        mine = socket.gethostname().split(".")[0]
+        live: dict[str, dict] = {}
+        for row in body:
+            if not isinstance(row, dict) or not row.get("session_id"):
+                continue
+            host = str(row.get("host") or "").split(".")[0]
+            if host and host != mine:
+                continue
+            live[str(row["session_id"])] = row
+        return live
+
+
+# --------------------------------------------------------------------- the credential store
+
+
+def credentials(db: Path) -> list[dict]:
+    """Every credential row, without the `data` column. Read-only; a locked store is not waited on."""
+    uri = f"file:{db}?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=5.0)
+    except sqlite3.Error as error:
+        log(f"  cannot open {db} read-only: {error}")
+        return []
+    try:
+        connection.execute("PRAGMA query_only = 1")
+        rows = connection.execute(CREDENTIAL_QUERY).fetchall()
+    except sqlite3.Error as error:
+        log(f"  cannot read auth_credentials: {error}")
+        return []
+    finally:
+        connection.close()
+    return [dict(zip(CREDENTIAL_COLUMNS, row)) for row in rows]
+
+
+def model_providers(rows: list[dict]) -> dict[str, list[dict]]:
+    """The credential rows of each model provider. An `mcp_oauth:...` row is not a model provider."""
+    providers: dict[str, list[dict]] = {}
+    for row in rows:
+        name = str(row.get("provider") or "")
+        if not name or ":" in name:
+            continue
+        providers.setdefault(name, []).append(row)
+    return providers
+
+
+def down_providers(providers: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """Providers whose every credential carries a disabled_cause, with those rows."""
+    down = {}
+    for name, rows in providers.items():
+        if rows and all(row.get("disabled_cause") for row in rows):
+            down[name] = rows
+    return down
+
+
+# ------------------------------------------------------------------- the sessions of this box
+
+
+def proc_text(pid: int, name: str) -> str:
+    try:
+        return (Path("/proc") / str(pid) / name).read_bytes().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def environ_of(pid: int) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for entry in proc_text(pid, "environ").split("\0"):
+        key, sep, value = entry.partition("=")
+        if sep:
+            values[key] = value
+    return values
+
+
+def store_of(argv: list[str], environment: dict[str, str]) -> Path | None:
+    """Which credential store a session reads: its profile's, or the default one.
+
+    `omp --profile NAME` keeps auth, sessions and caches under ~/.omp/profiles/NAME, so its
+    store is ~/.omp/profiles/NAME/agent/agent.db. PI_CODING_AGENT_DIR moves the whole agent
+    directory and is given either as that directory or as its parent.
+    """
+    for index, word in enumerate(argv):
+        if word == "--profile" and index + 1 < len(argv):
+            return Path.home() / "/".join((".omp/profiles", argv[index + 1], "agent/agent.db"))
+        if word.startswith("--profile="):
+            return Path.home() / "/".join((".omp/profiles", word.split("=", 1)[1], "agent/agent.db"))
+    directory = environment.get("PI_CODING_AGENT_DIR")
+    if directory:
+        root = Path(directory)
+        return (root / "agent.db") if (root / "agent.db").exists() else (root / "agent/agent.db")
+    return DEFAULT_DB
+
+
+def omp_sessions(store: Path) -> tuple[dict[str, int], int, int]:
+    """Live omp processes that read THIS store: by session id, how many carry no id, how many
+    read another store.
+
+    `store` is the store the sessions of this box read -- the default one -- which is not the
+    file `--db` points at when a dry run reads a copy. The session id comes from `--resume <id>`
+    or OMP_SESSION_ID. A `-p --mode json` run has neither: it loses the provider the same way,
+    so it counts as affected, but it has no id to attribute a transcript to.
+    """
+    mine: dict[str, int] = {}
+    elsewhere = 0
+    unnamed = 0
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if proc_text(pid, "comm").strip() != "omp":
+            continue
+        argv = [word for word in proc_text(pid, "cmdline").split("\0") if word]
+        if not argv or "__omp_worker" in " ".join(argv[1:2]):
+            continue
+        environment = environ_of(pid)
+        if store_of(argv, environment) != store:
+            elsewhere += 1
+            continue
+        session = ""
+        for index, word in enumerate(argv):
+            if word in ("--resume", "-r", "--restore") and index + 1 < len(argv):
+                found = UUID_RE.search(argv[index + 1])
+                session = found.group(0) if found else ""
+        session = session or environment.get("OMP_SESSION_ID", "")
+        if session:
+            mine[session] = pid
+        else:
+            unnamed += 1
+    return mine, unnamed, elsewhere
+
+
+# ------------------------------------------------------------------------ what sessions report
+
+
+def recent_transcripts(window: float, now: float) -> dict[str, Path]:
+    """Session id -> transcript file, for the files written inside the window. One scandir pass."""
+    found: dict[str, Path] = {}
+    try:
+        projects = list(os.scandir(SESSION_ROOT))
+    except OSError:
+        return found
+    for project in projects:
+        if not project.is_dir(follow_symlinks=False):
+            continue
+        try:
+            entries = list(os.scandir(project.path))
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.endswith(".jsonl"):
+                continue
+            try:
+                if now - entry.stat().st_mtime > window:
+                    continue
+            except OSError:
+                continue
+            match = UUID_RE.search(entry.name)
+            if match:
+                found[match.group(0)] = Path(entry.path)
+    return found
+
+
+def auth_errors(path: Path, since: float, tail_bytes: int) -> dict[str, int]:
+    """Auth errors in the tail of one transcript, by provider ('' when the line names none).
+
+    Only lines whose own timestamp is at or after `since` count, so a file that was written for
+    another reason does not carry an hour-old error into the window.
+    """
+    counts: dict[str, int] = {}
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - tail_bytes))
+            chunk = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return counts
+    for line in chunk.splitlines():
+        if '"errorMessage"' not in line:
+            continue
+        stamp = STAMP_RE.search(line)
+        if stamp:
+            try:
+                written = time.mktime(time.strptime(stamp.group(1), "%Y-%m-%dT%H:%M:%S")) - time.timezone
+            except ValueError:
+                written = since
+            if written < since:
+                continue
+        for value in ERROR_FIELD_RE.findall(line):
+            match = AUTH_ERROR_RE.search(value)
+            if not match:
+                continue
+            provider = ""
+            for group in PROVIDER_IN_ERROR:
+                if match.group(group):
+                    provider = match.group(group)
+            counts[provider] = counts.get(provider, 0) + 1
+    return counts
+
+
+def failing_sessions(
+    sessions: dict[str, int], window: float, now: float, tail_bytes: int
+) -> tuple[dict[str, set[str]], dict[str, int]]:
+    """Which live sessions report an auth error inside the window, by provider, and the counts."""
+    by_provider: dict[str, set[str]] = {}
+    totals: dict[str, int] = {}
+    transcripts = recent_transcripts(window, now)
+    for session in sessions:
+        path = transcripts.get(session)
+        if path is None:
+            continue
+        for provider, count in auth_errors(path, now - window, tail_bytes).items():
+            by_provider.setdefault(provider, set()).add(session)
+            totals[provider] = totals.get(provider, 0) + count
+    return by_provider, totals
+
+
+# ------------------------------------------------------------------------------------- state
+
+
+class State(object):
+    """The open crossings, one per provider, under an exclusive lock for the whole run."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a+")
+        fcntl.flock(self.handle, fcntl.LOCK_EX)
+        self.handle.seek(0)
+        try:
+            self.data = json.loads(self.handle.read() or "{}")
+        except ValueError:
+            self.data = {}
+        self.data.setdefault("open", {})
+
+    def save(self) -> None:
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.data, self.handle, indent=1, sort_keys=True)
+        self.handle.write("\n")
+        self.handle.flush()
+
+    def close(self) -> None:
+        fcntl.flock(self.handle, fcntl.LOCK_UN)
+        self.handle.close()
+
+
+# ------------------------------------------------------------------------------------ alerts
+
+
+def credential_lines(rows: list[dict]) -> list[str]:
+    """One line per disabled credential: its id, who it belongs to, when and why."""
+    lines = []
+    for row in sorted(rows, key=lambda item: item.get("id") or 0):
+        identity = redact(str(row.get("identity_key") or "no identity recorded"))
+        cause = redact(str(row.get("disabled_cause") or ""))
+        when = iso(row.get("updated_at") if isinstance(row.get("updated_at"), (int, float)) else None)
+        lines.append(f"  credential {row.get('id')} ({identity}), disabled {when}: {cause}")
+    return lines
+
+
+def alert_text(incident: dict, now: float, repeat: bool = False) -> str:
+    """What a person reads. The provider, the evidence, the count, and the one action."""
+    provider = incident["provider"]
+    host = socket.gethostname().split(".")[0]
+    opened = incident.get("opened", now)
+    age = human(now - opened) if repeat else ""
+    head = (
+        f"omp sessions on {host} have no {provider} login"
+        if not repeat
+        else f"omp sessions on {host} still have no {provider} login, {age} on"
+    )
+    lines = [head, ""]
+    if incident.get("credentials"):
+        lines.append(
+            f"All {len(incident['credentials'])} {provider} credential(s) in {incident['db']} are disabled:"
+        )
+        lines.extend(incident["credentials"])
+        lines.append("")
+    if incident.get("sessions_failing"):
+        lines.append(
+            f"{incident['sessions_failing']} live session(s) report an auth error for {provider} "
+            f"({incident.get('errors', 0)} error(s)) in the last {human(incident['window'])}."
+        )
+    lines.append(
+        f"{incident['sessions_affected']} live omp process(es) on this box read that credential store; "
+        f"{incident['sessions_elsewhere']} use another store (a --profile login) and keep working."
+    )
+    lines.append("")
+    lines.append(f"Only a person can fix this. In a terminal on {host}:")
+    lines.append("")
+    lines.append(f"    omp login {provider}")
+    lines.append("")
+    lines.append(
+        "That writes a new credential into the shared store and every session picks it up; no agent "
+        "can do it, and every session that uses this provider is stopped until it is done. "
+        f"The watch is {Path(os.path.realpath(__file__))} (dispatch://{DISPATCH_ISSUE})."
+    )
+    return "\n".join(lines)
+
+
+def clear_text(incident: dict, now: float, cause: str) -> str:
+    provider = incident["provider"]
+    host = socket.gethostname().split(".")[0]
+    return (
+        f"The {provider} login on {host} works again ({cause}). "
+        f"The outage was open {human(now - incident.get('opened', now))}, from {iso(incident.get('opened'))} "
+        f"to {iso(now)}."
+    )
+
+
+# --------------------------------------------------------------------------------- delivery
+
+
+def dispatch_call(arguments: list[str], options: argparse.Namespace) -> tuple[bool, str]:
+    """Run the dispatch CLI with the environment it needs. Returns (ok, first line of output)."""
+    if not DISPATCH_CLI.exists():
+        return False, f"{DISPATCH_CLI} is missing"
+    environment = dict(os.environ)
+    environment["DISPATCH_HOST"] = environment.get("DISPATCH_HOST") or "omp"
+    environment["DISPATCH_SESSION_ID"] = options.dispatch_session or environment.get("DISPATCH_SESSION_ID", "")
+    if not environment["DISPATCH_SESSION_ID"]:
+        return False, "no DISPATCH_SESSION_ID for the dispatch CLI"
+    try:
+        done = subprocess.run(
+            [str(DISPATCH_CLI), *arguments],
+            capture_output=True,
+            text=True,
+            timeout=options.dispatch_timeout,
+            stdin=subprocess.DEVNULL,
+            env=environment,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, str(error)
+    output = " ".join((done.stdout + done.stderr).split())[:400]
+    return done.returncode == 0, output
+
+
+def ask_id(output: str) -> str:
+    """The ask id in what `dispatch ask` printed, when it named one."""
+    found = re.search(r"/ask(?:s)?/([0-9a-f-]{36})", output) or UUID_RE.search(output)
+    return found.group(1) if found and found.lastindex else (found.group(0) if found else "")
+
+
+def tell_person(incident: dict, text: str, options: argparse.Namespace) -> tuple[bool, str]:
+    """Open the Dispatch ask that reaches Sami. One per crossing."""
+    question = (
+        f"{text}\n\n"
+        "This ask is the alert itself: it needs the login, not an answer. "
+        "Say 'Logged in' once the provider works again, or 'Leave it off' if the box should stay without it."
+    )
+    arguments = [
+        "ask",
+        "--issue",
+        options.issue,
+        "--question",
+        question[:2000],
+        "--option",
+        "Logged in: I ran the login; the sessions can go on",
+        "--option",
+        "Leave it off: the box stays without this provider for now",
+        "--urgency",
+        "blocking",
+    ]
+    if options.dry_run:
+        log(f"  [dry-run] dispatch {' '.join(arguments[:3])} … ({len(question)} chars)")
+        return True, "dry-run"
+    ok, output = dispatch_call(arguments, options)
+    if not ok:
+        log(f"  dispatch ask failed: {output}")
+        # The ask is the only human path; a note on the issue is the fallback, and it is read
+        # by the same people.
+        ok, output = dispatch_call(
+            ["message", "--issue", options.issue, "--body", question[:2000]], options
+        )
+        if ok:
+            log("  dispatch ask refused; posted a message on the issue instead")
+    return ok, output
+
+
+def resolve_person(incident: dict, text: str, options: argparse.Namespace) -> bool:
+    """Close the ask this crossing opened, with what fixed it."""
+    identifier = incident.get("ask")
+    if not identifier:
+        return False
+    if options.dry_run:
+        log(f"  [dry-run] dispatch resolve-ask {identifier}")
+        return True
+    ok, output = dispatch_call(
+        ["resolve-ask", "--ask", identifier, "--kind", "resolved", "--reason", text[:2000]], options
+    )
+    if not ok:
+        log(f"  dispatch resolve-ask failed: {output}")
+    return ok
+
+
+def tell_box_health(envoy: Envoy, text: str, options: argparse.Namespace) -> None:
+    """The agents that must stop: the holder of the box-health role, else the SRE session."""
+    if options.dry_run:
+        log(f"  [dry-run] envoy publish {BOX_HEALTH_ROLE_TOPIC} ({len(text)} chars)")
+        return
+    if not envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        envoy.send(options.box_health_owner, text)
+
+
+# ------------------------------------------------------------------------------------- a run
+
+
+def run_once(options: argparse.Namespace) -> int:
+    now = time.time()
+    db = Path(options.db)
+    rows = credentials(db)
+    providers = model_providers(rows)
+    down = down_providers(providers)
+    sessions, unnamed_processes, elsewhere = omp_sessions(Path(options.sessions_store))
+    envoy = None if options.dry_run and options.no_envoy else Envoy()
+    live = envoy.live_sessions() if envoy is not None else None
+    if live is not None:
+        known = {session: pid for session, pid in sessions.items() if session in live}
+        if known:
+            sessions = known
+    failing, errors = failing_sessions(sessions, options.window, now, options.tail_bytes)
+    log(
+        f"{len(providers)} model provider(s) in {db}, {len(down)} with no enabled credential; "
+        f"{len(sessions) + unnamed_processes} live omp process(es) on this store "
+        f"({unnamed_processes} with no session id), {elsewhere} on another"
+    )
+
+    # A provider is in trouble when its credentials are all disabled, or when enough live
+    # sessions report its auth errors inside the window.
+    unnamed = failing.get("", set())
+    trouble: dict[str, dict] = {}
+    for provider in set(down) | {name for name in failing if name}:
+        reporting = set(failing.get(provider, set()))
+        if provider in down:
+            reporting |= unnamed
+        reason = []
+        if provider in down:
+            reason.append("every credential disabled")
+        if len(reporting) >= options.sessions:
+            reason.append(f"{len(reporting)} session(s) reporting auth errors")
+        if not reason:
+            continue
+        trouble[provider] = {
+            "provider": provider,
+            "db": str(db),
+            "credentials": credential_lines(down.get(provider, [])),
+            "sessions_failing": len(reporting),
+            "errors": errors.get(provider, 0) + (errors.get("", 0) if provider in down else 0),
+            "sessions_affected": len(sessions) + unnamed_processes,
+            "sessions_elsewhere": elsewhere,
+            "window": options.window,
+            "reason": ", ".join(reason),
+        }
+
+    state = State(Path(options.state))
+    opened = state.data["open"]
+    alerts = 0
+    try:
+        for provider, incident in sorted(trouble.items()):
+            record = opened.get(provider)
+            if record is None:
+                incident["opened"] = now
+                text = alert_text(incident, now)
+                log(f"CROSSING {provider}: {incident['reason']}")
+                ok, output = tell_person(incident, text, options)
+                incident["ask"] = ask_id(output) if ok else ""
+                incident["told"] = now
+                if envoy is not None:
+                    tell_box_health(envoy, text, options)
+                elif options.dry_run:
+                    log("  [dry-run] no Envoy message (--no-envoy)")
+                opened[provider] = incident
+                alerts += 1
+                if options.print_alert:
+                    print(text)
+                continue
+            record.update(
+                {
+                    key: incident[key]
+                    for key in ("credentials", "sessions_failing", "errors", "sessions_affected", "sessions_elsewhere", "reason")
+                }
+            )
+            if now - record.get("told", 0) >= options.repeat:
+                text = alert_text(record, now, repeat=True)
+                log(f"STILL OPEN {provider}: {record['reason']}, {human(now - record.get('opened', now))} on")
+                tell_person(record, text, options)
+                record["told"] = now
+                if envoy is not None:
+                    tell_box_health(envoy, text, options)
+                alerts += 1
+                if options.print_alert:
+                    print(text)
+        for provider in [name for name in opened if name not in trouble]:
+            record = opened.pop(provider)
+            enabled = [row for row in providers.get(provider, []) if not row.get("disabled_cause")]
+            cause = (
+                f"credential {enabled[0]['id']} is enabled again"
+                if enabled
+                else "no session reports its auth errors any more"
+            )
+            text = clear_text(record, now, cause)
+            log(f"CLEAR {provider}: {cause}")
+            resolve_person(record, text, options)
+            if envoy is not None:
+                tell_box_health(envoy, text, options)
+            if options.print_alert:
+                print(text)
+        state.save()
+    finally:
+        state.close()
+    return alerts
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--db", default=str(DEFAULT_DB), help="credential store to read (read-only)")
+    parser.add_argument("--state", default=str(DEFAULT_STATE), help="where the open crossings are kept")
+    parser.add_argument(
+        "--sessions-store",
+        default=str(DEFAULT_DB),
+        help="the store this box's sessions read; a dry run against a copy still counts the live sessions",
+    )
+    parser.add_argument("--issue", default=DISPATCH_ISSUE, help="Dispatch issue the ask is opened on")
+    parser.add_argument(
+        "--sessions",
+        type=int,
+        default=3,
+        help="live sessions reporting auth errors inside the window that make a crossing (default 3)",
+    )
+    parser.add_argument("--window", type=float, default=300.0, help="how far back a transcript error counts (s)")
+    parser.add_argument("--tail-bytes", type=int, default=262144, help="bytes read from the end of a transcript")
+    parser.add_argument("--repeat", type=float, default=1800.0, help="how often an open crossing is said again (s)")
+    parser.add_argument("--dispatch-session", default="", help="DISPATCH_SESSION_ID the ask is opened as")
+    parser.add_argument("--dispatch-timeout", type=float, default=60.0, help="seconds a dispatch call may take")
+    parser.add_argument("--box-health-owner", default=os.environ.get("BOX_HEALTH_OWNER") or SRE)
+    parser.add_argument("--dry-run", action="store_true", help="decide and log, send nothing")
+    parser.add_argument("--no-envoy", action="store_true", help="with --dry-run: do not even build the Envoy client")
+    parser.add_argument("--print-alert", action="store_true", help="print each alert on stdout")
+    options = parser.parse_args()
+    # A state file that is not the default one is a test or a dry read of another box's copy:
+    # it must never send, because its memory of what was already said is not this box's.
+    if options.state != str(DEFAULT_STATE) and not options.dry_run:
+        log(f"--state {options.state} is not the default; forcing --dry-run")
+        options.dry_run = True
+    if options.db != str(DEFAULT_DB) and not options.dry_run:
+        log(f"--db {options.db} is not this box's store; forcing --dry-run")
+        options.dry_run = True
+    run_once(options)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
