@@ -1,0 +1,652 @@
+#!/usr/bin/python3
+"""Host-wide read cache in front of GitHub, for the gh calls agent sessions make.
+
+Every agent session on this machine calls GitHub through one GitHub App
+installation, so they share one primary rate limit. On 2026-11-01 that limit
+reached zero four times and every session that reads GitHub stopped
+(dispatch://BET-303). Many of those reads are the same read: several sessions
+and several polling loops asking one pull request for its checks every 30-120 s.
+
+This script is what `shims/gh` hands a READ call to. It does two things, both
+of which GitHub documents as free or cheap:
+
+  * an identical-read reuse window of 60 s: the same argv, from any session,
+    answered from the stored output of the first call, with no request at all;
+  * conditional requests for the plain `gh api` GET class: the stored ETag goes
+    out as `If-None-Match`, and a `304 Not Modified` does not count against the
+    primary rate limit for an authenticated request. Measured here on
+    2026-11-01: three conditional reads of
+    `repos/theorem-labs/example-task-repo` left `X-RateLimit-Used` at
+    549, three unconditional ones took it to 550, 551, 552.
+
+Nothing that writes is cached: the classifier is an allow-list of read verbs
+and, for `gh api`, a GET-only rule. A merge, a rerun, a dequeue, a review, a
+comment, anything carrying a request body and anything the allow-list does not
+name is handed straight to the normal path and never stored.
+
+Failure is always a pass-through: an unreadable cache, a corrupt entry, an
+unexpected gh output shape or any exception at all ends in running the command
+the way the caller wrote it. A stored answer is served only inside the 60 s
+window or after GitHub itself answered 304, so a read never sees an answer
+older than 60 s that GitHub has not confirmed.
+
+Usage (from the shim; not a user-facing command):
+    gh-read-cache -- <gh args...>
+Environment:
+    GH_READ_CACHE=0             turn the cache off (the call is still logged)
+    GH_READ_CACHE_DIR=<dir>     where entries and the request log live
+    GH_READ_CACHE_WINDOW=<secs> reuse window, default 60
+    GH_READ_CACHE_GH=<path>     the gh to run on a miss (the shim passes its own)
+    GH_READ_CACHE_BYPASS=1      set on the child, so a miss cannot re-enter
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+WINDOW_DEFAULT = 60.0
+MAX_BODY_BYTES = 8 * 1024 * 1024
+CACHE_MAX_BYTES = 256 * 1024 * 1024
+ENTRY_MAX_AGE = 6 * 3600
+LOG_MAX_AGE = 48 * 3600
+
+# Read verbs. A command whose first two words are not here is never cached.
+READ_COMMANDS = {
+    ("cache", "list"),
+    ("issue", "list"),
+    ("issue", "status"),
+    ("issue", "view"),
+    ("label", "list"),
+    ("pr", "checks"),
+    ("pr", "diff"),
+    ("pr", "list"),
+    ("pr", "status"),
+    ("pr", "view"),
+    ("release", "list"),
+    ("release", "view"),
+    ("repo", "view"),
+    ("run", "list"),
+    ("run", "view"),
+    ("search", "code"),
+    ("search", "commits"),
+    ("search", "issues"),
+    ("search", "prs"),
+    ("search", "repos"),
+    ("variable", "list"),
+    ("workflow", "list"),
+    ("workflow", "view"),
+}
+
+# Flags that make a read either not a read, not reproducible, or not one
+# response: a watch streams, a web call opens a browser, a log is huge.
+DENY_FLAGS = {"-w", "--watch", "--web", "--log", "--log-failed", "--input"}
+
+# gh flags that take a separate value, so the word after them is not a verb.
+VALUE_FLAGS = {
+    "-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header",
+    "-q", "--jq", "-t", "--template", "--cache", "--hostname", "--input",
+    "-p", "--preview", "-R", "--repo", "--json", "--limit", "-L", "--state",
+    "--author", "--label", "--branch", "--base", "--head", "--search",
+    "--assignee", "--app", "--user", "--workflow", "--status", "--event",
+    "--commit", "--created", "--owner", "--sort", "--order", "--color",
+}
+
+# `gh api` flags that carry a request body, so the call is not a GET.
+API_BODY_FLAGS = {"-f", "-F", "--field", "--raw-field", "--input"}
+
+# `gh api` flags whose output is not one header block followed by one body, so
+# the ETag path (which appends --include) cannot reconstruct the plain output.
+API_NO_ETAG_FLAGS = {
+    "-i", "--include", "--paginate", "--slurp", "--silent", "--verbose",
+    "-t", "--template",
+}
+
+# Endpoints whose whole point is the live number; caching one would hide the
+# thing it reports.
+NEVER_CACHE_ENDPOINTS = {"rate_limit", "/rate_limit"}
+
+CLASS_NONE = "none"
+CLASS_WINDOW = "window"
+CLASS_ETAG = "etag"
+
+
+def cache_root() -> str:
+    env = os.environ.get("GH_READ_CACHE_DIR")
+    if env:
+        return env
+    user = os.environ.get("USER") or ""
+    if not user:
+        try:
+            import pwd
+
+            user = pwd.getpwuid(os.geteuid()).pw_name
+        except Exception:
+            user = ""
+    # This host keeps bulky, regenerable data off the root disk; a machine
+    # without that disk uses the ordinary cache home. No absolute machine path
+    # is committed either way.
+    if user and os.path.isdir(os.path.join("/mnt/nvme", user)):
+        return os.path.join("/mnt/nvme", user, "gh-read-cache")
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    return os.path.join(base, "gh-read-cache")
+
+
+def make_private(path: str) -> None:
+    """mkdir -p, with every directory this creates private to the owner."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    # os.makedirs applies its mode to the leaf alone, and a directory it
+    # created on the way inherits the umask, so a cache under a fresh root
+    # would be world-readable.
+    part = path
+    while part and part != os.sep:
+        try:
+            if os.stat(part).st_uid == os.geteuid():
+                os.chmod(part, 0o700)
+        except OSError:
+            pass
+        if os.path.basename(part) not in ("log", "v1") and not os.path.basename(
+            part
+        ).startswith("gh-read-cache"):
+            break
+        part = os.path.dirname(part)
+
+
+def log_event(root: str, record: dict) -> None:
+    if os.environ.get("GH_READ_CACHE_LOG") == "0":
+        return
+    try:
+        logdir = os.path.join(root, "log")
+        make_private(logdir)
+        path = os.path.join(logdir, time.strftime("%Y%m%d%H", time.gmtime()) + ".jsonl")
+        line = json.dumps(record, separators=(",", ":"), default=str) + "\n"
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass
+
+
+def flag_value(args: list[str], flags: tuple[str, ...]) -> str | None:
+    """Value of the first of `flags` present, as `-f v`, `--flag=v` or `-Rv`."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        for flag in flags:
+            if a == flag:
+                return args[i + 1] if i + 1 < len(args) else None
+            if a.startswith(flag + "="):
+                return a[len(flag) + 1 :]
+            if len(flag) == 2 and len(a) > 2 and a.startswith(flag):
+                return a[2:]
+        if a in VALUE_FLAGS:
+            i += 1
+        i += 1
+    return None
+
+
+def all_flag_values(args: list[str], flags: tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        matched = False
+        for flag in flags:
+            if a == flag:
+                if i + 1 < len(args):
+                    out.append(args[i + 1])
+                i += 1
+                matched = True
+                break
+            if a.startswith(flag + "="):
+                out.append(a[len(flag) + 1 :])
+                matched = True
+                break
+            if len(flag) == 2 and len(a) > 2 and a.startswith(flag):
+                out.append(a[2:])
+                matched = True
+                break
+        if not matched and a in VALUE_FLAGS:
+            i += 1
+        i += 1
+    return out
+
+
+def positionals(args: list[str]) -> list[str]:
+    """Words that are not flags and not the value of a flag."""
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            out.extend(args[i + 1 :])
+            break
+        if a.startswith("-") and a != "-":
+            if a in VALUE_FLAGS:
+                i += 1
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
+def graphql_is_read(args: list[str]) -> bool:
+    """A GraphQL call is a read only when its query text says so.
+
+    GraphQL has no ETags and every call is a POST, so the only safe rule is the
+    text itself: an anonymous `{...}` or an explicit `query`, with no mutation
+    anywhere in it, and nothing read from a file (which this process would have
+    to read to know what it says).
+    """
+    query = None
+    for field in all_flag_values(args, ("-f", "--raw-field", "-F", "--field")):
+        name, sep, value = field.partition("=")
+        if sep and name == "query":
+            query = value
+    if query is None or query.startswith("@"):
+        return False
+    text = query.strip()
+    if "mutation" in text.lower():
+        return False
+    return text.startswith("{") or text.startswith("query")
+
+
+def classify(args: list[str]) -> str:
+    """CLASS_NONE, CLASS_WINDOW or CLASS_ETAG for this gh argv."""
+    if not args or args[0].startswith("-"):
+        return CLASS_NONE
+    for a in args:
+        if a.split("=", 1)[0] in DENY_FLAGS:
+            return CLASS_NONE
+
+    words = positionals(args)
+    if words[0] != "api":
+        if tuple(words[:2]) not in READ_COMMANDS:
+            return CLASS_NONE
+        return CLASS_WINDOW
+
+    endpoint = words[1] if len(words) > 1 else ""
+    if endpoint.strip("/") in NEVER_CACHE_ENDPOINTS:
+        return CLASS_NONE
+    method = (flag_value(args, ("-X", "--method")) or "").upper()
+    if endpoint == "graphql":
+        if not graphql_is_read(args):
+            return CLASS_NONE
+        if method and method != "POST":
+            return CLASS_NONE
+        return CLASS_WINDOW
+    if method and method != "GET":
+        return CLASS_NONE
+    for a in args:
+        if a.split("=", 1)[0] in API_BODY_FLAGS:
+            return CLASS_NONE
+    for a in args:
+        if a.split("=", 1)[0] in API_NO_ETAG_FLAGS:
+            return CLASS_WINDOW
+    return CLASS_ETAG
+
+
+def repo_context(args: list[str]) -> str:
+    """What repository this call is about, so two worktrees of one repo share.
+
+    A `-R owner/repo` or GH_REPO says it outright. Without one, gh resolves the
+    repository from the working directory, so the origin remote stands in for
+    it; a directory that is not a checkout falls back to its own path, which
+    only narrows the key.
+    """
+    explicit = flag_value(args, ("-R", "--repo"))
+    if explicit:
+        return "repo:" + explicit
+    env = os.environ.get("GH_REPO")
+    if env:
+        return "repo:" + env
+    try:
+        out = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return "remote:" + out.stdout.strip()
+    except Exception:
+        pass
+    return "cwd:" + os.getcwd()
+
+
+def routed_owner(context: str) -> str:
+    """The owner the shim routes to, which decides WHICH App installation and
+    therefore which token answers. Two owners are two identities even when the
+    rest of the call is identical, so the key separates them outright rather
+    than relying on the repository string to differ."""
+    tail = context.split(":", 1)[1] if ":" in context else context
+    tail = tail.rstrip("/")
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    if "github.com" in tail:
+        tail = tail.split("github.com", 1)[1].lstrip(":/")
+    parts = [p for p in tail.split("/") if p]
+    return parts[0] if parts else ""
+
+
+def cache_key(args: list[str]) -> str:
+    h = hashlib.sha256()
+    context = repo_context(args)
+    parts = [
+        "v1",
+        context,
+        "owner:" + routed_owner(context),
+        os.environ.get("GH_HOST", ""),
+        # An inherited token makes the call act as someone else; never let one
+        # identity read another identity's cached answer.
+        hashlib.sha256(
+            (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or "").encode()
+        ).hexdigest(),
+        # gh formats for a terminal differently from a pipe.
+        "tty" if sys.stdout.isatty() else "pipe",
+    ]
+    parts.extend(args)
+    for p in parts:
+        h.update(b"\x1f")
+        h.update(p.encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
+
+
+def entry_paths(root: str, key: str) -> tuple[str, str]:
+    d = os.path.join(root, "v1", key[:2])
+    return os.path.join(d, key + ".meta"), os.path.join(d, key + ".out")
+
+
+def load_meta(meta_path: str) -> dict | None:
+    try:
+        with open(meta_path, "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+        if isinstance(meta, dict):
+            return meta
+    except Exception:
+        pass
+    return None
+
+
+# GitHub computes a pull request's mergeability lazily and answers UNKNOWN
+# (REST: a null `mergeable`) while it does, and the answer to that is to read
+# again -- which is exactly what a cache would stop. A body that says so is
+# never stored, so the next read is a real read.
+UNCOMPUTED = re.compile(
+    rb'"(mergeStateStatus"\s*:\s*"UNKNOWN"|mergeable"\s*:\s*null)'
+)
+
+
+def store(
+    root: str, key: str, body: bytes, etag: str | None, code: int = 0, err: bytes = b""
+) -> None:
+    if len(body) + len(err) > MAX_BODY_BYTES:
+        return
+    if UNCOMPUTED.search(body):
+        return
+    meta_path, out_path = entry_paths(root, key)
+    try:
+        make_private(os.path.dirname(meta_path))
+        tmp_out = out_path + ".%d.tmp" % os.getpid()
+        with open(tmp_out, "wb") as fh:
+            fh.write(body)
+        os.replace(tmp_out, out_path)
+        meta = {
+            "t": time.time(),
+            "etag": etag,
+            "bytes": len(body),
+            "code": code,
+            "err": err.decode("utf-8", "replace")[:4096] if err else "",
+        }
+        tmp_meta = meta_path + ".%d.tmp" % os.getpid()
+        with open(tmp_meta, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh)
+        os.replace(tmp_meta, meta_path)
+    except Exception:
+        pass
+
+
+def prune(root: str) -> None:
+    """Keep the cache bounded. Cheap, and only on a small share of writes."""
+    try:
+        now = time.time()
+        files = []
+        total = 0
+        base = os.path.join(root, "v1")
+        for dirpath, _dirnames, filenames in os.walk(base):
+            for name in filenames:
+                p = os.path.join(dirpath, name)
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                if now - st.st_mtime > ENTRY_MAX_AGE or name.endswith(".tmp"):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+                    continue
+                files.append((st.st_mtime, st.st_size, p))
+                total += st.st_size
+        if total > CACHE_MAX_BYTES:
+            files.sort()
+            for _mtime, size, p in files:
+                if total <= CACHE_MAX_BYTES:
+                    break
+                try:
+                    os.unlink(p)
+                    total -= size
+                except OSError:
+                    pass
+        logdir = os.path.join(root, "log")
+        if os.path.isdir(logdir):
+            for name in os.listdir(logdir):
+                p = os.path.join(logdir, name)
+                try:
+                    if now - os.stat(p).st_mtime > LOG_MAX_AGE:
+                        os.unlink(p)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+def child_command(args: list[str]) -> list[str]:
+    gh = os.environ.get("GH_READ_CACHE_GH") or shutil.which("gh") or "gh"
+    return [gh] + args
+
+
+def run_child(args: list[str]) -> tuple[int, bytes, bytes]:
+    env = dict(os.environ)
+    env["GH_READ_CACHE_BYPASS"] = "1"
+    proc = subprocess.run(
+        child_command(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
+    )
+    return proc.returncode, proc.stdout or b"", proc.stderr or b""
+
+
+def exec_passthrough(args: list[str]) -> None:
+    env = dict(os.environ)
+    env["GH_READ_CACHE_BYPASS"] = "1"
+    cmd = child_command(args)
+    try:
+        os.execvpe(cmd[0], cmd, env)
+    except OSError:
+        proc = subprocess.run(cmd, env=env)
+        sys.exit(proc.returncode)
+
+
+def split_response(out: bytes) -> tuple[int | None, dict[str, str], bytes]:
+    """`gh api --include` writes a status line, headers, a blank line, a body."""
+    sep = out.find(b"\r\n\r\n")
+    if sep < 0:
+        return None, {}, out
+    head = out[:sep].decode("utf-8", "replace")
+    body = out[sep + 4 :]
+    lines = head.split("\r\n")
+    status = None
+    if lines and lines[0].startswith("HTTP/"):
+        bits = lines[0].split()
+        if len(bits) > 1 and bits[1].isdigit():
+            status = int(bits[1])
+    headers = {}
+    for line in lines[1:]:
+        name, sep2, value = line.partition(":")
+        if sep2:
+            headers[name.strip().lower()] = value.strip()
+    return status, headers, body
+
+
+def debug(event: str, detail: str = "") -> None:
+    if os.environ.get("GH_READ_CACHE_DEBUG") != "1":
+        return
+    try:
+        sys.stderr.write(
+            "gh-read-cache: %s%s\n" % (event, (" " + detail) if detail else "")
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def emit(body: bytes, code: int, err: bytes = b"") -> None:
+    try:
+        if err:
+            sys.stderr.buffer.write(err)
+            sys.stderr.buffer.flush()
+        sys.stdout.buffer.write(body)
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        os._exit(code)
+    sys.exit(code)
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        sys.exit(2)
+
+    root = cache_root()
+    base_record = {
+        "t": round(time.time(), 3),
+        "pid": os.getppid(),
+        "sid": os.environ.get("OMP_SESSION_ID", ""),
+        "argv": argv[:40],
+    }
+
+    if os.environ.get("GH_READ_CACHE") == "0" or os.environ.get("GH_READ_CACHE_BYPASS"):
+        log_event(root, dict(base_record, ev="off"))
+        exec_passthrough(argv)
+        return
+
+    try:
+        kind = classify(argv)
+    except Exception:
+        kind = CLASS_NONE
+    if kind == CLASS_NONE:
+        log_event(root, dict(base_record, ev="uncached"))
+        debug("uncached", "not a read this cache knows")
+        exec_passthrough(argv)
+        return
+
+    try:
+        window = float(os.environ.get("GH_READ_CACHE_WINDOW", WINDOW_DEFAULT))
+    except ValueError:
+        window = WINDOW_DEFAULT
+
+    try:
+        key = cache_key(argv)
+    except Exception:
+        log_event(root, dict(base_record, ev="uncached"))
+        exec_passthrough(argv)
+        return
+    base_record["key"] = key[:16]
+    base_record["class"] = kind
+    meta_path, out_path = entry_paths(root, key)
+    meta = load_meta(meta_path)
+
+    if meta is not None and (time.time() - float(meta.get("t", 0))) < window:
+        try:
+            with open(out_path, "rb") as fh:
+                body = fh.read()
+        except OSError:
+            body = None
+        if body is not None:
+            age = time.time() - float(meta["t"])
+            log_event(root, dict(base_record, ev="hit", age=round(age, 2)))
+            debug("hit", "age %.1fs, no request made" % age)
+            emit(body, int(meta.get("code", 0)), (meta.get("err") or "").encode())
+
+    if kind == CLASS_ETAG:
+        args = list(argv) + ["--include"]
+        if meta is not None and meta.get("etag"):
+            args += ["-H", "If-None-Match: %s" % meta["etag"]]
+        code, out, err = run_child(args)
+        status, headers, body = split_response(out)
+        if status == 304:
+            try:
+                with open(out_path, "rb") as fh:
+                    cached = fh.read()
+            except OSError:
+                cached = None
+            if cached is not None:
+                store(root, key, cached, meta.get("etag") if meta else None)
+                log_event(root, dict(base_record, ev="revalidated"))
+                debug("revalidated", "304 Not Modified, free of the rate limit")
+                emit(cached, 0)
+        if status is not None and 200 <= status < 300 and code == 0:
+            store(root, key, body, headers.get("etag"))
+            log_event(root, dict(base_record, ev="miss", status=status))
+            debug("miss", "HTTP %s" % status)
+            if random.random() < 0.02:
+                prune(root)
+            emit(body, 0)
+        # Anything else (a 404, an auth failure, an output shape this does not
+        # recognise) is reported the way gh reported it, and nothing is stored.
+        log_event(root, dict(base_record, ev="passthrough", status=status, code=code))
+        emit(body if status is not None else out, code, err)
+
+    code, out, err = run_child(argv)
+    # Success, or the one non-zero code gh defines for a read: `gh pr checks`
+    # answers 8 while checks are pending, and replaying 0 there would turn a
+    # pending gate into a pass. Nothing else is stored, because a non-zero exit
+    # with output is what a BROKEN gh looks like: the knives race leaves this
+    # shim holding the knives wrapper, and `gh api ...` then prints that tool's
+    # usage text and exits non-zero. A ten-second corruption must not be served
+    # for another sixty.
+    if code == 0 or (code == 8 and not err):
+        store(root, key, out, None, code=code, err=err)
+        if random.random() < 0.02:
+            prune(root)
+        log_event(root, dict(base_record, ev="miss", code=code))
+        debug("miss", "exit %d, stored" % code)
+    else:
+        log_event(root, dict(base_record, ev="passthrough", code=code))
+        debug("passthrough", "exit %d, not stored" % code)
+    emit(out, code, err)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BrokenPipeError:
+        os._exit(0)
+    except Exception:
+        # Never let this layer be the reason a gh call fails.
+        try:
+            exec_passthrough(sys.argv[2:] if sys.argv[1:2] == ["--"] else sys.argv[1:])
+        except Exception:
+            os._exit(70)

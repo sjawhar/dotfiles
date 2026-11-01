@@ -13,6 +13,22 @@ before handing the call to the real one.
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
   (`scripts/docs-pr-gate`).
+  It also logs and caches, because every session on a host shares the App installation's
+  one primary rate limit: on 2026-11-01 that limit reached zero four times and every
+  session that reads GitHub stopped (dispatch://BET-303). Each OUTERMOST call (a re-entry
+  from knives or from the cache carries a marker and is the same call) appends one JSONL
+  line — time, pid, session id, cwd, argv — under `<cache root>/log/`, where the cache root
+  is `/mnt/nvme/<user>/gh-read-cache` on a machine with that disk and
+  `${XDG_CACHE_HOME:-~/.cache}/gh-read-cache` on one without, 0700 either way. A READ then
+  goes through `scripts/gh-read-cache`, which answers an identical read from any session
+  inside 60 s with no request at all, and revalidates a plain `gh api` GET with its stored
+  ETag — a 304 does not count against the primary limit. Writes are never cached: the
+  classifier is an allow-list of read verbs and a GET-only rule for `gh api`, and anything
+  else, any failure and any unexpected output shape runs the command as written. A body
+  saying GitHub has not computed mergeability yet (`"mergeStateStatus":"UNKNOWN"`,
+  `"mergeable":null`) is never stored, since the answer to it is to read again.
+  `GH_READ_CACHE=0` turns the cache off, `GH_READ_CACHE_LOG=0` the log, and
+  `scripts/tests/test_gh_read_cache.py` is the contract.
 - **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and in a
   checkout that sets `git config omp.sessionTrailer false` (the backing git repository's config)
   runs every command that can write a description with `templates.commit_trailers` empty and

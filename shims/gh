@@ -4,6 +4,51 @@
 # KNIVES_GH_BYPASS=1 skips knives entirely (emergency hatch if knives gh misbehaves).
 set -euo pipefail
 
+# Every agent session on this machine reaches GitHub through one App
+# installation, so they share one primary rate limit; it reached zero four
+# times on 2026-11-01 and every session that reads GitHub stopped
+# (dispatch://BET-303). This records one line per OUTERMOST gh call, so the
+# spend can be attributed to a caller and a command. knives re-enters this
+# shim for its own forge queries, and the read cache re-enters it on a miss:
+# both carry a marker, and a marked call is the same call again, not a new
+# one. Every step is best-effort; nothing here may fail a gh call.
+_gh_cache_root() {
+    if [[ -n "${GH_READ_CACHE_DIR:-}" ]]; then
+        printf '%s' "$GH_READ_CACHE_DIR"
+        return
+    fi
+    local u="${USER:-$(id -un 2> /dev/null || true)}"
+    if [[ -n "$u" && -d "/mnt/nvme/$u" ]]; then
+        printf '%s' "/mnt/nvme/$u/gh-read-cache"
+    else
+        printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/gh-read-cache"
+    fi
+}
+_gh_call_log() {
+    local root dir a s out=''
+    root="$(_gh_cache_root)" || return 0
+    dir="$root/log"
+    mkdir -p "$dir" 2> /dev/null || return 0
+    chmod 700 "$root" "$dir" 2> /dev/null || true
+    for a in "$@"; do
+        s=${a//\\/\\\\}
+        s=${s//\"/\\\"}
+        s=${s//$'\n'/\\n}
+        s=${s//$'\r'/\\r}
+        s=${s//$'\t'/\\t}
+        out+=",\"$s\""
+    done
+    local now="${EPOCHREALTIME:-}"
+    now="${now/,/.}"
+    [[ -n "$now" ]] || now="$(date -u +%s)"
+    printf '{"t":%s,"pid":%s,"sid":"%s","cwd":"%s","ev":"call","argv":[%s]}\n' \
+        "$now" "$$" "${OMP_SESSION_ID:-}" "${PWD//\"/}" "${out:1}" \
+        >> "$dir/$(date -u +%Y%m%d%H).jsonl" 2> /dev/null || true
+}
+if [[ -z "${KNIVES_GH_SHIM_DEPTH:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && "${GH_READ_CACHE_LOG:-}" != 0 ]]; then
+    _gh_call_log "$@" || true
+fi
+
 # Agent context: an omp session (its bash tool carries OMP_SESSION_ID, its
 # eval kernel PI_SESSION_FILE with an allow-listed environment that drops
 # GIT_CONFIG_*), an agentbox session, or anything launched with the gh-app
@@ -100,6 +145,19 @@ if agent_context; then
     fi
     # Public repository text: refuse an internal reference before gh posts it.
     "$_dotfiles/scripts/public-text-gate" "$@" || exit 1
+    # A READ goes through the host-wide read cache (dispatch://BET-303):
+    # an identical read from any session inside 60 s is answered without a
+    # request at all, and a plain `gh api` GET revalidates its stored ETag
+    # with a conditional request, which GitHub does not count against the
+    # primary rate limit when it answers 304. The cache re-enters this shim
+    # for the call it does make, marked, so routing, the gates above and
+    # knives all run on it unchanged. Anything that is not a read, and any
+    # failure of that layer, continues below as before.
+    if [[ -z "${GH_READ_CACHE_BYPASS:-}" && "${GH_READ_CACHE:-}" != 0 && -x "$_dotfiles/scripts/gh-read-cache" ]]; then
+        _self="$(readlink -f "$0" 2> /dev/null || true)"
+        [[ -n "$_self" ]] || _self="$0"
+        GH_READ_CACHE_GH="$_self" exec "$_dotfiles/scripts/gh-read-cache" -- "$@"
+    fi
 fi
 
 # Content decides what is "real", never the path: any candidate carrying the
