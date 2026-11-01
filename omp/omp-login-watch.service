@@ -1,6 +1,10 @@
 [Unit]
 Description=Tell a person when this box's omp sessions have lost a provider login
 Documentation=file:%h/.dotfiles/scripts/omp-login-watch.md
+# A pass that dies sends nothing, and this is the only watch here whose alert a person needs.
+# Without this line a dead watch is a red unit in a journal nobody reads, which is the silence
+# of 2026-11-01 again (dispatch://INFRA-387); the handler says it over Envoy.
+OnFailure=omp-login-watch-failed.service
 
 [Service]
 Type=oneshot

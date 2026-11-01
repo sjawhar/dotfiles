@@ -50,5 +50,11 @@ else
     echo "$name: asks are opened as $identity (dispatch://INFRA-387)"
 fi
 
+# The OnFailure handler of the watch's unit. It is linked before the timer is armed, because
+# systemd refuses nothing for a missing OnFailure target -- it would simply stay silent, which
+# is the failure this handler exists to end.
+ensure_link "$HOME/.dotfiles/omp/$name-failed.service" \
+    "$HOME/.config/systemd/user/$name-failed.service" || exit 1
+
 ensure_box_health_owner "$name" || exit 1
 arm_user_timer omp "$name"

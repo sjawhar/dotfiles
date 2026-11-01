@@ -39,8 +39,12 @@ What one run does, with a read-only sqlite read, /proc reads and transcript tail
      credential ids with their causes (the cause text with any token-looking run removed), how
      many sessions are affected, and the one action: a person runs `omp login <provider>` in a
      terminal on this box. While the crossing is open it is repeated every --repeat (default
-     30 min). It clears when the provider has an enabled credential again and the transcripts
-     are quiet; the clear resolves the ask it opened.
+     30 min), and every ask it opens is kept. It clears when the provider has an enabled
+     credential again and the transcripts are quiet; the clear resolves every one of them.
+  6. When the human path itself fails -- the ask refused and the message after it refused too,
+     or no identity to act as -- the box-health role is told that nobody was told. A pass that
+     cannot open its state file sends that over the same path and exits non-zero, and the
+     unit's OnFailure handler runs `--report-failure`, which says the watch did not run.
 """
 
 from __future__ import annotations
@@ -531,6 +535,30 @@ def clear_text(incident: dict, now: float, cause: str) -> str:
     )
 
 
+def delivery_failure_text(incident: dict, output: str) -> str:
+    """What goes to the box-health role when the one human path did not carry the alert."""
+    provider = incident["provider"]
+    host = socket.gethostname().split(".")[0]
+    return (
+        f"NOBODY WAS TOLD that {host} has no {provider} login: the Dispatch ask and the message "
+        f"that falls back for it both failed ({output}). Only a person can fix this, by running "
+        f"`omp login {provider}` in a terminal on {host}, and this watch has no other way to "
+        f"reach one, so somebody must be told by hand (dispatch://{DISPATCH_ISSUE}). The alert "
+        "itself follows this message, and the ask is tried again at the next repeat."
+    )
+
+
+def state_failure_text(path: str, error: BaseException, trouble: int) -> str:
+    """What goes to the box-health role when a pass cannot keep its memory and so sends nothing."""
+    host = socket.gethostname().split(".")[0]
+    return (
+        f"omp-login-watch cannot open its state file {path} on {host}: {error}. The pass sent "
+        f"nothing, with {trouble} provider(s) in trouble, because without that file it cannot "
+        "tell a standing outage from a new one and would repeat every 60 s. Nothing watches this "
+        f"box's provider logins until the path is writable again (dispatch://{DISPATCH_ISSUE})."
+    )
+
+
 # --------------------------------------------------------------------------------- delivery
 
 
@@ -562,6 +590,24 @@ def ask_id(output: str) -> str:
     """The ask id in what `dispatch ask` printed, when it named one."""
     found = re.search(r"/ask(?:s)?/([0-9a-f-]{36})", output) or UUID_RE.search(output)
     return found.group(1) if found and found.lastindex else (found.group(0) if found else "")
+
+
+def remember_ask(record: dict, output: str) -> None:
+    """Keep every ask a crossing opened, so the clear can resolve each one.
+
+    `asks` is the list; `ask` stays the first of it, because a running copy of the previous
+    version reads only that key, and a crossing already open when the format moves keeps its
+    one recorded id and gains the rest. A pass of the older code against a state file this one
+    wrote still resolves the first ask and leaves the later ones, which is what it did before.
+    """
+    asks = record.get("asks")
+    if asks is None:
+        asks = [record["ask"]] if record.get("ask") else []
+    identifier = ask_id(output)
+    if identifier and identifier not in asks:
+        asks.append(identifier)
+    record["asks"] = asks
+    record["ask"] = asks[0] if asks else ""
 
 
 def tell_person(incident: dict, text: str, options: argparse.Namespace) -> tuple[bool, str]:
@@ -601,19 +647,24 @@ def tell_person(incident: dict, text: str, options: argparse.Namespace) -> tuple
 
 
 def resolve_person(incident: dict, text: str, options: argparse.Namespace) -> bool:
-    """Close the ask this crossing opened, with what fixed it."""
-    identifier = incident.get("ask")
-    if not identifier:
+    """Close every ask this crossing opened, with what fixed it."""
+    identifiers = incident.get("asks")
+    if identifiers is None:
+        identifiers = [incident["ask"]] if incident.get("ask") else []
+    if not identifiers:
         return False
     if options.dry_run:
-        log(f"  [dry-run] dispatch resolve-ask {identifier}")
+        log(f"  [dry-run] dispatch resolve-ask {' '.join(identifiers)}")
         return True
-    ok, output = dispatch_call(
-        ["resolve-ask", "--ask", identifier, "--kind", "resolved", "--reason", text[:2000]], options
-    )
-    if not ok:
-        log(f"  dispatch resolve-ask failed: {output}")
-    return ok
+    done = True
+    for identifier in identifiers:
+        ok, output = dispatch_call(
+            ["resolve-ask", "--ask", identifier, "--kind", "resolved", "--reason", text[:2000]], options
+        )
+        if not ok:
+            log(f"  dispatch resolve-ask {identifier} failed: {output}")
+            done = False
+    return done
 
 
 def tell_box_health(envoy: Envoy, text: str, options: argparse.Namespace) -> None:
@@ -675,7 +726,18 @@ def run_once(options: argparse.Namespace) -> int:
             "reason": ", ".join(reason),
         }
 
-    state = State(Path(options.state))
+    # The state file comes before any alert: without it a standing outage cannot be told from a
+    # new one and every pass would repeat. A pass that cannot open it therefore sends no alert,
+    # which is the one failure here that nobody would otherwise meet, so it is said over Envoy
+    # and the run exits non-zero for the unit's OnFailure handler.
+    try:
+        state = State(Path(options.state))
+    except OSError as error:
+        message = state_failure_text(str(options.state), error, len(trouble))
+        log(message)
+        if envoy is not None:
+            tell_box_health(envoy, message, options)
+        raise SystemExit(1)
     opened = state.data["open"]
     alerts = 0
     try:
@@ -686,8 +748,10 @@ def run_once(options: argparse.Namespace) -> int:
                 text = alert_text(incident, now)
                 log(f"CROSSING {provider}: {incident['reason']}")
                 ok, output = tell_person(incident, text, options)
-                incident["ask"] = ask_id(output) if ok else ""
+                remember_ask(incident, output if ok else "")
                 incident["told"] = now
+                if envoy is not None and not ok:
+                    tell_box_health(envoy, delivery_failure_text(incident, output), options)
                 if envoy is not None:
                     tell_box_health(envoy, text, options)
                 elif options.dry_run:
@@ -706,8 +770,11 @@ def run_once(options: argparse.Namespace) -> int:
             if now - record.get("told", 0) >= options.repeat:
                 text = alert_text(record, now, repeat=True)
                 log(f"STILL OPEN {provider}: {record['reason']}, {human(now - record.get('opened', now))} on")
-                tell_person(record, text, options)
+                ok, output = tell_person(record, text, options)
+                remember_ask(record, output if ok else "")
                 record["told"] = now
+                if envoy is not None and not ok:
+                    tell_box_health(envoy, delivery_failure_text(record, output), options)
                 if envoy is not None:
                     tell_box_health(envoy, text, options)
                 alerts += 1
@@ -732,6 +799,31 @@ def run_once(options: argparse.Namespace) -> int:
     finally:
         state.close()
     return alerts
+
+
+def report_failure(options: argparse.Namespace) -> int:
+    """What the unit's OnFailure handler runs: say over Envoy that the watch itself did not run.
+
+    A pass that dies -- an unwritable state file, a killed run, a python error -- is otherwise
+    only a red unit in a journal nobody reads, and the box then has no watch on its logins at
+    all. systemd gives the handler the failed unit's result in MONITOR_*.
+    """
+    host = socket.gethostname().split(".")[0]
+    unit = os.environ.get("MONITOR_UNIT") or "omp-login-watch.service"
+    text = (
+        f"{unit} FAILED on {host} ({os.environ.get('MONITOR_SERVICE_RESULT', 'unknown')}, "
+        f"exit code {os.environ.get('MONITOR_EXIT_CODE', '?')}/"
+        f"{os.environ.get('MONITOR_EXIT_STATUS', '?')}). While it does not run, nothing tells a "
+        f"person when this box's omp sessions lose a provider login: on 2026-11-01 that silence "
+        f"was 3 h 45 min and 67 stopped sessions (dispatch://{DISPATCH_ISSUE}). Read it with "
+        f"`systemctl --user status {unit}` and `journalctl --user -u {unit} -n 50`; the watch is "
+        f"{Path(os.path.realpath(__file__))}."
+    )
+    log(text)
+    envoy = Envoy()
+    if not envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        envoy.send(options.box_health_owner, text)
+    return 0
 
 
 def main() -> int:
@@ -759,7 +851,14 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="decide and log, send nothing")
     parser.add_argument("--no-envoy", action="store_true", help="with --dry-run: do not even build the Envoy client")
     parser.add_argument("--print-alert", action="store_true", help="print each alert on stdout")
+    parser.add_argument(
+        "--report-failure",
+        action="store_true",
+        help="say over Envoy that the watch's own unit failed; what OnFailure runs, not a pass",
+    )
     options = parser.parse_args()
+    if options.report_failure:
+        return report_failure(options)
     # A state file that is not the default one is a test or a dry read of another box's copy:
     # it must never send, because its memory of what was already said is not this box's.
     if options.state != str(DEFAULT_STATE) and not options.dry_run:

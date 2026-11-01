@@ -1,0 +1,16 @@
+[Unit]
+Description=Say over Envoy that this box's provider-login watch did not run
+Documentation=file:%h/.dotfiles/scripts/omp-login-watch.md
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+# One Envoy POST. It must not wait behind the box's load the way a pass may.
+TimeoutStartSec=60
+# No dispatch CLI here: the failing watch may be failing because it cannot reach Dispatch, and
+# the box-health role is the path that needs nothing of that. systemd hands this unit the
+# failed unit's result in MONITOR_UNIT, MONITOR_SERVICE_RESULT, MONITOR_EXIT_CODE and
+# MONITOR_EXIT_STATUS, which the report names.
+Environment=PATH=%h/.mise/shims:%h/.dotfiles/scripts:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.dotfiles/scripts/omp-login-watch --report-failure

@@ -21,7 +21,12 @@ import time
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "omp-login-watch"
+# The script under test, and the unit files beside it. Both are overridable, because
+# ~/.dotfiles is production with no staging step: a change is tested from a copy outside the
+# checkout (OMP_LOGIN_WATCH_SCRIPT=<copy> OMP_LOGIN_WATCH_UNITS=<dir> python3 this file) and
+# saved into the checkout only once it passes.
+SCRIPT = Path(os.environ.get("OMP_LOGIN_WATCH_SCRIPT") or Path(__file__).resolve().parents[1] / "omp-login-watch")
+UNITS = Path(os.environ.get("OMP_LOGIN_WATCH_UNITS") or Path(__file__).resolve().parents[2] / "omp")
 LOADER = importlib.machinery.SourceFileLoader("omp_login_watch", str(SCRIPT))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 assert SPEC is not None
@@ -31,6 +36,8 @@ LOADER.exec_module(WATCH)
 SECRET = "sk-ant-oat01-THIS-IS-THE-TOKEN-NOBODY-MAY-READ"
 CAUSE = 'oauth refresh failed: OAuthError: anthropic-console token refresh failed: 400 {"error": "invalid_grant"}'
 SESSIONS = ["01a10000-0000-7000-8000-00000000000%d" % n for n in range(1, 6)]
+# One ask id per ask a case opens, in order, so a crossing's second ask is told from its first.
+ASK_IDS = ["%s-2222-4333-8444-555555555555" % (str(n) * 8) for n in range(1, 6)]
 
 
 class FakeEnvoy:
@@ -119,7 +126,10 @@ class WatchCase(unittest.TestCase):
         self.sessions_root = self.tmp / "sessions"
         self.sessions_root.mkdir()
         self.calls: list[list[str]] = []
-        self.answer = (True, "https://dispatch.example/issues/INFRA-387/asks/11111111-2222-4333-8444-555555555555")
+        # None: every ask succeeds with the next id of ASK_IDS. A case that sets a pair forces
+        # that answer on every call, which is how a refusal is driven.
+        self.answer: tuple | None = None
+        self.asked = 0
         self.live: dict[str, int] = {}
         self.unnamed = 0
         self.elsewhere = 0
@@ -143,13 +153,23 @@ class WatchCase(unittest.TestCase):
 
     def dispatch_call(self, arguments, options):
         self.calls.append(list(arguments))
-        return self.answer
+        if self.answer is not None:
+            return self.answer
+        if arguments and arguments[0] == "ask":
+            identifier = ASK_IDS[min(self.asked, len(ASK_IDS) - 1)]
+            self.asked += 1
+            return True, f"https://dispatch.example/issues/INFRA-387/asks/{identifier}"
+        return True, "done"
 
     def asks(self) -> list[list[str]]:
         return [call for call in self.calls if call and call[0] == "ask"]
 
     def alerts(self) -> list[str]:
         return [message for _, message in FakeEnvoy.instances[-1].published] if FakeEnvoy.instances else []
+
+    def every_alert(self) -> list[str]:
+        """What left over Envoy across every run of the case, not just the last one."""
+        return [message for instance in FakeEnvoy.instances for _, message in instance.published]
 
     def store(self, name: str, rows) -> Path:
         path = self.tmp / name
@@ -323,6 +343,147 @@ class OncePerCrossing(WatchCase):
         WATCH.run_once(options(self.tmp, self.db, dry_run=True))
         self.assertEqual(self.calls, [])
         self.assertEqual(self.alerts(), [])
+
+
+class EveryAskOfACrossingIsClosed(WatchCase):
+    """Measured live on 2026-11-01T22:25Z against dispatch://SMOKE-69: the repeat opened ask
+    fdfdc332-0732-405d-b6bd-a49fd1d7cade, the clear resolved only the first ask
+    78ebd484-b747-4760-9bc3-611cc44f4511, and the repeat's ask stayed open. A four-hour outage
+    at the default repeat leaves seven of them behind."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.db = self.store("down.db", [("anthropic", CAUSE)])
+        self.live = {SESSIONS[0]: 101}
+
+    def age_the_crossing(self) -> None:
+        state = json.loads((self.tmp / "state.json").read_text())
+        state["open"]["anthropic"]["told"] = time.time() - 1801
+        (self.tmp / "state.json").write_text(json.dumps(state))
+
+    def test_a_repeat_ask_is_recorded_beside_the_first(self) -> None:
+        WATCH.run_once(options(self.tmp, self.db))
+        self.age_the_crossing()
+        WATCH.run_once(options(self.tmp, self.db))
+        record = json.loads((self.tmp / "state.json").read_text())["open"]["anthropic"]
+        self.assertEqual(record["asks"], ASK_IDS[:2])
+        self.assertEqual(record["ask"], ASK_IDS[0], "the previous format still names the first ask")
+
+    def test_the_clear_resolves_every_ask_the_crossing_opened(self) -> None:
+        WATCH.run_once(options(self.tmp, self.db))
+        self.age_the_crossing()
+        WATCH.run_once(options(self.tmp, self.db))
+        healthy = self.store("up.db", [("anthropic", CAUSE), ("anthropic", None)])
+        WATCH.run_once(options(self.tmp, healthy, sessions_store=str(self.db)))
+        resolved = [call[2] for call in self.calls if call and call[0] == "resolve-ask"]
+        self.assertEqual(resolved, ASK_IDS[:2], "both asks are closed, not just the first")
+        self.assertEqual(json.loads((self.tmp / "state.json").read_text())["open"], {})
+
+    def test_a_crossing_opened_by_the_previous_version_keeps_its_ask(self) -> None:
+        """The format moves under a live crossing: `ask` alone is what the old code wrote."""
+        # Every key the previous version wrote, and `ask` rather than `asks`.
+        (self.tmp / "state.json").write_text(
+            json.dumps(
+                {
+                    "open": {
+                        "anthropic": {
+                            "provider": "anthropic",
+                            "db": str(self.db),
+                            "credentials": ["  credential 1 (email:sami@theorem.dev), disabled …"],
+                            "sessions_failing": 1,
+                            "errors": 0,
+                            "sessions_affected": 1,
+                            "sessions_elsewhere": 0,
+                            "window": 300.0,
+                            "reason": "every credential disabled",
+                            "ask": ASK_IDS[4],
+                            "opened": time.time() - 7200,
+                            "told": time.time() - 1801,
+                        }
+                    }
+                }
+            )
+        )
+        WATCH.run_once(options(self.tmp, self.db))
+        record = json.loads((self.tmp / "state.json").read_text())["open"]["anthropic"]
+        self.assertEqual(record["asks"], [ASK_IDS[4], ASK_IDS[0]])
+        healthy = self.store("up.db", [("anthropic", None)])
+        WATCH.run_once(options(self.tmp, healthy, sessions_store=str(self.db)))
+        resolved = [call[2] for call in self.calls if call and call[0] == "resolve-ask"]
+        self.assertEqual(resolved, [ASK_IDS[4], ASK_IDS[0]])
+
+
+class WhenNobodyCanBeTold(WatchCase):
+    """The three paths that used to end in a journal line nobody reads."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.db = self.store("down.db", [("anthropic", CAUSE)])
+        self.live = {SESSIONS[0]: 101}
+
+    def test_an_ask_and_its_fallback_message_both_failing_is_said_to_box_health(self) -> None:
+        self.answer = (False, "403 ASK_REFUSED")
+        WATCH.run_once(options(self.tmp, self.db))
+        self.assertEqual([call[0] for call in self.calls], ["ask", "message"])
+        failures = [text for text in self.alerts() if "NOBODY WAS TOLD" in text]
+        self.assertEqual(len(failures), 1, "the box-health role hears that the human path is down")
+        self.assertIn("403 ASK_REFUSED", failures[0])
+        self.assertIn("omp login anthropic", failures[0])
+        self.assertEqual(len(self.alerts()), 2, "the alert itself still goes out beside it")
+
+    def test_an_identity_the_cli_refuses_is_said_too(self) -> None:
+        self.answer = (False, "no DISPATCH_SESSION_ID for the dispatch CLI")
+        WATCH.run_once(options(self.tmp, self.db))
+        failures = [text for text in self.alerts() if "NOBODY WAS TOLD" in text]
+        self.assertEqual(len(failures), 1)
+        self.assertIn("no DISPATCH_SESSION_ID", failures[0])
+
+    def test_a_repeat_that_cannot_be_delivered_is_said_too(self) -> None:
+        WATCH.run_once(options(self.tmp, self.db))
+        state = json.loads((self.tmp / "state.json").read_text())
+        state["open"]["anthropic"]["told"] = time.time() - 1801
+        (self.tmp / "state.json").write_text(json.dumps(state))
+        self.answer = (False, "500 DOC_SERVICE_UNAVAILABLE")
+        WATCH.run_once(options(self.tmp, self.db))
+        failures = [text for text in self.every_alert() if "NOBODY WAS TOLD" in text]
+        self.assertEqual(len(failures), 1)
+
+    def test_a_state_file_that_cannot_be_opened_is_said_and_exits_non_zero(self) -> None:
+        blocked = self.tmp / "blocked"
+        blocked.write_text("a file where the state directory would be")
+        with self.assertRaises(SystemExit) as refused:
+            WATCH.run_once(options(self.tmp, self.db, state=str(blocked / "state.json")))
+        self.assertEqual(refused.exception.code, 1, "the unit's OnFailure handler needs a failure")
+        failures = [text for text in self.alerts() if "cannot open its state file" in text]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(self.calls, [], "nothing was sent to a person, which is what it says")
+
+
+class WhenTheWatchItselfDoesNotRun(WatchCase):
+    def test_report_failure_names_the_unit_to_box_health(self) -> None:
+        for name, value in {
+            "MONITOR_UNIT": "omp-login-watch.service",
+            "MONITOR_SERVICE_RESULT": "exit-code",
+            "MONITOR_EXIT_CODE": "exited",
+            "MONITOR_EXIT_STATUS": "1",
+        }.items():
+            os.environ[name] = value
+            self.addCleanup(os.environ.pop, name, None)
+        self.assertEqual(WATCH.report_failure(options(self.tmp, self.tmp / "unused.db")), 0)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertIn("omp-login-watch.service FAILED", self.alerts()[0])
+        self.assertIn("exit-code", self.alerts()[0])
+        self.assertEqual(self.calls, [], "the failure report needs no dispatch CLI")
+
+
+class TheUnitSaysWhenItDidNotRun(unittest.TestCase):
+    """systemd is the only thing that sees a pass die; it must hand that to the Envoy path."""
+
+    def test_the_service_triggers_the_failure_report(self) -> None:
+        service = (UNITS / "omp-login-watch.service").read_text()
+        self.assertIn("OnFailure=omp-login-watch-failed.service", service)
+        handler = (UNITS / "omp-login-watch-failed.service").read_text()
+        self.assertIn("--report-failure", handler)
 
 
 class WhichStoreASessionReads(unittest.TestCase):
