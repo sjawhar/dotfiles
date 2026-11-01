@@ -116,6 +116,7 @@ class EntryOwnerTest(unittest.TestCase):
             "tmp": str(self.scratch), "tmp_mount": MOUNT, "tmp_age": 21600.0, "tmp_big": 0,
             "src": "/nonexistent-src", "src_mount": MOUNT,
             "tmp_walk_budget": 20.0, "tmp_idle_walk_budget": 5.0, "state": self.state,
+            "iops_caps": {},
             "tmp_digest": 3600.0, "tmp_digest_max": WATCH.ENTRY_DIGEST_MAX, "tmp_pending_max": 500,
             "http_timeout": 8.0, "dry_run": False, "write_state": False, "print_alert": False,
         }

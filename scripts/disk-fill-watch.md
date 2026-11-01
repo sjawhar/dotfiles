@@ -4,6 +4,8 @@ Every 5 minutes, records free space on each watched filesystem of **this** machi
 the fill rate from those `df`/`statvfs` samples. It alerts over Envoy when the disk is about to
 land — either because free space is under a hard floor, or because **three consecutive scheduled
 five-minute samples** each put time to full at the df free-space fill rate under the horizon.
+It also samples the **IOPS** of each mount whose device has a provisioned cap, and alerts when
+that device stays at it.
 
 ## Why it exists
 
@@ -227,6 +229,38 @@ logged.
 The expensive reads happen only on a run that actually sends. An ordinary run is `statvfs` plus a
 bounded `/tmp` scan: **0.3–0.4 s** measured on this box at load 43.
 
+## The IOPS cap
+
+A disk can stop a box without filling. `/mnt/durable` on sami-rocqperf is an Azure **P50**
+premium SSD data disk, and its tier allows **7,500 completed operations a second** whatever the
+hardware under it can do. Held there, every further read and write waits in a queue: free
+space, load and memory all read normal while the box behaves as though it has stopped. That is
+how the 2026-10-31T21:58Z outage of sami-rocqperf looked (dispatch://INFRA-586) — the device sat
+at its cap for hours — and nothing on the box sampled the device, so afterwards "minutes at the
+cap" was not a number anyone could produce.
+
+Every run, for each capped mount:
+
+| | |
+|---|---|
+| Device | `st_dev` of the mount, split into the major and minor numbers `/proc/diskstats` keys its lines by — the same lookup that places a writer on a filesystem. An **md** array or a **dm** mapping is read from its own line, never summed from its members, because the cap is enforced on the device the filesystem is mounted from |
+| Counters | reads completed (field 4) + writes completed (field 8), stored with the instant they were read |
+| IOPS | the difference in those counters divided by the seconds since the previous run. The first run after a restart or a deleted state file records and says the figure comes next run; a counter that went **backwards** (a reboot, or a different device under the mount) produces no figure either |
+| Log | one line per run, whether or not anything is wrong: `/mnt/durable: 412 IOPS over the last 300 s, cap 7500 (5% of it, on nvme0n2)` |
+| Alert | **three consecutive runs** at or over **90%** of the cap, said **once** per crossing |
+| Clear | the first run under **80%** of it |
+
+The two fractions are hysteresis: a run under 90% breaks the run of three, and only a run under
+80% closes a crossing, so a device sitting on the line is said once and not every period. The
+alert carries the same **device-placed writer sample** a fill alert carries — the top writers by
+`/proc/<pid>/io` traffic, placed on the mount by device id and never by a command line — and the
+highest figure the crossing reached. Nothing here reads the disk: two `/proc` reads a run, which
+is why the sample is taken every run and not only while something is wrong.
+
+`--iops-cap MOUNT=IOPS` is repeatable and adds to the default table (`/mnt/durable=7500`);
+`--iops-cap /mnt/durable=0` stops watching that mount's IOPS. Counters, the consecutive-run
+count and the open crossing live in the state file under `iops`.
+
 ## The scratch rule: `/tmp` and `~/src`
 
 Both are on `/` here and both are shared by every session: agents' scratch in `/tmp` was the
@@ -313,6 +347,10 @@ One first alert per crossing, one clear, an escalation for each 5 GiB the disk f
 the last level reported, and one every 30 minutes under the floor, while that crossing stays
 open. The clear goes to everyone who heard the crossing.
 
+An IOPS crossing takes the same route: one alert when the device has been at its cap for three
+consecutive runs, and one clear when it falls under 80% of the cap. It never escalates — the
+cap is a fixed number, so there is no further level to report.
+
 Every alert ends with what to DO: act only on the writers listed as on this filesystem (stopping
 one from the elsewhere group frees nothing here), stop or finish that lane, move its output to
 the other disk, then reclaim with skill://disk-hygiene — whose check-in comes
@@ -329,8 +367,8 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 - `alerted_at` is written and `fsync`ed **before** the first message is sent;
 - it also holds the df free-space samples, each mount's in-progress consecutive rate
   confirmations, the lowest free space each open crossing has already been reported at
-  (`reported_free`, what the 5 GiB escalation step is measured from), and the `/tmp` entries
-  already named;
+  (`reported_free`, what the 5 GiB escalation step is measured from), the `/tmp` entries
+  already named, and each capped mount's last `/proc/diskstats` counters under `iops`;
 - `--state <other path>` is for tests only: a run on any other file forces `--dry-run`.
 
 ## Inputs
@@ -344,6 +382,7 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 | A writer's session | `/proc/<pid>/environ`, `/proc/<pid>/cmdline`, `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl`, then its ancestors |
 | A writer's mount | `st_dev` of `/proc/<pid>/cwd` and of each regular file or directory open on `/proc/<pid>/fd/N`, stat'd through the fd, with the access mode from `/proc/<pid>/fdinfo/<N>`, compared with the mount's `st_dev` at the sample instant |
 | Young `/tmp` and `~/src` entries | `os.scandir` of each root, a budgeted `os.walk` for directories (symlinks measured as themselves, never followed), and the newest file or directory mtime seen while sizing |
+| IOPS of a capped device | reads completed + writes completed from `/proc/diskstats`, for the major and minor numbers of the mount's `st_dev`, against the previous run's reading |
 | Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
 | Samples, confirmations, crossings, named `/tmp` and `~/src` entries | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |
 
@@ -353,7 +392,8 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 scripts/disk-fill-watch --dry-run --print-alert                      # decide and print, send nothing
 scripts/disk-fill-watch --state /tmp/x.json --write-state \
     --print-alert --grace 0 --floor '/=400' --mount /                # deliberate trigger, sends nothing
-scripts/disk-fill-watch --mount / --mount /mnt/nvme --horizon 7200   # the unit's defaults
+scripts/disk-fill-watch --state /tmp/x.json --write-state --sudo never \
+    --iops-cap '/mnt/durable=7500'                                   # the IOPS line, twice for a figure
 ```
 
 ## Turning it off

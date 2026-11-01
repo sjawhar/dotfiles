@@ -65,6 +65,15 @@ is open on the mount that holds the root, and under a bounded walk, because /tmp
 entries and walking it on every run would itself be the load. A symlink is measured as itself
 and never followed, so a tree already moved to /mnt/nvme says nothing.
 
+It also samples, every run, the COMPLETED OPERATIONS of the block device under each mount with
+a provisioned IOPS cap (--iops-cap, default /mnt/durable at 7,500, the Azure P50 data disk's
+tier limit), and prints the rate since the previous run. A cap is enforced by throttling, so a
+device held at it queues every read and write while free space, load and memory all read
+normal: on 2026-10-31T21:58Z this box went down with /mnt/durable at its cap for hours
+(dispatch://INFRA-586) and nothing sampled the device, so the minutes it spent there could not
+be counted afterwards. Three runs in a row at or over 90% of the cap alert once, with the same
+device-placed writer sample an alert carries; under 80% clears.
+
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
 for the first alert, for every further FLOOR_STEP the disk falls below the lowest level
 already reported, for a repeat every 30 minutes while the crossing stays under its floor,
@@ -187,6 +196,26 @@ FLOOR_STEP = 5 * GIB
 # grace window. A disk this close to full has no period to spare, and nothing an `rm` does
 # inside one period makes a 30-minute deadline false.
 URGENT_HORIZON = 1800.0
+
+# Mounts whose block device has a PROVISIONED IOPS limit, and that limit. /mnt/durable on
+# sami-rocqperf is an Azure P50 premium SSD data disk, whose tier allows 7,500 completed
+# operations a second however fast the hardware under it is. A device held there queues every
+# further read and write, and the box behaves as though it has stopped while free space, load
+# and memory all read normal -- which is how the 2026-10-31T21:58Z outage looked
+# (dispatch://INFRA-586). Nothing on the box sampled the device, so the time it spent at the
+# cap exists as a number only from the run this watch started taking it.
+DEFAULT_IOPS_CAPS = {"/mnt/durable": 7500.0}
+
+# At or over this fraction of the cap the device IS at the cap: throttling forms a queue
+# before the measured rate reaches the round number, and a sample is an average over one
+# period, so an exactly-at-the-cap run is already a period of waiting.
+IOPS_ALERT_FRACTION = 0.90
+# ... and it is clear of it only well below that, so a device sitting on the line does not
+# alert, clear and alert again every period.
+IOPS_CLEAR_FRACTION = 0.80
+# Consecutive runs at the cap before it is said. One five-minute period at the cap is a build,
+# a restore or a container pull; three in a row is a box that stays slow.
+IOPS_CONFIRMATIONS = 3
 
 
 # Where log() writes. stdout for an ordinary run, whose stdout is the journal; stderr in the
@@ -1768,6 +1797,204 @@ def note_held_floor(now: dict, notes: dict) -> None:
     )
 
 
+# ------------------------------------------------------------------------------ the IOPS cap
+
+
+def diskstats_rows(text: str) -> dict[tuple[int, int], tuple[str, int]]:
+    """{(major, minor): (device name, completed reads + writes)} from /proc/diskstats text.
+
+    Fields 1-3 of a line are the major number, the minor number and the kernel's name for the
+    device; field 4 is reads COMPLETED and field 8 writes COMPLETED
+    (Documentation/admin-guide/iostats.rst). Completed operations are what a provisioned cap
+    counts: a merge the kernel made before the operation left the queue is one operation at the
+    device, and sectors do not enter it at all.
+    """
+    rows: dict[tuple[int, int], tuple[str, int]] = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        try:
+            rows[(int(parts[0]), int(parts[1]))] = (parts[2], int(parts[3]) + int(parts[7]))
+        except ValueError:
+            continue
+    return rows
+
+
+def device_ops(mount: str) -> tuple[str, int] | None:
+    """(block device name, completed reads + writes) for the device under `mount`, or None.
+
+    The device is the one st_dev names -- the same lookup that places a writer on a mount --
+    split into the major and minor numbers /proc/diskstats keys its lines by. On an md array or
+    a dm mapping that pair is the array's or the mapping's own, so its own line is read and not
+    its members': the cap is enforced on the device the filesystem is mounted from, and summing
+    the members would count one operation several times.
+    """
+    device = device_of(mount)
+    if device is None:
+        return None
+    try:
+        text = Path("/proc/diskstats").read_text()
+    except OSError:
+        return None
+    return diskstats_rows(text).get((os.major(device), os.minor(device)))
+
+
+def iops_rate(previous: dict, ops: int, at: float) -> tuple[float | None, float]:
+    """(completed operations per second since the previous run, the seconds it spans).
+
+    None where there is nothing to subtract from: the first run, a run whose state file was
+    deleted, or a counter that went backwards -- a reboot, or a different device under the
+    mount. /proc/diskstats counters are monotonic within one boot and nowhere else.
+    """
+    before_at = previous.get("at")
+    before_ops = previous.get("ops")
+    if before_at is None or before_ops is None:
+        return None, 0.0
+    span = at - float(before_at)
+    delta = ops - int(before_ops)
+    if span <= 0 or delta < 0:
+        return None, max(span, 0.0)
+    return delta / span, span
+
+
+def reset_iops_crossing(record: dict) -> None:
+    """Forget an IOPS crossing: what opened it, when, and the highest figure it reached."""
+    for key in ("alerted_at", "high_since", "peak"):
+        record.pop(key, None)
+
+
+def update_iops(record: dict, iops: float, cap: float, at: float) -> str:
+    """Count consecutive runs at the cap; "alert", "clear" or "" for this run.
+
+    "alert" once per crossing, on the IOPS_CONFIRMATIONS'th consecutive run at or over
+    IOPS_ALERT_FRACTION of the cap. "clear" the first run under IOPS_CLEAR_FRACTION while a
+    crossing is open. Between the two fractions nothing opens and nothing closes: a run under
+    90% breaks the run of three, and only a run under 80% ends a crossing that is already open,
+    so a device sitting on the line is said once and not every period.
+    """
+    if iops >= cap * IOPS_ALERT_FRACTION:
+        record["high_runs"] = int(record.get("high_runs") or 0) + 1
+        record["peak"] = max(float(record.get("peak") or 0.0), iops)
+        record.setdefault("high_since", at)
+        if record["high_runs"] >= IOPS_CONFIRMATIONS and not record.get("alerted_at"):
+            record["alerted_at"] = at
+            return "alert"
+        return ""
+    record["high_runs"] = 0
+    if iops >= cap * IOPS_CLEAR_FRACTION:
+        return ""
+    if record.get("alerted_at"):
+        return "clear"
+    reset_iops_crossing(record)
+    return ""
+
+
+def iops_alert_text(
+    mount: str, device: str, iops: float, cap: float, span: float, record: dict,
+    writers: str, when: float,
+) -> str:
+    runs = int(record.get("high_runs") or 0)
+    opened = record.get("high_since") or when
+    peak = float(record.get("peak") or iops)
+    return "\n".join(
+        [
+            f"DISK AT ITS IOPS CAP: {mount} on {socket.gethostname()} ({device}) completed"
+            f" {iops:.0f} operations a second over the last {short_time(span)},"
+            f" {100 * iops / cap:.0f}% of the {cap:.0f} IOPS this device is provisioned for."
+            f" {number_word(runs).capitalize()} consecutive runs have been at or over"
+            f" {100 * IOPS_ALERT_FRACTION:.0f}% of it, since {iso(opened)}"
+            f" ({human_time(when - opened)} ago); the highest sampled was {peak:.0f} IOPS.",
+            "Why this alerts: the cap belongs to the disk's tier, not to the hardware, and it"
+            " is enforced by throttling, so every operation over it waits in a queue. Free"
+            " space, load and memory all read normal while the box behaves as though it has"
+            " stopped. On 2026-10-31T21:58Z this box went down with this device held at its cap"
+            " for hours (dispatch://INFRA-586), and nothing here sampled the device, so the"
+            " time it spent at the cap could not be measured afterwards.",
+            writers,
+            f"DO: act only on the writers listed as on {mount} -- they are placed by the device"
+            " id of their cwd and open files, never by a command line. Stop or finish that"
+            " lane, or move its I/O to a device with headroom; nothing on this box makes a"
+            " throttled disk faster while the work stays on it.",
+            "This watch only detects. It deletes nothing, kills nothing and moves nothing."
+            f" From disk-fill-watch (~/.dotfiles/scripts/disk-fill-watch) on"
+            f" {socket.gethostname()}, a systemd --user timer.",
+        ]
+    )
+
+
+def iops_clear_text(
+    mount: str, device: str, iops: float, cap: float, record: dict, when: float
+) -> str:
+    opened = record.get("high_since") or record.get("alerted_at") or when
+    peak = float(record.get("peak") or iops)
+    return (
+        f"DISK IOPS CLEARED: {mount} on {socket.gethostname()} ({device}) is back to"
+        f" {iops:.0f} IOPS, under {100 * IOPS_CLEAR_FRACTION:.0f}% of its {cap:.0f} IOPS cap."
+        f" It was at the cap from {iso(opened)} to {iso(when)}"
+        f" ({human_time(when - opened)}), and the highest figure sampled was {peak:.0f} IOPS."
+        f" No action is needed. From disk-fill-watch on {socket.gethostname()}."
+    )
+
+
+def check_iops(options: argparse.Namespace, state: State, envoy: Envoy) -> tuple[int, int]:
+    """Sample each capped mount's device, log its IOPS, and say when it stays at the cap.
+
+    (alerts sent, crossings cleared). The counters and the instant they were read are the whole
+    measurement, and a rate needs two of them, so the first run after a restart records and
+    says that the figure comes next run. The reading is two /proc reads and costs nothing, so
+    it happens every run whether or not anything is wrong -- which is the point: "minutes at
+    the cap" is a number only where something sampled the device continuously.
+    """
+    alerts = cleared = 0
+    records: dict = state.data.setdefault("iops", {})
+    for mount, cap in sorted(options.iops_caps.items()):
+        sampled = device_ops(mount)
+        if sampled is None:
+            log(f"{mount}: no block device of its own in /proc/diskstats; IOPS not sampled")
+            continue
+        name, ops = sampled
+        at = time.time()
+        record = records.setdefault(mount, {})
+        rate, span = iops_rate(record, ops, at)
+        record.update({"at": at, "ops": ops, "device": name})
+        if rate is None:
+            log(f"{mount}: {name} completed-operation counters recorded; the first IOPS figure"
+                " comes next run")
+            state.commit(options)
+            continue
+        log(
+            f"{mount}: {rate:.0f} IOPS over the last {span:.0f} s, cap {cap:.0f}"
+            f" ({100 * rate / cap:.0f}% of it, on {name})"
+        )
+        decision = update_iops(record, rate, cap, at)
+        if not decision:
+            state.commit(options)
+            continue
+        if decision == "clear":
+            text = iops_clear_text(mount, name, rate, cap, record, at)
+            reset_iops_crossing(record)
+        else:
+            text = iops_alert_text(
+                mount, name, rate, cap, span, record,
+                writers_now(options, device_of(mount) or -1, mount), at,
+            )
+        # On disk before the message leaves, as every other alert here is: a resent first alert
+        # is worse than a late one.
+        state.commit(options)
+        if not options.dry_run:
+            log(f"  -> {tell_box_health(envoy, text)} (box-health lead)")
+        if decision == "clear":
+            cleared += 1
+            log(f"{mount}: IOPS CLEARED ({rate:.0f} IOPS)")
+        else:
+            alerts += 1
+            log(f"{mount}: IOPS ALERT ({rate:.0f} IOPS of a {cap:.0f} cap)")
+        if options.print_alert:
+            print(text)
+    return alerts, cleared
+
+
 def run_once(options: argparse.Namespace) -> int:
     started = time.time()
     envoy = Envoy(timeout=options.http_timeout)
@@ -1955,6 +2182,13 @@ def run_once(options: argparse.Namespace) -> int:
         if options.print_alert:
             print(text)
 
+    # The IOPS cap of each capped mount's device, measured against its previous reading. This
+    # is a different failure from a filling disk and is on its own mounts: a device at its
+    # provisioned limit has free space, and the disks that fill here have no cap.
+    iops_alerts, iops_clears = check_iops(options, state, envoy)
+    alerts += iops_alerts
+    cleared += iops_clears
+
     # The scratch rule: name each young, big top-level entry of /tmp and of the checkout root
     # (~/src) ONCE, whether or not a mount is crossing. It is the measurement step before any
     # gate -- a 17 GB tree in /tmp, or a checkout cut on / instead of /mnt/nvme, belongs to a
@@ -2132,6 +2366,15 @@ def main() -> int:
         " scratch threshold, and for a machine whose disks are not these",
     )
     parser.add_argument(
+        "--iops-cap",
+        action="append",
+        default=None,
+        metavar="MOUNT=IOPS",
+        help="watch the completed operations of the block device under MOUNT against this"
+        " provisioned cap; repeatable, and added to the defaults (/mnt/durable=7500)."
+        " MOUNT=0 stops watching that mount's IOPS",
+    )
+    parser.add_argument(
         "--horizon",
         type=float,
         default=7200.0,
@@ -2262,6 +2505,17 @@ def main() -> int:
         if not value:
             parser.error(f"--floor {override}: expected MOUNT=GiB")
         FLOORS[mount] = float(value) * GIB
+    options.iops_caps = dict(DEFAULT_IOPS_CAPS)
+    for override in options.iops_cap or []:
+        mount, _, value = override.partition("=")
+        try:
+            cap = float(value)
+        except ValueError:
+            parser.error(f"--iops-cap {override}: expected MOUNT=IOPS")
+        if cap > 0:
+            options.iops_caps[mount] = cap
+        else:
+            options.iops_caps.pop(mount, None)
     # The once-per-crossing record lives in one file. A run on any other state file has its own
     # memory of what was already said, so two state files would send two first alerts for one
     # crossing; a run on another file therefore never sends.

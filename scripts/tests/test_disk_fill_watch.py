@@ -6,8 +6,10 @@ Envoy role, and to the INFRA lead's session only when the role is held by nobody
 """
 
 import argparse
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -106,6 +108,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             "tmp_walk_budget": 20.0,
             "tmp_idle_walk_budget": 5.0,
             "state": self.state,
+            "iops_caps": {},
             "http_timeout": 8.0,
             "dry_run": False,
             "write_state": False,
@@ -545,6 +548,7 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             tmp_walk_budget=20.0,
             tmp_idle_walk_budget=5.0,
             state=self.state,
+            iops_caps={},
             http_timeout=8.0,
             dry_run=False,
             write_state=False,
@@ -1371,6 +1375,182 @@ class WriterFilesystemEvidenceTest(unittest.TestCase):
 
         self.assertNotIn("Writing elsewhere", text)
         self.assertLess(text.index(f"pid {large}"), text.index(f"pid {small}"))
+
+
+class DiskFillWatchIopsCapTest(unittest.TestCase):
+    """The IOPS of a capped mount's device, sampled every run against the previous run.
+
+    /mnt/durable is an Azure P50 data disk, capped at 7,500 completed operations a second. On
+    2026-10-31T21:58Z sami-rocqperf went down with it held at that cap for hours
+    (dispatch://INFRA-586) and nothing sampled the device, so "minutes at the cap" could not be
+    counted afterwards.
+    """
+
+    MOUNT = "/mnt/durable"
+    CAP = 7500.0
+    # Two readings of /proc/diskstats, 300 s apart. Fields: major, minor, name, reads
+    # completed, ... , writes completed (field 8). The data disk is 259:1 and the array
+    # 9:127, which carries its own line and is never summed from its members.
+    FIRST = "\n".join(
+        [
+            " 259       0 nvme0n1 100 0 0 0 200 0 0 0 0 0 0",
+            " 259       1 nvme0n2 1000 10 0 0 2000 20 0 0 0 0 0",
+            "   9     127 md127 50 0 0 0 60 0 0 0 0 0 0",
+        ]
+    )
+    SECOND = "\n".join(
+        [
+            " 259       0 nvme0n1 140 0 0 0 260 0 0 0 0 0 0",
+            " 259       1 nvme0n2 751000 10 0 0 1502000 20 0 0 0 0 0",
+            "   9     127 md127 90 0 0 0 110 0 0 0 0 0 0",
+        ]
+    )
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state.json"
+        self.envoy = FakeEnvoy()
+        self.now = 1_000_000.0
+        self.ops = 5_000_000
+
+        original_envoy = WATCH.Envoy
+        original_ops = WATCH.device_ops
+        original_writers = WATCH.writers_now
+        original_time = WATCH.time.time
+        WATCH.Envoy = lambda timeout=8.0: self.envoy
+        WATCH.device_ops = lambda mount: ("nvme0n2", self.ops)
+        WATCH.writers_now = lambda options, device, mount: "Top writers now: (none in this test)"
+        WATCH.time.time = lambda: self.now
+
+        def restore() -> None:
+            WATCH.Envoy = original_envoy
+            WATCH.device_ops = original_ops
+            WATCH.writers_now = original_writers
+            WATCH.time.time = original_time
+
+        self.addCleanup(restore)
+
+    def options(self, **overrides) -> argparse.Namespace:
+        values = dict(
+            DiskFillWatchAlertRoutingTest.options(self).__dict__,
+            mount=[],  # the IOPS sample is on its own mounts, and no disk is filling here
+            tmp="/nonexistent-tmp",
+            src="/nonexistent-src",
+            iops_caps={self.MOUNT: self.CAP},
+        )
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def step(self, iops: float, seconds: float = 300.0, **overrides) -> str:
+        """One scheduled run, `seconds` after the last, with the device at `iops`."""
+        self.now += seconds
+        self.ops += int(iops * seconds)
+        printed = io.StringIO()
+        # log() writes to the module's own LOG_STREAM, which is bound at import.
+        with unittest.mock.patch.object(WATCH, "LOG_STREAM", printed):
+            with contextlib.redirect_stdout(printed):
+                self.assertEqual(0, WATCH.run_once(self.options(**overrides)))
+        return printed.getvalue()
+
+    def messages(self) -> list[str]:
+        return [text for _, text in self.envoy.published + self.envoy.sent]
+
+    def test_the_iops_figure_comes_from_two_diskstats_readings(self) -> None:
+        before = WATCH.diskstats_rows(self.FIRST)[(259, 1)]
+        after = WATCH.diskstats_rows(self.SECOND)[(259, 1)]
+        self.assertEqual(("nvme0n2", 3000), before)
+        self.assertEqual(("nvme0n2", 2_253_000), after)
+
+        rate, span = WATCH.iops_rate({"at": 1000.0, "ops": before[1]}, after[1], 1300.0)
+
+        self.assertEqual(300.0, span)
+        self.assertAlmostEqual(7500.0, rate)
+
+    def test_an_array_is_read_from_its_own_line_not_from_its_members(self) -> None:
+        self.assertEqual(("md127", 110), WATCH.diskstats_rows(self.FIRST)[(9, 127)])
+
+    def test_a_counter_that_went_backwards_produces_no_figure(self) -> None:
+        """A reboot, or another device under the mount: the counters restart at zero."""
+        rate, _ = WATCH.iops_rate({"at": 1000.0, "ops": 2_253_000}, 3000, 1300.0)
+        self.assertIsNone(rate)
+
+    def test_the_first_run_records_the_counters_and_the_figure_comes_next_run(self) -> None:
+        self.assertIn("counters recorded", self.step(self.CAP))
+        self.assertEqual([], self.messages())
+        self.assertEqual(5_000_000 + 2_250_000, json.loads(self.state.read_text())["iops"][self.MOUNT]["ops"])
+
+    def test_the_run_logs_the_iops_figure_whether_or_not_anything_is_wrong(self) -> None:
+        self.step(100.0)
+        self.assertIn(f"{self.MOUNT}: 100 IOPS over the last 300 s, cap 7500", self.step(100.0))
+        self.assertEqual([], self.messages())
+
+    def test_three_consecutive_runs_at_the_cap_alert_once(self) -> None:
+        self.step(self.CAP)  # the first run has nothing to subtract from
+        self.step(self.CAP)  # one figure at the cap
+        self.step(self.CAP)  # two
+        self.assertEqual([], self.messages())
+
+        self.step(self.CAP)  # three in a row: said once
+
+        self.assertEqual(1, len(self.envoy.published))
+        self.assertEqual(WATCH.BOX_HEALTH_ROLE_TOPIC, self.envoy.published[0][0])
+        text = self.envoy.published[0][1]
+        self.assertIn("DISK AT ITS IOPS CAP", text)
+        self.assertIn("7500 IOPS this device is provisioned for", text)
+        self.assertIn("Three consecutive runs", text)
+        self.assertIn("Top writers now", text)
+
+        self.step(self.CAP)  # and not again while the crossing stays open
+        self.assertEqual(1, len(self.envoy.published))
+
+    def test_a_run_at_ninety_percent_of_the_cap_counts_as_at_the_cap(self) -> None:
+        for _ in range(4):
+            self.step(0.90 * self.CAP)
+        self.assertEqual(1, len(self.envoy.published))
+
+    def test_a_run_between_the_two_fractions_neither_alerts_nor_clears(self) -> None:
+        self.step(self.CAP)
+        self.step(self.CAP)
+        self.step(self.CAP)
+        self.step(0.85 * self.CAP)  # breaks the run of three
+        self.step(self.CAP)
+        self.assertEqual([], self.messages())
+
+        self.step(self.CAP)
+        self.step(self.CAP)
+        self.assertEqual(1, len(self.envoy.published))
+
+        self.step(0.85 * self.CAP)  # and does not close the crossing either
+        self.assertEqual(1, len(self.envoy.published))
+
+    def test_a_run_under_eighty_percent_clears_the_crossing(self) -> None:
+        for _ in range(4):
+            self.step(self.CAP)
+        self.assertEqual(1, len(self.envoy.published))
+
+        self.step(0.5 * self.CAP)
+
+        self.assertEqual(2, len(self.envoy.published))
+        clear = self.envoy.published[1][1]
+        self.assertIn("DISK IOPS CLEARED", clear)
+        self.assertIn("3750 IOPS", clear)
+        self.assertIn("highest figure sampled was 7500 IOPS", clear)
+        self.assertNotIn("alerted_at", json.dumps(json.loads(self.state.read_text())["iops"]))
+
+        for _ in range(4):  # a second crossing is a new alert
+            self.step(self.CAP)
+        self.assertEqual(3, len(self.envoy.published))
+
+    def test_a_dry_run_sends_nothing(self) -> None:
+        for _ in range(4):
+            self.step(self.CAP, dry_run=True, write_state=True)
+        self.assertEqual([], self.messages())
+
+    def test_a_mount_with_no_block_device_is_skipped(self) -> None:
+        WATCH.device_ops = lambda mount: None
+        self.assertIn("no block device of its own", self.step(self.CAP))
+        self.assertEqual([], self.messages())
 
 
 if __name__ == "__main__":
