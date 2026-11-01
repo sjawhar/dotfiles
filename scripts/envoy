@@ -6,9 +6,12 @@
 #   envoy ps --sub-agents — include subagent sessions
 #   envoy ps --json  — JSON output
 #   envoy ps --local — filter to this machine (its host, or a listener id)
-#   envoy send [--source envoy] <t> <msg> — send message (session UUID = direct, else publish to topic)
-#   envoy notify <topic> <msg> — publish as envoy: `send --source envoy <topic> <msg>`
-#   envoy broadcast <msg> — direct-send <msg> to every live titled session
+#   envoy send [--source envoy] [--message-file <path>] <t> [<msg>] — send message
+#                          (session UUID = direct, else publish to topic)
+#   envoy notify [--message-file <path>] <topic> [<msg>] — publish as envoy:
+#                          `send --source envoy <topic> <msg>`
+#   envoy broadcast [--message-file <path>] [<msg>] — direct-send the message to
+#                          every live titled session
 #                          `envoy ps` lists for this machine, by host
 #                          (`--all-machines` widens, `--machine <id>` picks a
 #                          host or a listener such as envoy-hub or gke), and
@@ -37,6 +40,21 @@
 # `envoy notify` is that send, for the timers that post such notices: an envoy
 # from before it answers `notify` as an unknown command, exits nonzero and sends
 # nothing, so a caller needs no probe for it.
+#
+# The message body of `send`, `notify` and `broadcast` comes either from the
+# command line, as it always has, or from `--message-file <path>` — `-` for
+# stdin, the spelling dispatch uses for its own --<field>-file flags. Give both
+# and the command refuses, naming the two inputs, since silently preferring one
+# is how an operator sends the wrong text. A body on an argv is readable by
+# every process on the box through /proc/<pid>/cmdline, lands in shell history,
+# and passes the shell's quoting rules first: on 2026-11-01 a command name in
+# backticks inside a double-quoted argument was run by the shell and its output
+# substituted into the message before envoy saw it. A --message-file body is
+# never a shell word and never an argv: its bytes reach the listener exactly as
+# they are, newlines, backticks, `$(…)` and a trailing newline included (jq
+# --rawfile reads the file; a shell variable would drop every trailing newline
+# and any NUL). An empty one is refused — a pipeline that produced nothing is a
+# mistake, not a message.
 #
 # `envoy --help` (also -h, help) prints the usage and exits 0; an unknown or
 # missing command prints it to stderr and exits 2.
@@ -333,22 +351,84 @@ _envoy_ps() {
     } | column -t -s $'\t'
 }
 
-_envoy_send() {
-    local asserted_source=""
-    if [ "${1:-}" = "--source" ]; then
-        if [ "${2:-}" != "envoy" ]; then
-            echo "--source accepts only envoy" >&2
-            return 2
-        fi
-        asserted_source="envoy"; shift 2
+# The path holding a --message-file body, and the private copy of a stream when
+# one had to be made. Set by resolve_message_file, read by _envoy_send.
+MESSAGE_FILE=""
+MESSAGE_FILE_TMP=""
+
+# resolve_message_file PATH sets MESSAGE_FILE to the file whose bytes are the
+# message: PATH itself when it is a regular file, else a private copy of it.
+# `-` is stdin, and stdin — like any pipe, fifo or /dev/fd path — can be read
+# only once, while broadcast sends the same body to every recipient, so it is
+# read once here and the copy is what each send reads.
+resolve_message_file() {
+    local src="$1"
+    if [ "$src" != - ]; then
+        [ -e "$src" ] || die "--message-file names $src, which does not exist"
+        [ ! -d "$src" ] || die "--message-file names $src, which is a directory"
+        [ -r "$src" ] || die "--message-file names $src, which could not be read"
     fi
-    if [ $# -lt 2 ]; then
+    if [ "$src" = - ] || [ ! -f "$src" ]; then
+        MESSAGE_FILE_TMP="$(mktemp "${TMPDIR:-/tmp}/envoy-message.XXXXXX")" ||
+            die "--message-file $src: no temporary file to read it into"
+        # shellcheck disable=SC2064  # $MESSAGE_FILE_TMP is fixed now
+        trap "rm -f '$MESSAGE_FILE_TMP'" EXIT
+        if [ "$src" = - ]; then cat; else cat -- "$src"; fi >"$MESSAGE_FILE_TMP" ||
+            die "--message-file $src could not be read"
+        MESSAGE_FILE="$MESSAGE_FILE_TMP"
+    else
+        MESSAGE_FILE="$src"
+    fi
+    # A body nobody wrote is a mistake upstream, not a message to deliver.
+    [ -s "$MESSAGE_FILE" ] ||
+        die "--message-file $src holds no bytes: there is no message to send"
+}
+
+# both_bodies WHERE COUNT FILE refuses a command given a message twice. It
+# names the two inputs and never prints either body: the command-line one is
+# already in this process's argv, and the file's bytes are the caller's.
+both_bodies() {
+    echo "envoy: $1 was given a message twice: $2 word(s) on the command line and --message-file $3. Pass one or the other." >&2
+    return 2
+}
+
+_envoy_send() {
+    local asserted_source="" message_file=""
+    # Options may come in any order, and parsing stops at the first word that is
+    # not one of them, so every word from the target on is message text exactly
+    # as before — `envoy send <t> --message-file x` still sends that text.
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --source)
+                if [ "${2:-}" != "envoy" ]; then
+                    echo "--source accepts only envoy" >&2
+                    return 2
+                fi
+                asserted_source="envoy"; shift 2 ;;
+            --message-file)
+                if [ -z "${2:-}" ]; then
+                    echo "--message-file needs a path, or - for stdin" >&2
+                    return 2
+                fi
+                message_file="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+    if [ $# -lt 1 ] || { [ -z "$message_file" ] && [ $# -lt 2 ]; }; then
         echo "Usage: envoy send [--source envoy] <target> <message>" >&2
+        echo "       envoy send [--source envoy] --message-file <path> <target>" >&2
         echo "  target: session ID (UUID) for direct send, or topic for publish" >&2
+        echo "  --message-file: the message's bytes, from a path or - for stdin" >&2
         return 1
     fi
     local target="$1"; shift
-    local message="$*"
+    local message=""
+    if [ -n "$message_file" ]; then
+        [ $# -eq 0 ] || both_bodies "envoy send" "$#" "$message_file" || return 2
+        resolve_message_file "$message_file"
+    else
+        message="$*"
+    fi
 
     # OMP exports OMP_SESSION_ID (and OMPCODE); Claude Code exports
     # CLAUDE_CODE_SESSION_ID (and CLAUDECODE).
@@ -364,14 +444,18 @@ _envoy_send() {
     fi
 
     local endpoint payload
+    # --rawfile for a file body, so its bytes reach the payload exactly: a shell
+    # variable drops every trailing newline and any NUL.
+    local -a body
+    if [ -n "$message_file" ]; then body=(--rawfile m "$MESSAGE_FILE"); else body=(--arg m "$message"); fi
     # Direct send for session ids (OMP and Claude Code use UUIDs).
     if [[ "$target" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
         endpoint="/v1/messages/send"
-        payload=$(jq -n --arg t "$target" --arg m "$message" --arg s "$source" --arg ss "$source_session" \
+        payload=$(jq -n "${body[@]}" --arg t "$target" --arg s "$source" --arg ss "$source_session" \
             '{ target_session: $t, message: $m, source: $s } + (if $ss == "" then {} else { source_session: $ss } end)')
     else
         endpoint="/v1/messages/publish"
-        payload=$(jq -n --arg t "$target" --arg m "$message" --arg s "$source" --arg ss "$source_session" \
+        payload=$(jq -n "${body[@]}" --arg t "$target" --arg s "$source" --arg ss "$source_session" \
             '{ topic: $t, message: $m, source: $s } + (if $ss == "" then {} else { source_session: $ss } end)')
     fi
 
@@ -387,13 +471,19 @@ _envoy_send() {
 }
 
 _envoy_broadcast() {
-    local machine="$MACHINE_ID" untitled=false dry_run=false dir_filter=""
+    local machine="$MACHINE_ID" untitled=false dry_run=false dir_filter="" message_file=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --all-machines) machine="" ;;
             --machine) machine="$2"; shift ;;
             --untitled) untitled=true ;;
             --dir) dir_filter="$2"; shift ;;
+            --message-file)
+                if [ -z "${2:-}" ]; then
+                    echo "--message-file needs a path, or - for stdin" >&2
+                    return 2
+                fi
+                message_file="$2"; shift ;;
             --dry-run|-n) dry_run=true ;;
             --) shift; break ;;
             -*) echo "Unknown option: $1" >&2; return 1 ;;
@@ -401,11 +491,23 @@ _envoy_broadcast() {
         esac
         shift
     done
-    if [ $# -lt 1 ]; then
-        echo "Usage: envoy broadcast [--all-machines|--machine <id>] [--untitled] [--dir <substr>] [--dry-run] <message>" >&2
+    if [ -n "$message_file" ] && [ $# -gt 0 ]; then
+        both_bodies "envoy broadcast" "$#" "$message_file" || return 2
+    fi
+    if [ -z "$message_file" ] && [ $# -lt 1 ]; then
+        echo "Usage: envoy broadcast [--all-machines|--machine <id>] [--untitled] [--dir <substr>] [--dry-run] (<message> | --message-file <path>)" >&2
         return 1
     fi
-    local message="$*"
+    local message=""
+    # Read a stream body once, here: every recipient's send reads the same file.
+    local -a pre=() post=()
+    if [ -n "$message_file" ]; then
+        resolve_message_file "$message_file"
+        pre=(--message-file "$MESSAGE_FILE")
+    else
+        message="$*"
+        post=("$message")
+    fi
 
     # Here, not in _envoy_ps's subshell below, so a `!` envoy.token runs once.
     resolve_listener
@@ -448,7 +550,7 @@ _envoy_broadcast() {
 
     local sent=0 failed=0 id title
     while IFS=$'\t' read -r id _ _ title; do
-        if _envoy_send "$id" "$message" >/dev/null; then
+        if _envoy_send "${pre[@]}" "$id" "${post[@]}" >/dev/null; then
             sent=$((sent + 1))
             printf 'sent    %s  %s\n' "$id" "$title"
         else
@@ -461,11 +563,26 @@ _envoy_broadcast() {
 }
 
 _envoy_notify() {
-    if [ $# -ne 2 ]; then
+    local -a opts=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --message-file)
+                if [ -z "${2:-}" ]; then
+                    echo "--message-file needs a path, or - for stdin" >&2
+                    return 2
+                fi
+                opts=(--message-file "$2"); shift 2 ;;
+            *) break ;;
+        esac
+    done
+    # A topic, and a message unless a file holds it. Both at once reaches
+    # _envoy_send, whose refusal names the two inputs.
+    if [ $# -lt 1 ] || [ $# -gt 2 ] || { [ ${#opts[@]} -eq 0 ] && [ $# -ne 2 ]; }; then
         echo "Usage: envoy notify <topic> <message>" >&2
+        echo "       envoy notify --message-file <path> <topic>" >&2
         return 1
     fi
-    _envoy_send --source envoy "$1" "$2"
+    _envoy_send --source envoy "${opts[@]}" "$@"
 }
 
 usage() {
@@ -480,6 +597,12 @@ Commands:
                                           direct-send to every live titled session
   config-path                             print the envoy.json envoy reads
   help, -h, --help                        print this usage
+
+send, notify and broadcast take the message either as <msg> on the command line
+or as --message-file <path> (- is stdin), whose bytes are sent exactly as they
+are — newlines, backticks and $(...) are text, not shell. Giving both is
+refused. Prefer --message-file for anything long or quoted: an argv is readable
+by every process on the box and goes through the shell's quoting rules first.
 EOF
 }
 
