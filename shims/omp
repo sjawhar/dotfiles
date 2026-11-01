@@ -88,6 +88,26 @@ if [[ -n "$profile" && ! "$profile" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
     exit 2
 fi
 
+# omp/config.local.yml (gitignored, machine-local) is the box's own model routing. On sami-rocqperf it points every
+# Anthropic role at the OSS Verify model gateway and falls each one back to the same model on the direct Anthropic
+# login (dispatch://INFRA-398; Sami, 2026-11-01 17:13Z, after the 12:35-16:20Z outage of the shared login). It
+# loads after omp/config.yml, so it wins on the roles it names, and before a caller's own overlays, so a `--config`
+# file still wins over both. A machine without the file is unchanged.
+# The default profile alone gets it: a named profile such as `pbc` bills another Anthropic account, and
+# config.yml's direct `anthropic/...` roles are what it must keep. A nested launch inherits PI_CONFIG_FILES from
+# its parent, so a profile launch drops the entry a default-profile parent added.
+local_overlay="$DOTFILES_DIR/omp/config.local.yml"
+if [[ -z "$profile" && -f "$local_overlay" ]]; then
+    case ":${PI_CONFIG_FILES:-}:" in
+        *":$local_overlay:"*) ;;
+        *) export PI_CONFIG_FILES="${PI_CONFIG_FILES/"$overlay"/"$overlay:$local_overlay"}" ;;
+    esac
+elif [[ -n "$profile" ]]; then
+    case ":${PI_CONFIG_FILES:-}:" in
+        *":$local_overlay:"*) export PI_CONFIG_FILES="${PI_CONFIG_FILES/":$local_overlay"/}" ;;
+    esac
+fi
+
 mirror_links() { # mirror_links SRC DST
     local src="$1" dst="$2" entry name
     mkdir -p "$dst"
