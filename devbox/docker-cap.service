@@ -7,9 +7,15 @@ Description=Hold Docker's build cache under 50 GB and remove unusable Docker dat
 # 14:20Z the same day. Nothing removed either.
 #
 # The 80% threshold and the 50 GB cap are the spec's. /mnt/nvme on sami-rocqperf is always over
-# 80%, so there the unit acts every hour; on a box with room it does nothing. BuildKit counts
-# only the cache's own bytes against the cap, not the layers it shares with images, so the cap
-# binds only on a pile of old records that no image holds.
+# 80%, so there the unit acts every hour; on a box with room it does nothing.
+#
+# The cap is enforced by age, not by BuildKit's --max-used-space: that flag counts only the
+# PRIVATE bytes of the cache, so on 2026-11-01 it compared 16.3 GB of 65.1 GB against the cap
+# and removed nothing in four hourly runs while the disk stood at 97% used (INFRA-586,
+# /mnt/nvme/sami/scratch/eng-ops-sysbox/buildkit/report.md). The script now removes the records
+# no build has used for 48h, then 24h, 12h and 6h, stopping as soon as the cache is under the
+# cap. 6 h is the floor: a lane building now keeps every record its build touches, and the
+# records under it, since BuildKit frees a parent only after its children.
 # Tagged images and containers are never removed: an eval image can take hours to rebuild, and
 # Docker's age filter dates an image by when it was built, not by when it was last pulled or used.
 ConditionPathExists=/var/run/docker.sock

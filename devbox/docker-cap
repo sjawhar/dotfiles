@@ -4,20 +4,76 @@
 # comment says why each bound is what it is.
 #
 # It acts only when the filesystem of Docker's data root is more than DOCKER_CAP_HIGH_PCT
-# (default 80) per cent used. Then it runs three prunes:
-#   - build cache: the least recently used records go until the cache is at most
-#     DOCKER_CAP_BUILD_CACHE (default 50GB);
+# (default 80) per cent used. Then it:
+#   - build cache: while the cache is bigger than DOCKER_CAP_BUILD_CACHE (default 50GB), removes
+#     every record that no build has used for DOCKER_CAP_CACHE_AGES, each threshold in turn
+#     (default 48h 24h 12h 6h). It stops at the first threshold that brings the cache under the
+#     cap, and never removes a record used inside the last threshold, so a build running now
+#     keeps its cache;
 #   - untagged (dangling) images created more than 24 h ago: no tag names them;
 #   - anonymous volumes that no container, running or stopped, uses. Docker 23 and later prune
 #     only anonymous volumes, so named volumes stay.
 # It never removes a tagged image or a container. A tagged image can be an eval image that takes
 # hours to rebuild, so its owner decides when it goes.
 #
-# DOCKER_CAP_HIGH_PCT and DOCKER_CAP_BUILD_CACHE can be set to override the defaults.
+# Why age, and not BuildKit's own --max-used-space cap, holds the cache down: BuildKit compares
+# that cap against the sum of the *private* bytes of its records only. A record whose layer
+# digest chain also exists in the image store is "shared" and counts zero
+# (moby/buildkit v0.26.2 cache/manager.go, prune(): the `if ui.Shared { continue }` in the
+# totalSize loop, and pruneOnce()'s `if opt.keepBytes != 0 && opt.totalSize < opt.keepBytes`).
+# The same `shared` flag also removes such a record from the candidate list unless --all is
+# given. On sami-rocqperf on 2026-11-01 that made the cap a no-op: 65.1 GB of cache, 48.8 GB of
+# it shared, so BuildKit compared 16.3 GB against the 50 GB cap and deleted nothing, hour after
+# hour, while /mnt/nvme stood at 97% used. A shared record is not free disk: it holds a
+# containerd snapshot of its own.
+#
+# Why the cache can still stand above the cap after a run: BuildKit removes a record only when
+# no other record holds it, and a child record holds its parent. `docker builder du` says
+# "reclaimable" anyway, because its own count subtracts the holds that children have
+# (cache/manager.go, DiskUsage(): the `m[p].refs--` rescan loop) while prune() asks the raw
+# `len(cr.refs) == 0`. So a 3-day-old record under a child that a build used an hour ago stays
+# until that child ages past the threshold, and the next hourly run takes the pair together.
+#
+# DOCKER_CAP_BUILD_CACHE is read in Docker's own SI units, as `docker builder du` prints them:
+# 50GB is 50,000,000,000 bytes. Docker's --max-used-space flag reads the same string as binary
+# (50GB = 53.7e9), which is one more reason the cap is ours and not the flag's.
+#
+# DOCKER_CAP_HIGH_PCT, DOCKER_CAP_BUILD_CACHE and DOCKER_CAP_CACHE_AGES override the defaults.
 set -euo pipefail
 
 high="${DOCKER_CAP_HIGH_PCT:-80}"
 cache_cap="${DOCKER_CAP_BUILD_CACHE:-50GB}"
+cache_ages="${DOCKER_CAP_CACHE_AGES:-48h 24h 12h 6h}"
+
+# Docker prints sizes in SI units ("65.1GB"), so 1 GB is 1000^3 bytes here.
+to_bytes() {
+    local size="${1//[[:space:]]/}" num unit mult
+    num="${size%%[!0-9.]*}"
+    unit="${size#"$num"}"
+    case "${unit^^}" in
+    "" | B) mult=1 ;;
+    KB) mult=1000 ;;
+    MB) mult=1000000 ;;
+    GB) mult=1000000000 ;;
+    TB) mult=1000000000000 ;;
+    KIB) mult=1024 ;;
+    MIB) mult=1048576 ;;
+    GIB) mult=1073741824 ;;
+    TIB) mult=1099511627776 ;;
+    *)
+        echo "docker-cap: cannot read the size '$1'" >&2
+        return 1
+        ;;
+    esac
+    awk -v n="$num" -v m="$mult" 'BEGIN { printf "%.0f\n", n * m }'
+}
+
+cache_bytes() {
+    local total
+    total="$(docker builder du | awk -F'\t' '$1 == "Total:" { print $NF }')"
+    [[ -n "$total" ]] || return 1
+    to_bytes "$total"
+}
 
 if ! root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || [[ -z "$root" ]]; then
     echo "docker-cap: the Docker daemon does not answer; nothing to do"
@@ -35,7 +91,18 @@ fi
 
 before="$(free_bytes)"
 echo "docker-cap: $root is ${pct}% used, over ${high}%"
-echo "build cache over $cache_cap: $(docker builder prune --force --max-used-space "$cache_cap" | tail -1)"
+
+cap_bytes="$(to_bytes "$cache_cap")"
+cache="$(cache_bytes)"
+for age in $cache_ages; do
+    if ((cache <= cap_bytes)); then
+        break
+    fi
+    echo "build cache is $((cache / 1000000000)) GB, over $cache_cap: records unused for $age: $(docker builder prune --force --all --filter "until=$age" | tail -1)"
+    cache="$(cache_bytes)"
+done
+echo "build cache is now $((cache / 1000000000)) GB, cap $cache_cap"
+
 echo "untagged images older than 24 h: $(docker image prune --force --filter until=24h | tail -1)"
 echo "unused anonymous volumes: $(docker volume prune --force | tail -1)"
 after="$(free_bytes)"
