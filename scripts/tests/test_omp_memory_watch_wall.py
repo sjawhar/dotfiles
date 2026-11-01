@@ -337,7 +337,7 @@ class WallAdviceTest(unittest.TestCase):
         advice = WATCH.wall_advice(touch)
         self.assertIn("ONE RUNAWAY", advice)
         self.assertIn("67% of the peak", advice)
-        self.assertIn("DO:", WATCH.wall_text(touch))
+        self.assertIn("DO, first and whatever the cause:", WATCH.wall_text(touch))
         self.assertIn("ONE RUNAWAY", WATCH.wall_text(touch))
 
     def test_many_processes_when_the_whole_scope_holds_the_peak_but_no_one_process_does(self) -> None:
@@ -427,6 +427,118 @@ class WallAdviceTest(unittest.TestCase):
         killed = self.touch(events_oom_kill=1)
         self.assertIn("already killed", WATCH.urgent_reason(killed, options))
         self.assertIn("NOT WAITING FOR THE DIGEST", WATCH.urgent_text(killed, "x"))
+
+
+class WallVerdictTest(unittest.TestCase):
+    """The report's verdict follows the counters, not the fact of being at the wall.
+
+    What a wrong verdict costs: on 2026-11-01 a session read three "one allocation away from a
+    memcg OOM kill" reports on a scope whose memory.events said `max` +697, `oom` 0, `oom_kill`
+    0 and whose 24.00 GiB held 10.14 GiB of page cache, and nearly cut a shared fleet gate from
+    2 slots to 1 -- doubling the wait for ~27 lanes -- to avert a kill the counters said was not
+    coming. cgroup-v2.rst: `max` counts the times usage "was about to go over the max boundary"
+    and reclaim brought it down; `oom` is the counter that rises when reclaim fails.
+    """
+
+    def touch(self, **overrides) -> dict:
+        base = dict(
+            at=1000.0, scope="run-r1.scope", key="run-r1.scope", session="s", worker="c-asan",
+            limit=CEILING, limit_from="memory.max", peak=CEILING, current=CEILING,
+            swap_max="0", events_max=697, events_delta=697, events_oom=0, events_oom_kill=0,
+            peak_touch=True, task_count=12, rss_sum=4 * GIB,
+            top=[(11, GIB, "omp --resume x")], suppressed=0, cooldown=900.0,
+            warn_fraction=0.70, urgent_anon=0.50,
+        )
+        base.update(overrides)
+        stats = base["stats"]
+        base.setdefault(
+            "usage",
+            stats.get("anon", 0) + stats.get("shmem", 0) + stats.get("kernel", 0) + stats.get("sock", 0),
+        )
+        return base
+
+    def cache_dominated(self, **overrides) -> dict:
+        """Tonight's third real event: 24.00 GiB at the ceiling, 10.14 GiB of it page cache."""
+        return self.touch(
+            stats={"anon": 11545 * GIB // 1024, "file": 10383 * GIB // 1024,
+                   "kernel": 2652 * GIB // 1024, "shmem": 0, "sock": 0},
+            **overrides,
+        )
+
+    def unreclaimable(self, **overrides) -> dict:
+        return self.touch(
+            stats={"anon": 21 * GIB, "file": GIB, "kernel": 2 * GIB, "shmem": 0, "sock": 0},
+            **overrides,
+        )
+
+    def test_the_headline_says_how_much_of_the_ceiling_is_reclaimable_cache(self) -> None:
+        """The number that decides whether the alert means anything goes in the first sentence."""
+        headline = WATCH.wall_text(self.cache_dominated()).splitlines()[0]
+        self.assertIn("10.14 GiB (42% of the ceiling) is reclaimable page cache", headline)
+        tight = WATCH.wall_text(self.unreclaimable()).splitlines()[0]
+        self.assertIn("1.00 GiB (4% of the ceiling) is reclaimable page cache", tight)
+
+    def test_a_cache_filled_scope_with_no_oom_is_told_it_is_not_about_to_die(self) -> None:
+        state, verdict = WATCH.wall_state(self.cache_dominated())
+        self.assertEqual(state, "normal")
+        self.assertIn("NOT one allocation from a kill", verdict)
+        text = WATCH.wall_text(self.cache_dominated())
+        self.assertNotIn("one allocation away", text)
+        self.assertIn("Do NOT kill your builds, halve a shared gate", text)
+
+    def test_an_unreclaimable_scope_at_its_ceiling_keeps_the_urgency(self) -> None:
+        state, verdict = WATCH.wall_state(self.unreclaimable())
+        self.assertEqual(state, "urgent")
+        self.assertIn("URGENT", verdict)
+        self.assertIn("the memcg OOM killer runs", verdict)
+        self.assertNotIn("NOT URGENT", verdict)
+
+    def test_an_oom_kill_is_urgent_however_much_cache_the_scope_holds(self) -> None:
+        state, verdict = WATCH.wall_state(self.cache_dominated(events_oom_kill=1))
+        self.assertEqual(state, "urgent")
+        self.assertIn("ALREADY killed", verdict)
+
+    def test_a_failed_reclaim_is_urgent_before_anything_has_died(self) -> None:
+        """`oom` rises when reclaim could not bring usage under memory.max; nothing died yet."""
+        state, verdict = WATCH.wall_state(self.cache_dominated(events_oom=3))
+        self.assertEqual(state, "urgent")
+        self.assertIn("memory.events oom is 3", verdict)
+        self.assertIn("the next failure is the kill", verdict)
+
+    def test_an_unreadable_memory_stat_reads_as_urgent(self) -> None:
+        """No split means no proof that any of the charge is reclaimable: assume none is."""
+        state, verdict = WATCH.wall_state(self.touch(stats={}, usage=CEILING))
+        self.assertEqual(state, "urgent")
+        self.assertIn("conservatively", verdict)
+        self.assertIn("none can be shown reclaimable", WATCH.wall_text(self.touch(stats={}, usage=CEILING)))
+
+    def test_the_verdict_is_urgent_wherever_the_box_health_owner_is_told_at_once(self) -> None:
+        """The owner's report and the immediate escalation can never contradict each other."""
+        import argparse
+
+        options = argparse.Namespace(wall_urgent_anon=0.50)
+        anon_heavy = self.touch(
+            stats={"anon": 13 * GIB, "file": 10 * GIB, "kernel": 0, "shmem": 0, "sock": 0}
+        )
+        # Under the 70% unreclaimable level, so only the anon share makes it urgent.
+        self.assertLess(anon_heavy["usage"], 0.70 * CEILING)
+        self.assertNotEqual(WATCH.urgent_reason(anon_heavy, options), "")
+        self.assertEqual(WATCH.wall_state(anon_heavy)[0], "urgent")
+
+    def test_the_handover_instruction_survives_every_state(self) -> None:
+        for name, touch in (
+            ("cache", self.cache_dominated()),
+            ("unreclaimable", self.unreclaimable()),
+            ("killed", self.cache_dominated(events_oom_kill=2)),
+        ):
+            with self.subTest(name):
+                text = WATCH.wall_text(touch)
+                self.assertIn("write your handover files now", text)
+                # And everything else the report owes its reader.
+                self.assertIn("Where that memory is, by memory.stat:", text)
+                self.assertIn("Why you are hearing this and did not before:", text)
+                self.assertIn("One report per scope per 15 min 0 s", text)
+                self.assertIn("This watch only detects; it kills nothing.", text)
 
 
 class RunOnceTest(unittest.TestCase):

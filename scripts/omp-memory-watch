@@ -545,7 +545,7 @@ def wall_advice(touch: dict) -> str:
         where = " memory.stat could not be read, so this run cannot say where it is."
     else:
         where = (
-            f" The largest field of its memory.stat {'now' if fell_back else ''} is {name} at"
+            f" The largest field of its memory.stat{' now' if fell_back else ''} is {name} at"
             f" {gib(size)}: {STAT_MEANING.get(name, 'see memory.stat')}.{STAT_LEVER.get(name, '')}"
         )
     if fell_back:
@@ -809,6 +809,127 @@ def alert_text(scope: str, incident: dict, now: float, kind: str) -> str:
     return "\n".join(lines)
 
 
+def reclaimable_bytes(touch: dict) -> int | None:
+    """The part of this scope's charge the kernel can give back, or None when it cannot be told.
+
+    memory.current minus the unreclaimable part (anon+shmem+kernel+sock) is page cache: clean
+    file pages the kernel drops under pressure, and dirty ones it writes back and then drops.
+    None means memory.stat was unreadable, where `scope_pressure` counts the whole of
+    memory.current as unreclaimable and no split exists to show.
+    """
+    if not (touch.get("stats") or {}):
+        return None
+    return max(int(touch.get("current") or 0) - int(touch.get("usage") or 0), 0)
+
+
+def reclaimable_clause(touch: dict) -> str:
+    """The headline's one clause: how much of the ceiling is page cache the kernel can drop.
+
+    It decides whether the rest of the report means anything, so it goes in the first sentence
+    and not three paragraphs down beside the memory.stat split.
+    """
+    limit = max(int(touch.get("limit") or 0), 1)
+    free = reclaimable_bytes(touch)
+    if free is None:
+        return ", of which none can be shown reclaimable: its memory.stat could not be read"
+    return f", of which {gib(free)} ({100 * free / limit:.0f}% of the ceiling) is reclaimable page cache"
+
+
+# Why the advice below turns on oom_kill, oom and the unreclaimable share, and not on the fact
+# of being at the wall. From Documentation/admin-guide/cgroup-v2.rst (read 2026-11-01 at
+# https://www.kernel.org/doc/Documentation/admin-guide/cgroup-v2.rst):
+#
+#   memory.max  "If a cgroup's memory usage reaches this limit and can't be reduced, the OOM
+#               killer is invoked in the cgroup."
+#   max         "The number of times the cgroup's memory usage was about to go over the max
+#               boundary.  If direct reclaim fails to bring it down, the cgroup goes to OOM
+#               state."
+#   oom         "The number of time the cgroup's memory usage was reached the limit and
+#               allocation was about to fail."
+#   oom_kill    "The number of processes belonging to this cgroup killed by any kind of OOM
+#               killer."
+#   file        "Amount of memory used to cache filesystem data, including tmpfs and shared
+#               memory."
+#
+# So `max` rising is the kernel SUCCEEDING: usage reached the boundary, direct reclaim brought
+# it down, the allocation went through. The counter that rises when reclaim FAILS is `oom`, and
+# the one that rises when something dies is `oom_kill`. The kill condition the kernel documents
+# is "can't be reduced", and a scope holding gigabytes of page cache can be reduced. A scope
+# whose ceiling is mostly cache therefore produces `max` events in normal operation and can sit
+# at memory.max indefinitely; telling its owner it is one allocation from death is false, and
+# the shedding that advice provokes -- killed builds, halved gates, abandoned measurements --
+# costs more than the event does.
+#
+# The urgent side keeps every shape `urgent_reason` already escalates on, plus `oom` above zero
+# and the unreclaimable share test, so this verdict is urgent wherever the box-health owner is
+# told at once and the two can never contradict each other. Nothing here changes WHETHER a
+# report is sent: every threshold that gates a report is untouched.
+
+
+def wall_state(touch: dict) -> tuple[str, str]:
+    """("urgent" or "normal", the sentence saying which and why, from this scope's counters)."""
+    limit = max(int(touch.get("limit") or 0), 1)
+    peak = max(int(touch.get("peak") or 0), 1)
+    usage = int(touch.get("usage") or 0)
+    anon = int((touch.get("stats") or {}).get("anon", 0))
+    oom = int(touch.get("events_oom") or 0)
+    killed = int(touch.get("events_oom_kill") or 0)
+    # The level this watch already calls a session near its limit (--fraction, 0.70: 16.8 GiB of
+    # 24 GiB, measured in omp-memory-watch.md), and the anon share that already skips the digest
+    # (--wall-urgent-anon, 0.50). Both are read from the touch so one run has one set of levels.
+    warn_fraction = float(touch.get("warn_fraction") or 0.70)
+    urgent_anon = float(touch.get("urgent_anon") or 0.50)
+    free = reclaimable_bytes(touch)
+    if killed:
+        return "urgent", (
+            f"URGENT, and not a forecast: memory.events oom_kill is {killed}. The memcg OOM"
+            " killer has ALREADY killed a process in this scope, so reclaim has run out here"
+            " before. The next allocation it cannot satisfy takes another process, and an OOM"
+            " kill loses every in-flight lane with no exit record."
+        )
+    if oom:
+        return "urgent", (
+            f"URGENT: memory.events oom is {oom}. Reclaim has already failed at memory.max in"
+            " this scope and an allocation was about to fail -- the kernel's own condition for"
+            " invoking the memcg OOM killer is a usage that reaches the limit and cannot be"
+            " reduced. oom_kill is still 0, so nothing has died yet; the next failure is the"
+            " kill."
+        )
+    if free is None:
+        return "urgent", (
+            "URGENT, conservatively: this scope's memory.stat could not be read, so no part of"
+            " its charge can be shown to be page cache. Read it as if none of it is reclaimable."
+        )
+    if usage >= warn_fraction * limit:
+        return "urgent", (
+            f"URGENT: {gib(usage)} of the {gib(limit)} ceiling is unreclaimable"
+            f" (anon+shmem+kernel+sock), {100 * usage / limit:.0f}% of it, and only {gib(free)}"
+            " is page cache the kernel can drop. That is at or past the"
+            f" {100 * warn_fraction:.0f}% level this watch calls a session near its limit, so"
+            " reclaim is nearly out of material: when it cannot bring the scope back under"
+            " memory.max, the memcg OOM killer runs."
+        )
+    if anon >= urgent_anon * peak:
+        return "urgent", (
+            f"URGENT: anonymous memory is {gib(anon)}, {100 * anon / peak:.0f}% of the"
+            f" {gib(peak)} peak, and anon is what the kernel cannot hand back. A scope at its"
+            " wall holding mostly anon has little left to reclaim, and when reclaim fails the"
+            " memcg OOM killer runs."
+        )
+    return "normal", (
+        f"NOT URGENT: {gib(free)} of this scope's {gib(limit)} ceiling --"
+        f" {100 * free / limit:.0f}% -- is page cache, which the kernel reclaims on demand, and"
+        f" memory.events oom is 0 with oom_kill 0. So every one of the {touch.get('events_max', 0)}"
+        " times this scope reached memory.max, direct reclaim brought it down and the allocation"
+        " went through: that is exactly what the `max` counter counts. `oom` is the counter that"
+        " rises when reclaim fails, and it has not risen here. This scope is NOT one allocation"
+        " from a kill; a cache-filled scope can sit on its ceiling for as long as its file"
+        " traffic keeps the cache full. Do NOT kill your builds, halve a shared gate, or abandon"
+        " a measurement on this report -- that cost is certain, and the kill it would avert is"
+        " not coming while these counters hold. Watch oom and oom_kill, not `max`."
+    )
+
+
 def wall_text(touch: dict) -> str:
     """What one scope's owner is told when its scope reaches memory.max.
 
@@ -845,7 +966,7 @@ def wall_text(touch: dict) -> str:
     lines = [
         f"OMP SCOPE REACHED ITS MEMORY WALL: scope {touch['scope']} on {socket.gethostname()}"
         f" ({who}" + (f", ossv-worker {worker}" if worker else ", no ossv-worker name on its command lines") + ")"
-        f" is at its {gib(limit)} memory.max.",
+        f" is at its {gib(limit)} memory.max{reclaimable_clause(touch)}.",
         "What says so: " + "; and ".join(reasons) + ".",
         f"Numbers now: memory.peak {gib(peak)}, memory.current {gib(touch.get('current') or 0)},"
         f" unreclaimable (anon+shmem+kernel+sock) {gib(touch.get('usage') or 0)}, ceiling"
@@ -870,11 +991,14 @@ def wall_text(touch: dict) -> str:
         " never meets that and still spends its whole budget. On ossv-agent-open on 2026-10-30,"
         " 31 of 95 worker scopes had touched their 24 GiB wall and 4 were reported."
     )
+    state, verdict = wall_state(touch)
     lines.append(
-        "DO: a scope at its wall is one allocation away from a memcg OOM kill, which loses every"
-        " in-flight lane with no exit record. Write your handover files first, whatever the"
-        " cause. Then: " + wall_advice(touch)
+        "DO, first and whatever the cause: write your handover files now -- what each lane was"
+        " doing and where its work is. That costs seconds, and it is right whether this scope is"
+        " in danger or not."
     )
+    lines.append(f"What the counters say about this scope ({state}): {verdict}")
+    lines.append("If you do shed, shed the right thing: " + wall_advice(touch))
     lines.append(
         f"This watch only detects; it kills nothing. One report per scope per"
         f" {human(touch.get('cooldown') or 900)}. From omp-memory-watch"
@@ -1039,6 +1163,10 @@ def wall_touch(
         top=by_rss[: options.wall_top],
         suppressed=suppressed,
         cooldown=options.wall_cooldown,
+        # The levels `wall_state` judges this touch against, carried with it so the report and
+        # the run that produced it can never disagree about what "near the limit" means.
+        warn_fraction=options.fraction,
+        urgent_anon=options.wall_urgent_anon,
     )
 
 

@@ -112,17 +112,62 @@ So a capped scope is also reported when, since the last poll, either
 - its **`memory.peak`** rises to `--wall-fraction` (default 0.98) of the ceiling.
 
 No hold, no grace, no rate. One report per scope per `--wall-cooldown` (default 15 min); touches
-inside the cooldown are counted and the next report says how many it covers. The report names
-the scope, the session, the `ossv-worker` name, `memory.peak`, `memory.current`, the
+inside the cooldown are counted and the next report says how many it covers. Its **headline**
+says how much of the ceiling is reclaimable page cache (`memory.current` less the unreclaimable
+part), because that one number decides whether the rest of the report means anything. It then
+names the scope, the session, the `ossv-worker` name, `memory.peak`, `memory.current`, the
 unreclaimable number, the `oom`/`oom_kill` counters, the **`memory.stat` split** (`anon`,
 `file`, `shmem`, `kernel`, `sock`, largest first), the **process count and the RSS sum of every
 process in the scope**, and the **three largest by RSS with their command lines**.
 
-### What the owner is told to do
+### How urgent the report says it is
+
+Reaching `memory.max` is not by itself a near-death state, and saying it is costs real work. On
+2026-11-01 one session on sami-rocqperf got three reports telling it a scope at its wall was
+"one allocation away from a memcg OOM kill" while that scope's counters read `max` +697, `oom`
+**0**, `oom_kill` **0**, with 10.14 GiB of its 24.00 GiB held as page cache. It nearly cut a
+shared fleet gate from 2 slots to 1 — doubling the wait for ~27 lanes, one of which had already
+waited 1 191 s — to avert a kill the counters said was not coming.
+
+What the kernel documents (`Documentation/admin-guide/cgroup-v2.rst`):
+
+| Counter | The kernel's words |
+|---|---|
+| `memory.max` | "If a cgroup's memory usage reaches this limit and **can't be reduced**, the OOM killer is invoked in the cgroup." |
+| `max` | "The number of times the cgroup's memory usage was about to go over the max boundary. If direct reclaim fails to bring it down, the cgroup goes to OOM state." |
+| `oom` | "The number of time the cgroup's memory usage was reached the limit and allocation was about to fail." |
+| `oom_kill` | "The number of processes belonging to this cgroup killed by any kind of OOM killer." |
+| `file` | "Amount of memory used to cache filesystem data, including tmpfs and shared memory." |
+
+So a rising `max` with `oom` still 0 is the kernel **succeeding**: usage reached the boundary,
+direct reclaim brought it down, the allocation went through. `oom` is the counter that rises
+when reclaim fails and `oom_kill` the one that rises when something dies. The kill condition is
+"can't be reduced", and a scope holding gigabytes of page cache **can** be reduced.
+
+The report's verdict therefore follows the counters, in this order:
+
+| State | Verdict |
+|---|---|
+| `oom_kill` > 0 | **urgent** — not a forecast: the memcg OOM killer has already run here |
+| `oom` > 0 | **urgent** — reclaim has already failed at `memory.max`; the next failure is the kill |
+| `memory.stat` unreadable | **urgent**, conservatively — no part of the charge can be shown reclaimable |
+| unreclaimable ≥ `--fraction` of the ceiling (0.70) | **urgent** — at or past the level this watch already calls a session near its limit, so reclaim is nearly out of material |
+| `anon` ≥ `--wall-urgent-anon` of the peak (0.50) | **urgent** — the shape that already skips the digest |
+| otherwise | **not urgent** — the pressure is page cache the kernel drops on demand; do not kill builds, halve a shared gate, or abandon a measurement on this report |
+
+The urgent side is a **superset** of what `urgent_reason` escalates to the box-health owner, so
+the owner's report and that immediate note can never contradict each other. None of this changes
+**whether** a report is sent: every threshold that gates a report — `--fraction`, `--grace`,
+`--clear-fraction`, `--wall-fraction`, `--wall-cooldown`, `--wall-urgent-anon` — is untouched.
+
+**"Write your handover files first" is unconditional.** It costs seconds and it is right in
+every state, so it leads the `DO` line whatever the counters say.
+
+### If the owner does shed, where to shed
 
 The three largest processes explained only 10–29% of a scope at its ceiling in the open4 and
 open6 digests of 2026-10-30, so "find the process" was the wrong instruction for those scopes.
-The advice line is chosen from the numbers:
+The report's last line is chosen from the numbers:
 
 | Condition | Advice |
 |---|---|
