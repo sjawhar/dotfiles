@@ -315,6 +315,109 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertEqual([], self.escalations())
         self.assertEqual(19 * WATCH.GIB, self.incident()["reported_free"])
 
+    def repeats(self) -> list[str]:
+        """Every message that is not the first alert, whichever rule sent it."""
+        return [
+            text
+            for _, text in self.envoy.published + self.envoy.sent
+            if "Said again on:" in text
+        ]
+
+    def age_last_message(self, seconds: float) -> None:
+        """Put the crossing's last message -- alert or escalation -- that far in the past."""
+        incident = self.incident()
+        field = "escalated_at" if incident.get("escalated_at") else "alerted_at"
+        shift = time.time() - seconds - incident[field]
+        fields = {field: incident[field] + shift}
+        if field == "escalated_at":
+            fields["alerted_at"] = incident["alerted_at"] + shift
+        self.rewrite_incident(**fields)
+
+    # On 2026-10-31 /mnt/nvme spent its one escalation at 20:42:26Z and then said nothing from
+    # 20:57Z until the box went down at 21:58Z, with free space under the floor the whole time.
+    # The clock now runs from the last message and keeps running while the disk is under floor.
+    def test_a_crossing_under_its_floor_repeats_every_escalate_period(self) -> None:
+        self.big_filesystem(19)
+        self.run_once()
+        self.envoy.published.clear()
+        self.envoy.sent.clear()
+
+        self.age_last_message(1800)  # +30 min after the first alert
+        self.run_once()
+        self.assertEqual(1, len(self.repeats()))
+
+        self.age_last_message(1800)  # +60 min: 30 min after that escalation
+        self.run_once()
+
+        self.assertEqual(2, len(self.repeats()))
+        self.assertEqual(2, self.incident()["escalations"])
+        for text in self.repeats():
+            self.assertIn("STILL UNDER THE FLOOR", text)
+            self.assertIn("Said again on: 30 min since the last message, still under the floor.", text)
+
+    def test_a_floor_step_says_which_trigger_sent_it(self) -> None:
+        self.big_filesystem(19)
+        self.run_once()
+        self.envoy.published.clear()
+        self.envoy.sent.clear()
+
+        self.fall_to(13)  # a 6 GiB fall, with no 30 minutes gone
+
+        self.assertEqual(1, len(self.repeats()))
+        self.assertIn("Said again on: a further 5.0 GiB fall.", self.repeats()[0])
+
+    def rate_only_crossing(self) -> None:
+        """A crossing open on the fill rate alone, with free space well above the floor."""
+        WATCH.free_bytes = lambda mount: (self.free, 1000 * WATCH.GIB)
+        self.free = 30 * WATCH.GIB
+        now = time.time()
+        self.state.write_text(
+            json.dumps(
+                {
+                    "mounts": {
+                        MOUNT: {
+                            "samples": [[now - 3000, 50 * WATCH.GIB], [now - 1, self.free]],
+                            "horizon_confirmations": [
+                                [now - 900, 3600.0],
+                                [now - 600, 3600.0],
+                                [now - 300, 3600.0],
+                            ],
+                        }
+                    },
+                    "incidents": {},
+                }
+            )
+        )
+
+    # Above the floor the crossing rests on the fill rate, and the rate is already in the first
+    # alert, so the clock still fires once: two falls of less than FLOOR_STEP, half an hour
+    # apart, send one escalation and not two.
+    def test_a_rate_only_crossing_above_the_floor_still_escalates_once(self) -> None:
+        self.rate_only_crossing()
+        self.run_once()
+        self.assertIn("DISK FILLING", self.envoy.published[0][1])
+        self.assertTrue(self.incident()["free"] > self.incident_floor())
+        self.envoy.published.clear()
+        self.envoy.sent.clear()
+
+        self.age_last_message(1800)
+        self.fall_to(29)
+        self.assertEqual(1, len(self.repeats()))
+        self.envoy.published.clear()
+        self.envoy.sent.clear()
+
+        self.age_last_message(1800)
+        self.fall_to(28)
+
+        self.assertEqual([], self.repeats())
+        self.assertEqual(1, self.incident()["escalations"])
+
+    def incident_floor(self) -> float:
+        return min(
+            WATCH.FLOORS.get(MOUNT, self.options().default_floor * WATCH.GIB),
+            1000 * WATCH.GIB * WATCH.MAX_FLOOR_FRACTION,
+        )
+
 
 class DiskFillWatchWritersJsonChildTest(unittest.TestCase):
     """`--writers-json` is parsed by its parent, so its stdout must be JSON and only JSON.

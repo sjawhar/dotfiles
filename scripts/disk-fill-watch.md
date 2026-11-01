@@ -44,15 +44,23 @@ Per mount, per run:
 | Last-two-sample rate | the same two-endpoint fall, over the last two samples only. It is read for one decision and nothing else: whether a crossing may skip the grace window |
 | Urgent | free ÷ the **faster** of those two rates is under `--urgent-horizon` (30 min) |
 | Alert | after `--grace` (240 s, so a second consecutive run confirms it) — **or at once, on the sample that opens the crossing, when it is urgent** |
-| Escalate | 30 minutes after the alert, if free is lower than it was then, **and again on each further fall of 5 GiB (`FLOOR_STEP`) below the lowest level already reported**, while the crossing stays open |
+| Escalate | **every 30 minutes since its last message, while free is under the floor**, **and** on each further fall of 5 GiB (`FLOOR_STEP`) below the lowest level already reported, while the crossing stays open. A crossing open only on the rate, with free above the floor, escalates once on the clock, as before |
 | Clear | free ≥ floor × 1.5 **and** no df free-space fall that reaches full inside twice the horizon |
 
 **A crossing that keeps falling keeps saying so.** The `/` crossing of 2026-10-31 opened about
 11:04Z, alerted at 11:09Z and escalated at 11:39Z, then said nothing while free space fell from
-22.6 GiB to 3.9 GiB: after the first escalation the only remaining test was the clock, and the
-clock fires once. Each further fall of `FLOOR_STEP` (5 GiB, the step the guard
+22.6 GiB to 3.9 GiB. Each further fall of `FLOOR_STEP` (5 GiB, the step the guard
 `guard-disk-writers` uses for the same purpose) below the lowest level this watch has already
 reported is a new fact, so it escalates again, with the current writers and the current number.
+
+**A crossing under its floor keeps saying so even when it is flat.** The clock runs from the
+last message, not from the first alert, and it keeps running. On 2026-10-31 `/mnt/nvme` spent
+its one escalation at 20:42:26Z, said nothing from 20:57Z while free space stayed under the
+78.2 GiB floor, and the box went down at 21:58Z. Under the floor is a standing fact, so the
+watch now repeats it every `--escalate` (30 min). Replayed against that day's samples the new
+rule speaks at 20:36Z, 20:46Z, 21:16Z and 21:36Z. Each escalation says which rule sent it:
+`Said again on: 30 min since the last message, still under the floor.` or
+`Said again on: a further 5.0 GiB fall.`
 
 **A sawtooth is not a leak.** `/mnt/nvme` on this box swings about 100 GB up and down every hour
 as grade jobs land and are cleaned (its 10-minute log on 2026-10-26 reads 295 GB → 479 → 378 →
@@ -284,8 +292,9 @@ unchanged: they always go to the box-health owner.
 ## Who hears about it
 
 Agent sessions only, never a person. Every message goes to the Envoy role
-**`notifications.role.lead-box-health`**: the first alert, the escalation 30 minutes later when
-a crossing is still open and free space is still **lower than at the alert**, each further
+**`notifications.role.lead-box-health`**: the first alert, a repeat every 30 minutes while the
+crossing stays under its floor (a crossing open only on the rate escalates once on that clock,
+and only while free space is **lower than at the alert**), each further
 escalation 5 GiB below the lowest level already reported, and the clear.
 Box health is the box-health lane's work, decided 2026-10-31T02:37:50Z; the chief of staff was
 on the escalation until then, the INFRA lead owned this detector and handed the lane over, and
@@ -300,9 +309,9 @@ the service's environment: every message then goes to that session alone, with n
 this is how the OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring
 owner instead of to this box's role holder. An invalid value stops the watch at start.
 
-One first alert per crossing, one clear, and an escalation for each 5 GiB the disk falls below
-the last level reported while that crossing stays open. The clear goes to everyone who heard the
-crossing.
+One first alert per crossing, one clear, an escalation for each 5 GiB the disk falls below
+the last level reported, and one every 30 minutes under the floor, while that crossing stays
+open. The clear goes to everyone who heard the crossing.
 
 Every alert ends with what to DO: act only on the writers listed as on this filesystem (stopping
 one from the elsewhere group frees nothing here), stop or finish that lane, move its output to

@@ -66,8 +66,8 @@ entries and walking it on every run would itself be the load. A symlink is measu
 and never followed, so a tree already moved to /mnt/nvme says nothing.
 
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
-for the first alert, for the escalation 30 minutes later when a crossing is still open and
-still descending, for each further fall of FLOOR_STEP below the lowest level already reported,
+for the first alert, for every further FLOOR_STEP the disk falls below the lowest level
+already reported, for a repeat every 30 minutes while the crossing stays under its floor,
 and for the clear. An unheld role falls back to the box-health SRE's session. This watch only
 detects. It deletes nothing and kills nothing.
 """
@@ -174,8 +174,8 @@ FLAT_RATE = GB / 3600
 # How much further free space must fall, below the lowest level this watch has already
 # reported, before an open crossing is said again. The `/` crossing of 2026-10-31 opened at
 # 11:04Z, was alerted at 11:09Z and escalated once at 11:39Z, and then said nothing while free
-# space fell from 22.6 GiB to 3.9 GiB: after the first escalation the only test was the clock,
-# and it fires once. A fall of this much is a new fact, so it is said. The guard that sheds
+# space fell from 22.6 GiB to 3.9 GiB: at that time the only test was the clock, and the clock
+# fired once. A fall of this much is a new fact, so it is said. The guard that sheds
 # writers uses the same step for the same purpose (agent-infra monitoring/host guard.sh
 # `FLOOR_STEP`, 5 GB decimal there).
 FLOOR_STEP = 5 * GIB
@@ -1865,17 +1865,30 @@ def run_once(options: argparse.Namespace) -> int:
 
         # The lowest free space this crossing has already been reported at: the first alert's
         # level, then each escalation's. A crossing that keeps falling has to keep saying so --
-        # the `/` crossing of 2026-10-31 said nothing between 11:39Z and 3.9 GiB free -- so the
-        # clock escalates once and each further FLOOR_STEP below that level escalates again.
+        # the `/` crossing of 2026-10-31 said nothing between 11:39Z and 3.9 GiB free -- so each
+        # further FLOOR_STEP below that level escalates again.
         reported_free = incident.get("reported_free")
         if reported_free is None:
             reported_free = incident.get("alert_free")
         still_falling = now["free"] < (incident.get("alert_free") or now["free"])
-        timed_out = (
-            not incident.get("escalated_at")
-            and started - (incident.get("alerted_at") or started) >= options.escalate
-            and still_falling
-        )
+        # The clock runs from the LAST message, not from the first alert, and it keeps running
+        # while the disk stays under its floor. It used to fire once per crossing: on
+        # 2026-10-31 /mnt/nvme spent that single escalation at 20:42:26Z and then said nothing
+        # from 20:57Z until the box went down at 21:58Z, with free space under the floor the
+        # whole time. Under the floor is a standing fact, so it is said again every
+        # --escalate. A crossing open only on the fill rate, with free space above its floor,
+        # keeps the one-escalation rule: there the clock is the rate's, and the rate is already
+        # in the first alert.
+        said_at = incident.get("escalated_at") or incident.get("alerted_at") or started
+        since_said = started - said_at
+        if now["below_floor"]:
+            timed_out = since_said >= options.escalate
+        else:
+            timed_out = (
+                not incident.get("escalated_at")
+                and since_said >= options.escalate
+                and still_falling
+            )
         stepped = reported_free is not None and now["free"] <= reported_free - FLOOR_STEP
         escalating = not first and (timed_out or stepped)
         if not first and not escalating:
@@ -1905,11 +1918,23 @@ def run_once(options: argparse.Namespace) -> int:
         else:
             incident["escalated_at"] = started
             incident["escalations"] = int(incident.get("escalations") or 0) + 1
-            kind = f"STILL DESCENDING after {human_time(started - incident['alerted_at'])}"
+            kind = (
+                f"STILL DESCENDING after {human_time(started - incident['alerted_at'])}"
+                if still_falling
+                else f"STILL UNDER THE FLOOR after {human_time(started - incident['alerted_at'])}"
+            )
         incident["reported_free"] = now["free"]
         text = alert_text(now, incident, writers, tmp_lines, kind, started)
         if not first:
+            # Which of the two escalation rules sent this one, said out loud: a reader who gets
+            # a message every half hour has to be able to tell it from one a new fall sent.
+            trigger = (
+                f"{short_time(options.escalate)} since the last message, still under the floor"
+                if timed_out
+                else f"a further {gib(FLOOR_STEP)} fall"
+            )
             text += (
+                f"\nSaid again on: {trigger}."
                 f"\nNothing has stopped it since the first alert at {iso(incident['alerted_at'])}:"
                 f" {gib(incident.get('alert_free') or 0)} free then, {gib(now['free'])} now."
             )
