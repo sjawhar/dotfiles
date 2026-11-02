@@ -2542,6 +2542,20 @@ move_resume_check() {
     return 1
 }
 
+# move_session_spec PID SID DIR…: the `agentbox new` options a move gives this session - the
+# session environment (move_session_env), then `--dir` for each DIR - in MOVE_SPEC, and the
+# resume check on them (move_resume_check: MOVE_RESUME or MOVE_RESUME_WHY, and its status).
+# `--self`, `move <id>` and `--plan` all ask this one function, so the plan shows exactly the
+# check a move will run.
+MOVE_SPEC=()
+move_session_spec() {
+    local pid="$1" sid="$2" d
+    shift 2
+    mapfile -t MOVE_SPEC < <(move_session_env "$pid")
+    for d in "$@"; do MOVE_SPEC+=(--dir "$d"); done
+    move_resume_check "$pid" "$sid" "${MOVE_SPEC[@]}"
+}
+
 move_census() {
     local -A pane_id=() pane_at=() cname=() comm=() ppid=() ctr=() unit=() cwd=() sid=()
     local pids=() files=() pid parent key name value id class detail chain found guard line leaf child
@@ -2737,8 +2751,8 @@ cmd_move_plan() {
     echo "agentbox move --plan: reading this host's live omp sessions; progress on stderr, the table at the end." >&2
     local census_rows=() total=0 done_n=0
     mapfile -t census_rows < <(move_census)
-    local class pid sid pane at cwd detail spec reason line path why note
-    local dirs=() whys=() rows=() why_rows=() blocked=0 movable=0 sids=()
+    local class pid sid pane at cwd detail spec reason line path why note resume
+    local dirs=() whys=() rows=() why_rows=() blocked=0 movable=0 sids=() refused_sids=()
     local -A counts=([host]=0 [no-pane]=0 [boxed]=0 [sandbox]=0 [subagent]=0)
     for line in "${census_rows[@]}"; do
         IFS="$SEP" read -r class pid sid pane at cwd detail <<<"$line"
@@ -2790,7 +2804,20 @@ cmd_move_plan() {
         if [[ -z "$sid" ]]; then
             reason="${reason:-${detail:-its omp holds no session file open, so a move cannot name it in full}}"
         fi
-        if [[ "$class" == host && -z "$reason" ]]; then
+        # The resume check the move will run, by the same function (move_session_spec), so a
+        # person sees before any notice which sessions would not come back. Its spec, session
+        # environment included, is the one the row shows.
+        resume=""
+        if [[ -n "$sid" ]]; then
+            if move_session_spec "$pid" "$sid" "${dirs[@]+"${dirs[@]}"}"; then
+                resume="resume: $MOVE_RESUME"
+            else
+                resume="REFUSED: $MOVE_RESUME_WHY"
+                refused_sids+=("$sid")
+            fi
+            (( ${#MOVE_SPEC[@]} )) && spec="${MOVE_SPEC[*]}"
+        fi
+        if [[ "$class" == host && -z "$reason" && "$resume" != REFUSED:* ]]; then
             movable=$((movable + 1))
         elif [[ "$class" == host ]]; then
             blocked=$((blocked + 1))
@@ -2803,31 +2830,33 @@ cmd_move_plan() {
             note="${note:+$note; }$MOVE_NOTICE_NOKIDS"
         fi
         line="$(printf '%s\x1e' "${whys[@]+"${whys[@]}"}")"
-        rows+=("$class	$sid	$pid	$pane	$at	$cwd	${spec:--}	$(move_gib "$image")	$note	${line%$'\x1e'}")
+        rows+=("$class	$sid	$pid	$pane	$at	$cwd	${spec:--}	$(move_gib "$image")	$note	${resume:--}	${line%$'\x1e'}")
     done
     local new_total=$((movable * image))
     if $json; then
         jq -Rn --argjson summary "$(jq -n \
-                --argjson movable "$movable" --argjson blocked "$blocked" \
+                --argjson movable "$movable" --argjson blocked "$blocked" --argjson refused "${#refused_sids[@]}" \
                 --argjson nopane "${counts[no-pane]:-0}" --argjson boxed "${counts[boxed]:-0}" \
                 --argjson sandbox "${counts[sandbox]:-0}" --argjson subagent "${counts[subagent]:-0}" \
                 --argjson image "$image" --argjson total "$new_total" --argjson free "$free" --argjson floor "$floor" \
-                '{movable: $movable, blocked: $blocked, not_a_pane: $nopane, already_boxed: $boxed,
-                  sandboxes: $sandbox, subagents: $subagent, new_disk_per_box_bytes: $image,
+                '{movable: $movable, blocked: $blocked, resume_refused: $refused, not_a_pane: $nopane,
+                  already_boxed: $boxed, sandboxes: $sandbox, subagents: $subagent, new_disk_per_box_bytes: $image,
                   new_disk_total_bytes: $total, free_bytes: $free, floor_bytes: $floor,
                   headroom_bytes: ($free - $floor - $total)}')" \
             '{summary: $summary, sessions: [inputs | split("\t") |
                 {class: .[0], session: .[1], pid: (.[2] | tonumber), pane: .[3], tmux: .[4],
                  cwd: .[5], spec: .[6], new_disk_gib: (.[7] | tonumber), note: .[8],
-                 dirs: (if (.[9] // "") == "" then []
-                        else (.[9] | split("\u001e") | map(split("\u001f") | {path: .[0], why: .[1]})) end)}]}' \
+                 resume: (if (.[9] | startswith("resume: ")) then .[9][8:] else null end),
+                 resume_refused: (if (.[9] | startswith("REFUSED: ")) then .[9][9:] else null end),
+                 dirs: (if (.[10] // "") == "" then []
+                        else (.[10] | split("\u001e") | map(split("\u001f") | {path: .[0], why: .[1]})) end)}]}' \
             < <(printf '%s\n' "${rows[@]}")
         return 0
     fi
     echo "agentbox move --plan: $(hostname -s), $(date -u +%FT%TZ)"
     echo
-    { echo "CLASS	SESSION	PID	PANE	TMUX	CWD	SPEC	NEW-GiB	NOTE"
-      printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1 -k6,6
+    { echo "CLASS	SESSION	PID	PANE	TMUX	CWD	SPEC	NEW-GiB	NOTE	RESUME"
+      printf '%s\n' "${rows[@]}" | cut -f1-10 | sort -t$'\t' -k1,1 -k6,6
     } | column -t -s $'\t'
     echo
     if (( ${#why_rows[@]} )); then
@@ -2839,6 +2868,7 @@ cmd_move_plan() {
         echo
     fi
     echo "host sessions outside a box: $((movable + blocked)) ($movable with a spec, $blocked that need a decision)"
+    echo "resume check: ${#refused_sids[@]} REFUSED, would not come back in a box and are not moved${refused_sids[*]:+: ${refused_sids[*]}}"
     echo "not a pane (headless or unit-run, yours to decide): ${counts[no-pane]:-0}"
     echo "excluded: ${counts[boxed]:-0} already in a box, ${counts[sandbox]:-0} in a grading sandbox, ${counts[subagent]:-0} subagents of another omp"
     echo "new disk: $(move_gib "$image") GiB per box (its sparse ext4 image; a move clones nothing), $(move_gib "$new_total") GiB for $movable boxes"
@@ -3111,14 +3141,11 @@ cmd_move_self() {
         whys+=("  $path — $why")
     done < <(move_dirs_why "$cwd" "$pid" "$sid" "${BOX_DIRS[@]+"${BOX_DIRS[@]}"}" 2>/dev/null)
     (( ${#dirs[@]} )) || die "$(move_dirs_why "$cwd" "$pid" "$sid" 2>&1 >/dev/null || true)"
-    for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
     # Where the session lives goes into the box with it, and the box must be able to open it:
     # both are settled before anything is hung up.
-    local envs=()
-    mapfile -t envs < <(move_session_env "$pid")
-    spec=("${envs[@]+"${envs[@]}"}" "${spec[@]}")
-    move_resume_check "$pid" "$sid" "${spec[@]}" \
+    move_session_spec "$pid" "$sid" "${dirs[@]}" \
         || die "session $sid cannot be moved: $MOVE_RESUME_WHY; nothing was hung up"
+    spec=("${MOVE_SPEC[@]}")
     if [[ -z "${MOVE_KIDS[$pid]:-}" ]]; then
         whys+=("  (this session has no live child process, so only its working directory, its own record and the last plan were read)")
     fi
@@ -3217,17 +3244,13 @@ cmd_move_notify() {
         if [[ -z "${MOVE_KIDS[$pid]:-}" ]]; then
             whys+=("$MOVE_NOTICE_NOKIDS")
         fi
-        spec=()
-        for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
         # Where the session lives goes into its box with it, and the box must be able to open it
-        # (move_session_env, move_resume_check), before any notice or hang-up.
-        local envs=()
-        mapfile -t envs < <(move_session_env "$pid")
-        spec=("${envs[@]+"${envs[@]}"}" "${spec[@]}")
-        if ! move_resume_check "$pid" "$sid" "${spec[@]}"; then
+        # (move_session_spec), before any notice or hang-up.
+        if ! move_session_spec "$pid" "$sid" "${dirs[@]}"; then
             echo "agentbox: $sid cannot be moved: $MOVE_RESUME_WHY; not notified, nothing hung up" >&2
             continue
         fi
+        spec=("${MOVE_SPEC[@]}")
         if ! move_check_floor "$image"; then return 2; fi
         if $now; then
             if $dry; then

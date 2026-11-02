@@ -783,6 +783,32 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertIn(f"-- omp --resume {nested}\n", allowed.stdout)
 
+    def test_the_plan_shows_each_session_s_resume_check(self) -> None:
+        """`--plan` runs the move's own resume check: a nested transcript shows the path the box
+        will resume, an unreachable one shows REFUSED with the reason, and the summary counts it."""
+        nested = self.nested_transcript()
+        self.nested_session(nested, environ={"OMP_PROFILE": "pbc"})
+        far = self.root / "elsewhere/sessions/-lane" / "2026-10-25T02-17-36-102Z_01a19700-0000-7000-8000-00000000f001.jsonl"
+        far.parent.mkdir(parents=True)
+        far.write_text("", encoding="utf-8")
+        self.make_proc(1102, ppid=1100, cwd=self.root / "lane", cmdline=f"omp --resume {far}")
+        self.set_pids(1101, 1102)
+        self.set_panes({1100: ("%47", "agents:3.1")})
+        env = 'move_image_bytes() { echo 280000000; }\nmove_free_bytes() { echo 900000000000; }\n'
+        plan = self.run_bash(env + "cmd_move_plan")
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertIn(f"resume: {nested}", plan.stdout)
+        self.assertIn("-e OMP_PROFILE=pbc --dir", plan.stdout)
+        self.assertIn(f"REFUSED: its transcript {far} is not in any path the box gets", plan.stdout)
+        self.assertIn("resume check: 1 REFUSED, would not come back in a box and are not moved: "
+                      "01a19700-0000-7000-8000-00000000f001", plan.stdout)
+        doc = json.loads(self.run_bash(env + "cmd_move_plan --json").stdout)
+        by = {s["session"]: s for s in doc["sessions"]}
+        self.assertEqual(by[self.METARQ]["resume"], str(nested))
+        self.assertIsNone(by[self.METARQ]["resume_refused"])
+        self.assertIn("is not in any path the box gets", by["01a19700-0000-7000-8000-00000000f001"]["resume_refused"])
+        self.assertEqual(doc["summary"]["resume_refused"], 1)
+
     def relaunch(self, environ: dict[str, str], respawn_fails: bool = False,
                  caller: dict[str, str] | None = None) -> list[str]:
         """Run the detached relauncher of `--all`/`move <id>`/`--now` for one session and return the
