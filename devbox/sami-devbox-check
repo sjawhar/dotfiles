@@ -109,7 +109,7 @@ tools_check() {
     if [[ ",$got," == *,ghcr.io,* ]]; then
         ok "docker in the box: logged in to ghcr.io (auths: $got)"
     elif ! secrets GHCR_PULL_TOKEN -- true >/dev/null 2>&1; then
-        echo "WAIT docker in the box: no ghcr.io login: ghcr.io takes only a classic personal access token for org packages; the sjawhar-agent App token gets 403 \"installation not allowed to Read organization package\" (2026-11-02 20:4xZ)"
+        echo "WAIT docker in the box: no ghcr.io login: ghcr.io takes only a classic personal access token for org packages (the sjawhar-agent App token gets 403); a classic PAT from a machine user means creating an account, which is Sami's decision; no session needs a private ghcr image now"
     else
         fail "docker in the box: GHCR_PULL_TOKEN resolves but ~/.docker/config.json has no ghcr.io login (auths: ${got:-none})"
     fi
@@ -329,7 +329,9 @@ host() {
     [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
     host_logins
     echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"
-    "$DOTFILES_DIR/scripts/agentbox" doctor 2>&1 | sed 's/^/   doctor: /'
+    # Bounded: it is for the record, and a doctor that hung (21:00Z, 2026-11-02) must not hold A2.
+    timeout 600 "$DOTFILES_DIR/scripts/agentbox" doctor </dev/null 2>&1 | sed 's/^/   doctor: /'
+    (( PIPESTATUS[0] == 124 )) && note "agentbox doctor did not finish in 10 minutes; stopped"
     echo "-- a new agent box runs the box half"
     local rc=0
     "$DOTFILES_DIR/scripts/agentbox" new --dir "$CUTOVER_DIR" -- bash "$DOTFILES_DIR/devbox/sami-devbox-check" --in-box </dev/null || rc=$?
