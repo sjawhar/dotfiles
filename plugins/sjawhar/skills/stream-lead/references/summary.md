@@ -13,7 +13,13 @@ lead's rounds once, from records, then end. You decide nothing for an owner and 
 3. Post each line of `pending_offline` as its own ledger comment on the stream issue, and add each entry of
    `pending_offline_decisions` to the record's decisions (`dispatch doc-edit`, numbered from a fresh read). Then
    delete from the local files exactly the lines you posted; a line another session added since stays.
-4. Write the summary (shape below) and upload it:
+4. Write the summary (shape below). Before you upload it, give it to one fresh reviewer of another model family
+   (`agent: astra` in a task call) with the facts file, and ask it to check each conclusion against the fact it
+   cites: a measurement at one size or of one population said to hold for another, a count whose population is not
+   the one named, a forecast written as a present count, a guessed cause stated as fact. Fix each finding, because
+   these summaries reach Sami and he has caught each of those flaws in a report. If the facts carry anything taken
+   from HDO model transcripts, use a fresh Claude reviewer instead, because HDO material never goes to another
+   model family. Then upload it:
    `dispatch artifact --issue <STREAM> --name summary.md --path summary.md --summary 'summary <UTC time>'`.
 5. In the record's top, change only the `## Numbers` values (from the scoreboard, each with its date) and the
    `Last summary:` link, with `dispatch doc-edit` against a fresh token. Other lines belong to the sessions that own

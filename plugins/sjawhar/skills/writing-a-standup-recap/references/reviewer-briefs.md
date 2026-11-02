@@ -34,7 +34,12 @@ load-bearing, unsupported, or when two drafts disagree, because agreement with a
 claim with no support, a wrong weekend label (weekend is Saturday and Sunday, Pacific), a billing figure whose
 days are UTC but read as Pacific, a chart whose dates disagree with the text, and a caveat that condensing
 dropped and that changes the meaning ("not in production", "measured on 3 cases", "its definition changed this
-week").
+week"). Then check each conclusion against its evidence, because a true number can carry a false inference: a
+measurement at one size or of one population said to hold for another, a count whose population differs from the
+one the sentence names ("waits on you" for every open ask), a forecast written as a present count, a guessed cause
+stated as fact. Use a reviewer from another model family for this check, because one of the same family shares
+the drafter's blind spots; for a part that carries anything taken from HDO model transcripts, use a fresh Claude
+reviewer, because HDO material never goes to another model family.
 
 ## Sami's feedback check
 Apply every rule in `references/sami-feedback.md` to the draft, one at a time. For each: PASS, or FAIL with the
