@@ -1,0 +1,251 @@
+#!/bin/bash
+# sami-devbox-provision: step 2 of dispatch://INFRA-993's cutover, "Provision", run from
+# sami-rocqperf by a session that acts in Google Cloud as dev-sjawhar@ (the box identity) and is on
+# the tailnet. It turns the bare VM agent-infra bootstrap/samidevbox.go makes into a machine an
+# agent session can be moved to, and ends with the A2 check. The drill that follows is
+# devbox/sami-devbox-drill.
+#
+#   sami-devbox-provision [--from STEP] [--only STEP]
+#
+# Steps, in order; each is safe to run again:
+#   vm         the VM is RUNNING; first login as sami through `gcloud compute ssh` (the guest agent
+#              makes the user from the key it puts in the instance's metadata; OS Login is off);
+#              the startup script has installed its packages and formatted the state and cold
+#              disks; sami is uid 1000.
+#   host       the root layer, devbox/gce-host.sh, from a throwaway clone: the disk units (RAID,
+#              /mnt/scratch, swap, /mnt/nvme, /mnt/durable, /home), Docker's data on the state disk,
+#              Sysbox, Tailscale joined as sami-devbox with tag:sami-devbox by the VM's own Google
+#              identity (TAILSCALE_CLIENT_ID: bootstrap/'s output samiDevboxTailnetClientId),
+#              linger. From here every step goes over Tailscale SSH.
+#   dotfiles   ~/.dotfiles cloned from GitHub (public, no login) onto the state disk, colocated jj.
+#   secrets    the secret files that are in no repository (SECRET_FILES below), over Tailscale SSH.
+#   tools      a first install.sh pass for mise's tools, then the secrets broker's host helper
+#              (installers/agent-secrets.sh). The pass is expected to stop at installers/omp.sh:
+#              its private marketplaces clone with a GitHub App token, which on this machine comes
+#              only through the broker, which needs the login of the next step (the clean-container
+#              dry run, 2026-11-02).
+#   broker     the secrets broker's machine login: prints a code a person types at Dispatch's
+#              /credentials/machine page; the step waits for the approval.
+#   install    install.sh again, now to the end; devbox/install.sh; then the standalone installers
+#              sami-rocqperf runs (EXTRA_INSTALLERS below).
+#   image      the agent-box image, built on the machine (`agentbox rebuild`).
+#   responder  the outside responder exists: the CronJob box-monitor in the dispatch cluster.
+#   speed      Tailscale SSH throughput from sami-rocqperf to sami-devbox, the path step 3's bulk
+#              copy takes.
+#   check      devbox/sami-devbox-check --mark-ready on the machine (A2). On a pass it writes the
+#              marker `agentbox move --to sami-devbox` requires.
+#
+# Envoy needs nothing deployed on the machine: the hub's listener (agent-infra envoy/) serves
+# every device the tailnet lets reach it, and bootstrap/ grants tag:sami-devbox tcp 9020 and
+# 4222 on the hub. A session reaches it with the envoy.json the secrets step copies.
+set -euo pipefail
+
+VM=sami-devbox
+ZONE=us-west4-a
+PROJECT=theorem-agent-infra
+MACHINE_TYPE=c4-highmem-288-lssd
+REPO=https://github.com/sjawhar/dotfiles
+KUBE=(kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n box-monitor)
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new "sami@$VM")
+GSSH=(gcloud compute ssh "sami@$VM" --zone "$ZONE" --project "$PROJECT" --strict-host-key-checking=no --quiet)
+LOGS="${SAMI_DEVBOX_PROVISION_LOGS:-/mnt/nvme/$(id -un)/scratch/devbox-provision/provision}"
+
+# The files a session on the machine needs that no repository holds (spec "Shared state during
+# the cutover": they copy at step 2). Paths are relative to $HOME and copied to the same path.
+# Never a person's login: no gcloud, Azure or GitHub sign-in is here, and none may be added.
+#   .config/sops/age/keys.txt       sami-rocqperf's machine age key, a recipient of every
+#                                   agent-tier secrets.env (.sops.yaml), so secretsd decrypts there
+#                                   with no `sops updatekeys`; sami-rocqperf retires.
+#   .dotfiles/secrets.env           the working copy, which differs from its last commit.
+#   .dotfiles/.secrets/             the private overlay (theorem-labs/sami) with its uncommitted
+#                                   secrets.local.env and secrets.env.
+#   .dotfiles/secrets.human.d/CAP_BROWSER.local.env   untracked human-tier file (YubiKey only).
+#   .dotfiles/omp/config.local.yml, .dotfiles/omp/models.local.yml
+#                                   untracked overlays: the model gateway provider and roles.
+#   .dotfiles/.claude/envoy.json, .config/legion/envoy.json
+#                                   Envoy and Dispatch for Claude Code and omp sessions (the
+#                                   Dispatch token).
+#   .ssh/jj-signing, .ssh/jj-signing.pub
+#                                   the commit-signing key, registered on GitHub as
+#                                   jj-signing-sami-rocqperf; it moves rather than a new key being
+#                                   registered (spec "Software").
+SECRET_FILES=(
+    .config/sops/age/keys.txt
+    .dotfiles/secrets.env
+    .dotfiles/.secrets/
+    .dotfiles/secrets.human.d/CAP_BROWSER.local.env
+    .dotfiles/omp/config.local.yml
+    .dotfiles/omp/models.local.yml
+    .dotfiles/.claude/envoy.json
+    .config/legion/envoy.json
+    .ssh/jj-signing
+    .ssh/jj-signing.pub
+)
+
+# The standalone installers sami-rocqperf runs that install.sh and devbox/install.sh do not
+# (spec "Software"; the inventory's user units). Left out on purpose: forward's laptop roles,
+# chathub, voxtype, ghostty (laptop programs); transcript-store-jobs, whose units move with their
+# owner at step 4; omp-login-watch, which reads omp's credential store (~/.omp/agent/agent.db)
+# and so arms at step 5, when the global omp state copies; and pulumi-drift-watch, which mints
+# its token from the `theorem` gcloud configuration, a person's login that this machine never
+# holds.
+EXTRA_INSTALLERS=(
+    disk-fill-watch load-swap-watch envoy-role-holder-watch omp-memory-watch session-cpu-record
+    # The box gateway token: sami-rocqperf (Azure) does not need it; a Google VM mints it from its
+    # own attached account.
+    ossv-box-gateway-token
+    # Not here:
+    # - omp-root-hang-watch watches one root session (SPEEDCOACH, scripts/omp-root-hang-watch
+    #   DEFAULT_SESSION), whose transcript is on sami-rocqperf. Arm it here when that session moves.
+    # - ossv-box-gateway-key needs ~/src/oss-verifier/bin/ossv-vm, which arrives with the data copy
+    #   (step 3). Run installers/ossv-box-gateway-key.sh after that copy.
+    # - hawk-token-refresh and omp-billing-watch: sami-rocqperf arms neither (checked
+    #   2026-11-02: `systemctl --user is-enabled` not-found), and no omp model there uses hawk.
+    #   hawk-token-refresh would fail every 3 minutes here: it clones a private repository with
+    #   no GitHub credential and mints with a hawk login, a person's, that this machine never holds.
+)
+
+STEPS=(vm host dotfiles secrets tools broker install image responder speed check)
+
+stamp() { date -u +%FT%TZ; }
+say() { echo "$(stamp) == $*"; }
+die() { echo "$(stamp) FAIL $*" >&2; exit 1; }
+remote() { "${SSH[@]}" "bash -lc $(printf '%q' "$*")"; }
+
+step_vm() {
+    local d
+    d="$(gcloud compute instances describe "$VM" --zone "$ZONE" --project "$PROJECT" --format='value(status,machineType.basename())')"
+    [[ "$d" == "RUNNING	$MACHINE_TYPE" ]] || die "$VM: want RUNNING $MACHINE_TYPE, got '$d'"
+    say "$VM RUNNING, $MACHINE_TYPE"
+    # The first login puts sami's key in the instance's own metadata (project keys are blocked on
+    # this VM) and the guest agent makes the user; retry while it does.
+    local i
+    for i in $(seq 30); do
+        "${GSSH[@]}" --command true 2>/dev/null && break
+        (( i == 30 )) && die "gcloud compute ssh sami@$VM never answered"
+        sleep 10
+    done
+    "${GSSH[@]}" --command 'set -e
+        for i in $(seq 120); do [ -e /var/lib/sami-devbox/packages-installed ] && break; sleep 5; done
+        [ -e /var/lib/sami-devbox/packages-installed ] || { echo "startup script has not finished"; exit 1; }
+        for d in state cold; do t=$(sudo blkid -p -s TYPE -o value /dev/disk/by-id/google-$d); [ "$t" = xfs ] || { echo "$d disk: $t"; exit 1; }; done
+        [ "$(id -u)" = 1000 ] || { echo "sami is uid $(id -u), not 1000: paths and file owners from the old boxes would not match"; exit 1; }
+        sudo -n true
+        echo "startup script done; state and cold disks XFS; sami uid 1000 with sudo"'
+}
+
+step_host() {
+    [[ -n "${TAILSCALE_CLIENT_ID:-}" ]] || die "TAILSCALE_CLIENT_ID is unset: it is agent-infra bootstrap/'s output samiDevboxTailnetClientId"
+    "${GSSH[@]}" --command "set -e
+        rm -rf /tmp/dotfiles-bootstrap
+        git clone -q --depth 1 $REPO /tmp/dotfiles-bootstrap
+        sudo TAILSCALE_CLIENT_ID=$(printf '%q' "$TAILSCALE_CLIENT_ID") SUDO_USER=sami bash /tmp/dotfiles-bootstrap/devbox/gce-host.sh
+        rm -rf /tmp/dotfiles-bootstrap"
+    local i
+    for i in $(seq 60); do
+        tailscale ping -c 1 --timeout 5s "$VM" >/dev/null 2>&1 && "${SSH[@]}" true 2>/dev/null && break
+        (( i == 60 )) && die "$VM is not reachable over Tailscale SSH 10 minutes after the join"
+        sleep 10
+    done
+    say "Tailscale SSH sami@$VM answers; $(tailscale status --json | jq -r --arg h "$VM" '.Peer[] | select(.HostName == $h) | "\(.DNSName) \(.TailscaleIPs[0]) \((.Tags // []) | join(","))"')"
+}
+
+step_dotfiles() {
+    remote "set -e
+        [ -d ~/.dotfiles/.git ] || git clone -q $REPO ~/.dotfiles
+        git -C ~/.dotfiles log --oneline -1"
+}
+
+step_secrets() {
+    local f missing=()
+    for f in "${SECRET_FILES[@]}"; do [[ -e "$HOME/$f" ]] || missing+=("$f"); done
+    (( ${#missing[@]} == 0 )) || die "not on this machine: ${missing[*]}"
+    # --relative keeps each path under $HOME; -a keeps the 0600 modes; nothing is deleted there.
+    (cd "$HOME" && rsync -a --relative -e "ssh -o BatchMode=yes" "${SECRET_FILES[@]}" "sami@$VM:")
+    remote 'ls -l ~/.config/sops/age/keys.txt ~/.config/legion/envoy.json ~/.ssh/jj-signing ~/.dotfiles/secrets.env ~/.dotfiles/omp/models.local.yml && du -sh ~/.dotfiles/.secrets'
+}
+
+step_tools() {
+    remote 'cd ~/.dotfiles
+        bash install.sh && echo "install.sh, first pass: completed" || echo "install.sh, first pass: stopped (exit $?); expected at installers/omp.sh until the broker login"
+        # install.sh put mise on PATH in its own child shell only; load what it installed.
+        [ -f ~/.bashrc ] && . ~/.bashrc
+        command -v mise >/dev/null || { echo "mise is not on PATH after the first pass"; exit 1; }
+        bash installers/agent-secrets.sh'
+}
+
+step_broker() {
+    # login-status exits 0 while the helper holds a launcher credential; otherwise the login
+    # prints a code for the operator to type at Dispatch's /credentials/machine page, and waits.
+    remote 'agent-secrets machine login-status || agent-secrets-login sami@theorem.dev'
+}
+
+step_install() {
+    remote "set -e
+        cd ~/.dotfiles
+        bash install.sh
+        bash devbox/install.sh
+        failed=''
+        for i in ${EXTRA_INSTALLERS[*]}; do
+            echo \"--- installers/\$i.sh\"
+            bash installers/\$i.sh || failed=\"\$failed \$i\"
+        done
+        [ -d .jj ] || jj git init --colocate
+        [ -z \"\$failed\" ] || { echo \"installers that failed:\$failed\"; exit 1; }"
+}
+
+step_image() {
+    remote '"$HOME/.dotfiles/scripts/agentbox" rebuild && docker image ls --format "{{.Repository}}:{{.Tag}} {{.Size}}" | grep agentbox'
+}
+
+step_responder() {
+    local s
+    s="$("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.spec.schedule} suspend={.spec.suspend} lastSuccess={.status.lastSuccessfulTime}' 2>&1)" \
+        || die "the responder is not deployed (agent-infra monitoring/responder.go): $s"
+    say "responder CronJob box-monitor: $s"
+    "${KUBE[@]}" logs "$("${KUBE[@]}" get jobs --sort-by=.metadata.creationTimestamp -o name | tail -1)" 2>&1 | sed 's/^/     /'
+}
+
+# Throughput over the path step 3's rsync takes: ssh over Tailscale from this machine. Zeros, as
+# neither ssh (Compression is off by default) nor WireGuard compresses, so the bytes cost what a
+# real file's do; one stream and four at once, as rsync runs one per tree.
+step_speed() {
+    local size_mib=4096 t0 t1 n
+    for n in 1 4; do
+        t0=$(date +%s.%N)
+        for _ in $(seq "$n"); do
+            head -c "${size_mib}M" /dev/zero | "${SSH[@]}" 'cat >/dev/null' &
+        done
+        wait
+        t1=$(date +%s.%N)
+        say "ssh over Tailscale, $n stream(s) x $size_mib MiB: $(awk -v b=$((n * size_mib)) -v t0="$t0" -v t1="$t1" 'BEGIN { s = t1 - t0; printf "%.0f MiB/s (%.1f s)", b / s, s }')"
+    done
+    tailscale ping -c 5 "$VM" 2>&1 | tail -2
+}
+
+step_check() {
+    remote '"$HOME/.dotfiles/devbox/sami-devbox-check" --mark-ready'
+}
+
+from="" only=""
+while (( $# )); do
+    case "$1" in
+        --from) from="$2"; shift 2 ;;
+        --only) only="$2"; shift 2 ;;
+        *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
+    esac
+done
+mkdir -p "$LOGS"
+log="$LOGS/provision-$(date -u +%Y%m%dT%H%M%SZ).log"
+exec > >(tee -a "$log") 2>&1
+echo "log: $log"
+started=""
+[[ -z "$from" ]] && started=1
+for s in "${STEPS[@]}"; do
+    [[ "$s" == "$from" ]] && started=1
+    [[ -n "$started" ]] || continue
+    [[ -z "$only" || "$s" == "$only" ]] || continue
+    say "step $s"
+    "step_$s"
+    say "step $s done"
+done

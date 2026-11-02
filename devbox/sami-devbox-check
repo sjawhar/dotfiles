@@ -1,0 +1,313 @@
+#!/bin/bash
+# sami-devbox-check: acceptance check A2 of dispatch://INFRA-993 on sami-devbox, and the part of
+# A5 a running machine can show (the disks are where the boot units put them).
+#
+#   sami-devbox-check               on sami-devbox, as sami: the host checks, then a new agent
+#                                   box that runs this script with --in-box; exit 0 only when
+#                                   every check of both passes.
+#   sami-devbox-check --mark-ready  the same, and on a pass writes the readiness marker that
+#                                   `agentbox move --to sami-devbox` requires before it moves
+#                                   any session (CUTOVER_DIR/target-ready).
+#   sami-devbox-check --in-box      the box half; agentbox runs it, a person does not.
+#
+# A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
+# box, Google Cloud as dev-sjawhar@, the build pool, the secrets broker, Envoy, Dispatch, MLflow,
+# the model gateway with a dev-box@ token and Azure; and that no person's login file is on any
+# mounted disk. The box half is run through `agentbox new`, the same launcher a session goes
+# through, so a check passes only with what a real box gets: its mounts, its relays, its env.
+#
+# Each line is `ok`, `FAIL` or `note`, with what was expected and what was read, so the log is
+# the evidence. The log goes to CUTOVER_DIR/a2-<UTC time>.log as well as to stdout.
+set -uo pipefail
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+CUTOVER_DIR="${SAMI_DEVBOX_CUTOVER_DIR:-/mnt/nvme/$(id -un)/cutover}"
+TAILNET=tail12ec1c.ts.net
+ACCOUNT="dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
+DEV_BOX="dev-box@theorem-agent-infra.iam.gserviceaccount.com"
+KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
+# The file names A2 lists. A2's list names credentialed_accounts.db, which gcloud does not
+# write; the store that holds a gcloud login is credentials.db, one row per account with its
+# refresh token (googlecloudsdk/core/credentials/store.py), so host_logins also reads every
+# credentials.db for a row of type authorized_user, a person's login.
+LOGIN_FILES=(application_default_credentials.json box_credential_config.json legacy_credentials credentialed_accounts.db)
+
+fails=0
+ok() { echo "ok   $*"; }
+fail() { echo "FAIL $*"; fails=$((fails + 1)); }
+note() { echo "note $*"; }
+stamp() { date -u +%FT%TZ; }
+
+# --- the box half ----------------------------------------------------------------------------
+in_box() {
+    [[ -n "${AGENTBOX_BOX:-}" ]] || { echo "sami-devbox-check --in-box runs inside an agent box" >&2; exit 2; }
+    echo "== box $AGENTBOX_BOX, $(stamp)"
+    ok "session runs in agent box $AGENTBOX_BOX (AGENTBOX_BOX set, /etc/agentbox-identity $( [[ -e /etc/agentbox-identity ]] && echo present || echo absent))"
+
+    local out got tok
+    # Google Cloud as the attached account: the account gcloud names, and a token Google
+    # itself says belongs to it, so a configured name with no working credential fails.
+    got="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>&1)"
+    [[ "$got" == "$ACCOUNT" ]] && ok "gcloud auth list: active account $got" || fail "gcloud auth list: want $ACCOUNT, got: $got"
+    if tok="$(gcloud auth print-access-token 2>&1)"; then
+        got="$(curl -fsS -m 20 --data-urlencode "access_token=$tok" https://oauth2.googleapis.com/tokeninfo 2>&1 | jq -r '.email // empty')"
+        [[ "$got" == "$ACCOUNT" ]] && ok "Google tokeninfo: the token gcloud prints is $got's" || fail "Google tokeninfo: want $ACCOUNT, got: ${got:-no email}"
+    else
+        fail "gcloud auth print-access-token: $(tail -1 <<<"$tok")"
+    fi
+
+    # The build pool: the GKE cluster the builds run in, through the box's ~/.kube.
+    got="$(kubectl --context "$KUBE_CONTEXT" -n builds auth can-i create jobs 2>&1)"
+    [[ "$got" == yes ]] && ok "build pool: kubectl -n builds auth can-i create jobs: yes" || fail "build pool: kubectl -n builds auth can-i create jobs: $got"
+
+    # The secrets broker: the box's own enrolment, which the broker made through the host's
+    # machine login, and its front door. A read through the broker needs a person's grant, so the
+    # read below is the agent tier, through secretsd and the machine's age key copied at step 2.
+    if [[ -s "${AGENT_SECRETS_KEY_DIR:-/nonexistent}/enrollment" ]]; then
+        ok "secrets broker: box enrolled ($(cat "$AGENT_SECRETS_KEY_DIR/enrollment"))"
+    else
+        fail "secrets broker: box not enrolled: $(cat "${AGENT_SECRETS_KEY_DIR:-/nonexistent}/enrollment.error" 2>/dev/null || echo "no AGENT_SECRETS_KEY_DIR or no enrollment file")"
+    fi
+    got="$(curl -sS -m 10 -o /dev/null -w '%{http_code}' "https://secrets.$TAILNET/healthz" 2>&1)"
+    [[ "$got" == 200 ]] && ok "secrets broker: https://secrets.$TAILNET/healthz 200" || fail "secrets broker: healthz answered $got"
+    # secrets prints where the value came from on stderr first; the length is the last line.
+    out="$(secrets CERAMIC_API_KEY -- sh -c 'echo ${#CERAMIC_API_KEY}' 2>&1 | tail -1)"
+    [[ "$out" =~ ^[0-9]+$ && "$out" -gt 0 ]] && ok "secrets: agent-tier CERAMIC_API_KEY resolves ($out characters)" || fail "secrets CERAMIC_API_KEY: $out"
+
+    # Envoy: the API through the box relay, and the NATS bus by name.
+    out="$(ENVOY_MAX_TIME=5 "$DOTFILES_DIR/scripts/envoy" ps --json 2>&1)" && ok "Envoy API answers ($(jq length <<<"$out" 2>/dev/null) sessions)" || fail "Envoy API: $(head -1 <<<"$out")"
+    timeout 5 bash -c "exec 3<>/dev/tcp/envoy-hub.$TAILNET/4222" 2>/dev/null && ok "Envoy NATS envoy-hub.$TAILNET:4222 reachable" || fail "Envoy NATS envoy-hub.$TAILNET:4222 unreachable"
+
+    # Dispatch, with the token in the session's envoy.json. The CLI is the omp plugin's; omp puts
+    # its directory on a session's PATH and sets DISPATCH_HOST and DISPATCH_SESSION_ID, and this
+    # script is not run by omp, so it names the CLI and sets both as a session's shell has them.
+    got="$(DISPATCH_HOST="${DISPATCH_HOST:-omp}" DISPATCH_SESSION_ID="${DISPATCH_SESSION_ID:-$(cat /proc/sys/kernel/random/uuid)}" \
+        "$DOTFILES_DIR/omp/plugins/node_modules/@sjawhar/pi-envoy/bin/dispatch" read --issue INFRA-993 2>&1 | head -1)"
+    [[ "$got" == "Title: sami-devbox"* ]] && ok "Dispatch: dispatch read --issue INFRA-993 -> ${got:0:60}" || fail "Dispatch: dispatch read --issue INFRA-993 -> $got"
+
+    # MLflow, the company tracking server (tailnet Service svc:mlflow).
+    got="$(curl -sS -m 10 "http://mlflow.$TAILNET/health" 2>&1)"
+    [[ "$got" == OK ]] && ok "MLflow: http://mlflow.$TAILNET/health OK" || fail "MLflow: /health answered: $got"
+
+    gateway_check
+    azure_check
+
+    echo "== box done, $fails failed, $(stamp)"
+    return "$fails"
+}
+
+# jwt_claim prints one claim of a JWT's payload.
+jwt_claim() {
+    local p="${1#*.}"
+    p="${p%%.*}"
+    p="$(tr '_-' '/+' <<<"$p")"
+    while (( ${#p} % 4 )); do p="$p="; done
+    base64 -d <<<"$p" 2>/dev/null | jq -r --arg c "$2" '.[$c] // empty'
+}
+
+# The model gateway takes a Google ID token for audience model-gateway-gce as a bearer and checks
+# its account against its own list (agent-infra model-gateway/vm/ossv_box_auth.py). A2 asks for
+# dev-box@'s token: on sami-devbox the host's ossv-box-gateway-token timer mints it by
+# impersonation (scripts/ossv-box-gateway-token), and the box reads it through the read-only
+# ossv-box mount.
+gateway_check() {
+    local f="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ossv-box/gateway-token" token email url code
+    if [[ ! -s "$f" ]]; then
+        fail "model gateway: no ID token at $f (host timer ossv-box-gateway-token)"
+        return
+    fi
+    token="$(<"$f")"
+    email="$(jwt_claim "$token" email)"
+    [[ "$email" == "$DEV_BOX" ]] && ok "model gateway: ID token's email is $email, audience $(jwt_claim "$token" aud)" || fail "model gateway: ID token's email: want $DEV_BOX, got ${email:-none}"
+    # The gateway sessions use: the ossv-gateway provider's baseUrl in omp/models.local.yml.
+    url="$(awk '/^  ossv-gateway:/ { p = 1; next } p && /baseUrl:/ { print $2; exit } /^  [^ ]/ { p = 0 }' "$DOTFILES_DIR/omp/models.local.yml" 2>/dev/null)"
+    [[ -n "$url" ]] || { fail "model gateway: no ossv-gateway baseUrl in $DOTFILES_DIR/omp/models.local.yml"; return; }
+    code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -K <(printf 'header = "Authorization: Bearer %s"\n' "$token") "$url/v1/models" 2>&1)"
+    [[ "$code" == 200 ]] && ok "model gateway: $url/v1/models with the dev-box@ token: 200" || fail "model gateway: $url/v1/models with the dev-box@ token answered $code"
+    # And a token it cannot verify is refused, so the 200 above was the token's doing.
+    code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer x.y.z' "$url/v1/models" 2>&1)"
+    [[ "$code" == 401 ]] && ok "model gateway: a forged token answers 401" || fail "model gateway: a forged token answered $code, want 401"
+}
+
+azure_check() {
+    local out
+    # As a session's az call: shims/az chooses the agents' Azure identity only in an agent session
+    # (OMP_SESSION_ID and its kin), which this script, run by agentbox directly, is not.
+    out="$(AGENTBOX_SESSION="${AGENTBOX_SESSION:-sami-devbox-check}" az account show --query '{user:user.name,type:user.type,subscription:id}' -o json 2>&1)"
+    if [[ "$(jq -r '.type // empty' <<<"$out" 2>/dev/null)" == servicePrincipal ]]; then
+        ok "Azure: az account show as service principal $(jq -r .user <<<"$out") on subscription $(jq -r .subscription <<<"$out")"
+    else
+        fail "Azure: az account show: want a servicePrincipal, got: $(tail -1 <<<"$out")"
+    fi
+}
+
+# --- the host half ---------------------------------------------------------------------------
+host_disks() {
+    local src fstype
+    for spec in "/mnt/nvme google-state" "/mnt/durable google-cold"; do
+        read -r mnt dev <<<"$spec"
+        src="$(findmnt -n -o SOURCE --target "$mnt" 2>/dev/null)"
+        fstype="$(findmnt -n -o FSTYPE --target "$mnt" 2>/dev/null)"
+        if [[ "$(findmnt -n -o TARGET --target "$mnt" 2>/dev/null)" == "$mnt" && "$(readlink -f "$src")" == "$(readlink -f "/dev/disk/by-id/$dev")" && "$fstype" == xfs ]]; then
+            ok "disk: $mnt is $dev ($src, $fstype)"
+        else
+            fail "disk: $mnt: want /dev/disk/by-id/$dev xfs, got ${src:-nothing} ${fstype:-}"
+        fi
+    done
+    # /home is the state disk's /mnt/nvme/home, bound: same device, same inode.
+    if [[ "$(stat -c %d:%i /home 2>/dev/null)" == "$(stat -c %d:%i /mnt/nvme/home 2>/dev/null)" ]]; then
+        ok "disk: /home is /mnt/nvme/home (bind)"
+    else
+        fail "disk: /home is not /mnt/nvme/home: $(findmnt -n -o SOURCE,FSTYPE /home 2>&1)"
+    fi
+    src="$(findmnt -n -o SOURCE /mnt/scratch 2>/dev/null)"
+    if [[ "$src" == /dev/md* ]]; then
+        local md members
+        md="$(basename "$(readlink -f "$src")")"
+        members="$(find "/sys/block/$md/slaves" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+        ok "disk: /mnt/scratch is $src ($(lsblk -dno SIZE "$src" 2>/dev/null | tr -d ' '), RAID of $members local SSDs)"
+    else
+        fail "disk: /mnt/scratch: want a RAID md device, got ${src:-nothing}"
+    fi
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -qx /mnt/scratch/swapfile; then
+        ok "swap: /mnt/scratch/swapfile active ($(swapon --show=SIZE --noheadings 2>/dev/null | head -1 | tr -d ' '))"
+    else
+        fail "swap: /mnt/scratch/swapfile not active: $(swapon --show 2>&1 | tr '\n' ' ')"
+    fi
+    [[ -d "/mnt/scratch/$(id -un)" && -O "/mnt/scratch/$(id -un)" ]] && ok "scratch: /mnt/scratch/$(id -un) is $(id -un)'s" || fail "scratch: /mnt/scratch/$(id -un) missing or not $(id -un)'s"
+}
+
+# sudo_find ARRAY ARGS...: `sudo -n find ARGS`, appending each path to the array named ARRAY, and
+# a FAIL when find (or sudo) exits non-zero, so a walk that failed never reads as one that found
+# nothing.
+sudo_find() {
+    local -n into="$1"
+    shift
+    local out err rc=0
+    out="$(mktemp)" err="$(mktemp)"
+    # shellcheck disable=SC2024  # the output files are sami's own temp files, on purpose
+    sudo -n find "$@" >"$out" 2>"$err" || rc=$?
+    mapfile -t -O "${#into[@]}" into <"$out"
+    (( rc == 0 )) || fail "logins: sudo -n find $1 exited $rc: $(tail -1 "$err")"
+    rm -f "$out" "$err"
+    return "$rc"
+}
+
+# No person's login on any mounted disk: the A2 file names, a gh login, and any gcloud or Azure
+# store that holds a user's login. Every local filesystem is walked once (-xdev per mount).
+host_logins() {
+    local -a names=() found=() dbs=() profiles=()
+    local n f walked=1
+    for n in "${LOGIN_FILES[@]}"; do names+=(-name "$n" -o); done
+    names+=(-path '*/.config/gh/hosts.yml')
+    for mnt in / /mnt/nvme /mnt/durable /mnt/scratch; do
+        sudo_find found "$mnt" -xdev \( "${names[@]}" \) -print || walked=0
+    done
+    if (( ${#found[@]} )); then
+        fail "logins: person's login files present: ${found[*]}"
+    elif (( walked )); then
+        ok "logins: no ${LOGIN_FILES[*]} or .config/gh/hosts.yml on /, /mnt/nvme, /mnt/durable, /mnt/scratch"
+    fi
+    # gcloud's own stores: a row whose credential is authorized_user is a person's login.
+    found=()
+    walked=1
+    sudo_find dbs / /mnt/nvme /mnt/durable -xdev -name credentials.db -path '*gcloud*' -print || walked=0
+    for f in "${dbs[@]}"; do
+        n="$(python3 - "$f" <<'PY' 2>&1
+import json, sqlite3, sys
+con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = con.execute("select account_id, value from credentials").fetchall()
+print(" ".join(a for a, v in rows if json.loads(v).get("type") == "authorized_user"))
+PY
+)"
+        [[ -n "$n" ]] && found+=("$f: $n")
+    done
+    if (( ${#found[@]} )); then fail "logins: gcloud user logins stored: ${found[*]}"
+    elif (( walked )); then ok "logins: no gcloud credentials.db holds an authorized_user row"; fi
+    # Azure: a profile whose subscriptions name a user is a person's login.
+    found=()
+    walked=1
+    sudo_find profiles / /mnt/nvme /mnt/durable -xdev -name azureProfile.json -print || walked=0
+    for f in "${profiles[@]}"; do
+        sudo -n cat "$f" 2>/dev/null | jq -e '[.subscriptions[]?.user.type] | any(. == "user")' >/dev/null 2>&1 && found+=("$f")
+    done
+    if (( ${#found[@]} )); then fail "logins: Azure user login in ${found[*]}"
+    elif (( walked )); then ok "logins: no azureProfile.json names a user"; fi
+}
+
+host_identity() {
+    local got
+    [[ "$(hostname -s)" == sami-devbox ]] && ok "host: hostname sami-devbox" || fail "host: hostname $(hostname -s)"
+    [[ "$(id -u)" == 1000 && "$(id -un)" == sami ]] && ok "host: user sami uid 1000" || fail "host: user $(id -un) uid $(id -u), want sami 1000"
+    got="$(tailscale status --self --json 2>/dev/null | jq -r '[.Self.HostName, (.Self.Tags // [] | join(","))] | join(" ")')"
+    [[ "$got" == "sami-devbox tag:sami-devbox" ]] && ok "tailnet: node sami-devbox, tag:sami-devbox" || fail "tailnet: want 'sami-devbox tag:sami-devbox', got '$got'"
+    got="$(curl -fsS -m 5 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email 2>&1)"
+    [[ "$got" == "$ACCOUNT" ]] && ok "host: the VM's attached account is $got" || fail "host: metadata account: $got"
+    [[ ! -e "$HOME/.config/gcloud/box_credential_config.json" && -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]] \
+        && ok "host: no box_credential_config.json and no GOOGLE_APPLICATION_CREDENTIALS (ADC is the metadata server)" \
+        || fail "host: a credential file is configured: ${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/box_credential_config.json}"
+}
+
+# No unit failing on the machine: the user manager's and the system's failed lists are empty, and
+# unit-health-watch (scripts/unit-health-watch) holds no open condition in its state file.
+host_units() {
+    local got state
+    got="$(systemctl --user --failed --no-legend --plain 2>&1)"
+    [[ -z "$got" ]] && ok "units: systemctl --user --failed lists nothing" || fail "units: systemctl --user --failed: $(tr '\n' ';' <<<"$got")"
+    got="$(systemctl --failed --no-legend --plain 2>&1)"
+    [[ -z "$got" ]] && ok "units: systemctl --failed lists nothing" || fail "units: systemctl --failed: $(tr '\n' ';' <<<"$got")"
+    for state in "/mnt/nvme/$(id -un)/tmp/unit-health-watch/state.json" "${XDG_STATE_HOME:-$HOME/.local/state}/unit-health-watch/state.json"; do
+        [[ -s "$state" ]] && break
+    done
+    if [[ ! -s "$state" ]]; then
+        fail "units: unit-health-watch has no state file (has it run? systemctl --user status unit-health-watch.timer)"
+    elif got="$(jq -r '(.incidents // {}) | to_entries[] | "\(.key): \(.value.why)"' "$state" 2>&1)" && [[ -z "$got" ]]; then
+        ok "units: unit-health-watch has nothing open (state $state, last run $(jq -r '.last_run | todate? // .' "$state"))"
+    else
+        fail "units: unit-health-watch has open conditions: $(tr '\n' ';' <<<"$got")"
+    fi
+}
+
+host() {
+    echo "== host $(hostname -s), $(stamp)"
+    host_identity
+    host_disks
+    host_units
+    host_logins
+    echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"
+    "$DOTFILES_DIR/scripts/agentbox" doctor 2>&1 | sed 's/^/   doctor: /'
+    echo "-- a new agent box runs the box half"
+    local rc=0
+    "$DOTFILES_DIR/scripts/agentbox" new --dir "$CUTOVER_DIR" -- bash "$DOTFILES_DIR/devbox/sami-devbox-check" --in-box </dev/null || rc=$?
+    (( rc == 0 )) || fail "box half: exit $rc (its own FAIL lines are above)"
+    echo "== $fails failed, $(stamp)"
+    (( fails == 0 ))
+}
+
+case "${1:-}" in
+    --in-box) in_box; exit $? ;;
+    ""|--mark-ready) ;;
+    *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
+esac
+
+mkdir -p "$CUTOVER_DIR" || exit 1
+# An old marker says nothing about this run: remove it first, so a failed or crashed run leaves none.
+rm -f "$CUTOVER_DIR/target-ready" || exit 1
+log="$CUTOVER_DIR/a2-$(date -u +%Y%m%dT%H%M%SZ).log"
+host 2>&1 | tee "$log"
+status=("${PIPESTATUS[@]}")
+fails="$(grep -c '^FAIL' "$log")"
+echo "log: $log"
+if (( status[0] != 0 || status[1] != 0 )) && (( fails == 0 )); then
+    echo "FAIL the host checks exited ${status[0]} (tee ${status[1]}) with no FAIL line: they stopped early" | tee -a "$log"
+    fails=1
+fi
+if (( fails == 0 )) && ! grep -qx "== 0 failed, .*" "$log"; then
+    echo "FAIL the host checks did not reach their last line" | tee -a "$log"
+    fails=1
+fi
+if (( fails == 0 )) && [[ "${1:-}" == --mark-ready ]]; then
+    printf '%s %s\n' "$(stamp)" "$(git -C "$DOTFILES_DIR" rev-parse HEAD)" >"$CUTOVER_DIR/target-ready"
+    echo "wrote $CUTOVER_DIR/target-ready"
+fi
+(( fails == 0 ))

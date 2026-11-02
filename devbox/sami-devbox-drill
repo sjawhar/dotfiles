@@ -1,0 +1,241 @@
+#!/bin/bash
+# sami-devbox-drill: the step 2 drill of dispatch://INFRA-993, acceptance checks A5 and A6. Run it
+# from a machine outside sami-devbox (sami-rocqperf) as a session that acts in Google Cloud as
+# dev-sjawhar@ and reaches sami-devbox over Tailscale SSH. Only before any session's data is on the
+# machine: it stops the VM.
+#
+#   sami-devbox-drill restart   A5 and the first half of A6. Writes a marker file on /home,
+#                               /mnt/nvme and /mnt/durable and one on /mnt/scratch, stops the VM,
+#                               and does NOT start it: the responder (the CronJob box-monitor in the
+#                               dispatch cluster) must find it TERMINATED and start it within 10
+#                               minutes. Then the three markers must be there, the scratch one gone
+#                               (a stop erases local SSD), and /mnt/scratch and its swap back.
+#   sami-devbox-drill silence   the second half of A6. The drill suspends the CronJob for 35
+#                               minutes (dev-sjawhar@ may get and patch it: agent-infra
+#                               cluster-grants, theorem-labs/agent-infra#1418) and the monitor
+#                               box-monitor-silent-sami-devbox must go to Alert; then it resumes the
+#                               CronJob. A Datadog downtime on that monitor for the drill keeps its
+#                               alert out of #fleet-alerts, so the alert reaches only the box-health
+#                               lead, from this log.
+#
+# Each line is `ok`, `FAIL` or `note`, with UTC times; the log is the evidence, and it also goes to
+# $SAMI_DEVBOX_DRILL_LOGS/<subcommand>-<UTC time>.log.
+set -uo pipefail
+
+VM=sami-devbox
+ZONE=us-west4-a
+PROJECT=theorem-agent-infra
+KUBE=(kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n box-monitor)
+MONITOR_NAME="Box-monitor silent for $VM"
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 "sami@$VM")
+LOGS="${SAMI_DEVBOX_DRILL_LOGS:-/mnt/nvme/$(id -un)/scratch/devbox-provision/drill}"
+# A6: the responder starts the stopped VM within 10 minutes. It runs every 5, so a stop just
+# after a run waits up to 5 for the next one; anything past 10 fails, and past 15 this script
+# starts the VM itself so the machine is not left down.
+START_DEADLINE=600
+GIVE_UP=900
+
+fails=0
+stamp() { date -u +%FT%TZ; }
+ok() { echo "$(stamp) ok   $*"; }
+fail() { echo "$(stamp) FAIL $*"; fails=$((fails + 1)); }
+note() { echo "$(stamp) note $*"; }
+status() { gcloud compute instances describe "$VM" --zone "$ZONE" --project "$PROJECT" --format='value(status)' 2>&1; }
+
+# ddpup: Datadog through pup with the service token and nothing else (agent-infra
+# monitoring/README.md, "Applying", says why), the token read as dev-sjawhar@, never a person's
+# login, and kept out of every command line.
+ddpup() (
+    t=$(gcloud secrets versions access latest --secret datadog-service-access-token --project "$PROJECT") || exit 1
+    [ -n "$t" ] || exit 1
+    d=$(mktemp -d) || exit 1
+    trap 'rm -rf -- "$d"' EXIT
+    unset DD_API_KEY DD_APP_KEY PUP_MOCK_SERVER
+    PUP_CONFIG_DIR=$d DD_ACCESS_TOKEN=$t DD_SITE=us3.datadoghq.com pup --no-agent "$@"
+)
+monitor_json() { ddpup monitors search --query "\"$MONITOR_NAME\"" 2>/dev/null | jq -c --arg n "$MONITOR_NAME" '[.. | objects | select(.name? == $n)] | first // empty'; }
+
+wait_ssh() {
+    local deadline=$((SECONDS + ${1:-900}))
+    while (( SECONDS < deadline )); do
+        "${SSH[@]}" true 2>/dev/null && return 0
+        sleep 10
+    done
+    return 1
+}
+
+no_sessions() {
+    local out
+    # Every omp process whatever its uid (a boxed one runs under a Sysbox subordinate uid), every
+    # running agent box, every tmux session, and any move-log line.
+    out="$("${SSH[@]}" 'pgrep -x omp | wc -l; docker ps -q --filter name="^agentbox-" | wc -l; tmux ls 2>/dev/null | wc -l; [ -s /mnt/nvme/sami/cutover/move-log.tsv ] && echo moved || echo none' 2>&1 | tr '\n' ' ')"
+    if [[ "$out" == "0 0 0 none " ]]; then
+        ok "no session on $VM (no omp process of any uid, no running agent box, no tmux session, no move-log line)"
+    else
+        fail "$VM is not empty (omp processes, agent boxes, tmux sessions, move log: $out); the drill stops the VM and runs only before any session is there"
+        return 1
+    fi
+}
+
+drill_restart() {
+    local s t0 t1 token
+    s="$(status)"
+    [[ "$s" == RUNNING ]] && ok "$VM is RUNNING" || { fail "$VM is $s, want RUNNING"; return; }
+    wait_ssh 60 && ok "Tailscale SSH sami@$VM answers" || { fail "no Tailscale SSH to sami@$VM"; return; }
+    no_sessions || return
+    s="$("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.spec.suspend} {.status.lastSuccessfulTime}' 2>&1)"
+    [[ "$s" == "false "* ]] && ok "responder CronJob box-monitor not suspended, last success ${s#* }" || { fail "responder CronJob: $s"; return; }
+
+    token="drill-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+    if "${SSH[@]}" "set -e; t=$token
+        echo \$t > /home/sami/.sami-devbox-drill
+        mkdir -p /mnt/nvme/sami/cutover/drill && echo \$t > /mnt/nvme/sami/cutover/drill/marker
+        sudo install -d -o sami -g sami /mnt/durable/sami-devbox-drill && echo \$t > /mnt/durable/sami-devbox-drill/marker
+        echo \$t > /mnt/scratch/sami/.sami-devbox-drill
+        sync" 2>&1; then
+        ok "markers $token written on /home, /mnt/nvme, /mnt/durable and /mnt/scratch"
+    else
+        fail "could not write the markers"; return
+    fi
+    "${SSH[@]}" 'swapon --show --noheadings; for m in /mnt/scratch /mnt/nvme /mnt/durable /home; do findmnt -n -o TARGET,SOURCE,FSTYPE --mountpoint "$m"; done' 2>&1 | sed 's/^/     before: /'
+
+    # A stop must say what happens to local SSD (Google refuses one that does not); discarding it is
+    # the point: the scratch marker must be gone after the start.
+    note "stopping $VM (gcloud compute instances stop --discard-local-ssd=true, graceful)"
+    local rc=0
+    gcloud compute instances stop "$VM" --zone "$ZONE" --project "$PROJECT" --discard-local-ssd=true 2>&1 | sed 's/^/     /'
+    rc=${PIPESTATUS[0]}
+    (( rc == 0 )) || { fail "gcloud compute instances stop exited $rc"; return; }
+    s="$(status)"
+    [[ "$s" == TERMINATED ]] || { fail "after stop $VM is $s, want TERMINATED"; return; }
+    t0=$SECONDS
+    ok "$VM TERMINATED at $(stamp); waiting for the responder, not starting it"
+
+    # Only an explicit start state, read by a gcloud call that succeeded, is the responder's start;
+    # an error message or any other state is not.
+    local started=0
+    while (( SECONDS - t0 < GIVE_UP )); do
+        if s="$(status)"; then
+            case "$s" in STAGING | PROVISIONING | RUNNING) started=1; break ;; esac
+        else
+            note "status query failed: $(tail -1 <<<"$s")"
+        fi
+        sleep 15
+    done
+    t1=$((SECONDS - t0))
+    if (( ! started )); then
+        fail "A6: the responder did not start $VM in $((GIVE_UP / 60)) minutes (last status: $s); starting it by hand"
+        gcloud compute instances start "$VM" --zone "$ZONE" --project "$PROJECT" 2>&1 | sed 's/^/     /'
+    elif (( t1 <= START_DEADLINE )); then
+        ok "A6: $VM is $s ${t1}s after the stop, within $((START_DEADLINE / 60)) minutes (the responder started it)"
+    else
+        fail "A6: $VM is $s only ${t1}s after the stop, over $((START_DEADLINE / 60)) minutes"
+    fi
+    "${KUBE[@]}" get jobs --sort-by=.metadata.creationTimestamp -o name 2>/dev/null | tail -3 | while read -r j; do
+        "${KUBE[@]}" logs "$j" 2>&1 | sed "s|^|     $j: |"
+    done
+
+    wait_ssh 900 && ok "Tailscale SSH back $((SECONDS - t0))s after the stop" || { fail "no Tailscale SSH 15 minutes after the start"; return; }
+    "${SSH[@]}" "t=$token
+        for f in /home/sami/.sami-devbox-drill /mnt/nvme/sami/cutover/drill/marker /mnt/durable/sami-devbox-drill/marker; do
+            [ \"\$(cat \$f 2>/dev/null)\" = \"\$t\" ] && echo \"ok   A5: \$f survived the stop\" || echo \"FAIL A5: \$f lost or changed: \$(cat \$f 2>&1)\"
+        done
+        [ -e /mnt/scratch/sami/.sami-devbox-drill ] && echo 'FAIL A5: the /mnt/scratch marker survived: scratch was not rebuilt' || echo 'ok   A5: the /mnt/scratch marker is gone (local SSD erased and rebuilt)'
+        findmnt -n -o SOURCE /mnt/scratch | grep -q '^/dev/md' && echo \"ok   A5: /mnt/scratch is back on \$(findmnt -n -o SOURCE /mnt/scratch)\" || echo 'FAIL A5: /mnt/scratch is not mounted on the RAID'
+        swapon --show=NAME --noheadings | grep -qx /mnt/scratch/swapfile && echo \"ok   A5: swap /mnt/scratch/swapfile is back (\$(swapon --show=SIZE --noheadings | head -1 | tr -d ' '))\" || echo 'FAIL A5: swap is not back'
+        systemctl is-active --quiet gce-disks.service && echo 'ok   A5: gce-disks.service active' || echo \"FAIL A5: gce-disks.service \$(systemctl is-active gce-disks.service)\"
+        a=\$(systemctl show -p ActiveEnterTimestampMonotonic --value gce-disks.service); u=\$(systemctl show -p ActiveEnterTimestampMonotonic --value user@1000.service)
+        [ \"\$a\" -gt 0 ] && [ \"\$u\" -gt \"\$a\" ] && echo 'ok   A5: user@1000.service started after the disks were up' || echo \"FAIL A5: boot order: gce-disks at \$a, user@1000 at \$u (monotonic us)\"
+        rm -f /home/sami/.sami-devbox-drill; rm -rf /mnt/nvme/sami/cutover/drill; sudo rm -rf /mnt/durable/sami-devbox-drill" 2>&1 | while IFS= read -r line; do
+        echo "$(stamp) $line"
+        [[ "$line" == FAIL* ]] && echo "$line" >>"$failfile"
+    done
+    fails=$((fails + $(wc -l <"$failfile")))
+}
+
+drill_silence() {
+    local m id s t0 dt="" body
+    m="$(monitor_json)"
+    [[ -n "$m" ]] || { fail "no Datadog monitor named \"$MONITOR_NAME\""; return; }
+    id="$(jq -r .id <<<"$m")"
+    s="$(jq -r '.overall_state // .status' <<<"$m")"
+    [[ "$s" == OK ]] && ok "monitor $id \"$MONITOR_NAME\" is OK before the drill" || { fail "monitor $id is $s before the drill, want OK"; return; }
+    # The plain resource/name form: `cronjobs.batch/<name>` answers yes for any name.
+    s="$("${KUBE[@]}" auth can-i patch cronjobs/box-monitor 2>&1)"
+    [[ "$s" == yes ]] && ok "dev-sjawhar@ may patch cronjobs/box-monitor" || { fail "kubectl auth can-i patch cronjobs/box-monitor -n box-monitor: $s (agent-infra #1418)"; return; }
+
+    # The downtime mutes the monitor's notifications for the drill only; its state still moves,
+    # which is what A6 reads.
+    body="$(jq -nc --argjson id "$id" --arg end "$(date -u -d '+75 minutes' +%FT%TZ)" \
+        '{data: {type: "downtime", attributes: {scope: "*", monitor_identifier: {monitor_id: $id}, schedule: {end: $end}, message: "INFRA-993 step 2 drill: box-monitor suspended on purpose; the box-health lead reads the result from the drill log."}}}')"
+    # stdout only: pup's warnings on stderr are not JSON.
+    if dt="$(ddpup downtime create --file <(printf %s "$body") 2>/dev/null | jq -r '.data.id // empty')" && [[ -n "$dt" ]]; then
+        ok "Datadog downtime $dt on monitor $id for 75 minutes"
+    else
+        fail "could not create a downtime on monitor $id: the alert will post to #fleet-alerts; stop and tell the box-health lead first"
+        return
+    fi
+
+    local patch=("${KUBE[@]}" patch cronjob box-monitor --type merge -p)
+    if "${patch[@]}" '{"spec":{"suspend":true}}' >/dev/null 2>&1 \
+        && [[ "$("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.spec.suspend}' 2>&1)" == true ]]; then
+        t0=$SECONDS
+        ok "CronJob box-monitor suspended at $(stamp); last scheduled run $("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.status.lastScheduleTime}')"
+    else
+        fail "could not suspend the CronJob box-monitor: $("${patch[@]}" '{"spec":{"suspend":true}}' 2>&1 | tail -1)"
+        ddpup downtime cancel "$dt" -y >/dev/null 2>&1
+        return
+    fi
+
+    while (( SECONDS - t0 < 50 * 60 )); do
+        s="$(monitor_json | jq -r '.overall_state // .status')"
+        [[ "$s" == Alert || "$s" == "No Data" ]] && break
+        sleep 60
+    done
+    if [[ "$s" == Alert || "$s" == "No Data" ]]; then
+        ok "A6: monitor $id went to $s $(((SECONDS - t0) / 60)) minutes after the suspend"
+    else
+        fail "A6: monitor $id still $s 50 minutes after the suspend"
+    fi
+    if (( SECONDS - t0 < 35 * 60 )); then
+        note "holding the suspend to 35 minutes as A6 states"
+        sleep $((35 * 60 - (SECONDS - t0)))
+    fi
+    note "resuming the CronJob box-monitor"
+    local _
+    for _ in 1 2 3 4 5; do
+        "${patch[@]}" '{"spec":{"suspend":false}}' >/dev/null 2>&1 \
+            && [[ "$("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.spec.suspend}' 2>&1)" == false ]] && break
+        sleep 30
+    done
+    if [[ "$("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.spec.suspend}' 2>&1)" == false ]]; then
+        ok "CronJob box-monitor resumed at $(stamp)"
+    else
+        fail "could not resume the CronJob box-monitor: run ${KUBE[*]} patch cronjob box-monitor --type merge -p '{\"spec\":{\"suspend\":false}}'"
+    fi
+    t0=$SECONDS
+    while (( SECONDS - t0 < 20 * 60 )); do
+        s="$(monitor_json | jq -r '.overall_state // .status')"
+        [[ "$s" == OK ]] && break
+        sleep 60
+    done
+    [[ "$s" == OK ]] && ok "monitor $id back to OK $(((SECONDS - t0) / 60)) minutes after the resume" || fail "monitor $id is $s 20 minutes after the resume"
+    ddpup downtime cancel "$dt" -y >/dev/null 2>&1 && ok "downtime $dt cancelled" || fail "could not cancel downtime $dt; it ends by itself at its end time"
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    restart | silence) ;;
+    *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
+esac
+mkdir -p "$LOGS" || exit 1
+log="$LOGS/$cmd-$(date -u +%Y%m%dT%H%M%SZ).log"
+failfile="$(mktemp)" || exit 1
+trap 'rm -f -- "$failfile"' EXIT
+{
+    note "sami-devbox-drill $cmd"
+    "drill_$cmd"
+    echo "$(stamp) == $cmd: $fails failed"
+} 2>&1 | tee "$log"
+echo "log: $log"
+! grep -q '^[^ ]* FAIL' "$log"

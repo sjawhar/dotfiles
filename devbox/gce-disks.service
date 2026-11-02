@@ -1,0 +1,34 @@
+[Unit]
+Description=sami-devbox disks: state and cold disks, /home and Docker data from the state disk, local-SSD RAID and swap at /mnt/scratch
+# devbox/gce-disks says what it does and why. A system unit, copied (not linked) by
+# devbox/gce-host.sh to /etc/systemd/system with the script at /usr/local/sbin/gce-disks: the
+# dotfiles live under /home, which is exactly what this unit mounts, so systemd could not read a
+# link into them at boot.
+#
+# Before= is ordering only. Every unit that must not start on the boot disk's empty directories
+# also asserts /run/gce-disks/ready (devbox/gce-disks-ready.conf), so it fails while this unit is
+# red; Requires= would do that too, but it would also restart the user manager and Docker each
+# time someone re-runs this unit by hand.
+#
+#   user@1000.service      the user manager and every lingering user service live in /home;
+#   ssh.service, cron      a login or a crontab job before the bind would see an empty home;
+#   google-guest-agent     it writes the instance's ssh keys into /home/<user>/.ssh at its start;
+#   tailscaled             its SSH server starts login shells in /home;
+#   docker, containerd,    their data directories are bound from the state disk.
+#   sysbox
+#
+# Default dependencies stay: they order this after local-fs.target and udev's coldplug
+# (sysinit.target), which the by-id links need, and nothing above starts before basic.target.
+After=local-fs.target systemd-udev-trigger.service
+Before=user@1000.service ssh.service cron.service google-guest-agent.service tailscaled.service docker.service containerd.service sysbox.service sysbox-mgr.service sysbox-fs.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gce-disks
+# Waiting for the disks (300 s each at most), creating the array and mkfs of 18 TiB of local SSD,
+# and the swap file all fit well inside this; an unbounded wait would hold every login.
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

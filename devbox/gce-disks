@@ -1,0 +1,335 @@
+#!/bin/bash
+# gce-disks: bring up sami-devbox's disks at every boot, before the user manager, ssh logins and
+# Docker start (devbox/gce-disks.service; dispatch://INFRA-993, "Shape and disks", "Boot order").
+#
+#   - the state disk (by-id google-state) at /mnt/nvme and the cold disk (google-cold) at
+#     /mnt/durable. The VM's startup script (agent-infra bootstrap/samidevbox.go) puts XFS on a
+#     blank one; this script never formats either and refuses a disk that holds no XFS, because a
+#     state disk that looks blank to a script is far more likely misattached than empty;
+#   - /home bound from /mnt/nvme/home, and Docker's, containerd's and Sysbox's data directories
+#     (/var/lib/docker, /var/lib/containerd, /var/lib/sysbox) bound from /mnt/nvme, so no daemon
+#     config or package conffile has to name another path and the 500 GiB boot disk holds none of
+#     their data (every agent box runs its own dockerd, whose images Sysbox keeps under
+#     /var/lib/sysbox);
+#   - every local NVMe SSD as one RAID 0 (md name `scratch`, XFS label `scratch`) at /mnt/scratch,
+#     with a 256 GiB swap file and /mnt/scratch/<user> for uid 1000. A stop of the VM erases every
+#     local SSD, so after a start the array is created fresh; after a reboot it is assembled again.
+#
+# Every step looks first and changes only what is missing, so it runs at every boot and by hand
+# (`systemctl start gce-disks` after a failure). It never unmounts, stops an array, formats a
+# state or cold disk, or removes a file other than a swap file of the wrong size. A failed step
+# does not stop the steps that do not depend on it (a broken scratch array still leaves /home
+# mounted for whoever logs in to repair it), but the script then exits non-zero and does not write
+# /run/gce-disks/ready, so the unit is red and the units whose drop-in asserts that file
+# (devbox/gce-disks-ready.conf: user@1000, docker, containerd, sysbox-mgr) refuse to start on the
+# boot disk's empty directories.
+#
+# GCE_DISKS_SWAP_SIZE (default 256G) and GCE_METADATA_HOST (default 169.254.169.254, an address,
+# since DNS may not be up this early) override the defaults, so a test can run it on loop devices.
+set -euo pipefail
+# Without this, a command substitution such as md="$(scratch_array)" runs with set -e off, and a
+# failed mdadm inside it would go unnoticed.
+shopt -s inherit_errexit
+
+readonly BY_ID=/dev/disk/by-id
+# The image's first user, made by the guest agent from the ssh key; the unit's Before= names
+# user@1000.service for the same reason.
+readonly DEVBOX_UID=1000
+readonly READY=/run/gce-disks/ready
+readonly SWAPFILE=/mnt/scratch/swapfile
+swap_size="${GCE_DISKS_SWAP_SIZE:-256G}"
+
+log() { echo "gce-disks: $*"; }
+die() {
+    echo "gce-disks: $*" >&2
+    exit 1
+}
+
+# wait_for PATH SECONDS: the guest environment's udev rules make the by-id links once the kernel
+# has the device, which can trail the start of this unit.
+wait_for() {
+    local i
+    for ((i = 0; i < $2; i++)); do
+        [[ -e "$1" ]] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# ensure_mount DEV DIR OPTIONS: mount XFS DEV on DIR unless it is mounted there already; a
+# different device on DIR is a failure, never stacked over.
+ensure_mount() {
+    local want have
+    want="$(stat -Lc '%Hr:%Lr' "$1")"
+    have="$(findmnt -rno MAJ:MIN --mountpoint "$2" | tail -n1 || true)"
+    if [[ -n "$have" ]]; then
+        [[ "$have" == "$want" ]] || die "$2 is mounted from device $have, not $1 ($want)"
+        log "$2: already mounted from $1"
+        return 0
+    fi
+    mkdir -p "$2"
+    mount -t xfs -o "$3" "$1" "$2"
+    log "$2: mounted $1 ($3)"
+}
+
+# same_dir A B: A and B are the same directory (a bind mount shows the same device and inode).
+same_dir() { [[ "$(stat -c %d:%i "$1")" == "$(stat -c %d:%i "$2")" ]]; }
+
+mount_data_disk() { # NAME DIR
+    local dev="$BY_ID/google-$1" fstype
+    wait_for "$dev" 300 || die "$dev did not appear in 300 s: is the $1 disk attached as device name $1?"
+    fstype="$(blkid -p -s TYPE -o value "$dev" || true)"
+    [[ "$fstype" == xfs ]] || die "$dev holds ${fstype:-no filesystem}, not XFS. The VM's startup script formats a blank $1 disk; this script never formats one. Read the disk before doing anything to it."
+    ensure_mount "$dev" "$2" noatime
+}
+
+mount_state() { mount_data_disk state /mnt/nvme; }
+mount_cold() { mount_data_disk cold /mnt/durable; }
+
+# /home from the state disk. On the first mount the boot disk's /home already holds what the
+# guest agent made from the instance's ssh key (/home/<user>/.ssh/authorized_keys), and whatever
+# the provisioning run put there; each entry the state disk does not have yet is copied before the
+# bind hides it, so that key is not lost. An entry the state disk has is never overwritten.
+bind_home() {
+    local src=/mnt/nvme/home entry name
+    mountpoint -q /mnt/nvme || die "/home: /mnt/nvme is not mounted"
+    if mountpoint -q /home; then
+        same_dir /home "$src" || die "/home is a mount of something other than $src"
+        log "/home: already bound from $src"
+        return 0
+    fi
+    [[ -d "$src" ]] || install -d -m 755 "$src"
+    shopt -s nullglob dotglob
+    for entry in /home/*; do
+        name="${entry##*/}"
+        [[ -e "$src/$name" || -L "$src/$name" ]] && continue
+        cp -a -- "$entry" "$src/"
+        log "/home: copied the boot disk's /home/$name to $src"
+    done
+    shopt -u nullglob dotglob
+    mount --bind "$src" /home
+    log "/home: bound from $src"
+}
+
+# bind_data NAME TARGET: TARGET bound from /mnt/nvme/NAME. A daemon that ran before this unit
+# existed left its data in TARGET on the boot disk: that is copied when /mnt/nvme/NAME is empty,
+# and refused when both hold data, since merging two Docker data roots is not a copy.
+bind_data() {
+    local src="/mnt/nvme/$1" target="$2"
+    mountpoint -q /mnt/nvme || die "$target: /mnt/nvme is not mounted"
+    [[ -d "$src" ]] || mkdir -m 0711 "$src"
+    mkdir -p "$target"
+    if mountpoint -q "$target"; then
+        same_dir "$target" "$src" || die "$target is a mount of something other than $src"
+        log "$target: already bound from $src"
+        return 0
+    fi
+    if [[ -n "$(ls -A "$target")" ]]; then
+        [[ -z "$(ls -A "$src")" ]] || die "$target on the boot disk and $src both hold data; move one aside by hand"
+        cp -a -- "$target/." "$src/"
+        log "$target: copied the boot disk's data to $src"
+    fi
+    mount --bind "$src" "$target"
+    log "$target: bound from $src"
+}
+
+bind_docker() { bind_data docker /var/lib/docker; }
+bind_containerd() { bind_data containerd /var/lib/containerd; }
+bind_sysbox() { bind_data sysbox /var/lib/sysbox; }
+
+# The local SSDs by kernel name. C4 names them google-local-nvme-ssd-N, older shapes
+# google-local-ssd-N; a partition link is not a member.
+local_ssds() {
+    local link
+    for link in "$BY_ID"/google-local-nvme-ssd-* "$BY_ID"/google-local-ssd-*; do
+        if [[ -e "$link" && "$link" != *-part* ]]; then readlink -f "$link"; fi
+    done | sort -u
+}
+
+# How many local SSDs the metadata server says the VM has, or nothing when it does not answer
+# (early in boot before the network, or in a test).
+metadata_ssd_count() {
+    local body
+    body="$(curl -fsS -m 2 --noproxy '*' -H 'Metadata-Flavor: Google' \
+        "http://${GCE_METADATA_HOST:-169.254.169.254}/computeMetadata/v1/instance/disks/?recursive=true" 2>/dev/null)" || return 0
+    { grep -o '"type": *"LOCAL-SSD"' <<<"$body" || true; } | wc -l
+}
+
+# Wait until the set of local SSDs stops changing for 3 s, and for as many as the metadata server
+# lists when it answers: a RAID 0 created over a device short would leave that SSD out until the
+# next stop, and a reboot would then find members of two kinds.
+settle_ssds() {
+    local i prev="" cur stable=0 want
+    udevadm settle --timeout=120 2>/dev/null || true
+    for ((i = 0; i < 120; i++)); do
+        cur="$(local_ssds)"
+        if [[ -n "$cur" && "$cur" == "$prev" ]]; then
+            stable=$((stable + 1))
+        else
+            stable=0
+        fi
+        prev="$cur"
+        if ((stable >= 3)); then
+            want="$(metadata_ssd_count)"
+            if [[ -z "$want" || "$want" -eq 0 || "$(wc -l <<<"$cur")" -ge "$want" ]]; then break; fi
+        fi
+        sleep 1
+    done
+    [[ -n "$cur" ]] || die "scratch: no local SSD under $BY_ID (google-local-nvme-ssd-* or google-local-ssd-*)"
+    if [[ -n "${want:-}" && "$want" -gt 0 && "$(wc -l <<<"$cur")" -lt "$want" ]]; then
+        die "scratch: the metadata server lists $want local SSDs, $(wc -l <<<"$cur") appeared in 120 s"
+    fi
+    printf '%s\n' "$cur"
+}
+
+# The active md array that holds every SSD, assembled from their superblocks after a reboot, or
+# created over all of them after a start (blank SSDs). Prints the md device.
+scratch_array() {
+    local -a ssds holders=() uuids=()
+    local dev h md members list
+    # Not `< <(settle_ssds)`: a process substitution's exit status is lost, and its die with it.
+    list="$(settle_ssds)"
+    mapfile -t ssds <<<"$list"
+    # Already active: this script ran earlier this boot, or udev's incremental assembly did.
+    for dev in "${ssds[@]}"; do
+        for h in /sys/class/block/"${dev##*/}"/holders/*; do
+            if [[ -e "$h" ]]; then holders+=("${h##*/}"); fi
+        done
+    done
+    if ((${#holders[@]})); then
+        mapfile -t holders < <(printf '%s\n' "${holders[@]}" | sort -u)
+        ((${#holders[@]} == 1)) || die "scratch: the local SSDs belong to several devices: ${holders[*]}"
+        md="/dev/${holders[0]}"
+        members="$(find "/sys/class/block/${holders[0]}/slaves" -mindepth 1 -maxdepth 1 | wc -l)"
+        ((members == ${#ssds[@]})) || die "scratch: $md holds $members devices, not the ${#ssds[@]} local SSDs"
+        log "scratch: $md already active over ${#ssds[@]} local SSDs" >&2
+        echo "$md"
+        return 0
+    fi
+    for dev in "${ssds[@]}"; do
+        # A blank SSD has no superblock and --examine fails: that is an empty UUID, not an error.
+        uuids+=("$({ mdadm --examine --export "$dev" 2>/dev/null || true; } | sed -n 's/^MD_UUID=//p')")
+    done
+    if [[ -z "$(printf '%s' "${uuids[@]}")" ]]; then
+        local -a force=()
+        if ((${#ssds[@]} == 1)); then force=(--force); fi
+        log "scratch: creating RAID 0 over ${#ssds[@]} blank local SSDs: ${ssds[*]}" >&2
+        mdadm --create /dev/md/scratch --name=scratch --level=0 --raid-devices="${#ssds[@]}" \
+            --run "${force[@]}" "${ssds[@]}" </dev/null >&2
+    elif [[ "$(printf '%s\n' "${uuids[@]}" | sort -u | wc -l)" -eq 1 && -n "${uuids[0]}" ]]; then
+        log "scratch: assembling the RAID 0 already on ${#ssds[@]} local SSDs" >&2
+        mdadm --assemble /dev/md/scratch --run "${ssds[@]}" >&2
+    else
+        die "scratch: the local SSDs carry different RAID superblocks (${uuids[*]}). To rebuild scratch, losing its data: mdadm --zero-superblock ${ssds[*]}; then systemctl start gce-disks"
+    fi
+    readlink -f /dev/md/scratch
+}
+
+mount_scratch() {
+    local md fstype
+    md="$(scratch_array)"
+    fstype="$(blkid -p -s TYPE -o value "$md" || true)"
+    case "$fstype" in
+    "")
+        log "scratch: making XFS (label scratch) on $md"
+        # -K: a fresh local SSD is already unmapped; discarding 18 TiB at mkfs only slows the boot.
+        mkfs.xfs -q -K -L scratch "$md"
+        ;;
+    xfs) ;;
+    *) die "scratch: $md holds $fstype, not XFS" ;;
+    esac
+    # No `discard`: Ubuntu's weekly fstrim.timer trims it without a cost on every delete.
+    ensure_mount "$md" /mnt/scratch noatime
+}
+
+swap() {
+    local want have
+    mountpoint -q /mnt/scratch || die "swap: /mnt/scratch is not mounted"
+    if swapon --show=NAME --noheadings | grep -qxF "$SWAPFILE"; then
+        log "swap: $SWAPFILE already active"
+        return 0
+    fi
+    want="$(numfmt --from=iec "$swap_size")"
+    have="$(stat -c %s "$SWAPFILE" 2>/dev/null || echo 0)"
+    if [[ "$have" != "$want" || "$(blkid -p -s TYPE -o value "$SWAPFILE" 2>/dev/null || true)" != swap ]]; then
+        rm -f "$SWAPFILE"
+        # fallocate is enough on XFS: swapon takes its unwritten extents (Linux 4.18 and later),
+        # so the file costs no write of 256 GiB at each start.
+        fallocate -l "$swap_size" "$SWAPFILE"
+        chmod 600 "$SWAPFILE"
+        mkswap -L scratch-swap "$SWAPFILE" >/dev/null
+        log "swap: made $swap_size at $SWAPFILE"
+    fi
+    swapon "$SWAPFILE"
+    log "swap: $SWAPFILE active"
+}
+
+# /mnt/scratch/<user> with the same layout as /mnt/nvme/<user>, so .bashrc, scripts/agent-session
+# and the devbox timers change only the root: TMPDIR (tmp), GOTMPDIR (gotmp), each agent session's
+# TMPDIR (session-tmp), GOCACHE (gocache), UV_CACHE_DIR (cache/uv), PIP_CACHE_DIR (cache/pip).
+user_scratch() {
+    local entry user gid dir sub
+    mountpoint -q /mnt/scratch || die "user scratch: /mnt/scratch is not mounted"
+    entry="$(getent passwd "$DEVBOX_UID")" || die "user scratch: no user with uid $DEVBOX_UID"
+    user="${entry%%:*}"
+    gid="$(cut -d: -f4 <<<"$entry")"
+    dir="/mnt/scratch/$user"
+    for sub in "" tmp gotmp session-tmp gocache cache cache/uv cache/pip; do
+        install -d -o "$DEVBOX_UID" -g "$gid" -m 700 "$dir/$sub"
+    done
+    log "user scratch: $dir ready for $user"
+    # The user's own directory on the state disk, which a fresh XFS root does not have: the
+    # cutover dir, the watchers' state and every /mnt/nvme/<user> path the old boxes used live
+    # there, and .bashrc and agent-session read it to place their caches. Never mode-changed or
+    # chowned when it exists: it holds data.
+    if mountpoint -q /mnt/nvme && [[ ! -d "/mnt/nvme/$user" ]]; then
+        install -d -o "$DEVBOX_UID" -g "$gid" -m 755 "/mnt/nvme/$user"
+        log "state disk: made /mnt/nvme/$user for $user"
+    fi
+}
+
+# run STEP: one step in a subshell, so `set -e` and die stop that step alone. Never called as a
+# condition: bash ignores `set -e` inside anything run from an if, && or ||.
+declare -A done_ok=()
+failed=()
+run() {
+    local rc
+    # set +e here so the step's failure does not end the script; set -e again inside the
+    # subshell, which would otherwise inherit the +e.
+    set +e
+    (
+        set -e
+        "$1"
+    )
+    rc=$?
+    set -e
+    if ((rc == 0)); then
+        done_ok[$1]=1
+    else
+        failed+=("$1")
+    fi
+}
+
+((EUID == 0)) || die "run as root (devbox/gce-disks.service)"
+rm -f "$READY"
+
+run mount_state
+if [[ -n "${done_ok[mount_state]:-}" ]]; then
+    run bind_home
+    run bind_docker
+    run bind_containerd
+    run bind_sysbox
+fi
+run mount_cold
+run mount_scratch
+if [[ -n "${done_ok[mount_scratch]:-}" ]]; then
+    run swap
+    run user_scratch
+fi
+
+if ((${#failed[@]})); then
+    die "failed: ${failed[*]}"
+fi
+mkdir -p "${READY%/*}"
+touch "$READY"
+log "all disks up"
