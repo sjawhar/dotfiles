@@ -36,6 +36,20 @@ RUN echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu && chmod 0440 /
     && echo agentbox > /etc/agentbox-identity \
     && install -d -o ubuntu -g ubuntu /home/ubuntu/.cache /home/ubuntu/.config /home/ubuntu/.local /home/ubuntu/.local/share /home/ubuntu/.ssh
 
+# No bubblewrap: a sandbox test cannot run in a box. Sysbox handles every procfs mount in the box
+# itself, adding its own submounts, and fails a /proc mount made from a nested user namespace, so
+# a bwrap run that mounts its own /proc dies at "Can't mount proc on /newroot/proc" (agentbox/AGENTS.md,
+# "Sandbox tests"). Such tests skip, and pytest ends green. This pytest plugin, found by every
+# pytest in the box through PYTHONPATH and an entry point (none is loaded where a caller replaces
+# PYTHONPATH), prints a red banner after the summary that names how many skipped and why.
+COPY agentbox_sandbox_skips.py /opt/agentbox/python/agentbox_sandbox_skips.py
+RUN install -d /opt/agentbox/python/agentbox_sandbox_skips-1.dist-info \
+    && printf 'Metadata-Version: 2.1\nName: agentbox-sandbox-skips\nVersion: 1\n' \
+        > /opt/agentbox/python/agentbox_sandbox_skips-1.dist-info/METADATA \
+    && printf '[pytest11]\nagentbox_sandbox_skips = agentbox_sandbox_skips\n' \
+        > /opt/agentbox/python/agentbox_sandbox_skips-1.dist-info/entry_points.txt
+ENV PYTHONPATH=/opt/agentbox/python
+
 # The entrypoint runs as root: it starts the inner dockerd, firewalls the
 # metadata forwarder off the containers the box starts, relays the box's own
 # Envoy address to the host's Envoy forwarder, logs the inner docker into

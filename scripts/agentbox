@@ -638,7 +638,8 @@ repos() {
 # tag are listed by `rebuild` and move when their sessions restart.
 image_tag() {
     local h
-    h="$(cat "$DOTFILES_DIR/agentbox/Dockerfile" "$DOTFILES_DIR/agentbox/entrypoint.sh" | sha256sum | cut -c1-12)"
+    h="$(cat "$DOTFILES_DIR/agentbox/Dockerfile" "$DOTFILES_DIR/agentbox/entrypoint.sh" \
+        "$DOTFILES_DIR/agentbox/agentbox_sandbox_skips.py" | sha256sum | cut -c1-12)"
     echo "agentbox:$h"
 }
 
