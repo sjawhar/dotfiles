@@ -75,11 +75,40 @@ before handing the call to the real one.
   (`scripts/omp-session-trailer`, which jj asks too; `omp-session-trailer git` in a repository
   prints its answer). `git commit` gets it from git's own `--trailer`. `git merge`, `pull`,
   `cherry-pick` and `revert` run with `core.hooksPath` at `git-hooks/`: its prepare-commit-msg
-  adds the line, and each hook name there then runs the repository's own hook of that name
-  (`git-hooks/hook`). A rebase, including `pull --rebase`, leaves replayed commits as they were;
+  adds the line, and each hook name there then runs the hook git would have run without that
+  override, a hooks directory the caller chose included (`git-hooks/hook`). A rebase, including
+  `pull --rebase`, leaves replayed commits as they were;
   an alias, `git am` and `git commit-tree` add nothing. Commits omp writes through its own git
   library never run `git`, so no shim reaches them: omp appends `PI_COMMIT_TRAILERS`, which
   `omp/extensions/session-env.ts` sets to the session's line.
+  It also gives a `git push` that jj runs the pre-push leak check that a git push from the same
+  checkout gets. jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once
+  per remote, so no hook runs for it. When the process that ran git is jj and a line of the
+  checkout's `git remote -v` passes the hook sweeper's `git remote -v` test (`sweep-hooks.sh`
+  beside the check: `(theorem-labs/(<names>)|<others>)(\.git)?/?[[:space:]]`, letter case
+  ignored, for the sweeper's six repositories, every `<name>` whose
+  `~/.cache/public-leak-check/theorem-labs_<name>` holds exactly `public`, and its `others`,
+  sjawhar/dotfiles), the shim drops `--no-verify` and adds a last
+  `-c core.hooksPath=jj-push-hooks/`. The sweeper also skips a checkout whose config file names
+  none of these as written; the shim does not, so it can check a push the sweeper left without a
+  hook. Its `pre-push` makes the installed hook's call, `<check> <remote> <url>`, with the URL
+  git is pushing to and the update lines git is about to send; the check, found the way the hook
+  finds it, alone decides, for every target. Every other hook name there links to
+  `jj-push-hooks/hook`, which takes the shim's `-c` back out of `GIT_CONFIG_PARAMETERS` and runs
+  the hook git would have run without it, so the override changes only which pre-push runs.
+  Where the answer depends on the cache and the cache cannot give it, the push is refused unread:
+  the cache counts as absent only when `stat` says it does not exist (ENOENT); a directory on the
+  way, or a symlink's target, that cannot be searched, a cache that cannot be read, or a deciding
+  entry that is empty, unreadable, not a regular file or holds another word refuses. Each refusal
+  line starts with `error: `, and the shim leaves out the one "failed to push some refs" line git
+  writes right after the gate's refusal, so jj shows the commit and the matched text even under
+  `--quiet`; another destination's failure keeps its line. Not seen, as `git push --no-verify` is
+  not: a jj told to run another git (`git.executable-path`) or copied under another name, a
+  checkout of a public repository outside the six that has no cache entry (a machine or box
+  without the cache), and a remote changed between the shim's decision and git reading its
+  config. `tests/test_jj_push_leak_gate.py` is the contract; it runs the sweeper's own code, as
+  it is at that run, on the same checkouts, and fails when the sweeper's `git remote -v` test
+  and the shim's differ.
 - **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights,
   a `PI_SHELL_PREFIX` that turns errexit, nounset and pipefail off before each bash call (so
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named

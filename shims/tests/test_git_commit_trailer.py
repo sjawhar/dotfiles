@@ -162,6 +162,29 @@ class GitCommitTrailerTest(unittest.TestCase):
         self.assertIn("Hook: yes", body)
         self.assertEqual(self.trailers(), [SESSION])
 
+    def test_a_hooks_path_the_caller_set_on_the_command_line_is_still_the_one_that_runs(self):
+        # shims/git's last -c core.hooksPath=git-hooks/ must change only the trailer. A hooks directory chosen in
+        # GIT_CONFIG_PARAMETERS (as a `git -c core.hooksPath=…` hands it to every git its hooks run) won over the
+        # repository's own when git-hooks/hook dropped all of GIT_CONFIG_PARAMETERS; it must win, as with plain git,
+        # and its hook must see the caller's GIT_CONFIG_PARAMETERS, not the shim's entry (jj push gate review, R2-3).
+        marker = self.tmp / "marker"
+        for name in ("own", "selected"):
+            hooks = self.tmp / name
+            hooks.mkdir()
+            (hooks / "commit-msg").write_text(
+                f'#!/bin/sh\nprintf "%s %s\\n" {name} "$GIT_CONFIG_PARAMETERS" >> "{marker}"\n'
+                f'git interpret-trailers --in-place --trailer "Hook: {name}" "$1"\n')
+            (hooks / "commit-msg").chmod(0o755)
+        self.git("config", "core.hooksPath", str(self.tmp / "own"), env=self.plain)
+        self.branch_with_commit("side", "side work", self.plain)
+        self.git("commit", "-q", "--allow-empty", "-m", "m", env=self.plain)
+        caller = f"'core.hooksPath'='{self.tmp / 'selected'}'"
+        marker.unlink()
+        self.git("merge", "-q", "--no-edit", "side", env={**self.agent, "GIT_CONFIG_PARAMETERS": caller})
+        self.assertEqual(marker.read_text().splitlines(), [f"selected {caller}"])
+        self.assertIn("Hook: selected", self.git("log", "-1", "--format=%B", env=self.plain))
+        self.assertEqual(self.trailers(), [SESSION])
+
     def test_a_merge_in_an_opted_out_checkout_carries_none(self):
         self.git("config", "omp.sessionTrailer", "false", env=self.plain)
         self.branch_with_commit("side", "side work", self.plain)

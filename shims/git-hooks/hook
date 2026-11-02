@@ -9,12 +9,15 @@
 # rebase is replaying commits (`pull --rebase`, a rebase started from a hook): a replayed
 # commit keeps the trailer of the session that made it.
 #
-# Then every hook, prepare-commit-msg included, runs the repository's own hook of the same
-# name, if it has one, with the same arguments and stdin, and exits with its status. The
-# repository's hooks directory is read with the command line's config dropped
-# (GIT_CONFIG_PARAMETERS), since that is where shims/git's override sits; its own
-# core.hooksPath from a config file still counts. A git run inside a hook (which inherits
-# the override) in another repository therefore reaches that repository's hooks.
+# Then every hook, prepare-commit-msg included, runs the hook git would have run without
+# shims/git's override, if there is one, with the same arguments and stdin, and exits with
+# its status. git appends that override, a last `-c core.hooksPath=<this directory>`, to
+# GIT_CONFIG_PARAMETERS, where every earlier -c, --config-env and the caller's own
+# GIT_CONFIG_PARAMETERS already sit, and it reaches every hook. So this takes that one entry
+# back out (the last one equal to it: a git run inside a hook appends its own after it), and
+# leaves every entry the caller set: a hooks directory the caller chose there, or in any
+# config file, is the one whose hook runs, and that hook sees the caller's environment.
+# jj-push-hooks/hook does the same for the jj push gate's override.
 set -euo pipefail
 
 name="${0##*/}"
@@ -31,7 +34,19 @@ if [[ "$name" == prepare-commit-msg && -n "${1:-}" &&
         --trailer "Omp-Session: $OMP_SESSION_ID" "$1"
 fi
 
-own="$(env -u GIT_CONFIG_PARAMETERS git rev-parse --path-format=absolute --git-path hooks 2> /dev/null || true)"
+# The entry as git writes it: 'key'='value', each quoted as sq_quote_buf in quote.c quotes.
+mine="${0%/*}" # as core.hooksPath names it: git runs <core.hooksPath>/<name>
+mine="${mine//\'/\'\\\'\'}"
+mine=" 'core.hooksPath'='${mine//!/\'\\!\'}' "
+p=" ${GIT_CONFIG_PARAMETERS-} "
+if [[ "$p" == *"$mine"* ]]; then
+    before="${p%"$mine"*}"
+    p="$before ${p:${#before}+${#mine}}"
+    p="${p# }"
+    p="${p% }"
+    if [[ -n "$p" ]]; then export GIT_CONFIG_PARAMETERS="$p"; else unset GIT_CONFIG_PARAMETERS; fi
+fi
+own="$(git rev-parse --path-format=absolute --git-path hooks 2> /dev/null || true)"
 if [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]; then
     exec "$own/$name" "$@"
 fi

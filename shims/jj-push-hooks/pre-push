@@ -1,0 +1,38 @@
+#!/bin/bash
+# jj-push-gate: the pre-push hook of a `git push` that jj runs in a checkout the hook sweeper guards.
+# jj runs git with --no-verify, so the checkout's own pre-push hook, which runs the shared public leak check, never
+# runs for a jj push. shims/git drops that flag for such a push and points core.hooksPath here (shims/AGENTS.md).
+# This makes the call the hook that install-prepush-hook.sh installs makes: the shared check, found the same way
+# ($PUBLIC_LEAK_CHECK, PATH, then ${XDG_CONFIG_HOME:-~/.config}/public-leak-check/path), run as `<check> <remote>
+# <url>` with git's own update lines on stdin. So the URL is the one git is pushing to, and the updates are the ones
+# it is about to send: an up-to-date ref is not among them. The check alone decides, for every target, sjawhar/dotfiles
+# included since its scrub (dispatch://INFRA-974). The differences:
+# - the checkout's own pre-push (pre-push.local included) does not run, as it did not before this gate;
+# - every line of a refusal starts with `error: `, the only git output jj still shows under --quiet, so the lines
+#   naming the commit and the text that matched always reach the person who pushed.
+# Every other hook name in this directory is a link to ./hook, which runs the hook git would have run without the gate.
+set -uo pipefail
+refuse() {
+    printf 'error: git shim: %s\n' "$@" >&2
+    exit 1
+}
+url="${2:-}"
+in="$(cat)" || refuse "cannot read the updates git gave the pre-push hook, so this jj push to $url is refused." \
+    "Nothing was pushed, and nothing is wrong with your commits: your commits were not read."
+chk="${PUBLIC_LEAK_CHECK:-}"
+[[ -n "$chk" ]] || chk="$(command -v public-leak-check.sh 2> /dev/null || true)"
+pointer="${XDG_CONFIG_HOME:-$HOME/.config}/public-leak-check/path"
+if [[ -z "$chk" && -s "$pointer" ]]; then IFS= read -r chk < "$pointer" || true; fi
+[[ -n "$chk" && -x "$chk" ]] || refuse "this machine has no public leak check, so this jj push to $url is refused. Nothing was pushed." \
+    "Nothing is wrong with your commits: the check never ran. Point at it with PUBLIC_LEAK_CHECK, put public-leak-check.sh on PATH," \
+    "or write its path in $pointer, then push again."
+crc=0
+out="$(bash "$chk" "$@" 2>&1 <<< "$in")" || crc=$?
+if ((crc == 0)); then
+    [[ -z "$out" ]] || printf '%s\n' "$out" >&2
+    exit 0
+fi
+while IFS= read -r line; do printf 'error: %s\n' "$line"; done <<< "$out" >&2
+((crc != 3)) || refuse "the public leak check refused this jj push to $url: the lines above name the commit and the text that matched, or say why the check could not read the target. Nothing was pushed."
+refuse "the public leak check could not finish (exit $crc), so this jj push to $url is refused. Nothing was pushed." \
+    "Nothing is wrong with your commits: the check never passed or refused them. The check: $chk"

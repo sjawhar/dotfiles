@@ -1,0 +1,29 @@
+#!/bin/bash
+# jj-push-gate-hook: every hook name in jj-push-hooks/ but pre-push is a link to this file. For the `git push` jj
+# runs in a checkout the hook sweeper guards, shims/git puts a last `-c core.hooksPath=<this directory>` on git's
+# command line, so that git runs the gate's pre-push (shims/AGENTS.md). git appends that -c to GIT_CONFIG_PARAMETERS,
+# where every earlier -c, --config-env and the caller's own GIT_CONFIG_PARAMETERS already sit, and it reaches every
+# hook git runs. So that it changes which pre-push runs and nothing else, this takes that one entry back out (the
+# last one equal to it: a git run inside a hook appends its own after it), asks git which hooks directory it would
+# then use, and execs that directory's hook of the same name, if it has one, with the arguments, stdin and
+# environment git would have given it without the gate. git-hooks/hook does the same for the trailer's override.
+set -uo pipefail
+name="${0##*/}"
+here="$(cd -P -- "${0%/*}" && pwd)"
+# The entry as git writes it: 'key'='value', each quoted as sq_quote_buf in quote.c quotes.
+mine="${0%/*}" # as core.hooksPath names it: git runs <core.hooksPath>/<name>
+mine="${mine//\'/\'\\\'\'}"
+mine=" 'core.hooksPath'='${mine//!/\'\\!\'}' "
+p=" ${GIT_CONFIG_PARAMETERS-} "
+if [[ "$p" == *"$mine"* ]]; then
+    before="${p%"$mine"*}"
+    p="$before ${p:${#before}+${#mine}}"
+    p="${p# }"
+    p="${p% }"
+    if [[ -n "$p" ]]; then export GIT_CONFIG_PARAMETERS="$p"; else unset GIT_CONFIG_PARAMETERS; fi
+fi
+own="$(git rev-parse --path-format=absolute --git-path hooks 2> /dev/null || true)"
+if [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]; then
+    exec "$own/$name" "$@"
+fi
+exit 0

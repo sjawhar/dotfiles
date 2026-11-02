@@ -1,8 +1,10 @@
 #!/bin/bash
 # git-worktree-shim: in an agent session, refuse a bare `git worktree prune` outside a
 # throwaway repository, lock every `git worktree add`, let `git worktree remove` past a
-# lock of ours and no further, and give every commit an omp session makes with
-# `git commit`, `merge`, `pull`, `cherry-pick` or `revert` its Omp-Session trailer.
+# lock of ours and no further, give every commit an omp session makes with
+# `git commit`, `merge`, `pull`, `cherry-pick` or `revert` its Omp-Session trailer, and
+# run the shared public leak check on every `git push` jj runs where the pre-push hook
+# would.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -96,8 +98,8 @@ done
 #   `ifexists=addIfDifferent` keeps an amend from repeating it.
 # - `git merge`, `pull`, `cherry-pick`, `revert` take no --trailer, so they run
 #   with `core.hooksPath` at shims/git-hooks/, whose prepare-commit-msg adds the
-#   same line and then runs the repository's own hook; every other hook name
-#   there just runs the repository's own. A rebase (`pull --rebase`) keeps each
+#   same line; then every hook name there runs the hook git would have run
+#   without that override (git-hooks/hook). A rebase (`pull --rebase`) keeps each
 #   replayed commit's message as it was. A caller's own `-c core.hooksPath`
 #   stands, and that command gets no trailer.
 # A commit made through an alias, `git rebase`, `git am` or `git commit-tree`
@@ -116,7 +118,174 @@ case "${args[i]:-}" in
         fi
         ;;
 esac
-[[ "${args[i]:-}" == worktree ]] || exec "$_real" "$@"
+# Only `worktree` and `push` read on: the push gate below sits past this exec,
+# so every other command runs without bash parsing it.
+[[ "${args[i]:-}" == worktree || "${args[i]:-}" == push ]] || exec "$_real" "$@"
+
+# jj publishes through git and turns git's hooks off: `jj git push` runs, once per
+# remote, `git -c core.fsmonitor=false -c submodule.recurse=false --git-dir <dir>
+# push --porcelain --no-verify --force-with-lease=<ref>:<old>… -- <remote>
+# <sha>:<ref>…` (jj 0.46, measured 2026-11-01). So the pre-push hook through which
+# a git checkout runs the shared public leak check never runs for a jj push, and
+# theorem-labs/rocq alone has fourteen jj checkouts here (dispatch://BET-214/ask/19a77b7a;
+# Sami, dispatch://BET-214/ask/3f2020ba: "Some reasonable check makes sense").
+# So when jj is the caller in a checkout that hook guards, this gives the push its
+# pre-push hook back: it drops jj's --no-verify and points core.hooksPath at
+# jj-push-hooks/, whose pre-push makes the hook's call to the same check. git
+# itself hands that hook the URL it is pushing to and the updates it is about to
+# send, so nothing about the push is guessed here: an up-to-date ref is not
+# scanned, a bookmark moved meanwhile does not change what goes out, and a remote
+# changed meanwhile does not change where it goes. jj has resolved every way of
+# naming what to push (--bookmark, --named, -r, --change, --all, --tag, aliases,
+# git.push, global options) before it runs git.
+# - Guarded is the rule by which the hook sweeper (sweep-hooks.sh, beside the
+#   shared check) installs the hook, copied from its `git remote -v` test (its
+#   `base`, `others`, `public_names` and `repos`): a line of `git remote -v`
+#   matching (theorem-labs/(<names>)|<others>)(\.git)?/?[[:space:]], letter case
+#   ignored, where <names> are the sweeper's six and the <name> of every file
+#   ~/.cache/public-leak-check/theorem-labs_<name> holding exactly `public`, and
+#   <others> its repositories outside theorem-labs (sjawhar/dotfiles). A line is
+#   matched as git prints it, URL whole, so a space in a path or a # or ? in an
+#   ssh alias changes nothing. The cache is read only when a line names
+#   theorem-labs/ and nothing else matched. The sweeper first skips a checkout
+#   whose config file it reads and finds no such name in; this does not, so it can
+#   check a push the sweeper left without a hook, and refuses there only what the
+#   check refuses (tests/test_jj_push_leak_gate.py runs both rules on the same
+#   checkouts).
+# - Fail closed where the answer depends on the cache and the cache cannot give it:
+#   the cache counts as absent only when the kernel says it does not exist (ENOENT,
+#   which it says only after searching every directory up to the missing name).
+#   Any other failure to reach it (a directory on the way, or a symlink's target,
+#   that cannot be searched), a cache directory that cannot be read, or an entry
+#   that would decide but cannot be read, is not a regular file, is empty or holds
+#   a word the check never writes refuses the push, saying the commits were not read.
+# A plain `git push` is untouched (it runs the checkout's hook), as is every other
+# command. Not seen, as `git push --no-verify` is not: a jj told to run another git
+# (`git.executable-path`) or copied under another name, a checkout of a public
+# repository outside the six that has no cache entry (a machine or agent box without
+# the cache), and a remote changed between this decision and git reading its config.
+from_jj() { # true when the process that ran this git is jj, also a jj binary replaced since it started
+    local exe
+    exe="$(readlink "/proc/$PPID/exe" 2> /dev/null)" || return 1
+    exe="${exe% (deleted)}"
+    [[ "${exe##*/}" == jj ]]
+}
+jj_push_refuse() {
+    printf 'error: git shim: %s\n' "$@" >&2
+    exit 1
+}
+JJ_PUSH_UNREAD="Nothing was pushed, and nothing is wrong with your commits: your commits were not read."
+# The sweeper's six public theorem-labs repositories and its public repositories elsewhere, its `base` and `others`.
+JJ_GATE_BASE='rocq-linux-process-semantics|oss-verify|oss-verify-proofs|metarocq|rocq|legion'
+JJ_GATE_OTHERS='sjawhar/dotfiles'
+# jj_gate_match LISTING RE: true when a line of LISTING matches the extended regular expression RE, letter case
+# ignored, as the sweeper's `git remote -v | grep -qiE "$repos"` does.
+jj_gate_match() {
+    local line hit=1
+    shopt -s nocasematch
+    while IFS= read -r line; do
+        if [[ "$line" =~ $2 ]]; then
+            hit=0
+            break
+        fi
+    done <<< "$1"
+    shopt -u nocasematch
+    return "$hit"
+}
+# jj_gate_rule NAMES [OTHERS]: the sweeper's `repos` regular expression for NAMES and OTHERS.
+jj_gate_rule() { printf '(theorem-labs/(%s)%s)(\\.git)?/?[[:space:]]' "$1" "${2:+|$2}"; }
+# jj_gate_kind PATH: what PATH is, symlinks followed: its type as stat names it (`directory`, `regular file`, ...);
+# `absent` when the kernel's own path walk says it does not exist (ENOENT), which it says only after searching every
+# directory up to the missing name, so the parent could be searched; `unknown` on any other failure, such as a
+# directory on the way, or a symlink's target, that cannot be searched. [[ -e ]] cannot tell those apart.
+jj_gate_kind() {
+    local out
+    if out="$(LC_ALL=C stat -L --printf '%F' -- "$1" 2>&1)"; then
+        printf '%s' "$out"
+    elif [[ "$out" == *": No such file or directory" ]]; then
+        printf absent
+    else
+        printf unknown
+    fi
+}
+# jj_push_guarded LISTING: true when the checkout whose `git remote -v` is LISTING is guarded (above), false when it
+# is not; refuses when that depends on a visibility cache it cannot read.
+jj_push_guarded() {
+    local out="$1" dir kind f name v ok names="$JJ_GATE_BASE" bad=""
+    local -a undecided=()
+    jj_gate_match "$out" "$(jj_gate_rule "$names" "$JJ_GATE_OTHERS")" && return 0
+    [[ "${out,,}" == *theorem-labs/* ]] || return 1
+    dir="${HOME:-}/.cache/public-leak-check"
+    kind="$(jj_gate_kind "$dir")"
+    [[ "$kind" != absent ]] || return 1
+    [[ "$kind" != unknown ]] ||
+        jj_push_refuse "cannot reach the public leak check's visibility cache $dir: a directory on the way to it, or the target of a symlink on the way, cannot be searched, so whether this jj push needs the check is unknown and it is refused." \
+            "$JJ_PUSH_UNREAD Make every directory on that path searchable, then push again."
+    [[ "$kind" == directory && -r "$dir" && -x "$dir" ]] ||
+        jj_push_refuse "cannot read the public leak check's visibility cache $dir, so whether this jj push needs the check is unknown and it is refused." \
+            "$JJ_PUSH_UNREAD Make that directory readable, then push again."
+    for f in "$dir"/theorem-labs_*; do
+        [[ -e "$f" || -L "$f" ]] || continue # no entry at all: the pattern itself
+        name="${f##*/theorem-labs_}" v="" ok=0
+        if [[ -f "$f" ]]; then
+            if [[ -r "$f" ]] && { IFS= read -r -d '' v || :; } 2> /dev/null < "$f"; then ok=1; fi
+        elif [[ "$(jj_gate_kind "$f")" == absent ]]; then
+            continue # a symlink to nothing: no entry, as for the sweeper
+        fi
+        while [[ "$v" == *$'\n' ]]; do v="${v%$'\n'}"; done # as the sweeper's $(cat) reads it
+        case "$ok:$v" in
+            1:public) names+="|$name" ;;
+            1:private | 1:internal) ;;
+            *) undecided+=("$name") ;;
+        esac
+    done
+    jj_gate_match "$out" "$(jj_gate_rule "$names" "$JJ_GATE_OTHERS")" && return 0
+    for name in "${undecided[@]}"; do
+        if jj_gate_match "$out" "$(jj_gate_rule "$name")"; then bad+=" $dir/theorem-labs_$name"; fi
+    done
+    [[ -z "$bad" ]] ||
+        jj_push_refuse "the public leak check's visibility cache entry${bad} is empty, unreadable, not a regular file or holds a word the check never writes, so whether this jj push needs the check is unknown and it is refused." \
+            "$JJ_PUSH_UNREAD An empty entry is one the check is rewriting: push again in a moment. Any other needs fixing or removing."
+    return 1
+}
+# jj_push_gate: in a guarded checkout, runs this push with git's hooks on and a last -c core.hooksPath=jj-push-hooks/,
+# which beats jj's own core.hooksPath and every earlier one, so the gate's pre-push runs; jj-push-hooks/hook, which
+# every other hook name there links to, takes that one -c back out and runs the hook git would have run without it.
+# When git's stderr carries git's own "failed to push some refs", jj 0.46 reads only git's stdout, which is empty
+# when a pre-push hook refused, and drops the stderr: the person sees "Git push output unfamiliar" and nothing else
+# (measured 2026-11-02). git prints that line for a destination right after that destination's pre-push hook
+# refused, so the one that belongs to the gate's refusal is the one right after its `error: git shim: ` lines; that
+# line alone is left out, and jj then reports git's stderr, the check's lines naming the commit and the text that
+# matched included, under --quiet too. Another destination's failure keeps its line: jj then reports that failure
+# from git's porcelain and drops the stderr, the gate's refusal with it. The push is refused either way: git exits 1.
+jj_push_gate() {
+    local out hooks a seen=0
+    local -a rest=()
+    out="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)" ||
+        jj_push_refuse "cannot list this repository's remotes, so whether this jj push needs the public leak check is unknown and it is refused." \
+            "$JJ_PUSH_UNREAD"
+    jj_push_guarded "$out" || return 0
+    hooks="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/jj-push-hooks"
+    [[ -x "$hooks/pre-push" ]] ||
+        jj_push_refuse "the leak gate's hook $hooks/pre-push is missing, so this jj push from a checkout of a public theorem-labs repository is refused." \
+            "$JJ_PUSH_UNREAD"
+    for a in "${args[@]:i+1}"; do
+        if ((!seen)); then
+            [[ "$a" == -- ]] && seen=1
+            [[ "$a" == --no-verify ]] && continue
+        fi
+        rest+=("$a")
+    done
+    exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$hooks" push --verify "${rest[@]}" \
+        2> >(awk '/^error: git shim: /{ gate = 1; print; fflush(); next }
+                  gate && /^error: failed to push some refs to /{ gate = 0; next }
+                  { gate = 0; print; fflush() }' >&2)
+}
+if [[ "${args[i]}" == push ]]; then
+    if from_jj; then jj_push_gate; fi
+    exec "$_real" "$@"
+fi
+
 verb="${args[i + 1]:-}"
 rest=("${args[@]:i+2}")
 

@@ -32,6 +32,10 @@ rw .cache/ms-playwright
 # hawk-token's private agent-c checkout (scripts/hawk-token): one clone on the host,
 # refreshed by whichever run finds it stale, shared by every box
 rw .cache/hawk-token
+# the public leak check's visibility cache (one file per repository: public, private or internal).
+# shims/git reads it to decide whether a jj push needs the check, and the check writes each
+# visibility it reads through gh into it, from inside a box as on the host, so it is rw.
+rw .cache/public-leak-check
 
 # cloud access (AWS by design)
 rw .aws
