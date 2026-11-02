@@ -7,9 +7,11 @@ before handing the call to the real one.
 
 - **`gh`** sources the auth token. In an agent session (omp, agentbox, or anything launched
   with the gh-app routing include) it routes every call to the repo owner's GitHub App; an
-  owner with no App installation (METR, can1357, every upstream we fork) gets the upstream
-  token from the secrets store (`gh-app.agent.fallback-secret`, `GH_PUBLIC_REPO_PAT`). No
-  agent process reaches the user's own login, through this shim or past it: gh runs with
+  owner with no App installation (METR, can1357, google, every upstream we fork) gets the upstream
+  token from the secrets store (`gh-app.agent.fallback-secret`, `GH_PUBLIC_REPO_PAT`), which is
+  Sami's own (`gh api user` on it answered `sjawhar` on 2026-11-02, a classic token with
+  `public_repo`), so such a call acts as him. No agent process reaches the login in gh's own
+  `hosts.yml` or keyring, through this shim or past it: gh runs with
   `GH_CONFIG_DIR` at `scripts/gh-agent-config`'s directory, whose placeholder login stands
   where the user's would be, so gh never reads his token from `hosts.yml` or the keyring;
   `scripts/agent-session` and `omp/extensions/session-env.ts` export that directory for the
@@ -24,7 +26,30 @@ before handing the call to the real one.
   `scripts/post-review <pr> <head sha> APPROVE|REQUEST_CHANGES <body-file> <owner/repo>`,
   since a comment does not count as an approval; elsewhere a verdict goes out as an App
   comment beginning `VERDICT: <verdict> at <head sha>`; anything
-  else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). `gh pr create` for an
+  else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). The refusal names the
+  identity the call really ran as: the App, the upstream token (from gh-app-token's stderr line), or
+  a token inherited in `GH_TOKEN`, which knives does not route; on 2026-11-02 a broker token made
+  for theorem-labs (`GITHUB_ADMIN_PAT`) in `GH_TOKEN` was refused on google/oss-fuzz and the
+  refusal said the App had made the call.
+  A post Sami instructed goes out as him on a citation: `GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>
+  gh issue create -R <owner>/<repo> --title <title> --body-file <file>` (or `gh issue comment` /
+  `gh pr comment <number or URL>` with `--body`/`--body-file`), with no `GH_TOKEN` for an owner
+  without the App, which the upstream token then serves. Before the call goes on, the shim runs
+  `scripts/gh-approved-post`, which refuses it unless: the ask is answered by sami@theorem.dev; its
+  one selected option approves (its label starts with post, send, publish, file, open, submit,
+  approve, yes or go, and is not a "do not" option); the ask's question or document names the
+  repository as a whole name; and the posted body is, exactly (line-end spaces and outer blank
+  lines aside), text between two `---` lines of the draft, with the title on a `Title: <title>`
+  line before them for an issue. The draft is the first version of the ask's document that shows
+  his answer (an edit after it does not count; a version holding two asks with the same question
+  is refused), or the ask's own question when it has no document. The call may carry
+  only `-R`, the title and the body, so what is checked is all that is posted; stdin bodies are
+  refused. Every check, passed or refused, appends one JSON line (time, session, pid, cwd, ask,
+  repository, title, body and its sha256, the document version, his selection and any answer
+  text, and the verdict) to `<cache root>/log/approved-posts.jsonl` (below), and the call's exit
+  code follows as a `"ev":"result"` line with the same pid. A call without `GH_SHIM_APPROVAL` is
+  unchanged (`shims/tests/test_gh_approved_post.py`).
+  `gh pr create` for an
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
   (`scripts/docs-pr-gate`). In an agent session every call first goes to the shared public leak

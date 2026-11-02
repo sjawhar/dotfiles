@@ -110,13 +110,19 @@ gh_shim_refuse() {
     } >&2
     exit 1
 }
-# What GitHub answers when the App may not do a call: a review of the App's own
-# pull request, a permission the installation lacks, a token GitHub rejects.
+# What GitHub answers when the identity a call ran as may not make it: a review
+# of the App's own pull request, a permission or repository the installation or
+# token lacks, a token GitHub rejects.
 GH_SHIM_REFUSED_BY_GITHUB='Can not (approve|request changes on) your own pull request|Resource not accessible by|HTTP 40[13]|Bad credentials|must have (admin|push|write|maintain)|not have permission|Permission to [^ ]+ denied|requires authentication'
-# gh_shim_refused_for_app RC ARGV…: GitHub refused the call for the App.
-gh_shim_refused_for_app() {
-    local rc="$1" pr="" repo="" verdict="APPROVE" a prev="" instead
-    shift
+# gh_shim_refused_by_github RC ERRFILE ARGV…: GitHub refused the call for the
+# identity it ran as, which is read from the call's environment and stderr, not
+# assumed. On 2026-11-02 a call carrying a broker token in GH_TOKEN (so knives
+# did not route it) was refused on google/oss-fuzz, and this block said it ran
+# as the App and that the user's login is never used by an agent, while the
+# token was the user's own and the routed call would have run as him too.
+gh_shim_refused_by_github() {
+    local rc="$1" err="$2" pr="" repo="" verdict="APPROVE" a prev="" instead who token
+    shift 2
     if [[ "${1:-}" == pr && "${2:-}" == review ]]; then
         for a in "${@:3}"; do
             case "$prev" in
@@ -143,13 +149,23 @@ gh_shim_refused_for_app() {
     fi
     if [[ -n "$pr" ]]; then
         instead="if the repository needs an approving review to merge (a comment does not count there), post the review as the legion-reviewer App: \`~/.dotfiles/scripts/post-review $pr <full 40-character head sha> $verdict <body-file> ${repo:-<owner/repo>}\`. Use that route only when your session did not author the pull request. Where a comment is enough, post the verdict as a pull-request comment from the App: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765)."
+    elif [[ "${1:-} ${2:-}" == "issue create" || "${1:-} ${2:-}" == "issue comment" || "${1:-} ${2:-}" == "pr comment" ]]; then
+        instead="if Sami instructed this post in a Dispatch ask he answered, run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN. The shim then checks that he answered it with its approving option and that the title and body are the draft he was shown, and logs the post; an owner with no App installation gets his own upstream token, so the post goes out as him (shims/AGENTS.md). Otherwise stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
     else
         instead="stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
     fi
+    token="$(sed -nE 's/.*using the personal token ([^ ]+) .*/\1/p' "$err" | head -n 1)"
+    if [[ -n "${GH_TOKEN:-}" ]]; then
+        who="the token in GH_TOKEN, inherited from the environment (${GH_TOKEN:0:4}…), so as that token's own GitHub user; nothing routed the call, and a broker token reaches only the repositories it was made for (GITHUB_ADMIN_PAT: theorem-labs)"
+    elif [[ -n "$token" ]]; then
+        who="the personal token $token, so as its GitHub user, not as an App: the repository's owner has no App installation"
+    else
+        who="the GitHub App this repository's owner routes agent calls to"
+    fi
     {
         echo "gh shim: REFUSED by GitHub: \`$(gh_shim_quote "$@")\` (exit $rc; GitHub's error is above)."
-        echo "  Identity: it ran as the GitHub App this repository's owner routes agent calls to. Do not retry with another credential, token or gh binary: $(gh_shim_user_login) is never used by an agent process. The one other identity an agent has is the legion-reviewer App, for a review verdict only, through scripts/post-review (below)."
-        echo "  Why: GitHub does not let that App make this call (it cannot approve or request changes on a pull request it opened, and it cannot use a permission its installation lacks)."
+        echo "  Identity: it ran as $who. Do not retry with another credential, token or gh binary. The legion-reviewer App, through scripts/post-review (below), is for a review verdict only."
+        echo "  Why: GitHub does not let that identity make this call (an App cannot approve or request changes on a pull request it opened, and an App installation or a token cannot use a permission or a repository it was not given)."
         echo "  Instead: $instead"
     } >&2
     exit "$rc"
@@ -280,18 +296,38 @@ if agent_context; then
             "Every other gh call is already routed to the GitHub App for the repository's owner: run the call itself (gh pr …, gh api repos/<owner>/<repo>/…) with -R <owner>/<repo>, and it gets the App's token. If that call is refused, stop and tell your lead which call and the error; do not look for another credential." \
             "$@"
     fi
+    # A post Sami instructed goes out as him only on a citation: GH_SHIM_APPROVAL
+    # names the Dispatch ask he answered, and scripts/gh-approved-post checks the
+    # answer and that the title and body are the draft he was shown, and logs the
+    # post beside the call log, before the call goes on its usual route (for an
+    # owner without the App, his own upstream token). A citation that does not
+    # hold refuses the call; a call without one is unchanged. On 2026-11-02 he
+    # answered "Post it" on dispatch://OSSV-232/ask/a7d1ac41-45c4-4504-a985-7c92998d2158
+    # and the issue still did not go out.
+    _approved_log=""
+    if [[ -n "${GH_SHIM_APPROVAL:-}" && -z "${GH_SHIM_INNER:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && -z "${KNIVES_GH_SHIM_DEPTH:-}" ]]; then
+        _approved_root="$(_gh_cache_root)"
+        mkdir -p "$_approved_root/log" && chmod 700 "$_approved_root" "$_approved_root/log" || exit 1
+        _approved_log="$_approved_root/log/approved-posts.jsonl"
+        "$_dotfiles/scripts/gh-approved-post" --log "$_approved_log" -- "$@" || exit 1
+    fi
     # The outermost call runs the rest of this shim as a child and keeps a copy
-    # of its stderr: when GitHub refuses the call for the App, gh's own error
-    # ("Can not approve your own pull request", "Resource not accessible by
-    # integration") reads to an agent like a missing credential, and an agent
-    # that goes looking for another one finds the user's. The refusal below
-    # names the call, says no other identity exists and gives the route.
+    # of its stderr: when GitHub refuses the call, gh's own error ("Can not
+    # approve your own pull request", "Resource not accessible by integration")
+    # reads to an agent like a missing credential, and an agent that goes looking
+    # for another one finds the user's. The refusal below names the call, the
+    # identity it ran as and the route.
     if [[ -z "${GH_SHIM_INNER:-}" && -z "${GH_READ_CACHE_BYPASS:-}" ]] \
         && _err="$(mktemp "${TMPDIR:-/tmp}/gh-shim-stderr.XXXXXX" 2> /dev/null)"; then
         set +e
         { GH_SHIM_INNER=1 "$0" "$@" 2>&1 >&3 3>&- | tee "$_err" >&2; } 3>&1
         _rc=${PIPESTATUS[0]}
         set -e
+        if [[ -n "$_approved_log" ]]; then
+            printf '{"t":"%s","pid":%s,"sid":"%s","ask":"%s","ev":"result","rc":%s}\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "${OMP_SESSION_ID:-}" "${GH_SHIM_APPROVAL//\"/}" "$_rc" \
+                >> "$_approved_log" 2> /dev/null || true
+        fi
         _refused=0
         _no_target=0
         _limited=0
@@ -300,16 +336,19 @@ if agent_context; then
             ((!_no_target)) && grep -qiE "$GH_SHIM_RATE_LIMITED" "$_err" && _limited=1
             ((!_no_target && !_limited)) && grep -qiE "$GH_SHIM_REFUSED_BY_GITHUB" "$_err" && _refused=1
         fi
-        if ((_limited)); then
+        if ((_limited || _refused)); then
             set +e
-            ( gh_shim_rate_limited "$_rc" "$_err" "$@" )
+            if ((_limited)); then
+                ( gh_shim_rate_limited "$_rc" "$_err" "$@" )
+            else
+                ( gh_shim_refused_by_github "$_rc" "$_err" "$@" )
+            fi
             set -e
             rm -f "$_err"
             exit "$_rc"
         fi
         rm -f "$_err"
         ((_no_target)) && gh_shim_no_target "$_rc" "$@"
-        ((_refused)) && gh_shim_refused_for_app "$_rc" "$@"
         exit "$_rc"
     fi
     # An inherited GH_TOKEN wins over everything below: knives skips minting and

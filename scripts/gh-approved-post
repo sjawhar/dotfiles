@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""gh-approved-post --log FILE -- <gh argv…>: check the Dispatch ask a post as Sami cites.
+
+shims/gh runs this in an agent session when a call carries GH_SHIM_APPROVAL, a Dispatch ask
+reference (dispatch://KEY/ask/<id>), before the call goes on. Exit 0 lets the call run on its
+usual route, which for an owner without the GitHub App is Sami's own upstream token
+(GH_PUBLIC_REPO_PAT, login sjawhar), and with a GH_TOKEN from the broker is that token. Exit 1
+refuses it, and stderr says why.
+
+His rule (CLAUDE.md): anything that commits him outside the company is drafted, shown to him,
+then sent; his answer to the draft is the permission to send it. On 2026-11-02 he answered
+dispatch://OSSV-232/ask/a7d1ac41-45c4-4504-a985-7c92998d2158 "Post it" and the post still did
+not go out. The call passes only when all of these hold:
+  - the call is `gh issue create`, `gh issue comment` or `gh pr comment`, with the repository
+    named (-R/--repo, or a GitHub URL as the comment target), the title in -t/--title and the
+    body in -b/--body or -F/--body-file <file>, and no other flag, so what is checked is all
+    that is posted;
+  - the ask exists, is answered by APPROVER, and its one selected option approves (its label
+    starts with an approving word and is not a "do not" option);
+  - the draft, in the version of the ask's document that first shows the answer (else in the
+    ask's own question), names the repository, and holds the posted body, exactly, between two
+    `---` lines; for an issue, a `Title: <title>` line before them gives the title.
+Every check, passed or refused, appends one JSON line to FILE: who (session, pid, cwd), which ask,
+which repository, the title and the body.
+"""
+
+import hashlib
+import html
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+APPROVER = "sami@theorem.dev"
+APPROVING = re.compile(r"^(post|send|publish|file|open|submit|approve|yes|go)\b", re.I)
+NEGATION = re.compile(r"^(do not|don't|dont|no|not|never|hold|wait|skip|cancel)\b|\bnot\b", re.I)
+VERBS = {("issue", "create"), ("issue", "comment"), ("pr", "comment")}
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:issues|pull)/\d+")
+
+
+class Refused(Exception):
+    pass
+
+
+def parse_call(argv: list[str]) -> dict:
+    if len(argv) < 2 or (argv[0], argv[1]) not in VERBS:
+        raise Refused(
+            "a cited post is `gh issue create`, `gh issue comment` or `gh pr comment`; this call is "
+            f"`gh {' '.join(argv[:2])}`."
+        )
+    call = {"verb": f"{argv[0]} {argv[1]}", "repo": "", "title": None, "body": None, "target": ""}
+    rest = argv[2:]
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        name, eq, inline = arg.partition("=") if arg.startswith("--") else (arg, "", "")
+        if name in ("-R", "--repo", "-t", "--title", "-b", "--body", "-F", "--body-file"):
+            if eq:
+                value = inline
+            elif i + 1 < len(rest):
+                i += 1
+                value = rest[i]
+            else:
+                raise Refused(f"`{arg}` has no value.")
+            if name in ("-R", "--repo"):
+                call["repo"] = value
+            elif name in ("-t", "--title"):
+                call["title"] = value
+            elif name in ("-b", "--body"):
+                call["body"] = value
+            else:
+                if value == "-":
+                    raise Refused("the body comes from stdin; pass it in a file (--body-file <file>).")
+                try:
+                    with open(value, encoding="utf-8") as f:
+                        call["body"] = f.read()
+                except OSError as e:
+                    raise Refused(f"cannot read the body file {value}: {e.strerror}.") from None
+        elif arg.startswith("-"):
+            raise Refused(
+                f"`{arg}` is not checked against the approved draft; a cited post takes only "
+                "-R/--repo, -t/--title, -b/--body and -F/--body-file."
+            )
+        elif call["verb"] != "issue create" and not call["target"]:
+            call["target"] = arg
+        else:
+            raise Refused(f"unexpected argument `{arg}`.")
+        i += 1
+    m = URL_RE.match(call["target"])
+    if m and call["repo"] and call["repo"].lower() != m.group(1).lower():
+        raise Refused(f"-R {call['repo']} and the target {call['target']} name different repositories.")
+    if m and not call["repo"]:
+        call["repo"] = m.group(1)
+    if not REPO_RE.match(call["repo"]):
+        raise Refused("name the repository: -R <owner>/<repo>.")
+    if call["verb"] == "issue create" and not call["title"]:
+        raise Refused("an issue needs its title in -t/--title.")
+    if call["verb"] != "issue create" and not call["target"]:
+        raise Refused(f"`gh {call['verb']}` needs the number or URL it comments on.")
+    if call["verb"] != "issue create" and call["title"] is not None:
+        raise Refused(f"`gh {call['verb']}` takes no title.")
+    if not call["body"] or not call["body"].strip():
+        raise Refused("the body is empty; pass it with -b/--body or -F/--body-file.")
+    return call
+
+
+def dispatch(*args: str) -> str:
+    try:
+        out = subprocess.run(["dispatch", *args], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Refused(f"`dispatch {' '.join(args)}` did not run: {e}.") from None
+    if out.returncode != 0:
+        first = (out.stderr.strip() or out.stdout.strip()).splitlines()[:1]
+        raise Refused(f"`dispatch {' '.join(args)}` failed (exit {out.returncode}): {' '.join(first)}")
+    return out.stdout
+
+
+def parse_ask(text: str) -> dict:
+    """The fields of `dispatch read --ref <ask>`, and its document link. The answer is read only
+    between the `State:` line and the replies, so text in the question or a reply cannot stand in
+    for it."""
+    m = re.match(r"Question: (.*?)\nOptions:\n(.*?)\nState: (\S+)\n", text, re.S)
+    if not m:
+        raise Refused("Dispatch's answer for the citation is not an ask.")
+    question, options_text, state = m.groups()
+    options = []
+    for line in options_text.splitlines():
+        if line.startswith("- "):
+            options.append(line[2:].split(" — ", 1)[0].strip())
+    ask = {"question": question, "options": options, "state": state, "by": "", "selected": "", "text": ""}
+    after = re.split(r"\n(?:Replies:\n|Node: ask )", text[m.end() - 1:], maxsplit=1)[0]
+    answer = re.match(r"\nAsk id: [^\n]*\nAnswer:\n- By: ([^\n]*)\n- Selected: ([^\n]*)(?:\n- Text: (.*))?", after, re.S)
+    if answer:
+        ask["by"] = answer.group(1).strip()
+        ask["selected"] = answer.group(2).strip()
+        ask["text"] = (answer.group(3) or "").strip()
+    links = text.rsplit("\nLinks:\n", 1)[1] if "\nLinks:\n" in text else ""
+    doc = re.search(r"^- anchored_to (?:artifact|spec|document) (dispatch://\S+)", links, re.M)
+    nodes = [ln for ln in text.splitlines() if ln.startswith("Node: ask ")]
+    part = re.search(r"part of (dispatch://\S+/(?:artifact/[^ @]+|spec)) \(version (\d+)\)", nodes[-1]) if nodes else None
+    ask["document"] = doc.group(1) if doc else part.group(1) if part else ""
+    ask["first_version"] = int(part.group(2)) if part and part.group(1) == ask["document"] else 1
+    return ask
+
+
+def ask_blocks(doc: str, question: str) -> list[dict]:
+    """The attributes of each ask block of the document whose text starts with the ask's question."""
+    first = question.splitlines()[0].strip()
+    return [
+        {k: html.unescape(v) for k, v in re.findall(r'(\w+)="([^"]*)"', m.group(1))}
+        for m in re.finditer(r"^:::ask\{([^\n]*)\}\n([^\n]*)", doc, re.M)
+        if m.group(2).strip() == first
+    ]
+
+
+def drafts(source: str) -> list[tuple[str | None, str]]:
+    """(title, body) for each text between two consecutive `---` lines; the title is the last
+    `Title: …` line before that section's opening rule."""
+    lines = source.split("\n")
+    rules = [i for i, line in enumerate(lines) if line.strip() == "---"]
+    found = []
+    for a, b in zip(rules, rules[1:]):
+        title = None
+        for line in reversed(lines[:a]):
+            if line.strip() == "---":
+                break
+            if line.startswith("Title: "):
+                title = line[len("Title: "):].strip()
+                break
+        found.append((title, "\n".join(lines[a + 1:b])))
+    return found
+
+
+def norm(text: str) -> str:
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n")).strip("\n")
+
+
+def check(ref: str, call: dict) -> dict:
+    if not re.match(r"^dispatch://[A-Z][A-Z0-9]*-\d+/ask/[0-9a-f-]{8,}$", ref):
+        raise Refused(f"GH_SHIM_APPROVAL={ref!r} is not a Dispatch ask reference (dispatch://KEY/ask/<id>).")
+    ask = parse_ask(dispatch("read", "--ref", ref))
+    record = {"answered_by": ask["by"], "selected": ask["selected"], "answer_text": ask["text"]}
+    if ask["state"] != "answered":
+        raise Refused(f"the ask is {ask['state']}, not answered.")
+    if ask["by"] != APPROVER:
+        raise Refused(f"the ask was answered by {ask['by'] or 'nobody'}, not {APPROVER}.")
+    if ask["selected"] not in ask["options"]:
+        raise Refused(f"the answer selects {ask['selected']!r}, which is not exactly one of the ask's options.")
+    if not APPROVING.match(ask["selected"]) or NEGATION.search(ask["selected"]):
+        raise Refused(f"the selected option {ask['selected']!r} does not approve a post.")
+    source, where = ask["question"], ref
+    if ask["document"]:
+        versions = re.search(r"^Versions: (\d+)$", dispatch("read", "--ref", ask["document"]), re.M)
+        if not versions:
+            raise Refused(f"cannot read the versions of {ask['document']}.")
+        for v in range(ask["first_version"], int(versions.group(1)) + 1):
+            doc = dispatch("doc-read", "--ref", f"{ask['document']}@v{v}")
+            blocks = ask_blocks(doc, ask["question"])
+            if len(blocks) > 1:
+                raise Refused(f"{ask['document']}@v{v} holds {len(blocks)} asks with this question, so which "
+                              "one he answered cannot be told.")
+            if blocks and blocks[0].get("state") == "answered":
+                if blocks[0].get("answered_by") != APPROVER:
+                    raise Refused(f"{ask['document']}@v{v} shows the ask answered by {blocks[0].get('answered_by')}.")
+                if json.loads(blocks[0].get("selected") or "[]") != [ask["selected"]]:
+                    raise Refused(f"{ask['document']}@v{v} shows another selection: {blocks[0].get('selected')}.")
+                source, where = doc, f"{ask['document']}@v{v}"
+                break
+        else:
+            raise Refused(f"no version of {ask['document']} shows the ask answered.")
+    record["draft"] = where
+    named = re.compile(rf"(?<![\w.-]){re.escape(call['repo'])}(?![\w-]|\.\w)", re.I)
+    if not named.search(source + "\n" + ask["question"]):
+        raise Refused(f"neither the ask nor its draft ({where}) names {call['repo']}.")
+    body = norm(call["body"])
+    sections = drafts(source)
+    titled = [title for title, draft in sections if norm(draft) == body]
+    if not titled:
+        raise Refused(f"the body is not, exactly, the text between two `---` lines in {where}.")
+    if call["title"] is not None and call["title"].strip() not in titled:
+        raise Refused(f"the title {call['title']!r} is not the `Title:` line of that draft in {where}.")
+    return record
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    log = ""
+    if len(argv) >= 2 and argv[0] == "--log":
+        log, argv = argv[1], argv[2:]
+    if argv[:1] == ["--"]:
+        argv = argv[1:]
+    ref = os.environ.get("GH_SHIM_APPROVAL", "")
+    record = {
+        "t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "sid": os.environ.get("OMP_SESSION_ID", ""),
+        "pid": os.getppid(),
+        "cwd": os.getcwd(),
+        "ask": ref,
+        "argv": argv,
+    }
+    try:
+        call = parse_call(argv)
+        record.update(repo=call["repo"], verb=call["verb"], target=call["target"], title=call["title"],
+                      body=call["body"], body_sha256=hashlib.sha256(call["body"].encode()).hexdigest())
+        record.update(check(ref, call))
+        record["verdict"] = "allowed"
+        code = 0
+    except Refused as e:
+        record["verdict"] = "refused"
+        record["why"] = str(e)
+        quoted = shlex.join(argv)
+        print(
+            f"gh shim: REFUSED: `gh {quoted}` cites {ref}, and the citation does not hold: {e}\n"
+            f"  Instead: fix what is named above. A post as Sami cites a Dispatch ask he answered with "
+            f"its approving option, whose document (or question) holds the exact text between two `---` "
+            f"lines, with a `Title: <title>` line before them for an issue (shims/AGENTS.md). If the text "
+            f"must change, show him the new text in a new ask; do not look for another credential.",
+            file=sys.stderr,
+        )
+        code = 1
+    if log:
+        try:
+            os.makedirs(os.path.dirname(log), mode=0o700, exist_ok=True)
+            fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError as e:
+            print(f"gh shim: cannot log the cited post to {log}: {e}", file=sys.stderr)
+            return 1
+    if code == 0:
+        print(
+            f"gh shim: cited post: {ref} answered by {APPROVER} ({record['selected']!r}); "
+            f"the text matches {record['draft']}. Logged to {log or 'nowhere'}.",
+            file=sys.stderr,
+        )
+        if record.get("answer_text"):
+            print(f"gh shim: his answer also says: {record['answer_text']}", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -225,7 +225,8 @@ class UserLogin(unittest.TestCase):
         err = result.stderr
         self.assertIn("Can not approve your own pull request", err)  # GitHub's own error stays
         self.assertIn("gh shim: REFUSED by GitHub: `gh pr review 1178 -R o/r --approve --body VERDICT:\\ APPROVE`", err)
-        self.assertIn("the user login `fake-user` from gh's hosts.yml and keyring is never used by an agent", err)
+        self.assertIn("Identity: it ran as the GitHub App this repository's owner routes agent calls to.", err)
+        self.assertNotIn("is never used by an agent", err)
         self.assertIn("`gh pr comment 1178 -R o/r --body-file <file>`", err)
         self.assertIn("`VERDICT: APPROVE at <full 40-character head sha>`", err)
         # agent-infra main needs an approving review, which a comment is not.
@@ -255,6 +256,30 @@ class UserLogin(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("`gh pr merge 5 -R o/r --admin`", result.stderr)
         self.assertIn("Instead: stop, and tell your lead which call GitHub refused", result.stderr)
+        self.assertNotIn("GH_SHIM_APPROVAL", result.stderr)
+
+    def test_a_refusal_of_an_inherited_token_names_that_token_not_the_app(self):
+        # 2026-11-02: GH_TOKEN held a broker token made for theorem-labs; knives does not route a
+        # call that carries one, and GitHub refused it on google/oss-fuzz. The refusal said "it ran
+        # as the GitHub App".
+        executable(self.bin / "knives",
+                   'echo "gh: Resource not accessible by personal access token (HTTP 403)" >&2; exit 1')
+        argv = ["issue", "create", "-R", "google/oss-fuzz", "--title", "t", "--body", "b"]
+        result, _ = self.run_gh(argv, self.shim_path, GH_TOKEN="github_pat_FAKE", **self.agent)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Identity: it ran as the token in GH_TOKEN, inherited from the environment (gith…)", result.stderr)
+        self.assertNotIn("ran as the GitHub App", result.stderr)
+        self.assertIn("GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN", result.stderr)
+
+    def test_a_refusal_on_the_upstream_token_names_that_token(self):
+        executable(self.bin / "knives",
+                   'echo "gh-app-token: no App installation for owner o; using the personal token GH_PUBLIC_REPO_PAT'
+                   ' - this call will act as its user, not as the App" >&2\n'
+                   'echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1')
+        result, _ = self.run_gh(["pr", "merge", "5", "-R", "o/r", "--admin"], self.shim_path, **self.agent)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Identity: it ran as the personal token GH_PUBLIC_REPO_PAT, so as its GitHub user", result.stderr)
+        self.assertNotIn("ran as the GitHub App", result.stderr)
 
     def rate_limited(self, knives_body):
         executable(self.bin / "knives", '[ "$1" = gh ] && shift; [ "$1" = -- ] && shift\n' + knives_body +
