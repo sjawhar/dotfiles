@@ -4,7 +4,8 @@
 # lock of ours and no further, give every commit an omp session makes with
 # `git commit`, `merge`, `pull`, `cherry-pick` or `revert` its Omp-Session trailer, and
 # run the shared public leak check on every `git push` jj runs where the pre-push hook
-# would.
+# would, and keep a pruning `git fetch` from deleting the destination of a short-named
+# refspec.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -118,6 +119,47 @@ case "${args[i]:-}" in
         fi
         ;;
 esac
+# A fetch with pruning on (`fetch.prune`, set in this repo's .gitconfig, or --prune)
+# deletes the destination of a command-line refspec whose source is not a full ref
+# name, such as `git fetch origin b:refs/remotes/origin/b`, instead of updating it,
+# whenever that destination already exists, and exits 0: every second run leaves it
+# missing (git 2.43.0, 2026-11-02; `+b:…`, tags, `HEAD:…` and a refs/heads/
+# destination too). Prune never deletes anything else for refspecs without a `*`:
+# a source the remote lacks fails the fetch first. So when every command-line
+# refspec is such a one and one of them has that form, the fetch runs with a last
+# --no-prune, and no refspec changes. A glob or negative refspec beside it, refspecs
+# on stdin (--stdin) or `--multiple` leave the fetch as it was, as does a fetch from
+# a URL with fetch.pruneTags, whose tag pruning --no-prune would also stop.
+if [[ "${args[i]:-}" == fetch ]]; then
+    fetch_fix=0 positional=0 opts=1 end=${#args[@]}
+    for ((k = i + 1; k < ${#args[@]}; k++)); do
+        a="${args[k]}"
+        if ((opts)); then
+            case "$a" in
+                --) opts=0 end=$k; continue ;;
+                --multiple | --stdin) exec "$_real" "$@" ;;
+                --upload-pack | -j | --jobs | --depth | --shallow-since | --shallow-exclude | --deepen | --refmap | \
+                    -o | --server-option | --negotiation-tip | --filter | --recurse-submodules-default | --submodule-prefix)
+                    k=$((k + 1)); continue ;;
+                -?*) continue ;;
+            esac
+        fi
+        positional=$((positional + 1))
+        if ((positional == 1)); then
+            remote="$a"
+            continue
+        fi
+        [[ "$a" != *'*'* && "$a" != ^* ]] || exec "$_real" "$@"
+        src="${a%%:*}" src="${src#+}"
+        [[ "$a" == *:?* && "$src" != refs/* ]] && fetch_fix=1
+    done
+    if ((fetch_fix)) && [[ "$remote" == *[:/]* ]]; then
+        "$_real" "${args[@]:0:i}" config --get --type=bool fetch.pruneTags 2> /dev/null | grep -qx true && exec "$_real" "$@"
+    fi
+    ((fetch_fix)) || exec "$_real" "$@"
+    exec "$_real" "${args[@]:0:end}" --no-prune "${args[@]:end}"
+fi
+
 # Only `worktree` and `push` read on: the push gate below sits past this exec,
 # so every other command runs without bash parsing it.
 [[ "${args[i]:-}" == worktree || "${args[i]:-}" == push ]] || exec "$_real" "$@"

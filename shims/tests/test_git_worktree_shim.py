@@ -279,6 +279,38 @@ class GitWorktreeShimTest(unittest.TestCase):
             self.fail("the shim chose the wrapper above it and the two exec each other forever")
         self.assertEqual(result.stdout, direct)
 
+    def clone_with_branch(self) -> Path:
+        """A clone of self.repo, whose branch `b` exists upstream."""
+        self.git("branch", "b", env=self.plain)
+        clone = self.tmp / "clone"
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(clone)], env=self.plain, check=True, capture_output=True)
+        return clone
+
+    def has_ref(self, repo: Path, ref: str) -> bool:
+        return self.git("rev-parse", "-q", "--verify", ref, env=self.plain, cwd=repo).returncode == 0
+
+    def test_a_pruning_fetch_to_a_short_named_source_keeps_its_destination(self):
+        # With pruning on, git 2.43 deletes the destination of `b:refs/remotes/origin/b` when it
+        # exists and exits 0, so every second run left it missing (2026-11-02, ledger L998).
+        clone = self.clone_with_branch()
+        for refspec, ref in (("b:refs/remotes/origin/b", "refs/remotes/origin/b"), ("+b:refs/remotes/origin/b", "refs/remotes/origin/b"), ("b:refs/heads/copy", "refs/heads/copy")):
+            for run in range(4):
+                result = self.git("-c", "fetch.prune=true", "fetch", "-q", "origin", refspec, cwd=clone)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(self.has_ref(clone, ref), f"{refspec}: run {run + 1} left {ref} missing")
+
+    def test_a_fetch_with_a_glob_or_no_explicit_destination_still_prunes(self):
+        clone = self.clone_with_branch()
+        for args in (("origin",), ("origin", "refs/heads/*:refs/remotes/origin/*", "b:refs/remotes/origin/b")):
+            self.git("update-ref", "refs/remotes/origin/stale", "HEAD", env=self.plain, cwd=clone)
+            result = self.git("-c", "fetch.prune=true", "fetch", "-q", *args, cwd=clone)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self.has_ref(clone, "refs/remotes/origin/stale"), f"fetch {' '.join(args)} pruned nothing")
+        for refspec in ("main", "+refs/heads/b:refs/remotes/origin/b"):
+            result = self.git("-c", "fetch.prune=true", "fetch", "-q", "origin", refspec, cwd=clone)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.has_ref(clone, "refs/remotes/origin/b"))
+
 
 if __name__ == "__main__":
     unittest.main()

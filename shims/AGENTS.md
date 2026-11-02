@@ -100,6 +100,10 @@ before handing the call to the real one.
   an alias, `git am` and `git commit-tree` add nothing. Commits omp writes through its own git
   library never run `git`, so no shim reaches them: omp appends `PI_COMMIT_TRAILERS`, which
   `omp/extensions/session-env.ts` sets to the session's line.
+  A `git fetch <remote> <src>:<dst>` whose source is not a full ref name runs with `--no-prune`
+  when no refspec has a `*`, since git's pruning deletes such a destination that already exists
+  (`b:refs/remotes/origin/b` left it missing every second run on git 2.43.0) and prunes nothing
+  else there; a glob refspec beside it, `--stdin` and `--multiple` leave the fetch as it was.
   It also gives a `git push` that jj runs the pre-push leak check that a git push from the same
   checkout gets. jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once
   per remote, so no hook runs for it. When the process that ran git is jj and a line of the
