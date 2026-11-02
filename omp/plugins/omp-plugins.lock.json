@@ -31,7 +31,7 @@
       "enabled": true
     },
     "verification-skills": {
-      "version": "0.21.19",
+      "version": "0.21.20",
       "enabledFeatures": null,
       "enabled": true
     },
@@ -46,7 +46,7 @@
       "enabled": true
     },
     "dev-infra": {
-      "version": "0.2.36",
+      "version": "0.2.37",
       "enabledFeatures": null,
       "enabled": true
     }
