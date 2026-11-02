@@ -274,6 +274,12 @@ before handing the call to the real one.
   stdout streams, so an attempt that wrote a byte of it is not run again. Never with
   `--delete-unmatched-destination-objects`, stdin (`-`, `-I`), or a pipe or device as a path;
   `storage mv` and `rm` never (the shim's `is_lock_retry_safe` gives each verb's reason).
+  Each attempt of such a call appends one line per kind of lock text it printed to `~/.local/state/gcloud-shim/locks.tsv`
+  (`GCLOUD_LOCK_LOG` overrides the path): `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>`,
+  kind `store` (the error above; outcome `retried` or `gave-up`) or `token-cache` (any other
+  `database is locked` line, the SDK's access-token cache warning; outcome `warning`). Count lock
+  hits with `wc -l` or `cut -f2,3 | sort | uniq -c`. Calls outside the retry are not seen; a
+  failed log write never changes the call.
   In an agent session with `KUBECONFIG` unset or empty, `container clusters get-credentials
   <cluster>` writes `~/.kube/config.d/<cluster>` (mode 0700 directory) instead of `~/.kube/config`,
   and prints the `export KUBECONFIG=…` to use it; one whose cluster name it cannot read from argv

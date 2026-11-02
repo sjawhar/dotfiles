@@ -1514,5 +1514,60 @@ class GcloudLockedStoreRetry(unittest.TestCase):
         self.assertEqual(list((self.stub_dir / "tmp").iterdir()), [])
 
 
+class GcloudLockLog(unittest.TestCase):
+    """Each lock text a retried call prints adds one tab-separated line to
+    ~/.local/state/gcloud-shim/locks.tsv: time, kind, outcome, subcommand, shim pid."""
+
+    setUp = GcloudLockedStoreRetry.setUp
+    tearDown = GcloudLockedStoreRetry.tearDown
+    stub_gcloud_crashing = GcloudLockedStoreRetry.stub_gcloud_crashing
+    run_shim = GcloudLockedStoreRetry.run_shim
+
+    def log_rows(self) -> list[list[str]]:
+        log = Path(self.env["HOME"]) / ".local" / "state" / "gcloud-shim" / "locks.tsv"
+        return [line.split("\t") for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def test_a_retried_store_lock_and_the_cache_warning_each_add_a_line(self):
+        self.stub_gcloud_crashing(times=1)
+        result = self.run_shim(["config", "config-helper", "--format=json"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = self.log_rows()
+        self.assertEqual(sorted(r[1:4] for r in rows), [["store", "retried", "config config-helper"],
+                                                        ["token-cache", "warning", "config config-helper"]])
+        for row in rows:
+            self.assertEqual(len(row), 5)
+            self.assertRegex(row[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+            self.assertRegex(row[4], r"^\d+$")
+
+    def test_a_store_lock_past_the_last_attempt_is_logged_as_gave_up(self):
+        self.stub_gcloud_crashing(times=100, crash=LOCK_TASK_ERROR, partial=False)
+        result = self.run_shim(["storage", "rsync", "gs://b/d", str(self.stub_dir)])
+        self.assertEqual(result.returncode, 1)
+        outcomes = [r[2] for r in self.log_rows() if r[1] == "store"]
+        self.assertEqual(outcomes, ["retried"] * 5 + ["gave-up"])
+        self.assertEqual({r[3] for r in self.log_rows()}, {"storage rsync gs://b/d"})
+
+    def test_the_schema_warning_alone_is_logged_and_the_call_succeeds(self):
+        write_stub(self.stub_dir, "gcloud",
+                   'echo "WARNING: Could not initialize access token cache schema: database is locked" >&2; echo TOKEN')
+        result = self.run_shim(["auth", "print-access-token"])
+        self.assertEqual((result.returncode, result.stdout), (0, "TOKEN\n"))
+        self.assertEqual([r[1:4] for r in self.log_rows()], [["token-cache", "warning", "auth print-access-token"]])
+
+    def test_no_lock_text_writes_no_log(self):
+        write_stub(self.stub_dir, "gcloud", "echo OK")
+        self.assertEqual(self.run_shim(["auth", "list"]).returncode, 0)
+        self.assertFalse((Path(self.env["HOME"]) / ".local" / "state" / "gcloud-shim").exists())
+
+    def test_an_unwritable_log_does_not_change_the_call(self):
+        state = Path(self.env["HOME"]) / ".local" / "state"
+        state.mkdir(parents=True)
+        (state / "gcloud-shim").write_text("not a directory", encoding="utf-8")
+        self.stub_gcloud_crashing(times=1)
+        result = self.run_shim(["auth", "print-access-token"])
+        self.assertEqual((result.returncode, result.stdout), (0, "OK-2\n"), result.stderr)
+
+
+
 if __name__ == "__main__":
     unittest.main()

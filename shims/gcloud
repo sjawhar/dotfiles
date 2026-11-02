@@ -789,6 +789,7 @@ is_lock_retry_safe() {
                 ;;
         esac
     done
+    GCLOUD_LOCK_SUBCOMMAND="${words[*]}"
     case "${words[0]:-} ${words[1]:-}" in
         "auth print-access-token" | "auth print-identity-token" | "auth list" | \
             "config config-helper" | "config get" | "config get-value" | "config list" | \
@@ -838,6 +839,48 @@ run_streamed_attempt() {
     } || :
 }
 
+# Every lock text an attempt printed adds one line to GCLOUD_LOCK_LOG, so counting lock hits is
+# `wc -l`, not a scan of transcripts: `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>`.
+# Kind `store` is GCLOUD_LOCK_ERROR, the locked store this retry handles; its outcome is
+# `retried` when the shim runs the call again, else `gave-up`. Kind `token-cache` is any other
+# line with `database is locked`, the SDK's warning that access_tokens.db was locked (`Could not
+# initialize access token cache schema: database is locked`, `Could not store access token in
+# cache: database is locked`); its outcome is `warning`, since the call goes on. Only calls that
+# run through this retry are seen; every other call is exec'd with its stderr untouched. Each line
+# is one O_APPEND write, and a log that cannot be written never changes the call.
+GCLOUD_LOCK_SUBCOMMAND=""
+log_lock_hits() {
+    local outcome="$1" err="${GCLOUD_RETRY_DIR}/err" line kinds=""
+    grep -qF -- "database is locked" "$err" 2>/dev/null || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ $GCLOUD_LOCK_ERROR ]]; then
+            [[ "$kinds" == *store* ]] || kinds+=" store"
+        elif [[ "$line" == *"database is locked"* ]]; then
+            [[ "$kinds" == *token-cache* ]] || kinds+=" token-cache"
+        fi
+    done 2>/dev/null < <(grep -F -- "database is locked" "$err" 2>/dev/null) || :
+    [[ -n "$kinds" ]] || return 0
+    local log dir now kind
+    if [[ -n "${GCLOUD_LOCK_LOG:-}" ]]; then
+        log="$GCLOUD_LOCK_LOG"
+    else
+        resolve_user_home 2>/dev/null || return 0
+        log="${GCLOUD_USER_HOME}/.local/state/gcloud-shim/locks.tsv"
+    fi
+    dir="$(dirname -- "$log")"
+    [[ -d "$dir" ]] || mkdir -p -- "$dir" 2>/dev/null || return 0
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 0
+    for kind in $kinds; do
+        if [[ "$kind" == store ]]; then
+            line="$outcome"
+        else
+            line=warning
+        fi
+        { printf '%s\t%s\t%s\t%s\t%s\n' "$now" "$kind" "$line" "$GCLOUD_LOCK_SUBCOMMAND" "$$" >>"$log"; } 2>/dev/null || :
+    done
+    return 0
+}
+
 # Runs argv (gcloud, or its launcher) and exits with its status; never returns. Without a
 # private directory for the output it execs argv once, as before.
 GCLOUD_RETRY_DIR=""
@@ -858,17 +901,20 @@ run_with_lock_retry() {
             if ((status == 0 || attempt > GCLOUD_LOCK_RETRIES)) ||
                 [[ -s "${GCLOUD_RETRY_DIR}/first" ]] ||
                 ! grep -qxE -- "$GCLOUD_LOCK_ERROR" "${GCLOUD_RETRY_DIR}/err"; then
+                log_lock_hits gave-up
                 exit "$status"
             fi
         else
             "$@" >"${GCLOUD_RETRY_DIR}/out" 2>"${GCLOUD_RETRY_DIR}/err" || status=$?
             if ((status == 0 || attempt > GCLOUD_LOCK_RETRIES)) ||
                 ! grep -qxE -- "$GCLOUD_LOCK_ERROR" "${GCLOUD_RETRY_DIR}/err"; then
+                log_lock_hits gave-up
                 cat -- "${GCLOUD_RETRY_DIR}/out"
                 cat -- "${GCLOUD_RETRY_DIR}/err" >&2
                 exit "$status"
             fi
         fi
+        log_lock_hits retried
         delay_ms=$((200 * attempt + RANDOM % (400 * attempt)))
         printf 'gcloud shim: another gcloud held a sqlite store in the configuration directory past the SDK busy timeout (attempt %d of %d); running it again in %d.%03d s.\n' \
             "$attempt" "$((GCLOUD_LOCK_RETRIES + 1))" "$((delay_ms / 1000))" "$((delay_ms % 1000))" >&2
