@@ -9,6 +9,20 @@
 | `## Skill catalog` | Each step's required worker skills. |
 | `## Contract change census` | For boundary tightenings as `opening-a-pr` defines them: the search commands, each hit's disposition, and the rollout line. Trace producers, consumers and shared builders in this repo and its siblings, including callers that rebuild values without spelling the field or endpoint (concatenation, `**kwargs`, a config map), which a name search does not find. The brief's caller list is not evidence. |
 | `## Permission source census` | Each new or widened permission, role, scope or capability flag, with its real holder in every shipped environment. The group, profile, binding or seed that grants it. The enforcement point. A test that fails for a permission with no holder. Manual grants and test-only identities are not production sources. |
+| `## Spend` | The `agent_spend` project tag, the cloud `created-by` label, repositories, start date, estimate table and list-price total that SKILL.md Step 4 requires. Before each worker batch and status update, record the three measured totals below beside the estimate. |
+
+## Measuring spend
+
+Each query returns list-price dollars since the plan's start date. Run each query before each worker batch and status update; their sum is the project's spend.
+
+```sh
+# Model API tokens, by the project tag sessions export (spend/README.md)
+bq query --project_id=autoformalization --use_legacy_sql=false "SELECT ROUND(SUM(list_usd),2) FROM \`theorem-agent-infra.agent_spend.spend_daily\` WHERE project='<tag>' AND day >= '<start>'"
+# Machines, disks and cluster nodes, by the created-by label on each resource
+bq query --project_id=autoformalization --use_legacy_sql=false "SELECT ROUND(SUM(usd_list),2) FROM \`theorem-agent-infra.agent_spend.cloud_cost_estimated\` WHERE JSON_VALUE(labels, '$.\"created-by\"')='<label>' AND day >= '<start>'"
+# GitHub Actions minutes, by repository; this table can lag by a day
+bq query --project_id=autoformalization --use_legacy_sql=false "SELECT ROUND(SUM(amount_usd),2) FROM \`theorem-agent-infra.agent_spend.github_actions_daily\` WHERE scope IN ('<repo>') AND day >= '<start>'"
+```
 
 ## A major design change
 
