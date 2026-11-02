@@ -77,7 +77,11 @@ DEFAULT_STATE = (
 
 SAMPLE_EVERY = 2.0  # seconds between /proc samples
 RSS_FLOOR = 64 << 20  # the smallest process worth recording; today's smallest victim had 190 MiB
-KEEP_DEAD = 900.0  # how long a vanished process stays in the table
+# How long a vanished process stays in the table. The kill line arrives within seconds of the
+# kill, and a restart reads on from its cursor 10 s later. Short, because processes of 64 MiB
+# or more churn: 4,268 records in the first six minutes on sami-rocqperf (3,099 of them python3)
+# at the first try of 15 minutes.
+KEEP_DEAD = 180.0
 BATCH = 60.0  # one notice per session per minute of kills
 RETRY = 30.0  # wait before a failed send is tried again
 STALE = 900.0  # a kill older than this when read is counted, not sent

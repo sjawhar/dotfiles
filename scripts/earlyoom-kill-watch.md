@@ -19,8 +19,10 @@ when earlyoom logs the kill: its owner must be recorded before.
 
 1. Every 2 s it reads `/proc/<pid>/stat` of every process and records each one with at least
    64 MiB resident (today's smallest victim had 190 MiB): its start time, its name, and the
-   session that owns it. A record stays 15 minutes after its process ends. One sample takes
-   about 0.3 s at load 370 with about 3,700 processes; the minute line says `sample_ms`.
+   session that owns it. A record stays 3 minutes after its process ends: the kill line arrives
+   within seconds, and processes that big churn (4,268 records in six minutes at a 15-minute
+   retention, 3,099 of them python3). One sample takes about 0.3 s at load 370 with about 3,700
+   processes; the minute line says `sample_ms`.
 2. It follows `journalctl -u earlyoom -o json`. For each `sending SIGTERM to process <pid> uid
    <uid> "<comm>": oom_score <n>, VmRSS <n> MiB, cmdline "..."` line it finds the owner, keeps
    the `mem avail` line just before it, and adds the kill to that session's batch.
@@ -82,7 +84,7 @@ earlyoom-kill-watch --counts
 
 `--replay` reads a past window and prints whom each kill would reach, with what the watch knows
 now (its saved records and the live process tree); it sends only with `--send`. A kill older than
-15 minutes is not in the records, so a replay of an old window shows mostly unmatched kills.
+3 minutes is not in the records, so a replay of an old window shows mostly unmatched kills.
 A drill copy (`--to`) starts by naming the session the notice was for.
 
 `scripts/tests/test_earlyoom_kill_watch.py` holds the rules, on real journal lines of 2026-11-02
