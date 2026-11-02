@@ -103,6 +103,13 @@ fi
 # own path (realpath -s); only the store check below resolves links.
 file="$(realpath -s -- "$file")"
 src_root="$(realpath -m -- "${file%/*/*}")"
+# A session to another machine is data leaving this one: no-offbox (beside this script) refuses a
+# transcript or artifacts directory under a `.no-offbox` marker or a pattern of
+# ~/.config/no-offbox/patterns, and the refusal names which.
+if [[ -n "$host" ]]; then
+    offbox="$("$(dirname -- "$(readlink -f -- "$0")")/no-offbox" -- "$file" "${file%.jsonl}" 2>&1)" ||
+        die "no-offbox refuses this session leaving the machine; nothing changed: $offbox"
+fi
 
 work="$(mktemp -d)"
 remote_dir=""

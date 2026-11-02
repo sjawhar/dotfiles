@@ -13,6 +13,7 @@ Reasons: `references/reasons.md`.
 - Never delete content that exists only on disk (untracked, gitignored and modified tracked files all count).
 - Learn liveness from check-in replies and process cwds; age or mtime never proves a path dead. Use an age threshold only to keep a path longer.
 - Run this skill by hand, never on a timer or cron, and stop when done. What timers already prune: `references/automatic-pruning.md`.
+- A `.no-offbox` file in a directory means nothing in it or below it may leave this machine; `~/.config/no-offbox/patterns` lists more such paths. The owner of the data writes the marker (a lane on its embargoed trees), never a cleaner, and nobody removes it but that owner. A move on this machine (to `/mnt/durable`) is allowed but must keep the protection: when the marker is in a directory above the tree you move, copy it to the same directory above the new path. Run `~/.dotfiles/scripts/no-offbox <path>` before you copy anything to another machine or a bucket; any exit status but 0 means do not copy.
 
 Tool: `S=$SKILL/scripts/disk_hygiene.py`, `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` (`$S --help`); you judge liveness and ownership.
 

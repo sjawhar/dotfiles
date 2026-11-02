@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""no-offbox: may these paths leave this machine?
+
+    no-offbox [--excludes [-0]] PATH...
+    no-offbox --root ROOT --from LIST [-0]
+
+A path may not leave this machine when:
+  - it, or any directory above it up to /, holds an entry named `.no-offbox` (the marker);
+  - it holds a marked directory anywhere below it: the tree may not leave AS A WHOLE;
+  - it, a directory above it, or a path below it matches a line of a patterns file:
+    ~/.config/no-offbox/patterns, and, run as root (sudo, a system unit), that file in every
+    /home user's home too.
+    One pattern per line; `#` starts a comment line. A line with `*`, `?` or `[` is a shell
+    glob matched against the whole absolute path (`*` matches `/` too); any other line is a
+    substring. Both match without regard to case.
+  - a directory below it cannot be read, so no one can tell that it holds no marker.
+
+Exit 0: every path may leave. Exit 1: at least one may not; each refusal is printed as a line,
+`no-offbox: REFUSED <path>: <why>`, the why naming the marker file or the pattern it found.
+Exit 2: usage error, or a patterns file that exists and cannot be read. A mover refuses on any
+status but 0: the marker means refusal, never a prompt.
+
+--excludes  print, one per line (NUL with -0), the paths whose exclusion lets the rest go: a
+            marked directory, a path a pattern matches, an unreadable directory, or the given
+            PATH itself when the refusal comes from above it. The refusals go to stderr.
+--root/--from  the bulk-copy form, for tar --no-recursion lists: LIST holds paths (relative to
+            ROOT, or absolute), one per line or NUL-separated with -0. Each is checked with the
+            directories above it and against the patterns, NOT walked: such a list names every
+            file itself. A directory's marker check is done once for all its entries.
+
+Symlinks below a path are not followed (rsync -a and tar copy the link). A PATH that is a
+symlink is checked both as written and as resolved.
+"""
+
+import fnmatch
+import os
+import pwd
+import re
+import sys
+
+MARKER = ".no-offbox"
+ME = "no-offbox"
+
+
+def pattern_files():
+    homes = [os.path.expanduser("~")]
+    if os.geteuid() == 0:
+        # root (sudo, a system unit) answers for every person's rule: each login user's file.
+        homes += [u.pw_dir for u in pwd.getpwall() if u.pw_uid >= 1000 and u.pw_dir.startswith("/home/")]
+    seen = []
+    for home in homes:
+        f = os.path.join(home, ".config", "no-offbox", "patterns")
+        if f not in seen:
+            seen.append(f)
+    return seen
+
+
+def load_patterns():
+    pats = []
+    for f in pattern_files():
+        try:
+            with open(f, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            print(f"{ME}: cannot read the patterns file {f}: {e.strerror}; refusing everything", file=sys.stderr)
+            sys.exit(2)
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            is_glob = any(c in line for c in "*?[")
+            pats.append((line, line.lower(), is_glob, f))
+    return pats
+
+
+class Checker:
+    def __init__(self, patterns):
+        self.patterns = patterns
+        self.marker_cache = {}
+        # One regex over every pattern, so a walk of millions of paths tests each path once; the
+        # pattern it matched is found only for a path that matches.
+        parts = [r"\A" + fnmatch.translate(lowpat) if is_glob else re.escape(lowpat) for _, lowpat, is_glob, _ in patterns]
+        self.any = re.compile("|".join(parts), re.IGNORECASE | re.DOTALL) if parts else None
+
+    def pattern_of(self, path):
+        if self.any is None or not self.any.search(path):
+            return None
+        low = path.lower()
+        for raw, lowpat, is_glob, src in self.patterns:
+            if (fnmatch.fnmatchcase(low, lowpat) if is_glob else lowpat in low):
+                return f"pattern '{raw}' (from {src})"
+        return None
+
+    def marker_in(self, d):
+        """The marker file of directory d, '' when it has none, None when d cannot be searched."""
+        if d in self.marker_cache:
+            return self.marker_cache[d]
+        m = os.path.join(d, MARKER)
+        try:
+            os.lstat(m)
+            found = m
+        except (FileNotFoundError, NotADirectoryError):
+            found = ""
+        except PermissionError:
+            found = None
+        self.marker_cache[d] = found
+        return found
+
+    def above(self, path):
+        """Findings from path itself and every directory above it, up to /."""
+        out, hit = [], set()
+        d = path
+        while True:
+            why = self.pattern_of(d)
+            if why and why not in hit:
+                hit.add(why)
+                out.append(f"{why} matches {d}")
+            m = self.marker_in(d)
+            if m:
+                out.append(f"marker {m}")
+            elif m is None:
+                out.append(f"cannot search {d} for a marker")
+            if d == "/":
+                return out
+            d = os.path.dirname(d)
+
+    def below(self, real, shown):
+        """[(exclude, why)] for each finding under directory `real`, walked without following
+        symlinks; each path is printed under `shown`, the PATH as given."""
+        out = []
+        stack = [real]
+        while stack:
+            d = stack.pop()
+            sd = shown + d[len(real):]
+            try:
+                with os.scandir(d) as it:
+                    entries = list(it)
+            except OSError as e:
+                out.append((sd, f"cannot read {sd} ({e.strerror}), so cannot tell it holds no marker"))
+                continue
+            if any(e.name == MARKER for e in entries):
+                out.append((sd, f"holds marker {os.path.join(sd, MARKER)}"))
+                continue
+            for e in entries:
+                sp = shown + e.path[len(real):]
+                why = self.pattern_of(e.path) or self.pattern_of(sp)
+                if why:
+                    out.append((sp, f"holds {sp}, which {why} matches"))
+                    continue
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                except OSError:
+                    pass
+        return out
+
+    def tree(self, arg):
+        """[(exclude, why)] for one PATH: from above it first; only when nothing above refuses
+        it is the tree below walked, since the PATH goes whole otherwise."""
+        lex = os.path.abspath(arg)
+        real = os.path.realpath(arg)
+        whys = []
+        for p in dict.fromkeys((lex, real)):
+            whys += self.above(p)
+        if whys:
+            return [(lex, w) for w in dict.fromkeys(whys)]
+        if os.path.isdir(real):
+            return self.below(real, lex)
+        return []
+
+    def entry(self, path):
+        """Findings for one entry of a --no-recursion list: the path and the directories above it."""
+        start = path if os.path.isdir(path) and not os.path.islink(path) else os.path.dirname(path)
+        why = self.pattern_of(path)
+        return list(dict.fromkeys(([f"{why} matches {path}"] if why else []) + self.above(start)))
+
+
+def usage(msg):
+    print(f"{ME}: {msg}\nusage: {ME} [--excludes [-0]] PATH...\n       {ME} --root ROOT --from LIST [-0]", file=sys.stderr)
+    sys.exit(2)
+
+
+def main(argv):
+    excludes = nul = False
+    root = listfile = None
+    paths = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            paths += argv[i + 1:]
+            break
+        if a == "--excludes":
+            excludes = True
+        elif a == "-0":
+            nul = True
+        elif a in ("--root", "--from"):
+            if i + 1 >= len(argv):
+                usage(f"{a} needs a value")
+            i += 1
+            if a == "--root":
+                root = argv[i]
+            else:
+                listfile = argv[i]
+        elif a in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        elif a.startswith("-") and a != "-":
+            usage(f"unknown option {a}")
+        else:
+            paths.append(a)
+        i += 1
+    chk = Checker(load_patterns())
+    refused = False
+    if listfile is not None or root is not None:
+        if listfile is None or root is None or paths or excludes:
+            usage("--root and --from go together, with no PATH and no --excludes")
+        root = os.path.abspath(root)
+        with open(listfile, "rb") as fh:
+            data = fh.read()
+        for raw in data.split(b"\0" if nul else b"\n"):
+            if not raw:
+                continue
+            rel = os.fsdecode(raw)
+            p = os.path.normpath(os.path.join(root, rel))
+            for why in chk.entry(p):
+                refused = True
+                print(f"{ME}: REFUSED {p}: {why}")
+        return 1 if refused else 0
+    if not paths:
+        usage("no PATH given")
+    for arg in paths:
+        findings = chk.tree(arg)
+        for exc, why in findings:
+            refused = True
+            print(f"{ME}: REFUSED {arg}: {why}", file=sys.stderr if excludes else sys.stdout)
+        if excludes:
+            for exc in dict.fromkeys(e for e, _ in findings):
+                sys.stdout.write(exc + ("\0" if nul else "\n"))
+    return 1 if refused else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
