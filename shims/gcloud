@@ -605,6 +605,58 @@ find_real_gcloud() {
     return 127
 }
 
+# `container clusters get-credentials` writes the cluster's context into the kubeconfig KUBECONFIG
+# names, else ~/.kube/config, and makes it that file's current-context. ~/.kube/config is shared by
+# every session on the machine: on 2026-11-02 (16:04Z and again after 19:30Z) an agent's
+# get-credentials for grade-us-west1 switched it to the grade cluster, and every other session's
+# `kubectl create` in builds-* failed with "requires container.jobs.create". So in an agent session
+# with KUBECONFIG unset or empty, the call writes ~/.kube/config.d/<cluster> instead, and says which
+# file to export. A person's own shell, and a caller that set KUBECONFIG, are unchanged.
+# The command's own value flags (--zone/-z, --region, --location) consume their values, as the
+# global ones do, so the one positional left after `get-credentials` is the cluster.
+GKE_GET_CREDENTIALS_VALUE_FLAGS=(--zone -z --region --location)
+route_get_credentials_kubeconfig() {
+    agent_context || return 0
+    [[ -z "${KUBECONFIG:-}" ]] || return 0
+    local arg track_stripped=0 cluster home dir
+    local -a words=()
+    while (($#)); do
+        arg="$1"
+        shift
+        case "$arg" in
+            -?*)
+                if { is_value_flag "$arg" || contains_word "$arg" "${GKE_GET_CREDENTIALS_VALUE_FLAGS[@]}"; } &&
+                    [[ "$arg" != *=* ]] && (($#)); then
+                    shift
+                fi
+                ;;
+            *)
+                if ((${#words[@]} == 0 && !track_stripped)) && contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
+                    track_stripped=1
+                    continue
+                fi
+                words+=("$arg")
+                ;;
+        esac
+    done
+    [[ "${words[0]:-}" == container && "${words[1]:-}" == clusters && "${words[2]:-}" == get-credentials ]] || return 0
+    cluster="${words[3]:-}"
+    cluster="${cluster##*/}"
+    if ((${#words[@]} != 4)) || [[ ! "$cluster" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+        echo "gcloud shim: refusing container clusters get-credentials in an agent session with KUBECONFIG unset: the cluster name cannot be read from argv (${words[*]:3}), and the call would write ~/.kube/config, which every session on this machine shares. Set KUBECONFIG to a file of your own, e.g. KUBECONFIG=\$HOME/.kube/config.d/<cluster>." >&2
+        exit 1
+    fi
+    resolve_user_home || {
+        echo "gcloud shim: refusing container clusters get-credentials: no home directory to put a kubeconfig of its own in, and the shared one is not written. Set KUBECONFIG." >&2
+        exit 1
+    }
+    home="$GCLOUD_USER_HOME"
+    dir="${home}/.kube/config.d"
+    mkdir -p -m 700 "$dir"
+    export KUBECONFIG="${dir}/${cluster}"
+    echo "gcloud shim: writing ${cluster}'s credentials to ${KUBECONFIG}, not ~/.kube/config (every session on this machine shares that file and its current-context). Use it with: export KUBECONFIG=${KUBECONFIG}" >&2
+}
+
 # gcloud writes one log file per call into <config dir>/logs and never prunes it: on
 # sami-rocqperf that was 8,356 files in ~/.config/gcloud/logs and 18,213 in a second
 # configuration directory in one day (2026-10-25, dispatch://INFRA-6), tens of GB. It also
@@ -782,6 +834,7 @@ main() {
     parse_gcloud_command_path "$@"
     refuse_adc_write_in_agent_session "$@"
     refuse_user_account_in_agent_session "$@"
+    route_get_credentials_kubeconfig "$@"
 
     # Read the ADC only for a command this block can refuse: an ambiguous path that
     # could be a protected one, or application-default login/revoke. Every other call

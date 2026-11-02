@@ -274,6 +274,13 @@ before handing the call to the real one.
   stdout streams, so an attempt that wrote a byte of it is not run again. Never with
   `--delete-unmatched-destination-objects`, stdin (`-`, `-I`), or a pipe or device as a path;
   `storage mv` and `rm` never (the shim's `is_lock_retry_safe` gives each verb's reason).
+  In an agent session with `KUBECONFIG` unset or empty, `container clusters get-credentials
+  <cluster>` writes `~/.kube/config.d/<cluster>` (mode 0700 directory) instead of `~/.kube/config`,
+  and prints the `export KUBECONFIG=…` to use it; one whose cluster name it cannot read from argv
+  is refused. `~/.kube/config` and its current-context are shared by every session on the machine:
+  on 2026-11-02 an agent's get-credentials for `grade-us-west1` switched it to the grade cluster,
+  and every other session's `kubectl create` in `builds-*` failed with "requires
+  container.jobs.create". A person's shell and a caller that set `KUBECONFIG` are unchanged.
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
   harness's or a git credential helper's PATH can hold this dir without `~/.dotfiles/bin`, where
   mise lives; these shims then run `~/.dotfiles/bin/mise` by its path, with `~/.mise` as its data

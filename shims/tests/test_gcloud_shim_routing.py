@@ -1133,6 +1133,59 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(stub_argv(result), args)
 
+    # In an agent session with KUBECONFIG unset, get-credentials writes a kubeconfig of the cluster's
+    # own, never ~/.kube/config: on 2026-11-02 an agent's get-credentials for grade-us-west1 switched
+    # that shared file's current-context and every other session's builds-* `kubectl create` failed.
+    def stub_gcloud_printing_kubeconfig(self) -> None:
+        write_stub(self.stub_dir, "gcloud", 'echo "KUBECONFIG=${KUBECONFIG-<unset>}"\nprintf "ARG=%s\\n" "$@"')
+
+    def test_agent_get_credentials_writes_a_kubeconfig_of_the_clusters_own(self):
+        self.stub_gcloud_printing_kubeconfig()
+        own = self.fake_home / ".kube" / "config.d"
+        cases = (
+            (["container", "clusters", "get-credentials", "grade-us-west1", "--region", "us-west1",
+              "--project", "p"], "grade-us-west1"),
+            (["container", "clusters", "get-credentials", "--zone", "us-west1-a", "builds"], "builds"),
+            (["--project", "p", "beta", "container", "clusters", "get-credentials", "-z", "z", "c1"], "c1"),
+            (["container", "clusters", "get-credentials",
+              "projects/p/locations/us-west1/clusters/grade-us-west1"], "grade-us-west1"),
+        )
+        for marker in self.AGENT_MARKERS:
+            for args, cluster in cases:
+                with self.subTest(marker=marker, args=args):
+                    result = self.run_shim(marker, args=args)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"KUBECONFIG={own / cluster}", result.stdout)
+                    self.assertIn(f"export KUBECONFIG={own / cluster}", result.stderr)
+                    self.assertEqual(stub_argv(result), args)
+        self.assertEqual(own.stat().st_mode & 0o777, 0o700)
+
+    def test_get_credentials_keeps_a_chosen_kubeconfig_and_a_persons_shell(self):
+        self.stub_gcloud_printing_kubeconfig()
+        args = ["container", "clusters", "get-credentials", "grade-us-west1", "--region", "us-west1"]
+        cases = (
+            ({**self.AGENT_MARKERS[0], "KUBECONFIG": "/tmp/mine"}, "KUBECONFIG=/tmp/mine"),
+            ({}, "KUBECONFIG=<unset>"),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env):
+                result = self.run_shim(env, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(expected, result.stdout)
+        result = self.run_shim(self.AGENT_MARKERS[0], args=["container", "clusters", "list"])
+        self.assertIn("KUBECONFIG=<unset>", result.stdout)
+
+    def test_agent_get_credentials_without_a_readable_cluster_is_refused(self):
+        self.stub_gcloud_that_must_not_run()
+        for args in (["container", "clusters", "get-credentials", "--region", "us-west1"],
+                     ["container", "clusters", "get-credentials", "a", "b"],
+                     ["container", "clusters", "get-credentials", "Bad_Name"]):
+            with self.subTest(args=args):
+                result = self.run_shim(self.AGENT_MARKERS[0], args=args)
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                self.assertIn("Set KUBECONFIG", result.stderr)
+
 
 LOCK_CRASH = "ERROR: gcloud crashed (OperationalError): database is locked"
 # What a `gcloud storage` task-graph worker logs when it finds credentials.db locked, after the
