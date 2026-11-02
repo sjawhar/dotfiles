@@ -27,7 +27,14 @@ before handing the call to the real one.
   else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). `gh pr create` for an
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
-  (`scripts/docs-pr-gate`).
+  (`scripts/docs-pr-gate`). In an agent session every call first goes to the shared public leak
+  check through `scripts/public-text-gate`, which refuses it before gh runs. When the check asks for the
+  text gh would read from stdin (its exit 4: `--input -`, `--body-file -`, `-F name=@-`), the
+  shim reads all of stdin (at most 64 MiB) into a private file it unlinks before writing a
+  byte, hands that open file to the check as `PUBLIC_LEAK_CHECK_STDIN=/dev/fd/N` (a value its
+  caller set is cleared first), and gives gh the same bytes only when the check passes. The
+  shim's stdin buffer has no pathname after it is opened; killing the shim leaves no named shim
+  stdin buffer (`shims/tests/test_gh_public_text_gate.py`).
   It also logs and caches, because every session on a host shares the App installation's
   one primary rate limit: on 2026-11-01 that limit reached zero four times and every
   session that reads GitHub stopped (dispatch://BET-303). Each OUTERMOST call (a re-entry

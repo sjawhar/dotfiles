@@ -330,7 +330,50 @@ if agent_context; then
         "$_dotfiles/scripts/docs-pr-gate" "${@:3}"
     fi
     # Public repository text: refuse an internal reference before gh posts it.
-    "$_dotfiles/scripts/public-text-gate" "$@" || exit 1
+    # A call that reads text from stdin (`--input -`, `--body-file -`, `-F name=@-`, …) makes the check exit 4: it
+    # cannot read those bytes without taking them from gh. So all of stdin goes into a private file (mktemp, mode
+    # 0600), opened once to write and then twice more through that descriptor (/dev/fd/N, so all three are the same
+    # file whatever its pathname names by then), and unlinked BEFORE any byte is written: no pathname holds the
+    # bytes, so no kill (SIGKILL included) leaves them on disk, and nothing can swap the file after the check.
+    # The check reads that open file as /dev/fd/N, and only when it passes does gh get the same file as its stdin. A
+    # read or write error, or more than 64 MiB, refuses the call. Which forms read stdin is the check's decision
+    # (gh-guard), not a list kept here; PUBLIC_LEAK_CHECK_STDIN_BUFFERS tells it this caller buffers, so its exit 4
+    # prints nothing. PUBLIC_LEAK_CHECK_STDIN is this block's alone: a value the caller set made gh send stdin the
+    # check never read (re-check, 2026-11-02), so it is cleared first. Measured 2026-11-01 21-23Z: 122 agent calls
+    # piped their text, 56 of them scripts/post-review's reviews.
+    unset PUBLIC_LEAK_CHECK_STDIN
+    _gate_rc=0
+    PUBLIC_LEAK_CHECK_STDIN_BUFFERS=1 "$_dotfiles/scripts/public-text-gate" "$@" || _gate_rc=$?
+    if ((_gate_rc == 4)); then
+        _stdin_max=$((64 * 1024 * 1024))
+        _stdin_buf="$(mktemp "${TMPDIR:-/tmp}/gh-shim-stdin.XXXXXX")" || {
+            echo "gh shim: refusing: cannot make a private file to hold stdin for the leak check" >&2
+            exit 1
+        }
+        if ! exec {_stdin_w}> "$_stdin_buf" || ! exec {_stdin_g}< "/dev/fd/$_stdin_w" {_stdin_h}< "/dev/fd/$_stdin_w"; then
+            rm -f "$_stdin_buf"
+            echo "gh shim: refusing: cannot open the private file that holds stdin for the leak check" >&2
+            exit 1
+        fi
+        rm -f "$_stdin_buf" || {
+            echo "gh shim: refusing: cannot unlink the private file that holds stdin for the leak check" >&2
+            exit 1
+        }
+        head -c "$((_stdin_max + 1))" >&"$_stdin_w" || {
+            echo "gh shim: refusing: cannot read stdin into a file for the leak check" >&2
+            exit 1
+        }
+        exec {_stdin_w}>&-
+        _stdin_size="$(stat -L -c %s "/dev/fd/$_stdin_g")" || exit 1
+        if ((_stdin_size > _stdin_max)); then
+            echo "gh shim: refusing: stdin is over 64 MiB, more than the leak check reads; pass the text in a file" >&2
+            exit 1
+        fi
+        PUBLIC_LEAK_CHECK_STDIN="/dev/fd/$_stdin_g" "$_dotfiles/scripts/public-text-gate" "$@" || exit 1
+        exec 0<&"$_stdin_h" {_stdin_g}<&- {_stdin_h}<&-
+    elif ((_gate_rc != 0)); then
+        exit 1
+    fi
     # A call goes through the host-wide read cache (dispatch://BET-303):
     # an identical read from any session inside 60 s (120 s for
     # `gh pr view/checks/list --json`) is answered without a

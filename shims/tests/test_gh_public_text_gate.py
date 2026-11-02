@@ -2,7 +2,10 @@
 """scripts/public-text-gate gives a gh command line to the shared public text check, and shims/gh
 refuses the call when the check refuses it. A stub check records the argv it was given and returns
 the code the test asks for, so these tests need no network and no real check on the machine. The
-last pair of tests covers a machine with no check at all: a read runs, a write is refused."""
+last pair of Gate tests covers a machine with no check at all: a read runs, a write is refused. The
+Stdin tests cover the check's exit 4 (the call reads text from stdin): the shim reads stdin into an
+unlinked private file, hands it to the check again as PUBLIC_LEAK_CHECK_STDIN=/dev/fd/N, and gives gh
+the same bytes only when that second check passes."""
 
 import os
 import shutil
@@ -20,8 +23,18 @@ STUB = """#!/bin/bash
 printf '%s\\n' "$*" >> "$STUB_LOG"
 exit ${STUB_RC:-0}
 """
+# A check that asks for stdin (exit 4) when no buffer is handed over, as the shared check does for `--input -`; with
+# a buffer it records how the buffer was handed over and the bytes it read, then exits STUB_RC2.
+STDIN_STUB = """#!/bin/bash
+printf 'run pointer=%s\\n' "${PUBLIC_LEAK_CHECK_STDIN:-none}" >> "$STUB_LOG"
+[ -n "${PUBLIC_LEAK_CHECK_STDIN:-}" ] || exit 4
+[[ $PUBLIC_LEAK_CHECK_STDIN =~ ^/dev/fd/[0-9]+$ ]] && [ -f "$PUBLIC_LEAK_CHECK_STDIN" ] || exit 2
+cat "$PUBLIC_LEAK_CHECK_STDIN" > "$STUB_READ"
+exit ${STUB_RC2:-0}
+"""
 FAKE_GH = """#!/bin/bash
 printf '%s\\n' "$*" >> "$GH_LOG"
+[ -z "${GH_STDIN:-}" ] || cat > "$GH_STDIN"
 exit 0
 """
 
@@ -129,6 +142,54 @@ class Shim(Base):
         result = self.run_shim("pr", "view", "9", "-R", "o/r", check_path=str(self.stub))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("pr view 9 -R o/r", self.gh_log.read_text())
+
+
+class Stdin(Base):
+    BODY = b'{"event": "COMMENT", "body": "Reviewed at abc123."}\n\x00binary\xff\n'
+
+    def run_stdin(self, extra=None, data=BODY, rc2="0"):
+        stub = self.bin / "stdin-check"
+        stub.write_text(STDIN_STUB)
+        stub.chmod(0o755)
+        (self.tmp / "t").mkdir(exist_ok=True)
+        env = {**self.env, "PUBLIC_LEAK_CHECK": str(stub), "STUB_RC2": rc2, "STUB_READ": str(self.tmp / "read"),
+               "GH_STDIN": str(self.tmp / "gh-stdin"), "TMPDIR": str(self.tmp / "t"), **(extra or {})}
+        result = subprocess.run([str(GH), "api", "--method", "POST", "repos/o/r/pulls/1/reviews", "--input", "-"],
+                                env=env, input=data, capture_output=True, check=False)
+        return result, self.stub_log.read_text().splitlines(), sorted((self.tmp / "t").iterdir())
+
+    def test_shim_buffers_stdin_and_gh_gets_the_bytes_the_check_read(self):
+        result, runs, left = self.run_stdin()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(runs[0], "run pointer=none")
+        self.assertRegex(runs[1], r"^run pointer=/dev/fd/[0-9]+$")
+        self.assertEqual((self.tmp / "read").read_bytes(), self.BODY)
+        self.assertEqual((self.tmp / "gh-stdin").read_bytes(), self.BODY)
+        self.assertEqual(left, [], "the shim left its stdin buffer behind")
+
+    def test_shim_refuses_when_the_check_refuses_the_buffered_stdin(self):
+        result, runs, left = self.run_stdin(rc2="3")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.gh_log.read_text(), "", "gh ran although the check refused the stdin")
+        self.assertEqual(left, [])
+
+    def test_shim_clears_a_stdin_pointer_its_caller_set(self):
+        # A caller-set pointer to a file of clean text made the check read that file while gh sent the real stdin.
+        decoy = self.tmp / "decoy"
+        decoy.write_text("clean")
+        result, runs, _ = self.run_stdin(extra={"PUBLIC_LEAK_CHECK_STDIN": str(decoy)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(runs[0], "run pointer=none")
+        self.assertNotIn(str(decoy), "\n".join(runs))
+        self.assertEqual((self.tmp / "read").read_bytes(), self.BODY)
+
+    def test_shim_refuses_stdin_over_64_mib(self):
+        result, runs, left = self.run_stdin(data=b"a" * (64 * 1024 * 1024 + 1))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"over 64 MiB", result.stderr)
+        self.assertEqual(self.gh_log.read_text(), "")
+        self.assertEqual(len(runs), 1, "the check was run on stdin it cannot read whole")
+        self.assertEqual(left, [])
 
 
 if __name__ == "__main__":
