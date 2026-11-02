@@ -65,40 +65,87 @@ def cached_token(path: pathlib.Path) -> str | None:
     return token
 
 
+# How long a caller with a cold cache waits for another session's request for the key before it
+# asks too. Long enough that one approval usually serves every verdict posted in that minute; short
+# enough that a request nobody approves does not hold anyone else's post. The variable is for tests.
+ASK_WAIT_SECONDS = int(os.environ.get("POST_REVIEW_ASK_WAIT_SECONDS", "120"))
+
+# Runs under secret-run, so only after the grant: the broker's wait for a human is over before it
+# starts. It takes the cache lock for the token POST and the cache write alone, and re-reads the
+# cache under that lock, so two grants that land together mint one token.
+MINT_SCRIPT = (
+    "import base64,calendar,fcntl,json,os,sys,time,urllib.request\n"
+    "owner, repo, cache, lock_path = sys.argv[1:5]\n"
+    "lock = open(lock_path, 'w')\n"
+    "fcntl.flock(lock, fcntl.LOCK_EX)\n"
+    "try:\n"
+    "    held = json.load(open(cache))\n"
+    "except (OSError, ValueError):\n"
+    "    held = {}\n"
+    "if str(held.get('token', '')).startswith('ghs_') and held.get('expires_at', 0) - time.time() >= 300:\n"
+    "    print(json.dumps(held))\n"
+    "    sys.exit(0)\n"
+    "import jwt\n"
+    "key = base64.b64decode(os.environ['" + KEY_SECRET + "'])\n"
+    "now = int(time.time())\n"
+    "assertion = jwt.encode({'iat': now - 60, 'exp': now + 540, 'iss': '" + APP_ID + "'},"
+    " key, algorithm='RS256')\n"
+    "def api(path, method='GET'):\n"
+    "    req = urllib.request.Request('https://api.github.com' + path, method=method)\n"
+    "    req.add_header('Authorization', 'Bearer ' + assertion)\n"
+    "    req.add_header('Accept', 'application/vnd.github+json')\n"
+    "    return json.load(urllib.request.urlopen(req))\n"
+    "inst = api('/repos/' + owner + '/' + repo + '/installation')\n"
+    "out = api('/app/installations/%d/access_tokens' % inst['id'], 'POST')\n"
+    "minted = {'token': out['token'],"
+    " 'expires_at': calendar.timegm(time.strptime(out['expires_at'], '%Y-%m-%dT%H:%M:%SZ'))}\n"
+    "if minted['token'].startswith('ghs_'):\n"
+    "    fd = os.open(cache + '.tmp', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n"
+    "    with os.fdopen(fd, 'w') as f:\n"
+    "        f.write(json.dumps(minted))\n"
+    "    os.replace(cache + '.tmp', cache)\n"
+    "print(json.dumps(minted))\n"
+)
+
+
 def installation_token(owner: str, repo: str) -> str:
     """Mint an installation token for the review App, through the broker, or reuse a live one.
 
-    Concurrent callers with a cold cache must not each mint: every mint is a grant prompt on
-    Sami's phone, and three verdicts posted in the same minute after the hour turned over asked
-    him three times. So the mint runs under an exclusive lock, and a caller that waited re-reads
-    the cache before minting, so only the first caller asks.
+    Every mint is a grant prompt on Sami's phone, and three verdicts posted in the same minute
+    after the hour turned over asked him three times. So a caller with a cold cache first waits
+    up to ASK_WAIT_SECONDS for another session's request (it holds `.asking`) to fill the cache,
+    and asks itself only when none is in flight or that wait runs out. No lock is held across the
+    broker's wait for the human: on 2026-11-02 at 19:31Z one request waiting for an approval held
+    the per-repo lock for more than nine minutes and stopped every other session's post. The
+    cache lock covers only the token POST and the cache write, inside MINT_SCRIPT.
     """
     path = cache_path(owner, repo)
     held = cached_token(path)
     if held:
         return held
-    lock = open(path.with_suffix(".lock"), "w")
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    asking = open(path.with_suffix(".asking"), "w")
+    deadline = time.monotonic() + ASK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(asking, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            held = cached_token(path)
+            if held:
+                asking.close()
+                return held
+            if time.monotonic() >= deadline:
+                print(
+                    f"post-review: another session's request for {KEY_SECRET} has waited more than"
+                    f" {ASK_WAIT_SECONDS} s for its approval; asking as well",
+                    file=sys.stderr,
+                )
+                break
+            time.sleep(1)
     held = cached_token(path)
     if held:
-        lock.close()
+        asking.close()
         return held
-    script = (
-        "import base64,json,os,subprocess,sys,time,urllib.request\n"
-        "import jwt\n"
-        "key = base64.b64decode(os.environ['" + KEY_SECRET + "'])\n"
-        "now = int(time.time())\n"
-        "assertion = jwt.encode({'iat': now - 60, 'exp': now + 540, 'iss': '" + APP_ID + "'},"
-        " key, algorithm='RS256')\n"
-        "def api(path, method='GET'):\n"
-        "    req = urllib.request.Request('https://api.github.com' + path, method=method)\n"
-        "    req.add_header('Authorization', 'Bearer ' + assertion)\n"
-        "    req.add_header('Accept', 'application/vnd.github+json')\n"
-        "    return json.load(urllib.request.urlopen(req))\n"
-        "inst = api('/repos/' + sys.argv[1] + '/' + sys.argv[2] + '/installation')\n"
-        "out = api('/app/installations/%d/access_tokens' % inst['id'], 'POST')\n"
-        "print(json.dumps({'token': out['token'], 'expires_at': out['expires_at']}))\n"
-    )
     run = subprocess.run(
         [
             "secret-run",
@@ -109,28 +156,25 @@ def installation_token(owner: str, repo: str) -> str:
             "--",
             "python3",
             "-c",
-            script,
+            MINT_SCRIPT,
             owner,
             repo,
+            str(path),
+            str(path.with_suffix(".lock")),
         ],
         capture_output=True,
         text=True,
     )
+    asking.close()
     if run.returncode != 0:
         die(f"could not mint a review App token:\n{run.stderr.strip()}", 1)
-    printed = run.stdout.strip().splitlines()[-1]
+    printed = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
     try:
-        minted = json.loads(printed)
-        token = minted["token"]
-        expires_at = time.mktime(time.strptime(minted["expires_at"], "%Y-%m-%dT%H:%M:%SZ"))
-        expires_at -= time.timezone
-    except (ValueError, KeyError):
+        token = json.loads(printed)["token"]
+    except (ValueError, KeyError, TypeError):
         die(f"the broker returned no installation token: {run.stdout.strip()[:200]}", 1)
     if not token.startswith("ghs_"):
         die(f"the broker returned no installation token: {printed[:200]}", 1)
-    path.write_text(json.dumps({"token": token, "expires_at": expires_at}))
-    path.chmod(0o600)
-    lock.close()
     return token
 
 
