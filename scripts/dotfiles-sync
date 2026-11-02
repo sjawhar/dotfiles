@@ -5,12 +5,15 @@
 # prints it and tags it pre-squash-<date>); commits from that old history are dropped, while
 # anything a machine holds that is neither on main nor in the old history is kept and named.
 #
-# A jj checkout keeps its working-copy change: it is rebased onto main, and the run fails on a
-# conflict instead of resolving it. Before fetching, the working copy's parent is pinned with
-# a bookmark, so the fetch cannot abandon it and roll the files on disk back to an older
-# ancestor while live sessions run them. A plain git checkout moves only when it is clean and
-# holds no commit origin's main lacks, and it lands on its `main` branch, so a session can
-# commit there and `git pull --rebase`.
+# A jj checkout keeps its working-copy change: it is rebased onto main, and the run refuses a
+# conflict instead of resolving it. The refusal comes before the rebase: a duplicate of the
+# change is rebased onto main first and abandoned, and only a duplicate with no conflict lets the
+# working copy move, so a refused run leaves every file on disk as it was (the tree is production,
+# and a rebased working copy writes jj's conflict markers into it). Before fetching, the working
+# copy's parent is pinned with a bookmark, so the fetch cannot abandon it and roll the files on
+# disk back to an older ancestor while live sessions run them. A plain git checkout moves only
+# when it is clean and holds no commit origin's main lacks, and it lands on its `main` branch, so
+# a session can commit there and `git pull --rebase`.
 set -euo pipefail
 
 # HOSTNAME=DESTINATION, every machine by user@MagicDNS name. The entry whose name is this
@@ -43,6 +46,20 @@ sync_here() {
     if [ "$(jj log -r @ --no-graph -T 'empty')" = true ]; then
       jj new --quiet main@origin
     else
+      # Trial first, on a duplicate that no working copy holds, so a conflict never reaches disk.
+      local trial trial_conflict
+      # awk reads to the end: an early `exit` would leave jj a broken pipe, which it exits 3 on.
+      trial=$(jj duplicate --color never "$wc" --onto main@origin 2>&1 | awk '/^Duplicated / && !n {print $5; n = 1}')
+      if [ -z "$trial" ]; then
+        echo "could not trial-rebase the working-copy change $wc onto main; not moved" >&2
+        return 1
+      fi
+      trial_conflict=$(jj log -r "$trial" --no-graph -T 'conflict')
+      jj abandon --quiet "$trial"
+      if [ "$trial_conflict" = true ]; then
+        echo "CONFLICT: the working-copy change $wc conflicts with main; not moved, nothing on disk changed; resolve it here" >&2
+        return 1
+      fi
       jj rebase --quiet -r "$wc" -d main@origin
       if [ "$(jj log -r "$wc" --no-graph -T 'conflict')" = true ]; then
         echo "CONFLICT: the working-copy change $wc conflicts with main; resolve it here" >&2
