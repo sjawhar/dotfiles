@@ -84,7 +84,7 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # fork, once upstream publishes a release that carries 67d1c4dc.
 "github:sjawhar/tmux-builds" = "3.8-fix5776"
 bat = "0.26.1"      # Cat with syntax highlighting
-bun = "1.4.2"
+bun = "1.4.4"
 eza = "0.23.5"
 fd = "10.4.2"
 fzf = "0.74.3"
