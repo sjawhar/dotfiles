@@ -28,6 +28,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1238,6 +1239,433 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("did not register on Envoy", result.stdout)
         self.assertEqual((self.root / "STUB_ENVOY").read_text(encoding="utf-8"), "")
 
+
+    # ── move --to another machine (dispatch://INFRA-993) ────────────────────────────────────
+    TO = "01a19700-0000-7000-8000-0000000e0001"
+    TO2 = "01a19700-0000-7000-8000-0000000e0002"
+
+    def target(self, resume: bool = True) -> None:
+        """The other machine of `move --to`, reached through `ssh` as every move reaches one. The
+        stub runs the remote command HERE, with the target's own tools first on PATH and the
+        target's own /proc: a tmux that records each call and, on new-window/new-session, starts a
+        fixture omp whose command line is that window's `--resume <path>` (unless `resume` is off:
+        the omp that cannot load the session, which exits at once), and ends it on kill-window.
+        rsync, setsid and this machine's tmux record their arguments; nothing reaches a real host."""
+        self.remote = self.root / "remote"
+        (self.remote / "proc").mkdir(parents=True)
+        (self.remote / "PGREP").write_text("", encoding="utf-8")
+        (self.remote / "TMUX").write_text("", encoding="utf-8")
+        if not resume:
+            (self.remote / "FAIL").write_text("", encoding="utf-8")
+        write_stub(self.remote / "bin", "tmux", "\n".join([
+            'printf "%s\\n" "$*" >>"$STUB_REMOTE/TMUX"',
+            'case "$1" in',
+            "  has-session) exit 1 ;;",
+            "  new-window|new-session)",
+            '    if [[ ! -e "$STUB_REMOTE/FAIL" ]]; then',
+            '      r="$(printf "%s" "$*" | grep -o -- "--resume [^ ;]*" | tail -1)"',
+            '      pid=$((4000000001 + $(wc -l <"$STUB_REMOTE/PGREP")))',
+            '      mkdir -p "$AGENTBOX_PROC/$pid/fd"',
+            '      printf "omp\\0--resume\\0%s\\0" "${r#--resume }" >"$AGENTBOX_PROC/$pid/cmdline"',
+            '      echo "$pid (omp) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4242" >"$AGENTBOX_PROC/$pid/stat"',
+            '      echo "$pid" >>"$STUB_REMOTE/PGREP"',
+            "    fi",
+            '    echo "@7" ;;',
+            '  kill-window) rm -rf "$AGENTBOX_PROC"/4*; : >"$STUB_REMOTE/PGREP" ;;',
+            "esac",
+            "exit 0",
+        ]))
+        write_stub(self.stubs, "ssh", "\n".join([
+            'while [[ "$1" == -* ]]; do case "$1" in -o|-p|-F|-i|-l) shift 2 ;; *) shift ;; esac; done',
+            'host="$1"; shift',
+            'printf "%s\\t%s\\n" "$host" "$*" >>"$STUB_REMOTE/SSH"',
+            '[[ -e "$STUB_REMOTE/DOWN" ]] && exit 255',
+            'cmd="$*"; cmd="${cmd#bash -lc }"',
+            # A path listed in MISSING is not on the target (the check of the working directory).
+            'eval "script=$cmd"',
+            'if [[ "$script" == "test -d "* ]] && grep -qxF -- "${script#test -d }" "$STUB_REMOTE/MISSING" 2>/dev/null; then exit 1; fi',
+            'export PATH="$STUB_REMOTE/bin:$PATH" STUB_PGREP="$STUB_REMOTE/PGREP" AGENTBOX_PROC="$STUB_REMOTE/proc"',
+            'eval "exec bash -c $cmd"',
+        ]))
+        write_stub(self.stubs, "rsync", 'printf "%s\\n" "$*" >>"$STUB_RSYNC"; exit "${STUB_RSYNC_RC:-0}"')
+        write_stub(self.stubs, "setsid", 'printf "%s\\n" "$*" >>"$STUB_SETSID"; exit 0')
+        self.local_tmux = self.root / "TMUX_ARGS"
+        write_stub(self.stubs, "tmux", "\n".join([
+            'case " $* " in',
+            '  *" list-panes "*) cat "$STUB_TMUX" 2>/dev/null; exit 0 ;;',
+            "esac",
+            f'printf "%s\\n" "$*" >>"{self.local_tmux}"',
+            'case " $* " in *" display-message "*) printf "42507\\n" ;; esac',
+            "exit 0",
+        ]))
+        self.cutover = self.root / "cutover"
+        self.cutover.mkdir()
+        (self.cutover / "target-ready").write_text("2026-11-02T12:00:00Z\n", encoding="utf-8")
+        self.env.update({
+            "STUB_REMOTE": str(self.remote),
+            "STUB_RSYNC": str(self.root / "RSYNC"),
+            "STUB_SETSID": str(self.root / "SETSID"),
+            "AGENTBOX_HOST": "oldbox",
+            "AGENTBOX_MOVE_CUTOVER": str(self.cutover),
+            "AGENTBOX_MOVE_TARGET_AGENTBOX": "/target/agentbox",
+            "AGENTBOX_MOVE_SETTLE": "0",
+            "AGENTBOX_MOVE_POLL": "0",
+            "AGENTBOX_MOVE_START_WAIT": "0",
+            "AGENTBOX_MOVE_HANGUP_WAIT": "0",
+            "AGENTBOX_RESPAWN_TRIES": "1",
+            "AGENTBOX_RESPAWN_WAIT": "0",
+            "XDG_CACHE_HOME": str(self.root / "cache"),
+        })
+
+    def moving_session(self, sid: str = TO, pid: int = 999999901, pane: str = "%81") -> Path:
+        """A host session ready to move, as the lanes have them: its omp (a pid above any pid_max, so
+        the relauncher's hang-up reaches no real process) under a pane shell, working in a worktree
+        of a checkout under $SRC with an uncommitted change, a child writing in a lane directory
+        outside $SRC, OMP_PROFILE set, and METARQ's nested transcript, whose own directory holds a
+        subagent's transcript and one archived behind a symlink to another disk. Returns the path."""
+        repo = self.src / "repo" if (self.src / "repo").exists() else self.checkout("repo")
+        self.worktree = repo / ".worktrees" / "wt"
+        if not self.worktree.exists():
+            self.git("worktree", "add", "-q", "-b", "wt", str(self.worktree), cwd=repo)
+            (self.worktree / "file").write_text("uncommitted\n", encoding="utf-8")
+        self.lane = self.root / "lane"
+        self.lane.mkdir(exist_ok=True)
+        transcript = self.home / ".omp/agent/sessions/-lane" \
+            / "2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
+            / f"2026-11-02T10-00-00-000Z_{sid}.jsonl"
+        own = transcript.with_suffix("")
+        own.mkdir(parents=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+        (own / "Sub.jsonl").write_text("{}\n", encoding="utf-8")
+        self.durable = self.root / "durable" / f"old-{sid}.jsonl"
+        self.durable.parent.mkdir(exist_ok=True)
+        self.durable.write_text("{}\n", encoding="utf-8")
+        os.symlink(self.durable, own / "Old.jsonl")
+        self.make_proc(pid - 1, comm="bash", ppid=1, cwd=self.worktree)
+        self.make_proc(pid, ppid=pid - 1, cwd=self.worktree, writes=(transcript,), environ={"OMP_PROFILE": "pbc"})
+        self.make_proc(pid + 5, comm="bash", ppid=pid, cwd=self.lane, writes=(self.lane / "out.log",))
+        # A child working in a second checkout under $SRC: a tree every box here has, and the
+        # other machine has not.
+        self.other = self.src / "other" if (self.src / "other").exists() else self.checkout("other")
+        self.make_proc(pid + 6, comm="bash", ppid=pid, cwd=self.other)
+        return transcript
+
+    def move_to(self, args: str = "--to devbox", own: int = 999999901) -> subprocess.CompletedProcess[str]:
+        result = self.run_bash(f"move_own_omp() {{ echo {own}; }}\ncmd_move_to {args}")
+        # The hand-off is a background `setsid` (a stub here): wait for it, so it writes nothing
+        # into the fixture after the test.
+        if "handed to a detached relauncher" in result.stdout:
+            for _ in range(100):
+                if (self.root / "SETSID").exists():
+                    break
+                time.sleep(0.05)
+        return result
+
+    def jobs(self) -> list[Path]:
+        return sorted((self.root / "cache/omp/agentbox/move-to").glob("*.json"))
+
+    def move_log(self) -> list[list[str]]:
+        log = self.cutover / "move-log.tsv"
+        return [line.split("\t") for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+
+    def test_a_session_moves_to_another_machine_and_resumes_there_by_its_transcript_path(self) -> None:
+        transcript = self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        moved = self.move_to()
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertIn("handed to a detached relauncher", moved.stdout)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        [member] = doc["members"]
+        self.assertEqual((doc["to"], doc["from"], member["sid"], member["resume"]), ("devbox", "oldbox", self.TO, str(transcript)))
+        self.assertEqual(member["spec"], ["-e", "OMP_PROFILE=pbc", "--dir", str(self.worktree), "--dir", str(self.lane)])
+        # The transcript tree whole - the file, its own directory with the subagent, the archived
+        # file behind the symlink - the worktree under $SRC with its uncommitted change, and the lane.
+        for path in (transcript, transcript.with_suffix(""), self.durable, self.worktree, self.other):
+            self.assertIn(str(path), doc["mirror"])
+        # Git storage merges, and so does the lane, a directory in no git tree; the mirror of a
+        # checkout leaves its own .git to the merge.
+        self.assertEqual(doc["merge"], [str(self.lane), str(self.src / "other/.git"), str(self.src / "repo/.git")])
+        self.assertEqual(doc["exclude"], [str(self.src / "other/.git")])
+        # The relauncher, once the old omp has left this machine's process list.
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        mirror, merge = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"--delete --backup --backup-dir={self.cutover}/replaced/", mirror)
+        self.assertIn("--exclude=agentbox-moved", mirror)
+        self.assertTrue(mirror.endswith(" sami@devbox:/"), mirror)
+        self.assertIn(f" {transcript} ", mirror)
+        self.assertIn(f"--exclude={self.src / 'other/.git'}/ ", mirror)
+        self.assertIn(f"--update --exclude=agentbox-moved -e ssh -o BatchMode=yes -o ConnectTimeout=20 {self.lane} {self.src / 'other/.git'} {self.src / 'repo/.git'} sami@devbox:/", merge)
+        for marker in (transcript.with_suffix("") / "agentbox-moved", self.home / ".omp/agentbox-moved" / self.TO):
+            body = marker.read_text(encoding="utf-8")
+            self.assertIn("from=oldbox\nto=devbox\n", body)
+            self.assertIn(f"transcript={transcript}\n", body)
+        [started] = [c for c in (self.remote / "TMUX").read_text(encoding="utf-8").splitlines() if c.startswith("new-")]
+        self.assertIn("new-session -d -P -F #{window_id} -s moved -n 01a19700", started)
+        # A --dir the target lacks is left out at launch there, as on a resume here.
+        self.assertIn(f"/target/agentbox new --drop-gone-dirs -e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", started)
+        [line] = self.move_log()
+        self.assertEqual(line[1:], [self.TO, "g-01a19700", "oldbox", "devbox", "moved", str(transcript)])
+        respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
+        self.assertEqual(len(respawn), 1, respawn)
+        self.assertIn("-t %81", respawn[0])
+        self.assertIn(f"session {self.TO} moved to devbox", respawn[0])
+
+    def test_a_resume_that_fails_on_the_target_puts_the_session_back_here(self) -> None:
+        transcript = self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target(resume=False)
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("rolled back", run.stdout)
+        self.assertIn("kill-window -t @7", (self.remote / "TMUX").read_text(encoding="utf-8"))
+        self.assertFalse((transcript.with_suffix("") / "agentbox-moved").exists())
+        self.assertFalse((self.home / ".omp/agentbox-moved" / self.TO).exists())
+        self.assertTrue((transcript.with_suffix("") / "Sub.jsonl").exists())
+        respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
+        self.assertEqual(len(respawn), 1, respawn)
+        self.assertIn(f"agentbox new --drop-gone-dirs -e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", respawn[0])
+        [line] = self.move_log()
+        self.assertTrue(line[5].startswith(f"failed: not resumed on devbox within 0s: {self.TO}"), line)
+
+    def test_a_working_directory_missing_on_the_target_puts_the_session_back_here(self) -> None:
+        """The box on the target cannot start without its first --dir, which --drop-gone-dirs never
+        drops, so the move checks it after the copy and rolls back before any window starts."""
+        transcript = self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        (self.remote / "MISSING").write_text(f"{self.worktree}\n", encoding="utf-8")
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertNotIn("new-session", (self.remote / "TMUX").read_text(encoding="utf-8"))
+        self.assertFalse((transcript.with_suffix("") / "agentbox-moved").exists())
+        [line] = self.move_log()
+        self.assertEqual(line[5], f"failed: the working directory {self.worktree} of {self.TO} is not on devbox")
+        respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
+        self.assertIn(f"-- omp --resume {transcript}", respawn[0])
+
+    def test_a_working_directory_the_move_does_not_copy_and_the_target_lacks_is_refused_first(self) -> None:
+        """A session working in a root of many sessions' trees (here the fixture's ~/tmp) gets no
+        copy of it, so the target must have it already; when it does not, the session is refused
+        while it still runs, from its own command and again by the relauncher."""
+        root = self.home / "tmp"
+        root.mkdir()
+        self.make_proc(999999940, comm="bash", ppid=1, cwd=root)
+        self.make_proc(999999941, ppid=999999940, cwd=root, session=self.TO)
+        self.set_pids(999999941)
+        self.set_panes({999999940: ("%85", "agents:8.1")})
+        self.target()
+        (self.remote / "MISSING").write_text(f"{root}\n", encoding="utf-8")
+        refused = self.move_to(own=999999941)
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn(f"nothing was hung up: its working directory {root} is not on devbox", refused.stderr)
+        self.assertEqual(self.jobs(), [])
+        (self.remote / "MISSING").unlink()
+        self.assertEqual(self.move_to(own=999999941).returncode, 0)
+        [job] = self.jobs()
+        (self.remote / "MISSING").write_text(f"{root}\n", encoding="utf-8")
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("refused, nothing was hung up: its working directory", run.stdout)
+        self.assertFalse((self.root / "RSYNC").exists())
+
+    def test_nothing_is_hung_up_when_the_target_is_not_ready_or_does_not_answer(self) -> None:
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        (self.cutover / "target-ready").unlink()
+        refused = self.move_to()
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn(f"devbox has no {self.cutover}/target-ready", refused.stderr)
+        self.assertIn("nothing was hung up", refused.stderr)
+        (self.remote / "DOWN").write_text("", encoding="utf-8")
+        refused = self.move_to()
+        self.assertIn("devbox does not answer `ssh -o BatchMode=yes -o ConnectTimeout=20 sami@devbox`", refused.stderr)
+        self.assertEqual(self.jobs(), [])
+        self.assertFalse((self.root / "SETSID").exists())
+
+    def test_a_session_already_running_on_the_target_halts_every_move(self) -> None:
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        proc = self.remote / "proc/4000000099"
+        (proc / "fd").mkdir(parents=True)
+        (proc / "cmdline").write_text(f"omp\0--resume\0{self.TO}\0", encoding="utf-8")
+        (self.remote / "PGREP").write_text("4000000099\n", encoding="utf-8")
+        refused = self.move_to()
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("one session is running on both machines", refused.stderr)
+        [line] = self.move_log()
+        self.assertEqual(line[1], self.TO)
+        self.assertEqual(line[5], "both-machines")
+        (self.remote / "PGREP").write_text("", encoding="utf-8")
+        again = self.move_to("--to devbox --dry-run")
+        self.assertIn(f"moves to devbox are halted: session {self.TO}", again.stderr)
+        self.assertEqual(self.move_to("--to devbox --clear-halt").returncode, 0)
+        self.assertEqual(self.move_to("--to devbox --dry-run").returncode, 0)
+
+    def test_two_failed_moves_in_a_row_halt_the_next_until_the_lead_clears_it(self) -> None:
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        (self.cutover / "move-log.tsv").write_text(
+            "2026-11-02T10:00:00Z\ts1\tg-1\toldbox\tdevbox\tmoved\t/t1\n"
+            "2026-11-02T10:10:00Z\ts2\tg-2\toldbox\tdevbox\tfailed: the copy to devbox\t/t2\n"
+            "2026-11-02T10:20:00Z\ts3\tg-3\toldbox\tdevbox\tmoved\t/t3\n"
+            "2026-11-02T10:20:00Z\ts4\tg-3\toldbox\tdevbox\tfailed: not resumed on devbox\t/t4\n",
+            encoding="utf-8",
+        )
+        halted = self.move_to("--to devbox --dry-run")
+        self.assertEqual(halted.returncode, 1)
+        self.assertIn("the last two moves failed (group g-2 at 2026-11-02T10:10:00Z, group g-3 at 2026-11-02T10:20:00Z)", halted.stderr)
+        self.assertEqual(self.move_to("--to devbox --clear-halt").returncode, 0)
+        self.assertEqual(self.move_log()[-1][5], "halt-cleared")
+        allowed = self.move_to("--to devbox --dry-run")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn("--dry-run: nothing was hung up, copied or sent", allowed.stdout)
+
+    def test_a_group_moves_once_every_session_sharing_its_tree_is_at_its_safe_point(self) -> None:
+        transcript = self.moving_session()
+        # A second session works in the same worktree: one group.
+        self.make_proc(999999910, comm="bash", ppid=1, cwd=self.worktree)
+        self.make_proc(999999911, ppid=999999910, cwd=self.worktree, session=self.TO2)
+        self.set_pids(999999901, 999999911)
+        self.set_panes({999999900: ("%81", "agents:4.1"), 999999910: ("%82", "agents:5.1")})
+        self.target()
+        first = self.move_to()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn(f"the group moves when {self.TO2} run(s) `agentbox move --to devbox` too", first.stdout)
+        self.assertEqual(self.jobs(), [])
+        sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(sent[:2], ["send", self.TO2])
+        self.assertIn("run `agentbox move --to devbox` from your bash tool", sent[2])
+        # The second session says it is ready (its own `move --to`); the first one's run moves both.
+        self.run_bash(f"move_to_ready_mark {self.TO2} devbox")
+        both = self.move_to()
+        self.assertEqual(both.returncode, 0, both.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(m["sid"] for m in doc["members"]), [self.TO, self.TO2])
+        self.assertEqual(doc["group"], "g-01a19700")
+        self.assertIn(str(transcript), doc["mirror"])
+        self.assertIn(str(self.session_file(self.TO2)), doc["mirror"])
+
+    def test_a_session_working_in_src_itself_shares_no_tree_with_the_others(self) -> None:
+        """A lead whose working directory is $SRC (or another root of many sessions' trees) would
+        otherwise contain every tree there, and its copy would be all of ~/src."""
+        self.moving_session()
+        self.make_proc(999999920, comm="bash", ppid=1, cwd=self.src)
+        self.make_proc(999999921, ppid=999999920, cwd=self.src, session=self.TO2)
+        self.set_pids(999999901, 999999921)
+        self.set_panes({999999900: ("%81", "agents:4.1"), 999999920: ("%83", "agents:6.1")})
+        self.target()
+        moved = self.move_to()
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        [job] = self.jobs()
+        self.assertEqual([m["sid"] for m in json.loads(job.read_text(encoding="utf-8"))["members"]], [self.TO])
+        self.assertNotIn(str(self.src), json.loads(job.read_text(encoding="utf-8"))["mirror"])
+
+    def test_sessions_that_share_only_a_directory_in_no_git_tree_move_apart(self) -> None:
+        """Caches, a tool's run directory and a lead root are written by many sessions; on
+        2026-11-02 they put 45 of this host's 46 sessions in one group. Such a directory is merged
+        into the target, never mirrored, and puts no two sessions in one group."""
+        self.moving_session()
+        self.make_proc(999999930, comm="bash", ppid=1, cwd=self.lane)
+        self.make_proc(999999931, ppid=999999930, cwd=self.lane, session=self.TO2)
+        self.set_pids(999999901, 999999931)
+        self.set_panes({999999900: ("%81", "agents:4.1"), 999999930: ("%84", "agents:7.1")})
+        self.target()
+        moved = self.move_to()
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        self.assertEqual([m["sid"] for m in doc["members"]], [self.TO])
+        self.assertIn(str(self.lane), doc["merge"])
+        self.assertNotIn(str(self.lane), doc["mirror"])
+
+    def test_what_a_pointer_file_names_stays_the_machine_s_own(self) -> None:
+        """The leak check a pointer file names is configuration of each machine, as the pointer is:
+        on sami-rocqperf it is inside a whole lane tree. A move neither copies it nor names it as a
+        --dir, since the target's `agentbox new` binds its own."""
+        self.moving_session()
+        leak = self.root / "lanes/frac-verify/shared/leak-check"
+        leak.mkdir(parents=True)
+        pointer = self.home / ".config/public-leak-check/path"
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text(f"{leak}/public-leak-check.sh\n", encoding="utf-8")
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        moved = self.move_to()
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        for listed in (doc["mirror"], doc["merge"], doc["members"][0]["spec"]):
+            self.assertFalse([p for p in listed if p.startswith(str(self.root / "lanes"))], listed)
+
+    def test_the_plan_lists_each_group_s_copy_and_size_and_changes_nothing(self) -> None:
+        transcript = self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        plan = self.run_bash("cmd_move_plan --to devbox")
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertIn("nothing is changed, copied or sent", plan.stdout)
+        self.assertIn("group g-01a19700: 1 session(s)", plan.stdout)
+        self.assertIn(f"resume on devbox: /target/agentbox new -e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", plan.stdout)
+        for path in (transcript, self.durable, self.worktree, self.lane, self.src / "repo/.git"):
+            self.assertRegex(plan.stdout, rf"\s\d[\d.]*[KMG]?\s+{path}\n")
+        self.assertIn("1 group(s), 1 session(s), 0 refused", plan.stdout)
+        self.assertFalse((self.remote / "SSH").exists())
+        self.assertFalse(self.plan_dir.exists())
+        self.assertFalse((self.root / "cache/omp/agentbox/move-to").exists())
+
+    def test_a_session_in_a_box_hands_its_move_to_the_host(self) -> None:
+        transcript = self.moving_session()
+        self.target()
+        env = {"AGENTBOX_BOX": "agentbox-0123456789ab", "AGENTBOX_DIRS": str(self.lane),
+               "OMP_SESSION_ID": self.TO, "TMUX_PANE": "%81"}
+        moved = self.run_bash(f'move_own_omp() {{ echo 999999901; }}\ncd "{self.worktree}"\ncmd_move_to --to devbox', env)
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        [job] = self.jobs()
+        [member] = json.loads(job.read_text(encoding="utf-8"))["members"]
+        self.assertEqual((member["box"], member["pid"], member["resume"]), ("agentbox-0123456789ab", 0, str(transcript)))
+        self.assertEqual(member["spec"], ["-e", "OMP_PROFILE=pbc", "--dir", str(self.lane)])
+        [call] = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "run-shell" in c]
+        self.assertIn(f"run-shell -b -t %81 setsid {AGENTBOX} move --to-run {job}", call)
+        # The host's relauncher hangs the box up with docker and moves it as any other.
+        write_stub(self.stubs, "docker", '[[ "$1" == inspect ]] && exit 1; printf "%s\\n" "$*" >>"$STUB_DOCKER"; exit 0')
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("kill -s SIGHUP agentbox-0123456789ab", (self.root / "STUB_DOCKER").read_text(encoding="utf-8"))
+        self.assertEqual(self.move_log()[0][5], "moved")
+
+    def test_a_transcript_the_session_sweep_took_is_resumed_by_its_recorded_path(self) -> None:
+        # dispatch://OSSV-240 deletes a transcript idle for 6 hours, even under a live omp; omp
+        # resumes it from Postgres by the path the sweep recorded.
+        swept = self.home / ".omp/agent/sessions/-lane" / f"2026-10-25T02-17-36-102Z_{self.METARQ}.jsonl"
+        record = self.root / "deleted.tsv"
+        record.write_text(f"{swept}\t100\tabc\t\t2026-11-02T08:00:00Z\n", encoding="utf-8")
+        self.nested_session(None, cmdline=f"omp --resume {self.METARQ}")
+        moved = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                              'cmd_move_self --dry-run', {"AGENTBOX_SWEEP_RECORD": str(record)})
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn(f"-- omp --resume {swept}\n", moved.stdout)
 
 if __name__ == "__main__":
     unittest.main()

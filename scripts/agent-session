@@ -17,6 +17,7 @@
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
+#   - refuses to resume an omp session that `agentbox move --to` moved off this machine (below);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
@@ -28,6 +29,47 @@ DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 (( $# )) || { echo "usage: agent-session <agent> [args…]" >&2; exit 2; }
 agent="$1"
 shift
+
+# A session `agentbox move --to <machine>` moved to another machine runs THERE now, and one
+# session id must never run on two machines at once (dispatch://INFRA-993, R4). The move writes
+# a marker, `agentbox-moved`, in the session's own directory (its transcript path without
+# `.jsonl`, which holds its subagent transcripts) and the same file as
+# ~/.omp/agentbox-moved/<session id>, since a resume by id cannot afford the walk of the session
+# tree that finds the transcript (12.5 s on sami-rocqperf, 2026-11-02). Every launcher of omp
+# comes through here (shims/omp; scripts/agentbox-run.ts checks it too, in a box), so a resume of
+# that session - by path or by id (or a prefix of one) - stops here. The marker counts only on the
+# machine it names as `from=`: a copy that reaches the target with a later bulk copy is inert
+# there. The move removes it again when the resume on the target fails.
+if [[ "${agent##*/}" == omp ]]; then
+    moved_index="$HOME/.omp/agentbox-moved"
+    this_machine="${AGENTBOX_HOST:-$(hostname -s)}"
+    moved_refuse() {
+        local marker="$1" from="" to="" at=""
+        [[ -f "$marker" ]] || return 0
+        from="$(sed -n 's/^from=//p' "$marker" | head -1)"
+        [[ "$from" == "$this_machine" ]] || return 0
+        to="$(sed -n 's/^to=//p' "$marker" | head -1)"
+        at="$(sed -n 's/^time=//p' "$marker" | head -1)"
+        echo "agent-session: this session moved to $to at $at (marker $marker); it runs there now, and one session must not run on two machines. Resume it on $to. If that move failed, the move removes this marker itself; remove it by hand only after checking that the session is not running on $to." >&2
+        exit 3
+    }
+    prev="" target=""
+    for arg in "$@"; do
+        [[ "$arg" == -- ]] && break
+        case "$prev" in --resume|-r|--session) target="$arg" ;; esac
+        case "$arg" in --resume=*|--session=*) target="${arg#*=}" ;; esac
+        prev="$arg"
+    done
+    if [[ -n "$target" ]]; then
+        if [[ "$target" == *.jsonl ]]; then
+            moved_refuse "${target%.jsonl}/agentbox-moved"
+            [[ "$target" =~ _([0-9a-f-]{36})\.jsonl$ ]] && moved_refuse "$moved_index/${BASH_REMATCH[1]}"
+        elif [[ "$target" =~ ^[0-9a-f-]+$ && -d "$moved_index" ]]; then
+            for marker in "$moved_index/$target"*; do moved_refuse "$marker"; done
+        fi
+    fi
+    unset -f moved_refuse
+fi
 
 routed=""
 for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do

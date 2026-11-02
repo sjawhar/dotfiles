@@ -35,9 +35,12 @@
 // so only the box's last line also goes to stderr; a box that ended is
 // otherwise silent.
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 const box = process.env.AGENTBOX_BOX ?? "unknown-box";
+// The machine a move's marker names as `from=`: the host's name, which a box has as AGENTBOX_HOST.
+const machine = process.env.AGENTBOX_HOST || os.hostname().split(".")[0];
 const logPath = `${process.env.HOME}/.cache/omp/agentbox/${box}.log`;
 
 function note(message: string, toStderr = false): void {
@@ -185,6 +188,47 @@ function wakeOverEnvoy(sid: string): void {
 	}
 }
 
+// A session `agentbox move --to <machine>` moved off this machine runs there now, and one
+// session id must never run on two machines at once (dispatch://INFRA-993). The move leaves a
+// marker, `agentbox-moved`, in the session's own directory (the transcript path without
+// `.jsonl`) and the same file as ~/.omp/agentbox-moved/<session id>; scripts/agent-session
+// refuses the same launches on the host, by the same rules. The marker counts only on the
+// machine it names as `from=` (AGENTBOX_HOST in a box, which has a hostname of its own).
+// Returns the refusal, or undefined when the launch may go ahead.
+export function movedRefusal(argv: string[], home: string, machine: string): string | undefined {
+	let target: string | undefined;
+	for (let i = 1; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") break;
+		if ((arg === "--resume" || arg === "-r" || arg === "--session") && i + 1 < argv.length) target = argv[i + 1];
+		else if (arg.startsWith("--resume=") || arg.startsWith("--session=")) target = arg.slice(arg.indexOf("=") + 1);
+	}
+	if (!target) return undefined;
+	const index = `${home}/.omp/agentbox-moved`;
+	const markers: string[] = [];
+	if (target.endsWith(".jsonl")) {
+		markers.push(`${target.slice(0, -".jsonl".length)}/agentbox-moved`);
+		const m = /_([0-9a-f-]{36})\.jsonl$/.exec(target);
+		if (m) markers.push(`${index}/${m[1]}`);
+	} else if (/^[0-9a-f-]+$/.test(target)) {
+		try {
+			for (const name of fs.readdirSync(index)) if (name.startsWith(target)) markers.push(`${index}/${name}`);
+		} catch {}
+	}
+	for (const marker of markers) {
+		let text: string;
+		try {
+			text = fs.readFileSync(marker, "utf8");
+		} catch {
+			continue;
+		}
+		const field = (k: string) => new RegExp(`^${k}=(.*)$`, "m").exec(text)?.[1] ?? "";
+		if (field("from") !== machine) continue;
+		return `this session moved to ${field("to")} at ${field("time")} (marker ${marker}); it runs there now, and one session must not run on two machines. Resume it on ${field("to")}.`;
+	}
+	return undefined;
+}
+
 // The session to resume: the file omp holds open (omp exports OMP_SESSION_ID
 // to its children, not itself), else the newest session file of this box's
 // working directory - an idle session holds no writer after a resume or a
@@ -307,6 +351,12 @@ if (import.meta.main) {
 		process.stderr.write("agentbox-run: usage: agentbox-run.ts omp [args…]\n");
 		process.exit(2);
 	}
+	const home = process.env.HOME ?? "";
+	const refusedAtStart = movedRefusal(launchArgv, home, machine);
+	if (refusedAtStart) {
+		note(`refused: ${refusedAtStart}`, true);
+		process.exit(3);
+	}
 
 	let child = spawnOmp(launchArgv);
 	let startedAt = Date.now();
@@ -329,6 +379,12 @@ if (import.meta.main) {
 		const sid = sessionId(child.pid);
 		if (!sid) {
 			note("restart requested, but this box has no session yet; omp left running, restart not performed");
+			restarting = false;
+			return;
+		}
+		const refused = movedRefusal(relaunchArgv(launchArgv, sid), home, machine);
+		if (refused) {
+			note(`restart refused, omp left running: ${refused}`);
 			restarting = false;
 			return;
 		}
