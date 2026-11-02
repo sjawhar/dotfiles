@@ -145,6 +145,10 @@ class AgentboxMove(unittest.TestCase):
             "".join(f"{pid}\t{pane}\t{at}\n" for pid, (pane, at) in panes.items()), encoding="utf-8"
         )
 
+    def session_file(self, session: str) -> Path:
+        """Where make_proc(session=...) puts the session's transcript, the path a move resumes by."""
+        return self.home / ".omp/agent/sessions/-work" / f"2026-11-01T09:00:00Z_{session}.jsonl"
+
     def set_containers(self, containers: dict[str, str]) -> None:
         (self.root / "STUB_DOCKER").write_text(
             "".join(f"{cid} {name}\n" for cid, name in containers.items()), encoding="utf-8"
@@ -697,10 +701,87 @@ class AgentboxMove(unittest.TestCase):
         moved = self.run_bash(env + f'cmd_move_notify 01a170c2 --now --dry-run --dir "{extra}"')
         self.assertEqual(moved.returncode, 0, moved.stderr)
         self.assertIn("would relaunch pane %70", moved.stdout)
-        self.assertIn(f"--dir {extra} -- omp --resume 01a170c2-69f0-7542-a611-195ce0c4a111", moved.stdout)
+        self.assertIn(f"--dir {extra} -- omp --resume {self.session_file('01a170c2-69f0-7542-a611-195ce0c4a111')}", moved.stdout)
         refused = self.run_bash(env + f'cmd_move_notify --all --now --dry-run --dir "{extra}"')
         self.assertEqual(refused.returncode, 1)
         self.assertIn("--dir names paths of ONE session", refused.stderr)
+
+    # ── where the session lives ─────────────────────────────────────────────────────────────
+    def nested_session(self, holds: Path | None, environ: dict[str, str] | None = None,
+                       cmdline: str = "omp") -> None:
+        """METARQ's shape (2026-11-02): a session started from another session's turn, whose
+        transcript is inside THAT session's directory, so `omp --resume <id>` cannot find it.
+        `holds` is the transcript the omp holds open, or None for an omp idle after a resume."""
+        lane = self.root / "lane"
+        lane.mkdir(exist_ok=True)
+        self.make_proc(1100, comm="bash", ppid=1, cwd=lane)
+        self.make_proc(1101, ppid=1100, cwd=lane, environ=environ, cmdline=cmdline,
+                       writes=(holds,) if holds else ())
+        self.set_pids(1101)
+        self.set_panes({1100: ("%47", "agents:3.1")})
+
+    METARQ = "01a170d9-5e66-7491-b0d2-fa6a2e55c14e"
+
+    def nested_transcript(self, root: Path | None = None) -> Path:
+        path = (root or self.home / ".omp/agent/sessions") / "-lane" \
+            / "2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
+            / f"2026-10-25T02-17-36-102Z_{self.METARQ}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+        return path
+
+    def test_a_nested_transcript_is_resumed_by_its_path_with_the_session_environment(self) -> None:
+        nested = self.nested_transcript()
+        self.nested_session(nested, environ={"OMP_PROFILE": "pbc", "TMUX_PANE": "%47", "HOME": "/x"})
+        rows = {row[1]: row for row in self.census()}
+        self.assertEqual(rows["1101"][:4], ["host", "1101", self.METARQ, "%47"])
+        moved = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                              'cmd_move_self --dry-run')
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn(f"agentbox new -e OMP_PROFILE=pbc --dir {self.root / 'lane'} -- omp --resume {nested}\n",
+                      moved.stdout)
+        # Only the variables that decide where the session lives go into the box.
+        self.assertNotIn("TMUX_PANE=", moved.stdout)
+        self.assertNotIn("HOME=/x", moved.stdout)
+
+    def test_an_idle_omp_s_nested_transcript_is_found_under_its_profile(self) -> None:
+        # Idle after a resume: no open transcript, its --resume names only the id. The profile's
+        # agent directory is searched; omp's profile dirs link sessions to the default's.
+        nested = self.nested_transcript(self.home / ".omp/profiles/pbc/agent/sessions")
+        self.nested_session(None, environ={"OMP_PROFILE": "pbc"}, cmdline=f"omp --resume {self.METARQ}")
+        moved = self.run_bash('move_image_bytes() { echo 280000000; }\n'
+                              f'cmd_move_notify {self.METARQ} --now --dry-run')
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn(f"-e OMP_PROFILE=pbc --dir {self.root / 'lane'} -- omp --resume {nested}\n", moved.stdout)
+
+    def test_a_session_whose_transcript_cannot_be_found_is_refused_before_the_hang_up(self) -> None:
+        self.nested_session(None, cmdline=f"omp --resume {self.METARQ}")
+        refused = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                                'move_hand_off() { echo HANDED-OFF; }\ncmd_move_self')
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertNotIn("HANDED-OFF", refused.stdout)
+        self.assertIn(f"no transcript of session {self.METARQ} can be read", refused.stderr)
+        self.assertIn("nothing was hung up", refused.stderr)
+        # From outside too: no notice and no hand-off.
+        outside = self.run_bash(f'move_hand_off() {{ echo HANDED-OFF; }}\ncmd_move_notify {self.METARQ} --now')
+        self.assertNotIn("HANDED-OFF", outside.stdout)
+        self.assertIn("cannot be moved", outside.stderr)
+
+    def test_a_transcript_the_box_would_not_see_is_refused_before_the_hang_up(self) -> None:
+        # Outside every path the box gets: not under the home allow-list, not a --dir. The omp is
+        # idle after a resume by that path, so no open file makes the path an inferred --dir.
+        nested = self.nested_transcript(self.root / "elsewhere/sessions")
+        self.nested_session(None, cmdline=f"omp --resume {nested}")
+        refused = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                                'move_hand_off() { echo HANDED-OFF; }\ncmd_move_self')
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertNotIn("HANDED-OFF", refused.stdout)
+        self.assertIn("is not in any path the box gets", refused.stderr)
+        # Naming its directory with --dir makes it reachable.
+        allowed = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                                f'cmd_move_self --dry-run --dir "{self.root / "elsewhere"}"')
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn(f"-- omp --resume {nested}\n", allowed.stdout)
 
     def relaunch(self, environ: dict[str, str], respawn_fails: bool = False,
                  caller: dict[str, str] | None = None) -> list[str]:
@@ -721,7 +802,8 @@ class AgentboxMove(unittest.TestCase):
             "exit 0",
         ]))
         result = self.run_bash(
-            f'move_relaunch 999999999 01a170c2-69f0-7542-a611-195ce0c4a111 %70 "{lane}" --dir "{lane}"',
+            f'move_relaunch 999999999 01a170c2-69f0-7542-a611-195ce0c4a111 %70 "{lane}" '
+            f'"{self.session_file("01a170c2-69f0-7542-a611-195ce0c4a111")}" --dir "{lane}"',
             {"AGENTBOX_RESPAWN_TRIES": "1", "AGENTBOX_RESPAWN_WAIT": "0", **(caller or {})},
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -848,7 +930,7 @@ class AgentboxMove(unittest.TestCase):
         )
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertIn(
-            f"agentbox new --dir {lane} -- omp --resume 01a19700-0000-7000-8000-00000000c001\n",
+            f"agentbox new --dir {lane} -- omp --resume {self.session_file('01a19700-0000-7000-8000-00000000c001')}\n",
             allowed.stdout,
         )
 
@@ -859,19 +941,21 @@ class AgentboxMove(unittest.TestCase):
         directory`, and --self then refused outright."""
         host_only = "/mnt/nvme/sami/tmp/a-path-this-box-does-not-have"
         self.assertFalse(Path(host_only).exists(), "the fixture needs a path this host lacks")
+        nested = self.home / ".omp/agent/sessions/-lane/2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
+            / "2026-10-25T02-17-36-102Z_01a19700-0000-7000-8000-000000000d09.jsonl"
         env = {
             "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa",
             "AGENTBOX_DIRS": f"{self.home}/lane:{self.home}/evidence",
             "OMP_SESSION_ID": "01a19700-0000-7000-8000-000000000d09",
+            "PI_SESSION_FILE": str(nested),
             "TMUX_PANE": "%7",
         }
         result = self.run_bash(f'cmd_move_self --dry-run --dir "{host_only}"', env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("already in box agentbox-aaaaaaaaaaaa", result.stdout)
-        # This box's own paths, then the new one, and the session resumed by its own id.
+        # This box's own paths, then the new one, and the session resumed by its transcript.
         self.assertIn(
-            f"--dir {self.home}/lane --dir {self.home}/evidence --dir {host_only} "
-            "-- omp --resume 01a19700-0000-7000-8000-000000000d09\n",
+            f"--dir {self.home}/lane --dir {self.home}/evidence --dir {host_only} -- omp --resume {nested}\n",
             result.stdout,
         )
         # A box started with no --dir has nothing to carry, and says so instead of guessing.
@@ -904,7 +988,7 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("agentbox move --self", notice)
         self.assertIn("Do not stop, delay or shorten any work", notice)
         self.assertIn(
-            f"agentbox new --dir {lane} -- omp --resume 01a19700-0000-7000-8000-00000000d001`", notice
+            f"agentbox new --dir {lane} -- omp --resume {self.session_file('01a19700-0000-7000-8000-00000000d001')}`", notice
         )
         # The sandboxed omp is not a session on this host and is never notified.
         self.assertNotIn("01a19700-0000-7000-8000-00000000d002", notice)
@@ -972,10 +1056,10 @@ class AgentboxMove(unittest.TestCase):
         # A positional after --resume is a user message to omp, which the transcript store counts
         # as text the person typed; the pane resumes bare and the waker wakes it over Envoy.
         sid = "01a19700-0000-7000-8000-000000020001"
-        result = self.run_bash(f"move_pane_command {sid} --dir /lane")
+        result = self.run_bash(f"move_pane_command {sid} /t/{sid}.jsonl --dir /lane")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"move --wake {sid}", result.stdout)
-        self.assertTrue(result.stdout.rstrip().endswith(f"agentbox new --dir /lane -- omp --resume {sid}"), result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith(f"agentbox new --dir /lane -- omp --resume /t/{sid}.jsonl"), result.stdout)
 
     def test_the_waker_notifies_once_the_resumed_process_registers(self) -> None:
         sid = "01a19700-0000-7000-8000-000000020002"

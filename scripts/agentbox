@@ -2453,6 +2453,95 @@ move_env_pane() {
     MOVE_PANE_ID="$pane" MOVE_PANE_AT=""
 }
 
+# The variables of an omp's environment that decide where its session lives: the profile, the
+# agent and config directories, the session directory, the session storage and its SQL DSN file,
+# and the XDG roots omp puts its data and state under. A moved session's box gets each one the
+# omp had, through `-e`, since the caller's environment never reaches a box: METARQ
+# (01a170d9, 2026-11-02) ran with OMP_PROFILE=pbc and its box's omp started without it.
+MOVE_SESSION_ENV=(OMP_PROFILE PI_PROFILE PI_CONFIG_DIR PI_CODING_AGENT_DIR PI_CODING_AGENT_SESSION_DIR
+    OMP_SESSION_STORAGE OMP_SESSION_SQL_DSN_FILE XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME)
+
+# move_session_env PID: `-e` and `NAME=VALUE`, one per line, for each of those the omp has set.
+move_session_env() {
+    local kv name n
+    while IFS= read -r -d '' kv; do
+        name="${kv%%=*}"
+        for n in "${MOVE_SESSION_ENV[@]}"; do
+            [[ "$name" == "$n" ]] && printf -- '-e\n%s\n' "$kv"
+        done
+    done < <(cat "$PROC/$1/environ" 2>/dev/null || true)
+}
+
+# move_agent_dir PID: the agent directory that omp's environment selects, as omp's dirs.ts does:
+# a named profile's own (OMP_PROFILE, else PI_PROFILE), else PI_CODING_AGENT_DIR, else the
+# default, under $HOME/${PI_CONFIG_DIR:-.omp}.
+move_agent_dir() {
+    local kv profile="" pi_profile="" omp_set=false config=".omp" agent=""
+    while IFS= read -r -d '' kv; do
+        case "$kv" in
+            OMP_PROFILE=*) profile="${kv#*=}"; omp_set=true ;;
+            PI_PROFILE=*) pi_profile="${kv#*=}" ;;
+            PI_CONFIG_DIR=*) config="${kv#*=}" ;;
+            PI_CODING_AGENT_DIR=*) agent="${kv#*=}" ;;
+        esac
+    done < <(cat "$PROC/$1/environ" 2>/dev/null || true)
+    $omp_set || profile="$pi_profile"
+    [[ "$profile" == default ]] && profile=""
+    if [[ -n "$profile" ]]; then echo "$HOME/$config/profiles/$profile/agent"
+    elif [[ -n "$agent" ]]; then echo "$agent"
+    else echo "$HOME/$config/agent"; fi
+}
+
+# move_transcript PID SID: the absolute path of the transcript session SID is in. A move resumes
+# the session by this path, never by its id: `omp --resume <id>` finds only a transcript at the
+# top of its working directory's session directory, and a session started from another session's
+# turn has its file inside THAT session's directory (METARQ: `…/-Code-personal-theorem/<FRAC's
+# session>/<stamp>_01a170d9-….jsonl`), so the id found nothing, in the box or on the host, and the
+# moved session ended. In order: the file named `_<SID>.jsonl` the omp holds open under a
+# `sessions` directory; its own `--resume` argument when that is such a file; the one file of that
+# name under the agent directory its environment selects. Nothing, when none of them answers.
+move_transcript() {
+    local pid="$1" sid="$2" fd link arg found=() dir
+    [[ -n "$sid" ]] || return 1
+    for fd in "$PROC/$pid/fd"/*; do
+        link="$(readlink "$fd" 2>/dev/null)" || continue
+        if [[ "$link" == /*/sessions/*_"$sid".jsonl ]]; then printf '%s\n' "$link"; return 0; fi
+    done
+    while IFS= read -r -d '' arg; do
+        if [[ "$arg" == /*_"$sid".jsonl && -f "$arg" ]]; then printf '%s\n' "$arg"; return 0; fi
+    done < <(cat "$PROC/$pid/cmdline" 2>/dev/null || true)
+    dir="$(move_agent_dir "$pid")/sessions"
+    mapfile -t found < <(find -L "$dir" -maxdepth 4 -type f -name "*_${sid}.jsonl" 2>/dev/null)
+    if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
+    return 1
+}
+
+# move_resume_check PID SID SPEC…: refuse BEFORE the hang-up when the box would not find the
+# session. Sets MOVE_RESUME to the transcript path and returns 0, or sets MOVE_RESUME_WHY and
+# returns 1: no transcript can be read, or the box would not see it (a path outside the home
+# allow-list, $SRC, the dotfiles and the --dir paths of SPEC).
+MOVE_RESUME="" MOVE_RESUME_WHY=""
+move_resume_check() {
+    local pid="$1" sid="$2" path real a prev="" d
+    shift 2
+    MOVE_RESUME="" MOVE_RESUME_WHY=""
+    if ! path="$(move_transcript "$pid" "$sid")"; then
+        MOVE_RESUME_WHY="no transcript of session $sid can be read (no open file, no --resume path, no single *_${sid}.jsonl under $(move_agent_dir "$pid")/sessions), so the box could not resume it"
+        return 1
+    fi
+    real="$(readlink -f "$path" 2>/dev/null || echo "$path")"
+    if move_dir_in_box "$real"; then MOVE_RESUME="$path"; return 0; fi
+    for a in "$@"; do
+        if [[ "$prev" == --dir ]]; then
+            d="$(readlink -f "$a" 2>/dev/null || echo "$a")"
+            if move_within "$real" "$d"; then MOVE_RESUME="$path"; return 0; fi
+        fi
+        prev="$a"
+    done
+    MOVE_RESUME_WHY="its transcript $real is not in any path the box gets (the home allow-list, \$SRC, the dotfiles, its --dir paths), so the box could not resume it; add its directory with --dir"
+    return 1
+}
+
 move_census() {
     local -A pane_id=() pane_at=() cname=() comm=() ppid=() ctr=() unit=() cwd=() sid=()
     local pids=() files=() pid parent key name value id class detail chain found guard line leaf child
@@ -2509,7 +2598,7 @@ move_census() {
         esac
     done < <(find "${files[@]}" -maxdepth 1 -type l -printf '%p\t%l\n' 2>/dev/null \
         | sed -n -e "s#^$PROC/\([0-9]\+\)/cwd\t#\1\tcwd\t#p" \
-                 -e "s#^$PROC/\([0-9]\+\)/fd/[0-9]\+\t.*/\.omp/agent/sessions/[^/]*/[0-9T:-]*Z_\([0-9a-f-]\{36\}\)\.jsonl\$#\1\tsid\t\2#p")
+                 -e "s#^$PROC/\([0-9]\+\)/fd/[0-9]\+\t.*/sessions/.*/[0-9T:-]*Z_\([0-9a-f-]\{36\}\)\.jsonl\$#\1\tsid\t\2#p")
     # 4. the session id of an omp that holds no writer on its transcript, from its own `--resume`
     # argument. A session idle after a resume is in that state (the same reason agentbox-run.ts
     # has a second source): 10 of this host's 83 host sessions were, at 16:30Z on 2026-11-01.
@@ -2850,13 +2939,14 @@ move_wake() {
 }
 
 # The command a moved pane runs: the waker in the background and the box launcher resuming the
-# session with no prompt. This file by its absolute path, which a box sees at the same path.
+# session with no prompt, by RESUME: the transcript's path (move_transcript), which omp opens
+# wherever it is, and which the box sees at the same path. This file by its absolute path too.
 move_pane_command() {
-    local sid="$1" log
-    shift
+    local sid="$1" resume="$2" log
+    shift 2
     log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$sid.log"
     printf '( setsid %q move --wake %q </dev/null >>%q 2>&1 & ); %s' \
-        "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "$log" "$(printf '%q ' agentbox new "$@" -- omp --resume "$sid")"
+        "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "$log" "$(printf '%q ' agentbox new "$@" -- omp --resume "$resume")"
 }
 
 # The tmux server a relauncher drives its pane through: `-S <socket>` from the TARGET omp's own
@@ -2880,11 +2970,12 @@ move_target_tmux() {
     return 0
 }
 
+# move_relaunch PID SID PANE CWD RESUME SPEC…
 move_relaunch() {
-    local pid="$1" sid="$2" pane="$3" cwd="$4" waited=0 inner
-    shift 4
+    local pid="$1" sid="$2" pane="$3" cwd="$4" resume="$5" waited=0 inner
+    shift 5
     local spec=("$@")
-    echo "$(date -u +%FT%TZ) move $sid: pid $pid, pane $pane, cwd $cwd, spec ${spec[*]}"
+    echo "$(date -u +%FT%TZ) move $sid: pid $pid, pane $pane, cwd $cwd, resume $resume, spec ${spec[*]}"
     move_target_tmux "$pid"
     echo "$(date -u +%FT%TZ) move $sid: tmux server ${MOVE_TMUX[1]:-from the environment of this process}, client $MOVE_TMUX_BIN"
     # Pids are reused: never signal one that is no longer this session's omp.
@@ -2902,10 +2993,10 @@ move_relaunch() {
         echo "$(date -u +%FT%TZ) move $sid: omp $pid exited after ${waited}s"
     fi
     if ! "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
-        echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $sid"
+        echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $resume"
         return 1
     fi
-    inner="$(move_pane_command "$sid" "${spec[@]}")"
+    inner="$(move_pane_command "$sid" "$resume" "${spec[@]}")"
     if ! move_respawn "$sid" "$pane" "$cwd" "$inner" "${spec[*]}"; then
         echo "$(date -u +%FT%TZ) move $sid: pane $pane holds no process and would not respawn; the session is DOWN. Bring it back from a host session: $MOVE_TMUX_BIN ${MOVE_TMUX[*]:+${MOVE_TMUX[*]} }respawn-pane -k -t $pane -c $cwd bash -i -c '$inner; exec bash -i'"
         return 1
@@ -2934,13 +3025,21 @@ move_self_in_box() {
     [[ -n "$sid" ]] || die "no OMP_SESSION_ID in this box, so a relaunch could not name the session to resume"
     pane="${TMUX_PANE:-}"
     cwd="$PWD"
-    local spec=()
+    local spec=() own resume=""
+    # The session is resumed by its transcript's path and keeps its session environment, as a
+    # move from the host does (move_transcript, move_session_env); ~/.omp is the same path here.
+    if own="$(move_own_omp)"; then
+        resume="$(move_transcript "$own" "$sid" || true)"
+        mapfile -t spec < <(move_session_env "$own")
+    fi
+    [[ -n "$resume" || "${PI_SESSION_FILE:-}" != *_"$sid".jsonl ]] || resume="$PI_SESSION_FILE"
+    [[ -n "$resume" ]] || die "no transcript of session $sid can be read here, so a new box could not resume it; nothing was hung up"
     for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
     echo "agentbox: this session is already in box ${AGENTBOX_BOX:-a box}; moving again into a new one with:"
-    echo "  agentbox new ${spec[*]} -- omp --resume $sid"
+    echo "  agentbox new ${spec[*]} -- omp --resume $resume"
     [[ -n "$pane" ]] || die "this box has no TMUX_PANE, so it cannot respawn its own pane; run the line above from a host session"
     if [[ "$dry" == true ]]; then return 0; fi
-    inner="$(move_pane_command "$sid" "${spec[@]}")"
+    inner="$(move_pane_command "$sid" "$resume" "${spec[@]}")"
     # The host's tmux server, through the relay every box has. respawn-pane -k kills what the
     # pane runs - the `agentbox new` of THIS box, so this box and this process end with it - and
     # starts the new launcher in its place. tmux has the command before anything dies.
@@ -3013,6 +3112,13 @@ cmd_move_self() {
     done < <(move_dirs_why "$cwd" "$pid" "$sid" "${BOX_DIRS[@]+"${BOX_DIRS[@]}"}" 2>/dev/null)
     (( ${#dirs[@]} )) || die "$(move_dirs_why "$cwd" "$pid" "$sid" 2>&1 >/dev/null || true)"
     for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
+    # Where the session lives goes into the box with it, and the box must be able to open it:
+    # both are settled before anything is hung up.
+    local envs=()
+    mapfile -t envs < <(move_session_env "$pid")
+    spec=("${envs[@]+"${envs[@]}"}" "${spec[@]}")
+    move_resume_check "$pid" "$sid" "${spec[@]}" \
+        || die "session $sid cannot be moved: $MOVE_RESUME_WHY; nothing was hung up"
     if [[ -z "${MOVE_KIDS[$pid]:-}" ]]; then
         whys+=("  (this session has no live child process, so only its working directory, its own record and the last plan were read)")
     fi
@@ -3028,14 +3134,14 @@ cmd_move_self() {
     fi
     if $dry; then
         echo "agentbox: would hang omp $pid up and respawn pane $pane ($at) as:"
-        echo "  agentbox new ${spec[*]} -- omp --resume $sid"
+        echo "  agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME"
         echo "each path and why:"
         printf '%s\n' "${whys[@]}"
         echo "anything else you work in is NOT in that box and is lost with it: add it with --dir."
         return 0
     fi
     printf '%s\n' "agentbox: the box gets these paths:" "${whys[@]}"
-    move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
+    move_hand_off "$pid" "$sid" "$pane" "$cwd" "$MOVE_RESUME" "${spec[@]}"
 }
 
 # The idle test is ancestry, never `read proc://`: under a shared omp worker broker that lists the
@@ -3113,16 +3219,25 @@ cmd_move_notify() {
         fi
         spec=()
         for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
+        # Where the session lives goes into its box with it, and the box must be able to open it
+        # (move_session_env, move_resume_check), before any notice or hang-up.
+        local envs=()
+        mapfile -t envs < <(move_session_env "$pid")
+        spec=("${envs[@]+"${envs[@]}"}" "${spec[@]}")
+        if ! move_resume_check "$pid" "$sid" "${spec[@]}"; then
+            echo "agentbox: $sid cannot be moved: $MOVE_RESUME_WHY; not notified, nothing hung up" >&2
+            continue
+        fi
         if ! move_check_floor "$image"; then return 2; fi
         if $now; then
             if $dry; then
-                echo "agentbox: would relaunch pane $pane ($at) now: agentbox new ${spec[*]} -- omp --resume $sid"
+                echo "agentbox: would relaunch pane $pane ($at) now: agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME"
                 continue
             fi
-            move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
+            move_hand_off "$pid" "$sid" "$pane" "$cwd" "$MOVE_RESUME" "${spec[@]}"
             continue
         fi
-        local notice="${MOVE_NOTICE_HEAD//%PID%/$pid} \`agentbox new ${spec[*]} -- omp --resume $sid\`, $MOVE_NOTICE_TAIL $MOVE_NOTICE_DIRS $(printf '%s; ' "${whys[@]}" | sed 's/; $//'). $MOVE_NOTICE_ADD"
+        local notice="${MOVE_NOTICE_HEAD//%PID%/$pid} \`agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME\`, $MOVE_NOTICE_TAIL $MOVE_NOTICE_DIRS $(printf '%s; ' "${whys[@]}" | sed 's/; $//'). $MOVE_NOTICE_ADD"
         if $dry; then
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue
