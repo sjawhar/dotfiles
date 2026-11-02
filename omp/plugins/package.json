@@ -8,7 +8,7 @@
     "@sjawhar/pi-legion": "15.0.0",
     "ctx-memory": "github:sjawhar/ctx-memory#v0.2.1",
     "gws-accounts": "github:sjawhar/gws-accounts#v0.1.10",
-    "secretsd": "github:sjawhar/forward#v3.7.1",
+    "secretsd": "github:sjawhar/forward#v3.7.2",
     "superpowers": "github:obra/superpowers#v7.0.1"
   },
   "patchedDependencies": {
