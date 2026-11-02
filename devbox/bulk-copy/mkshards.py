@@ -48,33 +48,22 @@ for f in sorted(os.listdir(outdir)):
             old_manifest = [ln.rstrip("\n").split("\t") for ln in fh if ln.startswith("s")]
     os.unlink(full)
 
-with open(a.listing, "rb") as fh:
-    raw = fh.read().split(b"\0")
-if a.partial:
-    raw = raw[:-1]
+def records(path):
+    """NUL-terminated records, streamed; a --partial listing's cut last record is dropped."""
+    rest = b""
+    with open(path, "rb") as fh:
+        while chunk := fh.read(64 << 20):
+            parts = (rest + chunk).split(b"\0")
+            rest = parts.pop()
+            yield from parts
+    if rest and not a.partial:
+        yield rest
 
+
+# Shards follow the listing's order (find's directory order), so memory stays small.
 expected = collections.defaultdict(lambda: [0, 0])
-dirs, items = [], []
-for rec in raw:
-    if not rec:
-        continue
-    kind, size, path = rec.split(b" ", 2)
-    spath = path.decode("utf-8", "surrogateescape")
-    if not path or (a.include and not under(spath, a.include)) or under(spath, a.exclude):
-        continue
-    e = expected["/".join(spath.split("/")[: a.depth])]
-    if kind == b"d":
-        dirs.append(path)
-        continue
-    e[0] += 1
-    e[1] += int(size) if kind == b"f" else 0
-    if path not in done_paths:
-        items.append((path, kind, int(size)))
-items.sort()
-dirs.sort()
-
 manifest = [(r[0], int(r[1]), int(r[2])) for r in old_manifest]
-n, cur, cur_bytes = len(manifest), [], 0
+n, cur, cur_bytes, n_items, n_dirs = len(manifest), [], 0, 0, 0
 
 
 def flush():
@@ -89,17 +78,37 @@ def flush():
     cur, cur_bytes = [], 0
 
 
-for path, kind, size in items:
+dirs_fh = None if a.partial else open(os.path.join(outdir, "zdirs.list"), "wb")
+for rec in records(a.listing):
+    if not rec:
+        continue
+    kind, size, path = rec.split(b" ", 2)
+    spath = path.decode("utf-8", "surrogateescape")
+    if not path or (a.include and not under(spath, a.include)) or under(spath, a.exclude):
+        continue
+    parts = spath.split("/")
+    if kind != b"d" or len(parts) >= a.depth:  # a directory above the group depth is no group
+        e = expected["/".join(parts[: a.depth])]
+    if kind == b"d":
+        n_dirs += 1
+        if dirs_fh:
+            dirs_fh.write(path + b"\0")
+        continue
+    size = int(size)
+    e[0] += 1
+    e[1] += size if kind == b"f" else 0
+    if path in done_paths:
+        continue
+    n_items += 1
     tar_bytes = 512 + (-(-size // 512) * 512 if kind == b"f" else 0)
     if cur and (cur_bytes + tar_bytes > limit or len(cur) >= a.shard_entries):
         flush()
     cur.append(path)
     cur_bytes += tar_bytes
 flush()
-if not a.partial:
-    with open(os.path.join(outdir, "zdirs.list"), "wb") as fh:
-        fh.write(b"\0".join(dirs) + (b"\0" if dirs else b""))
-    manifest.append(("zdirs", len(dirs), 512 * len(dirs)))
+if dirs_fh:
+    dirs_fh.close()
+    manifest.append(("zdirs", n_dirs, 512 * n_dirs))
 with open(os.path.join(outdir, "manifest.tsv"), "w") as fh:
     for row in manifest:
         fh.write("\t".join(map(str, row)) + "\n")
@@ -108,5 +117,5 @@ if not a.partial:
         for top in sorted(expected):
             fh.write(f"{top}\t{expected[top][0]}\t{expected[top][1]}\n")
 total = sum(m[2] for m in manifest)
-print(f"{a.tree}: {len(manifest)} shards ({len(manifest) - len(old_manifest)} new), {len(items)} new entries, "
-      f"{len(dirs)} dirs, {total / 2**30:.1f} GiB tar")
+print(f"{a.tree}: {len(manifest)} shards ({len(manifest) - len(old_manifest)} new), {n_items} new entries, "
+      f"{n_dirs} dirs, {total / 2**30:.1f} GiB tar")
