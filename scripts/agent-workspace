@@ -44,14 +44,15 @@ THE HAZARD. A worktree and a `--shared` clone both die with their source.
 REMOVING. A directory deletion is not enough for a worktree: the source keeps a registration in
 `.git/worktrees/<name>` until it is cleared, and jj keeps the workspace in its op log until
 `jj workspace forget`. `rm` does the right one for the shape it finds. It refuses a tree holding
-work no remote has unless `--force` says otherwise; it removes a worktree together with the lock
-shims/git puts on every `git worktree add` of an agent session (`ADD_LOCK`), wherever `rm` runs,
-and leaves a tree locked for any other reason standing; it clears a registration an earlier plain
-deletion left behind, by removing that one entry rather than running a prune (shims/git refuses
-a bare `git worktree prune` in an agent session, because from inside a box every other box's
-worktree looks missing and a prune deletes live registrations); and it deletes the workspace's
-branch from the shared source when a remote already holds every commit on it, which loses
-nothing, keeping anything `git branch -d` refuses. `--keep-branch` leaves the branch alone.
+work no remote has unless `--force` says otherwise; it removes a worktree together with either
+agent add-lock (`ADD_LOCKS`: shims/git's or shims/jj's, the two shims/git lets past in a session),
+wherever `rm` runs, and leaves a tree locked for any other reason standing; it clears a
+registration an earlier plain deletion left behind, by removing that one entry rather than
+running a prune (shims/git refuses a bare `git worktree prune` in an agent session, because from
+inside a box every other box's worktree looks missing and a prune deletes live registrations);
+and it deletes the workspace's branch from the shared source when a remote already holds every
+commit on it, which loses nothing, keeping anything `git branch -d` refuses. `--keep-branch`
+leaves the branch alone.
 
 WHERE THEY GO. `/mnt/nvme/<user>/worktrees` on a machine with that disk, else `~/.worktrees`
 (`ws_roots`). Trees already under `~/.worktrees` stay there and keep working: `list`, `rm` and
@@ -73,10 +74,11 @@ BORROWERS = "agent-workspace-borrowers"
 # The machine's big disk, where it has one. Tested exactly as `scripts/agentbox` tests it for a
 # box's checkouts; a constant so a test can point it somewhere else.
 NVME = Path("/mnt/nvme")
-# shims/git locks every `git worktree add` an agent session runs, `new` included, with this reason
-# (AGENTC-431), and lets a `git worktree remove` past it only inside a session. It is the
-# one lock `rm` takes off; any other lock is someone's claim on the tree.
-ADD_LOCK = "agent session: locked on add (AGENTC-431)"
+# The agent add-locks (AGENTC-431): shims/git puts the first on every `git worktree add` an agent
+# session runs, `new` included, and shims/jj the second on the git worktree of a `jj workspace add`
+# the git shim did not lock. Each shim lets a `git worktree remove` past either only inside a
+# session. They are the locks `rm` takes off; any other lock is someone's claim on the tree.
+ADD_LOCKS = ("agent session: locked on add (AGENTC-431)", "jj shim: locked on add (AGENTC-431)")
 
 
 def run(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -537,11 +539,11 @@ def cmd_rm(args: argparse.Namespace) -> int:
         source = info["source"]
         branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=dest, check=False).stdout.strip()
         remove = ["git", "worktree", "remove", "--force", str(dest)]
-        # The lock shims/git put on this tree at its add is this tool's to take off, in a session or
-        # outside one, where the shim sees no session and git would refuse. A second --force is
-        # git's way past a lock: the lock goes with the registration, and stays on when git refuses
-        # the removal for another reason. Any other lock stands; git's refusal names it.
-        if lock_reason(source, dest) == ADD_LOCK:
+        # An agent add-lock on this tree is this tool's to take off, in a session or outside one,
+        # where the shim sees no session and git would refuse. A second --force is git's way past a
+        # lock: the lock goes with the registration, and stays on when git refuses the removal for
+        # another reason. Any other lock stands; git's refusal names it.
+        if lock_reason(source, dest) in ADD_LOCKS:
             remove.insert(-1, "--force")
         res = run(remove, cwd=source, check=False)
         if res.returncode != 0:

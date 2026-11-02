@@ -37,6 +37,8 @@ SHIMS = Path(__file__).resolve().parents[2] / "shims"
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
 # What shims/git writes on every `git worktree add` an agent session runs.
 ADD_LOCK = "agent session: locked on add (AGENTC-431)"
+# What shims/jj writes on the git worktree of a `jj workspace add` shims/git did not lock.
+JJ_LOCK = "jj shim: locked on add (AGENTC-431)"
 
 GIT_ENV = {
     **os.environ,
@@ -324,10 +326,11 @@ class WorkspaceRootTest(WorkspaceCase):
 
 
 class AddLockTest(WorkspaceCase):
-    """`rm` takes off the lock shims/git puts on an agent session's tree, wherever it runs, and no other.
+    """`rm` takes off the two agent add-locks, wherever it runs, and no other lock.
 
     shims/git locks every `git worktree add` of an agent session, `agent-workspace new` included,
-    and lets a `git worktree remove` past that lock only inside an agent session.
+    and shims/jj locks the git worktree of a `jj workspace add` the git shim did not lock; each
+    shim lets a `git worktree remove` past either lock only inside an agent session.
     On 2026-11-01 the root-disk sweep ran `agent-workspace rm` from a systemd unit, where the shim
     sees no session, and git refused nearly every tree an agent had made with `cannot remove a
     locked working tree` (728 of the 871 registrations of one canonical checkout carried it).
@@ -374,15 +377,33 @@ class AddLockTest(WorkspaceCase):
                 self.assertFalse(tree.exists())
                 self.assertNotIn(str(tree), self.locks(), "the registration and its lock must go with the tree")
 
-    def test_rm_leaves_every_other_lock_and_its_tree(self) -> None:
-        # The second reason names the same issue and is still not this one: shims/jj's.
-        for reason in ("a person is using this tree", "jj shim: locked on add (AGENTC-431)"):
-            with self.subTest(reason=reason):
-                tree = self.wt / "proj" / f"held-{len(reason)}"
+    def test_rm_releases_both_agent_add_locks_inside_a_session_and_outside_one(self) -> None:
+        for n, (reason, (where, env)) in enumerate(
+            (r, e) for r in (ADD_LOCK, JJ_LOCK) for e in (("inside", self.inside), ("outside", self.outside))
+        ):
+            with self.subTest(reason=reason, rm_runs=where):
+                tree = self.wt / "proj" / f"agent-lock-{n}"
                 code, out = self.aw(self.outside, "new", "proj", tree.name)
                 self.assertEqual(code, 0, out)
                 git("worktree", "lock", "--reason", reason, str(tree), cwd=self.source)
-                code, out = self.aw(self.outside, "rm", "--force", "proj", tree.name)
+                code, out = self.aw(env, "rm", "proj", tree.name)
+                self.assertEqual(code, 0, out)
+                self.assertFalse(tree.exists())
+                self.assertNotIn(str(tree), self.locks())
+
+    def test_rm_leaves_every_other_lock_and_its_tree_inside_a_session_and_outside_one(self) -> None:
+        # The second reason names the same issue and is still neither agent add-lock.
+        for n, (reason, (where, env)) in enumerate(
+            (r, e)
+            for r in ("a person is using this tree", "held for the AGENTC-431 review")
+            for e in (("inside", self.inside), ("outside", self.outside))
+        ):
+            with self.subTest(reason=reason, rm_runs=where):
+                tree = self.wt / "proj" / f"held-{n}"
+                code, out = self.aw(self.outside, "new", "proj", tree.name)
+                self.assertEqual(code, 0, out)
+                git("worktree", "lock", "--reason", reason, str(tree), cwd=self.source)
+                code, out = self.aw(env, "rm", "--force", "proj", tree.name)
                 self.assertEqual(code, 1, out)
                 self.assertIn("locked", out)
                 self.assertTrue((tree / "file.txt").is_file(), "a tree someone else locked was removed")

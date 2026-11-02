@@ -178,7 +178,7 @@ EOF
         exec "$_real" "${args[@]:0:i+2}" --lock --reason "$LOCK_REASON" "${rest[@]}"
         ;;
     remove)
-        # A tree carrying a lock of ours (this shim's, or shims/jj's, exactly) is removed with
+        # A tree carrying an agent add-lock (this shim's, or shims/jj's, exactly) is removed with
         # the lock on: two --force is git's own way past a lock, and git then deletes the lock
         # with the registration, while every refusal leaves it where it was. Taking the lock off
         # first, as this shim used to, left the tree unlocked whenever git refused, as it does
@@ -201,40 +201,65 @@ EOF
         done
         ((force < 2)) && [[ -n "$target" ]] || exec "$_real" "$@"
 
-        # The awk program reads to EOF on purpose. `exit` on the first match
-        # closes the pipe while git is still writing; git then dies of SIGPIPE
-        # and `set -o pipefail` kills the shim before it runs git, so
-        # `git worktree remove` of a worktree this shim locked exits 141 and
-        # does nothing, leaving a half-registered worktree its owner cannot
-        # remove without bypassing the shim. That was observed once on the
-        # shared legion store (2026-09-30, by a review lane that bypassed the
-        # shim with /usr/bin/git).
+        # Which registration git will remove, found as git's find_worktree finds it: first a
+        # trailing part of a registered path, at a directory boundary, that names one tree only
+        # (`remove wt`, `remove nest/wt`); else the path read from where every `-C` leaves git,
+        # in order (an empty one changes nothing), compared with each registered path after
+        # both are resolved. Read from the shim's own directory instead, a tree named by its
+        # name or from another directory carried a lock the shim never saw.
         #
-        # It fires only when git's output exceeds the pipe's capacity, so it is
-        # load-dependent and I could not reproduce it at a 64 KiB pipe: 121
-        # worktrees give 19 KB of porcelain, which fits, and the lookup
-        # succeeded. This box's pipes drop to 8 KiB once the user is past
-        # pipe-user-pages-soft (measured the same day: F_GETPIPE_SZ read 8192 at
-        # some moments and 65536 at others), and 19 KB does not fit in 8 KiB.
-        # So: mechanism established in principle and by the pipe sizes, not
-        # reproduced end to end here.
+        # The listing is read whole, into a variable. A reader that stops early (an awk `exit`
+        # on its first match, as an earlier version had) closes the pipe while git is still
+        # writing; once the porcelain outgrows the pipe (121 worktrees give 19 KB, and this
+        # box's pipes drop to 8 KiB past pipe-user-pages-soft) git dies of SIGPIPE and
+        # `set -o pipefail` kills the shim before git runs. That was observed once on the shared
+        # legion store (2026-09-30), and left a half-registered worktree.
         #
-        # Dropping `exit` costs one full read of a short list and prints the
-        # same line: `f` is cleared at the next `worktree ` header, so a block
-        # holds at most one `locked`.
-        #
-        # The `|| true` is the guard that matters, and it is not belt and
-        # braces for the above: this lookup only DECIDES whether to let git past
-        # the lock, so any failure of it must degrade to "leave the lock alone"
-        # and let the real git run. Without it, errexit turns every way this
-        # pipeline can fail -- SIGPIPE, a git that cannot read the store, a
-        # locked `packed-refs` -- into a shim that exits before `exec`, so the
-        # user's own `git worktree remove` never runs at all. That covers the
-        # causes I did not find as well as the one I did.
-        abs="$(realpath -m -- "$target")"
-        lock="$("$_real" "${args[@]:0:i}" worktree list --porcelain | awk -v p="worktree $abs" '$0 == p {f = 1; next} /^worktree / {f = 0} f && /^locked/ {print}' || true)"
+        # The `|| true` is the guard that matters: this lookup only DECIDES whether to let git
+        # past the lock, so any failure of it (a git that cannot read the store, a locked
+        # `packed-refs`, a cause nobody found) must degrade to "leave the lock alone" and let the
+        # real git run, never to a shim that exits before the user's own command runs.
+        listing="$("$_real" "${args[@]:0:i}" worktree list --porcelain || true)"
+        paths=() locks=()
+        while IFS= read -r line; do
+            case "$line" in
+                "worktree "*) paths+=("${line#worktree }"); locks+=("") ;;
+                locked*) if ((${#locks[@]})); then locks[-1]="$line"; fi ;;
+            esac
+        done <<< "$listing"
+        found="" matches=0
+        for k in "${!paths[@]}"; do
+            if [[ "${paths[k]}" == "$target" || "${paths[k]}" == */"$target" ]]; then
+                found="$k" matches=$((matches + 1))
+            fi
+        done
+        if ((matches != 1)); then
+            found="" base="$PWD"
+            for ((k = 0; k < i; k++)); do
+                case "${args[k]}" in
+                    -C)
+                        d="${args[k + 1]:-}"
+                        if [[ "$d" == /* ]]; then base="$d"; elif [[ -n "$d" ]]; then base="$base/$d"; fi
+                        k=$((k + 1))
+                        ;;
+                    -c | --git-dir | --work-tree | --namespace | --config-env | --exec-path) k=$((k + 1)) ;;
+                esac
+            done
+            want="$target"
+            [[ "$want" == /* ]] || want="$base/$want"
+            real=()
+            if ((${#paths[@]})); then mapfile -t real < <(realpath -m -- "$want" "${paths[@]}" || true); fi
+            for k in "${!paths[@]}"; do
+                if [[ -n "${real[0]:-}" && "${real[k + 1]:-}" == "${real[0]}" ]]; then
+                    found="$k"
+                    break
+                fi
+            done
+        fi
+        [[ -n "$found" ]] || exec "$_real" "$@"
+        lock="${locks[found]}"
         [[ "$lock" == "locked $LOCK_REASON" || "$lock" == "locked $JJ_LOCK_REASON" ]] || exec "$_real" "$@"
-        ((force > 0)) || git_would_remove "$abs" "$target" || exec "$_real" "$@"
+        ((force > 0)) || git_would_remove "${paths[found]}" "$target" || exec "$_real" "$@"
         exec "$_real" "${args[@]:0:i+2}" --force --force "${rest[@]}"
         ;;
 esac

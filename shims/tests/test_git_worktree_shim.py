@@ -130,14 +130,51 @@ class GitWorktreeShimTest(unittest.TestCase):
         self.assertNotIn(str(path), self.registrations())
 
     def test_only_the_shims_own_lock_reasons_are_let_past(self):
-        # shims/jj's lock is the shims' own as well; a reason that only mentions the issue is not.
-        for reason, removed in (("jj shim: locked on add (AGENTC-431)", True), ("held for the AGENTC-431 review", False)):
+        # Both agent add-locks, this shim's and shims/jj's, are the shims' own; a reason that only
+        # mentions the issue is not.
+        for reason, removed in (
+            ("agent session: locked on add (AGENTC-431)", True),
+            ("jj shim: locked on add (AGENTC-431)", True),
+            ("held for the AGENTC-431 review", False),
+        ):
             with self.subTest(reason=reason):
                 path = self.tmp / f"held-{len(reason)}"
                 self.git("worktree", "add", "-q", "--detach", "--lock", "--reason", reason, str(path))
                 result = self.git("worktree", "remove", str(path))
                 self.assertEqual(result.returncode == 0, removed, result.stderr)
                 self.assertEqual(str(path) in self.registrations(), not removed)
+
+    def test_a_tree_named_from_where_every_dash_c_leaves_git_is_seen(self):
+        # git applies each -C in order (an empty one changes nothing) and reads a relative worktree
+        # path from where they leave it, not from the caller's directory.
+        deeper = self.tmp / "elsewhere" / "deeper"
+        deeper.mkdir(parents=True)
+        for name, dash_c in (("one", ["-C", "../../repo"]), ("several", ["-C", "", "-C", "../..", "-C", "repo"])):
+            with self.subTest(dash_c=dash_c):
+                path = self.added(name)
+                result = self.git(*dash_c, "worktree", "remove", f"../{name}", cwd=deeper)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(path.exists())
+                self.assertNotIn(str(path), self.registrations())
+
+    def test_a_tree_named_by_the_end_of_its_path_is_seen(self):
+        # git looks a worktree up first by a trailing part of its path that names one tree only.
+        for name in ("named", "nest/inner"):
+            with self.subTest(name=name):
+                path = self.added(name)
+                result = self.git("worktree", "remove", name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(path.exists())
+                self.assertNotIn(str(path), self.registrations())
+
+    def test_a_name_two_trees_end_in_removes_neither(self):
+        first, second = self.added("a/same"), self.added("b/same")
+        result = self.git("worktree", "remove", "same")
+        self.assertEqual(result.returncode, 128)
+        self.assertIn("is not a working tree", result.stderr)
+        for path in (first, second):
+            self.assertTrue(path.is_dir())
+            self.assertEqual(self.registrations()[str(path)], ADD_LOCK)
 
     def test_a_caller_path_without_the_system_dirs_still_reaches_real_git(self):
         env = {**self.agent, "PATH": str(SHIMS)}

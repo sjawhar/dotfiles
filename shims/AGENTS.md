@@ -56,7 +56,15 @@ before handing the call to the real one.
   `--ignore-immutable`. Read-only commands (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`,
   …) skip the check.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
-  `git worktree add`, so no box can prune another box's live registration, and gives every
+  `git worktree add`, so no box can prune another box's live registration. A
+  `git worktree remove` of a tree carrying either agent add-lock (that one, or the one `jj` puts
+  on; the exact reason, not one that only mentions AGENTC-431) runs with git's own double
+  `--force`, so the lock goes with the registration and a removal git refuses keeps it; without
+  a `--force` of the caller's the shim first runs git's own clean check (no checked-out
+  submodule, nothing `git status` lists), which the double `--force` would skip. It finds the
+  tree as git does: by a trailing part of its path that names one tree only, else by the path
+  read from where every `-C` leaves git. Any other lock stands, and `scripts/agent-workspace rm`
+  releases the same two locks from anywhere. It gives every
   commit an omp session makes its `Omp-Session` trailer, in every repository, public ones
   included, unless the checkout sets `git config omp.sessionTrailer false`
   (`scripts/omp-session-trailer`, which jj asks too; `omp-session-trailer git` in a repository
