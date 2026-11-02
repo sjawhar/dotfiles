@@ -9,8 +9,8 @@ Type=oneshot
 Nice=15
 IOSchedulingClass=idle
 # A run that cannot finish is killed, so runs can never pile up on the 30 s period. The alerting
-# is /proc and /sys reads only (~0.3 s). The oom bias adds ~0.2 s and the pane restarter 1-4 s at
-# load 400 (273 panes, 2026-11-02), plus at most one `docker exec` (~1.5 s, 10 s timeout) a run.
+# is /proc and /sys reads only (~0.3 s). The oom bias and the pane restarter add 1-2 s at load
+# 428 (220 panes, 2026-11-02), and the restarter stops itself at 8 s whatever the load.
 TimeoutStartSec=25
 # The pane restarter talks to the default tmux server, as envoy-role-holder-watch's pane check
 # does: the socket directory .bashrc sets, and the mise-managed tmux the server was started from

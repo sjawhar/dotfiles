@@ -1271,7 +1271,9 @@ def parent_of(pid: int) -> int:
         return 0
 
 
-def oom_bias_pass(omps: list[tuple[int, str]], adj: int, dry_run: bool) -> dict[str, int]:
+def oom_bias_pass(
+    omps: list[tuple[int, str]], adj: int, dry_run: bool, deadline: float = float("inf")
+) -> dict[str, int]:
     """Raise every process in a capped omp scope, except the session's own omp, to `adj`.
 
     When a scope reaches its MemoryMax the memcg OOM killer kills the member with the largest
@@ -1295,22 +1297,23 @@ def oom_bias_pass(omps: list[tuple[int, str]], adj: int, dry_run: bool) -> dict[
 
     It never lowers an adj (a member already at or above `adj` is counted and left), and never
     writes a process it may not: EPERM (another uid, as in an agent box) is counted as refused.
+
+    `omps` is every omp process on the machine (`omp_processes`), so a member's name is not read
+    again: each /proc open costs about 1 ms at load 400, and a scope can hold hundreds.
     """
     counts = {"scopes": 0, "raised": 0, "already": 0, "refused": 0, "gone": 0, "failed": 0, "no_leader": 0}
+    every_omp = {pid for pid, _cgroup in omps}
     cgroups = sorted({cgroup for _pid, cgroup in omps})
     for cgroup in cgroups:
+        if time.monotonic() > deadline:
+            counts["unfinished"] = counts.get("unfinished", 0) + 1
+            continue
         if not effective_limit(cgroup)[2]:
             continue
         counts["scopes"] += 1
         members = scope_tasks(cgroup)
         inside = set(members)
-        names: dict[int, str] = {}
-        for pid in members:
-            try:
-                names[pid] = (PROC_ROOT / str(pid) / "comm").read_text().strip()
-            except OSError:
-                names[pid] = ""
-        omp_members = [pid for pid in members if names[pid] == "omp"]
+        omp_members = [pid for pid in members if pid in every_omp]
         protected = {pid for pid in omp_members if parent_of(pid) not in inside}
         if not protected:
             counts["no_leader"] += 1
@@ -1356,6 +1359,8 @@ def oom_bias_note(counts: dict[str, int], adj: int, dry_run: bool) -> str:
         note += f", {counts['failed']} failed"
     if counts["no_leader"]:
         note += f", {counts['no_leader']} scope(s) with no session omp found (every omp left)"
+    if counts.get("unfinished"):
+        note += f", {counts['unfinished']} scope(s) left for the next run (out of time)"
     return note
 
 
@@ -1369,6 +1374,13 @@ AGENTBOX = Path.home() / ".dotfiles/scripts/agentbox"
 RESTART_STALE = 3600.0
 # How long a pane's session, read from the omp's open files, is reused while the same process runs.
 SID_REFRESH = 300.0
+# When each acting pass must stop, in seconds from the run's start. The unit kills a run at 25 s,
+# and at nice 15 and load 425 on 2026-11-02 an unbounded pane pass took 33 s and the unit killed
+# the run. The alerting itself is not bounded; a pass out of time stops, and the next run goes on.
+BIAS_DEADLINE = 6.0
+RESTART_DEADLINE = 14.0
+# Open-file scans a run may make: about 0.2 s each at that load.
+SCAN_BUDGET = 10
 PANE_FORMAT = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{session_name}:#{window_index}.#{pane_index}"
 BOX_NAME_RE = re.compile(r"--name[=\s]+(agentbox-[0-9a-f]{12})\b")
 PANE_WALK_DEPTH = 4
@@ -1409,36 +1421,53 @@ def tmux_panes() -> list[dict] | None:
     return rows
 
 
-def process_tree() -> dict[int, list[int]]:
-    """parent pid -> its children, for every process on the machine, from one /proc pass.
+def process_table() -> dict:
+    """Every process on the machine from one read of each /proc/<pid>/stat: its children, its
+    name and its start time.
 
-    tmux-resurrect-omp's `children` reads /proc/<pid>/task/*/children, one file per THREAD; an
-    omp has dozens, and walking 273 panes that way took 7.5 of a 9.3 s run at load 400 on
-    2026-11-02. One read of every /proc/<pid>/stat is about 0.2 s.
+    tmux-resurrect-omp's `children` reads /proc/<pid>/task/*/children, one file per THREAD, and
+    an omp has dozens: walking 273 panes that way took 7.5 of a 9.3 s run at load 400 on
+    2026-11-02. At that load each /proc open costs about 1 ms, so the walk reads nothing else per
+    process, and a command line (the slowest file: it takes the process's mmap lock) only where
+    a decision needs it.
     """
-    tree: dict[int, list[int]] = {}
+    children: dict[int, list[int]] = {}
+    names: dict[int, str] = {}
+    starts: dict[int, int] = {}
     for entry in os.listdir(PROC_ROOT):
-        if entry.isdigit():
-            parent = parent_of(int(entry))
-            if parent:
-                tree.setdefault(parent, []).append(int(entry))
-    return tree
+        if not entry.isdigit():
+            continue
+        try:
+            data = (PROC_ROOT / entry / "stat").read_text()
+            fields = data[data.rfind(")") + 2 :].split()
+            parent, start = int(fields[1]), int(fields[19])
+        except (OSError, ValueError, IndexError):
+            continue
+        pid = int(entry)
+        names[pid] = data[data.find("(") + 1 : data.rfind(")")]
+        starts[pid] = start
+        children.setdefault(parent, []).append(pid)
+    return {"children": children, "names": names, "starts": starts}
 
 
-def pane_processes(pane_pid: int, resurrect, tree: dict[int, list[int]] | None = None) -> list[tuple[int, str, str]]:
-    """(pid, comm, command line) of every process below the pane's own process, nearest first.
+def pane_processes(pane_pid: int, resurrect, table: dict | None = None) -> list[tuple[int, str]]:
+    """(pid, comm) of the processes below the pane's own process, nearest first.
 
-    From `tree` when given (one pass for the whole run), else read fresh from /proc."""
-    found: list[tuple[int, str, str]] = []
+    The walk stops at an omp: what runs below it is that session's tools, not the pane's. From
+    `table` when given (one /proc pass for the whole run), else read fresh."""
+    found: list[tuple[int, str]] = []
     frontier = [pane_pid]
     for _ in range(PANE_WALK_DEPTH):
         next_frontier: list[int] = []
         for pid in frontier:
-            for kid in tree.get(pid, []) if tree is not None else resurrect.children(pid):
-                found.append((kid, resurrect.comm(kid), resurrect.cmdline(kid)))
+            kids = table["children"].get(pid, []) if table is not None else resurrect.children(pid)
+            for kid in kids:
+                name = table["names"].get(kid, "") if table is not None else resurrect.comm(kid)
+                found.append((kid, name))
                 if len(found) >= PANE_WALK_MAX:
                     return found
-                next_frontier.append(kid)
+                if name != "omp":
+                    next_frontier.append(kid)
         frontier = next_frontier
     return found
 
@@ -1451,7 +1480,8 @@ def cwd_of(pid: int) -> str:
 
 
 def pane_state(
-    pane: dict, resurrect, known: dict | None = None, now: float = 0.0, tree: dict | None = None
+    pane: dict, resurrect, known: dict | None = None, now: float = 0.0, table: dict | None = None,
+    budget: dict | None = None,
 ) -> tuple[str, dict]:
     """("host" | "box" | "idle" | "busy", what was read) for one pane.
 
@@ -1460,34 +1490,45 @@ def pane_state(
     dead. busy: something else runs there. The session is found the way tmux-resurrect-omp finds
     it: the session file the omp holds open, else the id on its command line.
 
-    The open-file scan is the expensive part (6.4 s for 171 host panes on 2026-11-02), so the
-    pane's last record (`known`) is reused while the same omp process runs and its session was
-    read less than SID_REFRESH ago. A session switched in-app (/new) within that window and then
-    killed is resumed at the session it ran before the switch.
+    The open-file scan is the expensive part (6.4 s for 171 host panes on 2026-11-02, 30 s at
+    nice 15 and load 425), so the pane's last record (`known`) is reused while the same omp
+    process runs and its session was read less than SID_REFRESH ago, and a run scans at most
+    `budget["scans"]` panes; a pane over the budget keeps what it had, else the id on its
+    command line, and is scanned on a later run. A session switched in-app (/new) less than
+    SID_REFRESH before its omp was killed is resumed at the session it ran before the switch.
     """
     if pane["dead"]:
         return "idle", {}
-    procs = pane_processes(pane["pid"], resurrect, tree)
+    procs = pane_processes(pane["pid"], resurrect, table)
     if not procs:
         return "idle", {}
-    for pid, name, command in procs:
-        if name == "omp":
-            start = pid_start(pid)
-            if (
-                known and known.get("kind") == "host" and known.get("pid") == pid
-                and known.get("start") == start and known.get("sid")
-                and now - float(known.get("resolved") or 0) < SID_REFRESH
-            ):
-                sid, resolved = known["sid"], known["resolved"]
-            else:
-                sid, resolved = resurrect.open_session(pid) or resurrect.named_session(command), now
-            return "host", {"pid": pid, "start": start, "sid": sid, "resolved": resolved, "cwd": cwd_of(pid)}
-    for pid, _name, command in procs:
+    starts = table["starts"] if table is not None else {}
+    for pid, name in procs:
+        if name != "omp":
+            continue
+        start = starts.get(pid) or pid_start(pid)
+        same = bool(known) and known.get("kind") == "host" and known.get("pid") == pid and known.get("start") == start
+        resolved = float(known.get("resolved") or 0) if same else 0.0
+        sid = known.get("sid") if same else None
+        if not (sid and now - resolved < SID_REFRESH):
+            deadline = (budget or {}).get("deadline", float("inf"))
+            if (budget is None or budget["scans"] > 0) and time.monotonic() < deadline - 1:
+                if budget is not None:
+                    budget["scans"] -= 1
+                sid, resolved = resurrect.open_session(pid) or resurrect.named_session(resurrect.cmdline(pid)), now
+            elif not sid:
+                sid = resurrect.named_session(resurrect.cmdline(pid))
+        cwd = known.get("cwd") if same and known.get("cwd") else cwd_of(pid)
+        return "host", {"pid": pid, "start": start, "sid": sid, "resolved": resolved, "cwd": cwd}
+    for pid, _name in procs:
+        command = resurrect.cmdline(pid)
         launch = resurrect.LAUNCH_SPEC.search(command)
         if launch:
-            box = next((m.group(1) for _p, _n, c in procs if (m := BOX_NAME_RE.search(c))), "")
+            box = next(
+                (m.group(1) for p, _n in procs if (m := BOX_NAME_RE.search(resurrect.cmdline(p)))), ""
+            )
             return "box", {
-                "pid": pid, "start": pid_start(pid), "sid": resurrect.named_session(command),
+                "pid": pid, "start": starts.get(pid) or pid_start(pid), "sid": resurrect.named_session(command),
                 "spec": launch.group("spec"), "box": box, "cwd": cwd_of(pid),
             }
     return "busy", {"comm": procs[0][1]}
@@ -1509,16 +1550,19 @@ def same_session(a: str, b: str) -> bool:
     return bool(a and b) and (a.startswith(b) or b.startswith(a))
 
 
-def live_holder(sid: str, omps: list[tuple[int, str]], resurrect) -> int:
-    """The pid of a live omp that holds this session, by command line or open file, else 0."""
+def live_holder(sid: str, omps: list[tuple[int, str]], resurrect, records: dict, pane_id: str, now: float) -> str:
+    """Who else runs this session, else "": another pane this watch saw running it within
+    SID_REFRESH (read from that omp's open files), or a live omp whose command line names it.
+
+    No open-file scan here: one per omp is about 0.2 s at load 400, a hundred omps would cost the
+    whole run, and the pane records already hold what those scans found."""
+    for other, record in records.items():
+        if other != pane_id and now - float(record.get("seen") or 0) < SID_REFRESH and same_session(record.get("sid") or "", sid):
+            return f"pane {other}"
     for pid, _cgroup in omps:
-        if not os.path.exists(f"/proc/{pid}"):
-            continue
         if same_session(resurrect.named_session(cmdline_of(pid)) or "", sid):
-            return pid
-        if same_session(resurrect.open_session(pid) or "", sid):
-            return pid
-    return 0
+            return f"omp pid {pid}"
+    return ""
 
 
 def resume_command(record: dict) -> str:
@@ -1539,8 +1583,8 @@ def respawn_pane(pane_id: str, cwd: str, command: str) -> tuple[bool, str]:
 
 
 def restart_decision(record: dict, omps: list, restarts: dict, options: argparse.Namespace, now: float,
-                     resurrect, holder) -> str:
-    """"" when the pane's session should be resumed, else why it is left."""
+                     resurrect, holder, records: dict, pane_id: str) -> str:
+    """"" when the pane's session should be resumed, else why it is left. Cheap tests first."""
     sid = record.get("sid") or ""
     if not sid:
         return "left: the session it ran could not be read while it was alive"
@@ -1550,22 +1594,25 @@ def restart_decision(record: dict, omps: list, restarts: dict, options: argparse
         return f"left: its working directory {record.get('cwd') or '(unknown)'} is gone"
     if record.get("kind") == "box" and not record.get("spec"):
         return "left: the agentbox launcher line names no spec"
+    last = float(restarts.get(sid) or 0)
+    if last and now - last < options.restart_cooldown:
+        return f"left: resumed at {iso(last)}, less than {human(options.restart_cooldown)} ago"
     transcript = find_transcript(sid, holder)
     if not transcript:
         return "left: no transcript found, so whether it ended on purpose cannot be told"
     ended = holder.normal_exit_at(transcript)
     if ended:
         return f"left: the session ended normally at {ended}"
-    pid = live_holder(sid, omps, resurrect)
-    if pid:
-        return f"left: the session is live in omp pid {pid}"
-    last = float(restarts.get(sid) or 0)
-    if last and now - last < options.restart_cooldown:
-        return f"left: resumed at {iso(last)}, less than {human(options.restart_cooldown)} ago"
+    elsewhere = live_holder(sid, omps, resurrect, records, pane_id, now)
+    if elsewhere:
+        return f"left: the session is live in {elsewhere}"
     return ""
 
 
-def restart_pass(options: argparse.Namespace, state: State, omps: list[tuple[int, str]], now: float) -> str:
+def restart_pass(
+    options: argparse.Namespace, state: State, omps: list[tuple[int, str]], now: float,
+    deadline: float = float("inf"),
+) -> str:
     """Resume each tmux pane whose omp died without ending its session on purpose.
 
     Each run records, for every pane running omp (on the host or through `agentbox new`), the
@@ -1590,14 +1637,25 @@ def restart_pass(options: argparse.Namespace, state: State, omps: list[tuple[int
         restarts.pop(sid, None)
     live = resumed = left = 0
     box_lookups = 0
-    tree = process_tree()
+    table = process_table()
+    budget = {"scans": SCAN_BUDGET, "deadline": deadline}
     present = {pane["id"] for pane in panes}
     for pane_id in [pane_id for pane_id in records if pane_id not in present]:
         old = records.pop(pane_id)
         log(f"pane {pane_id} ({old.get('target')}) session {old.get('sid') or 'unknown'}: forgotten, the pane is gone")
-    for pane in panes:
+    # A run that runs out of RESTART_BUDGET stops where it is, and the next run starts there, so
+    # every pane is read within a few runs however loaded the box is and the watch's alerting
+    # never waits on it.
+    start = int(state.data.get("pane_cursor") or 0) % max(len(panes), 1)
+    order = panes[start:] + panes[:start]
+    unread = 0
+    for index, pane in enumerate(order):
+        if time.monotonic() > deadline:
+            unread = len(order) - index
+            state.data["pane_cursor"] = (start + index) % len(panes)
+            break
         old = records.get(pane["id"])
-        kind, seen = pane_state(pane, resurrect, old, now, tree)
+        kind, seen = pane_state(pane, resurrect, old, now, table, budget)
         if kind in ("host", "box"):
             live += 1
             same_process = old and old.get("pid") == seen["pid"] and old.get("start") == seen["start"]
@@ -1607,10 +1665,10 @@ def restart_pass(options: argparse.Namespace, state: State, omps: list[tuple[int
                 seen["looked"] = old.get("looked", 0) if same_process else 0
             if (
                 kind == "box" and not seen["sid"] and seen["box"] and box_lookups < 1
-                and now - float(seen["looked"]) >= SID_REFRESH
+                and now - float(seen["looked"]) >= SID_REFRESH and deadline - time.monotonic() > 11.0
             ):
-                # One box a run, and one try a pane per SID_REFRESH: a docker exec costs about
-                # 1.5 s, and the watch has 25 s.
+                # One box a run, only with 11 s to spare, and one try a pane per SID_REFRESH: a
+                # docker exec costs about 1.5 s and box_sessions waits 10 s at most.
                 box_lookups += 1
                 seen["looked"] = now
                 try:
@@ -1629,7 +1687,7 @@ def restart_pass(options: argparse.Namespace, state: State, omps: list[tuple[int
             records.pop(pane["id"], None)
             left += 1
             continue
-        reason = restart_decision(old, omps, restarts, options, now, resurrect, holder)
+        reason = restart_decision(old, omps, restarts, options, now, resurrect, holder, records, pane["id"])
         if reason:
             log(f"{name}: {reason}")
             records.pop(pane["id"], None)
@@ -1654,12 +1712,15 @@ def restart_pass(options: argparse.Namespace, state: State, omps: list[tuple[int
             log(f"{name}: respawn-pane failed: {error}")
             left += 1
     verb = "would resume" if dry else "resumed"
-    return f"panes: {live} running omp, {verb} {resumed}, left {left}"
-
+    note = f"panes: {live} running omp, {verb} {resumed}, left {left}"
+    if unread:
+        note += f", {unread} not read this run (out of time; the next run starts there)"
+    return note
 
 
 def run_once(options: argparse.Namespace) -> int:
     started = time.time()
+    run_clock = time.monotonic()
     envoy = Envoy(timeout=options.http_timeout)
     state = State(options.state)
     if not state.locked:
@@ -1746,7 +1807,7 @@ def run_once(options: argparse.Namespace) -> int:
     bias_note = "oom bias: off"
     if options.oom_bias:
         try:
-            counts = oom_bias_pass(omps, options.oom_bias_adj, options.dry_run)
+            counts = oom_bias_pass(omps, options.oom_bias_adj, options.dry_run, run_clock + BIAS_DEADLINE)
             bias_note = oom_bias_note(counts, options.oom_bias_adj, options.dry_run)
         except Exception as error:  # noqa: BLE001 -- the alerting below must still run
             bias_note = f"oom bias failed: {type(error).__name__}: {error}"
@@ -1987,7 +2048,7 @@ def run_once(options: argparse.Namespace) -> int:
     restart_note = "panes: restarter off"
     if options.restart:
         try:
-            restart_note = restart_pass(options, state, omps, started)
+            restart_note = restart_pass(options, state, omps, started, run_clock + RESTART_DEADLINE)
         except Exception as error:  # noqa: BLE001 -- the run's own record must still be written
             restart_note = f"panes: restarter failed: {type(error).__name__}: {error}"
 

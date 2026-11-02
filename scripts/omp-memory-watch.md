@@ -71,6 +71,14 @@ holds open, else the `--resume` id on its command line; for a pane running `agen
 `docker exec` costs about 1.5 s) the omp inside that one box. The state file keeps, per pane, the
 session, the working directory, and for a box the launcher's spec.
 
+The pass is bounded, because at load 425 on 2026-11-02 an unbounded one took 33 s and the unit
+killed the next period's run at its 25 s limit. Every process is read once, from its
+`/proc/<pid>/stat` (parent, name, start time); the walk stops at an omp, so a session's tools are
+never read; an omp's open files are scanned only when its session was last read more than 5 min
+ago, at most 10 scans a run; the box lookup runs only with 11 s to spare; and the pass stops 14 s
+after the run started (the oom bias at 6 s), the next run starting at the first pane or scope it
+did not reach. Measured at nice 15 and load 428: 1.6-2.3 s a whole run.
+
 A recorded pane that is now **idle** — its shell has no child process, or tmux marks it dead — is
 resumed exactly as the lead does it by hand:
 
@@ -287,8 +295,8 @@ reported.
 ## What one run does
 
 The alerting part: /proc and /sys reads only, no transcript reading in the decision, no model
-call, ~0.4 s. The two actions above add 1.5-4 s at load 400 with 273 panes (2026-11-02), most of
-it reading the pane processes, inside the unit's 25 s limit:
+call, ~0.4 s. The two actions above add 1-2 s at load 428 with 220 panes (2026-11-02), and the
+pane pass stops at 8 s whatever the load, inside the unit's 25 s limit:
 
 1. Every `omp` process on this machine, with the cgroup each runs in (`/proc/<pid>/cgroup`).
 2. The ceiling it is heading for: the smallest numeric `memory.max` from that cgroup up to the

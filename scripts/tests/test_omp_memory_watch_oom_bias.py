@@ -110,6 +110,12 @@ class OomBiasPassTest(unittest.TestCase):
         self.assertEqual(self.tree.adj(201), 0)
         self.assertEqual(counts["scopes"], 0)
 
+    def test_a_pass_past_its_deadline_leaves_the_scope_for_the_next_run(self) -> None:
+        self.session_scope()
+        counts = WATCH.oom_bias_pass([(100, SCOPE)], 500, dry_run=False, deadline=0.0)
+        self.assertEqual(counts["unfinished"], 1)
+        self.assertEqual(self.tree.adj(102), 0)
+
     def test_dry_run_counts_and_writes_nothing(self) -> None:
         self.session_scope()
         counts = WATCH.oom_bias_pass([(100, SCOPE)], 500, dry_run=True)

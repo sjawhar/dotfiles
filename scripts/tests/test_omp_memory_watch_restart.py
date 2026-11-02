@@ -62,7 +62,7 @@ class RestartPassTest(unittest.TestCase):
             ("log", self.lines.append),
             ("tmux_panes", lambda: self.panes),
             ("pane_state", lambda pane, resurrect, *known: self.states.pop(0)),
-            ("process_tree", lambda: {}),
+            ("process_table", lambda: {"children": {}, "names": {}, "starts": {}}),
             ("pane_processes", lambda pid, resurrect: []),
             ("respawn_pane", lambda pane, cwd, command: self.respawned.append((pane, cwd, command)) or (True, "")),
         ):
@@ -144,6 +144,22 @@ class RestartPassTest(unittest.TestCase):
         self.assertEqual(self.respawned, [])
         self.assertIn(f"live in omp pid {os.getpid()}", self.lines[-1])
 
+    def test_a_session_another_pane_runs_is_left(self) -> None:
+        """Resumed by hand in a second pane: a second resume would give one transcript two writers."""
+        self.panes = [dict(PANE), dict(PANE, id="%43", pid=4343, target="lanes:3.2")]
+        self.states += [self.host(), ("host", {"pid": 888, "start": 1, "sid": SID, "cwd": str(self.cwd)})]
+        WATCH.restart_pass(self.options(), self.state, [], 1000.0)
+        self.states += [("idle", {}), ("host", {"pid": 888, "start": 1, "sid": SID, "cwd": str(self.cwd)})]
+        WATCH.restart_pass(self.options(), self.state, [], 1030.0)
+        self.assertEqual(self.respawned, [])
+        self.assertIn("live in pane %43", " ".join(self.lines))
+
+    def test_a_pass_past_its_deadline_stops_and_resumes_nothing(self) -> None:
+        self.run_pass(self.host(), 1000.0)
+        note = WATCH.restart_pass(self.options(), self.state, [], 1030.0, deadline=0.0)
+        self.assertEqual(self.respawned, [])
+        self.assertIn("1 not read this run", note)
+
     def test_dry_run_names_the_pane_and_respawns_nothing(self) -> None:
         self.run_pass(self.host(), 1000.0)
         note = self.run_pass(("idle", {}), 1030.0, restart_dry_run=True)
@@ -178,6 +194,57 @@ class RestartPassTest(unittest.TestCase):
         self.run_pass(("idle", {}), 1000.0)
         self.assertEqual(self.respawned, [])
         self.assertEqual(self.lines, [])
+
+
+class PaneStateTest(unittest.TestCase):
+    """How one pane is read: from one process table, scanning open files only within budget."""
+
+    class Resurrect:
+        LAUNCH_SPEC = None
+
+        def __init__(self) -> None:
+            self.scans = 0
+            self.LAUNCH_SPEC = WATCH.sibling("tmux-resurrect-omp").LAUNCH_SPEC
+
+        def open_session(self, pid: int) -> str:
+            self.scans += 1
+            return SID
+
+        def cmdline(self, pid: int) -> str:
+            return {11: "bash -i", 12: "omp", 21: "bash /h/.dotfiles/scripts/agentbox new --dir /w -- omp --resume x ."}.get(pid, "")
+
+        def named_session(self, command: str):
+            return "x" if "--resume x" in command else None
+
+    # pane 10: bash 11 -> omp 12 -> python3 13; pane 20: the agentbox launcher 21 -> docker 22.
+    TABLE = {
+        "children": {10: [11], 11: [12], 12: [13], 20: [21], 21: [22]},
+        "names": {11: "bash", 12: "omp", 13: "python3", 21: "bash", 22: "docker"},
+        "starts": {12: 5, 21: 6},
+    }
+    PANE = {"id": "%1", "pid": 10, "dead": False, "target": "s:1.1"}
+
+    def test_the_walk_stops_at_the_omp_and_never_reads_its_tools(self) -> None:
+        self.assertEqual(WATCH.pane_processes(10, None, self.TABLE), [(11, "bash"), (12, "omp")])
+
+    def test_a_recent_read_of_the_same_process_is_reused_without_a_scan(self) -> None:
+        resurrect = self.Resurrect()
+        known = {"kind": "host", "pid": 12, "start": 5, "sid": SID, "resolved": 990.0, "cwd": "/w"}
+        kind, seen = WATCH.pane_state(self.PANE, resurrect, known, 1000.0, self.TABLE, {"scans": 10})
+        self.assertEqual((kind, seen["sid"], resurrect.scans), ("host", SID, 0))
+
+    def test_no_scan_is_made_over_the_budget(self) -> None:
+        resurrect = self.Resurrect()
+        kind, seen = WATCH.pane_state(self.PANE, resurrect, None, 1000.0, self.TABLE, {"scans": 0})
+        self.assertEqual((kind, seen["sid"], resurrect.scans), ("host", None, 0))
+        kind, seen = WATCH.pane_state(self.PANE, resurrect, None, 1000.0, self.TABLE, {"scans": 1})
+        self.assertEqual((seen["sid"], resurrect.scans), (SID, 1))
+
+    def test_an_agentbox_launcher_is_a_box_pane_with_its_spec(self) -> None:
+        pane = dict(self.PANE, pid=20)
+        kind, seen = WATCH.pane_state(pane, self.Resurrect(), None, 1000.0, self.TABLE, {"scans": 0})
+        self.assertEqual((kind, seen["spec"], seen["sid"]), ("box", "--dir /w", "x"))
+
 
 
 if __name__ == "__main__":
