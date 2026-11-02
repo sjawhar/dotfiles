@@ -82,6 +82,12 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "dry_run": False,
         "write_state": False,
         "print_alert": False,
+        # These runs read synthetic cgroups: neither acting pass may touch a real process or pane.
+        "oom_bias": False,
+        "oom_bias_adj": 500,
+        "restart": False,
+        "restart_dry_run": False,
+        "restart_cooldown": 3600.0,
     }
     values.update(overrides)
     return argparse.Namespace(**values)

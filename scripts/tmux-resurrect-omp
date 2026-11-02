@@ -205,17 +205,20 @@ def host_session_for(pane_pid: int, full_command: str) -> str | None:
 BOX_BUCKET = re.compile(r"-agentbox-[0-9a-f]{12}-(?P<repo>.+?)-*$")
 
 
-def box_sessions() -> dict[str, tuple[str | None, str]]:
-    """pane id -> (repo or None, session id) for every omp running in any agentbox.
+def box_sessions(boxes: list[str] | None = None) -> dict[str, tuple[str | None, str]]:
+    """pane id -> (repo or None, session id) for every omp running in the agentboxes named.
 
-    An open session file names both; an idle session's argv names only the id,
-    and that pane is restorable only when its own launcher line carries the
-    repo (`rewrite`).
+    Every running agentbox when `boxes` is None. An open session file names both; an idle
+    session's argv names only the id, and that pane is restorable only when its own launcher
+    line carries the repo (`rewrite`). Each box costs a `docker exec` (29 s for the 19 boxes
+    on sami-rocqperf on 2026-11-02), so omp-memory-watch's pane restarter names the one box
+    whose session it cannot read from the host.
     """
-    boxes = subprocess.run(
-        ["docker", "ps", "--filter", "name=^agentbox-", "--format", "{{.Names}}"],
-        capture_output=True, text=True, timeout=10,
-    ).stdout.split()
+    if boxes is None:
+        boxes = subprocess.run(
+            ["docker", "ps", "--filter", "name=^agentbox-", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.split()
     best: dict[str, tuple[float, str | None, str]] = {}
     for box in boxes:
         # A wedged box must not stall every autosave (resurrect runs this hook inline).

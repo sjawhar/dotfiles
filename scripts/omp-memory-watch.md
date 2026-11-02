@@ -2,7 +2,10 @@
 
 Every 30 s, checks that no agent session on **this** machine is heading for the memory ceiling
 its `omp` process runs under, and alerts the session itself over Envoy while it can still
-checkpoint and shed work on its own terms.
+checkpoint and shed work on its own terms. In the same run it biases the kernel's OOM choice
+away from each session's own omp ([below](#action-one-the-oom-kill-takes-the-runaway-child)), and
+resumes a tmux pane whose omp died without ending its session
+([below](#action-two-resume-a-pane-whose-omp-died)).
 
 ## Why it exists
 
@@ -22,8 +25,84 @@ oom_reaper: reaped process 3398496 (omp)
 About 40 in-session subagent lanes died with it and nothing warned first. (dispatch://INFRA-602)
 
 **Prevention belongs to the session, detection to this watch.** A session's own self-watch warns
-first and the session sheds its own lanes; this watch sits above the self-watches, kills nothing,
-sheds nothing and restarts nothing.
+first and the session sheds its own lanes; this watch sits above the self-watches and kills
+nothing and sheds nothing. It acts in the two ways below, which Sami asked for on 2026-11-02 at
+01:00Z: kill the runaway subprocess instead of the whole session, and restart the sessions that
+did die.
+
+## Action one: the OOM kill takes the runaway child
+
+When a scope reaches its `MemoryMax` the kernel's memcg OOM killer kills the member with the
+largest *badness*: its RSS, swap and page tables, plus `oom_score_adj × limit / 1000`. With every
+`oom_score_adj` at 0 that is the session's omp, the biggest single process (14.9 of 24 GiB at
+the kill above), and every subagent dies with it.
+
+A process may raise an `oom_score_adj` of its own uid but never lower one, so omp cannot be
+biased down without root. Every run therefore raises every **other** process in each capped omp
+scope to `--oom-bias-adj` (default +500). Under a 24 GiB limit +500 adds 12 GiB to each one's
+badness and nothing to the omp's. The live case at 2026-11-02T01:09Z, `run-u20238.scope` at
+22.19 of 24 GiB with `oom_kill 1` already: a 3.21 GiB `tsgo` scores 15.2 GiB against the
+session's 1.71 GiB omp, so the compile dies and the session lives.
+
+The rule protects **the session's own omp**, not every process named `omp`: the one omp in the
+scope whose parent is outside the scope — the process `shims/omp` starts through `systemd-run
+--scope`. A nested omp (a subagent, a js-eval helper) has its parent inside the scope and is
+biased like any other child: a runaway subagent holding 10 GiB is a far better victim than the
+session and its other lanes. A scope where no omp has its parent outside is counted
+(`scope(s) with no session omp found`) and keeps every omp at its old value.
+
+- Only scopes with a `memory.max` of their own. An uncapped session shares the login scope with
+  every other session in the login, and that scope is not one session's to bias.
+- An adj already at or above the target is counted and left: it is never lowered.
+- A process this user may not write (another uid, as inside an agent box) is counted as
+  `refused`. EPERM is normal there. An agent box's own OOM kill is not helped by this pass.
+- The pass is fenced: an error is logged in the run's line and the alerting goes on.
+- `--dry-run` counts what it would raise and writes nothing. `--no-oom-bias` turns it off.
+
+The counts go in the run's log line, for example
+`oom bias +500: 55 capped scope(s), raised 486, 594 already at or above, 0 refused (EPERM), 5 gone`.
+
+## Action two: resume a pane whose omp died
+
+Each run reads every pane of the default tmux server (`tmux list-panes -a`) and the processes
+below each pane, and finds the session the way `tmux-resurrect-omp` does: the session file an omp
+holds open, else the `--resume` id on its command line; for a pane running `agentbox new <spec>
+-- omp …`, the launcher's own line, else (once per pane per 5 min, one box per run, since each
+`docker exec` costs about 1.5 s) the omp inside that one box. The state file keeps, per pane, the
+session, the working directory, and for a box the launcher's spec.
+
+A recorded pane that is now **idle** — its shell has no child process, or tmux marks it dead — is
+resumed exactly as the lead does it by hand:
+
+```sh
+tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c 'cd <cwd> && ~/.dotfiles/shims/omp --resume <id> .; exec bash -i'
+tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c 'cd <cwd> && ~/.dotfiles/scripts/agentbox new <spec> -- omp --resume <id> .; exec bash -i'
+```
+
+with `~` expanded: the shim by its absolute path, because a pane that starts omp from `PATH` can
+miss `PI_CONFIG_FILES`, which broke three sessions on 2026-11-01. It is **left**, with the reason
+in the journal, when:
+
+| Reason | Why |
+|---|---|
+| the pane still runs omp or an agentbox launcher | it is not dead |
+| the session's transcript ends in a `session_exit` with `kind: "normal"` | it ended on purpose; the test is `normal_exit_at` from `envoy-role-holder-watch`, imported, not copied |
+| another live omp holds the session | resuming it twice would give one transcript two writers |
+| it was resumed less than `--restart-cooldown` (1 h) ago | at most once per session per hour |
+| it was last seen running more than 1 h ago | it died while nothing watched |
+| no session was read while it ran, no transcript is found, or its directory is gone | nothing safe to resume |
+| the pane now runs something else | it is no longer an omp pane; the record is dropped |
+
+A `session_exit` of kind `signal` (a `kill <pid>`, SIGTERM) is **not** a normal end, so a session
+stopped that way is resumed, once. A memcg OOM kill is SIGKILL and writes no `session_exit` at all.
+A pane this watch never saw running omp is never touched, so nothing that died before the
+restarter was deployed is resumed by it.
+
+`--restart-dry-run` (and `--dry-run`) decides and logs `DRY RUN, would resume: … <command>`, and
+respawns nothing. `--no-restart` turns it off. On a machine without `~/.dotfiles/shims/omp` or
+without a reachable tmux server the pass does nothing and says so in the run's line. The unit
+sets `TMUX_TMPDIR` and puts `shims/` first on `PATH`, as `envoy-role-holder-watch.service` does:
+the socket lives where `.bashrc` puts it, and `/usr/bin/tmux` (3.4) cannot talk to the 3.8 server.
 
 ## What it measures, and why not RSS
 
@@ -207,7 +286,9 @@ reported.
 
 ## What one run does
 
-/proc and /sys reads only, no transcript reading in the decision, no model call, ~0.4 s:
+The alerting part: /proc and /sys reads only, no transcript reading in the decision, no model
+call, ~0.4 s. The two actions above add 1.5-4 s at load 400 with 273 panes (2026-11-02), most of
+it reading the pane processes, inside the unit's 25 s limit:
 
 1. Every `omp` process on this machine, with the cgroup each runs in (`/proc/<pid>/cgroup`).
 2. The ceiling it is heading for: the smallest numeric `memory.max` from that cgroup up to the
@@ -313,7 +394,10 @@ spawning lanes, shed or finish the lanes you can, restart on your own terms.
 | Top processes (wall report only) | `cgroup.procs`, `/proc/<pid>/statm`, `/proc/<pid>/cmdline` |
 | Self-watch (alert only) | the command lines of the other processes in the scope, or of a process naming this pid |
 | Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
-| Samples, open crossings, wall memory | `/mnt/nvme/sami/tmp/omp-memory-watch/state.json` |
+| Samples, open crossings, wall memory, omp panes, resumes | `/mnt/nvme/sami/tmp/omp-memory-watch/state.json` |
+| OOM bias | `cgroup.procs` of each capped omp scope, `/proc/<pid>/comm`, `/proc/<pid>/stat` (parent), `/proc/<pid>/oom_score_adj` (read, and written upward) |
+| Panes | `tmux list-panes -a`, `/proc/<pid>/task/*/children` below each pane, an omp's open session file or `--resume` id, `docker exec` into one box when nothing else names its session |
+| Whether a session ended on purpose | the last entry of its transcript, by `normal_exit_at` in `envoy-role-holder-watch` |
 
 ## Running it by hand
 
@@ -321,9 +405,11 @@ spawning lanes, shed or finish the lanes you can, restart on your own terms.
 scripts/omp-memory-watch --dry-run --print-alert          # decide and print, send nothing
 scripts/omp-memory-watch --fraction 0.70 --grace 60       # the unit's crossing defaults
 scripts/omp-memory-watch --wall-fraction 0.98 --wall-cooldown 900 --wall-top 3   # wall defaults
+scripts/omp-memory-watch --dry-run                         # also: bias counts it would raise, panes it would resume
+scripts/omp-memory-watch --restart-dry-run                 # live alerts and bias, panes only named
 
-# The tests: synthetic cgroup trees, no real /sys read, python3 only.
-python3 -m unittest discover -s scripts/tests -p 'test_omp_memory_watch_wall.py'
+# The tests: synthetic cgroup and /proc trees, no real /sys, /proc or tmux touched, python3 only.
+python3 -m unittest discover -s scripts/tests -p 'test_omp_memory_watch*.py'
 ```
 
 ## Turning it off
@@ -333,6 +419,18 @@ systemctl --user disable --now omp-memory-watch.timer   # stop it
 systemctl --user enable  --now omp-memory-watch.timer   # start it again
 systemctl --user list-timers omp-memory-watch.timer     # when it next runs
 journalctl --user -u omp-memory-watch.service -n 50     # what the last runs decided
+```
+
+Either action alone is turned off by adding its flag to `ExecStart` in
+`omp/omp-memory-watch.service` and running `systemctl --user daemon-reload`: `--no-oom-bias`,
+`--no-restart`, or `--restart-dry-run` to keep the restarter naming panes without resuming them.
+An adj already raised stays raised until its process ends; to put one back by hand,
+`echo 0 > /proc/<pid>/oom_score_adj` needs root (a lower value is a privileged write).
+
+Every pane decision of the last hour:
+
+```sh
+journalctl --user -u omp-memory-watch.service --since -1h | grep -E 'RESUMED|would resume|: left:|forgotten'
 ```
 
 `installers/omp-memory-watch.sh` arms it (links `omp/omp-memory-watch.{service,timer}` into
