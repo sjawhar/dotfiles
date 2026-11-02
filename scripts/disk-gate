@@ -8,16 +8,36 @@
 # instant, and they all start: /mnt/nvme fell 18 GiB in two minutes that way on
 # 2026-11-01, and crossed its floor four times in eight hours.
 #
-#   disk-gate reserve <gib> <name> [--mount /mnt/nvme]   # 0 = go, 1 = wait
-#   disk-gate release <name>                             # when the work ends
+#   disk-gate reserve <gib> <name> [--written <gib>] [--mount /mnt/nvme]   # 0 = go, 1 = wait
+#   disk-gate renew <name> [<gib>] [--written <gib>] [--mount PATH]        # 0 = kept, 1 = not
+#   disk-gate release <name>                                               # when the work ends
 #   disk-gate status [--mount /mnt/nvme]
 #
 # A reservation expires after RESERVE_TTL_S (default 2 h), so a lane that dies
 # does not hold space for ever. `reserve` prints why it refused, with numbers.
+#
+# What a reservation costs. `df` already shows the bytes a lane has written, so
+# the gate counts only the part of a reservation not yet written: <gib> minus
+# what the holder last reported with `--written`. Counting the full <gib> would
+# subtract written bytes twice, once in `df` and once in the reservation. A
+# holder that never reports is counted at its full size, so a lane that forgets
+# to report makes the gate stricter, never looser. `--written` is the bytes the
+# reserved work now holds on this mount (for example
+# `du -s --block-size=1G` of its output tree); a later call without it keeps
+# the last figure. The gate does not measure written bytes itself: a `du` of
+# every holder's tree is too slow for a gate called every 5 s, and the fall in
+# free space cannot be given to one holder, because other writers move it too.
+#
+# A renewal (`renew`, or `reserve` again under a held name) that does not raise
+# what the holder costs is never refused, so a lane can renew downward, or
+# report what it wrote, at any time. A renewal that raises it is checked as a
+# new reservation; when refused, the holder keeps its old reservation, because
+# dropping it would offer other lanes the bytes it is still about to write.
 set -uo pipefail
 
 MOUNT=/mnt/nvme
 MOUNT_GIVEN=0
+WRITTEN=
 STATE_DIR="${DISK_GATE_STATE:-/mnt/nvme/sami/scratch/disk-gate}"
 RESERVE_TTL_S="${DISK_GATE_TTL:-7200}"
 
@@ -35,13 +55,25 @@ floor_gib() {
 }
 
 usage() {
-	echo "usage: disk-gate reserve <gib> <name> [--mount PATH] | release <name> | status [--mount PATH]" >&2
+	echo "usage: disk-gate reserve <gib> <name> [--written GIB] [--mount PATH] | renew <name> [<gib>] [--written GIB] [--mount PATH] | release <name> | status [--mount PATH]" >&2
 	exit 2
 }
+
+is_gib() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
 
 free_gib() { df -B1 --output=avail "$1" | tail -1 | awk '{printf "%.1f", $1/1073741824}'; }
 
 state_file() { echo "$STATE_DIR/$(echo "$1" | tr / _).tsv"; }
+
+# A row is name, GiB reserved, epoch seconds, GiB written (absent in rows an
+# older gate wrote, which means 0). What it costs is reserved minus written,
+# never below 0.
+AWK_COST='function cost(r,    c) { c = r[2] - (r[4] == "" ? 0 : r[4]); return (c > 0 ? c : 0) }'
+
+# cost_of GIB WRITTEN: what a reservation of GIB with WRITTEN written costs.
+cost_of() {
+	awk -v g="$1" -v w="$2" "$AWK_COST"' BEGIN { r[2] = g; r[4] = w; printf "%g", cost(r) }'
+}
 
 # Drop expired rows, print the rest. Callers hold the lock.
 live_rows() {
@@ -51,36 +83,121 @@ live_rows() {
 	awk -v now="$now" -v ttl="$RESERVE_TTL_S" -F'\t' '($3 + ttl) > now' "$f"
 }
 
-cmd_reserve() {
-	local gib="$1" name="$2" f lock held total free floor
-	[[ "$gib" =~ ^[0-9]+$ ]] || usage
-	[[ -n "$name" ]] || usage
+# Holder lines for status and refusals.
+print_holders() {
+	awk -F'\t' "$AWK_COST"'
+	{
+		split($0, r, "\t")
+		printf "  %s %s GiB since %s", $1, $2, strftime("%H:%M:%SZ", $3)
+		if ($4 != "" && $4 > 0) printf ", %s GiB written, %g GiB still counted", $4, cost(r)
+		printf "\n"
+	}' "$1"
+}
+
+# Sum of what every row but NAME costs.
+held_except() {
+	DG_NAME="$2" awk -F'\t' "$AWK_COST"'
+	$1 != ENVIRON["DG_NAME"] { split($0, r, "\t"); s += cost(r) }
+	END { printf "%g", s + 0 }' "$1" 2>/dev/null
+}
+
+# grant MODE NAME GIB: reserve or renew NAME on $MOUNT. Empty GIB (renew only)
+# keeps the held size; empty $WRITTEN keeps the last reported figure.
+grant() {
+	local mode="$1" name="$2" gib="$3" f lock old oldgib oldwritten written held free floor cost oldcost total
 	mkdir -p "$STATE_DIR"
 	f="$(state_file "$MOUNT")"
 	lock="$f.lock"
 	exec 9>"$lock"
 	flock 9
 	live_rows "$f" >"$f.tmp" 2>/dev/null || true
-	grep -v -P "^\Q$name\E\t" "$f.tmp" >"$f.new" 2>/dev/null || true
-	mv -f "$f.new" "$f"
-	rm -f "$f.tmp"
-	held=$(awk -F'\t' '{s += $2} END {print s + 0}' "$f" 2>/dev/null)
+	mv -f "$f.tmp" "$f"
+	old=$(DG_NAME="$name" awk -F'\t' '$1 == ENVIRON["DG_NAME"]' "$f")
+	if [[ -z "$old" && "$mode" == renew ]]; then
+		flock -u 9
+		echo "disk-gate: NOT RENEWED. No reservation named $name is held on $MOUNT. Run 'disk-gate reserve <gib> $name' to ask again." >&2
+		return 1
+	fi
+	oldgib=$(awk -F'\t' 'NR == 1 {print $2}' <<<"$old")
+	oldwritten=$(awk -F'\t' 'NR == 1 {print ($4 == "" ? 0 : $4)}' <<<"$old")
+	[[ -n "$gib" ]] || gib="$oldgib"
+	written="${WRITTEN:-${oldwritten:-0}}"
+	held=$(held_except "$f" "$name")
 	free=$(free_gib "$MOUNT")
 	floor=$(floor_gib "$MOUNT")
-	total=$(awk -v f="$free" -v h="$held" -v g="$gib" -v fl="$floor" 'BEGIN {printf "%.1f", f - h - g - fl}')
-	if awk -v t="$total" 'BEGIN {exit !(t < 0)}'; then
-		echo "disk-gate: NO. $MOUNT has ${free} GiB free; ${held} GiB is reserved by other lanes; your ${gib} GiB would leave $(awk -v f="$free" -v h="$held" -v g="$gib" 'BEGIN {printf "%.1f", f - h - g}') GiB, under the ${floor} GiB floor."
-		[[ -s "$f" ]] && { echo "disk-gate: holders:"; awk -F'\t' '{printf "  %s %s GiB since %s\n", $1, $2, strftime("%H:%M:%SZ", $3)}' "$f"; }
+	cost=$(cost_of "$gib" "$written")
+	total=$(awk -v f="$free" -v h="$held" -v c="$cost" -v fl="$floor" 'BEGIN {printf "%.1f", f - h - c - fl}')
+	local written_note=""
+	awk -v w="$written" 'BEGIN {exit !(w > 0)}' && written_note=" (${gib} reserved, ${written} written)"
+	if [[ -n "$old" ]]; then
+		oldcost=$(cost_of "$oldgib" "$oldwritten")
+	fi
+	# A new reservation, or a renewal that raises the cost, must fit above the
+	# floor. A renewal that does not raise it adds nothing, so it always holds.
+	if { [[ -z "$old" ]] || awk -v c="$cost" -v o="$oldcost" 'BEGIN {exit !(c > o)}'; } &&
+		awk -v t="$total" 'BEGIN {exit !(t < 0)}'; then
+		echo "disk-gate: NO. $MOUNT has ${free} GiB free; ${held} GiB is reserved by other lanes and not yet written; your ${cost} GiB${written_note} would leave $(awk -v f="$free" -v h="$held" -v c="$cost" 'BEGIN {printf "%.1f", f - h - c}') GiB, under the ${floor} GiB floor."
+		[[ -n "$old" ]] && echo "disk-gate: you keep your ${oldgib} GiB reservation as it was; it expires on its old schedule."
+		[[ -s "$f" ]] && { echo "disk-gate: holders:"; print_holders "$f"; }
 		flock -u 9
 		return 1
 	fi
-	printf '%s\t%s\t%s\n' "$name" "$gib" "$(date +%s)" >>"$f"
+	{
+		DG_NAME="$name" awk -F'\t' '$1 != ENVIRON["DG_NAME"]' "$f"
+		if [[ -n "$WRITTEN" || "$written" != 0 ]]; then
+			printf '%s\t%s\t%s\t%s\n' "$name" "$gib" "$(date +%s)" "$written"
+		else
+			printf '%s\t%s\t%s\n' "$name" "$gib" "$(date +%s)"
+		fi
+	} >"$f.new"
+	mv -f "$f.new" "$f"
 	# The file's name encodes the mount lossily (`/` becomes `_`), so keep the
 	# real path beside it for `release`, which finds a name across mounts.
 	printf '%s\n' "$MOUNT" >"$f.mount"
-	echo "disk-gate: GO. $MOUNT ${free} GiB free, ${held} GiB reserved by others, ${gib} GiB now yours, ${total} GiB over the ${floor} GiB floor. Run 'disk-gate release $name' when the work ends."
+	local margin
+	margin=$(awk -v t="$total" -v fl="$floor" 'BEGIN {if (t < 0) printf "%.1f GiB under", -t; else printf "%.1f GiB over", t; printf " the %s GiB floor", fl}')
+	if [[ "$mode" == renew ]]; then
+		echo "disk-gate: RENEWED. $name on $MOUNT counts ${cost} GiB${written_note} for another $((RESERVE_TTL_S / 60)) min. $MOUNT ${free} GiB free, ${held} GiB reserved by others, ${margin}."
+	else
+		echo "disk-gate: GO. $MOUNT ${free} GiB free, ${held} GiB reserved by others, ${cost} GiB now yours${written_note}${old:+ (renewed; it was ${oldcost} GiB)}, ${margin}. Run 'disk-gate release $name' when the work ends."
+	fi
 	flock -u 9
 	return 0
+}
+
+cmd_reserve() {
+	local gib="$1" name="$2"
+	is_gib "$gib" || usage
+	[[ -n "$name" && "$name" != *$'\t'* ]] || usage
+	grant reserve "$name" "$gib"
+}
+
+# Renew a held reservation: refresh its expiry, and change its size or the
+# bytes it has written. Without --mount it finds the name on any mount, as
+# release does.
+cmd_renew() {
+	local name="$1" gib="$2" f m rc=0 mounts=()
+	[[ -n "$name" && "$name" != *$'\t'* ]] || usage
+	[[ -z "$gib" ]] || is_gib "$gib" || usage
+	if [[ "$MOUNT_GIVEN" == 1 ]]; then
+		grant renew "$name" "$gib"
+		return
+	fi
+	shopt -s nullglob
+	for f in "$STATE_DIR"/*.tsv; do
+		DG_NAME="$name" awk -F'\t' '$1 == ENVIRON["DG_NAME"] {found = 1} END {exit !found}' "$f" &&
+			mounts+=("$(cat "$f.mount" 2>/dev/null || echo "$MOUNT")")
+	done
+	shopt -u nullglob
+	if ((${#mounts[@]} == 0)); then
+		echo "disk-gate: NOT RENEWED. No reservation named $name is held on any mount. Run 'disk-gate reserve <gib> $name' to ask again." >&2
+		return 1
+	fi
+	for m in "${mounts[@]}"; do
+		MOUNT="$m"
+		grant renew "$name" "$gib" || rc=1
+	done
+	return "$rc"
 }
 
 # Release a reservation by name. Without --mount it looks in every mount's
@@ -126,6 +243,7 @@ cmd_release() {
 # lock rewrote the file from a copy made in the middle of that reserve, and both
 # used "$f.tmp", so other lanes' reservations were lost: 2026-11-02, 40 statuses
 # against 40 reserves of one name in a private ledger left 1 holder of 3.
+# "Reserved" here is what holders have not yet written.
 cmd_status() {
 	local f lock held free floor
 	f="$(state_file "$MOUNT")"
@@ -135,11 +253,11 @@ cmd_status() {
 	flock 9
 	live_rows "$f" >"$f.tmp" 2>/dev/null || true
 	mv -f "$f.tmp" "$f" 2>/dev/null || true
-	held=$(awk -F'\t' '{s += $2} END {print s + 0}' "$f" 2>/dev/null)
+	held=$(held_except "$f" "")
 	free=$(free_gib "$MOUNT")
 	floor=$(floor_gib "$MOUNT")
 	echo "$MOUNT: ${free} GiB free, ${held} GiB reserved, ${floor} GiB floor, $(awk -v f="$free" -v h="$held" -v fl="$floor" 'BEGIN {printf "%.1f", f - h - fl}') GiB available to reserve."
-	[[ -s "$f" ]] && awk -F'\t' '{printf "  %s %s GiB since %s\n", $1, $2, strftime("%H:%M:%SZ", $3)}' "$f"
+	[[ -s "$f" ]] && print_holders "$f"
 	flock -u 9
 	return 0
 }
@@ -155,6 +273,11 @@ while (($#)); do
 		MOUNT_GIVEN=1
 		shift 2
 		;;
+	--written)
+		WRITTEN="${2:-}"
+		is_gib "$WRITTEN" || usage
+		shift 2
+		;;
 	*)
 		args+=("$1")
 		shift
@@ -163,6 +286,7 @@ while (($#)); do
 done
 case "$cmd" in
 reserve) cmd_reserve "${args[0]:-}" "${args[1]:-}" ;;
+renew) cmd_renew "${args[0]:-}" "${args[1]:-}" ;;
 release) cmd_release "${args[0]:-}" ;;
 status) cmd_status ;;
 *) usage ;;
