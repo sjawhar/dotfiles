@@ -91,6 +91,21 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-b
 | A6, start | seconds from TERMINATED to the next status | at most 600 |
 | A6, silence | the CronJob suspended 35 minutes | the monitor `Box-monitor silent for sami-devbox` goes to Alert, and back to OK after the resume |
 
+## Starting a session
+
+Every session on sami-devbox runs in an agent box (spec R2). `scripts/agent-new` boxes by default
+on a Google VM; run each line on sami-devbox, or after `ssh sami@sami-devbox` from another machine:
+
+```sh
+agent-new --repo <repo> --name <N> @<brief>   # start: worktree ~/src/<repo>-<N>, a box, tmux window agents:<N>
+tmux capture-pane -p -t agents:<N>; agentbox ls; envoy ps | grep '<repo>-<N>'   # see
+tmux kill-window -t agents:<N>; agent-workspace rm ~/src/<repo>-<N>   # stop: the box closes, its knives claims go; then the tree
+```
+
+The brief must be where the box sees it (`~/src`, `/mnt/durable/sami`) or in a directory of its own,
+which the box gets as a `--dir`. The worktree is a host directory, so it keeps its work after the box
+closes; `agent-workspace rm` refuses a tree with unpushed work.
+
 ## Step 3's first action
 
 `sami-devbox-provision --only speed` measures ssh over Tailscale from sami-rocqperf to sami-devbox
