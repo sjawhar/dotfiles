@@ -75,8 +75,9 @@ class RestartPassTest(unittest.TestCase):
         self.state = WATCH.State(root / "state.json")
         self.addCleanup(self.state.close)
 
-    def write_transcript(self, last: dict) -> None:
-        self.transcript.write_text(json.dumps({"type": "session", "id": SID}) + "\n" + json.dumps(last) + "\n")
+    def write_transcript(self, *entries: dict) -> None:
+        lines = [json.dumps({"type": "session", "id": SID})] + [json.dumps(entry) for entry in entries]
+        self.transcript.write_text("\n".join(lines) + "\n")
 
     def options(self, **overrides) -> argparse.Namespace:
         values = dict(dry_run=False, write_state=True, restart_dry_run=False, restart_cooldown=3600.0, state=self.state.path)
@@ -134,6 +135,25 @@ class RestartPassTest(unittest.TestCase):
         self.run_pass(("idle", {}), 1030.0)
         self.assertEqual(self.respawned, [])
         self.assertIn("ended normally at 2026-11-02T00:50:00.000Z", self.lines[-1])
+
+    def test_a_normal_exit_followed_by_its_last_turn_is_left(self) -> None:
+        """omp can flush the turn in flight after the exit marker: 01a18c23's last assistant
+        message landed 2.3 s after its 07:30:34Z exit, and the session was resumed against its
+        owner's Ctrl+D."""
+        self.run_pass(self.host(), 1000.0)
+        exit_entry = dict(NORMAL_EXIT, timestamp="2026-11-02T00:50:00.000Z")
+        self.write_transcript(exit_entry, {"type": "message", "message": {"role": "assistant"}, "timestamp": "2026-11-02T00:50:02.300Z"})
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(self.respawned, [])
+        self.assertIn("ended normally at 2026-11-02T00:50:00.000Z", self.lines[-1])
+
+    def test_a_session_resumed_after_a_normal_exit_is_resumed_again(self) -> None:
+        """Entries minutes after an exit are a resumed session's, so its later death is an incident."""
+        self.run_pass(self.host(), 1000.0)
+        exit_entry = dict(NORMAL_EXIT, timestamp="2026-11-02T00:50:00.000Z")
+        self.write_transcript(exit_entry, {"type": "message", "message": {"role": "assistant"}, "timestamp": "2026-11-02T00:55:00.000Z"})
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(len(self.respawned), 1)
 
     def test_a_pane_still_running_omp_is_never_respawned(self) -> None:
         self.run_pass(self.host(), 1000.0)

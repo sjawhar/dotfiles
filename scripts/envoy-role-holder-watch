@@ -628,16 +628,19 @@ def transcript_of(session_id: str) -> Path | None:
 
 
 def normal_exit_at(path: str | Path | None) -> str | None:
-    """When the transcript's LAST entry is a normal session exit, the time it records; else None.
+    """When the transcript ends in a normal session exit, the time it records; else None.
 
     omp ends a transcript it closes on purpose with
     {"type":"custom","customType":"session_exit","data":{"reason":"dispose","kind":"normal",
     "recordedAt":"2026-11-01T22:46:26.874Z"},...}. On 2026-11-01 sessions 01a1798a-9911
     ("Scan and redact leaked API keys") and 01a1798a-995f ("SCHED") in ~/src/machcsl-riscv
     exited that way at 22:46:26Z and 22:46:56Z still holding roles, and this watch alerted and
-    escalated on both as if they had stopped. Only the last entry counts: a session that was
-    resumed after an exit writes past it, and any other last entry -- a crash, a kill, a hang --
-    is still an incident.
+    escalated on both as if they had stopped. The exit counts when nothing follows it, or when
+    every entry after it is dated within EXIT_TAIL_S of it, before or after: omp can flush the
+    turn in flight after the exit marker. On 2026-11-02 session 01a18c23 exited by Ctrl+D at 07:30:34.078Z,
+    its last assistant message landed 2.3 s later, and omp-memory-watch resumed a session its
+    owner had ended. A session resumed after an exit writes minutes past it, and any other end
+    -- a crash, a kill, a hang -- is still an incident.
     """
     if not path:
         return None
@@ -649,22 +652,50 @@ def normal_exit_at(path: str | Path | None) -> str | None:
             lines = handle.read().splitlines()
     except OSError:
         return None
-    last = next((line for line in reversed(lines) if line.strip()), b"")
-    try:
-        entry = json.loads(last)
-    except ValueError:
-        return None
-    if not isinstance(entry, dict):
-        return None
-    data = entry.get("data")
-    if (
-        entry.get("type") == "custom"
-        and entry.get("customType") == "session_exit"
-        and isinstance(data, dict)
-        and data.get("kind") == "normal"
-    ):
-        return str(data.get("recordedAt") or entry.get("timestamp") or "unknown time")
+    tail: list[dict] = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(entry, dict):
+            return None
+        data = entry.get("data")
+        if (
+            entry.get("type") == "custom"
+            and entry.get("customType") == "session_exit"
+            and isinstance(data, dict)
+            and data.get("kind") == "normal"
+        ):
+            recorded = str(data.get("recordedAt") or entry.get("timestamp") or "")
+            if tail:
+                exit_at = _entry_time(recorded)
+                if exit_at is None or any(
+                    abs((_entry_time(str(later.get("timestamp") or "")) or float("inf")) - exit_at) > EXIT_TAIL_S
+                    for later in tail
+                ):
+                    return None
+            return recorded or "unknown time"
+        tail.append(entry)
+        if len(tail) > EXIT_TAIL_ENTRIES:
+            return None
     return None
+
+
+# How long after a normal exit omp may still write the turn it had in flight, and how many such
+# entries are looked through, before the exit no longer counts as the transcript's end.
+EXIT_TAIL_S = 10.0
+EXIT_TAIL_ENTRIES = 20
+
+
+def _entry_time(stamp: str) -> float | None:
+    """A transcript timestamp (`2026-11-02T07:30:34.078Z`) as a UTC epoch, or None when it has none."""
+    match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z", stamp)
+    if not match:
+        return None
+    return epoch_of(match.group(1) + "Z") + float(match.group(2) or 0)
 
 
 # --------------------------------------------------- what this run could establish about a holder
