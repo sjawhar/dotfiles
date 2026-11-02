@@ -2653,6 +2653,14 @@ move_agent_dir() {
 # still runs, and omp resumes such a session by that full path from the table
 # (dispatch://INFRA-754). Nothing, when none of them answers.
 MOVE_SWEEP_RECORD="${AGENTBOX_SWEEP_RECORD:-$HOME/.local/share/omp-session-sql/deleted.tsv}"
+# Set by a command that asks about many sessions (move_to_index_transcripts): a directory holding
+# one walk of each agent directory, which move_transcript then reads instead of walking again.
+MOVE_DEEP_INDEX_DIR=""
+move_to_index_transcripts() {
+    MOVE_DEEP_INDEX_DIR="$(mktemp -d)"
+    # shellcheck disable=SC2064  # the path is fixed now
+    trap "rm -rf '$MOVE_DEEP_INDEX_DIR'" EXIT
+}
 move_transcript() {
     local pid="$1" sid="$2" fd link arg found=() dir
     [[ -n "$sid" ]] || return 1
@@ -2664,7 +2672,20 @@ move_transcript() {
         if [[ "$arg" == /*_"$sid".jsonl && -f "$arg" ]]; then printf '%s\n' "$arg"; return 0; fi
     done < <(cat "$PROC/$pid/cmdline" 2>/dev/null || true)
     dir="$(move_agent_dir "$pid")/sessions"
-    mapfile -t found < <(find -L "$dir" -maxdepth 4 -type f -name "*_${sid}.jsonl" 2>/dev/null)
+    if [[ -n "$MOVE_DEEP_INDEX_DIR" ]]; then
+        # One walk of the agent directory for every session a run asks about, kept in a file so
+        # that the $(…) subshells this is called in share it: the walk took 12.5 s here at load
+        # 300, and `move --plan --to` asked it of each idle session in turn for over 40 minutes.
+        local idx
+        idx="$MOVE_DEEP_INDEX_DIR/$(printf '%s' "$dir" | md5sum | cut -c1-16)"
+        if [[ ! -e "$idx" ]]; then
+            find -L "$dir" -maxdepth 4 -type f -name '*_*.jsonl' 2>/dev/null >"$idx.$BASHPID" || true
+            mv -f "$idx.$BASHPID" "$idx"
+        fi
+        mapfile -t found < <(grep -- "_${sid}\.jsonl\$" "$idx" || true)
+    else
+        mapfile -t found < <(find -L "$dir" -maxdepth 4 -type f -name "*_${sid}.jsonl" 2>/dev/null)
+    fi
     if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
     if [[ -r "$MOVE_SWEEP_RECORD" ]]; then
         # Column 1 of deleted.tsv is the deleted file's path; the last row for the id wins.
@@ -2995,6 +3016,11 @@ cmd_move_plan() {
         if [[ -z "${MOVE_KIDS[$pid]:-}" ]]; then
             note="${note:+$note; }$MOVE_NOTICE_NOKIDS"
         fi
+        # What of the session the hang-up ends (move_orphans): the move refuses until it is a unit,
+        # is stopped, or the session passes --accept-orphans.
+        local orphans
+        orphans="$(move_orphans "$pid")"
+        [[ -z "$orphans" ]] || note="${note:+$note; }DIES WITH THE MOVE (not a unit; the move refuses without --accept-orphans): $(move_orphans_list "$orphans")"
         line="$(printf '%s\x1e' "${whys[@]+"${whys[@]}"}")"
         rows+=("$class	$sid	$pid	$pane	$at	$cwd	${spec:--}	$(move_gib "$image")	$note	${resume:--}	${line%$'\x1e'}")
     done
@@ -3212,6 +3238,74 @@ move_relaunch() {
     fi
 }
 
+# move_orphans OMP [CALLER]: "<pid>\t<descendants>\t<command line>" for each process the session
+# started that dies with the hang-up: every live process under its omp but omp's own helpers (the
+# worker broker, the python runner; what they start is listed) and the move command's own chain
+# (CALLER, its ancestors and descendants). A server, a watcher or a dashboard started from a tool
+# call is a child of the omp, and a hang-up ends it: KNOTCURVE's dashboard, started by hand from
+# its session, died with the move at 16:21Z on 2026-11-02 and was down about four hours. One row
+# per top process, with how many processes are under it. A systemd unit is not under the omp.
+move_orphans() {
+    local omp="$1" caller="${2:-}" p q cmd n
+    local -A skip=()
+    move_read_kids
+    if [[ -n "$caller" ]]; then
+        p="$caller"
+        while [[ -n "$p" && "$p" != "$omp" && "$p" != 0 && "$p" != 1 ]]; do
+            skip[$p]=1
+            move_stat "$p" || break
+            p="$MOVE_PPID"
+        done
+        while IFS= read -r q; do skip[$q]=1; done < <(move_descendants "$caller")
+    fi
+    local queue=() i=0
+    read -r -a queue <<<"${MOVE_KIDS[$omp]:-}"
+    while (( i < ${#queue[@]} )); do
+        p="${queue[i]}"
+        i=$((i + 1))
+        cmd="$(tr '\0' ' ' <"$PROC/$p/cmdline" 2>/dev/null || true)"
+        [[ -n "$cmd" ]] || continue
+        case "$cmd" in
+            *__omp_worker*|*/omp-python-runner*/runner-*.py*) skip[$p]=helper ;;
+        esac
+        if [[ -n "${skip[$p]:-}" ]]; then
+            read -r -a q <<<"${MOVE_KIDS[$p]:-}"
+            queue+=(${q[@]+"${q[@]}"})
+            continue
+        fi
+        n="$(move_descendants "$p" | wc -l)"
+        printf '%s\t%s\t%s\n' "$p" "$((n - 1))" "${cmd% }"
+    done
+}
+
+# The rows of move_orphans as one line a person reads.
+move_orphans_list() {
+    awk -F'\t' '{ printf "%s%s (pid %s%s)", (NR > 1 ? "; " : ""), $3, $1, ($2 > 0 ? ", " $2 " under it" : "") }' <<<"$1"
+}
+
+# move_orphans_gate OMP CALLER DRY: say what of the session dies with the hang-up; return 1 with
+# MOVE_ORPHANS_WHY unless there is nothing, the caller passed --accept-orphans, or this is a
+# dry run (which only says it).
+MOVE_ACCEPT_ORPHANS=false
+MOVE_ORPHANS_WHY=""
+move_orphans_gate() {
+    local orphans list
+    MOVE_ORPHANS_WHY=""
+    orphans="$(move_orphans "$1" "$2")"
+    [[ -n "$orphans" ]] || return 0
+    list="$(move_orphans_list "$orphans")"
+    MOVE_ORPHANS_WHY="these processes of this session are not systemd units, and the hang-up of the move ends them: $list. Make each one a unit (\`systemd-run --user --unit <name> …\` outlives the session), or stop it, or move anyway with --accept-orphans"
+    if $MOVE_ACCEPT_ORPHANS; then
+        echo "agentbox: --accept-orphans: the hang-up of the move ends $list" >&2
+        return 0
+    fi
+    if [[ "$3" == true ]]; then
+        echo "agentbox: the move would refuse: $MOVE_ORPHANS_WHY"
+        return 0
+    fi
+    return 1
+}
+
 # A box is not a one-way door. Every box defect found so far is fixed by moving again with one
 # more --dir, and a session INSIDE a box could do neither: `--dir <host path>` was checked in the
 # box's own view, where an unmounted host path does not exist ("--dir '<path>' is not an existing
@@ -3247,6 +3341,7 @@ move_self_in_box() {
     echo "agentbox: this session is already in box ${AGENTBOX_BOX:-a box}; moving again into a new one with:"
     echo "  agentbox new ${spec[*]} -- omp --resume $resume"
     [[ -n "$pane" ]] || die "this box has no TMUX_PANE, so it cannot respawn its own pane; run the line above from a host session"
+    if [[ -n "${own:-}" ]]; then move_orphans_gate "$own" "$$" "$dry" || die "nothing was hung up: $MOVE_ORPHANS_WHY"; fi
     if [[ "$dry" == true ]]; then return 0; fi
     inner="$(move_pane_command "$sid" "$resume" "${spec[@]}")"
     # The host's tmux server, through the relay every box has. respawn-pane -k kills what the
@@ -3303,6 +3398,7 @@ cmd_move_self() {
         case "$a" in
             --dry-run) dry=true ;;
             --force-floor) MOVE_FORCE_FLOOR=true ;;
+            --accept-orphans) MOVE_ACCEPT_ORPHANS=true ;;
             --dir)
                 [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir /mnt/nvme/$(id -un)/my-lane  ($usage)"
                 if $in_box; then raw_dirs+=("$2"); else add_box_dir "$2"; fi
@@ -3348,6 +3444,7 @@ cmd_move_self() {
         for b in "${BOX_DIRS[@]+"${BOX_DIRS[@]}"}"; do lead+=" --dir $(printf '%q' "$b")"; done
         die "tmux cannot reach pane $pane from this shell ($MOVE_TMUX_BIN ${MOVE_TMUX[*]} display-message failed), so the relauncher could not respawn it after the hang-up; nothing was hung up. Ask a host session to move this session from outside: $lead"
     fi
+    move_orphans_gate "$pid" "$$" "$dry" || die "nothing was hung up: $MOVE_ORPHANS_WHY"
     if $dry; then
         echo "agentbox: would hang omp $pid up and respawn pane $pane ($at) as:"
         echo "  agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME"
@@ -3387,6 +3484,7 @@ cmd_move_notify() {
             --dry-run) dry=true ;;
             --all) all=true ;;
             --force-floor) MOVE_FORCE_FLOOR=true ;;
+            --accept-orphans) MOVE_ACCEPT_ORPHANS=true ;;
             --dir)
                 [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir /mnt/nvme/$(id -un)/my-lane. $MOVE_USAGE"
                 add_box_dir "$2"
@@ -3442,6 +3540,10 @@ cmd_move_notify() {
         spec=("${MOVE_SPEC[@]}")
         if ! move_check_floor "$image"; then return 2; fi
         if $now; then
+            if ! move_orphans_gate "$pid" "" "$dry"; then
+                echo "agentbox: $sid cannot be moved now, nothing hung up: $MOVE_ORPHANS_WHY" >&2
+                continue
+            fi
             if $dry; then
                 echo "agentbox: would relaunch pane $pane ($at) now: agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME"
                 continue
@@ -3450,6 +3552,10 @@ cmd_move_notify() {
             continue
         fi
         local notice="${MOVE_NOTICE_HEAD//%PID%/$pid} \`agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME\`, $MOVE_NOTICE_TAIL $MOVE_NOTICE_DIRS $(printf '%s; ' "${whys[@]}" | sed 's/; $//'). $MOVE_NOTICE_ADD"
+        # What dies with the hang-up, so the session decides before it runs the move.
+        local orphans
+        orphans="$(move_orphans "$pid")"
+        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: they are not systemd units, and the hang-up ends them: $(move_orphans_list "$orphans"). Make each a unit (\`systemd-run --user --unit <name> …\`), stop it, or run the move with --accept-orphans."
         if $dry; then
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue
@@ -3720,11 +3826,15 @@ move_to_transcript_paths() {
         fi
     done
     [[ -d "${t%.jsonl}" ]] || return 0
+    # Two levels: a subagent's transcript and its own subagents'. A lead's session directory holds
+    # thousands of entries, and a walk of all of it ran for minutes at load 600.
+    local own
+    own="$(readlink -f "${t%.jsonl}")"
     while IFS= read -r -d '' link; do
         real="$(readlink -f "$link" 2>/dev/null)" || continue
         [[ -e "$real" ]] || continue
-        move_within "$real" "$(readlink -f "${t%.jsonl}")" || printf 'mirror\t%s\n' "$real"
-    done < <(find -H "${t%.jsonl}" -type l -print0 2>/dev/null)
+        move_within "$real" "$own" || printf 'mirror\t%s\n' "$real"
+    done < <(find -H "${t%.jsonl}" -maxdepth 2 -type l -print0 2>/dev/null)
     return 0
 }
 
@@ -3844,6 +3954,90 @@ move_to_copy() {
         rsync -aH --no-group --omit-dir-times --relative --update --exclude="$MOVE_MARKER" -e "${MOVE_TO_SSH[*]}" \
             "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" || return 1
     fi
+    return 0
+}
+
+# A git working tree whose repository the target has already (its own clone at the same path,
+# made from GitHub) is moved through git, never by copying one .git over another: the commit
+# the tree has checked out is pushed into the target's repository (git sends only the objects
+# it lacks), the tree is registered there (`git worktree add --no-checkout`), its files are
+# mirrored with its .git left out, and the index is rebuilt from HEAD, so uncommitted changes
+# arrive as changes (what was staged arrives unstaged). The other local branches are pushed too,
+# without force: one the target lacks is made there, and one it has only moves forward. Every
+# other tree keeps the rsync of its storage.
+# MOVE_TO_NATIVE holds "<tree>\t<common dir>" for each tree moved this way.
+MOVE_TO_NATIVE=()
+move_to_git_native_plan() {
+    local target="$1" w common keep p n
+    local -a merge=() mirror_excl=()
+    MOVE_TO_NATIVE=()
+    for w in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
+        [[ -d "$w" && -e "$w/.git" ]] || continue
+        common="$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
+        move_remote "$target" "test -d $(printf '%q' "$common/objects")" </dev/null >/dev/null 2>&1 || continue
+        MOVE_TO_NATIVE+=("$w	$common")
+    done
+    (( ${#MOVE_TO_NATIVE[@]} )) || return 0
+    # The target's repository is not overwritten: its storage leaves the merge, and each tree's
+    # .git (a directory or a worktree's pointer file) leaves the mirror.
+    for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        keep=1
+        for n in "${MOVE_TO_NATIVE[@]}"; do
+            common="${n#*$'\t'}"
+            if move_within "$p" "$common" || move_within "$p" "$(readlink -f "$common/objects")"; then keep=0; break; fi
+        done
+        (( keep )) && merge+=("$p")
+    done
+    MOVE_TO_MERGE=(${merge[@]+"${merge[@]}"})
+    for n in "${MOVE_TO_NATIVE[@]}"; do MOVE_TO_EXCLUDE+=("${n%%$'\t'*}/.git"); done
+    return 0
+}
+
+# Before the mirror: push and register each tree on the target. Sets MOVE_TO_WHY on failure.
+move_to_git_native_push() {
+    local target="$1" n w common tag head branch script
+    for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
+        w="${n%%$'\t'*}" common="${n#*$'\t'}"
+        tag="refs/agentbox-move/$(printf '%s' "$w" | md5sum | cut -c1-12)"
+        head="$(git -C "$w" rev-parse -q --verify HEAD)" || { MOVE_TO_WHY="$w has no commit to push"; return 1; }
+        branch="$(git -C "$w" symbolic-ref -q --short HEAD || true)"
+        if ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" git -C "$w" push --quiet --no-verify \
+            "$MOVE_TO_USER@$target:$common" "+HEAD:$tag" 2>&1; then
+            MOVE_TO_WHY="git push of $w to $target:$common failed"
+            return 1
+        fi
+        # The other local branches, without force: one the target has only moves forward.
+        GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" git -C "$w" push --quiet --no-verify \
+            "$MOVE_TO_USER@$target:$common" 'refs/heads/*:refs/heads/*' >/dev/null 2>&1 || true
+        script="set -e
+w=$(printf '%q' "$w") c=$(printf '%q' "$common") tag=$(printf '%q' "$tag") head=$(printf '%q' "$head") b=$(printf '%q' "$branch")
+if [ -e \"\$w/.git\" ] && git -C \"\$w\" rev-parse -q --git-dir >/dev/null 2>&1; then :
+elif [ -e \"\$w\" ] && [ -n \"\$(ls -A \"\$w\")\" ]; then echo \"\$w is on the target already and is not a git tree\" >&2; exit 3
+elif [ -n \"\$b\" ]; then
+    git --git-dir=\"\$c\" update-ref \"refs/heads/\$b\" \"\$head\"
+    git --git-dir=\"\$c\" worktree add --no-checkout --quiet \"\$w\" \"\$b\"
+else
+    git --git-dir=\"\$c\" worktree add --no-checkout --quiet --detach \"\$w\" \"\$head\"
+fi
+if [ -n \"\$b\" ]; then git --git-dir=\"\$c\" update-ref \"refs/heads/\$b\" \"\$head\"; git -C \"\$w\" symbolic-ref HEAD \"refs/heads/\$b\"
+else git -C \"\$w\" update-ref --no-deref HEAD \"\$head\"; fi
+git --git-dir=\"\$c\" update-ref -d \"\$tag\""
+        if ! move_remote "$target" "$script" </dev/null; then
+            MOVE_TO_WHY="the git tree $w could not be registered in $target:$common"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# After the mirror: each tree's index from its HEAD, its files as the mirror left them.
+move_to_git_native_finish() {
+    local target="$1" n w
+    for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
+        w="${n%%$'\t'*}"
+        move_remote "$target" "git -C $(printf '%q' "$w") reset -q" </dev/null \
+            || { MOVE_TO_WHY="git reset of $w on $target failed"; return 1; }
+    done
     return 0
 }
 
@@ -4030,7 +4224,6 @@ move_to_session_record() {
         MT_COPY[$s]="$(printf '%s\n' ${MOVE_TO_COPY[@]+"${MOVE_TO_COPY[@]}"})"
     fi
 }
-
 # move_to_find_group SID [DIR…]: SID's group in MOVE_TO_GROUP (SID first). SID's trees are its
 # inferred git working trees (its record and plan included); another session's are the git trees
 # its own processes work in (move_to_process_trees). A session joins when one of its processes
@@ -4144,6 +4337,7 @@ cmd_move_to() {
             --to) [[ -n "${2:-}" && "$2" != -* ]] || die "--to takes a machine name, e.g. --to sami-devbox. $MOVE_USAGE"; target="$2"; shift ;;
             --dry-run) dry=true ;;
             --clear-halt) clear=true ;;
+            --accept-orphans) MOVE_ACCEPT_ORPHANS=true ;;
             --dir)
                 [[ -n "${2:-}" ]] || die "--dir takes an existing directory. $MOVE_USAGE"
                 if $in_box; then raw_dirs+=("$2"); else add_box_dir "$2"; fi
@@ -4167,6 +4361,7 @@ cmd_move_to() {
     fi
     move_self_identify "agentbox move --to $target"
     local sid="$MOVE_SELF_SID" s members=() missing=() m err group
+    move_to_index_transcripts
     echo "agentbox move --to $target: reading this host's sessions' processes to find this session's group" >&2
     move_to_scan_processes
     [[ -n "${MT_ROW_OF[$sid]:-}" ]] || die "session $sid is not in this host's census"
@@ -4191,6 +4386,8 @@ cmd_move_to() {
     mapfile -t cwds < <(printf '%s\n' "${members[@]}" | jq -r .cwd)
     move_to_cwds_present "$target" "${cwds[@]}" || die "no move to $target; nothing was hung up: $MOVE_TO_WHY"
     move_to_offbox || die "no move to $target; nothing was hung up: $MOVE_TO_WHY"
+    # What of THIS session dies with the hang-up; each other member asks its own when it runs this.
+    move_orphans_gate "$MOVE_SELF_PID" "$$" "$dry" || die "no move to $target; nothing was hung up: $MOVE_ORPHANS_WHY"
     # Each other session of the group says itself that it is at its safe point.
     local waiting=() notice
     if (( ${#MOVE_TO_GROUP[@]} > 1 )); then
@@ -4257,6 +4454,7 @@ move_to_in_box() {
     move_to_copy_lists <<<"$copy"
     # The box may not see every pattern file or marker; the relauncher on the host asks again.
     move_to_offbox || die "no move to $target; nothing was hung up: $MOVE_TO_WHY"
+    if [[ -n "${own:-}" ]]; then move_orphans_gate "$own" "$$" "$dry" || die "no move to $target; nothing was hung up: $MOVE_ORPHANS_WHY"; fi
     local group="g-${sid:0:8}" member job sock
     # The host server's own socket path, asked through the relay: the relauncher runs under that
     # server's run-shell, whose environment need not name it (a drill's rollback found no pane %0
@@ -4378,10 +4576,17 @@ move_to_run() {
         log_all "$reason" "${all[@]}"
         return 1
     fi
-    # 2. The copy. 3. The markers. 4. The windows. Any failure rolls the whole group back.
+    # 2. The copy (git trees the target has a clone of go through git). 3. The markers. 4. The
+    # windows. Any failure rolls the whole group back.
+    move_to_git_native_plan "$target"
+    (( ${#MOVE_TO_NATIVE[@]} )) && say "through git: $(printf '%s ' "${MOVE_TO_NATIVE[@]%%$'\t'*}")"
     say "copying ${#MOVE_TO_MIRROR[@]} mirrored and ${#MOVE_TO_MERGE[@]} merged path(s)"
-    if ! move_to_copy "$target" "$stamp"; then
+    if ! move_to_git_native_push "$target"; then
+        reason="failed: $MOVE_TO_WHY"
+    elif ! move_to_copy "$target" "$stamp"; then
         reason="failed: the copy to $target"
+    elif ! move_to_git_native_finish "$target"; then
+        reason="failed: $MOVE_TO_WHY"
     else
         for ((i = 0; i < n; i++)); do
             move_to_mark "${sids[i]}" "${resumes[i]}" "$target" || { reason="failed: the marker of ${sids[i]} could not be written"; break; }
@@ -4467,6 +4672,7 @@ move_to_run() {
 MOVE_TO_SIZE_WAIT="${AGENTBOX_MOVE_SIZE_WAIT:-30}"
 cmd_move_plan_to() {
     local target="$1" s g m err p x size total=0 refused=0 bytes i line
+    move_to_index_transcripts
     local -A done_=() sizes=()
     local g_name=() g_text=() g_mirror=() g_merge=() g_exclude=() paths=()
     echo "agentbox move --plan --to $target: reading this host's live sessions; progress on stderr" >&2
@@ -4476,12 +4682,16 @@ cmd_move_plan_to() {
         move_to_find_group "$s"
         for m in "${MOVE_TO_GROUP[@]}"; do done_[$m]=1; done
         g="g-$(printf '%s\n' "${MOVE_TO_GROUP[@]}" | sort | head -1 | cut -c1-8)"
+        echo "agentbox: $(date -u +%T) group $g, ${#MOVE_TO_GROUP[@]} session(s)" >&2
         local text="group $g: ${#MOVE_TO_GROUP[@]} session(s)" copy="" class pid sid pane at cwd detail
         for m in "${MOVE_TO_GROUP[@]}"; do
             IFS="$SEP" read -r class pid sid pane at cwd detail <<<"${MT_ROW[$m]}"
             err="$(mktemp)"
             if p="$(move_to_member "$m" "$target" 2>"$err")"; then
                 text+=$'\n'"  $m  pane $pane ($at)  cwd $cwd"
+                local orphans
+                orphans="$(move_orphans "$pid")"
+                [[ -z "$orphans" ]] || text+=$'\n'"    DIES WITH THE MOVE (not a unit; the move refuses without --accept-orphans): $(move_orphans_list "$orphans")"
                 text+=$'\n'"    resume on $target: $(jq -r --arg t "$MOVE_TO_AGENTBOX" '"\($t) new \(.spec | join(" ")) -- omp --resume \(.resume)"' <<<"$p")"
                 copy+="$(move_to_transcript_paths "$(jq -r .resume <<<"$p")")"$'\n'
             else
@@ -4542,11 +4752,11 @@ cmd_move_plan_to() {
 MOVE_USAGE='usage:
   agentbox move --plan [--json]                     every live host session, the box it would get,
                                                     each path that box gets and why, and the disk
-  agentbox move --self [--dry-run] [--force-floor] [--dir PATH]…
+  agentbox move --self [--dry-run] [--force-floor] [--accept-orphans] [--dir PATH]…
                                                     run by the session in its own pane: relaunch
                                                     this pane into a box, resuming this session;
                                                     each --dir adds a path the inference missed
-  agentbox move <session-id>… | --all [--now] [--dry-run] [--force-floor]
+  agentbox move <session-id>… | --all [--now] [--dry-run] [--force-floor] [--accept-orphans]
                                                     ask each session over Envoy to move itself
                                                     (--now relaunches its pane from outside)
   agentbox move <session-id> [--now] [--dry-run] [--dir PATH]…
@@ -4555,7 +4765,7 @@ MOVE_USAGE='usage:
   agentbox move --plan --to <machine>              each group of sessions (sessions that share a
                                                     working tree), what a move to <machine> would
                                                     copy for it and the size; changes nothing
-  agentbox move --to <machine> [--dry-run] [--dir PATH]…
+  agentbox move --to <machine> [--dry-run] [--accept-orphans] [--dir PATH]…
                                                     run by the session in its own pane at its safe
                                                     point: its group moves to <machine> over
                                                     Tailscale SSH and resumes there in boxes, with
@@ -4564,6 +4774,9 @@ MOVE_USAGE='usage:
   agentbox move --to <machine> --clear-halt        the box-health lead lets moves to <machine> go
                                                     on after a halt (two failed moves in a row, or
                                                     a session found running on both machines)
+Every move refuses before the hang-up while the session has a process that is not a systemd unit
+and would die with it (a server, a watcher, a dashboard started from a tool call); the plans list
+them. Make each a unit, stop it, or pass --accept-orphans.
 More than one `move --plan` may run at once: it writes only this host'"'"'s plan files, one per
 session, each renamed into place.'
 

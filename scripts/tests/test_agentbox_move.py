@@ -1280,8 +1280,11 @@ class AgentboxMove(unittest.TestCase):
             'host="$1"; shift',
             'printf "%s\\t%s\\n" "$host" "$*" >>"$STUB_REMOTE/SSH"',
             '[[ -e "$STUB_REMOTE/DOWN" ]] && exit 255',
+            # git push runs `git-receive-pack '<dir>'` over ssh: run it as it is.
+            '[[ "$*" == "bash -lc "* ]] || { export PATH="$STUB_REMOTE/bin:$PATH"; exec bash -c "$*"; }',
             'cmd="$*"; cmd="${cmd#bash -lc }"',
-            # A path listed in MISSING is not on the target (the check of the working directory).
+            # A path listed in MISSING is not on the target (the check of the working directory,
+            # and of the target's own clone: <common dir>/objects).
             'eval "script=$cmd"',
             'if [[ "$script" == "test -d "* ]] && grep -qxF -- "${script#test -d }" "$STUB_REMOTE/MISSING" 2>/dev/null; then exit 1; fi',
             'export PATH="$STUB_REMOTE/bin:$PATH" STUB_PGREP="$STUB_REMOTE/PGREP" AGENTBOX_PROC="$STUB_REMOTE/proc"',
@@ -1350,7 +1353,12 @@ class AgentboxMove(unittest.TestCase):
         self.make_proc(pid + 6, comm="bash", ppid=pid, cwd=self.other)
         return transcript
 
-    def move_to(self, args: str = "--to devbox", own: int = 999999901) -> subprocess.CompletedProcess[str]:
+    def move_to(self, args: str = "--to devbox", own: int = 999999901, accept: bool = True) -> subprocess.CompletedProcess[str]:
+        """`move --to` as the session runs it. The fixture's sessions have live children (the
+        tree they work in comes from them), which a move ends: these tests accept that, and
+        test_a_move_lists_and_refuses_what_dies_with_the_hang_up tests the refusal."""
+        if accept:
+            args += " --accept-orphans"
         result = self.run_bash(f"move_own_omp() {{ echo {own}; }}\ncmd_move_to {args}")
         # The hand-off is a background `setsid` (a stub here): wait for it, so it writes nothing
         # into the fixture after the test.
@@ -1398,8 +1406,13 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("--exclude=agentbox-moved", mirror)
         self.assertTrue(mirror.endswith(" sami@devbox:/"), mirror)
         self.assertIn(f" {transcript} ", mirror)
+        # The target has a clone of both repositories (the stub's target is this machine), so
+        # their storage is not copied: the trees go through git and their .git stays out of the
+        # mirror.
         self.assertIn(f"--exclude={self.src / 'other/.git'}/ ", mirror)
-        self.assertIn(f"--update --exclude=agentbox-moved -e ssh -o BatchMode=yes -o ConnectTimeout=20 {self.lane} {self.src / 'other/.git'} {self.src / 'repo/.git'} sami@devbox:/", merge)
+        self.assertIn(f"--exclude={self.worktree}/.git ", mirror)
+        self.assertIn(f"--update --exclude=agentbox-moved -e ssh -o BatchMode=yes -o ConnectTimeout=20 {self.lane} sami@devbox:/", merge)
+        self.assertIn("through git:", run.stdout)
         for marker in (transcript.with_suffix("") / "agentbox-moved", self.home / ".omp/agentbox-moved" / self.TO):
             body = marker.read_text(encoding="utf-8")
             self.assertIn("from=oldbox\nto=devbox\n", body)
@@ -1414,6 +1427,44 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(len(respawn), 1, respawn)
         self.assertIn("-t %81", respawn[0])
         self.assertIn(f"session {self.TO} moved to devbox", respawn[0])
+
+    def test_a_tree_whose_repository_the_target_lacks_copies_its_storage(self) -> None:
+        """Without a clone of the repository on the target there is nothing to push into, so the
+        tree's git storage is merged by rsync as before."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        (self.remote / "MISSING").write_text(f"{self.src / 'repo/.git'}/objects\n{self.src / 'other/.git'}/objects\n", encoding="utf-8")
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("through git:", run.stdout)
+        _mirror, merge = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"{self.lane} {self.src / 'other/.git'} {self.src / 'repo/.git'} sami@devbox:/", merge)
+
+    def test_a_tree_moved_through_git_keeps_its_branch_head_and_uncommitted_change(self) -> None:
+        """On the target the tree is a worktree of the target's own clone, on the same branch at
+        the same commit, with the change it had uncommitted. The stub's target is this machine,
+        so the tree is checked where it is, after the move rebuilt its index from HEAD."""
+        self.moving_session()
+        head = subprocess.run(["git", "-C", str(self.worktree), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        git = lambda *a: subprocess.run(["git", "-C", str(self.worktree), *a], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(git("rev-parse", "HEAD"), head)
+        self.assertEqual(git("symbolic-ref", "--short", "HEAD"), "wt")
+        self.assertEqual(git("status", "--short"), "M file")
+        refs = subprocess.run(["git", "-C", str(self.src / "repo"), "for-each-ref", "refs/agentbox-move"], capture_output=True, text=True).stdout
+        self.assertEqual(refs, "")
 
     def test_a_resume_that_fails_on_the_target_puts_the_session_back_here(self) -> None:
         transcript = self.moving_session()
@@ -1673,6 +1724,59 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn(f"group g-01a19700, 2 session(s): {self.TO} {self.TO2}", result.stdout)
         self.assertEqual(sorted(log.read_text(encoding="utf-8").split()), [self.TO, self.TO2])
 
+    def orphan_session(self) -> None:
+        """A session at its safe point that still has what its tool calls started: a background
+        `sleep` (KNOTCURVE's dashboard was such a child, and died with its move on 2026-11-02),
+        omp's own worker broker and python runner, and a server the runner started."""
+        lane = self.root / "lane"
+        lane.mkdir(exist_ok=True)
+        self.make_proc(1100, comm="bash", ppid=1, cwd=lane)
+        self.make_proc(1101, ppid=1100, cwd=lane, session="01a19700-0000-7000-8000-0000000f0001")
+        self.make_proc(1102, comm="sleep", ppid=1101, cwd=lane, cmdline="sleep 1000")
+        self.make_proc(1103, ppid=1101, cwd=lane, cmdline="/x/bin/omp __omp_worker_daemon_broker")
+        self.make_proc(1104, comm="python3", ppid=1101, cwd=lane,
+                       cmdline="/usr/bin/python3 -u /t/omp-python-runner-1000/runner-ab12.py")
+        self.make_proc(1105, comm="python3", ppid=1104, cwd=lane, cmdline="python3 serve.py")
+        self.set_pids(1101)
+        self.set_panes({1100: ("%90", "agents:9.1")})
+
+    def test_a_move_lists_and_refuses_what_dies_with_the_hang_up(self) -> None:
+        self.orphan_session()
+        env = 'move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\nmove_hand_off() { echo HANDED-OFF; }\n'
+        refused = self.run_bash(env + "cmd_move_self")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertNotIn("HANDED-OFF", refused.stdout)
+        self.assertIn("nothing was hung up: these processes of this session are not systemd units", refused.stderr)
+        self.assertIn("sleep 1000 (pid 1102)", refused.stderr)
+        self.assertIn("python3 serve.py (pid 1105)", refused.stderr)
+        self.assertNotIn("__omp_worker", refused.stderr)
+        self.assertNotIn("runner-ab12", refused.stderr)
+        dry = self.run_bash(env + "cmd_move_self --dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("the move would refuse: these processes", dry.stdout)
+        accepted = self.run_bash(env + "cmd_move_self --accept-orphans")
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertIn("HANDED-OFF", accepted.stdout)
+        self.assertIn("--accept-orphans: the hang-up of the move ends sleep 1000 (pid 1102)", accepted.stderr)
+        # From outside too, and the plan lists them for the session's row.
+        now = self.run_bash(env + "cmd_move_notify 01a19700-0000-7000-8000-0000000f0001 --now")
+        self.assertNotIn("HANDED-OFF", now.stdout)
+        self.assertIn("cannot be moved now, nothing hung up: these processes", now.stderr)
+        plan = self.run_bash('move_image_bytes() { echo 280000000; }\nmove_free_bytes() { echo 900000000000; }\ncmd_move_plan --json')
+        [row] = json.loads(plan.stdout)["sessions"]
+        self.assertIn("DIES WITH THE MOVE", row["note"])
+        self.assertIn("sleep 1000 (pid 1102)", row["note"])
+
+    def test_a_move_to_another_machine_refuses_what_dies_with_the_hang_up(self) -> None:
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        refused = self.move_to(accept=False)
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn("nothing was hung up: these processes of this session are not systemd units", refused.stderr)
+        self.assertEqual(self.jobs(), [])
+
     def test_the_plan_lists_each_group_s_copy_and_size_and_changes_nothing(self) -> None:
         transcript = self.moving_session()
         self.set_pids(999999901)
@@ -1699,7 +1803,7 @@ class AgentboxMove(unittest.TestCase):
         self.target()
         env = {"AGENTBOX_BOX": "agentbox-0123456789ab", "AGENTBOX_DIRS": str(self.lane),
                "OMP_SESSION_ID": self.TO, "TMUX_PANE": "%81"}
-        moved = self.run_bash(f'move_own_omp() {{ echo 999999901; }}\ncd "{self.worktree}"\ncmd_move_to --to devbox', env)
+        moved = self.run_bash(f'move_own_omp() {{ echo 999999901; }}\ncd "{self.worktree}"\ncmd_move_to --to devbox --accept-orphans', env)
         self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
         [job] = self.jobs()
         [member] = json.loads(job.read_text(encoding="utf-8"))["members"]
