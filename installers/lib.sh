@@ -86,7 +86,11 @@ ensure_json() {
 # printed, because removing it would silently move a lane VM's alerts back to this box's role
 # holder. Returns 1 on an unusable value.
 ensure_box_health_owner() {
-    local name="$1" dropin="$HOME/.config/systemd/user/$name.service.d/box-health-owner.conf"
+    # Two statements: bash expands every word of one `local` before it assigns any, so a $name in
+    # the same statement is the caller's (unbound under `set -u`, which stopped every installer
+    # that called this except omp-login-watch.sh, whose own $name happened to match).
+    local name="$1"
+    local dropin="$HOME/.config/systemd/user/$name.service.d/box-health-owner.conf"
     local owner="${BOX_HEALTH_OWNER:-}"
     if [ -z "$owner" ]; then
         [ -f "$dropin" ] && echo "$name: keeping $(grep -h BOX_HEALTH_OWNER "$dropin"); BOX_HEALTH_OWNER is unset here"

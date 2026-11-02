@@ -70,6 +70,12 @@ arm_user_timer devbox nvme-cache-cap
 # containers removed, hourly, while Docker's disk is over 80% used (devbox/docker-cap.service).
 arm_user_timer devbox docker-cap
 
+# Every 5 min, tell the box-health owner over Envoy when a timer-driven user unit stops completing
+# its runs, has them killed at its time limit, or its timer stops firing; the units come from the
+# timers themselves (scripts/unit-health-watch.md). BOX_HEALTH_OWNER, when set, goes in its drop-in.
+ensure_box_health_owner unit-health-watch
+arm_user_timer devbox unit-health-watch
+
 # Scratch on the big disk for the box's systemd --user services, which read environment.d and
 # not .bashrc (devbox/nvme-tmp.conf). Installed only where /mnt/nvme/<user> exists and is
 # writable, and only once both directories are there, since environment.d has no conditionals.

@@ -1,0 +1,1259 @@
+#!/usr/bin/env python3
+"""Alert when a timer-driven systemd user unit on this box stops doing its job.
+
+Why this exists: on sami-rocqperf, from 2026-11-01 16:00Z to 2026-11-02 13:49Z, systemd killed
+between 26% and 98% of each hour's runs of `envoy-role-holder-watch` at the unit's 25 s
+TimeoutStartSec, while its timer fired every 30 seconds. In the 10:00Z hour of 2026-11-02 the
+journal holds 118 starts, 116 runs killed at the time limit, 2 runs that failed on their exit
+code and 0 runs that finished. Nobody saw it, because the only witness was the journal of the
+unit that had gone quiet. A role-holder alert came 7.5 hours late and a lane stayed down for 37
+minutes.
+
+A watch that never completes looks exactly like a watch with nothing to say. This one reads what
+systemd itself wrote about each run, so a unit that cannot speak is still seen.
+
+What one run does:
+
+  1. Take the list of units from the timers themselves (`systemctl --user list-timers --all`
+     and every enabled timer unit file), never from a hand-written list, so a new timer is
+     covered the moment it is loaded.
+  2. For each timer that repeats (OnUnitActiveSec, OnUnitInactiveSec or OnCalendar), count the
+     runs of its service in a window that is the last hour, or two periods when that is longer:
+     started, completed, killed at the time limit (UNIT_RESULT=timeout), failed otherwise, and
+     still running. The counts come from systemd's own journal records about the unit, one
+     `journalctl` read for every unit, never from the unit's output.
+  3. Judge four conditions per unit, each on its own:
+       - no run completed in the window while at least one run ended;
+       - more than --killed-share of the runs that ended were killed at the time limit;
+       - the timer stopped firing: an enabled timer that is not active, or an active one that
+         has not fired for two periods while its service is not running;
+       - one run has been running for two periods and more (a run that never ends also stops
+         the timer from starting the next).
+  4. Say each new condition once, all of one run's in one message, with the counts, the last
+     error systemd logged, the last line the unit printed, and what to read. Say it again once,
+     after --escalate, if it still holds, and say when it clears.
+
+Alerts go over Envoy to the box-health owner the same way every box watch here sends them:
+BOX_HEALTH_OWNER when it is set, else the `lead-box-health` role, else the SRE session. This
+watch only reports. It restarts nothing and changes no unit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import calendar
+import fcntl
+import itertools
+import json
+import os
+import re
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# Box health on this machine belongs to the SRE session (dispatch://INFRA-6), as for
+# load-swap-watch and disk-fill-watch: it hears an alert when nobody holds the role.
+SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
+DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
+OWNER_RE = re.compile(
+    r"01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
+
+# Where the state file goes, as the sibling watches place theirs: the big disk on an agent box,
+# ~/.local/state on a machine without one.
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/unit-health-watch/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    / "unit-health-watch/state.json"
+)
+
+# systemd's catalog ids for the records it writes about a unit (sd-messages.h).
+UNIT_STARTING = (
+    "7d4958e842da4a758f6c1cdc7b36dcc5"  # "Starting X..."      JOB_TYPE=start
+)
+UNIT_STARTED = (
+    "39f53479d3a045ac8e11786248231fbf"  # "Finished/Started X" JOB_RESULT=done
+)
+UNIT_FAILED = (
+    "be02cf6855d2428ba40df7e9d022f03d"  # "Failed to start X"  JOB_RESULT=failed|...
+)
+UNIT_RESULT = (
+    "d9b373ed55a64feb8242e02dbe79a49c"  # "X: Failed with result 'R'." UNIT_RESULT=R
+)
+UNIT_PROCESS_EXIT = (
+    "98e322203f7a4ed290d09fe03c09fe15"  # "Main process exited, code=..."
+)
+UNIT_RESOURCES = "ae8f7b866b0347b9af31fe1c80b127c0"  # "Consumed 1.2s CPU time."
+UNIT_SKIPPED = (
+    "0e4284a0caca4bfc81c0bb6786972673"  # "skipped because of an unmet condition"
+)
+
+RUNNING_STATES = {"activating", "active", "deactivating", "reloading", "refreshing"}
+ENABLED_STATES = {
+    "enabled",
+    "enabled-runtime",
+    "linked",
+    "linked-runtime",
+    "transient",
+    "generated",
+}
+
+# What a reader is told for each condition. One condition, one headline.
+HEADLINE = {
+    "no-completion": "NO RUN COMPLETED",
+    "killed": "RUNS KILLED AT THE TIME LIMIT",
+    "dead-timer": "TIMER STOPPED FIRING",
+    "stuck": "RUN NEVER ENDS",
+}
+KINDS = tuple(HEADLINE)
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"{stamp} {message}", flush=True)
+
+
+def iso(epoch: float | None) -> str:
+    if not epoch:
+        return "never"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def human_time(seconds: float | None) -> str:
+    if seconds is None:
+        return "-"
+    seconds = max(0.0, float(seconds))
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}min"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
+# ------------------------------------------------------------------------------- Envoy
+
+
+class Envoy:
+    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
+            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+            / "legion/envoy.json"
+        )
+        try:
+            config = json.loads(Path(path).read_text()).get("envoy") or {}
+        except (OSError, ValueError):
+            config = {}
+        if config.get("enabled") is False:
+            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
+        self.url = (
+            os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL
+        ).rstrip("/")
+        self.timeout = timeout
+        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
+        if token.startswith("!"):
+            try:
+                done = subprocess.run(
+                    ["/bin/sh", "-c", token[1:]],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=10,
+                    stdin=subprocess.DEVNULL,
+                )
+                token = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                token = ""
+        self.token = token
+
+    def request(
+        self, method: str, path: str, body: dict | None = None
+    ) -> tuple[int, dict | list]:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(self.url + path, data=data, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
+                raw = answer.read().decode() or "{}"
+                return answer.status, json.loads(raw)
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode() or "{}"
+            try:
+                return error.code, json.loads(raw)
+            except ValueError:
+                return error.code, {"error": raw.strip()}
+        except (TimeoutError, urllib.error.URLError, ValueError, OSError) as error:
+            return 0, {"error": str(error)}
+
+    def send(self, session_id: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/send",
+            {"target_session": session_id, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+    def publish(self, topic: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/publish",
+            {"topic": topic, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  publish to {topic} failed: {status} {body}")
+        return status == 200
+
+
+def box_health_owner() -> str:
+    """The session id BOX_HEALTH_OWNER names, or "" for the role-then-SRE default.
+
+    An unusable value is refused at start, not at the first alert: a watch that drops its
+    alerts quietly is the failure this watch exists to catch.
+    """
+    owner = (os.environ.get("BOX_HEALTH_OWNER") or "").strip()
+    if owner and not OWNER_RE.fullmatch(owner):
+        raise SystemExit(
+            f"BOX_HEALTH_OWNER={owner!r} is not an omp session id"
+            " (01xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); unset it for the box-health role"
+        )
+    return owner
+
+
+def tell_box_health(envoy: Envoy, text: str) -> str:
+    """Tell this box's health owner, and say who heard it ("" when every route refused)."""
+    owner = box_health_owner()
+    if owner:
+        return owner if envoy.send(owner, text) else ""
+    if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        return BOX_HEALTH_ROLE_TOPIC
+    if envoy.send(SRE, text):
+        return SRE
+    return ""
+
+
+# ------------------------------------------------------------------------------- systemd
+
+_SPAN_UNITS = {
+    "us": 1e-6,
+    "usec": 1e-6,
+    "ms": 1e-3,
+    "msec": 1e-3,
+    "s": 1.0,
+    "sec": 1.0,
+    "min": 60.0,
+    "m": 60.0,
+    "h": 3600.0,
+    "hr": 3600.0,
+    "d": 86400.0,
+    "w": 604800.0,
+    "month": 2629800.0,
+    "M": 2629800.0,
+    "y": 31557600.0,
+}
+_SPAN_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(usec|us|msec|ms|month|min|sec|hr|s|m|h|d|w|M|y)?"
+)
+
+
+def parse_timespan(text: str) -> float | None:
+    """Seconds in a systemd time span ("30s", "1min 30s", "1d 15h 3.8s"); None for infinity."""
+    text = (text or "").strip()
+    if not text or text == "infinity":
+        return None
+    total = 0.0
+    matched = False
+    for number, unit in _SPAN_RE.findall(text):
+        matched = True
+        # A bare number in a property value is microseconds.
+        total += float(number) * (_SPAN_UNITS[unit] if unit else 1e-6)
+    return total if matched else None
+
+
+def parse_when(text: str) -> float | None:
+    """Epoch seconds from systemctl's "Mon 2026-11-02 14:07:47 UTC" (read under TZ=UTC)."""
+    text = (text or "").strip()
+    if not text or text in {"n/a", "0"}:
+        return None
+    if text.startswith("@"):
+        try:
+            return float(text[1:])
+        except ValueError:
+            return None
+    match = re.search(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", text)
+    if not match:
+        return None
+    return float(calendar.timegm(time.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")))
+
+
+def run_command(argv: list[str], timeout: float = 60.0) -> str:
+    try:
+        done = subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=dict(os.environ, TZ="UTC", SYSTEMD_PAGER="", SYSTEMD_COLORS="0"),
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"  {' '.join(argv[:3])} failed: {error}")
+        return ""
+    return done.stdout
+
+
+def show(units: list[str], properties: list[str]) -> dict[str, dict[str, list[str]]]:
+    """`systemctl --user show` for many units at once: {Id: {property: [values...]}}.
+
+    A property can repeat (TimersMonotonic has one line per trigger), so each holds a list.
+    """
+    if not units:
+        return {}
+    out = run_command(
+        ["systemctl", "--user", "show", "-p", ",".join(properties), "--", *units]
+    )
+    found: dict[str, dict[str, list[str]]] = {}
+    for block in out.split("\n\n"):
+        props: dict[str, list[str]] = {}
+        for line in block.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                props.setdefault(key, []).append(value)
+        if props.get("Id"):
+            found[props["Id"][0]] = props
+    return found
+
+
+def first(props: dict[str, list[str]], key: str) -> str:
+    values = props.get(key) or [""]
+    return values[0]
+
+
+def calendar_period(spec: str) -> float | None:
+    """The shortest gap between three consecutive elapses of an OnCalendar spec."""
+    out = run_command(
+        ["systemd-analyze", "calendar", "--iterations=3", spec], timeout=20
+    )
+    return calendar_period_from(out)
+
+
+def calendar_period_from(out: str) -> float | None:
+    stamps = [
+        parse_when(line.split(":", 1)[1])
+        for line in out.splitlines()
+        if line.strip().startswith(("Next elapse:", "Iteration #"))
+    ]
+    stamps = [stamp for stamp in stamps if stamp]
+    gaps = [
+        later - earlier
+        for earlier, later in itertools.pairwise(stamps)
+        if later > earlier
+    ]
+    return min(gaps) if gaps else None
+
+
+_MONOTONIC_RE = re.compile(r"(OnUnitActiveUSec|OnUnitInactiveUSec)=([^;}]+)")
+_CALENDAR_RE = re.compile(r"OnCalendar=([^;]+?)\s*;")
+
+
+def timer_period(
+    props: dict[str, list[str]], calendar_lookup=None
+) -> tuple[float | None, str]:
+    """(seconds between firings, the trigger that says so); None for a timer that fires once.
+
+    OnActiveSec, OnBootSec and OnStartupSec fire once and are not a period.
+    """
+    calendar_lookup = calendar_lookup or calendar_period
+    best: tuple[float | None, str] = (None, "fires once")
+    for value in props.get("TimersMonotonic") or []:
+        for trigger, span in _MONOTONIC_RE.findall(value):
+            seconds = parse_timespan(span)
+            if seconds and (best[0] is None or seconds < best[0]):
+                name = (
+                    "OnUnitActiveSec"
+                    if trigger == "OnUnitActiveUSec"
+                    else "OnUnitInactiveSec"
+                )
+                best = (seconds, f"{name}={span.strip()}")
+    for value in props.get("TimersCalendar") or []:
+        for spec in _CALENDAR_RE.findall(value):
+            seconds = calendar_lookup(spec.strip())
+            if seconds and (best[0] is None or seconds < best[0]):
+                best = (seconds, f"OnCalendar={spec.strip()}")
+    return best
+
+
+TIMER_PROPS = [
+    "Id",
+    "Unit",
+    "LoadState",
+    "ActiveState",
+    "UnitFileState",
+    "TimersMonotonic",
+    "TimersCalendar",
+    "LastTriggerUSec",
+    "NextElapseUSecRealtime",
+    "RandomizedDelayUSec",
+    "AccuracyUSec",
+    "ActiveEnterTimestamp",
+]
+SERVICE_PROPS = [
+    "Id",
+    "Type",
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "TimeoutStartUSec",
+    "Documentation",
+    "InvocationID",
+    "ExecMainStartTimestamp",
+    "InactiveExitTimestamp",
+    "InactiveEnterTimestamp",
+]
+
+
+def timer_names() -> list[str]:
+    """Every timer systemd has loaded, and every enabled timer unit file, which catches one that
+    is enabled but was never loaded or was stopped."""
+    names: set[str] = set()
+    for line in run_command(
+        ["systemctl", "--user", "list-timers", "--all", "--no-legend", "--plain"]
+    ).splitlines():
+        for word in line.split():
+            if word.endswith(".timer"):
+                names.add(word)
+    for line in run_command(
+        [
+            "systemctl",
+            "--user",
+            "list-unit-files",
+            "--type=timer",
+            "--no-legend",
+            "--plain",
+        ]
+    ).splitlines():
+        parts = line.split()
+        # A template file is not a timer that runs.
+        if (
+            len(parts) >= 2
+            and parts[0].endswith(".timer")
+            and parts[1] in ENABLED_STATES
+            and "@" not in parts[0]
+        ):
+            names.add(parts[0])
+    return sorted(names)
+
+
+def discover() -> list[dict]:
+    """Every timer on this user manager, with its service and its period."""
+    timers = show(timer_names(), TIMER_PROPS)
+    services = show(
+        sorted(
+            {first(props, "Unit") for props in timers.values() if first(props, "Unit")}
+        ),
+        SERVICE_PROPS,
+    )
+    found = []
+    for name, props in sorted(timers.items()):
+        period, trigger = timer_period(props)
+        service_name = first(props, "Unit")
+        service = services.get(service_name, {})
+        documentation = [
+            doc.split(":", 1)[1] if doc.startswith("file:") else doc
+            for value in service.get("Documentation") or []
+            for doc in value.split()
+        ]
+        found.append(
+            {
+                "timer": name,
+                "service": service_name,
+                "load_state": first(props, "LoadState"),
+                "active_state": first(props, "ActiveState"),
+                "unit_file_state": first(props, "UnitFileState"),
+                "period": period,
+                "trigger": trigger,
+                "inactive_trigger": trigger.startswith("OnUnitInactiveSec"),
+                "last_trigger": parse_when(first(props, "LastTriggerUSec")),
+                "next_elapse": parse_when(first(props, "NextElapseUSecRealtime")),
+                "timer_since": parse_when(first(props, "ActiveEnterTimestamp")),
+                "slack": (parse_timespan(first(props, "RandomizedDelayUSec")) or 0.0)
+                + (parse_timespan(first(props, "AccuracyUSec")) or 0.0),
+                "service_type": first(service, "Type"),
+                "service_state": first(service, "ActiveState"),
+                "service_substate": first(service, "SubState"),
+                "timeout_start": parse_timespan(first(service, "TimeoutStartUSec")),
+                "documentation": documentation,
+                "invocation": first(service, "InvocationID"),
+                "run_started": parse_when(first(service, "ExecMainStartTimestamp"))
+                or parse_when(first(service, "InactiveExitTimestamp")),
+                "service_inactive_since": parse_when(
+                    first(service, "InactiveEnterTimestamp")
+                ),
+            }
+        )
+    return found
+
+
+# ------------------------------------------------------------------------------- the journal
+
+JOURNAL_FIELDS = (
+    "MESSAGE_ID,JOB_TYPE,JOB_RESULT,UNIT_RESULT,USER_INVOCATION_ID,MESSAGE,USER_UNIT"
+)
+
+
+def journal_records(services: list[str], since: float, until: float) -> list[dict]:
+    """systemd's own records about these units, one read for all of them.
+
+    USER_UNIT matches only what the user manager wrote about a unit, never the unit's output, so
+    an hour of every timer here is about a thousand records and 0.1 s: the units' own output for
+    the same units over 50 hours is 200,000 records and 44 s on this box.
+    """
+    if not services:
+        return []
+    argv = [
+        "journalctl",
+        "--user",
+        "--no-pager",
+        "-o",
+        "json",
+        f"--output-fields={JOURNAL_FIELDS}",
+        f"--since=@{int(since)}",
+        f"--until=@{int(until) + 1}",
+        *[f"USER_UNIT={service}" for service in services],
+    ]
+    records = []
+    for line in run_command(argv, timeout=90).splitlines():
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue
+    return records
+
+
+def text_of(record: dict) -> str:
+    message = record.get("MESSAGE")
+    if isinstance(message, list):  # journald hands non-UTF-8 text as a byte list
+        message = bytes(value for value in message if isinstance(value, int)).decode(
+            "utf8", "replace"
+        )
+    return str(message or "").strip()
+
+
+def runs_from_records(records: list[dict]) -> dict[str, list[dict]]:
+    """{service: [run, ...]}, one run per invocation, from systemd's records about the unit."""
+    runs: dict[str, dict[str, dict]] = {}
+    for record in records:
+        unit = record.get("USER_UNIT")
+        if not unit:
+            continue
+        when = int(record.get("__REALTIME_TIMESTAMP") or 0) / 1e6
+        invocation = record.get("USER_INVOCATION_ID") or f"t{when:.6f}"
+        message_id = record.get("MESSAGE_ID") or ""
+        if message_id == UNIT_RESOURCES:
+            continue
+        run = runs.setdefault(unit, {}).setdefault(
+            invocation,
+            {
+                "invocation": invocation,
+                "started": None,
+                "first_seen": when,
+                "outcome": None,
+                "ended": None,
+                "lines": [],
+            },
+        )
+        if message_id == UNIT_STARTING:
+            run["started"] = when
+        elif message_id == UNIT_SKIPPED or record.get("JOB_RESULT") == "skipped":
+            run["outcome"] = run["outcome"] or "skipped"
+            run["ended"] = when
+        elif message_id == UNIT_STARTED and record.get("JOB_RESULT") == "done":
+            run["done"] = when
+        elif message_id == UNIT_RESULT:
+            run["outcome"] = (
+                "timeout"
+                if record.get("UNIT_RESULT") == "timeout"
+                else (record.get("UNIT_RESULT") or "failed")
+            )
+            run["ended"] = when
+            run["lines"].append((when, text_of(record)))
+        elif message_id == UNIT_FAILED:
+            if not run["outcome"]:
+                run["outcome"] = record.get("JOB_RESULT") or "failed"
+                run["ended"] = when
+        elif message_id == UNIT_PROCESS_EXIT or not message_id:
+            text = text_of(record)
+            if text:
+                run["lines"].append((when, text))
+    return {
+        unit: sorted(
+            by_invocation.values(), key=lambda run: run["started"] or run["first_seen"]
+        )
+        for unit, by_invocation in runs.items()
+    }
+
+
+def tally(
+    runs: list[dict],
+    since: float,
+    until: float,
+    live_invocation: str = "",
+    oneshot: bool = True,
+) -> dict:
+    """Counts for the runs that STARTED inside [since, until].
+
+    A oneshot service's "Finished" is its run completing; any other type's "Started" is only its
+    start, so for those a run counts as completed once it has ended without a failure.
+    """
+    counts = {
+        "started": 0,
+        "completed": 0,
+        "killed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "running": 0,
+    }
+    failures: dict[str, int] = {}
+    last_failure: dict | None = None
+    first_start = last_start = None
+    for run in runs:
+        began = run["started"] or run["first_seen"]
+        if began < since or began > until:
+            continue
+        outcome = run.get("outcome")
+        if outcome == "skipped" and not run["started"]:
+            counts["skipped"] += 1
+            continue
+        counts["started"] += 1
+        first_start = began if first_start is None else min(first_start, began)
+        last_start = began if last_start is None else max(last_start, began)
+        if outcome == "timeout":
+            counts["killed"] += 1
+        elif outcome and outcome != "skipped":
+            counts["failed"] += 1
+            failures[outcome] = failures.get(outcome, 0) + 1
+        elif run.get("done") and (oneshot or run["invocation"] != live_invocation):
+            counts["completed"] += 1
+        else:
+            counts["running"] += 1
+            continue
+        if outcome and (
+            last_failure is None or (run["ended"] or 0) >= (last_failure["ended"] or 0)
+        ):
+            last_failure = run
+    counts["ended"] = counts["completed"] + counts["killed"] + counts["failed"]
+    counts["failures"] = failures
+    counts["first_start"] = first_start
+    counts["last_start"] = last_start
+    counts["last_failure"] = (
+        {
+            "at": last_failure["ended"],
+            "started": last_failure["started"] or last_failure["first_seen"],
+            "outcome": last_failure["outcome"],
+            "lines": [text for _, text in last_failure["lines"]],
+        }
+        if last_failure
+        else None
+    )
+    return counts
+
+
+def last_own_line(service: str, since: float, until: float) -> tuple[float | None, str]:
+    """The last line the unit itself printed in [since, until], or (None, "")."""
+    out = run_command(
+        [
+            "journalctl",
+            "--user",
+            "--no-pager",
+            "-o",
+            "json",
+            "--output-fields=MESSAGE",
+            "-n",
+            "1",
+            f"--since=@{int(since)}",
+            f"--until=@{int(until) + 1}",
+            f"_SYSTEMD_USER_UNIT={service}",
+        ],
+        timeout=30,
+    )
+    for line in reversed(out.splitlines()):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        return int(record.get("__REALTIME_TIMESTAMP") or 0) / 1e6, text_of(record)[:400]
+    return None, ""
+
+
+def own_line_for(
+    service: str, counts: dict, since: float, until: float
+) -> tuple[float | None, str]:
+    """The last line the unit printed in its last failed run, or in the window when none failed:
+    what the run was doing when it ended is the line a reader needs."""
+    failure = counts.get("last_failure")
+    if failure:
+        return last_own_line(service, failure["started"], failure["at"])
+    return last_own_line(service, since, until)
+
+
+# ------------------------------------------------------------------------------- judgement
+
+
+def window_for(unit: dict, options: argparse.Namespace) -> float:
+    """The last hour, or two periods and the timer's slack when that is longer, so a unit that
+    fires hourly or daily always has a run inside its window."""
+    period = unit.get("period")
+    if not period:
+        return options.window
+    return max(options.window, 2 * period + unit.get("slack", 0.0) + 60)
+
+
+def overdue_after(unit: dict) -> float:
+    """How long a periodic timer may go without firing before it counts as stopped."""
+    return 2 * unit["period"] + unit.get("slack", 0.0) + 120
+
+
+def judge(
+    unit: dict, counts: dict, now: float, options: argparse.Namespace, live: bool = True
+) -> dict[str, str]:
+    """{kind: why} for every condition that holds for this unit now."""
+    found: dict[str, str] = {}
+    if not unit.get("period"):
+        return found
+    window = window_for(unit, options)
+    if counts["ended"] and counts["completed"] == 0:
+        found["no-completion"] = (
+            f"completed 0 of {counts['started']} runs started in the last {human_time(window)}"
+        )
+    if (
+        counts["ended"]
+        and counts["killed"] >= options.min_killed
+        and counts["killed"] / counts["ended"] > options.killed_share
+    ):
+        found["killed"] = (
+            f"{counts['killed']} of {counts['ended']} runs that ended in the last {human_time(window)}"
+            f" were killed at the time limit ({counts['killed'] / counts['ended']:.0%},"
+            f" over the {options.killed_share:.0%} this watch allows)"
+        )
+    if not live:
+        return found
+    running = unit.get("service_state") in RUNNING_STATES
+    enabled = unit.get("unit_file_state") in ENABLED_STATES
+    timer_active = unit.get("active_state") == "active"
+    if not timer_active and enabled:
+        found["dead-timer"] = (
+            f"{unit['timer']} is {unit.get('unit_file_state')} but {unit.get('active_state') or 'not loaded'},"
+            " so it will not fire"
+        )
+    elif timer_active and not running:
+        base = unit.get("last_trigger") or unit.get("timer_since")
+        if unit.get("inactive_trigger") and unit.get("service_inactive_since"):
+            base = max(base or 0, unit["service_inactive_since"])
+        if base and now - base > overdue_after(unit):
+            found["dead-timer"] = (
+                f"{unit['timer']} last fired {human_time(now - base)} ago ({iso(base)}) and fires every"
+                f" {human_time(unit['period'])}; its service is not running"
+            )
+    if running and unit.get("run_started"):
+        age = now - unit["run_started"]
+        if age > max(overdue_after(unit), options.stuck_after):
+            found["stuck"] = (
+                f"the run that started at {iso(unit['run_started'])} is still {unit.get('service_state')}"
+                f" after {human_time(age)}, against a period of {human_time(unit['period'])}; no other run can start"
+            )
+    return found
+
+
+def clears(
+    kind: str, unit: dict, counts: dict, findings: dict, options: argparse.Namespace
+) -> bool:
+    """Hysteresis for the kill share: it clears at half the bar, never on it."""
+    if kind in findings:
+        return False
+    if kind == "killed" and counts["ended"] and counts["killed"] >= options.min_killed:
+        return (
+            counts["killed"] / counts["ended"]
+            <= options.killed_share * options.clear_factor
+        )
+    return True
+
+
+# ------------------------------------------------------------------------------- reading
+
+
+def reading(
+    unit: dict, counts: dict | None, now: float, options: argparse.Namespace
+) -> dict:
+    window = window_for(unit, options)
+    row = {
+        "timer": unit["timer"],
+        "service": unit["service"],
+        "period": unit.get("period"),
+        "trigger": unit.get("trigger"),
+        "timer_state": f"{unit.get('active_state')}/{unit.get('unit_file_state')}",
+        "service_state": unit.get("service_state"),
+        "last_trigger": iso(unit.get("last_trigger")),
+        "window": window,
+    }
+    if counts:
+        row.update(
+            {
+                key: counts[key]
+                for key in (
+                    "started",
+                    "completed",
+                    "killed",
+                    "failed",
+                    "running",
+                    "skipped",
+                )
+            }
+        )
+        row["failures"] = counts["failures"]
+    return row
+
+
+def report_text(
+    rows: list[dict],
+    verdicts: dict[str, dict[str, str]],
+    until: float,
+    live: bool = True,
+) -> str:
+    lines = [
+        f"unit-health-watch on {socket.gethostname()}, window ending {iso(until)}"
+        + (
+            ""
+            if live
+            else "; a past window: runs counted from the journal, timer and run state not judged,"
+            " 'last fired' is as of now"
+        ),
+        (
+            f"{'service':<36} {'every':>6} {'window':>6} {'start':>5} {'done':>5} {'kill':>5} {'fail':>5} {'run':>4}"
+            f"  {'last fired':<20}  verdict"
+        ),
+    ]
+    for row in rows:
+        found = verdicts.get(row["service"]) or {}
+        verdict = "; ".join(HEADLINE[kind] for kind in KINDS if kind in found) or (
+            "ok" if row.get("period") else "not periodic, not judged"
+        )
+        if row.get("period") is None:
+            counts = f"{'-':>5} {'-':>5} {'-':>5} {'-':>5} {'-':>4}"
+        else:
+            counts = (
+                f"{row.get('started', 0):>5} {row.get('completed', 0):>5} {row.get('killed', 0):>5}"
+                f" {row.get('failed', 0):>5} {row.get('running', 0):>4}"
+            )
+        lines.append(
+            f"{row['service']:<36} {human_time(row.get('period')):>6} {human_time(row['window']):>6} {counts}"
+            f"  {row['last_trigger']:<20}  {verdict}"
+        )
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------------------- alerts
+
+ADVICE = {
+    "no-completion": "Every check this unit makes is off while this holds, and its own alerts are"
+    " silent with it.",
+    "killed": "A run killed at its time limit has outgrown TimeoutStartSec, usually on a loaded box:"
+    " envoy-role-holder-watch needed more than its 25 s at load 450 on 2026-11-02. Measure a run's"
+    " wall time now, then make the run cheaper or raise the limit.",
+    "dead-timer": "Nothing starts this unit any more, so it reports nothing and fails nothing."
+    " `systemctl --user start <timer>` re-arms it once the reason it stopped is known.",
+    "stuck": "A run that never ends holds the unit, so the timer cannot start the next one."
+    " Read what the run is waiting on before stopping it.",
+}
+
+
+def unit_block(
+    unit: dict,
+    counts: dict,
+    kinds: dict[str, str],
+    since: float,
+    until: float,
+    own: tuple,
+) -> str:
+    service = unit["service"]
+    timeout = unit.get("timeout_start")
+    limit = (
+        f"its {human_time(timeout)} start limit (TimeoutStartSec)"
+        if timeout
+        else "its time limit"
+    )
+    failures = ", ".join(
+        f"{count} {result}" for result, count in sorted(counts["failures"].items())
+    )
+    lines = [
+        f"{service}: "
+        + "; ".join(f"{HEADLINE[kind]} - {why}" for kind, why in kinds.items())
+        + "."
+    ]
+    lines.append(
+        f"  Journal, {iso(since)} to {iso(until)}: {counts['started']} started, {counts['completed']} completed,"
+        f" {counts['killed']} killed at {limit}, {counts['failed']} failed otherwise"
+        + (f" ({failures})" if failures else "")
+        + f", {counts['running']} still running."
+    )
+    lines.append(
+        f"  Timer {unit['timer']}: {unit.get('trigger')}, {unit.get('active_state')}, last fired"
+        f" {iso(unit.get('last_trigger'))}, next {iso(unit.get('next_elapse')) if unit.get('next_elapse') else '-'}."
+    )
+    failure = counts.get("last_failure")
+    if failure:
+        lines.append(
+            f"  Last error, {iso(failure['at'])} ({failure['outcome']}): "
+            + " / ".join(failure["lines"][-3:])
+        )
+    when, text = own
+    scope = "its last failed run" if failure else "the window"
+    lines.append(
+        f"  Last line the unit printed in {scope}, {iso(when)}: {text}"
+        if text
+        else f"  The unit printed nothing in {scope}."
+    )
+    read = [
+        f"journalctl --user -u {service} --since {iso(since)}",
+        f"systemctl --user status {service} {unit['timer']}",
+    ]
+    read += unit.get("documentation") or []
+    lines.append("  Read: " + "; ".join(read))
+    for kind in kinds:
+        lines.append(f"  {ADVICE[kind].replace('<timer>', unit['timer'])}")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------------------- state
+
+
+class State:
+    """The one file this watch owns: its open conditions.
+
+    Opened under an exclusive, non-blocking flock for the whole run, so a hand run and the timer
+    can never both decide that a condition is new; the loser skips its period.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = open(path, "a+")
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.locked = True
+        except OSError:
+            self.locked = False
+            self.data = {}
+            return
+        self.handle.seek(0)
+        try:
+            self.data = json.loads(self.handle.read() or "{}")
+        except ValueError:
+            self.data = {}
+
+    def commit(self, options: argparse.Namespace) -> None:
+        if options.dry_run and not options.write_state:
+            return
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.data, self.handle, indent=1, sort_keys=True)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+    def close(self) -> None:
+        try:
+            self.handle.close()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------------------- one run
+
+
+def assess(
+    options: argparse.Namespace, now: float, live: bool
+) -> tuple[list[dict], dict, dict, dict]:
+    """(units, counts by service, findings by service, window start by service)."""
+    units = discover()
+    periodic = [unit for unit in units if unit.get("period")]
+    windows = {unit["service"]: window_for(unit, options) for unit in periodic}
+    since = now - max(windows.values(), default=options.window)
+    runs = runs_from_records(journal_records(sorted(windows), since, now))
+    counts: dict[str, dict] = {}
+    findings: dict[str, dict[str, str]] = {}
+    starts: dict[str, float] = {}
+    for unit in periodic:
+        service = unit["service"]
+        starts[service] = now - windows[service]
+        counts[service] = tally(
+            runs.get(service, []),
+            starts[service],
+            now,
+            live_invocation=unit.get("invocation", "") if live else "",
+            oneshot=unit.get("service_type") in {"oneshot", ""},
+        )
+        findings[service] = judge(unit, counts[service], now, options, live=live)
+    return units, counts, findings, starts
+
+
+def run_once(options: argparse.Namespace) -> int:
+    now = options.at or time.time()
+    live = options.at is None
+    units, counts, findings, starts = assess(options, now, live)
+
+    if options.report:
+        rows = [
+            reading(unit, counts.get(unit["service"]), now, options) for unit in units
+        ]
+        if options.json:
+            print(
+                json.dumps(
+                    {"at": iso(now), "units": rows, "findings": findings},
+                    indent=1,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(report_text(rows, findings, now, live))
+        return 0
+
+    envoy = Envoy(timeout=options.http_timeout)
+    state = State(options.state)
+    if not state.locked:
+        log(f"another run holds {options.state}; skipping this period")
+        return 0
+    incidents: dict = state.data.setdefault("incidents", {})
+    by_service = {unit["service"]: unit for unit in units if unit.get("period")}
+    opened: dict[str, dict[str, str]] = {}
+    escalated: dict[str, dict[str, str]] = {}
+    cleared: list[str] = []
+
+    for service, unit in sorted(by_service.items()):
+        for kind in KINDS:
+            key = f"{service}|{kind}"
+            why = findings[service].get(kind)
+            incident = incidents.get(key)
+            if why:
+                if not incident:
+                    incidents[key] = {
+                        "opened_at": now,
+                        "alerted_at": now,
+                        "escalated_at": None,
+                        "why": why,
+                    }
+                    opened.setdefault(service, {})[kind] = why
+                else:
+                    incident["why"] = why
+                    if (
+                        incident.get("escalated_at") is None
+                        and now - incident["alerted_at"] >= options.escalate
+                    ):
+                        incident["escalated_at"] = now
+                        escalated.setdefault(service, {})[kind] = why
+            elif incident and clears(
+                kind, unit, counts[service], findings[service], options
+            ):
+                cleared.append(
+                    f"{service}: {HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
+                    f" (opened {iso(incident['opened_at'])})."
+                )
+                incidents.pop(key)
+    # A unit whose timer is gone cannot be judged; its conditions close with that said.
+    for key in sorted(incidents):
+        service, _, kind = key.partition("|")
+        if service not in by_service:
+            cleared.append(
+                f"{service}: {HEADLINE.get(kind, kind)} closed: no loaded timer starts this unit any more"
+                f" (opened {iso(incidents[key]['opened_at'])})."
+            )
+            incidents.pop(key)
+
+    host = socket.gethostname()
+    messages: list[str] = []
+
+    def blocks(chosen: dict[str, dict[str, str]]) -> list[str]:
+        return [
+            unit_block(
+                by_service[service],
+                counts[service],
+                kinds,
+                starts[service],
+                now,
+                own_line_for(service, counts[service], starts[service], now),
+            )
+            for service, kinds in sorted(chosen.items())
+        ]
+
+    if opened:
+        messages.append(
+            f"UNIT RUNS NOT COMPLETING on {host}: {len(opened)} timer-driven"
+            f" unit{'s' if len(opened) != 1 else ''} stopped doing {'their' if len(opened) != 1 else 'its'} job.\n\n"
+            + "\n\n".join(blocks(opened))
+            + f"\n\nFrom unit-health-watch on {host}. It only reports; it changed no unit."
+        )
+    if escalated:
+        messages.append(
+            f"STILL NOT COMPLETING on {host}, {human_time(options.escalate)} after the first alert:"
+            f" {len(escalated)} unit{'s' if len(escalated) != 1 else ''}.\n\n"
+            + "\n\n".join(blocks(escalated))
+            + f"\n\nFrom unit-health-watch on {host}."
+        )
+    if cleared:
+        messages.append(
+            f"UNIT RUNS CLEARED on {host}:\n"
+            + "\n".join(f"  {line}" for line in cleared)
+            + f"\nNo action is needed for these. From unit-health-watch on {host}."
+        )
+
+    state.data["last_run"] = now
+    state.data["last_summary"] = {
+        service: {
+            key: counts[service][key]
+            for key in ("started", "completed", "killed", "failed")
+        }
+        for service in counts
+    }
+    state.commit(options)
+    state.close()
+
+    log(
+        f"checked {len(by_service)} periodic timer(s) of {len(units)}; open: {len(incidents)};"
+        f" new: {sum(len(kinds) for kinds in opened.values())}; cleared: {len(cleared)}"
+    )
+    heard: list[str] = []
+    unheard = 0
+    for text in messages:
+        if options.print_alert or options.dry_run:
+            print(text + "\n")
+        if not options.dry_run:
+            target = tell_box_health(envoy, text)
+            if target:
+                heard.append(target)
+            else:
+                unheard += 1
+    for target in heard:
+        log(f"told {target}")
+    if unheard:
+        # The state already records the alert as made, so this line is the only trace that it
+        # reached nobody.
+        log(
+            f"NOBODY HEARD IT: {unheard} message(s) refused by every Envoy route; see above"
+        )
+    return 0
+
+
+def parse_at(text: str) -> float:
+    match = re.fullmatch(
+        r"(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d)(?::(\d\d))?Z?", text.strip()
+    )
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a UTC time like 2026-11-02T11:00Z"
+        )
+    stamp = f"{match.group(1)} {match.group(2)}:{match.group(3) or '00'}"
+    return float(calendar.timegm(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--window",
+        type=float,
+        default=3600.0,
+        help="seconds of runs to count (default 3600; two periods when longer)",
+    )
+    parser.add_argument(
+        "--killed-share",
+        type=float,
+        default=0.25,
+        help="alert when more than this share of the runs that ended were killed at the time limit (default 0.25)",
+    )
+    parser.add_argument(
+        "--min-killed",
+        type=int,
+        default=2,
+        help="killed runs needed before the share counts (default 2)",
+    )
+    parser.add_argument(
+        "--clear-factor",
+        type=float,
+        default=0.5,
+        help="the kill share clears at this fraction of its bar (default 0.5)",
+    )
+    parser.add_argument(
+        "--stuck-after",
+        type=float,
+        default=900.0,
+        help="a run is stuck only after this many seconds as well as two periods (default 900)",
+    )
+    parser.add_argument(
+        "--escalate",
+        type=float,
+        default=7200.0,
+        help="say a condition again once after this many seconds (default 7200)",
+    )
+    parser.add_argument(
+        "--state",
+        type=Path,
+        default=DEFAULT_STATE,
+        help=f"state file (default {DEFAULT_STATE})",
+    )
+    parser.add_argument(
+        "--http-timeout",
+        type=float,
+        default=8.0,
+        help="Envoy request timeout (default 8 s)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="decide and print, send nothing, write no state",
+    )
+    parser.add_argument(
+        "--write-state",
+        action="store_true",
+        help="with --dry-run, still write the state file",
+    )
+    parser.add_argument(
+        "--print-alert",
+        action="store_true",
+        help="print a message to stdout as well as sending it",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="print every timer's reading now; send nothing, write no state",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="with --report, one JSON object"
+    )
+    parser.add_argument(
+        "--at",
+        type=parse_at,
+        default=None,
+        help="with --report, count the window ending at this UTC time (2026-11-02T11:00Z); timer state is not judged",
+    )
+    options = parser.parse_args()
+    box_health_owner()  # refuse an unusable BOX_HEALTH_OWNER before any work
+    if options.at is not None and not options.report:
+        parser.error("--at reads the past and only works with --report")
+    return run_once(options)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

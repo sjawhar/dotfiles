@@ -1,0 +1,12 @@
+[Unit]
+Description=Check every 5 min that each timer-driven user unit on this box still completes its runs
+
+[Timer]
+OnActiveSec=1min
+# Five minutes. Its window is the last hour of runs, so the period only sets how soon after a
+# condition holds it is said; envoy-role-holder-watch's 2026-11-01/02 silence went 20 hours.
+OnUnitActiveSec=5min
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target
