@@ -14,9 +14,10 @@
 # disk back to an older ancestor while live sessions run them. Without --old, a commit under the
 # working copy whose change main lacks refuses the run, naming the commit and its session, since
 # moving the working copy alone would drop that change from disk; one whose change main has (the
-# original dotfiles-publish leaves when it pushes a copy) is abandoned after the move. A plain git
-# checkout moves only when it is clean and holds no commit origin's main lacks, and it lands on
-# its `main` branch, so a session can commit there and `git pull --rebase`.
+# original dotfiles-publish leaves when it pushes a copy) is abandoned after the move, unless a
+# commit outside that set still builds on it. A plain git checkout moves only when it is clean
+# and holds no commit origin's main lacks, and it lands on its `main` branch, so a session can
+# commit there and `git pull --rebase`.
 set -euo pipefail
 
 # HOSTNAME=DESTINATION, every machine by user@MagicDNS name. The entry whose name is this
@@ -123,13 +124,15 @@ sync_here() {
     fi
     jj bookmark delete "$anchor" >/dev/null
     if [ -n "$published" ]; then
-      # Their changes are on main; any another workspace's working copy sits on stays. None is
-      # under a working copy, so jj leaves the working copy alone: its checkout step lost a race to
-      # another session's `jj commit` on 2026-11-02 at 20:29Z ("Concurrent checkout") and left
-      # the moved working copy behind as a second head.
+      # Their changes are on main. One that any commit outside them still builds on (a working
+      # copy, another session's side branch) stays: abandoning it would rebase that commit, and
+      # on 2026-11-02 at 20:29Z this step rebased eight such commits, three into conflicts. None
+      # is under a working copy, so jj leaves the working copy alone: its checkout step lost a
+      # race to another session's `jj commit` the same minute ("Concurrent checkout").
+      published="($published) ~ ::(visible_heads() ~ ($published))"
       echo "dropped commits whose changes main already has:"
-      jj log --ignore-working-copy -r "($published) ~ ::working_copies()" --no-graph -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
-      jj abandon --ignore-working-copy --quiet --ignore-immutable "($published) ~ ::working_copies()"
+      jj log --ignore-working-copy -r "$published" --no-graph -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
+      jj abandon --ignore-working-copy --quiet --ignore-immutable "$published"
     fi
     printf '%s on %s\n' "$(hostname)" "$(jj log -r @- --no-graph -T 'commit_id.short()')"
   else

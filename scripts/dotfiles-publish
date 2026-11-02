@@ -124,6 +124,9 @@ while :; do
         [[ -z "$files" ]] || above+=", which would conflict with main@origin in:$files"
         fixed="$(owned "$commit:: & immutable()")"
         [[ -z "$fixed" ]] || above+="${above:+; }commits this session's jj may not move ($fixed)"
+        # Anything named so far, or an unpublished commit below, keeps `dotfiles-sync` from moving
+        # the working copy; commits below whose changes main already has do not.
+        blocked="$above"
         if [[ -n "$below" ]]; then
             main="$(jj log -r main@origin --no-graph -T 'commit_id')"
             main_patches="$(git log -p --no-merges "$(git merge-base "$main" "$commit")..$main" | git patch-id --stable | cut -d' ' -f1)"
@@ -131,7 +134,7 @@ while :; do
             for c in $below; do
                 if on_main "$c"; then published+="${published:+|}$c"; else unpublished+="${unpublished:+|}$c"; fi
             done
-            [[ -z "$unpublished" ]] || above+="${above:+; }the unpublished commits below it ($(owned "$unpublished"))"
+            [[ -z "$unpublished" ]] || above+="${above:+; }the unpublished commits below it ($(owned "$unpublished"))" blocked=1
             [[ -z "$published" ]] || above+="${above:+; }commits below it whose changes main already has ($(owned "$published"))"
         fi
         if [[ -n "$above" ]]; then
@@ -142,7 +145,12 @@ while :; do
                 copies="$own"
             fi
             push="$own"
-            echo "dotfiles-publish: $above. Publishing $rev alone, as a copy on main; $rev and the working copy stay on their old base, and no file on disk changes. Whoever owns those lines or commits publishes or resolves them before \`dotfiles-sync local\` can move the working copy." >&2
+            if [[ -n "$blocked" ]]; then
+                next="Whoever owns those lines or commits publishes or resolves them before \`dotfiles-sync local\` can move the working copy."
+            else
+                next="\`dotfiles-sync local\` moves the working copy onto main and drops them."
+            fi
+            echo "dotfiles-publish: $above. Publishing $rev alone, as a copy on main; $rev and the working copy stay on their old base, and no file on disk changes. $next" >&2
         else
             drop_copies
             jj rebase --quiet -s "$commit" -d main@origin

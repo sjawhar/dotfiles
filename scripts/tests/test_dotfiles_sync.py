@@ -169,6 +169,28 @@ class SyncHere(DotfilesCheckout):
             self.jj("log", "-r", "@", "--no-graph", "-T", "commit_id"),
         )
 
+    def test_a_published_commit_another_commit_builds_on_stays_and_that_commit_is_not_rewritten(self) -> None:
+        # On 2026-11-02 at 20:29Z the abandon rebased eight commits that sat on published
+        # originals off the working copy's line, three of them into conflicts.
+        (self.checkout / "other.txt").write_text("published edit\n")
+        self.jj("commit", "--quiet", "-m", "published as a copy", "other.txt")
+        published = self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+        self.jj("new", "--quiet", "--no-edit", published, "-m", "a side branch")
+        side = self.jj("log", "-r", f"children({published}) ~ @", "--no-graph", "-T", "commit_id")
+        (self.checkout / "wip.txt").write_text("local edit\n")
+        (self.upstream / "other.txt").write_text("published edit\n")
+        self.commit_upstream("the copy")
+
+        result = self.sync()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
+        )
+        self.assertEqual(self.jj("log", "-r", f"{side}-", "--no-graph", "-T", "commit_id"), published)
+        self.assertEqual(self.jj("log", "-r", "visible_heads() & description(exact:'a side branch\n')", "--no-graph", "-T", "commit_id"), side)
+
 
 PUBLISH = Path(__file__).resolve().parents[1] / "dotfiles-publish"
 
@@ -434,6 +456,22 @@ class PublishUnderSessionGuard(Publish):
         self.assertIn("push refused 3 times", result.stderr)
         self.assertEqual(self.commits(), before)
         self.assertEqual(self.origin_main(), upstream_head)
+
+    def test_commits_below_that_main_already_has_do_not_read_as_a_sync_blocker(self) -> None:
+        # On 2026-11-02 a publish called 16 commits under its own "unpublished" and said their
+        # owners must publish them first; most were originals of copies main already had.
+        self.their_commit("shared.txt", "their edit\n")
+        (self.upstream / "shared.txt").write_text("their edit\n")
+        self.commit_upstream("their copy")
+        change = self.my_commit("other.txt", "my edit\n")
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("commits below it whose changes main already has", result.stderr)
+        self.assertNotIn("unpublished", result.stderr)
+        self.assertIn("`dotfiles-sync local` moves the working copy onto main", result.stderr)
+        self.assertEqual(self.run_ok("git", "show", f"{self.origin_main()}:other.txt", cwd=self.origin), "my edit\n")
 
 
 if __name__ == "__main__":
