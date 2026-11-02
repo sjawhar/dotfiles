@@ -91,6 +91,8 @@ ro .config/ctx
 ro .config/mailbox
 # the model-spend setup's endpoint, tags and session files (installers/agent-spend.sh), so box sessions export too
 ro .config/agent-spend
+# the transcript store's endpoint and reader/writer logins, so `tq` and the audits that read it work in a box
+ro .config/transcript-store
 # Dispatch and Envoy: envoy.json, which a box session without a profile of its
 # own reads, and a profile's own envoy.json may link to (envoy/AGENTS.md)
 ro .config/legion
