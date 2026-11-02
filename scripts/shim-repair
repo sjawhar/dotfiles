@@ -47,6 +47,10 @@ while :; do
 
   for f in "${paths[@]}"; do
     [ -s "$f" ] || continue
+    # Only a path HEAD has can be restored from HEAD. A path staged but not committed (an
+    # editor's temp copy of another script, 2026-11-02T05:21Z) would match that script and
+    # get a checkout and a chmod that restore nothing.
+    [ -n "${head_hash[$f]:-}" ] || continue
     live=$(sha256sum "$f" | cut -d' ' -f1)
     [ "$live" = "${head_hash[$f]:-}" ] && continue
 
