@@ -16,7 +16,10 @@ mkdir -p "$ERR"
 EXCLUDE=${DEVBOX_COPY_EXCLUDE:-$DIR/EXCLUDE}
 FILTER=$(dirname "$(readlink -f "$0")")/exclude-filter.py
 [[ -s $EXCLUDE && -x $FILTER ]] || { echo "refusing to start: no exclusion file $EXCLUDE or filter $FILTER" >&2; exit 2; }
-export BOX TREE ROOT DIR BUCKET LISTS LOG ERR EXCLUDE FILTER
+# The off-box rule's checker (NoOffboxMarker, 2026-11-02): markers `.no-offbox` and its patterns.
+NO_OFFBOX=${NO_OFFBOX:-$(command -v no-offbox || echo /mnt/nvme/sami/scratch/no-offbox/dot/scripts/no-offbox)}
+[[ -x $NO_OFFBOX ]] || { echo "refusing to start: no no-offbox checker" >&2; exit 2; }
+export BOX TREE ROOT DIR BUCKET LISTS LOG ERR EXCLUDE FILTER NO_OFFBOX
 
 feed() {  # the NUL-separated list of shard $1
   if [[ $LISTS == gs://* ]]; then gcloud storage cat "$LISTS/$1.list" 2>>"$ERR/$1.gcs"; else cat "$LISTS/$1.list"; fi
@@ -35,23 +38,34 @@ worker() {
     : >"$ERR/$shard.gcs"
     # GNU tar: --ignore-failed-read turns unreadable/vanished files into warnings (listed in .err);
     # --sparse stores holes as holes (test trees hold 1 TiB sparse files).
-    feed "$shard" | python3 "$FILTER" "$ROOT" "$EXCLUDE" 2>"$ERR/$shard.excluded" \
-      | sudo -n nice -n 19 ionice -c3 tar -C "$ROOT" --null --verbatim-files-from --no-recursion \
+    local list=$ERR/$shard.list.tmp
+    feed "$shard" | python3 "$FILTER" "$ROOT" "$EXCLUDE" >"$list" 2>"$ERR/$shard.excluded"
+    local fst=("${PIPESTATUS[@]}")
+    if [[ ${fst[0]} -ne 0 || ${fst[1]} -ne 0 ]]; then
+      rm -f "$list"
+      echo "$BOX $TREE $shard fail try=$try list_rc=${fst[0]} filter_rc=${fst[1]} at=$(date +%s)" >>"$LOG"
+      sleep 30; continue
+    fi
+    # Any status but 0 refuses the whole shard; it is not retried.
+    if ! sudo -n "$NO_OFFBOX" --root "$ROOT" --from "$list" -0 >"$ERR/$shard.offbox" 2>&1; then
+      rm -f "$list"
+      echo "$BOX $TREE $shard refused no-offbox (see err/$TREE/$shard.offbox) at=$(date +%s)" >>"$LOG"
+      return 1
+    fi
+    sudo -n nice -n 19 ionice -c3 tar -C "$ROOT" --null --verbatim-files-from --no-recursion \
       --sparse --ignore-failed-read --warning=no-file-changed --warning=no-file-removed \
-      -T - -cf - 2>"$ERR/$shard.err" \
+      -T "$list" -cf - 2>"$ERR/$shard.err" \
       | nice -n 19 gcloud storage cp - "$obj" 2>>"$ERR/$shard.gcs"
     local st=("${PIPESTATUS[@]}")
-    if [[ ${st[0]} -eq 0 && ${st[1]} -eq 0 && ${st[2]} -le 1 && ${st[3]} -eq 0 ]]; then
+    rm -f "$list"
+    if [[ ${st[0]} -le 1 && ${st[1]} -eq 0 ]]; then
       local bytes=$(gcloud storage ls -l "$obj" 2>/dev/null | awk 'NR==1{print $1}')
       local unread=$(grep -c -E 'Cannot (open|stat|read)|Permission denied' "$ERR/$shard.err")
       local excl=$(grep -c '^EXCLUDED ' "$ERR/$shard.excluded")
-      echo "$BOX $TREE $shard ok bytes=${bytes:-?} start=$t0 end=$(date +%s) tar_rc=${st[2]} unreadable=$unread excluded=$excl" >>"$LOG"
+      echo "$BOX $TREE $shard ok bytes=${bytes:-?} start=$t0 end=$(date +%s) tar_rc=${st[0]} unreadable=$unread excluded=$excl" >>"$LOG"
       return 0
     fi
-    # A failed filter must never let a list through: tar got nothing or a partial list, and the
-    # object, if gcloud finalized one, is deleted.
-    [[ ${st[1]} -ne 0 ]] && gcloud storage rm "$obj" >/dev/null 2>&1
-    echo "$BOX $TREE $shard fail try=$try list_rc=${st[0]} filter_rc=${st[1]} tar_rc=${st[2]} gcs_rc=${st[3]} at=$(date +%s)" >>"$LOG"
+    echo "$BOX $TREE $shard fail try=$try tar_rc=${st[0]} gcs_rc=${st[1]} at=$(date +%s)" >>"$LOG"
     sleep 30
   done
 }

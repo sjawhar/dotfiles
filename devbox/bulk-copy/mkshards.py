@@ -63,7 +63,8 @@ def records(path):
 # Shards follow the listing's order (find's directory order), so memory stays small.
 expected = collections.defaultdict(lambda: [0, 0])
 manifest = [(r[0], int(r[1]), int(r[2])) for r in old_manifest]
-n, cur, cur_bytes, n_items, n_dirs = len(manifest), [], 0, 0, 0
+n = max((int(r[0][1:]) for r in manifest), default=0)  # kept shards may have gaps
+cur, cur_bytes, n_items, n_dirs = [], 0, 0, 0
 
 
 def flush():

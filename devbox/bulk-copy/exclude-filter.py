@@ -9,7 +9,9 @@ Dropped entries go to stderr, one per line, so each shard keeps a record.
 import os
 import sys
 
-root, rules = sys.argv[1], sys.argv[2]
+args = [x for x in sys.argv[1:] if x != "--records"]
+records = "--records" in sys.argv  # input is a find listing of `KIND SIZE PATH` records
+root, rules = args[0], args[1]
 paths, comps, names = [], set(), []
 with open(rules) as fh:
     for ln in fh:
@@ -43,10 +45,11 @@ def excluded(rel):
 
 data = sys.stdin.buffer.read().split(b"\0")
 out = sys.stdout.buffer
-for rel in data:
-    if not rel:
+for rec in data:
+    if not rec:
         continue
-    if excluded(rel):
+    rel = rec.split(b" ", 2)[2] if records else rec
+    if rel and excluded(rel):
         sys.stderr.buffer.write(b"EXCLUDED " + rel + b"\n")
     else:
-        out.write(rel + b"\0")
+        out.write(rec + b"\0")
