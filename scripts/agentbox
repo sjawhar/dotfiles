@@ -922,6 +922,16 @@ mount_args() {
     # and so an in-box fetch, when the host had none, lands in the host's cache.
     mkdir -p -m 700 "/run/user/$UID_/envoy"
     a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
+    # The model gateway's key files, read-only, as directories so the writer's `mv -f` refresh
+    # reaches a running box: ossv-box/ (scripts/ossv-box-gateway-key, read by the ossv-gateway
+    # provider's `!cat` in omp/models.local.yml) and verified-grader/ (agent-infra
+    # model-gateway/box/verified-grader-gateway-key, read by the pbc-gateway provider). Without
+    # them every box's omp found no gateway key and every Claude subagent a boxed session started
+    # fell back to the direct Anthropic login: 78 of 78 boxed starts, 0 of 302 host starts, from
+    # 2026-11-01 22:30Z to 2026-11-02 08:10Z. A host that has no such key gets an empty directory.
+    mkdir -p -m 700 "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader"
+    a+=(-v "/run/user/$UID_/ossv-box:/run/user/$UID_/ossv-box:ro")
+    a+=(-v "/run/user/$UID_/verified-grader:/run/user/$UID_/verified-grader:ro")
     # The relayed host tmux server (ensure_tmux_forwarder), as a directory holding
     # tmux-<box uid>/default, so a bare `tmux` in the box under TMUX_TMPDIR (session_env) finds
     # it and a relay restarted since the box started is seen at once. A host with no tmux has
