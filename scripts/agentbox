@@ -1295,6 +1295,16 @@ cmd_new() {
     if [[ -d "$moved_sessions" ]] && ! box_dir_have "$moved_sessions"; then
         box_add_mount "$moved_sessions"
     fi
+    # Cold trees moved off /mnt/nvme and ~/src to /mnt/durable stay behind symlinks at their old
+    # paths, which a box has through ~/src or a --dir; without the target the symlink dangles in
+    # the box, and the tree looks gone rather than slow (2026-11-02, the second cold moves).
+    # Bound read-write: a lane that comes back to a moved tree writes into it as before.
+    local cold_root
+    for cold_root in "/mnt/durable/$(id -un)/nvme-cold" "/mnt/durable/$(id -un)/src-cold"; do
+        if [[ -d "$cold_root" ]] && ! box_dir_have "$cold_root"; then
+            box_add_mount "$cold_root"
+        fi
+    done
     set_resource_args "$mem_from" "$cpu_from"
     set_disk_bytes "$disk_from"
     [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} + ${#BOX_DIRS[@]} )) \
