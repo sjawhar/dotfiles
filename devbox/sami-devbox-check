@@ -136,6 +136,10 @@ azure_check() {
     out="$(AGENTBOX_SESSION="${AGENTBOX_SESSION:-sami-devbox-check}" az account show --query '{user:user.name,type:user.type,subscription:id}' -o json 2>&1)"
     if [[ "$(jq -r '.type // empty' <<<"$out" 2>/dev/null)" == servicePrincipal ]]; then
         ok "Azure: az account show as service principal $(jq -r .user <<<"$out") on subscription $(jq -r .subscription <<<"$out")"
+    elif [[ -z "${AGENT_AZURE_CLIENT_ID:-}" && ! -s "$HOME/.config/agent-azure/client-id" ]]; then
+        # The one wait A2 allows: the agent-azure identity is not issued yet, so the client id
+        # shims/az needs is absent. Any other az failure is a FAIL.
+        echo "WAIT Azure: $(tail -1 <<<"$out") (waits on agent-infra #1146, AzureWIF)"
     else
         fail "Azure: az account show: want a servicePrincipal, got: $(tail -1 <<<"$out")"
     fi
@@ -307,7 +311,10 @@ if (( fails == 0 )) && ! grep -qx "== 0 failed, .*" "$log"; then
     fails=1
 fi
 if (( fails == 0 )) && [[ "${1:-}" == --mark-ready ]]; then
-    printf '%s %s\n' "$(stamp)" "$(git -C "$DOTFILES_DIR" rev-parse HEAD)" >"$CUTOVER_DIR/target-ready"
-    echo "wrote $CUTOVER_DIR/target-ready"
+    # The marker names the run, and every WAIT line of it: what passed only because it waits on
+    # someone else.
+    { printf '%s %s %s\n' "$(stamp)" "$(git -C "$DOTFILES_DIR" rev-parse HEAD)" "$log"
+      grep '^WAIT' "$log" || true; } >"$CUTOVER_DIR/target-ready"
+    echo "wrote $CUTOVER_DIR/target-ready$(grep -q '^WAIT' "$log" && echo ", with its WAIT lines")"
 fi
 (( fails == 0 ))
