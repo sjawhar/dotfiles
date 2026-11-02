@@ -8,11 +8,14 @@
 // close_box runs. SIGUSR1 asks for a restart instead: the session id is read
 // from omp's open session file, omp is hung up (its ordinary graceful
 // teardown: draft saved, session_shutdown handlers run), and a fresh
-// `omp --resume <id> .` is spawned through the shim on PATH - so the new
+// `omp --resume <id>` is spawned through the shim on PATH - so the new
 // process picks up the current mise pin, plugin tree and config while the
-// container, its workspace and /tmp stay. The `.` is the resumed session's
-// first message: without it the agent sits idle at the prompt until someone
-// types, since nothing else tells it the restart is over. The restart request is consumed
+// container, its workspace and /tmp stay. The relaunch carries no message: omp
+// records a positional as a user message, so the `.` this used to send counted
+// as text the person typed in the transcript store. Without one the agent would
+// sit idle at the prompt, so the runner starts `agentbox move --wake`, which
+// sends one Envoy notice (a custom message) once the new process has
+// registered. The restart request is consumed
 // before the relaunch: a replacement that dies on startup ends the box
 // rather than looping. SIGHUP/SIGTERM (pane kill, docker stop) and SIGINT
 // mean "go away" as before - forwarded, never followed by a relaunch.
@@ -165,7 +168,21 @@ export function relaunchArgv(argv: string[], sid: string): string[] {
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	return [...kept, "--resume", sid, "."];
+	return [...kept, "--resume", sid];
+}
+
+const RESTART_WAKE_NOTICE =
+	"agentbox: the restart is done: this session was resumed in the same box on the host's current omp. Go on with the work you were doing before the restart. (An automated notice from agentbox, not a person.)";
+
+// Wake the resumed session over Envoy (scripts/agentbox move_wake), appending to this box's log.
+function wakeOverEnvoy(sid: string): void {
+	try {
+		Bun.spawn(["sh", "-c", 'exec agentbox move --wake "$1" "$2" >>"$3" 2>&1', "sh", sid, RESTART_WAKE_NOTICE, logPath], {
+			stdio: ["ignore", "ignore", "ignore"],
+		}).unref();
+	} catch (error) {
+		note(`could not start the Envoy waker for ${sid}: ${error}`);
+	}
 }
 
 // The session to resume: the file omp holds open (omp exports OMP_SESSION_ID
@@ -348,5 +365,6 @@ if (import.meta.main) {
 		child = spawnOmp(argv);
 		startedAt = Date.now();
 		note(`omp exited ${ran} for the restart; relaunched (pid ${child.pid}): ${argv.join(" ")}`);
+		wakeOverEnvoy(argv[argv.length - 1]);
 	}
 }

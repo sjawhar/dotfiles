@@ -3,7 +3,7 @@
 
 `agentbox new` starts a box for a NEW session. `move` reads every live top-level omp outside a
 box, works out the box each one would get, and relaunches its pane into `agentbox new <spec> --
-omp --resume <id> .`. The three things that decide whether a window of about a hundred sessions
+omp --resume <id>`, waking it over Envoy. The three things that decide whether a window of about a hundred sessions
 is safe are tested here:
 
 * the SPEC a working directory gets. A move never names a repo: a clone would give the session a
@@ -702,7 +702,7 @@ class AgentboxMove(unittest.TestCase):
         )
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertIn(
-            f"agentbox new --dir {lane} -- omp --resume 01a19700-0000-7000-8000-00000000c001 .",
+            f"agentbox new --dir {lane} -- omp --resume 01a19700-0000-7000-8000-00000000c001\n",
             allowed.stdout,
         )
 
@@ -725,7 +725,7 @@ class AgentboxMove(unittest.TestCase):
         # This box's own paths, then the new one, and the session resumed by its own id.
         self.assertIn(
             f"--dir {self.home}/lane --dir {self.home}/evidence --dir {host_only} "
-            "-- omp --resume 01a19700-0000-7000-8000-000000000d09 .",
+            "-- omp --resume 01a19700-0000-7000-8000-000000000d09\n",
             result.stdout,
         )
         # A box started with no --dir has nothing to carry, and says so instead of guessing.
@@ -758,7 +758,7 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("agentbox move --self", notice)
         self.assertIn("Do not stop, delay or shorten any work", notice)
         self.assertIn(
-            f"agentbox new --dir {lane} -- omp --resume 01a19700-0000-7000-8000-00000000d001 .", notice
+            f"agentbox new --dir {lane} -- omp --resume 01a19700-0000-7000-8000-00000000d001`", notice
         )
         # The sandboxed omp is not a session on this host and is never notified.
         self.assertNotIn("01a19700-0000-7000-8000-00000000d002", notice)
@@ -821,6 +821,46 @@ class AgentboxMove(unittest.TestCase):
         )
         self.assertEqual(plan["sessions"][0]["session"], "01a19700-0000-7000-8000-000000010001")
         self.assertEqual(plan["sessions"][0]["spec"], f"--dir {lane}")
+
+    def test_a_moved_pane_resumes_with_no_prompt_and_starts_the_waker(self) -> None:
+        # A positional after --resume is a user message to omp, which the transcript store counts
+        # as text the person typed; the pane resumes bare and the waker wakes it over Envoy.
+        sid = "01a19700-0000-7000-8000-000000020001"
+        result = self.run_bash(f"move_pane_command {sid} --dir /lane")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"move --wake {sid}", result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith(f"agentbox new --dir /lane -- omp --resume {sid}"), result.stdout)
+
+    def test_the_waker_notifies_once_the_resumed_process_registers(self) -> None:
+        sid = "01a19700-0000-7000-8000-000000020002"
+        write_stub(
+            self.stubs,
+            "envoy",
+            f'if [[ "$1" == ps ]]; then echo \'[{{"session_id":"{sid}","updated_at":99999999999999}}]\'; '
+            'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi; exit 0',
+        )
+        write_stub(self.stubs, "sleep", "exit 0")
+        result = self.run_bash(f"MOVE_WAKE_WAIT=10\nmove_wake {sid}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(sent[:4], ["send", "--source", "envoy", sid])
+        self.assertIn("not a person", sent[4])
+
+    def test_the_waker_never_notifies_the_old_registration(self) -> None:
+        # An Envoy row last updated before the waker started is the old process's; a notice to it
+        # would be lost, so the waker waits for a newer one and, without it, sends nothing.
+        sid = "01a19700-0000-7000-8000-000000020003"
+        write_stub(
+            self.stubs,
+            "envoy",
+            f'if [[ "$1" == ps ]]; then echo \'[{{"session_id":"{sid}","updated_at":1}}]\'; '
+            'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi; exit 0',
+        )
+        write_stub(self.stubs, "sleep", "exit 0")
+        result = self.run_bash(f"MOVE_WAKE_WAIT=10\nmove_wake {sid}")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("did not register on Envoy", result.stdout)
+        self.assertEqual((self.root / "STUB_ENVOY").read_text(encoding="utf-8"), "")
 
 
 if __name__ == "__main__":

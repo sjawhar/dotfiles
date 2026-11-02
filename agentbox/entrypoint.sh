@@ -123,22 +123,40 @@ if ! setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --r
     echo "agentbox: docker credHelpers not written; Docker Hub pulls stay anonymous" >&2
 fi
 
-# ECR needs no token in the box: docker-credential-ecr-login exchanges the box's instance role
-# for a registry token when docker asks. The identity is already allowed — what was missing is
-# that docker only reaches it when the config NAMES the helper for that host. Measured 2026-09-26,
-# same box and role ten seconds apart: without the entry `docker manifest inspect` returns "no
-# basic auth credentials" (docker sent nothing); with it, the call authenticates as the instance
-# role and any refusal after that is an IAM answer. The host list comes from the machine's own
-# config via AGENTBOX_ECR_HELPERS (scripts/agentbox), so a box mirrors the host rather than
-# carrying a second list that can drift. Skipped, with a note, when the helper is not installed:
-# naming a missing helper breaks every pull for that host, which is worse than no entry.
-# shellcheck disable=SC2016  # the inner sh expands $HOME and $ECR_HELPERS; this shell must not
-if [ -n "${AGENTBOX_ECR_HELPERS:-}" ] && [ "$AGENTBOX_ECR_HELPERS" != "{}" ]; then
+# Registries whose credential helper trades an identity the box already holds for a registry token,
+# so no token sits in the box: ECR (docker-credential-ecr-login, the instance role through the IMDS
+# relay) and Artifact Registry (docker-credential-gcloud, the machine's gcloud identity in the
+# mounted ~/.config/gcloud). The identity is already allowed - what was missing is that docker
+# only asks a helper when the config NAMES it for that registry host, and otherwise sends nothing.
+# ECR measured 2026-09-26, same box and role ten seconds apart: without the entry `docker manifest
+# inspect` returns "no basic auth credentials"; with it, the call authenticates as the instance
+# role. Artifact Registry measured 2026-11-02 in agentbox-3055672ec697: a manifest of a
+# us-east1-docker.pkg.dev image the host pulls answered "Unauthenticated request" until the gcloud
+# entry was added, then resolved. The host list comes from the machine's own config via
+# AGENTBOX_CRED_HELPERS (scripts/agentbox), so a box mirrors the host rather than carrying a second
+# list that can drift. An entry whose helper is not on PATH is skipped with a note: naming a
+# missing helper breaks every pull for that host, which is worse than no entry.
+# shellcheck disable=SC2016  # the inner sh expands $HOME, $v, $ok and $CRED_HELPERS; this shell must not
+cred_helpers_merge='
+c="$HOME/.docker/config.json"
+ok=""
+for v in $(printf %s "$CRED_HELPERS" | jq -r "[.[]] | unique | .[]"); do
+    if command -v "docker-credential-$v" >/dev/null 2>&1; then
+        ok="$ok $v"
+    else
+        echo "agentbox: docker-credential-$v is not on PATH; the registries the host routes to it stay unauthenticated" >&2
+    fi
+done
+mkdir -p "$HOME/.docker" && { [ -s "$c" ] || echo "{}" > "$c"; } &&
+    jq --argjson h "$CRED_HELPERS" --arg ok "$ok" ".credHelpers = ((.credHelpers // {}) + (\$h | with_entries(select(.value as \$v | \$ok | split(\" \") | any(. == \$v)))))" "$c" > "$c.tmp" &&
+    mv "$c.tmp" "$c"
+'
+if [ -n "${AGENTBOX_CRED_HELPERS:-}" ] && [ "$AGENTBOX_CRED_HELPERS" != "{}" ]; then
     if ! setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --reset-env \
             env -C / HOME="$HOME" PATH="$PATH" MISE_DATA_DIR="${MISE_DATA_DIR:-}" \
-            ECR_HELPERS="$AGENTBOX_ECR_HELPERS" \
-            sh -c 'command -v docker-credential-ecr-login >/dev/null 2>&1 || exit 7; c="$HOME/.docker/config.json"; mkdir -p "$HOME/.docker" && { [ -s "$c" ] || echo "{}" > "$c"; } && jq --argjson h "$ECR_HELPERS" ".credHelpers = ((.credHelpers // {}) + \$h)" "$c" > "$c.tmp" && mv "$c.tmp" "$c"'; then
-        echo "agentbox: ECR credHelpers not written; ECR pulls will fail with 'no basic auth credentials'" >&2
+            CRED_HELPERS="$AGENTBOX_CRED_HELPERS" \
+            sh -c "$cred_helpers_merge"; then
+        echo "agentbox: registry credHelpers not written; ECR and Artifact Registry pulls will fail unauthenticated" >&2
     fi
 fi
 

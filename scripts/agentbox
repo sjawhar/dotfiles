@@ -958,11 +958,14 @@ session_env() {
     # shells get it from .bashrc. A box reaches the tailnet through the host, so the server names
     # a box's caller by the host's Tailscale login. The launcher's own value wins.
     e+=(-e "CTX_SERVER=${CTX_SERVER:-http://ctx-memory.tail12ec1c.ts.net}")
-    # ECR: the box's instance role is already allowed, but docker only asks for it when the
-    # config names a helper for that registry host — without the entry it sends nothing at all
-    # ("no basic auth credentials", measured 2026-09-26). Pass the host's OWN ecr-login hosts so a
-    # box mirrors the machine and no second list can drift; empty when the host has none.
-    e+=(-e "AGENTBOX_ECR_HELPERS=$(jq -c '(.credHelpers // {}) | with_entries(select(.value == "ecr-login"))' "$HOME/.docker/config.json" 2>/dev/null || echo '{}')")
+    # Registries whose credential helper trades an identity the box already holds for a token:
+    # ECR (`ecr-login`, the instance role) and Artifact Registry (`gcloud`, the machine's gcloud
+    # identity). docker asks a helper only when the config names it for that registry host, and
+    # sends nothing otherwise ("no basic auth credentials" for ECR, measured 2026-09-26;
+    # "Unauthenticated request" for Artifact Registry, 2026-11-02). Pass the host's OWN entries for
+    # those two helpers so a box mirrors the machine and no second list can drift; empty when the
+    # host has none. No other helper: secretsd's entries are the entrypoint's own.
+    e+=(-e "AGENTBOX_CRED_HELPERS=$(jq -c '(.credHelpers // {}) | with_entries(select(.value == "ecr-login" or .value == "gcloud"))' "$HOME/.docker/config.json" 2>/dev/null || echo '{}')")
     # Also the inner dockerd's firewall rule (agentbox/entrypoint.sh).
     e+=(-e "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://$NETWORK_GATEWAY:$IMDS_PORT")
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
@@ -2723,6 +2726,44 @@ move_respawn() {
     return 1
 }
 
+# The resumed session gets no prompt. A positional after `--resume <id>` is a user message to omp,
+# so the `.` that used to wake it was recorded as text the person typed: the transcript store
+# counted it so for 33 moved sessions from 18:50Z on 2026-11-01 (found by the librarian). Without
+# it the session sits at its prompt until something arrives, so the wake is an Envoy notice
+# instead, which omp records as a custom message. The waker runs on the host beside the launcher,
+# from the pane command (move_pane_command), so a move from a box, whose own processes end with
+# that box, wakes its session too. It waits for the session's NEW process to register (an Envoy
+# update after the waker started, when the old omp is already gone) and sends the notice once.
+MOVE_WAKE_NOTICE='agentbox: the move is done: this session was resumed in its agent box. Go on with the work you were doing before the move. (An automated notice from agentbox, not a person.)'
+MOVE_WAKE_WAIT="${AGENTBOX_WAKE_WAIT:-600}"
+move_wake() {
+    # The notice is the move's unless the caller names its own (agentbox-run.ts: a restart's).
+    local sid="$1" notice="${2:-$MOVE_WAKE_NOTICE}" since seen waited=0
+    since="$(date +%s%3N)"
+    while (( waited < MOVE_WAKE_WAIT )); do
+        seen="$(envoy ps --json 2>/dev/null | jq -r --arg s "$sid" \
+            '[(if type == "array" then . else (.sessions // []) end)[] | select(.session_id == $s) | .updated_at // 0] | max // 0' 2>/dev/null || true)"
+        if (( ${seen:-0} > since )) && envoy send --source envoy "$sid" "$notice" >/dev/null; then
+            echo "$(date -u +%FT%TZ) move $sid: the resumed session registered on Envoy; wake notice sent"
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    echo "$(date -u +%FT%TZ) move $sid: the resumed session did not register on Envoy within ${MOVE_WAKE_WAIT}s; no wake notice sent, so it waits at its prompt until something reaches it"
+    return 1
+}
+
+# The command a moved pane runs: the waker in the background and the box launcher resuming the
+# session with no prompt. This file by its absolute path, which a box sees at the same path.
+move_pane_command() {
+    local sid="$1" log
+    shift
+    log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$sid.log"
+    printf '( setsid %q move --wake %q </dev/null >>%q 2>&1 & ); %s' \
+        "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "$log" "$(printf '%q ' agentbox new "$@" -- omp --resume "$sid")"
+}
+
 move_relaunch() {
     local pid="$1" sid="$2" pane="$3" cwd="$4" waited=0 inner
     shift 4
@@ -2743,10 +2784,10 @@ move_relaunch() {
         echo "$(date -u +%FT%TZ) move $sid: omp $pid exited after ${waited}s"
     fi
     if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
-        echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $sid ."
+        echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $sid"
         return 1
     fi
-    inner="$(printf '%q ' agentbox new "${spec[@]}" -- omp --resume "$sid" .)"
+    inner="$(move_pane_command "$sid" "${spec[@]}")"
     if ! move_respawn "$sid" "$pane" "$cwd" "$inner" "${spec[*]}"; then
         echo "$(date -u +%FT%TZ) move $sid: pane $pane holds no process and would not respawn; the session is DOWN. Bring it back from a host session: tmux respawn-pane -k -t $pane -c $cwd bash -i -c '$inner; exec bash -i'"
         return 1
@@ -2778,10 +2819,10 @@ move_self_in_box() {
     local spec=()
     for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
     echo "agentbox: this session is already in box ${AGENTBOX_BOX:-a box}; moving again into a new one with:"
-    echo "  agentbox new ${spec[*]} -- omp --resume $sid ."
+    echo "  agentbox new ${spec[*]} -- omp --resume $sid"
     [[ -n "$pane" ]] || die "this box has no TMUX_PANE, so it cannot respawn its own pane; run the line above from a host session"
     if [[ "$dry" == true ]]; then return 0; fi
-    inner="$(printf '%q ' agentbox new "${spec[@]}" -- omp --resume "$sid" .)"
+    inner="$(move_pane_command "$sid" "${spec[@]}")"
     # The host's tmux server, through the relay every box has. respawn-pane -k kills what the
     # pane runs - the `agentbox new` of THIS box, so this box and this process end with it - and
     # starts the new launcher in its place. tmux has the command before anything dies.
@@ -2860,7 +2901,7 @@ cmd_move_self() {
     move_check_floor "$(move_image_bytes "$BOX_DISK_BYTES")" || exit 2
     if $dry; then
         echo "agentbox: would hang omp $pid up and respawn pane $pane ($at) as:"
-        echo "  agentbox new ${spec[*]} -- omp --resume $sid ."
+        echo "  agentbox new ${spec[*]} -- omp --resume $sid"
         echo "each path and why:"
         printf '%s\n' "${whys[@]}"
         echo "anything else you work in is NOT in that box and is lost with it: add it with --dir."
@@ -2870,7 +2911,11 @@ cmd_move_self() {
     move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
 }
 
-MOVE_NOTICE_HEAD='agentbox: this session moves into an agent box (dispatch://INFRA-702). Do not stop, delay or shorten any work for it. The next time `read proc://` lists none of your jobs or services running, write your handover into the transcript and run `agentbox move --self` from your bash tool. It hangs this omp up gracefully and respawns this pane as'
+# The idle test is ancestry, never `read proc://`: under a shared omp worker broker that lists the
+# services of every session the broker serves (measured 2026-11-02: a session saw seven, none of
+# them its own, and so never found the moment to move). What the hang-up ends is exactly the
+# omp's own process tree, so that tree is the test. %PID% is the session's omp pid.
+MOVE_NOTICE_HEAD='agentbox: this session moves into an agent box (dispatch://INFRA-702). Do not stop, delay or shorten any work for it. The next time none of YOUR jobs is running, write your handover into the transcript and run `agentbox move --self` from your bash tool. A job is yours when its process descends from this session'"'"'s omp, pid %PID%: `pstree -p %PID%` shows them all (the bash tool you run it in is one; ignore it). Do not use `read proc://` to decide: it also lists services of other sessions that share an omp worker broker. If this session is finished or is ending, do not move it: end as you planned. `move --self` hangs this omp up gracefully and respawns this pane as'
 MOVE_NOTICE_TAIL='so you come back with the same session id, the same transcript and the same working directory, in a box with a cpu, memory, pids and disk limit of its own. Your tree is the host'"'"'s own directory, bind-mounted at its own path: uncommitted work included, nothing cloned, nothing copied.'
 # What the box gets, and the one thing the session must check before it runs the command. The
 # paths come from the session's live processes, from its own record of today and from the last
@@ -2931,13 +2976,13 @@ cmd_move_notify() {
         if ! move_check_floor "$image"; then return 2; fi
         if $now; then
             if $dry; then
-                echo "agentbox: would relaunch pane $pane ($at) now: agentbox new ${spec[*]} -- omp --resume $sid ."
+                echo "agentbox: would relaunch pane $pane ($at) now: agentbox new ${spec[*]} -- omp --resume $sid"
                 continue
             fi
             move_hand_off "$pid" "$sid" "$pane" "$cwd" "${spec[@]}"
             continue
         fi
-        local notice="$MOVE_NOTICE_HEAD \`agentbox new ${spec[*]} -- omp --resume $sid .\`, $MOVE_NOTICE_TAIL $MOVE_NOTICE_DIRS $(printf '%s; ' "${whys[@]}" | sed 's/; $//'). $MOVE_NOTICE_ADD"
+        local notice="${MOVE_NOTICE_HEAD//%PID%/$pid} \`agentbox new ${spec[*]} -- omp --resume $sid\`, $MOVE_NOTICE_TAIL $MOVE_NOTICE_DIRS $(printf '%s; ' "${whys[@]}" | sed 's/; $//'). $MOVE_NOTICE_ADD"
         if $dry; then
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue
@@ -2968,6 +3013,7 @@ cmd_move() {
         --plan) shift; cmd_move_plan "$@" ;;
         --self) shift; cmd_move_self "$@" ;;
         --relaunch) shift; move_relaunch "$@" ;;
+        --wake) shift; move_wake "$@" ;;
         -h|--help|help) echo "$MOVE_USAGE" ;;
         "") die "$MOVE_USAGE" ;;
         *) cmd_move_notify "$@" ;;

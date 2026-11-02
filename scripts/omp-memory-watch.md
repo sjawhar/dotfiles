@@ -80,19 +80,26 @@ after the run started (the oom bias at 6 s), the next run starting at the first 
 did not reach. Measured at nice 15 and load 428: 1.6-2.3 s a whole run.
 
 A recorded pane that is now **idle** — its shell has no child process, or tmux marks it dead — is
-resumed exactly as the lead does it by hand:
+resumed as the lead does it by hand, with no prompt after the id:
 
 ```sh
-tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c 'cd <cwd> && ~/.dotfiles/shims/omp --resume <id> .; exec bash -i'
-tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c 'cd <cwd> && ~/.dotfiles/scripts/agentbox new <spec> -- omp --resume <id> .; exec bash -i'
+tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c '( setsid ~/.dotfiles/scripts/agentbox move --wake <id> <notice> & ); cd <cwd> && ~/.dotfiles/shims/omp --resume <id>; exec bash -i'
+tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c '( setsid ~/.dotfiles/scripts/agentbox move --wake <id> <notice> & ); cd <cwd> && ~/.dotfiles/scripts/agentbox new <spec> -- omp --resume <id>; exec bash -i'
 ```
 
 with `~` expanded: the shim by its absolute path, because a pane that starts omp from `PATH` can
-miss `PI_CONFIG_FILES`, which broke three sessions on 2026-11-01. It is **left**, with the reason
-in the journal, when:
+miss `PI_CONFIG_FILES`, which broke three sessions on 2026-11-01. The resume used to end in `.`,
+which omp records as a user message and the transcript store therefore counted as text Sami typed;
+`agentbox move --wake` wakes the session instead with one Envoy notice once the resumed process has
+registered (log: `~/.cache/omp/agentbox/wake-<id>.log`). Right before the respawn the watch asks
+tmux for the pane again: `agentbox move` hangs a session up and respawns its pane into the box
+launcher seconds later, and on 2026-11-02 at 05:38:05Z a run that decided in that gap read the old
+pane pid and killed the launcher of session `01a14b36` with its own respawn. It is **left**, with
+the reason in the journal, when:
 
 | Reason | Why |
 |---|---|
+| the pane was respawned while the run decided (its pid is not the listed one) | something else, such as `agentbox move`, has already started the pane again |
 | the pane still runs omp or an agentbox launcher | it is not dead |
 | the session's transcript ends in a `session_exit` with `kind: "normal"` | it ended on purpose; the test is `normal_exit_at` from `envoy-role-holder-watch`, imported, not copied |
 | another live omp holds the session | resuming it twice would give one transcript two writers |

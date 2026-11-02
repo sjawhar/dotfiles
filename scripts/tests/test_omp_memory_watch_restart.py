@@ -55,6 +55,8 @@ class RestartPassTest(unittest.TestCase):
         self.respawned: list[tuple[str, str, str]] = []
         self.states: list[tuple[str, dict]] = []
         self.panes = [dict(PANE)]
+        # What tmux answers for a pane just before a respawn; the listed pid unless a test moves it.
+        self.pane_now = {PANE["id"]: {"pid": PANE["pid"], "dead": False}}
         for name, value in (
             ("OMP_SHIM", shim),
             ("AGENTBOX", Path("/home/u/.dotfiles/scripts/agentbox")),
@@ -64,6 +66,7 @@ class RestartPassTest(unittest.TestCase):
             ("pane_state", lambda pane, resurrect, *known: self.states.pop(0)),
             ("process_table", lambda: {"children": {}, "names": {}, "starts": {}}),
             ("pane_processes", lambda pid, resurrect: []),
+            ("pane_now", lambda pane_id: self.pane_now.get(pane_id)),
             ("respawn_pane", lambda pane, cwd, command: self.respawned.append((pane, cwd, command)) or (True, "")),
         ):
             original = getattr(WATCH, name)
@@ -90,10 +93,13 @@ class RestartPassTest(unittest.TestCase):
     def test_a_pane_whose_omp_died_is_resumed_with_the_absolute_shim(self) -> None:
         self.run_pass(self.host(), 1000.0)
         note = self.run_pass(("idle", {}), 1030.0)
-        self.assertEqual(
-            self.respawned,
-            [("%42", str(self.cwd), f"cd {self.cwd} && {WATCH.OMP_SHIM} --resume {SID} .")],
-        )
+        self.assertEqual(len(self.respawned), 1)
+        pane, cwd, command = self.respawned[0]
+        self.assertEqual((pane, cwd), ("%42", str(self.cwd)))
+        # No prompt after the id: omp would record it as a user message. The waker sends one
+        # Envoy notice instead.
+        self.assertTrue(command.endswith(f"cd {self.cwd} && {WATCH.OMP_SHIM} --resume {SID}"), command)
+        self.assertIn(f"move --wake {SID} ", command)
         self.assertIn("resumed 1", note)
         self.assertTrue(any("RESUMED" in line and "did not end normally" in line for line in self.lines))
 
@@ -166,16 +172,27 @@ class RestartPassTest(unittest.TestCase):
         self.assertEqual(self.respawned, [])
         self.assertIn("would resume 1", note)
         self.assertIn("DRY RUN, would resume", self.lines[-1])
-        self.assertIn(f"--resume {SID} .", self.lines[-1])
+        self.assertTrue(self.lines[-1].endswith(f"--resume {SID}"), self.lines[-1])
 
     def test_a_box_pane_is_resumed_through_agentbox_with_its_spec(self) -> None:
         box = {"pid": 9, "start": 1, "sid": SID, "spec": "--dir /mnt/lane", "box": "agentbox-0123456789ab", "cwd": str(self.cwd)}
         self.run_pass(("box", box), 1000.0)
         self.run_pass(("idle", {}), 1030.0)
-        self.assertEqual(
+        self.assertTrue(
+            self.respawned[0][2].endswith(
+                f"cd {self.cwd} && /home/u/.dotfiles/scripts/agentbox new --dir /mnt/lane -- omp --resume {SID}"
+            ),
             self.respawned[0][2],
-            f"cd {self.cwd} && /home/u/.dotfiles/scripts/agentbox new --dir /mnt/lane -- omp --resume {SID} .",
         )
+
+    def test_a_pane_respawned_while_the_run_decided_is_left(self) -> None:
+        """`agentbox move` respawns the pane into the box launcher seconds after the hang-up; a run
+        that decided in between must not kill that launcher with a respawn of its own."""
+        self.run_pass(self.host(), 1000.0)
+        self.pane_now["%42"] = {"pid": PANE["pid"] + 1, "dead": False}
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(self.respawned, [])
+        self.assertIn("left: the pane was respawned while this run decided", self.lines[-1])
 
     def test_a_pane_that_keeps_running_something_else_is_forgotten(self) -> None:
         self.run_pass(self.host(), 1000.0)

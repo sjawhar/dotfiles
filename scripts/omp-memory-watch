@@ -1567,12 +1567,43 @@ def live_holder(sid: str, omps: list[tuple[int, str]], resurrect, records: dict,
     return ""
 
 
+RESUME_WAKE_NOTICE = (
+    "omp-memory-watch: this session's omp ended without a normal exit, so its pane was resumed."
+    " Go on with the work you were doing. (An automated notice, not a person.)"
+)
+
+
 def resume_command(record: dict) -> str:
-    """What the lead runs by hand, with the launcher by its absolute path."""
+    """What the lead runs by hand, with the launcher by its absolute path.
+
+    The resume carries no prompt: omp records a positional as a user message, and the `.` this
+    used to end with was counted as text the person typed by the transcript store. The session is
+    woken instead by one Envoy notice, sent by `agentbox move --wake` once the resumed process has
+    registered; it runs in the background beside the launcher and logs to wake-<id>.log."""
     cwd, sid = shlex.quote(record["cwd"]), shlex.quote(record["sid"])
+    log = shlex.quote(str(Path.home() / ".cache" / "omp" / "agentbox" / f"wake-{record['sid']}.log"))
+    wake = (
+        f"( setsid {shlex.quote(str(AGENTBOX))} move --wake {sid} {shlex.quote(RESUME_WAKE_NOTICE)}"
+        f" </dev/null >>{log} 2>&1 & ); "
+    )
     if record["kind"] == "box":
-        return f"cd {cwd} && {shlex.quote(str(AGENTBOX))} new {record['spec']} -- omp --resume {sid} ."
-    return f"cd {cwd} && {shlex.quote(str(OMP_SHIM))} --resume {sid} ."
+        return f"{wake}cd {cwd} && {shlex.quote(str(AGENTBOX))} new {record['spec']} -- omp --resume {sid}"
+    return f"{wake}cd {cwd} && {shlex.quote(str(OMP_SHIM))} --resume {sid}"
+
+
+def pane_now(pane_id: str) -> dict | None:
+    """The pane as tmux has it at this moment: its process and whether it is dead, or None."""
+    try:
+        done = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_pid}\t#{pane_dead}"],
+            capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    parts = done.stdout.strip().split("\t")
+    if done.returncode != 0 or len(parts) != 2 or not parts[0].isdigit():
+        return None
+    return {"pid": int(parts[0]), "dead": parts[1] == "1"}
 
 
 def respawn_pane(pane_id: str, cwd: str, command: str) -> tuple[bool, str]:
@@ -1706,7 +1737,15 @@ def restart_pass(
             log(f"{name}: DRY RUN, would resume: its omp is gone and the session did not end normally: {command}")
             resumed += 1
             continue
-        if pane_processes(pane["pid"], resurrect) and not pane["dead"]:
+        # The pane as it is NOW, not as the listing at the start of this run had it: `agentbox
+        # move` hangs a session's omp up and respawns its pane into the box launcher seconds
+        # later, and a run that decided in that gap read the old pane pid, found nothing under it,
+        # and killed the launcher with its own respawn (01a14b36, pane %7, 2026-11-02T05:38:05Z).
+        current = pane_now(pane["id"])
+        if current is None or current["pid"] != pane["pid"]:
+            log(f"{name}: left: the pane was respawned while this run decided")
+            continue
+        if pane_processes(current["pid"], resurrect) and not current["dead"]:
             log(f"{name}: left: something started in the pane while this run decided")
             continue
         restarts[old["sid"]] = now
