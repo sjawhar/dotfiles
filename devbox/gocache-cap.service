@@ -1,14 +1,15 @@
 [Unit]
-Description=Clean the box's Go build cache (/mnt/nvme/<user>/gocache) when it passes 80 GB
-# The Go build cache grew about 4.8 GB an hour on sami-rocqperf on 2026-10-25 (dispatch://INFRA-6),
-# and Go trims only entries unused for 5 days, so nothing bounded it. Go has no size-based trim,
-# so over the cap this runs a full `go clean -cache`, and each lane's next build is a cold one.
+Description=Keep the box's Go build cache (/mnt/nvme/<user>/gocache) near 25 GB, cleaning it past 50 GB
+# Go trims only entries unused for 5 days and has no size-based trim, so nothing else bounds the
+# cache. On 2026-11-02 it grew about 20 GB in 80 minutes (agents' `go test` on agent-infra
+# compiling the Pulumi provider SDKs) and two caches together held about 95 GB while /mnt/nvme sat
+# under its 78.2 GiB floor; owners cleared them by hand at 07:30Z and 08:2xZ.
 #
-# Why 80 GB: the caches every lane used together on 2026-10-25 held about 70 GB (INFRA 62 GB,
-# LINUX 8.5 GB), so 80 GB keeps every lane's working set warm, and a clean happens only when
-# entries that no lane uses pile up. 80 GB is also small next to the 35 GB free-space floor on
-# /mnt/nvme: with 529 GB free on 2026-10-25, a full cache uses 15 % of that space, and a
-# cache over the cap is at most one hour's growth (about 5 GB) past it.
+# Over 25 GB this deletes the entries nobody used in the last 3 hours, which keeps every lane's
+# working set warm (Go refreshes an entry's mtime when it uses one over an hour old). Only if the
+# cache is still over 50 GB, which means three hours of builds wrote that much, does it run a full
+# `go clean -cache`, after which each lane's next build is a cold one. 50 GB is under the floor's
+# margin on a disk that has run 60-140 GiB free; the 80 GB cap this replaced was the whole margin.
 ConditionPathIsDirectory=/mnt/nvme/%u/gocache
 
 [Service]
