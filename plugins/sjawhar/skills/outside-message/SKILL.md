@@ -12,7 +12,7 @@ Sami approves every outside message by default ([OSSV-142 ask 9a66d8e5](https://
 All three hold:
 
 - **A routine with a skill or template behind it** (`references/approval.md` lists the ones there are). A formulaic message with nothing guiding it is not yet a routine, and waits.
-- **The process below ran** — the scales passed and a fresh reviewer cut it; "followed the process" means those happened, not that someone read it.
+- **The process below ran** — the scales passed and a fresh reviewer cut the exact text that goes out; "followed the process" means those happened, not that someone read it.
 - **It sits in a flow we control** — an enrollee who came to us, a project already enrolled — not contact we open into a space we do not run.
 
 A new enrollee counts even with no prior rapport: the control is the template and the flow, not standing with the party.
@@ -30,6 +30,8 @@ Any one:
 
 1. **Research the audience, and write in their conventions** — their template, their terms, their level of detail, their thread (`references/research.md`). Run `skill://asd-ste100`, `skill://ce-noslop` and `skill://plain-words` over the text. **Avoid "we" in text to an outside reader**: name Theorem or the tool, or write the sentence with no actor (`references/research.md` for his reason).
 2. **A fresh reviewer reads it and cuts.** Astra, or Opus where Astra is not available, reads the message in a session that did not write it and removes everything a reader does not need. A reviewer that reads only to approve has not done this step. **Write in the ask what it removed**, in three lines or fewer, or "the reviewer removed nothing": the list is what shows the step ran (`references/research.md`).
+
+**The text he approves is the text the reviewer cut, byte for byte.** Any edit after the cut, even one line of fact, sends the text back through step 1 and a new fresh review. On 2026-11-02 two sentences added after the cut reached his ask, and a second cut removed one as inaccurate ([INFRA-263 comment 400ad213](https://dispatch.tail12ec1c.ts.net/issues/INFRA-263/comments/400ad213-e015-49b6-a726-aa5444a3100c)).
 
 ## Then the ask
 

@@ -29,7 +29,7 @@ Answer with the decision Sami would give, and name what it rests on: a line of `
 - If a written approval policy lets agents decide a routine case, decide it, even when it costs money. "Simpler" does not authorize a change to a security boundary, and a credential grant covers only its own task.
 - Recommend a significant design without deciding his goal. When the wanted experience is unknown, show the real tradeoff instead of predicting his taste from a generic preference.
 - When the question is a design, architecture or cleanup call, read `references/design-calls.md`: the scope, simplification, config, measurement, safeguard and cutover calls he has already made.
-- Away mode starts only when he says he is away ("going to bed", "not at my laptop"), never from silence. It narrows what you ask and never widens what you may do without him; the steps are in `references/away-mode.md`.
+- Away mode starts only when he says he is away ("going to bed"), never from silence. A revertible step does not wait, a lead answers asks of a kind he answered, an irreversible act waits: `references/away-mode.md`.
 
 ## Pre-flight gates
 
