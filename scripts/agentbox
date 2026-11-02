@@ -780,12 +780,48 @@ ensure_forward_channels() {
     done
 }
 
+# Host services that are not forward's but listen on this host's loopback all the same, by port.
+# Each one that has a listener gets exactly what a forward channel gets: a forwarder on the box
+# network's gateway (agentbox-loopback-<port>) and, through AGENTBOX_FORWARD_CHANNELS, a relay in
+# the box on the same address and port, so a session reaches it at the address it uses on the
+# host. A port with no listener is skipped, so a host without the service starts its boxes
+# without it. 5005 is the OSS Verify MLflow tracking server: the machine-local unit
+# ossv-mlflow-tunnel.service holds an IAP tunnel to VM ossv-mlflow on 127.0.0.1:5005, and on
+# 2026-11-02 every route to it from a box failed and two lanes waited on it - the box's own
+# loopback, the box network's gateway, docker0's 172.17.0.1, and the tailnet (`tailscale serve`'s
+# :8449 listener is bound to the tailscale0 device, so a packet from a box bridge never reaches
+# it). AGENTBOX_LOOPBACK_PORTS (space-separated ports) replaces the list.
+read -r -a LOOPBACK_SERVICE_PORTS <<<"${AGENTBOX_LOOPBACK_PORTS-5005}"
+LOOPBACK_SERVICES=()
+loopback_services() {
+    LOOPBACK_SERVICES=()
+    (( ${#LOOPBACK_SERVICE_PORTS[@]} )) || return 0
+    local ports
+    ports="$(IFS='|'; echo "${LOOPBACK_SERVICE_PORTS[*]}")"
+    mapfile -t LOOPBACK_SERVICES < <(
+        ss -Hltn | awk '{ print $4 }' | grep -E "^127\.0\.0\.[0-9]+:($ports)\$" | sort -u
+    )
+}
+
+# Not fatal, as the tmux relay is not: a box works without MLflow, and a launch must not die of it.
+ensure_loopback_services() {
+    local service port
+    loopback_services
+    for service in ${LOOPBACK_SERVICES[@]+"${LOOPBACK_SERVICES[@]}"}; do
+        port="${service##*:}"
+        ( ensure_tcp_forwarder "agentbox-loopback-$port" "$port" "$service" ) \
+            || echo "agentbox: the relay of host service $service did not start; this box cannot reach it (journalctl --user -u agentbox-loopback-$port)" >&2
+    done
+    return 0
+}
+
 ensure_forwarders() {
     ensure_tcp_forwarder agentbox-imds "$IMDS_PORT" 169.254.169.254:80
     ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
     ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
     ensure_tmux_forwarder
     ensure_forward_channels
+    ensure_loopback_services
 }
 
 # The allow-list, as docker -v arguments. rw dirs are created on the host
@@ -935,11 +971,15 @@ session_env() {
     # its profile's envoy.json as a host session does (agentbox/mounts has the
     # neutral file's directory), and a variable here would override that file.
     e+=(-e "AGENTBOX_ENVOY_FORWARDER=$NETWORK_GATEWAY:$ENVOY_PORT")
-    # Each forward channel this host serves, "addr:port,…", for the box's own relays
-    # (entrypoint.sh). Read here rather than in the box, which cannot see the host's
-    # loopback; a host with no forward running passes none and the box starts without them.
+    # Each forward channel this host serves and each loopback service it has (loopback_services),
+    # "addr:port,…", for the box's own relays (entrypoint.sh). Read here rather than in the box,
+    # which cannot see the host's loopback; a host with neither passes none and the box starts
+    # without them. The entrypoint relays every entry the same way, so a service rides the list
+    # named for forward's channels and no image change is needed for one.
     forward_channels
-    e+=(-e "AGENTBOX_FORWARD_CHANNELS=$(IFS=,; echo "${FORWARD_CHANNELS[*]}")")
+    loopback_services
+    local relays=("${FORWARD_CHANNELS[@]}" ${LOOPBACK_SERVICES[@]+"${LOOPBACK_SERVICES[@]}"})
+    e+=(-e "AGENTBOX_FORWARD_CHANNELS=$(IFS=,; echo "${relays[*]}")")
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
     e+=(-e "AGENTBOX_BOX=$box" -e AGENTBOX_USER=ubuntu)
     # The box's disk limit, so a session and `agentbox doctor --here` can name the ceiling their
@@ -1226,6 +1266,23 @@ cmd_new() {
     while IFS=$'\t' read -r cfg_dir _why; do
         box_dir_have "$cfg_dir" || box_add_mount "$cfg_dir"
     done < <(move_config_dirs)
+    # The box-wide disk gate's state. `scripts/disk-gate` serialises every lane's large writes
+    # through one lock and one count in this directory; a box that cannot see it writes into a
+    # root-owned stub of its own, so `disk-gate reserve` takes no lock, counts nothing and reports
+    # an empty reserved figure - the failure the gate exists to end (three lane boxes within six
+    # minutes of the gate's announcement, 2026-11-02). The path is disk-gate's DEFAULT, never the
+    # caller's DISK_GATE_STATE: session_env builds the box's environment from scratch, so the
+    # disk-gate in the box always uses its default, and a launcher that bound the caller's value
+    # bound a directory the box never reads. That is how the first version of this block failed:
+    # its author's shell still exported DISK_GATE_STATE=/tmp/dg-test-47661 from testing the gate,
+    # so two test boxes got that directory and not this one. Made here when absent, as mount_args
+    # makes each rw allow-list path, so docker never creates it root-owned.
+    local gate_state
+    gate_state="/mnt/nvme/$(id -un)/scratch/disk-gate"
+    if [[ -d "${gate_state%/*}" ]]; then
+        mkdir -p "$gate_state"
+        box_dir_have "$gate_state" || box_add_mount "$gate_state"
+    fi
     # Transcripts archived to /mnt/durable stay behind symlinks under ~/.omp/agent/sessions, which
     # every box has; without the target the symlink dangles in the box and a resumed omp exits
     # `Session "<id>" not found` (2026-11-01, lane box h-dgn-t1, three times). Bound read-write:
