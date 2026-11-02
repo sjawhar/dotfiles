@@ -50,6 +50,63 @@ The chief of staff's `~/src/scrum/workstreams/streams.json` is optional and over
 matched by `issue` or `slug`: `rank` (priority; an unranked stream sorts after the ranked ones) and `attention`
 (one of Sami's attention items, starred and sorted first).
 
+## The stream pilot
+
+`chief-dashboard pilot` runs a work stream without a standing lead session (`chief_dashboard/pilot.py`). The stream's
+state is the Dispatch document `stream.md` on its stream issue; local state lives under `--state DIR`, one directory
+per stream. Nothing here writes to Dispatch or sends an Envoy message: `summary` starts the omp session that does.
+
+- `facts --stream KEY --state DIR [--now ISO] [--pilot-start ISO]` prints one JSON snapshot and writes it to
+  `DIR/KEY/facts-<UTC>.json`: the record (saved to `DIR/KEY/stream.md`), the latest scoreboard, each `Order of work`
+  row with its owner column's text, its issue's title, status and claim and whether the claim holder is live, each
+  open commitment with its line, link, issue title, whether it is overdue and whether its owner session is live
+  (`owner_live`), the `LEDGER` comments since the last run, Envoy role holders (`envoy ps --json`) with the record's
+  next holder, sessions that claim more than one open issue of the project, and a `findings` list. A row counts as
+  started, not ready, while no live session claims it and its latest `started.tsv` line is under 2 hours old or an
+  omp process still runs in its tmux pane, read from /proc as `chief-dashboard sessions` reads it (`agent-new` leaves a
+  bash in the pane after omp exits, which does not count; tmux names both `bash`, since `omp` is a shim). Each multi-claim
+  entry carries `pilot_session`: whether that session posted a `LEDGER start` on the stream issue since the pilot
+  start (2026-11-03T14:30Z unless `--pilot-start`); the set accumulates in `DIR/KEY/pilot-sessions.txt`.
+  `pending_offline` lists the lines of `offline-ledger.md` and `pending_offline_decisions` the entries of
+  `offline-decisions.md`. An issue with no `stream.md` gives `record: null` and the copy is removed. While Dispatch is
+  down the snapshot uses the saved copy and the offline files, reads nothing else from Dispatch, marks no row ready and
+  leaves `last-facts` alone; an unreachable Envoy gives role liveness `null`.
+- `summary --stream KEY --state DIR --window WINDOW [--dry-run]` runs `facts`, then
+  `omp -p --no-title --max-time 30m --max-cost 15` in `DIR/KEY`, logging to `DIR/KEY/summary-<UTC>.log` and exiting
+  with omp's code. The prompt tells the session to append `ISSUE<TAB>pending<TAB>UTC` to `started.tsv` before each
+  `agent-new` and `ISSUE<TAB>PANE<TAB>UTC` after. With no record it starts nothing and logs
+  `no stream record, skipped`. `--dry-run` prints the command instead.
+- `schedule --jobs FILE --state DIR` runs until stopped. Start it as a named omp background service, not a systemd
+  unit. Each job fires at each local `at` time and, with `dues_from`, at each `due` in that stream's record. Every
+  cycle re-reads the jobs file and the record from Dispatch (an outage keeps the saved copy; a 404 removes it) and
+  recomputes the fires from them, so a due the owner removed no longer fires and a moved one fires at its new time. A
+  time that passes while another job runs, a due included, still fires when that job ends; only times already past
+  when the process started are dropped. Fires of one job at one time run once, and every due they cover goes into
+  `DIR/<stream>/fired-dues.json`, so a restart does not fire it again. It sleeps at most 10 minutes between cycles and
+  runs jobs one at a time, each in its own process group: at its timeout the whole group is killed and reaped
+  (exit 124) before the next job. A thread writes `DIR/heartbeat` (UTC time, pid) every 60 s; the process exits 1 if
+  that thread dies, so a file older than 15 minutes means the scheduler is down.
+- `census --stream KEY [--out FILE]` prints the session ids of the live top-level sessions in the stream's tmux
+  windows (`sessions.py`), one per line, to freeze a baseline.
+- `measure --stream KEY --start ISO --end ISO [--sessions-file FILE] [--json]` counts, per session and over
+  [start, end) in INFRA, BET, LINUX and OSSV: issues claimed and created, sub-issues of its own work, work moved
+  (`LEDGER handoff`, a claim released before done), dones with an own child still open, dones without evidence, asks
+  opened, and whether it held one issue. Without `--sessions-file` it measures the sessions that posted
+  `LEDGER start` on the stream issue in the window. A done is the session's when it made the change or held the claim.
+  Every such close is judged, and an issue counts when any of its closes violates: a child counts against a close only
+  when the session had created it, it existed with that parent at the close and was not done then. Evidence is a link
+  in that close's reason message, or in the session's `LEDGER done` line for the issue when that close is the first at
+  or after the line (any https link but a Dispatch issue page, or a `dispatch://` reference to a document, comment or
+  message). A link on the issue itself is never evidence. `exit_after_done` is always null: it needs transcripts.
+
+Every time argument is ISO 8601; an offset is converted to UTC, and a time without one is UTC.
+
+The jobs file is JSON with a named time zone (DST-correct through `zoneinfo`):
+
+```json
+{"timezone": "America/Los_Angeles", "jobs": [{"name": "summary", "at": ["06:30", "14:30"], "dues_from": "INFRA-167", "command": ["chief-dashboard", "pilot", "summary", "--stream", "INFRA-167", "--state", "/state", "--window", "rocq"], "cwd": "/state/INFRA-167", "timeout_s": 1800}]}
+```
+
 ## What it reads
 
 All real data, re-read every 2 minutes. The page updates itself live: the server pushes its version over a

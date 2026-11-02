@@ -12,6 +12,8 @@ chief-dashboard sami-messages [--since ISO8601] > FILE.md
 chief-dashboard sessions [--record FILE.json]
                                         live agent sessions per tmux window, as the page counts them
                                         (sessions.py); --record also writes the raw reading, for a test fixture
+chief-dashboard pilot {facts,summary,schedule,census,measure} ...
+                                        stream facts, summary scheduling, session census and event-only measurement
 
 Without uv: python3 -m chief_dashboard <command> from ~/.dotfiles/chief-dashboard."""
 
@@ -38,7 +40,12 @@ def main() -> None:
     sub.add_parser("sami-messages", add_help=False, help="his messages to a session, verbatim: -h for options")
     w = sub.add_parser("sessions", help="live agent sessions per tmux window, as the page counts them")
     w.add_argument("--record", type=Path, help="also write the raw reading (processes, panes, containers) here")
+    sub.add_parser("pilot", add_help=False, help="stream-pilot facts, summaries, schedule and measurement: -h for options")
     args, rest = p.parse_known_args()
+    if args.cmd == "pilot":
+        from .pilot import main as pilot
+
+        sys.exit(pilot(rest))
     if args.cmd == "dispatch-check":
         from .dispatch_check import main as dispatch_check
 
