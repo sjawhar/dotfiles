@@ -3,7 +3,7 @@
 # checkout made for it.
 #
 #   agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE]
-#                [--dir PATH]… [<repo>…] -- <cmd> [args…]
+#                [--dir PATH]… [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]
 #                                       run a command in a fresh box holding a
 #                                       checkout of each repo, working in the
 #                                       first; each --dir gives the box one
@@ -14,7 +14,9 @@
 #                                       (docker run -e: a bare NAME passes the
 #                                       caller's value); --memory/--cpus/--disk
 #                                       raise or lower this box's limits
-#                                       (defaults below)
+#                                       (defaults below); --drop-gone-dirs,
+#                                       for a resume, leaves out a --dir after
+#                                       the first that no longer exists
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
 #   agentbox ls                         running boxes
 #   agentbox doctor                     health checks, host side and box side
@@ -1269,8 +1271,19 @@ close_box() {
 }
 
 cmd_new() {
-    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE] [--dir PATH]… [<repo>…] -- <cmd> [args…]"
-    local user_env=() box_repos=() repo
+    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE] [--dir PATH]… [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
+    local user_env=() box_repos=() repo a drop_gone=false dirs_seen=0
+    # --drop-gone-dirs: this launch RESUMES a session (move_pane_command, omp-memory-watch's
+    # restarter, tmux-resurrect-omp), so its --dir paths were right when they were recorded and a
+    # path removed since then (a lane's finished scratch tree, a per-session TMPDIR an older move
+    # recorded: 01a1798a on 2026-11-02, whose resume stopped at a shell on "is not an existing
+    # directory") is left out with a line on stderr instead of refusing the whole resume. The first
+    # --dir is where the box works, so a resume whose first --dir is gone is still refused. Read
+    # before the loop, since add_box_dir refuses a missing path as each --dir is read.
+    for a in "$@"; do
+        [[ "$a" == -- ]] && break
+        [[ "$a" == --drop-gone-dirs ]] && drop_gone=true
+    done
     # Where each limit came from, so a refusal names what the caller actually set.
     local mem_from="AGENTBOX_MEMORY" cpu_from="AGENTBOX_CPUS" disk_from="AGENTBOX_DISK"
     [[ -n "${AGENTBOX_MEMORY:-}" ]] || mem_from="the default memory limit"
@@ -1298,8 +1311,16 @@ cmd_new() {
                 BOX_DISK="$2" disk_from="--disk"
                 shift 2
                 ;;
+            --drop-gone-dirs) shift ;;
             --dir)
                 [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir ~/src/bet-grade  ($usage)"
+                dirs_seen=$((dirs_seen + 1))
+                if $drop_gone && [[ ! -e "$2" && ! -L "$2" ]]; then
+                    (( dirs_seen > 1 )) || die "--dir '$2', the first --dir and so the directory this resume works in, no longer exists; nothing was started"
+                    echo "agentbox: --dir '$2' no longer exists; this resume goes on without it" >&2
+                    shift 2
+                    continue
+                fi
                 add_box_dir "$2"
                 shift 2
                 ;;
@@ -1762,6 +1783,33 @@ move_dir_in_box() {
         if move_within "$path" "$p"; then return 0; fi
     done
     return 1
+}
+
+# A path that is removed when the omp a move hangs up exits: its per-session TMPDIR.
+# scripts/agent-session makes one for every agent session, `mktemp -d
+# /mnt/nvme/<user>/session-tmp/$$-XXXXXXXX`, exports it as TMPDIR and AGENT_SESSION_SCRATCH, and
+# devbox/session-scratch-reap removes it once no live process holds it. A spec that names one
+# names a path the next `agentbox new` refuses ("is not an existing directory"): 01a1798a's move at
+# 10:42Z on 2026-11-02 recorded /mnt/nvme/sami/session-tmp/53458-LivaHYZv, the TMPDIR of its omp
+# (pid 53458), and when the session ended at 16:23Z the restarter's resume of that spec stopped at
+# a shell. The box needs none of it: the session there gets a TMPDIR of its
+# own. So nothing under the session-tmp root (AGENTBOX_SESSION_TMP replaces it, as the tests need:
+# their own tree is under this host's real root) and nothing under the omp's own
+# AGENT_SESSION_SCRATCH, wherever that is (MOVE_SCRATCH, set by move_dirs_why), is ever a --dir.
+MOVE_SESSION_TMP="${AGENTBOX_SESSION_TMP:-/mnt/nvme/$(id -un)/session-tmp}"
+MOVE_SCRATCH=""
+move_dir_dies_with_omp() {
+    if move_within "$1" "$MOVE_SESSION_TMP"; then return 0; fi
+    [[ -n "$MOVE_SCRATCH" ]] && move_within "$1" "$MOVE_SCRATCH"
+}
+
+# The omp's own AGENT_SESSION_SCRATCH, from its environment, or nothing.
+move_omp_scratch() {
+    local kv
+    while IFS= read -r -d '' kv; do
+        if [[ "$kv" == AGENT_SESSION_SCRATCH=/* ]]; then printf '%s\n' "${kv#*=}"; return 0; fi
+    done < <(cat "$PROC/$1/environ" 2>/dev/null || true)
+    return 0
 }
 
 # The root of the git working tree a path is in, printed, or nothing. No fork: the first ancestor
@@ -2273,6 +2321,12 @@ move_dirs_why() {
     shift $(( $# > 3 ? 3 : $# ))
     [[ -n "$cwd" ]] || { echo "its working directory cannot be read" >&2; return 1; }
     [[ -d "$cwd" ]] || { echo "its working directory $cwd is gone" >&2; return 1; }
+    MOVE_SCRATCH=""
+    [[ -n "$pid" ]] && MOVE_SCRATCH="$(move_omp_scratch "$pid")"
+    if move_dir_dies_with_omp "$cwd"; then
+        echo "it works in $cwd, a per-session TMPDIR that is removed when this omp exits, so the box could never be resumed there; cd to the tree it works in first" >&2
+        return 1
+    fi
     case "$cwd" in
         /) echo "it works in /, which a box cannot be given (that is the whole host filesystem)" >&2; return 1 ;;
         "$HOME") echo "it works in \$HOME, which would shadow the box's own home and its allow-list" >&2; return 1 ;;
@@ -2320,7 +2374,7 @@ move_dirs_why() {
             move_resolve_dir_var "$store"
             bounded="$MOVE_RESOLVED"
             [[ -n "$bounded" && -d "$bounded" ]] || continue
-            if move_dir_in_box "$bounded" || move_dir_too_broad "$bounded"; then continue; fi
+            if move_dir_in_box "$bounded" || move_dir_too_broad "$bounded" || move_dir_dies_with_omp "$bounded"; then continue; fi
             move_keep "$bounded" "the git object store of $tree, which is outside it"
         done < <(move_git_storage "$tree")
         return 0
@@ -2342,7 +2396,7 @@ move_dirs_why() {
             fi
             path="${resolved[$path]}"
             [[ -n "$path" && -d "$path" ]] || continue
-            if move_dir_in_box "$path" || move_dir_too_broad "$path"; then continue; fi
+            if move_dir_in_box "$path" || move_dir_too_broad "$path" || move_dir_dies_with_omp "$path"; then continue; fi
             move_keep "$path" "$why"
         done
     }
@@ -2375,6 +2429,10 @@ move_dirs_why() {
     # checkout whose `.git/objects` is a symlink elsewhere is a box that answers `not a git
     # repository`, exactly as `agentbox new --dir` did before add_box_dir_storage.
     for cand in "$@"; do
+        if move_dir_dies_with_omp "$cand"; then
+            echo "--dir $cand is a per-session TMPDIR, which is removed when this omp exits, so a box given it could not be resumed; name a directory that outlives the session" >&2
+            return 1
+        fi
         move_take_storage "$cand"
         move_keep "$cand" "you named it with --dir"
     done
@@ -2993,7 +3051,7 @@ move_pane_command() {
     shift 2
     log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$sid.log"
     printf '( setsid %q move --wake %q </dev/null >>%q 2>&1 & ); %s' \
-        "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "$log" "$(printf '%q ' agentbox new "$@" -- omp --resume "$resume")"
+        "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "$log" "$(printf '%q ' agentbox new --drop-gone-dirs "$@" -- omp --resume "$resume")"
 }
 
 # The tmux server a relauncher drives its pane through: `-S <socket>` from the TARGET omp's own
@@ -3047,6 +3105,15 @@ move_relaunch() {
         echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $resume"
         return 1
     fi
+    # The launcher leaves out a --dir that is gone by the time it runs (--drop-gone-dirs), since a
+    # respawn can come ten minutes after the spec was read. This log says which, as the pane's own
+    # lines reach nobody.
+    local i
+    for ((i = 0; i + 1 < ${#spec[@]}; i++)); do
+        if [[ "${spec[i]}" == --dir && ! -e "${spec[i+1]}" ]]; then
+            echo "$(date -u +%FT%TZ) move $sid: --dir ${spec[i+1]} no longer exists; the box starts without it"
+        fi
+    done
     inner="$(move_pane_command "$sid" "$resume" "${spec[@]}")"
     if ! move_respawn "$sid" "$pane" "$cwd" "$inner" "${spec[*]}"; then
         echo "$(date -u +%FT%TZ) move $sid: pane $pane holds no process and would not respawn; the session is DOWN. Bring it back from a host session: $MOVE_TMUX_BIN ${MOVE_TMUX[*]:+${MOVE_TMUX[*]} }respawn-pane -k -t $pane -c $cwd bash -i -c '$inner; exec bash -i'"

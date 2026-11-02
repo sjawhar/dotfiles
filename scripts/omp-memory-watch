@@ -1847,6 +1847,28 @@ def own_scope_memory_max(pid: int) -> int | None:
     return read_int(CGROUP_ROOT / cgroup.strip("/") / "memory.max")
 
 
+def gone_box_dirs(spec: str) -> list[str]:
+    """Every --dir of an `agentbox new` spec after the first that no longer exists.
+
+    A spec is what the box was given when it started, and a path in it can be gone by the time
+    the session is resumed: 01a1798a's box spec of 2026-11-02T10:42Z named its old omp's TMPDIR,
+    /mnt/nvme/sami/session-tmp/53458-LivaHYZv, which is removed when that omp exits, and at its
+    16:23Z resume `agentbox new` refused it as "not an existing directory" and the pane sat at a
+    shell. The launcher leaves such a path out (--drop-gone-dirs); this names them for the log.
+    The first --dir is where the box works, the record's cwd, which restart_decision checks."""
+    words = spec.split()
+    dirs = [words[i + 1] for i in range(len(words) - 1) if words[i] == "--dir"]
+    return [d for d in dirs[1:] if not os.path.lexists(d)]
+
+
+def gone_note(resume: dict) -> str:
+    """The log's words for the --dir paths a resume goes on without, else ""."""
+    gone = resume.get("gone_dirs") or []
+    if not gone:
+        return ""
+    return "; without " + ", ".join(f"--dir {d}" for d in gone) + (", which no longer exists" if len(gone) == 1 else ", which no longer exist")
+
+
 def resume_command(record: dict) -> str:
     """What the lead runs by hand, with the launcher by its absolute path.
 
@@ -1861,7 +1883,10 @@ def resume_command(record: dict) -> str:
         f" </dev/null >>{log} 2>&1 & ); "
     )
     if record["kind"] == "box":
-        return f"{wake}cd {cwd} && {shlex.quote(str(AGENTBOX))} new {record['spec']} -- omp --resume {sid}"
+        # --drop-gone-dirs: a --dir removed since the box started is left out, not refused
+        # (box_spec_dirs). A spec read from a launcher a move started has it already.
+        drop = "" if "--drop-gone-dirs" in record["spec"].split() else "--drop-gone-dirs "
+        return f"{wake}cd {cwd} && {shlex.quote(str(AGENTBOX))} new {drop}{record['spec']} -- omp --resume {sid}"
     ceiling = record.get("memory_max")
     env = f"OMP_MEMORY_MAX={int(ceiling)} " if isinstance(ceiling, int) and ceiling > 0 else ""
     return f"{wake}cd {cwd} && {env}{shlex.quote(str(OMP_SHIM))} --resume {sid}"
@@ -2028,6 +2053,8 @@ def restart_decision(record: dict, omps: list, restarts: dict, options: argparse
         return f"left: its working directory {resume.get('cwd') or '(unknown)'} is gone", {}
     if resume.get("kind") == "box" and not resume.get("spec"):
         return "left: the agentbox launcher line names no spec", {}
+    if resume.get("kind") == "box":
+        resume = dict(resume, gone_dirs=gone_box_dirs(resume["spec"]))
     last = float(restarts.get(sid) or 0)
     if last and now - last < options.restart_cooldown:
         return f"left: resumed at {iso(last)}, less than {human(options.restart_cooldown)} ago", {}
@@ -2130,7 +2157,7 @@ def restart_pass(
         how = f"tmux new-window -n {title} -c {shlex.quote(resume['cwd'])} bash -i -c {shlex.quote(command + '; exec bash -i')}"
         if dry:
             log(f"{name}: DRY RUN, would resume in a new pane of window {window} (else a new window {title}"
-                f" of tmux session {tmux_session}): agentbox move gave up ({resume['gave_up']}): {command}")
+                f" of tmux session {tmux_session}): agentbox move gave up ({resume['gave_up']}){gone_note(resume)}: {command}")
             resumed += 1
             continue
         restarts[resume["sid"]] = now
@@ -2138,7 +2165,7 @@ def restart_pass(
         ok, out, where = open_pane(window, tmux_session, title, resume["cwd"], command)
         if ok:
             heard = report(down_resumed_text(resume["sid"], resume["gave_up"], f"in new pane {out} ({where}), since pane {pane_id} is gone", command))
-            log(f"{name}: RESUMED in new pane {out} ({where}): agentbox move gave up ({resume['gave_up']}): {command} -> {heard}")
+            log(f"{name}: RESUMED in new pane {out} ({where}): agentbox move gave up ({resume['gave_up']}){gone_note(resume)}: {command} -> {heard}")
             resumed += 1
         else:
             heard = report(resume_failed_text(resume["sid"], f"agentbox move gave up ({resume['gave_up']}), its pane {pane_id} is gone, and no new pane could be opened: {out}", how))
@@ -2206,6 +2233,7 @@ def restart_pass(
             continue
         command = resume_command(resume)
         why = f"agentbox move gave up ({resume['gave_up']})" if resume.get("gave_up") else "its omp is gone and the session did not end normally"
+        why += gone_note(resume)
         if dry:
             log(f"{name}: DRY RUN, would resume: {why}: {command}")
             resumed += 1

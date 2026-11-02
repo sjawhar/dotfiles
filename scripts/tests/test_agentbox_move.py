@@ -85,6 +85,9 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_MOVE_ROOTS": ":".join(
                 str(self.home / p) for p in ("Code", "Code/personal", ".worktrees", "tmp")
             ),
+            # The per-session TMPDIR root (scripts/agent-session), pinned to the fixture: this
+            # host's real root holds the suite's own temporary tree.
+            "AGENTBOX_SESSION_TMP": str(self.root / "session-tmp"),
             # The durable disk every box binds whole, pinned to the fixture for the same reason.
             "AGENTBOX_DURABLE": str(self.root / "durable"),
             "STUB_PGREP": str(self.root / "STUB_PGREP"),
@@ -380,6 +383,59 @@ class AgentboxMove(unittest.TestCase):
         rows = [line.split("\t") for line in result.stdout.splitlines()]
         self.assertEqual([row[0] for row in rows], [str(lane), str(child), str(named)])
         self.assertEqual(rows[2][1], "you named it with --dir")
+
+    def incident_session(self) -> tuple[Path, Path, Path]:
+        """01a1798a at its 2026-11-02T10:42Z move, in the fixture: omp pid 53458 in its tree,
+        its own TMPDIR session-tmp/53458-LivaHYZv (agent-session's `$$-XXXXXXXX`), where omp's
+        python runner writes, and a lane tree it writes in too."""
+        lane = self.home / "machcsl-riscv"
+        lane.mkdir()
+        scratch = self.root / "session-tmp" / "53458-LivaHYZv"
+        runner = scratch / "omp-python-runner-1000"
+        runner.mkdir(parents=True)
+        (runner / "runner-2mgc0ebjdknhi.py").write_text("", encoding="utf-8")
+        verified = self.home / "tmp" / "verified-linux" / "reviews"
+        verified.mkdir(parents=True)
+        (verified / "r.md").write_text("", encoding="utf-8")
+        environ = {"AGENT_SESSION_SCRATCH": str(scratch), "TMPDIR": str(scratch)}
+        self.make_proc(53458, comm="omp", ppid=1, cwd=lane, environ=environ)
+        self.make_proc(53470, comm="python3", ppid=53458, cwd=runner, environ=environ,
+                       writes=(runner / "runner-2mgc0ebjdknhi.py",))
+        self.make_proc(53471, comm="bash", ppid=53458, cwd=lane, environ=environ, writes=(verified / "r.md",))
+        return lane, scratch, verified
+
+    def test_a_per_session_tmpdir_is_never_in_the_spec(self) -> None:
+        """The 10:42Z spec named /mnt/nvme/sami/session-tmp/53458-LivaHYZv, which
+        session-scratch-reap removes once the hung-up omp is gone, so the restarter's resume of
+        that spec at 16:23Z was refused ("is not an existing directory")."""
+        lane, scratch, verified = self.incident_session()
+        result = self.run_bash(f'move_dirs "{lane}" 53458')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), [str(lane), str(self.home / "tmp" / "verified-linux")])
+        self.assertNotIn(str(scratch), result.stdout)
+
+    def test_the_omps_own_scratch_is_never_in_the_spec_wherever_it_is(self) -> None:
+        """AGENT_SESSION_SCRATCH is agent-session's per-session directory, under the root or not
+        (a nested launch inherits its parent session's): it dies with the session either way."""
+        lane = self.home / "lane"
+        lane.mkdir()
+        scratch = self.home / "elsewhere" / "4242-AbCdEfGh"
+        scratch.mkdir(parents=True)
+        self.make_proc(4242, comm="omp", ppid=1, cwd=lane, environ={"AGENT_SESSION_SCRATCH": str(scratch)})
+        self.make_proc(4243, comm="bash", ppid=4242, cwd=scratch)
+        result = self.run_bash(f'move_dirs "{lane}" 4242')
+        self.assertEqual(result.stdout.split(), [str(lane)], result.stderr)
+
+    def test_a_session_working_in_or_naming_a_per_session_tmpdir_is_refused(self) -> None:
+        """The working directory and a hand-named --dir are kept whatever the inference says, so
+        either one in a TMPDIR that dies with the omp is a box no resume could start: refused."""
+        lane, scratch, _verified = self.incident_session()
+        in_it = self.run_bash(f'move_dirs "{scratch}" 53458')
+        self.assertNotEqual(in_it.returncode, 0)
+        self.assertIn("a per-session TMPDIR that is removed when this omp exits", in_it.stderr)
+        named = self.run_bash(f'move_dirs "{lane}" 53458 "" "{scratch}"')
+        self.assertNotEqual(named.returncode, 0)
+        self.assertIn(f"--dir {scratch} is a per-session TMPDIR", named.stderr)
 
     def test_move_self_dir_is_refused_by_the_same_checks_agentbox_new_applies(self) -> None:
         lane = self.home / "lane"
@@ -890,6 +946,32 @@ class AgentboxMove(unittest.TestCase):
         calls = args.read_text(encoding="utf-8").splitlines()
         self.assertFalse(any(" respawn-pane " in f" {c} " for c in calls), calls)
 
+    def test_the_relauncher_logs_a_dir_gone_since_the_spec_and_the_launcher_drops_it(self) -> None:
+        """A respawn can run up to ten minutes after the spec was read, and the old omp's TMPDIR
+        is reaped minutes after it exits: the pane's launcher leaves such a --dir out
+        (--drop-gone-dirs), and the move's log, the one record anyone reads, names it."""
+        lane = self.root / "lane"
+        lane.mkdir()
+        gone = self.root / "session-tmp" / "53458-LivaHYZv"
+        sid = "01a1798a-99af-7266-95dd-fa4be35f9109"
+        self.make_proc(999999999, cwd=lane, session=sid, environ={"TMUX": "/sock/tmux-1000/default,28813,1"})
+        args = self.root / "TMUX_ARGS"
+        args.write_text("", encoding="utf-8")
+        write_stub(self.stubs, "tmux", "\n".join([
+            f'printf "%s\\n" "$*" >>"{args}"',
+            'case " $* " in *" display-message "*) printf "%%23\\n" ;; esac',
+            "exit 0",
+        ]))
+        result = self.run_bash(
+            f'move_relaunch 999999999 {sid} %23 "{lane}" "{self.session_file(sid)}" --dir "{lane}" --dir "{gone}"',
+            {"AGENTBOX_RESPAWN_TRIES": "1", "AGENTBOX_RESPAWN_WAIT": "0"},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"move {sid}: --dir {gone} no longer exists; the box starts without it", result.stdout)
+        respawn = [c for c in args.read_text(encoding="utf-8").splitlines() if " respawn-pane " in f" {c} "]
+        self.assertEqual(len(respawn), 1, respawn)
+        self.assertIn("agentbox new --drop-gone-dirs --dir", respawn[0])
+
     def test_a_session_file_names_the_session_in_full_and_a_truncated_name_is_no_id(self) -> None:
         """A prefix would resume another session, so only the 36-character id in the transcript's
         name counts; everything else reads as "no id" and is refused rather than guessed."""
@@ -1122,7 +1204,8 @@ class AgentboxMove(unittest.TestCase):
         result = self.run_bash(f"move_pane_command {sid} /t/{sid}.jsonl --dir /lane")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"move --wake {sid}", result.stdout)
-        self.assertTrue(result.stdout.rstrip().endswith(f"agentbox new --dir /lane -- omp --resume /t/{sid}.jsonl"), result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith(
+            f"agentbox new --drop-gone-dirs --dir /lane -- omp --resume /t/{sid}.jsonl"), result.stdout)
 
     def test_the_waker_notifies_once_the_resumed_process_registers(self) -> None:
         sid = "01a19700-0000-7000-8000-000000020002"

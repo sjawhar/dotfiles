@@ -369,6 +369,53 @@ class AgentboxDirs(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "")
 
+    # ── a resume of a spec recorded earlier ──────────────────────────────────────────────────
+    def incident_spec(self) -> tuple[list[str], Path]:
+        """01a1798a's box spec of its 2026-11-02T10:42Z move, under the fixture root: its
+        working tree, the git object store and two lane trees, which still exist, and its old
+        omp's TMPDIR (session-tmp/53458-LivaHYZv), which was removed when that omp exited."""
+        work = self.root / "src-machcsl-riscv"
+        kept = [self.root / "nvme" / name for name in ("git-objects", "frac-verify", "tmp/verified-linux")]
+        gone = self.root / "nvme" / "session-tmp" / "53458-LivaHYZv"
+        for path in (work, *kept, gone):
+            path.mkdir(parents=True)
+        gone.rmdir()
+        spec: list[str] = []
+        for path in (work, kept[0], kept[1], gone, kept[2]):
+            spec += ["--dir", str(path)]
+        return spec, gone
+
+    def test_a_plain_launch_still_refuses_a_dir_that_does_not_exist(self) -> None:
+        """What a person types is checked as before: a typo is refused, not silently dropped."""
+        spec, gone = self.incident_spec()
+        result = self.launch(*spec)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"--dir '{gone}' is not an existing directory", result.stderr)
+
+    def test_a_resume_goes_on_without_a_dir_removed_since_the_spec_was_recorded(self) -> None:
+        """16:23Z on 2026-11-02: the restarter resumed 01a1798a with its 10:42Z spec, `agentbox
+        new` refused the gone TMPDIR, and the pane sat at a shell until a person restarted it by
+        hand with the same dirs minus that one. --drop-gone-dirs is that, done by the launcher."""
+        spec, gone = self.incident_spec()
+        args = self.run_args_of("--drop-gone-dirs", *spec)
+        binds = self.binds_of(args)
+        for flag, value in zip(spec, spec[1:]):
+            if flag == "--dir" and value != str(gone):
+                self.assertIn(f"{value}:{value}", binds)
+        self.assertFalse(any(str(gone) in bind for bind in binds), binds)
+        self.assertEqual(self.workdir_of(args), spec[1])
+        result = self.launch("--drop-gone-dirs", *spec)
+        self.assertIn(f"--dir '{gone}' no longer exists; this resume goes on without it", result.stderr)
+
+    def test_a_resume_whose_working_directory_is_gone_is_still_refused(self) -> None:
+        """The first --dir is where the box works: without it there is nothing to resume in."""
+        spec, _gone = self.incident_spec()
+        Path(spec[1]).rmdir()
+        result = self.launch("--drop-gone-dirs", *spec)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"--dir '{spec[1]}', the first --dir", result.stderr)
+        self.assertFalse(self.run_args.exists(), "no box may start")
+
 
 if __name__ == "__main__":
     unittest.main()

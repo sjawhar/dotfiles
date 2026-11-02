@@ -259,7 +259,13 @@ def box_sessions(boxes: list[str] | None = None) -> dict[str, tuple[str | None, 
 
 
 def resume_command(spec: str | None, sid: str) -> str:
-    return f"agentbox new {spec} -- omp --resume {sid}" if spec else f"omp --resume {sid}"
+    """The line a restored pane runs. A box's spec is what it was given when it started, so a
+    --dir removed since then is left out (`agentbox new --drop-gone-dirs`) instead of refusing the
+    whole resume, which is how 01a1798a's pane sat at a shell on 2026-11-02 at 16:23Z."""
+    if not spec:
+        return f"omp --resume {sid}"
+    drop = "" if "--drop-gone-dirs" in spec.split() else "--drop-gone-dirs "
+    return f"agentbox new {drop}{spec} -- omp --resume {sid}"
 
 
 def rewrite(save_file: Path) -> tuple[int, int]:

@@ -215,10 +215,49 @@ class RestartPassTest(RestarterCase):
         self.run_pass(("idle", {}), 1030.0)
         self.assertTrue(
             self.respawned[0][2].endswith(
-                f"cd {self.cwd} && /home/u/.dotfiles/scripts/agentbox new --dir /mnt/lane -- omp --resume {SID}"
+                f"cd {self.cwd} && /home/u/.dotfiles/scripts/agentbox new --drop-gone-dirs --dir /mnt/lane -- omp --resume {SID}"
             ),
             self.respawned[0][2],
         )
+
+    def test_a_box_resumes_without_a_dir_its_spec_names_that_is_gone_and_says_so(self) -> None:
+        """01a1798a, pane %23: its 10:42Z box spec named its old omp's TMPDIR, removed when that
+        omp exited. At 16:23Z the restarter resumed that spec, `agentbox new` refused the gone
+        directory, and the pane sat at a shell until a person restarted it by hand at 16:28Z
+        with the same dirs minus that one. The spec below is that one, under the fixture root."""
+        root = Path(self.tmp.name)
+        kept = [root / "nvme" / name for name in ("git-objects", "frac-verify", "tmp/verified-linux")]
+        for path in kept:
+            path.mkdir(parents=True)
+        gone = root / "nvme" / "session-tmp" / "53458-LivaHYZv"
+        spec = (f"--dir {self.cwd} --dir {kept[0]} --dir {kept[1]} --dir {gone} --dir {kept[2]}"
+                " --dir /var/tmp/baseline-cache --dir /var/tmp/baseline-farm-state")
+        box = {"pid": 9, "start": 1, "sid": SID, "spec": spec, "box": "agentbox-676432b23e44", "cwd": str(self.cwd)}
+        self.run_pass(("box", box), 1000.0)
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(len(self.respawned), 1, self.lines)
+        command = self.respawned[0][2]
+        self.assertIn(f"/home/u/.dotfiles/scripts/agentbox new --drop-gone-dirs {spec} -- omp --resume {SID}", command)
+        resumed = [line for line in self.lines if "RESUMED" in line]
+        self.assertEqual(len(resumed), 1, self.lines)
+        self.assertIn(f"without --dir {gone}", resumed[0])
+        self.assertNotIn(f"--dir {kept[0]}, ", resumed[0])
+
+    def test_a_box_spec_that_drops_gone_dirs_already_is_not_given_it_twice(self) -> None:
+        """A box a move started runs `agentbox new --drop-gone-dirs …`, which is the spec read back."""
+        box = {"pid": 9, "start": 1, "sid": SID, "spec": f"--drop-gone-dirs --dir {self.cwd}", "box": "agentbox-0123456789ab", "cwd": str(self.cwd)}
+        self.run_pass(("box", box), 1000.0)
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertTrue(self.respawned[0][2].endswith(
+            f"agentbox new --drop-gone-dirs --dir {self.cwd} -- omp --resume {SID}"), self.respawned[0][2])
+
+    def test_a_box_whose_working_directory_is_gone_is_left(self) -> None:
+        box = {"pid": 9, "start": 1, "sid": SID, "spec": f"--dir {self.cwd}", "box": "agentbox-0123456789ab", "cwd": str(self.cwd)}
+        self.run_pass(("box", box), 1000.0)
+        self.cwd.rmdir()
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(self.respawned, [])
+        self.assertIn(f"left: its working directory {self.cwd} is gone", self.lines[-1])
 
     def test_a_pane_respawned_while_the_run_decided_is_left(self) -> None:
         """`agentbox move` respawns the pane into the box launcher seconds after the hang-up; a run
@@ -393,7 +432,7 @@ class MoveLogTest(RestarterCase):
         self.pass_at("2026-11-02T12:09:40Z", ("box", box))
         self.pass_at("2026-11-02T12:10:10Z", ("idle", {}))
         self.assertEqual(len(self.respawned), 1)
-        self.assertIn(f"agentbox new --dir {work} -- omp --resume {HEALTHY_SID}", self.respawned[0][2])
+        self.assertIn(f"agentbox new --drop-gone-dirs --dir {work} -- omp --resume {HEALTHY_SID}", self.respawned[0][2])
 
     def test_a_move_silent_for_ten_minutes_no_longer_holds_the_pane(self) -> None:
         work = self.session(HEALTHY_SID, HEALTHY_CWD, HEALTHY_LOG, upto=3)  # killed after the hang-up
@@ -422,7 +461,7 @@ class MoveLogTest(RestarterCase):
         self.assertEqual((window, tmux_session, title, cwd), ("@7", "agents3", "omp-01a16c67", str(work)))
         # Back as the box the move was making, with its spec, not as the host session it was.
         self.assertTrue(command.endswith(
-            f"cd {work} && /home/u/.dotfiles/scripts/agentbox new --dir {work} --dir /mnt/nvme/sami/frac-verify"
+            f"cd {work} && /home/u/.dotfiles/scripts/agentbox new --drop-gone-dirs --dir {work} --dir /mnt/nvme/sami/frac-verify"
             " --dir /mnt/nvme/sami/speed --dir /mnt/nvme/sami/tmp/r3a --dir /mnt/nvme/sami/gate-runs"
             f" --dir /mnt/nvme/sami/gate-briefs --dir /mnt/nvme/sami/git-objects -- omp --resume {DOWN_SID}"
         ), command)
@@ -463,7 +502,7 @@ class MoveLogTest(RestarterCase):
         self.pass_at("2026-11-01T17:47:00Z", ("host", self.r3a_record(work)))
         self.pass_at("2026-11-01T17:48:00Z", ("idle", {}))
         self.assertEqual(len(self.respawned), 1)
-        self.assertIn(f"agentbox new --dir {work} -- omp --resume {DOWN_SID}", self.respawned[0][2])
+        self.assertIn(f"agentbox new --drop-gone-dirs --dir {work} -- omp --resume {DOWN_SID}", self.respawned[0][2])
         self.assertIn("agentbox move gave up (2026-11-01T17:47:36Z: respawn pane failed", self.lines[-1])
         self.assertEqual(len(self.told), 1)
 
