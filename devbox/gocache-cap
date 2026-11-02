@@ -10,12 +10,16 @@
 # `go clean -cache`, which removes the whole cache: every entry directory (00-ff) is deleted, and
 # README, trim.txt and log.txt are kept.
 #
-# GOCACHE_CAP_DIR (default /mnt/nvme/<user>/gocache), GOCACHE_TRIM_BYTES (default 25 GB),
+# GOCACHE_CAP_DIR (default <scratch>/gocache, where <scratch> is /mnt/scratch/<user> when
+# devbox/gce-disks made it, as on sami-devbox, and /mnt/nvme/<user> otherwise: the GOCACHE .bashrc
+# and scripts/agent-session set), GOCACHE_TRIM_BYTES (default 25 GB),
 # GOCACHE_TRIM_AGE_MIN (default 180) and GOCACHE_CAP_BYTES (default 50 GB) can be set to override
 # the defaults, so that a test can run the unit against a scratch cache.
 set -euo pipefail
 
-dir="${GOCACHE_CAP_DIR:-/mnt/nvme/$(id -un)/gocache}"
+scratch="/mnt/nvme/$(id -un)"
+if [[ -d "/mnt/scratch/$(id -un)" ]]; then scratch="/mnt/scratch/$(id -un)"; fi
+dir="${GOCACHE_CAP_DIR:-$scratch/gocache}"
 trim_at="${GOCACHE_TRIM_BYTES:-25000000000}"
 trim_age="${GOCACHE_TRIM_AGE_MIN:-180}"
 cap="${GOCACHE_CAP_BYTES:-50000000000}"

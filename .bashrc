@@ -116,10 +116,19 @@ export PLAYWRIGHT_SKIP_BROWSER_GC=1
 # cache, so uv falls back to copying.
 # Guarded on the directory, so an agent box, which does not mount it, keeps the home defaults;
 # a value the caller already has wins.
+# On sami-devbox the losable part goes to the local-SSD scratch, /mnt/scratch/$USER, made at
+# every boot with the same layout by devbox/gce-disks (dispatch://INFRA-993, "Shape and disks"):
+# TMPDIR, GOTMPDIR, the Go build cache and the uv and pip caches. A machine without that
+# directory (sami-rocqperf) keeps all of it on /mnt/nvme.
 if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
-    export UV_CACHE_DIR="${UV_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/uv}"
+    _scratch="/mnt/nvme/${USER:-$(id -un)}"
+    [ -d "/mnt/scratch/${USER:-$(id -un)}" ] && _scratch="/mnt/scratch/${USER:-$(id -un)}"
+    export UV_CACHE_DIR="${UV_CACHE_DIR:-$_scratch/cache/uv}"
+    # A venv on the state disk cannot hardlink from a cache on scratch; say copy, or uv warns at
+    # every install that it fell back to it.
+    case "$UV_CACHE_DIR" in /mnt/scratch/*) export UV_LINK_MODE="${UV_LINK_MODE:-copy}" ;; esac
     export GOMODCACHE="${GOMODCACHE:-/mnt/nvme/${USER:-$(id -un)}/gomodcache}"
-    export GOCACHE="${GOCACHE:-/mnt/nvme/${USER:-$(id -un)}/gocache}"
+    export GOCACHE="${GOCACHE:-$_scratch/gocache}"
     # The rest of the big caches, in the same shape: a model hub (4.5 GB), Playwright's and
     # Puppeteer's browser downloads (2.2 GB and 0.7 GB), mise's version lists (1 GB), pip's wheels
     # (0.5 GB) and bun's install cache (11 GB) all sat on the root disk when it ran out on
@@ -129,7 +138,7 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/mnt/nvme/${USER:-$(id -un)}/cache/ms-playwright}"
     export MISE_CACHE_DIR="${MISE_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/mise}"
     export PUPPETEER_CACHE_DIR="${PUPPETEER_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/puppeteer}"
-    export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/pip}"
+    export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$_scratch/cache/pip}"
     # Only bun's install cache moves; its binaries and global link store stay in ~/.bun.
     export BUN_INSTALL_CACHE_DIR="${BUN_INSTALL_CACHE_DIR:-/mnt/nvme/${USER:-$(id -un)}/cache/bun}"
     # Scratch too. Anything honouring TMPDIR (Go's build tree, cargo, mktemp) otherwise writes
@@ -140,15 +149,15 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     # wins: an agent session's own per-session scratch (scripts/agent-session) and an explicitly
     # exported TMPDIR both keep their value. Empty tmp* dirs left here are pruned daily
     # (devbox/tmp-empty-prune.timer).
-    _nvme_tmp="/mnt/nvme/${USER:-$(id -un)}/tmp"
+    _nvme_tmp="$_scratch/tmp"
     if [ -z "${TMPDIR:-}" ] && mkdir -p "$_nvme_tmp" 2>/dev/null && [ -w "$_nvme_tmp" ]; then
         export TMPDIR="$_nvme_tmp"
     fi
-    _nvme_gotmp="/mnt/nvme/${USER:-$(id -un)}/gotmp"
+    _nvme_gotmp="$_scratch/gotmp"
     if [ -z "${GOTMPDIR:-}" ] && mkdir -p "$_nvme_gotmp" 2>/dev/null && [ -w "$_nvme_gotmp" ]; then
         export GOTMPDIR="$_nvme_gotmp"
     fi
-    unset _nvme_tmp _nvme_gotmp
+    unset _nvme_tmp _nvme_gotmp _scratch
 fi
 
 # YubiKey PC/SC: forward serve owns ~/.pcscd/pcscd.comm on machines with the marker dir (devbox: forward's pcsc channel to the laptop; oryx: SSH-forwarded socat bridge).

@@ -4,7 +4,8 @@
 Technique: `curl` and `logger` are stubs first on PATH. The curl stub (Python) parses the options
 the script uses, records each request (URL, headers including those from a `-K` config, form and
 JSON bodies, stdin) as one JSON line, and answers by URL: an Azure-style token endpoint, Google
-STS, the GCE metadata server's identity path, and IAM Credentials' generateIdToken. HOME,
+STS, the GCE metadata server's email, token and identity paths (the VM's account is STUB_GCE_EMAIL,
+dev-box unless a test names another), and IAM Credentials' generateIdToken. HOME,
 XDG_RUNTIME_DIR and the credential file are scratch paths, so the test never reads the box's own
 login or writes its token.
 """
@@ -26,6 +27,9 @@ IDENTITY = (
     "http://metadata.test/computeMetadata/v1/instance/service-accounts/default/identity"
     "?audience=model-gateway-gce&format=full"
 )
+EMAIL = "http://metadata.test/computeMetadata/v1/instance/service-accounts/default/email"
+GCE_TOKEN = "http://metadata.test/computeMetadata/v1/instance/service-accounts/default/token"
+VM_ACCOUNT = "dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
 
 CURL_STUB = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -64,6 +68,8 @@ elif "/service-accounts/default/identity" in url:
     if os.environ.get("STUB_ID_FAIL"):
         sys.exit(22)
     print(os.environ.get("STUB_ID_TOKEN", "header.payload.signature"))
+elif url.endswith("/computeMetadata/v1/instance/service-accounts/default/email"):
+    print(os.environ.get("STUB_GCE_EMAIL", "dev-box@theorem-agent-infra.iam.gserviceaccount.com"), end="")
 elif "/computeMetadata/v1/instance/service-accounts/default/token" in url:
     print(json.dumps({"access_token": "gce-token"}))
 elif url.endswith(":generateIdToken"):
@@ -94,7 +100,7 @@ class GatewayTokenWriter(unittest.TestCase):
             "HOME": str(root / "home"),
             "XDG_RUNTIME_DIR": str(self.runtime),
             "GOOGLE_APPLICATION_CREDENTIALS": str(self.cred),
-            "OSSV_GCE_METADATA_HOST": "metadata.test",
+            "GCE_METADATA_HOST": "metadata.test",
             "STUB_LOG": str(self.log),
         }
 
@@ -150,12 +156,36 @@ class GatewayTokenWriter(unittest.TestCase):
             self.assertNotIn(OWN_ACCOUNT, r["url"] or "")
 
     def test_google_box_reads_the_token_of_the_account_it_runs_as(self) -> None:
-        result = self.run_writer()  # no credential file: a box in Google Cloud
+        result = self.run_writer()  # no credential file: a box in Google Cloud that runs as dev-box
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([r["url"] for r in self.requests()], [IDENTITY])
-        self.assertIn("Metadata-Flavor: Google", self.requests()[0]["headers"])
+        self.assertEqual([r["url"] for r in self.requests()], [EMAIL, IDENTITY])
+        for r in self.requests():
+            self.assertIn("Metadata-Flavor: Google", r["headers"])
         self.assertEqual(self.token.read_text(encoding="utf-8"), "header.payload.signature")
+
+    def test_google_vm_of_another_account_mints_dev_box_by_generate_id_token(self) -> None:
+        """sami-devbox runs as dev-sjawhar; the gateway accepts only dev-box, so the token is
+        dev-box's, minted with the VM's own metadata access token, and the metadata server's own
+        identity endpoint (which would name dev-sjawhar) is never asked."""
+        result = self.run_writer(STUB_GCE_EMAIL=VM_ACCOUNT)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([r["url"] for r in self.requests()], [EMAIL, GCE_TOKEN, GENERATE])
+        generate = self.requests()[2]
+        self.assertIn("Authorization: Bearer gce-token", generate["headers"])
+        self.assertEqual(json.loads(generate["data"]), {"audience": "model-gateway-gce", "includeEmail": True})
+        self.assertEqual(self.token.read_text(encoding="utf-8"), "header.payload.signature")
+        self.assertEqual(stat.S_IMODE(self.token.stat().st_mode), 0o600)
+
+    def test_google_vm_refused_by_iam_writes_no_token(self) -> None:
+        """Until bootstrap/samidevbox.go's grant is applied, generateIdToken answers 403."""
+        result = self.run_writer(STUB_GCE_EMAIL=VM_ACCOUNT, STUB_ID_FAIL="1")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.token.exists())
+        self.assertIn("no identity token", result.stderr)
+        self.assertNotIn("gce-token", result.stderr)
 
     def test_no_token_reaches_a_command_line(self) -> None:
         self.azure_credential()

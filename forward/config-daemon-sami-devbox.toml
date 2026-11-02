@@ -1,0 +1,32 @@
+# Laptop role, sami-devbox pair: run by forward-daemon@sami-devbox.service,
+# carried over an SSH tunnel to the VM by forward-tunnel@sami-devbox.service
+# (Host sami-devbox-tunnel in ~/.ssh/config.local). Fields and URL policy are
+# explained in config-daemon-oryx.toml. sami-leanperf's pair holds 127.0.0.1 and
+# sami-rocqperf's 127.0.0.2, so this daemon listens on 127.0.0.3 and dials the
+# bridge and grant feed at 12821 and 12825 (config-serve-sami-devbox.toml).
+# Tunnelled connections arrive from 127.0.0.1, which any local process shares.
+listen = "127.0.0.3"
+peer = "127.0.0.1"
+bridge_port = 12821
+grant_port = 12825
+
+# Same policy as config-daemon-sami-rocqperf.toml, with this pair's preview host:
+# the tunnelled 12802, pinned to that port because a bare loopback entry would
+# open any laptop-local URL.
+mode = "allowlist"
+opener = ["/usr/bin/xdg-open"]
+clipboard = ["wl-copy"]
+allow = [
+  "*.anthropic.com",
+  "127.0.0.3:12802",
+  "accounts.google.com",
+  "auth.openai.com",
+  "claude.ai",
+  "d-9267c4f5db.awsapps.com",
+  "device.sso.*.amazonaws.com",
+  "github.com",
+  "oidc.us-west-2.amazonaws.com",
+  "production-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "staging-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "viewer.hawk.internal.trajectorylabs.com",
+]

@@ -83,7 +83,14 @@ fi
 # bounding the session's footprint and would thrash the array instead of killing one lane. Swap
 # is here for everything else: the login scope's cold pages, idle services, and the box-wide
 # reclaim headroom the kswapd watermarks (part 2) work against.
-if [ -n "$swap_wanted" ] && [ -d "$(dirname "$SWAP_DIR")" ]; then
+# On sami-devbox the swap is devbox/gce-disks' 256 GiB file on the local-SSD scratch
+# (/mnt/scratch/swapfile), remade at every boot because a stop erases those disks; a second file
+# on the state disk would cost Hyperdisk IOPS the lanes need, and an fstab line here would race
+# the unit that mounts it. So the unit's presence skips this part.
+if [ -n "$swap_wanted" ] && [ -e /etc/systemd/system/gce-disks.service ]; then
+    echo "omp-box-memory-guard: swap is devbox/gce-disks' (/mnt/scratch/swapfile); no swap file here"
+    swapon --show
+elif [ -n "$swap_wanted" ] && [ -d "$(dirname "$SWAP_DIR")" ]; then
     if ! swapon --show=NAME --noheadings | grep -qxF "$SWAP_FILE"; then
         # `sudo test`, not `[ -f ]`: the swap directory is 0700 root, so an unprivileged
         # stat of the file inside it says "no such file" and the install silently skips the
@@ -164,9 +171,11 @@ fi
 #   * the disarm marker below, which outlives the unit being removed altogether (a removed unit
 #     is indistinguishable from a never-installed one, so unit state alone cannot carry the
 #     decision);
-#   * the unit being inactive and not enabled -- someone disarmed it.
+#   * the unit being inactive and not enabled when its link was already installed -- someone
+#     disarmed it.
 # Neither is overridden here. Arming after a deliberate stop is a human decision: remove the
-# marker, then start the unit by hand.
+# marker, then start the unit by hand. A unit whose link this run creates is a first install (a
+# new machine): nobody can have stopped it, so it is armed unless the marker says otherwise.
 mkdir -p "$STATE_DIR" 2>/dev/null \
     || echo "NOTE: ${STATE_DIR} could not be created; pass --state to put the guard's state elsewhere."
 if [ -n "${container:-}" ] || [ -f /.dockerenv ]; then
@@ -176,7 +185,10 @@ fi
 GUARD_UNIT=omp-box-memory-guard.service
 DISARM_MARKER="${XDG_CONFIG_HOME:-$HOME/.config}/omp-box-memory-guard.disarmed"
 mkdir -p "$HOME/.config/systemd/user"
-ensure_link "$HOME/.dotfiles/omp/$GUARD_UNIT" "$HOME/.config/systemd/user/$GUARD_UNIT"
+guard_link="$HOME/.config/systemd/user/$GUARD_UNIT"
+guard_new=""
+if [ ! -e "$guard_link" ] && [ ! -L "$guard_link" ]; then guard_new=1; fi
+ensure_link "$HOME/.dotfiles/omp/$GUARD_UNIT" "$guard_link"
 systemctl --user daemon-reload
 
 guard_state=$(systemctl --user is-active "$GUARD_UNIT" 2>/dev/null || true)
@@ -186,7 +198,7 @@ if [ -e "$DISARM_MARKER" ]; then
     echo "  Reason recorded there: $(head -n1 "$DISARM_MARKER" 2>/dev/null)"
     echo "  The unit file is installed and up to date; it is ${guard_state:-absent}."
     echo "  To arm it: rm '$DISARM_MARKER' && systemctl --user enable --now $GUARD_UNIT"
-elif [ "$guard_state" != active ] && [ "$guard_enabled" != enabled ]; then
+elif [ -z "$guard_new" ] && [ "$guard_state" != active ] && [ "$guard_enabled" != enabled ]; then
     echo "omp-box-memory-guard: NOT arming: the unit is ${guard_state:-inactive} and"
     echo "  ${guard_enabled:-not enabled}, which is how a deliberate stop looks. The unit file is"
     echo "  installed and up to date. To arm it: systemctl --user enable --now $GUARD_UNIT"

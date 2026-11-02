@@ -21,6 +21,9 @@ from collections.abc import Mapping
 from pathlib import Path
 
 SHIMS = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SHIMS.parent / "scripts" / "tests"))
+from gce_metadata_stub import MetadataStub  # noqa: E402 - found through the path above
+
 # The SDK 589.0.0 root parser's own flag table, each flag with the number of
 # values it takes: written by `python3 scripts/gcloud-global-flags --json` from
 # the installed SDK, and kept apart from the shim so the shim's arrays are
@@ -75,6 +78,8 @@ class GcloudRouting(unittest.TestCase):
         self.env = {
             "PATH": f"{self.stub_dir}:{SHIMS}:/usr/bin:/bin",
             "HOME": str(self.fake_home),
+            # Not a Google VM, wherever the suite runs (scripts/on-google-vm): a closed port.
+            "GCE_METADATA_HOST": "127.0.0.1:9",
         }
 
     def tearDown(self) -> None:
@@ -799,6 +804,25 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("gcloud auth login", result.stderr)
                 self.assertEqual(result.stdout, "")
+
+    def test_google_vm_with_box_active_refuses_application_default_login_and_revoke(self):
+        """On a Google VM the box's ADC is the metadata server behind an absent well-known file,
+        so the file a login would write is exactly what must not appear. A stub metadata server
+        stands in for the VM's (scripts/on-google-vm reads GCE_METADATA_HOST)."""
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        google = {"GCE_METADATA_HOST": server.host}
+        self.stub_gcloud_that_must_not_run()
+        for operation in ("login", "revoke"):
+            with self.subTest(operation=operation):
+                result = self.run_shim(google, args=["auth", "application-default", operation])
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("gcloud auth login", result.stderr)
+                self.assertEqual(result.stdout, "")
+        # Another configuration active: not the box's identity, so it passes, as before.
+        (self.cloudsdk_config / "active_config").write_text("default\n", encoding="utf-8")
+        result = self.run_shim(google, args=["auth", "application-default", "login"])
+        self.assertEqual(result.stdout.strip(), "SHOULD-NOT-RUN")
 
     def test_adc_is_opened_only_for_the_commands_it_can_refuse(self):
         """Ordinary calls leave the ADC unopened: a runtime monitor then sees gcloud read it,

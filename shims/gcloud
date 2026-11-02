@@ -16,8 +16,11 @@
 # credentials (ADC) remain its own identity.
 #
 # `gcloud auth application-default login` and `revoke` are refused whenever
-# the ADC in CLOUDSDK_CONFIG is an `external_account` credential. This check
-# ignores GOOGLE_APPLICATION_CREDENTIALS and the active configuration.
+# the ADC in CLOUDSDK_CONFIG is an `external_account` credential, or `box` is
+# active on a Google VM (scripts/on-google-vm), where the box's ADC is the
+# metadata server and the well-known file must stay absent: a login written
+# there would be whom every Google library on the machine acts as. This check
+# ignores GOOGLE_APPLICATION_CREDENTIALS.
 #
 # An agent session (`shims/gh`'s test) runs as the box identity by default:
 # agent-infra's applies run in CI or as its applier service account,
@@ -416,6 +419,14 @@ is_external_account_adc() {
     [[ "$adc_json" =~ \"type\"[[:space:]]*:[[:space:]]*\"external_account\" ]]
 }
 
+# The box's ADC is this machine's own identity: the external_account credential an
+# Azure box writes there, or, with `box` active on a Google VM, the metadata server
+# behind an absent well-known file. Probed only on the paths that can refuse.
+adc_is_box_identity() {
+    is_external_account_adc && return 0
+    box_is_active && "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../scripts/on-google-vm"
+}
+
 # An identity the caller chose: the box route never overrides one of these.
 # Each counts only with a non-empty value, the last occurrence winning, as the
 # SDK reads them: _FindFlagValue takes the last --configuration, and an empty
@@ -715,14 +726,14 @@ main() {
     # it sees gcloud, not this wrapper.
     if ((GCLOUD_COMMAND_AMBIGUOUS)); then
         if { ((GCLOUD_POSSIBLE_LOGIN)) && login_lands_on_box "$@"; } ||
-            { ((GCLOUD_POSSIBLE_ADC_OPERATION)) && is_external_account_adc; }; then
+            { ((GCLOUD_POSSIBLE_ADC_OPERATION)) && adc_is_box_identity; }; then
             echo "gcloud shim: refusing a command whose path an unrecognized flag makes ambiguous while it could still be a protected auth command; drop that flag, or name a configuration explicitly (--configuration <name>, or GCLOUD_ACCOUNT=<name>)." >&2
             if agent_context; then
                 print_agent_route >&2
             fi
             exit 1
         fi
-    elif ((GCLOUD_READING_KINDS == 2)) && is_external_account_adc; then
+    elif ((GCLOUD_READING_KINDS == 2)) && adc_is_box_identity; then
         echo "gcloud shim: refusing auth application-default ${GCLOUD_COMMAND_WORDS[2]}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which agent-secrets and gcloud use." >&2
         exit 1
     fi

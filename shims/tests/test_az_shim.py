@@ -2,20 +2,30 @@
 """shims/az points az at the box identity in an agent session and nowhere else.
 
 Technique: a stub `az` in a dir after the shims dir on PATH, printing the AZURE_CONFIG_DIR it
-was given, and a fake HOME holding a box identity profile and a user login profile.
+was given, and a fake HOME holding a box identity profile and a user login profile. The Google-VM
+cases run the real scripts/on-google-vm against scripts/tests/gce_metadata_stub.py, a stand-in
+metadata server named by GCE_METADATA_HOST; every other case names a closed port there, so no case
+depends on the machine the suite runs on. Their az stub records what `az login` got, argv and
+stdin, and writes a service-principal profile.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 SHIMS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SHIMS.parent / "scripts" / "tests"))
+from gce_metadata_stub import MetadataStub, id_token  # noqa: E402 - found through the path above
+
 SESSION = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
 TIMEOUT = 20
@@ -32,6 +42,20 @@ echo "config=${AZURE_CONFIG_DIR-unset} args=$*"
 
 USER_PROFILE = '{"subscriptions": [{"user": {"name": "Sami@Theorem.dev", "type": "user"}}]}'
 BOX_PROFILE = '{"subscriptions": [{"user": {"name": "systemAssignedIdentity", "type": "servicePrincipal"}}]}'
+# The agents' own Azure identity (theorem-labs/agent-infra#1146): a made-up client id, the real tenant.
+CLIENT_ID = "00000000-1111-2222-3333-444444444444"
+TENANT = "aaa6ad34-51af-41e7-891f-f16f5c53c396"
+# `az login --service-principal --federated-token @/dev/stdin`: record argv and stdin, write the profile.
+FEDERATED_STUB = """
+if [ "${1-}" = login ]; then
+    { printf '%s\\n' "$@"; printf 'STDIN=%s\\n' "$(cat)"; } >> "$LOGIN_LOG"
+    [ -z "${LOGIN_FAILS-}" ] || { echo "AADSTS700213: No matching federated identity record found" >&2; exit 1; }
+    printf '%s' "$SP_PROFILE" > "$AZURE_CONFIG_DIR/azureProfile.json"
+    exit 0
+fi
+echo "config=${AZURE_CONFIG_DIR-unset} args=$*"
+"""
+SP_PROFILE = json.dumps({"subscriptions": [{"user": {"name": CLIENT_ID, "type": "servicePrincipal"}}]})
 
 
 def write_stub(directory: Path, name: str, body: str) -> Path:
@@ -59,6 +83,8 @@ class AzShim(unittest.TestCase):
             "PATH": f"{SHIMS}{os.pathsep}{self.stub_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
         }
         self.agent = {**self.plain, "OMP_SESSION_ID": SESSION}
+        # Not a Google VM unless a case says so: a closed port (scripts/on-google-vm).
+        self.plain["GCE_METADATA_HOST"] = self.agent["GCE_METADATA_HOST"] = "127.0.0.1:9"
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -137,6 +163,120 @@ class AzShim(unittest.TestCase):
         result = self.az(env, "version")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, f"config={self.box} args=version\n")
+
+    def google_vm(self, **extra: str) -> dict[str, str]:
+        """An agent session on a Google VM whose az signs in as agent-azure (FEDERATED_STUB)."""
+        stub = MetadataStub.start()
+        self.addCleanup(stub.stop)
+        write_stub(self.stub_dir, "az", FEDERATED_STUB)
+        self.login_log = self.root / "login.log"
+        return {**self.agent, "GCE_METADATA_HOST": stub.host, "LOGIN_LOG": str(self.login_log),
+                "SP_PROFILE": SP_PROFILE, **extra}
+
+    def logins(self) -> list[list[str]]:
+        if not self.login_log.exists():
+            return []
+        calls, call = [], []
+        for line in self.login_log.read_text(encoding="utf-8").splitlines():
+            call.append(line)
+            if line.startswith("STDIN="):
+                calls.append(call)
+                call = []
+        return calls
+
+    def test_a_google_vm_signs_agent_azure_in_with_the_metadata_id_token(self) -> None:
+        """No managed identity on a Google VM: `az login --service-principal --federated-token`
+        with the VM account's Google ID token for audience api://AzureADTokenExchange, read from the
+        metadata server and passed on stdin, so no token is ever on a command line. The box dir
+        left by the Azure machine's managed identity (BOX_PROFILE) is replaced, not used."""
+        env = self.google_vm(AGENT_AZURE_CLIENT_ID=CLIENT_ID)
+        result = self.az(env, "account", "show")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"config={self.box} args=account show\n")
+        token = id_token("api://AzureADTokenExchange")
+        self.assertEqual(self.logins(), [[
+            "login", "--service-principal", "--username", CLIENT_ID, "--tenant", TENANT,
+            "--federated-token", "@/dev/stdin", "--only-show-errors", "--output", "none", f"STDIN={token}",
+        ]])
+        self.assertEqual((self.box / "azureProfile.json").read_text(encoding="utf-8"), SP_PROFILE)
+
+    def test_the_real_az_parser_reads_the_token_the_shim_passes_on_stdin(self) -> None:
+        """The stub above reads stdin itself, so it cannot tell `@-` from a working argument. Run
+        the installed Azure CLI's own `@file` expansion (knack's CLICommandParser) on the argv the
+        shim gave `az login`, with the token on stdin: it must come out as the token."""
+        python = real_az_python()
+        if python is None:
+            self.skipTest("no installed Azure CLI with knack on PATH")
+        env = self.google_vm(AGENT_AZURE_CLIENT_ID=CLIENT_ID)
+        self.assertEqual(self.az(env, "account", "show").returncode, 0)
+        argv = self.logins()[0][:-1]
+        token = id_token("api://AzureADTokenExchange")
+        code = ("import json, sys\n"
+                "from knack.parser import CLICommandParser\n"
+                "print(json.dumps(CLICommandParser._expand_prefixed_files(sys.argv[1:])))\n")
+        out = subprocess.run([python, "-c", code, *argv], input=token, capture_output=True, text=True,
+                             timeout=60, check=True).stdout
+        expanded = json.loads(out)
+        self.assertEqual(expanded[expanded.index("--federated-token") + 1], token)
+
+    def test_a_google_vm_signs_in_again_once_the_last_sign_in_is_20_minutes_old(self) -> None:
+        env = self.google_vm(AGENT_AZURE_CLIENT_ID=CLIENT_ID)
+        for _ in range(3):
+            self.assertEqual(self.az(env, "account", "show").returncode, 0)
+        self.assertEqual(len(self.logins()), 1)
+        stamp = self.box / ".agent-azure-login"
+        old = time.time() - 21 * 60
+        os.utime(stamp, (old, old))
+        self.assertEqual(self.az(env, "account", "show").returncode, 0)
+        self.assertEqual(len(self.logins()), 2)
+
+    def test_a_google_vm_reads_the_client_id_file(self) -> None:
+        id_file = self.home / ".config" / "agent-azure" / "client-id"
+        id_file.parent.mkdir(parents=True)
+        id_file.write_text(CLIENT_ID + "\n", encoding="utf-8")
+        result = self.az(self.google_vm(), "account", "show")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.logins()[0][3], CLIENT_ID)
+
+    def test_a_google_vm_without_the_client_id_stops_and_says_where_it_goes(self) -> None:
+        result = self.az(self.google_vm(), "account", "show")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("AGENT_AZURE_CLIENT_ID", result.stderr)
+        self.assertIn(str(self.home / ".config" / "agent-azure" / "client-id"), result.stderr)
+        self.assertNotIn("No such file", result.stderr)
+        self.assertEqual(self.logins(), [])
+
+    def test_a_google_vm_whose_sign_in_fails_stops_with_azures_reason(self) -> None:
+        result = self.az(self.google_vm(AGENT_AZURE_CLIENT_ID=CLIENT_ID, LOGIN_FAILS="1"), "account", "show")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("AADSTS700213", result.stderr)
+        self.assertFalse((self.box / ".agent-azure-login").exists())
+
+    def test_a_google_vm_plain_shell_is_left_alone(self) -> None:
+        env = {**self.google_vm(AGENT_AZURE_CLIENT_ID=CLIENT_ID)}
+        del env["OMP_SESSION_ID"]
+        result = self.az(env, "account", "show")
+        self.assertEqual(result.stdout, "config=unset args=account show\n")
+        self.assertEqual(self.logins(), [])
+
+
+def real_az_python() -> str | None:
+    """The Python of the first real (non-shim) Azure CLI on PATH, when it has knack."""
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        az = Path(d) / "az"
+        if not az.is_file() or az.resolve() == (SHIMS / "az").resolve():
+            continue
+        try:
+            first = az.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+        except (OSError, IndexError):
+            continue
+        if first.startswith("#!") and "python" in first:
+            python = first[2:].split()[0]
+            if subprocess.run([python, "-c", "import knack.parser"], capture_output=True).returncode == 0:
+                return python
+    return None
 
 
 if __name__ == "__main__":

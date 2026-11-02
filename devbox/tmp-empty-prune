@@ -21,10 +21,14 @@
 # unreadable mount, a delete that failed, that message for a path that is still there - fails
 # the run, and so does an exit of find that the lines do not account for.
 #
-# TMP_EMPTY_PRUNE_ROOT overrides the root, so a test can run this against a scratch tree.
+# TMP_EMPTY_PRUNE_ROOT overrides the root, so a test can run this against a scratch tree. The
+# default is the TMPDIR .bashrc gives shells: /mnt/scratch/<user>/tmp where devbox/gce-disks made
+# it (sami-devbox), /mnt/nvme/<user>/tmp otherwise.
 set -uo pipefail
 
-root="${TMP_EMPTY_PRUNE_ROOT:-/mnt/nvme/$(id -un)/tmp}"
+root="/mnt/nvme/$(id -un)/tmp"
+if [[ -d "/mnt/scratch/$(id -un)/tmp" ]]; then root="/mnt/scratch/$(id -un)/tmp"; fi
+root="${TMP_EMPTY_PRUNE_ROOT:-$root}"
 root="${root%/}"
 
 errors="$(mktemp)" || exit 1

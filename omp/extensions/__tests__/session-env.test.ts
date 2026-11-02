@@ -66,13 +66,16 @@ describe("agentGoogleCredentials", () => {
 		if (box) writeFileSync(path.join(dir, ".config", "gcloud", "box_credential_config.json"), "{}");
 		return dir;
 	};
+	// The machine kind, as scripts/on-google-vm answers it: by exit status alone.
+	const NOT_GOOGLE = "/bin/false";
+	const GOOGLE = "/bin/true";
 
 	test("points an unset variable, or the well-known file, at the box identity", () => {
 		const h = home(true);
 		const box = path.join(h, ".config", "gcloud", "box_credential_config.json");
-		expect(agentGoogleCredentials({ HOME: h })).toBe(box);
+		expect(agentGoogleCredentials({ HOME: h }, NOT_GOOGLE)).toBe(box);
 		expect(
-			agentGoogleCredentials({ HOME: h, GOOGLE_APPLICATION_CREDENTIALS: `${h}/.config/gcloud/./application_default_credentials.json` }),
+			agentGoogleCredentials({ HOME: h, GOOGLE_APPLICATION_CREDENTIALS: `${h}/.config/gcloud/./application_default_credentials.json` }, NOT_GOOGLE),
 		).toBe(box);
 	});
 
@@ -80,24 +83,33 @@ describe("agentGoogleCredentials", () => {
 		const h = home(false);
 		const cfg = path.join(home(true), ".config", "gcloud");
 		const box = path.join(cfg, "box_credential_config.json");
-		expect(agentGoogleCredentials({ HOME: h, CLOUDSDK_CONFIG: cfg })).toBe(box);
+		expect(agentGoogleCredentials({ HOME: h, CLOUDSDK_CONFIG: cfg }, NOT_GOOGLE)).toBe(box);
 		expect(
 			agentGoogleCredentials({
 				HOME: h,
 				CLOUDSDK_CONFIG: cfg,
 				GOOGLE_APPLICATION_CREDENTIALS: path.join(cfg, "application_default_credentials.json"),
-			}),
+			}, NOT_GOOGLE),
 		).toBe(box);
 	});
 
 	test("keeps a file a launcher chose", () => {
 		const h = home(true);
 		const own = path.join(h, ".config", "gcloud", "legacy_credentials", "sami@theorem.dev", "adc.json");
-		expect(agentGoogleCredentials({ HOME: h, GOOGLE_APPLICATION_CREDENTIALS: own })).toBe(own);
+		expect(agentGoogleCredentials({ HOME: h, GOOGLE_APPLICATION_CREDENTIALS: own }, NOT_GOOGLE)).toBe(own);
+		expect(agentGoogleCredentials({ HOME: h, GOOGLE_APPLICATION_CREDENTIALS: own }, GOOGLE)).toBe(own);
 	});
 
 	test("sets nothing on a machine with no box identity", () => {
-		expect(agentGoogleCredentials({ HOME: home(false) })).toBeUndefined();
+		expect(agentGoogleCredentials({ HOME: home(false) }, NOT_GOOGLE)).toBeUndefined();
+	});
+
+	test("sets nothing on a Google VM, whose ADC is the metadata server", () => {
+		// A box_credential_config.json there was carried over from an Azure box (dispatch://INFRA-993).
+		const h = home(true);
+		expect(agentGoogleCredentials({ HOME: h }, GOOGLE)).toBeUndefined();
+		const wellKnown = path.join(h, ".config", "gcloud", "application_default_credentials.json");
+		expect(agentGoogleCredentials({ HOME: h, GOOGLE_APPLICATION_CREDENTIALS: wellKnown }, GOOGLE)).toBe(wellKnown);
 	});
 });
 

@@ -19,6 +19,21 @@
 # needs no person. Where that does not work either (no managed identity on the machine), the
 # call goes through unchanged, unless the default dir holds a user login: that is the case this
 # shim exists to stop, and it is reported instead of run.
+#
+# A Google VM (scripts/on-google-vm; sami-devbox, dispatch://INFRA-993) has no Azure managed
+# identity. There the box dir holds the agents' own Azure identity `agent-azure` (a user-assigned
+# managed identity, Virtual Machine Contributor on resource group SAMI; agent-infra
+# bootstrap/agentazure.go, theorem-labs/agent-infra#1146), whose federated credential trusts the
+# Google ID tokens of the VM's account dev-sjawhar@ (subject its unique id, audience
+# api://AzureADTokenExchange). The shim signs in with `az login --service-principal
+# --federated-token`, the token straight from the metadata server, no secret anywhere. az keeps
+# that token as the client assertion it trades for access tokens (azure/cli/core/auth/identity.py,
+# client_assertion), and Google issues it for one hour, so the shim signs in again whenever the
+# last sign-in is 20 minutes old or more, under a lock, so concurrent calls neither race nor ever
+# hold an assertion near its expiry. The client id is Azure's, known once #1146 is applied (its
+# output agentAzureClientId): AGENT_AZURE_CLIENT_ID, else the file
+# ${XDG_CONFIG_HOME:-~/.config}/agent-azure/client-id that provisioning writes; without either the
+# call stops and says so.
 set -euo pipefail
 
 self="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -70,7 +85,43 @@ agent_context() {
 
 if [ -z "${AZURE_CONFIG_DIR+set}" ] && agent_context; then
     box="${AZURE_BOX_CONFIG_DIR:-$HOME/.azure-box-identity}"
-    if [ -f "$box/azureProfile.json" ]; then
+    if "$self_dir/../scripts/on-google-vm"; then
+        tenant=aaa6ad34-51af-41e7-891f-f16f5c53c396
+        id_file="${XDG_CONFIG_HOME:-$HOME/.config}/agent-azure/client-id"
+        client_id="${AGENT_AZURE_CLIENT_ID:-}"
+        if [ -z "$client_id" ] && [ -r "$id_file" ]; then client_id="$(tr -d '[:space:]' < "$id_file")"; fi
+        if [ -z "$client_id" ]; then
+            echo "shims/az: this Google VM signs in to Azure as the agent-azure identity, and its client id is not known here." >&2
+            echo "shims/az: set AGENT_AZURE_CLIENT_ID, or write it to $id_file (agent-infra bootstrap output agentAzureClientId, theorem-labs/agent-infra#1146)." >&2
+            exit 1
+        fi
+        mkdir -p "$box"
+        exec 9> "$box/.agent-azure-login.lock"
+        flock 9
+        stamp="$box/.agent-azure-login"
+        if [ ! -f "$box/azureProfile.json" ] || [ "$(cat "$stamp" 2> /dev/null)" != "$client_id" ] \
+            || [ -z "$(find "$stamp" -mmin -20 2> /dev/null)" ]; then
+            metadata="http://${GCE_METADATA_HOST:-metadata.google.internal}/computeMetadata/v1"
+            if ! token="$(curl -fsS -m 10 --noproxy '*' -H 'Metadata-Flavor: Google' \
+                "$metadata/instance/service-accounts/default/identity?audience=api://AzureADTokenExchange&format=full")" \
+                || [ -z "$token" ]; then
+                echo "shims/az: no Google ID token for audience api://AzureADTokenExchange from the metadata server ($metadata)." >&2
+                exit 1
+            fi
+            # The token goes in on stdin, never on a command line. az's `@file` expansion opens the
+            # named file and has no `-` for stdin, so the file is /dev/stdin.
+            if ! out="$(printf '%s' "$token" | AZURE_CONFIG_DIR="$box" timeout 120 "$real" login --service-principal \
+                --username "$client_id" --tenant "$tenant" --federated-token @/dev/stdin --only-show-errors --output none 2>&1)"; then
+                rm -f "$stamp"
+                echo "shims/az: az login --service-principal --federated-token as agent-azure ($client_id) failed:" >&2
+                printf '%s\n' "$out" >&2
+                exit 1
+            fi
+            printf '%s\n' "$client_id" > "$stamp"
+        fi
+        exec 9>&-
+        export AZURE_CONFIG_DIR="$box"
+    elif [ -f "$box/azureProfile.json" ]; then
         export AZURE_CONFIG_DIR="$box"
     elif mkdir -p "$box" 2> /dev/null \
         && AZURE_CONFIG_DIR="$box" timeout 60 "$real" login --identity --only-show-errors > /dev/null 2>&1 \

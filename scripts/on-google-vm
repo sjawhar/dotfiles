@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# on-google-vm: exit 0 when this machine is a Google Compute Engine VM, 1 otherwise. No output.
+#
+# The one test for a Google VM in this repository (dispatch://INFRA-993): every script that takes a
+# Google branch (installers/gcloud-box.sh, scripts/agent-session, scripts/agentbox, shims/az,
+# shims/gcloud, devbox/gce-host.sh) calls this rather than a copy of it. The test is the metadata
+# server answering this instance's id, the check Google documents for "am I on Compute Engine"; the
+# DMI product name is not used, because inside an agent box (Sysbox) it is the host's or missing.
+#
+# GCE_METADATA_HOST names the metadata server, as it does for Google's own client libraries
+# (google-auth's compute_engine/_metadata.py, cloud.google.com/go/compute/metadata): an agent box
+# on a Google VM gets it set to the host's metadata relay (scripts/agentbox), and tests set it to a
+# stub server. On a machine outside Google the name metadata.google.internal does not resolve, so
+# the answer comes back in about 0.25 s (measured on sami-rocqperf, Azure, 2026-11-02).
+curl -fsS -m 2 --noproxy '*' -o /dev/null -H 'Metadata-Flavor: Google' \
+    "http://${GCE_METADATA_HOST:-metadata.google.internal}/computeMetadata/v1/instance/id" 2>/dev/null || exit 1

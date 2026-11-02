@@ -31,5 +31,20 @@ if ! sudo -n true 2>/dev/null; then
     echo "NOTE: sudo -n is not allowed here, so an alert names only this user's writers."
 fi
 
+# sami-devbox (dispatch://INFRA-993, "Software") has four disks, each with its own floor: boot
+# 50 GiB, state (/mnt/nvme) 400, local-SSD scratch 500, cold (/mnt/durable) 200. Its state disk
+# is capped at 160,000 IOPS and its cold disk at 3,000, not the Azure P50's 7,500 the script
+# assumes for /mnt/durable. The layout, not the host name, picks it: a machine whose
+# /mnt/scratch and /mnt/durable are both mounts is that machine. The unit is committed and
+# linked, so the per-machine arguments go in a drop-in beside the link.
+dropin="$HOME/.config/systemd/user/disk-fill-watch.service.d/devbox-disks.conf"
+if mountpoint -q /mnt/scratch && mountpoint -q /mnt/durable; then
+    mkdir -p "$(dirname "$dropin")"
+    printf '%s\n' '[Service]' 'ExecStart=' \
+        'ExecStart=%h/.dotfiles/scripts/disk-fill-watch --mount / --mount /mnt/nvme --mount /mnt/scratch --mount /mnt/durable --floor /=50 --floor /mnt/nvme=400 --floor /mnt/scratch=500 --floor /mnt/durable=200 --iops-cap /mnt/nvme=160000 --iops-cap /mnt/durable=3000' \
+        >"$dropin.new"
+    if cmp -s "$dropin.new" "$dropin"; then rm -f "$dropin.new"; else mv -f "$dropin.new" "$dropin" && echo "disk-fill-watch: four disks and their floors ($dropin)"; fi
+fi
+
 ensure_box_health_owner disk-fill-watch || exit 1
 arm_user_timer omp disk-fill-watch

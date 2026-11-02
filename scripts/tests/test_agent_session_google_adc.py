@@ -10,9 +10,12 @@ credential file of its own; the well-known file is not such a choice.
 Technique: a scratch DOTFILES_DIR whose agent-secrets-session execs its argv (as
 test_agent_session_spend.py does), a scratch gcloud config dir (CLOUDSDK_CONFIG) holding a synthetic
 external_account configuration and a synthetic user login as the well-known file, and an agent that
-is a Python with google-auth calling google.auth.default(), which builds both kinds offline. The live
-case runs the same agent against this machine's own gcloud config dir and mints a token, printing only
-the account Google's tokeninfo names; it is skipped where the machine has no box identity.
+is a Python with google-auth calling google.auth.default(), which builds both kinds offline. The
+Google-VM cases run the real scripts/on-google-vm against gce_metadata_stub.py, a stand-in metadata
+server that GCE_METADATA_HOST and GCE_METADATA_IP name (every other case names a closed port, so no
+case depends on the machine the suite runs on). The live case runs the same agent against this
+machine's own gcloud config dir and mints a token, printing only the account Google's tokeninfo
+names; it is skipped where the machine has no box identity.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from gce_metadata_stub import MetadataStub
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SCRIPT = DOTFILES / "scripts" / "agent-session"
@@ -55,6 +60,7 @@ print(json.dumps(out))
 """
 EXTERNAL = "google.auth.identity_pool.Credentials"
 USER = "google.oauth2.credentials.Credentials"
+GCE = "google.auth.compute_engine.credentials.Credentials"
 
 
 def executable(path: Path, body: str) -> None:
@@ -93,6 +99,7 @@ class AgentSessionGoogleAdcTest(unittest.TestCase):
         (dotfiles / "shims").mkdir()
         executable(dotfiles / "scripts" / "agent-secrets-session", 'exec "$@"')
         executable(dotfiles / "scripts" / "gh-agent-config", "echo \"$HOME/.config/gh-agent\"")
+        (dotfiles / "scripts" / "on-google-vm").symlink_to(DOTFILES / "scripts" / "on-google-vm")
         shutil.copy(DOTFILES / "scripts" / "agent-spend-env.sh", dotfiles / "scripts" / "agent-spend-env.sh")
         self.gcloud = self.root / "gcloud"
         self.gcloud.mkdir()
@@ -117,6 +124,10 @@ class AgentSessionGoogleAdcTest(unittest.TestCase):
             "XDG_CONFIG_HOME": str(self.root / "config"),
             "XDG_CACHE_HOME": str(self.root / "cache"),
             "CLOUDSDK_CONFIG": str(self.gcloud),
+            # Not a Google VM unless a case says so: a closed port (scripts/on-google-vm).
+            "GCE_METADATA_HOST": "127.0.0.1:9",
+            "GCE_METADATA_IP": "127.0.0.1:9",
+            "GCE_METADATA_TIMEOUT": "1",
         }
 
     def agent(self, env: dict[str, str], *args: str, through_session: bool = True) -> dict[str, str | None]:
@@ -152,6 +163,26 @@ class AgentSessionGoogleAdcTest(unittest.TestCase):
         self.box.unlink()
         out = self.agent({})
         self.assertEqual((out["kind"], out["file"]), (USER, None))
+
+    def google_vm(self) -> dict[str, str]:
+        """The environment of a session on a Google VM: the stub is its metadata server."""
+        stub = MetadataStub.start()
+        self.addCleanup(stub.stop)
+        return {"GCE_METADATA_HOST": stub.host, "GCE_METADATA_IP": stub.host}
+
+    def test_a_google_vm_session_exports_no_credential_file(self) -> None:
+        """A box_credential_config.json carried over from an Azure machine fetches its token from
+        Azure's IMDS, which a Google VM has not; the session leaves the variable unset, and with no
+        well-known file (installers/gcloud-box.sh removes it there) ADC is the metadata server."""
+        self.well_known.unlink()
+        out = self.agent(self.google_vm())
+        self.assertEqual((out["kind"], out["file"]), (GCE, None))
+
+    def test_a_google_vm_session_keeps_a_callers_own_file(self) -> None:
+        own = self.gcloud / "legacy_credentials" / "someone@example.com" / "adc.json"
+        user_login(own)
+        out = self.agent({**self.google_vm(), "GOOGLE_APPLICATION_CREDENTIALS": str(own)})
+        self.assertEqual((out["kind"], out["file"]), (USER, str(own)))
 
     @unittest.skipUnless((LIVE_GCLOUD / "box_credential_config.json").is_file(), "this machine has no box identity")
     def test_live_this_machines_session_mints_as_the_box_account(self) -> None:

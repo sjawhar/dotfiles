@@ -10,7 +10,9 @@ Description=Keep the box's Go build cache (/mnt/nvme/<user>/gocache) near 25 GB,
 # cache is still over 50 GB, which means three hours of builds wrote that much, does it run a full
 # `go clean -cache`, after which each lane's next build is a cold one. 50 GB is under the floor's
 # margin on a disk that has run 60-140 GiB free; the 80 GB cap this replaced was the whole margin.
-ConditionPathIsDirectory=/mnt/nvme/%u/gocache
+# On sami-devbox GOCACHE is /mnt/scratch/<user>/gocache (devbox/gce-disks); either one runs it.
+ConditionPathIsDirectory=|/mnt/nvme/%u/gocache
+ConditionPathIsDirectory=|/mnt/scratch/%u/gocache
 
 [Service]
 Type=oneshot

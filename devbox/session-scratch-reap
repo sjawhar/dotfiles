@@ -32,8 +32,9 @@
 # window stays whatever /proc says, which covers the moment between agent-session's mkdir and the
 # agent's exec.
 #
-# SESSION_SCRATCH_ROOT (default /mnt/nvme/<user>/session-tmp), SESSION_SCRATCH_GRACE_SECONDS
-# (default 600) and SESSION_SCRATCH_IO_PRESSURE_MAX (default 20) override the defaults, so a test
+# SESSION_SCRATCH_ROOT (default /mnt/nvme/<user>/session-tmp, or /mnt/scratch/<user>/session-tmp
+# where that exists), SESSION_SCRATCH_GRACE_SECONDS (default 600) and
+# SESSION_SCRATCH_IO_PRESSURE_MAX (default 20) override the defaults, so a test
 # can run the unit against a scratch root. --dry-run decides and prints, removing nothing.
 #
 # ---------------------------------------------------------------------------------------------
@@ -394,7 +395,11 @@ fi
 # The session-tmp root
 # ---------------------------------------------------------------------------------------------
 
-root="${SESSION_SCRATCH_ROOT:-/mnt/nvme/$(id -un)/session-tmp}"
+# /mnt/scratch/<user>/session-tmp where devbox/gce-disks made /mnt/scratch/<user> (sami-devbox):
+# scripts/agent-session puts each session's TMPDIR there on that machine.
+root="/mnt/nvme/$(id -un)/session-tmp"
+if [[ -d "/mnt/scratch/$(id -un)/session-tmp" ]]; then root="/mnt/scratch/$(id -un)/session-tmp"; fi
+root="${SESSION_SCRATCH_ROOT:-$root}"
 root="${root%/}"
 grace="${SESSION_SCRATCH_GRACE_SECONDS:-600}"
 pressure_max="${SESSION_SCRATCH_IO_PRESSURE_MAX:-20}"

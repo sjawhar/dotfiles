@@ -9,6 +9,11 @@ One script, two roots on `/mnt/nvme/<user>`, two rules:
 
 Everything down to "The tmp root" is about `session-tmp/`.
 
+On sami-devbox, where `devbox/gce-disks` mounts the local SSDs at `/mnt/scratch` and makes
+`/mnt/scratch/<user>`, the `session-tmp/` root is `/mnt/scratch/<user>/session-tmp` instead
+(`scripts/agent-session` and this script both prefer it when it exists); `tmp/`, where
+`scripts/work-dir` makes directories meant to outlive a session, stays on `/mnt/nvme/<user>`.
+
 Every agent session on a machine with `/mnt/nvme/<user>` gets a **TMPDIR of its own** there, and
 this timer removes it when the session is gone. Two halves, two files:
 

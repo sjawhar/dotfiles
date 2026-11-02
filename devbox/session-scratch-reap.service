@@ -4,7 +4,9 @@ Description=Remove the per-session scratch directories (/mnt/nvme/<user>/session
 # remove it: a transient systemd scope (what shims/omp starts a capped session in) refuses
 # ExecStopPost, and an agent box, whose exit path does remove its own directory, mounts no
 # /mnt/nvme. The decision is process liveness, never age: devbox/session-scratch-reap.md.
-ConditionPathIsDirectory=/mnt/nvme/%u/session-tmp
+# On sami-devbox that root is /mnt/scratch/<user>/session-tmp (devbox/gce-disks); either one runs it.
+ConditionPathIsDirectory=|/mnt/nvme/%u/session-tmp
+ConditionPathIsDirectory=|/mnt/scratch/%u/session-tmp
 
 [Service]
 Type=oneshot

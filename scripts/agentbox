@@ -838,7 +838,20 @@ ensure_loopback_services() {
 }
 
 ensure_forwarders() {
-    ensure_tcp_forwarder agentbox-imds "$IMDS_PORT" 169.254.169.254:80
+    if "$DOTFILES_DIR/scripts/on-google-vm" 2>/dev/null; then
+        # Google's metadata server refuses a Host header naming the relay, so a byte relay will
+        # not do: scripts/agentbox-gce-metadata-relay rewrites it.
+        local relay="$DOTFILES_DIR/scripts/agentbox-gce-metadata-relay"
+        if systemctl --user is-active --quiet agentbox-imds \
+            && ! systemctl --user show -p ExecStart --value agentbox-imds 2>/dev/null | grep -qF "$relay"; then
+            systemctl --user stop agentbox-imds 2>/dev/null || true
+        fi
+        start_unit agentbox-imds python3 "$relay" "$NETWORK_GATEWAY" "$IMDS_PORT" "$NETWORK_SUBNET" || true
+        wait_for bash -c "ss -ltn 'sport = :$IMDS_PORT' | grep -q '$NETWORK_GATEWAY:$IMDS_PORT'" \
+            || die "forwarder agentbox-imds did not bind $NETWORK_GATEWAY:$IMDS_PORT (journalctl --user -u agentbox-imds)"
+    else
+        ensure_tcp_forwarder agentbox-imds "$IMDS_PORT" 169.254.169.254:80
+    fi
     ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
     ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
     ensure_tmux_forwarder
@@ -852,6 +865,9 @@ ensure_forwarders() {
 # link into an unmounted path.
 mount_args() {
     local box="$1" a=() p src
+    # Made here, as the user, when absent (a new machine): docker would make a missing bind source
+    # as root, and nothing the user runs could then write under it (sami-devbox, 2026-11-02).
+    mkdir -p "$SRC"
     a+=(-v "$SRC:$SRC")
     # $SRC may hold symlinks to checkouts elsewhere (~/src/dotfiles → ~/.dotfiles);
     # each target is mounted at its own path so the link resolves inside. A target on the durable
@@ -1011,6 +1027,17 @@ session_env() {
     # Also the inner dockerd's firewall rule (agentbox/entrypoint.sh).
     e+=(-e "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://$NETWORK_GATEWAY:$IMDS_PORT")
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
+    # On a Google VM the same relay reaches Google's metadata server, which is also
+    # 169.254.169.254:80 (dispatch://INFRA-993): gcloud, google-auth and Go's compute/metadata
+    # then act as the VM's attached account with no credential file. Each reads its own name:
+    # gcloud GCE_METADATA_ROOT (core/credentials/gce_read.py), google-auth GCE_METADATA_HOST then
+    # GCE_METADATA_ROOT, and GCE_METADATA_IP for its probe (compute_engine/_metadata.py), Go
+    # GCE_METADATA_HOST, which alone also makes it decide it is on GCE. On another machine none is
+    # set, so no client takes the AWS or Azure metadata service for Google's.
+    if "$DOTFILES_DIR/scripts/on-google-vm" 2>/dev/null; then
+        e+=(-e "GCE_METADATA_HOST=$NETWORK_GATEWAY:$IMDS_PORT" -e "GCE_METADATA_ROOT=$NETWORK_GATEWAY:$IMDS_PORT")
+        e+=(-e "GCE_METADATA_IP=$NETWORK_GATEWAY:$IMDS_PORT")
+    fi
     # The host's Envoy forwarder, which the entrypoint relays the box's own
     # 127.0.0.1:$ENVOY_PORT to. No Envoy or Dispatch variable: a box session reads
     # its profile's envoy.json as a host session does (agentbox/mounts has the
@@ -4454,8 +4481,9 @@ probe_google() {
     echo "$g"; return 1
 }
 probe_gcloud() {
-    # The box identity the SDK is configured for (dev-<name>@theorem-agent-infra, a keyless
-    # external_account bound to this machine), not a user login.
+    # The box identity the SDK is configured for (dev-<name>@theorem-agent-infra: a keyless
+    # external_account bound to this machine on Azure, the account attached to the VM through
+    # the metadata relay on a Google VM), not a user login.
     a="$(timeout 60 gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>&1 | grep -v "^[[:space:]]*$" | tail -1)"
     case "$a" in *@*) echo "active account $a"; return 0;; esac
     echo "${a:-gcloud names no active account}"; return 1

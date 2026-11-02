@@ -69,7 +69,10 @@
 //     holds whoever last ran an ADC login: on sami-rocqperf the user's own login
 //     since 2026-11-01T02:53Z, so an agent's library call ran as him. Set once at
 //     load, like GH_CONFIG_DIR (scripts/agent-session sets it too). A file a
-//     launcher chose is kept, unless it is that well-known file.
+//     launcher chose is kept, unless it is that well-known file. A Google VM
+//     (scripts/on-google-vm, asked only when the file exists) gets none: its
+//     ADC is the metadata server, and a box_credential_config.json there is one
+//     carried over from an Azure box, whose token source a Google VM lacks.
 //
 // Subagents load no extensions but share the parent process, and their
 // session_start events fire process-wide. A session family deliberately
@@ -112,7 +115,9 @@ function withoutOverlays(chain: string): string {
 		.join(":");
 }
 
-const GH_AGENT_CONFIG = path.join(path.dirname(realpathSync(import.meta.path)), "..", "..", "scripts", "gh-agent-config");
+const SCRIPTS = path.join(path.dirname(realpathSync(import.meta.path)), "..", "..", "scripts");
+const GH_AGENT_CONFIG = path.join(SCRIPTS, "gh-agent-config");
+const ON_GOOGLE_VM = path.join(SCRIPTS, "on-google-vm");
 
 /** The GH_CONFIG_DIR an agent process gets: the caller's own, unless it is unset or the user's default. */
 export function agentGhConfigDir(env: NodeJS.ProcessEnv = process.env, script = GH_AGENT_CONFIG): string | undefined {
@@ -127,13 +132,19 @@ export function agentGhConfigDir(env: NodeJS.ProcessEnv = process.env, script = 
 }
 
 /** The ADC file an agent process gets: the caller's own, unless it is unset or the well-known file. */
-export function agentGoogleCredentials(env: NodeJS.ProcessEnv = process.env): string | undefined {
+export function agentGoogleCredentials(env: NodeJS.ProcessEnv = process.env, onGoogleVm = ON_GOOGLE_VM): string | undefined {
 	const gcloudDir = env.CLOUDSDK_CONFIG || path.join(env.HOME || homedir(), ".config", "gcloud");
 	const current = env.GOOGLE_APPLICATION_CREDENTIALS;
 	const wellKnown = path.join(gcloudDir, "application_default_credentials.json");
 	if (current && path.resolve(current) !== path.resolve(wellKnown)) return current;
 	const box = path.join(gcloudDir, "box_credential_config.json");
-	return existsSync(box) ? box : current;
+	if (!existsSync(box)) return current;
+	try {
+		execFileSync(onGoogleVm, { env, stdio: "ignore", timeout: 10_000 });
+		return current;
+	} catch {
+		return box;
+	}
 }
 
 // JJ_CONFIG replaces jj's default config lookup, so the overlay must chain

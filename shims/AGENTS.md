@@ -223,7 +223,17 @@ before handing the call to the real one.
   `AZURE_CONFIG_DIR`, empty included, is kept, and outside an agent session nothing changes, so
   the user's own shell still runs as the user. It takes the first `az` past its own PATH entry
   (`shims/ssh-keygen`'s lookup), else the mise pin (`"pipx:azure-cli"` in `mise.toml`), and is
-  otherwise transparent: same argv, stdin, stdout and exit code, no output of its own.
+  otherwise transparent: same argv, stdin, stdout and exit code, no output of its own. On a
+  Google VM (`scripts/on-google-vm`; sami-devbox, dispatch://INFRA-993), which has no Azure
+  managed identity, the agent's dir holds the agents' own Azure identity `agent-azure`
+  (theorem-labs/agent-infra#1146) instead: the shim runs `az login --service-principal
+  --federated-token @/dev/stdin` into it with the VM account's Google ID token for audience
+  `api://AzureADTokenExchange`, read from the metadata server and passed on stdin, and signs in
+  again, under a lock, once the last sign-in is 20 minutes old (Google issues the token for an
+  hour, and az keeps it as its client assertion). The client id comes from
+  `AGENT_AZURE_CLIENT_ID`, else `~/.config/agent-azure/client-id` (the apply's
+  `agentAzureClientId`); without either the call stops and says where it goes
+  (`shims/tests/test_az_shim.py`).
 - `gh-app-token`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`, `pyright`, `basedpyright`:
   see each file's header.
 - **`gcloud`** (its header) decides gcloud's own identity: the active configuration `box`, the
@@ -234,6 +244,10 @@ before handing the call to the real one.
   `GOOGLE_APPLICATION_CREDENTIALS` as the machine's `box_credential_config.json`
   (`installers/gcloud-box.sh`) for the whole session, eval kernels included; a file a caller
   named is kept, the well-known one excepted (`scripts/tests/test_agent_session_google_adc.py`).
+  On a Google VM there is no such file and they export nothing: `box`'s account is the VM's
+  attached one, and gcloud and every client library take its tokens from the metadata server,
+  so the shim also refuses `auth application-default login|revoke` there whenever `box` is
+  active, since the well-known file it would write must stay absent.
   In an agent session the shim refuses, on every route, each call that writes or removes the
   well-known file: `auth application-default login|revoke`, and an `auth login` with
   `--update-adc` or a `--flags-file`. Only a routed bare login dropped `--update-adc` before,

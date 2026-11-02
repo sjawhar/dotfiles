@@ -47,15 +47,20 @@ rw .pulumi
 # `gcloud auth list` answered "real gcloud binary not found" and the build pool was unreachable).
 # The config dir is the machine's gcloud identity, not a user login: its active configuration is
 # `box`, whose account is the keyless external_account dev-<name>@theorem-agent-infra that gcloud
-# exchanges for a token through the metadata relay the box already has. agent-c's deploy.py also
+# exchanges for a token through the metadata relay the box already has, or on a Google VM the
+# VM's attached account, which gcloud takes from the metadata server through that same relay
+# (GCE_METADATA_*, scripts/agentbox). agent-c's deploy.py also
 # requires a file in it (agent-devbox-wif-adc.json), which a box now writes where the host keeps
 # it instead of into an overlay that dies with the box.
 ro .gcloud
 rw .config/gcloud
 # Azure. The machine's own identity, which shims/az gives every agent session in place of the
-# user's ~/.azure login (that one is never mounted). `az login --identity` writes the profile
-# and refreshes tokens in it, so it is rw.
+# user's ~/.azure login (that one is never mounted). `az login --identity` (or, on a Google VM,
+# `az login --service-principal --federated-token`) writes the profile and refreshes tokens in
+# it, so it is rw. On a Google VM shims/az reads the agent-azure identity's client id from
+# .config/agent-azure, which holds no secret.
 rw .azure-box-identity
+ro .config/agent-azure
 
 # work identities agents use (a customer platform's client config is in the private part of this
 # list, .secrets/dotfiles/agentbox/mounts, so its name stays out of this public repository)

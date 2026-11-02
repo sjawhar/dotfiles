@@ -22,6 +22,11 @@ a size, so over the cap the cache is emptied and the next build, resolve or down
 one. Everything removed is re-downloadable or rebuildable; none of it is a working copy. Where a
 tool has no non-interactive cleaner at all, the pass removes the cache directory itself.
 
+On sami-devbox the uv and pip caches are on the local-SSD scratch, `/mnt/scratch/<user>/cache/uv`
+and `.../cache/pip` (`devbox/gce-disks` makes the directory at every boot; `.bashrc` and
+`scripts/agent-session` prefer it when it exists), and the pass caps them there with the same caps.
+A stop of the VM empties them too.
+
 | Cache | Variable | Default dir | Cap | Over the cap |
 |---|---|---|---|---|
 | uv | `UV_CACHE_DIR` | `/mnt/nvme/<user>/cache/uv` | **40 GB** | `uv cache prune` (drops entries no env points at); if still over, `uv cache clean` |

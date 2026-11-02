@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""agentbox-gce-metadata-relay BIND_IP PORT SUBNET: the agent boxes' relay to Google's metadata server.
+
+scripts/agentbox starts it on a Google VM (dispatch://INFRA-993) in place of the plain TCP relay
+(socat) it uses elsewhere. A byte relay does not work here: a box's client names the relay in its
+Host header (172.25.0.1:8169), and Google's metadata server answers any Host but
+metadata.google.internal, `metadata` or 169.254.169.254 (port 80 only) with 400 Bad Request
+(measured on sami-devbox 2026-11-02). So this relay is HTTP: it sends each request on with
+Host: metadata.google.internal and copies the answer back, streamed, so a `?wait_for_change=true`
+long poll works. It admits only clients in SUBNET, the box network, as the socat relay does.
+"""
+
+from __future__ import annotations
+
+import http.client
+import ipaddress
+import socketserver
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+UPSTREAM = "169.254.169.254"
+HOST = "metadata.google.internal"
+HOP = {"connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "te", "trailer"}
+
+
+class Relay(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    subnet: ipaddress.IPv4Network
+
+    def relay(self) -> None:
+        if ipaddress.ip_address(self.client_address[0]) not in self.subnet:
+            self.send_error(403)
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
+        headers["Host"] = HOST
+        up = http.client.HTTPConnection(UPSTREAM, 80, timeout=3700)
+        try:
+            up.request(self.command, self.path, body=body, headers=headers)
+            resp = up.getresponse()
+            self.send_response(resp.status, resp.reason)
+            for k, v in resp.getheaders():
+                if k.lower() not in HOP and k.lower() != "content-length":
+                    self.send_header(k, v)
+            data = resp.read()
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except OSError as e:
+            self.send_error(502, f"metadata server: {e}")
+        finally:
+            up.close()
+
+    do_GET = do_POST = do_PUT = do_HEAD = relay
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+def main() -> None:
+    bind, port, subnet = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+    Relay.subnet = ipaddress.ip_network(subnet, strict=False)
+    socketserver.TCPServer.allow_reuse_address = True
+    ThreadingHTTPServer.daemon_threads = True
+    ThreadingHTTPServer((bind, port), Relay).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -49,6 +49,11 @@ chmod 666 /var/run/docker.sock
 # DOCKER-USER exists once dockerd runs; containers the box starts must not
 # reach the metadata forwarder, or every sandbox would hold the devbox role.
 iptables -I DOCKER-USER -d "${AGENTBOX_IMDS_FORWARDER%:*}" -p tcp --dport "${AGENTBOX_IMDS_FORWARDER##*:}" -j DROP
+# Nor the metadata address itself: on a Google VM the metadata server answers any
+# NATed container at 169.254.169.254 with the VM's account token, with no hop
+# limit like AWS's IMDSv2 (dispatch://INFRA-993). The box's own processes are not
+# in this chain and keep their relay.
+iptables -I DOCKER-USER -d 169.254.169.254 -j DROP
 
 # Envoy at the address the host's envoy.json names (http://127.0.0.1:<port>),
 # relayed to the host's forwarder at the network gateway, so the one file

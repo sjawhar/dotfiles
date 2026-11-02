@@ -11,10 +11,15 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-[ "$(hostname -s)" = sami-rocqperf ] || {
-    echo "ossv-box-gateway-token: only sami-rocqperf has this developer-box route" >&2
-    exit 1
-}
+# sami-devbox (dispatch://INFRA-993) reaches the gateway on tcp:4000 by its tag (agent-infra
+# bootstrap/main.go) and has no lane key: the gateway takes only dev-box's token from it.
+case "$(hostname -s)" in
+    sami-rocqperf | sami-devbox) ;;
+    *)
+        echo "ossv-box-gateway-token: only sami-rocqperf and sami-devbox have this developer-box route" >&2
+        exit 1
+        ;;
+esac
 for tool in curl jq; do
     command -v "$tool" > /dev/null || {
         echo "ossv-box-gateway-token: $tool is not available" >&2

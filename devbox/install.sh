@@ -29,6 +29,10 @@ bash "${DOTFILES_DIR}/installers/omp-embed.sh"
 # registers them and enrolls their boxes (see installers/agent-secrets.sh).
 bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 
+# The Google Cloud SDK where boxes can see it (~/.gcloud), with the GKE auth plugin and the
+# dispatch cluster's context (see installers/gcloud-sdk.sh). Before gcloud-box.sh, which needs it.
+bash "${DOTFILES_DIR}/installers/gcloud-sdk.sh"
+
 # On an Azure VM enrolled in box-identity, gcloud and ADC act as dev-sjawhar with no
 # sign-in; an apply impersonates agent-infra's applier from it (see installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
@@ -45,11 +49,12 @@ bash "${DOTFILES_DIR}/installers/omp-box-memory-guard.sh"
 # (devbox/tmp-empty-prune.service).
 arm_user_timer devbox tmp-empty-prune
 
-# The box's one Go build cache, /mnt/nvme/<user>/gocache (GOCACHE in .bashrc), cleaned hourly
+# The box's one Go build cache, <scratch>/gocache (GOCACHE in .bashrc; <scratch> is
+# /mnt/scratch/<user> where devbox/gce-disks makes it, else /mnt/nvme/<user>), cleaned hourly
 # once it passes 80 GB (devbox/gocache-cap.service).
 arm_user_timer devbox gocache-cap
 
-# Each agent session's own TMPDIR under /mnt/nvme/<user>/session-tmp (scripts/agent-session),
+# Each agent session's own TMPDIR under <scratch>/session-tmp (scripts/agent-session),
 # removed once no live process holds it (devbox/session-scratch-reap.md).
 arm_user_timer devbox session-scratch-reap
 
@@ -79,18 +84,25 @@ arm_user_timer devbox unit-health-watch
 # Scratch on the big disk for the box's systemd --user services, which read environment.d and
 # not .bashrc (devbox/nvme-tmp.conf). Installed only where /mnt/nvme/<user> exists and is
 # writable, and only once both directories are there, since environment.d has no conditionals.
+# On sami-devbox, where devbox/gce-disks makes /mnt/scratch/<user> on the local SSDs, the scratch
+# goes there instead (devbox/scratch-tmp.conf), and the other file's link is removed.
 # A running unit keeps the environment it started with; each picks this up at its next start.
 nvme_home="/mnt/nvme/$(id -un)"
-if [ -d "$nvme_home" ] && mkdir -p "$nvme_home/tmp" "$nvme_home/gotmp" 2>/dev/null \
-    && [ -w "$nvme_home/tmp" ] && [ -w "$nvme_home/gotmp" ]; then
+tmp_home="$nvme_home" tmp_conf=nvme-tmp.conf other_conf=scratch-tmp.conf
+if [ -d "/mnt/scratch/$(id -un)" ]; then
+    tmp_home="/mnt/scratch/$(id -un)" tmp_conf=scratch-tmp.conf other_conf=nvme-tmp.conf
+fi
+if [ -d "$nvme_home" ] && mkdir -p "$tmp_home/tmp" "$tmp_home/gotmp" 2>/dev/null \
+    && [ -w "$tmp_home/tmp" ] && [ -w "$tmp_home/gotmp" ]; then
     mkdir -p ~/.config/environment.d
-    ensure_link "${DEVBOX_DIR}/nvme-tmp.conf" ~/.config/environment.d/nvme-tmp.conf
+    ensure_link "${DEVBOX_DIR}/${tmp_conf}" ~/.config/environment.d/${tmp_conf}
+    if [ -L ~/.config/environment.d/${other_conf} ]; then rm -f ~/.config/environment.d/${other_conf}; fi
     if command -v systemctl &>/dev/null && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-        systemctl --user set-environment TMPDIR="$nvme_home/tmp" GOTMPDIR="$nvme_home/gotmp" \
+        systemctl --user set-environment TMPDIR="$tmp_home/tmp" GOTMPDIR="$tmp_home/gotmp" \
             || echo "WARNING: no reachable systemd --user manager; TMPDIR applies at next login" >&2
     fi
 else
-    echo "No writable $nvme_home: leaving the user manager's TMPDIR alone"
+    echo "No writable $tmp_home: leaving the user manager's TMPDIR alone"
 fi
 
 # ~/.ssh/known_hosts append-only, so no session's program can write over the file every session

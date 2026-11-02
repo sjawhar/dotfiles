@@ -12,11 +12,16 @@
 # than trimmed: none of these tools can trim to a size, and everything removed is re-downloadable
 # or rebuildable. Nothing here is a working copy.
 #
-# NVME_CACHE_ROOT and each <NAME>_CACHE_CAP_BYTES below override the defaults, so a test can run
-# the unit against scratch directories. --dry-run reports and cleans nothing.
+# NVME_CACHE_ROOT, SCRATCH_CACHE_ROOT and each <NAME>_CACHE_CAP_BYTES below override the defaults,
+# so a test can run the unit against scratch directories. --dry-run reports and cleans nothing.
 set -euo pipefail
 
 root="${NVME_CACHE_ROOT:-/mnt/nvme/$(id -un)}"
+# On sami-devbox the uv and pip caches are on the local-SSD scratch, /mnt/scratch/<user>
+# (devbox/gce-disks), where .bashrc and scripts/agent-session point them; a cache there is capped
+# like one under the root. A machine without that directory keeps them under the root.
+scratch="${SCRATCH_CACHE_ROOT:-/mnt/scratch/$(id -un)}"
+[[ -d "$scratch" ]] || scratch="$root"
 uv_cap="${UV_CACHE_CAP_BYTES:-40000000000}"
 cargo_cap="${CARGO_CACHE_CAP_BYTES:-20000000000}"
 modcache_cap="${GOMODCACHE_CAP_BYTES:-40000000000}"
@@ -39,8 +44,8 @@ report() { # report NAME DIR SIZE CAP
 
 # uv: `uv cache prune` removes the entries no environment on this machine still points at, which
 # is the cheap pass; `uv cache clean` empties the cache and is what a cap over budget needs.
-uv_dir="${UV_CACHE_DIR:-$root/cache/uv}"
-if [[ -d "$uv_dir" && "$uv_dir" == "$root"/* ]]; then
+uv_dir="${UV_CACHE_DIR:-$scratch/cache/uv}"
+if [[ -d "$uv_dir" && ("$uv_dir" == "$root"/* || "$uv_dir" == "$scratch"/*) ]]; then
     size="$(size_of "$uv_dir")"
     if ((size <= uv_cap)); then
         report uv "$uv_dir" "$size" "$uv_cap"
@@ -113,7 +118,7 @@ fi
 cap_cache() { # cap_cache NAME VAR DIR CAP [CLEANER...]
     local name="$1" var="$2" dir="$3" cap="$4"
     shift 4
-    [[ -d "$dir" && "$dir" == "$root"/* ]] || return 0
+    [[ -d "$dir" && ("$dir" == "$root"/* || "$dir" == "$scratch"/*) ]] || return 0
     local size
     size="$(size_of "$dir")"
     if ((size <= cap)); then
@@ -149,7 +154,7 @@ cap_cache mise MISE_CACHE_DIR "${MISE_CACHE_DIR:-$root/cache/mise}" "$mise_cap" 
 # removes the directory; puppeteer re-downloads the build its package pins on the next run.
 cap_cache puppeteer PUPPETEER_CACHE_DIR "${PUPPETEER_CACHE_DIR:-$root/cache/puppeteer}" "$puppeteer_cap"
 # `pip cache purge` empties the wheel and http caches, which is the whole directory.
-cap_cache pip PIP_CACHE_DIR "${PIP_CACHE_DIR:-$root/cache/pip}" "$pip_cap" pip cache purge
+cap_cache pip PIP_CACHE_DIR "${PIP_CACHE_DIR:-$scratch/cache/pip}" "$pip_cap" pip cache purge
 # `bun pm cache rm` removes the install cache directory, bunx packages included.
 cap_cache bun BUN_INSTALL_CACHE_DIR "${BUN_INSTALL_CACHE_DIR:-$root/cache/bun}" "$bun_cap" bun pm cache rm
 

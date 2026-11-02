@@ -13,7 +13,8 @@
 #     (scripts/gh-agent-config), so a gh that runs past shims/gh never acts as the user;
 #   - points GOOGLE_APPLICATION_CREDENTIALS at the machine's own Google identity, where it has one
 #     (installers/gcloud-box.sh), so a Google client library or Pulumi acts as the machine, not as
-#     the user, unless the caller names a credential file of its own;
+#     the user, unless the caller names a credential file of its own; on a Google VM it sets
+#     none, and the libraries take the VM's account from the metadata server;
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
@@ -111,10 +112,17 @@ fi
 # box_credential_config.json, a file only that installer writes (gcloud rewrites its own copy under
 # legacy_credentials/ whenever it stores credentials). A file a caller chose is kept, unless it is
 # the well-known file, which names no identity of its own.
+#
+# A Google VM (sami-devbox, dispatch://INFRA-993) has no such file: gcloud-box.sh removes it and the
+# well-known file, and ADC falls through to the metadata server, which is the VM's attached
+# account. A box_credential_config.json there is one carried over from an Azure machine; it fetches
+# its token from Azure's IMDS, which a Google VM does not have, so it is not exported. The probe
+# runs only when that file exists, so a machine without one pays nothing for it.
 gcloud_cfg="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
 box_adc="$gcloud_cfg/box_credential_config.json"
 if [[ -f "$box_adc" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" \
-    || "$(realpath -m "$GOOGLE_APPLICATION_CREDENTIALS")" == "$(realpath -m "$gcloud_cfg/application_default_credentials.json")" ]]; then
+    || "$(realpath -m "$GOOGLE_APPLICATION_CREDENTIALS")" == "$(realpath -m "$gcloud_cfg/application_default_credentials.json")" ]] \
+    && ! "$DOTFILES_DIR/scripts/on-google-vm"; then
     export GOOGLE_APPLICATION_CREDENTIALS="$box_adc"
 fi
 
@@ -133,16 +141,29 @@ fi
 # shell's pid, which is the agent's own pid (every hop from here is an exec), and
 # devbox/session-scratch-reap.service removes a directory no live process holds. A nested launch
 # (scripts/omp-fork) inherits the session's directory rather than making one that outlives it.
+#
+# On sami-devbox TMPDIR, GOTMPDIR, the session's TMPDIR and the Go build and uv caches go to the
+# local-SSD scratch, /mnt/scratch/<user>, which devbox/gce-disks makes at every boot with the same
+# layout (dispatch://INFRA-993, "Software"); a machine without it keeps them on /mnt/nvme.
 nvme_home="/mnt/nvme/${USER:-$(id -un)}"
+scratch_home="$nvme_home"
+if [[ -d "/mnt/scratch/${USER:-$(id -un)}" ]]; then
+    scratch_home="/mnt/scratch/${USER:-$(id -un)}"
+fi
 if [[ -d "$nvme_home" ]]; then
-    export UV_CACHE_DIR="${UV_CACHE_DIR:-$nvme_home/cache/uv}"
-    export GOCACHE="${GOCACHE:-$nvme_home/gocache}"
+    export UV_CACHE_DIR="${UV_CACHE_DIR:-$scratch_home/cache/uv}"
+    # A venv on the state disk cannot hardlink from a cache on scratch; say copy, or uv warns at
+    # every install that it fell back to it.
+    if [[ "$UV_CACHE_DIR" == /mnt/scratch/* ]]; then
+        export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+    fi
+    export GOCACHE="${GOCACHE:-$scratch_home/gocache}"
     export GOMODCACHE="${GOMODCACHE:-$nvme_home/gomodcache}"
     # Go writes its build tree to GOTMPDIR, and only falls back to TMPDIR when it is unset. The
     # session's own TMPDIR below already lands on the big disk, so this is what keeps a `go build`
     # off the root disk in a tool shell that sets a TMPDIR of its own (dispatch://INFRA-6).
-    if mkdir -p "$nvme_home/gotmp" 2>/dev/null && [[ -w "$nvme_home/gotmp" ]]; then
-        export GOTMPDIR="${GOTMPDIR:-$nvme_home/gotmp}"
+    if mkdir -p "$scratch_home/gotmp" 2>/dev/null && [[ -w "$scratch_home/gotmp" ]]; then
+        export GOTMPDIR="${GOTMPDIR:-$scratch_home/gotmp}"
     fi
     # cargo keeps its registry and git checkouts under CARGO_HOME and has no variable for those
     # alone, so the whole directory moves and bin/ links back to ~/.cargo/bin, which is on PATH
@@ -157,8 +178,8 @@ if [[ -d "$nvme_home" ]]; then
     fi
     if [[ -n "${AGENT_SESSION_SCRATCH:-}" && -d "${AGENT_SESSION_SCRATCH:-}" ]]; then
         export TMPDIR="$AGENT_SESSION_SCRATCH"
-    elif mkdir -p -m 700 "$nvme_home/session-tmp" 2>/dev/null \
-        && scratch="$(mktemp -d "$nvme_home/session-tmp/$$-XXXXXXXX" 2>/dev/null)"; then
+    elif mkdir -p -m 700 "$scratch_home/session-tmp" 2>/dev/null \
+        && scratch="$(mktemp -d "$scratch_home/session-tmp/$$-XXXXXXXX" 2>/dev/null)"; then
         export AGENT_SESSION_SCRATCH="$scratch" TMPDIR="$scratch"
     fi
 fi
