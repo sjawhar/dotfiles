@@ -2018,6 +2018,20 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         if not (comm in SHELLS and tpgid == pane_pid):
             log(f"pane {pane['pane_id']} {where}: agent pane runs {pane['pane_current_command']}, not omp and not a bare shell; holding")
             continue
+        # A pane whose shell has a live child is working, whatever its foreground process group
+        # says. A script started with `&` or left running by a wrapper sits outside the pane's
+        # foreground group, so tpgid reads back as the shell itself and the pane looks idle.
+        # Measured 2026-11-01 18:40Z on pane %724: the alert fired while the shell's child was
+        # `gate-then-merge.sh bet 2322 …`, and the `tmux send-keys` it recommended would have
+        # started an omp beside a running gate. The children are named rather than counted, so a
+        # reader can tell a gate run from a stray `less`.
+        kids = [p for p in children.get(pane_pid, []) if p in info]
+        if kids:
+            names = ", ".join(f"{info[p][0]} (pid {p})" for p in sorted(kids)[:3])
+            log(f"pane {pane['pane_id']} {where}: at a shell, but its shell has live children: {names}; holding")
+            if incident:
+                clear(key, incident, f"its shell has live children: {names}")
+            continue
         if pane.get("@agent_oneshot", "").strip() not in ("", "0", "false", "off"):
             # Its owner says this pane runs a one-shot omp and outlives it, so a shell here is the
             # end of the work, not the death of a lane. An incident already open is cleared rather
@@ -2059,12 +2073,24 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
                 # it would put a `grep -F <path>` in the alert that can never match and reads
                 # to a person as "nothing holds it".
                 transcript = ""
+            # `omp --resume <id>` resolves an id against the session store of the directory it
+            # is run in, and a pane's cwd is not always the directory the session was started
+            # in: measured 2026-11-01 17:51Z on pane %58, where `omp --resume
+            # 01a19827-…` run from /home/sami/Code/legion answered `Error: Session
+            # "01a19827-…" not found.` while the session's transcript sat under
+            # -src-oh-my-pi. `--resume <path>` takes the transcript itself and needs no
+            # directory, so it is what the alert hands a reader whenever the transcript lives
+            # outside the pane's own session directory.
+            by_id = f"omp --resume {session}" if session else ""
+            own_dir = str(session_dir_of(pane["pane_current_path"]))
+            if transcript and not str(Path(transcript).parent).startswith(own_dir):
+                by_id = f"omp --resume {shlex.quote(transcript)}"
             incident.update({
                 "pane_id": pane["pane_id"], "where": where, "window_name": pane["window_name"],
                 "title": pane["pane_title"], "cwd": pane["pane_current_path"], "shell": comm,
                 "shell_pid": pane_pid, "session": session, "session_source": source,
                 "transcript": transcript,
-                "restart": restart or (f"omp --resume {session}" if session else ""),
+                "restart": restart or by_id,
             })
             try:
                 incident["last_write"] = os.path.getmtime(transcript) if transcript else None
