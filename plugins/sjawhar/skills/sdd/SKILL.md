@@ -32,7 +32,7 @@ Each slice is platform/application, infrastructure, task-authoring or task-queue
 
 ## Step 3. List the skills
 
-List the repo's skill directories (for example `ls .claude/skills .agents/skills ~/.dotfiles/plugins/sjawhar/skills`) and use only names they print; a recalled skill may not exist. Load what planning needs yourself, and pick the design, implementation, testing and infrastructure skills for the rest: the plan's `## Skill catalog` maps each step to the skills its worker must load, and each brief names them (`using-subagents`).
+List the repo's skill directories (for example `ls .claude/skills .agents/skills ~/.dotfiles/plugins/sjawhar/skills`) and use only names they print; a recalled skill may not exist. Load what planning needs yourself, and pick the design, implementation, testing and infrastructure skills for the rest: the plan's `## Skill catalog` maps each step to the skills its worker must load, and each brief names them (`using-subagents`). A step that adds or changes a CI workflow maps `developing-ci`, read before the first workflow edit, because a workflow written without it runs the whole suite on every push.
 
 ## Step 4. Write the plan
 
