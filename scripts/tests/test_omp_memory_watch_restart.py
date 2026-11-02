@@ -104,6 +104,15 @@ class RestartPassTest(unittest.TestCase):
         self.assertIn("resumed 1", note)
         self.assertTrue(any("RESUMED" in line and "did not end normally" in line for line in self.lines))
 
+    def test_a_resume_keeps_the_ceiling_the_session_ran_at(self) -> None:
+        """01a19336 ran at a 40 GiB ceiling and came back at shims/omp's 24G default, under the
+        34 GiB it had just used (2026-11-02 09:18:48Z)."""
+        kind, record = self.host()
+        self.run_pass((kind, dict(record, memory_max=42949672960)), 1000.0)
+        self.run_pass(("idle", {}), 1030.0)
+        _pane, _cwd, command = self.respawned[0]
+        self.assertTrue(command.endswith(f"&& OMP_MEMORY_MAX=42949672960 {WATCH.OMP_SHIM} --resume {SID}"), command)
+
     def test_the_respawn_is_the_leads_command(self) -> None:
         calls = []
 

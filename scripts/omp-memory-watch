@@ -1521,7 +1521,8 @@ def pane_state(
             elif not sid:
                 sid = resurrect.named_session(resurrect.cmdline(pid))
         cwd = known.get("cwd") if same and known.get("cwd") else cwd_of(pid)
-        return "host", {"pid": pid, "start": start, "sid": sid, "resolved": resolved, "cwd": cwd}
+        return "host", {"pid": pid, "start": start, "sid": sid, "resolved": resolved, "cwd": cwd,
+                        "memory_max": own_scope_memory_max(pid)}
     for pid, _name in procs:
         command = resurrect.cmdline(pid)
         launch = resurrect.LAUNCH_SPEC.search(command)
@@ -1573,6 +1574,25 @@ RESUME_WAKE_NOTICE = (
 )
 
 
+def own_scope_memory_max(pid: int) -> int | None:
+    """The memory.max of the transient scope this omp runs in, read each pass, else None.
+
+    A resume through `shims/omp` takes its 24G default unless OMP_MEMORY_MAX says otherwise, so a
+    session whose scope had been raised came back lower than it was using: 01a19336 ran at a
+    40 GiB ceiling, was resumed into 24 GiB on 2026-11-02 at 09:18:48Z, and its last peak was
+    34 GiB. Only a `run-*.scope` of its own counts: a session in the login scope has no ceiling to
+    carry, and its scope's memory.max is not the session's. Read each pass, so a ceiling raised
+    by hand while the session runs is the one carried.
+    """
+    try:
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text().strip().rpartition(":")[2]
+    except OSError:
+        return None
+    if not re.fullmatch(r"run-[^/]+\.scope", cgroup.rpartition("/")[2]):
+        return None
+    return read_int(CGROUP_ROOT / cgroup.strip("/") / "memory.max")
+
+
 def resume_command(record: dict) -> str:
     """What the lead runs by hand, with the launcher by its absolute path.
 
@@ -1588,7 +1608,9 @@ def resume_command(record: dict) -> str:
     )
     if record["kind"] == "box":
         return f"{wake}cd {cwd} && {shlex.quote(str(AGENTBOX))} new {record['spec']} -- omp --resume {sid}"
-    return f"{wake}cd {cwd} && {shlex.quote(str(OMP_SHIM))} --resume {sid}"
+    ceiling = record.get("memory_max")
+    env = f"OMP_MEMORY_MAX={int(ceiling)} " if isinstance(ceiling, int) and ceiling > 0 else ""
+    return f"{wake}cd {cwd} && {env}{shlex.quote(str(OMP_SHIM))} --resume {sid}"
 
 
 def pane_now(pane_id: str) -> dict | None:
