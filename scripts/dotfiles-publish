@@ -25,7 +25,10 @@
 # A refused or partial run leaves every file on disk as it was.
 #
 # <commit> is any jj revision naming one commit (a change id, a commit id). Commit only your own
-# paths first (`jj commit <paths>`), then name that commit here.
+# paths first (`jj commit <paths>`), then name that commit here. The script follows <commit>'s
+# change id, not its commit id: a rebase gives the change a new commit id, and the old one still
+# names the commit from before it. On 2026-11-02 at 16:19Z a run given a commit id pushed that old
+# commit after its rebase, was refused 3 times, and left a duplicate of the change.
 set -euo pipefail
 
 TRIES="${DOTFILES_PUBLISH_TRIES:-3}"
@@ -36,16 +39,26 @@ die() { echo "dotfiles-publish: $*" >&2; exit 1; }
 rev="$1"
 cd "${DOTFILES_DIR:-$HOME/.dotfiles}"
 [[ -d .jj ]] || die "$PWD is not a jj checkout"
+change="$(jj log -r "$rev" --no-graph -T 'change_id ++ "\n"' 2>/dev/null)" \
+    || die "no single commit is named $rev"
+[[ "$change" =~ ^[k-z]{32}$ ]] || die "$rev names more than one commit"
+
+# The one visible commit of <commit>'s change now.
+current() {
+    local id
+    id="$(jj log -r "change_id($change)" --no-graph -T 'commit_id ++ "\n"' 2>/dev/null)" \
+        || die "change $change of $rev has no visible commit"
+    [[ "$id" =~ ^[0-9a-f]{40}$ ]] || die "change $change of $rev is divergent (more than one commit); abandon the extra copies"
+    echo "$id"
+}
 
 attempt=0
 while :; do
     attempt=$((attempt + 1))
     jj git fetch --quiet
-    commit="$(jj log -r "$rev" --no-graph -T 'commit_id ++ "\n"' 2>/dev/null)" \
-        || die "no single commit is named $rev"
-    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "$rev names more than one commit"
+    commit="$(current)"
     [[ "$(jj log -r "$commit" --no-graph -T 'empty')" != true ]] || die "$rev is empty: nothing to publish"
-    push="$commit"
+    push="$commit" copy=""
     # Commits under <commit> that main does not have are someone else's unpublished work.
     below="$(jj log -r "::$commit- ~ ::main@origin" --no-graph -T 'commit_id.short() ++ " "')"
     below="${below% }"
@@ -84,12 +97,12 @@ while :; do
                 jj abandon --quiet "$own"
                 die "$rev's change is already on main; nothing to publish"
             fi
-            push="$(jj log -r "$own" --no-graph -T 'commit_id')"
+            push="$(jj log -r "$own" --no-graph -T 'commit_id')" copy=1
             echo "dotfiles-publish: $above${files:+, which would conflict with main@origin in:$files}. Publishing $rev alone, as a copy on main; $rev and the working copy stay on their old base, and no file on disk changes. Whoever owns those lines or commits publishes or resolves them before \`dotfiles-sync local\` can move the working copy." >&2
         else
             jj abandon --quiet "$own"
             jj rebase --quiet -s "$commit" -d main@origin
-            push="$(jj log -r "$rev" --no-graph -T 'commit_id')"
+            push="$(current)"
             if [[ -n "$(jj log -r "$push:: & conflicts()" --no-graph -T 'commit_id')" ]]; then
                 die "CONFLICT after the rebase although the trial had none; resolve it in $PWD now"
             fi
@@ -99,8 +112,9 @@ while :; do
         echo "dotfiles-publish: main is $push"
         exit 0
     fi
-    # A copy that lost the race is made again from the new main.
-    [[ "$push" == "$commit" ]] || jj abandon --quiet "$push"
+    # A copy that lost the race is made again from the new main. A rebased <commit> stays: the
+    # next try rebases it again.
+    [[ -z "$copy" ]] || jj abandon --quiet "$push"
     (( attempt < TRIES )) || die "push refused $attempt times; the last answer: $err"
     echo "dotfiles-publish: push refused (another session pushed first?); fetching and trying again" >&2
 done

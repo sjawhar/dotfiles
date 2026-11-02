@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """scripts/dotfiles-sync --here and scripts/dotfiles-publish on a jj checkout: a refused sync or
-publish leaves the working copy as it was.
+publish leaves the working copy as it was, and a publish pushes the commit as it is after its
+rebase, whether it is named by change id or commit id.
 
 The working tree of ~/.dotfiles is production: every session and user unit reads it, and it always
 holds other sessions' uncommitted edits. A sync whose working-copy change conflicts with origin's
@@ -174,7 +175,7 @@ class Publish(DotfilesCheckout):
         result = self.publish(change)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("the working copy, above", result.stderr)
+        self.assertIn("the working copy, which would conflict", result.stderr)
         self.assertIn("wip.txt", result.stderr)
         main = self.origin_main()
         self.assertEqual(self.run_ok("git", "rev-parse", f"{main}^", cwd=self.origin).strip(), upstream_head)
@@ -201,6 +202,56 @@ class Publish(DotfilesCheckout):
         self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
         self.assertEqual((self.checkout / "shared.txt").read_text(), "upstream edit\n")
         self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+
+    def test_a_commit_named_by_its_commit_id_is_rebased_and_the_rebased_commit_pushed(self) -> None:
+        # The rebase gives the change a new commit id, and the old id still names the commit from
+        # before it. On 2026-11-02 at 16:19Z a run given a commit id pushed that old commit, was
+        # refused 3 times, and left a duplicate of the change.
+        change = self.my_commit("other.txt", "my edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+        upstream_head = self.origin_main()
+        old = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
+
+        result = subprocess.run(["bash", str(PUBLISH), old], env=self.env, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("refused", result.stderr)
+        pushed = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
+        self.assertNotEqual(pushed, old)
+        self.assertEqual(self.origin_main(), pushed)
+        self.assertEqual(self.jj("log", "-r", f"{change}-", "--no-graph", "-T", "commit_id"), upstream_head)
+        self.assertEqual(self.jj("log", "-r", 'description(exact:"mine\n")', "--no-graph", "-T", "commit_id ++ ' '"), f"{pushed} ")
+        self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+
+    def test_a_rebased_commit_whose_push_loses_a_race_is_kept_and_pushed_on_the_next_try(self) -> None:
+        change = self.my_commit("other.txt", "my edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+        upstream_head = self.origin_main()
+        # Origin refuses the first push, as when another session pushes first.
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text('#!/bin/sh\n[ -e refused-once ] && exit 0\ntouch refused-once\necho "refused once" >&2\nexit 1\n')
+        hook.chmod(0o755)
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("push refused", result.stderr)
+        pushed = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
+        self.assertEqual(self.origin_main(), pushed)
+        self.assertEqual(self.jj("log", "-r", f"{change}-", "--no-graph", "-T", "commit_id"), upstream_head)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+
+
+class PublishByCommitId(Publish):
+    """Every publish case again, the commit named by its commit id instead of its change id."""
+
+    def publish(self, rev: str) -> subprocess.CompletedProcess[str]:
+        return super().publish(self.jj("log", "-r", rev, "--no-graph", "-T", "commit_id"))
+
 
 
 if __name__ == "__main__":
