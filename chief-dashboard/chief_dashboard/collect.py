@@ -50,21 +50,34 @@ def read_registry(errors: list[str]) -> dict:
 
 
 def scoreboard(api: Dispatch, cache: VersionCache, key: str) -> dict:
-    """Every version of the issue's scoreboard.json, oldest first: {number, created_at, data | error}."""
+    """The issue's scoreboard.json over time, oldest first: {number, created_at, data | error}.
+
+    Only the newest version of each UTC day carries `data`, plus the newest version overall. A lead uploads its
+    scoreboard many times a day and each copy embeds every dated reading of every number, so keeping them all
+    duplicated the same series hundreds of times: on 2026-11-02 OSS Verify's 404 versions were 340 MB of the
+    snapshot's 408 MB, the service held 2.0 GB and a refresh took 757 s. Every reader works at day granularity or
+    takes the newest (`board_at`, `day_plan`, `day_record` over the last 7 days), and a version with no `data` is
+    skipped by each of them.
+    """
     issue = api.issue(key)
     art = next((a for a in issue.get("artifacts", []) if a["slug"] == SCOREBOARD_SLUG), None)
     out = {"issue_title": issue.get("title"), "versions": [], "artifacts": issue.get("artifacts", [])}
     if art is None:
         return out
-    for v in sorted(art["versions"], key=lambda v: v["number"]):
+    versions = sorted(art["versions"], key=lambda v: v["number"])
+    keep = {v["number"] for v in {(v.get("created_at") or "")[:10]: v for v in versions}.values()}
+    if versions:
+        keep.add(versions[-1]["number"])
+    for v in versions:
         row = {"number": v["number"], "created_at": v["created_at"]}
-        try:
-            data = cache.get(api, key, v["number"])
-            if not isinstance(data, dict):
-                raise SourceError("the file is not a JSON object")
-            row["data"] = data
-        except SourceError as e:
-            row["error"] = str(e)
+        if v["number"] in keep:
+            try:
+                data = cache.get(api, key, v["number"])
+                if not isinstance(data, dict):
+                    raise SourceError("the file is not a JSON object")
+                row["data"] = data
+            except SourceError as e:
+                row["error"] = str(e)
         out["versions"].append(row)
     return out
 
