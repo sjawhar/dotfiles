@@ -53,8 +53,7 @@ Delete only paths you prove are yours; never assume an unknown workspace has no 
 - Never run one `du` of everything, even bounded by `-d` or `-t`. Size suspected paths one at a time, `du -xsm` under `systemd-run --user -p Nice=19 -p IOWeight=10`. For where space went, what writes now or what appeared recently: `references/finding-space.md`.
 - Rank space owners by each session's `du -xsm` of its own paths, never by walking all trees or by a write sample; a process, by sizing its open files twice, minutes apart.
 - A free-space guard samples during a batch too: a higher number to start, a lower one to abort what runs.
-- When many agents of one lead write to one disk, one reads free space and refuses for all. Across leads, run `disk-gate reserve <gib> <name>` before the work and `disk-gate release <name>` after.
-- Size a reservation from a measured peak, never from what the work keeps. No measured peak: measure one in a pool pod first, and bring back only the output.
+- When many agents of one lead write to one disk, one reads free space and refuses for all. Across leads, run `disk-gate reserve <gib> <name>` before the work and `disk-gate release <name>` after, sized by a measured peak and never by what the work keeps; measure an unmeasured build in a pool pod first.
 - Before you promise space back, measure every path that may share inodes (a workspace and `~/.cache/uv`, a cache and a data directory, `os.link` copies) in one `du` (`$S sizes --hardlinks <tree> <cache>`).
 - When a leaked test or process causes space or load, read `references/test-leaks.md`.
 
