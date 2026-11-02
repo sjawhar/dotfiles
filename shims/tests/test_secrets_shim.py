@@ -136,10 +136,7 @@ class SecretsShim(unittest.TestCase):
         result = self.run_shim(*args, **env)
         self.assertEqual(result.returncode, 77, result.stderr.decode())
         self.assertEqual(result.stdout, b"")
-        for call in self.argv_log():
-            self.assertEqual(
-                call[:2], ["get", "--no-request"], f"the daemon was asked: {call}"
-            )
+        self.assertEqual(self.argv_log(), [], "the real secrets ran")
         return result.stderr.decode()
 
     def test_agent_tier_keys_pass_through_byte_for_byte(self) -> None:
@@ -220,9 +217,10 @@ class SecretsShim(unittest.TestCase):
             stderr,
         )
 
-    def test_a_live_grant_passes_through(self) -> None:
-        self.assert_passes_through("HUMAN_KEY", "--", "env", GRANTED_KEYS="HUMAN_KEY")
-        self.assert_passes_through("get", "HUMAN_KEY", GRANTED_KEYS="HUMAN_KEY")
+    def test_a_grant_another_session_holds_does_not_pass(self) -> None:
+        # The real `get --no-request` reports "grant":true when ANY session holds the key.
+        self.assert_refused("HUMAN_KEY", "--", "env", GRANTED_KEYS="HUMAN_KEY")
+        self.assert_refused("get", "HUMAN_KEY", GRANTED_KEYS="HUMAN_KEY")
 
     def test_no_config_means_no_human_keys(self) -> None:
         self.assert_passes_through(

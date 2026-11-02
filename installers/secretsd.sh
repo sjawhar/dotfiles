@@ -189,8 +189,8 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
         # 2026-11-01 thirteen agent requests died that way. Agents get
         # human-tier keys from the Legion credential broker instead: the omp
         # tool secrets_request (forward's omp extension) and shims/secrets
-        # refuse an agent's human-tier request that has no live grant and name
-        # the broker's secret-run command.
+        # refuse every agent request for a human-tier key and name the
+        # broker's secret-run command.
         case "$SECRETSD_VERSION" in
             1.*|2.0.*|2.1.*) ;;
             *)

@@ -121,7 +121,7 @@ before handing the call to the real one.
 - **`ssh-keygen`** drops `SSH_AUTH_SOCK` for `-Y`, the operations git and jj sign and verify commits
   with: the signing key is a file, and ssh-keygen asks the agent first, so a stuck agent socket
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
-- **`secrets`** refuses an agent's request for a human-tier key its session holds no grant for
+- **`secrets`** refuses every agent request for a human-tier key
   (exit 77), and names the broker command (`secret-run`) or, in a session the broker does not
   serve, the `omp --resume` line that relaunches it as one. secretsd's only prompt for such a key
   is a YubiKey blink the firmware holds about 15 seconds, and on 2026-11-01 thirteen agent
