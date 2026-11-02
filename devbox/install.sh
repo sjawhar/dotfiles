@@ -93,4 +93,8 @@ else
     echo "No writable $nvme_home: leaving the user manager's TMPDIR alone"
 fi
 
+# ~/.ssh/known_hosts append-only, so no session's program can write over the file every session
+# shares; ssh's UpdateHostKeys is off for this user (see installers/ssh-known-hosts.sh).
+bash "${DOTFILES_DIR}/installers/ssh-known-hosts.sh"
+
 echo "--- Devbox setup complete ---"
