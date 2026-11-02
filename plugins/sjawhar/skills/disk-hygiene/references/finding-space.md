@@ -1,5 +1,7 @@
 # Finding where the space went, and what writes now
 
+Read this before you size, rank or watch disk use, or before you delete by a pattern or with `find`.
+
 `S` and `SKILL` are as set in SKILL.md. Each command here answers one question and prints what its
 number does not measure. On 2026-10-30 two disks on this box filled while nine readings taken that
 afternoon were each true of something other than the question asked.
@@ -32,6 +34,12 @@ afternoon were each true of something other than the question asked.
   (`find -xtype l`). A sweep of `~/.cache` and `~/.local` on 2026-10-30 found 3,679 of them. They
   hold no data: they show where a deleted tree left the links that point at it.
 
+- Where the space usually is, largest first: dangling images, buildkit cache with leaked leases, unused tagged images, orphaned sandboxes, `/tmp` families, workspaces. Workspaces free less than they look, because `uv` venvs hardlink into `~/.cache/uv` where the cache shares their filesystem. `$S sizes --hardlinks <tree> <cache>` measures the shared bytes: sizing the two trees in two commands counts them in both.
+- Do not size a candidate to decide its deletion: under IO load sizing is slow. Measure the result by the directory you removed, before and after, not by `df`: when several sessions clear at once the filesystem moves gigabytes between consecutive reads, so `df` tells you about the box and not about your cleanup. Where you do read `df`, read the filesystem the path is on, which `df <path>` gives: a removal under another mount leaves `/` unchanged.
+- Never run one `du` of everything: it can run for hours. To find where the space went, what writes now, or what appeared in the last hours, use this file. Each instrument there is a named subcommand of `$S`, and each prints what its number does not measure.
+- `du -d` and `du -t` bound what `du` PRINTS, not what it READS: to total a directory it stats every inode under it, so a bounded `du` over a whole multi-terabyte array is still a whole-array walk. On 2026-11-01 `du -x -d2 -t 2G /mnt/nvme ...` ran over two hours on the 3.2 TB array without finishing. So size the paths you suspect, one at a time: `du -xsm <path>` on a named directory, run as a unit so it survives your session and loses every I/O race to real work, `systemd-run --user --unit=<name> -p Nice=19 -p IOWeight=10 bash -c 'du -xsm <paths> > <outfile>'`. Ask each session for its own `du -xsm` rather than walking everyone's trees from one place, and never run two walkers at once (the rule above).
+- A file with link count 2 or more frees nothing when one of its names is deleted. A cache and a data directory sharing inodes, or mutation copies made with `os.link`, look twice their real size in a per-path `du`. Measure every path that may share inodes in one `du` call, which counts each inode once, before you promise anyone the space back.
+
 ## What writes now
 
 - Rank the writers: `sudo python3 $S writers --seconds 5 --top 15`. It names each process, its
@@ -60,6 +68,8 @@ afternoon were each true of something other than the question asked.
   rather than accumulation, so there is no runaway writer to find: 164.5 MB/s across dozens of
   processes, none above 61.5 MB/s, on a volume whose net was about zero.
 
+- A write sample says who writes now, not who holds the space. `/proc/<pid>/io` `write_bytes` counts rewrites and deleted output on every filesystem, so the top writer in a 15-second sample is often a build that deletes as it goes. To rank owners, ask each session for the `du -xsm` of its own paths; to rank a process, sample the size of the files it holds open twice, minutes apart. On 2026-11-01 a figure of "4.21 GB written in four minutes" by the omp transcript tree was the size of every file whose mtime moved; its real growth was 0.49 GiB/h.
+
 ## Two deletions that took more than they were given
 
 - `find` tests the starting directory as well as its contents, so give every `find … -delete` or
@@ -76,3 +86,5 @@ afternoon were each true of something other than the question asked.
   scratch file. Three lanes globbed `/tmp` within one hour of each other. Where a cleanup must use
   a pattern, list the matches and read them before you remove any: `ls` costs a second and turns a
   guess into a decision, and `rm` prints nothing it took.
+- Never glob a shared directory: a prefix is not ownership. Name each entry you delete, or delete a directory you made. `rm -f /tmp/mt.*`, cleaning one agent's own pid-suffixed scratch, destroyed two unrecoverable files of somebody else's that shared the prefix. The box tree needs the same rule for a second reason, its live bind-mount sources: [box-mounts.md](box-mounts.md).
+- Give every `find ... -delete` or `find ... -exec rm` a `-mindepth 1`, because `find` tests the starting directory too and has deleted the directory it was told to clean inside (this file).

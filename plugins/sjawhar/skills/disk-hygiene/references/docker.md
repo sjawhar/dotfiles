@@ -1,5 +1,7 @@
 # Phase 5: Docker
 
+Read this in Phase 5, and before you delete a tree a container left root-owned files in.
+
 `S` and `SKILL` are as set in SKILL.md. Do the steps in order.
 
 1. If `docker system df` fails with `rw layer snapshot not found for container X`, run `docker rm -f X` and run it again. Never use `docker system df -v`: it stalls under IO load. Use `$S images` and `$S containers`.
@@ -25,3 +27,7 @@
    - **agentbox**: never.
    - **other**: delete only eval or task sandboxes, never service containers (postgres, nats, registries, envoy, buildx). A sandbox is an orphan when no eval process exists and nothing names it, or when its only holder is a dangling `docker exec -it ... bash`. Kill the shell, then `docker compose -p PROJECT down -v`. If a live session can be the owner, ask first.
 6. `docker volume prune -f` (dangling only, attached to no container). Always safe.
+
+## Root-owned files a container left on a bind mount
+
+- A container that ran as root left root-owned files on its bind mount, and `rm -rf` as your user fails on each of them with `Permission denied`, per file, so the tree looks deleted at the top and is not. Remove such a tree with a throwaway container on the same mount (`docker run --rm -v <parent>:/w alpine:3 rm -rf /w/<tree>`), then `ls` the path to confirm it is gone. A long delete under a tool time limit can stop halfway: run it under `systemd-run --user --wait`.

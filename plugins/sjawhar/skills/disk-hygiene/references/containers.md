@@ -1,5 +1,7 @@
 # Container verdicts (`disk_hygiene.py containers`)
 
+Read this when you act on a verdict from `$S containers`.
+
 How the census sets each verdict. The removal rules are in [docker.md](docker.md), step 5.
 
 | Family | Identified by | Verdict |

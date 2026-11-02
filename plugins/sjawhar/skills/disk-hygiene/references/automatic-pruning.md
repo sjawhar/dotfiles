@@ -1,5 +1,9 @@
 # What already prunes on its own
 
+Read this to learn what timers already prune and what they leave for this skill, before you add automation of your own. SKILL.md's rule, as it stood with its reason:
+
+- Never put this skill on a timer or cron: it needs the check-in. Run it by hand, and stop when done. What already runs on a timer, and what it leaves for this skill: this file.
+
 - `~/.dotfiles/agentbox/devbox-prune` runs every 6 h where its timer is on. On the host daemon it does Docker step 6 ([docker.md](docker.md)). In each box it does steps 2 and 6, a default-builder `docker builder prune -f`, and a cut of Go build cache idle >2 days. It never uses `-a`, deletes a tagged image or judges liveness. In a box, read its log with `systemd-run --user systemctl --user status devbox-prune.service`.
 - agentbox deletes each session's workspace when omp exits.
 - `~/.dotfiles/devbox/tmp-empty-prune.timer` (armed by `devbox/install.sh`) runs daily and deletes the empty `tmp*` directories older than a day directly under `/mnt/nvme/$USER/tmp`, which Python's `tempfile.mkdtemp()` leaves behind.

@@ -1,5 +1,7 @@
 # Phase 6: Caches, temp and the jj op store
 
+Read this in Phase 6, before you delete temp directories, caches or jj operations.
+
 `S` and `SKILL` are as set in SKILL.md.
 
 - `python3 $S tmp --older-than-hours 24 --protected protected.json` lists stale temp families (directories whose names match its `--families` regex; `--dir` defaults to `/tmp`). It dates each directory by the newest mtime in it, not by the directory's own mtime. A directory's own mtime changes only when an entry appears in it or goes. Add `--apply --ledger` to delete. Ask Sami before you delete a `/tmp` entry that `$S tmp` does not list in a family, because no rule shows whose it is. Never delete by glob in a shared namespace on one owner's word, because the glob also matches other owners' files.

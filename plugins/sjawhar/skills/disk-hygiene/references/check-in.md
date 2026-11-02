@@ -1,5 +1,9 @@
 # Phase 2: Check-in, releases and the protected set
 
+Read this in Phase 2, before you send the check-in. SKILL.md's Phase 2 rule, as it stood with its reasons:
+
+Send the check-in message to each session `envoy_sessions` lists with a title on this machine (not subagents: their parent answers for them), then build the release and protected files. The message and those steps are in this file. Do not skip the check-in because it is slow: most sessions answer in minutes, and their replies change the plan.
+
 `S` is as set in SKILL.md. Send this to each titled live session on the machine:
 
 ```

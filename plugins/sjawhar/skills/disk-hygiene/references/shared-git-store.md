@@ -4,6 +4,7 @@ Read this before you forget a jj workspace, remove a git worktree, or repair one
 
 - Never run a repo-wide `git worktree prune`: from a box, it deletes every other box's worktree entry. `~/.dotfiles/shims/git` refuses a bare prune.
 - Drop your own entry with `jj --ignore-working-copy --config fsmonitor.backend=none workspace forget NAME` or `git worktree remove <path>`, so that only that one entry goes.
+- Remove a worktree with `git worktree remove`, never by deleting its directory. `~/.dotfiles/shims/git` locks every worktree it adds (AGENTC-431), and that lock outlives the directory, so a deleted directory leaves a locked registration in the shared store that nothing cleans and no prune may touch. Two such registrations survived from 2026-11-01 08:30Z until their owner unlocked and removed each by exact path.
 - If entries go missing (a git that predates the `~/.dotfiles/shims/git` prune refusal, or git run outside the shim), run `git -C <ws> rev-parse --git-dir` on each kept workspace or checkout. "is not a working tree" is the same loss.
 - Before `jj workspace forget X`, run `cat X/.git` and make sure no other live worktree's `.git` names the same admin dir. If one does, the forget breaks that sibling: its git fails with `fatal: not a git repository`, while its jj keeps working, so nobody notices.
 - To restore a missing entry, make `<store>/.git/worktrees/<name>/` with three files:
