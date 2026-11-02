@@ -5,8 +5,6 @@ description: "Use when the devbox GNOME keyring is locked, or after a devbox reb
 
 # Unlock the devbox keyring
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Every reboot locks the `login` keyring. SSH login cannot unlock it: `ubuntu` has no Unix password, and only `/etc/pam.d/common-password` loads `pam_gnome_keyring.so`.
 
 This applies only to a machine with the `gnome-keyring` package. sami-rocqperf has never had it, so it has no keyring to unlock and `unlock-keyring` says so; there, a tool that keeps its login in a keyring (pup, for one) falls back to the kernel keyring, which a reboot clears, and needs its own login again (`pup auth login`).

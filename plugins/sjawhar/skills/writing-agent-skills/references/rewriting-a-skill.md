@@ -43,7 +43,7 @@ Another fresh agent reads only the new text and quotes each sentence that falls 
 
 Also report: a rule with no reason next to it, a reason that only restates its rule, two rules that contradict, and a sentence a careful engineer would read twice.
 
-Brief the slop agent with the table above and the new text only, and ask for: quote, class, replacement. The rewriter fixes each finding or answers it with one line of evidence. Fix a finding by replacing words where you can; for a missing reason or definition, add one clause and cut as many bytes elsewhere, because the rewrite may grow only by the 200 bytes the precedence sentence needs (step D). Then a second round checks only the changed lines. Stop after three rounds and never report a finding twice: agent review loops do not end on their own, and a three-round cap, with no other change, took one-round passes from 65% to 78%.
+Brief the slop agent with the table above and the new text only, and ask for: quote, class, replacement. The rewriter fixes each finding or answers it with one line of evidence. Fix a finding by replacing words where you can; for a missing reason or definition, add one clause and cut as many bytes elsewhere, because the rewrite may grow by 200 bytes at most (step D). Then a second round checks only the changed lines. Stop after three rounds and never report a finding twice: agent review loops do not end on their own, and a three-round cap, with no other change, took one-round passes from 65% to 78%.
 
 ## Step C: behavior test for the most-loaded skills
 
@@ -79,10 +79,9 @@ It prints, per skill: SKILL.md bytes and body words, description characters, rul
 - SKILL.md over 20,000 bytes (Claude Code keeps about that much after compaction).
 - Description over 1,024 characters (Codex's cap), empty, or not starting with "Use".
 - A relative link or `references/`, `scripts/` path that does not exist in the skill directory.
-- The precedence sentence is missing.
 
 It warns, without failing, at SKILL.md over 8,000 bytes (Codex keeps the first 8,000), description over 500 characters, and over 40 rule lines.
 
-For a rewrite, add `--old <scratch>/old`. It then also fails when the new SKILL.md is more than 200 bytes larger than the old one (the precedence sentence is about 135), because a rewrite that grows defeats its purpose and files regrow on their own. If meeting the bar would drop a rule, keep the rule and give the byte count and the reason in the commit message.
+For a rewrite, add `--old <scratch>/old`. It then also fails when the new SKILL.md is more than 200 bytes larger than the old one, because a rewrite that grows defeats its purpose and files regrow on their own. If meeting the bar would drop a rule, keep the rule and give the byte count and the reason in the commit message.
 
 Add `--log ~/.cache/skill-sizes.tsv` to append one dated row per skill. Run it daily for a week after the rewrite lands and report the growth, because rewritten instruction files regrew to 91.5% of their old size within 10 commits.

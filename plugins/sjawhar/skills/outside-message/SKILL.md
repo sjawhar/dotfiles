@@ -5,8 +5,6 @@ description: "Use before any text reaches a person outside Theorem: a GitHub iss
 
 # A message to someone outside Theorem
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Sami approves every outside message by default ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27). The lockdown is on because outside messages were low quality, and it loosens as each routine is captured in a skill or template and a party's reaction is gauged ([OSSV-271 ask c75d17dd](https://dispatch.tail12ec1c.ts.net/issues/OSSV-271/asks/c75d17dd-bb18-4cb3-be3c-957da82655be), 2026-11-01). The test is not who the reader is but whether the message is a vetted routine or novel contact.
 
 ## Goes without his approval

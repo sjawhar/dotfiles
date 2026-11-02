@@ -5,8 +5,6 @@ description: "Use before you read, grep, jq or script over agent session transcr
 
 # Using the transcript store
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Every omp session, subagent transcript and session artifact on sami-rocqperf and sami-leanperf is in one ClickHouse store, about 10 minutes behind the live files, **and so are the Claude Code and Codex logs copied from seven of Nickolai's hosts** (`machcsl-gcp-1` to `-3`, `share1014-desktop`, `share1014-vm1` to `-vm3`), merged into the same `transcripts` database on 2026-10-30 and readable with the default reader (agent-infra#996, on dispatch://LINUX-31/ask/ecd0eab6: "it's just one big pool of data"). **So `tq time` and `tq top` with no `--host` count his sessions beside ours**; pass `--host` when you mean one machine. `tq` answers in under a second what a hand-written script answers in minutes over 25 GB, so query `tq` first. Open a raw file only at the `FILE:LINE` that `tq` gives you.
 
 | Question | Command | Default window |

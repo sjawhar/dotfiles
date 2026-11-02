@@ -5,8 +5,6 @@ description: "Use whenever you are building a large project autonomously with su
 
 # Subagent-driven development
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 **Stop if the Legion daemon started this session.** Run `printenv LEGION_ROLE`. If it prints a role, you are a per-process Legion phase worker (or an architect) booted from the daemon's `LEGION_*` environment: follow `skill://legion-worker` (or `skill://legion-architect`) and your role prompt, and stop reading here. The daemon runs one phase of the issue at a time under Legion's own skills, so this skill's planning, dispatch, merge and close steps would do work that belongs to other roles. If your assignment asked for this skill, tell the issue's architect with `envoy_publish` to its role topic (`notifications.role.<token>`; your system prompt's `Legion addressing` line names it), as `skill://legion-worker` says for any cross-phase decision.
 
 Where this skill and a stock workflow skill (`subagent-driven-development`, `writing-plans`, `executing-plans`, or another) disagree, follow this skill. Load `subagent-driven-development` and `using-subagents`.

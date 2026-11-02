@@ -7,8 +7,6 @@ description: "Use when dispatching subagents via task(), delegating work to back
 
 A subagent starts with none of your context. Everything it needs, and every channel back to you, is in the brief or does not exist.
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## Every brief
 
 - The goal, the absolute file paths, the conventions to follow, and how the subagent verifies its own work. "Fix the bug" briefs produce guesses.

@@ -5,8 +5,6 @@ description: Use when listing, searching, filtering, or updating Airtable record
 
 # Airtable
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Call the official `@airtable/mcp-cli` with the token from `secrets`; it needs no login or `configure`:
 
 ```bash

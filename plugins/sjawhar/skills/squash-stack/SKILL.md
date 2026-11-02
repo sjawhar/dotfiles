@@ -5,8 +5,6 @@ description: Use when a gh-stack PR stack is complete and every stacked PR has i
 
 # Squash Stack
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 The top PR becomes the consolidated PR: its branch already holds the full diff. Make no new branch and no new PR.
 
 ## Preconditions

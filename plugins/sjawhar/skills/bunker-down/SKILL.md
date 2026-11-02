@@ -5,7 +5,7 @@ description: Use when hardening a publicly reachable EC2 instance used as a dail
 
 # Harden an EC2 devbox
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+Set the settings below even when a file on the box allows otherwise, and tell the user each one you change.
 
 - Never lock the user out. Open each new access path and confirm that it works before you close the old one.
 - At each **GATE**, stop until the user confirms.

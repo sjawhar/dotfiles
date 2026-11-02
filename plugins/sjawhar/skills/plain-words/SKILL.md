@@ -5,8 +5,6 @@ description: "Use before you send or publish any text a person reads: an ask, a 
 
 # Say the literal thing
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## Answering a question
 
 1. Answer the exact question, only it, in the order it was asked; anything else reads as evasion and the question comes again.
