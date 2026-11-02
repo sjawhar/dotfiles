@@ -11,6 +11,7 @@ the tests never read or write Sami's real ~/.config/gcloud.
 """
 
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -1134,6 +1135,9 @@ class GcloudRouting(unittest.TestCase):
 
 
 LOCK_CRASH = "ERROR: gcloud crashed (OperationalError): database is locked"
+# What a `gcloud storage` task-graph worker logs when it finds credentials.db locked, after the
+# progress dots gcloud writes to a stderr that is no terminal (reproduced on 2026-11-02).
+LOCK_TASK_ERROR = "ERROR: database is locked"
 
 
 class GcloudLockedStoreRetry(unittest.TestCase):
@@ -1154,13 +1158,15 @@ class GcloudLockedStoreRetry(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def stub_gcloud_crashing(self, times: int, crash: str = LOCK_CRASH) -> None:
-        """A gcloud whose first `times` calls print partial output and crash, then succeed."""
+    def stub_gcloud_crashing(self, times: int, crash: str = LOCK_CRASH, partial: bool = True) -> None:
+        """A gcloud whose first `times` calls print partial output (stdout only when `partial`)
+        and crash, then succeed."""
+        partial_out = 'echo "PARTIAL-$n"; ' if partial else ""
         write_stub(
             self.stub_dir,
             "gcloud",
             f'n=$(( $(cat "{self.calls}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "{self.calls}"\n'
-            f'if (( n <= {times} )); then echo "PARTIAL-$n"; '
+            f'if (( n <= {times} )); then {partial_out}'
             f'echo "WARNING: Could not store access token in cache: database is locked" >&2; '
             f'echo "{crash}" >&2; exit 1; fi\n'
             'echo "OK-$n"; echo "NOTE-$n" >&2',
@@ -1186,6 +1192,132 @@ class GcloudLockedStoreRetry(unittest.TestCase):
                 self.assertIn("NOTE-2", result.stderr)
                 self.assertIn("attempt 1 of 6", result.stderr)
                 self.assertEqual(self.call_count(), 2)
+
+    def test_the_storage_task_error_is_a_locked_store_too(self):
+        self.stub_gcloud_crashing(times=1, crash=f"....{LOCK_TASK_ERROR}")
+        result = self.run_shim(["auth", "print-access-token"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "OK-2\n")
+        self.assertEqual(self.call_count(), 2)
+
+    def test_storage_transfers_and_reads_are_run_again_on_either_text(self):
+        """cp and rsync give each object the same bytes on every attempt, and ls, cat, du and the
+        objects/buckets reads change nothing. stdout goes through as it comes; stderr shows each
+        attempt, the crashed one included."""
+        source = self.stub_dir / "src"
+        source.mkdir()
+        (source / "f.txt").write_text("x\n", encoding="utf-8")
+        commands = (
+            ["storage", "cp", str(source / "f.txt"), "gs://b/f.txt"],
+            ["storage", "cp", "-r", str(source), "gs://b/d", "--no-clobber"],
+            ["storage", "cp", "gs://b/f.txt", str(self.stub_dir / "dl.txt")],
+            ["storage", "rsync", str(source), "gs://b/d", "--recursive"],
+            ["--project", "p", "storage", "ls", "-l", "gs://b/"],
+            ["storage", "cat", "gs://b/f.txt"],
+            ["storage", "du", "-s", "gs://b"],
+            ["storage", "objects", "describe", "gs://b/f.txt"],
+            ["storage", "buckets", "list"],
+        )
+        for args in commands:
+            for crash in (LOCK_CRASH, LOCK_TASK_ERROR, f"..........{LOCK_TASK_ERROR}"):
+                with self.subTest(args=args, crash=crash):
+                    self.calls.unlink(missing_ok=True)
+                    self.stub_gcloud_crashing(times=2, crash=crash, partial=False)
+                    result = self.run_shim(args)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "OK-3\n")
+                    self.assertEqual(result.stderr.count(crash), 2)
+                    self.assertIn("attempt 2 of 6", result.stderr)
+                    self.assertIn("NOTE-3", result.stderr)
+                    self.assertEqual(self.call_count(), 3)
+
+    def test_storage_retry_is_bounded(self):
+        self.stub_gcloud_crashing(times=100, crash=LOCK_TASK_ERROR, partial=False)
+        result = self.run_shim(["storage", "rsync", "gs://b/d", str(self.stub_dir)])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.call_count(), 6)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr.count(LOCK_TASK_ERROR), 6)
+
+    def test_a_storage_attempt_that_wrote_stdout_is_not_run_again(self):
+        """Its bytes are already downstream; a second attempt would write them twice."""
+        self.stub_gcloud_crashing(times=1, crash=LOCK_TASK_ERROR, partial=True)
+        result = self.run_shim(["storage", "cat", "gs://b/f.txt"])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.call_count(), 1)
+        self.assertEqual(result.stdout, "PARTIAL-1\n")
+        self.assertIn(LOCK_TASK_ERROR, result.stderr)
+
+    def test_storage_stdout_is_streamed_byte_for_byte(self):
+        """`storage cat` of a large object into a pipe must not wait for the whole object: the
+        stub's first bytes reach the reader while the stub still runs, and every byte, a NUL
+        first included, arrives unchanged."""
+        go = self.stub_dir / "go"
+        write_stub(
+            self.stub_dir,
+            "gcloud",
+            f"printf '\\0\\001first\\n'; while [[ ! -e {go} ]]; do /bin/sleep 0.05; done; printf 'rest\\377'",
+        )
+        proc = subprocess.Popen([str(SHIMS / "gcloud"), "storage", "cat", "gs://b/o"], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=self.env)
+        try:
+            assert proc.stdout is not None
+            self.assertEqual(proc.stdout.read(8), b"\x00\x01first\n")
+            go.touch()
+            out, err = proc.communicate(timeout=30)
+        finally:
+            go.touch()
+            proc.kill()
+            proc.wait()
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(out, b"rest\xff")
+
+    def test_storage_status_passes_through(self):
+        write_stub(self.stub_dir, "gcloud", 'echo "ERROR: (gcloud.storage.cp) not found" >&2; exit 2')
+        result = self.run_shim(["storage", "cp", "gs://b/o", str(self.stub_dir / "o")])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "ERROR: (gcloud.storage.cp) not found\n")
+
+    def test_storage_calls_that_remove_or_read_stdin_run_once(self):
+        fifo = self.stub_dir / "fifo"
+        os.mkfifo(fifo)
+        source = self.stub_dir / "f.txt"
+        source.write_text("x\n", encoding="utf-8")
+        cases = (
+            ["storage", "rsync", str(self.stub_dir), "gs://b/d", "--delete-unmatched-destination-objects"],
+            ["storage", "mv", "gs://b/o", "gs://b/p"],
+            ["storage", "rm", "gs://b/o"],
+            ["storage", "cp", "-I", "gs://b/d/"],
+            ["storage", "cp", "-rI", "gs://b/d/"],
+            ["storage", "cp", "--read-paths-from-stdin", "gs://b/d/"],
+            ["storage", "cp", "-", "gs://b/o"],
+            ["storage", "cp", "gs://b/o", "-"],
+            ["storage", "cp", str(fifo), "gs://b/o"],
+            ["storage", "cp", "/dev/stdin", "gs://b/o"],
+            ["storage", "objects", "update", "gs://b/o", "--storage-class=NEARLINE"],
+            ["storage", "buckets", "create", "gs://b"],
+            ["storage", "hash", str(source)],
+        )
+        for args in cases:
+            with self.subTest(args=args):
+                self.calls.unlink(missing_ok=True)
+                self.stub_gcloud_crashing(times=1, crash=LOCK_TASK_ERROR, partial=False)
+                result = self.run_shim(args)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(self.call_count(), 1)
+                self.assertIn(LOCK_TASK_ERROR, result.stderr)
+                self.assertNotIn("gcloud shim:", result.stderr)
+
+    def test_storage_other_errors_run_once(self):
+        for crash in ("ERROR: (gcloud.storage.cp) database is locked", "WARNING: database is locked",
+                      "ERROR: database is locked: gs://b/o", "ERROR: gcloud crashed (OperationalError): disk I/O error"):
+            with self.subTest(crash=crash):
+                self.calls.unlink(missing_ok=True)
+                self.stub_gcloud_crashing(times=1, crash=crash, partial=False)
+                result = self.run_shim(["storage", "cp", "a", "gs://b/o"])
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(self.call_count(), 1)
+                self.assertIn(crash, result.stderr)
 
     def test_retry_is_bounded_and_the_last_crash_passes_through(self):
         self.stub_gcloud_crashing(times=100)
