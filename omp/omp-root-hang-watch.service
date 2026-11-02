@@ -1,0 +1,17 @@
+[Unit]
+Description=Tell the chief of staff once when the SPEEDCOACH root omp session hangs on a tool call
+Documentation=file:%h/.dotfiles/scripts/omp-root-hang-watch.md
+
+[Service]
+Type=oneshot
+# Below the lanes: the watch reads one file and answers on a 30-minute scale, so a run that
+# starts a minute late changes nothing.
+Nice=15
+IOSchedulingClass=idle
+# A quiet run took 5-14 s on sami-rocqperf at load ~400 on 2026-11-02, mostly python3 start-up;
+# an alert adds one `envoy send` (60 s cap in the script). A run that cannot finish is killed.
+TimeoutStartSec=120
+# `envoy` is a bash script that needs the same tools a shell gives it.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=MISE_DATA_DIR=%h/.mise
+ExecStart=%h/.dotfiles/scripts/omp-root-hang-watch

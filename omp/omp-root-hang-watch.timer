@@ -1,0 +1,11 @@
+[Unit]
+Description=Check every 5 min that the SPEEDCOACH root omp session is not hung on a tool call
+
+[Timer]
+OnActiveSec=1min
+# The stall threshold is 30 min, so a 5-minute period alerts 30-35 min after the last line.
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

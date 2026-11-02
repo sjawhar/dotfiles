@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""omp-root-hang-watch: tell the chief of staff once when a root omp session hangs.
+
+    omp-root-hang-watch [--session ID] [--to ID] [--stale-minutes N] [--sessions-root DIR]
+                        [--state FILE] [--dry-run]
+
+Every 5 minutes (the `omp-root-hang-watch` user timer), it reads one session's transcript,
+`~/.omp/agent/sessions/<dir>/<time>_<session>.jsonl`. It sends one Envoy message to the chief of
+staff when both are true:
+
+1. The transcript has had no new line for 30 minutes (its mtime).
+2. The session has a live child job: a tool call the session started that has no result.
+
+"Live child job", exactly: in the last 4 MiB of the transcript, a `tool_execution_start` entry
+written after the last assistant message, with no `toolResult` message for the same
+`toolCallId`. These are the calls of the batch the session is waiting on now. A start before
+the last assistant message is a call an earlier omp process left open before a restart, and
+it does not count.
+
+Why this signal and not the process tree or the subagent transcripts: on 2026-11-02 the root's
+`bash` call started at 00:08:09.946Z never wrote a result, and the transcript wrote nothing
+more until 01:59:36Z, while two of the lane's pull requests waited for it. An open
+call in a still transcript is that incident, read from one file. The root omp's descendants
+cannot say it: it always has idle eval kernels and persistent shells, and its in-process
+subagents' tool calls are its children too. No subagent wrote a line during that window, so
+"subagent transcripts moved" would have stayed quiet through the whole incident.
+
+One exception. `wait` and `task` block on subagents and background jobs by design: in this
+session's history 62 calls took 20-39 minutes, `wait` up to its 30-minute cap and `task` up
+to 39 minutes. When every open call is one of those two, the watch alerts only when nothing
+under the session's directory (subagent transcripts, job logs) changed in the window either:
+then the jobs it waits on are not moving and nothing will wake it.
+
+It sends at most one message per stall: the state file records the transcript's size and
+mtime at the alert, and the next alert needs a transcript that moved and then stalled again.
+A failed send records nothing, so the next run tries again.
+
+It never signals, stops or restarts any process. A person or the chief of staff decides what
+to do with the session.
+
+Exit status: 0 for a quiet run or a sent alert, 1 when the transcript is missing or the send
+failed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+DEFAULT_SESSION = "01a16a9e-a9b0-761c-97bf-28d7cf2eaac2"  # SPEEDCOACH, lead of the Rocq speed stream
+CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+SESSIONS_ROOT = Path.home() / ".omp" / "agent" / "sessions"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "omp-root-hang-watch"
+ENVOY = Path(__file__).resolve().parent / "envoy"
+TAIL_BYTES = 4 << 20
+BLOCKING_TOOLS = frozenset({"wait", "task"})
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def find_transcript(root: Path, session: str) -> Path | None:
+    """The session's own transcript: `<root>/<cwd dir>/<time>_<session>.jsonl`, newest first."""
+    found = sorted(root.glob(f"*/*_{session}.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return found[0] if found else None
+
+
+def open_calls(transcript: Path) -> list[dict]:
+    """Tool calls of the current batch that have no result yet."""
+    size = transcript.stat().st_size
+    with transcript.open("rb") as handle:
+        handle.seek(max(0, size - TAIL_BYTES))
+        lines = handle.read().split(b"\n")
+    if size > TAIL_BYTES:
+        lines = lines[1:]  # the first line of the window is a partial line
+    starts: dict[str, dict] = {}
+    for raw in lines:
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if entry.get("type") == "custom" and entry.get("customType") == "tool_execution_start":
+            data = entry.get("data") or {}
+            call = data.get("toolCallId")
+            if call:
+                starts[call] = {
+                    "id": call,
+                    "tool": data.get("toolName", "?"),
+                    "started": data.get("startedAt") or entry.get("timestamp", "?"),
+                    "intent": data.get("intent") or "",
+                }
+        elif entry.get("type") == "message":
+            message = entry.get("message") or {}
+            if message.get("role") == "assistant":
+                starts.clear()
+            elif message.get("role") == "toolResult":
+                starts.pop(message.get("toolCallId"), None)
+    return list(starts.values())
+
+
+def newest_change(directory: Path, since: float) -> Path | None:
+    """The first file under `directory` changed after `since`, or None."""
+    for parent, _dirs, files in os.walk(directory):
+        for name in files:
+            path = Path(parent) / name
+            try:
+                if path.stat().st_mtime > since:
+                    return path
+            except OSError:
+                continue
+    return None
+
+
+def root_pids(session: str) -> list[int]:
+    """Live omp processes whose command line names the session (`omp --resume <id>`)."""
+    pids = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if argv and Path(argv[0].decode(errors="replace")).name == "omp" and any(
+            session.encode() in arg for arg in argv[1:]
+        ):
+            pids.append(int(entry.name))
+    return sorted(pids)
+
+
+def send(target: str, text: str) -> bool:
+    try:
+        done = subprocess.run(
+            [str(ENVOY), "send", "--source", "envoy", target, text],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        log(f"send to {target} failed: {error}")
+        return False
+    if done.returncode != 0:
+        log(f"send to {target} failed: exit {done.returncode}: {(done.stderr or done.stdout).strip()}")
+    return done.returncode == 0
+
+
+def utc(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def alert_text(session: str, transcript: Path, mtime: float, now: float, calls: list[dict], pids: list[int]) -> str:
+    minutes = int((now - mtime) // 60)
+    listed = "; ".join(
+        f"{c['tool']} started {c['started']}" + (f" ({c['intent']})" if c["intent"] else "") for c in calls
+    )
+    process = (
+        f"omp process {', '.join(map(str, pids))} is alive" if pids
+        else "no omp process names this session on its command line"
+    )
+    return (
+        f"ROOT SESSION HANG: session {session} wrote no transcript line for {minutes} min "
+        f"(last line at {utc(mtime)}). It waits on a tool call with no result: {listed}. "
+        f"{process}. Transcript: {transcript}. "
+        "This watch did not stop or restart anything. Look at the session's pane, or send it "
+        "an Envoy message, and decide. "
+        f"(omp-root-hang-watch on {socket.gethostname()}; one message per stall.)"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--session", default=DEFAULT_SESSION, help="root session id to watch")
+    parser.add_argument("--to", default=CHIEF_OF_STAFF, help="Envoy session id that gets the alert")
+    parser.add_argument("--stale-minutes", type=float, default=30.0)
+    parser.add_argument("--sessions-root", type=Path, default=SESSIONS_ROOT)
+    parser.add_argument("--state", type=Path, default=None, help="default: $XDG_STATE_HOME/omp-root-hang-watch/<session>.json")
+    parser.add_argument("--dry-run", action="store_true", help="print the alert; send nothing, write no state")
+    options = parser.parse_args(argv)
+
+    state_path = options.state or STATE_DIR / f"{options.session}.json"
+    window = options.stale_minutes * 60
+    now = time.time()
+
+    transcript = find_transcript(options.sessions_root, options.session)
+    if transcript is None:
+        log(f"FAIL: no transcript *_{options.session}.jsonl under {options.sessions_root}/*/")
+        return 1
+    stat = transcript.stat()
+    age = now - stat.st_mtime
+    if age < window:
+        log(f"quiet: transcript moved {int(age)} s ago ({transcript.name})")
+        return 0
+
+    calls = open_calls(transcript)
+    if not calls:
+        log(f"quiet: transcript still for {int(age // 60)} min, but no tool call is open (session is idle)")
+        return 0
+    if all(c["tool"] in BLOCKING_TOOLS for c in calls):
+        moved = newest_change(transcript.with_suffix(""), now - window)
+        if moved is not None:
+            log(f"quiet: open {', '.join(c['tool'] for c in calls)} waits on jobs that still write ({moved})")
+            return 0
+
+    key = f"{stat.st_size}:{stat.st_mtime_ns}"
+    try:
+        sent_for = json.loads(state_path.read_text()).get("key")
+    except (OSError, ValueError):
+        sent_for = None
+    if sent_for == key:
+        log(f"quiet: already alerted for this stall (transcript still at {key})")
+        return 0
+
+    text = alert_text(options.session, transcript, stat.st_mtime, now, calls, root_pids(options.session))
+    if options.dry_run:
+        log(f"DRY RUN: would send to {options.to}: {text}")
+        return 0
+    if not send(options.to, text):
+        return 1
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"key": key, "sent_at": utc(now), "to": options.to}) + "\n")
+    tmp.replace(state_path)
+    log(f"ALERT sent to {options.to}: {text}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
