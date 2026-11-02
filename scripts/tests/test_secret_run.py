@@ -46,6 +46,8 @@ BROKER_URL = next(
     if line.startswith("AGENT_SECRETS_URL=")
 )
 STALE_URL = "https://stale.example"
+# The one stderr line a process with a client but no broker identity gets (secret-run's header).
+NO_IDENTITY_NOTICE = "secret-run: this process has no secrets-broker identity, so a key only the broker holds"
 CHOSEN_URL = "http://127.0.0.1:8443"
 LOCAL_URL = "https://local.example"
 # case -> (the caller's environment, env.local's URL or None, the URL and record the broker call
@@ -80,7 +82,8 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-# identity exits $STUB_IDENTITY (printing to both streams, as a client may); `machine login-status`
+# identity exits $STUB_IDENTITY (printing to both streams, as a client may, or with
+# $STUB_IDENTITY_SILENT nothing on stderr, as the real client with no identity); `machine login-status`
 # prints $STUB_LOGIN (default issued); `register [--wait N] --exec -- CMD` prints its argv and execs
 # CMD as a registered session, whose identity is then $STUB_REGISTERED_IDENTITY (default 0); every
 # other call prints its argv less `--reason R` and its URL, then either exits $STUB_BROKER_EXIT or
@@ -89,7 +92,7 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 AGENT_SECRETS_STUB = r"""
 if [[ "$1" == identity ]]; then
     echo "identity-stdout"
-    echo "identity: ${STUB_IDENTITY_MSG:-no broker identity}" >&2
+    [[ -n "${STUB_IDENTITY_SILENT:-}" ]] || echo "identity: ${STUB_IDENTITY_MSG:-no broker identity}" >&2
     exit "${STUB_IDENTITY:-1}"
 fi
 if [[ "$1 ${2:-}" == "machine login-status" ]]; then
@@ -214,6 +217,7 @@ class SecretRun(unittest.TestCase):
             ],
         )
         self.assertNotIn("identity-stdout", result.stdout)
+        self.assertNotIn(NO_IDENTITY_NOTICE, result.stderr)
         self.assertRegex(result.stderr, r"(?m)^REASON skill: smoke \| session: no omp session; pid \d+, cwd ")
 
     def test_equals_forms_and_a_duration_wait_reach_the_broker(self) -> None:
@@ -266,7 +270,24 @@ class SecretRun(unittest.TestCase):
         )
         self.assertNotIn("BROKER", result.stdout)
         self.assertIn("identity: no key dir", result.stderr)
+        self.assertEqual(result.stderr.count(NO_IDENTITY_NOTICE), 1, result.stderr)
         self.assertNotIn("cannot run", result.stderr)
+
+    def test_a_silent_no_identity_still_says_so_once(self) -> None:
+        """A detached tmux, 2026-11-02: identity exits 1 and prints nothing, so before the notice
+        the switch to secretsd was silent and broker-only keys were "not found" with no hint."""
+        self.with_client()
+        cases = {
+            "exec": (*self.EXEC_ARGS, *self.CMD),
+            "request": ("request", "AIRTABLE_TOKEN"),
+            "dry run": ("--dry-run", "AIRTABLE_TOKEN", *self.CMD),
+        }
+        for case, args in cases.items():
+            with self.subTest(case=case):
+                result = self.run_secret_run(*args, STUB_IDENTITY="1", STUB_IDENTITY_SILENT="1")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr.count(NO_IDENTITY_NOTICE), 1, result.stderr)
+                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
 
     def test_no_client_runs_secretsd(self) -> None:
         result = self.run_secret_run(*self.EXEC_ARGS, *self.CMD)
@@ -638,6 +659,7 @@ class SecretRun(unittest.TestCase):
             result.stdout.splitlines(),
             ["SECRETSD get DEEL_API_KEY", "SECRETSD get GH_PUBLIC_REPO_PAT"],
         )
+        self.assertEqual(result.stderr.count(NO_IDENTITY_NOTICE), 1, result.stderr)
 
     def test_request_on_secretsd_stops_at_the_first_failure(self) -> None:
         self.with_client()
@@ -801,12 +823,14 @@ class SecretRun(unittest.TestCase):
         )
         self.assertEqual(len(lines), 6, result.stdout)
         self.assertNotIn("REASON", result.stderr)
+        self.assertNotIn(NO_IDENTITY_NOTICE, result.stderr)
 
     def test_dry_run_on_secretsd_runs_nothing(self) -> None:
         self.with_client()
         result = self.run_secret_run("--dry-run", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("store: secretsd (no broker identity)", result.stdout)
+        self.assertEqual(result.stderr.count(NO_IDENTITY_NOTICE), 1, result.stderr)
         self.assertIn("session_id: none", result.stdout)
         for absent in ("BROKER", "SECRETSD", "via="):
             self.assertNotIn(absent, result.stdout)
@@ -816,6 +840,7 @@ class SecretRun(unittest.TestCase):
         result = self.run_secret_run("--dry-run", "--register", "AIRTABLE_TOKEN", *self.CMD, STUB_IDENTITY="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("store: the broker once --register enrolls this process, else secretsd", result.stdout)
+        self.assertNotIn(NO_IDENTITY_NOTICE, result.stderr)
         self.assertIn("session_id: none", result.stdout)
         for absent in ("REGISTER", "BROKER", "SECRETSD", "via="):
             self.assertNotIn(absent, result.stdout)
