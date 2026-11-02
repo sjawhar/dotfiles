@@ -16,7 +16,7 @@
 # It never removes a tagged image or a container. A tagged image can be an eval image that takes
 # hours to rebuild, so its owner decides when it goes.
 #
-# Why age, and not BuildKit's own --max-used-space cap, holds the cache down: BuildKit compares
+# Why age comes before BuildKit's own --max-used-space cap: without --all, BuildKit compares
 # that cap against the sum of the *private* bytes of its records only. A record whose layer
 # digest chain also exists in the image store is "shared" and counts zero
 # (moby/buildkit v0.26.2 cache/manager.go, prune(): the `if ui.Shared { continue }` in the
@@ -36,7 +36,7 @@
 #
 # DOCKER_CAP_BUILD_CACHE is read in Docker's own SI units, as `docker builder du` prints them:
 # 50GB is 50,000,000,000 bytes. Docker's --max-used-space flag reads the same string as binary
-# (50GB = 53.7e9), which is one more reason the cap is ours and not the flag's.
+# (50GB = 53.7e9), so the last pass gives BuildKit a slightly larger cap than the age passes use.
 #
 # DOCKER_CAP_HIGH_PCT, DOCKER_CAP_BUILD_CACHE and DOCKER_CAP_CACHE_AGES override the defaults.
 set -euo pipefail
@@ -101,7 +101,22 @@ for age in $cache_ages; do
     echo "build cache is $((cache / 1000000000)) GB, over $cache_cap: records unused for $age: $(docker builder prune --force --all --filter "until=$age" | tail -1)"
     cache="$(cache_bytes)"
 done
-echo "build cache is now $((cache / 1000000000)) GB, cap $cache_cap"
+# A record no build has used inside the shortest age still counts against the cap, and on a box
+# that builds all day most of the cache is that young: on 2026-11-02 at 13:03Z the four ages
+# together removed 0.3 GB of a 147 GB cache, and the cache had grown 66 GB in the hour. So when
+# the ages leave the cache over the cap, ask BuildKit for the cap itself. With --all that pass
+# does remove shared records: the same cache went 197.8 GB -> 136.8 GB (61.3 GB freed) at 13:52Z.
+# It stops at the records a running build holds, so the cache can stay above the cap; the line
+# below says how much of what is left could still go.
+if ((cache > cap_bytes)); then
+    echo "build cache is $((cache / 1000000000)) GB after the age passes: asking BuildKit for $cache_cap: $(docker builder prune --force --all --max-used-space "$cache_cap" | tail -1)"
+    cache="$(cache_bytes)"
+fi
+left=""
+if ((cache > cap_bytes)); then
+    left=", of which $(docker builder du 2> /dev/null | awk '/^Reclaimable:/{print $2}') could still go once its builds end"
+fi
+echo "build cache is now $((cache / 1000000000)) GB, cap $cache_cap$left"
 
 echo "untagged images older than 24 h: $(docker image prune --force --filter until=24h | tail -1)"
 echo "unused anonymous volumes: $(docker volume prune --force | tail -1)"
