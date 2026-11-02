@@ -107,6 +107,10 @@ EXTRA_INSTALLERS=(
     #   no GitHub credential and mints with a hawk login, a person's, that this machine never holds.
 )
 
+# The agent-azure user-assigned identity of theorem-labs/agent-infra#1146 (bootstrap output
+# agentAzureClientId). Not a secret: shims/az reads it from ~/.config/agent-azure/client-id.
+AGENT_AZURE_CLIENT_ID=6133297b-4afa-4f36-ab55-67413835961e
+
 STEPS=(vm host dotfiles secrets tools broker install image responder speed check)
 
 stamp() { date -u +%FT%TZ; }
@@ -183,6 +187,10 @@ step_secrets() {
                 "    authHeader: true" "    compat:" "      replayUnsignedThinking: false" >> "$f"
         fi
         grep -n -e "ossv-box/gateway-token" -e "^  anthropic:" "$f"'
+    remote "install -d -m 0755 ~/.config/agent-azure
+        printf '%s\n' $AGENT_AZURE_CLIENT_ID > ~/.config/agent-azure/client-id
+        chmod 0644 ~/.config/agent-azure/client-id
+        ls -l ~/.config/agent-azure/client-id"
 }
 
 step_tools() {
