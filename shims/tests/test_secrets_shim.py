@@ -205,7 +205,7 @@ class SecretsShim(unittest.TestCase):
         ).stderr.decode()
         self.assertIn("    omp --resume 01a1-from-file\n", stderr)
 
-    def test_admin_pat_names_both_and_maps_nothing(self) -> None:
+    def test_admin_pat_is_sent_to_the_broker_name(self) -> None:
         stderr = self.assert_refused(
             "GITHUB_ADMIN_PAT_THEOREM", "--", "gh", "api", "user"
         )
@@ -213,9 +213,10 @@ class SecretsShim(unittest.TestCase):
             'secret-run --reason "<what for>" GITHUB_ADMIN_PAT -- <command>', stderr
         )
         self.assertIn(
-            "Sami has not confirmed that GITHUB_ADMIN_PAT and GITHUB_ADMIN_PAT_THEOREM are the same token",
+            "The broker holds this same token under the name GITHUB_ADMIN_PAT",
             stderr,
         )
+        self.assertNotIn("not confirmed", stderr)
 
     def test_a_grant_another_session_holds_does_not_pass(self) -> None:
         # The real `get --no-request` reports "grant":true when ANY session holds the key.
