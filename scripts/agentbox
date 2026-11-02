@@ -2664,10 +2664,10 @@ move_to_index_transcripts() {
 move_transcript() {
     local pid="$1" sid="$2" fd link arg found=() dir
     [[ -n "$sid" ]] || return 1
-    for fd in "$PROC/$pid/fd"/*; do
-        link="$(readlink "$fd" 2>/dev/null)" || continue
-        if [[ "$link" == /*/sessions/*_"$sid".jsonl ]]; then printf '%s\n' "$link"; return 0; fi
-    done
+    # One `find` over the descriptors, not a `readlink` fork per descriptor: a lead's omp holds
+    # thousands, and at load 500 the forks made a group's plan run for half an hour (2026-11-02).
+    link="$(find "$PROC/$pid/fd" -maxdepth 1 -type l -lname "/*/sessions/*_${sid}.jsonl" -printf '%l\n' -quit 2>/dev/null || true)"
+    if [[ -n "$link" ]]; then printf '%s\n' "$link"; return 0; fi
     while IFS= read -r -d '' arg; do
         if [[ "$arg" == /*_"$sid".jsonl && -f "$arg" ]]; then printf '%s\n' "$arg"; return 0; fi
     done < <(cat "$PROC/$pid/cmdline" 2>/dev/null || true)
@@ -3269,7 +3269,13 @@ move_orphans() {
     while (( i < ${#queue[@]} )); do
         p="${queue[i]}"
         i=$((i + 1))
-        cmd="$(tr '\0' ' ' 2>/dev/null <"$PROC/$p/cmdline" || true)"
+        # Read by the shell itself, not a `tr` fork per process.
+        cmd=""
+        if [[ -r "$PROC/$p/cmdline" ]]; then
+            local parts=()
+            mapfile -d '' -t parts 2>/dev/null <"$PROC/$p/cmdline" || true
+            cmd="${parts[*]}"
+        fi
         [[ -n "$cmd" ]] || continue
         case "$cmd" in
             *__omp_worker*|*/omp-python-runner*/runner-*.py*) skip[$p]=helper ;;
@@ -3841,8 +3847,9 @@ move_to_transcript_paths() {
     local -A said=()
     own="$(readlink -f "${t%.jsonl}")"
     base="${own##*/}"
-    while IFS= read -r -d '' link; do
-        real="$(readlink -f "$link" 2>/dev/null)" || continue
+    # The link's own target, from the `find`; `readlink -f` (a fork) only for a relative one.
+    while IFS=$'\t' read -r -d '' link real; do
+        [[ "$real" == /* ]] || real="$(readlink -f "$link" 2>/dev/null)" || continue
         [[ -e "$real" ]] || continue
         move_within "$real" "$own" && continue
         d="$real"
@@ -3851,7 +3858,7 @@ move_to_transcript_paths() {
         [[ -z "${said[$real]:-}" ]] || continue
         said[$real]=1
         printf 'mirror\t%s\n' "$real"
-    done < <(find -H "${t%.jsonl}" -maxdepth 2 -type l -print0 2>/dev/null)
+    done < <(find -H "${t%.jsonl}" -maxdepth 2 -type l -printf '%p\t%l\0' 2>/dev/null)
     return 0
 }
 
