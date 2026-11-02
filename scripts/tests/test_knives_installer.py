@@ -10,8 +10,9 @@ installer's `knives ledger sweep` starts, the `knives` on its PATH takes the
 ledger lock itself and holds it a moment, as a running sweep does, so that sweep
 always finds the lock held (it happens on its own in about two installs of five).
 
-Runs against the knives in KNIVES_BIN, else the one on PATH, and is skipped when
-that knives has no `knives ledger` (any release before the shared ledger).
+Runs against the knives in KNIVES_BIN, else the pinned one mise resolves (never the
+shims/knives wrapper), and is skipped when that knives has no `knives ledger`. Two more
+tests pin the link to the registry's private part (repos.local.toml from the .secrets clone).
 """
 
 from __future__ import annotations
@@ -64,9 +65,24 @@ def write_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def real_knives() -> str:
+    """The knives binary itself, never a wrapper. On an agent session's PATH `knives` is
+    shims/knives, which finds its binary through PATH again; with the test's stub first on that
+    PATH the stub execs the shim, the shim finds the stub, and its loop guard refuses the run. So
+    resolve the pin the way the shim does, through mise, unless KNIVES_BIN names one."""
+    if os.environ.get("KNIVES_BIN"):
+        return os.environ["KNIVES_BIN"]
+    mise = shutil.which("mise") or str(DOTFILES / "bin" / "mise")
+    found = subprocess.run(
+        [mise, "which", "-C", "/", "knives", "--tool", "github:sjawhar/knives"],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+    )
+    return found.stdout.strip() if found.returncode == 0 else ""
+
+
 class KnivesInstallerMigratedPush(unittest.TestCase):
     def setUp(self) -> None:
-        knives = os.environ.get("KNIVES_BIN") or shutil.which("knives") or ""
+        knives = real_knives()
         has_ledger = bool(knives) and subprocess.run(
             [knives, "ledger", "--help"], capture_output=True, check=False
         ).returncode == 0
@@ -215,6 +231,41 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
             ["trajectory-labs-pbc--knives-ledger.git"],
             result.stdout + result.stderr,
         )
+
+    def private_registry(self) -> Path:
+        return self.dotfiles / ".secrets" / "dotfiles" / "knives" / "repos.local.toml"
+
+    def test_the_private_registry_is_linked_when_the_private_clone_holds_it(self) -> None:
+        # Given: a new machine whose private clone (.secrets) holds the registry's private part.
+        (self.config / "state.json").unlink()
+        self.private_registry().parent.mkdir(parents=True)
+        self.private_registry().write_text('[repos.smoke]\nforbidden = ["acme-corp"]\n', encoding="utf-8")
+
+        # When: the installer joins it.
+        result = self.install()
+
+        # Then: knives finds the private part beside repos.toml, and reads it.
+        link = self.config / "repos.local.toml"
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(link.is_symlink(), result.stdout + result.stderr)
+        self.assertEqual(link.resolve(), self.private_registry().resolve())
+        listed = subprocess.run(
+            [self.env["KNIVES_BIN"], "repos", "--json"], capture_output=True, text=True,
+            env=self.env, check=False,
+        )
+        self.assertNotIn("not a valid registry", listed.stderr)
+
+    def test_no_private_registry_is_linked_without_the_private_clone(self) -> None:
+        # Given: a new machine with no private clone.
+        (self.config / "state.json").unlink()
+
+        # When: the installer joins it.
+        result = self.install()
+
+        # Then: the install succeeds and leaves no private part beside repos.toml.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.config / "repos.local.toml").is_symlink())
+        self.assertFalse((self.config / "repos.local.toml").exists())
 
 
 if __name__ == "__main__":
