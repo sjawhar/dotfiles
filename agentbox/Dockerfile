@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg git git-lfs openssh-client sudo jq iproute2 \
         python3 python3-jwt python3-cryptography build-essential pkg-config libssl-dev \
-        tmux less procps xz-utils unzip zstd rsync file \
+        tmux less procps xz-utils unzip zstd rsync file acl \
         python3-pip python3-yaml python3-venv postgresql-client sqlite3 socat wget bc bsdextrautils \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
