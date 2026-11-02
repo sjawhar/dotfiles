@@ -228,6 +228,11 @@ class UserLogin(unittest.TestCase):
         self.assertIn("the user login `fake-user` from gh's hosts.yml and keyring is never used by an agent", err)
         self.assertIn("`gh pr comment 1178 -R o/r --body-file <file>`", err)
         self.assertIn("`VERDICT: APPROVE at <full 40-character head sha>`", err)
+        # agent-infra main needs an approving review, which a comment is not.
+        self.assertIn(
+            "`~/.dotfiles/scripts/post-review 1178 <full 40-character head sha> APPROVE <body-file> o/r`", err
+        )
+        self.assertIn("only when your session did not author the pull request", err)
 
     def test_an_api_review_refused_for_the_app_gets_the_same_route(self):
         argv = ["api", "-X", "POST", "repos/o/r/pulls/7/reviews", "-f", "event=REQUEST_CHANGES"]
@@ -236,6 +241,7 @@ class UserLogin(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("`gh pr comment 7 -R o/r --body-file <file>`", result.stderr)
         self.assertIn("`VERDICT: REQUEST_CHANGES at", result.stderr)
+        self.assertIn("post-review 7 <full 40-character head sha> REQUEST_CHANGES <body-file> o/r`", result.stderr)
 
     def test_an_unrouted_call_reaches_github_without_the_user_and_says_to_stop(self):
         result, sent = self.run_gh(REVIEW, self.shim_path, KNIVES_UNROUTED="1", **self.agent)

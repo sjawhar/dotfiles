@@ -214,6 +214,104 @@ class GhReadCacheTest(unittest.TestCase):
             self.run_cache(*args)
             self.assertEqual(len(self.calls()) - before, 2, args)
 
+    # -- a write clears what it makes stale --------------------------------
+
+    def read_twice_around(self, read, write, **after):
+        """Read, write, read again with a new answer behind the stub."""
+        first = self.run_cache(*read)
+        self.assertEqual(first.stdout, "BODY-1")
+        w = self.run_cache(*write)
+        self.assertEqual(w.returncode, 0, w.stderr)
+        return self.run_cache(*read, STUB_BODY="BODY-2", **after)
+
+    def test_a_write_clears_the_read_of_its_pull_request(self):
+        # 2026-11-02: three sessions read their old body back after a
+        # successful `gh pr edit` and edited again.
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        b = self.read_twice_around(read, ("pr", "edit", "5", "-R", "o/r", "--body", "NEW"))
+        self.assertEqual(b.stdout, "BODY-2")
+        self.assertEqual(len(self.calls()), 3, self.calls())
+
+    def test_a_write_to_another_pull_request_keeps_this_one(self):
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        b = self.read_twice_around(read, ("pr", "edit", "6", "-R", "o/r", "--body", "NEW"))
+        self.assertEqual(b.stdout, "BODY-1")
+        self.assertEqual(len(self.calls()), 2, self.calls())
+
+    def test_a_write_to_another_repository_keeps_this_one(self):
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        b = self.read_twice_around(read, ("pr", "edit", "5", "-R", "o/other", "--body", "NEW"))
+        self.assertEqual(b.stdout, "BODY-1")
+
+    def test_an_api_write_clears_the_same_pull_request(self):
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        write = ("api", "-X", "PATCH", "repos/o/r/pulls/5", "-f", "body=NEW")
+        self.assertEqual(self.read_twice_around(read, write).stdout, "BODY-2")
+
+    def test_a_url_write_clears_the_numbered_read(self):
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        write = ("pr", "comment", "https://github.com/O/r/pull/5", "--body", "hi")
+        self.assertEqual(self.read_twice_around(read, write).stdout, "BODY-2")
+
+    def test_a_pull_request_write_clears_repository_wide_reads(self):
+        read = ("pr", "list", "-R", "o/r", "--json", "title")
+        write = ("pr", "edit", "5", "-R", "o/r", "--title", "T")
+        self.assertEqual(self.read_twice_around(read, write).stdout, "BODY-2")
+
+    def test_a_repository_write_clears_every_read_of_the_repository(self):
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        write = ("api", "-X", "PATCH", "repos/o/r", "-f", "description=x")
+        self.assertEqual(self.read_twice_around(read, write).stdout, "BODY-2")
+
+    def test_a_write_with_no_number_clears_the_repository(self):
+        # `gh pr edit` with no number edits the current branch's pull
+        # request, which the cache cannot name; it clears the repository.
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        write = ("pr", "edit", "-R", "o/r", "--body", "NEW")
+        self.assertEqual(self.read_twice_around(read, write).stdout, "BODY-2")
+
+    def test_a_graphql_mutation_clears_everything(self):
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        write = ("api", "graphql", "-f", "query=mutation { x }")
+        self.assertEqual(self.read_twice_around(read, write).stdout, "BODY-2")
+
+    def test_a_failed_write_keeps_its_exit_code_and_still_clears(self):
+        # A write that fails can still have reached GitHub.
+        read = ("pr", "view", "5", "-R", "o/r", "--json", "body")
+        self.run_cache(*read)
+        w = self.run_cache("pr", "merge", "5", "-R", "o/r", STUB_FAIL=3)
+        self.assertEqual(w.returncode, 3)
+        self.assertIn("something went wrong", w.stderr)
+        self.assertEqual(self.run_cache(*read, STUB_BODY="BODY-2").stdout, "BODY-2")
+
+    def test_scope_of_never_reads_a_flag_value_as_the_number(self):
+        import importlib.machinery
+        import importlib.util
+
+        loader = importlib.machinery.SourceFileLoader("ghrc", str(CACHE))
+        spec = importlib.util.spec_from_loader("ghrc", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        ctx = "remote:git@github.com:O/R.git"
+        cases = {
+            "pr view 5 --json body": ("o/r", "5"),
+            "pr comment --body 7 5": ("o/r", "5"),
+            "issue close #9 --reason completed": ("o/r", "9"),
+            "pr view": ("o/r", None),
+            "pr view my-branch": ("o/r", None),
+            "pr comment 5 extra": ("o/r", None),
+            "api repos/{owner}/{repo}/issues/4/comments": ("o/r", "4"),
+            "api repos/o/r/issues/comments/123": ("o/r", None),
+            "api user": (None, None),
+            "search prs foo": (None, None),
+        }
+        for line, want in cases.items():
+            self.assertEqual(mod.scope_of(line.split(), ctx), want, line)
+        self.assertTrue(mod.is_write("pr edit 5 --body x".split()))
+        self.assertTrue(mod.is_write("api repos/o/r/pulls/5 -f body=x".split()))
+        self.assertFalse(mod.is_write("api -X GET repos/o/r/pulls -f per_page=5".split()))
+        self.assertFalse(mod.is_write("pr checkout 5".split()))
+
     # -- conditional requests ----------------------------------------------
 
     def test_etag_revalidation_serves_the_stored_body(self):

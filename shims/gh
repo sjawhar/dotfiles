@@ -142,13 +142,13 @@ gh_shim_refused_for_app() {
         done
     fi
     if [[ -n "$pr" ]]; then
-        instead="post the verdict as a pull-request comment from the App: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765)."
+        instead="if the repository needs an approving review to merge (a comment does not count there), post the review as the legion-reviewer App: \`~/.dotfiles/scripts/post-review $pr <full 40-character head sha> $verdict <body-file> ${repo:-<owner/repo>}\`. Use that route only when your session did not author the pull request. Where a comment is enough, post the verdict as a pull-request comment from the App: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765)."
     else
         instead="stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
     fi
     {
         echo "gh shim: REFUSED by GitHub: \`$(gh_shim_quote "$@")\` (exit $rc; GitHub's error is above)."
-        echo "  Identity: it ran as the GitHub App this repository's owner routes agent calls to. An agent has no other GitHub identity: $(gh_shim_user_login) is never used by an agent process, so retrying with another credential is not a route."
+        echo "  Identity: it ran as the GitHub App this repository's owner routes agent calls to. Do not retry with another credential, token or gh binary: $(gh_shim_user_login) is never used by an agent process. The one other identity an agent has is the legion-reviewer App, for a review verdict only, through scripts/post-review (below)."
         echo "  Why: GitHub does not let that App make this call (it cannot approve or request changes on a pull request it opened, and it cannot use a permission its installation lacks)."
         echo "  Instead: $instead"
     } >&2
@@ -331,14 +331,17 @@ if agent_context; then
     fi
     # Public repository text: refuse an internal reference before gh posts it.
     "$_dotfiles/scripts/public-text-gate" "$@" || exit 1
-    # A READ goes through the host-wide read cache (dispatch://BET-303):
-    # an identical read from any session inside 60 s is answered without a
+    # A call goes through the host-wide read cache (dispatch://BET-303):
+    # an identical read from any session inside 60 s (120 s for
+    # `gh pr view/checks/list --json`) is answered without a
     # request at all, and a plain `gh api` GET revalidates its stored ETag
     # with a conditional request, which GitHub does not count against the
     # primary rate limit when it answers 304. The cache re-enters this shim
     # for the call it does make, marked, so routing, the gates above and
-    # knives all run on it unchanged. Anything that is not a read, and any
-    # failure of that layer, continues below as before.
+    # knives all run on it unchanged. A write runs as written, and when it
+    # ends the cache stops serving every read of that pull request or issue
+    # and every repository-wide read of its repository. Anything else, and
+    # any failure of that layer, continues below as before.
     if [[ -z "${GH_READ_CACHE_BYPASS:-}" && "${GH_READ_CACHE:-}" != 0 && -x "$_dotfiles/scripts/gh-read-cache" ]]; then
         _self="$(readlink -f "$0" 2> /dev/null || true)"
         [[ -n "$_self" ]] || _self="$0"

@@ -18,8 +18,12 @@ before handing the call to the real one.
   gh ahead of it in omp's Python eval kernel, which approved a pull request as the user on
   2026-11-02. `gh auth` verbs other than `status` are refused, and a call GitHub refuses for
   the App (a review of the App's own pull request, a permission its installation lacks) ends
-  with a `gh shim: REFUSED` block naming the call, the identity, why, and the route: a
-  verdict goes out as an App comment beginning `VERDICT: <verdict> at <head sha>`; anything
+  with a `gh shim: REFUSED` block naming the call, the identity, why, and the route: where
+  the repository needs an approving review (agent-infra's main does), a session that did not
+  author the pull request posts the review as the legion-reviewer App with
+  `scripts/post-review <pr> <head sha> APPROVE|REQUEST_CHANGES <body-file> <owner/repo>`,
+  since a comment does not count as an approval; elsewhere a verdict goes out as an App
+  comment beginning `VERDICT: <verdict> at <head sha>`; anything
   else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). `gh pr create` for an
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
@@ -35,8 +39,15 @@ before handing the call to the real one.
   inside 60 s with no request at all, and revalidates a plain `gh api` GET with its stored
   ETag — a 304 does not count against the primary limit. Writes are never cached: the
   classifier is an allow-list of read verbs and a GET-only rule for `gh api`, and anything
-  else, any failure and any unexpected output shape runs the command as written. A body
-  saying GitHub has not computed mergeability yet (`"mergeStateStatus":"UNKNOWN"`,
+  else, any failure and any unexpected output shape runs the command as written. A write
+  that goes through (a `gh pr`/`gh issue` verb that is not a read, `gh run rerun`, a `gh api`
+  call with a method other than GET or with fields, a GraphQL mutation) also stops the cache
+  serving, from the moment it ends, every read of the same pull request or issue, every
+  repository-wide read of its repository and every cross-repository read (`search`,
+  GraphQL); a write it cannot place in one number clears the repository, and one it cannot
+  place in a repository clears everything. Without that, a session read its old pull-request
+  body back for up to 120 s after a successful `gh pr edit` (three sessions on 2026-11-02).
+  A body saying GitHub has not computed mergeability yet (`"mergeStateStatus":"UNKNOWN"`,
   `"mergeable":null`) is never stored, since the answer to it is to read again. Only one
   process asks GitHub a given question at a time: the second of two overlapping identical
   reads waits up to 30 s for the first one's answer and then makes its own, so it can
@@ -44,7 +55,8 @@ before handing the call to the real one.
   120 s rather than 60 s, since the gate loops on this host poll every 30 s and every
   120 s and a 60 s window misses the slower one by construction (measured 2026-11-01: an
   identical read inside 60 s was 11.7% of calls, inside 120 s 19.9%).
-  `GH_READ_CACHE=0` turns the cache off, `GH_READ_CACHE_LOG=0` the log,
+  `GH_READ_CACHE=0` turns the cache off (a write from such a session then clears nothing),
+  `GH_READ_CACHE_LOG=0` the log,
   `GH_READ_CACHE_DEBUG=1` prints one stderr line per hit, and
   `scripts/tests/test_gh_read_cache.py` is the contract.
 - **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and in a
