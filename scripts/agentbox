@@ -182,6 +182,22 @@ SECRETSD_SOCK="/run/user/$UID_/secretsd.sock"
 LAUNCHER_DIR="$HOME/.config/agent-secrets"
 # Why broker_ready last said no, with the command that fixes it.
 BROKER_UNREADY=""
+# The user's directory on the durable disk (/mnt/durable/<user>, a network disk with about 2 TB
+# free, against /mnt/nvme's 160 GB on 2026-11-02), where lanes put new staging and caches. Every
+# box binds it whole, read-write, at its own path (mount_args), so a box that writes there writes
+# to the durable disk. A box that bound only three subdirectories of it had, at the directory
+# itself, a root-owned 0755 stub docker made on the box's own disk: a write there was refused,
+# and `df` there answered /mnt/nvme's free space (KNOTCURVE, 2026-11-02 16:00Z). The launcher
+# passes the path into the box as AGENTBOX_DURABLE (session_env), since the box's user is not
+# the host's; "none" there means the host has no such directory. AGENTBOX_DURABLE replaces the
+# path for the tests too. Empty when there is nothing to bind.
+DURABLE_DIR="${AGENTBOX_DURABLE:-/mnt/durable/$(id -un)}"
+[[ "$DURABLE_DIR" == /* && -d "$DURABLE_DIR" ]] || DURABLE_DIR=""
+# The durable filesystem as `agentbox doctor` compares it: device number, total blocks, block
+# size, available blocks. The device and not statfs's filesystem id: two stat builds on this host
+# print the id's two words in opposite orders (`stat -f -c %i`, 2026-11-02), while a bind keeps
+# st_dev, and a box answers 66305 for /mnt/durable/sami as the host does.
+durable_fs() { echo "$(stat -c %d "$DURABLE_DIR") $(stat -f -c '%b %S %a' "$DURABLE_DIR")"; }
 
 # What a session relies on, and nothing more: agentbox/mounts, one "<rw|ro>
 # <path>" per line. Read here (host) and by doctor (box); both see the file
@@ -325,6 +341,9 @@ box_dir_bound_why() {
     local path="$1" p
     [[ "$path" == "$SRC" ]] && { echo "every box has $SRC"; return 0; }
     [[ "$path" == "$HOME/.dotfiles" || "$path" == "$DOTFILES_DIR" ]] && { echo "every box has the dotfiles"; return 0; }
+    if [[ -n "$DURABLE_DIR" ]] && move_within "$path" "$DURABLE_DIR"; then
+        echo "every box has the durable disk $DURABLE_DIR"; return 0
+    fi
     for p in "$SRC"/*; do
         [[ -L "$p" ]] || continue
         [[ "$(readlink -f "$p")" == "$path" ]] && { echo "every box has it already: $p links to it and $SRC is mounted"; return 0; }
@@ -832,10 +851,13 @@ mount_args() {
     local box="$1" a=() p src
     a+=(-v "$SRC:$SRC")
     # $SRC may hold symlinks to checkouts elsewhere (~/src/dotfiles → ~/.dotfiles);
-    # each target is mounted at its own path so the link resolves inside.
+    # each target is mounted at its own path so the link resolves inside. A target on the durable
+    # disk (a tree moved to src-cold) is in the box through that disk's bind below, and binding it
+    # again stacked 71 more mounts on top of it (2026-11-02).
     for p in "$SRC"/*; do
         [[ -L "$p" ]] || continue
         src="$(readlink -f "$p")"
+        [[ -n "$DURABLE_DIR" ]] && move_within "$src" "$DURABLE_DIR" && continue
         a+=(-v "$src:$src")
     done
     # What the --dir flags come to (BOX_MOUNTS, add_box_dir): each named directory the box does
@@ -847,6 +869,13 @@ mount_args() {
     for p in ${BOX_MOUNTS[@]+"${BOX_MOUNTS[@]}"}; do
         a+=(-v "$p:$p")
     done
+    # The durable disk, whole (DURABLE_DIR). It holds what every box needs from it besides a
+    # lane's staging and caches: the transcripts archived to omp-sessions-moved, behind symlinks
+    # under ~/.omp/agent/sessions (without them a resumed omp exits `Session "<id>" not found`,
+    # 2026-11-01, lane box h-dgn-t1), and the cold trees in nvme-cold and src-cold, behind
+    # symlinks at their old paths (2026-11-02). A --dir or an object store under it is not in
+    # BOX_MOUNTS (box_dir_bound_why, box_dir_have), so nothing here binds it twice.
+    [[ -z "$DURABLE_DIR" ]] || a+=(-v "$DURABLE_DIR:$DURABLE_DIR")
     a+=(-v "$BOXES/$box:$BOXES/$box")
     # $HOME and /tmp inside the box's own directory, so the box's disk limit covers the two
     # places a session writes without being told where. Without them both land in the
@@ -995,6 +1024,13 @@ session_env() {
     e+=(-e "AGENTBOX_FORWARD_CHANNELS=$(IFS=,; echo "${relays[*]}")")
     e+=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=include.path -e "GIT_CONFIG_VALUE_0=$DOTFILES_DIR/gh-app-routes.gitconfig")
     e+=(-e "AGENTBOX_BOX=$box" -e AGENTBOX_USER=ubuntu)
+    # The durable disk and the host's figures for it, which `agentbox doctor --here` compares
+    # with its own (DURABLE_CHECK); "none" on a host that has no durable directory.
+    if [[ -n "$DURABLE_DIR" ]]; then
+        e+=(-e "AGENTBOX_DURABLE=$DURABLE_DIR" -e "AGENTBOX_DURABLE_FS=$(durable_fs)")
+    else
+        e+=(-e AGENTBOX_DURABLE=none)
+    fi
     # The box's disk limit, so a session and `agentbox doctor --here` can name the ceiling their
     # ENOSPC came from; 0 for a box started with --disk 0, which has no filesystem of its own.
     e+=(-e "AGENTBOX_DISK=$(if (( BOX_DISK_BYTES )); then size_text "$BOX_DISK_BYTES"; else echo 0; fi)")
@@ -1296,25 +1332,6 @@ cmd_new() {
         mkdir -p "$gate_state"
         box_dir_have "$gate_state" || box_add_mount "$gate_state"
     fi
-    # Transcripts archived to /mnt/durable stay behind symlinks under ~/.omp/agent/sessions, which
-    # every box has; without the target the symlink dangles in the box and a resumed omp exits
-    # `Session "<id>" not found` (2026-11-01, lane box h-dgn-t1, three times). Bound read-write:
-    # omp appends to its transcript through the symlink.
-    local moved_sessions
-    moved_sessions="/mnt/durable/$(id -un)/omp-sessions-moved"
-    if [[ -d "$moved_sessions" ]] && ! box_dir_have "$moved_sessions"; then
-        box_add_mount "$moved_sessions"
-    fi
-    # Cold trees moved off /mnt/nvme and ~/src to /mnt/durable stay behind symlinks at their old
-    # paths, which a box has through ~/src or a --dir; without the target the symlink dangles in
-    # the box, and the tree looks gone rather than slow (2026-11-02, the second cold moves).
-    # Bound read-write: a lane that comes back to a moved tree writes into it as before.
-    local cold_root
-    for cold_root in "/mnt/durable/$(id -un)/nvme-cold" "/mnt/durable/$(id -un)/src-cold"; do
-        if [[ -d "$cold_root" ]] && ! box_dir_have "$cold_root"; then
-            box_add_mount "$cold_root"
-        fi
-    done
     set_resource_args "$mem_from" "$cpu_from"
     set_disk_bytes "$disk_from"
     [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} + ${#BOX_DIRS[@]} )) \
@@ -1715,6 +1732,7 @@ move_in_box_paths() {
         MOVE_IN_BOX+=("$(readlink -f "$p")")
     done
     while read -r p; do [[ -n "$p" ]] && MOVE_IN_BOX+=("$HOME/$p"); done < <(mounts_of rw; mounts_of ro)
+    [[ -z "$DURABLE_DIR" ]] || MOVE_IN_BOX+=("$DURABLE_DIR")
 }
 
 move_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
@@ -2017,8 +2035,7 @@ move_session_roots() {
         return 0
     fi
     SESSION_ROOTS=("$HOME/.omp/agent/sessions")
-    local moved="/mnt/durable/$(id -un)/omp-sessions-moved"
-    [[ -d "$moved" ]] && SESSION_ROOTS+=("$moved")
+    [[ -n "$DURABLE_DIR" && -d "$DURABLE_DIR/omp-sessions-moved" ]] && SESSION_ROOTS+=("$DURABLE_DIR/omp-sessions-moved")
     return 0
 }
 
@@ -3372,6 +3389,41 @@ probe_run() {
 }
 '
 
+# The box side of the durable-disk check: /mnt/durable/<user> in the box (AGENTBOX_DURABLE) must
+# be the host's filesystem, which the launcher measured (AGENTBOX_DURABLE_FS, durable_fs): the
+# same device and size, and about the same free space. A box that had only a stub there
+# answered `df` with its own disk's figures and refused writes (2026-11-02), and nothing said so.
+# `agentbox doctor` passes the host's figures of the moment; `doctor --here` has those of the
+# box's launch, so free space is compared to within 2% of the disk's size. The single quotes are
+# the point: everything expands where it runs.
+# shellcheck disable=SC2016
+DURABLE_CHECK='
+check_durable() {
+    d="${AGENTBOX_DURABLE:-}"
+    case "$d" in
+        "") fail "durable disk: this box predates the durable-disk bind (no AGENTBOX_DURABLE), so /mnt/durable/<user> here is not the durable disk; relaunch it at a safe point with: agentbox move --self"; return 0;;
+        none) echo "note box: no durable disk (the host has no /mnt/durable/<user>)"; return 0;;
+    esac
+    gib() { awk -v b="$1" "BEGIN { printf \"%.0f\", b / 1073741824 }"; }
+    read -r hdev hblocks hbsize havail <<<"${AGENTBOX_DURABLE_FS:-}"
+    if [ -z "${havail:-}" ]; then fail "durable disk $d: the launcher passed no host figures (AGENTBOX_DURABLE_FS) to compare with"; return 0; fi
+    if ! bdev="$(stat -c %d "$d" 2>/dev/null)" || ! b="$(stat -f -c "%b %S %a" "$d" 2>/dev/null)"; then fail "durable disk $d is not in this box; relaunch it with: agentbox move --self"; return 0; fi
+    read -r bblocks bbsize bavail <<<"$b"
+    hfree=$((havail * hbsize)); bfree=$((bavail * bbsize)); size=$((hblocks * hbsize))
+    delta=$((bfree - hfree)); [ "$delta" -lt 0 ] && delta=$((-delta))
+    figures="$(gib "$bfree") GiB free of $(gib $((bblocks * bbsize))) here, $(gib "$hfree") of $(gib "$size") on the host"
+    if [ "$bdev" != "$hdev" ] || [ "$bblocks" != "$hblocks" ]; then
+        fail "durable disk $d is not the host'"'"'s filesystem ($figures): a write there fills this box'"'"'s own disk; relaunch it with: agentbox move --self"
+    elif [ "$delta" -gt $((size / 50)) ]; then
+        fail "durable disk $d: free space differs from the host'"'"'s by more than 2% ($figures)"
+    elif ! { touch "$d/.doctor.$$" 2>/dev/null && rm -f "$d/.doctor.$$"; }; then
+        fail "durable disk $d is the host'"'"'s filesystem but $(id -un) cannot write it (owner $(stat -c %U "$d"), mode $(stat -c %a "$d"))"
+    else
+        ok "durable disk $d is the host'"'"'s filesystem, writable ($figures)"
+    fi
+}
+'
+
 # A probe's name for a person, and the command that shows the same answer on the host.
 probe_label() {
     case "$1" in
@@ -3450,6 +3502,7 @@ else
         fail "disk limit $AGENTBOX_DISK: workspace, HOME and /tmp are not one filesystem of this box ($(df -h --output=target . "$HOME" /tmp / | tail -4 | tr "\n" " "))"
     fi
 fi
+check_durable
 if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git clone of its own"; else fail "cwd is not a git clone of its own (cwd-dependent: run doctor from your checkout, not /tmp)"; fi
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
 # `gh auth status` is answered by shims/gh, which reports the App routing instead of a user
@@ -3640,7 +3693,10 @@ cmd_doctor() {
             if broker_ready; then
                 enroll_box "$box" "" || fail "host: enroll $box: $(cat "$(box_keydir "$box")/enrollment.error" 2>/dev/null)"
             fi
-            box_out="$(docker exec --user ubuntu -w "$ws" "$box" bash -c "$PROBE_FUNCS$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+            # The host's durable figures of this moment, not of the launch above.
+            local durable_env=()
+            [[ -z "$DURABLE_DIR" ]] || durable_env=(-e "AGENTBOX_DURABLE_FS=$(durable_fs)")
+            box_out="$(docker exec --user ubuntu -w "$ws" ${durable_env[@]+"${durable_env[@]}"} "$box" bash -c "$PROBE_FUNCS$DURABLE_CHECK$DOCTOR_BOX_SCRIPT" 2>&1)" || true
         else
             fail "host: doctor box did not reach sleep-running state"
         fi
@@ -3668,7 +3724,7 @@ cmd_doctor() {
 cmd_doctor_here() {
     [[ -n "${AGENTBOX_BOX:-}" ]] || die "doctor --here runs INSIDE a box; on the host run 'agentbox doctor'"
     local out fails name line
-    out="$(bash -c "$PROBE_FUNCS$DOCTOR_BOX_SCRIPT" 2>&1)" || true
+    out="$(bash -c "$PROBE_FUNCS$DURABLE_CHECK$DOCTOR_BOX_SCRIPT" 2>&1)" || true
     grep -vE '^@' <<<"$out"
     # Inside a box there is no host answer to compare with, so a credential the machine itself
     # may not hold is reported and never counted: `agentbox doctor` on the host is what tells a

@@ -85,6 +85,8 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_MOVE_ROOTS": ":".join(
                 str(self.home / p) for p in ("Code", "Code/personal", ".worktrees", "tmp")
             ),
+            # The durable disk every box binds whole, pinned to the fixture for the same reason.
+            "AGENTBOX_DURABLE": str(self.root / "durable"),
             "STUB_PGREP": str(self.root / "STUB_PGREP"),
             "STUB_TMUX": str(self.root / "STUB_TMUX"),
             "STUB_DOCKER": str(self.root / "STUB_DOCKER"),
@@ -307,6 +309,21 @@ class AgentboxMove(unittest.TestCase):
         self.make_proc(421, comm="git", ppid=420, cwd=inner, writes=(dotfiles / "notes",))
         result = self.run_bash(f'move_dirs_why "{lane}" 420')
         self.assertEqual(result.stdout.splitlines(), [f"{lane}\tits own working directory"])
+
+    def test_a_path_on_the_durable_disk_is_never_named(self) -> None:
+        """Every box binds /mnt/durable/<user> whole, so a cache or a cold tree under it is in
+        the box already, and naming it would bind it a second time."""
+        lane = self.home / "lane"
+        lane.mkdir()
+        cache = self.root / "durable" / "knotcurve-pivot-cache"
+        cache.mkdir(parents=True)
+        (cache / "pivot.bin").write_text("", encoding="utf-8")
+        cold = self.root / "durable" / "nvme-cold" / "old-lane"
+        cold.mkdir(parents=True)
+        self.make_proc(425, comm="omp", ppid=1, cwd=lane)
+        self.make_proc(426, comm="python3", ppid=425, cwd=cold, writes=(cache / "pivot.bin",))
+        result = self.run_bash(f'move_dirs_why "{lane}" 425')
+        self.assertEqual(result.stdout.splitlines(), [f"{lane}\tits own working directory"], result.stderr)
 
     def test_a_root_many_sessions_share_is_never_mounted_whole(self) -> None:
         """~/Code, ~/.worktrees and /mnt/<user>{,/tmp,/worktrees,/scratch} hold many sessions'

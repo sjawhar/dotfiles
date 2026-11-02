@@ -15,6 +15,7 @@ need a real host replaced by no-ops. The docker stub records `docker run`'s argu
 
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
 import tempfile
@@ -83,6 +84,10 @@ class AgentboxDirs(unittest.TestCase):
             # The limits are tested in scripts/tests/test_agentbox_limits.py; a box here needs no
             # filesystem of its own, which would want root.
             "AGENTBOX_DISK": "0",
+            # The user's directory on the durable disk, which every box binds whole when the
+            # host has it. Absent unless a test makes it, so no answer here depends on whether
+            # this host has /mnt/durable/<user>.
+            "AGENTBOX_DURABLE": str(self.root / "durable"),
         }
 
     def tearDown(self) -> None:
@@ -253,6 +258,97 @@ class AgentboxDirs(unittest.TestCase):
                 self.assertEqual(self.workdir_of(args), path)
                 self.assertIn("is not mounted again", result.stderr)
                 self.assertIn(naming, result.stderr)
+
+    def env_of(self, args: list[str]) -> dict[str, str]:
+        pairs = [value.split("=", 1) for flag, value in zip(args, args[1:]) if flag == "-e" and "=" in value]
+        return {name: value for name, value in pairs}
+
+    def test_every_box_binds_the_durable_disk_whole_at_its_own_path(self) -> None:
+        """Lanes put staging and caches on /mnt/durable/<user>, not /mnt/nvme. A box that bound
+        only three subdirectories of it had, at /mnt/durable/<user> itself, a root-owned 0755
+        directory docker made on the box's own disk: a write there was refused, and `df` showed
+        /mnt/nvme's free space (KNOTCURVE, 2026-11-02 16:00Z). So the whole directory is bound,
+        read-write, and the subdirectories it holds are not bound again."""
+        durable = self.root / "durable"
+        for sub in ("omp-sessions-moved", "nvme-cold", "src-cold"):
+            (durable / sub).mkdir(parents=True)
+        # A checkout moved cold stays behind a symlink in $SRC; its target is on the durable
+        # disk and must not be bound a second time on top of it.
+        (durable / "src-cold" / "old-tree").mkdir()
+        (self.src / "old-tree").symlink_to(durable / "src-cold" / "old-tree")
+        args = self.run_args_of("--dir", str(self.lane))
+        binds = self.binds_of(args)
+        self.assertIn(f"{durable}:{durable}", binds)
+        self.assertNotIn(f"{durable}:{durable}:ro", binds)
+        self.assertEqual([b for b in binds if b.startswith(f"{durable}/")], [], binds)
+        env = self.env_of(args)
+        self.assertEqual(env.get("AGENTBOX_DURABLE"), str(durable))
+        # The host's figures for the filesystem, which `agentbox doctor --here` compares with
+        # its own: device number, total blocks, block size, available blocks.
+        self.assertEqual(len(env.get("AGENTBOX_DURABLE_FS", "").split()), 4, env)
+
+    def test_a_directory_on_the_durable_disk_is_the_working_directory_and_not_bound_twice(self) -> None:
+        """docker refuses a second mount at one destination, and a --dir under the durable disk
+        is already in the box through it."""
+        durable = self.root / "durable"
+        cache = durable / "knotcurve-pivot-cache"
+        cache.mkdir(parents=True)
+        result = self.launch("--dir", str(cache))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        args = self.run_args.read_text(encoding="utf-8").splitlines()
+        binds = self.binds_of(args)
+        self.assertEqual([b for b in binds if b.split(":")[0].startswith(str(durable))], [f"{durable}:{durable}"], binds)
+        self.assertEqual(self.workdir_of(args), str(cache))
+        self.assertIn("is not mounted again", result.stderr)
+        self.assertIn("durable disk", result.stderr)
+
+    def test_a_host_with_no_durable_disk_binds_none_and_says_so(self) -> None:
+        args = self.run_args_of("--dir", str(self.lane))
+        self.assertEqual([b for b in self.binds_of(args) if "durable" in b], [])
+        self.assertEqual(self.env_of(args).get("AGENTBOX_DURABLE"), "none")
+
+    def check_durable(self, durable: Path | None, host_fs: str | None) -> subprocess.CompletedProcess[str]:
+        """The box side of the doctor check, run against a directory of this host. No
+        `durable` is a box whose launcher set no AGENTBOX_DURABLE at all."""
+        env = {k: v for k, v in self.env.items() if k != "AGENTBOX_DURABLE"}
+        if durable is not None:
+            env["AGENTBOX_DURABLE"] = str(durable)
+        if host_fs is not None:
+            env["AGENTBOX_DURABLE_FS"] = host_fs
+        script = (
+            f'source "{AGENTBOX}"\n'
+            'ok() { echo "ok   $*"; }; fail() { echo "FAIL $*"; }\n'
+            'eval "$DURABLE_CHECK"\ncheck_durable\n'
+        )
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, check=False, timeout=60)
+
+    def test_doctor_passes_a_durable_disk_that_is_the_host_filesystem(self) -> None:
+        durable = self.root / "durable"
+        durable.mkdir()
+        info, fs = os.stat(durable), os.statvfs(durable)
+        host = f"{info.st_dev} {fs.f_blocks} {fs.f_frsize} {fs.f_bavail}"
+        result = self.check_durable(durable, host)
+        self.assertRegex(result.stdout, r"(?m)^ok   durable disk .* is the host's filesystem", result.stdout + result.stderr)
+        self.assertNotIn("FAIL", result.stdout)
+
+    def test_doctor_fails_a_durable_disk_that_is_another_filesystem(self) -> None:
+        """The regression this check exists for: the path is a directory on the box's own disk,
+        so its device and size are not the host's."""
+        durable = self.root / "durable"
+        durable.mkdir()
+        result = self.check_durable(durable, "0 1064991722 4096 524288000")
+        self.assertIn("FAIL durable disk", result.stdout, result.stdout + result.stderr)
+        self.assertIn("not the host's filesystem", result.stdout)
+
+    def test_doctor_fails_a_box_that_predates_the_durable_disk(self) -> None:
+        result = self.check_durable(None, None)
+        self.assertIn("FAIL", result.stdout, result.stdout + result.stderr)
+        self.assertIn("agentbox move --self", result.stdout)
+
+    def test_doctor_notes_a_host_with_no_durable_disk(self) -> None:
+        result = self.check_durable(Path("none"), None)
+        self.assertNotIn("FAIL", result.stdout, result.stdout + result.stderr)
+        self.assertIn("no durable disk", result.stdout)
 
     def test_a_shared_working_directory_never_lends_its_session_id_to_a_box(self) -> None:
         """omp names a session directory after the cwd, so every session working in a host
