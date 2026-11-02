@@ -3,12 +3,12 @@ name: gpt-api
 description: |
   General-purpose subagent on OpenAI GPT-5.6 Terra billed to the OpenAI API. It spends
   per-token API money, as `astra-api` and `oracle` do, and as `astra` does once the Codex
-  window is spent; so it refuses to start while Sami's OpenAI API pause holds (`disabledProviders: [openai]`). Use only
-  when a non-Anthropic model is genuinely needed and `astra` (the same family on the Codex
-  subscription) is unavailable or unsuitable; say why in the brief. When the pause is lifted
-  it degrades to GPT-6.1 Terra, then GPT-6.1 Sol, then the Codex subscription, and never to
-  Anthropic. Full tool
-  access; finishes the task it is handed and reports with evidence.
+  window is spent. Sami's OpenAI API pause is a default, not a block: other roles and agents
+  default to Claude, and this agent, named on the API, runs. Use only when a non-Anthropic
+  model is genuinely needed and `astra` (the same family on the Codex subscription) is
+  unavailable or unsuitable; say why in the brief. It degrades to GPT-6.1 Terra, then
+  GPT-6.1 Sol, then the Codex subscription, and never to Anthropic. Full tool access;
+  finishes the task it is handed and reports with evidence.
 model:
   - "openai/gpt-5.6-terra:xhigh"
 color: yellow

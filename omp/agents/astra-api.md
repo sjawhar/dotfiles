@@ -2,10 +2,10 @@
 name: astra-api
 description: |
   OpenAI GPT-6 Astra billed to the OpenAI API: the `astra` agent for when the Codex
-  subscription's usage window is exhausted. Spends per-token API money, so it refuses to
-  start while Sami's OpenAI API pause holds (`disabledProviders: [openai]`); when the pause
-  is lifted it degrades to GPT-6.1 Sol, then GPT-6 Sol, then the Codex subscription, and
-  never to Anthropic: a refusal means no non-Anthropic model was reachable.
+  subscription's usage window is exhausted. Spends per-token API money. Sami's OpenAI API
+  pause is a default, not a block: other roles and agents default to Claude, and this agent,
+  named on the API, runs. It degrades to GPT-6.1 Sol, then GPT-6 Sol, then the Codex
+  subscription, and never to Anthropic: a refusal means no non-Anthropic model was reachable.
   Full tool access; finishes the task it is handed and reports with evidence.
 model:
   - "openai/gpt-6-astra:xhigh"
