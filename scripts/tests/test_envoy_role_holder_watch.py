@@ -38,6 +38,9 @@ class PaneAlertTest(unittest.TestCase):
         )
 
         self.assertIn("Automatic restart: NOT RUN", text)
+        # Sami, 2026-10-28 18:15Z (INFRA-691): no durable pause marker; a person looks at the pane.
+        self.assertIn("look at the pane and decide", text)
+        self.assertNotIn("persist", text)
 
 
 class DirectoryInventoryTest(unittest.TestCase):
@@ -101,6 +104,47 @@ class DirectoryInventoryTest(unittest.TestCase):
         self.assertIn("Last session: NOT RESOLVED", text)
         self.assertIn("holds 1 transcript:", text)
         self.assertIn("live in pid 4242", text)
+
+
+class BoxLauncherTest(unittest.TestCase):
+    """An `agentbox move` respawns a pane into `agentbox new … -- omp --resume <id>`; until the
+    box's omp starts (15 min at load 410 on 2026-11-02) only its launchers name the session."""
+
+    SID = "01a170d9-5e66-7491-b0d2-fa6a2e55c14e"
+
+    def test_the_launchers_of_a_box_name_its_session(self) -> None:
+        for argv in (
+            ["bash", "/home/u/.dotfiles/scripts/agentbox", "new", "--dir", "/home/u/src/x", "--",
+             "omp", "--resume", self.SID],
+            ["/home/u/.mise/installs/bun/1.4.4/bin/bun", "/home/u/.dotfiles/scripts/agentbox-run.ts",
+             "omp", "--resume", self.SID],
+            ["/sbin/docker-init", "--", "/usr/local/bin/entrypoint.sh", "bun",
+             "/home/u/.dotfiles/scripts/agentbox-run.ts", "omp", "--resume", self.SID, "."],
+        ):
+            self.assertEqual(WATCH.box_launcher_session(argv), (self.SID, None), argv)
+
+    def test_a_shell_that_only_carries_the_command_as_text_is_not_a_launcher(self) -> None:
+        """The pane's `bash -i -c '…'` outlives a box whose omp failed: it must not hide it."""
+        for argv in (
+            ["bash", "-i", "-c", f"( setsid agentbox move --wake {self.SID} ); agentbox new -- omp --resume {self.SID}"],
+            ["bash", "/home/u/.dotfiles/scripts/agentbox", "move", "--wake", self.SID],
+            ["bash", "/home/u/.dotfiles/scripts/agentbox", "new", "--", "omp"],
+            ["bash", "-i"],
+        ):
+            self.assertEqual(WATCH.box_launcher_session(argv), (None, None), argv)
+
+    def test_the_process_row_says_a_box_is_starting_it(self) -> None:
+        WATCH._BOX_LAUNCHERS[4242] = f"bash agentbox new -- omp --resume {self.SID}"
+        self.addCleanup(WATCH._BOX_LAUNCHERS.clear)
+
+        class Registry:
+            def registry(self, session_id):
+                return 404, {}
+
+        evidence = WATCH.holder_evidence(Registry(), self.SID, {self.SID: 4242}, {}, 120.0, 0.0)
+
+        self.assertTrue(evidence["alive"])
+        self.assertIn("an agent box is starting or running this session", evidence["found"])
 
 
 if __name__ == "__main__":

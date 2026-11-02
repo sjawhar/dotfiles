@@ -8,12 +8,15 @@ Type=oneshot
 # competes with the proof lanes it watches is worse than one that answers a second later.
 Nice=15
 IOSchedulingClass=idle
-# A run that cannot finish is killed, so runs can never pile up on the 30 s period. Measured at
-# this Nice and IO class, 23 roles and 56 panes: 2.6-3.6 s with every holder seen, and 12 s with
-# every holder unseen -- one walk of the ~34k transcripts under ~/.omp/agent/sessions (1.2 s),
-# one /v1/sessions read, the pane check, and for each unseen holder a header pass and a scan of
-# every process's descriptors. 25 s leaves room for that worst case at twice this box's load.
-TimeoutStartSec=25
+# A run that cannot finish is killed. Runs cannot pile up whatever this is: a oneshot that is
+# still starting absorbs the next timer tick. Every slow step of a run is bounded -- the walk of
+# ~/.omp/agent/sessions shares one 3 s budget per run, each holder's working-directory walk 1 s,
+# each Envoy call 8 s, tmux 10 s -- and the summary line names each phase's seconds. Measured on
+# 2026-11-02 at load 350-410: 6-13 s, 22 s at the worst, and stalls of the whole box in which
+# systemd itself logged nothing for over 25 s. 25 s killed 100% of runs from 09:00Z to 13:20Z
+# (the unbounded walk) and still some after it; 90 s holds the worst run measured at twice
+# this load, with margin.
+TimeoutStartSec=90
 # The pane check talks to the default tmux server. Two things a shell gives it and a systemd
 # service does not: the socket directory .bashrc sets, and the mise-managed tmux the server was
 # started from — /usr/bin/tmux is 3.4 against a 3.8 server and answers "server exited

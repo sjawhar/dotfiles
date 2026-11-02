@@ -64,10 +64,8 @@ omp runs there again or the pane goes away. The session is resolved from what th
 running in the pane, else the transcript in the pane's directory whose own title the pane title
 carries, else the `omp --resume` command tmux-resurrect saved for that pane's place.
 
-The watcher does not execute that command. It cannot distinguish a failed session from one that
-was deliberately `/pause`d before the process left its pane: omp keeps that state in process
-memory and writes no durable session marker. It must only alert until omp persists a marker the
-watch can check.
+The watcher never executes that command. A pane a person paused and a pane whose omp died look
+the same to a script, so the person or lead who reads the alert looks at the pane and decides.
 
 Scope: role holders, and panes. A session that holds no role and has no pane is not watched.
 """
@@ -169,7 +167,7 @@ FORGET_AFTER = 86400.0
 # written at one absolute time, and a reader judges whether that file is the work or a log
 # beside it. Every sentence it produces names the file.
 DEFAULT_DIR_GRACE = 300.0
-# The walk is bounded three ways, because a run has a 30 s period and a 25 s TimeoutStartSec:
+# The walk is bounded three ways, because a run has a 30 s period and a 90 s TimeoutStartSec:
 # entries stat'ed, depth, and wall clock. A truncated walk is reported as truncated and is never
 # used to quiet anything -- "I did not finish looking" is not "nothing was written here".
 DIR_SCAN_ENTRIES = 20000
@@ -436,6 +434,24 @@ class Envoy:
 
 _HEADER_IDS: dict[tuple[int, int], str | None] = {}
 _TRANSCRIPT_INDEX: tuple[dict[str, Path], list[Path]] | None = None
+# Session id -> the transcript this watch last knew it by: every transcript an `omp` process
+# holds open this run, every lookup that succeeded, and what the state file kept from earlier
+# runs for the role holders and panes it still watches. `transcript_of` reads it first, so the
+# session root is walked only for a session this watch never saw running.
+_KNOWN_TRANSCRIPTS: dict[str, str] = {}
+# The walk of the session root and the header pass behind it share ONE wall-clock budget per
+# run. Unbounded, they were the whole of every run on 2026-11-02: at load 410-455 the box's root
+# disk answered a walk of 19,287 transcripts in 247 s and the header pass in 325 s (cProfile,
+# 13:06-13:16Z, at this unit's Nice and IO class), against the 25 s TimeoutStartSec it had, so from 09:00Z
+# no run finished, and nothing after the first unseen holder -- the other roles, the pane check,
+# every alert and clear -- ran at all. A walk that runs out is said to have run out.
+TRANSCRIPT_WALK_SECONDS = 3.0
+# A holder the walk missed is walked for again only this long after. The five holders unseen
+# for hours on 2026-11-02 (alerted and escalated since 00:26Z) missed in every period and each
+# period paid the whole budget for them; a session that comes back is seen by its process or
+# its heartbeat first, so a later walk could only ever find an old file.
+TRANSCRIPT_REWALK = 600.0
+_TRANSCRIPT_WALK: dict = {"deadline": 0.0, "truncated": False}
 
 
 def session_id_in_header(path: str | Path) -> str | None:
@@ -485,30 +501,83 @@ def session_id_in_header(path: str | Path) -> str | None:
     return found
 
 
+# Command names whose processes may be an agent box's launcher (`agentbox new … -- omp --resume
+# <id>`, run by bash; agentbox-run.ts, run by bun under the box's docker-init; the docker client).
+BOX_LAUNCHER_COMMS = {"bash", "sh", "bun", "docker-init", "docker"}
+# pid -> the launcher argv this run took a session from, so the process row can say that what
+# holds the session is a box starting or running it, not an omp.
+_BOX_LAUNCHERS: dict[int, str] = {}
+
+
+def box_launcher_session(argv: list[str]) -> tuple[str | None, str | None]:
+    """The session an agent box launcher is starting, from its own argv, else (None, None).
+
+    `agentbox move` hangs a session's omp up and respawns its pane into `agentbox new … -- omp
+    --resume <id>`; until the box is up and its omp has started, that omp is in no process, and
+    on 2026-11-02 a respawn at 12:51:45Z had its box's omp start at 13:07:15Z, at load 410. The
+    launcher processes live exactly as long as that box: they exit with its omp. So a launcher
+    naming the session is a box starting or running it, and the watch counts it as present.
+
+    Matched on argv WORDS, never on a substring of one: a pane's `bash -i -c '( setsid agentbox
+    move --wake <id> … ); agentbox new … --resume <id>'` carries the whole command in one word
+    and outlives a box that failed, so it is not a launcher.
+    """
+    names = [os.path.basename(word) for word in argv]
+    launcher = "agentbox-run.ts" in names or any(
+        name == "agentbox" and index + 1 < len(names) and names[index + 1] == "new"
+        for index, name in enumerate(names)
+    )
+    if not launcher or "--resume" not in argv:
+        return None, None
+    return resume_target(" ".join(argv))
+
+
 def omp_sessions_by_pid() -> dict[str, int]:
     """Every session id an `omp` process on this machine holds, mapped to that pid.
 
-    Three sources, in widening order: the command line (`omp --resume <id>`), the file name of
-    an open transcript, and that transcript's own header. The header is what makes a resumed
-    subagent lane visible; without it the process holds the session and nothing can tell.
+    Three sources, in widening order: the command line (`omp --resume <id>`, or the header of
+    the file `omp --resume <path>` names), the file name of an open transcript, and that
+    transcript's own header. The header is what makes a resumed subagent lane visible; without
+    it the process holds the session and nothing can tell.
+
+    An omp in an agent box is a host process too: its comm is `omp` and its command line is
+    readable, but its uid is shifted (166536 here) and its /proc/<pid>/fd and environ are not,
+    so for a boxed omp the command line is the only one of the three. Then, for the sessions no
+    omp names, an agent box launcher that names it: see `box_launcher_session`.
 
     A pid here is positive evidence of life and nothing else. Its absence is not evidence of
-    death: this reads only processes whose comm is `omp`, so a lane under a differently named
-    parent is invisible to it, which is why `transcript_holders` reads the transcript's own
-    openers before anything alerts.
+    death: this reads only processes whose comm is `omp` or a launcher's, so a lane under a
+    differently named parent is invisible to it, which is why `transcript_holders` reads the
+    transcript's own openers before anything alerts.
     """
     held: dict[str, int] = {}
+    launchers: dict[str, tuple[int, str]] = {}
+    _BOX_LAUNCHERS.clear()
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
         pid = int(entry)
         try:
-            if Path(f"/proc/{pid}/comm").read_text().strip() != "omp":
+            comm = Path(f"/proc/{pid}/comm").read_text().strip()
+            if comm != "omp" and comm not in BOX_LAUNCHER_COMMS:
                 continue
-            command = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf8", "replace")
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf8", "replace").split("\0")
         except OSError:
             continue
+        argv = [word for word in argv if word]
+        if comm != "omp":
+            session, path = box_launcher_session(argv)
+            if session:
+                launchers.setdefault(session, (pid, " ".join(argv)))
+                if path:
+                    _KNOWN_TRANSCRIPTS[session] = path
+            continue
+        command = " ".join(argv)
         found = set(UUID_RE.findall(command))
+        resumed, path = resume_target(command)
+        if resumed and path:
+            found.add(resumed)
+            _KNOWN_TRANSCRIPTS[resumed] = path
         try:
             descriptors = os.listdir(f"/proc/{pid}/fd")
         except OSError:
@@ -519,13 +588,26 @@ def omp_sessions_by_pid() -> dict[str, int]:
             except OSError:
                 continue
             if "/.omp/agent/sessions/" in target and target.endswith(".jsonl"):
-                found.update(UUID_RE.findall(os.path.basename(target)))
+                named = UUID_RE.findall(os.path.basename(target))
                 from_header = session_id_in_header(target)
+                # The file a running omp holds is the transcript of these ids, for certain: kept,
+                # so the lookup after this holder stops needs no walk of the session root.
+                for session_id in named + ([from_header] if from_header else []):
+                    _KNOWN_TRANSCRIPTS[session_id] = target
+                found.update(named)
                 if from_header:
                     found.add(from_header)
         for session_id in found:
             held.setdefault(session_id, pid)
+    for session, (pid, command) in launchers.items():
+        if session not in held:
+            held[session] = pid
+            _BOX_LAUNCHERS[pid] = command
     return held
+
+
+# (device, inode) of every open .jsonl -> the pids holding it, read once per run on first use.
+_OPEN_JSONL: dict[tuple[int, int], list[int]] | None = None
 
 
 def transcript_holders(path: str | Path) -> list[int]:
@@ -533,32 +615,36 @@ def transcript_holders(path: str | Path) -> list[int]:
 
     `omp_sessions_by_pid` reads only processes whose comm is `omp`. This reads the file's own
     openers instead, by device and inode, so a lane running under a wrapper, a renamed binary or
-    a box's init still counts as a holder. Run once per incident, not once per role per period:
-    it stats every descriptor of every process this user can read.
+    a box's init still counts as a holder. It reads every descriptor of every process this user
+    can read, so it does that ONCE per run, for every holder asked about: once per holder was
+    0.66 s each at load 410 on 2026-11-02, with six open incidents in every period.
     """
+    global _OPEN_JSONL
     try:
         info = os.stat(path)
     except OSError:
         return []
-    want = (info.st_dev, info.st_ino)
-    holders: list[int] = []
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        directory = f"/proc/{entry}/fd"
-        try:
-            descriptors = os.listdir(directory)
-        except OSError:
-            continue
-        for descriptor in descriptors:
+    if _OPEN_JSONL is None:
+        _OPEN_JSONL = {}
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            directory = f"/proc/{entry}/fd"
             try:
-                seen = os.stat(f"{directory}/{descriptor}")
+                descriptors = os.listdir(directory)
             except OSError:
                 continue
-            if (seen.st_dev, seen.st_ino) == want:
-                holders.append(int(entry))
-                break
-    return holders
+            for descriptor in descriptors:
+                try:
+                    if not os.readlink(f"{directory}/{descriptor}").endswith(".jsonl"):
+                        continue
+                    seen = os.stat(f"{directory}/{descriptor}")
+                except OSError:
+                    continue
+                pids = _OPEN_JSONL.setdefault((seen.st_dev, seen.st_ino), [])
+                if int(entry) not in pids:
+                    pids.append(int(entry))
+    return list(_OPEN_JSONL.get((info.st_dev, info.st_ino), []))
 
 
 def transcript_index() -> tuple[dict[str, Path], list[Path]]:
@@ -571,15 +657,47 @@ def transcript_index() -> tuple[dict[str, Path], list[Path]]:
     box's 34,238 transcripts, and a run that called it once per role spent 19 s of its 25 s
     TimeoutStartSec on it (measured 2026-10-29 at load 77); a run systemd SIGTERMs is a watch
     that has stopped watching while its timer still looks healthy.
+
+    And bounded by TRANSCRIPT_WALK_SECONDS, which it shares with the header pass in
+    `transcript_of`. The working directories are walked newest first, so a budget that runs out
+    leaves out the oldest sessions; a walk that stops sets `_TRANSCRIPT_WALK["truncated"]`, and
+    the transcript row says so.
     """
     global _TRANSCRIPT_INDEX
     if _TRANSCRIPT_INDEX is not None:
         return _TRANSCRIPT_INDEX
+    deadline = time.time() + TRANSCRIPT_WALK_SECONDS
+    _TRANSCRIPT_WALK.update(deadline=deadline, truncated=False)
     cutoff = time.time() - 7 * 86400
     by_id: dict[str, tuple[float, Path]] = {}
     unnamed: list[tuple[float, Path]] = []
-    for root, _, names in os.walk(SESSION_ROOT, onerror=lambda _error: None):
+    tops: list[tuple[float, str]] = []
+
+    def out_of_time() -> bool:
+        if time.time() > deadline:
+            _TRANSCRIPT_WALK["truncated"] = True
+        return _TRANSCRIPT_WALK["truncated"]
+
+    try:
+        with os.scandir(SESSION_ROOT) as entries:
+            for entry in entries:
+                if out_of_time():
+                    break
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        tops.append((entry.stat(follow_symlinks=False).st_mtime, entry.path))
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    tops.sort(key=lambda item: -item[0])
+    walks = (os.walk(top, onerror=lambda _error: None) for _, top in tops)
+    for root, _, names in (step for walk in walks for step in walk):
+        if out_of_time():
+            break
         for name in names:
+            if out_of_time():
+                break
             if not name.endswith(".jsonl"):
                 continue
             candidate = os.path.join(root, name)
@@ -603,28 +721,43 @@ def transcript_index() -> tuple[dict[str, Path], list[Path]]:
     return _TRANSCRIPT_INDEX
 
 
-def transcript_of(session_id: str) -> Path | None:
+def transcript_of(session_id: str, walk: bool = True) -> Path | None:
     """The session's own transcript file, the newest one when a session was resumed.
 
-    Two passes, for the same reason `session_id_in_header` exists: a file named `<stamp>_<id>`
-    is found anywhere under the session root, including the subagent directories that
-    `SESSION_ROOT.iterdir()` alone never descended into, and a file whose name carries no id at
-    all (ArityLane.jsonl) is found by reading headers, newest first. That second pass is not
-    cheap and not rare: 25,936 of this box's 34,272 transcripts carry no id in their name (every
-    subagent's does not), and reading their headers costs about 1.5 s warm for the first miss in
-    a run and ~0.3 s for each later one, from the memo. It runs only on a miss, and the walk
-    behind it runs once per run, which is what keeps a whole period inside its 25 s budget.
+    First the transcript this watch already knows the session by (`_KNOWN_TRANSCRIPTS`): the
+    file an omp process holds open for it now or held in an earlier run. That is the common
+    case and costs one stat; a holder this watch saw running never needs the walk below.
+
+    Then two passes, for the same reason `session_id_in_header` exists: a file named
+    `<stamp>_<id>` is found anywhere under the session root, including the subagent
+    directories that `SESSION_ROOT.iterdir()` alone never descended into, and a file whose name
+    carries no id at all (ArityLane.jsonl) is found by reading headers, newest first. That
+    second pass is not cheap and not rare: 25,936 of this box's 34,272 transcripts carry no id
+    in their name (every subagent's does not). Both passes run only on a miss, once per run,
+    inside TRANSCRIPT_WALK_SECONDS together, which is what keeps a whole period inside its
+    TimeoutStartSec at any load. `walk=False` stops after the known transcript: a holder whose
+    last walk missed is walked again only every TRANSCRIPT_REWALK seconds (see run_once).
     """
     if not UUID_RE.fullmatch(session_id or ""):
         return None
+    known = _KNOWN_TRANSCRIPTS.get(session_id)
+    if known and os.path.isfile(known):
+        return Path(known)
+    if not walk:
+        return None
     by_id, unnamed = transcript_index()
     found = by_id.get(session_id)
+    if not found:
+        for candidate in unnamed:
+            if time.time() > _TRANSCRIPT_WALK["deadline"]:
+                _TRANSCRIPT_WALK["truncated"] = True
+                break
+            if session_id_in_header(candidate) == session_id:
+                found = candidate
+                break
     if found:
-        return found
-    for candidate in unnamed:
-        if session_id_in_header(candidate) == session_id:
-            return candidate
-    return None
+        _KNOWN_TRANSCRIPTS[session_id] = str(found)
+    return found
 
 
 def normal_exit_at(path: str | Path | None) -> str | None:
@@ -781,6 +914,7 @@ def holder_evidence(
     now: float,
     directory: str = "",
     dir_grace: float = DEFAULT_DIR_GRACE,
+    walk: bool = True,
 ) -> dict:
     """Every source this watch has on one holder, and what each one answered.
 
@@ -813,9 +947,12 @@ def holder_evidence(
     pid = held.get(holder)
     sources.append(
         ("process", pid is not None,
-         f"an omp process holds this session: pid {pid}" if pid
+         (f"an agent box is starting or running this session: launcher pid {pid}"
+          f" ({_BOX_LAUNCHERS[pid][:200]}); its omp is not up yet, or is in a box whose omp this"
+          " watch cannot name" if pid in _BOX_LAUNCHERS
+          else f"an omp process holds this session: pid {pid}") if pid
          else f"{CANNOT_SEE_HOLDER} in any omp process on this machine (no command line names it,"
-              " and no open transcript's name or header does)")
+              " no open transcript's name or header does, and no agent box launcher names it)")
     )
 
     entry = live.get(holder)
@@ -878,7 +1015,12 @@ def holder_evidence(
                  f" {status} {body.get('error') or ''}".strip())
             )
 
-    transcript = transcript_of(holder)
+    # The transcript is looked up only when the two cheap sources are silent. A holder a process
+    # or a fresh heartbeat already shows is found, and its transcript changes nothing that is
+    # said about it; looking it up for every role every period is what put the session-root walk
+    # into every run of 2026-11-02 (see TRANSCRIPT_WALK_SECONDS).
+    seen_already = any(seen for _, seen, _ in sources)
+    transcript = None if seen_already else transcript_of(holder, walk)
     last_write = None
     if transcript:
         try:
@@ -907,7 +1049,11 @@ def holder_evidence(
         if transcript and scan["transcript"] and str(transcript) == scan["transcript"]
         else str(transcript)
     )
-    if last_write and now - last_write <= write_grace:
+    if seen_already:
+        sources.append(
+            ("transcript", False, "not read: a source above already found the holder")
+        )
+    elif last_write and now - last_write <= write_grace:
         sources.append(
             ("transcript", True,
              f"its transcript {where} was written {human(now - last_write)} ago, inside the"
@@ -925,7 +1071,13 @@ def holder_evidence(
             ("transcript", False,
              f"{CANNOT_SEE_HOLDER} in any transcript under {SESSION_ROOT}, by file name or"
              " header, nor in any .jsonl named after it under "
-             + (directory or "(no working directory recorded)"))
+             + (directory or "(no working directory recorded)")
+             + (f"; {SESSION_ROOT} was searched for it less than {int(TRANSCRIPT_REWALK)} s ago"
+                " and held nothing this watch reached, so it was not searched again this period"
+                if not walk else
+                f"; the search of {SESSION_ROOT} stopped at its {TRANSCRIPT_WALK_SECONDS:g} s"
+                " budget, so a transcript in a part it did not reach was not seen"
+                if _TRANSCRIPT_WALK["truncated"] else ""))
         )
 
     openers: list[int] = []
@@ -990,6 +1142,8 @@ def holder_evidence(
         "dir_sentence": dir_sentence,
         "dir_truncated": scan["truncated"],
         "exited_at": None if found else normal_exit_at(transcript),
+        # True when this call walked the session root for the holder and found nothing.
+        "walk_missed": walk and not seen_already and not transcript,
     }
 
 
@@ -1645,8 +1799,8 @@ def pane_alert_text(incident: dict, now: float) -> str:
             f" Then {brief}."
         )
         lines.append(
-            "Automatic restart: NOT RUN. omp does not persist `/pause` state after its process"
-            " exits, so this watch cannot safely tell a failed session from a deliberately paused one."
+            "Automatic restart: NOT RUN. This watch never restarts a pane: a paused pane and a dead"
+            " one look the same to a script, so look at the pane and decide."
         )
     else:
         lines.append(f"Do: start the lane again in that pane, never a new one, and {brief}.")
@@ -2006,13 +2160,45 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
 
 
 
+def keep_known_transcripts(state: State) -> None:
+    """Put into the state file the known transcripts of the sessions it still watches: every
+    role holder, and the session of every pane it remembers or holds an incident on. The next
+    run reads them back into `_KNOWN_TRANSCRIPTS`, so a holder that stops after this run is
+    looked up with one stat, not a walk of the session root."""
+    watched = {record.get("holder") for record in (state.data.get("roles") or {}).values()}
+    for group in ("panes", "pane_incidents"):
+        watched |= {record.get("session") for record in (state.data.get(group) or {}).values()
+                    if isinstance(record, dict)}
+    state.data["transcripts"] = {
+        session: path for session, path in sorted(_KNOWN_TRANSCRIPTS.items()) if session in watched
+    }
+
+
 def run_once(options: argparse.Namespace) -> int:
+    global _TRANSCRIPT_INDEX, _OPEN_JSONL
     started = time.time()
+    # Where each run spends its time, in the summary line, so a run that nears its
+    # TimeoutStartSec names the step that took it there.
+    phases: list[str] = []
+    mark = started
+
+    def phase(name: str) -> None:
+        nonlocal mark
+        phases.append(f"{name} {time.time() - mark:.1f}s")
+        mark = time.time()
+
     envoy = Envoy(timeout=options.http_timeout)
     state = State(options.state)
     if not state.locked:
         log(f"another run holds {options.state}; skipping this period")
         return 0
+    _TRANSCRIPT_INDEX = _OPEN_JSONL = None
+    _TRANSCRIPT_WALK.update(deadline=0.0, truncated=False)
+    _KNOWN_TRANSCRIPTS.clear()
+    _KNOWN_TRANSCRIPTS.update(
+        {session: path for session, path in (state.data.get("transcripts") or {}).items()
+         if isinstance(path, str)}
+    )
     roles_state: dict = state.data.setdefault("roles", {})
     # Incident memory, keyed by role AND holder so a role that is re-claimed by a new session
     # starts a new incident. It lives in this one file, which the service owns, and is written
@@ -2026,6 +2212,7 @@ def run_once(options: argparse.Namespace) -> int:
     except RuntimeError as error:
         log(f"envoy unreachable: {error}")
         return 2
+    phase("envoy")
     live = {
         session["session_id"]: session for session in sessions if session.get("session_id")
     }
@@ -2035,6 +2222,7 @@ def run_once(options: argparse.Namespace) -> int:
         if (session.get("host") or session.get("machine_id")) == host and session.get("roles")
     ]
     held = omp_sessions_by_pid()
+    phase("processes")
     # Where this watch last saw each session running, for the alert's "look at the pane" step.
     pane_of: dict[str, str] = {}
     for pane_key, remembered in (state.data.get("panes") or {}).items():
@@ -2063,6 +2251,17 @@ def run_once(options: argparse.Namespace) -> int:
                     "topics": session.get("topics") or [],
                 }
             )
+    # On disk before any per-holder work: the roster and where each holder's transcript is, so a
+    # run that is killed later still leaves the next one what this one learnt.
+    keep_known_transcripts(state)
+    state.commit(options)
+
+    # The pane check first: it is cheap (0.2-1.3 s at load 400) and reads no holder, so a period
+    # whose holder checks run long still checks every pane and sends its alerts and clears.
+    agents, at_shell, pane_alerts, pane_clears = check_panes(
+        options, state, envoy, sessions, held, started
+    )
+    phase("panes")
 
     alerts = clears = 0
     # The tally every alert of every other class carries: how much this suppression has
@@ -2109,10 +2308,14 @@ def run_once(options: argparse.Namespace) -> int:
             state.commit(options)
             continue
 
+        # A holder the last walk missed is walked for again only after TRANSCRIPT_REWALK.
+        rewalk = started - (record.get("transcript_missed_at") or 0) >= TRANSCRIPT_REWALK
         evidence = holder_evidence(
             envoy, holder, held, live, options.write_grace, started,
-            record.get("dir") or "", options.dir_grace,
+            record.get("dir") or "", options.dir_grace, rewalk,
         )
+        if evidence["walk_missed"]:
+            record["transcript_missed_at"] = started
         pid = evidence["pid"]
 
         # A role whose holder another live session has taken is not this holder's incident.
@@ -2310,15 +2513,16 @@ def run_once(options: argparse.Namespace) -> int:
             )
         state.commit(options)
 
-    agents, at_shell, pane_alerts, pane_clears = check_panes(
-        options, state, envoy, sessions, held, started
-    )
+    phase("roles")
+    keep_known_transcripts(state)
     state.commit(options)
     state.close()
     log(
         f"checked {len(roles_state)} local role(s) and {agents} agent pane(s), {at_shell} at a shell,"
-        f" in {time.time() - started:.2f}s; {alerts + pane_alerts} alert(s),"
-        f" {clears + pane_clears} clear(s)"
+        f" in {time.time() - started:.2f}s ({', '.join(phases)}"
+        + (f"; session-root walk stopped at its {TRANSCRIPT_WALK_SECONDS:g} s budget"
+           if _TRANSCRIPT_WALK["truncated"] else "")
+        + f"); {alerts + pane_alerts} alert(s), {clears + pane_clears} clear(s)"
     )
     for line in suppression_lines(started, suppressed, short=True):
         log(line)

@@ -363,6 +363,109 @@ class NormalExitTest(Lane):
         self.assertTrue(any("ESCALATED" in line for line in self.period()))
 
 
+class TranscriptLookupCostTest(Lane):
+    """On 2026-11-02 from 09:00Z no run finished inside its 25 s TimeoutStartSec: at load 410-455
+    the walk of the session root took 247 s and the header pass behind it 325 s, and every run
+    paid for them, because the transcript of every holder was looked up -- seen or not. A holder
+    a process shows is never looked up, a known transcript costs one stat, and the walk stops at
+    its budget and says so."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.walks = 0
+        original = WATCH.transcript_index
+
+        def counted():
+            self.walks += 1
+            return original()
+
+        WATCH.transcript_index = counted
+        self.addCleanup(setattr, WATCH, "transcript_index", original)
+        WATCH._KNOWN_TRANSCRIPTS.clear()
+        self.addCleanup(WATCH._KNOWN_TRANSCRIPTS.clear)
+
+    def test_a_holder_a_process_shows_never_walks_the_session_root(self) -> None:
+        evidence = WATCH.holder_evidence(
+            FakeEnvoy(), HOLDER, {HOLDER: 4242}, {}, 120.0, self.now, str(self.dir), 300.0,
+        )
+
+        self.assertTrue(evidence["alive"])
+        self.assertEqual(self.walks, 0)
+        self.assertIn("not read", self.row(evidence, "transcript"))
+
+    def test_a_known_transcript_is_found_without_a_walk(self) -> None:
+        path = self.root / "elsewhere" / "ArityLane.jsonl"
+        path.parent.mkdir()
+        path.write_text('{"type":"session","id":"' + HOLDER + '"}\n')
+        WATCH._KNOWN_TRANSCRIPTS[HOLDER] = str(path)
+
+        self.assertEqual(WATCH.transcript_of(HOLDER), path)
+        self.assertEqual(self.walks, 0)
+
+    def test_the_walk_stops_at_its_budget_and_the_row_says_so(self) -> None:
+        lane = WATCH.SESSION_ROOT / "-src-lane"
+        lane.mkdir()
+        for number in range(50):
+            (lane / f"Sub{number}.jsonl").write_text('{"type":"session","id":"x"}\n')
+        original = WATCH.TRANSCRIPT_WALK_SECONDS
+        WATCH.TRANSCRIPT_WALK_SECONDS = -1.0
+        self.addCleanup(setattr, WATCH, "TRANSCRIPT_WALK_SECONDS", original)
+
+        evidence = self.evidence()
+
+        self.assertFalse(evidence["alive"])
+        self.assertIn("stopped at its", self.row(evidence, "transcript"))
+
+    def test_a_holder_the_walk_missed_is_not_walked_for_again_at_once(self) -> None:
+        first = self.evidence()
+        self.assertTrue(first["walk_missed"])
+        self.assertEqual(self.walks, 1)
+
+        WATCH._TRANSCRIPT_INDEX = None
+        second = WATCH.holder_evidence(
+            FakeEnvoy(), HOLDER, {}, {}, 120.0, self.now, str(self.dir), 300.0, False,
+        )
+
+        self.assertEqual(self.walks, 1)
+        self.assertFalse(second["walk_missed"])
+        self.assertIn("not searched again", self.row(second, "transcript"))
+
+    def test_a_run_keeps_the_transcript_a_process_held_for_the_next_run(self) -> None:
+        path = WATCH.SESSION_ROOT / "-src-lane" / "2026-11-02T00-00-00-000Z_parent" / "Lane.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"type":"session","id":"' + HOLDER + '"}\n')
+        os.utime(path, (self.now - 900, self.now - 900))
+        state = self.root / "state.json"
+        state.write_text(json.dumps({
+            "roles": {"lane-owner-cost": {"holder": HOLDER, "host": socket.gethostname(), "dir": str(self.dir)}},
+        }))
+        options = argparse.Namespace(
+            state=state, dry_run=True, write_state=True, print_alert=False,
+            http_timeout=1.0, grace=60.0, write_grace=120.0, dir_grace=300.0, escalate=600.0,
+        )
+
+        def holding() -> dict:
+            WATCH._KNOWN_TRANSCRIPTS[HOLDER] = str(path)
+            return {HOLDER: 4242}
+
+        for name, value in (
+            ("Envoy", RunEnvoy), ("log", lambda line: None), ("omp_sessions_by_pid", holding),
+            ("transcript_holders", lambda path: []),
+            ("check_panes", lambda *args: (0, 0, 0, 0)),
+        ):
+            original = getattr(WATCH, name)
+            setattr(WATCH, name, value)
+            self.addCleanup(setattr, WATCH, name, original)
+        WATCH.run_once(options)
+        self.assertEqual(json.loads(state.read_text())["transcripts"], {HOLDER: str(path)})
+
+        # The holder's process is gone: the next run finds its transcript by one stat.
+        WATCH.omp_sessions_by_pid = lambda: {}
+        WATCH.run_once(options)
+        incident = json.loads(state.read_text())["incidents"][f"lane-owner-cost|{HOLDER}"]
+        self.assertEqual(self.walks, 0)
+        self.assertIn(str(path), " ".join(sentence for _, _, sentence in incident["sources"]))
+
 
 if __name__ == "__main__":
     unittest.main()

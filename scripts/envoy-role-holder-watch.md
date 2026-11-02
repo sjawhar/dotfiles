@@ -58,7 +58,7 @@ One run, with no model call:
 
    | Source | What it reads |
    |---|---|
-   | `process` | an `omp` process naming the session on its command line, in an open transcript's **file name**, or in that transcript's **header** (`{"type":"session","id":…}`, which is the second record, not the first) |
+   | `process` | an `omp` process naming the session on its command line (the id, or the header of the file `--resume <path>` names), in an open transcript's **file name**, or in that transcript's **header** (`{"type":"session","id":…}`, which is the second record, not the first). An omp in an agent box counts: its comm and command line are readable from the host, only its descriptors are not. So does an **agent box launcher** naming the session (`agentbox new … -- omp --resume <id>`, `agentbox-run.ts … --resume <id>`, matched on argv words): it lives exactly as long as the box, and it is the only process of a session between an `agentbox move` respawn and its box's omp starting (15 min at load 410 on 2026-11-02) |
    | `openers` | any process **this user can read** holding the session's transcript open, matched by device and inode, so a lane under a wrapper or a renamed binary still counts and one inside an agent box (uid-shifted `/proc`) does not. Read **only** when the first three came back silent — which is also the only time it can change the answer — so a healthy role never pays its cost, and an open incident keeps paying it every period, since it is the one source that can see a lane running under a name this watch does not know, and so the one that can clear such an incident |
    | `transcript` | how long ago the session's transcript was written. Inside `--write-grace` (120 s) something is writing it |
    | `registry` | Envoy's own entry and heartbeat: `GET /v1/sessions`, confirmed for an absent holder with `GET /v1/registry/<id>`. Both only read |
@@ -79,12 +79,23 @@ One run, with no model call:
 
 Timing: last sighting + 60 s grace + at most one 30 s period, so about a minute.
 
-Cost of a run: every transcript is resolved through a **single** walk of the session root
-(34,272 files, 1.2 s here), not one glob per role. Measured at the unit's `Nice=15` and idle IO,
-23 roles and 56 panes: **2.6-3.6 s** with every holder seen, and **12 s** with every holder
-unseen — the degenerate case, where each one costs a header pass and a scan of every process's
-descriptors. `TimeoutStartSec` is 25 s; a run systemd kills is a watch that has stopped watching
-while its timer still looks healthy.
+Cost of a run. A holder a process or a fresh heartbeat shows is never looked up further: its
+transcript is read only when those two are silent. Then the transcript is the one the watch
+already knows the session by — the file an omp held open for it, this run or an earlier one,
+kept in the state file — at the cost of one stat. Only a session it never saw running needs the
+walk of the session root, and that walk and the header pass behind it share one **3 s** budget
+per run (`TRANSCRIPT_WALK_SECONDS`), go through the working directories newest first, say so
+in the transcript row when they run out, and are not repeated for the same holder for 10
+minutes after a miss. The descriptor scan behind `openers` is one per run, for every holder.
+The pane check runs before the holder checks, so a long period still checks every pane.
+
+Unbounded, the walk was every run on 2026-11-02 from 09:00Z: at load 410-455 the box's root disk
+answered it in 247 s and the header pass in 325 s, and every run was killed at its then 25 s
+`TimeoutStartSec` before any holder after the first, any pane, alert or clear. Measured after,
+at load 350-410: **6-13 s**, 22 s at the worst; the summary line gives each phase's seconds
+(`envoy`, `processes`, `panes`, `roles`). `TimeoutStartSec` is 90 s, since whole-box stalls in
+which systemd itself logs nothing for 25 s happen at this load; a oneshot still starting absorbs
+the next timer tick, so runs cannot pile up.
 
 ## What not reading the claim costs
 
@@ -169,11 +180,9 @@ newest, the session id, its title, and whether an omp process holds it now (`liv
 carried its title while the directory held exactly one, of a live session, so a reader had to
 look the directory up to learn the association was wrong and not missing.
 
-The watcher never runs that command. `/pause` freezes omp with a process-local gate. It writes no
-paused state to the session JSONL or `$HOME/.omp/agent` state, so a later shell prompt is
-indistinguishable from a failed agent. An automatic restart could revive a session Sami paused
-before its shell appeared. The alert therefore says `Automatic restart: NOT RUN` until omp
-persists a pause marker the watcher can check.
+The watcher never runs that command, and the alert says `Automatic restart: NOT RUN`. It never
+restarts that pane automatically, because a paused pane and a dead one look the same to a
+script. The person or lead who reads the alert decides from the pane.
 
 It goes to the INFRA lead and the lane's stream lead — the live holder of a `lead-*` or
 `stream-lead-*` role whose working directory is the session's — and a `Told:` line names each
