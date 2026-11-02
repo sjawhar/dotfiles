@@ -1,0 +1,22 @@
+[Unit]
+Description=Tell a session over Envoy when the host's earlyoom kills one of its processes
+Documentation=file:%h/.dotfiles/scripts/earlyoom-kill-watch.md
+
+[Service]
+# A long-running service, not a timer like the other watches: a killed process's pid is gone
+# when earlyoom logs the kill, so its owner must be recorded before, from a /proc sample every
+# 2 s, and the journal is followed as it is written.
+Type=simple
+ExecStart=%h/.dotfiles/scripts/earlyoom-kill-watch
+Restart=always
+RestartSec=10
+# Above the lanes' nice 15 watches but below the sessions: a sample that starves for seconds
+# misses a process that grows to gigabytes between two samples. One sample read every
+# /proc/<pid>/stat on sami-rocqperf (about 3,700 processes, load 370) in about 0.3 s.
+Nice=5
+# `envoy` is a bash script that needs the same tools a shell gives it.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=MISE_DATA_DIR=%h/.mise
+
+[Install]
+WantedBy=default.target

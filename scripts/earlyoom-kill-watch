@@ -1,0 +1,642 @@
+#!/usr/bin/env python3
+"""earlyoom-kill-watch: tell a session when the host's earlyoom kills one of its processes.
+
+    earlyoom-kill-watch [--to ID] [--dry-run] [--state FILE]      # the service: runs until stopped
+    earlyoom-kill-watch --replay --since 2026-11-02T15:00Z [--until ...] [--to ID] [--send]
+    earlyoom-kill-watch --counts                                  # kills per hour, as JSON
+
+Why this exists: on 2026-11-02 the host's earlyoom (`earlyoom -m 10,5 -s 100,100 --sort-by-rss
+--ignore <omp, tmux, sshd, ...>`) sent SIGTERM 51 times by 15:23Z, 15 of them in the 15:00Z
+hour, each time available memory fell to 10%. The kills are by design: they keep the sessions
+alive. But a killed tool exits 143 with no message, so its session cannot tell why. RULING
+(01a199e0) spent time on that at 15:21Z after its box's `simsci` died four times.
+
+What it does, as one long-running user service (`omp/earlyoom-kill-watch.service`):
+
+  1. Every 2 s it reads /proc/<pid>/stat of every process and records each one with at least
+     64 MiB resident: its start time, its name, and the session that owns it. The pid is gone
+     once earlyoom has killed it, so the owner must be known BEFORE the kill.
+  2. It follows `journalctl -u earlyoom -o json` and, for each `sending SIGTERM to process ...`
+     line, finds the owner from step 1, keeps the `mem avail` line just before it, and adds the
+     kill to that session's batch.
+  3. A batch is sent one minute after its first kill, so several kills of one session in one
+     minute are one Envoy notice: what was killed, when, its RSS, the host's available memory,
+     and what to do next.
+  4. Every minute it logs one line, `kills_this_hour=N hour=YYYY-MM-DDTHHZ kills_prev_hour=M
+     unmatched_this_hour=U notices_this_hour=X tracked=T pending=P sample_ms=S`, for any reader
+     that wants the rate (`journalctl --user -u earlyoom-kill-watch -g kills_this_hour -n 1`).
+
+How the owner is found, best first (the notice says which one matched):
+
+  * process tree: the nearest `omp` ancestor of the process (omp's `__omp_worker*` helpers
+    skipped). In an agent box the tool's ancestors run through the box's omp too, since the host
+    sees the box's processes with shifted uids (166536). This covers almost every kill today.
+  * same agent box / same systemd scope: a process reparented away from its omp (a daemonized
+    tool) is matched by its cgroup: the box's docker scope, or the `run-*.scope` shims/omp starts,
+    when exactly one session's omp runs in it.
+  * session-tmp path: a process never sampled (younger than one sample, or below 64 MiB until
+    the end) whose command line holds `session-tmp/<pid>-...`, the scratch directory
+    scripts/agent-session makes as `$$-XXXXXXXX` before it execs omp, so <pid> is the omp.
+  * otherwise unmatched: counted and logged, and nobody is told. Sending it to a guessed
+    session would be worse than silence.
+
+The session id of an omp: the transcript it holds open (`.../<time>Z_<id>.jsonl`, the same rule
+scripts/agentbox uses), else its own `--resume`/`--restore` argument, else, for a box whose omp
+the host cannot read, `docker exec <box>` reading the box omp's open files (only at notice time).
+
+It kills nothing, and changes no limit. earlyoom's own `-N` hook runs after the kill, when the
+pid is already gone, and earlyoom's config belongs to agent-infra's guard, so this watch reads
+the journal instead.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import queue
+import re
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+ENVOY = Path(__file__).resolve().parent / "envoy"
+PROC_ROOT = Path("/proc")
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/earlyoom-kill-watch/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "earlyoom-kill-watch/state.json"
+)
+
+SAMPLE_EVERY = 2.0  # seconds between /proc samples
+RSS_FLOOR = 64 << 20  # the smallest process worth recording; today's smallest victim had 190 MiB
+KEEP_DEAD = 900.0  # how long a vanished process stays in the table
+BATCH = 60.0  # one notice per session per minute of kills
+RETRY = 30.0  # wait before a failed send is tried again
+STALE = 900.0  # a kill older than this when read is counted, not sent
+HOURS_KEPT = 48
+PAGE = os.sysconf("SC_PAGE_SIZE")
+
+KILL_RE = re.compile(
+    r'^sending (?P<signal>SIG[A-Z]+) to process (?P<pid>\d+) uid (?P<uid>\d+) "(?P<comm>.*?)": '
+    r'oom_score (?P<score>-?\d+), VmRSS (?P<rss>\d+) MiB, cmdline "(?P<cmdline>.*?)"?$'
+)
+AVAIL_RE = re.compile(r"^mem avail: +(\d+) of +(\d+) MiB \( *([0-9.]+)%\)")
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+TRANSCRIPT_RE = re.compile(r"/sessions/.*/[0-9T:-]*Z_(" + UUID + r")\.jsonl$")
+ARG_RE = re.compile(r"(?:^|/[0-9T:-]*Z_)(" + UUID + r")(?:\.jsonl)?$")
+SESSION_TMP_RE = re.compile(r"/session-tmp/(\d+)-[A-Za-z0-9]{8}(?:/|\s|$)")
+DOCKER_RE = re.compile(r"/docker-([0-9a-f]{64})\.scope")
+SCOPE_RE = re.compile(r"^(.*?/(?:run-[^/]+|session-[^/]+|tmux-spawn-[^/]+)\.scope)")
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def utc(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def hour_key(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%HZ", time.gmtime(epoch))
+
+
+def parse_kill(message: str) -> dict | None:
+    match = KILL_RE.match(message)
+    if not match:
+        return None
+    return {
+        "signal": match["signal"], "pid": int(match["pid"]), "uid": int(match["uid"]), "comm": match["comm"],
+        "oom_score": int(match["score"]), "rss_mib": int(match["rss"]), "cmdline": match["cmdline"],
+    }
+
+
+def parse_avail(message: str) -> tuple[int, int, float] | None:
+    match = AVAIL_RE.match(message)
+    return (int(match[1]), int(match[2]), float(match[3])) if match else None
+
+
+def message_of(entry: dict) -> str:
+    message = entry.get("MESSAGE") or ""
+    if isinstance(message, list):  # journald gives non-UTF-8 text as a byte array
+        message = bytes(message).decode("utf8", "replace")
+    return message
+
+
+def docker_session(container: str) -> str:
+    """The session of the omp in a box, from inside it: the transcript its omp holds open."""
+    script = (
+        'for p in $(pgrep -x omp); do for fd in /proc/$p/fd/*; do readlink "$fd" 2>/dev/null; done; done'
+    )
+    try:
+        done = subprocess.run(["docker", "exec", container, "sh", "-c", script],
+                              capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    found = sorted({m[1] for m in map(TRANSCRIPT_RE.search, done.stdout.splitlines()) if m})
+    return found[0] if len(found) == 1 else ""
+
+
+def scope_description(unit: str) -> str:
+    """The Description of a user scope. shims/omp starts each host session in `run-*.scope` and
+    systemd describes it by its command, `.../agent-session omp --resume <id>`."""
+    try:
+        done = subprocess.run(["systemctl", "--user", "show", "-p", "Description", "--value", unit],
+                              capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def envoy_send(target: str, text: str) -> bool:
+    try:
+        done = subprocess.run([str(ENVOY), "send", "--source", "envoy", "--message-file", "-", target],
+                              input=text, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"send to {target} failed: {error}")
+        return False
+    if done.returncode != 0:
+        log(f"send to {target} failed: exit {done.returncode}: {(done.stderr or done.stdout).strip()}")
+    return done.returncode == 0
+
+
+def meminfo_available(proc_root: Path) -> str:
+    try:
+        rows = dict(line.split(":", 1) for line in (proc_root / "meminfo").read_text().splitlines())
+        avail, total = int(rows["MemAvailable"].split()[0]), int(rows["MemTotal"].split()[0])
+    except (OSError, KeyError, ValueError):
+        return ""
+    return f"{100.0 * avail / total:.1f}% ({avail >> 10} of {total >> 10} MiB)"
+
+
+class Watch:
+    def __init__(self, proc_root: Path = PROC_ROOT, state_path: Path = DEFAULT_STATE, send=envoy_send,
+                 to: str = "", host: str = "", docker_session=docker_session, started: float = 0.0,
+                 replay: bool = False, describe=scope_description) -> None:
+        self.proc_root = Path(proc_root)
+        self.state_path = Path(state_path)
+        self.send = send
+        self.to = to
+        self.host = host or socket.gethostname()
+        self.docker_session = docker_session
+        self.describe = describe
+        self.replay = replay
+        self.lock = threading.RLock()
+        state: dict = {}
+        try:
+            state = json.loads(self.state_path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        self.cursor: str | None = state.get("cursor")
+        self.last_ts: int = int(state.get("last_ts") or 0)
+        self.recent: list[str] = list(state.get("recent") or [])
+        self.table: dict[str, dict] = state.get("table") or {}
+        self.sessions: dict[str, dict] = state.get("sessions") or {}
+        self.hours: dict[str, dict] = state.get("hours") or {}
+        self.pending: list[dict] = state.get("pending") or []
+        self.avail: list | None = state.get("avail")
+        # With no cursor, the journal is read from the hour's start for the count only: a kill
+        # from before this watch started is not news.
+        self.notify_after = 0.0 if (self.cursor or replay) else started
+        self.sample_ms = 0
+        self.procs: dict[int, tuple[str, int, int, int]] = {}
+
+    # ---------------------------------------------------------------- /proc
+
+    def read(self, pid: int, name: str) -> bytes:
+        try:
+            return (self.proc_root / str(pid) / name).read_bytes()
+        except OSError:
+            return b""
+
+    def stat(self, pid: int) -> tuple[str, int, int, int] | None:
+        """(comm, ppid, start ticks, rss bytes) from /proc/<pid>/stat."""
+        text = self.read(pid, "stat").decode("utf8", "replace")
+        close = text.rfind(")")
+        if close < 0:
+            return None
+        fields = text[close + 2:].split()
+        try:
+            return text[text.find("(") + 1:close], int(fields[1]), int(fields[19]), int(fields[21]) * PAGE
+        except (IndexError, ValueError):
+            return None
+
+    def scan(self) -> dict[int, tuple[str, int, int, int]]:
+        procs = {}
+        try:
+            names = os.listdir(self.proc_root)
+        except OSError:
+            return procs
+        for name in names:
+            if name.isdigit():
+                row = self.stat(int(name))
+                if row:
+                    procs[int(name)] = row
+        return procs
+
+    def cmdline(self, pid: int) -> list[str]:
+        return [w for w in self.read(pid, "cmdline").decode("utf8", "replace").split("\0") if w]
+
+    def cgroup(self, pid: int) -> str:
+        for line in self.read(pid, "cgroup").decode("utf8", "replace").splitlines():
+            if line.startswith("0::"):
+                return line[3:]
+        return ""
+
+    def is_session_omp(self, pid: int, comm: str) -> bool:
+        return comm == "omp" and not any("__omp_worker" in w for w in self.cmdline(pid)[:3])
+
+    # ---------------------------------------------------------------- sessions
+
+    def session_of(self, pid: int, start: int, container: str = "", docker: bool = False) -> str:
+        key = f"{pid}:{start}"
+        cached = self.sessions.get(key)
+        if cached and cached.get("session"):
+            return cached["session"]
+        found: set[str] = set()
+        try:
+            for fd in os.listdir(self.proc_root / str(pid) / "fd"):
+                try:
+                    match = TRANSCRIPT_RE.search(os.readlink(self.proc_root / str(pid) / "fd" / fd))
+                except OSError:
+                    continue
+                if match:
+                    found.add(match[1])
+        except OSError:
+            pass
+        if not found:
+            for word in self.cmdline(pid)[1:]:
+                match = ARG_RE.search(word)
+                if match:
+                    found.add(match[1])
+                    break
+        session = sorted(found)[0] if len(found) == 1 else ""
+        if not session and docker and container:
+            session = self.docker_session(container)
+        if session:
+            self.sessions[key] = {"session": session, "seen": time.time()}
+        return session
+
+    def owner_live(self, pid: int, procs: dict) -> dict:
+        """Who owns a live process: its nearest session omp, else the one omp of its box or scope."""
+        cgroup = self.cgroup(pid)
+        docker = DOCKER_RE.search(cgroup)
+        container = docker[1] if docker else ""
+        node, steps = procs.get(pid, (None, 0, 0, 0))[1], 0
+        while node and node > 1 and steps < 64:
+            row = procs.get(node) or self.stat(node)
+            if not row:
+                break
+            if self.is_session_omp(node, row[0]):
+                return {"omp": node, "omp_start": row[2], "container": container, "how": "process tree",
+                        "session": self.session_of(node, row[2], container)}
+            node, steps = row[1], steps + 1
+        scope = docker[0] if docker else (SCOPE_RE.match(cgroup)[1] if SCOPE_RE.match(cgroup) else "")
+        if scope:
+            owners = {}
+            for other, row in procs.items():
+                if row[0] == "omp" and other != pid and scope in self.cgroup(other) and self.is_session_omp(other, "omp"):
+                    owners[(other, row[2])] = self.session_of(other, row[2], container)
+            if len(set(owners.values())) == 1:
+                (omp, omp_start), session = next(iter(owners.items()))
+                how = "same agent box" if docker else "same systemd scope"
+                return {"omp": omp, "omp_start": omp_start, "container": container, "how": how, "session": session}
+        unit = scope.rsplit("/", 1)[-1] if scope.endswith(".scope") and "/run-" in scope else ""
+        return {"omp": 0, "omp_start": 0, "container": container, "how": "", "session": "", "scope": unit}
+
+    # ---------------------------------------------------------------- sampling
+
+    def sample(self, now: float) -> None:
+        clock = time.monotonic()
+        procs = self.scan()
+        with self.lock:
+            self.procs = procs
+            for pid, (comm, _ppid, start, rss) in procs.items():
+                # omp and its broker are the sessions themselves, and earlyoom's --ignore spares them.
+                if rss < RSS_FLOOR or comm in ("omp", "omp daemon brok"):
+                    continue
+                key = f"{pid}:{start}"
+                entry = self.table.get(key)
+                if entry is None:
+                    entry = {"pid": pid, "start": start, "comm": comm, "first_seen": now, "rss_max": 0}
+                    entry.update(self.owner_live(pid, procs))
+                    self.table[key] = entry
+                entry["last_seen"] = now
+                entry["rss_max"] = max(entry["rss_max"], rss >> 20)
+            for key in [k for k, e in self.table.items() if now - e.get("last_seen", 0) > KEEP_DEAD]:
+                del self.table[key]
+            for key in [k for k, e in self.sessions.items() if now - e.get("seen", 0) > 86400]:
+                del self.sessions[key]
+        self.sample_ms = int((time.monotonic() - clock) * 1000)
+
+    # ---------------------------------------------------------------- journal
+
+    def hour(self, epoch: float) -> dict:
+        return self.hours.setdefault(hour_key(epoch), {"kills": 0, "unmatched": 0, "notices": 0})
+
+    def on_entry(self, entry: dict, now: float) -> None:
+        cursor = entry.get("__CURSOR") or ""
+        ts_us = int(entry.get("__REALTIME_TIMESTAMP") or 0)
+        with self.lock:
+            if ts_us < self.last_ts or (cursor and cursor in self.recent):
+                return
+            self.last_ts, self.cursor = ts_us, cursor or self.cursor
+            self.recent = (self.recent + [cursor])[-64:]
+            message = message_of(entry)
+            avail = parse_avail(message)
+            if avail:
+                self.avail = list(avail)
+                return
+            kill = parse_kill(message)
+            if not kill:
+                return
+            at = ts_us / 1e6
+            kill["at"] = at
+            kill["avail"] = self.avail
+            self.hour(at)["kills"] += 1
+            owner = self.owner_of(kill)
+            kill.update(how=owner["how"], omp=owner["omp"], session=owner["session"])
+            if not owner["session"]:
+                self.hour(at)["unmatched"] += 1
+                log(f"{utc(at)} unmatched kill: pid {kill['pid']} uid {kill['uid']} \"{kill['comm']}\""
+                    f" {kill['rss_mib']} MiB: {kill['cmdline'][:160]}")
+                return
+            log(f"{utc(at)} kill: pid {kill['pid']} \"{kill['comm']}\" {kill['rss_mib']} MiB -> session"
+                f" {owner['session']} ({owner['how']})")
+            if at < self.notify_after or (not self.replay and now - at > STALE):
+                return
+            for batch in self.pending:
+                if batch["session"] == owner["session"] and at - batch["opened"] < BATCH:
+                    batch["kills"].append(kill)
+                    break
+            else:
+                self.pending.append({"session": owner["session"], "opened": at, "kills": [kill], "retry_at": 0})
+
+    def owner_of(self, kill: dict) -> dict:
+        pid, comm = kill["pid"], kill["comm"]
+        # earlyoom logs before it signals, so the process is sometimes still here. Not in a replay:
+        # by then the pid may be another process with the same name.
+        row = None if self.replay else self.stat(pid)
+        if row and row[0] == comm:
+            entry = self.table.get(f"{pid}:{row[2]}") or self.owner_live(pid, self.scan())
+        else:
+            known = [e for e in self.table.values() if e["pid"] == pid and e["comm"] == comm]
+            entry = max(known, key=lambda e: e.get("last_seen", 0)) if known else None
+        if entry and entry.get("omp"):
+            if not entry.get("session"):
+                omp = self.stat(entry["omp"])
+                if omp and omp[2] == entry["omp_start"]:
+                    entry["session"] = self.session_of(entry["omp"], omp[2], entry.get("container", ""), docker=True)
+            if entry.get("session"):
+                return {"session": entry["session"], "how": entry["how"], "omp": entry["omp"]}
+        match = SESSION_TMP_RE.search(kill["cmdline"])
+        if match:
+            omp_pid = int(match[1])
+            omp = self.stat(omp_pid)
+            if omp and omp[0] == "omp":
+                session = self.session_of(omp_pid, omp[2])
+                if session:
+                    return {"session": session, "how": "session-tmp path in its command line", "omp": omp_pid}
+        if entry and entry.get("scope"):
+            words = self.describe(entry["scope"]).split()
+            found = {m[1] for m in map(ARG_RE.search, words) if m}
+            if len(found) == 1:
+                return {"session": found.pop(), "how": f"its systemd scope {entry['scope']}, which shims/omp started"
+                        " for this session (no omp runs in it now)", "omp": 0}
+        return {"session": "", "how": "", "omp": 0}
+
+    # ---------------------------------------------------------------- notices
+
+    def notice(self, batch: dict) -> str:
+        kills = batch["kills"]
+        lines = []
+        for kill in kills:
+            avail = kill.get("avail")
+            memory = f"host available memory {avail[2]:.2f}% ({avail[0]} of {avail[1]} MiB)" if avail else \
+                "host available memory not logged"
+            lines.append(
+                f"- {utc(kill['at'])}: pid {kill['pid']} \"{kill['comm']}\", VmRSS {kill['rss_mib']} MiB,"
+                f" {memory}. Command: {kill['cmdline'][:200]}"
+            )
+        hows = sorted({f"{k['how']} (omp pid {k['omp']})" if k["omp"] else k["how"] for k in kills})
+        now_free = meminfo_available(self.proc_root)
+        drill = (
+            f"DRILL COPY: this notice was for session {batch['session']}; it came to you because the"
+            " watch runs with --to.\n" if self.to else ""
+        )
+        return (
+            f"{drill}earlyoom-kill-watch on {self.host}: the host's earlyoom stopped {len(kills)} of your"
+            " processes with SIGTERM, because the host's available memory fell to 10%.\n"
+            + "\n".join(lines)
+            + "\nA tool that earlyoom stopped exits with status 143 and gives no message. The kill keeps the"
+            " omp sessions on this host alive; it is not a fault in your tool or your work.\n"
+            "Before you run it again, do one of these: (1) run fewer of these jobs in parallel, or give"
+            " each one less memory; (2) run a large build, test suite, eval or sweep as a Job in the"
+            " dispatch cluster (skill://running-heavy-jobs); (3) wait until the host's available memory"
+            " is well above 10% (`grep MemAvailable /proc/meminfo`), then try again."
+            + (f" Available now: {now_free}." if now_free else "")
+            + f"\nMatched to your session by: {'; '.join(hows)}. (An automated notice, not a person;"
+            " one notice per minute of kills.)"
+        )
+
+    def flush(self, now: float, force: bool = False) -> int:
+        with self.lock:
+            due = [b for b in self.pending
+                   if (force or now - b["opened"] >= BATCH) and now >= b.get("retry_at", 0) and not b.get("sending")]
+            for batch in due:
+                batch["sending"] = True
+        sent = 0
+        for batch in due:
+            target = self.to or batch["session"]
+            ok = self.send(target, self.notice(batch))
+            with self.lock:
+                batch.pop("sending", None)
+                if ok:
+                    self.pending.remove(batch)
+                    self.hour(now)["notices"] += 1
+                    sent += 1
+                    log(f"notice sent to {target}: {len(batch['kills'])} kill(s) of session {batch['session']}")
+                else:
+                    batch["retry_at"] = now + RETRY
+        return sent
+
+    def counts_line(self, now: float) -> str:
+        with self.lock:
+            this = self.hours.get(hour_key(now), {})
+            prev = self.hours.get(hour_key(now - 3600), {})
+            return (
+                f"kills_this_hour={this.get('kills', 0)} hour={hour_key(now)} kills_prev_hour={prev.get('kills', 0)}"
+                f" unmatched_this_hour={this.get('unmatched', 0)} notices_this_hour={this.get('notices', 0)}"
+                f" tracked={len(self.table)} pending={len(self.pending)} sample_ms={self.sample_ms}"
+            )
+
+    def save(self, now: float) -> None:
+        if self.replay:
+            return
+        with self.lock:
+            for key in sorted(self.hours)[:-HOURS_KEPT]:
+                del self.hours[key]
+            state = {
+                "cursor": self.cursor, "last_ts": self.last_ts, "recent": self.recent, "table": self.table,
+                "sessions": self.sessions, "hours": self.hours, "avail": self.avail,
+                "pending": [{k: v for k, v in b.items() if k != "sending"} for b in self.pending],
+                "saved_at": utc(now),
+            }
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state))
+            tmp.replace(self.state_path)
+
+
+def journal_args(watch: Watch, now: float, since: str = "", until: str = "", follow: bool = True) -> list[str]:
+    args = ["journalctl", "-u", "earlyoom", "-o", "json", "--no-pager"]
+    if since:
+        args.append(f"--since={since}")
+    elif watch.cursor:
+        args.append(f"--after-cursor={watch.cursor}")
+    else:
+        args.append(f"--since=@{int(now // 3600 * 3600)}")
+    if until:
+        args.append(f"--until={until}")
+    if follow:
+        args.append("--follow")
+    return args
+
+
+def journal_time(text: str) -> str:
+    """`2026-11-02T15:00Z` -> what journalctl takes (`2026-11-02 15:00:00 UTC`)."""
+    match = re.fullmatch(r"(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d)(?::(\d\d))?Z?", text)
+    return f"{match[1]} {match[2]}:{match[3] or '00'} UTC" if match else text
+
+
+def run_service(options: argparse.Namespace) -> int:
+    lock_path = options.state.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = open(lock_path, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log(f"another earlyoom-kill-watch holds {lock_path}; exiting")
+        return 1
+    send = envoy_send
+    if options.dry_run:
+        def send(target, text):
+            log(f"DRY RUN: would send to {target}: {text}")
+            return True
+    now = time.time()
+    watch = Watch(state_path=options.state, send=send, to=options.to, started=now)
+    lines: queue.Queue = queue.Queue()
+    journal = subprocess.Popen(journal_args(watch, now), stdout=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
+
+    def read_journal() -> None:
+        for raw in journal.stdout:
+            lines.put(raw)
+        lines.put(None)
+
+    threading.Thread(target=read_journal, daemon=True).start()
+    sender: threading.Thread | None = None
+    log(f"earlyoom-kill-watch started: state {options.state}, route {'--to ' + options.to if options.to else 'owner'},"
+        f" {'from cursor' if watch.cursor else 'no cursor: counting from the hour, notifying from now'}")
+    last_report = 0.0
+
+    def send_due(at: float) -> None:
+        if watch.flush(at):
+            watch.save(time.time())
+
+    # systemd stops the service with SIGTERM; the state is saved on the way out, so a restart
+    # neither counts nor sends a line twice.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        while True:
+            now = time.time()
+            watch.sample(now)
+            read = 0
+            while True:
+                try:
+                    raw = lines.get_nowait()
+                except queue.Empty:
+                    break
+                if raw is None:
+                    log(f"journalctl exited ({journal.wait()}); exiting for systemd to restart")
+                    return 1
+                try:
+                    watch.on_entry(json.loads(raw), now)
+                except ValueError:
+                    continue
+                read += 1
+            if read:
+                watch.save(now)
+            if watch.pending and (sender is None or not sender.is_alive()):
+                sender = threading.Thread(target=send_due, args=(now,), daemon=True)
+                sender.start()
+            if now - last_report >= 60:
+                log(watch.counts_line(now))
+                watch.save(now)
+                last_report = now
+            time.sleep(max(0.2, SAMPLE_EVERY - (time.time() - now)))
+    finally:
+        watch.save(time.time())
+        journal.terminate()
+
+
+def run_replay(options: argparse.Namespace) -> int:
+    """Read a past window of the journal and show whom each kill would reach, with what this
+    watch knows now (its saved table and the live process tree). Sends only with --send."""
+    def show(target, text):
+        log(f"WOULD SEND to {target}:\n{text}\n")
+        return True
+
+    watch = Watch(state_path=options.state, send=envoy_send if options.send else show, to=options.to, replay=True)
+    watch.cursor, watch.last_ts, watch.recent, watch.pending = None, 0, [], []
+    watch.hours = {}
+    watch.sample(time.time())
+    args = journal_args(watch, time.time(), since=journal_time(options.since),
+                        until=journal_time(options.until) if options.until else "", follow=False)
+    done = subprocess.run(args, capture_output=True, text=True)
+    for raw in done.stdout.splitlines():
+        try:
+            watch.on_entry(json.loads(raw), time.time())
+        except ValueError:
+            continue
+    watch.flush(time.time(), force=True)
+    log(json.dumps(watch.hours, sort_keys=True))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--to", default="", help="send every notice to this session id instead of its owner (a drill)")
+    parser.add_argument("--dry-run", action="store_true", help="log the notices; send nothing")
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--replay", action="store_true", help="read a past window; send nothing unless --send")
+    parser.add_argument("--since", default="", help="replay window start, e.g. 2026-11-02T15:00Z")
+    parser.add_argument("--until", default="", help="replay window end")
+    parser.add_argument("--send", action="store_true", help="with --replay: send the notices")
+    parser.add_argument("--counts", action="store_true", help="print the saved kills per hour as JSON")
+    options = parser.parse_args(argv)
+    if options.to and not re.fullmatch(UUID, options.to):
+        parser.error(f"--to {options.to!r} is not a session id")
+    if options.counts:
+        try:
+            print(json.dumps(json.loads(options.state.read_text()).get("hours") or {}, indent=1, sort_keys=True))
+        except (OSError, ValueError) as error:
+            print(f"no state at {options.state}: {error}", file=sys.stderr)
+            return 1
+        return 0
+    if options.replay:
+        if not options.since:
+            parser.error("--replay needs --since")
+        return run_replay(options)
+    return run_service(options)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
