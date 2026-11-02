@@ -35,7 +35,7 @@ description: "Use when you create, edit, rewrite, shorten, test or delete an age
 - State the condition that decides; never add "unless it matters" or "where reasonable". One such clause turned a consistent instruction into a noisy one.
 - Keep incident stories, dates and URLs out of the body; put them in the commit message, because the agent reads a story as an instruction and misses its rule.
 - Check that every path, command and skill you name exists. An agent that follows a dead pointer creates the missing thing.
-- Do not copy the rule to follow the code over a skill into a skill: it is in CLAUDE.md, which every session loads.
+- Do not copy the rule to follow the code over a skill into a skill: it is in `~/.dotfiles/.claude/CLAUDE.md`.
 
 ## 4. Test it
 

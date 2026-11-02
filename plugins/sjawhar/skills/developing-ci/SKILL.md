@@ -5,8 +5,6 @@ description: "Use before any CI edit or re-run, even small: job, matrix, runner,
 
 # Developing CI
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 CI minutes are money: dollars = billed minutes x the runner's price per minute. Most waste is a whole suite that runs on every push, on a runner too large for it, more often than a merge needs it. Documentation-only runs and runs of replaced heads are usually a few percent.
 
 ## 1. Before you add or change a job: estimate it
