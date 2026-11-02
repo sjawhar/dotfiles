@@ -28,9 +28,17 @@ def shake_regions(path, art):
     key = (str(path), art)
     if key not in _SHAKE_CACHE:
         regions, cur, buf = {}, None, []
-        # A subagent's transcript sits inside its parent's artifact directory, and its shake logs are written
-        # there, beside it, not under a directory of its own.
-        f = next((p for p in (artifact_dir(path) / f"{art}.shake.log", Path(path).parent / f"{art}.shake.log") if p.exists()), None)
+        # A subagent's transcript sits inside its parent's artifact directory, but omp writes every shake log
+        # into the TOP-LEVEL session's artifact directory, at any depth of nesting. So look in the transcript's
+        # own artifact directory, then in each directory above it, up to the sessions root (a second-level
+        # subagent's logs are two levels up; one level was all an older lookup tried, 8ede7b94).
+        here = Path(path).resolve()
+        tries = [artifact_dir(path) / f"{art}.shake.log"]
+        for d in list(here.parents)[:6]:
+            if d.name == "sessions":
+                break
+            tries.append(d / f"{art}.shake.log")
+        f = next((p for p in tries if p.exists()), None)
         if f is not None:
             for line in f.read_text(errors="replace").splitlines():
                 m = re.match(r"### region (\d+) \(", line)
