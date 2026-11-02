@@ -75,7 +75,7 @@ every session, which says how much of the box the agents were using in total.
 
 ```
  CORES   CPU-H      RSS  SESSION                               TITLE                 CWD
-  4.04    0.08    10.1G  01a13bcd-3e9f-7770-b0f4-88fa364eb58e  🚰 PIPE: task pipeli… /home/sami/src/example-task-repo
+  4.04    0.08    10.1G  01a13bcd-3e9f-7770-b0f4-88fa364eb58e  🚰 PIPE: task pipeli… /home/sami/src/<task repo>
  46.70    0.95           all 77 session(s)
 ```
 

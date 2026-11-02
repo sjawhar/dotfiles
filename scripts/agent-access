@@ -138,35 +138,6 @@ check_ant() {
     row anthropic_ant "$status" "${email:-unknown}" "${exp:-unknown}" "ant auth status"
 }
 
-# Platform has no CLI; its OAuth tokens live in the client's own file, whose path differs by
-# company (platform/auth.json at Theorem, trajectory-labs/platform.json at Trajectory). Each file
-# present gets its own row. Decode the id_token's own exp - never print it - and note the
-# refresh_token lets the client refresh past that.
-check_platform() {
-    local f tok exp now ttl status name found=0
-    for f in "$HOME/.config/platform/auth.json" "$HOME/.config/trajectory-labs/platform.json"; do
-        [[ -f "$f" ]] || continue
-        found=1
-        name="platform_$(basename "$(dirname "$f")")"
-        tok="$(jq -r '.id_token // empty' "$f" 2>/dev/null)"
-        if [[ -z "$tok" ]]; then
-            row "$name" unknown - - "$f" "config present, no id_token field"
-            continue
-        fi
-        exp="$(JWT_FIELD_TOKEN="$tok" jwt_field exp)"
-        if [[ -z "$exp" ]]; then
-            row "$name" unknown - - "$f" "id_token present, exp claim unreadable"
-            continue
-        fi
-        now=$(date +%s)
-        ttl=$((exp - now))
-        if ((ttl > 0)); then status=live; else status=expired; fi
-        row "$name" "$status" "platform client (no CLI; config only)" "$(iso "$exp")" "$f" \
-            "id_token only; refresh_token is also present and the platform client refreshes on use"
-    done
-    ((found)) || row platform missing - - "$HOME/.config/platform/auth.json" "no platform client config"
-}
-
 check_vercel() {
     local out rc user
     out="$(timeout "$TIMEOUT_S" vercel whoami 2>&1)"
@@ -339,7 +310,20 @@ check_dispatch() {
     fi
 }
 
-for fn in check_aws check_github_app check_hawk check_ant check_platform check_vercel \
+# A check whose name would name a customer lives in the private repository theorem-labs/sami,
+# cloned at <dotfiles>/.secrets: each <dotfiles>/.secrets/dotfiles/agent-access.d/*.sh is sourced
+# here, defines its check functions on the helpers above, and appends them to extra_checks and
+# the row names they write to extra_rows. A machine without that clone runs only the checks above.
+dotfiles="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+extra_checks=()
+extra_rows=()
+for extra in "$dotfiles"/.secrets/dotfiles/agent-access.d/*.sh; do
+    [[ -r "$extra" ]] || continue
+    # shellcheck disable=SC1090
+    source "$extra"
+done
+
+for fn in check_aws check_github_app check_hawk check_ant "${extra_checks[@]}" check_vercel \
     check_datadog check_gcloud check_gws check_fleetctl check_sentry check_kubectl \
     check_secretsd check_agent_secrets_broker check_modal check_dispatch; do
     "$fn" &
@@ -350,7 +334,7 @@ wait
 # from the files it wrote. An unmatched glob stays literal, and the loops below
 # skip a name with no row file.
 gws_rows=("$tmp"/google_workspace_*)
-order=(aws github_app anthropic_ant hawk platform platform_platform platform_trajectory-labs google_workspace "${gws_rows[@]##*/}" \
+order=(aws github_app anthropic_ant hawk "${extra_rows[@]}" google_workspace "${gws_rows[@]##*/}" \
     gcloud vercel datadog_pup \
     fleetctl sentry kubectl secretsd_grants agent_secrets_broker modal dispatch)
 

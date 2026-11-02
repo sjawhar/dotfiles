@@ -53,9 +53,9 @@ rw .config/gcloud
 # and refreshes tokens in it, so it is rw.
 rw .azure-box-identity
 
-# work identities agents use
+# work identities agents use (a customer platform's client config is in the private part of this
+# list, .secrets/dotfiles/agentbox/mounts, so its name stays out of this public repository)
 rw .config/trajectory-labs
-rw .config/platform
 rw .config/gws
 rw .config/knives
 rw .cache/knives

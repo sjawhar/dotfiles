@@ -16,7 +16,7 @@ of which GitHub documents as free or cheap:
     out as `If-None-Match`, and a `304 Not Modified` does not count against the
     primary rate limit for an authenticated request. Measured here on
     2026-11-01: three conditional reads of
-    `repos/theorem-labs/example-task-repo` left `X-RateLimit-Used` at
+    `repos/theorem-labs/<task repo>` left `X-RateLimit-Used` at
     549, three unconditional ones took it to 550, 551, 552.
 
 Nothing that writes is cached: the classifier is an allow-list of read verbs

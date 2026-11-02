@@ -28,4 +28,4 @@ A user in an OU that enforces 2-Step Verification who has not enrolled cannot si
 3. Remove the membership. Enforcement returns by propagation too: `isEnforcedIn2Sv` still read false 30 seconds after the 204, and true within about 4 minutes. The 204 is the truth about membership; re-read `isEnforcedIn2Sv` after a pause before concluding enforcement is back.
 4. Rotate the password to a value nobody records, then `signOut`.
 
-Neither the password reset nor `signOut` revokes an OAuth grant whose scopes include no Gmail scope. Platform's sign-in grant (`openid`, `userinfo.email`, `userinfo.profile`) survived both, checked by a token refresh and an authenticated call before and after.
+Neither the password reset nor `signOut` revokes an OAuth grant whose scopes include no Gmail scope. A customer platform's sign-in grant (`openid`, `userinfo.email`, `userinfo.profile`) survived both, checked by a token refresh and an authenticated call before and after.

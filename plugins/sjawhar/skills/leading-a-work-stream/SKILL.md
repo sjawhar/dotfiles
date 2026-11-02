@@ -25,7 +25,7 @@ Arm a reminder that wakes you every 3 hours and run the six-step loop it names: 
 
 A date is the time the work takes at agent speed, plus only the waits nobody can shorten. Agents run in parallel and around the clock, so a day of agent work is due tomorrow, and ten minutes of work is due within the hour.
 
-- Each date carries its basis in one line ("about 3 h of work, 2 h of Platform runs"), so padding is visible.
+- Each date carries its basis in one line ("about 3 h of work, 2 h of grading runs"), so padding is visible.
 - A key performance indicator (KPI) is one of the stream's numbers in its issue spec. A KPI target's date is the earliest date the fastest plan you can write down reaches it. Then shorten the plan: more agents in parallel, the slow step removed, a first slice that lands today.
 - When a date will slip, say so the moment you know, with the new date and why. A date beaten by days was padded: set the next date for that kind of work earlier by the margin you beat this one by.
 

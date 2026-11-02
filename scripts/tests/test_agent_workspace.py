@@ -2,7 +2,7 @@
 """Regression tests for agent-workspace: a second tree of one repository shares its objects.
 
 The case these were written for: on 2026-10-30, eight children of
-~/.worktrees/example-task-repo each held an object store of its own, 19.0 GB for one
+~/.worktrees/<task repo> each held an object store of its own, 19.0 GB for one
 repository whose history is 4.8 GB, and the root filesystem of sami-rocqperf reached 14 MiB
 free. The tests build the same shape in miniature and check the five things the provisioner
 must get right: the default shares, the flag that does not is the flag, removal clears the

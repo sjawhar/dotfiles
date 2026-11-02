@@ -40,7 +40,7 @@ def make_jwt(payload: dict) -> str:
 
 
 # Secret-shaped substrings this script must never print, however a stub or a
-# real CLI answers: full JWTs (hawk, platform) and token-prefixed credentials.
+# real CLI answers: full JWTs (hawk) and token-prefixed credentials.
 SECRET_MARKERS = [
     "eyJhbGciOiAibm9uZSIsICJ0eXAiOiAiSldUIn0",  # this suite's JWT header b64
     "ghs_should_never_print",
@@ -58,7 +58,7 @@ class AgentAccess(unittest.TestCase):
         self.home.mkdir()
         self.addCleanup(self.temp_dir.cleanup)
 
-    def run_access(self, *args: str, timeout: float = 20) -> subprocess.CompletedProcess:
+    def run_access(self, *args: str, timeout: float = 20, script: Path = AGENT_ACCESS) -> subprocess.CompletedProcess:
         # Only stub_dir plus the directories holding core utils the script
         # itself relies on (python3, jq, awk, timeout, grep, ...) - never the
         # host's real PATH, or a real aws/gcloud/vercel install would answer
@@ -77,7 +77,7 @@ class AgentAccess(unittest.TestCase):
         }
         start = time.monotonic()
         result = subprocess.run(
-            [str(AGENT_ACCESS), *args],
+            [str(script), *args],
             capture_output=True,
             text=True,
             env=env,
@@ -257,14 +257,6 @@ fi
         cache.mkdir(parents=True)
         (cache / "covered-123.json").write_text(json.dumps({"sjawhar": 1}))
 
-        # platform config with a (deliberately expired) id_token
-        tl_dir = self.home / ".config" / "trajectory-labs"
-        tl_dir.mkdir(parents=True)
-        platform_jwt = make_jwt({"exp": int(time.time()) - 10})
-        (tl_dir / "platform.json").write_text(
-            json.dumps({"id_token": platform_jwt, "refresh_token": "rt"})
-        )
-
         result = self.run_access("--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = {row["name"]: row for row in json.loads(result.stdout)}
@@ -276,7 +268,6 @@ fi
         self.assertEqual(rows["anthropic_ant"]["status"], "live")
         self.assertEqual(rows["github_app"]["status"], "live")
         self.assertIn("sjawhar", rows["github_app"]["identity"])
-        self.assertEqual(rows["platform_trajectory-labs"]["status"], "expired")
         self.assertEqual(rows["vercel"]["identity"], "sami-2219")
         self.assertEqual(rows["datadog_pup"]["status"], "live")
         self.assertEqual(rows["gcloud"]["status"], "live")
@@ -293,7 +284,37 @@ fi
 
         self.assert_no_secrets(result.stdout)
         self.assertNotIn(hawk_jwt, result.stdout)
-        self.assertNotIn(platform_jwt, result.stdout)
+
+    def test_private_checks_beside_the_dotfiles_are_sourced_and_ordered(self) -> None:
+        # A check whose name would name a customer lives in <dotfiles>/.secrets/dotfiles/
+        # agent-access.d/*.sh (a private repository); the script finds that directory from its
+        # own path, runs each check it adds and prints the rows it names after hawk.
+        dotfiles = self.root / "dotfiles"
+        (dotfiles / "scripts").mkdir(parents=True)
+        script = dotfiles / "scripts" / "agent-access"
+        shutil.copy(AGENT_ACCESS, script)
+        private = dotfiles / ".secrets" / "dotfiles" / "agent-access.d"
+        private.mkdir(parents=True)
+        (private / "demo.sh").write_text(
+            'check_demo() { row demo_platform live demo-identity - "demo login" "from the private part"; }\n'
+            "extra_checks+=(check_demo)\n"
+            "extra_rows+=(demo_platform)\n",
+            encoding="utf-8",
+        )
+        result = self.run_access("--json", script=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = [row["name"] for row in json.loads(result.stdout)]
+        self.assertIn("demo_platform", names)
+        self.assertLess(names.index("hawk"), names.index("demo_platform"))
+        demo = next(row for row in json.loads(result.stdout) if row["name"] == "demo_platform")
+        self.assertEqual((demo["status"], demo["identity"]), ("live", "demo-identity"))
+
+    def test_without_the_private_directory_only_the_public_checks_run(self) -> None:
+        result = self.run_access("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = [row["name"] for row in json.loads(result.stdout)]
+        self.assertIn("hawk", names)
+        self.assertFalse([n for n in names if n.startswith("demo")], names)
 
 
 if __name__ == "__main__":

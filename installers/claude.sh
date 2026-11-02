@@ -21,6 +21,17 @@ if [ -d "${DOTFILES_DIR}/.claude/skills" ] && [ ! -L "${DOTFILES_DIR}/.claude/sk
     rm -rf "${DOTFILES_DIR}/.claude/skills"
 fi
 
+# Skills that name a customer live in the private repository theorem-labs/sami (cloned at
+# .secrets), not in the public plugin, so Claude Code reads them from its user skills directory.
+private_skills="${DOTFILES_DIR}/.secrets/dotfiles/skills"
+if [ -d "$private_skills" ]; then
+    mkdir -p "$HOME/.claude/skills"
+    for skill in "$private_skills"/*/; do
+        [ -f "${skill}SKILL.md" ] || continue
+        ensure_link "${skill%/}" "$HOME/.claude/skills/$(basename "$skill")"
+    done
+fi
+
 # A default cld session reads .claude/envoy.json and has no Dispatch or Envoy without one
 # (envoy/AGENTS.md): link it to the neutral file this machine's Dispatch and Envoy setup wrote.
 envoy_json="${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json"

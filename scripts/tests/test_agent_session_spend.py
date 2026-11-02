@@ -181,9 +181,9 @@ class AgentSessionSpendTest(unittest.TestCase):
         self.assertEqual(out["CLAUDE_CODE_ENABLE_TELEMETRY"], "<unset>")
 
     def test_the_working_directory_glob_then_shared(self) -> None:
-        platform = self.root / "src" / "example-task-repo"
-        platform.mkdir(parents=True)
-        self.assertEqual(self.run_agent({}, cwd=platform)["THEOREM_PROJECT"], "task-making")
+        task_repo = self.root / "src" / "binary-equivalence-example"
+        task_repo.mkdir(parents=True)
+        self.assertEqual(self.run_agent({}, cwd=task_repo)["THEOREM_PROJECT"], "task-making")
         self.assertEqual(self.run_agent({})["THEOREM_PROJECT"], "shared")
 
     def test_tailnet_endpoint_without_token_exports_and_sets_no_header(self) -> None:
@@ -215,13 +215,13 @@ class AgentSessionSpendTest(unittest.TestCase):
     def test_the_machine_default_in_every_shell_is_not_an_inherited_project(self) -> None:
         # The setup's env.sh puts the machine's default project in every shell; the working directory still decides.
         (self.config / "agent-spend" / "default-project").write_text("legion\n")
-        platform = self.root / "src" / "example-task-repo"
-        platform.mkdir(parents=True)
+        task_repo = self.root / "src" / "binary-equivalence-example"
+        task_repo.mkdir(parents=True)
         shell = {"OTEL_RESOURCE_ATTRIBUTES": "theorem.project=legion,theorem.person=sami@theorem.dev"}
-        self.assertEqual(self.run_agent(shell, cwd=platform)["THEOREM_PROJECT"], "task-making")
+        self.assertEqual(self.run_agent(shell, cwd=task_repo)["THEOREM_PROJECT"], "task-making")
         self.assertEqual(self.run_agent(shell)["THEOREM_PROJECT"], "legion")
         other = {"OTEL_RESOURCE_ATTRIBUTES": "theorem.project=rocq-speed"}
-        self.assertEqual(self.run_agent(other, cwd=platform)["THEOREM_PROJECT"], "rocq-speed")
+        self.assertEqual(self.run_agent(other, cwd=task_repo)["THEOREM_PROJECT"], "rocq-speed")
 
     def test_the_machines_lane_unless_one_is_inherited(self) -> None:
         (self.config / "agent-spend" / "lane").write_text("box-1\n")

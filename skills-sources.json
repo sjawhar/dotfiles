@@ -5,6 +5,10 @@
       "root": "plugins/sjawhar"
     },
     {
+      "$comment": "Skills that name a customer, kept out of this public repository: the private repository theorem-labs/sami, cloned at .secrets, holds them under dotfiles/skills. A machine without that clone has no such pool, and dotfiles-skills.ts skips it.",
+      "root": ".secrets/dotfiles"
+    },
+    {
       "root": "vendor/gh-stack"
     },
     {

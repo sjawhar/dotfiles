@@ -7,7 +7,7 @@ further tree of that repository is cut from it, so its objects exist once. `new`
 the way the thing it is requires.
 
 Why this exists, measured on sami-rocqperf on 2026-10-30. Under
-`~/.worktrees/example-task-repo`, eight children held an object store of their own:
+`~/.worktrees/<task repo>`, eight children held an object store of their own:
 census 4.8 GB, craft-a 4.9 GB, craft-b 8.6 GB, lanes-main 221 MB, per-lemma-bridge 196 MB,
 lane-candidate 162 MB, speed-loop-weekly 142 MB, design10x 17 MB — 19.0 GB of `.git` for ONE
 repository whose history is about 4.8 GB. Seven children of the same directory were worktrees
@@ -194,7 +194,7 @@ def unpushed_work(ws: Path) -> str:
     """What THIS tree holds that no remote has, as one line; empty when nothing.
 
     Scoped to the tree's own HEAD on purpose. A worktree shares the source's refs, and the
-    canonical checkout of example-task-repo carries 1,448 local branches, so one
+    canonical checkout of the task repository carries 1,448 local branches, so one
     `git rev-list` per branch took this check past five minutes on 2026-10-30. The other
     branches are not this workspace's work and nothing here removes them.
     """

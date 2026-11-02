@@ -43,7 +43,7 @@ sessions and an agent box does not share it, so a resumed worker finds no tree.
 
 **Never `git clone` a repository a checkout of which is already on the machine.** A plain clone
 materialises its own object store. On 2026-10-30 nine children of
-`~/.worktrees/example-task-repo` each held one — 19.0 GiB for a repository whose canonical
+`~/.worktrees/<task repo>` each held one — 19.0 GiB for a repository whose canonical
 checkout is 2.0 GiB — and the root disk reached 14 MiB free with 221 GiB free on another volume.
 Through `agent-workspace`, a second tree of that repository costs 202 MiB of files and 2.1 MiB in
 the source. Where a tree genuinely needs refs of its own, `agent-workspace new --separate-repo`

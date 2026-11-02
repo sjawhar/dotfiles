@@ -37,6 +37,18 @@ What you SHOULD do:
 
 If the input needs no changes, output it as-is.'
 
+# Terms that would name a customer stay out of the public vocabulary.json: the private
+# repository theorem-labs/sami (cloned at <dotfiles>/.secrets) lists them in the same form,
+# and they join the list here. A machine without that clone has only the public terms.
+PRIVATE_VOCABULARY="$(dirname "$(readlink -f "$0")")/../.secrets/dotfiles/voxtype/vocabulary.json"
+if [ -r "$PRIVATE_VOCABULARY" ]; then
+    private_terms=$("$JQ" -r '.[]' "$PRIVATE_VOCABULARY" 2>/dev/null || true)
+    if [ -n "$private_terms" ]; then
+        VOXTYPE_VOCABULARY="${VOXTYPE_VOCABULARY:+${VOXTYPE_VOCABULARY}
+}${private_terms}"
+    fi
+fi
+
 # Vocabulary from voxtype (newline-separated). Appended to the system prompt
 # so near-miss transcriptions get corrected to these exact spellings.
 if [ -n "${VOXTYPE_VOCABULARY:-}" ]; then

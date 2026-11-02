@@ -309,7 +309,7 @@ def read_streams(api: Dispatch) -> dict[str, dict]:
             ats = [v.get("at") for v in (n.get("values") or ()) if isinstance(v, dict) and v.get("at")]
             if ats:
                 # `cadence` says what produces the next reading, for a number that is not read on a clock. Rocq
-                # speed's is a Platform grade of 10 fixed trees on two images, 3-4 h, so re-reading an unchanged image
+                # speed's is a platform grade of 10 fixed trees on two images, 3-4 h, so re-reading an unchanged image
                 # measures noise: its scoreboard says "on each grader image or Rocq build change" (2026-10-29).
                 # Without this the check flagged a number that was correctly unchanged, which is a check that cannot
                 # tell a real state from its own definition.

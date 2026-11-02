@@ -2,7 +2,7 @@
 """Regression tests for worktree-clone-check: it flags the clone and leaves the worktree alone.
 
 The case it was written for is in scripts/worktree-clone-check.md: five children of
-~/.worktrees/example-task-repo held their own object stores on 2026-10-30 and root hit
+~/.worktrees/<task repo> held their own object stores on 2026-10-30 and root hit
 zero bytes free. The tests below build the same shape in miniature — one real worktree, one
 clone — and check the three things the gate must get right: which child it names, that an
 identical store reached by a hardlink is not counted as duplicated bytes, and that a copy with

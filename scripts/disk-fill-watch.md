@@ -272,7 +272,7 @@ gives the newest file or directory modification time it saw; it never infers tha
 ended.
 
 **"Born" is the entry's birth, not its ctime.** On 2026-10-31T21:51:59Z this watch named
-`~/src/example-task-repo` — the shared canonical checkout, created 2026-10-14T01:48:07Z
+`~/src/<task repo>` — the shared canonical checkout, created 2026-10-14T01:48:07Z
 (`stat -c %w`) — as "born in the last 6 h", because a session had restored its HEAD at
 18:01:03Z and a Linux ctime moves with the directory's mtime. The birth now comes from
 **statx(2)** (`os.stat` grew `st_birthtime` on Linux only in Python 3.13; this box runs 3.12.3,

@@ -26,14 +26,14 @@ This check was run against the same directory at **16:22Z on 2026-10-30**, after
 had begun clearing up, and its own reading differs from that one in detail: four of those stores
 were left, two of them made by `export from jj` and two by a local `git clone` of a sibling, and
 the shared pack id stood in two of them — through a single inode. It found 23 clones in all
-under `~/.worktrees`, beside 12 real worktrees, and under `example-task-repo`:
+under `~/.worktrees`, beside 12 real worktrees, and under `<task repo>`:
 
 | child | `.git` | duplicated | how it was made (first reflog line) |
 |---|---|---|---|
-| `craft-b` | 9.16 GB | — (5.12 GB of it is one inode shared with `census`) | 2026-10-30T11:24:39Z `clone: from …/example-task-repo/census` |
+| `craft-b` | 9.16 GB | — (5.12 GB of it is one inode shared with `census`) | 2026-10-30T11:24:39Z `clone: from …/<task repo>/census` |
 | `i2` | 5.14 GB | 5.07 GB | 2026-10-30T14:32:56Z `export from jj` |
 | `craft-a` | 5.14 GB | 5.06 GB | 2026-10-30T11:31:07Z `export from jj` |
-| `census` | 5.13 GB | — | 2026-10-30T11:23:49Z `clone: from …/example-task-repo/./proof-craft` |
+| `census` | 5.13 GB | — | 2026-10-30T11:23:49Z `clone: from …/<task repo>/./proof-craft` |
 
 Four sessions, one repository, four object stores. Across the whole root the stores named
 26.72 GB, occupied **21.60 GB** of root after hardlink dedup, and **10.87 GB of that was a
@@ -103,25 +103,25 @@ $ scripts/worktree-clone-check
 worktree-clone-check 2026-10-30T16:22:14Z  root /home/sami/.worktrees  depth 2
 23 clone(s), 12 real worktree(s), 1 symlinked child(ren) not followed
 
-clone  example-task-repo/craft-b
+clone  <task repo>/craft-b
        size    total 10.88 GB, .git 9.16 GB, 5.12 GB of it hardlinked to another store
        head    detached fcb25b7a6487 @ fcb25b7a648
        session Omp-Session: 01a16551-5d7c-72f0-bd54-d1c97d2adfdc
-       reflog  2026-10-30T11:24:39Z  clone: from /home/sami/.worktrees/example-task-repo/census
+       reflog  2026-10-30T11:24:39Z  clone: from /home/sami/.worktrees/<task repo>/census
        packs   3, 8.97 GB
 …
-clone  example-task-repo/i2
+clone  <task repo>/i2
        size    total 5.95 GB, .git 5.14 GB
        head    detached ba212843fdbf @ ba212843fdb
        session Omp-Session: 01a16551-5d7c-72f0-bd54-d1c97d2adfdc
        reflog  2026-10-30T14:32:56Z  export from jj
        packs   1, 5.07 GB; 5.07 GB of them objects an earlier store already holds
 …
-clone  example-task-repo/lanes-main
+clone  <task repo>/lanes-main
        size    total 0.58 GB, .git 0.23 GB
        head    branch main @ ee13045fa6
        session Omp-Session: 01a16a9e-a9b0-761c-97bf-28d7cf2eaac2
-       reflog  2026-10-24T05:22:55Z  clone: from https://github.com/theorem-labs/example-task-repo.git
+       reflog  2026-10-24T05:22:55Z  clone: from https://github.com/theorem-labs/<task repo>.git
        packs   35, 0.19 GB; 0.19 GB of them objects an earlier store already holds
        holds   5 worktree(s) point INTO this store
 …

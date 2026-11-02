@@ -185,10 +185,17 @@ BROKER_UNREADY=""
 
 # What a session relies on, and nothing more: agentbox/mounts, one "<rw|ro>
 # <path>" per line. Read here (host) and by doctor (box); both see the file
-# because the dotfiles are mounted.
+# because the dotfiles are mounted. A path whose name would name a customer is
+# listed in the same form in the private repository theorem-labs/sami (cloned at
+# .secrets), PRIVATE_MOUNTS_FILE; a machine without that clone has none of them.
 MOUNTS_FILE="$DOTFILES_DIR/agentbox/mounts"
-# The entries of one mode, one path per line.
-mounts_of() { awk -v m="$1" '$1 == m { print $2 }' "$MOUNTS_FILE"; }
+PRIVATE_MOUNTS_FILE="$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts"
+# The entries of one mode, one path per line, from both lists.
+mounts_of() {
+    local files=("$MOUNTS_FILE")
+    [[ -r "$PRIVATE_MOUNTS_FILE" ]] && files+=("$PRIVATE_MOUNTS_FILE")
+    awk -v m="$1" '$1 == m { print $2 }' "${files[@]}"
+}
 
 die() { echo "agentbox: $*" >&2; exit 1; }
 
@@ -323,10 +330,10 @@ box_dir_bound_why() {
         [[ "$(readlink -f "$p")" == "$path" ]] && { echo "every box has it already: $p links to it and $SRC is mounted"; return 0; }
     done
     while read -r p; do
-        [[ "$HOME/$p" == "$path" ]] && { echo "$MOUNTS_FILE gives every box this path read-write"; return 0; }
+        [[ "$HOME/$p" == "$path" ]] && { echo "the box allow-list ($MOUNTS_FILE or its private part) gives every box this path read-write"; return 0; }
     done < <(mounts_of rw)
     while read -r p; do
-        [[ "$HOME/$p" == "$path" ]] && { echo "$MOUNTS_FILE gives every box this path READ-ONLY"; return 0; }
+        [[ "$HOME/$p" == "$path" ]] && { echo "the box allow-list ($MOUNTS_FILE or its private part) gives every box this path READ-ONLY"; return 0; }
     done < <(mounts_of ro)
     return 1
 }
@@ -352,7 +359,7 @@ box_dir_have() {
 }
 
 # A TREE IS NOT ITS OBJECTS. `~/src/machcsl-riscv/.git/objects` on this host is a SYMLINK to
-# /mnt/nvme/sami/git-objects/machcsl-riscv, and so are example-task-repo's,
+# /mnt/nvme/sami/git-objects/machcsl-riscv, and so are the task repository's,
 # machcsl-riscv-experimental's, link-eval-accept29's and ossvp-ulimit's. A box given the tree and
 # not the store answers `not a git repository` for every command in it - measured 2026-11-01 in
 # box agentbox-a0875d5a6f7c, started with `--dir ~/src/machcsl-riscv`, where `git rev-parse HEAD`
@@ -1491,7 +1498,7 @@ cmd_restart() {
 # works in it (cmd_new: a repo wins the working directory). For a NEW session that is right. For
 # a LIVE one it is not: the session would come back in a tree that is not the one it had - no
 # uncommitted changes, no index, no branch, and, for the 17 sessions sharing
-# ~/src/example-task-repo on 2026-11-01, none of each other's work either. $SRC is
+# the task repository's canonical checkout on 2026-11-01, none of each other's work either. $SRC is
 # bind-mounted read-write into every box already (mount_args), so `--dir <cwd>` of a checkout or
 # of a worktree under it adds no mount and no clone at all, and the session resumes in exactly
 # the directory it was in. So a move's spec is --dir only, and the only new disk it claims is
@@ -1702,7 +1709,7 @@ move_git_owner() {
 # Where a git working tree's OBJECTS actually live, one absolute path per line. A checkout's
 # `.git/objects` is not always inside the tree: on this host `~/src/machcsl-riscv/.git/objects`
 # is a SYMLINK to /mnt/nvme/sami/git-objects/machcsl-riscv, and so are
-# example-task-repo's, link-eval-accept29's, machcsl-riscv-experimental's and
+# the task repository's, link-eval-accept29's, machcsl-riscv-experimental's and
 # ossvp-ulimit's. A box given the tree but not the store answers `not a git repository` for every
 # command in it, and `knives gh` fails with it (measured 2026-11-01 by session 01a1798a-995f in
 # box agentbox-676432b23e44). So four things are followed for every tree in the spec, including
@@ -3035,7 +3042,7 @@ while read -r m p; do
         ro) [ -e "$HOME/$p" ] || { echo "note box: ro $p absent (not on the host)"; continue; }
             mounted "$HOME/$p" && ! writable "$HOME/$p" && ok "ro $p" || fail "ro $p: not a read-only mount (mounts entry newer than this box: relaunch to pick it up)";;
     esac
-done <"$DOTFILES_DIR/agentbox/mounts"
+done < <(cat "$DOTFILES_DIR/agentbox/mounts"; [ -r "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts" ] && cat "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts")
 r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os.environ[\"DBUS_SESSION_BUS_ADDRESS\"].split(\"=\",1)[1]); s.sendall(b\"\\0AUTH EXTERNAL 31303030\\r\\n\"); print(s.recv(64).split()[0].decode())" 2>&1)"; [ "$r" = OK ] && ok "session bus (keyring) reachable through the relay" || fail "session bus: $r"
 [ "$(ls -A "$HOME/.ssh" | sort | tr "\n" " ")" = "jj-signing jj-signing.pub " ] && ok ".ssh holds exactly the jj-signing pair" || fail ".ssh contents: $(ls -A "$HOME/.ssh" | tr "\n" " ")"
 # The ghcr login the entrypoint makes needs the machine to hold GHCR_PULL_TOKEN, so the host

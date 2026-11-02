@@ -20,7 +20,7 @@ Never change the active configuration or the ADC file to get Sami's login: every
 
 **A refusal is a stop, not a prompt to borrow an identity.** Never move a person's credential to where a machine keeps it: minting a token from his login (`gcloud auth print-access-token` under `theorem`) and feeding it to `docker login`, a git credential helper or a kubectl context writes his identity into a file every process on a shared host can read, and logs every later action as him. Instead find the account that is meant to hold the access and run as it, or impersonate it (`--impersonate-service-account`). On 2026-10-31 an agent did exactly this on `linux28-agents-7` to get past a registry denial, and it had to be withdrawn.
 
-Refused by a registry or shared environment: use an account that already has access, or copy it from a host that has it; never ask a person, the list is settled (`references/platform-access.md`). For `customer-gcp-project` no one at Theorem can grant access at all, so there is no one to ask.
+Refused by a registry or shared environment: use an account that already has access, or copy it from a host that has it; never ask a person, the list is settled. A Google Cloud project a customer owns is theirs alone to grant, so no one at Theorem can be asked for a role on it; the private skill for that customer's platform (`~/.dotfiles/.secrets/dotfiles/skills/`) lists the accounts that already hold access.
 
 ## Which identity az uses
 

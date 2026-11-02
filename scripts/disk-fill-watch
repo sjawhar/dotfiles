@@ -995,7 +995,7 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
 # ------------------------------------------------- the scratch rule: /tmp and the src root
 
 # The entry's BIRTH, not its ctime. On 2026-10-31T21:51:59Z this watch said "NEW BIG ~/src
-# ENTRY ... /home/sami/src/example-task-repo, born in the last 6 h" for the shared
+# ENTRY ... /home/sami/src/<task repo>, born in the last 6 h" for the shared
 # canonical checkout, which was created on 2026-10-14T01:48:07Z (`stat -c %w`); what changed
 # at 18:01:03Z was its directory mtime, when a session restored its HEAD, and a Linux ctime
 # moves with it. Only statx's btime answers the question the rule asks.

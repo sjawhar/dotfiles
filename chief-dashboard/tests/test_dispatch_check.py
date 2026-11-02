@@ -356,7 +356,7 @@ def test_a_stream_whose_main_number_is_older_than_a_tick_is_flagged_to_its_lead(
 
 
 def test_a_main_number_with_a_cadence_is_not_flagged_for_its_age():
-    # 2026-10-29: this check told Rocq speed its 4 h old number was stale. The number is a Platform grade of 10 fixed
+    # 2026-10-29: this check told Rocq speed its 4 h old number was stale. The number is a platform grade of 10 fixed
     # trees on two images, 3-4 h of farm time, and no image had changed, so a re-reading would have measured noise.
     # Its scoreboard says what produces the next one ("on each grader image or Rocq build change"). A check that
     # reads a value's age and not the condition that should produce a new one cannot tell a real state from its own
@@ -529,7 +529,7 @@ def test_an_issue_whose_spec_sets_its_own_status_rule_is_left_alone():
     spec = {"slug": "spec", "id": "s1", "versions": [{"number": 1}]}
     api = FakeDispatch([issue("BET-9", status="in_progress", claim=session(), artifacts=[spec],
                               links=["https://github.com/o/r/pull/7"])],
-                       texts={"s1": "## Problem\n\nThe status moves only on the criteria below, measured on Platform."})
+                       texts={"s1": "## Problem\n\nThe status moves only on the criteria below, measured on the platform."})
     green = {"https://github.com/o/r/pull/7": pr("https://github.com/o/r/pull/7")}
     lines = found(check(api, dc.Scope("BET"), github=lambda keys, linked: {"BET-9": green}), "STATUS")
     assert lines == []
