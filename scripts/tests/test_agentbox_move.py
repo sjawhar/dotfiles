@@ -1618,6 +1618,31 @@ class AgentboxMove(unittest.TestCase):
         for listed in (doc["mirror"], doc["merge"], doc["members"][0]["spec"]):
             self.assertFalse([p for p in listed if p.startswith(str(self.root / "lanes"))], listed)
 
+    def test_a_move_reads_the_paths_of_its_own_group_only(self) -> None:
+        """The group is found from the sessions' processes: a session whose processes are in none
+        of the group's trees is never inferred, since inferring every session on the host took
+        221 s before the hang-up on 2026-11-02."""
+        self.moving_session()
+        self.make_proc(999999910, comm="bash", ppid=1, cwd=self.worktree)
+        self.make_proc(999999911, ppid=999999910, cwd=self.worktree, session=self.TO2)
+        apart = self.root / "apart"
+        apart.mkdir()
+        third = "01a19700-0000-7000-8000-0000000e0003"
+        self.make_proc(999999950, comm="bash", ppid=1, cwd=apart)
+        self.make_proc(999999951, ppid=999999950, cwd=apart, session=third)
+        self.set_pids(999999901, 999999911, 999999951)
+        self.set_panes({999999900: ("%81", "agents:4.1"), 999999910: ("%82", "agents:5.1"),
+                        999999950: ("%86", "agents:9.1")})
+        self.target()
+        log = self.root / "PATHS"
+        result = self.run_bash(
+            'eval "orig_$(declare -f move_to_session_paths)"\n'
+            f'move_to_session_paths() {{ echo "$2" >>"{log}"; orig_move_to_session_paths "$@"; }}\n'
+            "move_own_omp() { echo 999999901; }\ncmd_move_to --to devbox --dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"group g-01a19700, 2 session(s): {self.TO} {self.TO2}", result.stdout)
+        self.assertEqual(sorted(log.read_text(encoding="utf-8").split()), [self.TO, self.TO2])
+
     def test_the_plan_lists_each_group_s_copy_and_size_and_changes_nothing(self) -> None:
         transcript = self.moving_session()
         self.set_pids(999999901)
@@ -1628,8 +1653,12 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("nothing is changed, copied or sent", plan.stdout)
         self.assertIn("group g-01a19700: 1 session(s)", plan.stdout)
         self.assertIn(f"resume on devbox: /target/agentbox new -e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", plan.stdout)
-        for path in (transcript, self.durable, self.worktree, self.lane, self.src / "repo/.git"):
+        # The mirrored paths are measured; the merged ones are listed unmeasured, since rsync sends
+        # only what is newer than the target's copy.
+        for path in (transcript, self.durable, self.worktree, self.other):
             self.assertRegex(plan.stdout, rf"\s\d[\d.]*[KMG]?\s+{path}\n")
+        for path in (self.lane, self.src / "repo/.git"):
+            self.assertRegex(plan.stdout, rf"\s-\s+{path}\n")
         self.assertIn("1 group(s), 1 session(s), 0 refused", plan.stdout)
         self.assertFalse((self.remote / "SSH").exists())
         self.assertFalse(self.plan_dir.exists())

@@ -750,18 +750,46 @@ ensure_unix_forwarder() {
 # cannot drive panes cannot be boxed at all - which would leave the coordination sessions, the
 # heaviest on the host, outside every limit this work exists to apply.
 #
-# The socket the host session itself uses ($TMUX's first field) is the source, so a machine
-# whose TMUX_TMPDIR is not /tmp (this one keeps its sockets in ~/.tmux/sockets) is followed
-# rather than guessed; AGENTBOX_TMUX_SOCK overrides, and a host with no tmux gets no relay and
-# no mount. Inside, it is TMUX_TMPDIR/tmux-<box uid>/default, which is where a bare `tmux`
-# looks: the box user is uid 1000 by the image (agentbox/Dockerfile), whatever the host's uid.
+# The relay is ONE unit shared by every box on the host, so it always points at the host's
+# DEFAULT tmux server, never at the server a launch happens to come from: on 2026-11-02 one
+# `agentbox new` from a drill's `tmux -L devbox-drill` pane re-pointed the unit, and from
+# 17:18:45Z to 17:58Z every box's `tmux` reached that drill server instead of `agents`. The
+# default server is the one named `default` beside the caller's own socket (a `-L <name>` server
+# shares its directory, the caller's TMUX_TMPDIR), else under TMUX_TMPDIR, else /tmp;
+# AGENTBOX_TMUX_SOCK overrides, and a host with no default server gets no relay and no mount.
+# Inside, it is TMUX_TMPDIR/tmux-<box uid>/default, which is where a bare `tmux` looks: the box
+# user is uid 1000 by the image (agentbox/Dockerfile), whatever the host's uid.
 BOX_UID=1000
 HOST_TMUX_SOCK=""
 host_tmux_sock() {
+    HOST_TMUX_SOCK="${AGENTBOX_TMUX_SOCK:-}"
     # TMUX is unset outside tmux, where a bare ${TMUX%%,*} ends the launch under `set -u`.
-    HOST_TMUX_SOCK="${AGENTBOX_TMUX_SOCK:-${TMUX:+${TMUX%%,*}}}"
+    if [[ -z "$HOST_TMUX_SOCK" && -n "${TMUX:-}" ]]; then
+        HOST_TMUX_SOCK="$(dirname "${TMUX%%,*}")/default"
+        [[ -S "$HOST_TMUX_SOCK" ]] || HOST_TMUX_SOCK=""
+    fi
     [[ -n "$HOST_TMUX_SOCK" ]] || HOST_TMUX_SOCK="${TMUX_TMPDIR:-/tmp}/tmux-$UID_/default"
     [[ -S "$HOST_TMUX_SOCK" ]] || HOST_TMUX_SOCK=""
+}
+
+# The pane's tmux identity for the box, as `-e` and `NAME=VALUE` lines (session_env). TMUX is
+# `<socket>,<server pid>,<session index>`; the box gets the relay's path in the socket field, so
+# its tmux reaches the host's default server. Only a launch FROM that server gets it, and only
+# that launch gets TMUX_PANE: a pane id is a pane of one server, and %0 of a `-L` server is
+# another session's pane on the default one, which a box's `move --self` or `move --to` rollback
+# would respawn. A launch from any other server keeps its own TMUX, which does not resolve in
+# the box (omp only needs to know it is under tmux), and no pane, and is told so.
+box_tmux_env() {
+    [[ -n "${TMUX:-}" ]] || return 0
+    host_tmux_sock
+    local caller="${TMUX%%,*}"
+    if [[ -n "$HOST_TMUX_SOCK" && "$(readlink -f "$caller" 2>/dev/null)" == "$(readlink -f "$HOST_TMUX_SOCK")" ]]; then
+        printf -- '-e\nTMUX=/run/user/%s/tmux/tmux-%s/default,%s\n' "$UID_" "$BOX_UID" "${TMUX#*,}"
+        [[ -n "${TMUX_PANE:-}" ]] && printf -- '-e\nTMUX_PANE=%s\n' "$TMUX_PANE"
+        return 0
+    fi
+    printf -- '-e\nTMUX=%s\n' "$TMUX"
+    echo "agentbox: this launch is under tmux server $caller, not the host's default (${HOST_TMUX_SOCK:-none found}), which is the only server a box's tmux reaches; this box gets no TMUX_PANE, so it cannot drive or respawn its own pane" >&2
 }
 BOX_TMUX_DIR="$RUN_BASE/tmux"
 ensure_tmux_forwarder() {
@@ -1089,17 +1117,10 @@ session_env() {
     # is replaced with the relay's path inside the box and the rest is kept: omp still knows it
     # is under tmux, and tmux reaches the host's server.
     local v
-    for v in TMUX_PANE TERM_PROGRAM TERM_PROGRAM_VERSION; do
+    for v in TERM_PROGRAM TERM_PROGRAM_VERSION; do
         [[ -n "${!v:-}" ]] && e+=(-e "$v=${!v}")
     done
-    if [[ -n "${TMUX:-}" ]]; then
-        host_tmux_sock
-        if [[ -n "$HOST_TMUX_SOCK" ]]; then
-            e+=(-e "TMUX=/run/user/$UID_/tmux/tmux-$BOX_UID/default,${TMUX#*,}")
-        else
-            e+=(-e "TMUX=$TMUX")
-        fi
-    fi
+    mapfile -t -O "${#e[@]}" e < <(box_tmux_env)
     printf '%s\n' "${e[@]}"
 }
 
@@ -3442,8 +3463,8 @@ cmd_move_notify() {
 # `move --self` moves a session into a box on THIS machine; `move --to <machine>` moves it to a
 # box on another one, sami-devbox, with the same session id. The session's own process runs it
 # at its safe point, as it runs `--self`. It reaches the target over Tailscale SSH as
-# $MOVE_TO_USER and, for the session's GROUP - every live host session that shares a git working
-# tree with it (move_to_group), since a shared tree moves once, with all its users:
+# $MOVE_TO_USER and, for the session's GROUP - every live host session that works in one of its
+# git working trees (move_to_find_group), since a shared tree moves once, with all its users:
 #
 #   1. hangs each session up gracefully (SIGHUP, as `--self` does);
 #   2. copies to the target each session's transcript tree (its file, its own directory with the
@@ -3878,71 +3899,165 @@ move_to_settled() {
     done
 }
 
-# move_to_group SID: the sessions of SID's group, in MOVE_TO_GROUP (SID first): every session
-# whose MT_SHARE paths overlap - one inside the other - those of a session already in it.
-# MT_SHARE[sid] holds each session's paths, one per line (move_to_census_paths).
+# Each session's --dir paths (MT_DIRS), group paths (MT_SHARE: its git working trees), copy
+# lines (MT_COPY) and census row (MT_ROW), newline-joined, by session id; MOVE_TO_GROUP is the
+# group move_to_find_group found.
 declare -A MT_SHARE=() MT_ROW=() MT_COPY=() MT_DIRS=()
 MOVE_TO_GROUP=()
-move_to_overlap() {
-    local a b
-    while IFS= read -r a; do
-        [[ -n "$a" ]] || continue
-        while IFS= read -r b; do
-            [[ -n "$b" ]] || continue
-            if move_within "$a" "$b" || move_within "$b" "$a"; then return 0; fi
-        done <<<"${MT_SHARE[$2]:-}"
-    done <<<"${MT_SHARE[$1]:-}"
-    return 1
-}
-move_to_group() {
-    local queue=("$1") s t i=0
-    local -A in=([$1]=1)
-    MOVE_TO_GROUP=("$1")
-    while (( i < ${#queue[@]} )); do
-        s="${queue[i]}"
-        i=$((i + 1))
-        for t in "${!MT_SHARE[@]}"; do
-            [[ -z "${in[$t]:-}" ]] || continue
-            if move_to_overlap "$s" "$t"; then
-                in[$t]=1
-                queue+=("$t")
-                MOVE_TO_GROUP+=("$t")
-            fi
-        done
-    done
-}
 
-# move_to_census_paths [SELF_SID]: every live host session's census row (MT_ROW), --dir paths
-# (MT_DIRS), group paths (MT_SHARE) and copy lines (MT_COPY), each newline-joined, by session id.
-# SELF_SID gets the caller's --dir paths (BOX_DIRS) too. The plan's last answer counts, as for
-# `--self` (MOVE_USE_PLAN). Progress goes to stderr.
-move_to_census_paths() {
-    local self="${1:-}" rows=() line class pid sid pane at cwd detail sids=() n=0 extra=()
+# The host's sessions and their processes, read once: MT_ROW_OF (session id -> census row, for
+# every host or no-pane session with an id) and MT_TOUCHES ("<session id>\t<link>\t<target>" for
+# the working directory and every open file of each process of a session, from one `find` over
+# /proc).
+declare -A MT_ROW_OF=() MT_DONE=() MT_PTREES=()
+MT_TOUCHES=""
+move_to_scan_processes() {
+    local rows=() line class pid sid pane at cwd detail p map
     mapfile -t rows < <(move_census)
-    for line in "${rows[@]}"; do
-        IFS="$SEP" read -r class pid sid pane at cwd detail <<<"$line"
-        [[ ( "$class" == host || "$class" == no-pane ) && -n "$sid" ]] && sids+=("$sid")
-    done
-    echo "agentbox: ${#sids[@]} sessions with an id to read, to find the groups" >&2
     move_read_kids
-    move_record_prefetch "${sids[@]+"${sids[@]}"}"
-    MOVE_USE_PLAN=true
+    map="$(mktemp)"
     for line in "${rows[@]}"; do
         IFS="$SEP" read -r class pid sid pane at cwd detail <<<"$line"
         [[ ( "$class" == host || "$class" == no-pane ) && -n "$sid" ]] || continue
-        n=$((n + 1))
-        extra=()
-        [[ "$sid" == "$self" ]] && extra=(${BOX_DIRS[@]+"${BOX_DIRS[@]}"})
-        MT_ROW[$sid]="$line"
-        if move_to_session_paths "$pid" "$sid" "$cwd" ${extra[@]+"${extra[@]}"}; then
-            MT_DIRS[$sid]="$(printf '%s\n' "${MOVE_TO_DIRS[@]}")"
-            MT_SHARE[$sid]="$(printf '%s\n' "${MOVE_TO_SHARE[@]+"${MOVE_TO_SHARE[@]}"}")"
-            MT_COPY[$sid]="$(printf '%s\n' "${MOVE_TO_COPY[@]+"${MOVE_TO_COPY[@]}"}")"
-        else
-            MT_DIRS[$sid]="" MT_SHARE[$sid]="" MT_COPY[$sid]=""
-        fi
-        printf 'agentbox: [%d/%d] %s %s\n' "$n" "${#sids[@]}" "$sid" "$cwd" >&2
+        MT_ROW_OF[$sid]="$line"
+        while IFS= read -r p; do printf '%s\t%s\n' "$p" "$sid"; done < <(move_descendants "$pid") >>"$map"
     done
+    MT_TOUCHES="$(find "$PROC"/[0-9]*/cwd "$PROC"/[0-9]*/fd -maxdepth 1 -type l -printf '%p\t%l\n' 2>/dev/null \
+        | awk -F'\t' -v proc="$PROC/" 'NR == FNR { sid[$1] = $2; next }
+            { p = substr($1, length(proc) + 1); sub(/\/.*/, "", p); if (p in sid) print sid[p] "\t" $0 }' "$map" - || true)"
+    rm -f "$map"
+}
+
+# move_to_writes LINK: true when LINK, a /proc/<pid>/fd/<n> or /proc/<pid>/cwd, is a working
+# directory or a file open for writing (O_WRONLY or O_RDWR), as move_proc_dirs counts it.
+move_to_writes() {
+    local link="$1" key value flags=""
+    [[ "$link" == */cwd ]] && return 0
+    local pid="${link#"$PROC"/}"
+    pid="${pid%%/*}"
+    while read -r key value; do
+        [[ "$key" == flags: ]] && { flags="$value"; break; }
+    done 2>/dev/null <"$PROC/$pid/fdinfo/${link##*/}" || true
+    [[ -n "$flags" ]] && (( (8#$flags & 3) ))
+}
+
+# move_to_process_trees SID: the git working trees SID's own processes work in (a working
+# directory, or a file open for writing, in one), one per line, from MT_TOUCHES: what a session
+# shares with others, found without inferring its paths. Cached in MT_PTREES.
+move_to_process_trees() {
+    local s="$1" _sid link target dir
+    local -A seen=() roots=()
+    if [[ -z "${MT_PTREES[$s]+x}" ]]; then
+        while IFS=$'\t' read -r _sid link target; do
+            [[ "$target" == /* && "$target" != *" (deleted)" ]] || continue
+            if [[ "$link" == */cwd ]]; then dir="$target"; else dir="${target%/*}"; fi
+            [[ -n "$dir" && -z "${seen[$dir]:-}" ]] || continue
+            case "$dir" in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*|/tmp|/tmp/*) continue ;; esac
+            move_git_root_var "$dir" || { seen[$dir]=1; continue; }
+            move_to_writes "$link" || continue
+            seen[$dir]=1
+            move_dir_too_broad "$MOVE_GIT_ROOT" && continue
+            move_within "$MOVE_GIT_ROOT" "$HOME/.dotfiles" && continue
+            move_within "$MOVE_GIT_ROOT" "$DOTFILES_DIR" && continue
+            roots[$MOVE_GIT_ROOT]=1
+        done < <(awk -F'\t' -v s="$s" '$1 == s' <<<"$MT_TOUCHES")
+        MT_PTREES[$s]="$(printf '%s\n' "${!roots[@]}")"
+    fi
+    printf '%s\n' "${MT_PTREES[$s]}"
+}
+
+# move_to_records_parallel SID…: move_to_session_record for each SID not read yet, in parallel,
+# MOVE_RECORD_JOBS at a time, each in a subshell that leaves its answer in files.
+move_to_records_parallel() {
+    local s tmp running=0 todo=()
+    for s in "$@"; do [[ -n "${MT_DONE[$s]:-}" ]] || todo+=("$s"); done
+    (( ${#todo[@]} )) || return 0
+    tmp="$(mktemp -d)"
+    for s in "${todo[@]}"; do
+        (
+            move_to_session_record "$s"
+            printf '%s' "${MT_DIRS[$s]}" >"$tmp/$s.dirs"
+            printf '%s' "${MT_SHARE[$s]}" >"$tmp/$s.share"
+            printf '%s' "${MT_COPY[$s]}" >"$tmp/$s.copy"
+        ) &
+        running=$((running + 1))
+        if (( running >= MOVE_RECORD_JOBS )); then wait -n || true; running=$((running - 1)); fi
+    done
+    wait || true
+    for s in "${todo[@]}"; do
+        MT_DONE[$s]=1
+        MT_ROW[$s]="${MT_ROW_OF[$s]}"
+        MT_DIRS[$s]="$(cat "$tmp/$s.dirs" 2>/dev/null || true)"
+        MT_SHARE[$s]="$(cat "$tmp/$s.share" 2>/dev/null || true)"
+        MT_COPY[$s]="$(cat "$tmp/$s.copy" 2>/dev/null || true)"
+    done
+    rm -rf "$tmp"
+}
+
+# move_to_session_record SID [DIR…]: MT_DIRS, MT_SHARE and MT_COPY of one session
+# (move_to_session_paths), once; DIR… are the caller's own --dir paths.
+move_to_session_record() {
+    local s="$1" class pid sid pane at cwd detail
+    shift
+    [[ -z "${MT_DONE[$s]:-}" ]] || return 0
+    MT_DONE[$s]=1
+    MT_ROW[$s]="${MT_ROW_OF[$s]}"
+    IFS="$SEP" read -r class pid sid pane at cwd detail <<<"${MT_ROW_OF[$s]}"
+    MT_DIRS[$s]="" MT_SHARE[$s]="" MT_COPY[$s]=""
+    if move_to_session_paths "$pid" "$s" "$cwd" "$@"; then
+        MT_DIRS[$s]="$(printf '%s\n' "${MOVE_TO_DIRS[@]}")"
+        MT_SHARE[$s]="$(printf '%s\n' ${MOVE_TO_SHARE[@]+"${MOVE_TO_SHARE[@]}"})"
+        MT_COPY[$s]="$(printf '%s\n' ${MOVE_TO_COPY[@]+"${MOVE_TO_COPY[@]}"})"
+    fi
+}
+
+# move_to_find_group SID [DIR…]: SID's group in MOVE_TO_GROUP (SID first). SID's trees are its
+# inferred git working trees (its record and plan included); another session's are the git trees
+# its own processes work in (move_to_process_trees). A session joins when one of its processes
+# has its working directory, or a file open for writing, in a tree of a member, until nothing is
+# added. Then each member's paths are inferred, in parallel. Inferring every session of this host
+# one after the other took 221 s at load 300 (2026-11-02), all of it before the hang-up. Needs
+# move_to_scan_processes. DIR… are SID's own --dir paths.
+move_to_find_group() {
+    local self="$1" s i=0 o link trees
+    shift
+    local queue=("$self")
+    local -A in=([$self]=1)
+    MOVE_USE_PLAN=true
+    MOVE_TO_GROUP=()
+    move_to_session_record "$self" "$@"
+    while (( i < ${#queue[@]} )); do
+        s="${queue[i]}"
+        i=$((i + 1))
+        [[ -n "${MT_ROW_OF[$s]:-}" ]] || continue
+        MOVE_TO_GROUP+=("$s")
+        trees="$(move_to_process_trees "$s")"
+        [[ -z "${MT_DONE[$s]:-}" ]] || trees+=$'\n'"${MT_SHARE[$s]}"
+        while IFS=$'\t' read -r o link; do
+            [[ -z "${in[$o]:-}" ]] || continue
+            move_to_writes "$link" || continue
+            in[$o]=1
+            queue+=("$o")
+        done < <(TREES="$trees" awk -F'\t' '
+            BEGIN { n = split(ENVIRON["TREES"], t, "\n") }
+            {
+                p = $3
+                if ($2 !~ /\/cwd$/) sub(/\/[^\/]*$/, "", p)
+                for (k = 1; k <= n; k++) if (t[k] != "" && (p == t[k] || index(p, t[k] "/") == 1)) { print $1 "\t" $2; next }
+            }' <<<"$MT_TOUCHES")
+    done
+    move_to_records_parallel "${MOVE_TO_GROUP[@]}"
+}
+
+# move_to_census_paths: MT_* for EVERY session, for `move --plan --to`, which shows every group
+# (move_to_records_parallel, after one prefetch of every session's record).
+move_to_census_paths() {
+    move_to_scan_processes
+    echo "agentbox: ${#MT_ROW_OF[@]} sessions with an id to read, $MOVE_RECORD_JOBS at a time" >&2
+    move_record_prefetch "${!MT_ROW_OF[@]}"
+    MOVE_USE_PLAN=true
+    move_to_records_parallel "${!MT_ROW_OF[@]}"
+    echo "agentbox: ${#MT_ROW_OF[@]} sessions read" >&2
     [[ -z "$MOVE_RECORD_CACHE" ]] || rm -f "$MOVE_RECORD_CACHE"
     MOVE_RECORD_CACHE=""
     return 0
@@ -4032,10 +4147,11 @@ cmd_move_to() {
     fi
     move_self_identify "agentbox move --to $target"
     local sid="$MOVE_SELF_SID" s members=() missing=() m err group
-    echo "agentbox move --to $target: reading this host's live sessions to find this session's group (progress on stderr)" >&2
-    move_to_census_paths "$sid"
+    echo "agentbox move --to $target: reading this host's sessions' processes to find this session's group" >&2
+    move_to_scan_processes
+    [[ -n "${MT_ROW_OF[$sid]:-}" ]] || die "session $sid is not in this host's census"
+    move_to_find_group "$sid" ${BOX_DIRS[@]+"${BOX_DIRS[@]}"}
     [[ -n "${MT_DIRS[$sid]:-}" ]] || die "$(move_dirs_why "$MOVE_SELF_CWD" "$MOVE_SELF_PID" "$sid" 2>&1 >/dev/null || true)"
-    move_to_group "$sid"
     group="g-$(printf '%s\n' "${MOVE_TO_GROUP[@]}" | sort | head -1 | cut -c1-8)"
     for s in "${MOVE_TO_GROUP[@]}"; do
         err="$(mktemp)"
@@ -4319,19 +4435,22 @@ move_to_run() {
 
 # `move --plan --to <machine>`: every group of this host's live sessions, what a move to the
 # machine would copy for it and how big that is here. It changes nothing: no plan file, no ready
-# file, no notice, no call to the target. Every path is measured once, by one parallel `du` run
-# after the groups are known (AGENTBOX_MOVE_JOBS at a time, as the record reader): measured one
-# at a time, the trees of this host's 45 sessions had not been measured after 20 minutes at load
-# 300 on 2026-11-02.
+# file, no notice, no call to the target. Only the MIRRORED paths are measured - the trees and
+# transcripts a move sends whole - each at most MOVE_TO_SIZE_WAIT seconds, MOVE_RECORD_JOBS at
+# once. The merged paths (git storage, caches, lane roots) are listed unmeasured: rsync sends
+# only what is newer than the target's copy, so their size here says nothing about the move,
+# and measuring them (frac-verify, gate-runs, whole object stores) kept the plan of 2026-11-02
+# running past 50 minutes.
+MOVE_TO_SIZE_WAIT="${AGENTBOX_MOVE_SIZE_WAIT:-30}"
 cmd_move_plan_to() {
     local target="$1" s g m err p x size total=0 refused=0 bytes i line
     local -A done_=() sizes=()
     local g_name=() g_text=() g_mirror=() g_merge=() g_exclude=() paths=()
     echo "agentbox move --plan --to $target: reading this host's live sessions; progress on stderr" >&2
-    move_to_census_paths ""
+    move_to_census_paths
     for s in $(printf '%s\n' "${!MT_ROW[@]}" | sort); do
         [[ -z "${done_[$s]:-}" ]] || continue
-        if [[ -z "${MT_SHARE[$s]:-}" ]]; then MOVE_TO_GROUP=("$s"); else move_to_group "$s"; fi
+        move_to_find_group "$s"
         for m in "${MOVE_TO_GROUP[@]}"; do done_[$m]=1; done
         g="g-$(printf '%s\n' "${MOVE_TO_GROUP[@]}" | sort | head -1 | cut -c1-8)"
         local text="group $g: ${#MOVE_TO_GROUP[@]} session(s)" copy="" class pid sid pane at cwd detail
@@ -4355,13 +4474,14 @@ cmd_move_plan_to() {
         g_mirror+=("$(printf '%s\n' ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"})")
         g_merge+=("$(printf '%s\n' ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"})")
         g_exclude+=("$(printf '%s\n' ${MOVE_TO_EXCLUDE[@]+"${MOVE_TO_EXCLUDE[@]}"})")
-        paths+=(${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"})
+        paths+=(${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_EXCLUDE[@]+"${MOVE_TO_EXCLUDE[@]}"})
     done
     mapfile -t paths < <(printf '%s\n' ${paths[@]+"${paths[@]}"} | sort -u | sed '/^$/d')
-    echo "agentbox: ${#g_name[@]} group(s); measuring ${#paths[@]} path(s), $MOVE_RECORD_JOBS at a time" >&2
+    echo "agentbox: ${#g_name[@]} group(s); measuring the ${#paths[@]} mirrored path(s), $MOVE_RECORD_JOBS at a time, ${MOVE_TO_SIZE_WAIT}s each at most" >&2
     while IFS=$'\t' read -r size p; do
         [[ -n "$p" ]] && sizes[$p]="$size"
-    done < <(printf '%s\0' ${paths[@]+"${paths[@]}"} | xargs -0 -r -P "$MOVE_RECORD_JOBS" -n 1 du -sb 2>/dev/null || true)
+    done < <(printf '%s\0' ${paths[@]+"${paths[@]}"} \
+        | xargs -0 -r -P "$MOVE_RECORD_JOBS" -n 1 timeout "$MOVE_TO_SIZE_WAIT" du -sb 2>/dev/null || true)
     echo "agentbox move --plan --to $target: $(hostname -s), $(date -u +%FT%TZ); nothing is changed, copied or sent"
     for ((i = 0; i < ${#g_name[@]}; i++)); do
         echo
@@ -4370,21 +4490,23 @@ cmd_move_plan_to() {
         echo "    mirrored (deletions too):"
         while IFS= read -r p; do
             [[ -n "$p" ]] || continue
-            size="${sizes[$p]:-0}"
-            # A tree's own .git is merged instead, and measured there.
+            if [[ -z "${sizes[$p]:-}" ]]; then
+                printf '      %8s  %s\n' "?" "$p (not measured within ${MOVE_TO_SIZE_WAIT}s)"
+                continue
+            fi
+            size="${sizes[$p]}"
+            # A tree's own .git is merged instead.
             while IFS= read -r x; do
                 [[ -n "$x" ]] && move_within "$x" "$p" && size=$((size - ${sizes[$x]:-0}))
             done <<<"${g_exclude[i]}"
             bytes=$((bytes + size))
             printf '      %8s  %s\n' "$(numfmt --to=iec "$size")" "$p"
         done <<<"${g_mirror[i]}"
-        echo "    merged (git storage: nothing newer on $target replaced, nothing deleted):"
+        echo "    merged (only what is newer than on $target is sent; not measured):"
         while IFS= read -r p; do
-            [[ -n "$p" ]] || continue
-            bytes=$((bytes + ${sizes[$p]:-0}))
-            printf '      %8s  %s\n' "$(numfmt --to=iec "${sizes[$p]:-0}")" "$p"
+            [[ -n "$p" ]] && printf '      %8s  %s\n' "-" "$p"
         done <<<"${g_merge[i]}"
-        echo "    group total: $(numfmt --to=iec "$bytes") (sizes here; rsync sends only what $target lacks)"
+        echo "    mirrored total: $(numfmt --to=iec "$bytes") (sizes here; rsync sends only what $target lacks)"
         total=$((total + bytes))
     done
     echo
