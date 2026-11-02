@@ -649,6 +649,27 @@ def session_of(pid: int) -> str:
     return sorted(found)[0] if found else ""
 
 
+def scope_session(pids: list[int], first: int) -> str:
+    """The session id of a capped scope: its largest omp's, else any other omp's in the scope.
+
+    The largest omp process in a scope is not always the session. On 2026-11-02 at 09:41:57Z the
+    librarian's scope reached its wall led by omp's worker broker (`omp __omp_worker_daemon_broker`),
+    which names no session and holds no transcript, so the report went to nobody while the
+    session's own omp sat beside it in the same scope.
+    """
+    session = session_of(first)
+    if session:
+        return session
+    for pid in pids:
+        command = cmdline_of(pid)
+        if pid == first or not command or "__omp_worker" in command or Path(command.split()[0]).name != "omp":
+            continue
+        session = session_of(pid)
+        if session:
+            return session
+    return ""
+
+
 def self_watch_anywhere(omp_pid: int) -> str:
     """The self-watch test for a session with no scope of its own.
 
@@ -1140,7 +1161,7 @@ def wall_touch(
     pids = scope_tasks(target["cgroup"])
     worker, directory = worker_of(pids)
     from_worker = worker_session(directory)
-    session = from_worker or session_of(target["pid"])
+    session = from_worker or scope_session(pids, target["pid"])
     memory["reported_at"] = now
     suppressed = int(memory.pop("suppressed", 0))
     # Every process in the scope, not only the three named: the three largest explained 10-29%
@@ -2010,7 +2031,7 @@ def run_once(options: argparse.Namespace) -> int:
             continue
 
         if not incident.get("alerted_at"):
-            session = session_of(pid)
+            session = scope_session(scope_tasks(cgroup), pid) if target["limited"] else session_of(pid)
             incident["session"] = session
             incident["self_watch"] = self_watch_of(cgroup, pid) if target["limited"] else self_watch_anywhere(pid)
             count = crossings.get(session or key, 0) + 1

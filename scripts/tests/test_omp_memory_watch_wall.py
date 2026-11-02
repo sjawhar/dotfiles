@@ -254,14 +254,14 @@ class WallReportTest(unittest.TestCase):
         self.commands[11] = self.commands[11].replace("/home/sami/work", str(self.root / "home/sami/work"))
         self.options = options(self.root / "state.json")
 
-    def touch(self) -> dict:
+    def touch(self, pid: int = 11) -> dict:
         name = "run-rreport.scope"
         cgroup = write_scope(
-            self.root, name, events_max=5, peak=CEILING, current=16 * GIB, procs=(11, 12, 13, 14)
+            self.root, name, events_max=5, peak=CEILING, current=16 * GIB, procs=tuple(sorted(self.commands))
         )
         walls: dict = {name: {"events_max": 0, "peak": 1 * GIB}}
         target = dict(
-            key=name, scope=name, cgroup=cgroup, pid=11, limit=CEILING,
+            key=name, scope=name, cgroup=cgroup, pid=pid, limit=CEILING,
             limit_from=f"memory.max of {name}", limited=True,
             usage=WATCH.scope_pressure(cgroup)[0], current=16 * GIB,
             events=WATCH.memory_events(cgroup), peak_bytes=CEILING,
@@ -291,6 +291,18 @@ class WallReportTest(unittest.TestCase):
         touch = self.touch()
         self.assertEqual(touch["session"], "")
         self.assertIn("session UNKNOWN", WATCH.wall_text(touch))
+
+    def test_a_scope_led_by_the_worker_broker_is_reported_to_its_session(self) -> None:
+        """At 09:41:57Z on 2026-11-02 the librarian's scope was led by omp's worker broker, which
+        names no session, and the report went to nobody; the session omp was in the same scope."""
+        (self.worker_dir / "session_unconfirmed").write_text("")
+        self.commands[15] = "/home/sami/.mise/installs/omp/bin/omp __omp_worker_daemon_broker"
+        self.rss[15] = 12 * GIB
+        sid = "01a14ba2-817c-748e-9cb5-d1ad60308a9c"
+        original = WATCH.session_of
+        WATCH.session_of = lambda pid: sid if pid == 11 else ""
+        self.addCleanup(lambda: setattr(WATCH, "session_of", original))
+        self.assertEqual(self.touch(pid=15)["session"], sid)
 
     def test_swap_sentence_follows_memory_swap_max(self) -> None:
         """The old text claimed MemorySwapMax=0 for every scope; a worker scope has swap."""
