@@ -15,6 +15,9 @@ On 2026-10-25 two things several streams write were found to exist on one disk:
   sent to a box without its image.
 - `/mnt/nvme/sami/compute-inventory.csv`, 356 KB and 1,874 lines, which records
   which VM belongs to which stream. Several streams append to it; nobody owns it.
+  Since 2026-11-02 it lives in `/mnt/nvme/sami/compute-inventory/` beside the
+  VM delete log `vm-delete-log.tsv`, and the run copies both; the old paths are
+  symlinks into that directory.
 
 That same day `/mnt/nvme` fell from 201 GB free to 131 GB in twenty minutes, and
 a throwaway script deleted 120 grading-run directories by mistake.

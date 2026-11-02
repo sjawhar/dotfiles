@@ -218,7 +218,10 @@ class NoOffbox(unittest.TestCase):
         m = self.mark(scrum)
         text = text.replace("/home/sami/src/scrum", str(scrum))
         text = text.replace("/mnt/nvme/sami/grade-farm", str(self.data / "none"))
-        text = text.replace("/mnt/nvme/sami/compute-inventory.csv", str(self.tree("inv") / "result.json"))
+        inv = self.tree("inv")
+        (inv / "compute-inventory.csv").write_text("project,name\n", encoding="utf-8")
+        (inv / "vm-delete-log.tsv").write_text("when\tname\n", encoding="utf-8")
+        text = text.replace("/mnt/nvme/sami/compute-inventory", str(inv))
         scripts = self.root / "scripts"
         scripts.mkdir()
         copy = scripts / "backup-shared-state"
@@ -229,6 +232,7 @@ class NoOffbox(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn(f"REFUSED scrum-records: no-offbox: REFUSED {scrum}: marker {m}", r.stderr)
         self.assertIn("copied compute-inventory", r.stdout)
+        self.assertIn("copied vm-delete-log", r.stdout)
         self.assertNotIn("scrum", self.calls())
         self.assertIn("gcloud storage cp", self.calls())
 

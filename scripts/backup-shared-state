@@ -59,7 +59,10 @@ copy_repo() {
 }
 
 copy_repo /mnt/nvme/sami/grade-farm grade-farm
-copy_file /mnt/nvme/sami/compute-inventory.csv compute-inventory
+# Since 2026-11-02 the ledger and the VM delete log live in one directory (oss-verify-proofs-internal
+# ops #945); the old paths are symlinks into it.
+copy_file /mnt/nvme/sami/compute-inventory/compute-inventory.csv compute-inventory
+copy_file /mnt/nvme/sami/compute-inventory/vm-delete-log.tsv vm-delete-log
 
 # ~/src/scrum holds the chief of staff's handoffs, the owner brief every stream
 # lead reads, the playbook and the meta-loop record. It is not a git repository
