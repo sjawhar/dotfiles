@@ -25,7 +25,17 @@ account="no-user-login-in-agent-sessions"
 token="agent-session-placeholder-not-a-token.gh-must-run-through-dotfiles-shims-gh"
 
 mkdir -p "$dir"
-[[ -e "$dir/config.yml" || -L "$dir/config.yml" ]] || ln -sfn "$user_cfg/config.yml" "$dir/config.yml"
+# An agent box mounts no ~/.config/gh, so link only to a config.yml that is there; a dangling
+# link makes gh fail after its config migration instead of running.
+cfg="$dir/config.yml"
+[[ -L "$cfg" && ! -e "$cfg" ]] && rm -f "$cfg"
+if [[ ! -e "$cfg" ]]; then
+    if [[ -f "$user_cfg/config.yml" ]]; then
+        ln -sfn "$user_cfg/config.yml" "$cfg"
+    else
+        : > "$cfg"
+    fi
+fi
 hosts="$dir/hosts.yml"
 want="github.com:
     users:
