@@ -1,6 +1,6 @@
 # Protected merge and literal evidence writes
 
-Read before you post evidence or merge. Use the current approved identity, never a reused personal token or an admin path. Load the skills for each tool before you use it, for example `dispatch` before a Dispatch write and `using-secrets` before you use a credential.
+Read before you post evidence or merge. Use the current approved identity, never a reused personal token or `--admin`; take an admin token only from the broker, for an approval `landing-a-pr`'s repo merge rules allow. Load the skills for each tool before you use it, for example `dispatch` before a Dispatch write and `using-secrets` before you use a credential.
 
 ## Gate, then merge pinned
 

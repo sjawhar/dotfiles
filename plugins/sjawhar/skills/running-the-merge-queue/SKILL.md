@@ -20,8 +20,8 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 - Use the queue record named in Sami's request or in the notes your role started with. With none, keep evidence on the existing PR or issue. Never create another tracker or queue issue: a second record splits the history.
 - Record each ruling's source, time and scope: standing approvals (kept through handoffs until superseded), holds, release conditions, priorities, approved windows. Read the record again at each wake and before each merge, because rulings change while you wait.
 - Never restore a lifted hold or infer a quiet window from history: only a current ruling sets them.
-- Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use. A grant given to this queue session stays live for it: keep merging under it, and ask Sami once for the merge window the queue needs (a time span in which you may merge READY PRs without asking per PR).
-- At registration, check the author, the GitHub account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS. A self-approval restriction is an unmet gate.
+- Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use. A grant given to this queue session stays live for it: keep merging under it, and ask Sami once for a merge window: a span to merge READY PRs without asking per PR.
+- At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS. An approval it cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
 - With no explicit priority, merge first what Sami's stated goal needs, then parents before children, and a large corpus change before PRs that would have to integrate with it. Never by READY arrival order, which rewards speed over value.
 - Ask Sami on the existing Dispatch issue, so the answer stays with the work.
 - For holds that need a composition test, migration batches, colliding PRs, stacks or a Dispatch answer, read [sequencing](references/sequencing.md).
@@ -59,7 +59,7 @@ Before you declare READY or merge, read [review evidence](references/review-evid
 ## 5. Check every gate
 
 - Check CI, mergeability, holds, the base, the file and commit scope and the Dispatch key at the head, each as [merge mechanics](references/merge-mechanics.md) lists them, before you declare READY.
-- Review: an independent review artifact on the PR names the applicable head, with all blocking findings closed and all others dispositioned. Self-approval is not one.
+- Review: an independent review artifact on the PR names the head, with all blocking findings closed and all others dispositioned. Your approval is not one.
 - Runtime code, CI configuration, scripts, Dockerfiles and infrastructure, never waived: after the ordinary review rounds, the owner (under `sdd`, the coordinator) runs `ce-simplify-code` once, then the `thermonuclear-deep-review` and `thermonuclear-code-quality` agents (the thermonuclear pair) once at the final code head. Simplify is the last code change and the pair the last review, so the last review sees the code that ships. The order and reruns are in [review evidence](references/review-evidence.md).
 - Acceptance: every change to what runs needs its changed end-to-end scenarios run at the intended current head before merge: application, infrastructure, tasks, agents, harnesses, and their instructions and configuration. A `.md` or `.yaml` suffix does not make an operative change prose-only: the scenario must run through the program that reads that file. Prose that changes nothing that runs needs no scenario and no oracle.
 - Before you check that evidence, read [acceptance](references/acceptance.md): who owns the proof, the state of each scenario, and when to run the `oracle`.
@@ -68,7 +68,7 @@ Before you declare READY or merge, read [review evidence](references/review-evid
 
 Before any write, read [merge mechanics](references/merge-mechanics.md).
 
-- Refresh every gate for one SHA and merge only by the pinned command there. Never bypass branch protection or self-approval restrictions. A moved head means check again, never an unpinned retry.
+- Refresh every gate for one SHA and merge only by the pinned command there. Never bypass branch protection. A moved head means check again, never an unpinned retry.
 - Update the queue or PR record with the merge result.
 
 ## 7. Close the loop
