@@ -210,6 +210,80 @@ function spawnOmp(argv: string[]) {
 	});
 }
 
+// OOM bias inside the box (dispatch://INFRA-702). At the box's memory limit the kernel kills
+// the box process with the largest badness: its RSS plus oom_score_adj × limit / 1000. With
+// every adj at 0 that is often omp, and the session dies with its subagents. On the host,
+// scripts/omp-memory-watch raises every process in an omp scope but omp to +500, but it cannot
+// write a box's processes (Sysbox maps their uid: EPERM). So the runner does it here: every
+// child of the runner but omp (dockerd, the relays) and every child of omp is raised, with the
+// descendants it already has, and anything forked later inherits +500 from its parent. At +500
+// under a 24 GiB limit each raised process scores 12 GiB more, so among them the largest still
+// goes first, and omp outlives any of them. The runner and omp stay at 0: either one dying ends
+// the box. Raising an adj of one's own process needs no privilege; nothing is ever lowered.
+export const OOM_BIAS_ADJ = 500;
+const OOM_BIAS_INTERVAL_MS = 10_000;
+
+export function childPids(pid: number, procRoot = "/proc"): number[] {
+	const kids: number[] = [];
+	let tids: string[];
+	try {
+		tids = fs.readdirSync(`${procRoot}/${pid}/task`);
+	} catch {
+		return kids; // gone
+	}
+	for (const tid of tids) {
+		try {
+			for (const word of fs.readFileSync(`${procRoot}/${pid}/task/${tid}/children`, "utf8").split(" ")) {
+				const kid = Number(word);
+				if (kid > 0) kids.push(kid);
+			}
+		} catch {}
+	}
+	return kids;
+}
+
+function readAdj(pid: number, procRoot: string): number | undefined {
+	try {
+		return Number(fs.readFileSync(`${procRoot}/${pid}/oom_score_adj`, "utf8").trim());
+	} catch {
+		return undefined; // gone
+	}
+}
+
+// Raise `top` and every descendant it has now to `adj`; returns how many were raised.
+function raiseTree(top: number, adj: number, procRoot: string): number {
+	let raised = 0;
+	const seen = new Set<number>();
+	const stack = [top];
+	while (stack.length > 0) {
+		const pid = stack.pop() as number;
+		if (seen.has(pid)) continue;
+		seen.add(pid);
+		const current = readAdj(pid, procRoot);
+		if (current === undefined) continue;
+		if (current < adj) {
+			try {
+				fs.writeFileSync(`${procRoot}/${pid}/oom_score_adj`, String(adj));
+				raised++;
+			} catch {}
+		}
+		stack.push(...childPids(pid, procRoot));
+	}
+	return raised;
+}
+
+// One pass. A direct child already at `adj` was raised before it forked, so its descendants
+// inherited `adj` and are not walked again.
+export function oomBiasPass(runnerPid: number, ompPid: number, adj = OOM_BIAS_ADJ, procRoot = "/proc"): number {
+	const tops = [...childPids(runnerPid, procRoot).filter((pid) => pid !== ompPid), ...childPids(ompPid, procRoot)];
+	let raised = 0;
+	for (const pid of tops) {
+		const current = readAdj(pid, procRoot);
+		if (current !== undefined && current < adj) raised += raiseTree(pid, adj, procRoot);
+	}
+	return raised;
+}
+
 if (import.meta.main) {
 	const launchArgv = process.argv.slice(2);
 	if (launchArgv[0] !== "omp") {
@@ -220,6 +294,14 @@ if (import.meta.main) {
 	let child = spawnOmp(launchArgv);
 	let startedAt = Date.now();
 	note(`omp started (pid ${child.pid}): ${launchArgv.join(" ")}`);
+	const oomBias = setInterval(() => {
+		try {
+			oomBiasPass(process.pid, child.pid);
+		} catch (error) {
+			note(`oom bias pass failed: ${error}`);
+		}
+	}, OOM_BIAS_INTERVAL_MS);
+	oomBias.unref();
 	let relaunch: string[] | undefined;
 	let restarting = false;
 	let shuttingDown = false;
