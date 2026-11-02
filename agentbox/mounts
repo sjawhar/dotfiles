@@ -122,3 +122,7 @@ ro .ssh/google_compute_engine.pub
 # (move_config_dirs in scripts/agentbox). Without both, every public text write from a box is
 # refused and a lead cannot work in one (dispatch://INFRA-702, 2026-11-01).
 ro .config/public-leak-check
+# On sami-devbox the pointer names a copy under the home, ~/.local/share/public-leak-check (the
+# /mnt/nvme/sami/frac-verify tree is not on that machine), so every box gets that directory too,
+# read-only; on a machine without it the entry is skipped.
+ro .local/share/public-leak-check

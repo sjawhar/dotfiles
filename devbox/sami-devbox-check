@@ -101,6 +101,11 @@ in_box() {
 # session in a box sees them.
 tools_check() {
     local pin got live
+    # The public-text leak check shims/gh requires before gh pr create/edit/comment: the pointer
+    # and the script it names, both in the box.
+    got="$(cat "$HOME/.config/public-leak-check/path" 2>&1)"
+    [[ -x "$got" ]] && ok "public-leak-check: $got is in the box" || fail "public-leak-check: the pointer names '$got', which this box does not have; shims/gh refuses gh pr create/edit/comment"
+
     pin="$(sed -n 's/^"github:sjawhar\/knives" = "\([^"]*\)".*/\1/p' "$DOTFILES_DIR/mise.toml")"
     got="$(knives --version 2>&1 | tail -1)"
     [[ -n "$pin" && "$got" == "knives $pin" ]] && ok "knives: $got (the mise.toml pin)" || fail "knives: want 'knives $pin', got: $got"
