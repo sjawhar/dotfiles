@@ -119,6 +119,39 @@ without a reachable tmux server the pass does nothing and says so in the run's l
 sets `TMUX_TMPDIR` and puts `shims/` first on `PATH`, as `envoy-role-holder-watch.service` does:
 the socket lives where `.bashrc` puts it, and `/usr/bin/tmux` (3.4) cannot talk to the 3.8 server.
 
+## Action three: a session with no scope of its own gets one
+
+`shims/omp` starts each session in a `run-*.scope` with a ceiling and `OOMPolicy=continue`. When
+both of its scope probes time out (two 25 s user-manager timeouts 10 s apart, at load 450) it
+starts the session in its shell's cgroup instead: the login scope `session-c5.scope`, or tmux's.
+01a19679 started that way at 11:57Z on 2026-11-02 and ran uncapped until it was moved by hand at
+13:36-13:45Z. Sessions started before shims/omp c31519b run in a scope with systemd's default
+`OOMPolicy=stop`, which ends the whole session when the kernel kills one runaway child
+(2026-11-02T03:22:08Z, a session and 40 subagents).
+
+Each run takes every top-level `omp` of this user on the host (its parent is not an omp, and it
+has run for at least a minute) whose cgroup is a `session-*.scope` or `tmux-spawn-*.scope`, or a
+`run-*.scope` whose `OOMPolicy` is `stop`, and moves it into a new delegated
+`run-c<first 16 hex of the session id>.scope` in `app.slice` with `OOMPolicy=continue`:
+
+- From a login or tmux scope it moves **the session's own process tree only** (the omp and its
+  descendants still in that cgroup), never the rest of the login scope. The ceiling is the one
+  the session asked for (`OMP_MEMORY_SCOPE`, which the shim exports before it falls back), else
+  the shim's 24 GiB default, with `MemorySwapMax=0`. A tree whose RSS is already at or above
+  that ceiling is left, and the run says so.
+- From an `OOMPolicy=stop` scope it moves every process in the scope and keeps the scope's
+  `MemoryMax`, `MemorySwapMax` and `TasksMax`.
+
+The scope is made with `StartTransientUnit` holding the omp, then each other process is added
+with `AttachProcessesToUnit`, one pid a call (a pid that has exited fails the whole call). Each
+move is one journal line (`scope adopt: moved omp <pid> (<session>, N process(es)) from <old>
+into <new> …`). No process is signalled, and memory a process already holds stays charged to the
+old cgroup: cgroup v2 moves processes, not pages. A process left over (out of time, or born in
+the old cgroup since) is attached on a later run. Each scope's `OOMPolicy` is read once, with one
+`systemctl show` for every scope not yet known, since a scope's policy and name never change. The
+pass stops 40 s after the run starts, and begins a systemd call only with 10 s left.
+`--no-adopt-scopes` turns it off; `--dry-run` logs `scope adopt: would move …` and moves nothing.
+
 ## What it measures, and why not RSS
 
 `shims/omp` starts each session under `systemd-run --user --scope -p MemoryMax=$OMP_MEMORY_MAX
@@ -302,8 +335,10 @@ reported.
 ## What one run does
 
 The alerting part: /proc and /sys reads only, no transcript reading in the decision, no model
-call, ~0.4 s. The two actions above add 1-2 s at load 428 with 220 panes (2026-11-02), and the
-pane pass stops at 8 s whatever the load, inside the unit's 25 s limit:
+call, ~0.4 s. The actions above add 1-2 s at load 428 with 220 panes (2026-11-02); each stops
+itself at a time from the run's start (oom bias 6 s, panes 14 s, scopes 40 s), inside the unit's
+90 s limit, which whole-box stalls at load 450 need (the old 25 s killed runs in which systemd
+itself logged nothing):
 
 1. Every `omp` process on this machine, with the cgroup each runs in (`/proc/<pid>/cgroup`).
 2. The ceiling it is heading for: the smallest numeric `memory.max` from that cgroup up to the
@@ -436,9 +471,10 @@ systemctl --user list-timers omp-memory-watch.timer     # when it next runs
 journalctl --user -u omp-memory-watch.service -n 50     # what the last runs decided
 ```
 
-Either action alone is turned off by adding its flag to `ExecStart` in
+Each action alone is turned off by adding its flag to `ExecStart` in
 `omp/omp-memory-watch.service` and running `systemctl --user daemon-reload`: `--no-oom-bias`,
-`--no-restart`, or `--restart-dry-run` to keep the restarter naming panes without resuming them.
+`--no-restart`, `--no-adopt-scopes`, or `--restart-dry-run` to keep the restarter naming panes
+without resuming them.
 An adj already raised stays raised until its process ends; to put one back by hand,
 `echo 0 > /proc/<pid>/oom_score_adj` needs root (a lower value is a privileged write).
 

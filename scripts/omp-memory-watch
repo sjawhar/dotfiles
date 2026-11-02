@@ -330,7 +330,7 @@ def mem_total() -> int:
 def cgroup_of(pid: int) -> str:
     """The cgroup v2 path of a pid, as written in /proc/<pid>/cgroup ("0::/user.slice/...")."""
     try:
-        for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines():
+        for line in (PROC_ROOT / str(pid) / "cgroup").read_text().splitlines():
             parts = line.split(":", 2)
             if len(parts) == 3 and parts[0] == "0":
                 return parts[2].strip()
@@ -596,7 +596,7 @@ def omp_processes() -> list[tuple[int, str]]:
 def rss_of(pid: int) -> int:
     """VmRSS in bytes, read from /proc/<pid>/statm (resident pages)."""
     try:
-        return int(Path(f"/proc/{pid}/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+        return int((PROC_ROOT / str(pid) / "statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE")
     except (OSError, ValueError, IndexError):
         return 0
 
@@ -608,7 +608,7 @@ def pid_start(pid: int) -> int:
     over when it changes -- a remembered pid alone can come back as an unrelated process.
     """
     try:
-        data = Path(f"/proc/{pid}/stat").read_text()
+        data = (PROC_ROOT / str(pid) / "stat").read_text()
         return int(data[data.rfind(")") + 2 :].split()[19])
     except (OSError, ValueError, IndexError):
         return 0
@@ -1385,6 +1385,232 @@ def oom_bias_note(counts: dict[str, int], adj: int, dry_run: bool) -> str:
     return note
 
 
+# ------------------------------------------- give a session that has no scope of its own one
+#
+# shims/omp starts each session in a `run-*.scope` with a memory ceiling and OOMPolicy=continue.
+# When both of its scope probes fail -- two 25 s user-manager timeouts 10 s apart at load 450 --
+# it starts the session in whatever cgroup its shell is in: the login scope (session-c5.scope,
+# hundreds of other processes) or tmux's. Session 01a19679 started that way at 11:57Z on
+# 2026-11-02 and ran with no ceiling until it was moved by hand at 13:36-13:45Z. Sessions started
+# before shims/omp c31519b run in a scope with systemd's default OOMPolicy=stop, which ends the
+# whole session when the kernel kills one runaway child (2026-11-02T03:22:08Z, 40 subagents).
+# This pass moves both into a new delegated `run-c<16 hex of the session>.scope` with
+# OOMPolicy=continue. No process is signalled, and the memory each one already holds stays
+# charged where it is: cgroup v2 moves a process, not its pages.
+DEFAULT_CEILING = "24G"  # shims/omp's default, dispatch://INFRA-898
+CEILING_CAP = 96 << 30  # shims/omp's clamp for one session
+# When the pass must stop, in seconds from the run's start; a systemd call is begun only with
+# BUS_TIMEOUT left before it.
+ADOPT_DEADLINE = 40.0
+BUS_TIMEOUT = 10.0
+ADOPT_MIN_AGE = 60.0
+RUN_SCOPE_RE = re.compile(r"run-[^/]+\.scope")
+# The cgroups a session lands in when the shim falls back: the login session's, or tmux's.
+ADOPTABLE_RE = re.compile(r"(session-[^/]+|tmux-spawn-[^/]+)\.scope")
+BUS = ["busctl", "--user", "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+       "org.freedesktop.systemd1.Manager"]
+
+
+def systemd_user(argv: list[str], timeout: float = BUS_TIMEOUT) -> tuple[bool, str]:
+    """Run one systemctl or busctl call: (it succeeded, its stdout or its error). Tests replace it."""
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, str(error)
+    return done.returncode == 0, (done.stdout if done.returncode == 0 else done.stderr).strip()
+
+
+def proc_words(pid: int, name: str) -> list[str]:
+    """/proc/<pid>/cmdline or environ as its NUL-separated words, [] when unreadable."""
+    try:
+        return [w for w in (PROC_ROOT / str(pid) / name).read_bytes().decode("utf8", "replace").split("\0") if w]
+    except OSError:
+        return []
+
+
+def ceiling_bytes(text: str) -> int | None:
+    """`24G`, `512M`, a byte count -> bytes, clamped at CEILING_CAP; None when it is not one."""
+    match = re.fullmatch(r"([0-9]+)([KMGT]?)", (text or "").strip())
+    if not match:
+        return None
+    value = int(match.group(1)) << {"": 0, "K": 10, "M": 20, "G": 30, "T": 40}[match.group(2)]
+    return min(value, CEILING_CAP) if value > 0 else None
+
+
+def adopt_session_id(pid: int) -> str:
+    """The session an omp runs: the LAST id on its command line (a nested transcript path names
+    its parent first), else the OMP_SESSION_ID it inherited, else ""."""
+    ids = UUID_RE.findall(" ".join(proc_words(pid, "cmdline")))
+    if ids:
+        return ids[-1]
+    env = dict(word.split("=", 1) for word in proc_words(pid, "environ") if "=" in word)
+    return env.get("OMP_SESSION_ID", "") if UUID_RE.fullmatch(env.get("OMP_SESSION_ID", "")) else ""
+
+
+def children_by_parent() -> dict[int, list[int]]:
+    children: dict[int, list[int]] = {}
+    for entry in os.listdir(PROC_ROOT):
+        if entry.isdigit():
+            children.setdefault(parent_of(int(entry)), []).append(int(entry))
+    return children
+
+
+def tree_in(pid: int, cgroup: str, children: dict[int, list[int]]) -> list[int]:
+    """The process and its descendants that are still in `cgroup`, the process first. A child
+    that already has a cgroup of its own (a tool's own scope, a box) is not the session's to move."""
+    found, stack = [], [pid]
+    while stack:
+        current = stack.pop()
+        if cgroup_of(current) == cgroup:
+            found.append(current)
+        stack.extend(children.get(current, []))
+    return found
+
+
+def scope_policies(units: list[str]) -> dict[str, str]:
+    """OOMPolicy of each unit, from one `systemctl show` call."""
+    ok, out = systemd_user(["systemctl", "--user", "show", "-p", "Id", "-p", "OOMPolicy", *units])
+    found: dict[str, str] = {}
+    if ok:
+        for block in out.split("\n\n"):
+            fields = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+            if fields.get("Id") and fields.get("OOMPolicy"):
+                found[fields["Id"]] = fields["OOMPolicy"]
+    return found
+
+
+def attach(unit: str, pids: list[int], deadline: float) -> tuple[int, int, int]:
+    """(attached, vanished or refused, left for the next run). One pid per call: a pid that has
+    exited fails the whole call."""
+    attached = failed = 0
+    for index, pid in enumerate(pids):
+        if time.monotonic() > deadline - BUS_TIMEOUT:
+            return attached, failed, len(pids) - index
+        ok, _ = systemd_user(BUS + ["AttachProcessesToUnit", "ssau", unit, "/", "1", str(pid)])
+        attached, failed = attached + ok, failed + (not ok)
+    return attached, failed, 0
+
+
+def scope_adopt_pass(
+    omps: list[tuple[int, str]], state, options: argparse.Namespace, now: float,
+    deadline: float = float("inf"),
+) -> str:
+    """Move each top-level host omp session that has no `run-*.scope` of its own, or whose
+    `run-*.scope` has OOMPolicy=stop, into a new one; log each move; say what it did."""
+    dry_run = options.dry_run
+    adopted: dict = state.data.setdefault("adopted", {})
+    policies: dict = state.data.setdefault("scope_policy", {})
+    uid = os.getuid()
+    user = f"/user.slice/user-{uid}.slice/"
+    manager = f"{user}user@{uid}.service/"
+    every_omp = {pid for pid, _ in omps}
+    notes: list[str] = []
+    children: dict[int, list[int]] | None = None
+
+    # The rest of an earlier move: the session's own processes still in the cgroup it left.
+    for unit, record in list(adopted.items()):
+        pid = int(record.get("pid") or 0)
+        if pid_start(pid) != record.get("start") or not cgroup_of(pid).endswith("/" + unit):
+            adopted.pop(unit)
+            continue
+        if record.get("kind") == "stop":
+            rest = scope_tasks(record["from"])
+        else:
+            children = children if children is not None else children_by_parent()
+            rest = tree_in(pid, record["from"], children)
+        if rest and not dry_run:
+            done, failed, left = attach(unit, rest, deadline)
+            notes.append(f"{unit}: attached {done} more, {failed} gone, {left} left")
+
+    # Top-level host sessions: this user's, not a subagent of another omp, and up for a minute,
+    # so an `omp` a script runs for a moment is not given a scope of its own.
+    ticks = os.sysconf("SC_CLK_TCK")
+    try:
+        uptime = float((PROC_ROOT / "uptime").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        uptime = 0.0
+    sessions = [
+        (pid, cgroup) for pid, cgroup in sorted(omps)
+        if cgroup.startswith(user) and parent_of(pid) not in every_omp
+        and uptime - pid_start(pid) / ticks >= ADOPT_MIN_AGE
+    ]
+    live_run_scopes = {
+        cgroup.rpartition("/")[2] for _, cgroup in sessions
+        if cgroup.startswith(manager) and RUN_SCOPE_RE.fullmatch(cgroup.rpartition("/")[2])
+    }
+    # A scope's policy never changes and its name is never reused: read once, kept while it lives.
+    unknown = sorted(live_run_scopes - set(policies))
+    if unknown and time.monotonic() < deadline - BUS_TIMEOUT:
+        policies.update(scope_policies(unknown))
+    for leaf in set(policies) - live_run_scopes:
+        policies.pop(leaf)
+    candidates: list[tuple[int, str, str]] = []
+    taken: set[str] = set()
+    for pid, cgroup in sessions:
+        leaf = cgroup.rpartition("/")[2]
+        if leaf in live_run_scopes and policies.get(leaf) == "stop" and cgroup not in taken:
+            taken.add(cgroup)  # one move per scope: it takes every process in it
+            candidates.append((pid, cgroup, "stop"))
+        elif not RUN_SCOPE_RE.fullmatch(leaf) and ADOPTABLE_RE.fullmatch(leaf):
+            candidates.append((pid, cgroup, "unscoped"))
+
+    moved = 0
+    for pid, cgroup, kind in candidates:
+        if time.monotonic() > deadline - BUS_TIMEOUT:
+            notes.append(f"{len(candidates) - moved} session(s) left for the next run (out of time)")
+            break
+        sid = adopt_session_id(pid)
+        old = cgroup.rpartition("/")[2]
+        if kind == "stop":
+            ok, out = systemd_user(["systemctl", "--user", "show", "-p", "MemoryMax", "-p", "MemorySwapMax", "-p", "TasksMax", old])
+            props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line) if ok else {}
+            if not props:
+                notes.append(f"{old}: its limits could not be read ({out}); left")
+                continue
+            limits = [(key, props[key]) for key in ("MemoryMax", "MemorySwapMax", "TasksMax")
+                      if props.get(key) not in (None, "", "infinity")]
+            members = scope_tasks(cgroup)
+        else:
+            env = dict(word.split("=", 1) for word in proc_words(pid, "environ") if "=" in word)
+            # shims/omp exports the ceiling it asked for before it falls back, so a session keeps
+            # its own value; anything else gets the shim's default.
+            ceiling = ceiling_bytes(env.get("OMP_MEMORY_SCOPE", "")) or ceiling_bytes(DEFAULT_CEILING)
+            children = children if children is not None else children_by_parent()
+            members = tree_in(pid, cgroup, children)
+            rss = sum(rss_of(member) for member in members)
+            if rss >= ceiling:
+                log(f"scope adopt: left omp {pid} ({sid or 'session unknown'}) in {old}: its processes"
+                    f" hold {gib(rss)}, at or above the {gib(ceiling)} ceiling it would get")
+                continue
+            limits = [("MemoryMax", str(ceiling)), ("MemorySwapMax", "0")]
+        base = "run-c" + (sid.replace("-", "")[:16] if sid else f"pid{pid}")
+        unit, number = f"{base}.scope", 2
+        while (CGROUP_ROOT / manager.strip("/") / "app.slice" / unit).exists():
+            unit, number = f"{base}-{number}.scope", number + 1
+        what = (f"omp {pid} ({sid or 'session unknown'}, {len(members)} process(es)) from {old} into"
+                f" {unit}, OOMPolicy=continue, " + ", ".join(f"{k}={v}" for k, v in limits))
+        if dry_run:
+            log(f"scope adopt: would move {what}")
+            moved += 1
+            continue
+        props = ["Description", "s", f"omp session {sid or pid} (moved from {old} by omp-memory-watch)",
+                 "Slice", "s", "app.slice", "Delegate", "b", "true", "OOMPolicy", "s", "continue"]
+        for key, value in limits:
+            props += [key, "t", value]
+        ok, out = systemd_user(BUS + ["StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail",
+                                      str(len(props) // 3 + 1), *props, "PIDs", "au", "1", str(pid), "0"])
+        if not ok:
+            log(f"scope adopt: FAILED to create {unit} for omp {pid} in {old}: {out}")
+            notes.append(f"{old}: create failed")
+            continue
+        adopted[unit] = {"pid": pid, "start": pid_start(pid), "from": cgroup, "kind": kind, "sid": sid, "at": now}
+        state.commit(options)
+        done, failed, left = attach(unit, [member for member in members if member != pid], deadline)
+        moved += 1
+        log(f"scope adopt: moved {what}; attached {done + 1}, {failed} gone, {left} left for the next run")
+    verb = "would move" if dry_run else "moved"
+    return f"scopes: {verb} {moved} session(s)" + (f" ({'; '.join(notes)})" if notes else "")
+
 # ------------------------------------------------------------ resume a pane whose omp died
 
 # What a resumed pane runs. The shim by its absolute path: a pane that starts omp from PATH can
@@ -1397,9 +1623,9 @@ RESTART_STALE = 3600.0
 SID_REFRESH = 300.0
 # How long a recorded pane may run something other than omp before it is forgotten.
 BUSY_FORGET = 120.0
-# When each acting pass must stop, in seconds from the run's start. The unit kills a run at 25 s,
-# and at nice 15 and load 425 on 2026-11-02 an unbounded pane pass took 33 s and the unit killed
-# the run. The alerting itself is not bounded; a pass out of time stops, and the next run goes on.
+# When each acting pass must stop, in seconds from the run's start. At nice 15 and load 425 on
+# 2026-11-02 an unbounded pane pass took 33 s and the unit (then 25 s) killed the run. The
+# alerting itself is not bounded; a pass out of time stops, and the next run goes on.
 BIAS_DEADLINE = 6.0
 RESTART_DEADLINE = 14.0
 # Open-file scans a run may make: about 0.2 s each at that load.
@@ -2142,13 +2368,20 @@ def run_once(options: argparse.Namespace) -> int:
         except Exception as error:  # noqa: BLE001 -- the run's own record must still be written
             restart_note = f"panes: restarter failed: {type(error).__name__}: {error}"
 
+    scope_note = "scopes: adoption off"
+    if options.adopt_scopes:
+        try:
+            scope_note = scope_adopt_pass(omps, state, options, started, run_clock + ADOPT_DEADLINE)
+        except Exception as error:  # noqa: BLE001 -- the run's own record must still be written
+            scope_note = f"scopes: adoption failed: {type(error).__name__}: {error}"
+
     state.commit(options)
     state.close()
     log(
         f"checked {len(targets)} omp session(s), {watched} close enough to sample, in "
         f"{time.time() - started:.2f}s; {alerts} alert(s), {clears} clear(s),"
         f" {walls_hit} wall touch(es) ({urgent} urgent), {len(pending_wall)} waiting for the digest;"
-        f" {bias_note}; {restart_note}"
+        f" {bias_note}; {restart_note}; {scope_note}"
     )
     return 0
 
@@ -2259,6 +2492,13 @@ def main() -> int:
         "--restart-dry-run",
         action="store_true",
         help="decide and log which panes would be resumed, resume none (--dry-run implies it)",
+    )
+    parser.add_argument(
+        "--no-adopt-scopes",
+        dest="adopt_scopes",
+        action="store_false",
+        help="do not move an omp session with no run-*.scope of its own, or one in an"
+        " OOMPolicy=stop scope, into a new run-c<session>.scope",
     )
     parser.add_argument(
         "--restart-cooldown",

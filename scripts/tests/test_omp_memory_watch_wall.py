@@ -88,6 +88,7 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "restart": False,
         "restart_dry_run": False,
         "restart_cooldown": 3600.0,
+        "adopt_scopes": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)

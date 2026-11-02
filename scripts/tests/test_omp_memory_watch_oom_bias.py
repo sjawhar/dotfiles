@@ -163,7 +163,7 @@ class OomBiasInTheRunTest(unittest.TestCase):
             wall_top=3, wall_pending_max=400, wall_digest_mode="send", wall_urgent_anon=0.50,
             wall_pending_json=False, state=Path(self.tmp.name) / "state.json", http_timeout=8.0,
             dry_run=True, write_state=False, print_alert=False, oom_bias=True, oom_bias_adj=500,
-            restart=False, restart_dry_run=False, restart_cooldown=3600.0,
+            restart=False, restart_dry_run=False, restart_cooldown=3600.0, adopt_scopes=False,
         )
         values.update(overrides)
         return argparse.Namespace(**values)
