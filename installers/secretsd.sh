@@ -181,6 +181,16 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
         # 2s cooldown. Gated on 2.2+: older daemons refuse to start when the
         # cooldown sits at or below the 15s floor, and they do not read the
         # declaration that would make it safe.
+        # Human tier therefore means a physical touch per request, and nothing
+        # tells Sami one is waiting: the key blinks for about 15 seconds
+        # (age-plugin-yubikey's touch window, shorter than
+        # SECRETSD_REQUEST_TTL_SECS), then sops fails with
+        # "yubikey-stanza-undecryptable" and the daemon answers TIMEOUT. On
+        # 2026-11-01 thirteen agent requests died that way. Agents get
+        # human-tier keys from the Legion credential broker instead: the omp
+        # tool secrets_request (forward's omp extension) and shims/secrets
+        # refuse an agent's human-tier request that has no live grant and name
+        # the broker's secret-run command.
         case "$SECRETSD_VERSION" in
             1.*|2.0.*|2.1.*) ;;
             *)

@@ -113,6 +113,14 @@ before handing the call to the real one.
 - **`ssh-keygen`** drops `SSH_AUTH_SOCK` for `-Y`, the operations git and jj sign and verify commits
   with: the signing key is a file, and ssh-keygen asks the agent first, so a stuck agent socket
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
+- **`secrets`** refuses an agent's request for a human-tier key its session holds no grant for
+  (exit 77), and names the broker command (`secret-run`) or, in a session the broker does not
+  serve, the `omp --resume` line that relaunches it as one. secretsd's only prompt for such a key
+  is a YubiKey blink the firmware holds about 15 seconds, and on 2026-11-01 thirteen agent
+  requests timed out on it. An agent is a caller with `OMP_SESSION_ID`, `PI_SESSION_FILE`,
+  `CLAUDECODE` or `ENVOY_SESSION_ID` set; every other call, and every call from Sami's shells,
+  execs the first `secrets` past its own PATH entry with the same arguments. A shell that ran
+  `secrets` before the shim existed has the old path hashed and bypasses it until `hash -r`.
 - **`bq`** puts BigQuery's CLI on PATH at all. The Cloud SDK installs it beside gcloud in the
   SDK's own bin dir, which is on nobody's PATH here, so every caller named the SDK's full path
   instead (agent-infra's spend loaders, 2026-10-29). It takes the first `bq` past its own PATH
