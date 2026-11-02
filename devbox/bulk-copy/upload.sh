@@ -17,7 +17,7 @@ EXCLUDE=${DEVBOX_COPY_EXCLUDE:-$DIR/EXCLUDE}
 FILTER=$(dirname "$(readlink -f "$0")")/exclude-filter.py
 [[ -s $EXCLUDE && -x $FILTER ]] || { echo "refusing to start: no exclusion file $EXCLUDE or filter $FILTER" >&2; exit 2; }
 # The off-box rule's checker (NoOffboxMarker, 2026-11-02): markers `.no-offbox` and its patterns.
-NO_OFFBOX=${NO_OFFBOX:-$(command -v no-offbox || echo /mnt/nvme/sami/scratch/no-offbox/dot/scripts/no-offbox)}
+NO_OFFBOX=${NO_OFFBOX:-$(command -v no-offbox || echo /home/sami/.dotfiles/scripts/no-offbox)}
 [[ -x $NO_OFFBOX ]] || { echo "refusing to start: no no-offbox checker" >&2; exit 2; }
 export BOX TREE ROOT DIR BUCKET LISTS LOG ERR EXCLUDE FILTER NO_OFFBOX
 

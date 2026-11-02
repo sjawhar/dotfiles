@@ -10,7 +10,7 @@ cd "$DEVBOX_COPY_DIR" || exit 1
 PAR=${1:-16}
 B=sami-rocqperf
 mk() { nice -n 19 python3 mkshards.py "$@" >>driver.log 2>&1; }
-NO_OFFBOX=${NO_OFFBOX:-$(command -v no-offbox || echo /mnt/nvme/sami/scratch/no-offbox/dot/scripts/no-offbox)}
+NO_OFFBOX=${NO_OFFBOX:-$(command -v no-offbox || echo /home/sami/.dotfiles/scripts/no-offbox)}
 # no-offbox's exclusions under /mnt/durable/$1, as mkshards --exclude args relative to /mnt/durable.
 offbox_ex() {
   local out rc
