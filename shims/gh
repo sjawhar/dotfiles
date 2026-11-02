@@ -167,6 +167,63 @@ gh_shim_no_target() {
     } >&2
     exit "$rc"
 }
+# What GitHub answers when a credential's request budget is spent: the primary
+# limit ("API rate limit exceeded for user ID …", HTTP 403 or 429) or a
+# secondary limit. The call is allowed; the budget is not there now. Read
+# before the refusal pattern, which matches the same HTTP 403.
+GH_SHIM_RATE_LIMITED='API rate limit (already )?exceeded|secondary rate limit|HTTP 429'
+# gh_shim_rate_limited RC ERRFILE ARGV…: the credential's rate limit stopped the
+# call. On 2026-11-02 the shared public-repo token's REST budget ran out and the
+# refusal text told agents the App could not make the call and to stop.
+gh_shim_rate_limited() {
+    local rc="$1" err="$2" who token="" owner="" repo="" prev="" a want=core line name left limit reset when
+    local -a limits=()
+    shift 2
+    token="$(sed -nE 's/.*using the personal token ([^ ]+) .*/\1/p' "$err" | head -n 1)"
+    owner="$(sed -nE 's/.*\(owner=([^)]+)\).*/\1/p; s/.*no App installation for owner ([^ ;]+).*/\1/p' "$err" | head -n 1)"
+    if [[ -n "$token" ]]; then
+        who="the shared public-repo token $token${owner:+ (owner $owner has no App installation)}. It is a personal token, so every session on every machine that reads such an owner, and every other token of the same GitHub user, spends this one budget"
+    else
+        who="the GitHub App installation${owner:+ for owner $owner}, which every agent session shares"
+    fi
+    for a in "$@"; do
+        case "$prev" in -R | --repo) repo="$a" ;; esac
+        case "$a" in
+            --repo=*) repo="${a#--repo=}" ;;
+            graphql) [[ "${1:-}" == api ]] && want=graphql ;;
+        esac
+        [[ -z "$repo" && "$a" =~ ^/?repos/([^/]+/[^/?]+) ]] && repo="${BASH_REMATCH[1]}"
+        prev="$a"
+    done
+    # The rate_limit endpoint costs nothing against any limit. It runs on the
+    # same route as the call: the same repository when the call named one, else
+    # the same directory and environment, from which the call itself was routed.
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && limits+=("$line")
+    done < <(
+        if [[ -n "$repo" ]]; then export GH_REPO="$repo"; fi
+        GH_SHIM_INNER=1 GH_READ_CACHE=0 GH_READ_CACHE_LOG=0 timeout 30 "$0" api rate_limit \
+            --jq '.resources | to_entries[] | select(.key == "core" or .key == "graphql") | "\(.key) \(.value.remaining) \(.value.limit) \(.value.reset)"' \
+            2> /dev/null || true
+    )
+    {
+        echo "gh shim: RATE LIMITED: \`$(gh_shim_quote "$@")\` (exit $rc; GitHub's error is above)."
+        echo "  Identity: it ran as $who."
+        if ((${#limits[@]} == 0)); then
+            echo "  Limit: the reset time could not be read; \`gh api rate_limit\` from the same repository shows it and costs nothing."
+        else
+            for line in "${limits[@]}"; do
+                read -r name left limit reset <<< "$line"
+                [[ "$name" == "$want" || "$left" == 0 ]] || continue
+                when="$(date -u -d "@$reset" +%H:%M:%SZ 2> /dev/null || echo "epoch $reset")"
+                echo "  Limit: $name $left of $limit left; it resets at $when (in $(((reset - $(date +%s) + 59) / 60)) min)."
+            done
+        fi
+        echo "  Why: this is not a refusal. The call is allowed and the credential is the right one; its request budget is spent for now (a secondary limit, when nothing above reads 0 left, clears within minutes)."
+        echo "  Instead: retry after the reset. To read more cheaply, use one GraphQL query (\`gh api graphql\`), which has a budget of its own, in place of repeated REST calls, and poll no faster than once every few minutes. Do not look for another credential."
+    } >&2
+    exit "$rc"
+}
 if agent_context; then
     _dotfiles="${DOTFILES_DIR:-$HOME/.dotfiles}"
     _routed=0
@@ -237,9 +294,18 @@ if agent_context; then
         set -e
         _refused=0
         _no_target=0
+        _limited=0
         if ((_rc != 0)); then
             grep -q '^knives gh: no target repository' "$_err" && _no_target=1
-            ((!_no_target)) && grep -qiE "$GH_SHIM_REFUSED_BY_GITHUB" "$_err" && _refused=1
+            ((!_no_target)) && grep -qiE "$GH_SHIM_RATE_LIMITED" "$_err" && _limited=1
+            ((!_no_target && !_limited)) && grep -qiE "$GH_SHIM_REFUSED_BY_GITHUB" "$_err" && _refused=1
+        fi
+        if ((_limited)); then
+            set +e
+            ( gh_shim_rate_limited "$_rc" "$_err" "$@" )
+            set -e
+            rm -f "$_err"
+            exit "$_rc"
         fi
         rm -f "$_err"
         ((_no_target)) && gh_shim_no_target "$_rc" "$@"

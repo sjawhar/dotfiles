@@ -20,6 +20,7 @@ import socketserver
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -31,6 +32,9 @@ AGENT_CONFIG = DOTFILES / "scripts" / "gh-agent-config"
 AGENT_SESSION = DOTFILES / "scripts" / "agent-session"
 USER_TOKEN = "gho_FAKEUSERTOKEN0000000000000000000000"
 APP_TOKEN = "ghs_FAKEAPPTOKEN00000000000000000000000"
+PAT_TOKEN = "ghp_FAKEPUBLICREPOPAT000000000000000000"
+# Seconds after "now" at which the stub's spent core budget resets.
+RESET_IN = 600
 HEAD = "556750abe84e20ed2e431d7dcf4b029df4d7bd9a"
 REVIEW = ["pr", "review", "1178", "-R", "o/r", "--approve", "--body", "VERDICT: APPROVE"]
 COMMENT = ["pr", "comment", "1178", "-R", "o/r", "--body", "VERDICT: APPROVE"]
@@ -75,6 +79,15 @@ class Handler(BaseHTTPRequestHandler):
         with open(self.log_path, "a") as log:
             log.write(json.dumps({"path": self.path, "token": token,
                                   "mutation": query.lstrip().startswith("mutation")}) + "\n")
+        if self.path.split("?")[0].endswith("/rate_limit"):
+            reset = int(time.time()) + RESET_IN
+            return self._reply(200, {"resources": {
+                "core": {"limit": 5000, "used": 5000, "remaining": 0, "reset": reset},
+                "graphql": {"limit": 5000, "used": 10, "remaining": 4990, "reset": reset + 1800}}})
+        if "ratelimited" in self.path:
+            return self._reply(403, {"message": "API rate limit exceeded for user ID 1. If you reach out to GitHub "
+                                     "Support for help, please include the request ID.",
+                                     "documentation_url": "https://docs.github.com/rest/overview/rate-limits"})
         login = {USER_TOKEN: "fake-user", APP_TOKEN: "fake-app[bot]"}.get(token)
         if login is None:
             return self._reply(401, {"message": "Bad credentials", "status": "401"})
@@ -236,6 +249,39 @@ class UserLogin(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("`gh pr merge 5 -R o/r --admin`", result.stderr)
         self.assertIn("Instead: stop, and tell your lead which call GitHub refused", result.stderr)
+
+    def rate_limited(self, knives_body):
+        executable(self.bin / "knives", '[ "$1" = gh ] && shift; [ "$1" = -- ] && shift\n' + knives_body +
+                   '\nexec "$KNIVES_REAL_GH" "$@"')
+        argv = ["api", "repos/o/ratelimited/pulls"]
+        result, sent = self.run_gh(argv, self.shim_path, **self.agent)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("API rate limit exceeded", result.stderr)  # GitHub's own error stays
+        self.assertIn("gh shim: RATE LIMITED: `gh api repos/o/ratelimited/pulls`", result.stderr)
+        self.assertNotIn("REFUSED", result.stderr)
+        self.assertNotIn("tell your lead", result.stderr)
+        self.assertIn("use one GraphQL query", result.stderr)
+        # The reset comes from the rate_limit endpoint, read on the call's own route.
+        self.assertIn("/rate_limit", [r["path"].split("?")[0] for r in sent])
+        want = time.strftime("%H:%M", time.gmtime(time.time() + RESET_IN))
+        self.assertRegex(result.stderr, r"Limit: core 0 of 5000 left; it resets at \d\d:\d\d:\d\dZ \(in 1[01] min\)")
+        self.assertIn(f"resets at {want}", result.stderr)
+        self.assertNotIn("graphql 4990", result.stderr)  # a budget with requests left is not the cause
+        return result.stderr
+
+    def test_a_spent_public_repo_token_says_rate_limit_and_reset_not_refusal(self):
+        err = self.rate_limited(
+            'echo "gh-app-token: minting token for profile agent (owner=o) through the broker..." >&2\n'
+            'echo "gh-app-token: no App installation for owner o; using the personal token GH_PUBLIC_REPO_PAT'
+            ' - this call will act as its user, not as the App" >&2\n'
+            f'export GH_TOKEN={PAT_TOKEN}')
+        self.assertIn("the shared public-repo token GH_PUBLIC_REPO_PAT (owner o has no App installation)", err)
+
+    def test_a_spent_app_installation_says_rate_limit_too(self):
+        err = self.rate_limited(
+            'echo "gh-app-token: minting token for profile agent (owner=o) through the broker..." >&2\n'
+            f'export GH_TOKEN={APP_TOKEN}')
+        self.assertIn("the GitHub App installation for owner o, which every agent session shares", err)
 
     def test_a_call_knives_could_not_route_says_to_name_a_repository_not_to_stop(self):
         # 2026-11-02: `gh api markdown` outside a checkout; knives names no target and gh's 401 follows.
