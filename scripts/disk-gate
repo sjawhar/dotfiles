@@ -17,6 +17,7 @@
 set -uo pipefail
 
 MOUNT=/mnt/nvme
+MOUNT_GIVEN=0
 STATE_DIR="${DISK_GATE_STATE:-/mnt/nvme/sami/scratch/disk-gate}"
 RESERVE_TTL_S="${DISK_GATE_TTL:-7200}"
 
@@ -74,25 +75,50 @@ cmd_reserve() {
 		return 1
 	fi
 	printf '%s\t%s\t%s\n' "$name" "$gib" "$(date +%s)" >>"$f"
+	# The file's name encodes the mount lossily (`/` becomes `_`), so keep the
+	# real path beside it for `release`, which finds a name across mounts.
+	printf '%s\n' "$MOUNT" >"$f.mount"
 	echo "disk-gate: GO. $MOUNT ${free} GiB free, ${held} GiB reserved by others, ${gib} GiB now yours, ${total} GiB over the ${floor} GiB floor. Run 'disk-gate release $name' when the work ends."
 	flock -u 9
 	return 0
 }
 
+# Release a reservation by name. Without --mount it looks in every mount's
+# state file, because a lane that reserved with `--mount /mnt/durable` and
+# releases the usual way must not be told it freed a claim the gate still
+# counts (found 2026-11-02 01:4xZ: the claim stayed held until it expired).
+# A name held nowhere is an error, exit 1, never a reported success.
 cmd_release() {
-	local name="$1" f lock
+	local name="$1" f lock found=0 where=() files=()
 	[[ -n "$name" ]] || usage
-	f="$(state_file "$MOUNT")"
-	lock="$f.lock"
 	mkdir -p "$STATE_DIR"
-	exec 9>"$lock"
-	flock 9
-	if [[ -f "$f" ]]; then
-		grep -v -P "^\Q$name\E\t" "$f" >"$f.new" 2>/dev/null || true
-		mv -f "$f.new" "$f"
+	if [[ "$MOUNT_GIVEN" == 1 ]]; then
+		files=("$(state_file "$MOUNT")")
+	else
+		shopt -s nullglob
+		files=("$STATE_DIR"/*.tsv)
+		shopt -u nullglob
 	fi
-	echo "disk-gate: released $name on $MOUNT; $(free_gib "$MOUNT") GiB free."
-	flock -u 9
+	for f in "${files[@]}"; do
+		lock="$f.lock"
+		exec 9>"$lock"
+		flock 9
+		if [[ -f "$f" ]] && grep -q -P "^\Q$name\E\t" "$f"; then
+			grep -v -P "^\Q$name\E\t" "$f" >"$f.new" 2>/dev/null || true
+			mv -f "$f.new" "$f"
+			found=1
+			where+=("$(cat "$f.mount" 2>/dev/null || basename "$f" .tsv)")
+		fi
+		flock -u 9
+	done
+	if ((found == 0)); then
+		echo "disk-gate: NOT RELEASED. No reservation named $name is held$([[ "$MOUNT_GIVEN" == 1 ]] && echo " on $MOUNT" || echo " on any mount"). Run 'disk-gate status --mount <mount>' to see who holds what." >&2
+		return 1
+	fi
+	local m
+	for m in "${where[@]}"; do
+		echo "disk-gate: released $name on $m; $(free_gib "$m" 2>/dev/null || echo '?') GiB free."
+	done
 }
 
 cmd_status() {
@@ -117,6 +143,7 @@ while (($#)); do
 	case "$1" in
 	--mount)
 		MOUNT="${2:-}"
+		MOUNT_GIVEN=1
 		shift 2
 		;;
 	*)
