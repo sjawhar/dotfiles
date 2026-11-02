@@ -54,7 +54,7 @@ Delete only paths you prove are yours; never assume an unknown workspace has no 
 - Rank space owners by each session's `du -xsm` of its own paths, never by walking all trees or by a write sample; a process, by sizing its open files twice, minutes apart.
 - A free-space guard samples during a batch too: a higher number to start, a lower one to abort what runs.
 - When many agents of one lead write to one disk, one reads free space and refuses for all. Across leads, run `disk-gate reserve <gib> <name>` before the work and `disk-gate release <name>` after.
-- Size a reservation from a measured PEAK, never from what the work keeps: a 1.4M cut's freeze kept 12 GB and had written 35.3 GiB in 2 h with no plateau. A build with no measured peak measures one in a pool pod first, and brings back only its output.
+- Size a reservation from a measured peak, never from what the work keeps. No measured peak: measure one in a pool pod first, and bring back only the output.
 - Before you promise space back, measure every path that may share inodes (a workspace and `~/.cache/uv`, a cache and a data directory, `os.link` copies) in one `du` (`$S sizes --hardlinks <tree> <cache>`).
 - When a leaked test or process causes space or load, read `references/test-leaks.md`.
 
