@@ -23,7 +23,7 @@
 # A Google VM (scripts/on-google-vm; sami-devbox, dispatch://INFRA-993) has no Azure managed
 # identity. There the box dir holds the agents' own Azure identity `agent-azure` (a user-assigned
 # managed identity, Virtual Machine Contributor on resource group SAMI; agent-infra
-# bootstrap/agentazure.go, theorem-labs/agent-infra#1146), whose federated credential trusts the
+# box-identity/agentazure.go, theorem-labs/agent-infra#1146), whose federated credential trusts the
 # Google ID tokens of the VM's account dev-sjawhar@ (subject its unique id, audience
 # api://AzureADTokenExchange). The shim signs in with `az login --service-principal
 # --federated-token`, the token straight from the metadata server, no secret anywhere. az keeps
@@ -92,7 +92,7 @@ if [ -z "${AZURE_CONFIG_DIR+set}" ] && agent_context; then
         if [ -z "$client_id" ] && [ -r "$id_file" ]; then client_id="$(tr -d '[:space:]' < "$id_file")"; fi
         if [ -z "$client_id" ]; then
             echo "shims/az: this Google VM signs in to Azure as the agent-azure identity, and its client id is not known here." >&2
-            echo "shims/az: set AGENT_AZURE_CLIENT_ID, or write it to $id_file (agent-infra bootstrap output agentAzureClientId, theorem-labs/agent-infra#1146)." >&2
+            echo "shims/az: set AGENT_AZURE_CLIENT_ID, or write it to $id_file (agent-infra box-identity output agentAzureClientId, theorem-labs/agent-infra#1146)." >&2
             exit 1
         fi
         mkdir -p "$box"

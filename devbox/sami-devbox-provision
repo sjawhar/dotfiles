@@ -107,7 +107,7 @@ EXTRA_INSTALLERS=(
     #   no GitHub credential and mints with a hawk login, a person's, that this machine never holds.
 )
 
-# The agent-azure user-assigned identity of theorem-labs/agent-infra#1146 (bootstrap output
+# The agent-azure user-assigned identity of theorem-labs/agent-infra#1146 (box-identity output
 # agentAzureClientId). Not a secret: shims/az reads it from ~/.config/agent-azure/client-id.
 AGENT_AZURE_CLIENT_ID=6133297b-4afa-4f36-ab55-67413835961e
 
