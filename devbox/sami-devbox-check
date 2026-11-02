@@ -348,7 +348,43 @@ host() {
     local rc=0
     "$DOTFILES_DIR/scripts/agentbox" new --dir "$CUTOVER_DIR" -- bash "$DOTFILES_DIR/devbox/sami-devbox-check" --in-box </dev/null || rc=$?
     (( rc == 0 )) || fail "box half: exit $rc (its own FAIL lines are above)"
+    host_kernel
     echo "== $fails failed, $(stamp)"
+    (( fails == 0 ))
+}
+
+# The kernel is not wedged (2026-11-02: cgroup writeback left umounts, fusermount3 and sync in D
+# state, and every box teardown hung). D3 first: the throwaway boxes this run made (the doctor's,
+# agentbox-doctor*) are torn down within 5 minutes, no umount of a box is left, and no
+# agentbox-doctor* mount stays. Then D2, sync completes; then D1, last, so a teardown umount that
+# blocks past 10 minutes is caught too.
+host_kernel() {
+    local boxes got deadline=$((SECONDS + 300))
+    boxes="/mnt/nvme/$(id -un)/agentbox/boxes"
+    while (( SECONDS < deadline )); do
+        got="$(pgrep -af "umount .*$boxes/agentbox-" ; findmnt -rn -o TARGET | grep "^$boxes/agentbox-doctor")"
+        [[ -z "$got" ]] && break
+        sleep 10
+    done
+    [[ -z "$got" ]] && ok "D3: box teardown: no umount of a box runs and no agentbox-doctor mount stays" \
+        || fail "D3: box teardown hangs after 5 minutes: $(tr '\n' ';' <<<"$got")"
+    # sync in the background: a sync stuck in D state cannot be killed, so `timeout sync` would
+    # wait on it forever.
+    local p _
+    sync </dev/null >/dev/null 2>&1 & p=$!
+    for _ in $(seq 60); do kill -0 "$p" 2>/dev/null || break; sleep 1; done
+    if kill -0 "$p" 2>/dev/null; then fail "D2: sync did not complete in 60 s (pid $p left running)"; disown "$p"
+    else ok "D2: sync completes"; fi
+    # The time since each D task last ran (/proc/<pid>/sched se.exec_start, ms since boot), so it
+    # measures time blocked, not process age.
+    # shellcheck disable=SC2016  # the inner shell and awk expand these
+    local dtasks
+    if ! dtasks="$(sudo -n sh -c 'up=$(cut -d" " -f1 /proc/uptime); for d in /proc/[0-9]*; do grep -q "^State:.D" $d/status 2>/dev/null || continue; s=$(awk "/^se.exec_start/{print \$3}" $d/sched 2>/dev/null); [ -n "$s" ] && echo "$up $s ${d#/proc/} $(tr " " _ < $d/comm)"; done; true' 2>&1)"; then
+        fail "D1: the D-state scan did not run: $dtasks"
+    else
+        got="$(awk '{b=$1-$2/1000; if (b>600) printf "pid %s (%s) in D state for %d s\n",$3,$4,b}' <<<"$dtasks")"
+        [[ -z "$got" ]] && ok "D1: no task in D state over 600 s" || fail "D1: $(tr '\n' ';' <<<"$got")"
+    fi
     (( fails == 0 ))
 }
 
