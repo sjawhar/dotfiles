@@ -628,10 +628,12 @@ STARTED_RECORD = f"""# Pilot: stream record
 class FactsDispatch:
     """The read-only Dispatch routes facts uses, in the shapes Dispatch returned (claim.actor, agents session_id)."""
 
-    def __init__(self, record: str, claims: dict[str, str] | None = None, live=(SESSION,)):
+    def __init__(self, record: str, claims: dict[str, str] | None = None, live=(SESSION,),
+                 issues: dict[str, dict] | None = None):
         self.record = record
         self.claims = claims or {}
         self.live = list(live)
+        self.issues = issues or {}
 
     def get(self, path: str):
         if path == "/api/v1/issues/INFRA-167/artifacts/stream.md/text":
@@ -645,7 +647,8 @@ class FactsDispatch:
         key = path.removeprefix("/api/v1/issues/")
         holder = self.claims.get(key)
         return {"key": key, "status": "in_progress",
-                "claim": {"actor": actor(holder), "at": "2026-11-01T10:00:00Z"} if holder else None}
+                "claim": {"actor": actor(holder), "at": "2026-11-01T10:00:00Z"} if holder else None,
+                **self.issues.get(key, {})}
 
 
 def fake_commands(monkeypatch, panes: set[str], sessions: list[dict] | None) -> list[list[str]]:
@@ -721,6 +724,26 @@ def test_facts_counts_a_start_while_young_or_its_pane_lives_unless_a_live_sessio
     assert "role has no live holder: missing-role" in result["findings"]
     assert "ready issue with no owner: INFRA-12" in result["findings"]
     assert "ready issue with no owner: INFRA-10" not in result["findings"]
+
+
+def test_facts_never_marks_a_legion_issue_or_one_under_a_legion_parent_ready(monkeypatch, tmp_path):
+    record = STARTED_RECORD.replace(
+        "| 4 |", "| 5 | https://dispatch.test/issues/INFRA-14 | Legion-labelled. | none | ready |\n"
+        "| 6 | https://dispatch.test/issues/INFRA-15 | Child of a Legion issue. | none | ready |\n| 4 |")
+    fake_commands(monkeypatch, set(), [])
+    api = FactsDispatch(record, issues={"INFRA-14": {"labels": ["legion"]}, "INFRA-15": {"parent": "INFRA-16"},
+                                        "INFRA-16": {"parent": "INFRA-17"}, "INFRA-17": {"labels": ["legion"]}})
+
+    result, _ = pilot.facts(api, "INFRA-167", tmp_path, datetime(2026, 11, 1, 18, tzinfo=UTC))
+
+    rows = {item["issue"]: item for item in result["order_of_work"]}
+    # The Legion daemon routes these: an outside session's claim would take the tree out of its workflow.
+    assert [(rows[k]["ready_no_owner"], rows[k]["legion"]) for k in ("INFRA-14", "INFRA-15")] == [
+        (False, True), (False, True)]
+    assert (rows["INFRA-12"]["ready_no_owner"], rows["INFRA-12"]["legion"]) == (True, False)
+    assert "ready issue with no owner: INFRA-12" in result["findings"]
+    assert not {"ready issue with no owner: INFRA-14", "ready issue with no owner: INFRA-15"} & set(result["findings"])
+
 
 class FailingRecord(FactsDispatch):
     """FactsDispatch whose reads fail with ERROR, as `sources.Dispatch.get` raises it: only the stream.md read when

@@ -64,7 +64,9 @@ per stream. Nothing here writes to Dispatch or sends an Envoy message: `summary`
   next holder, sessions that claim more than one open issue of the project, and a `findings` list. A row counts as
   started, not ready, while no live session claims it and its latest `started.tsv` line is under 2 hours old or an
   omp process still runs in its tmux pane, read from /proc as `chief-dashboard sessions` reads it (`agent-new` leaves a
-  bash in the pane after omp exits, which does not count; tmux names both `bash`, since `omp` is a shim). Each multi-claim
+  bash in the pane after omp exits, which does not count; tmux names both `bash`, since `omp` is a shim). A row whose
+  issue, or an ancestor through `parent`, has the `legion` label is never ready (`legion: true`): the Legion daemon
+  routes that tree, and an outside session's claim takes it out of the workflow. Each multi-claim
   entry carries `pilot_session`: whether that session posted a `LEDGER start` on the stream issue since the pilot
   start (2026-11-03T14:30Z unless `--pilot-start`); the set accumulates in `DIR/KEY/pilot-sessions.txt`.
   `pending_offline` lists the lines of `offline-ledger.md` and `pending_offline_decisions` the entries of

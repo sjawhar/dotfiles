@@ -360,6 +360,18 @@ def facts(api, stream: str, state: Path, now: dt.datetime, pilot_start: dt.datet
             issue_cache[key] = api.get(f"/api/v1/issues/{quote(key)}")
         return issue_cache[key]
 
+    def under_legion(key: str | None) -> bool:
+        """Whether the issue or an ancestor carries the `legion` label: the Legion daemon routes that tree, and an
+        outside session's claim takes it out of the workflow (skill://dispatch)."""
+        seen: set[str] = set()
+        while key and key not in seen:
+            seen.add(key)
+            work = read_issue(key)
+            if "legion" in (work.get("labels") or []):
+                return True
+            key = work.get("parent")
+        return False
+
     issue = read_issue(stream) if down is None else None
     agents = ({agent.get("session_id"): agent for agent in api.get("/api/v1/agents") if agent.get("session_id")}
               if down is None else {})
@@ -376,19 +388,22 @@ def facts(api, stream: str, state: Path, now: dt.datetime, pilot_start: dt.datet
     order: list[dict] = []
     for row in parse_order_of_work(record or ""):
         if down is not None:
-            order.append({**row, "title": None, "status": None, "claim": None, "ready_no_owner": False})
+            order.append({**row, "title": None, "status": None, "claim": None, "legion": None,
+                          "ready_no_owner": False})
             continue
         work = read_issue(row["issue"])
         claim_session, claim_title, claim_live = _title((work.get("claim") or {}).get("actor"), agents)
         waits_done = all(read_issue(key).get("status") == "done" for key in row["waits_on"])
         # Only a live session's claim governs: a claim left by an ended session does not hide a fresh start.
         started = recent_starts.get(row["issue"]) if not claim_live else None
-        ready = work.get("status") != "done" and not claim_live and waits_done and started is None
+        legion = under_legion(row["issue"])
+        ready = work.get("status") != "done" and not claim_live and waits_done and started is None and not legion
         item = {
             **row,
             "title": work.get("title"),
             "status": work.get("status"),
             "claim": {"session": claim_session, "title": claim_title, "live": claim_live} if claim_session else None,
+            "legion": legion,
             "ready_no_owner": ready,
         }
         if started:
