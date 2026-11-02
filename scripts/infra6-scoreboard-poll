@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# infra6-scoreboard-poll: the clock behind three numbers of the INFRA-6 scoreboard
+# (dispatch://INFRA-6/artifact/scoreboard-json), which stopped being read on 2026-11-01 because
+# their polls ran only when a session remembered them.
+#
+#   blocked-agent-hours  every 3-hour tick. At hh:29 for hh in 01 04 07 10 13 16 19 22 (UTC), one
+#                        direct Envoy message to each lead in leads.tsv (below) asks for its
+#                        own count of agents x hours idle on infrastructure in the window that
+#                        ended at hh:00. A direct ask, never a topic broadcast: on 2026-10-29 the
+#                        broadcast got 0 answers of 12 and the direct ask 12 of 12
+#                        (dispatch://INFRA-6/comment/2bee1e2b-e429-45e0-b35a-fe77bb0078cb). The
+#                        replies go to the INFRA session, which the scoreboard's cadence names. At
+#                        hh:59 the job wakes that session to add them up and record the reading:
+#                        the replies are free text, so adding them up is a judgment, not a parse.
+#   admin-paths          daily, at the 10:29Z tick: the five paths of dispatch://INFRA-243, read by
+#                        the method of the 2026-11-01T09:26Z reading, but the IAM reads run as
+#                        infra-applier@ and not as Sami's login.
+#   acceptance           daily, at the 10:29Z tick: checks 1 and 6 of docs/specs/fleet.md
+#                        "Acceptance" are read here. Checks 2 to 5 need #fleet-alerts, which only
+#                        the session's Slack tool reads, so the wake message asks the session to
+#                        read them.
+#
+# Run it as the omp job `infra6-scoreboard-poll` (a persistent omp service), not as a systemd
+# unit: the chief of staff's ruling of 2026-11-01, dispatch://INFRA-26/comment/615d0105.
+#
+#   infra6-scoreboard-poll            the loop
+#   infra6-scoreboard-poll tick       one blocked-hours poll now, for the window that ended at the last tick
+#   infra6-scoreboard-poll daily      the admin-paths and acceptance reads now, printed
+set -uo pipefail
+
+readonly INFRA_SESSION=01a13c57-d826-7242-80fe-5f0670188b11
+readonly APPLIER=infra-applier@theorem-agent-infra.iam.gserviceaccount.com
+readonly DEPLOY=serviceAccount:deploy@theorem-agent-infra.iam.gserviceaccount.com
+readonly BOX=serviceAccount:dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com
+state=${XDG_STATE_HOME:-$HOME/.local/state}/infra6-scoreboard-poll
+mkdir -p "$state"
+
+log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
+
+# The replies must reach the INFRA session's inbox, so the sends carry its id as their source
+# whatever session started the job (`envoy send` stamps source_session from OMP_SESSION_ID).
+send_as_infra() { OMP_SESSION_ID=$INFRA_SESSION envoy send --message-file "$2" "$1" >/dev/null; }
+
+# The leads asked: "$state/leads.tsv", one "<session id><TAB><lane name>" per line, which the INFRA
+# session keeps. It is a list and not every titled session, because a coordinator answers for its
+# workers: asking each worker too would count the same idle hours twice. A lead that is no longer
+# live is skipped, and the wake message names it so the list is mended.
+lanes() {
+	local live
+	live=$(envoy ps --json | jq -r '.[].session_id')
+	while IFS=$'\t' read -r sid name; do
+		case "$sid" in '' | '#'*) continue ;; esac
+		if grep -qx "$sid" <<<"$live"; then echo "$sid"; else log "lead $name ($sid) is not live" >&2; echo "$name $sid" >>"$state/gone.txt"; fi
+	done <"$state/leads.tsv"
+}
+
+# window_end prints the last tick at or before now (01, 04, ..., 22 UTC), as HH:00.
+window_end() {
+	local h
+	h=$((10#$(date -u +%H)))
+	h=$(( h - ((h - 1 + 24) % 3) ))
+	printf '%02d:00' $(( (h + 24) % 24 ))
+}
+
+poll() {
+	local end start msg n=0 failed=0 sid
+	: >"$state/gone.txt"
+	end=$(window_end)
+	start=$(printf '%02d:00' $(( (10#${end%%:*} + 21) % 24 )))
+	msg="$state/poll-message.txt"
+	cat >"$msg" <<EOF
+INFRA-6 blocked-agent-hours poll, window $(date -u +%F) $start to ${end}Z. From the INFRA session (01a13c57), sent by its job infra6-scoreboard-poll.
+
+Reply to me with one line for your lane:
+- agents idle x hours idle in that window because of infrastructure (merge path, apply, credential, the box, Dispatch, CI, Envoy, model gateway or login), from your own count. Give one item for each cause.
+- 0 if no agent of yours was idle on infrastructure. Work that waits while you keep working is 0.
+- "not working" if your lane did no work in the window.
+
+Reply within 30 minutes. I count only what you report. I estimate nothing.
+EOF
+	while read -r sid; do
+		[ -n "$sid" ] || continue
+		if send_as_infra "$sid" "$msg"; then n=$((n + 1)); else failed=$((failed + 1)); log "send to $sid failed"; fi
+	done < <(lanes)
+	printf '%s %s %s %s\n' "$(date -u +%FT%TZ)" "$start-$end" "$n" "$failed" >>"$state/polls.log"
+	log "poll $start-${end}Z sent to $n leads, $failed failed"
+}
+
+# admin_paths prints one line per path of dispatch://INFRA-243: OPEN or CLOSED and the evidence.
+admin_paths() {
+	local open=0 roles members
+	# The credential's presence, read without minting a token: a mint would be a use of his login.
+	if gcloud auth list --filter=account:sami@theorem.dev --format='value(account)' 2>/dev/null | grep -qx 'sami@theorem.dev'; then
+		echo "1 OPEN: Sami's Google login (sami@theorem.dev) is a credentialed account in gcloud on this box"; open=$((open + 1))
+	else
+		echo "1 CLOSED: gcloud on this box holds no sami@theorem.dev credential"
+	fi
+	if AZURE_CONFIG_DIR=$HOME/.azure az account show --query user.name -o tsv 2>/dev/null | grep -qi '^sami@'; then
+		echo "2 OPEN: ~/.azure holds Sami@Theorem.dev's az login (a session that sets AZURE_CONFIG_DIR=~/.azure uses it; shims/az points agents at the box identity by default)"; open=$((open + 1))
+	else
+		echo "2 CLOSED: ~/.azure holds no Sami@Theorem.dev login"
+	fi
+	if ! roles=$(gcloud projects get-iam-policy theorem-agent-infra --impersonate-service-account="$APPLIER" \
+		--flatten='bindings[].members' --filter="bindings.members:$DEPLOY" --format='value(bindings.role)' 2>/dev/null); then
+		echo "3 UNREAD: theorem-agent-infra's IAM policy could not be read as $APPLIER"
+		echo "4 UNREAD: same"
+	else
+		if grep -qx 'roles/iam.serviceAccountAdmin' <<<"$roles"; then
+			echo "3 OPEN: deploy@ holds roles/iam.serviceAccountAdmin on theorem-agent-infra"; open=$((open + 1))
+		else echo "3 CLOSED: deploy@ holds no roles/iam.serviceAccountAdmin on theorem-agent-infra"; fi
+		if grep -qE '^roles/container\.(clusterAdmin|admin)$' <<<"$roles"; then
+			echo "4 OPEN: deploy@ holds $(grep -E '^roles/container\.(clusterAdmin|admin)$' <<<"$roles" | paste -sd,) on theorem-agent-infra (it can write a Deployment in dispatch)"; open=$((open + 1))
+		else echo "4 CLOSED: deploy@ holds no container admin role on theorem-agent-infra"; fi
+	fi
+	if ! members=$(gcloud secrets get-iam-policy github-settings-app --project theorem-agent-infra \
+		--impersonate-service-account="$APPLIER" --format=json 2>/dev/null |
+		jq -r '.bindings[]? | select(.role == "roles/secretmanager.secretAccessor") | .members[]'); then
+		echo "5 UNREAD: github-settings-app's IAM policy could not be read as $APPLIER"
+	elif grep -qx "$BOX" <<<"$members"; then
+		echo "5 OPEN: the box identity reads github-settings-app"; open=$((open + 1))
+	else
+		echo "5 CLOSED: github-settings-app's accessors are $(paste -sd, <<<"$members"); the box identity is not among them"
+	fi
+	echo "admin-paths = $open"
+}
+
+# acceptance_1_6 prints checks 1 and 6. Check 1 is read from the clouds' side: Datadog takes a
+# VM's owner tag from its owner label, so a running VM with no owner label is a host-list row
+# with no owner.
+acceptance_1_6() {
+	local p total=0 none=0 t n
+	for p in theorem-research autoformalization theorem-agent-infra; do
+		t=$(gcloud compute instances list --project "$p" --filter='status=RUNNING' --format='value(name)' 2>/dev/null | wc -l)
+		n=$(gcloud compute instances list --project "$p" --filter='status=RUNNING AND -labels.owner:*' --format='value(name)' 2>/dev/null | wc -l)
+		total=$((total + t)); none=$((none + n))
+		echo "1 $p: $t running, $n with no owner label"
+	done
+	if [ "$none" -eq 0 ]; then echo "1 PASS on GCP: $total running VMs, each with an owner label"; else echo "1 FAIL: $none of $total running VMs carry no owner label"; fi
+	echo "6 $(cd "$HOME" && dispatch read --issue INFRA-302 2>/dev/null | grep -E '^Status:' || echo 'Status: UNREAD') (dispatch://INFRA-302: PASS only once a box is closed and its four checks hold)"
+}
+
+daily() {
+	echo "== admin-paths, read $(date -u +%FT%TZ)"
+	admin_paths
+	echo "== acceptance checks 1 and 6, read $(date -u +%FT%TZ)"
+	acceptance_1_6
+}
+
+wake() {
+	local end start msg
+	end=$(window_end)
+	start=$(printf '%02d:00' $(( (10#${end%%:*} + 21) % 24 )))
+	msg="$state/wake-message.txt"
+	{
+		echo "infra6-scoreboard-poll: add up the blocked-agent-hours replies for $(date -u +%F) $start-${end}Z (poll sent at ${end%%:*}:29Z; $(tail -1 "$state/polls.log" | cut -d' ' -f3) leads asked). Count each lane's own figure only, name each cause, give n and how it was asked, and do not add two lanes' counts of one cause. Append the reading to dispatch://INFRA-6/artifact/scoreboard-json."
+		if [ -s "$state/gone.txt" ]; then
+			echo "Leads in $state/leads.tsv that are no longer live, not asked; replace or remove each:"
+			cat "$state/gone.txt"
+		fi
+		if [ "$end" = "10:00" ]; then
+			echo
+			echo "Daily tick: also read acceptance checks 2 to 5 in #fleet-alerts (C0C9V89H79U, the last 24 h: posts of monitors 28896344, 29164428 and 29172451, and theorem_gcloud_credential_read signals), append admin-paths and acceptance to the scoreboard, and post the day's three readings in one comment on INFRA-6. Read by this job:"
+			cat "$state/daily.txt"
+		fi
+	} >"$msg"
+	if send_as_infra "$INFRA_SESSION" "$msg"; then log "woke the INFRA session for $start-${end}Z"; else log "wake send failed"; fi
+}
+
+# next_at MM: prints the epoch of the next MM past a tick hour (01 04 07 10 13 16 19 22 UTC).
+next_at() {
+	local now h m=$1 t
+	now=$(date -u +%s)
+	for d in 0 1; do
+		for h in 01 04 07 10 13 16 19 22; do
+			t=$(date -u -d "$(date -u -d "@$now" +%F) $h:$m:00 UTC + $d day" +%s)
+			if [ "$t" -gt "$now" ]; then echo "$t"; return; fi
+		done
+	done
+}
+
+loop() {
+	local poll_at wake_at
+	log "started; INFRA session $INFRA_SESSION; state $state"
+	while :; do
+		poll_at=$(next_at 29)
+		sleep $(( poll_at - $(date -u +%s) ))
+		poll
+		[ "$(window_end)" = "10:00" ] && daily >"$state/daily.txt" 2>&1
+		wake_at=$(next_at 59)
+		sleep $(( wake_at - $(date -u +%s) ))
+		wake
+	done
+}
+
+case "${1:-loop}" in
+	loop) loop ;;
+	tick) poll ;;
+	daily) daily ;;
+	*) echo "usage: infra6-scoreboard-poll [loop|tick|daily]" >&2; exit 2 ;;
+esac
