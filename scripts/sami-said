@@ -269,11 +269,29 @@ def norm(text: str) -> str:
 
 
 def agent_dirs(given: list[str]) -> list[Path]:
+    """The omp agent directories to read, each one once.
+
+    A profile's `sessions` and `history.db` are often symlinks to the default agent directory's, so the same
+    transcript and the same prompt were read twice and every row printed twice, at twice the run time (found by
+    the skill librarian, 2026-11-02, ledger L1009). Two directories are the same source when their resolved
+    `sessions` path is the same.
+    """
     if given:
         return [Path(d).expanduser() for d in given]
     home = Path.home() / ".omp"
     found = [home / "agent"] + sorted(home.glob("profiles/*/agent"))
-    return [d for d in found if (d / "sessions").is_dir()]
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for d in found:
+        sessions = d / "sessions"
+        if not sessions.is_dir():
+            continue
+        key = sessions.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
 
 
 def load_history(root: Path) -> AgentDir:
