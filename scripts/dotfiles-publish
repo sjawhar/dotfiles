@@ -16,6 +16,12 @@
 #     moving them would write markers. The first real run met exactly this, on 2026-11-02:
 #     another session's uncommitted line in scripts/AGENTS.md sat beside one main already had.
 #   - nothing conflicts: the real commits are rebased, and <commit> is pushed.
+#   - <commit> sits on commits main does not have (another session's, committed and not yet
+#     published): the duplicate of <commit> alone is pushed, and nothing local moves. Pushing
+#     <commit> itself would publish those commits under your push, and rebasing it onto main
+#     would drop them from the working copy, so from the files on disk. On 2026-11-02 at 15:46Z
+#     two such commits sat under an earlyoom-kill-watch commit and went into its push, which
+#     the leak check refused.
 # A refused or partial run leaves every file on disk as it was.
 #
 # <commit> is any jj revision naming one commit (a change id, a commit id). Commit only your own
@@ -40,10 +46,13 @@ while :; do
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "$rev names more than one commit"
     [[ "$(jj log -r "$commit" --no-graph -T 'empty')" != true ]] || die "$rev is empty: nothing to publish"
     push="$commit"
-    if [[ -z "$(jj log -r "main@origin & ::$commit-" --no-graph -T 'commit_id')" ]]; then
+    # Commits under <commit> that main does not have are someone else's unpublished work.
+    below="$(jj log -r "::$commit- ~ ::main@origin" --no-graph -T 'commit_id.short() ++ " "')"
+    below="${below% }"
+    if [[ -n "$below" || -z "$(jj log -r "main@origin & ::$commit-" --no-graph -T 'commit_id')" ]]; then
         # Trial first. jj reports "Duplicated <old commit> as <change> <new commit>"; awk reads
         # all of it, since jj exits 3 when its output pipe closes early.
-        own="" others=()
+        own="" others=() files=""
         declare -A origin_of=()
         while read -r old new; do
             # jj prints the copy's id short (8 characters here), so the copies are keyed by 8.
@@ -67,13 +76,16 @@ while :; do
             jj abandon --quiet "$own"
             die "CONFLICT: $rev conflicts with main@origin; nothing moved and no file on disk changed. Merge main's change into your commit by hand, then run this again."
         fi
+        if [[ -n "$below" ]]; then
+            above+="${above:+; }the unpublished commits below it ($below)"
+        fi
         if [[ -n "$above" ]]; then
             if [[ "$(jj log -r "$own" --no-graph -T 'empty')" == true ]]; then
                 jj abandon --quiet "$own"
                 die "$rev's change is already on main; nothing to publish"
             fi
             push="$(jj log -r "$own" --no-graph -T 'commit_id')"
-            echo "dotfiles-publish: $above, above $rev, would conflict with main@origin in: $files. Publishing $rev alone, as a copy on main; $rev and the working copy stay on their old base, and no file on disk changes. Whoever owns those uncommitted lines resolves them before \`dotfiles-sync local\` can move the working copy." >&2
+            echo "dotfiles-publish: $above${files:+, which would conflict with main@origin in:$files}. Publishing $rev alone, as a copy on main; $rev and the working copy stay on their old base, and no file on disk changes. Whoever owns those lines or commits publishes or resolves them before \`dotfiles-sync local\` can move the working copy." >&2
         else
             jj abandon --quiet "$own"
             jj rebase --quiet -s "$commit" -d main@origin
