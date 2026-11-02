@@ -159,20 +159,32 @@ class Publish(DotfilesCheckout):
         self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
         self.assertEqual(self.origin_main(), upstream_head)
 
-    def test_a_working_copy_edit_that_conflicts_with_main_also_refuses(self) -> None:
-        # The working copy descends from the commit and moves with it, so its conflict would reach
-        # disk the same way.
+    def test_a_working_copy_that_would_conflict_stays_and_the_commit_goes_alone(self) -> None:
+        # The working copy descends from the commit and would move with it, so its conflict would
+        # reach disk: it stays on its old base, and a copy of the commit alone goes to main. The
+        # first real run met this (2026-11-02): another session's uncommitted line beside one main
+        # already had.
         change = self.my_commit("other.txt", "my edit\n")
         (self.upstream / "wip.txt").write_text("upstream edit\n")
         self.commit_upstream("upstream")
         upstream_head = self.origin_main()
+        mine = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
+        wc = self.jj("log", "-r", "@", "--no-graph", "-T", "commit_id")
 
         result = self.publish(change)
 
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("the working copy, above", result.stderr)
+        self.assertIn("wip.txt", result.stderr)
+        main = self.origin_main()
+        self.assertEqual(self.run_ok("git", "rev-parse", f"{main}^", cwd=self.origin).strip(), upstream_head)
+        self.assertEqual(self.run_ok("git", "show", f"{main}:other.txt", cwd=self.origin), "my edit\n")
+        self.assertEqual(self.run_ok("git", "show", f"{main}:wip.txt", cwd=self.origin), "upstream edit\n")
+        # Nothing local moved, and no file on disk changed.
+        self.assertEqual(self.jj("log", "-r", change, "--no-graph", "-T", "commit_id"), mine)
+        self.assertEqual(self.jj("log", "-r", "@", "--no-graph", "-T", "commit_id"), wc)
         self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
         self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
-        self.assertEqual(self.origin_main(), upstream_head)
 
     def test_a_commit_that_does_not_conflict_is_rebased_and_pushed(self) -> None:
         change = self.my_commit("other.txt", "my edit\n")

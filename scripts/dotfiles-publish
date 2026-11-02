@@ -8,11 +8,18 @@
 # conflicts writes jj's conflict markers into the working copy, and on 2026-11-02 at
 # 11:59:11-11:59:31Z the publish steps run by hand did exactly that to shims/gh, so about 22 gh
 # calls from 7 sessions read a file of markers. So the rebase is tried first on a DUPLICATE of
-# <commit> and its descendants, which no working copy holds, and abandoned; only a trial with no
-# conflict lets the real commits move. A refused run leaves every file on disk as it was.
+# <commit> and its descendants, which no working copy holds:
+#   - <commit> itself conflicts: refused, and nothing moves.
+#   - <commit> is clean but something above it conflicts (the working copy, holding other
+#     sessions' uncommitted edits next to a change main already has): the clean duplicate of
+#     <commit> is pushed, and the originals and the working copy stay where they are, since
+#     moving them would write markers. The first real run met exactly this, on 2026-11-02:
+#     another session's uncommitted line in scripts/AGENTS.md sat beside one main already had.
+#   - nothing conflicts: the real commits are rebased, and <commit> is pushed.
+# A refused or partial run leaves every file on disk as it was.
 #
 # <commit> is any jj revision naming one commit (a change id, a commit id). Commit only your own
-# paths first (`git commit -- <paths>`, or `jj commit <paths>`), then name that commit here.
+# paths first (`jj commit <paths>`), then name that commit here.
 set -euo pipefail
 
 TRIES="${DOTFILES_PUBLISH_TRIES:-3}"
@@ -32,28 +39,56 @@ while :; do
         || die "no single commit is named $rev"
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "$rev names more than one commit"
     [[ "$(jj log -r "$commit" --no-graph -T 'empty')" != true ]] || die "$rev is empty: nothing to publish"
+    push="$commit"
     if [[ -z "$(jj log -r "main@origin & ::$commit-" --no-graph -T 'commit_id')" ]]; then
-        # Trial first. The duplicates' ids come from jj's own report; awk reads all of it,
-        # since jj exits 3 when its output pipe closes early.
-        mapfile -t trial < <(jj duplicate --color never "$commit::" --onto main@origin 2>&1 \
-            | awk '/^Duplicated / {print $5}')
-        (( ${#trial[@]} )) || die "could not trial-rebase $rev onto main; nothing moved"
-        set="$(IFS='|'; echo "${trial[*]}")"
-        conflicted="$(jj log -r "($set) & conflicts()" --no-graph -T 'change_id.short() ++ " "')"
-        jj abandon --quiet "$set"
-        if [[ -n "$conflicted" ]]; then
-            die "CONFLICT: $rev or one of its descendants conflicts with main@origin; nothing moved and no file on disk changed. Merge main's change into your commit by hand, then run this again."
+        # Trial first. jj reports "Duplicated <old commit> as <change> <new commit>"; awk reads
+        # all of it, since jj exits 3 when its output pipe closes early.
+        own="" others=()
+        declare -A origin_of=()
+        while read -r old new; do
+            # jj prints the copy's id short (8 characters here), so the copies are keyed by 8.
+            if [[ "$commit" == "$old"* ]]; then own="$new"; else others+=("$new"); origin_of[${new:0:8}]="$old"; fi
+        done < <(jj duplicate --color never "$commit::" --onto main@origin 2>&1 \
+            | awk '/^Duplicated / {print $2, $5}')
+        [[ -n "$own" ]] || die "could not trial-rebase $rev onto main; nothing moved"
+        above=""
+        if (( ${#others[@]} )); then
+            dups="$(IFS='|'; echo "${others[*]}")"
+            wc="$(jj log -r @ --no-graph -T 'commit_id')"
+            files=""
+            for c in $(jj log -r "($dups) & conflicts()" --no-graph -T 'commit_id ++ " "'); do
+                if [[ "$wc" == "${origin_of[${c:0:8}]:-none}"* ]]; then name="the working copy"; else name="commit ${origin_of[${c:0:8}]:-?}"; fi
+                above+="${above:+, }$name"
+                files+=" $(jj resolve --list -r "$c" 2>/dev/null | awk '{print $1}' | paste -sd' ' -)"
+            done
+            jj abandon --quiet "$dups"
         fi
-        jj rebase --quiet -s "$commit" -d main@origin
-        commit="$(jj log -r "$rev" --no-graph -T 'commit_id')"
-        if [[ -n "$(jj log -r "$commit:: & conflicts()" --no-graph -T 'commit_id')" ]]; then
-            die "CONFLICT after the rebase although the trial had none; resolve it in $PWD now"
+        if [[ "$(jj log -r "$own" --no-graph -T 'conflict')" == true ]]; then
+            jj abandon --quiet "$own"
+            die "CONFLICT: $rev conflicts with main@origin; nothing moved and no file on disk changed. Merge main's change into your commit by hand, then run this again."
+        fi
+        if [[ -n "$above" ]]; then
+            if [[ "$(jj log -r "$own" --no-graph -T 'empty')" == true ]]; then
+                jj abandon --quiet "$own"
+                die "$rev's change is already on main; nothing to publish"
+            fi
+            push="$(jj log -r "$own" --no-graph -T 'commit_id')"
+            echo "dotfiles-publish: $above, above $rev, would conflict with main@origin in: $files. Publishing $rev alone, as a copy on main; $rev and the working copy stay on their old base, and no file on disk changes. Whoever owns those uncommitted lines resolves them before \`dotfiles-sync local\` can move the working copy." >&2
+        else
+            jj abandon --quiet "$own"
+            jj rebase --quiet -s "$commit" -d main@origin
+            push="$(jj log -r "$rev" --no-graph -T 'commit_id')"
+            if [[ -n "$(jj log -r "$push:: & conflicts()" --no-graph -T 'commit_id')" ]]; then
+                die "CONFLICT after the rebase although the trial had none; resolve it in $PWD now"
+            fi
         fi
     fi
-    if err="$(git push --quiet origin "$commit:refs/heads/main" 2>&1)"; then
-        echo "dotfiles-publish: main is $commit"
+    if err="$(git push --quiet origin "$push:refs/heads/main" 2>&1)"; then
+        echo "dotfiles-publish: main is $push"
         exit 0
     fi
+    # A copy that lost the race is made again from the new main.
+    [[ "$push" == "$commit" ]] || jj abandon --quiet "$push"
     (( attempt < TRIES )) || die "push refused $attempt times; the last answer: $err"
     echo "dotfiles-publish: push refused (another session pushed first?); fetching and trying again" >&2
 done
