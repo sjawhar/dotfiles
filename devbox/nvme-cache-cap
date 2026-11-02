@@ -36,7 +36,23 @@ dry=""
 
 status=0
 
-size_of() { du -sb "$1" | cut -f1; }
+# A cache is written while du walks it: uv, for one, makes and removes .tmp* entries under
+# builds-v0. du still prints the total of what it read, but exits 1 for each entry gone before it
+# got there, and under `set -e` that ended the whole run on 2026-11-02 20:39Z, so no cap was
+# checked. A vanished entry is not an error here; any other du error still is.
+size_of() {
+    local out errs rc=0
+    errs="$(mktemp)"
+    out="$(du -sb "$1" 2>"$errs")" || rc=$?
+    if ((rc != 0)) && grep -qv ': No such file or directory$' "$errs"; then
+        cat "$errs" >&2
+        rm -f "$errs"
+        return "$rc"
+    fi
+    rm -f "$errs"
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "${out%%$'\t'*}"
+}
 
 report() { # report NAME DIR SIZE CAP
     echo "nvme-cache-cap: $1 $2 is $3 bytes, cap $4"

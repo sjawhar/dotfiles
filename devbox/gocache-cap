@@ -29,7 +29,25 @@ if [[ ! -d "$dir" ]]; then
     exit 0
 fi
 
-size="$(du -sb "$dir" | cut -f1)"
+# Builds add and remove entries while du walks the cache. du still prints the total of what it
+# read, but exits 1 for each entry gone before it got there, which under `set -e` ends the run
+# (devbox/nvme-cache-cap failed this way on 2026-11-02 20:39Z). A vanished entry is not an error
+# here; any other du error still is.
+size_of() {
+    local out errs rc=0
+    errs="$(mktemp)"
+    out="$(du -sb "$1" 2>"$errs")" || rc=$?
+    if ((rc != 0)) && grep -qv ': No such file or directory$' "$errs"; then
+        cat "$errs" >&2
+        rm -f "$errs"
+        return "$rc"
+    fi
+    rm -f "$errs"
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "${out%%$'\t'*}"
+}
+
+size="$(size_of "$dir")"
 if ((size <= trim_at)); then
     echo "gocache-cap: $dir is $size bytes, at or under the trim size of $trim_at"
     exit 0
@@ -51,7 +69,7 @@ done
 for cache in "${caches[@]}"; do
     find "$cache" -mindepth 2 -maxdepth 2 -path "$cache/[0-9a-f][0-9a-f]/*" -type f -mmin "+$trim_age" -delete 2>/dev/null || true
 done
-trimmed="$(du -sb "$dir" | cut -f1)"
+trimmed="$(size_of "$dir")"
 if ((trimmed <= cap)); then
     echo "gocache-cap: $dir was $size bytes, over the trim size of $trim_at; deleted entries unused for $trim_age min; now $trimmed bytes"
     exit 0
@@ -62,4 +80,4 @@ cd /
 for cache in "${caches[@]}"; do
     GOCACHE="$cache" go clean -cache
 done
-echo "gocache-cap: $dir was $size bytes, $trimmed after the trim, over the cap of $cap; cleaned ${caches[*]}; now $(du -sb "$dir" | cut -f1) bytes"
+echo "gocache-cap: $dir was $size bytes, $trimmed after the trim, over the cap of $cap; cleaned ${caches[*]}; now $(size_of "$dir") bytes"

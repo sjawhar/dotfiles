@@ -109,6 +109,12 @@ $ PIP_CACHE_CAP_BYTES=1000 devbox/nvme-cache-cap
 nvme-cache-cap: pip …/cache/pip was 23679 bytes, over the cap of 1000; ran pip cache purge; now 0 bytes
 ```
 
+An entry that vanishes while `du` walks a cache (uv removes its own `.tmp*` entries under
+`builds-v0`) is not an error: the run takes du's total of what it read. Until 2026-11-02 such an
+entry made du exit 1 and ended the whole run, so no cap was checked from 20:39Z until the fix
+(`scripts/tests/test_cache_cap_du.py`). Any other du error still fails the run. `gocache-cap`
+sizes its cache the same way.
+
 ## Running it by hand
 
 ```sh
