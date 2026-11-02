@@ -375,12 +375,16 @@ codexResets:
 # scripts/agent-session) is the gh config directory with no login of the user's:
 # without it a kernel's gh reads ~/.config/gh, and on 2026-11-02T00:07Z an eval
 # cell's `gh pr review --approve` approved a pull request as the user that way.
+# GOOGLE_APPLICATION_CREDENTIALS (same two places) names the machine's own
+# Google identity: without it a kernel's google.auth.default() reads the
+# well-known ADC file, which is the user's own login on sami-rocqperf.
 eval:
   envPassthrough:
     names:
       - OMP_SESSION_ID
       - JJ_CONFIG
       - GH_CONFIG_DIR
+      - GOOGLE_APPLICATION_CREDENTIALS
     prefixes:
       - DISPATCH_
       - ENVOY_

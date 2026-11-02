@@ -61,6 +61,16 @@
 //     Python eval cell's `gh pr review --approve` ran mise's gh on the user's
 //     login and approved theorem-labs/agent-infra#1178 as him.
 //
+//   GOOGLE_APPLICATION_CREDENTIALS — the machine's own Google identity: the
+//     keyless external_account configuration installers/gcloud-box.sh writes
+//     to box_credential_config.json in gcloud's config dir, where that file
+//     exists. Client libraries, Pulumi and omp's own google-vertex reader take
+//     it before the well-known application_default_credentials.json, which
+//     holds whoever last ran an ADC login: on sami-rocqperf the user's own login
+//     since 2026-11-01T02:53Z, so an agent's library call ran as him. Set once at
+//     load, like GH_CONFIG_DIR (scripts/agent-session sets it too). A file a
+//     launcher chose is kept, unless it is that well-known file.
+//
 // Subagents load no extensions but share the parent process, and their
 // session_start events fire process-wide. A session family deliberately
 // shares one identity (one set of eyes): subagent transcripts live *inside*
@@ -79,7 +89,7 @@
 // answers (a PATH wrapper that loops) degrades to no trailer instead of
 // holding the session past omp's 30 s extension-handler deadline.
 import { execFile, execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -116,6 +126,16 @@ export function agentGhConfigDir(env: NodeJS.ProcessEnv = process.env, script = 
 	}
 }
 
+/** The ADC file an agent process gets: the caller's own, unless it is unset or the well-known file. */
+export function agentGoogleCredentials(env: NodeJS.ProcessEnv = process.env): string | undefined {
+	const gcloudDir = env.CLOUDSDK_CONFIG || path.join(env.HOME || homedir(), ".config", "gcloud");
+	const current = env.GOOGLE_APPLICATION_CREDENTIALS;
+	const wellKnown = path.join(gcloudDir, "application_default_credentials.json");
+	if (current && path.resolve(current) !== path.resolve(wellKnown)) return current;
+	const box = path.join(gcloudDir, "box_credential_config.json");
+	return existsSync(box) ? box : current;
+}
+
 // JJ_CONFIG replaces jj's default config lookup, so the overlay must chain
 // the user layer explicitly. Honor a pre-existing JJ_CONFIG (captured before
 // this extension ever overwrites it, minus any attribution overlays a parent
@@ -150,6 +170,8 @@ function jjConfigBase(): Promise<string | undefined> {
 export default function (pi: ExtensionAPI) {
 	const ghConfigDir = agentGhConfigDir();
 	if (ghConfigDir) process.env.GH_CONFIG_DIR = ghConfigDir;
+	const googleCredentials = agentGoogleCredentials();
+	if (googleCredentials) process.env.GOOGLE_APPLICATION_CREDENTIALS = googleCredentials;
 	const set = async (
 		_event: unknown,
 		ctx: { sessionManager?: { getSessionFile?: () => string | undefined } },

@@ -11,6 +11,9 @@
 #     launching shell's mise hook may have put the real gh ahead of shims/gh;
 #   - points GH_CONFIG_DIR at the gh config directory with no login of the user's
 #     (scripts/gh-agent-config), so a gh that runs past shims/gh never acts as the user;
+#   - points GOOGLE_APPLICATION_CREDENTIALS at the machine's own Google identity, where it has one
+#     (installers/gcloud-box.sh), so a Google client library or Pulumi acts as the machine, not as
+#     the user, unless the caller names a credential file of its own;
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
@@ -55,6 +58,22 @@ if [[ -z "${GH_CONFIG_DIR:-}" || "${GH_CONFIG_DIR%/}" == "$user_gh_cfg" ]]; then
     else
         echo "agent-session: scripts/gh-agent-config failed; GH_CONFIG_DIR is not set, so only shims/gh keeps gh off the user's login" >&2
     fi
+fi
+
+# Google's application default credentials (ADC). Client libraries, gcloud's application-default
+# commands, Pulumi's gcp provider and its gs:// backend read GOOGLE_APPLICATION_CREDENTIALS, and
+# without it the well-known file application_default_credentials.json, which holds whoever last
+# ran an ADC login: on sami-rocqperf the user's own login since 2026-11-01T02:53Z, so an agent's
+# library call ran as him. On a machine enrolled in the box identity, installers/gcloud-box.sh
+# writes the keyless external_account configuration of its service account to
+# box_credential_config.json, a file only that installer writes (gcloud rewrites its own copy under
+# legacy_credentials/ whenever it stores credentials). A file a caller chose is kept, unless it is
+# the well-known file, which names no identity of its own.
+gcloud_cfg="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
+box_adc="$gcloud_cfg/box_credential_config.json"
+if [[ -f "$box_adc" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" \
+    || "$(realpath -m "$GOOGLE_APPLICATION_CREDENTIALS")" == "$(realpath -m "$gcloud_cfg/application_default_credentials.json")" ]]; then
+    export GOOGLE_APPLICATION_CREDENTIALS="$box_adc"
 fi
 
 # Scratch and language caches on the big disk, where this machine has one (dispatch://INFRA-613).

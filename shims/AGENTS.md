@@ -151,8 +151,16 @@ before handing the call to the real one.
   the user's own shell still runs as the user. It takes the first `az` past its own PATH entry
   (`shims/ssh-keygen`'s lookup), else the mise pin (`"pipx:azure-cli"` in `mise.toml`), and is
   otherwise transparent: same argv, stdin, stdout and exit code, no output of its own.
-- `gh-app-token`, `gcloud`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`,
-  `pyright`, `basedpyright`: see each file's header.
+- `gh-app-token`, `google-user-token`, `aws-cp`, `tmux`, `xdg-open`, `pyright`, `basedpyright`:
+  see each file's header.
+- **`gcloud`** (its header) decides gcloud's own identity: the active configuration `box`, the
+  machine's service account. It does not reach a Google client library or Pulumi, which
+  read `GOOGLE_APPLICATION_CREDENTIALS` and otherwise the well-known
+  `application_default_credentials.json`, the user's own login on sami-rocqperf since
+  2026-11-01T02:53Z. So `scripts/agent-session` and `omp/extensions/session-env.ts` export
+  `GOOGLE_APPLICATION_CREDENTIALS` as the machine's `box_credential_config.json`
+  (`installers/gcloud-box.sh`) for the whole session, eval kernels included; a file a caller
+  named is kept, the well-known one excepted (`scripts/tests/test_agent_session_google_adc.py`).
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
   harness's or a git credential helper's PATH can hold this dir without `~/.dotfiles/bin`, where
   mise lives; these shims then run `~/.dotfiles/bin/mise` by its path, with `~/.mise` as its data

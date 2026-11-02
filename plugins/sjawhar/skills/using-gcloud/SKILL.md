@@ -9,7 +9,7 @@ If this skill disagrees with the code, a command's output or its `--help`, follo
 
 ## Which identity gcloud uses
 
-On an Azure VM enrolled in the box identity (`~/.dotfiles/installers/gcloud-box.sh`), gcloud, the application default credentials (ADC) and client libraries all act as the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`, in the active configuration `box` (project `autoformalization`). It needs no sign-in and does not expire.
+On an Azure VM enrolled in the box identity (`~/.dotfiles/installers/gcloud-box.sh`), gcloud acts as the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`, in the active configuration `box` (project `autoformalization`). In an agent session, client libraries and Pulumi act as it too: the session sets `GOOGLE_APPLICATION_CREDENTIALS` to its keyless configuration `~/.config/gcloud/box_credential_config.json`. It needs no sign-in and does not expire. Do not unset that variable or point it at `application_default_credentials.json`: on sami-rocqperf that file has held Sami's own login since 2026-11-01.
 
 Sami's own Google login (sami@theorem.dev) is the configuration `theorem`. Use the box first. When a step fails as the box with a permission error, two of his decisions are the evidence for what to do: on 2026-10-25 he told one agent to use the box identity, because the aim is to stop needing his login ([dispatch://LINUX-29](https://dispatch.tail12ec1c.ts.net/issues/LINUX-29)); on 2026-10-26 he answered another agent's request for a grant that he is not needed and that a login on the box can do what he can ([dispatch://LINUX-29/ask/88b5ec06](https://dispatch.tail12ec1c.ts.net/issues/LINUX-29/asks/88b5ec06-8139-4625-a317-34d39ad82ba9)). Our reading, not his rule: run that step with his login rather than asking him, and widen the box account's grant in code so the next run needs neither; when your case differs from both, decide on its own facts. To use it:
 
@@ -36,7 +36,7 @@ Sami's login expires about once each day. As the box you do not see this error.
 2. For a build or measurement machine, do not ask Sami to log in: use `az vm create` (resource group `sami`, location `westus2`), because `az` needs no daily login.
 3. When a step needs Sami's login:
    - Start the login yourself; do not ask Sami to run it. In a terminal that stays open (`tmux`), run `gcloud auth login --no-launch-browser` with no `--configuration`, `GCLOUD_ACCOUNT`, `CLOUDSDK_ACTIVE_CONFIG_NAME` or `--cred-file`: any of those with a non-empty value stops the routing below. While `box` is the active configuration, `~/.dotfiles/shims/gcloud` routes this plain login to `theorem`, says so, and drops `--update-adc`, so the box's ADC stays its own identity. The login renews `legacy_credentials/sami@theorem.dev/adc.json`, the file client libraries use (above).
-   - Do not run `gcloud auth application-default login` or `revoke` for this: the shim refuses both while the box's ADC is an `external_account` credential.
+   - Do not run `gcloud auth application-default login` or `revoke` for this. Each one rewrites or removes `application_default_credentials.json`, which every process outside an agent session reads.
    - Find the open re-login ask (`dispatch search --query 'gcloud re-login'`) and post each printed link and the box error there. Open a new ask only if none is open: two asks split his answers. If it already holds another session's link, post no link; add one line naming the step you need.
    - Type the code from Sami's answer into the waiting command.
 

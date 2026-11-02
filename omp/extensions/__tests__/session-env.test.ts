@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { agentGhConfigDir, userConfigChain } from "../session-env";
+import { agentGhConfigDir, agentGoogleCredentials, userConfigChain } from "../session-env";
 
 const dirs: string[] = [];
 /** An environment whose PATH finds a `jj` running `body` first. */
@@ -56,6 +56,51 @@ describe("agentGhConfigDir", () => {
 	});
 });
 
+describe("agentGoogleCredentials", () => {
+	// Without GOOGLE_APPLICATION_CREDENTIALS a client library reads the well-known ADC file, which
+	// holds whoever last ran an ADC login: the user's own on sami-rocqperf since 2026-11-01.
+	const home = (box: boolean) => {
+		const dir = mkdtempSync(path.join(os.tmpdir(), "session-env-adc-"));
+		dirs.push(dir);
+		mkdirSync(path.join(dir, ".config", "gcloud"), { recursive: true });
+		if (box) writeFileSync(path.join(dir, ".config", "gcloud", "box_credential_config.json"), "{}");
+		return dir;
+	};
+
+	test("points an unset variable, or the well-known file, at the box identity", () => {
+		const h = home(true);
+		const box = path.join(h, ".config", "gcloud", "box_credential_config.json");
+		expect(agentGoogleCredentials({ HOME: h })).toBe(box);
+		expect(
+			agentGoogleCredentials({ HOME: h, GOOGLE_APPLICATION_CREDENTIALS: `${h}/.config/gcloud/./application_default_credentials.json` }),
+		).toBe(box);
+	});
+
+	test("honours CLOUDSDK_CONFIG for both files", () => {
+		const h = home(false);
+		const cfg = path.join(home(true), ".config", "gcloud");
+		const box = path.join(cfg, "box_credential_config.json");
+		expect(agentGoogleCredentials({ HOME: h, CLOUDSDK_CONFIG: cfg })).toBe(box);
+		expect(
+			agentGoogleCredentials({
+				HOME: h,
+				CLOUDSDK_CONFIG: cfg,
+				GOOGLE_APPLICATION_CREDENTIALS: path.join(cfg, "application_default_credentials.json"),
+			}),
+		).toBe(box);
+	});
+
+	test("keeps a file a launcher chose", () => {
+		const h = home(true);
+		const own = path.join(h, ".config", "gcloud", "legacy_credentials", "sami@theorem.dev", "adc.json");
+		expect(agentGoogleCredentials({ HOME: h, GOOGLE_APPLICATION_CREDENTIALS: own })).toBe(own);
+	});
+
+	test("sets nothing on a machine with no box identity", () => {
+		expect(agentGoogleCredentials({ HOME: home(false) })).toBeUndefined();
+	});
+});
+
 describe("the Python eval kernel's environment", () => {
 	// omp starts the Python eval kernel with its built-in allowlist only (fixed names plus the
 	// LC_, XDG_ and PI_ prefixes, packages/coding-agent/src/eval/py/runtime.ts) and what
@@ -66,7 +111,9 @@ describe("the Python eval kernel's environment", () => {
 	test("admits every variable session-env exports", async () => {
 		const source = await Bun.file(path.join(import.meta.dir, "..", "session-env.ts")).text();
 		const exported = [...new Set(Array.from(source.matchAll(/process\.env\.([A-Z][A-Z0-9_]*)\s*=(?!=)/g), m => m[1]))];
-		expect(exported).toEqual(expect.arrayContaining(["OMP_SESSION_ID", "PI_COMMIT_TRAILERS", "JJ_CONFIG"]));
+		expect(exported).toEqual(
+			expect.arrayContaining(["OMP_SESSION_ID", "PI_COMMIT_TRAILERS", "JJ_CONFIG", "GH_CONFIG_DIR", "GOOGLE_APPLICATION_CREDENTIALS"]),
+		);
 		const config = Bun.YAML.parse(await Bun.file(path.join(import.meta.dir, "..", "..", "config.yml")).text()) as {
 			eval?: { envPassthrough?: { names?: string[]; prefixes?: string[] } };
 		};
