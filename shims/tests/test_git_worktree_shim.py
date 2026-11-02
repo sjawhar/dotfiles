@@ -11,6 +11,8 @@ SHIMS = Path(__file__).parents[1]
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
 # The porcelain line of the lock shims/git puts on every `git worktree add` of an agent session.
 ADD_LOCK = "locked agent session: locked on add (AGENTC-431)"
+# Where the checkouts other sessions and boxes share live; never a temporary root.
+SRC = Path.home() / "src"
 
 
 def plain_env() -> dict[str, str]:
@@ -21,16 +23,34 @@ def plain_env() -> dict[str, str]:
 
 class GitWorktreeShimTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.repo = self.tmp / "repo"
-        self.repo.mkdir()
         self.plain = plain_env()
         self.agent = {**self.plain, "OMP_SESSION_ID": "test-session"}
-        for cmd in (["git", "init", "-q"], ["git", "commit", "-q", "--allow-empty", "-m", "init"]):
-            subprocess.run(cmd, cwd=self.repo, env=self.plain, check=True, capture_output=True)
+        self.tmp = self.scratch()
+        self.repo = self.new_repo(self.tmp / "repo")
 
-    def tearDown(self):
-        shutil.rmtree(self.tmp)
+    def scratch(self, parent: Path | None = None) -> Path:
+        path = Path(tempfile.mkdtemp(dir=parent, prefix=".git-shim-test-"))
+        self.addCleanup(shutil.rmtree, path)
+        return path
+
+    def new_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True)
+        for cmd in (["git", "init", "-q"], ["git", "commit", "-q", "--allow-empty", "-m", "init"]):
+            subprocess.run(cmd, cwd=path, env=self.plain, check=True, capture_output=True)
+        return path
+
+    def use_shared_store(self) -> None:
+        """Point self.tmp and self.repo under ~/src, where a prune must stay refused."""
+        SRC.mkdir(exist_ok=True)
+        self.tmp = self.scratch(SRC)
+        self.repo = self.new_repo(self.tmp / "repo")
+
+    def assert_refused(self, result: subprocess.CompletedProcess[str], repo: Path | None = None) -> None:
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("refused", result.stderr)
+        # The message names the store it refused and the case a prune is allowed in.
+        self.assertIn(os.path.realpath((repo or self.repo) / ".git"), result.stderr)
+        self.assertIn("mkdtemp", result.stderr)
 
     def git(self, *args: str, env: dict[str, str] | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=cwd or self.repo, env=env or self.agent, capture_output=True, text=True, check=False)
@@ -50,25 +70,71 @@ class GitWorktreeShimTest(unittest.TestCase):
         return path
 
     def test_a_bare_prune_is_refused_in_an_agent_session_and_deletes_nothing(self):
+        self.use_shared_store()
         path = self.missing_worktree("gone")
-        result = self.git("worktree", "prune")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("refused", result.stderr)
+        self.assert_refused(self.git("worktree", "prune"))
         self.assertIn(str(path), self.registrations())
 
     def test_a_prune_behind_global_options_is_still_seen(self):
+        # -C decides which store is judged, not the directory the caller stands in.
+        throwaway = self.repo
+        self.use_shared_store()
         self.missing_worktree("gone")
-        result = self.git("-C", str(self.repo), "worktree", "prune", cwd=self.tmp)
-        self.assertEqual(result.returncode, 1)
+        self.assert_refused(self.git("-C", str(self.repo), "worktree", "prune", cwd=throwaway))
+        self.assertEqual(self.git("-C", str(throwaway), "worktree", "prune", cwd=self.repo).returncode, 0)
 
     def test_a_dry_run_prune_is_allowed(self):
-        self.missing_worktree("gone")
-        self.assertEqual(self.git("worktree", "prune", "-n").returncode, 0)
+        self.use_shared_store()
+        path = self.missing_worktree("gone")
+        for flag in ("-n", "--dry-run"):
+            with self.subTest(flag=flag):
+                result = self.git("worktree", "prune", flag, "-v")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("gone", result.stdout + result.stderr)
+                self.assertIn(str(path), self.registrations())
 
     def test_outside_an_agent_session_prune_behaves_as_git_does(self):
+        self.use_shared_store()
         path = self.missing_worktree("gone")
         self.assertEqual(self.git("worktree", "prune", env=self.plain).returncode, 0)
         self.assertNotIn(str(path), self.registrations())
+
+    def test_a_prune_in_a_throwaway_repository_is_allowed(self):
+        # No other session can have a worktree in a store under a temporary root.
+        no_tmpdir = {k: v for k, v in self.agent.items() if k != "TMPDIR"}
+        for label, parent, env in (("mkdtemp", None, self.agent), ("/tmp", Path("/tmp"), no_tmpdir), ("/var/tmp", Path("/var/tmp"), no_tmpdir)):
+            with self.subTest(root=label):
+                self.tmp = self.scratch(parent)
+                self.repo = self.new_repo(self.tmp / "repo")
+                path = self.missing_worktree("gone")
+                result = self.git("worktree", "prune", env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(str(path), self.registrations())
+
+    def test_a_path_that_only_begins_with_a_temporary_root_is_refused(self):
+        # $TMPDIR=<base>/tmp does not cover <base>/tmpfoo, as /tmp does not cover /tmpfoo.
+        base = self.scratch(SRC)
+        (base / "tmp").mkdir()
+        self.tmp, self.repo = base, self.new_repo(base / "tmpfoo" / "repo")
+        path = self.missing_worktree("gone")
+        self.assert_refused(self.git("worktree", "prune", env={**self.agent, "TMPDIR": str(base / "tmp")}))
+        self.assertIn(str(path), self.registrations())
+
+    def test_symlinks_are_resolved_on_both_sides(self):
+        # A $TMPDIR spelled through a symlink still covers the directory it names.
+        base = self.scratch(SRC)
+        (base / "link").symlink_to(base / "real")
+        self.tmp, self.repo = base, self.new_repo(base / "real" / "repo")
+        self.missing_worktree("gone")
+        allowed = self.git("worktree", "prune", env={**self.agent, "TMPDIR": str(base / "link")})
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        # A shared store reached through a symlink under /tmp is still a shared store.
+        self.use_shared_store()
+        self.missing_worktree("gone")
+        link = self.scratch() / "link"
+        link.symlink_to(self.repo)
+        self.assert_refused(self.git("worktree", "prune", cwd=link))
+        self.assert_refused(self.git("worktree", "prune", env={**self.agent, "GIT_DIR": str(link / ".git")}, cwd=link))
 
     def test_an_added_worktree_is_locked_and_its_owner_can_still_remove_it(self):
         path = self.tmp / "wt"
@@ -179,10 +245,9 @@ class GitWorktreeShimTest(unittest.TestCase):
     def test_a_caller_path_without_the_system_dirs_still_reaches_real_git(self):
         env = {**self.agent, "PATH": str(SHIMS)}
         self.assertEqual(self.git("rev-parse", "HEAD", env=env).returncode, 0)
+        self.use_shared_store()
         self.missing_worktree("gone")
-        refused = self.git("worktree", "prune", env=env)
-        self.assertEqual(refused.returncode, 1)
-        self.assertIn("refused", refused.stderr)
+        self.assert_refused(self.git("worktree", "prune", env=env))
 
     def test_other_commands_pass_through_unchanged(self):
         direct = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout

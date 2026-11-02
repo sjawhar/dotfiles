@@ -56,7 +56,12 @@ before handing the call to the real one.
   `--ignore-immutable`. Read-only commands (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`,
   …) skip the check.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
-  `git worktree add`, so no box can prune another box's live registration. A
+  `git worktree add`, so no box can prune another box's live registration. The prune runs
+  when the repository's common directory, resolved through symlinks, lies under a temporary
+  root by whole path components: `$TMPDIR`, `/tmp`, `/var/tmp`, `/mnt/nvme/<user>/session-tmp`,
+  `/mnt/nvme/<user>/tmp-omp-batch` or `/mnt/nvme/tmp-omp-batch`. No other session can have a
+  worktree in such a throwaway repository, and five oh-my-pi tests that prune one they made
+  with `mkdtemp` failed in every agent session until it did. `-n`/`--dry-run` always runs. A
   `git worktree remove` of a tree carrying either agent add-lock (that one, or the one `jj` puts
   on; the exact reason, not one that only mentions AGENTC-431) runs with git's own double
   `--force`, so the lock goes with the registration and a removal git refuses keeps it; without

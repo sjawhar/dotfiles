@@ -1,8 +1,8 @@
 #!/bin/bash
-# git-worktree-shim: in an agent session, refuse a bare `git worktree prune`, lock
-# every `git worktree add`, let `git worktree remove` past a lock of ours and no
-# further, and give every commit an omp session makes with `git commit`, `merge`,
-# `pull`, `cherry-pick` or `revert` its Omp-Session trailer.
+# git-worktree-shim: in an agent session, refuse a bare `git worktree prune` outside a
+# throwaway repository, lock every `git worktree add`, let `git worktree remove` past a
+# lock of ours and no further, and give every commit an omp session makes with
+# `git commit`, `merge`, `pull`, `cherry-pick` or `revert` its Omp-Session trailer.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -157,17 +157,42 @@ git_would_remove() {
     fi
 }
 
+# Succeeds when the repository's common directory (its store of worktree registrations) lies
+# under a temporary root of this session, where no other session or box can register a
+# worktree: a throwaway repository a test made with mkdtemp. Both sides are resolved through
+# symlinks (git 2.43 already prints the common directory resolved; realpath keeps that true
+# for a git that does not) and compared by whole path components, so /tmpfoo is not under
+# /tmp. A root that resolves to / would allow everything and is skipped.
+prune_common=""
+prune_is_safe() {
+    local root user
+    prune_common="$("$_real" "${args[@]:0:i}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)" || return 1
+    prune_common="$(realpath -e -- "$prune_common" 2> /dev/null)" || return 1
+    user="$(id -un)"
+    for root in ${TMPDIR:+"$TMPDIR"} /tmp /var/tmp "/mnt/nvme/$user/session-tmp" "/mnt/nvme/$user/tmp-omp-batch" /mnt/nvme/tmp-omp-batch; do
+        root="$(realpath -e -- "$root" 2> /dev/null)" || continue
+        [[ "$root" != / && "$prune_common" == "$root"/* ]] && return 0
+    done
+    return 1
+}
+
 case "$verb" in
     prune)
         for a in "${rest[@]}"; do
             [[ "$a" == -n || "$a" == --dry-run ]] && exec "$_real" "$@"
         done
-        cat >&2 << 'EOF'
-git shim: `git worktree prune` is refused in an agent session (AGENTC-431).
-From inside a box every other box's worktree looks missing, so a prune deletes
-live sessions' registrations in the shared store; it did so 17 times on 2026-09-26.
-Remove your own worktree with `git worktree remove <path>` or `jj workspace forget <name>`;
-`git worktree prune -n` shows what a prune would delete without deleting it.
+        prune_is_safe && exec "$_real" "$@"
+        cat >&2 << EOF
+git shim: \`git worktree prune\` is refused in an agent session (AGENTC-431).
+This repository keeps its worktree registrations in ${prune_common:-a store git did not name},
+which other sessions and agent boxes can share. From inside a box every other box's
+worktree looks missing, so a prune deletes live sessions' registrations; it did so 17 times
+on 2026-09-26.
+A prune runs only where no other session can have a worktree: a repository whose store lies
+under a temporary root (\$TMPDIR, /tmp, /var/tmp, /mnt/nvme/<user>/session-tmp,
+/mnt/nvme/<user>/tmp-omp-batch, /mnt/nvme/tmp-omp-batch), such as one a test made with mkdtemp.
+Remove your own worktree with \`git worktree remove <path>\` or \`jj workspace forget <name>\`;
+\`git worktree prune -n\` shows what a prune would delete without deleting it.
 EOF
         exit 1
         ;;
