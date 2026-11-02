@@ -82,11 +82,15 @@ Timing: last sighting + 60 s grace + at most one 30 s period, so about a minute.
 Cost of a run. A holder a process or a fresh heartbeat shows is never looked up further: its
 transcript is read only when those two are silent. Then the transcript is the one the watch
 already knows the session by — the file an omp held open for it, this run or an earlier one,
-kept in the state file — at the cost of one stat. Only a session it never saw running needs the
-walk of the session root, and that walk and the header pass behind it share one **3 s** budget
-per run (`TRANSCRIPT_WALK_SECONDS`), go through the working directories newest first, say so
-in the transcript row when they run out, and are not repeated for the same holder for 10
-minutes after a miss. The descriptor scan behind `openers` is one per run, for every holder.
+kept in the state file — at the cost of one stat. Next is the session directory of the working
+directory Envoy lists for the holder (`~/.omp/agent/sessions/<encoded dir>/*_<id>.jsonl`), one
+listing, every time: that is where omp writes a session's transcript. Only a session found in
+neither needs the walk of the session root, and that walk and the header pass behind it share
+one **3 s** budget per run (`TRANSCRIPT_WALK_SECONDS`), go through the working directories
+newest first, say so in the transcript row when they run out, and are not repeated for the
+same holder for 10 minutes after a miss. A transcript on no disk here is looked up in the
+session sweep's record, below. The descriptor scan behind `openers` is one per run, for every
+holder.
 The pane check runs before the holder checks, so a long period still checks every pane.
 
 Unbounded, the walk was every run on 2026-11-02 from 09:00Z: at load 410-455 the box's root disk
@@ -122,8 +126,10 @@ acts on an alert the day the lookup stops releasing the claim.
   loop has stopped looks healthy here. In the 2026-10-27 case the transcript stopped at 05:52:19Z
   while the process lived until 05:55:01Z; this watch would have fired on the process, not on the
   hang.
-- Whether anyone acts. It alerts, repeats once as an escalation after 10 minutes, and alerts once
-  more when the role is live again. It restarts nothing and kills nothing.
+- Whether anyone acts. It alerts, repeats once as an escalation 10 minutes or more after the
+  first alert — a message that says it is a repeat of the incident first seen at `<time>`, first
+  alerted at `<time>`, and that no further repeat follows — and alerts once more when the role is
+  live again. It restarts nothing and kills nothing.
 - **A lane whose process this user cannot read.** Inside an agent box `/proc/<pid>/fd` is
   uid-shifted, so neither the process source nor `openers` can see it; both answer "not found"
   and say so in those words. That is one more reason an alert may say only that it cannot see
@@ -254,7 +260,8 @@ check then covers it however its pane ends. The repo lane is being re-dispatched
 | Role claim | **not read** by the watch, and named in no remedy: `GET /v1/roles/<role>` releases a lapsed holder's claim as it answers; see "What not reading the claim costs" |
 | Envoy registry entry and heartbeat | `GET $ENVOY/v1/sessions`, and `GET $ENVOY/v1/registry/<id>` for a holder absent from that list (`sessionEntryHandler` reads the session bucket and answers it; it makes no release) |
 | Holder process | `/proc/*/comm`, `/proc/*/cmdline`, `/proc/*/fd` |
-| Last seen alive | `st_mtime` of the holder's `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl`, read once when the incident opens and carried unchanged through every message about it |
+| Last seen alive | `st_mtime` of the holder's `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl`, else `mtime_ms` of its row in Postgres when the sweep took it, read once when the incident opens and carried unchanged through every message about it |
+| Swept transcript | the session sweep's record `~/.local/share/omp-session-sql/deleted.tsv` (which files it deleted, and when), then the last two 1 MiB parts of the row in `omp_session_files` on agents-postgres, through `psql` and the sweep's DSN file beside that record; read once per holder (5 s limit) and kept in the state file under `swept` |
 | Handover files (alert text only) | absolute `.md` paths the holder's transcript names whose basename reads like a handover, plus `WAKE.md`/`HANDOVER.md`/`HANDOFF.md`/`STATE.md` in its working directory, `/mnt/nvme/sami/<lane>` and `/mnt/nvme/sami/tmp/<lane>` |
 | Listener and bearer | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
 | Roster and open incidents | `/mnt/nvme/sami/tmp/envoy-role-holder-watch/state.json` |
@@ -295,6 +302,41 @@ reached, records `exited_reported_at` on the incident, and never alerts or escal
 again. Any other last entry is still an incident. On 2026-11-01 sessions 01a1798a-9911 and
 01a1798a-995f in `~/src/machcsl-riscv` exited this way at 22:46:26Z and 22:46:56Z and were
 escalated as if they had stopped.
+
+### A recorded exit holds when the transcript moves
+
+Once read, the exit on the incident is the record, not the transcript. On 2026-11-02 the holder
+of `bet-owner-nickmine` (01a19366-958c, a design lane its owner ended on purpose) exited
+normally at 05:41:32Z, and the watch recorded it at 05:47:45Z. Two things then took the
+transcript out of reach, and each time the watch acted as if no exit had ever been read:
+
+- 07:50:22Z `omp-transcript-offload` replaced the file with a symlink into `/mnt/durable`. At
+  13:20:57Z, in the first run to finish since 09:00Z, the 3 s walk of the session root ran out
+  before it reached that directory. No exit was found, the incident had no `alerted_at`, and a
+  first alert went to the chief of staff, the INFRA lead and TASKCOACH.
+- 14:08:13Z the session sweep (dispatch://OSSV-240) imported the transcript into Postgres and
+  deleted it at 14:10:26Z. At 14:10:46Z the watch escalated, labelled "STILL UNSEEN after 10
+  minutes", 49 minutes after the alert.
+
+These were the only two messages: per-role counts of every alert, escalation and clear since
+2026-10-31 show no role alerted twice for one holder except by this path. Now:
+
+1. An exit on the incident holds whether or not the transcript can be read again. Only the
+   session writing its transcript after the exit (a resume) undoes it, logged as `it was
+   resumed`; a resumed session the watch sees running closes the incident anyway.
+2. The holder's own session directory is listed before the walk, so a holder the watch never saw
+   running is found by one listing.
+3. A transcript on no disk here is looked up in the sweep's record and read back from the table,
+   so a holder that ended before the watch first looked still reads as exited. When it is not an
+   exit, the alert's step 3 gives `omp --resume <path>` by full path, which is the only resume
+   a session held only in Postgres supports (dispatch://INFRA-754).
+4. An incident whose alert went out after its exit was recorded gets one clear, to everyone the
+   alert reached, saying that alert was wrong and why.
+
+A planned stop is recognised by the session's own exit record, which omp writes as it closes.
+There is still no planned-stop list a lead fills in: a stop that does not end in that record (a
+kill, a closed pane) looks like a crash here, and the rule in "A pane left at a shell is treated
+as a death" applies to it.
 
 ## Who hears about it
 

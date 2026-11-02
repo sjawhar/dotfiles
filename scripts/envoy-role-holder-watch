@@ -452,6 +452,24 @@ TRANSCRIPT_WALK_SECONDS = 3.0
 # its heartbeat first, so a later walk could only ever find an old file.
 TRANSCRIPT_REWALK = 600.0
 _TRANSCRIPT_WALK: dict = {"deadline": 0.0, "truncated": False}
+# The session sweep of dispatch://OSSV-240 (`omp-session-sql-sweep.timer`) imports every
+# transcript idle for 6 hours into the `omp_session_files` table on agents-postgres, then deletes
+# the local file. The transcript of a holder that ended hours ago is therefore often not on this
+# disk at all: bet-owner-nickmine's holder 01a19366 exited normally at 2026-11-02T05:41:32Z, the
+# sweep imported its transcript at 14:08:13Z and deleted it at 14:10:26Z, and the 14:10:46Z run
+# escalated a planned stop, because nothing it could read still held the exit. The sweep's own
+# record (`deleted.tsv`) names each file it deleted; the tail is read back from the table.
+SWEEP_STATE = Path.home() / ".local/share/omp-session-sql"
+PSQL = ("psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-At")
+# One read of one row's last two 1 MiB parts took 0.18 s from this box (2026-11-02 14:20Z).
+SWEEP_READ_SECONDS = 5.0
+# Session id -> (path, swept at) for every top-level transcript the sweep deleted, read once per
+# run and only when a holder's transcript is not on this disk.
+_SWEEP_INDEX: dict[str, tuple[str, str]] | None = None
+# Session id -> {"path", "swept_at", "mtime", "exited_at"}: what the table holds for a swept
+# transcript. It is closed and never changes, so it is read once per holder and kept in the state
+# file beside the known transcripts.
+_SWEPT: dict[str, dict] = {}
 
 
 def session_id_in_header(path: str | Path) -> str | None:
@@ -721,7 +739,36 @@ def transcript_index() -> tuple[dict[str, Path], list[Path]]:
     return _TRANSCRIPT_INDEX
 
 
-def transcript_of(session_id: str, walk: bool = True) -> Path | None:
+def transcript_in_dir(directory: Path, session_id: str) -> Path | None:
+    """The newest `<stamp>_<id>.jsonl` directly inside one session directory: one listing.
+
+    omp writes a session's transcript into the session directory of its working directory, and
+    Envoy lists that working directory for every role holder, so this is where a holder's
+    transcript is. On 2026-11-02 at 13:20:57Z the walk of the whole session root ran out of its
+    3 s budget before it reached bet-owner-nickmine's holder, whose transcript sat in exactly
+    this directory (a symlink into /mnt/durable, where omp-transcript-offload had moved it at
+    07:50:22Z), and the watch sent a first alert about a holder that had exited normally at
+    05:41:32Z. A symlink counts: `stat` follows it, as omp does.
+    """
+    suffix = f"_{session_id}.jsonl"
+    best: tuple[float, Path] | None = None
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not entry.name.endswith(suffix):
+                    continue
+                try:
+                    stamp = entry.stat().st_mtime
+                except OSError:
+                    continue
+                if best is None or stamp > best[0]:
+                    best = (stamp, Path(entry.path))
+    except OSError:
+        return None
+    return best[1] if best else None
+
+
+def transcript_of(session_id: str, walk: bool = True, directory: str = "") -> Path | None:
     """The session's own transcript file, the newest one when a session was resumed.
 
     First the transcript this watch already knows the session by (`_KNOWN_TRANSCRIPTS`): the
@@ -735,14 +782,21 @@ def transcript_of(session_id: str, walk: bool = True) -> Path | None:
     second pass is not cheap and not rare: 25,936 of this box's 34,272 transcripts carry no id
     in their name (every subagent's does not). Both passes run only on a miss, once per run,
     inside TRANSCRIPT_WALK_SECONDS together, which is what keeps a whole period inside its
-    TimeoutStartSec at any load. `walk=False` stops after the known transcript: a holder whose
-    last walk missed is walked again only every TRANSCRIPT_REWALK seconds (see run_once).
+    TimeoutStartSec at any load. Before them, the session directory of the holder's own
+    working directory (`transcript_in_dir`), which costs one listing and so runs every time.
+    `walk=False` stops before the walk: a holder whose last walk missed is walked again only
+    every TRANSCRIPT_REWALK seconds (see run_once).
     """
     if not UUID_RE.fullmatch(session_id or ""):
         return None
     known = _KNOWN_TRANSCRIPTS.get(session_id)
     if known and os.path.isfile(known):
         return Path(known)
+    if directory:
+        found = transcript_in_dir(session_dir_of(directory), session_id)
+        if found:
+            _KNOWN_TRANSCRIPTS[session_id] = str(found)
+            return found
     if not walk:
         return None
     by_id, unnamed = transcript_index()
@@ -785,6 +839,11 @@ def normal_exit_at(path: str | Path | None) -> str | None:
             lines = handle.read().splitlines()
     except OSError:
         return None
+    return exit_in_lines(lines)
+
+
+def exit_in_lines(lines: list[bytes]) -> str | None:
+    """`normal_exit_at` on the last lines of a transcript, wherever they were read from."""
     tail: list[dict] = []
     for line in reversed(lines):
         if not line.strip():
@@ -815,6 +874,75 @@ def normal_exit_at(path: str | Path | None) -> str | None:
         if len(tail) > EXIT_TAIL_ENTRIES:
             return None
     return None
+
+
+def swept_index() -> dict[str, tuple[str, str]]:
+    """Session id -> (path, deleted at) for each top-level transcript the session sweep deleted.
+
+    Read from the sweep's own record, `deleted.tsv` (path, bytes, sha256, symlink target, deleted
+    at), once per run and only when a holder's transcript is not on this disk. The last row for
+    an id wins. A subagent's transcript (`<stamp>_<id>/Sub.jsonl`) is not the session's.
+    """
+    global _SWEEP_INDEX
+    if _SWEEP_INDEX is not None:
+        return _SWEEP_INDEX
+    _SWEEP_INDEX = {}
+    try:
+        with open(SWEEP_STATE / "deleted.tsv", "rb") as handle:
+            for raw in handle:
+                fields = raw.decode("utf-8", "replace").rstrip("\n").split("\t")
+                name = os.path.basename(fields[0])
+                match = re.fullmatch(r"[0-9T:.-]+Z_(" + UUID_RE.pattern + r")\.jsonl", name)
+                if match:
+                    _SWEEP_INDEX[match.group(1)] = (fields[0], fields[4] if len(fields) > 4 else "")
+    except OSError:
+        pass
+    return _SWEEP_INDEX
+
+
+def swept_transcript(session_id: str) -> dict | None:
+    """What the session sweep did with this session's transcript, or None when it did not take it.
+
+    {"path", "swept_at", "mtime", "exited_at"} once the table has been read, kept in `_SWEPT`;
+    with "error" instead when the read failed, which is not kept, so the next run reads again.
+    The row is keyed by the file's full path today, and by its path under ~/.omp/agent
+    (`sessions/...`) after the key migration dispatch://INFRA-997 plans, so both are asked for.
+    """
+    if session_id in _SWEPT:
+        return _SWEPT[session_id]
+    entry = swept_index().get(session_id)
+    if not entry:
+        return None
+    path, swept_at = entry
+    record = {"path": path, "swept_at": swept_at, "mtime": None, "exited_at": None}
+    keys = [path]
+    agent_root = str(SESSION_ROOT.parent) + "/"
+    if path.startswith(agent_root):
+        keys.append(path[len(agent_root):])
+    listed = ", ".join("'" + key.replace("'", "''") + "'" for key in keys)
+    query = (
+        "SELECT coalesce(f.mtime_ms::text, '') || E'\\n' || coalesce((SELECT right(string_agg("
+        "t.content, '' ORDER BY t.start_offset), 65536) FROM (SELECT p.content, p.start_offset"
+        " FROM omp_session_files_parts p WHERE p.path = f.path ORDER BY p.start_offset DESC"
+        f" LIMIT 2) t), right(f.content, 65536), '') FROM omp_session_files f WHERE f.path IN ({listed})"
+        " LIMIT 1;\n"
+    )
+    try:
+        dsn = (SWEEP_STATE / "dsn").read_text().strip()
+        done = subprocess.run(
+            [*PSQL, dsn, "-f", "-"], input=query, capture_output=True, text=True,
+            timeout=SWEEP_READ_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return {**record, "error": f"the table could not be read: {error}"}
+    if done.returncode != 0 or not done.stdout.strip():
+        problem = done.stderr.strip().splitlines()[-1:] or ["no row for it in omp_session_files"]
+        return {**record, "error": f"the table could not be read: {problem[0][:200]}"}
+    stamp, _, tail = done.stdout.partition("\n")
+    record["mtime"] = int(stamp) / 1000 if stamp.strip().isdigit() else None
+    record["exited_at"] = exit_in_lines(tail.encode().splitlines())
+    _SWEPT[session_id] = record
+    return record
 
 
 # How long after a normal exit omp may still write the turn it had in flight, and how many such
@@ -1020,7 +1148,7 @@ def holder_evidence(
     # said about it; looking it up for every role every period is what put the session-root walk
     # into every run of 2026-11-02 (see TRANSCRIPT_WALK_SECONDS).
     seen_already = any(seen for _, seen, _ in sources)
-    transcript = None if seen_already else transcript_of(holder, walk)
+    transcript = None if seen_already else transcript_of(holder, walk, directory)
     last_write = None
     if transcript:
         try:
@@ -1044,6 +1172,11 @@ def holder_evidence(
             transcript = Path(scan["transcript"])
             last_write = scan["transcript_mtime"]
 
+    # On no disk here at all: the session sweep may have moved it into Postgres (see SWEEP_STATE).
+    swept = None if seen_already or transcript else swept_transcript(holder)
+    if swept and swept["mtime"]:
+        last_write = swept["mtime"]
+
     where = (
         f"{transcript} (in the holder's own working directory, not the session root)"
         if transcript and scan["transcript"] and str(transcript) == scan["transcript"]
@@ -1052,6 +1185,17 @@ def holder_evidence(
     if seen_already:
         sources.append(
             ("transcript", False, "not read: a source above already found the holder")
+        )
+    elif swept:
+        sources.append(
+            ("transcript", False,
+             f"its transcript {swept['path']} is no longer on this disk: the session sweep"
+             " (dispatch://OSSV-240) moved it into Postgres omp_sessions and deleted it at"
+             f" {swept['swept_at'] or 'a time it did not record'}; "
+             + (swept["error"] if swept.get("error") else
+                f"it was last written {iso(swept['mtime'])}, and "
+                + (f"its last entry is a normal session exit at {swept['exited_at']}"
+                   if swept["exited_at"] else "its last entry is not a normal session exit")))
         )
     elif last_write and now - last_write <= write_grace:
         sources.append(
@@ -1098,6 +1242,8 @@ def holder_evidence(
             # source that answered nothing, when in fact there was no file to look at.
             sources.append(
                 ("openers", False,
+                 "not looked at: its transcript is a row in Postgres, which no process here can"
+                 " hold open" if swept else
                  "not looked at: there is no transcript to find openers of")
             )
 
@@ -1141,9 +1287,13 @@ def holder_evidence(
         "dir_write": scan["mtime"],
         "dir_sentence": dir_sentence,
         "dir_truncated": scan["truncated"],
-        "exited_at": None if found else normal_exit_at(transcript),
+        "exited_at": None if found else (
+            normal_exit_at(transcript) if transcript else (swept or {}).get("exited_at")
+        ),
+        # What the session sweep did with the transcript, when it is not on this disk.
+        "swept": swept,
         # True when this call walked the session root for the holder and found nothing.
-        "walk_missed": walk and not seen_already and not transcript,
+        "walk_missed": walk and not seen_already and not transcript and not swept,
     }
 
 
@@ -1337,17 +1487,30 @@ def alert_text(
         " holder that no omp process, no transcript and no registry entry knows may never have"
         " had one."
     )
-    step_three = (
-        f"  3. Only once a person has looked and found no live lane: read the tail of"
-        f" {transcript}, and restart the lane IN ITS OWN PANE, never a new one -- two omp"
-        f" processes on one transcript is the INFRA-681 double loop. {handover}."
-        if transcript
-        else "  3. THIS STEP MAY NOT APPLY: no transcript for this holder exists, under"
-        f" {SESSION_ROOT} or under its own working directory, so there is nothing to read and"
-        " nothing to resume in place. A holder that leaves no transcript here was started by"
-        " something other than a person at a pane, and only that thing can start it again."
-        + (" Its lane's handover files: " + ", ".join(files) + "." if files else "")
-    )
+    swept = record.get("swept") or {}
+    if transcript:
+        step_three = (
+            f"  3. Only once a person has looked and found no live lane: read the tail of"
+            f" {transcript}, and restart the lane IN ITS OWN PANE, never a new one -- two omp"
+            f" processes on one transcript is the INFRA-681 double loop. {handover}."
+        )
+    elif swept.get("path") and not swept.get("error"):
+        step_three = (
+            "  3. Only once a person has looked and found no live lane: its transcript is no"
+            " longer on this disk. The session sweep (dispatch://OSSV-240) moved it into Postgres"
+            f" omp_sessions at {swept.get('swept_at') or 'an unrecorded time'}, keyed"
+            f" {swept['path']}. Restart the lane IN ITS OWN PANE with `omp --resume"
+            f" {swept['path']}` -- by that full path: resume by id does not find a session that"
+            f" is only in Postgres (dispatch://INFRA-754). {handover}."
+        )
+    else:
+        step_three = (
+            "  3. THIS STEP MAY NOT APPLY: no transcript for this holder exists, under"
+            f" {SESSION_ROOT} or under its own working directory, so there is nothing to read and"
+            " nothing to resume in place. A holder that leaves no transcript here was started by"
+            " something other than a person at a pane, and only that thing can start it again."
+            + (" Its lane's handover files: " + ", ".join(files) + "." if files else "")
+        )
     lines = [
         f"ENVOY ROLE HOLDER UNSEEN ({kind}): nothing this watch can read has seen the holder of"
         f" role {role} for {unseen_for}, since {iso(record.get('opened_at'))}.",
@@ -2190,7 +2353,8 @@ def keep_known_transcripts(state: State) -> None:
     """Put into the state file the known transcripts of the sessions it still watches: every
     role holder, and the session of every pane it remembers or holds an incident on. The next
     run reads them back into `_KNOWN_TRANSCRIPTS`, so a holder that stops after this run is
-    looked up with one stat, not a walk of the session root."""
+    looked up with one stat, not a walk of the session root. The same for what the session sweep
+    did with a watched session's transcript (`_SWEPT`), so the table is read once per holder."""
     watched = {record.get("holder") for record in (state.data.get("roles") or {}).values()}
     for group in ("panes", "pane_incidents"):
         watched |= {record.get("session") for record in (state.data.get(group) or {}).values()
@@ -2198,10 +2362,13 @@ def keep_known_transcripts(state: State) -> None:
     state.data["transcripts"] = {
         session: path for session, path in sorted(_KNOWN_TRANSCRIPTS.items()) if session in watched
     }
+    state.data["swept"] = {
+        session: record for session, record in sorted(_SWEPT.items()) if session in watched
+    }
 
 
 def run_once(options: argparse.Namespace) -> int:
-    global _TRANSCRIPT_INDEX, _OPEN_JSONL
+    global _TRANSCRIPT_INDEX, _OPEN_JSONL, _SWEEP_INDEX
     started = time.time()
     # Where each run spends its time, in the summary line, so a run that nears its
     # TimeoutStartSec names the step that took it there.
@@ -2218,12 +2385,17 @@ def run_once(options: argparse.Namespace) -> int:
     if not state.locked:
         log(f"another run holds {options.state}; skipping this period")
         return 0
-    _TRANSCRIPT_INDEX = _OPEN_JSONL = None
+    _TRANSCRIPT_INDEX = _OPEN_JSONL = _SWEEP_INDEX = None
     _TRANSCRIPT_WALK.update(deadline=0.0, truncated=False)
     _KNOWN_TRANSCRIPTS.clear()
     _KNOWN_TRANSCRIPTS.update(
         {session: path for session, path in (state.data.get("transcripts") or {}).items()
          if isinstance(path, str)}
+    )
+    _SWEPT.clear()
+    _SWEPT.update(
+        {session: record for session, record in (state.data.get("swept") or {}).items()
+         if isinstance(record, dict)}
     )
     roles_state: dict = state.data.setdefault("roles", {})
     # Incident memory, keyed by role AND holder so a role that is re-claimed by a new session
@@ -2402,16 +2574,55 @@ def run_once(options: argparse.Namespace) -> int:
         # normal session_exit (see normal_exit_at). Said once -- in the journal, and to everyone
         # an earlier alert reached -- and then never again for this holder. The marker lives
         # on the incident, in the same state file as alerted_at, and is forgotten with it.
-        if evidence["exited_at"]:
-            if not incident.get("exited_reported_at"):
-                incident["exited_reported_at"] = started
-                incident["exited_at"] = evidence["exited_at"]
+        #
+        # The marker, not the transcript, is the record from then on. On 2026-11-02 the exit of
+        # bet-owner-nickmine's holder was recorded at 05:47:45Z; at 13:20:57Z the run could not
+        # re-read the transcript inside its walk budget, fell through to "not yet alerted" and
+        # sent a first alert, and at 14:10:46Z, after the session sweep had deleted the file,
+        # it escalated. A planned stop is not undone by its file moving. Only one thing undoes
+        # it: the session writing again after its exit, which is a resume -- and a resumed
+        # session that this watch sees running closes the incident, marker and all.
+        exited = evidence["exited_at"] or incident.get("exited_at")
+        exit_time = _entry_time(str(incident.get("exited_at") or ""))
+        if (
+            not evidence["exited_at"] and exit_time and evidence["transcript"]
+            and (evidence["last_write"] or 0) > exit_time + EXIT_TAIL_S
+        ):
+            log(
+                f"{role}: holder {holder} wrote {evidence['transcript']} at"
+                f" {iso(evidence['last_write'])}, after its normal exit at {incident['exited_at']}:"
+                " it was resumed, so that exit no longer counts"
+            )
+            for field in ("exited_at", "exited_reported_at"):
+                incident.pop(field, None)
+            exited = None
+        if exited:
+            late = bool(incident.get("alerted_at")) and not incident.get("cleared_at")
+            if not incident.get("exited_reported_at") or late:
+                recorded = incident.get("exited_reported_at")
+                incident["exited_reported_at"] = recorded or started
+                incident["exited_at"] = exited
                 state.commit(options)
-                said = f"holder exited normally at {evidence['exited_at']}"
-                log(
-                    f"{role}: {said} (session {holder}, last entry of {evidence['transcript']} is"
-                    " a normal session_exit); not alerting on this holder again"
-                )
+                if evidence["exited_at"] and evidence["transcript"]:
+                    where = f"the last entry of {evidence['transcript']} is a normal session_exit"
+                elif evidence["exited_at"] and evidence["swept"]:
+                    where = (
+                        f"the last entry of {evidence['swept']['path']}, read from Postgres"
+                        " omp_sessions where the session sweep moved it, is a normal session_exit"
+                    )
+                else:
+                    where = (
+                        f"this watch recorded that exit at {iso(recorded)}, and the transcript is"
+                        " not readable now"
+                    )
+                said = f"holder exited normally at {exited}"
+                if late and recorded:
+                    said += (
+                        f"; the alert of {iso(incident['alerted_at'])} about it was wrong: it went"
+                        f" out after this watch had recorded that exit at {iso(recorded)}, when a"
+                        " later run could not re-read the transcript"
+                    )
+                log(f"{role}: {said} (session {holder}; {where}); not alerting on this holder again")
                 if send_clear(
                     envoy, options, role, incident, holder, said, started, "exited",
                     suppression_lines(started, suppressed),
@@ -2476,6 +2687,7 @@ def run_once(options: argparse.Namespace) -> int:
 
         if not incident.get("alerted_at"):
             incident["transcript"] = evidence["transcript"]
+            incident["swept"] = evidence["swept"]
             incident["handover"] = handover_files(holder, record.get("dir") or "")
             incident["listener"] = envoy.url
             incident["pane"] = pane_of.get(holder, "")
@@ -2512,19 +2724,30 @@ def run_once(options: argparse.Namespace) -> int:
             started - incident["alerted_at"] >= options.escalate
             and not incident.get("escalated_at")
         ):
+            # The one repeat an incident gets, and it says so: the facts are the ones the first
+            # alert carried, so the message names when the incident was first seen and first
+            # alerted, how long ago that really was, and that nothing further will follow.
+            first_seen, first_alert = iso(incident["opened_at"]), iso(incident["alerted_at"])
             text = alert_text(
-                role, incident, holder, started, "STILL UNSEEN after 10 minutes",
+                role, incident, holder, started,
+                f"REPEAT of the incident first seen at {first_seen},"
+                f" {human(started - incident['alerted_at'])} after its first alert",
                 suppression_lines(started, suppressed),
             )
             text += (
-                f"\nNobody has cleared this since the first alert at {iso(incident['alerted_at'])}."
-                " You own looking at the pane."
+                f"\nTHIS IS A REPEAT, AND THE ONLY ONE: the incident was first seen at {first_seen}"
+                f" and first alerted at {first_alert}, and no source has seen the holder since."
+                " No further alert goes out for this holder unless a source sees it again or its"
+                " transcript is found to end in a normal exit. You own looking at the pane."
             )
             incident["escalated_at"] = started
             state.commit(options)
             if not options.dry_run:
                 envoy.send(CHIEF_OF_STAFF, guard_verdict(text))
-            log(f"{role}: ESCALATED to the chief of staff")
+            log(
+                f"{role}: ESCALATED to the chief of staff, a repeat of the incident first seen at"
+                f" {first_seen} and first alerted at {first_alert}; no further repeat"
+            )
         elif unseen_for > FORGET_AFTER:
             log(
                 f"{role}: dropping {holder} from the state file after {human(unseen_for)} unseen;"
