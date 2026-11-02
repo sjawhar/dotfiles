@@ -1,0 +1,58 @@
+#!/bin/bash
+# tmp-empty-prune: delete the empty tmp* entries at the top of the big disk's TMPDIR once nothing
+# has changed in them for two days. devbox/tmp-empty-prune.service says why they pile up.
+#
+# One find does the work: -mindepth 1, because the root is itself named tmp and find would
+# otherwise test it too (dispatch://INFRA-893); -mtime +1, which find reads as two whole days;
+# -empty, which also matches an empty file; and -delete, which removes a directory only while it
+# is still empty.
+#
+# Every lane on the box makes and removes its own tmp* directories in this root, so a directory
+# find has listed can be gone by the time find looks at it. -ignore_readdir_race does not cover
+# that for a directory: GNU find honours it only for its own stat of a file and for -delete. A
+# directory is stat'ed by fts, whose failure find reports whatever the option says
+# (find/ftsfind.c consider_visiting, FTS_NS), and the open -empty makes to look inside one is
+# not covered either (find/pred.c pred_empty); both are the same in findutils 4.9.0 and 4.10.0.
+# Each prints "No such file or directory" and makes find exit 1. e0fb5e0d added the option for
+# this race, and the run of 2026-11-02 00:00Z still failed on two such directories.
+#
+# So every line find writes is read here. That message for an entry of the root that is no
+# longer there is a directory that vanished, and is counted. Any other line - a refusal, an
+# unreadable mount, a delete that failed, that message for a path that is still there - fails
+# the run, and so does an exit of find that the lines do not account for.
+#
+# TMP_EMPTY_PRUNE_ROOT overrides the root, so a test can run this against a scratch tree.
+set -uo pipefail
+
+root="${TMP_EMPTY_PRUNE_ROOT:-/mnt/nvme/$(id -un)/tmp}"
+root="${root%/}"
+
+errors="$(mktemp)" || exit 1
+trap 'rm -f -- "$errors"' EXIT
+status=0
+removed="$(LC_ALL=C find "$root" -mindepth 1 -maxdepth 1 -ignore_readdir_race -name 'tmp*' \
+    -mtime +1 -empty -delete -printf . 2>"$errors" | wc -c)" || status=$?
+
+vanished=0 failed=0
+while IFS= read -r line; do
+    # find's message in the C locale: find: '/path/that/failed': No such file or directory
+    path="${line#*\'}"
+    path="${path%%\'*}"
+    if [[ "$line" == *"': No such file or directory" && "$path" == "$root"/* ]] &&
+        [[ "${path#"$root"/}" != */* && ! -e "$path" && ! -L "$path" ]]; then
+        vanished=$((vanished + 1))
+    else
+        echo "tmp-empty-prune: $line" >&2
+        failed=$((failed + 1))
+    fi
+done <"$errors"
+
+# find exits 1 on each vanished directory, and that exit is accounted for. Any other exit, or an
+# exit 1 with no line behind it, is not.
+if ((status != 0 && failed == 0 && (status != 1 || vanished == 0))); then
+    echo "tmp-empty-prune: find exited $status and no line it wrote says why" >&2
+    failed=$((failed + 1))
+fi
+
+echo "tmp-empty-prune: $root: $removed removed, $vanished vanished during the walk, $failed failed"
+((failed == 0))

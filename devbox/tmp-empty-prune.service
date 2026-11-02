@@ -10,8 +10,7 @@ ConditionPathIsDirectory=/mnt/nvme/%u/tmp
 Type=oneshot
 Nice=19
 IOSchedulingClass=idle
-# -ignore_readdir_race: other processes remove their own entries during the walk, and find
-# would otherwise fail the run on each one it listed and then could not stat.
-# -mindepth 1: without it find tests the starting directory too, and it is named tmp
-# (dispatch://INFRA-893).
-ExecStart=/usr/bin/find /mnt/nvme/%u/tmp -mindepth 1 -ignore_readdir_race -maxdepth 1 -name tmp* -empty -mtime +1 -delete
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# The find it runs, and why a directory that vanishes during the walk does not fail the run while
+# every other error does: devbox/tmp-empty-prune.
+ExecStart=%h/.dotfiles/devbox/tmp-empty-prune
