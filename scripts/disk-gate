@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# disk-gate: one reader of a shared disk, for every lane on this box.
+#
+# A lane that is about to write a lot asks here first. The gate takes a lock, so
+# concurrent askers are answered one at a time, and it counts the space other
+# lanes have already been promised but not yet written. Without it each lane
+# reads `df` for itself, twenty lanes see the same free space at the same
+# instant, and they all start: /mnt/nvme fell 18 GiB in two minutes that way on
+# 2026-11-01, and crossed its floor four times in eight hours.
+#
+#   disk-gate reserve <gib> <name> [--mount /mnt/nvme]   # 0 = go, 1 = wait
+#   disk-gate release <name>                             # when the work ends
+#   disk-gate status [--mount /mnt/nvme]
+#
+# A reservation expires after RESERVE_TTL_S (default 2 h), so a lane that dies
+# does not hold space for ever. `reserve` prints why it refused, with numbers.
+set -uo pipefail
+
+MOUNT=/mnt/nvme
+STATE_DIR="${DISK_GATE_STATE:-/mnt/nvme/sami/scratch/disk-gate}"
+RESERVE_TTL_S="${DISK_GATE_TTL:-7200}"
+
+# The floor each mount keeps free after every reservation is honoured. These are
+# the fleet's own numbers: /mnt/nvme's 78 GiB floor is what disk-fill-watch
+# alerts on, and / needs more headroom than its 18 GiB floor because a full root
+# stops every session on the box at once (2026-10-27T00:00:31Z: rsyslog,
+# journald and dockerd's exec went together).
+floor_gib() {
+	case "$1" in
+	/mnt/nvme) echo 78 ;;
+	/) echo 40 ;;
+	*) echo 20 ;;
+	esac
+}
+
+usage() {
+	echo "usage: disk-gate reserve <gib> <name> [--mount PATH] | release <name> | status [--mount PATH]" >&2
+	exit 2
+}
+
+free_gib() { df -B1 --output=avail "$1" | tail -1 | awk '{printf "%.1f", $1/1073741824}'; }
+
+state_file() { echo "$STATE_DIR/$(echo "$1" | tr / _).tsv"; }
+
+# Drop expired rows, print the rest. Callers hold the lock.
+live_rows() {
+	local f="$1" now
+	now=$(date +%s)
+	[[ -f "$f" ]] || return 0
+	awk -v now="$now" -v ttl="$RESERVE_TTL_S" -F'\t' '($3 + ttl) > now' "$f"
+}
+
+cmd_reserve() {
+	local gib="$1" name="$2" f lock held total free floor
+	[[ "$gib" =~ ^[0-9]+$ ]] || usage
+	[[ -n "$name" ]] || usage
+	mkdir -p "$STATE_DIR"
+	f="$(state_file "$MOUNT")"
+	lock="$f.lock"
+	exec 9>"$lock"
+	flock 9
+	live_rows "$f" >"$f.tmp" 2>/dev/null || true
+	grep -v -P "^\Q$name\E\t" "$f.tmp" >"$f.new" 2>/dev/null || true
+	mv -f "$f.new" "$f"
+	rm -f "$f.tmp"
+	held=$(awk -F'\t' '{s += $2} END {print s + 0}' "$f" 2>/dev/null)
+	free=$(free_gib "$MOUNT")
+	floor=$(floor_gib "$MOUNT")
+	total=$(awk -v f="$free" -v h="$held" -v g="$gib" -v fl="$floor" 'BEGIN {printf "%.1f", f - h - g - fl}')
+	if awk -v t="$total" 'BEGIN {exit !(t < 0)}'; then
+		echo "disk-gate: NO. $MOUNT has ${free} GiB free; ${held} GiB is reserved by other lanes; your ${gib} GiB would leave $(awk -v f="$free" -v h="$held" -v g="$gib" 'BEGIN {printf "%.1f", f - h - g}') GiB, under the ${floor} GiB floor."
+		[[ -s "$f" ]] && { echo "disk-gate: holders:"; awk -F'\t' '{printf "  %s %s GiB since %s\n", $1, $2, strftime("%H:%M:%SZ", $3)}' "$f"; }
+		flock -u 9
+		return 1
+	fi
+	printf '%s\t%s\t%s\n' "$name" "$gib" "$(date +%s)" >>"$f"
+	echo "disk-gate: GO. $MOUNT ${free} GiB free, ${held} GiB reserved by others, ${gib} GiB now yours, ${total} GiB over the ${floor} GiB floor. Run 'disk-gate release $name' when the work ends."
+	flock -u 9
+	return 0
+}
+
+cmd_release() {
+	local name="$1" f lock
+	[[ -n "$name" ]] || usage
+	f="$(state_file "$MOUNT")"
+	lock="$f.lock"
+	mkdir -p "$STATE_DIR"
+	exec 9>"$lock"
+	flock 9
+	if [[ -f "$f" ]]; then
+		grep -v -P "^\Q$name\E\t" "$f" >"$f.new" 2>/dev/null || true
+		mv -f "$f.new" "$f"
+	fi
+	echo "disk-gate: released $name on $MOUNT; $(free_gib "$MOUNT") GiB free."
+	flock -u 9
+}
+
+cmd_status() {
+	local f held free floor
+	f="$(state_file "$MOUNT")"
+	mkdir -p "$STATE_DIR"
+	live_rows "$f" >"$f.tmp" 2>/dev/null || true
+	mv -f "$f.tmp" "$f" 2>/dev/null || true
+	held=$(awk -F'\t' '{s += $2} END {print s + 0}' "$f" 2>/dev/null)
+	free=$(free_gib "$MOUNT")
+	floor=$(floor_gib "$MOUNT")
+	echo "$MOUNT: ${free} GiB free, ${held} GiB reserved, ${floor} GiB floor, $(awk -v f="$free" -v h="$held" -v fl="$floor" 'BEGIN {printf "%.1f", f - h - fl}') GiB available to reserve."
+	[[ -s "$f" ]] && awk -F'\t' '{printf "  %s %s GiB since %s\n", $1, $2, strftime("%H:%M:%SZ", $3)}' "$f"
+	return 0
+}
+
+[[ $# -ge 1 ]] || usage
+cmd="$1"
+shift
+args=()
+while (($#)); do
+	case "$1" in
+	--mount)
+		MOUNT="${2:-}"
+		shift 2
+		;;
+	*)
+		args+=("$1")
+		shift
+		;;
+	esac
+done
+case "$cmd" in
+reserve) cmd_reserve "${args[0]:-}" "${args[1]:-}" ;;
+release) cmd_release "${args[0]:-}" ;;
+status) cmd_status ;;
+*) usage ;;
+esac
