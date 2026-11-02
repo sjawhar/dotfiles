@@ -46,8 +46,8 @@ Highest first. One row per issue. Each issue is one outcome with one owner sessi
 
 ## Sami's direction
 
-Quote his words with the date and a link. Never shorten a quote into a stronger rule.
-- "<his words>" (Sami, <YYYY-MM-DD>, <https link>)
+One line per direction, as narrow as he gave it, with the date and the link to his own words. Never widen it.
+- <his direction, in one line> (Sami, <YYYY-MM-DD>, <https link to his words>)
 
 ## Open commitments
 

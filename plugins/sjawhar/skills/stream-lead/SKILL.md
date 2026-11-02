@@ -60,7 +60,7 @@ relay: when it was busy, wrong or stopped, the whole stream waited.
 
 - Gate a step, or ask to be told before or after one.
 - Turn one decision into a rule, or send it to other sessions. It settles cases with the same deciding facts.
-- Shorten a quote of Sami's into a stronger rule, or give a number he did not give.
+- State Sami's direction more broadly than his words at its link, or give a number he did not give.
 - Choose an owner's own steps (which task to launch, at what size). Give the goal, the constraint and the number.
 - Tell an owner to split its issue or move part of its work to another issue. One session holds one issue to done
   (skill://one-issue-session).
