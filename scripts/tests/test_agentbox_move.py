@@ -107,6 +107,7 @@ class AgentboxMove(unittest.TestCase):
         cmdline: str = "omp",
         writes: tuple[Path | str, ...] = (),
         reads: tuple[Path | str, ...] = (),
+        environ: dict[str, str] | None = None,
     ) -> None:
         """One process in the fixture /proc: stat, comm, cmdline, cgroup, cwd and its open files.
 
@@ -120,6 +121,7 @@ class AgentboxMove(unittest.TestCase):
         (directory / "comm").write_text(comm + "\n", encoding="utf-8")
         (directory / "cmdline").write_text(cmdline.replace(" ", "\0") + "\0", encoding="utf-8")
         (directory / "cgroup").write_text(cgroup + "\n", encoding="utf-8")
+        (directory / "environ").write_text("".join(f"{k}={v}\0" for k, v in (environ or {}).items()), encoding="utf-8")
         os.symlink(str(cwd), directory / "cwd")
         fd = 30
         for path, flags in [(p, "0100002") for p in writes] + [(p, "0100000") for p in reads]:
@@ -598,6 +600,54 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(rows["506"][0], "sandbox")
         self.assertEqual(rows["507"][0], "no-pane")
         self.assertIn("ossv-step.service", rows["507"][6])
+
+    def pane_behind_another_socket(self, pane: str) -> None:
+        """LANE-E's shape (2026-11-02): omp -> bash shims/omp -> the pane's login shell -> the tmux
+        server, on a server whose socket is not tmux's default, so the census's list-panes, from a
+        tool shell with no TMUX, reached nothing. Only the server named by the omp's own TMUX knows
+        pane %70, and says its process is 42507."""
+        lane = self.root / "lane"
+        lane.mkdir()
+        self.make_proc(28813, comm="tmux: server", ppid=1, cwd=lane)
+        self.make_proc(42507, comm="bash", ppid=28813, cwd=lane)
+        self.make_proc(925768, comm="bash", ppid=42507, cwd=lane)
+        self.make_proc(925946, ppid=925768, cwd=lane, session="01a170c2-69f0-7542-a611-195ce0c4a111",
+                       environ={"TMUX": "/sock/tmux-1000/default,28813,1", "TMUX_PANE": pane})
+        self.set_pids(925946)
+        (self.root / "TMUX_ARGS").write_text("", encoding="utf-8")
+        write_stub(self.stubs, "tmux", "\n".join([
+            f'printf "%s\\n" "$*" >>"{self.root / "TMUX_ARGS"}"',
+            'case " $* " in',
+            '  *" list-panes "*) echo "error connecting to /tmp/tmux-1000/default (No such file or directory)" >&2; exit 1 ;;',
+            '  *" display-message "*)',
+            '    [ "$1 $2" = "-S /sock/tmux-1000/default" ] || exit 1',
+            '    case " $* " in *" -t %70 "*) printf "42507\\tlane:1.0\\n" ;; *" -t %71 "*) printf "999\\tother:2.0\\n" ;; *) exit 1 ;; esac ;;',
+            "esac",
+        ]))
+
+    def test_a_pane_the_pane_list_misses_is_read_from_the_omps_own_tmux(self) -> None:
+        self.pane_behind_another_socket("%70")
+        result = self.run_bash("move_census")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The failed list-panes is said, not hidden.
+        self.assertIn("list-panes -a` failed (exit 1): error connecting to /tmp/tmux-1000/default", result.stderr)
+        rows = [line.split("\x1f") for line in result.stdout.splitlines()]
+        self.assertEqual([r[:5] for r in rows],
+                         [["host", "925946", "01a170c2-69f0-7542-a611-195ce0c4a111", "%70", "lane:1.0"]])
+
+    def test_a_pane_whose_process_is_not_the_walks_is_not_taken(self) -> None:
+        # The environment can be inherited from elsewhere; the server must confirm the pane.
+        self.pane_behind_another_socket("%71")
+        rows = {row[1]: row for row in self.census()}
+        self.assertEqual(rows["925946"][0], "no-pane")
+        self.assertIn("28813:tmux: server", rows["925946"][6])
+
+    def test_the_pane_list_asks_the_server_of_the_callers_own_tmux(self) -> None:
+        self.pane_behind_another_socket("%70")
+        result = self.run_bash("move_census", {"TMUX": "/sock/tmux-1000/default,28813,1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = (self.root / "TMUX_ARGS").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(args[0].startswith("-S /sock/tmux-1000/default list-panes -a"), args)
 
     def test_a_session_file_names_the_session_in_full_and_a_truncated_name_is_no_id(self) -> None:
         """A prefix would resume another session, so only the 36-character id in the transcript's

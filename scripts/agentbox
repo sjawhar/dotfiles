@@ -2404,16 +2404,51 @@ move_stat() {
     return 0
 }
 
+# move_env_pane OMP_PID PANE_PID: the tmux pane an omp runs in, from the omp's own environment,
+# for the case where the census's `tmux list-panes` reached no server (a tool shell whose
+# environment dropped TMUX and TMUX_TMPDIR talks to /tmp/tmux-<uid>/default, where this host's
+# server is not: 2026-11-02, LANE-E read "no-pane" while its walk reached the server). TMUX_PANE
+# names the pane and TMUX's first comma field the server's socket; the pane counts only when
+# that server says the pane's own process is PANE_PID, the process the walk came up through.
+# Sets MOVE_PANE_ID and MOVE_PANE_AT.
+move_env_pane() {
+    local kv pane="" server="" out pane_pid at
+    MOVE_PANE_ID="" MOVE_PANE_AT=""
+    while IFS= read -r -d '' kv; do
+        case "$kv" in
+            TMUX_PANE=*) pane="${kv#TMUX_PANE=}" ;;
+            TMUX=*) server="${kv#TMUX=}" ;;
+        esac
+    done < <(cat "$PROC/$1/environ" 2>/dev/null || true)
+    [[ "$pane" == %* && -n "$server" ]] || return 1
+    out="$(tmux -S "${server%%,*}" display-message -p -t "$pane" "#{pane_pid}"$'\t'"#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null)" || return 1
+    IFS=$'\t' read -r pane_pid at <<<"$out"
+    [[ "$pane_pid" == "$2" ]] || return 1
+    MOVE_PANE_ID="$pane" MOVE_PANE_AT="$at"
+}
+
 move_census() {
     local -A pane_id=() pane_at=() cname=() comm=() ppid=() ctr=() unit=() cwd=() sid=()
-    local pids=() files=() pid parent key name value id class detail chain found guard line leaf
+    local pids=() files=() pid parent key name value id class detail chain found guard line leaf child
+    local server=() panes="" err rc=0
     mapfile -t pids < <(pgrep -x omp 2>/dev/null || true)
     (( ${#pids[@]} )) || return 0
-    # 1. the tmux panes, by the pid of each pane's own process (a login shell, normally).
+    # 1. the tmux panes, by the pid of each pane's own process (a login shell, normally), on the
+    # server of this process's own TMUX when it has one. A failure is said, not hidden: the walk
+    # below then reads each omp's pane from its own environment.
+    [[ -n "${TMUX:-}" ]] && server=(-S "${TMUX%%,*}")
+    err="$(mktemp)"
+    panes="$(tmux "${server[@]}" list-panes -a -F "#{pane_pid}"$'\t'"#{pane_id}"$'\t'"#{session_name}:#{window_index}.#{pane_index}" 2>"$err")" || rc=$?
+    if (( rc != 0 )); then
+        echo "agentbox: \`tmux ${server[*]:+${server[*]} }list-panes -a\` failed (exit $rc): $(head -n 1 "$err"); each omp's pane is read from its own TMUX and TMUX_PANE instead" >&2
+        panes=""
+    fi
+    rm -f "$err"
     while IFS=$'\t' read -r key id name; do
+        [[ -n "$key" ]] || continue
         pane_id[$key]="$id"
         pane_at[$key]="$name"
-    done < <(tmux list-panes -a -F "#{pane_pid}"$'\t'"#{pane_id}"$'\t'"#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null || true)
+    done <<<"$panes"
     # 2. the container each omp sits in, and the systemd unit of one that sits in no container.
     # A box is a container whose name starts with agentbox-; any other container is a sandbox.
     while read -r id name; do cname[${id:0:12}]="$name"; done < <(docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null || true)
@@ -2510,6 +2545,7 @@ move_census() {
             if [[ "$detail" == agentbox-* ]]; then class=boxed; else class=sandbox; fi
         fi
         parent="${ppid[$pid]}"
+        child="$pid"
         guard=0
         while (( guard < 64 )); do
             guard=$((guard + 1))
@@ -2529,8 +2565,21 @@ move_census() {
                     if [[ "$class" == host ]]; then class=sandbox; detail="a bwrap sandbox (pid $parent)"; fi
                     break
                     ;;
+                "tmux: server")
+                    # A pane's process sits directly under the server. The pane list had no
+                    # entry for it (the list-panes above reached no server, or another one),
+                    # so ask the server the omp's own environment names.
+                    if [[ "$child" != "$pid" ]] && move_env_pane "$pid" "$child"; then
+                        pane_id[$child]="$MOVE_PANE_ID"
+                        pane_at[$child]="$MOVE_PANE_AT"
+                        found="$child"
+                    fi
+                    chain="$chain ${parent}:${comm[$parent]}"
+                    break
+                    ;;
             esac
             chain="$chain ${parent}:${comm[$parent]}"
+            child="$parent"
             parent="${ppid[$parent]}"
         done
         case "${cwd[$pid]:-}" in
@@ -2902,6 +2951,15 @@ cmd_move_self() {
         die "the omp above this command runs session $sid, while this tool's OMP_SESSION_ID is $OMP_SESSION_ID; a move must not resume a session it has not identified. Run 'agentbox move --plan' and move it by id."
     fi
     [[ -n "$pane" ]] || die "this session has no tmux pane to relaunch ($detail); it is one of the plan's not-a-pane rows and needs a person"
+    # The hand-off below drives the pane through tmux. A tool shell whose environment dropped
+    # TMUX would talk to the default socket, where this host's server may not be; the omp's own
+    # TMUX names the server the census just confirmed the pane on.
+    if [[ -z "${TMUX:-}" ]]; then
+        local kv
+        while IFS= read -r -d '' kv; do
+            [[ "$kv" == TMUX=* ]] && export TMUX="${kv#TMUX=}"
+        done < <(cat "$PROC/$pid/environ" 2>/dev/null || true)
+    fi
     local dirs=() whys=() spec=() d path why
     move_read_kids
     # --self takes the UNION of what it sees now, what the session's own record names and what
