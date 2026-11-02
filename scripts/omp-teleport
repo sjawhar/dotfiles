@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# omp-teleport: copy one closed omp session to another profile, another machine, or both.
+#
+#   omp-teleport [--move] [--from-profile P] [--host H] [--profile P] [--cwd DIR] SESSION
+#
+# A wrapper around `omp session pack`, `omp session unpack` and (with --move) `omp session moved`.
+# The copy carries the transcript, the subagent transcripts, the artifacts and the image blobs.
+# By default the source file does not change, so you get two copies with one session id: do not
+# run both at once, since each registers in Envoy under that id. --move writes a note at the end
+# of the source file saying where the session went; opening that file later starts a new copy
+# with a new id instead of continuing it. Nothing else moves: not the working directory, the
+# Dispatch or knives claims, the Envoy role, or the tmux pane. Spec: dispatch://INFRA-1011.
+#
+# SESSION is a session file path, or an id or id prefix found in the source profile.
+# --from-profile  profile holding the session now (default: the caller's OMP_PROFILE)
+# --host          target machine as ssh names it (default: this machine)
+# --profile       target profile (default: the default profile)
+# --cwd           working directory of the session on the target; must exist there
+#                 (default: the working directory the session has now)
+#
+# Exit status: 0 success, 1 refusal or failure, 2 usage error.
+set -euo pipefail
+trap 'exit 1' ERR
+
+usage() {
+    echo "usage: omp-teleport [--move] [--from-profile P] [--host H] [--profile P] [--cwd DIR] SESSION" >&2
+    exit 2
+}
+die() {
+    echo "omp-teleport: $*" >&2
+    exit 1
+}
+# Each omp call gets its profile from OMP_PROFILE alone; an inherited agent dir or legacy profile
+# variable would otherwise point it at another profile's store.
+omp_in() { # omp_in PROFILE ARGS...
+    local p="$1"
+    shift
+    env -u PI_CODING_AGENT_DIR -u PI_PROFILE OMP_PROFILE="$p" omp "$@"
+}
+# The sessions root omp uses for a profile, as packages/utils/src/dirs.ts resolves it once the
+# agent-dir override is unset: ~/<PI_CONFIG_DIR or .omp>/agent, or .../profiles/<P>/agent.
+# shellcheck disable=SC2016 # literal on purpose: the same text runs here and on the target
+SESSIONS_ROOT_SH='sessions_root() { local base="$HOME/${PI_CONFIG_DIR:-.omp}"; if [[ -z "$1" ]]; then echo "$base/agent/sessions"; else echo "$base/profiles/$1/agent/sessions"; fi; }'
+eval "$SESSIONS_ROOT_SH"
+norm_profile() {
+    local p="${1//[[:space:]]/}"
+    [[ "$p" == default ]] && p=""
+    [[ -z "$p" || "$p" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || die "invalid profile name: $1"
+    echo "$p"
+}
+stamp() { # size and sha256 of a file; fails when either cannot be read
+    local size sum
+    size="$(stat -L -c %s -- "$1")" || return 1
+    sum="$(sha256sum -- "$1")" || return 1
+    echo "$size ${sum%% *}"
+}
+
+for tool in omp jq sha256sum tar realpath; do
+    command -v "$tool" >/dev/null || die "$tool is not on PATH"
+done
+
+move=0 host="" dst="" cwd="" session=""
+if [[ -n "${OMP_PROFILE+x}" ]]; then src="$OMP_PROFILE"; else src="${PI_PROFILE:-}"; fi
+while (($#)); do
+    case "$1" in
+        --move) move=1 ;;
+        --from-profile | --host | --profile | --cwd)
+            (($# >= 2)) || usage
+            case "$1" in
+                --from-profile) src="$2" ;;
+                --host) host="$2" ;;
+                --profile) dst="$2" ;;
+                --cwd) cwd="$2" ;;
+            esac
+            shift ;;
+        -*) usage ;;
+        *) [[ -z "$session" ]] || usage; session="$1" ;;
+    esac
+    shift
+done
+[[ -n "$session" ]] || usage
+src="$(norm_profile "$src")"
+dst="$(norm_profile "$dst")"
+
+# Resolve SESSION to one file in the source profile. A file is <timestamp>_<id>.jsonl, and the
+# timestamp holds no '_', so the id is everything after the first '_'.
+if [[ "$session" == */* || "$session" == *.jsonl ]]; then
+    [[ -f "$session" ]] || die "no session file $session"
+    file="$session"
+else
+    matches=()
+    shopt -s nullglob
+    for f in "$(sessions_root "$src")"/*/*_"$session"*.jsonl; do
+        base="${f##*/}"
+        [[ "${base#*_}" == "$session"* ]] && matches+=("$f")
+    done
+    shopt -u nullglob
+    ((${#matches[@]} > 0)) || die "no session $session in profile ${src:-default}"
+    ((${#matches[@]} == 1)) || die "$session matches ${#matches[@]} sessions in profile ${src:-default}; give more of the id or the file path: ${matches[*]}"
+    file="${matches[0]}"
+fi
+# omp finds the artifacts directory beside the path it is given, so keep a symlinked transcript's
+# own path (realpath -s); only the store check below resolves links.
+file="$(realpath -s -- "$file")"
+src_root="$(realpath -m -- "${file%/*/*}")"
+
+work="$(mktemp -d)"
+remote_dir=""
+cleanup() {
+    rm -rf -- "$work" || echo "omp-teleport: could not delete $work" >&2
+    if [[ -n "$remote_dir" ]]; then
+        ssh -o BatchMode=yes "$host" "rm -rf -- $(printf %q "$remote_dir")" ||
+            echo "omp-teleport: could not delete $host:$remote_dir" >&2
+    fi
+}
+trap cleanup EXIT
+remote() { # run a bash script on the target, read from stdin, so the login shell never parses it
+    ssh -o BatchMode=yes "$host" 'bash -s' <<<"$1"
+}
+
+# Refuse a target whose sessions store holds the source file: unpack would rewrite the source.
+# Profiles can share one store through a symlink, and --host can name this machine.
+if [[ -z "$host" ]]; then
+    target_root="$(realpath -m -- "$(sessions_root "$dst")")"
+    same_machine=1
+else
+    probe="$(remote "$SESSIONS_ROOT_SH
+cat /etc/machine-id
+realpath -m -- \"\$(sessions_root $(printf %q "$dst"))\"
+mktemp -d")" || die "cannot reach $host; nothing changed"
+    { read -r remote_machine; read -r target_root; read -r remote_dir; } <<<"$probe"
+    [[ "$remote_machine" == "$(cat /etc/machine-id)" ]] && same_machine=1 || same_machine=0
+fi
+if ((same_machine)) && [[ "$src_root" == "$target_root" ]]; then
+    die "profile ${dst:-default} stores its sessions in $target_root, which holds $file; nothing to copy"
+fi
+
+before="$(stamp "$file")" || die "cannot read $file"
+archive="$work/session.tar"
+if ! omp_in "$src" session pack "$file" "$archive" >/dev/null 2>"$work/pack.err"; then
+    cat "$work/pack.err" >&2
+    die "pack refused; nothing changed"
+fi
+if grep -q 'referenced blob(s) are missing' "$work/pack.err"; then
+    cat "$work/pack.err" >&2
+    die "the session refers to images that profile ${src:-default} does not hold; pass --from-profile with the profile that owns $file"
+fi
+
+manifest="$(tar -xOf "$archive" manifest.json)" || die "the archive has no manifest"
+id="$(jq -er .id <<<"$manifest")" || die "the archive manifest has no id"
+[[ -n "$cwd" ]] || cwd="$(jq -er .cwd <<<"$manifest")" || die "the archive manifest has no cwd"
+
+if [[ -z "$host" ]]; then
+    landed="$(omp_in "$dst" session unpack "$archive" --cwd "$cwd")" || die "unpack refused; nothing changed"
+else
+    scp -q -o BatchMode=yes "$archive" "$host:$remote_dir/session.tar" || die "copy to $host failed; nothing changed"
+    landed="$(remote "env -u PI_CODING_AGENT_DIR -u PI_PROFILE OMP_PROFILE=$(printf %q "$dst") omp session unpack $(printf %q "$remote_dir/session.tar") --cwd $(printf %q "$cwd")")" ||
+        die "unpack on $host refused; nothing changed"
+fi
+landed="$(tail -n1 <<<"$landed")"
+new_base="${landed##*/}"
+new_id="${new_base%.jsonl}"
+new_id="${new_id#*_}"
+[[ -n "$new_id" && "$landed" == *.jsonl ]] || die "unpack printed no session file; check ${host:-this machine} for the copy"
+
+if ((move)); then
+    after="$(stamp "$file")" || die "the copy is at $landed, but $file cannot be read, so it is not marked as moved"
+    [[ "$after" == "$before" ]] ||
+        die "$file changed after it was packed, so the two copies now differ; the source is not marked as moved"
+    label="${host:-$(hostname -s)}/${dst:-default}/$new_id"
+    omp_in "$src" session moved "$file" --to "$label" || die "the copy is at $landed, but marking the source as moved failed"
+    echo "Marked $file as moved to $label." >&2
+elif [[ "$new_id" == "$id" ]]; then
+    echo "warning: both copies have session id $id; do not run both at once (each registers in Envoy under that id)." >&2
+fi
+
+[[ "$new_id" == "$id" ]] || echo "The target already had a different copy of this session, so the copy is a fork with id $new_id." >&2
+echo "Copied to ${host:-this machine}:$landed" >&2
+resume="omp --profile $(printf %q "${dst:-default}") --resume $(printf %q "$new_id")"
+if [[ -n "$host" ]]; then echo "ssh $(printf %q "$host") -t $resume"; else echo "$resume"; fi
