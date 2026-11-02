@@ -3,8 +3,9 @@
 # instead of typing CLOUDSDK_ACTIVE_CONFIG_NAME=<name> per command or mutating
 # global state with `gcloud config configurations activate`.
 #
-# On a box, a plain `gcloud auth login` goes to Sami's `theorem`
-# configuration instead of overwriting the machine's `box` identity. This
+# In the user's own session on a box, a plain `gcloud auth login` goes to his
+# own configuration (USER_LOGIN_CONFIGURATION below) instead of overwriting the
+# machine's `box` identity. This
 # applies only when `active_config` is `box` and the caller chose no identity:
 # GCLOUD_ACCOUNT and CLOUDSDK_ACTIVE_CONFIG_NAME are unset or empty, and the
 # last `--configuration` and the last `--cred-file` in argv are absent or empty
@@ -15,32 +16,35 @@
 # credentials (ADC) remain its own identity.
 #
 # `gcloud auth application-default login` and `revoke` are refused whenever
-# the ADC in CLOUDSDK_CONFIG is an `external_account` credential. Sami signs in
-# with `gcloud auth login` instead: agent-secrets borrows that login itself
-# (`gcloud auth print-access-token`), and a client library reaches it through
-# GOOGLE_APPLICATION_CREDENTIALS naming `legacy_credentials/<account>/adc.json`
-# (plugins/sjawhar/skills/using-gcloud). This check ignores
-# GOOGLE_APPLICATION_CREDENTIALS and the active configuration.
+# the ADC in CLOUDSDK_CONFIG is an `external_account` credential. This check
+# ignores GOOGLE_APPLICATION_CREDENTIALS and the active configuration.
 #
-# In an agent session (`shims/gh`'s test) every call that would write or remove
-# the well-known ADC file is refused on every route, with a REFUSED block
-# naming the call, the identity, why, and the route: `auth application-default
+# An agent session (`shims/gh`'s test) runs as the box identity by default:
+# agent-infra's applies run in CI or as its applier service account,
+# impersonated from the box identity, and a step only a person can make is on
+# agent-infra's docs/break-glass.md (GCLOUD_BREAK_GLASS_URL below), which an
+# agent cites in a dispatch ask to that person. In an agent session the shim
+# refuses a call whose account is a person's own login (--account or
+# CLOUDSDK_CORE_ACCOUNT, anything but *.gserviceaccount.com), unless an explicit
+# --configuration names the configuration that holds that login: the route an
+# apply no declared identity can make yet takes under Sami's standing permission,
+# each use recorded (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec).
+# On 2026-11-02T00:07Z an exported CLOUDSDK_CORE_ACCOUNT made one agent shell's
+# kubectl, through gke-gcloud-auth-plugin and its per-kubeconfig token cache,
+# create GKE Jobs as the user for an hour.
+#
+# Also in an agent session, every call that would write or remove the
+# well-known ADC file is refused on every route: `auth application-default
 # login|revoke`, and any `auth login` with --update-adc or a --flags-file. That
 # file is whom every Google library and Pulumi without
 # GOOGLE_APPLICATION_CREDENTIALS acts as; on 2026-11-01T02:53Z a login under an
 # explicit configuration kept --update-adc and wrote the user's own credential
 # there. Agent sessions get the box identity through
-# GOOGLE_APPLICATION_CREDENTIALS (scripts/agent-session).
+# GOOGLE_APPLICATION_CREDENTIALS (scripts/agent-session). Each agent-session
+# refusal is a REFUSED block naming the call, the identity, why, and the route:
+# the box identity, the CI route or the applier, and the break-glass page.
 #
-# Also in an agent session, a call whose account is a person's own login, by
-# --account or CLOUDSDK_CORE_ACCOUNT (anything but *.gserviceaccount.com), is
-# refused the same way, unless an explicit --configuration names the
-# configuration whose own account that login is: the recorded route for a step
-# that must act as him. On 2026-11-02T00:07Z an exported CLOUDSDK_CORE_ACCOUNT
-# made one agent shell's kubectl, through gke-gcloud-auth-plugin and its
-# per-kubeconfig token cache, create GKE Jobs as the user for an hour.
-#
-# Both protections classify the command the way gcloud does, so a flag cannot
+# The ADC and login protections classify the command the way gcloud does, so a flag cannot
 # hide the command path: every global flag and its value are consumed wherever
 # they appear among the command words, and one leading release track (`alpha`,
 # `beta`, `preview`) is stripped for classification only. A flag missing from
@@ -75,6 +79,14 @@
 # Doctrine: fail LOUD where an identity is supposed to exist, never fall
 # through to a different one.
 set -euo pipefail
+
+# The configuration that holds the user's own Google login: his plain login on a box goes
+# there. This shim writes its name nowhere else.
+USER_LOGIN_CONFIGURATION=theorem
+# agent-infra's applier, which a session impersonates from the box identity for an apply
+# (agent-infra bootstrap/README.md, "Who applies"), and the page of the steps only a person can make.
+GCLOUD_APPLIER="infra-applier@theorem-agent-infra.iam.gserviceaccount.com"
+GCLOUD_BREAK_GLASS_URL="https://github.com/theorem-labs/agent-infra/blob/main/docs/break-glass.md"
 
 # The global flags of the installed SDK, split by how many values each takes.
 # Generated from the root parser's own declarations by `scripts/gcloud-global-flags`
@@ -467,14 +479,27 @@ login_target() {
     printf 'the account this login signs in (configuration %s%s)' "$name" "${account:+, account $account}"
 }
 
+# The route every agent-session refusal ends with: the box identity for reads and the session's own
+# work, the CI route or the applier for a production change, and the break-glass page for a step
+# only a person can make. It names no sign-in command and no configuration of a person's.
+print_agent_route() {
+    local box_account root
+    box_account="$(config_account box 2> /dev/null)" || box_account=""
+    root="$(resolve_config_root 2> /dev/null && printf '%s' "$GCLOUD_CONFIG_ROOT")" || root="<gcloud config dir>"
+    echo "  Instead: run as the box identity, configuration box${box_account:+ (${box_account})}, with no other configuration or account selected; your session's libraries and Pulumi already act as it (GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-${root}/box_credential_config.json})."
+    echo "  A production change goes through its program's CI apply on main, or an apply as ${GCLOUD_APPLIER}, impersonated from the box identity (CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=${GCLOUD_APPLIER})."
+    echo "  A step only a person can make: send that person a dispatch ask that cites ${GCLOUD_BREAK_GLASS_URL}, which gives the person's steps."
+}
+
 # Refuses, in an agent session, a call that names a person's own Google login as its account,
 # through --account or CLOUDSDK_CORE_ACCOUNT, under any configuration but the one that holds that
 # login. A service account (*.gserviceaccount.com, the box identity among them) is a machine's and
-# passes. An explicit --configuration whose own account is that login is the recorded route for a
-# step that must act as the person, and passes. On 2026-11-02T00:07Z one agent shell exported its
-# account as the user's; every later kubectl in it minted his token through gke-gcloud-auth-plugin,
-# whose cache beside the kubeconfig is keyed by context, not account, so for an hour every caller
-# of that kubeconfig created GKE Jobs as him.
+# passes. An explicit --configuration whose own account is that login is the route an apply that no
+# declared identity can make yet takes under Sami's standing permission, each use recorded
+# (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec), and passes. On 2026-11-02T00:07Z
+# one agent shell exported its account as the user's; every later kubectl in it minted his token
+# through gke-gcloud-auth-plugin, whose cache beside the kubeconfig is keyed by context, not
+# account, so for an hour every caller of that kubeconfig created GKE Jobs as him.
 refuse_user_account_in_agent_session() {
     agent_context || return 0
     local account source configuration file name holder=""
@@ -503,11 +528,11 @@ refuse_user_account_in_agent_session() {
         printf ' %q' "$@"
         printf ')\n'
         echo "  Identity: ${account}, a person's own Google login, named by ${source}."
-        echo "  Why: a call under that login is that person's own act in Google Cloud, and an agent does not take it on by naming an account. It also reaches past this call: gke-gcloud-auth-plugin caches the token beside the kubeconfig and gives it to every later caller of that kubeconfig."
+        echo "  Why: a call under that login is that person's own act in Google Cloud, and naming an account reaches past this call: gke-gcloud-auth-plugin caches the token beside the kubeconfig and gives it to every later caller of that kubeconfig."
+        echo "  Drop the account (unset CLOUDSDK_CORE_ACCOUNT; no --account)."
+        print_agent_route
         if [[ -n "$holder" ]]; then
-            echo "  Instead: drop the account (unset CLOUDSDK_CORE_ACCOUNT; no --account), so the call runs as the box identity, configuration box. A step that must act as that person takes the recorded login-rule route: name his configuration explicitly with --configuration ${holder}, and record the use."
-        else
-            echo "  Instead: drop the account (unset CLOUDSDK_CORE_ACCOUNT; no --account), so the call runs as the box identity, configuration box. No configuration here holds that login; a step only that person can do goes to him as a dispatch ask."
+            echo "  An apply that no declared identity can make yet may use that login under Sami's standing permission (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec): select its configuration (${holder}) explicitly with --configuration on that one command, and record the use on dispatch://INFRA-6. Never for a seed credential, a permission boundary or a new project."
         fi
     } >&2
     exit 1
@@ -541,7 +566,7 @@ refuse_adc_write_in_agent_session() {
         printf ')\n'
         echo "  Identity: $what as $identity."
         echo "  Why: every Google client library and Pulumi on this machine without GOOGLE_APPLICATION_CREDENTIALS acts as whoever that file names, so one write changes the identity of every such process. No agent process writes it."
-        echo "  Instead: your session's libraries already act as the box identity (GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-${GCLOUD_CONFIG_ROOT}/box_credential_config.json}) and gcloud as configuration box. A production change goes through its program's apply workflow on main. A step only a person can do: send that person a dispatch ask."
+        print_agent_route
     } >&2
     exit 1
 }
@@ -691,7 +716,10 @@ main() {
     if ((GCLOUD_COMMAND_AMBIGUOUS)); then
         if { ((GCLOUD_POSSIBLE_LOGIN)) && login_lands_on_box "$@"; } ||
             { ((GCLOUD_POSSIBLE_ADC_OPERATION)) && is_external_account_adc; }; then
-            echo "gcloud shim: refusing a command whose path an unrecognized flag makes ambiguous while it could still be a protected auth command; drop that flag, or name a configuration explicitly with --configuration theorem or GCLOUD_ACCOUNT=theorem." >&2
+            echo "gcloud shim: refusing a command whose path an unrecognized flag makes ambiguous while it could still be a protected auth command; drop that flag, or name a configuration explicitly (--configuration <name>, or GCLOUD_ACCOUNT=<name>)." >&2
+            if agent_context; then
+                print_agent_route >&2
+            fi
             exit 1
         fi
     elif ((GCLOUD_READING_KINDS == 2)) && is_external_account_adc; then
@@ -701,13 +729,13 @@ main() {
 
     if is_box_routed_auth_login "$@"; then
         if has_option --flags-file "$@"; then
-            echo "gcloud shim: refusing implicit box auth login with --flags-file; name a configuration explicitly with --configuration theorem or GCLOUD_ACCOUNT=theorem." >&2
+            echo "gcloud shim: refusing implicit box auth login with --flags-file; name the configuration to sign in under explicitly (--configuration <name>, or GCLOUD_ACCOUNT=<name>)." >&2
             exit 1
         fi
         resolve_config_root
         local config_dir="${GCLOUD_CONFIG_ROOT}/configurations"
-        if [[ ! -f "${config_dir}/config_theorem" ]]; then
-            echo "gcloud shim: configuration theorem is missing at ${config_dir}/config_theorem; create it with gcloud config configurations create theorem --no-activate." >&2
+        if [[ ! -f "${config_dir}/config_${USER_LOGIN_CONFIGURATION}" ]]; then
+            echo "gcloud shim: configuration ${USER_LOGIN_CONFIGURATION} is missing at ${config_dir}/config_${USER_LOGIN_CONFIGURATION}; create it with gcloud config configurations create ${USER_LOGIN_CONFIGURATION} --no-activate." >&2
             exit 1
         fi
 
@@ -721,11 +749,11 @@ main() {
             routed_args+=("$arg")
         done
 
-        echo "gcloud shim: routing auth login to configuration theorem because box is this machine's own identity." >&2
+        echo "gcloud shim: routing auth login to configuration ${USER_LOGIN_CONFIGURATION} because box is this machine's own identity." >&2
         if ((update_adc)); then
             echo "gcloud shim: dropping --update-adc: the box's ADC stays its own identity." >&2
         fi
-        export CLOUDSDK_ACTIVE_CONFIG_NAME=theorem
+        export CLOUDSDK_ACTIVE_CONFIG_NAME="$USER_LOGIN_CONFIGURATION"
         exec_real_gcloud "$real_gcloud" "${routed_args[@]}"
     fi
 

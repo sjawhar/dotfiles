@@ -474,7 +474,7 @@ class GcloudRouting(unittest.TestCase):
                 result = self.run_shim(args=args)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("--flags-file", result.stderr)
-                self.assertIn("--configuration theorem", result.stderr)
+                self.assertIn("--configuration <name>", result.stderr)
                 self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
 
     def test_release_track_is_stripped_once(self):
@@ -513,7 +513,7 @@ class GcloudRouting(unittest.TestCase):
         with self.subTest(case="flags-file refused"):
             result = self.run_shim(args=["alpha", "auth", "login", f"--flags-file={flags_file}"])
             self.assertEqual(result.returncode, 1)
-            self.assertIn("--configuration theorem", result.stderr)
+            self.assertIn("--configuration <name>", result.stderr)
         with self.subTest(case="explicit configuration passes through"):
             args = ["beta", "--configuration", "theorem", "auth", "login"]
             result = self.run_shim(args=args)
@@ -667,7 +667,7 @@ class GcloudRouting(unittest.TestCase):
             with self.subTest(args=args):
                 result = self.run_shim(args=args)
                 self.assertEqual(result.returncode, 1)
-                self.assertIn("--configuration theorem", result.stderr)
+                self.assertIn("--configuration <name>", result.stderr)
                 self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
 
     def test_shim_flag_table_matches_the_sdk_589_fixture(self):
@@ -723,8 +723,8 @@ class GcloudRouting(unittest.TestCase):
                 flags_file.write_text(contents, encoding="utf-8")
                 result = self.run_shim(args=args)
                 self.assertEqual(result.returncode, 1)
-                self.assertIn("--configuration theorem", result.stderr)
-                self.assertIn("GCLOUD_ACCOUNT=theorem", result.stderr)
+                self.assertIn("--configuration <name>", result.stderr)
+                self.assertIn("GCLOUD_ACCOUNT=<name>", result.stderr)
                 self.assertEqual(result.stderr.count("\n"), 1)
                 self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
                 self.assertNotIn("SHOULD-NOT-RUN", result.stderr)
@@ -951,11 +951,27 @@ class GcloudRouting(unittest.TestCase):
         ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "login", "--update-adc"]),
         ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login", "--update-adc"]),
         ({}, ["auth", "login", "--cred-file=/tmp/key.json", "--update-adc"]),
+        ({}, ["--configuration", "box", "auth", "login", "--cred-file", "/tmp/key.json", "--update-adc"]),
         ({}, ["auth", "login", "--flags-file", "/tmp/flags.yaml"]),
         ({}, ["auth", "application-default", "login"]),
         ({}, ["beta", "auth", "application-default", "login", "--no-launch-browser"]),
         ({}, ["auth", "application-default", "revoke"]),
     )
+    BREAK_GLASS_URL = "https://github.com/theorem-labs/agent-infra/blob/main/docs/break-glass.md"
+    APPLIER = "infra-applier@theorem-agent-infra.iam.gserviceaccount.com"
+
+    def assert_agent_refusal(self, result: subprocess.CompletedProcess[str]) -> None:
+        """Every agent-session refusal: nothing ran, and the text names the box identity, the CI
+        route and the applier, and the break-glass page, and tells the agent to run no sign-in."""
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+        self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+        self.assertIn("box identity", result.stderr)
+        self.assertIn("CI apply", result.stderr)
+        self.assertIn(self.APPLIER, result.stderr)
+        self.assertIn("dispatch ask", result.stderr)
+        self.assertIn(self.BREAK_GLASS_URL, result.stderr)
+        self.assertNotIn("gcloud auth login", result.stderr)
 
     def write_user_adc(self) -> Path:
         """The well-known ADC holding a user login, as on sami-rocqperf since 2026-11-01."""
@@ -970,22 +986,19 @@ class GcloudRouting(unittest.TestCase):
             for env, args in self.ADC_WRITES:
                 with self.subTest(marker=marker, env=env, args=args):
                     result = self.run_shim({**marker, **env}, args=args)
-                    self.assertEqual(result.returncode, 1, result.stdout)
-                    self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
-                    self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+                    self.assert_agent_refusal(result)
                     self.assertIn(str(adc), result.stderr)
-                    self.assertIn("box identity", result.stderr)
-                    self.assertIn("dispatch ask", result.stderr)
-                    self.assertNotIn("gcloud auth login", result.stderr)
         self.assertEqual(adc.read_text(encoding="utf-8"), '{"type":"authorized_user"}\n')
 
     def test_agent_session_refusal_names_the_account_the_login_would_write(self):
-        (self.configs_dir / "config_theorem").write_text("[core]\naccount = sami@theorem.dev\n", encoding="utf-8")
+        (self.configs_dir / "config_gws-personal").write_text("[core]\naccount = someone@example.com\n",
+                                                             encoding="utf-8")
         self.stub_gcloud_that_must_not_run()
         result = self.run_shim(self.AGENT_MARKERS[0],
-                               args=["--configuration", "theorem", "auth", "login", "--update-adc"])
+                               args=["--configuration", "gws-personal", "auth", "login",
+                                     "--cred-file=/tmp/key.json", "--update-adc"])
         self.assertEqual(result.returncode, 1)
-        self.assertIn("configuration theorem, account sami@theorem.dev", result.stderr)
+        self.assertIn("configuration gws-personal, account someone@example.com", result.stderr)
 
     def test_agent_session_passes_calls_that_leave_the_adc_alone(self):
         self.write_user_adc()
@@ -1009,8 +1022,24 @@ class GcloudRouting(unittest.TestCase):
         self.assertIn("CONFIG=theorem", result.stdout)
         self.assertNotIn("--update-adc", stub_argv(result))
 
+    def test_users_own_session_routes_his_plain_login_and_refuses_the_adc_login(self):
+        """With no agent variable set and box active, his plain login goes to his own configuration
+        without --update-adc, and an ADC login is refused while the box's ADC is external_account."""
+        self.write_external_account_adc()
+        result = self.run_shim(args=["auth", "login", "--update-adc"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = next(line for line in result.stdout.splitlines() if line.startswith("CONFIG="))
+        self.assertNotIn(config, ("CONFIG=box", "CONFIG=<unset>"))
+        self.assertEqual(stub_argv(result), ["auth", "login"])
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim(args=["auth", "application-default", "login"])
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+
     # In an agent session a call whose account is the user's own login is refused unless it names,
-    # with --configuration, the configuration that holds that login. On 2026-11-02T00:07Z an agent
+    # with --configuration, the configuration that holds that login: the route an apply no declared
+    # identity can make yet takes under Sami's standing permission, each use recorded
+    # (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec). On 2026-11-02T00:07Z an agent
     # shell exported CLOUDSDK_CORE_ACCOUNT=sami@theorem.dev, and every later kubectl in it created
     # GKE Jobs as him through gke-gcloud-auth-plugin's `gcloud config config-helper`.
     USER = "sami@theorem.dev"
@@ -1036,21 +1065,16 @@ class GcloudRouting(unittest.TestCase):
             for env, args, source in cases:
                 with self.subTest(marker=marker, env=env, args=args):
                     result = self.run_shim({**marker, **env}, args=args)
-                    self.assertEqual(result.returncode, 1, result.stdout)
-                    self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
-                    self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+                    self.assert_agent_refusal(result)
                     self.assertIn(f"Identity: {self.USER}, a person's own Google login, named by {source}.",
                                   result.stderr)
-                    self.assertIn("box identity", result.stderr)
-                    self.assertIn("--configuration theorem", result.stderr)
-                    self.assertNotIn("gcloud auth login", result.stderr)
+                    self.assertIn("dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec", result.stderr)
 
     def test_agent_session_refusal_without_a_holding_configuration_routes_to_a_person(self):
         self.stub_gcloud_that_must_not_run()
         result = self.run_shim({**self.AGENT_MARKERS[0], "CLOUDSDK_CORE_ACCOUNT": "someone@example.com"},
                                args=["auth", "print-access-token"])
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("dispatch ask", result.stderr)
+        self.assert_agent_refusal(result)
         self.assertNotIn("--configuration", result.stderr.split("Instead:")[1])
 
     def test_agent_session_passes_the_recorded_route_and_machine_accounts(self):
@@ -1058,10 +1082,14 @@ class GcloudRouting(unittest.TestCase):
         cases = (
             ({"CLOUDSDK_CORE_ACCOUNT": self.USER}, ["--configuration", "theorem", "auth", "print-access-token"]),
             ({}, ["--configuration=theorem", "--account", self.USER, "projects", "list"]),
+            ({}, ["--configuration", "theorem", "auth", "print-access-token"]),
+            ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "print-access-token"]),
             ({"CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["auth", "print-access-token"]),
             ({}, ["auth", "print-access-token", f"--account={self.BOX}"]),
+            ({}, ["auth", "print-access-token", f"--impersonate-service-account={self.APPLIER}"]),
             ({}, ["config", "config-helper", "--format=json"]),
             ({"CLOUDSDK_CORE_ACCOUNT": ""}, ["auth", "list"]),
+            ({}, ["auth", "login", "--cred-file=/tmp/key.json"]),
         )
         for env, args in cases:
             with self.subTest(env=env, args=args):
@@ -1072,7 +1100,9 @@ class GcloudRouting(unittest.TestCase):
     def test_users_own_session_keeps_his_account(self):
         self.write_identity_configs()
         for env, args in (({"CLOUDSDK_CORE_ACCOUNT": self.USER}, ["auth", "print-access-token"]),
-                          ({}, ["auth", "print-access-token", "--account", self.USER])):
+                          ({}, ["auth", "print-access-token", "--account", self.USER]),
+                          ({}, ["--configuration", "theorem", "auth", "print-access-token"]),
+                          ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "print-access-token"])):
             with self.subTest(env=env, args=args):
                 result = self.run_shim(env, args=args)
                 self.assertEqual(result.returncode, 0, result.stderr)

@@ -2,9 +2,10 @@
 # Arm the daily Pulumi drift report (scripts/pulumi-drift-watch).
 #
 # Standalone installer (like load-swap-watch.sh and omp-memory-watch.sh) — not sourced by
-# install.sh. Run it only on a machine that holds the Google login the previews need, which
-# today is sami-rocqperf: the watch previews theorem-labs/agent-infra's stacks against the
-# live cloud, and a machine without that login would report a failure every day.
+# install.sh. Run it only on a machine whose gcloud identity (the box identity on sami-rocqperf)
+# can mint a token as agent-infra's applier, infra-applier@, which the previews run as: the watch
+# previews theorem-labs/agent-infra's stacks against the live cloud, and a machine without that
+# would report a failure every day.
 #
 # Why this exists: on 2026-10-30 a Legion worker pod found, through nine failing assertions,
 # that agent-infra 904aecc3 had merged at 00:34Z declaring an IAM role nobody applied. The
@@ -26,8 +27,9 @@ command -v pulumi >/dev/null || {
     echo "pulumi-drift-watch: no envoy.json; the watch has no listener to send its report through" >&2
     exit 1
 }
-if ! gcloud --configuration=theorem auth print-access-token >/dev/null 2>&1; then
-    echo "pulumi-drift-watch: the theorem gcloud configuration mints no access token here." >&2
+if ! gcloud auth print-access-token \
+    --impersonate-service-account=infra-applier@theorem-agent-infra.iam.gserviceaccount.com >/dev/null 2>&1; then
+    echo "pulumi-drift-watch: this machine's gcloud identity mints no token as infra-applier@ (impersonation)." >&2
     echo "  Every preview would fail and report a failure, which is noise, not a measurement." >&2
     exit 1
 fi

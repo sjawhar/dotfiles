@@ -237,13 +237,19 @@ before handing the call to the real one.
   In an agent session the shim refuses, on every route, each call that writes or removes the
   well-known file: `auth application-default login|revoke`, and an `auth login` with
   `--update-adc` or a `--flags-file`. Only a routed bare login dropped `--update-adc` before,
-  so an agent's `--configuration theorem auth login --update-adc`, started at 2026-11-01T02:41Z,
-  wrote the user's login there at 02:53Z. It also refuses a call whose account is a person's
-  own login (`--account` or `CLOUDSDK_CORE_ACCOUNT`, anything but `*.gserviceaccount.com`),
-  unless an explicit `--configuration` names the configuration that holds that login, the
-  recorded route: on 2026-11-02T00:07Z an exported account made one agent shell's kubectl create
-  GKE Jobs as the user, and gke-gcloud-auth-plugin's cache beside the kubeconfig, keyed by
-  context and not account, gave his token to every caller of it for an hour. Outside an agent
+  so an agent's login under the user's own configuration with `--update-adc`, started at
+  2026-11-01T02:41Z, wrote the user's login there at 02:53Z. It also refuses a call whose
+  account is a person's own login (`--account` or `CLOUDSDK_CORE_ACCOUNT`, anything but
+  `*.gserviceaccount.com`), unless an explicit `--configuration` names the configuration that
+  holds that login: the route an apply that no declared identity can make yet takes under Sami's
+  standing permission, each use recorded (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec).
+  On 2026-11-02T00:07Z an exported account made one agent shell's kubectl create GKE Jobs as the
+  user, and gke-gcloud-auth-plugin's cache beside the kubeconfig, keyed by context and not
+  account, gave his token to every caller of it for an hour. Each refusal names the box
+  identity, the CI route, agent-infra's applier `infra-applier@` impersonated from the box
+  identity, and agent-infra's `docs/break-glass.md` for a step only a person can make, which the
+  agent cites in a `dispatch ask` to that person; none names a sign-in command. The user's
+  configuration's name is one variable in the shim, `USER_LOGIN_CONFIGURATION`. Outside an agent
   session nothing changes (`shims/tests/test_gcloud_shim_routing.py`). A read-only call
   (`config config-helper`, which kubectl runs, `auth print-access-token` and the others listed at
   the shim's `is_lock_retry_safe`) that crashes with exactly `ERROR: gcloud crashed (OperationalError): database is locked`,

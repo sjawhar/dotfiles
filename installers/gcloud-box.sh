@@ -8,16 +8,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # account dev-sjawhar, reached through workload identity federation from the VM's
 # user-assigned managed identity box-sjawhar. No sign-in, nothing that expires.
 #
-# Sami's own login stays in configuration `theorem` (admin work:
-# `gcloud --configuration theorem`, or GCLOUD_ACCOUNT=theorem through
-# shims/gcloud) and its ADC in legacy_credentials/<his account>/adc.json. When
-# `theorem` is missing, this creates it, never active, with his account and the
-# box project, so shims/gcloud has a configuration to send a plain
-# `gcloud auth login` to; an existing `theorem` and his legacy_credentials are
-# never touched. gcloud writes only the box account's own legacy_credentials
-# entry. Besides that, the box configuration, active_config and gcloud's
-# credential store, the one file changed is application_default_credentials.json;
-# a user login found there is kept once as application_default_credentials.json.pre-box.
+# It creates no configuration for a person's login: an agent applies in CI or as
+# agent-infra's applier, impersonated from this identity, and a step only a
+# person can make is on agent-infra's docs/break-glass.md. Any other configuration
+# that already exists, and its legacy_credentials, are never touched. gcloud writes
+# only the box account's own legacy_credentials entry. Besides that, the box
+# configuration, active_config and gcloud's credential store, the one file changed
+# is application_default_credentials.json; a user login found there is kept once
+# as application_default_credentials.json.pre-box.
 #
 # On any other machine (no Azure IMDS, or an IMDS identity that is not
 # box-sjawhar) it changes nothing. Role installer: devbox/install.sh runs it.
@@ -27,7 +25,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # honoured, so a throwaway config dir can stand in for ~/.config/gcloud.
 
 BOX_ACCOUNT="dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
-SAMI_ACCOUNT="sami@theorem.dev"
 BOX_PROJECT="autoformalization"
 # Client ID of the managed identity box-sjawhar (resource group sami).
 BOX_CLIENT_ID="15c6fb2c-a770-43c9-840b-291d65265bae"
@@ -97,7 +94,7 @@ fi
 stored="$(gc auth list --filter="account:${BOX_ACCOUNT}" --format='value(account)' 2>/dev/null)"
 if [[ "$cred_changed" == yes || "$stored" != "$BOX_ACCOUNT" ]]; then
     gc --configuration box auth login --cred-file="$CRED_FILE" >/dev/null 2>&1
-    echo "gcloud-box: stored the ${BOX_ACCOUNT} credential (gcloud auth login --cred-file)"
+    echo "gcloud-box: stored the ${BOX_ACCOUNT} credential in gcloud's credential store (from ${CRED_FILE})"
 fi
 if [[ "$(gc --configuration box config get core/account 2>/dev/null)" != "$BOX_ACCOUNT" ]]; then
     gc --configuration box config set core/account "$BOX_ACCOUNT" >/dev/null 2>&1
@@ -106,15 +103,6 @@ fi
 if [[ "$(gc --configuration box config get core/project 2>/dev/null)" != "$BOX_PROJECT" ]]; then
     gc --configuration box config set core/project "$BOX_PROJECT" >/dev/null 2>&1
     echo "gcloud-box: configuration box project -> ${BOX_PROJECT}"
-fi
-
-# 2b. Configuration `theorem`: Sami's own login, never active. shims/gcloud sends a plain
-# `gcloud auth login` here, and refuses it on a box that lacks this configuration.
-if [[ ! -f "${GCLOUD_DIR}/configurations/config_theorem" ]]; then
-    gc config configurations create theorem --no-activate >/dev/null 2>&1
-    gc --configuration theorem config set core/account "$SAMI_ACCOUNT" >/dev/null 2>&1
-    gc --configuration theorem config set core/project "$BOX_PROJECT" >/dev/null 2>&1
-    echo "gcloud-box: created configuration theorem (${SAMI_ACCOUNT}); sign in with gcloud auth login"
 fi
 
 # 3. `box` is the active configuration.
@@ -136,4 +124,3 @@ if ! cmp -s "$CRED_FILE" "$ADC_FILE"; then
 fi
 
 echo "gcloud-box: gcloud and ADC act as ${BOX_ACCOUNT}"
-echo "gcloud-box: Sami's login is unchanged: gcloud --configuration theorem"

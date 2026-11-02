@@ -30,7 +30,7 @@ bash "${DOTFILES_DIR}/installers/omp-embed.sh"
 bash "${DOTFILES_DIR}/installers/agent-secrets.sh"
 
 # On an Azure VM enrolled in box-identity, gcloud and ADC act as dev-sjawhar with no
-# sign-in; Sami's login stays in configuration `theorem` (see installers/gcloud-box.sh).
+# sign-in; an apply impersonates agent-infra's applier from it (see installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
 # Model-spend records from every harness, now that gcloud acts as the box identity, which reads the collector's token,

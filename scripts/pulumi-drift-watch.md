@@ -49,8 +49,10 @@ service account with state-bucket and state-key access.
 
 ## Credentials
 
-The box's own gcloud login, minted per run (`gcloud --configuration=theorem auth
-print-access-token`). `TAILSCALE_API_KEY` is set to a value that authenticates nowhere, which is
+agent-infra's applier, `infra-applier@theorem-agent-infra.iam.gserviceaccount.com`, whose token
+the box identity mints per run by impersonation (`gcloud auth print-access-token
+--impersonate-service-account=infra-applier@…`; agent-infra `bootstrap/README.md`, "Who
+applies"). No person's login is used. `TAILSCALE_API_KEY` is set to a value that authenticates nowhere, which is
 what `bootstrap/README.md`'s targeted runs use: the Tailscale provider has to be configurable
 for the program to compile, and a preview that does not refresh never calls Tailscale.
 
