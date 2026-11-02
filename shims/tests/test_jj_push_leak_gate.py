@@ -96,12 +96,12 @@ FAKE_GH = '#!/bin/bash\nprintf \'%s\\n\' "$*" >> "@GHLOG@"\nexit 1\n'
 
 # The leak check's visibility cache as each test starts: the six theorem-labs repositories this box's cache records as
 # public (2026-11-01), one outside the hook sweeper's six that it records as public, a private one, and public
-# repositories of other owners. The check decides every target from these entries. A mixed-case entry is how the check
-# names one it read for a mixed-case URL; %72ocq is the check's own lookup for that URL.
+# repositories of other owners. The check decides every target from these entries; it lower-cases a slug before it
+# reads one. The %72ocq entry is for the gate, whose rule reads the cache by the path as written: the check calls
+# theorem-labs/%72ocq no repository name and refuses a push to it unread (test_other_names_and_url_forms).
 CACHE = {
     **{f"theorem-labs_{r}": "public" for r in ("rocq", "rocq-linux-process-semantics", "oss-verify", "metarocq", "legion", "oss-verify-proofs")},
     "theorem-labs_cached-public": "public",
-    "Theorem-Labs_Rocq": "public",
     "theorem-labs_%72ocq": "public",
     "theorem-labs_private-fixture": "private",
     # sjawhar/dotfiles is public and, since its scrub (dispatch://INFRA-974), the sweeper's `others`: checked like any
@@ -239,7 +239,23 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.git("remote", "add", name, url)
         self.git("config", f"remote.{name}.vcs", "sink")
 
+    def keep_cache_fresh(self):
+        """Every cache entry written now, as far as the check's clock goes. The check trusts a cached "private" for 60 s
+        and a "public" for 600 s from the entry's mtime, then asks gh, here the fake one, which answers nothing: a test
+        slower than that on a loaded machine read its private target as unknown and saw it refused. Only the mtime moves;
+        what a test did to an entry, its directory or its permissions stays."""
+        try:
+            entries = list(self.cache.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                os.utime(entry)
+            except OSError:
+                pass
+
     def jj(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        self.keep_cache_fresh()
         return run_bounded(["jj", *args], cwd or self.repo, self.env)
 
     def ok(self, *args: str) -> str:
@@ -283,6 +299,15 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertTrue([ln for ln in shown if f"[customer: {self.customer}]" in ln], ("the refusal must name what matched", r.stderr))
         self.assertNotIn(url, self.received(commit))
         self.assertEqual(self.gh_calls(), [])
+
+    def assert_refused_unreadable(self, r: subprocess.CompletedProcess[str], commit: str, url: str, slug: str):
+        """Refused by the check because it cannot read the visibility of SLUG, the target at URL; nothing of COMMIT
+        received there, and no leaked text named."""
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"error: LEAK CHECK: cannot read the visibility of {slug}", r.stderr)
+        self.assertIn(f"error: git shim: the public leak check refused this jj push to {url}", r.stderr)
+        self.assertNotIn("Take out", r.stderr)
+        self.assertNotIn(url, self.received(commit))
 
     def assert_refused_unread(self, r: subprocess.CompletedProcess[str], commit: str, why: str):
         """Refused before any content was read, saying so and that the commits are not the problem, and sent nowhere."""
@@ -339,6 +364,7 @@ class JjPushLeakGateTest(unittest.TestCase):
 
     def git_push(self, remote: str, commit: str, ref: str) -> subprocess.CompletedProcess[str]:
         """A plain `git push` through shims/git, which leaves it to the checkout's own hook."""
+        self.keep_cache_fresh()
         return subprocess.run(["git", "push", remote, f"{commit}:refs/heads/{ref}"], cwd=self.repo, env=self.env, capture_output=True, text=True)
 
     # Every way of naming what to push: jj resolves them all before it runs git.
@@ -422,13 +448,10 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assert_refused(self.jj("git", "push", "-b", "b1"), c)
         self.assertEqual(self.received(c), [PRIVATE])
 
-    @unittest.expectedFailure
-    def test_known_check_defect_a_private_push_url_first_hides_the_commit(self):
-        # NOT a defect of this gate, and the same for a plain git push through the installed hook: after git pushed to
-        # the private URL it moves refs/remotes/origin/b1 to the commit, and the check's pre-push mode then counts every
-        # commit reachable from origin/* as already on the target, so it scans 0 commits for the public URL. It is the
-        # open check defect "a private fetch ref hides commits bound for a public push URL" (handover, section 5);
-        # remove expectedFailure when the check is fixed.
+    def test_a_private_push_url_first_does_not_hide_the_commit(self):
+        # After git pushed to the private URL it moves refs/remotes/origin/b1 to the commit. The check once counted
+        # every commit reachable from origin/* as already on the target and so scanned 0 commits for the public URL;
+        # it now leaves out only what the target itself holds (git ls-remote), so the public URL is still refused.
         self.git("config", "--add", "remote.origin.pushurl", PRIVATE)
         self.git("config", "--add", "remote.origin.pushurl", ROCQ)
         c = self.leak()
@@ -447,10 +470,15 @@ class JjPushLeakGateTest(unittest.TestCase):
         c = self.leak()
         urls = {"mirror": "git@github.com:Theorem-Labs/Rocq.git", "work": "ssh://git@ssh.github.com:443/theorem-labs/metarocq.git",
                 "short": "https://github.com/theorem-labs/rocq", "pi": "https://github.com/theorem-labs/rocq.git",
-                "dots": "https://GitHub.com./theorem-labs/x/../rocq.git/", "pct": "https://github.com/theorem-labs/%72ocq"}
+                "dots": "https://GitHub.com./theorem-labs/x/../rocq.git/"}
         for remote, url in urls.items():
             self.ok("bookmark", "track", f"b1@{remote}")
             self.assert_refused(self.jj("git", "push", "--remote", remote, "-b", "b1"), c, url)
+        # The gate guards the percent-encoded path; the check takes theorem-labs/%72ocq for no repository name, so it
+        # cannot read its visibility and refuses before it scans.
+        pct = "https://github.com/theorem-labs/%72ocq"
+        self.ok("bookmark", "track", "b1@pct")
+        self.assert_refused_unreadable(self.jj("git", "push", "--remote", "pct", "-b", "b1"), c, pct, "theorem-labs/%72ocq")
         self.assertEqual(self.received(c), [])
 
     def test_ssh_aliases_are_guarded(self):
@@ -1127,15 +1155,14 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assert_refused_unread(self.jj("--quiet", "git", "push", "-b", "b1"), c, "the leak gate's hook")
 
     def test_a_visibility_failure_is_not_called_leaked_text(self):
-        # The gate knows the checkout (its match ignores case, as the sweeper's does); the check, given the URL as
-        # written, finds no entry for Theorem-Labs/ROCQ, asks the fake gh, gets nothing, and refuses for that reason alone.
+        # The gate knows the checkout (its match ignores case, as the sweeper's does, and it needs no cache for the
+        # sweeper's six); the check, which reads the cache lower-cased, finds no entry for theorem-labs/rocq, asks the
+        # fake gh, gets nothing, and refuses for that reason alone, naming the repository as the URL writes it.
         url = "https://github.com/Theorem-Labs/ROCQ.git"
         self.git("remote", "set-url", "origin", url)
+        (self.cache / "theorem-labs_rocq").unlink()
         c = self.commit("guard.v", "(* clean *)", "Clean", "b1")
-        r = self.jj("git", "push", "-b", "b1")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("error: LEAK CHECK: cannot read the visibility of Theorem-Labs/ROCQ", r.stderr)
-        self.assertNotIn("Take out", r.stderr)
+        self.assert_refused_unreadable(self.jj("git", "push", "-b", "b1"), c, url, "Theorem-Labs/ROCQ")
         self.assertEqual(self.received(c), [])
         self.assertTrue(self.gh_calls(), "the visibility read went to the fake gh")
 

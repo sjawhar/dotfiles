@@ -3,8 +3,9 @@
 
 The shim imports google-auth and boto3, which only its own `# /// script` header declares. Like
 the browser-capture tests, these run with the interpreter of the environment uv builds from that
-header: discovered or run directly, this file is one test that runs itself there, where it
-tests the shim in-process.
+header. Collected by any runner (unittest or pytest), this file runs one test,
+InShimEnvironment, which runs the file again there; the test classes that need the shim skip
+outside that environment and run inside it.
 """
 import importlib.machinery
 import importlib.util
@@ -57,12 +58,15 @@ def run_in_shim_environment() -> None:
         raise AssertionError(f"exited {result.returncode} in the shim's environment:\n{result.stderr}{result.stdout}")
 
 
-def load_tests(loader, tests, pattern):
-    if os.environ.get(IN_SHIM_ENVIRONMENT):
-        return tests
-    return unittest.TestSuite(
-        [unittest.FunctionTestCase(run_in_shim_environment, description="google-user-token tests, in the shim's uv environment")]
-    )
+in_shim_environment = unittest.skipUnless(
+    os.environ.get(IN_SHIM_ENVIRONMENT), "runs in the shim's uv environment, through InShimEnvironment"
+)
+
+
+@unittest.skipIf(os.environ.get(IN_SHIM_ENVIRONMENT), "this is the run it starts")
+class InShimEnvironment(unittest.TestCase):
+    def test_google_user_token_in_the_shim_environment(self):
+        run_in_shim_environment()
 
 
 CONFIG = {
@@ -72,6 +76,7 @@ CONFIG = {
 }
 
 
+@in_shim_environment
 class ScopeExpansion(unittest.TestCase):
     def test_bare_scope_expands(self):
         self.assertEqual(gut.expand_scopes("drive"), ("https://www.googleapis.com/auth/drive",))
@@ -89,6 +94,7 @@ class ScopeExpansion(unittest.TestCase):
             gut.expand_scopes(" , ")
 
 
+@in_shim_environment
 class ConfigLoading(unittest.TestCase):
     def setUp(self):
         self.client = mock.Mock()
@@ -126,6 +132,7 @@ class ConfigLoading(unittest.TestCase):
             gut.load_config()
 
 
+@in_shim_environment
 class Delegation(unittest.TestCase):
     def test_main_defaults_subject_from_imds(self):
         with (

@@ -41,13 +41,15 @@ COMMENT = ["pr", "comment", "1178", "-R", "o/r", "--body", "VERDICT: APPROVE"]
 
 
 def real_gh() -> Path | None:
-    """The first gh on PATH, or in mise's install dirs, that is not a shim (shims/gh's own test)."""
+    """The first gh on PATH, or in mise's install dirs, that is not a shim: neither shims/gh nor mise's own shim, a
+    link to the mise binary. With mise's shim chosen its dir came first on the tests' PATH, so shims/knives, which
+    skips mise's dirs only under the test's scratch HOME, resolved knives to mise's knives shim and looped back."""
     dirs = os.environ.get("PATH", "").split(os.pathsep)
     for root in (Path.home() / ".mise" / "installs" / "gh", Path.home() / ".local/share/mise/installs/gh"):
         dirs += [str(p.parent) for p in sorted(root.glob("*/*/bin/gh"))]
     for d in dirs:
         candidate = Path(d) / "gh"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
+        if candidate.is_file() and os.access(candidate, os.X_OK) and candidate.resolve().name == "gh":
             if b"knives-gh-shim" not in candidate.read_bytes()[:512]:
                 return candidate
     return None
