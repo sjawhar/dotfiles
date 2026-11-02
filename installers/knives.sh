@@ -12,6 +12,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # prints a paste-ready entry for the checkout you stand in.
 mkdir -p ~/.config/knives
 ensure_link "${DOTFILES_DIR}/knives/repos.toml" ~/.config/knives/repos.toml
+# Values that name a customer (a forbidden term, a consumer) stay out of this public repository:
+# the private repository theorem-labs/sami, cloned at .secrets, holds them, and knives reads
+# repos.local.toml beside repos.toml and adds them to the entries it names (knives 3.2.0 and later).
+private_registry="${DOTFILES_DIR}/.secrets/dotfiles/knives/repos.local.toml"
+if [[ -f "$private_registry" ]]; then
+    ensure_link "$private_registry" ~/.config/knives/repos.local.toml
+fi
 
 # The ledger (~/.config/knives/ledger/<owner>/<name>/) travels between
 # machines through the repositories each repos.toml entry's `ledger` names.

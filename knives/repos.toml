@@ -56,7 +56,8 @@ workspaces = "~/src/oh-my-pi-worktrees"
 # fork-only branch is exempt). "sjawhar" is not listed: it is the required changelog attribution.
 # "agent-c" is matched only as a path/slug segment: bare it collides with upstream's @oh-my-pi/pi-agent-core.
 # "agentc-" catches internal issue keys (AGENTC-123); "legion" already catches LEGION- keys.
-forbidden = ["trajectory-labs", "trajectory_labs", "trajectorylabs", "/agent-c", "agent-c/", "agentc-", "cybertask", "legion", "luthien", "platform", "middleman", "sami-agents", ".worktrees/", "secretsd", "envoy", "dispatch://", "knives", "notch", "orchestrator"]
+# A term that names a customer is in the private part, repos.local.toml (installers/knives.sh).
+forbidden = ["trajectory-labs", "trajectory_labs", "trajectorylabs", "/agent-c", "agent-c/", "agentc-", "cybertask", "legion", "luthien", "middleman", "sami-agents", ".worktrees/", "secretsd", "envoy", "dispatch://", "knives", "notch", "orchestrator"]
 
 [repos.openchamber]
 upstream = "https://github.com/openchamber/openchamber.git"
@@ -167,7 +168,8 @@ workspaces = "/theorem/knives-ws/lean4"
 upstream = "https://github.com/rocq-prover/rocq.git"
 origin = "https://github.com/theorem-labs/rocq.git"
 base = "v9.3"
-consumers = ["theorem-labs/example-task-repo", "theorem-labs/grading-tools"]
+# A consumer whose name names a customer is in the private part, repos.local.toml.
+consumers = ["theorem-labs/grading-tools"]
 
 # The 9.0 line (BET-155: the xv6iris grader runs a pinned Rocq 9.0.1). Its members fork
 # from the V9.0.1 tag (9dad753e3d) on upstream's 9.0 release branch, which is the base
