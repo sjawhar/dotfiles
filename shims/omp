@@ -212,6 +212,11 @@ fi
 # start under a 192M cap with MemoryHigh at 144M was still in `discoverAndLoadMCPTools` after 84 s).
 # A plain MemoryMax kills promptly, and the wrapper waits for the session so it can say why: a
 # ceiling nobody can see costs a lead more time than the kill itself.
+# OOMPolicy=continue: at the ceiling the kernel kills the largest process in the scope, usually a
+# runaway child, and the session should live on. systemd's default for a scope is `stop`, which
+# ends the whole scope after that kill: at 2026-11-02T03:22:08Z the kernel killed the right child
+# and systemd then stopped the session with its 40 subagents. Agent boxes already run this way
+# (their docker scopes are OOMPolicy=continue). If omp itself is the one killed, the wrapper says so.
 # The default ceiling (dispatch://INFRA-898, answered on its ask on 2026-10-31): 24 GiB per session,
 # above every session measured that day (the largest of 44 held 17.8 GiB at 17:07Z). A caller's own
 # value stays, clamped at 96G. A session already inside a ceiling's scope (OMP_MEMORY_SCOPE, set
@@ -234,14 +239,14 @@ if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; the
     mem_max="$OMP_MEMORY_MAX"
     unset OMP_MEMORY_MAX
     export OMP_MEMORY_SCOPE="$mem_max"
-    if systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -- true \
+    if systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue -- true \
         >/dev/null 2>&1; then
         # A non-interactive shell gives a background job /dev/null as stdin unless the job names
         # its own, and interactive omp then refuses to start ("stdin is not a TTY"). So hand the
         # job the wrapper's own stdin through a spare descriptor. With job control off the job
         # stays in this shell's process group, so it still owns the terminal.
         exec 3<&0
-        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 \
+        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue \
             -- "$DOTFILES_DIR/scripts/agent-session" omp "$@" <&3 3<&- &
         omp_pid=$!
         exec 3<&-
