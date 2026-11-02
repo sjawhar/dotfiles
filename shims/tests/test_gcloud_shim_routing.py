@@ -1009,6 +1009,75 @@ class GcloudRouting(unittest.TestCase):
         self.assertIn("CONFIG=theorem", result.stdout)
         self.assertNotIn("--update-adc", stub_argv(result))
 
+    # In an agent session a call whose account is the user's own login is refused unless it names,
+    # with --configuration, the configuration that holds that login. On 2026-11-02T00:07Z an agent
+    # shell exported CLOUDSDK_CORE_ACCOUNT=sami@theorem.dev, and every later kubectl in it created
+    # GKE Jobs as him through gke-gcloud-auth-plugin's `gcloud config config-helper`.
+    USER = "sami@theorem.dev"
+    BOX = "dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
+
+    def write_identity_configs(self) -> None:
+        (self.configs_dir / "config_theorem").write_text(f"[core]\naccount = {self.USER}\n", encoding="utf-8")
+        (self.configs_dir / "config_box").write_text(f"[core]\naccount = {self.BOX}\n", encoding="utf-8")
+
+    def test_agent_session_refuses_the_users_account(self):
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        cases = (
+            ({"CLOUDSDK_CORE_ACCOUNT": self.USER}, ["config", "config-helper", "--format=json"],
+             "CLOUDSDK_CORE_ACCOUNT in the environment"),
+            ({}, ["auth", "print-access-token", f"--account={self.USER}"], "--account"),
+            ({}, ["storage", "cp", "ctx.tar.gz", "gs://bucket/ctx.tar.gz", "--account", self.USER], "--account"),
+            ({"CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["--account", self.USER, "auth", "list"], "--account"),
+            # A configuration that does not hold that login is no route to it.
+            ({}, ["--configuration", "box", "--account", self.USER, "auth", "print-access-token"], "--account"),
+        )
+        for marker in self.AGENT_MARKERS:
+            for env, args, source in cases:
+                with self.subTest(marker=marker, env=env, args=args):
+                    result = self.run_shim({**marker, **env}, args=args)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                    self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+                    self.assertIn(f"Identity: {self.USER}, a person's own Google login, named by {source}.",
+                                  result.stderr)
+                    self.assertIn("box identity", result.stderr)
+                    self.assertIn("--configuration theorem", result.stderr)
+                    self.assertNotIn("gcloud auth login", result.stderr)
+
+    def test_agent_session_refusal_without_a_holding_configuration_routes_to_a_person(self):
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim({**self.AGENT_MARKERS[0], "CLOUDSDK_CORE_ACCOUNT": "someone@example.com"},
+                               args=["auth", "print-access-token"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("dispatch ask", result.stderr)
+        self.assertNotIn("--configuration", result.stderr.split("Instead:")[1])
+
+    def test_agent_session_passes_the_recorded_route_and_machine_accounts(self):
+        self.write_identity_configs()
+        cases = (
+            ({"CLOUDSDK_CORE_ACCOUNT": self.USER}, ["--configuration", "theorem", "auth", "print-access-token"]),
+            ({}, ["--configuration=theorem", "--account", self.USER, "projects", "list"]),
+            ({"CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["auth", "print-access-token"]),
+            ({}, ["auth", "print-access-token", f"--account={self.BOX}"]),
+            ({}, ["config", "config-helper", "--format=json"]),
+            ({"CLOUDSDK_CORE_ACCOUNT": ""}, ["auth", "list"]),
+        )
+        for env, args in cases:
+            with self.subTest(env=env, args=args):
+                result = self.run_shim({**self.AGENT_MARKERS[0], **env}, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_users_own_session_keeps_his_account(self):
+        self.write_identity_configs()
+        for env, args in (({"CLOUDSDK_CORE_ACCOUNT": self.USER}, ["auth", "print-access-token"]),
+                          ({}, ["auth", "print-access-token", "--account", self.USER])):
+            with self.subTest(env=env, args=args):
+                result = self.run_shim(env, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
 
 if __name__ == "__main__":
     unittest.main()

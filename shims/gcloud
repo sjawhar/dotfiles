@@ -32,6 +32,14 @@
 # there. Agent sessions get the box identity through
 # GOOGLE_APPLICATION_CREDENTIALS (scripts/agent-session).
 #
+# Also in an agent session, a call whose account is a person's own login, by
+# --account or CLOUDSDK_CORE_ACCOUNT (anything but *.gserviceaccount.com), is
+# refused the same way, unless an explicit --configuration names the
+# configuration whose own account that login is: the recorded route for a step
+# that must act as him. On 2026-11-02T00:07Z an exported CLOUDSDK_CORE_ACCOUNT
+# made one agent shell's kubectl, through gke-gcloud-auth-plugin and its
+# per-kubeconfig token cache, create GKE Jobs as the user for an hour.
+#
 # Both protections classify the command the way gcloud does, so a flag cannot
 # hide the command path: every global flag and its value are consumed wherever
 # they appear among the command words, and one leading release track (`alpha`,
@@ -436,18 +444,73 @@ agent_context() {
     return 1
 }
 
+# The account a configuration sets: the `account` line of its file in gcloud's configuration
+# directory, or nothing when the configuration or the line is missing.
+config_account() {
+    local account="" line
+    resolve_config_root
+    while IFS= read -r line; do
+        [[ "$line" =~ ^account[[:space:]]*=[[:space:]]*([^[:space:]]+) ]] && account="${BASH_REMATCH[1]}"
+    done < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" 2> /dev/null || true
+    printf '%s' "$account"
+}
+
 # The configuration a login would sign in under, and its account, for the refusal text.
 login_target() {
-    local name account="" line
+    local name account
     name="$(effective_option_value --configuration "$@")"
     [[ -n "$name" ]] || name="${CLOUDSDK_ACTIVE_CONFIG_NAME:-${GCLOUD_ACCOUNT:-}}"
     resolve_config_root
     [[ -n "$name" ]] || name="$(cat "${GCLOUD_CONFIG_ROOT}/active_config" 2>/dev/null || true)"
     [[ -n "$name" ]] || name=default
-    while IFS= read -r line; do
-        [[ "$line" =~ ^account[[:space:]]*=[[:space:]]*([^[:space:]]+) ]] && account="${BASH_REMATCH[1]}"
-    done < "${GCLOUD_CONFIG_ROOT}/configurations/config_${name}" 2> /dev/null || true
+    account="$(config_account "$name")"
     printf 'the account this login signs in (configuration %s%s)' "$name" "${account:+, account $account}"
+}
+
+# Refuses, in an agent session, a call that names a person's own Google login as its account,
+# through --account or CLOUDSDK_CORE_ACCOUNT, under any configuration but the one that holds that
+# login. A service account (*.gserviceaccount.com, the box identity among them) is a machine's and
+# passes. An explicit --configuration whose own account is that login is the recorded route for a
+# step that must act as the person, and passes. On 2026-11-02T00:07Z one agent shell exported its
+# account as the user's; every later kubectl in it minted his token through gke-gcloud-auth-plugin,
+# whose cache beside the kubeconfig is keyed by context, not account, so for an hour every caller
+# of that kubeconfig created GKE Jobs as him.
+refuse_user_account_in_agent_session() {
+    agent_context || return 0
+    local account source configuration file name holder=""
+    account="$(effective_option_value --account "$@")"
+    source="--account"
+    if [[ -z "$account" ]]; then
+        account="${CLOUDSDK_CORE_ACCOUNT:-}"
+        source="CLOUDSDK_CORE_ACCOUNT in the environment"
+    fi
+    [[ -n "$account" && "$account" != *.gserviceaccount.com ]] || return 0
+    configuration="$(effective_option_value --configuration "$@")"
+    if [[ -n "$configuration" && "$(config_account "$configuration")" == "$account" ]]; then
+        return 0
+    fi
+    resolve_config_root
+    for file in "${GCLOUD_CONFIG_ROOT}"/configurations/config_*; do
+        [[ -f "$file" ]] || continue
+        name="${file##*/config_}"
+        if [[ "$(config_account "$name")" == "$account" ]]; then
+            holder="$name"
+            break
+        fi
+    done
+    {
+        printf 'gcloud shim: REFUSED in an agent session (argv:'
+        printf ' %q' "$@"
+        printf ')\n'
+        echo "  Identity: ${account}, a person's own Google login, named by ${source}."
+        echo "  Why: a call under that login is that person's own act in Google Cloud, and an agent does not take it on by naming an account. It also reaches past this call: gke-gcloud-auth-plugin caches the token beside the kubeconfig and gives it to every later caller of that kubeconfig."
+        if [[ -n "$holder" ]]; then
+            echo "  Instead: drop the account (unset CLOUDSDK_CORE_ACCOUNT; no --account), so the call runs as the box identity, configuration box. A step that must act as that person takes the recorded login-rule route: name his configuration explicitly with --configuration ${holder}, and record the use."
+        else
+            echo "  Instead: drop the account (unset CLOUDSDK_CORE_ACCOUNT; no --account), so the call runs as the box identity, configuration box. No configuration here holds that login; a step only that person can do goes to him as a dispatch ask."
+        fi
+    } >&2
+    exit 1
 }
 
 # Refuses, in an agent session, every call that would write or remove the well-known ADC file,
@@ -529,6 +592,7 @@ main() {
 
     parse_gcloud_command_path "$@"
     refuse_adc_write_in_agent_session "$@"
+    refuse_user_account_in_agent_session "$@"
 
     # Read the ADC only for a command this block can refuse: an ambiguous path that
     # could be a protected one, or application-default login/revoke. Every other call
