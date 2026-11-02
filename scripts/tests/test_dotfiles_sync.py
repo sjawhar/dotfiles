@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""scripts/dotfiles-sync --here on a jj checkout: a refused sync leaves the working copy as it was.
+"""scripts/dotfiles-sync --here and scripts/dotfiles-publish on a jj checkout: a refused sync or
+publish leaves the working copy as it was.
 
-The working tree of ~/.dotfiles is production: every session and user unit reads it. A sync whose
-working-copy change conflicts with origin's main must refuse before it touches a file on disk, so
-no session ever reads jj's conflict markers. One that does not conflict moves onto main and keeps
-the change.
+The working tree of ~/.dotfiles is production: every session and user unit reads it, and it always
+holds other sessions' uncommitted edits. A sync whose working-copy change conflicts with origin's
+main, or a publish whose commit (or the working copy above it) does, must refuse before it touches
+a file on disk, so no session ever reads jj's conflict markers. One that does not conflict moves
+onto main. On 2026-11-02 at 11:59Z the publish steps run by hand (`jj rebase -s <commit> -d
+main@origin`) conflicted and left markers in shims/gh for 20 seconds.
 """
 
 from __future__ import annotations
@@ -31,7 +34,10 @@ def real_binary(name: str) -> str:
     return located
 
 
-class SyncHere(unittest.TestCase):
+class DotfilesCheckout(unittest.TestCase):
+    """An origin, a plain clone that pushes to it as another machine, and the colocated jj
+    checkout under a HOME of its own that the script under test works in."""
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
@@ -60,6 +66,7 @@ class SyncHere(unittest.TestCase):
         self.run_ok("git", "clone", "-q", str(self.origin), str(self.upstream))
         (self.upstream / "shared.txt").write_text("base\n")
         (self.upstream / "other.txt").write_text("base\n")
+        (self.upstream / "wip.txt").write_text("base\n")
         self.commit_upstream("base")
         self.checkout = self.home / ".dotfiles"
         self.run_ok("jj", "git", "clone", "--quiet", "--colocate", str(self.origin), str(self.checkout))
@@ -80,6 +87,8 @@ class SyncHere(unittest.TestCase):
     def jj(self, *args: str) -> str:
         return self.run_ok("jj", *args, cwd=self.checkout)
 
+
+class SyncHere(DotfilesCheckout):
     def sync(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["bash", str(SYNC), "--here", ""], env=self.env, capture_output=True, text=True)
 
@@ -114,6 +123,72 @@ class SyncHere(unittest.TestCase):
             self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"),
             self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
         )
+
+
+PUBLISH = Path(__file__).resolve().parents[1] / "dotfiles-publish"
+
+
+class Publish(DotfilesCheckout):
+    def origin_main(self) -> str:
+        return self.run_ok("git", "rev-parse", "main", cwd=self.origin).strip()
+
+    def my_commit(self, path: str, text: str) -> str:
+        """Commit one path of mine, leaving another session's uncommitted edit in wip.txt."""
+        (self.checkout / path).write_text(text)
+        self.jj("commit", "--quiet", "-m", "mine", path)
+        (self.checkout / "wip.txt").write_text("another session's edit\n")
+        return self.jj("log", "-r", "@-", "--no-graph", "-T", "change_id")
+
+    def publish(self, rev: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(PUBLISH), rev], env=self.env, capture_output=True, text=True)
+
+    def test_a_conflicting_commit_is_refused_and_no_file_moves(self) -> None:
+        change = self.my_commit("shared.txt", "my edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+        upstream_head = self.origin_main()
+        mine = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT", result.stderr)
+        self.assertEqual((self.checkout / "shared.txt").read_text(), "my edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+        self.assertEqual(self.jj("log", "-r", change, "--no-graph", "-T", "commit_id"), mine)
+        self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
+        self.assertEqual(self.origin_main(), upstream_head)
+
+    def test_a_working_copy_edit_that_conflicts_with_main_also_refuses(self) -> None:
+        # The working copy descends from the commit and moves with it, so its conflict would reach
+        # disk the same way.
+        change = self.my_commit("other.txt", "my edit\n")
+        (self.upstream / "wip.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+        upstream_head = self.origin_main()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+        self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "change_id"), "")
+        self.assertEqual(self.origin_main(), upstream_head)
+
+    def test_a_commit_that_does_not_conflict_is_rebased_and_pushed(self) -> None:
+        change = self.my_commit("other.txt", "my edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+        upstream_head = self.origin_main()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pushed = self.jj("log", "-r", change, "--no-graph", "-T", "commit_id")
+        self.assertEqual(self.origin_main(), pushed)
+        self.assertEqual(self.jj("log", "-r", f"{change}-", "--no-graph", "-T", "commit_id"), upstream_head)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+        self.assertEqual((self.checkout / "shared.txt").read_text(), "upstream edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
 
 
 if __name__ == "__main__":

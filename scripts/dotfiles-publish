@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# dotfiles-publish <commit>: put one of your commits of the ~/.dotfiles jj checkout on origin's
+# main. It fetches, rebases <commit> and its descendants (the working copy among them) onto
+# main@origin, and pushes <commit> to main as a fast-forward. A push that loses a race to another
+# session's push fetches and tries again.
+#
+# The checkout is production: every session and user unit reads its files. A rebase that
+# conflicts writes jj's conflict markers into the working copy, and on 2026-11-02 at
+# 11:59:11-11:59:31Z the publish steps run by hand did exactly that to shims/gh, so about 22 gh
+# calls from 7 sessions read a file of markers. So the rebase is tried first on a DUPLICATE of
+# <commit> and its descendants, which no working copy holds, and abandoned; only a trial with no
+# conflict lets the real commits move. A refused run leaves every file on disk as it was.
+#
+# <commit> is any jj revision naming one commit (a change id, a commit id). Commit only your own
+# paths first (`git commit -- <paths>`, or `jj commit <paths>`), then name that commit here.
+set -euo pipefail
+
+TRIES="${DOTFILES_PUBLISH_TRIES:-3}"
+
+die() { echo "dotfiles-publish: $*" >&2; exit 1; }
+
+[[ $# -eq 1 && "$1" != -* ]] || die "usage: dotfiles-publish <commit>"
+rev="$1"
+cd "${DOTFILES_DIR:-$HOME/.dotfiles}"
+[[ -d .jj ]] || die "$PWD is not a jj checkout"
+
+attempt=0
+while :; do
+    attempt=$((attempt + 1))
+    jj git fetch --quiet
+    commit="$(jj log -r "$rev" --no-graph -T 'commit_id ++ "\n"' 2>/dev/null)" \
+        || die "no single commit is named $rev"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "$rev names more than one commit"
+    [[ "$(jj log -r "$commit" --no-graph -T 'empty')" != true ]] || die "$rev is empty: nothing to publish"
+    if [[ -z "$(jj log -r "main@origin & ::$commit-" --no-graph -T 'commit_id')" ]]; then
+        # Trial first. The duplicates' ids come from jj's own report; awk reads all of it,
+        # since jj exits 3 when its output pipe closes early.
+        mapfile -t trial < <(jj duplicate --color never "$commit::" --onto main@origin 2>&1 \
+            | awk '/^Duplicated / {print $5}')
+        (( ${#trial[@]} )) || die "could not trial-rebase $rev onto main; nothing moved"
+        set="$(IFS='|'; echo "${trial[*]}")"
+        conflicted="$(jj log -r "($set) & conflicts()" --no-graph -T 'change_id.short() ++ " "')"
+        jj abandon --quiet "$set"
+        if [[ -n "$conflicted" ]]; then
+            die "CONFLICT: $rev or one of its descendants conflicts with main@origin; nothing moved and no file on disk changed. Merge main's change into your commit by hand, then run this again."
+        fi
+        jj rebase --quiet -s "$commit" -d main@origin
+        commit="$(jj log -r "$rev" --no-graph -T 'commit_id')"
+        if [[ -n "$(jj log -r "$commit:: & conflicts()" --no-graph -T 'commit_id')" ]]; then
+            die "CONFLICT after the rebase although the trial had none; resolve it in $PWD now"
+        fi
+    fi
+    if err="$(git push --quiet origin "$commit:refs/heads/main" 2>&1)"; then
+        echo "dotfiles-publish: main is $commit"
+        exit 0
+    fi
+    (( attempt < TRIES )) || die "push refused $attempt times; the last answer: $err"
+    echo "dotfiles-publish: push refused (another session pushed first?); fetching and trying again" >&2
+done
