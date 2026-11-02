@@ -522,9 +522,13 @@ def test_schedule_kills_running_jobs_when_a_launch_fails(monkeypatch, tmp_path):
                        wait=lambda results, seconds: pytest.fail("the scheduler must exit before it waits"))
 
     [process] = launched
-    grandchild = _read_pid(pid_file)
+    assert process.returncode is not None, "A's wrapper was not reaped"
+    # The scheduler can kill A's group before its shell forks the child or writes the pid file; the whole group
+    # dies either way, so a missing pid file is a pass, not a hang.
+    if not pid_file.exists():
+        return
+    grandchild = int(pid_file.read_text())
     try:
-        assert process.returncode is not None, "A's wrapper was not reaped"
         assert _dies(grandchild), f"A's grandchild {grandchild} outlived the scheduler"
     finally:
         if _alive(grandchild):
