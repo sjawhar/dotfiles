@@ -16,6 +16,7 @@ import concurrent.futures as cf
 import datetime as dt
 import json
 import os
+import queue
 import re
 import shlex
 import signal
@@ -605,9 +606,14 @@ def _load_fired(state: Path, streams: set[str]) -> dict[str, set[str]]:
 
 
 def _write_fired(state: Path, fired: dict[str, set[str]]) -> None:
+    """Only the scheduler's main thread calls this, after it has collected every finished job, so two jobs of one
+    stream that end together add their keys to one set and the file is written once. The rename keeps a reader or a
+    crash from seeing half a file."""
     for stream, entries in fired.items():
         directory = _state_dir(state, stream)
-        (directory / "fired-dues.json").write_text(json.dumps({"fired": sorted(entries)}, indent=2) + "\n")
+        partial = directory / "fired-dues.json.tmp"
+        partial.write_text(json.dumps({"fired": sorted(entries)}, indent=2) + "\n")
+        os.replace(partial, directory / "fired-dues.json")
 
 
 def _jobs(path: Path) -> tuple[str, list[dict]]:
@@ -622,6 +628,7 @@ def _jobs(path: Path) -> tuple[str, list[dict]]:
 
 
 HEARTBEAT_INTERVAL_S = 60
+MAX_CONCURRENT_JOBS = 4
 
 
 def write_heartbeat(state: Path, now: dt.datetime, pid: int) -> None:
@@ -648,12 +655,16 @@ def start_heartbeat(state: Path, interval_s: float = HEARTBEAT_INTERVAL_S) -> th
     return thread
 
 
-def run_scheduled_command(job: dict) -> int:
-    """Run one scheduled command in its own process group. If its timeout expires, kill and reap every descendant
-    before the scheduler accepts another fire: a wrapper around omp must not leave omp alive."""
-    process = subprocess.Popen(job["command"], cwd=job["cwd"], start_new_session=True)
+def start_scheduled_command(job: dict) -> subprocess.Popen:
+    """Start one scheduled command in its own process group."""
+    return subprocess.Popen(job["command"], cwd=job["cwd"], start_new_session=True)
+
+
+def finish_scheduled_command(process: subprocess.Popen, timeout_s: float) -> int:
+    """Wait for a started command. If its timeout expires, kill and reap every descendant before reporting exit 124:
+    a wrapper around omp must not leave omp alive."""
     try:
-        return process.wait(timeout=job["timeout_s"])
+        return process.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -663,11 +674,32 @@ def run_scheduled_command(job: dict) -> int:
         return 124
 
 
-def schedule(jobs_file: Path, state: Path, api=None, clock=None, sleep=time.sleep) -> None:
-    """Run the local scheduler until stopped. Each cycle reloads the jobs file, refreshes the due-source records and
-    recomputes the fires from them (`fires_since`), so nothing a record no longer holds can run; it runs the earliest
-    due group, one job at a time, then reloads again. CLOCK and SLEEP are injectable so the loop itself is tested on
-    a fake clock."""
+def _await_job(fire: Fire, process, timeout_s: float, results: queue.Queue) -> None:
+    """A job's worker thread: it only waits for the process and hands the outcome to the main thread, which alone
+    touches the scheduler's state."""
+    started = time.monotonic()
+    try:
+        code: int | str = finish_scheduled_command(process, timeout_s)
+    except BaseException as error:  # noqa: BLE001 - the main thread must learn the job ended, or it never runs again
+        code = f"error {error!r}"
+    results.put((fire, code, time.monotonic() - started))
+
+
+def _wait_for_result(results: queue.Queue, seconds: float) -> list:
+    """Block until a job ends or SECONDS pass; return the outcome that woke it, if any."""
+    try:
+        return [results.get(timeout=seconds)]
+    except queue.Empty:
+        return []
+
+
+def schedule(jobs_file: Path, state: Path, api=None, clock=None, wait=_wait_for_result,
+             max_jobs: int = MAX_CONCURRENT_JOBS) -> None:
+    """Run the local scheduler until stopped. Each cycle collects the jobs that ended, reloads the jobs file,
+    refreshes the due-source records and recomputes the fires from them (`fires_since`), so nothing a record no longer
+    holds can run. It starts every fire that is due, earliest first, while fewer than MAX_JOBS jobs run; a job runs
+    at most one instance at a time, so a fire of a running job waits until it ends. Then it waits for the next fire
+    time, a job's end or ten minutes. CLOCK and WAIT are injectable so the loop itself is tested on a fake clock."""
     clock = clock or (lambda: dt.datetime.now(dt.UTC))
     started_at = clock()
     print(f"pilot-schedule started {utc_text(started_at)}", flush=True)
@@ -675,10 +707,28 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, sleep=time.slee
     api = api or Dispatch()
     fired: dict[str, set[str]] = {}
     executed_daily: set[tuple[str, str]] = set()
+    running: dict[str, Fire] = {}
+    results: queue.Queue = queue.Queue()
+    finished: list = []
     while True:
         if not heartbeat.is_alive():
             print("pilot-schedule heartbeat thread is not running", file=sys.stderr, flush=True)
             raise SystemExit(1)
+        while True:
+            try:
+                finished.append(results.get_nowait())
+            except queue.Empty:
+                break
+        if finished:
+            for fire, code, elapsed in finished:
+                del running[fire.name]
+                print(f"{utc_text(clock())} ran {fire.name} exit {code} in {elapsed:.1f}s", flush=True)
+                # A daily time is marked run whatever the fire's kind: a due that coincides with it covers it.
+                executed_daily.add((fire.name, utc_text(fire.at)))
+                for stream, key in fire.due_keys:
+                    fired.setdefault(stream, set()).add(key)
+            _write_fired(state, fired)
+            finished = []
         timezone, jobs = _jobs(jobs_file)
         now = clock()
         streams = {job["dues_from"] for job in jobs if job.get("dues_from")}
@@ -687,25 +737,20 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, sleep=time.slee
             fired.setdefault(stream, _load_fired(state, {stream})[stream])
         dues = {stream: _load_dues(state, stream, now) for stream in streams}
         fires = coalesce_fires(fires_since(jobs, timezone, started_at, now, dues, fired, executed_daily))
-        if not fires:
-            sleep(600)
-            continue
-        first_at = fires[0].at
-        delay = (first_at - now).total_seconds()
-        if delay > 0:
-            sleep(min(delay, 600))
-            continue
         by_name = {job["name"]: job for job in jobs}
-        for fire in (fire for fire in fires if fire.at == first_at):
-            started = time.monotonic()
-            code = run_scheduled_command(by_name[fire.name])
-            elapsed = time.monotonic() - started
-            print(f"{utc_text(clock())} ran {fire.name} exit {code} in {elapsed:.1f}s", flush=True)
-            # A daily time is marked run whatever the fire's kind: a due that coincides with it covers it.
-            executed_daily.add((fire.name, utc_text(fire.at)))
-            for stream, key in fire.due_keys:
-                fired.setdefault(stream, set()).add(key)
-        _write_fired(state, fired)
+        for fire in fires:
+            if fire.at > now or len(running) >= max_jobs:
+                break
+            if fire.name in running:
+                continue
+            job = by_name[fire.name]
+            process = start_scheduled_command(job)
+            running[fire.name] = fire
+            print(f"{utc_text(now)} start {fire.name} for {utc_text(fire.at)}", flush=True)
+            threading.Thread(target=_await_job, args=(fire, process, job["timeout_s"], results),
+                             name=f"pilot-job-{fire.name}", daemon=True).start()
+        upcoming = [(fire.at - now).total_seconds() for fire in fires if fire.at > now and fire.name not in running]
+        finished = wait(results, min([600.0, *upcoming]))
 
 
 def census_ids(measured: dict, stream: str) -> list[str]:
@@ -1044,6 +1089,8 @@ def main(argv: list[str] | None = None, api: Dispatch | None = None) -> int:
     schedule_parser = command.add_parser("schedule")
     schedule_parser.add_argument("--jobs", type=Path, required=True)
     schedule_parser.add_argument("--state", type=Path, required=True)
+    schedule_parser.add_argument("--max-jobs", type=int, choices=range(1, 65), metavar="N", default=MAX_CONCURRENT_JOBS,
+                                 help=f"jobs that may run at once (1-64, default {MAX_CONCURRENT_JOBS})")
     census_parser = command.add_parser("census")
     census_parser.add_argument("--stream", required=True)
     census_parser.add_argument("--out", type=Path)
@@ -1056,7 +1103,7 @@ def main(argv: list[str] | None = None, api: Dispatch | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "schedule":
-            schedule(args.jobs, args.state)
+            schedule(args.jobs, args.state, max_jobs=args.max_jobs)
             return 0
         if args.command == "census":
             census(args.stream, args.out)

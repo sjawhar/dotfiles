@@ -76,16 +76,19 @@ per stream. Nothing here writes to Dispatch or sends an Envoy message: `summary`
   with omp's code. The prompt tells the session to append `ISSUE<TAB>pending<TAB>UTC` to `started.tsv` before each
   `agent-new` and `ISSUE<TAB>PANE<TAB>UTC` after. With no record it starts nothing and logs
   `no stream record, skipped`. `--dry-run` prints the command instead.
-- `schedule --jobs FILE --state DIR` runs until stopped. Start it as a named omp background service, not a systemd
-  unit. Each job fires at each local `at` time and, with `dues_from`, at each `due` in that stream's record. Every
-  cycle re-reads the jobs file and the record from Dispatch (an outage keeps the saved copy; a 404 removes it) and
-  recomputes the fires from them, so a due the owner removed no longer fires and a moved one fires at its new time. A
-  time that passes while another job runs, a due included, still fires when that job ends; only times already past
-  when the process started are dropped. Fires of one job at one time run once, and every due they cover goes into
-  `DIR/<stream>/fired-dues.json`, so a restart does not fire it again. It sleeps at most 10 minutes between cycles and
-  runs jobs one at a time, each in its own process group: at its timeout the whole group is killed and reaped
-  (exit 124) before the next job. A thread writes `DIR/heartbeat` (UTC time, pid) every 60 s; the process exits 1 if
-  that thread dies, so a file older than 15 minutes means the scheduler is down.
+- `schedule --jobs FILE --state DIR [--max-jobs N]` runs until stopped. Start it as a named omp background service,
+  not a systemd unit. Each job fires at each local `at` time and, with `dues_from`, at each `due` in that stream's
+  record. Every cycle re-reads the jobs file and the record from Dispatch (an outage keeps the saved copy; a 404
+  removes it) and recomputes the fires from them, so a due the owner removed no longer fires and a moved one fires at
+  its new time. Different jobs run at the same time, up to N at once (default 4); a fire that comes due while N jobs
+  run starts when one ends. Each job runs one instance at a time: a fire of a job that comes due while that job
+  runs, a due included, starts when it ends. Only times already past when the process started are dropped. Fires of
+  one job at one time run once, and every due they cover goes into `DIR/<stream>/fired-dues.json`, so a restart does
+  not fire it again; only the main thread writes that file, once for all the jobs that ended together, by renaming a
+  complete copy over it. It waits at most 10 minutes between cycles, and wakes early for a fire time or a job's end.
+  Each job runs in its own process group: at its timeout the whole group is killed and reaped (exit 124) before the
+  job counts as ended. A thread writes `DIR/heartbeat` (UTC time, pid) every 60 s; the process exits 1 if that thread
+  dies, so a file older than 15 minutes means the scheduler is down.
 - `census --stream KEY [--out FILE]` prints the session ids of the live top-level sessions in the stream's tmux
   windows (`sessions.py`), one per line, to freeze a baseline.
 - `measure --stream KEY --start ISO --end ISO [--sessions-file FILE] [--json]` counts, per session and over

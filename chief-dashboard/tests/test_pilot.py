@@ -237,7 +237,8 @@ def test_scheduled_command_kills_and_reaps_its_process_group_on_timeout(monkeypa
     monkeypatch.setattr(pilot.subprocess, "Popen", lambda *args, **kwargs: calls.append(("popen", args, kwargs)) or Process())
     monkeypatch.setattr(pilot.os, "killpg", lambda pid, signal: calls.append(("killpg", pid, signal)))
 
-    assert pilot.run_scheduled_command({"command": ["summary"], "cwd": ".", "timeout_s": 7}) == 124
+    process = pilot.start_scheduled_command({"command": ["summary"], "cwd": ".", "timeout_s": 7})
+    assert pilot.finish_scheduled_command(process, 7) == 124
     assert calls[0][2]["start_new_session"] is True
     assert calls[1] == ("wait", 7)
     assert calls[2][0] == "killpg" and calls[3] == ("wait", None)
@@ -267,28 +268,55 @@ class Stop(Exception):
 
 
 def drive_schedule(monkeypatch, tmp_path, start: datetime, durations: dict[str, float], runs: int, record,
-                   b_at=("06:31",)):
-    """Run `schedule()` on a fake clock: sleeps advance it, each job advances it by its duration, and the loop stops
-    after RUNS jobs or an hour of fake time. RECORD is the stream.md Dispatch returns, or a function of the clock that
-    returns it (an owner editing the record while the scheduler runs). Returns [(job, UTC start)] and the state."""
+                   b_at=("06:31",), a_at=("06:30",), max_jobs=pilot.MAX_CONCURRENT_JOBS, a_dues_from=None):
+    """Run `schedule()` on a fake clock with its real worker threads: each started job blocks until the scheduler's
+    wait reaches the job's end (start plus its duration), and a wait with no job ending inside it advances the clock
+    by the whole wait. The loop stops after RUNS starts or an hour of fake time. RECORD is the stream.md Dispatch
+    returns, or a function of the clock that returns it (an owner editing the record while the scheduler runs).
+    Returns [(job, UTC start)] and the state."""
     import json
+    import threading
     from datetime import timedelta
 
     clock = [start]
     ran: list[tuple[str, str]] = []
+    pending: list[Handle] = []
     tmp_path.mkdir(parents=True, exist_ok=True)
     jobs = tmp_path / "jobs.json"
     jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [
-        {"name": "A", "at": ["06:30"], "dues_from": None, "command": ["A"], "cwd": ".", "timeout_s": 900},
-        {"name": "B", "at": list(b_at), "dues_from": "INFRA-167", "command": ["B"], "cwd": ".", "timeout_s": 900},
+        {"name": "A", "at": list(a_at), "dues_from": a_dues_from, "command": ["A"], "cwd": ".", "timeout_s": 9000},
+        {"name": "B", "at": list(b_at), "dues_from": "INFRA-167", "command": ["B"], "cwd": ".", "timeout_s": 9000},
     ]}))
 
-    def run(job):
+    class Handle:
+        def __init__(self, end):
+            self.end = end
+            self.released = threading.Event()
+
+    def start_command(job):
         ran.append((job["name"], pilot.utc_text(clock[0])))
-        clock[0] += timedelta(seconds=durations[job["name"]])
         if len(ran) == runs:
             raise Stop
+        handle = Handle(clock[0] + timedelta(seconds=durations[job["name"]]))
+        pending.append(handle)
+        return handle
+
+    def finish_command(handle, timeout_s):
+        assert handle.released.wait(timeout=30)
         return 0
+
+    def wait(results, seconds):
+        limit = clock[0] + timedelta(seconds=seconds)
+        ending = min(pending, key=lambda handle: handle.end, default=None)
+        if ending and ending.end <= limit:
+            clock[0] = max(clock[0], ending.end)
+            pending.remove(ending)
+            ending.released.set()
+            return [results.get(timeout=30)]
+        clock[0] = limit
+        if clock[0] > start + timedelta(hours=1):
+            raise Stop
+        return []
 
     class Alive:
         def is_alive(self):
@@ -299,16 +327,16 @@ def drive_schedule(monkeypatch, tmp_path, start: datetime, durations: dict[str, 
             assert path == "/api/v1/issues/INFRA-167/artifacts/stream.md/text"
             return {"markdown": record(clock[0]) if callable(record) else record}
 
-    monkeypatch.setattr(pilot, "run_scheduled_command", run)
+    monkeypatch.setattr(pilot, "start_scheduled_command", start_command)
+    monkeypatch.setattr(pilot, "finish_scheduled_command", finish_command)
     monkeypatch.setattr(pilot, "start_heartbeat", lambda state: Alive())
 
-    def sleep(seconds):
-        clock[0] += timedelta(seconds=seconds)
-        if clock[0] > start + timedelta(hours=1):
-            raise Stop
-
-    with pytest.raises(Stop):
-        pilot.schedule(jobs, tmp_path / "state", api=Api(), clock=lambda: clock[0], sleep=sleep)
+    try:
+        with pytest.raises(Stop):
+            pilot.schedule(jobs, tmp_path / "state", api=Api(), clock=lambda: clock[0], wait=wait, max_jobs=max_jobs)
+    finally:
+        for handle in pending:
+            handle.released.set()
     return ran, tmp_path / "state"
 
 
@@ -325,12 +353,39 @@ def due_record(*dues: str) -> str:
         for n, due in enumerate(dues, 1))
 
 
-def test_schedule_runs_a_due_that_fell_beyond_the_lookahead_while_a_long_job_ran(monkeypatch, tmp_path):
-    """A runs 14:30-14:50. B's 14:45 due was past the ten-minute lookahead when A started; it runs when A ends."""
+def test_schedule_starts_a_due_while_another_job_runs(monkeypatch, tmp_path):
+    """A runs 14:30-14:50. B's 14:45 due starts at 14:45, before A ends."""
     ran, _ = drive_schedule(monkeypatch, tmp_path, datetime(2026, 11, 1, 14, 29, tzinfo=UTC), {"A": 1200, "B": 1},
                             runs=99, record=due_record("2026-11-01T14:45Z"), b_at=("12:00",))
 
+    assert ran == [("A", "2026-11-01T14:30:00Z"), ("B", "2026-11-01T14:45:00Z")]
+
+
+def test_schedule_runs_a_job_once_at_a_time_and_its_next_fire_when_it_ends(monkeypatch, tmp_path):
+    """A fires at 14:30Z and 14:40Z and runs 20 minutes: its second fire waits for the first and starts at 14:50."""
+    ran, _ = drive_schedule(monkeypatch, tmp_path, datetime(2026, 11, 1, 14, 29, tzinfo=UTC), {"A": 1200, "B": 1},
+                            runs=99, record=due_record(), a_at=("06:30", "06:40"), b_at=("12:00",))
+
+    assert ran == [("A", "2026-11-01T14:30:00Z"), ("A", "2026-11-01T14:50:00Z")]
+
+
+def test_schedule_holds_a_due_fire_while_the_cap_is_full(monkeypatch, tmp_path):
+    """With one job allowed at once, B's 14:45 due waits for A, which runs 14:30-14:50."""
+    ran, _ = drive_schedule(monkeypatch, tmp_path, datetime(2026, 11, 1, 14, 29, tzinfo=UTC), {"A": 1200, "B": 1},
+                            runs=99, record=due_record("2026-11-01T14:45Z"), b_at=("12:00",), max_jobs=1)
+
     assert ran == [("A", "2026-11-01T14:30:00Z"), ("B", "2026-11-01T14:50:00Z")]
+
+
+def test_schedule_records_both_dues_when_two_jobs_of_one_stream_end_together(monkeypatch, tmp_path):
+    ran, state = drive_schedule(monkeypatch, tmp_path, datetime(2026, 11, 1, 14, 29, tzinfo=UTC), {"A": 60, "B": 60},
+                                runs=99, record=due_record("2026-11-01T14:31Z"), a_at=("12:00",), b_at=("12:00",),
+                                a_dues_from="INFRA-167")
+
+    assert ran == [("A", "2026-11-01T14:31:00Z"), ("B", "2026-11-01T14:31:00Z")]
+    assert (state / "INFRA-167" / "fired-dues.json").read_text() == (
+        '{\n  "fired": [\n    "A@2026-11-01T14:31:00Z",\n    "B@2026-11-01T14:31:00Z"\n  ]\n}\n')
+    assert not (state / "INFRA-167" / "fired-dues.json.tmp").exists()
 
 
 def test_schedule_drops_a_due_the_owner_removed_and_follows_one_they_moved(monkeypatch, tmp_path):
@@ -353,13 +408,13 @@ def test_schedule_drops_a_due_the_owner_removed_and_follows_one_they_moved(monke
     assert ran == [("A", "2026-11-01T14:30:00Z"), ("B", "2026-11-01T14:40:00Z")]
 
 
-def test_schedule_runs_a_fire_crossed_during_a_job_once_for_its_daily_and_both_dues(monkeypatch, tmp_path):
-    """A (06:30 PST, 14:30Z) runs for two minutes; B's daily time and two commitments fall at 14:31Z meanwhile.
-    The loop then runs for an hour of fake time with nothing more to do."""
+def test_schedule_runs_one_fire_for_a_daily_time_and_both_dues_while_another_job_runs(monkeypatch, tmp_path):
+    """A (06:30 PST, 14:30Z) runs for two minutes; B's daily time and two commitments fall at 14:31Z meanwhile, and
+    B runs once then. The loop then runs for an hour of fake time with nothing more to do."""
     ran, state = drive_schedule(monkeypatch, tmp_path, datetime(2026, 11, 1, 14, 29, tzinfo=UTC),
                                 {"A": 120, "B": 1}, runs=99, record=TWO_DUES)
 
-    assert ran == [("A", "2026-11-01T14:30:00Z"), ("B", "2026-11-01T14:32:00Z")]
+    assert ran == [("A", "2026-11-01T14:30:00Z"), ("B", "2026-11-01T14:31:00Z")]
     # The scheduler refreshed the record from Dispatch before it read the dues, and remembers the due it ran.
     assert (state / "INFRA-167" / "stream.md").read_text() == TWO_DUES
     assert (state / "INFRA-167" / "fired-dues.json").read_text() == (
@@ -374,7 +429,8 @@ def test_scheduled_command_timeout_kills_a_real_grandchild(tmp_path):
     command = ["sh", "-c", f"sleep 60 & echo $! > {pid_file}; wait"]
     started = clock.monotonic()
 
-    assert pilot.run_scheduled_command({"command": command, "cwd": str(tmp_path), "timeout_s": 1}) == 124
+    process = pilot.start_scheduled_command({"command": command, "cwd": str(tmp_path), "timeout_s": 1})
+    assert pilot.finish_scheduled_command(process, 1) == 124
     assert clock.monotonic() - started < 10
     grandchild = int(pid_file.read_text())
     def running(pid: int) -> bool:
