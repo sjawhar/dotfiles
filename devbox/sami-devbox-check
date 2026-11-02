@@ -109,7 +109,7 @@ tools_check() {
     if [[ ",$got," == *,ghcr.io,* ]]; then
         ok "docker in the box: logged in to ghcr.io (auths: $got)"
     elif ! secrets GHCR_PULL_TOKEN -- true >/dev/null 2>&1; then
-        echo "WAIT docker in the box: no ghcr.io login (auths: ${got:-none}): GHCR_PULL_TOKEN is in no agent-tier file or broker store"
+        echo "WAIT docker in the box: no ghcr.io login: ghcr.io takes only a classic personal access token for org packages; the sjawhar-agent App token gets 403 \"installation not allowed to Read organization package\" (2026-11-02 20:4xZ)"
     else
         fail "docker in the box: GHCR_PULL_TOKEN resolves but ~/.docker/config.json has no ghcr.io login (auths: ${got:-none})"
     fi
@@ -131,7 +131,7 @@ PY
         ok "slack MCP: omp holds one live Slack credential"
     elif [[ "$got" == 0 && "$live" == 0 ]]; then
         echo "WAIT openai-codex/ waits on the gateway openai group (INFRA-481)"
-        echo "WAIT slack MCP: needs Sami's Slack OAuth, which is a person's login; decision pending"
+        echo "WAIT slack MCP: needs a person's Slack OAuth (Sami's), which the spec bars on this machine; agent.db is not copied (decided 18:24Z)"
     else
         fail "slack MCP: live Slack credentials: $got (all live credentials: $live)"
     fi
