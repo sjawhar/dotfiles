@@ -1,0 +1,6065 @@
+{
+"processes": [
+{
+"pid": 1,
+"ppid": 0,
+"uid": 0,
+"argv": [
+"/sbin/init"
+],
+"cgroup": ""
+},
+{
+"pid": 28813,
+"ppid": 1,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-tmux-builds/3.8-fix5776/tmux",
+"-d",
+"-s",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 29214,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 29316,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 29450,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 29549,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 29699,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 29903,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 30128,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 30289,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 30531,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 30716,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 30914,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 31109,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 31319,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 31523,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 31735,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 31940,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 32136,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 32342,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 32928,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 33025,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 33181,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 33477,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 33938,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 34161,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 34393,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 34878,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 35314,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 35529,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 35743,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 35961,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 36196,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 36427,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 36672,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 36902,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 37122,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 37352,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 37931,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 38083,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 38275,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 38406,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 38590,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 38832,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 39048,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 39277,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 39490,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 39781,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 40013,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 40483,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 40842,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 41435,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 41452,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 41926,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 42098,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 42507,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 43902,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 44166,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 47200,
+"ppid": 29214,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a13dca-e979-7264-af32-f654ef57a6f5"
+],
+"cgroup": ""
+},
+{
+"pid": 47314,
+"ppid": 47200,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a13dca-e979-7264-af32-f654ef57a6f5"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r72ce86c44ff741318560790740180240.scope"
+},
+{
+"pid": 47523,
+"ppid": 29316,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+],
+"cgroup": ""
+},
+{
+"pid": 47661,
+"ppid": 47523,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r4048b167119a4ce0bf065a34da6b29dd.scope"
+},
+{
+"pid": 47876,
+"ppid": 29450,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a14db1-5568-7640-b39d-4b09c768ce73"
+],
+"cgroup": ""
+},
+{
+"pid": 48107,
+"ppid": 47876,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a14db1-5568-7640-b39d-4b09c768ce73"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r118612f5eb644909a7d27f8b2c10f81f.scope"
+},
+{
+"pid": 48281,
+"ppid": 29549,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a17b06-9430-7245-8284-bad29b104512"
+],
+"cgroup": ""
+},
+{
+"pid": 48470,
+"ppid": 48281,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a17b06-9430-7245-8284-bad29b104512"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rb70b3b426e7c4ace8592e15a290479fc.scope"
+},
+{
+"pid": 48767,
+"ppid": 29699,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a16220-ec30-77ce-8b02-83d31fb7399a"
+],
+"cgroup": ""
+},
+{
+"pid": 49027,
+"ppid": 48767,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a16220-ec30-77ce-8b02-83d31fb7399a"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0053d85298d24b66a062e823c336c724.scope"
+},
+{
+"pid": 49271,
+"ppid": 29903,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a14ba2-817c-748e-9cb5-d1ad60308a9c"
+],
+"cgroup": ""
+},
+{
+"pid": 49524,
+"ppid": 49271,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a14ba2-817c-748e-9cb5-d1ad60308a9c"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0790d51e087f46569dc01d6dbdd1800f.scope"
+},
+{
+"pid": 49584,
+"ppid": 41435,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a14c3d-9d7f-7079-97aa-f810a884c050"
+],
+"cgroup": ""
+},
+{
+"pid": 49672,
+"ppid": 30128,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a14b36-227b-7141-acdb-b5397251a0b1"
+],
+"cgroup": ""
+},
+{
+"pid": 49747,
+"ppid": 49584,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a14c3d-9d7f-7079-97aa-f810a884c050"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rd2eeb459004e4a4ba3262d58b2ec706c.scope"
+},
+{
+"pid": 49810,
+"ppid": 49672,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a14b36-227b-7141-acdb-b5397251a0b1"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-ra8e31c8386444420b54881c9f24c4088.scope"
+},
+{
+"pid": 50633,
+"ppid": 31940,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a175f1-5540-7091-a88d-a871b7c87193"
+],
+"cgroup": ""
+},
+{
+"pid": 50701,
+"ppid": 41926,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a13bca-08df-7586-a33d-12ed3b04a3c0"
+],
+"cgroup": ""
+},
+{
+"pid": 50773,
+"ppid": 50633,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a175f1-5540-7091-a88d-a871b7c87193"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1e72dd54bce7445e8e5e5070f26c9b2d.scope"
+},
+{
+"pid": 50825,
+"ppid": 50701,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a13bca-08df-7586-a33d-12ed3b04a3c0"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rd8ce85a2da9d46a2b2eea1b37e1bc97b.scope"
+},
+{
+"pid": 50891,
+"ppid": 32136,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a175f1-a3bf-71f2-a9b8-4f18af2e8f51"
+],
+"cgroup": ""
+},
+{
+"pid": 51065,
+"ppid": 50891,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a175f1-a3bf-71f2-a9b8-4f18af2e8f51"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rdd9c524239b946d8b43561220d48d4a0.scope"
+},
+{
+"pid": 51179,
+"ppid": 32342,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a14bc2-bed5-712f-afc4-4cc4c2df0c9c"
+],
+"cgroup": ""
+},
+{
+"pid": 51365,
+"ppid": 51179,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a14bc2-bed5-712f-afc4-4cc4c2df0c9c"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r6411bf35f98e4054b2ca8d7d12687e8d.scope"
+},
+{
+"pid": 53111,
+"ppid": 33477,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a1798a-99af-7266-95dd-fa4be35f9109"
+],
+"cgroup": ""
+},
+{
+"pid": 53458,
+"ppid": 53111,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a1798a-99af-7266-95dd-fa4be35f9109"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r36af6092c8204fcab33064b1f1893bea.scope"
+},
+{
+"pid": 53817,
+"ppid": 33938,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a17abe-cb74-726b-ac1f-5a5711aec7b5"
+],
+"cgroup": ""
+},
+{
+"pid": 54091,
+"ppid": 53817,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a17abe-cb74-726b-ac1f-5a5711aec7b5"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r9c9bede743544d4da4a7f7b67f8c3d02.scope"
+},
+{
+"pid": 54456,
+"ppid": 34161,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a179bb-880f-7663-98b2-a41ee9487fd2"
+],
+"cgroup": ""
+},
+{
+"pid": 54591,
+"ppid": 54456,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a179bb-880f-7663-98b2-a41ee9487fd2"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rf609dddafd8145b499f95c9278d8ea96.scope"
+},
+{
+"pid": 54875,
+"ppid": 34393,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a16f34-f364-72b2-8d0d-4c3390aeeb5b"
+],
+"cgroup": ""
+},
+{
+"pid": 55133,
+"ppid": 54875,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a16f34-f364-72b2-8d0d-4c3390aeeb5b"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r2473c2f7d6e04e0894acbaa13610118c.scope"
+},
+{
+"pid": 55698,
+"ppid": 34878,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a16a9e-a90d-7148-95ed-0e9e7839dbd2"
+],
+"cgroup": ""
+},
+{
+"pid": 55821,
+"ppid": 55698,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a16a9e-a90d-7148-95ed-0e9e7839dbd2"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rcd0ea35eb06e4d1ebcf10f01df2fd284.scope"
+},
+{
+"pid": 56063,
+"ppid": 35314,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a15d00-68a6-70b8-a374-677232a8b642"
+],
+"cgroup": ""
+},
+{
+"pid": 56269,
+"ppid": 56063,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a15d00-68a6-70b8-a374-677232a8b642"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r17c93161268846fd8a4a3ebf91cf04de.scope"
+},
+{
+"pid": 56452,
+"ppid": 35529,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a13bcd-3e9f-7770-b0f4-88fa364eb58e"
+],
+"cgroup": ""
+},
+{
+"pid": 56643,
+"ppid": 56452,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a13bcd-3e9f-7770-b0f4-88fa364eb58e"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rf78692ed6961453eb97a3e1d98a2bd69.scope"
+},
+{
+"pid": 56827,
+"ppid": 35743,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a14126-ae14-7525-98b7-6b1ac6cefd80"
+],
+"cgroup": ""
+},
+{
+"pid": 56969,
+"ppid": 56827,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a14126-ae14-7525-98b7-6b1ac6cefd80"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rc776330a9a4e45ad81fb020cd5cb0f58.scope"
+},
+{
+"pid": 57472,
+"ppid": 36196,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a16551-5d7c-72f0-bd54-d1c97d2adfdc"
+],
+"cgroup": ""
+},
+{
+"pid": 57655,
+"ppid": 57472,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a16551-5d7c-72f0-bd54-d1c97d2adfdc"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r71623d4161bf4dd5841c2760b86d3c2a.scope"
+},
+{
+"pid": 58136,
+"ppid": 36902,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a1460d-0d43-72a0-bb27-0ce3049cae16"
+],
+"cgroup": ""
+},
+{
+"pid": 58220,
+"ppid": 58136,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a1460d-0d43-72a0-bb27-0ce3049cae16"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-ra9270e4db92e465bbe5144035e7febfc.scope"
+},
+{
+"pid": 58266,
+"ppid": 37122,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a19225-2d38-70f2-8416-0297f9e22f62"
+],
+"cgroup": ""
+},
+{
+"pid": 58359,
+"ppid": 58266,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19225-2d38-70f2-8416-0297f9e22f62"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r5c0381388ce544499469aeee5d2ecb1b.scope"
+},
+{
+"pid": 61738,
+"ppid": 41452,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a1708b-35e2-746c-9dda-337c0544ec65"
+],
+"cgroup": ""
+},
+{
+"pid": 61802,
+"ppid": 61738,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a1708b-35e2-746c-9dda-337c0544ec65"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r14003d3937a14956ad810ca41c56db1d.scope"
+},
+{
+"pid": 77103,
+"ppid": 47314,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r72ce86c44ff741318560790740180240.scope"
+},
+{
+"pid": 81820,
+"ppid": 1,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-re40e38abbf2f4366bd3ab54d69fa143b.scope"
+},
+{
+"pid": 85377,
+"ppid": 51065,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rdd9c524239b946d8b43561220d48d4a0.scope"
+},
+{
+"pid": 85713,
+"ppid": 1,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rd0f6fc50cc1c403cb9ee48e14fbccce0.scope"
+},
+{
+"pid": 91451,
+"ppid": 56643,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rf78692ed6961453eb97a3e1d98a2bd69.scope"
+},
+{
+"pid": 102161,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 102347,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 102762,
+"ppid": 102161,
+"uid": 1000,
+"argv": [
+"bash",
+"--restore",
+"2026-10-31T03-00-54-541Z_01a18fe7-2c8d-707b-9611-8a3645941c7d.jsonl"
+],
+"cgroup": ""
+},
+{
+"pid": 102783,
+"ppid": 102762,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--restore",
+"2026-10-31T03-00-54-541Z_01a18fe7-2c8d-707b-9611-8a3645941c7d.jsonl"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r619833a6ed084d00b6352f650d796787.scope"
+},
+{
+"pid": 102794,
+"ppid": 102347,
+"uid": 1000,
+"argv": [
+"bash",
+"--restore",
+"2026-10-31T19-06-28-439Z_01a1935b-2cd7-7294-bb07-29236b2e94b9.jsonl"
+],
+"cgroup": ""
+},
+{
+"pid": 102922,
+"ppid": 102794,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--restore",
+"2026-10-31T19-06-28-439Z_01a1935b-2cd7-7294-bb07-29236b2e94b9.jsonl"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r419e317d8b524e19a7c2975fb53e9294.scope"
+},
+{
+"pid": 103451,
+"ppid": 51365,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r6411bf35f98e4054b2ca8d7d12687e8d.scope"
+},
+{
+"pid": 114861,
+"ppid": 348407,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-13200e72281ffa45f452f63f4ae38ab6ace0535c7e8e1a6c7e14ebdb70cc6255.scope/init.scope"
+},
+{
+"pid": 118033,
+"ppid": 47661,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r4048b167119a4ce0bf065a34da6b29dd.scope"
+},
+{
+"pid": 145360,
+"ppid": 30289,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a19225-9e3d-73fc-8f30-ddbedb89ba31"
+],
+"cgroup": ""
+},
+{
+"pid": 145443,
+"ppid": 145360,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19225-9e3d-73fc-8f30-ddbedb89ba31"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r390530e51e474f1294a7d0d674926d39.scope"
+},
+{
+"pid": 145566,
+"ppid": 30914,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a18fe5-18c7-7176-9c34-9692e2e168ed"
+],
+"cgroup": ""
+},
+{
+"pid": 145659,
+"ppid": 31109,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a18fe4-efc5-7796-97ac-71fca2b30417"
+],
+"cgroup": ""
+},
+{
+"pid": 145679,
+"ppid": 145566,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18fe5-18c7-7176-9c34-9692e2e168ed"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rfcbf3322f15b441687422f0958427c36.scope"
+},
+{
+"pid": 145876,
+"ppid": 31319,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a18fe4-e052-727e-ba1d-5c77557e1a67"
+],
+"cgroup": ""
+},
+{
+"pid": 145992,
+"ppid": 145659,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18fe4-efc5-7796-97ac-71fca2b30417"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r6e3713f6fa3749ac99a8f2075fb105db.scope"
+},
+{
+"pid": 146107,
+"ppid": 145876,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18fe4-e052-727e-ba1d-5c77557e1a67"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r4a1c7bf802f94236a7bbe800b819bca8.scope"
+},
+{
+"pid": 146221,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 147158,
+"ppid": 146221,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"2026-10-26T01-40-04-106Z_01a175dd-5d8a-75ac-99a0-68919637ef66.jsonl"
+],
+"cgroup": ""
+},
+{
+"pid": 147319,
+"ppid": 147158,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"2026-10-26T01-40-04-106Z_01a175dd-5d8a-75ac-99a0-68919637ef66.jsonl"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rad1c5fc016334fb8a8e99c68b922ab01.scope"
+},
+{
+"pid": 178644,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 179148,
+"ppid": 178644,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a18fe5-35a7-76f0-8a02-59a3a02132ba"
+],
+"cgroup": ""
+},
+{
+"pid": 179193,
+"ppid": 179148,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18fe5-35a7-76f0-8a02-59a3a02132ba"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r9adad20548244deb82851cf18be34c96.scope"
+},
+{
+"pid": 224415,
+"ppid": 179193,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r9adad20548244deb82851cf18be34c96.scope"
+},
+{
+"pid": 246481,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 246512,
+"ppid": 246481,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a18c6b-c125-7047-9793-c219add49cb5"
+],
+"cgroup": ""
+},
+{
+"pid": 256029,
+"ppid": 1,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 258668,
+"ppid": 1,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 266269,
+"ppid": 246512,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-7abef3ca6089"
+],
+"cgroup": ""
+},
+{
+"pid": 274787,
+"ppid": 256029,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"-p",
+"--mode",
+"--model"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1dce1c0346c64402acc1523d10f2b41c.scope"
+},
+{
+"pid": 275157,
+"ppid": 258668,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"-p",
+"--mode",
+"--model"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1dce1c0346c64402acc1523d10f2b41c.scope"
+},
+{
+"pid": 294010,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 294089,
+"ppid": 294010,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 294970,
+"ppid": 56643,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rf78692ed6961453eb97a3e1d98a2bd69.scope"
+},
+{
+"pid": 298915,
+"ppid": 294089,
+"uid": 1000,
+"argv": [
+"bash",
+"-p",
+"--mode",
+"--model"
+],
+"cgroup": ""
+},
+{
+"pid": 299292,
+"ppid": 298915,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"-p",
+"--mode",
+"--model"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u20074.scope"
+},
+{
+"pid": 303664,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"8f75bcfb73293e38105d140745398b70102c72f10acc1b0ed57742529c38f00d"
+],
+"cgroup": ""
+},
+{
+"pid": 307377,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 307457,
+"ppid": 307377,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a18c6a-ffcd-719e-92a0-31ace0ee6b81"
+],
+"cgroup": ""
+},
+{
+"pid": 313837,
+"ppid": 303664,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a18c6b-c125-7047-9793-c219add49cb5"
+],
+"cgroup": ""
+},
+{
+"pid": 319012,
+"ppid": 40483,
+"uid": 1000,
+"argv": [
+"omp",
+"--resume",
+"01a13c57-d826-7242-80fe-5f0670188b11"
+],
+"cgroup": "0::/user.slice/user-1000.slice/session-c5.scope"
+},
+{
+"pid": 325600,
+"ppid": 313837,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a18c6b-c125-7047-9793-c219add49cb5"
+],
+"cgroup": ""
+},
+{
+"pid": 326035,
+"ppid": 307457,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-d79dfc281916"
+],
+"cgroup": ""
+},
+{
+"pid": 332142,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"13200e72281ffa45f452f63f4ae38ab6ace0535c7e8e1a6c7e14ebdb70cc6255"
+],
+"cgroup": ""
+},
+{
+"pid": 333263,
+"ppid": 332142,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a18c6a-ffcd-719e-92a0-31ace0ee6b81"
+],
+"cgroup": ""
+},
+{
+"pid": 335651,
+"ppid": 4127533,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a16640-8259-71ed-bb68-1e4927b77a01"
+],
+"cgroup": ""
+},
+{
+"pid": 335652,
+"ppid": 4127534,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a1933a-fb17-70d6-b0e7-c225271e4ae8"
+],
+"cgroup": ""
+},
+{
+"pid": 336856,
+"ppid": 333263,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a18c6a-ffcd-719e-92a0-31ace0ee6b81"
+],
+"cgroup": ""
+},
+{
+"pid": 338926,
+"ppid": 61802,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r14003d3937a14956ad810ca41c56db1d.scope"
+},
+{
+"pid": 339459,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 339576,
+"ppid": 339459,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 340165,
+"ppid": 37931,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a13b68-d957-74b8-ad2b-b642fd17bfd9"
+],
+"cgroup": ""
+},
+{
+"pid": 340204,
+"ppid": 325600,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18c6b-c125-7047-9793-c219add49cb5"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-8f75bcfb73293e38105d140745398b70102c72f10acc1b0ed57742529c38f00d.scope/init.scope"
+},
+{
+"pid": 343243,
+"ppid": 340165,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a13b68-d957-74b8-ad2b-b642fd17bfd9"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u11268.scope"
+},
+{
+"pid": 344228,
+"ppid": 339576,
+"uid": 1000,
+"argv": [
+"bash",
+"-p",
+"--mode",
+"--model"
+],
+"cgroup": ""
+},
+{
+"pid": 344544,
+"ppid": 344228,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"-p",
+"--mode",
+"--model"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u20085.scope"
+},
+{
+"pid": 348407,
+"ppid": 336856,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18c6a-ffcd-719e-92a0-31ace0ee6b81"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-13200e72281ffa45f452f63f4ae38ab6ace0535c7e8e1a6c7e14ebdb70cc6255.scope/init.scope"
+},
+{
+"pid": 352219,
+"ppid": 319012,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/session-c5.scope"
+},
+{
+"pid": 353669,
+"ppid": 335651,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a16640-8259-71ed-bb68-1e4927b77a01"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-fe081233af58ff74f2afca77fc8e241a1681ee8aea6e55b22dce92ee8760b422.scope/init.scope"
+},
+{
+"pid": 353690,
+"ppid": 335652,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a1933a-fb17-70d6-b0e7-c225271e4ae8"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-3ca0cbed7ce807bc6d655f5d6f1359bfa42210025daeef623faf76466b94a521.scope/init.scope"
+},
+{
+"pid": 405924,
+"ppid": 48470,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rb70b3b426e7c4ace8592e15a290479fc.scope"
+},
+{
+"pid": 430137,
+"ppid": 49027,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0053d85298d24b66a062e823c336c724.scope"
+},
+{
+"pid": 436725,
+"ppid": 2951286,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0790d51e087f46569dc01d6dbdd1800f.scope"
+},
+{
+"pid": 488242,
+"ppid": 2811149,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 488963,
+"ppid": 488242,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"-p",
+"--no-session",
+"--mode",
+"--max-time"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0790d51e087f46569dc01d6dbdd1800f.scope"
+},
+{
+"pid": 495641,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 495671,
+"ppid": 495641,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a17be5-bbe7-729d-9a4b-5bc7348f8100"
+],
+"cgroup": ""
+},
+{
+"pid": 496060,
+"ppid": 319012,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/session-c5.scope"
+},
+{
+"pid": 498527,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 506611,
+"ppid": 49524,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0790d51e087f46569dc01d6dbdd1800f.scope"
+},
+{
+"pid": 516864,
+"ppid": 495671,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-4faa73bef48a"
+],
+"cgroup": ""
+},
+{
+"pid": 517390,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"0f9824a309af67b528f575f73751efe9b75a4ca5d662ce609dbfb392ecb824ea"
+],
+"cgroup": ""
+},
+{
+"pid": 522009,
+"ppid": 42098,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a170c2-69ef-7141-8dc8-1e824a25ad38"
+],
+"cgroup": ""
+},
+{
+"pid": 522379,
+"ppid": 522009,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a170c2-69ef-7141-8dc8-1e824a25ad38"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u8643.scope"
+},
+{
+"pid": 525163,
+"ppid": 49747,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rd2eeb459004e4a4ba3262d58b2ec706c.scope"
+},
+{
+"pid": 532532,
+"ppid": 517390,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a17be5-bbe7-729d-9a4b-5bc7348f8100"
+],
+"cgroup": ""
+},
+{
+"pid": 537977,
+"ppid": 58220,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-ra9270e4db92e465bbe5144035e7febfc.scope"
+},
+{
+"pid": 548006,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 548362,
+"ppid": 548006,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a19344-b12c-707d-ac4d-72d035d5bb3c"
+],
+"cgroup": ""
+},
+{
+"pid": 560944,
+"ppid": 532532,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a17be5-bbe7-729d-9a4b-5bc7348f8100"
+],
+"cgroup": ""
+},
+{
+"pid": 572535,
+"ppid": 548362,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-910ba59656e3"
+],
+"cgroup": ""
+},
+{
+"pid": 575644,
+"ppid": 560944,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a17be5-bbe7-729d-9a4b-5bc7348f8100"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-0f9824a309af67b528f575f73751efe9b75a4ca5d662ce609dbfb392ecb824ea.scope/init.scope"
+},
+{
+"pid": 575680,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"8f2edfa079ef2b5aa161cd923a9242bed93168c5c9edd6121893e0249d1193e2"
+],
+"cgroup": ""
+},
+{
+"pid": 576724,
+"ppid": 575680,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a19344-b12c-707d-ac4d-72d035d5bb3c"
+],
+"cgroup": ""
+},
+{
+"pid": 580888,
+"ppid": 576724,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a19344-b12c-707d-ac4d-72d035d5bb3c"
+],
+"cgroup": ""
+},
+{
+"pid": 588237,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 595754,
+"ppid": 580888,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19344-b12c-707d-ac4d-72d035d5bb3c"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-8f2edfa079ef2b5aa161cd923a9242bed93168c5c9edd6121893e0249d1193e2.scope/init.scope"
+},
+{
+"pid": 626216,
+"ppid": 353690,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-3ca0cbed7ce807bc6d655f5d6f1359bfa42210025daeef623faf76466b94a521.scope/init.scope"
+},
+{
+"pid": 627368,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"sleep"
+],
+"cgroup": ""
+},
+{
+"pid": 654853,
+"ppid": 39048,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"2026-10-25T02-17-36-102Z_01a170d9-5e66-7491-b0d2-fa6a2e55c14e.jsonl"
+],
+"cgroup": ""
+},
+{
+"pid": 655827,
+"ppid": 654853,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"2026-10-25T02-17-36-102Z_01a170d9-5e66-7491-b0d2-fa6a2e55c14e.jsonl"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r29c72f70d801479893a9fe3b379011cc.scope"
+},
+{
+"pid": 700229,
+"ppid": 4161019,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-0cce80fdd682fddf4db6ea3de46d433e727fb0c8489d3455afa7eb3774affcb3.scope/init.scope"
+},
+{
+"pid": 778465,
+"ppid": 1,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-ra65b2ca1d65d48088caa00aed3d93ac7.scope"
+},
+{
+"pid": 802144,
+"ppid": 522379,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u8643.scope"
+},
+{
+"pid": 857031,
+"ppid": 56643,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rf78692ed6961453eb97a3e1d98a2bd69.scope"
+},
+{
+"pid": 863416,
+"ppid": 40013,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"2026-10-26T08-03-25-321Z_01a1773c-5609-7026-bc1a-7495b2954172.jsonl"
+],
+"cgroup": ""
+},
+{
+"pid": 865114,
+"ppid": 863416,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"2026-10-26T08-03-25-321Z_01a1773c-5609-7026-bc1a-7495b2954172.jsonl"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-ra52951ebff9c4c32acb25540db978c48.scope"
+},
+{
+"pid": 870910,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"sleep"
+],
+"cgroup": ""
+},
+{
+"pid": 894485,
+"ppid": 37352,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a19366-958c-7295-8c2b-171fa219c033"
+],
+"cgroup": ""
+},
+{
+"pid": 894738,
+"ppid": 894485,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19366-958c-7295-8c2b-171fa219c033"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u414.scope"
+},
+{
+"pid": 907823,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a16c67-c564-7581-82fb-53fbc135de32"
+],
+"cgroup": ""
+},
+{
+"pid": 908873,
+"ppid": 907823,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a16c67-c564-7581-82fb-53fbc135de32"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u13736.scope"
+},
+{
+"pid": 915101,
+"ppid": 340204,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-8f75bcfb73293e38105d140745398b70102c72f10acc1b0ed57742529c38f00d.scope/init.scope"
+},
+{
+"pid": 925768,
+"ppid": 42507,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a170c2-69f0-7542-a611-195ce0c4a111"
+],
+"cgroup": ""
+},
+{
+"pid": 925946,
+"ppid": 925768,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a170c2-69f0-7542-a611-195ce0c4a111"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u3391.scope"
+},
+{
+"pid": 1003391,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 1188448,
+"ppid": 925946,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u3391.scope"
+},
+{
+"pid": 1216049,
+"ppid": 44166,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a13325-a08c-7572-acb7-c79d1750edd5"
+],
+"cgroup": ""
+},
+{
+"pid": 1217918,
+"ppid": 1216049,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a13325-a08c-7572-acb7-c79d1750edd5"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u14327.scope"
+},
+{
+"pid": 1265219,
+"ppid": 53458,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r36af6092c8204fcab33064b1f1893bea.scope"
+},
+{
+"pid": 1295135,
+"ppid": 50773,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1e72dd54bce7445e8e5e5070f26c9b2d.scope"
+},
+{
+"pid": 1358852,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"sleep"
+],
+"cgroup": ""
+},
+{
+"pid": 1369927,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 1381826,
+"ppid": 48107,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r118612f5eb644909a7d27f8b2c10f81f.scope"
+},
+{
+"pid": 1408349,
+"ppid": 2174674,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u559.scope"
+},
+{
+"pid": 1491626,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 1711344,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a18859-1af5-76fd-aab6-5522380442bf"
+],
+"cgroup": ""
+},
+{
+"pid": 1712196,
+"ppid": 1711344,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18859-1af5-76fd-aab6-5522380442bf"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u17348.scope"
+},
+{
+"pid": 1723593,
+"ppid": 908873,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u13736.scope"
+},
+{
+"pid": 1736730,
+"ppid": 102922,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r419e317d8b524e19a7c2975fb53e9294.scope"
+},
+{
+"pid": 1820595,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 1835084,
+"ppid": 1217918,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u14327.scope"
+},
+{
+"pid": 1878733,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a17c3a-86a5-711c-83f1-49561ee59c90"
+],
+"cgroup": ""
+},
+{
+"pid": 1914795,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"sleep"
+],
+"cgroup": ""
+},
+{
+"pid": 1916709,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 1918503,
+"ppid": 1878733,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-cc8a4823982a"
+],
+"cgroup": ""
+},
+{
+"pid": 1920549,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"5fa624f9cf059874756814aebd1bd196a2df97abde34be7bf13573e512ad1432"
+],
+"cgroup": ""
+},
+{
+"pid": 1920861,
+"ppid": 1920549,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a17c3a-86a5-711c-83f1-49561ee59c90"
+],
+"cgroup": ""
+},
+{
+"pid": 1924071,
+"ppid": 1920861,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a17c3a-86a5-711c-83f1-49561ee59c90"
+],
+"cgroup": ""
+},
+{
+"pid": 1936503,
+"ppid": 1924071,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a17c3a-86a5-711c-83f1-49561ee59c90"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-5fa624f9cf059874756814aebd1bd196a2df97abde34be7bf13573e512ad1432.scope/init.scope"
+},
+{
+"pid": 1957373,
+"ppid": 77103,
+"uid": 1000,
+"argv": [
+"bash",
+"--memory",
+"--cpus",
+"--disk",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--"
+],
+"cgroup": ""
+},
+{
+"pid": 2018044,
+"ppid": 1957373,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-e79e4a0a8332"
+],
+"cgroup": ""
+},
+{
+"pid": 2027981,
+"ppid": 575644,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-0f9824a309af67b528f575f73751efe9b75a4ca5d662ce609dbfb392ecb824ea.scope/init.scope"
+},
+{
+"pid": 2174342,
+"ppid": 31735,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a19324-ec44-73da-a272-12d744b0ae5a"
+],
+"cgroup": ""
+},
+{
+"pid": 2174674,
+"ppid": 2174342,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19324-ec44-73da-a272-12d744b0ae5a"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u559.scope"
+},
+{
+"pid": 2184325,
+"ppid": 30531,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a18ff5-af47-7740-8244-14ac36832af2"
+],
+"cgroup": ""
+},
+{
+"pid": 2185171,
+"ppid": 2184325,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18ff5-af47-7740-8244-14ac36832af2"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r291da128b9ff4cdab6c11680d098ce94.scope"
+},
+{
+"pid": 2192321,
+"ppid": 2811149,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 2192517,
+"ppid": 2192321,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"-p",
+"--no-session",
+"--mode",
+"--max-time"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0790d51e087f46569dc01d6dbdd1800f.scope"
+},
+{
+"pid": 2205578,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2205586,
+"ppid": 2205578,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a193a6-369e-723e-bab2-f19fbf7e768a"
+],
+"cgroup": ""
+},
+{
+"pid": 2226966,
+"ppid": 1936503,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-5fa624f9cf059874756814aebd1bd196a2df97abde34be7bf13573e512ad1432.scope/init.scope"
+},
+{
+"pid": 2229564,
+"ppid": 2205586,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-538d7d7e6479"
+],
+"cgroup": ""
+},
+{
+"pid": 2231910,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"3b02120cc83e77cd38e73712720dcb266e839a0fcb8384db3ee51c4f502aec17"
+],
+"cgroup": ""
+},
+{
+"pid": 2233015,
+"ppid": 2231910,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a193a6-369e-723e-bab2-f19fbf7e768a"
+],
+"cgroup": ""
+},
+{
+"pid": 2244720,
+"ppid": 2233015,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a193a6-369e-723e-bab2-f19fbf7e768a"
+],
+"cgroup": ""
+},
+{
+"pid": 2258826,
+"ppid": 2244720,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a193a6-369e-723e-bab2-f19fbf7e768a"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-3b02120cc83e77cd38e73712720dcb266e839a0fcb8384db3ee51c4f502aec17.scope/init.scope"
+},
+{
+"pid": 2325335,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2354019,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2354053,
+"ppid": 2354019,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a1933d-69b9-7444-845e-46fa4d6e0ff2"
+],
+"cgroup": ""
+},
+{
+"pid": 2373875,
+"ppid": 2354053,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-4e3325a195d8"
+],
+"cgroup": ""
+},
+{
+"pid": 2378534,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"317568df0eb9c7a1ad502c81b31012b3b92b8bd693153d4815e544a7eda486c4"
+],
+"cgroup": ""
+},
+{
+"pid": 2379293,
+"ppid": 2378534,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a1933d-69b9-7444-845e-46fa4d6e0ff2"
+],
+"cgroup": ""
+},
+{
+"pid": 2383558,
+"ppid": 2379293,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a1933d-69b9-7444-845e-46fa4d6e0ff2"
+],
+"cgroup": ""
+},
+{
+"pid": 2393595,
+"ppid": 2383558,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a1933d-69b9-7444-845e-46fa4d6e0ff2"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-317568df0eb9c7a1ad502c81b31012b3b92b8bd693153d4815e544a7eda486c4.scope/init.scope"
+},
+{
+"pid": 2394543,
+"ppid": 1820595,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 2394872,
+"ppid": 2394543,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a18c23-51c0-7516-841b-88777e9e3fa9"
+],
+"cgroup": ""
+},
+{
+"pid": 2411125,
+"ppid": 2394872,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-0ed20006ea81"
+],
+"cgroup": ""
+},
+{
+"pid": 2412765,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"899156a93942d294c4611777d972560227abb65de60a8eb609fa5285cbded34b"
+],
+"cgroup": ""
+},
+{
+"pid": 2413123,
+"ppid": 2412765,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a18c23-51c0-7516-841b-88777e9e3fa9"
+],
+"cgroup": ""
+},
+{
+"pid": 2416545,
+"ppid": 2413123,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a18c23-51c0-7516-841b-88777e9e3fa9"
+],
+"cgroup": ""
+},
+{
+"pid": 2418912,
+"ppid": 1916709,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 2419754,
+"ppid": 2418912,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a17eb1-db5d-7033-9d46-b1cb3221f612"
+],
+"cgroup": ""
+},
+{
+"pid": 2427627,
+"ppid": 2416545,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18c23-51c0-7516-841b-88777e9e3fa9"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-899156a93942d294c4611777d972560227abb65de60a8eb609fa5285cbded34b.scope/init.scope"
+},
+{
+"pid": 2429104,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"sleep"
+],
+"cgroup": ""
+},
+{
+"pid": 2439856,
+"ppid": 2419754,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-f71a8ee7c33c"
+],
+"cgroup": ""
+},
+{
+"pid": 2442637,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"6ed86a39afce114c818b173e0c1361e7775114aa54b2fdbd0d160ae8a8650697"
+],
+"cgroup": ""
+},
+{
+"pid": 2443136,
+"ppid": 2442637,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a17eb1-db5d-7033-9d46-b1cb3221f612"
+],
+"cgroup": ""
+},
+{
+"pid": 2448153,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-i",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2449181,
+"ppid": 2443136,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a17eb1-db5d-7033-9d46-b1cb3221f612"
+],
+"cgroup": ""
+},
+{
+"pid": 2459726,
+"ppid": 2258826,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-3b02120cc83e77cd38e73712720dcb266e839a0fcb8384db3ee51c4f502aec17.scope/init.scope"
+},
+{
+"pid": 2466308,
+"ppid": 2448153,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a18a99-b630-76bc-84c8-4308273f21e2"
+],
+"cgroup": ""
+},
+{
+"pid": 2471373,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"sleep"
+],
+"cgroup": ""
+},
+{
+"pid": 2483622,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2485565,
+"ppid": 2449181,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a17eb1-db5d-7033-9d46-b1cb3221f612"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-6ed86a39afce114c818b173e0c1361e7775114aa54b2fdbd0d160ae8a8650697.scope/init.scope"
+},
+{
+"pid": 2488847,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2488861,
+"ppid": 2488847,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a19344-9aac-72ff-8a94-23360d37d127"
+],
+"cgroup": ""
+},
+{
+"pid": 2491296,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2507939,
+"ppid": 2488861,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-2fc309263ec8"
+],
+"cgroup": ""
+},
+{
+"pid": 2508659,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"fd5b5064c7da8b8c77f6ee6637e90ed389f739436e2cf17a3eee818b7931e5d7"
+],
+"cgroup": ""
+},
+{
+"pid": 2509026,
+"ppid": 2508659,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a19344-9aac-72ff-8a94-23360d37d127"
+],
+"cgroup": ""
+},
+{
+"pid": 2512848,
+"ppid": 2509026,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a19344-9aac-72ff-8a94-23360d37d127"
+],
+"cgroup": ""
+},
+{
+"pid": 2528280,
+"ppid": 2512848,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19344-9aac-72ff-8a94-23360d37d127"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-fd5b5064c7da8b8c77f6ee6637e90ed389f739436e2cf17a3eee818b7931e5d7.scope/init.scope"
+},
+{
+"pid": 2543603,
+"ppid": 2393595,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-317568df0eb9c7a1ad502c81b31012b3b92b8bd693153d4815e544a7eda486c4.scope/init.scope"
+},
+{
+"pid": 2582629,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 2591507,
+"ppid": 2582629,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19679-aacf-7456-a9fa-87327b9ecd86"
+],
+"cgroup": "0::/user.slice/user-1000.slice/session-c5.scope"
+},
+{
+"pid": 2636947,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-i",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2640802,
+"ppid": 2636947,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"2026-10-25T00-53-10-873Z_01a1708c-1459-7298-8fc6-6e59db682fec",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a1708c-1459-7298-8fc6-6e59db682fec"
+],
+"cgroup": ""
+},
+{
+"pid": 2644742,
+"ppid": 2466308,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-044e696d5a1e"
+],
+"cgroup": ""
+},
+{
+"pid": 2652147,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"527d171bd388878ed43950a7c503d0ed61b470629095a6af02353259374b8bb7"
+],
+"cgroup": ""
+},
+{
+"pid": 2666371,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 2667949,
+"ppid": 2666371,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"2026-10-30T18-44-51-207Z_01a18e21-0587-77bd-9bf3-6a27cc44005d.jsonl"
+],
+"cgroup": ""
+},
+{
+"pid": 2668215,
+"ppid": 2667949,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"2026-10-30T18-44-51-207Z_01a18e21-0587-77bd-9bf3-6a27cc44005d.jsonl"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u90.scope"
+},
+{
+"pid": 2671790,
+"ppid": 2485565,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-6ed86a39afce114c818b173e0c1361e7775114aa54b2fdbd0d160ae8a8650697.scope/init.scope"
+},
+{
+"pid": 2677574,
+"ppid": 2640802,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-f6d4186c091f"
+],
+"cgroup": ""
+},
+{
+"pid": 2677593,
+"ppid": 2652147,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a18a99-b630-76bc-84c8-4308273f21e2"
+],
+"cgroup": ""
+},
+{
+"pid": 2681350,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"d21dea061951854d38856b253bb7ef1799aa1911caf4f434f0e0c570a5c43d5a"
+],
+"cgroup": ""
+},
+{
+"pid": 2682591,
+"ppid": 2681350,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a1708c-1459-7298-8fc6-6e59db682fec"
+],
+"cgroup": ""
+},
+{
+"pid": 2686481,
+"ppid": 2528280,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-fd5b5064c7da8b8c77f6ee6637e90ed389f739436e2cf17a3eee818b7931e5d7.scope/init.scope"
+},
+{
+"pid": 2686705,
+"ppid": 2682591,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a1708c-1459-7298-8fc6-6e59db682fec"
+],
+"cgroup": ""
+},
+{
+"pid": 2692830,
+"ppid": 2677593,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a18a99-b630-76bc-84c8-4308273f21e2"
+],
+"cgroup": ""
+},
+{
+"pid": 2697636,
+"ppid": 1936503,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-5fa624f9cf059874756814aebd1bd196a2df97abde34be7bf13573e512ad1432.scope/init.scope"
+},
+{
+"pid": 2705900,
+"ppid": 2686705,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a1708c-1459-7298-8fc6-6e59db682fec"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-d21dea061951854d38856b253bb7ef1799aa1911caf4f434f0e0c570a5c43d5a.scope/init.scope"
+},
+{
+"pid": 2735249,
+"ppid": 2692830,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18a99-b630-76bc-84c8-4308273f21e2"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-527d171bd388878ed43950a7c503d0ed61b470629095a6af02353259374b8bb7.scope/init.scope"
+},
+{
+"pid": 2773104,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2811149,
+"ppid": 49524,
+"uid": 1000,
+"argv": [
+"/usr/bin/python3",
+"--commit",
+"--base",
+"--model",
+"--runs",
+"--parallel"
+],
+"cgroup": ""
+},
+{
+"pid": 2866228,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 2867012,
+"ppid": 2866228,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a19344-b12c-707d-ac4d-72d035d5bb3c"
+],
+"cgroup": ""
+},
+{
+"pid": 2890280,
+"ppid": 2867012,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-033928d4c9c7"
+],
+"cgroup": ""
+},
+{
+"pid": 2891694,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"cc1feee65186df125b31eeab0be3820cabf581b577ffb58f862edd0285a82c42"
+],
+"cgroup": ""
+},
+{
+"pid": 2891892,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 2892353,
+"ppid": 2891694,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a19344-b12c-707d-ac4d-72d035d5bb3c"
+],
+"cgroup": ""
+},
+{
+"pid": 2892538,
+"ppid": 2891892,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u7352.scope"
+},
+{
+"pid": 2897029,
+"ppid": 2892353,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a19344-b12c-707d-ac4d-72d035d5bb3c"
+],
+"cgroup": ""
+},
+{
+"pid": 2918112,
+"ppid": 2897029,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19344-b12c-707d-ac4d-72d035d5bb3c"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-cc1feee65186df125b31eeab0be3820cabf581b577ffb58f862edd0285a82c42.scope/init.scope"
+},
+{
+"pid": 2934891,
+"ppid": 36427,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a16551-03d5-76e6-8056-64317a9f893f"
+],
+"cgroup": ""
+},
+{
+"pid": 2950527,
+"ppid": 2811149,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 2951286,
+"ppid": 2950527,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"-p",
+"--no-session",
+"--mode",
+"--max-time"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0790d51e087f46569dc01d6dbdd1800f.scope"
+},
+{
+"pid": 2994736,
+"ppid": 2668215,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u90.scope"
+},
+{
+"pid": 3005919,
+"ppid": 2934891,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a16551-03d5-76e6-8056-64317a9f893f"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rdb832c9cec9d477094343f46d3e3446d.scope"
+},
+{
+"pid": 3031147,
+"ppid": 2705900,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-d21dea061951854d38856b253bb7ef1799aa1911caf4f434f0e0c570a5c43d5a.scope/init.scope"
+},
+{
+"pid": 3061833,
+"ppid": 38590,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"2026-10-25T02-25-48-934Z_01a170e0-e386-7223-9afa-1de32c879230.jsonl"
+],
+"cgroup": ""
+},
+{
+"pid": 3063114,
+"ppid": 3061833,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"2026-10-25T02-25-48-934Z_01a170e0-e386-7223-9afa-1de32c879230.jsonl"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u129.scope"
+},
+{
+"pid": 3070231,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 3129152,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 3157592,
+"ppid": 2591507,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/session-c5.scope"
+},
+{
+"pid": 3232135,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"-bash"
+],
+"cgroup": ""
+},
+{
+"pid": 3258430,
+"ppid": 2735249,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-527d171bd388878ed43950a7c503d0ed61b470629095a6af02353259374b8bb7.scope/init.scope"
+},
+{
+"pid": 3313116,
+"ppid": 38406,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a171be-3f32-70cb-a57e-1fa34521bb0f"
+],
+"cgroup": ""
+},
+{
+"pid": 3314839,
+"ppid": 3313116,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a171be-3f32-70cb-a57e-1fa34521bb0f"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u14523.scope"
+},
+{
+"pid": 3321956,
+"ppid": 2892538,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u7352.scope"
+},
+{
+"pid": 3366384,
+"ppid": 32928,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 3366757,
+"ppid": 3366384,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u19936.scope"
+},
+{
+"pid": 3403145,
+"ppid": 33181,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a18fd7-c40f-728c-af9e-a1e13b1d540b"
+],
+"cgroup": ""
+},
+{
+"pid": 3403714,
+"ppid": 3403145,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a18fd7-c40f-728c-af9e-a1e13b1d540b"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u15917.scope"
+},
+{
+"pid": 3451886,
+"ppid": 33025,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a19057-a352-7791-b899-0a00e92d012f"
+],
+"cgroup": ""
+},
+{
+"pid": 3452556,
+"ppid": 3451886,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a19057-a352-7791-b899-0a00e92d012f"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u19938.scope"
+},
+{
+"pid": 3520888,
+"ppid": 40842,
+"uid": 1000,
+"argv": [
+"omp",
+"--resume",
+"01a15237-75c3-7321-befb-e6e1cc57a948"
+],
+"cgroup": "0::/user.slice/user-1000.slice/session-c5.scope"
+},
+{
+"pid": 3546666,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 3600451,
+"ppid": 3403714,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u15917.scope"
+},
+{
+"pid": 3606282,
+"ppid": 2427627,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-899156a93942d294c4611777d972560227abb65de60a8eb609fa5285cbded34b.scope/init.scope"
+},
+{
+"pid": 3614161,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-i",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 3615790,
+"ppid": 3614161,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a1704a-5dd4-71e9-8294-b3e86587e269"
+],
+"cgroup": ""
+},
+{
+"pid": 3624582,
+"ppid": 3615790,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-f02642f1c9e4"
+],
+"cgroup": ""
+},
+{
+"pid": 3625706,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"49c785f92536cc8218c4de6dbd8aea898e8004fa26dca23141b2d714eaa34d05"
+],
+"cgroup": ""
+},
+{
+"pid": 3626648,
+"ppid": 3625706,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a1704a-5dd4-71e9-8294-b3e86587e269"
+],
+"cgroup": ""
+},
+{
+"pid": 3630508,
+"ppid": 3626648,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a1704a-5dd4-71e9-8294-b3e86587e269"
+],
+"cgroup": ""
+},
+{
+"pid": 3641560,
+"ppid": 3630508,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a1704a-5dd4-71e9-8294-b3e86587e269"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-49c785f92536cc8218c4de6dbd8aea898e8004fa26dca23141b2d714eaa34d05.scope/init.scope"
+},
+{
+"pid": 3693114,
+"ppid": 1,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_mnemopi_embed_server"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u11166.scope"
+},
+{
+"pid": 3693306,
+"ppid": 3693114,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_mnemopi_embed"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u11166.scope"
+},
+{
+"pid": 3699742,
+"ppid": 2192517,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0790d51e087f46569dc01d6dbdd1800f.scope"
+},
+{
+"pid": 3746800,
+"ppid": 47314,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r72ce86c44ff741318560790740180240.scope"
+},
+{
+"pid": 3802547,
+"ppid": 35961,
+"uid": 1000,
+"argv": [
+"bash",
+"--resume",
+"01a16553-3e04-7776-a285-c3590293cf71"
+],
+"cgroup": ""
+},
+{
+"pid": 3803183,
+"ppid": 3802547,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a16553-3e04-7776-a285-c3590293cf71"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1dce1c0346c64402acc1523d10f2b41c.scope"
+},
+{
+"pid": 3896261,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-i",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 3903822,
+"ppid": 3896261,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--",
+"--resume",
+"01a16640-8259-71ed-bb68-1e4927b77a01"
+],
+"cgroup": ""
+},
+{
+"pid": 3909368,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"-c"
+],
+"cgroup": ""
+},
+{
+"pid": 3909385,
+"ppid": 3909368,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a1933a-fb17-70d6-b0e7-c225271e4ae8"
+],
+"cgroup": ""
+},
+{
+"pid": 3914801,
+"ppid": 3641560,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_daemon_broker"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-49c785f92536cc8218c4de6dbd8aea898e8004fa26dca23141b2d714eaa34d05.scope/init.scope"
+},
+{
+"pid": 4043486,
+"ppid": 3903822,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-35caee7cb1c6"
+],
+"cgroup": ""
+},
+{
+"pid": 4044507,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"fe081233af58ff74f2afca77fc8e241a1681ee8aea6e55b22dce92ee8760b422"
+],
+"cgroup": ""
+},
+{
+"pid": 4057967,
+"ppid": 3909385,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-af5fb0f592bc"
+],
+"cgroup": ""
+},
+{
+"pid": 4061862,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"3ca0cbed7ce807bc6d655f5d6f1359bfa42210025daeef623faf76466b94a521"
+],
+"cgroup": ""
+},
+{
+"pid": 4095822,
+"ppid": 2393595,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-317568df0eb9c7a1ad502c81b31012b3b92b8bd693153d4815e544a7eda486c4.scope/init.scope"
+},
+{
+"pid": 4101040,
+"ppid": 102783,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"__omp_worker_js_eval_process"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r619833a6ed084d00b6352f650d796787.scope"
+},
+{
+"pid": 4125522,
+"ppid": 28813,
+"uid": 1000,
+"argv": [
+"bash",
+"--dir",
+"--dir",
+"--dir",
+"--",
+"--resume",
+"01a17be9-e6c9-70ee-808e-c23ba35d6434"
+],
+"cgroup": ""
+},
+{
+"pid": 4127533,
+"ppid": 4044507,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a16640-8259-71ed-bb68-1e4927b77a01"
+],
+"cgroup": ""
+},
+{
+"pid": 4127534,
+"ppid": 4061862,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a1933a-fb17-70d6-b0e7-c225271e4ae8"
+],
+"cgroup": ""
+},
+{
+"pid": 4138234,
+"ppid": 4125522,
+"uid": 1000,
+"argv": [
+"docker",
+"run",
+"--name",
+"agentbox-d7c1bb68a0a4"
+],
+"cgroup": ""
+},
+{
+"pid": 4144690,
+"ppid": 1,
+"uid": 0,
+"argv": [
+"/usr/bin/containerd-shim-runc-v2",
+"-id",
+"0cce80fdd682fddf4db6ea3de46d433e727fb0c8489d3455afa7eb3774affcb3"
+],
+"cgroup": ""
+},
+{
+"pid": 4145862,
+"ppid": 4144690,
+"uid": 165536,
+"argv": [
+"/sbin/docker-init",
+"--",
+"--resume",
+"01a17be9-e6c9-70ee-808e-c23ba35d6434"
+],
+"cgroup": ""
+},
+{
+"pid": 4150207,
+"ppid": 4145862,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/bun/1.4.2/bin/bun",
+"--resume",
+"01a17be9-e6c9-70ee-808e-c23ba35d6434"
+],
+"cgroup": ""
+},
+{
+"pid": 4161019,
+"ppid": 4150207,
+"uid": 166536,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"--resume",
+"01a17be9-e6c9-70ee-808e-c23ba35d6434"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-0cce80fdd682fddf4db6ea3de46d433e727fb0c8489d3455afa7eb3774affcb3.scope/init.scope"
+},
+{
+"pid": 4186402,
+"ppid": 2811149,
+"uid": 1000,
+"argv": [
+"bash"
+],
+"cgroup": ""
+},
+{
+"pid": 4187020,
+"ppid": 4186402,
+"uid": 1000,
+"argv": [
+"~/.mise/installs/github-sjawhar-oh-my-pi/18.13.3-sami.20261029-115123/bin/omp",
+"-p",
+"--no-session",
+"--mode",
+"--max-time"
+],
+"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r0790d51e087f46569dc01d6dbdd1800f.scope"
+}
+],
+"panes": [
+{
+"pane": "%442",
+"pid": 1914795,
+"tmux": "after1333-2219",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1",
+"pid": 29214,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠹ 👔 CHIEF: chief of staff"
+},
+{
+"pane": "%2",
+"pid": 29316,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠏ sre"
+},
+{
+"pane": "%3",
+"pid": 29450,
+"tmux": "agents",
+"window": "chief",
+"title": "π > 📈 TREND: Unblock Jason's dashboard access"
+},
+{
+"pane": "%4",
+"pid": 29549,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠋ ctx"
+},
+{
+"pane": "%5",
+"pid": 29699,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠼ 🔑 LOGIN: Clean up worktrees after restart"
+},
+{
+"pane": "%6",
+"pid": 29903,
+"tmux": "agents",
+"window": "chief",
+"title": "π > 📚 LIBRAR: Create best-practices skill and test harness"
+},
+{
+"pane": "%7",
+"pid": 30128,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🔍 VERIFY: oss verify lead"
+},
+{
+"pane": "%8",
+"pid": 30289,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠦ 📝 REWRT: Ship PRs through CI/CD queue"
+},
+{
+"pane": "%9",
+"pid": 30531,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ 🧰 TOOLS: Build OSS Verify tools repository"
+},
+{
+"pane": "%10",
+"pid": 30716,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 🐧 LPS: Own LPSREV OSS Verify fixes"
+},
+{
+"pane": "%11",
+"pid": 30914,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠋ 📡 PUB: Build event-based proof publication on merge"
+},
+{
+"pane": "%12",
+"pid": 31109,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🔎 PV: Build semantic search over proof index"
+},
+{
+"pane": "%309",
+"pid": 2891892,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🍴 PROCS: Add process semantics via machcsl-riscv"
+},
+{
+"pane": "%13",
+"pid": 31319,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠙ 📚 SKILLS: Own OSS Verify skills stream"
+},
+{
+"pane": "%14",
+"pid": 31523,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ 🗃️ SQLPG: Own SQLPage item in OSS Verify"
+},
+{
+"pane": "%15",
+"pid": 31735,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🌐 CURL: Coordinate OSS Verify curl lanes"
+},
+{
+"pane": "%16",
+"pid": 31940,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠧ Finish v2026.10.1 oss-verify-proofs release"
+},
+{
+"pane": "%17",
+"pid": 32136,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 📝 STATE: Wrap up work and record state"
+},
+{
+"pane": "%18",
+"pid": 32342,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ Add route-since router to run --publish"
+},
+{
+"pane": "%86",
+"pid": 178644,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠙ 📊 DASH: Rebuild OSSV dashboard page from design"
+},
+{
+"pane": "%112",
+"pid": 2666371,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ ✅ PROVE: Design theorem prove CLI and CI workflow"
+},
+{
+"pane": "%508",
+"pid": 2582629,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 🐧 ADAPT: Complete LINUXADAPT owner brief and adapter"
+},
+{
+"pane": "%19",
+"pid": 32928,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠧ 🎼 ORCH: orchestration lead"
+},
+{
+"pane": "%20",
+"pid": 33025,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠼ 🎭 SPEC: Review contested specs with maintainer personas"
+},
+{
+"pane": "%21",
+"pid": 33181,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠇ 🐧 LINUX: Coordinate eval build and regrade agents"
+},
+{
+"pane": "%23",
+"pid": 33477,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠴ Coordinate baseline sync PRs and handovers"
+},
+{
+"pane": "%25",
+"pid": 33938,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠦ Own Verified Linux build platform research"
+},
+{
+"pane": "%26",
+"pid": 34161,
+"tmux": "agents",
+"window": "linux",
+"title": "π > 🎼 ORCH: orchestration harshikaa"
+},
+{
+"pane": "%27",
+"pid": 34393,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠹ ⏱️ PROVE: 📊 SCIENCE: what makes agent proving faster"
+},
+{
+"pane": "%1118",
+"pid": 3232135,
+"tmux": "agents",
+"window": "linux",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%29",
+"pid": 34878,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠸ 🏋️ COACH: 🏋️ TASKCOACH: RL task difficulty coach"
+},
+{
+"pane": "%30",
+"pid": 3614161,
+"tmux": "agents",
+"window": "tasks",
+"title": "π > ⏱️ FDBK: ⚡ FEEDBACK: task difficulty feedback in minutes"
+},
+{
+"pane": "%31",
+"pid": 35314,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠙ 📋 SPEC: intermediate spec tasks"
+},
+{
+"pane": "%32",
+"pid": 35529,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠋ 🚰 PIPE: task pipeline"
+},
+{
+"pane": "%33",
+"pid": 35743,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠇ ⚡ EFF: efficiency evals"
+},
+{
+"pane": "%34",
+"pid": 35961,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠸ 🧮 MACH: machcsl task owner"
+},
+{
+"pane": "%35",
+"pid": 36196,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠼ ✂️ SHORT: proof-shortening task owner"
+},
+{
+"pane": "%36",
+"pid": 36427,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠏ 🧭 XV6: xv6iris task owner"
+},
+{
+"pane": "%37",
+"pid": 36672,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠼ 📜 LEMMA: lemma-list task owner"
+},
+{
+"pane": "%38",
+"pid": 36902,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠋ pivot po"
+},
+{
+"pane": "%39",
+"pid": 37122,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠦ 📏 EVAL: Update verification skill release rule"
+},
+{
+"pane": "%83",
+"pid": 102347,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠏ 🐫 OCAML: Build RL tasks from public proof corpora"
+},
+{
+"pane": "%40",
+"pid": 37352,
+"tmux": "agents",
+"window": "tasks",
+"title": "π > 📐 DESIGN: Plan task design analysis across candidates"
+},
+{
+"pane": "%82",
+"pid": 102161,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠇ 🎫 BET491: Claim BET-491 and read spec"
+},
+{
+"pane": "%41",
+"pid": 37931,
+"tmux": "agents",
+"window": "grader",
+"title": "π > ➗ FRAC: fractional proof"
+},
+{
+"pane": "%42",
+"pid": 38083,
+"tmux": "agents",
+"window": "grader",
+"title": "π > theorem"
+},
+{
+"pane": "%43",
+"pid": 38275,
+"tmux": "agents",
+"window": "grader",
+"title": "π > theorem"
+},
+{
+"pane": "%44",
+"pid": 38406,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠙ 🧪 S4: Lean TRUE branch and switch (BET-59)"
+},
+{
+"pane": "%45",
+"pid": 38590,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠴ 🧮 S2: Lean grader core (BET-59)"
+},
+{
+"pane": "%46",
+"pid": 38832,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠧ 🐓 S3: coqchk per-statement report (BET-59)"
+},
+{
+"pane": "%47",
+"pid": 39048,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠋ 🐓 METARQ: 🔬 BET-64: MetaRocq whole-tree check"
+},
+{
+"pane": "%48",
+"pid": 39277,
+"tmux": "agents",
+"window": "grader",
+"title": "π > Fix omp overwriting tmux pane title"
+},
+{
+"pane": "%49",
+"pid": 39490,
+"tmux": "agents",
+"window": "grader",
+"title": "π > 🐓 ROCQ: 🛡️ BET-64 GuardLane: MetaRocq guard checker"
+},
+{
+"pane": "%51",
+"pid": 39781,
+"tmux": "agents",
+"window": "grader",
+"title": "π > 🛤️ NEST: 🧩 BET-64 NestedLane"
+},
+{
+"pane": "%52",
+"pid": 40013,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠏ ⏱️ LANE: ⏱️ BET-64 CheckTimeLane"
+},
+{
+"pane": "%55",
+"pid": 40483,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠙ 🤖 INFRA: agent infra"
+},
+{
+"pane": "%56",
+"pid": 3896261,
+"tmux": "agents",
+"window": "infra",
+"title": "π > 📝 SPEC: Improve dispatch spec-writing skills"
+},
+{
+"pane": "%58",
+"pid": 40842,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠇ omp po"
+},
+{
+"pane": "%61",
+"pid": 41435,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠹ ⛩️ GATE: gateway"
+},
+{
+"pane": "%62",
+"pid": 41452,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠦ Set up model-spend cost tracking"
+},
+{
+"pane": "%66",
+"pid": 1711344,
+"tmux": "agents",
+"window": "infra",
+"title": "π > 🌿 SOURCE: Build redesigned source control system"
+},
+{
+"pane": "%68",
+"pid": 2636947,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠋ 🦎 TAIL: Investigate 34 open ygo PRs"
+},
+{
+"pane": "%65",
+"pid": 41926,
+"tmux": "agents",
+"window": "rocq",
+"title": "π > 🐓 ROCQ: rocq speedup"
+},
+{
+"pane": "%67",
+"pid": 42098,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠙ ⏱️ LANEC: 🧪 LANE-C: one mid-run check 10x faster"
+},
+{
+"pane": "%70",
+"pid": 42507,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠏ 🐓 GRADE: ⚙️ LANE-E: final grade outside build and coqchk"
+},
+{
+"pane": "%74",
+"pid": 907823,
+"tmux": "agents",
+"window": "rocq",
+"title": "π > 🤖 R3A: new VM bytecode interpreter"
+},
+{
+"pane": "%78",
+"pid": 43902,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠙ 🐓 ROCQ: 🏎️ SPEEDCOACH: Rocq speed lead"
+},
+{
+"pane": "%79",
+"pid": 44166,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠇ 📊 GRADE: mid-run grading tool"
+},
+{
+"pane": "%84",
+"pid": 146221,
+"tmux": "agents",
+"window": "cicd",
+"title": "π ⠋ ⏳ RATE: Resolve PR merge and lint symlink exceptions"
+},
+{
+"pane": "%1116",
+"pid": 2866228,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1061",
+"pid": 2205578,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠹ curl-lps-pair"
+},
+{
+"pane": "%1041",
+"pid": 495641,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠸ ✂️ CUT: Fetch and verify build binaries"
+},
+{
+"pane": "%1037",
+"pid": 3909368,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🗺️ MMAP: Detect mmap calls in curl bufq binaries"
+},
+{
+"pane": "%1030",
+"pid": 2488847,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠧ 🎯 BH1: Build bh1 closure-target on farm"
+},
+{
+"pane": "%1026",
+"pid": 2354019,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠸ 🌀 CURL: Revive agents and dispatch lane leads"
+},
+{
+"pane": "%1021",
+"pid": 1916709,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠴ 🌊 STREAM: Port fclose spec to LPS"
+},
+{
+"pane": "%1018",
+"pid": 1820595,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🔗 LINK: Unfreeze LINK agent stuck in ask"
+},
+{
+"pane": "%1006",
+"pid": 307377,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠏ 🎯 FUZZ: Strip lane-added comments from donor files"
+},
+{
+"pane": "%1004",
+"pid": 246481,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🐝 FUZZ: Prove fuzz harness never aborts"
+},
+{
+"pane": "%986",
+"pid": 1878733,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 💾 GATE: Back up gate script before hub shutdown"
+},
+{
+"pane": "%971",
+"pid": 4125522,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠹ 📦 KIT: Build and verify kitcut integration branch"
+},
+{
+"pane": "%923",
+"pid": 2448153,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠧ 🚚 RELOC: Fix licence headers in generated glue files"
+},
+{
+"pane": "%1123",
+"pid": 588237,
+"tmux": "agents",
+"window": "w-h-rw-sta-4",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1",
+"pid": 29214,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠹ 👔 CHIEF: chief of staff"
+},
+{
+"pane": "%2",
+"pid": 29316,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠏ sre"
+},
+{
+"pane": "%3",
+"pid": 29450,
+"tmux": "agents",
+"window": "chief",
+"title": "π > 📈 TREND: Unblock Jason's dashboard access"
+},
+{
+"pane": "%4",
+"pid": 29549,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠋ ctx"
+},
+{
+"pane": "%5",
+"pid": 29699,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠼ 🔑 LOGIN: Clean up worktrees after restart"
+},
+{
+"pane": "%6",
+"pid": 29903,
+"tmux": "agents",
+"window": "chief",
+"title": "π > 📚 LIBRAR: Create best-practices skill and test harness"
+},
+{
+"pane": "%7",
+"pid": 30128,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🔍 VERIFY: oss verify lead"
+},
+{
+"pane": "%8",
+"pid": 30289,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠦ 📝 REWRT: Ship PRs through CI/CD queue"
+},
+{
+"pane": "%9",
+"pid": 30531,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ 🧰 TOOLS: Build OSS Verify tools repository"
+},
+{
+"pane": "%10",
+"pid": 30716,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 🐧 LPS: Own LPSREV OSS Verify fixes"
+},
+{
+"pane": "%11",
+"pid": 30914,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠋ 📡 PUB: Build event-based proof publication on merge"
+},
+{
+"pane": "%12",
+"pid": 31109,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🔎 PV: Build semantic search over proof index"
+},
+{
+"pane": "%309",
+"pid": 2891892,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🍴 PROCS: Add process semantics via machcsl-riscv"
+},
+{
+"pane": "%13",
+"pid": 31319,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠙ 📚 SKILLS: Own OSS Verify skills stream"
+},
+{
+"pane": "%14",
+"pid": 31523,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ 🗃️ SQLPG: Own SQLPage item in OSS Verify"
+},
+{
+"pane": "%15",
+"pid": 31735,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🌐 CURL: Coordinate OSS Verify curl lanes"
+},
+{
+"pane": "%16",
+"pid": 31940,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠧ Finish v2026.10.1 oss-verify-proofs release"
+},
+{
+"pane": "%17",
+"pid": 32136,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 📝 STATE: Wrap up work and record state"
+},
+{
+"pane": "%18",
+"pid": 32342,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ Add route-since router to run --publish"
+},
+{
+"pane": "%86",
+"pid": 178644,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠙ 📊 DASH: Rebuild OSSV dashboard page from design"
+},
+{
+"pane": "%112",
+"pid": 2666371,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ ✅ PROVE: Design theorem prove CLI and CI workflow"
+},
+{
+"pane": "%508",
+"pid": 2582629,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 🐧 ADAPT: Complete LINUXADAPT owner brief and adapter"
+},
+{
+"pane": "%19",
+"pid": 32928,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠧ 🎼 ORCH: orchestration lead"
+},
+{
+"pane": "%20",
+"pid": 33025,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠼ 🎭 SPEC: Review contested specs with maintainer personas"
+},
+{
+"pane": "%21",
+"pid": 33181,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠇ 🐧 LINUX: Coordinate eval build and regrade agents"
+},
+{
+"pane": "%23",
+"pid": 33477,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠴ Coordinate baseline sync PRs and handovers"
+},
+{
+"pane": "%25",
+"pid": 33938,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠦ Own Verified Linux build platform research"
+},
+{
+"pane": "%26",
+"pid": 34161,
+"tmux": "agents",
+"window": "linux",
+"title": "π > 🎼 ORCH: orchestration harshikaa"
+},
+{
+"pane": "%27",
+"pid": 34393,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠹ ⏱️ PROVE: 📊 SCIENCE: what makes agent proving faster"
+},
+{
+"pane": "%1118",
+"pid": 3232135,
+"tmux": "agents",
+"window": "linux",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%29",
+"pid": 34878,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠸ 🏋️ COACH: 🏋️ TASKCOACH: RL task difficulty coach"
+},
+{
+"pane": "%30",
+"pid": 3614161,
+"tmux": "agents",
+"window": "tasks",
+"title": "π > ⏱️ FDBK: ⚡ FEEDBACK: task difficulty feedback in minutes"
+},
+{
+"pane": "%31",
+"pid": 35314,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠙ 📋 SPEC: intermediate spec tasks"
+},
+{
+"pane": "%32",
+"pid": 35529,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠋ 🚰 PIPE: task pipeline"
+},
+{
+"pane": "%33",
+"pid": 35743,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠇ ⚡ EFF: efficiency evals"
+},
+{
+"pane": "%34",
+"pid": 35961,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠸ 🧮 MACH: machcsl task owner"
+},
+{
+"pane": "%35",
+"pid": 36196,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠼ ✂️ SHORT: proof-shortening task owner"
+},
+{
+"pane": "%36",
+"pid": 36427,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠏ 🧭 XV6: xv6iris task owner"
+},
+{
+"pane": "%37",
+"pid": 36672,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠼ 📜 LEMMA: lemma-list task owner"
+},
+{
+"pane": "%38",
+"pid": 36902,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠋ pivot po"
+},
+{
+"pane": "%39",
+"pid": 37122,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠦ 📏 EVAL: Update verification skill release rule"
+},
+{
+"pane": "%83",
+"pid": 102347,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠏ 🐫 OCAML: Build RL tasks from public proof corpora"
+},
+{
+"pane": "%40",
+"pid": 37352,
+"tmux": "agents",
+"window": "tasks",
+"title": "π > 📐 DESIGN: Plan task design analysis across candidates"
+},
+{
+"pane": "%82",
+"pid": 102161,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠇ 🎫 BET491: Claim BET-491 and read spec"
+},
+{
+"pane": "%41",
+"pid": 37931,
+"tmux": "agents",
+"window": "grader",
+"title": "π > ➗ FRAC: fractional proof"
+},
+{
+"pane": "%42",
+"pid": 38083,
+"tmux": "agents",
+"window": "grader",
+"title": "π > theorem"
+},
+{
+"pane": "%43",
+"pid": 38275,
+"tmux": "agents",
+"window": "grader",
+"title": "π > theorem"
+},
+{
+"pane": "%44",
+"pid": 38406,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠙ 🧪 S4: Lean TRUE branch and switch (BET-59)"
+},
+{
+"pane": "%45",
+"pid": 38590,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠴ 🧮 S2: Lean grader core (BET-59)"
+},
+{
+"pane": "%46",
+"pid": 38832,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠧ 🐓 S3: coqchk per-statement report (BET-59)"
+},
+{
+"pane": "%47",
+"pid": 39048,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠋ 🐓 METARQ: 🔬 BET-64: MetaRocq whole-tree check"
+},
+{
+"pane": "%48",
+"pid": 39277,
+"tmux": "agents",
+"window": "grader",
+"title": "π > Fix omp overwriting tmux pane title"
+},
+{
+"pane": "%49",
+"pid": 39490,
+"tmux": "agents",
+"window": "grader",
+"title": "π > 🐓 ROCQ: 🛡️ BET-64 GuardLane: MetaRocq guard checker"
+},
+{
+"pane": "%51",
+"pid": 39781,
+"tmux": "agents",
+"window": "grader",
+"title": "π > 🛤️ NEST: 🧩 BET-64 NestedLane"
+},
+{
+"pane": "%52",
+"pid": 40013,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠏ ⏱️ LANE: ⏱️ BET-64 CheckTimeLane"
+},
+{
+"pane": "%55",
+"pid": 40483,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠙ 🤖 INFRA: agent infra"
+},
+{
+"pane": "%56",
+"pid": 3896261,
+"tmux": "agents",
+"window": "infra",
+"title": "π > 📝 SPEC: Improve dispatch spec-writing skills"
+},
+{
+"pane": "%58",
+"pid": 40842,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠇ omp po"
+},
+{
+"pane": "%61",
+"pid": 41435,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠹ ⛩️ GATE: gateway"
+},
+{
+"pane": "%62",
+"pid": 41452,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠦ Set up model-spend cost tracking"
+},
+{
+"pane": "%66",
+"pid": 1711344,
+"tmux": "agents",
+"window": "infra",
+"title": "π > 🌿 SOURCE: Build redesigned source control system"
+},
+{
+"pane": "%68",
+"pid": 2636947,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠋ 🦎 TAIL: Investigate 34 open ygo PRs"
+},
+{
+"pane": "%65",
+"pid": 41926,
+"tmux": "agents",
+"window": "rocq",
+"title": "π > 🐓 ROCQ: rocq speedup"
+},
+{
+"pane": "%67",
+"pid": 42098,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠙ ⏱️ LANEC: 🧪 LANE-C: one mid-run check 10x faster"
+},
+{
+"pane": "%70",
+"pid": 42507,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠏ 🐓 GRADE: ⚙️ LANE-E: final grade outside build and coqchk"
+},
+{
+"pane": "%74",
+"pid": 907823,
+"tmux": "agents",
+"window": "rocq",
+"title": "π > 🤖 R3A: new VM bytecode interpreter"
+},
+{
+"pane": "%78",
+"pid": 43902,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠙ 🐓 ROCQ: 🏎️ SPEEDCOACH: Rocq speed lead"
+},
+{
+"pane": "%79",
+"pid": 44166,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠇ 📊 GRADE: mid-run grading tool"
+},
+{
+"pane": "%84",
+"pid": 146221,
+"tmux": "agents",
+"window": "cicd",
+"title": "π ⠋ ⏳ RATE: Resolve PR merge and lint symlink exceptions"
+},
+{
+"pane": "%1116",
+"pid": 2866228,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1061",
+"pid": 2205578,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠹ curl-lps-pair"
+},
+{
+"pane": "%1041",
+"pid": 495641,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠸ ✂️ CUT: Fetch and verify build binaries"
+},
+{
+"pane": "%1037",
+"pid": 3909368,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🗺️ MMAP: Detect mmap calls in curl bufq binaries"
+},
+{
+"pane": "%1030",
+"pid": 2488847,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠧ 🎯 BH1: Build bh1 closure-target on farm"
+},
+{
+"pane": "%1026",
+"pid": 2354019,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠸ 🌀 CURL: Revive agents and dispatch lane leads"
+},
+{
+"pane": "%1021",
+"pid": 1916709,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠴ 🌊 STREAM: Port fclose spec to LPS"
+},
+{
+"pane": "%1018",
+"pid": 1820595,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🔗 LINK: Unfreeze LINK agent stuck in ask"
+},
+{
+"pane": "%1006",
+"pid": 307377,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠏ 🎯 FUZZ: Strip lane-added comments from donor files"
+},
+{
+"pane": "%1004",
+"pid": 246481,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🐝 FUZZ: Prove fuzz harness never aborts"
+},
+{
+"pane": "%986",
+"pid": 1878733,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 💾 GATE: Back up gate script before hub shutdown"
+},
+{
+"pane": "%971",
+"pid": 4125522,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠹ 📦 KIT: Build and verify kitcut integration branch"
+},
+{
+"pane": "%923",
+"pid": 2448153,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠧ 🚚 RELOC: Fix licence headers in generated glue files"
+},
+{
+"pane": "%1123",
+"pid": 588237,
+"tmux": "agents",
+"window": "w-h-rw-sta-4",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1",
+"pid": 29214,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠹ 👔 CHIEF: chief of staff"
+},
+{
+"pane": "%2",
+"pid": 29316,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠏ sre"
+},
+{
+"pane": "%3",
+"pid": 29450,
+"tmux": "agents",
+"window": "chief",
+"title": "π > 📈 TREND: Unblock Jason's dashboard access"
+},
+{
+"pane": "%4",
+"pid": 29549,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠋ ctx"
+},
+{
+"pane": "%5",
+"pid": 29699,
+"tmux": "agents",
+"window": "chief",
+"title": "π ⠼ 🔑 LOGIN: Clean up worktrees after restart"
+},
+{
+"pane": "%6",
+"pid": 29903,
+"tmux": "agents",
+"window": "chief",
+"title": "π > 📚 LIBRAR: Create best-practices skill and test harness"
+},
+{
+"pane": "%7",
+"pid": 30128,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🔍 VERIFY: oss verify lead"
+},
+{
+"pane": "%8",
+"pid": 30289,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠦ 📝 REWRT: Ship PRs through CI/CD queue"
+},
+{
+"pane": "%9",
+"pid": 30531,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ 🧰 TOOLS: Build OSS Verify tools repository"
+},
+{
+"pane": "%10",
+"pid": 30716,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 🐧 LPS: Own LPSREV OSS Verify fixes"
+},
+{
+"pane": "%11",
+"pid": 30914,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠋ 📡 PUB: Build event-based proof publication on merge"
+},
+{
+"pane": "%12",
+"pid": 31109,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🔎 PV: Build semantic search over proof index"
+},
+{
+"pane": "%309",
+"pid": 2891892,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🍴 PROCS: Add process semantics via machcsl-riscv"
+},
+{
+"pane": "%13",
+"pid": 31319,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠙ 📚 SKILLS: Own OSS Verify skills stream"
+},
+{
+"pane": "%14",
+"pid": 31523,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ 🗃️ SQLPG: Own SQLPage item in OSS Verify"
+},
+{
+"pane": "%15",
+"pid": 31735,
+"tmux": "agents",
+"window": "ossv",
+"title": "π > 🌐 CURL: Coordinate OSS Verify curl lanes"
+},
+{
+"pane": "%16",
+"pid": 31940,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠧ Finish v2026.10.1 oss-verify-proofs release"
+},
+{
+"pane": "%17",
+"pid": 32136,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 📝 STATE: Wrap up work and record state"
+},
+{
+"pane": "%18",
+"pid": 32342,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠼ Add route-since router to run --publish"
+},
+{
+"pane": "%86",
+"pid": 178644,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠙ 📊 DASH: Rebuild OSSV dashboard page from design"
+},
+{
+"pane": "%112",
+"pid": 2666371,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ ✅ PROVE: Design theorem prove CLI and CI workflow"
+},
+{
+"pane": "%508",
+"pid": 2582629,
+"tmux": "agents",
+"window": "ossv",
+"title": "π ⠸ 🐧 ADAPT: Complete LINUXADAPT owner brief and adapter"
+},
+{
+"pane": "%19",
+"pid": 32928,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠧ 🎼 ORCH: orchestration lead"
+},
+{
+"pane": "%20",
+"pid": 33025,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠼ 🎭 SPEC: Review contested specs with maintainer personas"
+},
+{
+"pane": "%21",
+"pid": 33181,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠇ 🐧 LINUX: Coordinate eval build and regrade agents"
+},
+{
+"pane": "%23",
+"pid": 33477,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠴ Coordinate baseline sync PRs and handovers"
+},
+{
+"pane": "%25",
+"pid": 33938,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠦ Own Verified Linux build platform research"
+},
+{
+"pane": "%26",
+"pid": 34161,
+"tmux": "agents",
+"window": "linux",
+"title": "π > 🎼 ORCH: orchestration harshikaa"
+},
+{
+"pane": "%27",
+"pid": 34393,
+"tmux": "agents",
+"window": "linux",
+"title": "π ⠹ ⏱️ PROVE: 📊 SCIENCE: what makes agent proving faster"
+},
+{
+"pane": "%1118",
+"pid": 3232135,
+"tmux": "agents",
+"window": "linux",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%29",
+"pid": 34878,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠸ 🏋️ COACH: 🏋️ TASKCOACH: RL task difficulty coach"
+},
+{
+"pane": "%30",
+"pid": 3614161,
+"tmux": "agents",
+"window": "tasks",
+"title": "π > ⏱️ FDBK: ⚡ FEEDBACK: task difficulty feedback in minutes"
+},
+{
+"pane": "%31",
+"pid": 35314,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠙ 📋 SPEC: intermediate spec tasks"
+},
+{
+"pane": "%32",
+"pid": 35529,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠋ 🚰 PIPE: task pipeline"
+},
+{
+"pane": "%33",
+"pid": 35743,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠇ ⚡ EFF: efficiency evals"
+},
+{
+"pane": "%34",
+"pid": 35961,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠸ 🧮 MACH: machcsl task owner"
+},
+{
+"pane": "%35",
+"pid": 36196,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠼ ✂️ SHORT: proof-shortening task owner"
+},
+{
+"pane": "%36",
+"pid": 36427,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠏ 🧭 XV6: xv6iris task owner"
+},
+{
+"pane": "%37",
+"pid": 36672,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠼ 📜 LEMMA: lemma-list task owner"
+},
+{
+"pane": "%38",
+"pid": 36902,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠋ pivot po"
+},
+{
+"pane": "%39",
+"pid": 37122,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠦ 📏 EVAL: Update verification skill release rule"
+},
+{
+"pane": "%83",
+"pid": 102347,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠏ 🐫 OCAML: Build RL tasks from public proof corpora"
+},
+{
+"pane": "%40",
+"pid": 37352,
+"tmux": "agents",
+"window": "tasks",
+"title": "π > 📐 DESIGN: Plan task design analysis across candidates"
+},
+{
+"pane": "%82",
+"pid": 102161,
+"tmux": "agents",
+"window": "tasks",
+"title": "π ⠇ 🎫 BET491: Claim BET-491 and read spec"
+},
+{
+"pane": "%41",
+"pid": 37931,
+"tmux": "agents",
+"window": "grader",
+"title": "π > ➗ FRAC: fractional proof"
+},
+{
+"pane": "%42",
+"pid": 38083,
+"tmux": "agents",
+"window": "grader",
+"title": "π > theorem"
+},
+{
+"pane": "%43",
+"pid": 38275,
+"tmux": "agents",
+"window": "grader",
+"title": "π > theorem"
+},
+{
+"pane": "%44",
+"pid": 38406,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠙ 🧪 S4: Lean TRUE branch and switch (BET-59)"
+},
+{
+"pane": "%45",
+"pid": 38590,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠴ 🧮 S2: Lean grader core (BET-59)"
+},
+{
+"pane": "%46",
+"pid": 38832,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠧ 🐓 S3: coqchk per-statement report (BET-59)"
+},
+{
+"pane": "%47",
+"pid": 39048,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠋ 🐓 METARQ: 🔬 BET-64: MetaRocq whole-tree check"
+},
+{
+"pane": "%48",
+"pid": 39277,
+"tmux": "agents",
+"window": "grader",
+"title": "π > Fix omp overwriting tmux pane title"
+},
+{
+"pane": "%49",
+"pid": 39490,
+"tmux": "agents",
+"window": "grader",
+"title": "π > 🐓 ROCQ: 🛡️ BET-64 GuardLane: MetaRocq guard checker"
+},
+{
+"pane": "%51",
+"pid": 39781,
+"tmux": "agents",
+"window": "grader",
+"title": "π > 🛤️ NEST: 🧩 BET-64 NestedLane"
+},
+{
+"pane": "%52",
+"pid": 40013,
+"tmux": "agents",
+"window": "grader",
+"title": "π ⠏ ⏱️ LANE: ⏱️ BET-64 CheckTimeLane"
+},
+{
+"pane": "%55",
+"pid": 40483,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠙ 🤖 INFRA: agent infra"
+},
+{
+"pane": "%56",
+"pid": 3896261,
+"tmux": "agents",
+"window": "infra",
+"title": "π > 📝 SPEC: Improve dispatch spec-writing skills"
+},
+{
+"pane": "%58",
+"pid": 40842,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠇ omp po"
+},
+{
+"pane": "%61",
+"pid": 41435,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠹ ⛩️ GATE: gateway"
+},
+{
+"pane": "%62",
+"pid": 41452,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠦ Set up model-spend cost tracking"
+},
+{
+"pane": "%66",
+"pid": 1711344,
+"tmux": "agents",
+"window": "infra",
+"title": "π > 🌿 SOURCE: Build redesigned source control system"
+},
+{
+"pane": "%68",
+"pid": 2636947,
+"tmux": "agents",
+"window": "infra",
+"title": "π ⠋ 🦎 TAIL: Investigate 34 open ygo PRs"
+},
+{
+"pane": "%65",
+"pid": 41926,
+"tmux": "agents",
+"window": "rocq",
+"title": "π > 🐓 ROCQ: rocq speedup"
+},
+{
+"pane": "%67",
+"pid": 42098,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠙ ⏱️ LANEC: 🧪 LANE-C: one mid-run check 10x faster"
+},
+{
+"pane": "%70",
+"pid": 42507,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠏ 🐓 GRADE: ⚙️ LANE-E: final grade outside build and coqchk"
+},
+{
+"pane": "%74",
+"pid": 907823,
+"tmux": "agents",
+"window": "rocq",
+"title": "π > 🤖 R3A: new VM bytecode interpreter"
+},
+{
+"pane": "%78",
+"pid": 43902,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠙ 🐓 ROCQ: 🏎️ SPEEDCOACH: Rocq speed lead"
+},
+{
+"pane": "%79",
+"pid": 44166,
+"tmux": "agents",
+"window": "rocq",
+"title": "π ⠇ 📊 GRADE: mid-run grading tool"
+},
+{
+"pane": "%84",
+"pid": 146221,
+"tmux": "agents",
+"window": "cicd",
+"title": "π ⠋ ⏳ RATE: Resolve PR merge and lint symlink exceptions"
+},
+{
+"pane": "%1116",
+"pid": 2866228,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1061",
+"pid": 2205578,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠹ curl-lps-pair"
+},
+{
+"pane": "%1041",
+"pid": 495641,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠸ ✂️ CUT: Fetch and verify build binaries"
+},
+{
+"pane": "%1037",
+"pid": 3909368,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🗺️ MMAP: Detect mmap calls in curl bufq binaries"
+},
+{
+"pane": "%1030",
+"pid": 2488847,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠧ 🎯 BH1: Build bh1 closure-target on farm"
+},
+{
+"pane": "%1026",
+"pid": 2354019,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠸ 🌀 CURL: Revive agents and dispatch lane leads"
+},
+{
+"pane": "%1021",
+"pid": 1916709,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠴ 🌊 STREAM: Port fclose spec to LPS"
+},
+{
+"pane": "%1018",
+"pid": 1820595,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🔗 LINK: Unfreeze LINK agent stuck in ask"
+},
+{
+"pane": "%1006",
+"pid": 307377,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠏ 🎯 FUZZ: Strip lane-added comments from donor files"
+},
+{
+"pane": "%1004",
+"pid": 246481,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 🐝 FUZZ: Prove fuzz harness never aborts"
+},
+{
+"pane": "%986",
+"pid": 1878733,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π > 💾 GATE: Back up gate script before hub shutdown"
+},
+{
+"pane": "%971",
+"pid": 4125522,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠹ 📦 KIT: Build and verify kitcut integration branch"
+},
+{
+"pane": "%923",
+"pid": 2448153,
+"tmux": "agents",
+"window": "ossv-lanes",
+"title": "π ⠧ 🚚 RELOC: Fix licence headers in generated glue files"
+},
+{
+"pane": "%1123",
+"pid": 588237,
+"tmux": "agents",
+"window": "w-h-rw-sta-4",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%834",
+"pid": 1491626,
+"tmux": "farm-idle-stop",
+"window": "tmux",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1109",
+"pid": 627368,
+"tmux": "gate-1405-delta",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1115",
+"pid": 2471373,
+"tmux": "gate-1416-cross",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1114",
+"pid": 2429104,
+"tmux": "gate-1416-security",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1121",
+"pid": 339459,
+"tmux": "gate-1423-cross",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1120",
+"pid": 294010,
+"tmux": "gate-1423-merge",
+"window": "tmux",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1066",
+"pid": 2325335,
+"tmux": "gm-1287",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1091",
+"pid": 3546666,
+"tmux": "gm-1390",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1111",
+"pid": 1003391,
+"tmux": "gm-1405",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1034",
+"pid": 2773104,
+"tmux": "gm-1410",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1029",
+"pid": 2483622,
+"tmux": "gm-1422",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1036",
+"pid": 3129152,
+"tmux": "gm-1427",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1052",
+"pid": 1369927,
+"tmux": "gm-1428",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1068",
+"pid": 2491296,
+"tmux": "gm-1432",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1071",
+"pid": 3070231,
+"tmux": "gm-1433",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1122",
+"pid": 548006,
+"tmux": "lane-curl-decide",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1110",
+"pid": 870910,
+"tmux": "m2-2310",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%569",
+"pid": 498527,
+"tmux": "machcsl-repack-loop",
+"window": "bash",
+"title": "sami-rocqperf"
+},
+{
+"pane": "%1015",
+"pid": 1358852,
+"tmux": "pack-runs-archive",
+"window": "bash",
+"title": "sami-rocqperf"
+}
+],
+"containers": {
+"8f2edfa079ef2b5aa161cd923a9242bed93168c5c9edd6121893e0249d1193e2": "agentbox-910ba59656e3",
+"cc1feee65186df125b31eeab0be3820cabf581b577ffb58f862edd0285a82c42": "agentbox-033928d4c9c7",
+"d21dea061951854d38856b253bb7ef1799aa1911caf4f434f0e0c570a5c43d5a": "agentbox-f6d4186c091f",
+"527d171bd388878ed43950a7c503d0ed61b470629095a6af02353259374b8bb7": "agentbox-044e696d5a1e",
+"3b02120cc83e77cd38e73712720dcb266e839a0fcb8384db3ee51c4f502aec17": "agentbox-538d7d7e6479",
+"0f9824a309af67b528f575f73751efe9b75a4ca5d662ce609dbfb392ecb824ea": "agentbox-4faa73bef48a",
+"3ca0cbed7ce807bc6d655f5d6f1359bfa42210025daeef623faf76466b94a521": "agentbox-af5fb0f592bc",
+"fe081233af58ff74f2afca77fc8e241a1681ee8aea6e55b22dce92ee8760b422": "agentbox-35caee7cb1c6",
+"fd5b5064c7da8b8c77f6ee6637e90ed389f739436e2cf17a3eee818b7931e5d7": "agentbox-2fc309263ec8",
+"6ed86a39afce114c818b173e0c1361e7775114aa54b2fdbd0d160ae8a8650697": "agentbox-f71a8ee7c33c",
+"899156a93942d294c4611777d972560227abb65de60a8eb609fa5285cbded34b": "agentbox-0ed20006ea81",
+"317568df0eb9c7a1ad502c81b31012b3b92b8bd693153d4815e544a7eda486c4": "agentbox-4e3325a195d8",
+"13200e72281ffa45f452f63f4ae38ab6ace0535c7e8e1a6c7e14ebdb70cc6255": "agentbox-d79dfc281916",
+"8f75bcfb73293e38105d140745398b70102c72f10acc1b0ed57742529c38f00d": "agentbox-7abef3ca6089",
+"841d08555e0e7e895faf31caef90360f573414a7df4d92b8a69774928c7a7294": "agentbox-e79e4a0a8332",
+"5fa624f9cf059874756814aebd1bd196a2df97abde34be7bf13573e512ad1432": "agentbox-cc8a4823982a",
+"0cce80fdd682fddf4db6ea3de46d433e727fb0c8489d3455afa7eb3774affcb3": "agentbox-d7c1bb68a0a4",
+"49c785f92536cc8218c4de6dbd8aea898e8004fa26dca23141b2d714eaa34d05": "agentbox-f02642f1c9e4",
+"2c615d3da5a29037492442534d9c9362c55e07713186cb598127ce453639aea4": "legion-tenants-test-985403",
+"a35156122d93f4f14a1063aaec57b2cd7213d89589526589f3ec5dd34065611d": "upbeat_blackwell",
+"856dd6c3ec44fcea7b30d121a27074e30f24eac93cbe9e6e295e251aa579e7b4": "g2294pg",
+"41a9179a6e42911dfd289e86b2acf136984503c151b8bc5eb85d738b7ea95600": "jovial_cray",
+"94a2f814a2f9979e2e7d2e1e584a2af3e31a32b3aff3a328c18b4e77e091892c": "jolly_engelbart",
+"0f3c187044b9332a6dbb90ea52beb417aecc0b4346abc216786fd71981b3d1cd": "task12-libreac-clang",
+"8a512fe4b412dcb778f168730e23dc534fc2c2b2f09721bc05058505017d857e": "dispatch-pg"
+}
+}

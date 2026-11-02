@@ -9,6 +9,9 @@ chief-dashboard lead-times (--project KEY | --all-streams) [--days 7]
                                         how long a project's issues and pull requests took, to set dates from (lead_times.py)
 chief-dashboard sami-messages [--since ISO8601] > FILE.md
                                         Sami's messages to the chief's session, verbatim (sami_messages.py)
+chief-dashboard sessions [--record FILE.json]
+                                        live agent sessions per tmux window, as the page counts them
+                                        (sessions.py); --record also writes the raw reading, for a test fixture
 
 Without uv: python3 -m chief_dashboard <command> from ~/.dotfiles/chief-dashboard."""
 
@@ -33,6 +36,8 @@ def main() -> None:
     sub.add_parser("dispatch-check", add_help=False, help="Dispatch work that needs a lead: run with -h for options")
     sub.add_parser("lead-times", add_help=False, help="measured issue and PR times to set dates from: -h for options")
     sub.add_parser("sami-messages", add_help=False, help="his messages to a session, verbatim: -h for options")
+    w = sub.add_parser("sessions", help="live agent sessions per tmux window, as the page counts them")
+    w.add_argument("--record", type=Path, help="also write the raw reading (processes, panes, containers) here")
     args, rest = p.parse_known_args()
     if args.cmd == "dispatch-check":
         from .dispatch_check import main as dispatch_check
@@ -52,6 +57,15 @@ def main() -> None:
         from .check import main as check
 
         sys.exit(check(str(args.file)))
+    if args.cmd == "sessions":
+        from . import sessions
+
+        processes, panes, containers = sessions.read_processes(), sessions.read_panes(), sessions.read_containers()
+        if args.record:
+            raw = sessions.record(processes, panes, containers)
+            args.record.write_text(json.dumps(raw, indent=0, ensure_ascii=False) + "\n")
+        print(sessions.report(sessions.measure(processes, panes, containers)))
+        return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.cmd == "serve":
         from .server import serve

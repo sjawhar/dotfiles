@@ -19,6 +19,9 @@ One row per stream: attention first, then behind or not measured, then rank.
 - The lead's first main number: value, change since the previous reading, a bar from its first value to its target; a status chip for every main number, so a worse one still shows.
 - The bottleneck in one line; the loop's first two flags.
 - Lead, last Dispatch activity, decisions waiting, "note to lead".
+- Live agent sessions in the stream's tmux window, measured from this machine's processes and tmux (`sessions.py`).
+  The header counts every live session; a strip under the behind list names each session outside a stream window,
+  with its window: no cap refuses a session, the count makes growth visible (Sami, 2026-11-02).
 Tapping a row opens its detail in place (`#s-<slug>` links open it too): every main number with its guards and trend, every loop flag, experiments, every value, and the note box (Envoy to the scoreboard's lead; delivery shown).
 
 ## 3. What changed (D4)

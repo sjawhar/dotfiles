@@ -10,6 +10,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import sessions
 from .plan import refs_in
 from .plan_issues import plan_items, read_issues, wanted_keys
 from .prs import PrCache
@@ -74,6 +75,9 @@ def collect(
     errors: list[str] = []
     snap: dict = {"read_at": _now(), "errors": errors}
     snap["registry"] = read_registry(errors)
+    # Live agent sessions per tmux window, read from this machine's processes and tmux (sessions.py), first: it
+    # needs no outside service, so a Dispatch outage still shows them.
+    snap["sessions"] = sessions.read(errors)
     try:
         api = api or Dispatch()
     except (OSError, KeyError, ValueError) as e:

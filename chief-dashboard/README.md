@@ -66,6 +66,14 @@ reloads.
   or its `scope_issues`) when the ask waits on a person and its issue is assigned to sami@theorem.dev or has no
   assignee in INFRA, BET, LINUX or OSSV. They are not listed: that is his Dispatch Inbox.
 - Live sessions (`GET /api/v1/agents`) for each lead's last Dispatch activity.
+- Live agent sessions on this machine (`chief_dashboard/sessions.py`), measured on every read, never declared by a
+  lead: every top-level `omp` process (argv[0] `omp` or an oh-my-pi command line, no `omp` ancestor, not an
+  `__omp_worker_*` helper), from `/proc`, `tmux list-panes -a` and `docker ps`. A session counts in its pane's
+  window of the `agents` tmux session; one inside an agent box has no pane, so it counts in the window of its host
+  `docker run --name <box>` (container from its cgroup). `WINDOW_STREAMS` there maps each window to its stream issue
+  (dispatch://INFRA-202/spec, "Windows on sami-rocqperf"): a new window is one line. Any other window, a pane in
+  another tmux session, or no pane at all is "outside a stream window". `chief-dashboard sessions` prints what the
+  page counts; `--record FILE` writes the reading as a test fixture, cut to flags and ids.
 - Explainer videos: every `explainer*.mp4` artifact on a stream issue (latest version), titled by the `title:` front
   matter of `<same name>-script.md` when it exists, else by the file name. Dispatch serves files only with the
   machine token, as downloads, without Range support, so the page cannot link there: each version is downloaded once
@@ -78,7 +86,10 @@ reloads.
 The header (its Decisions count links to Sami's Dispatch Inbox, and it links the standup room at `/standup`), the
 chief of staff's panel (a note box that sends to it over Envoy, and a link into its live conversation in Dispatch),
 every main number that is behind its line across all streams (the one list to read first), the learning loop's
-newest round, then the streams in rank order.
+newest round, then the streams in rank order. The header's Agent sessions tile counts every live agent session and
+those outside a stream window, and links to the strip under the behind list that counts them by window and names
+each one outside, with its window (or tmux session) and its pane title. Each stream's header line carries its own
+count ("13 sessions in tasks"), or "no tmux window of its own".
 
 Each stream shows its header line (the decisions waiting on Sami, any links its scoreboard lists, and the plan's
 merged marks) and one row per main number. The row's name is a full-width line of ordinary text with the Pace

@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from . import model
+from . import model, sessions
 from .model import Number, Stream, parse_time
 from .pace import BEHIND, CANT_TELL, ON_PACE, PACIFIC, Pace, Reading, every_hours, guard, line_at, pace, readings
 from .plan import DayPlan, Item, WeekPlan, day_plan, day_record, fix_time, pacific_day, tally, week_plan
@@ -69,6 +69,10 @@ class StreamView:
     example: bool  # the plan shown is example items (?example=1)
     week: WeekPlan | None = None
     week_lines: list[PlanLine] = field(default_factory=list)
+    # Live agent sessions in the stream's tmux windows (sessions.py); None when they were not measured or the stream
+    # has no window of its own in sessions.WINDOW_STREAMS.
+    sessions: int | None = None
+    windows: list[str] = field(default_factory=list)
 
     @property
     def board_link(self) -> str | None:
@@ -91,6 +95,7 @@ class PageV2:
     planned: int
     behind: list[tuple[StreamView, KpiRow]] = field(default_factory=list)  # every Behind main number, in page order
     agents: dict = field(default_factory=dict)  # live Dispatch sessions by id, for the running dots
+    census: dict | None = None  # the snapshot's `sessions`: live agent sessions by window and the ungrouped ones
 
 
 def clock(t: datetime | None, now: datetime) -> str:
@@ -222,7 +227,11 @@ def build(snap: dict, now: datetime, example: bool = False) -> PageV2:
     ]
     counts = {ON_PACE: 0, BEHIND: 0, CANT_TELL: 0}
     behind: list[tuple[StreamView, KpiRow]] = []
+    census = snap.get("sessions")
+    per_stream = sessions.stream_counts(census)
     for v in views:
+        v.windows = sessions.stream_windows(v.st.issue or "")
+        v.sessions = per_stream.get(v.st.issue or "", 0) if census and v.windows else None
         for k in v.kpis:
             counts[k.label.label] += 1
             if k.label.label == BEHIND:
@@ -242,4 +251,5 @@ def build(snap: dict, now: datetime, example: bool = False) -> PageV2:
         planned=sum(v.planned for v in views),
         behind=behind,
         agents=snap.get("agents") or {},
+        census=census,
     )
