@@ -130,11 +130,15 @@ PY
     if [[ "$got" == 1 ]]; then
         ok "slack MCP: omp holds one live Slack credential"
     elif [[ "$got" == 0 && "$live" == 0 ]]; then
-        echo "WAIT omp provider logins: no person's login on the VM (INFRA-993 decision 18:24Z); models through ossv-gateway with the dev-box@ token"
+        echo "WAIT openai-codex/ waits on the gateway openai group (INFRA-481)"
         echo "WAIT slack MCP: needs Sami's Slack OAuth, which is a person's login; decision pending"
     else
         fail "slack MCP: live Slack credentials: $got (all live credentials: $live)"
     fi
+    # anthropic/ goes through ossv-gateway with the dev-box@ token (omp/models.local.yml, written
+    # by sami-devbox-provision's secrets step): a real turn from inside the box.
+    got="$(timeout 200 omp -p "say ok" --model anthropic/claude-opus-4-8 2>&1 | tail -1)"
+    [[ "${got,,}" == *ok* ]] && ok "anthropic/claude-opus-4-8 through ossv-gateway answers: $got" || fail "anthropic/claude-opus-4-8: $got"
 }
 
 # jwt_claim prints one claim of a JWT's payload.
@@ -321,6 +325,8 @@ host() {
     local missing
     missing="$(cd "$DOTFILES_DIR" && mise ls --missing 2>&1)"
     [[ -z "$missing" ]] && ok "mise: every pin in mise.toml is installed" || fail "mise ls --missing: $(tr '\n' ';' <<<"$missing")"
+    missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"
+    [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
     host_logins
     echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"
     "$DOTFILES_DIR/scripts/agentbox" doctor 2>&1 | sed 's/^/   doctor: /'
