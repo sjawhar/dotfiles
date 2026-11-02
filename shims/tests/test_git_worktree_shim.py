@@ -9,6 +9,8 @@ from pathlib import Path
 
 SHIMS = Path(__file__).parents[1]
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+# The porcelain line of the lock shims/git puts on every `git worktree add` of an agent session.
+ADD_LOCK = "locked agent session: locked on add (AGENTC-431)"
 
 
 def plain_env() -> dict[str, str]:
@@ -82,6 +84,60 @@ class GitWorktreeShimTest(unittest.TestCase):
         self.assertEqual(self.registrations()[str(path)], "locked mine")
         self.assertNotEqual(self.git("worktree", "remove", str(path)).returncode, 0)
         self.assertIn(str(path), self.registrations())
+
+    def added(self, name: str) -> Path:
+        """A tree an agent session added, so it carries the shim's add-lock."""
+        path = self.tmp / name
+        self.assertEqual(self.git("worktree", "add", "-q", "--detach", str(path)).returncode, 0)
+        self.assertEqual(self.registrations()[str(path)], ADD_LOCK)
+        return path
+
+    def test_a_removal_git_refuses_keeps_the_add_lock(self):
+        # Uncommitted work and no --force: git refuses, and the tree keeps the lock it was added with.
+        path = self.added("dirty")
+        (path / "work.txt").write_text("mine\n")
+        result = self.git("worktree", "remove", str(path))
+        self.assertEqual(result.returncode, 128)
+        self.assertIn("contains modified or untracked files, use --force to delete it", result.stderr)
+        self.assertTrue((path / "work.txt").is_file())
+        self.assertEqual(self.registrations()[str(path)], ADD_LOCK, "a refused removal left the tree unlocked")
+
+    def test_a_tree_holding_a_submodule_is_still_refused_without_force(self):
+        # git refuses such a tree unless --force says otherwise; the double --force that takes the
+        # add-lock along must not take that refusal away, or the submodule's work is deleted.
+        sub = self.tmp / "sub"
+        sub.mkdir()
+        for cmd in (["git", "init", "-q"], ["git", "commit", "-q", "--allow-empty", "-m", "sub"]):
+            subprocess.run(cmd, cwd=sub, env=self.plain, check=True, capture_output=True)
+        path = self.added("withsub")
+        for cmd in (
+            ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "s"],
+            ["git", "commit", "-q", "-m", "add the submodule"],
+        ):
+            subprocess.run(cmd, cwd=path, env=self.plain, check=True, capture_output=True)
+        result = self.git("worktree", "remove", str(path))
+        self.assertEqual(result.returncode, 128)
+        self.assertIn("working trees containing submodules cannot be moved or removed", result.stderr)
+        self.assertTrue((path / "s" / ".git").exists())
+        self.assertEqual(self.registrations()[str(path)], ADD_LOCK)
+
+    def test_a_forced_removal_takes_a_dirty_tree_and_its_add_lock(self):
+        path = self.added("dirty")
+        (path / "work.txt").write_text("mine\n")
+        result = self.git("worktree", "remove", "--force", str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(path.exists())
+        self.assertNotIn(str(path), self.registrations())
+
+    def test_only_the_shims_own_lock_reasons_are_let_past(self):
+        # shims/jj's lock is the shims' own as well; a reason that only mentions the issue is not.
+        for reason, removed in (("jj shim: locked on add (AGENTC-431)", True), ("held for the AGENTC-431 review", False)):
+            with self.subTest(reason=reason):
+                path = self.tmp / f"held-{len(reason)}"
+                self.git("worktree", "add", "-q", "--detach", "--lock", "--reason", reason, str(path))
+                result = self.git("worktree", "remove", str(path))
+                self.assertEqual(result.returncode == 0, removed, result.stderr)
+                self.assertEqual(str(path) in self.registrations(), not removed)
 
     def test_a_caller_path_without_the_system_dirs_still_reaches_real_git(self):
         env = {**self.agent, "PATH": str(SHIMS)}

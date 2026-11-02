@@ -1,8 +1,8 @@
 #!/bin/bash
 # git-worktree-shim: in an agent session, refuse a bare `git worktree prune`, lock
-# every `git worktree add`, unlock a lock of ours before `git worktree remove`, and
-# give every commit an omp session makes with `git commit`, `merge`, `pull`,
-# `cherry-pick` or `revert` its Omp-Session trailer.
+# every `git worktree add`, let `git worktree remove` past a lock of ours and no
+# further, and give every commit an omp session makes with `git commit`, `merge`,
+# `pull`, `cherry-pick` or `revert` its Omp-Session trailer.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -10,6 +10,9 @@
 set -euo pipefail
 
 LOCK_REASON="agent session: locked on add (AGENTC-431)"
+# The lock shims/jj puts on a workspace's git worktree when this shim did not lock it
+# already (a `jj workspace add` outside an agent session). Ours as well.
+JJ_LOCK_REASON="jj shim: locked on add (AGENTC-431)"
 
 # The first git on PATH past this shim, judged by content like shims/gh. Entries
 # before the shim's own (`-ef`: its directory however PATH spells it) already had
@@ -117,6 +120,43 @@ esac
 verb="${args[i + 1]:-}"
 rest=("${args[@]:i+2}")
 
+# Exits as `git worktree remove` without --force would refuse the tree at $1 (spelled $2 by
+# the caller), returns 0 when it would go on, 1 when it cannot tell. git's own check
+# (check_clean_worktree in builtin/worktree.c) refuses a tree holding a checked-out
+# submodule, or anything `git status --porcelain --ignore-submodules=none` lists there. The
+# double --force a lock of ours takes skips that check too, so this runs it first, each git
+# with the GIT_DIR and GIT_WORK_TREE git's check gives its own `git status`, so a GIT_DIR or
+# index the caller exported cannot point it at another repository.
+tree_git() {
+    (
+        unset GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
+        cd "$1" && GIT_DIR="$1/.git" GIT_WORK_TREE="$1" "$_real" "${@:2}"
+    )
+}
+git_would_remove() {
+    local tree="$1" given="$2" gd gitlinks path status populated=0
+    [[ -e "$tree" ]] || return 0 # git checks only a tree that is still there
+    gd="$(tree_git "$tree" rev-parse --absolute-git-dir 2> /dev/null)" || return 1
+    if [[ -d "$gd/modules" ]]; then populated=1; fi
+    # Read to EOF, as the lookup below does; a failed listing means "cannot tell".
+    gitlinks="$(tree_git "$tree" -c core.quotePath=false ls-files --stage | awk '$1 == "160000"')" || return 1
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        path="${path#*$'\t'}"
+        if [[ "$path" == \"* ]]; then return 1; fi # a name git had to quote: cannot tell
+        if [[ -e "$tree/$path/.git" ]]; then populated=1; fi
+    done <<< "$gitlinks"
+    if ((populated)); then
+        echo "fatal: working trees containing submodules cannot be moved or removed" >&2
+        exit 128
+    fi
+    status="$(tree_git "$tree" status --porcelain --ignore-submodules=none)" || return 1
+    if [[ -n "$status" ]]; then
+        echo "fatal: '$given' contains modified or untracked files, use --force to delete it" >&2
+        exit 128
+    fi
+}
+
 case "$verb" in
     prune)
         for a in "${rest[@]}"; do
@@ -138,12 +178,32 @@ EOF
         exec "$_real" "${args[@]:0:i+2}" --lock --reason "$LOCK_REASON" "${rest[@]}"
         ;;
     remove)
-        # The worktree is the last non-option argument. Unlock it first only when
-        # the lock is one this shim or shims/jj set; any other lock stands.
+        # A tree carrying a lock of ours (this shim's, or shims/jj's, exactly) is removed with
+        # the lock on: two --force is git's own way past a lock, and git then deletes the lock
+        # with the registration, while every refusal leaves it where it was. Taking the lock off
+        # first, as this shim used to, left the tree unlocked whenever git refused, as it does
+        # for uncommitted work. Any other lock stands.
         #
+        # The worktree is the last non-option argument; options end at `--`. The --force count
+        # is git's: one skips git's clean check, two its lock check too, `--no-force` starts
+        # again. A count this misses only adds a check.
+        force=0 target="" opts=1
+        for a in "${rest[@]}"; do
+            if ((opts)); then
+                case "$a" in
+                    --) opts=0; continue ;;
+                    --force) force=$((force + 1)); continue ;;
+                    --no-force) force=0; continue ;;
+                    -*) [[ "$a" =~ ^-f+$ ]] && force=$((force + ${#a} - 1)); continue ;;
+                esac
+            fi
+            target="$a"
+        done
+        ((force < 2)) && [[ -n "$target" ]] || exec "$_real" "$@"
+
         # The awk program reads to EOF on purpose. `exit` on the first match
         # closes the pipe while git is still writing; git then dies of SIGPIPE
-        # and `set -o pipefail` kills the shim before it unlocks, so
+        # and `set -o pipefail` kills the shim before it runs git, so
         # `git worktree remove` of a worktree this shim locked exits 141 and
         # does nothing, leaving a half-registered worktree its owner cannot
         # remove without bypassing the shim. That was observed once on the
@@ -164,23 +224,18 @@ EOF
         # holds at most one `locked`.
         #
         # The `|| true` is the guard that matters, and it is not belt and
-        # braces for the above: this lookup only DECIDES whether to unlock, so
-        # any failure of it must degrade to "leave the lock alone" and let the
-        # real git run. Without it, errexit turns every way this pipeline can
-        # fail -- SIGPIPE, a git that cannot read the store, a locked
-        # `packed-refs` -- into a shim that exits before `exec`, so the user's
-        # own `git worktree remove` never runs at all. That covers the causes
-        # I did not find as well as the one I did.
-        target=""
-        for a in "${rest[@]}"; do [[ "$a" == -* ]] || target="$a"; done
-        if [[ -n "$target" ]]; then
-            abs="$(realpath -m -- "$target")"
-            lock="$("$_real" "${args[@]:0:i}" worktree list --porcelain | awk -v p="worktree $abs" '$0 == p {f = 1; next} /^worktree / {f = 0} f && /^locked/ {print}' || true)"
-            if [[ "$lock" == *AGENTC-431* ]]; then
-                "$_real" "${args[@]:0:i}" worktree unlock "$abs"
-            fi
-        fi
-        exec "$_real" "$@"
+        # braces for the above: this lookup only DECIDES whether to let git past
+        # the lock, so any failure of it must degrade to "leave the lock alone"
+        # and let the real git run. Without it, errexit turns every way this
+        # pipeline can fail -- SIGPIPE, a git that cannot read the store, a
+        # locked `packed-refs` -- into a shim that exits before `exec`, so the
+        # user's own `git worktree remove` never runs at all. That covers the
+        # causes I did not find as well as the one I did.
+        abs="$(realpath -m -- "$target")"
+        lock="$("$_real" "${args[@]:0:i}" worktree list --porcelain | awk -v p="worktree $abs" '$0 == p {f = 1; next} /^worktree / {f = 0} f && /^locked/ {print}' || true)"
+        [[ "$lock" == "locked $LOCK_REASON" || "$lock" == "locked $JJ_LOCK_REASON" ]] || exec "$_real" "$@"
+        ((force > 0)) || git_would_remove "$abs" "$target" || exec "$_real" "$@"
+        exec "$_real" "${args[@]:0:i+2}" --force --force "${rest[@]}"
         ;;
 esac
 exec "$_real" "$@"

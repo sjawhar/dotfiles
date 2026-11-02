@@ -4,10 +4,11 @@
 The case these were written for: on 2026-10-30, eight children of
 ~/.worktrees/<task repo> each held an object store of its own, 19.0 GB for one
 repository whose history is 4.8 GB, and the root filesystem of sami-rocqperf reached 14 MiB
-free. The tests build the same shape in miniature and check the five things the provisioner
+free. The tests build the same shape in miniature and check the six things the provisioner
 must get right: the default shares, the flag that does not is the flag, removal clears the
-registration the source keeps, a tree whose source is gone is named rather than handed over
-broken, and a colocated jj workspace is removed as a jj workspace and not as a git worktree.
+registration the source keeps, removal takes off the lock shims/git puts on an agent session's
+tree and no other lock, a tree whose source is gone is named rather than handed over broken,
+and a colocated jj workspace is removed as a jj workspace and not as a git worktree.
 """
 
 import importlib.machinery
@@ -15,13 +16,15 @@ import importlib.util
 import io
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "agent-workspace"
 LOADER = importlib.machinery.SourceFileLoader("agent_workspace", str(SCRIPT))
@@ -29,6 +32,11 @@ SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 assert SPEC is not None
 AW = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(AW)
+SHIMS = Path(__file__).resolve().parents[2] / "shims"
+# shims/git tells an agent session by these, and by a gh-app-routes include in GIT_CONFIG_*.
+AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+# What shims/git writes on every `git worktree add` an agent session runs.
+ADD_LOCK = "agent session: locked on add (AGENTC-431)"
 
 GIT_ENV = {
     **os.environ,
@@ -313,6 +321,84 @@ class WorkspaceRootTest(WorkspaceCase):
         self.assertIn("still registered it", out)
         listing = git("worktree", "list", "--porcelain", cwd=self.source).stdout
         self.assertNotIn(str(tree), listing)
+
+
+class AddLockTest(WorkspaceCase):
+    """`rm` takes off the lock shims/git puts on an agent session's tree, wherever it runs, and no other.
+
+    shims/git locks every `git worktree add` of an agent session, `agent-workspace new` included,
+    and lets a `git worktree remove` past that lock only inside an agent session.
+    On 2026-11-01 the root-disk sweep ran `agent-workspace rm` from a systemd unit, where the shim
+    sees no session, and git refused nearly every tree an agent had made with `cannot remove a
+    locked working tree` (728 of the 871 registrations of one canonical checkout carried it).
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        config_env = re.compile(r"GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)")
+        outside = {
+            k: v for k, v in GIT_ENV.items() if k not in AGENT_MARKERS and not config_env.fullmatch(k)
+        }
+        # This checkout's shims first, as a session's PATH and the sweep's unit both have them.
+        outside["PATH"] = f"{SHIMS}{os.pathsep}{outside['PATH']}"
+        outside["GIT_OPTIONAL_LOCKS"] = "0"
+        self.outside = outside
+        self.inside = {**outside, "OMP_SESSION_ID": "01a00000-0000-7000-8000-000000000000"}
+
+    def aw(self, env: dict[str, str], *argv: str) -> tuple[int, str]:
+        """Run agent-workspace with every git it starts seeing `env`; stderr joins the output."""
+        err = io.StringIO()
+        with mock.patch.object(AW, "GIT_ENV", env), redirect_stderr(err):
+            code, out = self.run_aw(*argv)
+        return code, out + err.getvalue()
+
+    def locks(self) -> dict[str, str | None]:
+        """git's view: each registered tree, and its lock reason (None when it is not locked)."""
+        listing = git("worktree", "list", "--porcelain", cwd=self.source).stdout
+        regs: dict[str, str | None] = {}
+        for block in listing.strip().split("\n\n"):
+            lines = block.splitlines()
+            path = lines[0].removeprefix("worktree ")
+            regs[path] = next((line.removeprefix("locked").strip() for line in lines if line.startswith("locked")), None)
+        return regs
+
+    def test_rm_removes_a_tree_an_agent_session_made_from_inside_a_session_or_outside_one(self) -> None:
+        for where, env in (("inside", self.inside), ("outside", self.outside)):
+            with self.subTest(rm_runs=where):
+                tree = self.wt / "proj" / f"made-in-session-rm-{where}"
+                code, out = self.aw(self.inside, "new", "proj", tree.name)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(self.locks()[str(tree)], ADD_LOCK, "shims/git did not lock the add")
+                code, out = self.aw(env, "rm", "proj", tree.name)
+                self.assertEqual(code, 0, out)
+                self.assertFalse(tree.exists())
+                self.assertNotIn(str(tree), self.locks(), "the registration and its lock must go with the tree")
+
+    def test_rm_leaves_every_other_lock_and_its_tree(self) -> None:
+        # The second reason names the same issue and is still not this one: shims/jj's.
+        for reason in ("a person is using this tree", "jj shim: locked on add (AGENTC-431)"):
+            with self.subTest(reason=reason):
+                tree = self.wt / "proj" / f"held-{len(reason)}"
+                code, out = self.aw(self.outside, "new", "proj", tree.name)
+                self.assertEqual(code, 0, out)
+                git("worktree", "lock", "--reason", reason, str(tree), cwd=self.source)
+                code, out = self.aw(self.outside, "rm", "--force", "proj", tree.name)
+                self.assertEqual(code, 1, out)
+                self.assertIn("locked", out)
+                self.assertTrue((tree / "file.txt").is_file(), "a tree someone else locked was removed")
+                self.assertEqual(self.locks()[str(tree)], reason)
+
+    def test_a_removal_git_refuses_leaves_the_add_lock_on(self) -> None:
+        # Moved by hand without `git worktree repair`: the registration still names the old path,
+        # so git finds no worktree at the new one and removes nothing.
+        tree = self.wt / "proj" / "alpha"
+        code, out = self.aw(self.inside, "new", "proj", "alpha")
+        self.assertEqual(code, 0, out)
+        moved = tree.with_name("alpha-moved")
+        tree.rename(moved)
+        code, out = self.aw(self.outside, "rm", str(moved))
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.locks()[str(tree)], ADD_LOCK, "a tree still registered was left unlocked")
 
 
 if __name__ == "__main__":

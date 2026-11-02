@@ -44,7 +44,9 @@ THE HAZARD. A worktree and a `--shared` clone both die with their source.
 REMOVING. A directory deletion is not enough for a worktree: the source keeps a registration in
 `.git/worktrees/<name>` until it is cleared, and jj keeps the workspace in its op log until
 `jj workspace forget`. `rm` does the right one for the shape it finds. It refuses a tree holding
-work no remote has unless `--force` says otherwise; it clears a registration an earlier plain
+work no remote has unless `--force` says otherwise; it removes a worktree together with the lock
+shims/git puts on every `git worktree add` of an agent session (`ADD_LOCK`), wherever `rm` runs,
+and leaves a tree locked for any other reason standing; it clears a registration an earlier plain
 deletion left behind, by removing that one entry rather than running a prune (shims/git refuses
 a bare `git worktree prune` in an agent session, because from inside a box every other box's
 worktree looks missing and a prune deletes live registrations); and it deletes the workspace's
@@ -71,6 +73,10 @@ BORROWERS = "agent-workspace-borrowers"
 # The machine's big disk, where it has one. Tested exactly as `scripts/agentbox` tests it for a
 # box's checkouts; a constant so a test can point it somewhere else.
 NVME = Path("/mnt/nvme")
+# shims/git locks every `git worktree add` an agent session runs, `new` included, with this reason
+# (AGENTC-431), and lets a `git worktree remove` past it only inside a session. It is the
+# one lock `rm` takes off; any other lock is someone's claim on the tree.
+ADD_LOCK = "agent session: locked on add (AGENTC-431)"
 
 
 def run(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -436,6 +442,27 @@ def registered_worktrees(source: Path) -> set[str]:
     return {line.removeprefix("worktree ").strip() for line in listing.splitlines() if line.startswith("worktree ")}
 
 
+def lock_reason(source: Path, dest: Path) -> str | None:
+    """Why git holds THIS worktree locked: "" for a lock without a reason, None when unlocked.
+
+    Matched by real path, as `git worktree remove` finds the tree, so this is the lock on the
+    registration git would remove.
+    """
+    listing = run(["git", "worktree", "list", "--porcelain"], cwd=source, check=False).stdout
+    want = os.path.realpath(dest)
+    for block in listing.split("\n\n"):
+        lines = block.splitlines()
+        if not lines or not lines[0].startswith("worktree "):
+            continue
+        if os.path.realpath(lines[0].removeprefix("worktree ")) != want:
+            continue
+        for line in lines[1:]:
+            if line == "locked" or line.startswith("locked "):
+                return line.removeprefix("locked").removeprefix(" ")
+        return None
+    return None
+
+
 def forget_registration(source: Path, dest: Path) -> bool:
     """Remove the source's registration of THIS worktree, and no other.
 
@@ -509,7 +536,14 @@ def cmd_rm(args: argparse.Namespace) -> int:
     if info["kind"] == "worktree" and info["source"] and info["source"].exists():
         source = info["source"]
         branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=dest, check=False).stdout.strip()
-        res = run(["git", "worktree", "remove", "--force", str(dest)], cwd=source, check=False)
+        remove = ["git", "worktree", "remove", "--force", str(dest)]
+        # The lock shims/git put on this tree at its add is this tool's to take off, in a session or
+        # outside one, where the shim sees no session and git would refuse. A second --force is
+        # git's way past a lock: the lock goes with the registration, and stays on when git refuses
+        # the removal for another reason. Any other lock stands; git's refusal names it.
+        if lock_reason(source, dest) == ADD_LOCK:
+            remove.insert(-1, "--force")
+        res = run(remove, cwd=source, check=False)
         if res.returncode != 0:
             die(
                 f"git worktree remove failed in {source}:\n"
