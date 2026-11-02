@@ -1,6 +1,6 @@
 ---
 name: thermonuclear-code-quality
-description: Diff-scoped maintainability audit for structure, abstraction, file growth, branching complexity, and type boundaries. Runs on the @review role (Codex), which falls back to Anthropic Opus on failure or quota.
+description: Diff-scoped maintainability audit for structure, abstraction, file growth, branching complexity, and type boundaries. Runs on the @review role, billed to the OpenAI API (GPT-5.6 Terra, degrading to GPT-6.1 Terra, GPT-6.1 Sol, then the Codex subscription when its window reopens) and never to Anthropic.
 model: ["@review"]
 ---
 

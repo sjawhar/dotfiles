@@ -56,13 +56,19 @@ modelRoles:
 # openai/gpt-6-astra and gpt-api served openai/gpt-5.6-terra, read back from
 # each subagent's own transcript.
 #
-# The boundary that comes with it: no OpenAI model is any other agent's
-# default, and no role or wildcard chain routes anything to one. `modelRoles`
-# names Anthropic, Codex and Gemini only; `task.agentModelOverrides` names no
-# `openai/` id; and `openai/*: []` below stops every OpenAI model that is not
-# one of the named reviewers from inheriting the Anthropic `default` chain, so
-# a session never starts spending on the API unasked. Measured in the same run:
-# a plain `task` subagent with no model still served anthropic/claude-opus-5.
+# The boundary that comes with it, and where it does not hold. No wildcard
+# chain routes to an OpenAI model: `openai/*: []` below stops every OpenAI
+# model that is not one of the named ones from inheriting the Anthropic
+# `default` chain, and a plain `task` subagent serves Claude. But these spend
+# per-token API money: the `review` and `oracle` roles above name
+# openai/gpt-5.6-terra, so every agent on @review spends it (bug-finder,
+# code-reviewer, comment-analyzer and test-analyzer through
+# `task.agentModelOverrides` below, and both thermonuclear-* agents), as does
+# the oracle agent; and the `astra` agent's chain (openai-codex/gpt-6-astra
+# below) moves it to openai/gpt-6-astra when omp's usage preflight finds the
+# Codex window spent or at its reserve (measured 2026-11-02 12:21Z and 12:28Z).
+# No setting enforces the pause, so a stream that must stay off the OpenAI API
+# avoids those agents by name.
 # omp-billing-watch reports the spend. openai-codex (the Codex subscription) is
 # a separate provider and was never paused.
 extensionHandlers:
