@@ -237,6 +237,18 @@ class UserLogin(unittest.TestCase):
         self.assertIn("`gh pr merge 5 -R o/r --admin`", result.stderr)
         self.assertIn("Instead: stop, and tell your lead which call GitHub refused", result.stderr)
 
+    def test_a_call_knives_could_not_route_says_to_name_a_repository_not_to_stop(self):
+        # 2026-11-02: `gh api markdown` outside a checkout; knives names no target and gh's 401 follows.
+        executable(self.bin / "knives",
+                   'echo "knives gh: no target repository (no -R/--repo flag, ...), or set GH_REPO=<owner>/<repo>." >&2\n'
+                   'echo "gh: Bad credentials (HTTP 401)" >&2; exit 1')
+        result, _ = self.run_gh(["api", "markdown", "--input", "-"], self.shim_path, **self.agent)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("gh shim: NOT ROUTED: `gh api markdown --input -`", result.stderr)
+        self.assertIn("GH_REPO=<owner>/<repo>", result.stderr)
+        self.assertNotIn("REFUSED", result.stderr)
+        self.assertNotIn("tell your lead", result.stderr)
+
     def test_a_failure_that_is_not_a_refusal_adds_nothing(self):
         executable(self.bin / "knives", 'echo "GraphQL: Could not resolve to a PullRequest" >&2; exit 1')
         result, _ = self.run_gh(["pr", "view", "5", "-R", "o/r"], self.shim_path, **self.agent)
