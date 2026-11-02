@@ -64,7 +64,8 @@ Note which command proves Puppeteer: `@puppeteer/browsers install` (the standalo
 CLI in the `puppeteer` package that every consumer uses, reads it.
 
 The Go **build** cache — `GOCACHE`, a different and faster-growing directory — has its own,
-earlier unit: `devbox/gocache-cap.service`, 80 GB. This unit does not touch it.
+earlier unit: `devbox/gocache-cap.service`, which trims entries unused for 3 h past 25 GB and
+cleans the cache past 50 GB. This unit does not touch it.
 
 A cache directory outside `/mnt/nvme/<user>` is left alone: every pass refuses a directory that is
 not under the root, so a caller that set its own cache elsewhere keeps it.
