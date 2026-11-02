@@ -125,6 +125,50 @@ class SyncHere(DotfilesCheckout):
             self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
         )
 
+    def test_an_unpublished_commit_under_the_working_copy_is_refused_and_no_file_moves(self) -> None:
+        # Moving the working copy alone onto main would drop this commit's change from disk.
+        (self.checkout / "other.txt").write_text("their edit\n")
+        self.jj("commit", "--quiet", "-m", "theirs", "other.txt")
+        (self.checkout / "wip.txt").write_text("local edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+        parent = self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+
+        result = self.sync()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNPUBLISHED", result.stderr)
+        self.assertIn("theirs", result.stderr)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "their edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "local edit\n")
+        self.assertEqual((self.checkout / "shared.txt").read_text(), "base\n")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), parent)
+
+    def test_a_commit_under_the_working_copy_that_main_already_has_is_dropped(self) -> None:
+        # dotfiles-publish pushes a copy and leaves the original under the working copy.
+        (self.checkout / "other.txt").write_text("published edit\n")
+        self.jj("commit", "--quiet", "-m", "published as a copy", "other.txt")
+        (self.checkout / "wip.txt").write_text("local edit\n")
+        (self.upstream / "other.txt").write_text("published edit\n")
+        self.commit_upstream("the copy")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+
+        result = self.sync()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "published edit\n")
+        self.assertEqual((self.checkout / "shared.txt").read_text(), "upstream edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "local edit\n")
+        self.assertEqual(
+            self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
+        )
+        self.assertEqual(
+            self.jj("log", "-r", "all() ~ ::main@origin", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "@", "--no-graph", "-T", "commit_id"),
+        )
+
 
 PUBLISH = Path(__file__).resolve().parents[1] / "dotfiles-publish"
 
@@ -221,7 +265,7 @@ class Publish(DotfilesCheckout):
         self.assertNotEqual(pushed, old)
         self.assertEqual(self.origin_main(), pushed)
         self.assertEqual(self.jj("log", "-r", f"{change}-", "--no-graph", "-T", "commit_id"), upstream_head)
-        self.assertEqual(self.jj("log", "-r", 'description(exact:"mine\n")', "--no-graph", "-T", "commit_id ++ ' '"), f"{pushed} ")
+        self.assertEqual(self.jj("log", "-r", 'description(glob:"mine\n*")', "--no-graph", "-T", "commit_id ++ ' '"), f"{pushed} ")
         self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
         self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
 
@@ -252,6 +296,144 @@ class PublishByCommitId(Publish):
     def publish(self, rev: str) -> subprocess.CompletedProcess[str]:
         return super().publish(self.jj("log", "-r", rev, "--no-graph", "-T", "commit_id"))
 
+
+ME = "01a1aaaa-0000-7000-8000-000000000001"
+THEM = "01a1bbbb-0000-7000-8000-000000000002"
+
+
+def session_config(session: str) -> str:
+    """What omp gives each session's jj (~/.cache/omp/jj/omp-attribution-<id>.toml): its own
+    trailer, and every described commit near a head that another session made is immutable."""
+    return (
+        f"[templates]\ncommit_trailers = '\"Omp-Session: {session}\"'\n"
+        "[revset-aliases]\n"
+        "\"immutable_heads()\" = 'builtin_immutable_heads() | (ancestors(visible_heads(), 4) ~ ::builtin_immutable_heads()"
+        f" ~ description(glob:\"*Omp-Session: {session}*\") ~ empty() ~ present(@) ~ (description(exact:\"\") ~ working_copies()))'\n"
+    )
+
+
+class PublishUnderSessionGuard(Publish):
+    """The publishing session's jj refuses to rewrite or abandon another session's commit, as omp
+    sets it up. On 2026-11-02 at 19:41-19:42Z three runs by one session each copied another
+    session's two commits above its own, could not abandon the copies, stopped there, and left 14
+    commits behind; the chief-dashboard commit showed five times in `jj log`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = Path(self.temp_dir.name)
+        base = self.env["JJ_CONFIG"]
+        self.configs = {}
+        for session in (ME, THEM):
+            path = root / f"omp-attribution-{session}.toml"
+            path.write_text(session_config(session))
+            self.configs[session] = f"{base}{os.pathsep}{path}"
+        self.env["JJ_CONFIG"] = self.configs[ME]
+
+    def their_commit(self, path: str, text: str) -> str:
+        """Another session commits one path of its own on top of the working copy's parent."""
+        (self.checkout / path).write_text(text)
+        env = {**self.env, "JJ_CONFIG": self.configs[THEM]}
+        result = subprocess.run(["jj", "commit", "--quiet", "-m", "theirs", path], cwd=self.checkout, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.jj("log", "-r", "@-", "--no-graph", "-T", "change_id")
+
+    def commits(self) -> set[str]:
+        """Every visible commit except those on origin's main."""
+        return set(self.jj("log", "-r", "all() ~ ::main@origin", "--no-graph", "-T", 'commit_id ++ "\\n"').split())
+
+    def test_their_commit_above_mine_stays_and_mine_goes_alone_leaving_no_copy(self) -> None:
+        change = self.my_commit("other.txt", "my edit\n")
+        theirs = self.their_commit("shared.txt", "their edit\n")
+        (self.checkout / "wip.txt").write_text("another session's edit\n")
+        (self.upstream / "new.txt").write_text("upstream\n")
+        self.commit_upstream("upstream")
+        before = self.commits()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        main = self.origin_main()
+        self.assertEqual(self.run_ok("git", "show", f"{main}:other.txt", cwd=self.origin), "my edit\n")
+        self.assertEqual(self.run_ok("git", "show", f"{main}:shared.txt", cwd=self.origin), "base\n")
+        # Their commit and the working copy did not move, and no copy of anything is left.
+        self.assertEqual(self.commits(), before)
+        self.assertEqual(self.jj("log", "-r", f"{theirs}-", "--no-graph", "-T", "change_id"), change)
+        self.assertEqual((self.checkout / "shared.txt").read_text(), "their edit\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+
+    def test_a_refused_publish_with_their_commit_above_leaves_no_copy(self) -> None:
+        change = self.my_commit("shared.txt", "my edit\n")
+        self.their_commit("other.txt", "their edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+        upstream_head = self.origin_main()
+        before = self.commits()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT", result.stderr)
+        self.assertEqual(self.commits(), before)
+        self.assertEqual(self.origin_main(), upstream_head)
+
+    def test_a_copy_that_keeps_losing_the_race_leaves_only_my_commit(self) -> None:
+        # Their unpublished commit sits under mine, so a copy of mine goes alone; every push is
+        # refused. Each try's copy is abandoned, so no try adds a commit.
+        self.their_commit("shared.txt", "their edit\n")
+        change = self.my_commit("other.txt", "my edit\n")
+        (self.upstream / "new.txt").write_text("upstream\n")
+        self.commit_upstream("upstream")
+        upstream_head = self.origin_main()
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text('#!/bin/sh\necho "refused" >&2\nexit 1\n')
+        hook.chmod(0o755)
+        before = self.commits()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("push refused 3 times", result.stderr)
+        self.assertEqual(self.commits(), before)
+        self.assertEqual(self.jj("log", "-r", 'description(exact:"mine\\n\\nOmp-Session: ' + ME + '\\n")', "--no-graph", "-T", "change_id"), change)
+        self.assertEqual(self.origin_main(), upstream_head)
+
+    def test_a_copy_that_loses_one_race_is_pushed_and_leaves_no_copy(self) -> None:
+        self.their_commit("shared.txt", "their edit\n")
+        change = self.my_commit("other.txt", "my edit\n")
+        (self.upstream / "new.txt").write_text("upstream\n")
+        self.commit_upstream("upstream")
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text('#!/bin/sh\n[ -e refused-once ] && exit 0\ntouch refused-once\necho "refused once" >&2\nexit 1\n')
+        hook.chmod(0o755)
+        before = self.commits()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("push refused", result.stderr)
+        main = self.origin_main()
+        self.assertEqual(self.run_ok("git", "show", f"{main}:other.txt", cwd=self.origin), "my edit\n")
+        self.assertEqual(self.run_ok("git", "show", f"{main}:shared.txt", cwd=self.origin), "base\n")
+        self.assertEqual(self.commits(), before)
+
+    def test_another_sessions_commit_published_for_it_leaves_no_copy_when_every_push_is_refused(self) -> None:
+        # This session's jj may not rewrite their commit, so a copy of it goes; the copy carries
+        # their trailer, which once made its abandon after a lost race fail.
+        change = self.their_commit("other.txt", "their edit\n")
+        (self.upstream / "new.txt").write_text("upstream\n")
+        self.commit_upstream("upstream")
+        upstream_head = self.origin_main()
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text('#!/bin/sh\necho "refused" >&2\nexit 1\n')
+        hook.chmod(0o755)
+        before = self.commits()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("push refused 3 times", result.stderr)
+        self.assertEqual(self.commits(), before)
+        self.assertEqual(self.origin_main(), upstream_head)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,9 @@
 #     <commit> is pushed, and the originals and the working copy stay where they are, since
 #     moving them would write markers. The first real run met exactly this, on 2026-11-02:
 #     another session's uncommitted line in scripts/AGENTS.md sat beside one main already had.
+#   - <commit>, or a commit above it, is one this session's jj may not rewrite (omp makes every
+#     session's jj treat another session's described commit near a head as immutable): the
+#     duplicate of <commit> alone is pushed, and nothing local moves.
 #   - nothing conflicts: the real commits are rebased, and <commit> is pushed.
 #   - <commit> sits on commits main does not have (another session's, committed and not yet
 #     published): the duplicate of <commit> alone is pushed, and nothing local moves. Pushing
@@ -22,7 +25,11 @@
 #     would drop them from the working copy, so from the files on disk. On 2026-11-02 at 15:46Z
 #     two such commits sat under an earlyoom-kill-watch commit and went into its push, which
 #     the leak check refused.
-# A refused or partial run leaves every file on disk as it was.
+# A refused or partial run leaves every file on disk as it was, and leaves no duplicate behind:
+# every copy this run makes and does not push is abandoned on any exit, with --ignore-immutable,
+# since a copy carries its original's description and so its session's trailer. On 2026-11-02 at
+# 19:41-19:42Z three runs of one session copied another session's two commits above its own, were
+# refused the plain abandon of those copies, stopped there, and left 14 commits behind.
 #
 # <commit> is any jj revision naming one commit (a change id, a commit id). Commit only your own
 # paths first (`jj commit <paths>`), then name that commit here. The script follows <commit>'s
@@ -43,6 +50,16 @@ change="$(jj log -r "$rev" --no-graph -T 'change_id ++ "\n"' 2>/dev/null)" \
     || die "no single commit is named $rev"
 [[ "$change" =~ ^[k-z]{32}$ ]] || die "$rev names more than one commit"
 
+# The copies this run made and has not pushed, as full commit ids joined by `|`.
+copies=""
+drop_copies() {
+    [[ -n "$copies" ]] || return 0
+    jj abandon --quiet --ignore-immutable "$copies" \
+        || echo "dotfiles-publish: could not abandon this run's copies ($copies); abandon them by hand" >&2
+    copies=""
+}
+trap drop_copies EXIT
+
 # The one visible commit of <commit>'s change now.
 current() {
     local id
@@ -52,55 +69,82 @@ current() {
     echo "$id"
 }
 
+# on_main <commit>: true when main@origin already has <commit>'s change, as when it was published
+# as a copy and the original stayed: applying it to main changes nothing, or a commit on main
+# since the fork point carries the same patch.
+on_main() {
+    local tree
+    tree="$(git merge-tree --write-tree --merge-base="$1^" "$main" "$1" 2>/dev/null)" \
+        && [[ "$tree" == "$(git rev-parse "$main^{tree}")" ]] && return 0
+    [[ -n "$main_patches" ]] && grep -qx "$(git diff-tree -p "$1" | git patch-id --stable | cut -d' ' -f1)" <<<"$main_patches"
+}
+
+# owned <revset>: each commit as `<short id> (<its Omp-Session>)`, space-separated.
+owned() {
+    jj log -r "$1" --no-graph \
+        -T 'commit_id.short() ++ " (" ++ trailers.filter(|t| t.key() == "Omp-Session").map(|t| t.value()).join(",") ++ ") "' \
+        | sed 's/ ()//g; s/ $//'
+}
+
 attempt=0
 while :; do
     attempt=$((attempt + 1))
     jj git fetch --quiet
     commit="$(current)"
     [[ "$(jj log -r "$commit" --no-graph -T 'empty')" != true ]] || die "$rev is empty: nothing to publish"
-    push="$commit" copy=""
+    push="$commit"
     # Commits under <commit> that main does not have are someone else's unpublished work.
-    below="$(jj log -r "::$commit- ~ ::main@origin" --no-graph -T 'commit_id.short() ++ " "')"
-    below="${below% }"
+    below="$(jj log -r "::$commit- ~ ::main@origin" --no-graph -T 'commit_id ++ " "')"
     if [[ -n "$below" || -z "$(jj log -r "main@origin & ::$commit-" --no-graph -T 'commit_id')" ]]; then
         # Trial first. jj reports "Duplicated <old commit> as <change> <new commit>"; awk reads
         # all of it, since jj exits 3 when its output pipe closes early.
-        own="" others=() files=""
-        declare -A origin_of=()
+        olds=() news=() own=""
         while read -r old new; do
-            # jj prints the copy's id short (8 characters here), so the copies are keyed by 8.
-            if [[ "$commit" == "$old"* ]]; then own="$new"; else others+=("$new"); origin_of[${new:0:8}]="$old"; fi
+            olds+=("$old") news+=("$new")
+            [[ "$commit" != "$old"* ]] || own="$new"
         done < <(jj duplicate --color never "$commit::" --onto main@origin 2>&1 \
             | awk '/^Duplicated / {print $2, $5}')
-        [[ -n "$own" ]] || die "could not trial-rebase $rev onto main; nothing moved"
-        above=""
-        if (( ${#others[@]} )); then
-            dups="$(IFS='|'; echo "${others[*]}")"
-            wc="$(jj log -r @ --no-graph -T 'commit_id')"
-            files=""
-            for c in $(jj log -r "($dups) & conflicts()" --no-graph -T 'commit_id ++ " "'); do
-                if [[ "$wc" == "${origin_of[${c:0:8}]:-none}"* ]]; then name="the working copy"; else name="commit ${origin_of[${c:0:8}]:-?}"; fi
-                above+="${above:+, }$name"
-                files+=" $(jj resolve --list -r "$c" 2>/dev/null | awk '{print $1}' | paste -sd' ' -)"
-            done
-            jj abandon --quiet "$dups"
+        if (( ${#news[@]} )); then
+            copies="$(jj log -r "$(IFS='|'; echo "${news[*]}")" --no-graph -T 'commit_id ++ "|"')"
+            copies="${copies%|}"
         fi
+        [[ -n "$own" ]] || die "could not trial-rebase $rev onto main; nothing moved"
+        own="$(jj log -r "$own" --no-graph -T 'commit_id')"
         if [[ "$(jj log -r "$own" --no-graph -T 'conflict')" == true ]]; then
-            jj abandon --quiet "$own"
             die "CONFLICT: $rev conflicts with main@origin; nothing moved and no file on disk changed. Merge main's change into your commit by hand, then run this again."
         fi
+        above="" files=""
+        wc="$(jj log -r @ --no-graph -T 'commit_id')"
+        for c in $(jj log -r "($copies) ~ $own & conflicts()" --no-graph -T 'commit_id ++ " "'); do
+            for i in "${!news[@]}"; do [[ "$c" == "${news[$i]}"* ]] && break; done
+            if [[ "$wc" == "${olds[$i]}"* ]]; then name="the working copy"; else name="commit ${olds[$i]}"; fi
+            above+="${above:+, }$name"
+            files+=" $(jj resolve --list -r "$c" 2>/dev/null | awk '{print $1}' | paste -sd' ' -)"
+        done
+        [[ -z "$files" ]] || above+=", which would conflict with main@origin in:$files"
+        fixed="$(owned "$commit:: & immutable()")"
+        [[ -z "$fixed" ]] || above+="${above:+; }commits this session's jj may not move ($fixed)"
         if [[ -n "$below" ]]; then
-            above+="${above:+; }the unpublished commits below it ($below)"
+            main="$(jj log -r main@origin --no-graph -T 'commit_id')"
+            main_patches="$(git log -p --no-merges "$(git merge-base "$main" "$commit")..$main" | git patch-id --stable | cut -d' ' -f1)"
+            unpublished="" published=""
+            for c in $below; do
+                if on_main "$c"; then published+="${published:+|}$c"; else unpublished+="${unpublished:+|}$c"; fi
+            done
+            [[ -z "$unpublished" ]] || above+="${above:+; }the unpublished commits below it ($(owned "$unpublished"))"
+            [[ -z "$published" ]] || above+="${above:+; }commits below it whose changes main already has ($(owned "$published"))"
         fi
         if [[ -n "$above" ]]; then
-            if [[ "$(jj log -r "$own" --no-graph -T 'empty')" == true ]]; then
-                jj abandon --quiet "$own"
-                die "$rev's change is already on main; nothing to publish"
+            [[ "$(jj log -r "$own" --no-graph -T 'empty')" != true ]] || die "$rev's change is already on main; nothing to publish"
+            # Only the copy of <commit> goes on; the copies above it go now.
+            if [[ "$copies" != "$own" ]]; then
+                jj abandon --quiet --ignore-immutable "($copies) ~ $own"
+                copies="$own"
             fi
-            push="$(jj log -r "$own" --no-graph -T 'commit_id')" copy=1
-            echo "dotfiles-publish: $above${files:+, which would conflict with main@origin in:$files}. Publishing $rev alone, as a copy on main; $rev and the working copy stay on their old base, and no file on disk changes. Whoever owns those lines or commits publishes or resolves them before \`dotfiles-sync local\` can move the working copy." >&2
+            push="$own"
+            echo "dotfiles-publish: $above. Publishing $rev alone, as a copy on main; $rev and the working copy stay on their old base, and no file on disk changes. Whoever owns those lines or commits publishes or resolves them before \`dotfiles-sync local\` can move the working copy." >&2
         else
-            jj abandon --quiet "$own"
+            drop_copies
             jj rebase --quiet -s "$commit" -d main@origin
             push="$(current)"
             if [[ -n "$(jj log -r "$push:: & conflicts()" --no-graph -T 'commit_id')" ]]; then
@@ -109,12 +153,13 @@ while :; do
         fi
     fi
     if err="$(git push --quiet origin "$push:refs/heads/main" 2>&1)"; then
+        copies=""
         echo "dotfiles-publish: main is $push"
         exit 0
     fi
     # A copy that lost the race is made again from the new main. A rebased <commit> stays: the
     # next try rebases it again.
-    [[ -z "$copy" ]] || jj abandon --quiet "$push"
+    drop_copies
     (( attempt < TRIES )) || die "push refused $attempt times; the last answer: $err"
     echo "dotfiles-publish: push refused (another session pushed first?); fetching and trying again" >&2
 done

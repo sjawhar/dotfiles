@@ -11,9 +11,12 @@
 # working copy move, so a refused run leaves every file on disk as it was (the tree is production,
 # and a rebased working copy writes jj's conflict markers into it). Before fetching, the working
 # copy's parent is pinned with a bookmark, so the fetch cannot abandon it and roll the files on
-# disk back to an older ancestor while live sessions run them. A plain git checkout moves only
-# when it is clean and holds no commit origin's main lacks, and it lands on its `main` branch, so
-# a session can commit there and `git pull --rebase`.
+# disk back to an older ancestor while live sessions run them. Without --old, a commit under the
+# working copy whose change main lacks refuses the run, naming the commit and its session, since
+# moving the working copy alone would drop that change from disk; one whose change main has (the
+# original dotfiles-publish leaves when it pushes a copy) is abandoned after the move. A plain git
+# checkout moves only when it is clean and holds no commit origin's main lacks, and it lands on
+# its `main` branch, so a session can commit there and `git pull --rebase`.
 set -euo pipefail
 
 # HOSTNAME=DESTINATION, every machine by user@MagicDNS name. The entry whose name is this
@@ -24,6 +27,16 @@ MACHINES=(
   sami-leanperf=sami@sami-leanperf
   sami-rocqperf=sami@sami-rocqperf
 )
+
+# on_main <commit>: true when $main already has <commit>'s change, as when dotfiles-publish pushed
+# a copy of it and left the original under the working copy: applying it to main changes nothing,
+# or a commit on main since the fork point ($main_patches) carries the same patch.
+on_main() {
+  local tree
+  tree=$(git merge-tree --write-tree --merge-base="$1^" "$main" "$1" 2>/dev/null) \
+    && [ "$tree" = "$(git rev-parse "$main^{tree}")" ] && return 0
+  [ -n "$main_patches" ] && grep -qx "$(git diff-tree -p "$1" | git patch-id --stable | cut -d' ' -f1)" <<<"$main_patches"
+}
 
 sync_here() {
   local old="$1"
@@ -43,6 +56,26 @@ sync_here() {
     wc=$(jj log -r @ --no-graph -T 'change_id')
     before=$(jj diff -r @ --git | { grep -v '^index ' || true; } | sha256sum)
     jj git fetch --quiet
+    # Commits under the working copy that main lacks (after a squash, --old handles them below).
+    # Moving the working copy alone onto main would drop their changes from the files on disk, so
+    # one whose change main does not have stops the run; the others, originals dotfiles-publish
+    # left when it pushed a copy, are abandoned once the working copy is on main.
+    local main="" main_patches="" c below="" published="" unpublished=""
+    [ -n "$old" ] || below=$(jj log -r "::@- ~ ::main@origin" --no-graph -T 'commit_id ++ " "')
+    if [ -n "$below" ]; then
+      main=$(jj log -r main@origin --no-graph -T 'commit_id')
+      main_patches=$(git log -p --no-merges "$(git merge-base "$main" "$(jj log -r @- --no-graph -T 'commit_id')")..$main" | git patch-id --stable | cut -d' ' -f1) || main_patches=""
+      for c in $below; do
+        if on_main "$c"; then published+="${published:+|}$c"; else unpublished+="${unpublished:+|}$c"; fi
+      done
+      if [ -n "$unpublished" ]; then
+        echo "UNPUBLISHED: commits under the working copy that main lacks; not moved, nothing on disk changed. Each session publishes its own with dotfiles-publish <commit>:" >&2
+        jj log -r "$unpublished" --no-graph >&2 \
+          -T 'commit_id.short() ++ " " ++ trailers.filter(|t| t.key() == "Omp-Session").map(|t| t.value()).join(",") ++ " " ++ description.first_line() ++ "\n"'
+        jj bookmark delete "$anchor" >/dev/null
+        return 1
+      fi
+    fi
     if [ "$(jj log -r @ --no-graph -T 'empty')" = true ]; then
       jj new --quiet main@origin
     else
@@ -55,7 +88,9 @@ sync_here() {
         return 1
       fi
       trial_conflict=$(jj log -r "$trial" --no-graph -T 'conflict')
-      jj abandon --quiet "$trial"
+      # The trial is this run's own copy; it carries the working copy's description, which omp's
+      # per-session jj config can make immutable here.
+      jj abandon --quiet --ignore-immutable "$trial"
       if [ "$trial_conflict" = true ]; then
         echo "CONFLICT: the working-copy change $wc conflicts with main; not moved, nothing on disk changed; resolve it here" >&2
         return 1
@@ -87,6 +122,12 @@ sync_here() {
       jj abandon --quiet --ignore-immutable "::$anchor ~ ::main@origin ~ ::working_copies()"
     fi
     jj bookmark delete "$anchor" >/dev/null
+    if [ -n "$published" ]; then
+      # Their changes are on main; any another workspace's working copy sits on stays.
+      echo "dropped commits whose changes main already has:"
+      jj log -r "($published) ~ ::working_copies()" --no-graph -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
+      jj abandon --quiet --ignore-immutable "($published) ~ ::working_copies()"
+    fi
     printf '%s on %s\n' "$(hostname)" "$(jj log -r @- --no-graph -T 'commit_id.short()')"
   else
     git fetch -q origin
