@@ -579,10 +579,100 @@ exec_real_gcloud() {
     local real_gcloud="$1"
     shift
     export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-1}"
+    local -a launcher=("$real_gcloud")
     if needs_forward_browser; then
-        exec env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud" "$@"
+        launcher=(env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud")
     fi
-    exec "$real_gcloud" "$@"
+    if is_lock_retry_safe "$@"; then
+        run_with_lock_retry "${launcher[@]}" "$@"
+    fi
+    exec "${launcher[@]}" "$@"
+}
+
+# The SDK opens its sqlite stores in the configuration directory with a 5 s busy timeout
+# (lib/googlecloudsdk/core/credentials/creds.py:364-368). It only warns when the access-token
+# cache (access_tokens.db) is locked, but a locked credentials.db is a crash: `config
+# config-helper`, which gke-gcloud-auth-plugin runs for every kubectl call, writes the
+# credential back on every call (lib/surface/config/config_helper.py:116, creds.py:555). With
+# 60 concurrent calls on sami-rocqperf on 2026-11-02, 23 died with exactly GCLOUD_LOCK_CRASH
+# and exit 1. For a command that only reads and prints, the shim holds gcloud's stdout and
+# stderr in a private directory and, on that crash alone, runs it again, at most
+# GCLOUD_LOCK_RETRIES more times with jittered backoff growing from 0.2-0.6 s to 1-3 s; the
+# output of a crashed attempt is dropped. Any other result passes through as it came.
+GCLOUD_LOCK_CRASH='ERROR: gcloud crashed (OperationalError): database is locked'
+GCLOUD_LOCK_RETRIES=5
+
+# True for a command that only reads and prints and reads no stdin, so running it again repeats
+# nothing: `auth print-access-token|print-identity-token|list`, `config config-helper|get|
+# get-value|list|configurations list|configurations describe`, and `storage sign-url`. The
+# command words are read as read_command_words reads them, to the third word; a `-` anywhere,
+# as an entry or a value, or a --flags-file can mean stdin, and is never retried.
+is_lock_retry_safe() {
+    local arg track_stripped=0
+    local -a words=()
+    for arg in "$@"; do
+        case "$arg" in
+            - | *=- | --flags-file | --flags-file=*) return 1 ;;
+        esac
+    done
+    while (($#)) && ((${#words[@]} < 3)); do
+        arg="$1"
+        shift
+        case "$arg" in
+            -?*)
+                if is_value_flag "$arg" && [[ "$arg" != *=* ]] && (($#)); then
+                    shift
+                fi
+                ;;
+            *)
+                if ((${#words[@]} == 0 && !track_stripped)) &&
+                    contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
+                    track_stripped=1
+                    continue
+                fi
+                words+=("$arg")
+                ;;
+        esac
+    done
+    case "${words[0]:-} ${words[1]:-}" in
+        "auth print-access-token" | "auth print-identity-token" | "auth list" | \
+            "config config-helper" | "config get" | "config get-value" | "config list" | \
+            "storage sign-url")
+            return 0
+            ;;
+        "config configurations")
+            [[ "${words[2]:-}" == list || "${words[2]:-}" == describe ]]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Runs argv (gcloud, or its launcher) and exits with its status; never returns. Without a
+# private directory for the output it execs argv once, as before.
+GCLOUD_RETRY_DIR=""
+run_with_lock_retry() {
+    local status attempt=1 delay_ms
+    GCLOUD_RETRY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gcloud-shim.XXXXXX")" || exec "$@"
+    # A printed token sits in that directory until gcloud's attempt ends; remove it on every exit.
+    trap 'rm -rf "$GCLOUD_RETRY_DIR"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    while :; do
+        status=0
+        "$@" >"${GCLOUD_RETRY_DIR}/out" 2>"${GCLOUD_RETRY_DIR}/err" || status=$?
+        if ((status == 0 || attempt > GCLOUD_LOCK_RETRIES)) ||
+            ! grep -qxF -- "$GCLOUD_LOCK_CRASH" "${GCLOUD_RETRY_DIR}/err"; then
+            cat -- "${GCLOUD_RETRY_DIR}/out"
+            cat -- "${GCLOUD_RETRY_DIR}/err" >&2
+            exit "$status"
+        fi
+        delay_ms=$((200 * attempt + RANDOM % (400 * attempt)))
+        printf 'gcloud shim: another gcloud held a sqlite store in the configuration directory past the SDK busy timeout (attempt %d of %d); running it again in %d.%03d s.\n' \
+            "$attempt" "$((GCLOUD_LOCK_RETRIES + 1))" "$((delay_ms / 1000))" "$((delay_ms % 1000))" >&2
+        sleep "$((delay_ms / 1000)).$(printf '%03d' "$((delay_ms % 1000))")"
+        attempt=$((attempt + 1))
+    done
 }
 
 main() {

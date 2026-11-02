@@ -233,7 +233,11 @@ before handing the call to the real one.
   recorded route: on 2026-11-02T00:07Z an exported account made one agent shell's kubectl create
   GKE Jobs as the user, and gke-gcloud-auth-plugin's cache beside the kubeconfig, keyed by
   context and not account, gave his token to every caller of it for an hour. Outside an agent
-  session nothing changes (`shims/tests/test_gcloud_shim_routing.py`).
+  session nothing changes (`shims/tests/test_gcloud_shim_routing.py`). A read-only call
+  (`config config-helper`, which kubectl runs, `auth print-access-token` and the others listed at
+  the shim's `is_lock_retry_safe`) that crashes with exactly `ERROR: gcloud crashed (OperationalError): database is locked`,
+  because another gcloud held `credentials.db` past the SDK's 5 s busy timeout, runs again at most
+  5 more times, 0.2-3 s apart with jitter, and only the last attempt's output is shown.
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
   harness's or a git credential helper's PATH can hold this dir without `~/.dotfiles/bin`, where
   mise lives; these shims then run `~/.dotfiles/bin/mise` by its path, with `~/.mise` as its data

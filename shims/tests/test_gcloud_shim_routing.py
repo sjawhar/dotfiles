@@ -1079,5 +1079,101 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(stub_argv(result), args)
 
 
+LOCK_CRASH = "ERROR: gcloud crashed (OperationalError): database is locked"
+
+
+class GcloudLockedStoreRetry(unittest.TestCase):
+    """The SDK crashes when another gcloud holds its credentials.db past the 5 s busy timeout.
+    The shim runs a read-only command again on exactly that crash, a bounded number of times,
+    and shows only the attempt that counts."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.stub_dir = Path(self.tmp.name)
+        self.calls = self.stub_dir / "calls"
+        # The backoff sleeps; a stub keeps the tests fast and records each delay.
+        write_stub(self.stub_dir, "sleep", f'echo "$1" >> "{self.stub_dir}/sleeps"')
+        home = self.stub_dir / "home"
+        (home / ".config" / "gcloud" / "configurations").mkdir(parents=True)
+        self.env = {"PATH": f"{self.stub_dir}:{SHIMS}:/usr/bin:/bin", "HOME": str(home)}
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def stub_gcloud_crashing(self, times: int, crash: str = LOCK_CRASH) -> None:
+        """A gcloud whose first `times` calls print partial output and crash, then succeed."""
+        write_stub(
+            self.stub_dir,
+            "gcloud",
+            f'n=$(( $(cat "{self.calls}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "{self.calls}"\n'
+            f'if (( n <= {times} )); then echo "PARTIAL-$n"; '
+            f'echo "WARNING: Could not store access token in cache: database is locked" >&2; '
+            f'echo "{crash}" >&2; exit 1; fi\n'
+            'echo "OK-$n"; echo "NOTE-$n" >&2',
+        )
+
+    def run_shim(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(SHIMS / "gcloud"), *args], capture_output=True, text=True, env=self.env)
+
+    def call_count(self) -> int:
+        return int(self.calls.read_text(encoding="utf-8"))
+
+    def test_locked_store_crash_is_run_again_and_only_the_last_attempt_shows(self):
+        for args in (["config", "config-helper", "--format=json"], ["auth", "print-access-token"],
+                     ["--project", "p", "beta", "auth", "print-identity-token"],
+                     ["config", "configurations", "describe", "box"], ["storage", "sign-url", "gs://b/o"]):
+            with self.subTest(args=args):
+                self.calls.unlink(missing_ok=True)
+                self.stub_gcloud_crashing(times=1)
+                result = self.run_shim(args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "OK-2\n")
+                self.assertNotIn(LOCK_CRASH, result.stderr)
+                self.assertIn("NOTE-2", result.stderr)
+                self.assertIn("attempt 1 of 6", result.stderr)
+                self.assertEqual(self.call_count(), 2)
+
+    def test_retry_is_bounded_and_the_last_crash_passes_through(self):
+        self.stub_gcloud_crashing(times=100)
+        result = self.run_shim(["config", "config-helper", "--format=json"])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.call_count(), 6)
+        self.assertEqual(result.stdout, "PARTIAL-6\n")
+        self.assertEqual(result.stderr.count(LOCK_CRASH), 1)
+        delays = [float(d) for d in (self.stub_dir / "sleeps").read_text(encoding="utf-8").split()]
+        self.assertEqual(len(delays), 5)
+        for attempt, delay in enumerate(delays, start=1):
+            self.assertGreaterEqual(delay, 0.2 * attempt)
+            self.assertLess(delay, 0.6 * attempt)
+
+    def test_other_failures_and_other_commands_run_once(self):
+        cases = (
+            (["compute", "instances", "create", "vm"], LOCK_CRASH),
+            (["container", "clusters", "get-credentials", "c"], LOCK_CRASH),
+            (["auth", "login"], LOCK_CRASH),
+            (["auth", "print-access-token", "-"], LOCK_CRASH),
+            (["config", "config-helper", "--flags-file=-"], LOCK_CRASH),
+            (["config", "config-helper"], "ERROR: gcloud crashed (OperationalError): disk I/O error"),
+            (["auth", "print-access-token"], "ERROR: (gcloud.auth.print-access-token) database is locked"),
+        )
+        for args, crash in cases:
+            with self.subTest(args=args, crash=crash):
+                self.calls.unlink(missing_ok=True)
+                self.stub_gcloud_crashing(times=1, crash=crash)
+                result = self.run_shim(args)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(self.call_count(), 1)
+                self.assertEqual(result.stdout, "PARTIAL-1\n")
+                self.assertIn(crash, result.stderr)
+
+    def test_the_retry_directory_is_removed(self):
+        self.env["TMPDIR"] = str(self.stub_dir / "tmp")
+        (self.stub_dir / "tmp").mkdir()
+        self.stub_gcloud_crashing(times=1)
+        result = self.run_shim(["auth", "print-access-token"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list((self.stub_dir / "tmp").iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()
