@@ -239,8 +239,16 @@ if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; the
     mem_max="$OMP_MEMORY_MAX"
     unset OMP_MEMORY_MAX
     export OMP_MEMORY_SCOPE="$mem_max"
-    if systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue -- true \
-        >/dev/null 2>&1; then
+    # Under load the systemd user manager waits on the kernel's cgroup lock and a scope request
+    # times out ("Failed to start transient scope unit: Connection timed out"): 5 of 7 tries did
+    # between 05:04 and 05:20Z on 2026-11-02, at load 450-520. A session started then would run
+    # with no ceiling and no OOMPolicy, so the probe tries once more after 10 s before falling
+    # back. In an agent box the refusal is the expected answer (below), so there is no retry.
+    scope_probe() {
+        systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue -- true \
+            >/dev/null 2>&1
+    }
+    if scope_probe || { [[ ! -e /etc/agentbox-identity ]] && sleep 10 && scope_probe; }; then
         # A non-interactive shell gives a background job /dev/null as stdin unless the job names
         # its own, and interactive omp then refuses to start ("stdin is not a TTY"). So hand the
         # job the wrapper's own stdin through a spare descriptor. With job control off the job
