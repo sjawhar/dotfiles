@@ -85,16 +85,21 @@ def normalize(node: dict | None) -> dict:
 
 
 def fetch(refs: list[str], timeout: float = 60) -> dict[str, dict]:
-    """{ref: state} for every ref, one query per repository owner. A ref the query could not read carries `error`."""
+    """{ref: state} for every ref, one query per repository. A ref the query could not read carries `error`."""
     refs = [r for r in refs if parse_ref(r)]
     out: dict[str, dict] = {}
-    for owner in sorted({parse_ref(r)[0] for r in refs}):
-        out.update(_fetch_owner([r for r in refs if parse_ref(r)[0] == owner], timeout))
+    for repo in sorted({r.split("#")[0] for r in refs}):
+        out.update(_fetch_repo([r for r in refs if r.split("#")[0] == repo], timeout))
     return out
 
 
-def _fetch_owner(refs: list[str], timeout: float) -> dict[str, dict]:
-    """One GraphQL query for refs that all belong to one owner, routed to that owner's App by `GH_REPO`."""
+def _fetch_repo(refs: list[str], timeout: float) -> dict[str, dict]:
+    """One GraphQL query for the refs of a single repository, routed to its owner's App by `GH_REPO`.
+
+    One query per repository, not per owner: the leak check refuses a call whose text it flags when that call can
+    also reach a public repository, so a query mixing a flagged private repository with a public one was refused
+    whole and every ref in it lost its state (measured 2026-11-02 13:24Z).
+    """
     env = {**os.environ, "GH_REPO": refs[0].split("#")[0]}
     # Outside any checkout: the shim routes by the working directory's git remote before GH_REPO.
     done = subprocess.run(
