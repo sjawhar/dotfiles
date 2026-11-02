@@ -1777,12 +1777,46 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("nothing was hung up: these processes of this session are not systemd units", refused.stderr)
         self.assertEqual(self.jobs(), [])
 
+    def test_the_plan_of_a_move_is_the_caller_s_own_group_unless_told_otherwise(self) -> None:
+        """By default the plan answers the question a session asks before it moves - its own
+        group, found as `move --to` finds it - and reads no other session's paths; --group names
+        another session, and --all plans every group."""
+        self.moving_session()
+        self.make_proc(999999910, comm="bash", ppid=1, cwd=self.worktree)
+        self.make_proc(999999911, ppid=999999910, cwd=self.worktree, session=self.TO2)
+        apart = self.root / "apart"
+        apart.mkdir()
+        third = "01a19700-0000-7000-8000-0000000e0003"
+        self.make_proc(999999950, comm="bash", ppid=1, cwd=apart)
+        self.make_proc(999999951, ppid=999999950, cwd=apart, session=third)
+        self.set_pids(999999901, 999999911, 999999951)
+        self.set_panes({999999900: ("%81", "agents:4.1"), 999999910: ("%82", "agents:5.1"),
+                        999999950: ("%86", "agents:9.1")})
+        self.target()
+        log = self.root / "PATHS"
+        wrap = ('eval "orig_$(declare -f move_to_session_paths)"\n'
+                f'move_to_session_paths() {{ echo "$2" >>"{log}"; orig_move_to_session_paths "$@"; }}\n')
+        own = self.run_bash(wrap + "cmd_move_plan --to devbox", {"OMP_SESSION_ID": self.TO})
+        self.assertEqual(own.returncode, 0, own.stderr)
+        self.assertIn("group g-01a19700: 2 session(s)", own.stdout)
+        self.assertNotIn(third, own.stdout)
+        self.assertEqual(sorted(log.read_text(encoding="utf-8").split()), [self.TO, self.TO2])
+        other = self.run_bash("cmd_move_plan --to devbox --group 01a19700-0000-7000-8000-0000000e0003")
+        self.assertEqual(other.returncode, 0, other.stderr)
+        self.assertIn("1 group(s), 1 session(s)", other.stdout)
+        self.assertIn(third, other.stdout)
+        every = self.run_bash("cmd_move_plan --to devbox --all")
+        self.assertIn("2 group(s), 3 session(s)", every.stdout)
+        nobody = self.run_bash("cmd_move_plan --to devbox")
+        self.assertEqual(nobody.returncode, 1)
+        self.assertIn("name one with --group <session>, or plan every group with --all", nobody.stderr)
+
     def test_the_plan_lists_each_group_s_copy_and_size_and_changes_nothing(self) -> None:
         transcript = self.moving_session()
         self.set_pids(999999901)
         self.set_panes({999999900: ("%81", "agents:4.1")})
         self.target()
-        plan = self.run_bash("cmd_move_plan --to devbox")
+        plan = self.run_bash("cmd_move_plan --to devbox --all")
         self.assertEqual(plan.returncode, 0, plan.stderr)
         self.assertIn("nothing is changed, copied or sent", plan.stdout)
         self.assertIn("group g-01a19700: 1 session(s)", plan.stdout)

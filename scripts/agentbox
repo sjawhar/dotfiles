@@ -2914,23 +2914,29 @@ move_find() {
 }
 
 cmd_move_plan() {
-    local json=false a target=""
+    local json=false a target="" all=false group=""
     while (( $# )); do
         a="$1"
         case "$a" in
             --json) json=true ;;
             --to) [[ -n "${2:-}" && "$2" != -* ]] || die "--to takes a machine name. $MOVE_USAGE"; target="$2"; shift ;;
-            --self|--all|--now|--dry-run|--force-floor)
-                die "agentbox move --plan takes only --json or --to <machine>; '$a' belongs to another form of the command. $MOVE_USAGE" ;;
-            *) die "agentbox move --plan takes only --json or --to <machine>, not '$a'. $MOVE_USAGE" ;;
+            --all) all=true ;;
+            --group) [[ -n "${2:-}" && "$2" != -* ]] || die "--group takes a session id or a prefix of one. $MOVE_USAGE"; group="$2"; shift ;;
+            --self|--now|--dry-run|--force-floor)
+                die "agentbox move --plan takes only --json or --to <machine> [--group <session> | --all]; '$a' belongs to another form of the command. $MOVE_USAGE" ;;
+            *) die "agentbox move --plan takes only --json or --to <machine> [--group <session> | --all], not '$a'. $MOVE_USAGE" ;;
         esac
         shift
     done
     if [[ -n "$target" ]]; then
         $json && die "agentbox move --plan --to prints a table only; --json is the plan of moves into boxes here. $MOVE_USAGE"
-        cmd_move_plan_to "$target"
+        [[ -z "$group" ]] || ! $all || die "--group and --all are two different plans; give one. $MOVE_USAGE"
+        if $all; then cmd_move_plan_to "$target" all
+        elif [[ -n "$group" ]]; then cmd_move_plan_to "$target" group "$group"
+        else cmd_move_plan_to "$target" self "${OMP_SESSION_ID:-}"; fi
         return $?
     fi
+    $all || [[ -n "$group" ]] && die "--all and --group go with --to <machine>. $MOVE_USAGE"
     # Say what is happening BEFORE the first slow step. Three sessions read this command as a
     # hang on 2026-11-01 and killed it at 45-120 s because it printed nothing at all until the
     # table at the end; one of them ran it three times. Every progress line goes to stderr, so
@@ -4661,23 +4667,36 @@ move_to_run() {
     return 1
 }
 
-# `move --plan --to <machine>`: every group of this host's live sessions, what a move to the
-# machine would copy for it and how big that is here. It changes nothing: no plan file, no ready
-# file, no notice, no call to the target. Only the MIRRORED paths are measured - the trees and
-# transcripts a move sends whole - each at most MOVE_TO_SIZE_WAIT seconds, MOVE_RECORD_JOBS at
-# once. The merged paths (git storage, caches, lane roots) are listed unmeasured: rsync sends
-# only what is newer than the target's copy, so their size here says nothing about the move,
-# and measuring them (frac-verify, gate-runs, whole object stores) kept the plan of 2026-11-02
-# running past 50 minutes.
+# `move --plan --to <machine> [--group <session> | --all]`: what a move to the machine would copy
+# for one group and how big that is here - by default the caller's own group (the question a
+# session asks before it moves), found as `move --to` finds it (move_to_find_group: 56 s for a
+# group of 14 at load 300), else the group of the session --group names, or with --all every
+# group of the host, which needs every session's paths (more than two minutes at load 600). It
+# changes nothing: no plan file, no ready file, no notice, no call to the target. Only the
+# MIRRORED paths are measured - the trees and transcripts a move sends whole - each at most
+# MOVE_TO_SIZE_WAIT seconds, MOVE_RECORD_JOBS at once. The merged paths (git storage, caches,
+# lane roots) are listed unmeasured: rsync sends only what is newer than the target's copy, so
+# their size here says nothing about the move, and measuring them (frac-verify, gate-runs, whole
+# object stores) kept the plan of 2026-11-02 running past 50 minutes.
 MOVE_TO_SIZE_WAIT="${AGENTBOX_MOVE_SIZE_WAIT:-30}"
 cmd_move_plan_to() {
-    local target="$1" s g m err p x size total=0 refused=0 bytes i line
+    local target="$1" mode="$2" who="${3:-}" s g m err p x size total=0 refused=0 bytes i line order=() hits=()
     move_to_index_transcripts
     local -A done_=() sizes=()
     local g_name=() g_text=() g_mirror=() g_merge=() g_exclude=() paths=()
-    echo "agentbox move --plan --to $target: reading this host's live sessions; progress on stderr" >&2
-    move_to_census_paths
-    for s in $(printf '%s\n' "${!MT_ROW[@]}" | sort); do
+    if [[ "$mode" == all ]]; then
+        echo "agentbox move --plan --to $target --all: reading every live session of this host; progress on stderr" >&2
+        move_to_census_paths
+        mapfile -t order < <(printf '%s\n' "${!MT_ROW[@]}" | sort)
+    else
+        [[ -n "$who" ]] || die "no session to plan: run it from a session's bash tool (its OMP_SESSION_ID), or name one with --group <session>, or plan every group with --all"
+        echo "agentbox move --plan --to $target: reading this host's sessions' processes to find the group of $who" >&2
+        move_to_scan_processes
+        mapfile -t hits < <(printf '%s\n' "${!MT_ROW_OF[@]}" | awk -v t="$who" 'index($0, t) == 1')
+        (( ${#hits[@]} == 1 )) || die "$(if (( ${#hits[@]} )); then echo "$who names ${#hits[@]} live sessions; give more of the id"; else echo "no live host session here matches $who (agentbox move --plan lists them)"; fi)"
+        order=("${hits[0]}")
+    fi
+    for s in "${order[@]}"; do
         [[ -z "${done_[$s]:-}" ]] || continue
         move_to_find_group "$s"
         for m in "${MOVE_TO_GROUP[@]}"; do done_[$m]=1; done
@@ -4762,9 +4781,12 @@ MOVE_USAGE='usage:
   agentbox move <session-id> [--now] [--dry-run] [--dir PATH]…
                                                     the same for one session, each --dir adding a
                                                     path the inference missed
-  agentbox move --plan --to <machine>              each group of sessions (sessions that share a
-                                                    working tree), what a move to <machine> would
-                                                    copy for it and the size; changes nothing
+  agentbox move --plan --to <machine> [--group <session> | --all]
+                                                    what a move to <machine> would copy for the
+                                                    group of this session (the sessions that work
+                                                    in its git trees) and the size; --group plans
+                                                    the group of another session, --all every
+                                                    group; changes nothing
   agentbox move --to <machine> [--dry-run] [--accept-orphans] [--dir PATH]…
                                                     run by the session in its own pane at its safe
                                                     point: its group moves to <machine> over
