@@ -20,7 +20,10 @@ if command -v systemctl &>/dev/null && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
         || echo "WARNING: no reachable systemd --user manager; MISE_DATA_DIR applies at next login" >&2
 fi
 
-ensure_command mise "curl -fsSL https://mise.run | MISE_INSTALL_PATH=\"${DOTFILES_DIR}/bin/mise\" sh"
+# mise.toml cannot pin mise itself, so its version is pinned here. A machine that
+# already has mise keeps its binary; this pins a fresh install.
+MISE_VERSION=v2026.10.11
+ensure_command mise "curl -fsSL https://mise.run | MISE_VERSION=${MISE_VERSION} MISE_INSTALL_PATH=\"${DOTFILES_DIR}/bin/mise\" sh"
 
 if [ "$SKIP_MISE" = true ]; then
     echo "Skipping mise install (--skip-mise)"
