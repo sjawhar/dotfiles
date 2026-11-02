@@ -3269,7 +3269,7 @@ move_orphans() {
     while (( i < ${#queue[@]} )); do
         p="${queue[i]}"
         i=$((i + 1))
-        cmd="$(tr '\0' ' ' <"$PROC/$p/cmdline" 2>/dev/null || true)"
+        cmd="$(tr '\0' ' ' 2>/dev/null <"$PROC/$p/cmdline" || true)"
         [[ -n "$cmd" ]] || continue
         case "$cmd" in
             *__omp_worker*|*/omp-python-runner*/runner-*.py*) skip[$p]=helper ;;
@@ -3834,12 +3834,23 @@ move_to_transcript_paths() {
     [[ -d "${t%.jsonl}" ]] || return 0
     # Two levels: a subagent's transcript and its own subagents'. A lead's session directory holds
     # thousands of entries, and a walk of all of it ran for minutes at load 600.
-    local own
+    # The archiver moves a session directory's files to the same relative place under its own
+    # root and leaves a symlink for each, so a lead's offloaded logs were 330 paths of one plan;
+    # a target inside a directory named as this session's own is copied as that directory, once.
+    local own base d
+    local -A said=()
     own="$(readlink -f "${t%.jsonl}")"
+    base="${own##*/}"
     while IFS= read -r -d '' link; do
         real="$(readlink -f "$link" 2>/dev/null)" || continue
         [[ -e "$real" ]] || continue
-        move_within "$real" "$own" || printf 'mirror\t%s\n' "$real"
+        move_within "$real" "$own" && continue
+        d="$real"
+        while [[ "$d" == /*/* && "${d##*/}" != "$base" ]]; do d="${d%/*}"; done
+        [[ "${d##*/}" == "$base" ]] && real="$d"
+        [[ -z "${said[$real]:-}" ]] || continue
+        said[$real]=1
+        printf 'mirror\t%s\n' "$real"
     done < <(find -H "${t%.jsonl}" -maxdepth 2 -type l -print0 2>/dev/null)
     return 0
 }

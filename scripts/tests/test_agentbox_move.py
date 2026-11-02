@@ -1811,6 +1811,26 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(nobody.returncode, 1)
         self.assertIn("name one with --group <session>, or plan every group with --all", nobody.stderr)
 
+    def test_an_archived_session_directory_is_copied_once(self) -> None:
+        """The archiver leaves one symlink per moved file of a session directory, all into one
+        directory of the same name on the cold disk: that directory is one path to copy, not one
+        per file (a lead's plan listed 330)."""
+        own = self.home / ".omp/agent/sessions/-lane/2026-11-02T10-00-00-000Z_01a19700-0000-7000-8000-0000000e0009"
+        own.mkdir(parents=True)
+        own.with_suffix(".jsonl").write_text("{}\n", encoding="utf-8")
+        cold = self.root / "durable/omp-sessions-moved/-lane" / own.name
+        cold.mkdir(parents=True)
+        for i in range(3):
+            (cold / f"{i}.bash.log").write_text("x\n", encoding="utf-8")
+            os.symlink(cold / f"{i}.bash.log", own / f"{i}.bash.log")
+        lone = self.root / "elsewhere.jsonl"
+        lone.write_text("{}\n", encoding="utf-8")
+        os.symlink(lone, own / "Lone.jsonl")
+        result = self.run_bash(f'move_to_transcript_paths "{own}.jsonl"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(result.stdout.splitlines()), sorted([
+            f"mirror\t{own}.jsonl", f"mirror\t{own}", f"mirror\t{cold}", f"mirror\t{lone}"]))
+
     def test_the_plan_lists_each_group_s_copy_and_size_and_changes_nothing(self) -> None:
         transcript = self.moving_session()
         self.set_pids(999999901)
