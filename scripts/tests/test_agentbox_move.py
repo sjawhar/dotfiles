@@ -601,7 +601,7 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(rows["507"][0], "no-pane")
         self.assertIn("ossv-step.service", rows["507"][6])
 
-    def pane_behind_another_socket(self, pane: str) -> None:
+    def pane_behind_another_socket(self, pane: str, tmux: str = "/sock/tmux-1000/default,28813,1") -> None:
         """LANE-E's shape (2026-11-02): omp -> bash shims/omp -> the pane's login shell -> the tmux
         server, on a server whose socket is not tmux's default, so the census's list-panes, from a
         tool shell with no TMUX, reached nothing. Only the server named by the omp's own TMUX knows
@@ -612,7 +612,7 @@ class AgentboxMove(unittest.TestCase):
         self.make_proc(42507, comm="bash", ppid=28813, cwd=lane)
         self.make_proc(925768, comm="bash", ppid=42507, cwd=lane)
         self.make_proc(925946, ppid=925768, cwd=lane, session="01a170c2-69f0-7542-a611-195ce0c4a111",
-                       environ={"TMUX": "/sock/tmux-1000/default,28813,1", "TMUX_PANE": pane})
+                       environ={"TMUX": tmux, "TMUX_PANE": pane})
         self.set_pids(925946)
         (self.root / "TMUX_ARGS").write_text("", encoding="utf-8")
         write_stub(self.stubs, "tmux", "\n".join([
@@ -648,6 +648,102 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = (self.root / "TMUX_ARGS").read_text(encoding="utf-8").splitlines()
         self.assertTrue(args[0].startswith("-S /sock/tmux-1000/default list-panes -a"), args)
+
+    def unreachable_tmux(self) -> None:
+        # What LANE-E's tool shell got on the right socket: its tmux 3.4 against the 3.8 server.
+        write_stub(self.stubs, "tmux", 'echo "server exited unexpectedly" >&2; exit 1')
+
+    def test_a_server_no_tmux_can_reach_is_confirmed_from_proc_alone(self) -> None:
+        self.pane_behind_another_socket("%70")
+        self.unreachable_tmux()
+        rows = [r[:5] for r in self.census()]
+        self.assertEqual(rows, [["host", "925946", "01a170c2-69f0-7542-a611-195ce0c4a111", "%70", ""]])
+
+    def test_a_tmux_that_names_another_server_is_not_trusted_from_proc(self) -> None:
+        self.pane_behind_another_socket("%70", tmux="/sock/tmux-1000/default,4242,1")
+        self.unreachable_tmux()
+        self.assertEqual(self.census()[0][0], "no-pane")
+
+    def test_the_server_is_asked_with_its_own_binary(self) -> None:
+        self.pane_behind_another_socket("%70")
+        own = self.root / "server-bin"
+        own.mkdir()
+        write_stub(own, "tmux", '[ "$1 $2 $3 $6" = "-S /sock/tmux-1000/default display-message %70" ] && printf "42507\\tlane:1.0\\n"')
+        os.symlink(own / "tmux", self.proc / "28813" / "exe")
+        self.unreachable_tmux()  # the tmux on PATH is another version
+        rows = [r[:5] for r in self.census()]
+        self.assertEqual(rows, [["host", "925946", "01a170c2-69f0-7542-a611-195ce0c4a111", "%70", "lane:1.0"]])
+
+    def test_move_self_refuses_before_the_hang_up_when_tmux_cannot_reach_its_pane(self) -> None:
+        self.pane_behind_another_socket("%70")
+        self.unreachable_tmux()
+        extra = self.root / "extra"
+        extra.mkdir()
+        result = self.run_bash(
+            'move_own_omp() { echo 925946; }\nmove_image_bytes() { echo 280000000; }\n'
+            'move_hand_off() { echo HANDED-OFF; }\n'
+            f'cmd_move_self --dir "{extra}"'
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("HANDED-OFF", result.stdout)
+        self.assertIn("nothing was hung up", result.stderr)
+        self.assertIn(f"agentbox move 01a170c2-69f0-7542-a611-195ce0c4a111 --now --dir {extra}", result.stderr)
+
+    def test_a_lead_moves_one_session_from_outside_with_its_extra_paths(self) -> None:
+        self.pane_behind_another_socket("%70")
+        extra = self.root / "extra"
+        extra.mkdir()
+        env = 'move_image_bytes() { echo 280000000; }\n'
+        moved = self.run_bash(env + f'cmd_move_notify 01a170c2 --now --dry-run --dir "{extra}"')
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn("would relaunch pane %70", moved.stdout)
+        self.assertIn(f"--dir {extra} -- omp --resume 01a170c2-69f0-7542-a611-195ce0c4a111", moved.stdout)
+        refused = self.run_bash(env + f'cmd_move_notify --all --now --dry-run --dir "{extra}"')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("--dir names paths of ONE session", refused.stderr)
+
+    def relaunch(self, environ: dict[str, str], respawn_fails: bool = False,
+                 caller: dict[str, str] | None = None) -> list[str]:
+        """Run the detached relauncher of `--all`/`move <id>`/`--now` for one session and return the
+        tmux calls it made. The omp's pid is above any pid_max, so its hang-up and liveness checks
+        reach no real process."""
+        lane = self.root / "lane"
+        lane.mkdir(exist_ok=True)
+        self.make_proc(999999999, cwd=lane, session="01a170c2-69f0-7542-a611-195ce0c4a111", environ=environ)
+        args = self.root / "TMUX_ARGS"
+        args.write_text("", encoding="utf-8")
+        write_stub(self.stubs, "tmux", "\n".join([
+            f'printf "%s\\n" "$*" >>"{args}"',
+            'case " $* " in',
+            '  *" respawn-pane "*) exit ' + ("1" if respawn_fails else "0") + " ;;",
+            '  *" display-message "*) printf "42507\\n" ;;',
+            "esac",
+            "exit 0",
+        ]))
+        result = self.run_bash(
+            f'move_relaunch 999999999 01a170c2-69f0-7542-a611-195ce0c4a111 %70 "{lane}" --dir "{lane}"',
+            {"AGENTBOX_RESPAWN_TRIES": "1", "AGENTBOX_RESPAWN_WAIT": "0", **(caller or {})},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return args.read_text(encoding="utf-8").splitlines()
+
+    def test_the_relauncher_drives_the_pane_on_the_target_omps_own_server(self) -> None:
+        # The caller's TMUX names another server; the target omp's own wins.
+        calls = self.relaunch({"TMUX": "/sock/tmux-1000/default,28813,1", "TMUX_PANE": "%70"},
+                              caller={"TMUX": "/other/server,1,1"})
+        self.assertTrue(calls)
+        self.assertTrue(all(c.startswith("-S /sock/tmux-1000/default ") for c in calls), calls)
+        self.assertTrue(any(c.startswith("-S /sock/tmux-1000/default respawn-pane -k -t %70 ") for c in calls), calls)
+
+    def test_a_respawn_that_fails_types_the_launcher_on_the_same_server(self) -> None:
+        calls = self.relaunch({"TMUX": "/sock/tmux-1000/default,28813,1"}, respawn_fails=True)
+        self.assertTrue(any(c.startswith("-S /sock/tmux-1000/default send-keys -t %70 ") for c in calls), calls)
+        self.assertTrue(all(c.startswith("-S /sock/tmux-1000/default ") for c in calls), calls)
+
+    def test_a_target_without_tmux_in_its_environment_uses_the_callers_server(self) -> None:
+        calls = self.relaunch({})
+        self.assertTrue(calls)
+        self.assertFalse(any(c.startswith("-S ") for c in calls), calls)
 
     def test_a_session_file_names_the_session_in_full_and_a_truncated_name_is_no_id(self) -> None:
         """A prefix would resume another session, so only the 36-character id in the transcript's

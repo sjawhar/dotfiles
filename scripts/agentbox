@@ -2404,27 +2404,53 @@ move_stat() {
     return 0
 }
 
-# move_env_pane OMP_PID PANE_PID: the tmux pane an omp runs in, from the omp's own environment,
-# for the case where the census's `tmux list-panes` reached no server (a tool shell whose
-# environment dropped TMUX and TMUX_TMPDIR talks to /tmp/tmux-<uid>/default, where this host's
-# server is not: 2026-11-02, LANE-E read "no-pane" while its walk reached the server). TMUX_PANE
-# names the pane and TMUX's first comma field the server's socket; the pane counts only when
-# that server says the pane's own process is PANE_PID, the process the walk came up through.
-# Sets MOVE_PANE_ID and MOVE_PANE_AT.
+# The tmux client to talk to a server with: that server's OWN binary, from /proc/<pid>/exe. A
+# client of another version cannot talk to it: LANE-E's tool shell had /usr/bin ahead of mise on
+# PATH (2026-11-02), and its tmux 3.4 against this host's 3.8 server answered "server exited
+# unexpectedly" on the right socket. `tmux` from PATH when the binary cannot be read.
+MOVE_TMUX_BIN=tmux
+move_tmux_bin() {
+    MOVE_TMUX_BIN=tmux
+    if [[ -n "${1:-}" && -x "$PROC/$1/exe" ]]; then
+        MOVE_TMUX_BIN="$(readlink -f "$PROC/$1/exe" 2>/dev/null || true)"
+        [[ -x "$MOVE_TMUX_BIN" ]] || MOVE_TMUX_BIN=tmux
+    fi
+    return 0
+}
+
+# move_env_pane OMP_PID PANE_PID SERVER_PID: the tmux pane an omp runs in, from the omp's own
+# environment, for the case where the census's `tmux list-panes` found no entry for it (a tool
+# shell whose environment dropped TMUX and TMUX_TMPDIR talks to /tmp/tmux-<uid>/default, where
+# this host's server is not, and one whose tmux is another version cannot talk to the server at
+# all: 2026-11-02, LANE-E read "no-pane" while its walk reached the server). TMUX_PANE names the
+# pane, TMUX's first comma field the server's socket and its second the server's pid. The pane
+# counts when that server, asked with its own binary, says the pane's process is PANE_PID, the
+# process the walk came up through. When the server cannot be asked at all, it counts on /proc
+# alone: TMUX names SERVER_PID, the tmux server the walk reached, and PANE_PID is that server's
+# direct child; the pane's location is then unknown. Sets MOVE_PANE_ID and MOVE_PANE_AT.
 move_env_pane() {
-    local kv pane="" server="" out pane_pid at
+    local kv pane="" tmuxv="" out pane_pid at rest
     MOVE_PANE_ID="" MOVE_PANE_AT=""
     while IFS= read -r -d '' kv; do
         case "$kv" in
             TMUX_PANE=*) pane="${kv#TMUX_PANE=}" ;;
-            TMUX=*) server="${kv#TMUX=}" ;;
+            TMUX=*) tmuxv="${kv#TMUX=}" ;;
         esac
     done < <(cat "$PROC/$1/environ" 2>/dev/null || true)
-    [[ "$pane" == %* && -n "$server" ]] || return 1
-    out="$(tmux -S "${server%%,*}" display-message -p -t "$pane" "#{pane_pid}"$'\t'"#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null)" || return 1
-    IFS=$'\t' read -r pane_pid at <<<"$out"
-    [[ "$pane_pid" == "$2" ]] || return 1
-    MOVE_PANE_ID="$pane" MOVE_PANE_AT="$at"
+    [[ "$pane" == %* && -n "$tmuxv" ]] || return 1
+    move_tmux_bin "$3"
+    if out="$("$MOVE_TMUX_BIN" -S "${tmuxv%%,*}" display-message -p -t "$pane" "#{pane_pid}"$'\t'"#{session_name}:#{window_index}.#{pane_index}" 2>/dev/null)" \
+        && [[ -n "$out" ]]; then
+        IFS=$'\t' read -r pane_pid at <<<"$out"
+        [[ "$pane_pid" == "$2" ]] || return 1
+        MOVE_PANE_ID="$pane" MOVE_PANE_AT="$at"
+        return 0
+    fi
+    rest="${tmuxv#*,}"
+    [[ "$tmuxv" == *,* && "${rest%%,*}" == "$3" ]] || return 1
+    move_stat "$2" || return 1
+    [[ "$MOVE_PPID" == "$3" ]] || return 1
+    MOVE_PANE_ID="$pane" MOVE_PANE_AT=""
 }
 
 move_census() {
@@ -2567,9 +2593,9 @@ move_census() {
                     ;;
                 "tmux: server")
                     # A pane's process sits directly under the server. The pane list had no
-                    # entry for it (the list-panes above reached no server, or another one),
-                    # so ask the server the omp's own environment names.
-                    if [[ "$child" != "$pid" ]] && move_env_pane "$pid" "$child"; then
+                    # entry for it (the list-panes above reached no server, or another one, or
+                    # spoke another version), so ask the server the omp's own environment names.
+                    if [[ "$child" != "$pid" ]] && move_env_pane "$pid" "$child" "$parent"; then
                         pane_id[$child]="$MOVE_PANE_ID"
                         pane_at[$child]="$MOVE_PANE_AT"
                         found="$child"
@@ -2779,19 +2805,19 @@ move_respawn() {
     run="$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i"
     while (( attempt < MOVE_RESPAWN_TRIES )); do
         attempt=$((attempt + 1))
-        if err="$(tmux respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$run" 2>&1)"; then
+        if err="$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$run" 2>&1)"; then
             echo "$(date -u +%FT%TZ) move $sid: pane $pane respawned into agentbox new $what"
             return 0
         fi
         echo "$(date -u +%FT%TZ) move $sid: respawn of pane $pane failed (try $attempt of $MOVE_RESPAWN_TRIES): ${err:-tmux printed nothing}"
         if (( attempt < MOVE_RESPAWN_TRIES )); then sleep "$MOVE_RESPAWN_WAIT"; fi
     done
-    if [[ -n "$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" ]] \
-        && tmux send-keys -t "$pane" "$inner" Enter 2>/dev/null; then
+    if [[ -n "$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" ]] \
+        && "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" send-keys -t "$pane" "$inner" Enter 2>/dev/null; then
         echo "$(date -u +%FT%TZ) move $sid: pane $pane would not respawn; the launcher was typed into the shell it still runs"
         return 0
     fi
-    tmux select-pane -t "$pane" -T "agentbox: session $sid is down; pane $pane would not respawn" 2>/dev/null || true
+    "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" select-pane -t "$pane" -T "agentbox: session $sid is down; pane $pane would not respawn" 2>/dev/null || true
     return 1
 }
 
@@ -2833,11 +2859,34 @@ move_pane_command() {
         "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "$log" "$(printf '%q ' agentbox new "$@" -- omp --resume "$sid")"
 }
 
+# The tmux server a relauncher drives its pane through: `-S <socket>` from the TARGET omp's own
+# TMUX, read before the hang-up while its /proc entry still exists, and that server's own binary
+# (move_tmux_bin, from the pid TMUX names). The relauncher of `--all`, `move <id>`, `--now` or
+# `--self` runs in the caller's environment, and a caller whose TMUX is unset or names another
+# server talks to tmux's default socket, where this host's server is not
+# (/tmp/tmux-1000/default against ~/.tmux/sockets/tmux-1000/default on 2026-11-02), while one
+# whose PATH finds another tmux version cannot talk to the server at all. Empty, it is the
+# caller's own server and tmux, as before.
+MOVE_TMUX=()
+move_target_tmux() {
+    local kv tmuxv="" rest=""
+    MOVE_TMUX=()
+    while IFS= read -r -d '' kv; do
+        [[ "$kv" == TMUX=* ]] && tmuxv="${kv#TMUX=}"
+    done < <(cat "$PROC/$1/environ" 2>/dev/null || true)
+    [[ -n "$tmuxv" ]] && MOVE_TMUX=(-S "${tmuxv%%,*}")
+    [[ "$tmuxv" == *,* ]] && rest="${tmuxv#*,}"
+    move_tmux_bin "${rest%%,*}"
+    return 0
+}
+
 move_relaunch() {
     local pid="$1" sid="$2" pane="$3" cwd="$4" waited=0 inner
     shift 4
     local spec=("$@")
     echo "$(date -u +%FT%TZ) move $sid: pid $pid, pane $pane, cwd $cwd, spec ${spec[*]}"
+    move_target_tmux "$pid"
+    echo "$(date -u +%FT%TZ) move $sid: tmux server ${MOVE_TMUX[1]:-from the environment of this process}, client $MOVE_TMUX_BIN"
     # Pids are reused: never signal one that is no longer this session's omp.
     if [[ "$(cat "$PROC/$pid/comm" 2>/dev/null || true)" == omp ]]; then
         kill -HUP "$pid" 2>/dev/null || true
@@ -2852,13 +2901,13 @@ move_relaunch() {
     else
         echo "$(date -u +%FT%TZ) move $sid: omp $pid exited after ${waited}s"
     fi
-    if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    if ! "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
         echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $sid"
         return 1
     fi
     inner="$(move_pane_command "$sid" "${spec[@]}")"
     if ! move_respawn "$sid" "$pane" "$cwd" "$inner" "${spec[*]}"; then
-        echo "$(date -u +%FT%TZ) move $sid: pane $pane holds no process and would not respawn; the session is DOWN. Bring it back from a host session: tmux respawn-pane -k -t $pane -c $cwd bash -i -c '$inner; exec bash -i'"
+        echo "$(date -u +%FT%TZ) move $sid: pane $pane holds no process and would not respawn; the session is DOWN. Bring it back from a host session: $MOVE_TMUX_BIN ${MOVE_TMUX[*]:+${MOVE_TMUX[*]} }respawn-pane -k -t $pane -c $cwd bash -i -c '$inner; exec bash -i'"
         return 1
     fi
 }
@@ -2951,15 +3000,6 @@ cmd_move_self() {
         die "the omp above this command runs session $sid, while this tool's OMP_SESSION_ID is $OMP_SESSION_ID; a move must not resume a session it has not identified. Run 'agentbox move --plan' and move it by id."
     fi
     [[ -n "$pane" ]] || die "this session has no tmux pane to relaunch ($detail); it is one of the plan's not-a-pane rows and needs a person"
-    # The hand-off below drives the pane through tmux. A tool shell whose environment dropped
-    # TMUX would talk to the default socket, where this host's server may not be; the omp's own
-    # TMUX names the server the census just confirmed the pane on.
-    if [[ -z "${TMUX:-}" ]]; then
-        local kv
-        while IFS= read -r -d '' kv; do
-            [[ "$kv" == TMUX=* ]] && export TMUX="${kv#TMUX=}"
-        done < <(cat "$PROC/$pid/environ" 2>/dev/null || true)
-    fi
     local dirs=() whys=() spec=() d path why
     move_read_kids
     # --self takes the UNION of what it sees now, what the session's own record names and what
@@ -2977,6 +3017,15 @@ cmd_move_self() {
         whys+=("  (this session has no live child process, so only its working directory, its own record and the last plan were read)")
     fi
     move_check_floor "$(move_image_bytes "$BOX_DISK_BYTES")" || exit 2
+    # The relauncher hangs this omp up BEFORE it respawns the pane, so a pane the relauncher
+    # cannot reach would leave the session down. The census may have found the pane from /proc
+    # alone (move_env_pane), so ask the server now, from here, as the relauncher will.
+    move_target_tmux "$pid"
+    if ! "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_pid}' >/dev/null 2>&1; then
+        local lead="agentbox move $sid --now" b
+        for b in "${BOX_DIRS[@]+"${BOX_DIRS[@]}"}"; do lead+=" --dir $(printf '%q' "$b")"; done
+        die "tmux cannot reach pane $pane from this shell ($MOVE_TMUX_BIN ${MOVE_TMUX[*]} display-message failed), so the relauncher could not respawn it after the hang-up; nothing was hung up. Ask a host session to move this session from outside: $lead"
+    fi
     if $dry; then
         echo "agentbox: would hang omp $pid up and respawn pane $pane ($at) as:"
         echo "  agentbox new ${spec[*]} -- omp --resume $sid"
@@ -3006,16 +3055,29 @@ MOVE_NOTICE_NOKIDS='(this session has no live child process, so only its working
 
 cmd_move_notify() {
     local now=false dry=false all=false t targets=() rows=() row
-    for t in "$@"; do
+    # --dir names a path the inference missed, for a session moved from outside (a lead's
+    # `move <id> --now` for a session whose own shell cannot reach tmux). Checked exactly as
+    # `agentbox new --dir` checks it, and given to one session only: paths are per session.
+    while (( $# )); do
+        t="$1"
         case "$t" in
             --now) now=true ;;
             --dry-run) dry=true ;;
             --all) all=true ;;
             --force-floor) MOVE_FORCE_FLOOR=true ;;
+            --dir)
+                [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir /mnt/nvme/$(id -un)/my-lane. $MOVE_USAGE"
+                add_box_dir "$2"
+                shift
+                ;;
             -*) die "unknown option $t. $MOVE_USAGE" ;;
             *) targets+=("$t") ;;
         esac
+        shift
     done
+    if (( ${#BOX_DIRS[@]} )) && { $all || (( ${#targets[@]} != 1 )); }; then
+        die "--dir names paths of ONE session: give exactly one session id with it, not --all. $MOVE_USAGE"
+    fi
     if $all; then
         mapfile -t rows < <(move_census | awk -F"$SEP" '$1 == "host" && $3 != "" && $4 != ""')
     else
@@ -3041,9 +3103,9 @@ cmd_move_notify() {
             [[ -n "$dir" ]] || continue
             dirs+=("$dir")
             whys+=("$dir ($why)")
-        done < <(move_dirs_why "$cwd" "$pid" "$sid" 2>/dev/null)
+        done < <(move_dirs_why "$cwd" "$pid" "$sid" "${BOX_DIRS[@]+"${BOX_DIRS[@]}"}" 2>/dev/null)
         if (( ! ${#dirs[@]} )); then
-            echo "agentbox: $sid cannot be moved: $(move_dirs_why "$cwd" "$pid" "$sid" 2>&1 >/dev/null || true)" >&2
+            echo "agentbox: $sid cannot be moved: $(move_dirs_why "$cwd" "$pid" "$sid" "${BOX_DIRS[@]+"${BOX_DIRS[@]}"}" 2>&1 >/dev/null || true)" >&2
             continue
         fi
         if [[ -z "${MOVE_KIDS[$pid]:-}" ]]; then
@@ -3082,6 +3144,9 @@ MOVE_USAGE='usage:
   agentbox move <session-id>… | --all [--now] [--dry-run] [--force-floor]
                                                     ask each session over Envoy to move itself
                                                     (--now relaunches its pane from outside)
+  agentbox move <session-id> [--now] [--dry-run] [--dir PATH]…
+                                                    the same for one session, each --dir adding a
+                                                    path the inference missed
 More than one `move --plan` may run at once: it writes only this host'"'"'s plan files, one per
 session, each renamed into place.'
 
