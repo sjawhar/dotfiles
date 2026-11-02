@@ -5,7 +5,7 @@ description: "Use whenever you are building a large project autonomously with su
 
 # Subagent-driven development
 
-**Stop for Legion.** Run `printenv LEGION_ROLE`; if it prints a role, `envoy_publish` the conflict to the issue architect at `notifications.role.<token>` if assigned this skill (role prompt's `Legion addressing` names it), then follow `skill://legion-worker` (or `skill://legion-architect`) and role prompt, and stop. Legion runs one phase at a time, so this crosses its boundary.
+**Stop if the Legion daemon started this session.** Run `printenv LEGION_ROLE`. If it prints a role, you are a per-process Legion phase worker (or an architect) booted from the daemon's `LEGION_*` environment: follow `skill://legion-worker` (or `skill://legion-architect`) and your role prompt, and stop reading here. The daemon runs one phase of the issue at a time under Legion's own skills, so this skill's planning, dispatch, merge and close steps would do work that belongs to other roles. If your assignment asked for this skill, tell the issue's architect with `envoy_publish` to its role topic (`notifications.role.<token>`; your system prompt's `Legion addressing` line names it), as `skill://legion-worker` says for any cross-phase decision.
 
 Where this skill and a stock workflow skill (`subagent-driven-development`, `writing-plans`, `executing-plans`, or another) disagree, follow this skill. Load `subagent-driven-development` and `using-subagents`.
 
@@ -36,32 +36,31 @@ List the repo's skill directories (for example `ls .claude/skills .agents/skills
 
 ## Step 4. Write the plan
 
-After Step 1, draft from what you know before further reads; then fan subagents into its named gaps. Research informs the plan or answers a named open question; it never reopens an approved design, and a research subagent never writes the plan. Edit an existing spec, plan or review in place, because a replacement loses decisions; then dispatch a `reviewer` on changed work.
+Write the plan's first draft from what you know: after step 1's reading, open no further files until it exists. Then fan subagents out to fill the gaps it names. Research may inform the plan or close a named gap; it never restarts an approved design, and a research brief never asks for a plan. Reuse an existing spec, plan or review: repair the gap in it, then dispatch a `reviewer` on the work the repair affects.
 
 - The plan lives in the issue (its Dispatch document or GitHub issue body), never in a repo file or a PR, whatever `writing-plans` says.
 - Plan the full request. Split parallel work into units no two workers edit, and name the shared contracts before dispatch, because two workers who meet a shared interface mid-flight both rewrite it and one loses its work.
 - Check every claim about existing code against the artefact it names (constant, schema object, emit site, threshold) and cite file:line. A false claim, implemented faithfully, is the defect. A number you read in a skill file is a claim too: cite the code that sets it.
 - **Slices.** Each slice merges as one PR and ends in something the requester can try: a command that runs, a page that renders, a real record that moves. Cut each slice as a thin end-to-end path, never a layer, and order them so the one the requester can use ships first. A slice is a merge and acceptance boundary, not a work assignment: its tasks still split into parallel ownership units, and independent slices run at once. Later slices extend the contracts named up front, never replace them. A slice that only works with scaffolding you would delete later does not ship alone: fold it into the next slice's PR.
 - Complete cutovers: migrate every caller and remove obsolete paths, shims, aliases, compatibility exports and dead code, unless Sami requires compatibility.
-- The six sections every plan carries, the spend queries, the rule for a second workspace, and how to run a major design change with him: `references/plan-sections.md`.
+- The five sections every plan carries, the rule for a second workspace, and how to run a major design change with him: `references/plan-sections.md`.
 - A `reviewer` gates every new or materially changed plan before implementation, and checks that the plan meets the issue's goal and every requirement of it, not only that it is buildable. A requirement the plan leaves out fails the review unless the requester recorded that it is out of scope here.
-- **Spend.** Before launch, record in the issue plan its `agent_spend` project tag, `created-by` label, start date, machines (count, size, hours), cluster Jobs, CI minutes and model API tokens (zero if unused); use a prior measured same-work unit times count or a stated conservative assumption, not a placeholder, and total at list price to cost scope. Before each worker batch and status update, compare the estimate with the cumulative totals from the three queries in `references/plan-sections.md` (model tokens, cloud resources, Actions), because the bill arrives days later. When they exceed the estimate, launch nothing new, let workers finish, record variance and remaining forecast, and open an issue ask; resume launches only after the requester answers, because continued spend changes the approved cost.
 
 ## Step 5. Dispatch the work
 
-Build each brief from the Legion role prompts, fetched at dispatch time, with the slice's full acceptance scenario and the decisions and rejections for its step: `references/briefs.md`, `references/acceptance.md`. A failed fetch blocks the dispatch, with no fallback. Dispatch independent work concurrently and keep unblocked work moving, except while the Step 4 Spend ask is open; results arrive as messages, so never sit in `wait` while other work is open.
+Build each brief from the Legion role prompts, fetched at dispatch time, with the slice's full acceptance scenario and the decisions and rejections for its step: `references/briefs.md`, `references/acceptance.md`. A failed fetch blocks the dispatch, with no fallback. Dispatch independent work concurrently and keep unblocked work moving; results arrive as messages, so never sit in `wait` while other work is open.
 
 ## Step 6. Acceptance after each slice
 
 Dispatch `deep` acceptance for the slice's outcome once its tasks are merged into its branch; the last slice runs every driver (the script or command that runs a scenario through the real surface) in the plan. The acceptance worker dispatches no reviewer of its own: it writes a failing test for each defect and sends each defect with its test back to the implementer session that built the slice. Mark every scenario `RAN`, `BLOCKED` or `WAIVED-BY-SAMI`, and for a slice with a browser page have the implementer run ce-dogfood first: `references/acceptance.md`.
 
-- `BLOCKED` stops merge readiness until every scenario runs or Sami waives its named blocker. Independent work continues, except while the Step 4 Spend ask is open.
+- `BLOCKED` stops merge readiness until every scenario runs or Sami waives its named blocker. Independent work continues.
 
 ## Step 7. Review, then merge
 
 After acceptance, run each step on the branch tip the step before it left: the final `reviewer`, then `ce-simplify-code` once for a runtime change, then you dispatch `thermonuclear-deep-review` and `thermonuclear-code-quality` once at that commit. Then fill the gate ledger from the artifacts at that commit and send the merge packet (`running-the-merge-queue` says what it holds): `references/review-and-merge.md`.
 
-Judge the issue goal and requirements, not only plan scenarios, and say so in every review brief. An unmet requirement fails regardless of branch, PR or report claims; it is out of scope only if, before review, the requester answered an ask, wrote a comment, or approved a spec without it. Silence, a reaction or an agent correction do not count; moving it to a new issue is not acceptance. The `reviewer` dispatches one subagent whose only job is to red-team the goal and requirements, reads it before deciding, and names each finding and disposition; no findings means an incomplete review and failed work.
+Judge the result against the issue's goal and its requirements, not only the plan's scenarios, and say so in each review brief. A requirement the result does not meet fails the review whether or not the branch, the PR body or a report declares it; it passes only when the requester recorded, before the review, that it would not be done in this piece of work. That record is one of three things: an ask the requester answered, a comment the requester wrote, or a spec version the requester approved that no longer carries the requirement; silence, a reaction, and an agent's own correction of the spec are not records. Moving a missing part to a new issue is not acceptance. The `reviewer` dispatches one subagent whose only job is to red-team the result against the goal and the requirements, and reads its findings before deciding; its verdict names each finding and what it did with it. A verdict with no red-team findings in it is not a verdict: the review is incomplete and the work does not pass.
 
 ## Step 8. Keep the issue status current
 
