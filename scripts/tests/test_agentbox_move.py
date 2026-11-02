@@ -853,6 +853,26 @@ class AgentboxMove(unittest.TestCase):
         self.assertTrue(calls)
         self.assertFalse(any(c.startswith("-S ") for c in calls), calls)
 
+    def test_a_pane_tmux_answers_empty_for_is_gone_and_not_respawned(self) -> None:
+        """tmux 3.8 answers `display-message -t <gone pane>` with exit 0 and an empty line, so the
+        exit code said a closed pane was there and the relauncher tried `respawn-pane` on it every
+        15 s for 10 minutes (pane %1665 of a drill session, 2026-11-02T15:19:08Z)."""
+        lane = self.root / "lane"
+        lane.mkdir()
+        sid = "01a170c2-69f0-7542-a611-195ce0c4a111"
+        self.make_proc(999999999, cwd=lane, session=sid, environ={"TMUX": "/sock/tmux-1000/default,28813,1"})
+        args = self.root / "TMUX_ARGS"
+        args.write_text("", encoding="utf-8")
+        write_stub(self.stubs, "tmux", f'printf "%s\\n" "$*" >>"{args}"\nexit 0')
+        result = self.run_bash(
+            f'move_relaunch 999999999 {sid} %70 "{lane}" "{self.session_file(sid)}" --dir "{lane}"',
+            {"AGENTBOX_RESPAWN_TRIES": "3", "AGENTBOX_RESPAWN_WAIT": "0"},
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"move {sid}: pane %70 is gone; nothing respawned.", result.stdout)
+        calls = args.read_text(encoding="utf-8").splitlines()
+        self.assertFalse(any(" respawn-pane " in f" {c} " for c in calls), calls)
+
     def test_a_session_file_names_the_session_in_full_and_a_truncated_name_is_no_id(self) -> None:
         """A prefix would resume another session, so only the 36-character id in the transcript's
         name counts; everything else reads as "no id" and is refused rather than guessed."""

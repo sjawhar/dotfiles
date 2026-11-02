@@ -3022,7 +3022,11 @@ move_relaunch() {
     else
         echo "$(date -u +%FT%TZ) move $sid: omp $pid exited after ${waited}s"
     fi
-    if ! "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    # The answer, not the exit code: tmux 3.8 answers display-message for a pane that no longer
+    # exists with exit 0 and an empty line (measured 2026-11-02), so for the closed pane %1665 of a
+    # drill session at 15:19:08Z this test passed and each respawn try then failed `can't find
+    # pane` for 10 minutes, as for 01a16c67's pane %74 at 10:20:48-10:32:00Z.
+    if [[ -z "$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_id}' 2>/dev/null)" ]]; then
         echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $resume"
         return 1
     fi
@@ -3154,7 +3158,7 @@ cmd_move_self() {
     # cannot reach would leave the session down. The census may have found the pane from /proc
     # alone (move_env_pane), so ask the server now, from here, as the relauncher will.
     move_target_tmux "$pid"
-    if ! "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_pid}' >/dev/null 2>&1; then
+    if [[ -z "$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" ]]; then
         local lead="agentbox move $sid --now" b
         for b in "${BOX_DIRS[@]+"${BOX_DIRS[@]}"}"; do lead+=" --dir $(printf '%q' "$b")"; done
         die "tmux cannot reach pane $pane from this shell ($MOVE_TMUX_BIN ${MOVE_TMUX[*]} display-message failed), so the relauncher could not respawn it after the hang-up; nothing was hung up. Ask a host session to move this session from outside: $lead"

@@ -84,7 +84,9 @@ if ((${#ws[@]})); then
 fi
 
 if ! pane="$("${split[@]}" 2>/tmp/agent-new.$$.err)"; then
-    if grep -q 'no space for new pane' /tmp/agent-new.$$.err; then
+    # tmux 3.8 says "no space for a new pane" (measured 2026-11-02), which the old pattern here,
+    # 'no space for new pane', never matched, so a full window was never tiled.
+    if grep -qE 'no space for (a )?new pane' /tmp/agent-new.$$.err; then
         tmux select-layout -t "$window" tiled >/dev/null
         pane="$("${split[@]}")"
     else
