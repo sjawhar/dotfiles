@@ -99,7 +99,7 @@ in the journal, when:
 | it was resumed less than `--restart-cooldown` (1 h) ago | at most once per session per hour |
 | it was last seen running more than 1 h ago | it died while nothing watched |
 | no session was read while it ran, no transcript is found, or its directory is gone | nothing safe to resume |
-| the pane now runs something else | it is no longer an omp pane; the record is dropped |
+| the pane has run something other than omp for 2 min | it is no longer an omp pane; the record is dropped. A shorter spell is the shim's bash finishing or `exec bash -i` reading `.bashrc`, and is waited out |
 
 A `session_exit` of kind `signal` (a `kill <pid>`, SIGTERM) is **not** a normal end, so a session
 stopped that way is resumed, once. A memcg OOM kill is SIGKILL and writes no `session_exit` at all.

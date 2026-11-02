@@ -1374,6 +1374,8 @@ AGENTBOX = Path.home() / ".dotfiles/scripts/agentbox"
 RESTART_STALE = 3600.0
 # How long a pane's session, read from the omp's open files, is reused while the same process runs.
 SID_REFRESH = 300.0
+# How long a recorded pane may run something other than omp before it is forgotten.
+BUSY_FORGET = 120.0
 # When each acting pass must stop, in seconds from the run's start. The unit kills a run at 25 s,
 # and at nice 15 and load 425 on 2026-11-02 an unbounded pane pass took 33 s and the unit killed
 # the run. The alerting itself is not bounded; a pass out of time stops, and the next run goes on.
@@ -1683,7 +1685,13 @@ def restart_pass(
             continue
         name = f"pane {pane['id']} ({pane['target']}) session {old.get('sid') or 'unknown'}"
         if kind == "busy":
-            log(f"{name}: left: the pane now runs {seen['comm']}, not omp; forgotten")
+            # A pane is busy for a moment after its omp dies: the shim's bash finishing, then the
+            # `exec bash -i` reading .bashrc (seconds at load 400). Only a pane that stays busy is
+            # running something else on purpose.
+            busy_since = float(old.setdefault("busy_since", now))
+            if now - busy_since < BUSY_FORGET:
+                continue
+            log(f"{name}: left: the pane has run {seen['comm']}, not omp, for {human(now - busy_since)}; forgotten")
             records.pop(pane["id"], None)
             left += 1
             continue

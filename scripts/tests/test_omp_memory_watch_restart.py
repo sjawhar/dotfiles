@@ -177,12 +177,20 @@ class RestartPassTest(unittest.TestCase):
             f"cd {self.cwd} && /home/u/.dotfiles/scripts/agentbox new --dir /mnt/lane -- omp --resume {SID} .",
         )
 
-    def test_a_pane_that_now_runs_something_else_is_forgotten(self) -> None:
+    def test_a_pane_that_keeps_running_something_else_is_forgotten(self) -> None:
         self.run_pass(self.host(), 1000.0)
         self.run_pass(("busy", {"comm": "vim"}), 1030.0)
-        self.run_pass(("idle", {}), 1060.0)
+        self.run_pass(("busy", {"comm": "vim"}), 1160.0)
+        self.run_pass(("idle", {}), 1190.0)
         self.assertEqual(self.respawned, [])
-        self.assertIn("now runs vim", " ".join(self.lines))
+        self.assertIn("has run vim, not omp, for 2 min 10 s; forgotten", " ".join(self.lines))
+
+    def test_a_pane_busy_for_a_moment_after_its_omp_died_is_still_resumed(self) -> None:
+        """The shim's bash finishing and `exec bash -i` reading .bashrc show as a child for seconds."""
+        self.run_pass(self.host(), 1000.0)
+        self.run_pass(("busy", {"comm": "bash"}), 1030.0)
+        self.run_pass(("idle", {}), 1060.0)
+        self.assertEqual(len(self.respawned), 1)
 
     def test_a_death_nobody_saw_for_over_an_hour_is_left(self) -> None:
         self.run_pass(self.host(), 1000.0)
