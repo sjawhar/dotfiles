@@ -93,23 +93,33 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="+", type=Path)
     parser.add_argument("--log", type=Path, help="append one dated TSV row per skill to this file")
-    parser.add_argument("--old", type=Path, help="old copy of the one skill checked; fail if SKILL.md grew too much")
+    parser.add_argument(
+        "--old",
+        type=Path,
+        help="old copy of the one skill checked: its directory, its SKILL.md, or a pipe such as "
+        "<(git show HEAD:path/SKILL.md); fail if SKILL.md grew too much",
+    )
     args = parser.parse_args()
     if args.old and len(args.paths) != 1:
         parser.error("--old takes exactly one skill path")
-    old_md = None
+    old_bytes = None
     if args.old:
         old_md = args.old.expanduser()
         if old_md.is_dir():
             old_md = old_md / "SKILL.md"
-        if not old_md.is_file():
-            parser.error(f"--old: no SKILL.md at {args.old}")
+        try:
+            # Read the bytes rather than stat the path: a pipe from <(git show ...) has no size.
+            old_bytes = len(old_md.read_bytes())
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            parser.error(
+                f"--old: no SKILL.md at {args.old}; give the old skill's directory, its SKILL.md, "
+                "or a pipe such as <(git show HEAD:path/SKILL.md)"
+            )
     failed = False
     rows = []
     for path in args.paths:
         stats, fails, warns = check(path)
-        if old_md:
-            old_bytes = old_md.stat().st_size
+        if old_bytes is not None:
             if stats["bytes"] > old_bytes + GROWTH_ALLOWANCE:
                 fails.append(
                     f"SKILL.md grew from {old_bytes} to {stats['bytes']} bytes, "
