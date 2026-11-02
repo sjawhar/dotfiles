@@ -177,6 +177,12 @@ before handing the call to the real one.
   `GOOGLE_APPLICATION_CREDENTIALS` as the machine's `box_credential_config.json`
   (`installers/gcloud-box.sh`) for the whole session, eval kernels included; a file a caller
   named is kept, the well-known one excepted (`scripts/tests/test_agent_session_google_adc.py`).
+  In an agent session the shim refuses, on every route, each call that writes or removes the
+  well-known file: `auth application-default login|revoke`, and an `auth login` with
+  `--update-adc` or a `--flags-file`. Only a routed bare login dropped `--update-adc` before,
+  so an agent's `--configuration theorem auth login --update-adc`, started at 2026-11-01T02:41Z,
+  wrote the user's login there at 02:53Z. Outside an agent session nothing changes
+  (`shims/tests/test_gcloud_shim_routing.py`).
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
   harness's or a git credential helper's PATH can hold this dir without `~/.dotfiles/bin`, where
   mise lives; these shims then run `~/.dotfiles/bin/mise` by its path, with `~/.mise` as its data

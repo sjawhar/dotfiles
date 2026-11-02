@@ -36,7 +36,7 @@ Sami's login expires about once each day. As the box you do not see this error.
 2. For a build or measurement machine, do not ask Sami to log in: use `az vm create` (resource group `sami`, location `westus2`), because `az` needs no daily login.
 3. When a step needs Sami's login:
    - Start the login yourself; do not ask Sami to run it. In a terminal that stays open (`tmux`), run `gcloud auth login --no-launch-browser` with no `--configuration`, `GCLOUD_ACCOUNT`, `CLOUDSDK_ACTIVE_CONFIG_NAME` or `--cred-file`: any of those with a non-empty value stops the routing below. While `box` is the active configuration, `~/.dotfiles/shims/gcloud` routes this plain login to `theorem`, says so, and drops `--update-adc`, so the box's ADC stays its own identity. The login renews `legacy_credentials/sami@theorem.dev/adc.json`, the file client libraries use (above).
-   - Do not run `gcloud auth application-default login` or `revoke` for this. Each one rewrites or removes `application_default_credentials.json`, which every process outside an agent session reads.
+   - Do not run `gcloud auth application-default login` or `revoke`, and never add `--update-adc` to a login. Each writes or removes `application_default_credentials.json`, which every process outside an agent session reads; in an agent session `shims/gcloud` refuses all three on every route.
    - Find the open re-login ask (`dispatch search --query 'gcloud re-login'`) and post each printed link and the box error there. Open a new ask only if none is open: two asks split his answers. If it already holds another session's link, post no link; add one line naming the step you need.
    - Type the code from Sami's answer into the waiting command.
 

@@ -22,6 +22,16 @@
 # (plugins/sjawhar/skills/using-gcloud). This check ignores
 # GOOGLE_APPLICATION_CREDENTIALS and the active configuration.
 #
+# In an agent session (`shims/gh`'s test) every call that would write or remove
+# the well-known ADC file is refused on every route, with a REFUSED block
+# naming the call, the identity, why, and the route: `auth application-default
+# login|revoke`, and any `auth login` with --update-adc or a --flags-file. That
+# file is whom every Google library and Pulumi without
+# GOOGLE_APPLICATION_CREDENTIALS acts as; on 2026-11-01T02:53Z a login under an
+# explicit configuration kept --update-adc and wrote the user's own credential
+# there. Agent sessions get the box identity through
+# GOOGLE_APPLICATION_CREDENTIALS (scripts/agent-session).
+#
 # Both protections classify the command the way gcloud does, so a flag cannot
 # hide the command path: every global flag and its value are consumed wherever
 # they appear among the command words, and one leading release track (`alpha`,
@@ -414,6 +424,65 @@ is_box_routed_auth_login() {
     ((GCLOUD_READING_KINDS == 1)) && login_lands_on_box "$@"
 }
 
+# Agent session: the test `shims/gh` uses (omp's bash tool and eval kernel, an agentbox session,
+# anything launched with the gh-app routing include). Any other process is the user's own.
+agent_context() {
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
+    local i v
+    for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
+        v="GIT_CONFIG_VALUE_$i"
+        [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
+    done
+    return 1
+}
+
+# The configuration a login would sign in under, and its account, for the refusal text.
+login_target() {
+    local name account="" line
+    name="$(effective_option_value --configuration "$@")"
+    [[ -n "$name" ]] || name="${CLOUDSDK_ACTIVE_CONFIG_NAME:-${GCLOUD_ACCOUNT:-}}"
+    resolve_config_root
+    [[ -n "$name" ]] || name="$(cat "${GCLOUD_CONFIG_ROOT}/active_config" 2>/dev/null || true)"
+    [[ -n "$name" ]] || name=default
+    while IFS= read -r line; do
+        [[ "$line" =~ ^account[[:space:]]*=[[:space:]]*([^[:space:]]+) ]] && account="${BASH_REMATCH[1]}"
+    done < "${GCLOUD_CONFIG_ROOT}/configurations/config_${name}" 2> /dev/null || true
+    printf 'the account this login signs in (configuration %s%s)' "$name" "${account:+, account $account}"
+}
+
+# Refuses, in an agent session, every call that would write or remove the well-known ADC file,
+# on every route: `auth application-default login|revoke`, and a login with --update-adc (or a
+# --flags-file, which can hold it). That file is what every Google client library and Pulumi on
+# the machine falls back to without GOOGLE_APPLICATION_CREDENTIALS, so whoever it names, every
+# such process acts as. On 2026-11-01T02:53Z an agent's login under an explicit configuration
+# kept --update-adc (only the routed bare login drops it) and wrote the user's own credential
+# there. The text names no login command: the route is the box identity, CI, or a person.
+refuse_adc_write_in_agent_session() {
+    agent_context || return 0
+    local what identity
+    resolve_config_root
+    local adc="${GCLOUD_CONFIG_ROOT}/application_default_credentials.json"
+    if ((GCLOUD_POSSIBLE_ADC_OPERATION)); then
+        what="it would write or remove ${adc}"
+        identity="the Google account signed in in the browser (login), or none (revoke)"
+    elif ((GCLOUD_POSSIBLE_LOGIN)) && { has_option --update-adc "$@" || has_option --flags-file "$@"; }; then
+        what="--update-adc would write ${adc}"
+        has_option --update-adc "$@" || what="a --flags-file can hold --update-adc, which would write ${adc}"
+        identity="$(login_target "$@")"
+    else
+        return 0
+    fi
+    {
+        printf 'gcloud shim: REFUSED in an agent session (argv:'
+        printf ' %q' "$@"
+        printf ')\n'
+        echo "  Identity: $what as $identity."
+        echo "  Why: every Google client library and Pulumi on this machine without GOOGLE_APPLICATION_CREDENTIALS acts as whoever that file names, so one write changes the identity of every such process. No agent process writes it."
+        echo "  Instead: your session's libraries already act as the box identity (GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-${GCLOUD_CONFIG_ROOT}/box_credential_config.json}) and gcloud as configuration box. A production change goes through its program's apply workflow on main. A step only a person can do: send that person a dispatch ask."
+    } >&2
+    exit 1
+}
+
 find_real_gcloud() {
     local self candidate
     self="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -459,6 +528,7 @@ main() {
     real_gcloud="$(find_real_gcloud)"
 
     parse_gcloud_command_path "$@"
+    refuse_adc_write_in_agent_session "$@"
 
     # Read the ADC only for a command this block can refuse: an ambiguous path that
     # could be a protected one, or application-default login/revoke. Every other call

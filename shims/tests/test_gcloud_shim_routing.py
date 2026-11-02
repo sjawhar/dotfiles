@@ -934,6 +934,81 @@ class GcloudRouting(unittest.TestCase):
         self.assertIn("DISPLAY=<unset>", result.stdout)
         self.assertIn("BROWSER=<unset>", result.stdout)
 
+    # In an agent session no route writes or removes the well-known ADC file. On 2026-11-01T02:41Z
+    # `--configuration theorem auth login --no-launch-browser --update-adc` was not routed, kept
+    # --update-adc, and at 02:53Z wrote the user's own credential over the box's.
+    AGENT_MARKERS = (
+        {"OMP_SESSION_ID": "01a00000-0000-7000-8000-000000000000"},
+        {"PI_SESSION_FILE": "/tmp/session.jsonl"},
+        {"AGENTBOX_SESSION": "1"},
+        {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "include.path",
+         "GIT_CONFIG_VALUE_0": "/home/u/.dotfiles/gh-app-routes.gitconfig"},
+    )
+    ADC_WRITES = (
+        ({}, ["auth", "login", "--update-adc"]),
+        ({}, ["--configuration", "theorem", "auth", "login", "--no-launch-browser", "--update-adc"]),
+        ({}, ["--configuration=theorem", "auth", "login", "--update-adc"]),
+        ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "login", "--update-adc"]),
+        ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login", "--update-adc"]),
+        ({}, ["auth", "login", "--cred-file=/tmp/key.json", "--update-adc"]),
+        ({}, ["auth", "login", "--flags-file", "/tmp/flags.yaml"]),
+        ({}, ["auth", "application-default", "login"]),
+        ({}, ["beta", "auth", "application-default", "login", "--no-launch-browser"]),
+        ({}, ["auth", "application-default", "revoke"]),
+    )
+
+    def write_user_adc(self) -> Path:
+        """The well-known ADC holding a user login, as on sami-rocqperf since 2026-11-01."""
+        adc = self.cloudsdk_config / "application_default_credentials.json"
+        adc.write_text('{"type":"authorized_user"}\n', encoding="utf-8")
+        return adc
+
+    def test_agent_session_refuses_every_route_that_writes_the_adc(self):
+        adc = self.write_user_adc()
+        self.stub_gcloud_that_must_not_run()
+        for marker in self.AGENT_MARKERS:
+            for env, args in self.ADC_WRITES:
+                with self.subTest(marker=marker, env=env, args=args):
+                    result = self.run_shim({**marker, **env}, args=args)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                    self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+                    self.assertIn(str(adc), result.stderr)
+                    self.assertIn("box identity", result.stderr)
+                    self.assertIn("dispatch ask", result.stderr)
+                    self.assertNotIn("gcloud auth login", result.stderr)
+        self.assertEqual(adc.read_text(encoding="utf-8"), '{"type":"authorized_user"}\n')
+
+    def test_agent_session_refusal_names_the_account_the_login_would_write(self):
+        (self.configs_dir / "config_theorem").write_text("[core]\naccount = sami@theorem.dev\n", encoding="utf-8")
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim(self.AGENT_MARKERS[0],
+                               args=["--configuration", "theorem", "auth", "login", "--update-adc"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("configuration theorem, account sami@theorem.dev", result.stderr)
+
+    def test_agent_session_passes_calls_that_leave_the_adc_alone(self):
+        self.write_user_adc()
+        for args in (["config", "list"], ["auth", "list"], ["auth", "print-access-token"],
+                     ["auth", "application-default", "print-access-token"], ["compute", "instances", "list"]):
+            with self.subTest(args=args):
+                result = self.run_shim(self.AGENT_MARKERS[0], args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_users_own_session_keeps_its_adc_login(self):
+        """Outside an agent session the user's explicit login with --update-adc reaches gcloud as he
+        typed it, and a bare one under box is still routed with --update-adc dropped."""
+        self.write_user_adc()
+        args = ["--configuration", "theorem", "auth", "login", "--update-adc"]
+        result = self.run_shim(args=args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stub_argv(result), args)
+        result = self.run_shim(args=["auth", "login", "--update-adc"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertNotIn("--update-adc", stub_argv(result))
+
 
 if __name__ == "__main__":
     unittest.main()
