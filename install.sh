@@ -19,6 +19,7 @@ source "${DOTFILES_DIR}/installers/claude.sh"
 source "${DOTFILES_DIR}/installers/omp.sh"
 source "${DOTFILES_DIR}/installers/secretsd.sh"
 source "${DOTFILES_DIR}/installers/agent-spend.sh"
+source "${DOTFILES_DIR}/installers/ctx-memory.sh"
 
 echo "Generating completions..."
 COMPLETIONS_DIR="${DOTFILES_DIR}/completions.d"
